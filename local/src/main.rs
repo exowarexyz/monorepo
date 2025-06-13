@@ -29,6 +29,7 @@ async fn main() -> std::process::ExitCode {
     // Initialize default directory
     let home_directory = std::env::var("HOME").expect("$HOME is not configured");
     let default_directory = PathBuf::from(format!("{}/.exoware_local", home_directory));
+    let default_directory: &'static str = default_directory.to_str().unwrap().to_string().leak();
 
     // Define application
     let matches = Command::new("local")
@@ -40,17 +41,17 @@ async fn main() -> std::process::ExitCode {
                 .long(VERBOSE_FLAG)
                 .action(ArgAction::SetTrue),
         )
+        .arg(
+            Arg::new(DIRECTORY_FLAG)
+                .short('d')
+                .long(DIRECTORY_FLAG)
+                .action(ArgAction::Set)
+                .default_value(default_directory)
+                .value_parser(clap::value_parser!(PathBuf)),
+        )
         .subcommand(
             Command::new(RUN_COMMAND)
                 .about("Start the local server.")
-                .arg(
-                    Arg::new(DIRECTORY_FLAG)
-                        .short('d')
-                        .long(DIRECTORY_FLAG)
-                        .action(ArgAction::Set)
-                        .default_value(default_directory)
-                        .value_parser(clap::value_parser!(PathBuf)),
-                )
                 .arg(
                     Arg::new(PORT_FLAG)
                         .short('p')
