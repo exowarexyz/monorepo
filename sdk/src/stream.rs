@@ -3,6 +3,7 @@ use futures_util::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
 };
+use http::Request;
 use reqwest::header::{HeaderValue, AUTHORIZATION};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
@@ -57,7 +58,17 @@ impl StreamClient {
 
     pub async fn subscribe(&self, name: &str) -> Result<Subscription, Error> {
         let url = format!("{}/stream/{}", self.client.base_url, name).replace("http", "ws");
-        let (ws_stream, _) = connect_async(url).await?;
+
+        let request = Request::builder()
+            .uri(&url)
+            .header(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {}", self.client.auth_token)).unwrap(),
+            )
+            .body(())
+            .unwrap();
+
+        let (ws_stream, _) = connect_async(request).await?;
         let (write, read) = ws_stream.split();
 
         Ok(Subscription { write, read })

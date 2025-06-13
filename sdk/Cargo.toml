@@ -14,10 +14,20 @@ documentation = "https://docs.rs/exoware-sdk"
 tokio = { workspace = true, features = ["full"] }
 thiserror = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
-tokio-tungstenite = { workspace = true }
+tokio-tungstenite = { workspace = true, features = ["native-tls"] }
 url = { workspace = true }
-serde = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 base64 = { workspace = true }
 futures-util = { workspace = true }
 async-trait = { workspace = true }
+log = "0.4.22"
+http = "1.1.0"
+
+[dev-dependencies]
+exoware-local = { workspace = true }
+tempfile = "3.10.1"
+portpicker = "0.1.1"
+rand = "0.8.5"
+tracing = "0.1.40"
+tracing-subscriber = "0.3.18"

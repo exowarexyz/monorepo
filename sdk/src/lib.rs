@@ -28,4 +28,8 @@ impl Client {
     pub fn stream(&self) -> stream::StreamClient {
         stream::StreamClient::new(self.clone())
     }
+
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
 }

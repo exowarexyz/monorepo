@@ -6,6 +6,8 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
+exoware-local = { path = "local" }
+exoware-sdk = { path = "sdk" }
 tokio = "1.43.0"
 clap = "4.5.18"
 tracing = "0.1.41"
