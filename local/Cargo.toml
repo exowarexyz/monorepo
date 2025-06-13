@@ -17,6 +17,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 axum = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+base64 = { workspace = true }
 
 [[bin]]
 name = "local"

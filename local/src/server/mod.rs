@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use thiserror::Error;
 use tokio::net::TcpListener;
 
+mod store;
+
 /// Subcommand for the server.
 pub const CMD: &str = "server";
 
@@ -16,12 +18,12 @@ pub enum Error {
     Io(#[from] std::io::Error),
 }
 
-pub async fn run(directory: &PathBuf, port: &u16) -> Result<(), Error> {
+pub async fn run(_directory: &PathBuf, port: &u16) -> Result<(), Error> {
     // Create a listener for the server on the specified port.
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
 
     // Create a router for the server.
-    let router = Router::new();
+    let router = Router::new().nest("/store", store::router());
 
     // Serve the server.
     serve(listener, router.into_make_service())
