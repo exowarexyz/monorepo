@@ -38,7 +38,7 @@ jobs:
     - name: Install speccy
       run: npm install -g speccy
     - name: Lint OpenAPI spec
-      run: speccy lint docs/openapi.yaml
+      run: speccy lint openapi.yaml
 
   Unit:
     runs-on: ubuntu-latest

@@ -13,6 +13,8 @@
 * store: TBA
 * stream: TBA
 
+_Fully described in the [OpenAPI spec](./openapi.yaml)._
+
 ## Examples
 
 * [alto](https://github.com/commonwarexyz/alto): A minimal (and wicked fast) blockchain built with the Commonware Library.
