@@ -13,12 +13,17 @@ use crate::server::auth;
 
 mod handlers;
 
+/// A type alias for a map of stream names to their broadcast senders.
 pub type StreamMap = Arc<DashMap<String, broadcast::Sender<Bytes>>>;
 
+/// The state for the stream routes.
 #[derive(Clone)]
 pub struct StreamState {
+    /// A map of active streams.
     pub streams: StreamMap,
+    /// The authentication token.
     pub auth_token: Arc<String>,
+    /// A flag to allow unauthenticated access for read-only methods.
     pub allow_public_access: bool,
 }
 
@@ -32,6 +37,10 @@ impl auth::RequireAuth for StreamState {
     }
 }
 
+/// Creates a new `Router` for the stream endpoints.
+///
+/// This function initializes the `StreamState` and sets up the routes for
+/// publishing to and subscribing to streams.
 pub fn router(auth_token: Arc<String>, allow_public_access: bool) -> Router {
     let state = StreamState {
         streams: StreamMap::new(DashMap::new()),

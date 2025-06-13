@@ -7,41 +7,42 @@ use tracing::error;
 
 mod server;
 
-/// Returns the version of the crate.
+/// Returns the version of the crate from `CARGO_PKG_VERSION`.
 pub fn crate_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// Flag for verbose output
+/// Flag for verbose output. Controls logging level.
 const VERBOSE_FLAG: &str = "verbose";
 
-/// Flag for the directory to use.
+/// Flag for the directory to use for the persistent store.
 const DIRECTORY_FLAG: &str = "directory";
 
-/// Flag for the port to use.
+/// Flag for the port to use for the server.
 const PORT_FLAG: &str = "port";
 
-/// Flag for the min consistency bound.
+/// Flag for the minimum consistency bound in milliseconds.
 const CONSISTENCY_BOUND_MIN_FLAG: &str = "consistency-bound-min";
 
-/// Flag for the max consistency bound.
+/// Flag for the maximum consistency bound in milliseconds.
 const CONSISTENCY_BOUND_MAX_FLAG: &str = "consistency-bound-max";
 
-/// Flag for the auth token.
+/// Flag for the authentication token.
 const AUTH_TOKEN_FLAG: &str = "auth-token";
 
-/// Flag to allow public access.
+/// Flag to allow public, unauthenticated access for read-only methods.
 const ALLOW_PUBLIC_ACCESS_FLAG: &str = "allow-public-access";
 
 /// Entrypoint for the Exoware Local CLI.
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    // Initialize default directory
+    // Initialize the default directory for the persistent store. This will be
+    // `$HOME/.exoware_local`.
     let home_directory = std::env::var("HOME").expect("$HOME is not configured");
     let default_directory = PathBuf::from(format!("{}/.exoware_local", home_directory));
     let default_directory: &'static str = default_directory.to_str().unwrap().to_string().leak();
 
-    // Define application
+    // Define the CLI application and its arguments.
     let matches = Command::new("local")
         .version(crate_version())
         .about("Exoware local development server.")
@@ -50,6 +51,7 @@ async fn main() -> std::process::ExitCode {
             Arg::new(VERBOSE_FLAG)
                 .short('v')
                 .long(VERBOSE_FLAG)
+                .help("Enable verbose logging.")
                 .action(ArgAction::SetTrue),
         )
         .subcommand(
@@ -108,7 +110,7 @@ async fn main() -> std::process::ExitCode {
         )
         .get_matches();
 
-    // Create logger
+    // Create a logger with a level determined by the `verbose` flag.
     let level = if matches.get_flag(VERBOSE_FLAG) {
         tracing::Level::DEBUG
     } else {
@@ -116,10 +118,11 @@ async fn main() -> std::process::ExitCode {
     };
     tracing_subscriber::fmt().with_max_level(level).init();
 
-    // Parse subcommands
+    // Parse subcommands and run the appropriate logic.
     if let Some(server_matches) = matches.subcommand_matches(server::CMD) {
         match server_matches.subcommand() {
             Some((server::RUN_CMD, matches)) => {
+                // Extract arguments for the `run` command.
                 let directory = matches.get_one::<PathBuf>(DIRECTORY_FLAG).unwrap();
                 let port = matches.get_one::<u16>(PORT_FLAG).unwrap();
                 let consistency_bound_min = matches
@@ -133,6 +136,7 @@ async fn main() -> std::process::ExitCode {
                 let auth_token = matches.get_one::<String>(AUTH_TOKEN_FLAG).unwrap();
                 let allow_public_access = matches.get_flag(ALLOW_PUBLIC_ACCESS_FLAG);
 
+                // Validate that the minimum consistency bound is not greater than the maximum.
                 if consistency_bound_min > consistency_bound_max {
                     error!(
                         "--consistency-bound-min cannot be greater than --consistency-bound-max"
@@ -140,6 +144,7 @@ async fn main() -> std::process::ExitCode {
                     return std::process::ExitCode::FAILURE;
                 }
 
+                // Run the server.
                 if let Err(e) = server::run(
                     directory,
                     port,

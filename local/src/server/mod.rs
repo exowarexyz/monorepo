@@ -17,12 +17,26 @@ pub const RUN_CMD: &str = "run";
 /// Errors that can occur when running the local server.
 #[derive(Error, Debug)]
 pub enum Error {
+    /// An I/O error occurred.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// An error occurred with the underlying RocksDB store.
     #[error("rocksdb error: {0}")]
     RocksDb(#[from] rocksdb::Error),
 }
 
+/// Runs the Exoware local server.
+///
+/// This function sets up and runs the HTTP server, which includes the store and stream endpoints.
+///
+/// # Arguments
+///
+/// * `directory` - The path to the directory for the persistent store.
+/// * `port` - The port to bind the server to.
+/// * `consistency_bound_min` - The minimum eventual consistency delay in milliseconds.
+/// * `consistency_bound_max` - The maximum eventual consistency delay in milliseconds.
+/// * `auth_token` - The token to use for bearer authentication.
+/// * `allow_public_access` - A flag to allow unauthenticated access for read-only methods.
 pub async fn run(
     directory: &Path,
     port: &u16,

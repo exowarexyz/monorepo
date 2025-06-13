@@ -10,12 +10,18 @@ use std::sync::Arc;
 
 mod handlers;
 
+/// The state for the store routes.
 #[derive(Clone)]
 pub struct StoreState {
+    /// The RocksDB database instance.
     pub db: Arc<DB>,
+    /// The minimum eventual consistency delay in milliseconds.
     pub consistency_bound_min: u64,
+    /// The maximum eventual consistency delay in milliseconds.
     pub consistency_bound_max: u64,
+    /// The authentication token.
     pub auth_token: Arc<String>,
+    /// A flag to allow unauthenticated access for read-only methods.
     pub allow_public_access: bool,
 }
 
@@ -29,6 +35,10 @@ impl auth::RequireAuth for StoreState {
     }
 }
 
+/// Creates a new `Router` for the store endpoints.
+///
+/// This function initializes the `StoreState` and sets up the routes for
+/// setting, getting, and querying key-value pairs.
 pub fn router(
     path: &Path,
     consistency_bound_min: u64,

@@ -7,11 +7,23 @@ use axum::{
 };
 use std::sync::Arc;
 
+/// A trait for states that require authentication.
+///
+/// This trait provides access to the authentication token and the public access flag,
+/// allowing the authentication middleware to be generic over different states.
 pub trait RequireAuth: Clone + Send + Sync + 'static {
+    /// Returns the authentication token.
     fn auth_token(&self) -> Arc<String>;
+    /// Returns whether public access is allowed.
     fn allow_public_access(&self) -> bool;
 }
 
+/// Axum middleware for authentication.
+///
+/// This middleware checks for a bearer token in the `Authorization` header.
+/// If the token is valid, the request is passed to the next handler.
+/// If `allow_public_access` is true, GET requests are allowed without a token.
+/// Otherwise, an `UNAUTHORIZED` status code is returned.
 pub async fn middleware<S>(
     State(state): State<S>,
     request: Request<Body>,

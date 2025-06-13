@@ -13,18 +13,22 @@ use tokio_tungstenite::{
 };
 use url::Url;
 
+/// A client for interacting with real-time streams.
 #[derive(Clone)]
 pub struct StreamClient {
     client: Client,
 }
 
+/// A subscription to a real-time stream.
 #[derive(Debug)]
 pub struct Subscription {
     write: SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
+    /// The stream of incoming messages.
     pub read: SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
 }
 
 impl Subscription {
+    /// Closes the WebSocket connection.
     pub async fn close(mut self) -> Result<(), Error> {
         self.write.close().await?;
         Ok(())
@@ -32,10 +36,12 @@ impl Subscription {
 }
 
 impl StreamClient {
+    /// Creates a new `StreamClient`.
     pub fn new(client: Client) -> Self {
         Self { client }
     }
 
+    /// Publishes a message to a stream.
     pub async fn publish(&self, name: &str, data: Vec<u8>) -> Result<(), Error> {
         let url = format!("{}/stream/{}", self.client.base_url, name);
         let mut headers = reqwest::header::HeaderMap::new();
@@ -60,6 +66,10 @@ impl StreamClient {
         Ok(())
     }
 
+    /// Subscribes to a stream.
+    ///
+    /// This function opens a WebSocket connection and returns a `Subscription` object,
+    /// which can be used to read messages from the stream and close the connection.
     pub async fn subscribe(&self, name: &str) -> Result<Subscription, Error> {
         let url = format!("{}/stream/{}", self.client.base_url, name).replace("http", "ws");
         let parsed_url = Url::parse(&url)?;

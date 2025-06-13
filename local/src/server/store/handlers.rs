@@ -12,23 +12,36 @@ use rocksdb::{Direction, IteratorMode};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// The maximum size of a key in bytes (512 bytes).
 const MAX_KEY_SIZE: usize = 512;
+/// The maximum size of a value in bytes (20 MB).
 const MAX_VALUE_SIZE: usize = 20 * 1024 * 1024;
 
+/// The structure of a value as it is stored in the database.
 #[derive(Serialize, Deserialize, Debug)]
 struct StoredValue {
+    /// The raw value.
     value: Vec<u8>,
+    /// The timestamp (in milliseconds) when the value becomes visible.
     visible_at: u128,
+    /// The timestamp (in seconds) when the value was last updated.
     updated_at: u64,
 }
 
+/// Application-specific errors for the store handlers.
 #[derive(Debug)]
 pub enum AppError {
+    /// An error from the underlying RocksDB database.
     RocksDb(rocksdb::Error),
+    /// An error during serialization or deserialization.
     Bincode(Box<bincode::ErrorKind>),
+    /// The requested key was not found.
     NotFound,
+    /// The provided key is larger than `MAX_KEY_SIZE`.
     KeyTooLarge,
+    /// The provided value is larger than `MAX_VALUE_SIZE`.
     ValueTooLarge,
+    /// An attempt was made to update a key more than once per second.
     UpdateRateExceeded,
 }
 
@@ -74,29 +87,46 @@ impl IntoResponse for AppError {
     }
 }
 
+/// Query parameters for the `query` endpoint.
 #[derive(Deserialize)]
 pub struct QueryParams {
+    /// The key to start the query from (inclusive).
     start: Option<String>,
+    /// The key to end the query at (exclusive).
     end: Option<String>,
+    /// The maximum number of results to return.
     limit: Option<usize>,
 }
 
+/// The result of a `get` request.
 #[derive(Serialize)]
 pub struct GetResult {
+    /// The base64-encoded value.
     value: String,
 }
 
+/// An individual item in a `query` result.
 #[derive(Serialize)]
 pub struct QueryResultItem {
+    /// The key of the item.
     key: String,
+    /// The base64-encoded value of the item.
     value: String,
 }
 
+/// The result of a `query` request.
 #[derive(Serialize)]
 pub struct QueryResults {
+    /// A list of key-value pairs.
     results: Vec<QueryResultItem>,
 }
 
+/// Sets a key-value pair in the store.
+///
+/// This handler enforces key and value size limits. It also implements an eventual
+/// consistency model by delaying the visibility of the new value based on the
+/// `consistency_bound_min` and `consistency_bound_max` settings. A rate limit
+/// of one update per second per key is also enforced.
 pub async fn set(
     State(state): State<StoreState>,
     Path(key): Path<String>,
@@ -140,6 +170,11 @@ pub async fn set(
     Ok(StatusCode::OK)
 }
 
+/// Retrieves a value from the store by its key.
+///
+/// This handler respects the eventual consistency model. A value will not be returned
+/// until the current time is after its `visible_at` timestamp. If the value is not
+/// yet visible or does not exist, a `404 Not Found` error is returned.
 pub async fn get(
     State(state): State<StoreState>,
     Path(key): Path<String>,
@@ -164,6 +199,10 @@ pub async fn get(
     }
 }
 
+/// Queries for a range of key-value pairs.
+///
+/// This handler allows for paginated, range-based queries of the store. It respects
+/// the eventual consistency model, only returning values that are currently visible.
 pub async fn query(
     State(state): State<StoreState>,
     Query(params): Query<QueryParams>,

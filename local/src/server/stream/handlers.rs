@@ -10,6 +10,10 @@ use futures::stream::StreamExt;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 
+/// Publishes a message to a stream.
+///
+/// If the stream does not exist, it is created. Messages are broadcast to all
+/// active subscribers.
 pub async fn publish(
     State(state): State<StreamState>,
     Path(name): Path<String>,
@@ -26,6 +30,10 @@ pub async fn publish(
     }
 }
 
+/// Upgrades a connection to a WebSocket and subscribes to a stream.
+///
+/// This handler performs an authentication check before upgrading the connection.
+/// If authentication is successful, the client is subscribed to the specified stream.
 pub async fn subscribe(
     State(state): State<StreamState>,
     Path(name): Path<String>,
@@ -53,7 +61,13 @@ pub async fn subscribe(
     (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
 }
 
+/// Handles an individual WebSocket connection.
+///
+/// This function listens for messages from a broadcast channel and forwards them
+/// to the client. It also handles client-side close messages.
 async fn handle_socket(mut socket: WebSocket, streams: StreamMap, name: String) {
+    // Subscribe to the broadcast channel for the stream. If the channel does
+    // not exist, it is created.
     let rx = {
         let tx = streams
             .entry(name.clone())

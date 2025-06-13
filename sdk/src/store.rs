@@ -8,8 +8,10 @@ struct GetResultPayload {
     value: String,
 }
 
+/// The result of a `get` request.
 #[derive(Deserialize, Debug)]
 pub struct GetResult {
+    /// The retrieved value.
     pub value: Vec<u8>,
 }
 
@@ -19,9 +21,12 @@ pub struct QueryResultItemPayload {
     value: String,
 }
 
+/// An individual item in a `query` result.
 #[derive(Deserialize, Debug)]
 pub struct QueryResultItem {
+    /// The key of the item.
     pub key: String,
+    /// The value of the item.
     pub value: Vec<u8>,
 }
 
@@ -30,21 +35,26 @@ struct QueryResultPayload {
     results: Vec<QueryResultItemPayload>,
 }
 
+/// The result of a `query` request.
 #[derive(Deserialize, Debug)]
 pub struct QueryResult {
+    /// A list of key-value pairs.
     pub results: Vec<QueryResultItem>,
 }
 
+/// A client for interacting with the key-value store.
 #[derive(Clone)]
 pub struct StoreClient {
     client: Client,
 }
 
 impl StoreClient {
+    /// Creates a new `StoreClient`.
     pub fn new(client: Client) -> Self {
         Self { client }
     }
 
+    /// Sets a key-value pair in the store.
     pub async fn set(&self, key: &str, value: Vec<u8>) -> Result<(), Error> {
         let url = format!("{}/store/{}", self.client.base_url, key);
         let mut headers = reqwest::header::HeaderMap::new();
@@ -69,6 +79,9 @@ impl StoreClient {
         Ok(())
     }
 
+    /// Retrieves a value from the store by its key.
+    ///
+    /// If the key does not exist, `Ok(None)` is returned.
     pub async fn get(&self, key: &str) -> Result<Option<GetResult>, Error> {
         let url = format!("{}/store/{}", self.client.base_url, key);
         let mut headers = reqwest::header::HeaderMap::new();
@@ -99,6 +112,13 @@ impl StoreClient {
         Ok(Some(GetResult { value }))
     }
 
+    /// Queries for a range of key-value pairs.
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - The key to start the query from (inclusive). If `None`, the query starts from the first key.
+    /// * `end` - The key to end the query at (exclusive). If `None`, the query continues to the last key.
+    /// * `limit` - The maximum number of results to return. If `None`, all results are returned.
     pub async fn query(
         &self,
         start: Option<&str>,
