@@ -21,6 +21,9 @@ const DIRECTORY_FLAG: &str = "directory";
 /// Flag for the port to use.
 const PORT_FLAG: &str = "port";
 
+/// Flag for the consistency bound.
+const CONSISTENCY_BOUND_FLAG: &str = "consistency-bound";
+
 /// Entrypoint for the Exoware Local CLI.
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
@@ -64,8 +67,8 @@ async fn main() -> std::process::ExitCode {
                                 .action(ArgAction::Set),
                         )
                         .arg(
-                            Arg::new("consistency-bound")
-                                .long("consistency-bound")
+                            Arg::new(CONSISTENCY_BOUND_FLAG)
+                                .long(CONSISTENCY_BOUND_FLAG)
                                 .help("The consistency bound in milliseconds.")
                                 .required(true)
                                 .value_parser(clap::value_parser!(u64))
