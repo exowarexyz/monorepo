@@ -5,3 +5,11 @@ edition = "2021"
 publish = true
 license = "MIT OR Apache-2.0"
 description = "TBA"
+readme = "README.md"
+homepage = "https://exoware.xyz"
+repository = "https://github.com/exowarexyz/monorepo/tree/main/local"
+documentation = "https://docs.rs/exoware-local"
+
+[[bin]]
+name = "local"
+path = "src/main.rs"
