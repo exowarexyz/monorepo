@@ -18,7 +18,7 @@ const MAX_VALUE_SIZE: usize = 20 * 1024 * 1024;
 #[derive(Serialize, Deserialize, Debug)]
 struct StoredValue {
     value: Vec<u8>,
-    visible_at: u64,
+    visible_at: u128,
     updated_at: u64,
 }
 
@@ -109,29 +109,30 @@ pub async fn set(
         return Err(AppError::ValueTooLarge);
     }
 
-    let now = SystemTime::now()
+    let now_millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_secs();
+        .as_millis();
+    let now_secs = (now_millis / 1000) as u64;
 
     if let Some(existing_value) = state.db.get(&key)? {
         let stored_value: StoredValue = bincode::deserialize(&existing_value)?;
-        if now - stored_value.updated_at < 1 {
+        if now_secs - stored_value.updated_at < 1 {
             return Err(AppError::UpdateRateExceeded);
         }
     }
 
-    let delay_ms = if state.consistency_bound > 0 {
-        rand::thread_rng().gen_range(1..=state.consistency_bound)
+    let delay_ms = if state.consistency_bound_max > 0 {
+        rand::thread_rng().gen_range(state.consistency_bound_min..=state.consistency_bound_max)
     } else {
         0
     };
-    let visible_at = now + (delay_ms / 1000);
+    let visible_at = now_millis + delay_ms as u128;
 
     let stored_value = StoredValue {
         value: value.to_vec(),
         visible_at,
-        updated_at: now,
+        updated_at: now_secs,
     };
 
     let encoded_value = bincode::serialize(&stored_value)?;
@@ -150,7 +151,7 @@ pub async fn get(
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_secs();
+                .as_millis();
             if stored_value.visible_at <= now {
                 Ok(Json(GetResult {
                     value: general_purpose::STANDARD.encode(&stored_value.value),
@@ -179,7 +180,7 @@ pub async fn query(
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_secs();
+        .as_millis();
 
     for item in iter {
         if results.len() >= limit {

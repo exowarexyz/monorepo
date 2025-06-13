@@ -13,19 +13,22 @@ mod handlers;
 #[derive(Clone)]
 pub struct StoreState {
     pub db: Arc<DB>,
-    pub consistency_bound: u64,
+    pub consistency_bound_min: u64,
+    pub consistency_bound_max: u64,
 }
 
 pub fn router(
     path: &Path,
-    consistency_bound: u64,
+    consistency_bound_min: u64,
+    consistency_bound_max: u64,
     auth_token: Arc<String>,
     allow_public_access: bool,
 ) -> Result<Router, rocksdb::Error> {
     let db = Arc::new(DB::open_default(path)?);
     let state = StoreState {
         db,
-        consistency_bound,
+        consistency_bound_min,
+        consistency_bound_max,
     };
 
     let post_routes = Router::new()

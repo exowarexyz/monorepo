@@ -21,8 +21,11 @@ const DIRECTORY_FLAG: &str = "directory";
 /// Flag for the port to use.
 const PORT_FLAG: &str = "port";
 
-/// Flag for the consistency bound.
-const CONSISTENCY_BOUND_FLAG: &str = "consistency-bound";
+/// Flag for the min consistency bound.
+const CONSISTENCY_BOUND_MIN_FLAG: &str = "consistency-bound-min";
+
+/// Flag for the max consistency bound.
+const CONSISTENCY_BOUND_MAX_FLAG: &str = "consistency-bound-max";
 
 /// Flag for the auth token.
 const AUTH_TOKEN_FLAG: &str = "auth-token";
@@ -73,10 +76,18 @@ async fn main() -> std::process::ExitCode {
                                 .action(ArgAction::Set),
                         )
                         .arg(
-                            Arg::new(CONSISTENCY_BOUND_FLAG)
-                                .long(CONSISTENCY_BOUND_FLAG)
-                                .help("The consistency bound in milliseconds.")
-                                .required(true)
+                            Arg::new(CONSISTENCY_BOUND_MIN_FLAG)
+                                .long(CONSISTENCY_BOUND_MIN_FLAG)
+                                .help("The minimum consistency bound in milliseconds.")
+                                .default_value("0")
+                                .value_parser(clap::value_parser!(u64))
+                                .action(ArgAction::Set),
+                        )
+                        .arg(
+                            Arg::new(CONSISTENCY_BOUND_MAX_FLAG)
+                                .long(CONSISTENCY_BOUND_MAX_FLAG)
+                                .help("The maximum consistency bound in milliseconds.")
+                                .default_value("60000")
                                 .value_parser(clap::value_parser!(u64))
                                 .action(ArgAction::Set),
                         )
@@ -111,16 +122,29 @@ async fn main() -> std::process::ExitCode {
             Some((server::RUN_CMD, matches)) => {
                 let directory = matches.get_one::<PathBuf>(DIRECTORY_FLAG).unwrap();
                 let port = matches.get_one::<u16>(PORT_FLAG).unwrap();
-                let consistency_bound = matches
-                    .get_one::<u64>(CONSISTENCY_BOUND_FLAG)
+                let consistency_bound_min = matches
+                    .get_one::<u64>(CONSISTENCY_BOUND_MIN_FLAG)
+                    .copied()
+                    .unwrap();
+                let consistency_bound_max = matches
+                    .get_one::<u64>(CONSISTENCY_BOUND_MAX_FLAG)
                     .copied()
                     .unwrap();
                 let auth_token = matches.get_one::<String>(AUTH_TOKEN_FLAG).unwrap();
                 let allow_public_access = matches.get_flag(ALLOW_PUBLIC_ACCESS_FLAG);
+
+                if consistency_bound_min > consistency_bound_max {
+                    error!(
+                        "--consistency-bound-min cannot be greater than --consistency-bound-max"
+                    );
+                    return std::process::ExitCode::FAILURE;
+                }
+
                 if let Err(e) = server::run(
                     directory,
                     port,
-                    consistency_bound,
+                    consistency_bound_min,
+                    consistency_bound_max,
                     auth_token.clone(),
                     allow_public_access,
                 )

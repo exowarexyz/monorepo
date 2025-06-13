@@ -7,8 +7,12 @@ use std::time::Duration;
 use tempfile::tempdir;
 use tokio::task::JoinHandle;
 
-async fn with_server<F, Fut>(allow_public_access: bool, consistency_bound: u64, test_fn: F)
-where
+async fn with_server<F, Fut>(
+    allow_public_access: bool,
+    consistency_bound_min: u64,
+    consistency_bound_max: u64,
+    test_fn: F,
+) where
     F: FnOnce(Client) -> Fut,
     Fut: Future<Output = ()>,
 {
@@ -27,7 +31,8 @@ where
             exoware_local::server::run(
                 dir.path(),
                 &port,
-                consistency_bound,
+                consistency_bound_min,
+                consistency_bound_max,
                 auth_token,
                 allow_public_access,
             )
@@ -46,7 +51,7 @@ where
 
 #[tokio::test]
 async fn test_store_set_get() {
-    with_server(true, 0, |client| async move {
+    with_server(true, 0, 0, |client| async move {
         let store = client.store();
         store.set("key1", b"value1".to_vec()).await.unwrap();
         let res = store.get("key1").await.unwrap().unwrap();
@@ -57,7 +62,7 @@ async fn test_store_set_get() {
 
 #[tokio::test]
 async fn test_store_query() {
-    with_server(true, 0, |client| async move {
+    with_server(true, 0, 0, |client| async move {
         let store = client.store();
         store.set("a", b"1".to_vec()).await.unwrap();
         store.set("b", b"2".to_vec()).await.unwrap();
@@ -73,7 +78,7 @@ async fn test_store_query() {
 
 #[tokio::test]
 async fn test_get_not_found() {
-    with_server(true, 0, |client| async move {
+    with_server(true, 0, 0, |client| async move {
         let store = client.store();
         let res = store.get("nonexistent").await.unwrap();
         assert!(res.is_none());
@@ -83,7 +88,7 @@ async fn test_get_not_found() {
 
 #[tokio::test]
 async fn test_stream() {
-    with_server(true, 0, |client| async move {
+    with_server(true, 0, 0, |client| async move {
         let stream = client.stream();
         let mut sub = stream.subscribe("test-stream").await.unwrap();
 
@@ -104,7 +109,7 @@ async fn test_stream() {
 
 #[tokio::test]
 async fn test_auth() {
-    with_server(false, 0, |client| async move {
+    with_server(false, 0, 0, |client| async move {
         let store = client.store();
         let err = store.get("key").await.unwrap_err();
         match err {
@@ -132,7 +137,7 @@ async fn test_auth() {
 
 #[tokio::test]
 async fn test_limits() {
-    with_server(true, 0, |client| async move {
+    with_server(true, 0, 0, |client| async move {
         let store = client.store();
         let large_key = "a".repeat(1024);
         let err = store.set(&large_key, b"value".to_vec()).await.unwrap_err();
@@ -153,14 +158,17 @@ async fn test_limits() {
 
 #[tokio::test]
 async fn test_eventual_consistency() {
-    with_server(true, 2000, |client| async move {
+    with_server(true, 200, 300, |client| async move {
         let store = client.store();
         store.set("key", b"value".to_vec()).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Check that the value is not visible before the minimum consistency bound.
+        tokio::time::sleep(Duration::from_millis(100)).await;
         let res = store.get("key").await.unwrap();
         assert!(res.is_none());
 
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        // Check that the value is visible after the maximum consistency bound.
+        tokio::time::sleep(Duration::from_millis(300)).await;
 
         let res = store.get("key").await.unwrap().unwrap();
         assert_eq!(res.value, b"value");
