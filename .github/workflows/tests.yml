@@ -1,0 +1,77 @@
+name: Tests
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  UDEPS_VERSION: 0.1.50
+
+jobs:
+  Lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Install nightly Rust toolchain
+      run: rustup toolchain install nightly && rustup component add --toolchain nightly rustfmt
+    - name: Run setup
+      uses: ./.github/actions/setup
+    - name: Lint
+      run: cargo clippy --all-targets -- -D warnings
+    - name: Fmt
+      run: cargo +nightly fmt --all -- --check
+    - name: Check docs
+      run: cargo doc --no-deps --document-private-items
+      env:
+        RUSTDOCFLAGS: "-D warnings"
+
+  Unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Run setup
+      uses: ./.github/actions/setup
+    - name: Run tests
+      run: cargo test --verbose
+
+  Dependencies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Install nightly Rust toolchain
+      run: rustup toolchain install nightly
+    - name: Get Rust version
+      id: rust-version
+      run: echo "rust_version=$(rustc +nightly --version)" >> "$GITHUB_OUTPUT"
+    - name: Run setup
+      uses: ./.github/actions/setup
+    - name: Cache cargo-udeps
+      id: cargo-udeps-cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/bin/cargo-udeps
+        key: ${{ runner.os }}-${{ env.UDEPS_VERSION }}-cargo-udeps-${{ steps.rust-version.outputs.rust_version }}
+    - name: Install cargo-udeps
+      if: steps.cargo-udeps-cache.outputs.cache-hit != 'true'
+      run: cargo +nightly install cargo-udeps --version ${{ env.UDEPS_VERSION }}
+    - name: Check for unused dependencies
+      run: cargo +nightly udeps --all-targets
+
+  Scripts:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Run shellcheck
+      run: find scripts -name "*.sh" -exec shellcheck -o all {} +
