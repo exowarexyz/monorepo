@@ -470,6 +470,7 @@ dependencies = [
  "async-trait",
  "base64",
  "exoware-local",
+ "exoware-sdk",
  "futures-util",
  "http",
  "portpicker",

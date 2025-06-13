@@ -1,3 +1,6 @@
+#[cfg(feature = "testing")]
+pub mod testing;
+
 pub mod error;
 pub mod store;
 pub mod stream;

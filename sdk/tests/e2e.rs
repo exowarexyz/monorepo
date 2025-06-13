@@ -1,53 +1,6 @@
-use exoware_sdk::{error::Error, Client};
+use exoware_sdk::{error::Error, testing::with_server, Client};
 use futures_util::StreamExt;
-use rand::distributions::Alphanumeric;
-use rand::Rng;
-use std::future::Future;
 use std::time::Duration;
-use tempfile::tempdir;
-use tokio::task::JoinHandle;
-
-async fn with_server<F, Fut>(
-    allow_public_access: bool,
-    consistency_bound_min: u64,
-    consistency_bound_max: u64,
-    test_fn: F,
-) where
-    F: FnOnce(Client) -> Fut,
-    Fut: Future<Output = ()>,
-{
-    let port = portpicker::pick_unused_port().expect("failed to find unused port");
-    let addr = format!("http://127.0.0.1:{}", port);
-    let dir = tempdir().unwrap();
-    let auth_token: String = rand::thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(16)
-        .map(char::from)
-        .collect();
-
-    let server_task: JoinHandle<Result<(), exoware_local::server::Error>> = tokio::spawn({
-        let auth_token = auth_token.clone();
-        async move {
-            exoware_local::server::run(
-                dir.path(),
-                &port,
-                consistency_bound_min,
-                consistency_bound_max,
-                auth_token,
-                allow_public_access,
-            )
-            .await
-        }
-    });
-
-    // Give the server a moment to start up
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let client = Client::new(addr, auth_token.clone());
-    test_fn(client).await;
-
-    server_task.abort();
-}
 
 #[tokio::test]
 async fn test_store_set_get() {
