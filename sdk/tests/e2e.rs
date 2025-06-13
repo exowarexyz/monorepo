@@ -129,3 +129,32 @@ async fn test_eventual_consistency() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn test_eventual_consistency_query() {
+    with_server(true, 200, 300, |client| async move {
+        let store = client.store();
+
+        // Set the first key and wait for it to become consistent.
+        store.set("a", b"1".to_vec()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // Set the second key, which will not be immediately visible.
+        store.set("c", b"3".to_vec()).await.unwrap();
+
+        // Query for a range of keys. Only "a" should be visible.
+        let res = store.query(Some("a"), Some("d"), None).await.unwrap();
+        assert_eq!(res.results.len(), 1);
+        assert_eq!(res.results[0].key, "a");
+
+        // Wait for the second key to become consistent.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // Query again. Both "a" and "c" should now be visible.
+        let res = store.query(Some("a"), Some("d"), None).await.unwrap();
+        assert_eq!(res.results.len(), 2);
+        assert_eq!(res.results[0].key, "a");
+        assert_eq!(res.results[1].key, "c");
+    })
+    .await;
+}
