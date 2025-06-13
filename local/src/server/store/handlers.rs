@@ -12,17 +12,24 @@ use rocksdb::{Direction, IteratorMode};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const MAX_KEY_SIZE: usize = 512;
+const MAX_VALUE_SIZE: usize = 20 * 1024 * 1024;
+
 #[derive(Serialize, Deserialize, Debug)]
 struct StoredValue {
     value: Vec<u8>,
     visible_at: u64,
+    updated_at: u64,
 }
 
 #[derive(Debug)]
 pub enum AppError {
     RocksDb(rocksdb::Error),
-    Bincode(bincode::Error),
+    Bincode(Box<bincode::ErrorKind>),
     NotFound,
+    KeyTooLarge,
+    ValueTooLarge,
+    UpdateRateExceeded,
 }
 
 impl From<rocksdb::Error> for AppError {
@@ -31,8 +38,8 @@ impl From<rocksdb::Error> for AppError {
     }
 }
 
-impl From<bincode::Error> for AppError {
-    fn from(err: bincode::Error) -> Self {
+impl From<Box<bincode::ErrorKind>> for AppError {
+    fn from(err: Box<bincode::ErrorKind>) -> Self {
         AppError::Bincode(err)
     }
 }
@@ -49,6 +56,18 @@ impl IntoResponse for AppError {
                 format!("Internal server error: {}", err),
             ),
             AppError::NotFound => (StatusCode::NOT_FOUND, "Not Found".to_string()),
+            AppError::KeyTooLarge => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("Key size cannot exceed {} bytes", MAX_KEY_SIZE),
+            ),
+            AppError::ValueTooLarge => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("Value size cannot exceed {} bytes", MAX_VALUE_SIZE),
+            ),
+            AppError::UpdateRateExceeded => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "Key can only be updated once per second".to_string(),
+            ),
         };
 
         (status, error_message).into_response()
@@ -83,10 +102,24 @@ pub async fn set(
     Path(key): Path<String>,
     value: Bytes,
 ) -> Result<impl IntoResponse, AppError> {
+    if key.len() > MAX_KEY_SIZE {
+        return Err(AppError::KeyTooLarge);
+    }
+    if value.len() > MAX_VALUE_SIZE {
+        return Err(AppError::ValueTooLarge);
+    }
+
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
+
+    if let Some(existing_value) = state.db.get(&key)? {
+        let stored_value: StoredValue = bincode::deserialize(&existing_value)?;
+        if now - stored_value.updated_at < 1 {
+            return Err(AppError::UpdateRateExceeded);
+        }
+    }
 
     let visible_at = if state.simulate_eventual_consistency {
         now + rand::thread_rng().gen_range(0..=60)
@@ -97,6 +130,7 @@ pub async fn set(
     let stored_value = StoredValue {
         value: value.to_vec(),
         visible_at,
+        updated_at: now,
     };
 
     let encoded_value = bincode::serialize(&stored_value)?;
