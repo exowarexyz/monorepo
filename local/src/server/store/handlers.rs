@@ -1,3 +1,4 @@
+use crate::server::store::StoreState;
 use axum::{
     body::Bytes,
     extract::{Path, Query, State},
@@ -6,15 +7,21 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose, Engine as _};
-use rocksdb::{Direction, IteratorMode, DB};
+use rand::Rng;
+use rocksdb::{Direction, IteratorMode};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-pub type Store = Arc<DB>;
+#[derive(Serialize, Deserialize, Debug)]
+struct StoredValue {
+    value: Vec<u8>,
+    visible_at: u64,
+}
 
 #[derive(Debug)]
 pub enum AppError {
     RocksDb(rocksdb::Error),
+    Bincode(bincode::Error),
     NotFound,
 }
 
@@ -24,10 +31,20 @@ impl From<rocksdb::Error> for AppError {
     }
 }
 
+impl From<bincode::Error> for AppError {
+    fn from(err: bincode::Error) -> Self {
+        AppError::Bincode(err)
+    }
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, error_message) = match self {
             AppError::RocksDb(err) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Internal server error: {}", err),
+            ),
+            AppError::Bincode(err) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Internal server error: {}", err),
             ),
@@ -62,28 +79,57 @@ pub struct QueryResults {
 }
 
 pub async fn set(
-    State(db): State<Store>,
+    State(state): State<StoreState>,
     Path(key): Path<String>,
     value: Bytes,
 ) -> Result<impl IntoResponse, AppError> {
-    db.put(key, value)?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let visible_at = if state.simulate_eventual_consistency {
+        now + rand::thread_rng().gen_range(0..=60)
+    } else {
+        now
+    };
+
+    let stored_value = StoredValue {
+        value: value.to_vec(),
+        visible_at,
+    };
+
+    let encoded_value = bincode::serialize(&stored_value)?;
+    state.db.put(key, encoded_value)?;
     Ok(StatusCode::OK)
 }
 
 pub async fn get(
-    State(db): State<Store>,
+    State(state): State<StoreState>,
     Path(key): Path<String>,
 ) -> Result<Json<GetResult>, AppError> {
-    match db.get(key)? {
-        Some(value) => Ok(Json(GetResult {
-            value: general_purpose::STANDARD.encode(value),
-        })),
+    let db_value = state.db.get(key)?;
+    match db_value {
+        Some(value) => {
+            let stored_value: StoredValue = bincode::deserialize(&value)?;
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            if stored_value.visible_at <= now {
+                Ok(Json(GetResult {
+                    value: general_purpose::STANDARD.encode(&stored_value.value),
+                }))
+            } else {
+                Err(AppError::NotFound)
+            }
+        }
         None => Err(AppError::NotFound),
     }
 }
 
 pub async fn query(
-    State(db): State<Store>,
+    State(state): State<StoreState>,
     Query(params): Query<QueryParams>,
 ) -> Result<Json<QueryResults>, AppError> {
     let limit = params.limit.unwrap_or(usize::MAX);
@@ -92,23 +138,36 @@ pub async fn query(
         IteratorMode::From(key.as_bytes(), Direction::Forward)
     });
 
-    let iter = db.iterator(mode);
+    let iter = state.db.iterator(mode);
 
     let mut results = Vec::new();
-    for item in iter.take(limit) {
-        let (key, value) = item?;
-        let key_str = String::from_utf8(key.into()).unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
 
-        if let Some(end_key) = &params.end {
-            if &key_str >= end_key {
-                break;
-            }
+    for item in iter {
+        if results.len() >= limit {
+            break;
         }
 
-        results.push(QueryResultItem {
-            key: key_str,
-            value: general_purpose::STANDARD.encode(value),
-        });
+        let (key, value) = item?;
+        let stored_value: StoredValue = bincode::deserialize(&value)?;
+
+        if stored_value.visible_at <= now {
+            let key_str = String::from_utf8(key.into()).unwrap();
+
+            if let Some(end_key) = &params.end {
+                if &key_str >= end_key {
+                    break;
+                }
+            }
+
+            results.push(QueryResultItem {
+                key: key_str,
+                value: general_purpose::STANDARD.encode(&stored_value.value),
+            });
+        }
     }
 
     Ok(Json(QueryResults { results }))

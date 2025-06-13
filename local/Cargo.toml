@@ -20,6 +20,8 @@ axum = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 base64 = { workspace = true }
 rocksdb = { workspace = true }
+rand = { workspace = true }
+bincode = { workspace = true }
 
 [[bin]]
 name = "local"

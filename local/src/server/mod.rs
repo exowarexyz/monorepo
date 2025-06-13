@@ -20,12 +20,19 @@ pub enum Error {
     RocksDb(#[from] rocksdb::Error),
 }
 
-pub async fn run(directory: &Path, port: &u16) -> Result<(), Error> {
+pub async fn run(
+    directory: &Path,
+    port: &u16,
+    simulate_eventual_consistency: bool,
+) -> Result<(), Error> {
     // Create a listener for the server on the specified port.
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
 
     // Create a router for the server.
-    let router = Router::new().nest("/store", store::router(directory)?);
+    let router = Router::new().nest(
+        "/store",
+        store::router(directory, simulate_eventual_consistency)?,
+    );
 
     // Serve the server.
     serve(listener, router.into_make_service())
