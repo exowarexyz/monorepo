@@ -4,6 +4,7 @@ use thiserror::Error;
 use tokio::net::TcpListener;
 
 mod store;
+mod stream;
 
 /// Subcommand for the server.
 pub const CMD: &str = "server";
@@ -25,7 +26,11 @@ pub async fn run(directory: &Path, port: &u16, consistency_bound: u64) -> Result
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
 
     // Create a router for the server.
-    let router = Router::new().nest("/store", store::router(directory, consistency_bound)?);
+    let store_router = store::router(directory, consistency_bound)?;
+    let stream_router = stream::router();
+    let router = Router::new()
+        .nest("/store", store_router)
+        .nest("/stream", stream_router);
 
     // Serve the server.
     serve(listener, router.into_make_service())
