@@ -29,17 +29,19 @@ pub fn router(
     };
 
     let post_routes = Router::new()
-        .route("/:key", post(handlers::set))
+        .route("/{key}", post(handlers::set))
         .layer(from_fn_with_state(auth_token.clone(), auth::middleware));
 
     let get_routes = Router::new()
-        .route("/:key", get(handlers::get))
+        .route("/{key}", get(handlers::get))
         .route("/", get(handlers::query));
 
     let router = if allow_public_access {
         post_routes.merge(get_routes)
     } else {
-        post_routes.merge(get_routes.layer(from_fn_with_state(auth_token, auth::middleware)))
+        get_routes
+            .layer(from_fn_with_state(auth_token, auth::middleware))
+            .merge(post_routes)
     };
 
     Ok(router.with_state(state))

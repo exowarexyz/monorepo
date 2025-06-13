@@ -4,10 +4,12 @@ use futures_util::{
     SinkExt, StreamExt,
 };
 use http::Request;
-use reqwest::header::{HeaderValue, AUTHORIZATION};
+use reqwest::header::{HeaderValue, AUTHORIZATION, CONNECTION, UPGRADE};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    connect_async, tungstenite::protocol::Message, MaybeTlsStream, WebSocketStream,
+    connect_async,
+    tungstenite::{handshake::client::generate_key, protocol::Message},
+    MaybeTlsStream, WebSocketStream,
 };
 
 #[derive(Clone)]
@@ -15,6 +17,7 @@ pub struct StreamClient {
     client: Client,
 }
 
+#[derive(Debug)]
 pub struct Subscription {
     write: SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
     pub read: SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
@@ -60,7 +63,13 @@ impl StreamClient {
         let url = format!("{}/stream/{}", self.client.base_url, name).replace("http", "ws");
 
         let request = Request::builder()
+            .method("GET")
             .uri(&url)
+            .version(http::Version::HTTP_11)
+            .header(UPGRADE, "websocket")
+            .header(CONNECTION, "Upgrade")
+            .header("Sec-WebSocket-Key", generate_key())
+            .header("Sec-WebSocket-Version", "13")
             .header(
                 AUTHORIZATION,
                 HeaderValue::from_str(&format!("Bearer {}", self.client.auth_token)).unwrap(),

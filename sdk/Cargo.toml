@@ -25,7 +25,7 @@ log = "0.4.22"
 http = "1.1.0"
 
 [dev-dependencies]
-exoware-local = { workspace = true }
+exoware-local = { path = "../local" }
 tempfile = "3.10.1"
 portpicker = "0.1.1"
 rand = "0.8.5"

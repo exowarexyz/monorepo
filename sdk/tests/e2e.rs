@@ -119,6 +119,13 @@ async fn test_auth() {
             Error::Http(status) => assert_eq!(status, 401),
             _ => panic!("unexpected error type"),
         }
+
+        let stream = bad_client.stream();
+        let err = stream.subscribe("test-stream").await.unwrap_err();
+        match err {
+            Error::WebSocket(_) => {}
+            _ => panic!("unexpected error type"),
+        }
     })
     .await;
 }
@@ -149,6 +156,7 @@ async fn test_eventual_consistency() {
     with_server(true, 2000, |client| async move {
         let store = client.store();
         store.set("key", b"value".to_vec()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
         let res = store.get("key").await.unwrap();
         assert!(res.is_none());
 

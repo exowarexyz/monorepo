@@ -121,7 +121,11 @@ pub async fn set(
         }
     }
 
-    let delay_ms = rand::thread_rng().gen_range(0..=state.consistency_bound);
+    let delay_ms = if state.consistency_bound > 0 {
+        rand::thread_rng().gen_range(1..=state.consistency_bound)
+    } else {
+        0
+    };
     let visible_at = now + (delay_ms / 1000);
 
     let stored_value = StoredValue {

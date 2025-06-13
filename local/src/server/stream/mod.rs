@@ -19,10 +19,10 @@ pub fn router(auth_token: Arc<String>, allow_public_access: bool) -> Router {
     let streams = StreamMap::new(DashMap::new());
 
     let post_routes = Router::new()
-        .route("/:name", post(publish))
+        .route("/{name}", post(publish))
         .layer(from_fn_with_state(auth_token.clone(), auth::middleware));
 
-    let get_routes = Router::new().route("/:name", get(subscribe));
+    let get_routes = Router::new().route("/{name}", get(subscribe));
 
     let router = if allow_public_access {
         post_routes.merge(get_routes)
