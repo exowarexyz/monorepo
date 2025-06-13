@@ -1,10 +1,10 @@
 //! Exoware Local CLI
 
-use std::path::PathBuf;
-
 use clap::{Arg, ArgAction, Command};
+use std::path::PathBuf;
+use tracing::error;
 
-mod kv;
+mod server;
 
 /// Returns the version of the crate.
 pub fn crate_version() -> &'static str {
@@ -19,9 +19,6 @@ const DIRECTORY_FLAG: &str = "directory";
 
 /// Flag for the port to use.
 const PORT_FLAG: &str = "port";
-
-/// Command to run the local server.
-const RUN_COMMAND: &str = "run";
 
 /// Entrypoint for the Exoware Local CLI.
 #[tokio::main]
@@ -41,24 +38,28 @@ async fn main() -> std::process::ExitCode {
                 .long(VERBOSE_FLAG)
                 .action(ArgAction::SetTrue),
         )
-        .arg(
-            Arg::new(DIRECTORY_FLAG)
-                .short('d')
-                .long(DIRECTORY_FLAG)
-                .action(ArgAction::Set)
-                .default_value(default_directory)
-                .value_parser(clap::value_parser!(PathBuf)),
-        )
         .subcommand(
-            Command::new(RUN_COMMAND)
-                .about("Start the local server.")
+            Command::new(server::CMD)
+                .about("Interact with a local server.")
                 .arg(
-                    Arg::new(PORT_FLAG)
-                        .short('p')
-                        .long(PORT_FLAG)
+                    Arg::new(DIRECTORY_FLAG)
+                        .short('d')
+                        .long(DIRECTORY_FLAG)
                         .action(ArgAction::Set)
-                        .default_value("8080")
-                        .value_parser(clap::value_parser!(u16)),
+                        .default_value(default_directory)
+                        .value_parser(clap::value_parser!(PathBuf)),
+                )
+                .subcommand(
+                    Command::new(server::RUN_CMD)
+                        .about("Run the local server.")
+                        .arg(
+                            Arg::new(PORT_FLAG)
+                                .short('p')
+                                .long(PORT_FLAG)
+                                .action(ArgAction::Set)
+                                .default_value("8080")
+                                .value_parser(clap::value_parser!(u16)),
+                        ),
                 ),
         )
         .get_matches();
@@ -70,5 +71,25 @@ async fn main() -> std::process::ExitCode {
         tracing::Level::INFO
     };
     tracing_subscriber::fmt().with_max_level(level).init();
+
+    // Parse subcommands
+    let directory = matches.get_one::<PathBuf>(DIRECTORY_FLAG).unwrap();
+    if let Some(server_matches) = matches.subcommand_matches(server::CMD) {
+        match server_matches.subcommand() {
+            Some((server::RUN_CMD, matches)) => {
+                let port = matches.get_one::<u16>(PORT_FLAG).unwrap();
+                if let Err(e) = server::run(directory, port).await {
+                    error!(error = ?e, "failed to run local server");
+                } else {
+                    return std::process::ExitCode::SUCCESS;
+                }
+            }
+            _ => {
+                error!("invalid subcommand");
+                return std::process::ExitCode::FAILURE;
+            }
+        }
+    }
+
     std::process::ExitCode::FAILURE
 }
