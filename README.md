@@ -5,13 +5,13 @@
 
 ## Primitives
 
-* [simulator](./simulator/README.md):
-* [sdk](./sdk/README.md):
+* [simulator](./simulator/README.md): Simulate Exoware Components during local development.
+* [sdk](./sdk/README.md): Interact with Exoware Components.
 
 ## Components
 
-* store:
-* stream:
+* store: TBA
+* stream: TBA
 
 ## Examples
 
