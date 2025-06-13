@@ -37,25 +37,20 @@ pub async fn subscribe(
             if let Ok(auth_str) = auth_header.to_str() {
                 if let Some(bearer_token) = auth_str.strip_prefix("Bearer ") {
                     if bearer_token == state.auth_token.as_str() {
-                        // continue
-                    } else {
-                        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+                        return match axum::extract::WebSocketUpgrade::from_request(request, &state)
+                            .await
+                        {
+                            Ok(ws) => ws.on_upgrade(move |socket| {
+                                handle_socket(socket, state.streams, name)
+                            }),
+                            Err(rejection) => rejection.into_response(),
+                        };
                     }
-                } else {
-                    return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
                 }
-            } else {
-                return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
             }
-        } else {
-            return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
         }
     }
-
-    match axum::extract::WebSocketUpgrade::from_request(request, &state).await {
-        Ok(ws) => ws.on_upgrade(move |socket| handle_socket(socket, state.streams, name)),
-        Err(rejection) => rejection.into_response(),
-    }
+    (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
 }
 
 async fn handle_socket(mut socket: WebSocket, streams: StreamMap, name: String) {
