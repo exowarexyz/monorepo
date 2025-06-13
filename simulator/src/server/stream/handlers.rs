@@ -39,26 +39,28 @@ pub async fn subscribe(
     Path(name): Path<String>,
     request: Request<Body>,
 ) -> Response {
-    if !state.allow_public_access {
-        let headers = request.headers();
-        if let Some(auth_header) = headers.get("Authorization") {
+    let mut authorized = state.allow_public_access;
+
+    if !authorized {
+        if let Some(auth_header) = request.headers().get("Authorization") {
             if let Ok(auth_str) = auth_header.to_str() {
                 if let Some(bearer_token) = auth_str.strip_prefix("Bearer ") {
                     if bearer_token == state.auth_token.as_str() {
-                        return match axum::extract::WebSocketUpgrade::from_request(request, &state)
-                            .await
-                        {
-                            Ok(ws) => ws.on_upgrade(move |socket| {
-                                handle_socket(socket, state.streams, name)
-                            }),
-                            Err(rejection) => rejection.into_response(),
-                        };
+                        authorized = true;
                     }
                 }
             }
         }
     }
-    (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
+
+    if authorized {
+        match axum::extract::WebSocketUpgrade::from_request(request, &state).await {
+            Ok(ws) => ws.on_upgrade(move |socket| handle_socket(socket, state.streams, name)),
+            Err(rejection) => rejection.into_response(),
+        }
+    } else {
+        (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
+    }
 }
 
 /// Handles an individual WebSocket connection.

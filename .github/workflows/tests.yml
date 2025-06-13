@@ -31,6 +31,14 @@ jobs:
       run: cargo doc --no-deps --document-private-items
       env:
         RUSTDOCFLAGS: "-D warnings"
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+    - name: Install speccy
+      run: npm install -g speccy
+    - name: Lint OpenAPI spec
+      run: speccy lint docs/openapi.yaml
 
   Unit:
     runs-on: ubuntu-latest

@@ -1,0 +1,142 @@
+openapi: 3.0.0
+info:
+  title: Exoware API
+  version: 0.0.1
+  description: API for Exoware simulator components (store and stream).
+servers:
+  - url: /
+    description: Local simulator server
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+security:
+  - bearerAuth: []
+
+paths:
+  /store/{key}:
+    parameters:
+      - name: key
+        in: path
+        required: true
+        schema:
+          type: string
+        description: The key for the store operation.
+    get:
+      summary: Get a value
+      description: Retrieves a value from the store by its key. Respects eventual consistency.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  value:
+                    type: string
+                    format: byte
+                    description: The base64-encoded value.
+        '404':
+          description: Not Found
+        '401':
+          description: Unauthorized
+    post:
+      summary: Set a value
+      description: Sets a key-value pair in the store. Enforces size limits and eventual consistency.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: OK
+        '413':
+          description: Payload Too Large
+        '429':
+          description: Too Many Requests
+        '401':
+          description: Unauthorized
+
+  /store/:
+    get:
+      summary: Query for key-value pairs
+      description: Queries for a range of key-value pairs, respecting eventual consistency.
+      parameters:
+        - name: start
+          in: query
+          required: false
+          schema:
+            type: string
+          description: The key to start the query from (inclusive).
+        - name: end
+          in: query
+          required: false
+          schema:
+            type: string
+          description: The key to end the query at (exclusive).
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+          description: The maximum number of results to return.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        key:
+                          type: string
+                        value:
+                          type: string
+                          format: byte
+        '401':
+          description: Unauthorized
+
+  /stream/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+        description: The name of the stream.
+    post:
+      summary: Publish to a stream
+      description: Publishes a message to a stream.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: OK
+        '401':
+          description: Unauthorized
+    get:
+      summary: Subscribe to a stream
+      description: Subscribes to a stream via WebSocket.
+      responses:
+        '101':
+          description: Switching Protocols
+        '401':
+          description: Unauthorized
