@@ -10,6 +10,7 @@ clap = "4.5.18"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
 thiserror = "2.0.12"
+axum = "0.8.1"
 
 [profile.bench]
 # Because we enable overflow checks in "release," we should benchmark with them.

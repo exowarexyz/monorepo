@@ -16,6 +16,7 @@ clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
+axum = { workspace = true }
 
 [[bin]]
 name = "local"
