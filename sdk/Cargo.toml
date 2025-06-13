@@ -1,0 +1,13 @@
+[package]
+name = "exoware-sdk"
+version = "0.0.1"
+edition = "2021"
+publish = true
+license = "MIT OR Apache-2.0"
+description = "TBA"
+readme = "README.md"
+homepage = "https://exoware.xyz"
+repository = "https://github.com/exowarexyz/monorepo/tree/main/sdk"
+documentation = "https://docs.rs/exoware-sdk"
+
+[dependencies]
