@@ -1,8 +1,10 @@
 use axum::{serve, Router};
 use std::path::Path;
+use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::TcpListener;
 
+mod auth;
 mod store;
 mod stream;
 
@@ -21,13 +23,25 @@ pub enum Error {
     RocksDb(#[from] rocksdb::Error),
 }
 
-pub async fn run(directory: &Path, port: &u16, consistency_bound: u64) -> Result<(), Error> {
+pub async fn run(
+    directory: &Path,
+    port: &u16,
+    consistency_bound: u64,
+    auth_token: String,
+    allow_public_access: bool,
+) -> Result<(), Error> {
     // Create a listener for the server on the specified port.
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
 
     // Create a router for the server.
-    let store_router = store::router(directory, consistency_bound)?;
-    let stream_router = stream::router();
+    let auth_token = Arc::new(auth_token);
+    let store_router = store::router(
+        directory,
+        consistency_bound,
+        auth_token.clone(),
+        allow_public_access,
+    )?;
+    let stream_router = stream::router(auth_token, allow_public_access);
     let router = Router::new()
         .nest("/store", store_router)
         .nest("/stream", stream_router);

@@ -24,6 +24,12 @@ const PORT_FLAG: &str = "port";
 /// Flag for the consistency bound.
 const CONSISTENCY_BOUND_FLAG: &str = "consistency-bound";
 
+/// Flag for the auth token.
+const AUTH_TOKEN_FLAG: &str = "auth-token";
+
+/// Flag to allow public access.
+const ALLOW_PUBLIC_ACCESS_FLAG: &str = "allow-public-access";
+
 /// Entrypoint for the Exoware Local CLI.
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
@@ -73,6 +79,19 @@ async fn main() -> std::process::ExitCode {
                                 .required(true)
                                 .value_parser(clap::value_parser!(u64))
                                 .action(ArgAction::Set),
+                        )
+                        .arg(
+                            Arg::new(AUTH_TOKEN_FLAG)
+                                .long(AUTH_TOKEN_FLAG)
+                                .help("The authorization token to use.")
+                                .required(true)
+                                .action(ArgAction::Set),
+                        )
+                        .arg(
+                            Arg::new(ALLOW_PUBLIC_ACCESS_FLAG)
+                                .long(ALLOW_PUBLIC_ACCESS_FLAG)
+                                .help("Allow public access for read-only methods.")
+                                .action(ArgAction::SetTrue),
                         ),
                 ),
         )
@@ -93,10 +112,20 @@ async fn main() -> std::process::ExitCode {
                 let directory = matches.get_one::<PathBuf>(DIRECTORY_FLAG).unwrap();
                 let port = matches.get_one::<u16>(PORT_FLAG).unwrap();
                 let consistency_bound = matches
-                    .get_one::<u64>("consistency-bound")
+                    .get_one::<u64>(CONSISTENCY_BOUND_FLAG)
                     .copied()
                     .unwrap();
-                if let Err(e) = server::run(directory, port, consistency_bound).await {
+                let auth_token = matches.get_one::<String>(AUTH_TOKEN_FLAG).unwrap();
+                let allow_public_access = matches.get_flag(ALLOW_PUBLIC_ACCESS_FLAG);
+                if let Err(e) = server::run(
+                    directory,
+                    port,
+                    consistency_bound,
+                    auth_token.clone(),
+                    allow_public_access,
+                )
+                .await
+                {
                     error!(error = ?e, "failed to run local server");
                 } else {
                     return std::process::ExitCode::SUCCESS;
