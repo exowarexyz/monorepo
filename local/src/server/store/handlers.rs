@@ -121,11 +121,8 @@ pub async fn set(
         }
     }
 
-    let visible_at = if state.simulate_eventual_consistency {
-        now + rand::thread_rng().gen_range(0..=60)
-    } else {
-        now
-    };
+    let delay_ms = rand::thread_rng().gen_range(0..=state.consistency_bound);
+    let visible_at = now + (delay_ms / 1000);
 
     let stored_value = StoredValue {
         value: value.to_vec(),

@@ -64,10 +64,12 @@ async fn main() -> std::process::ExitCode {
                                 .action(ArgAction::Set),
                         )
                         .arg(
-                            Arg::new("simulate-eventual-consistency")
-                                .long("simulate-eventual-consistency")
-                                .help("Simulate eventual consistency for store requests.")
-                                .action(ArgAction::SetTrue),
+                            Arg::new("consistency-bound")
+                                .long("consistency-bound")
+                                .help("The consistency bound in milliseconds.")
+                                .required(true)
+                                .value_parser(clap::value_parser!(u64))
+                                .action(ArgAction::Set),
                         ),
                 ),
         )
@@ -87,9 +89,11 @@ async fn main() -> std::process::ExitCode {
             Some((server::RUN_CMD, matches)) => {
                 let directory = matches.get_one::<PathBuf>(DIRECTORY_FLAG).unwrap();
                 let port = matches.get_one::<u16>(PORT_FLAG).unwrap();
-                let simulate_eventual_consistency =
-                    matches.get_flag("simulate-eventual-consistency");
-                if let Err(e) = server::run(directory, port, simulate_eventual_consistency).await {
+                let consistency_bound = matches
+                    .get_one::<u64>("consistency-bound")
+                    .copied()
+                    .unwrap();
+                if let Err(e) = server::run(directory, port, consistency_bound).await {
                     error!(error = ?e, "failed to run local server");
                 } else {
                     return std::process::ExitCode::SUCCESS;

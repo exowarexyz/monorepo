@@ -11,14 +11,14 @@ mod handlers;
 #[derive(Clone)]
 pub struct StoreState {
     pub db: Arc<DB>,
-    pub simulate_eventual_consistency: bool,
+    pub consistency_bound: u64,
 }
 
-pub fn router(path: &Path, simulate_eventual_consistency: bool) -> Result<Router, rocksdb::Error> {
+pub fn router(path: &Path, consistency_bound: u64) -> Result<Router, rocksdb::Error> {
     let db = Arc::new(DB::open_default(path)?);
     let state = StoreState {
         db,
-        simulate_eventual_consistency,
+        consistency_bound,
     };
     let router = Router::new()
         .route("/", get(handlers::query))
