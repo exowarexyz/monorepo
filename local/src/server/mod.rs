@@ -1,5 +1,5 @@
 use axum::{serve, Router};
-use std::path::PathBuf;
+use std::path::Path;
 use thiserror::Error;
 use tokio::net::TcpListener;
 
@@ -16,14 +16,16 @@ pub const RUN_CMD: &str = "run";
 pub enum Error {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("rocksdb error: {0}")]
+    RocksDb(#[from] rocksdb::Error),
 }
 
-pub async fn run(_directory: &PathBuf, port: &u16) -> Result<(), Error> {
+pub async fn run(directory: &Path, port: &u16) -> Result<(), Error> {
     // Create a listener for the server on the specified port.
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
 
     // Create a router for the server.
-    let router = Router::new().nest("/store", store::router());
+    let router = Router::new().nest("/store", store::router(directory)?);
 
     // Serve the server.
     serve(listener, router.into_make_service())

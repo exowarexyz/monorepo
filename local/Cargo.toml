@@ -19,6 +19,7 @@ thiserror = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 base64 = { workspace = true }
+rocksdb = { workspace = true }
 
 [[bin]]
 name = "local"

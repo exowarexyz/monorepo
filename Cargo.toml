@@ -13,6 +13,7 @@ thiserror = "2.0.12"
 axum = "0.8.1"
 serde = { version = "1.0.219", features = ["derive"] }
 base64 = "0.22.1"
+rocksdb = "0.22.0"
 
 [profile.bench]
 # Because we enable overflow checks in "release," we should benchmark with them.

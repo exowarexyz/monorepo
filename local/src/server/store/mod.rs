@@ -2,15 +2,17 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use rocksdb::DB;
+use std::path::Path;
+use std::sync::Arc;
 
 mod handlers;
 
-pub fn router() -> Router {
-    let db = Arc::new(RwLock::new(BTreeMap::new()));
-    Router::new()
+pub fn router(path: &Path) -> Result<Router, rocksdb::Error> {
+    let db = Arc::new(DB::open_default(path)?);
+    let router = Router::new()
         .route("/", get(handlers::query))
         .route("/:key", post(handlers::set).get(handlers::get))
-        .with_state(db)
+        .with_state(db);
+    Ok(router)
 }
