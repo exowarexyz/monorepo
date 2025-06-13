@@ -15,6 +15,18 @@ pub struct StoreState {
     pub db: Arc<DB>,
     pub consistency_bound_min: u64,
     pub consistency_bound_max: u64,
+    pub auth_token: Arc<String>,
+    pub allow_public_access: bool,
+}
+
+impl auth::RequireAuth for StoreState {
+    fn auth_token(&self) -> Arc<String> {
+        self.auth_token.clone()
+    }
+
+    fn allow_public_access(&self) -> bool {
+        self.allow_public_access
+    }
 }
 
 pub fn router(
@@ -29,23 +41,18 @@ pub fn router(
         db,
         consistency_bound_min,
         consistency_bound_max,
+        auth_token,
+        allow_public_access,
     };
 
-    let post_routes = Router::new()
-        .route("/{key}", post(handlers::set))
-        .layer(from_fn_with_state(auth_token.clone(), auth::middleware));
+    let router = Router::new()
+        .route("/{key}", post(handlers::set).get(handlers::get))
+        .route("/", get(handlers::query))
+        .layer(from_fn_with_state(
+            state.clone(),
+            auth::middleware::<StoreState>,
+        ))
+        .with_state(state);
 
-    let get_routes = Router::new()
-        .route("/{key}", get(handlers::get))
-        .route("/", get(handlers::query));
-
-    let router = if allow_public_access {
-        post_routes.merge(get_routes)
-    } else {
-        get_routes
-            .layer(from_fn_with_state(auth_token, auth::middleware))
-            .merge(post_routes)
-    };
-
-    Ok(router.with_state(state))
+    Ok(router)
 }

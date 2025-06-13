@@ -11,6 +11,7 @@ use tokio_tungstenite::{
     tungstenite::{handshake::client::generate_key, protocol::Message},
     MaybeTlsStream, WebSocketStream,
 };
+use url::Url;
 
 #[derive(Clone)]
 pub struct StreamClient {
@@ -61,6 +62,11 @@ impl StreamClient {
 
     pub async fn subscribe(&self, name: &str) -> Result<Subscription, Error> {
         let url = format!("{}/stream/{}", self.client.base_url, name).replace("http", "ws");
+        let parsed_url = Url::parse(&url)?;
+
+        let host = parsed_url
+            .host_str()
+            .ok_or_else(|| Error::Internal("Invalid URL: missing host".to_string()))?;
 
         let request = Request::builder()
             .method("GET")
@@ -70,6 +76,7 @@ impl StreamClient {
             .header(CONNECTION, "Upgrade")
             .header("Sec-WebSocket-Key", generate_key())
             .header("Sec-WebSocket-Version", "13")
+            .header("Host", host)
             .header(
                 AUTHORIZATION,
                 HeaderValue::from_str(&format!("Bearer {}", self.client.auth_token)).unwrap(),

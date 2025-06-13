@@ -472,7 +472,6 @@ dependencies = [
  "exoware-local",
  "futures-util",
  "http",
- "log",
  "portpicker",
  "rand 0.8.5",
  "reqwest",

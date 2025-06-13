@@ -110,7 +110,8 @@ async fn test_stream() {
 #[tokio::test]
 async fn test_auth() {
     with_server(false, 0, 0, |client| async move {
-        let store = client.store();
+        let unauth_client = Client::new(client.base_url().to_string(), "".to_string());
+        let store = unauth_client.store();
         let err = store.get("key").await.unwrap_err();
         match err {
             Error::Http(status) => assert_eq!(status, 401),
