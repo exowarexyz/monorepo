@@ -11,10 +11,10 @@ mod stream;
 /// Subcommand for the server.
 pub const CMD: &str = "server";
 
-/// Run the local server.
+/// Run the simulator server.
 pub const RUN_CMD: &str = "run";
 
-/// Errors that can occur when running the local server.
+/// Errors that can occur when running the simulator server.
 #[derive(Error, Debug)]
 pub enum Error {
     /// An I/O error occurred.
@@ -25,7 +25,7 @@ pub enum Error {
     RocksDb(#[from] rocksdb::Error),
 }
 
-/// Runs the Exoware local server.
+/// Runs the Exoware simulator server.
 ///
 /// This function sets up and runs the HTTP server, which includes the store and stream endpoints.
 ///

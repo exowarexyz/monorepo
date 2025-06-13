@@ -1,5 +1,5 @@
 [package]
-name = "exoware-local"
+name = "exoware-simulator"
 version = "0.0.1"
 edition = "2021"
 publish = true
@@ -7,8 +7,8 @@ license = "MIT OR Apache-2.0"
 description = "TBA"
 readme = "README.md"
 homepage = "https://exoware.xyz"
-repository = "https://github.com/exowarexyz/monorepo/tree/main/local"
-documentation = "https://docs.rs/exoware-local"
+repository = "https://github.com/exowarexyz/monorepo/tree/main/simulator"
+documentation = "https://docs.rs/exoware-simulator"
 
 [dependencies]
 tokio = { workspace = true, features = ["full"] }
@@ -27,5 +27,5 @@ tokio-stream = { workspace = true, features = ["sync"] }
 futures = { workspace = true }
 
 [[bin]]
-name = "local"
+name = "simulator"
 path = "src/main.rs"

@@ -1,12 +1,12 @@
 [workspace]
 members = [
-    "local",
+    "simulator",
     "sdk",
 ]
 resolver = "2"
 
 [workspace.dependencies]
-exoware-local = { path = "local" }
+exoware-simulator = { path = "simulator" }
 exoware-sdk = { path = "sdk" }
 tokio = "1.43.0"
 clap = "4.5.18"

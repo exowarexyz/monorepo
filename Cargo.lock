@@ -444,7 +444,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "exoware-local"
+name = "exoware-sdk"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "base64",
+ "exoware-sdk",
+ "exoware-simulator",
+ "futures-util",
+ "http",
+ "portpicker",
+ "rand 0.8.5",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.12",
+ "tokio",
+ "tokio-tungstenite 0.23.1",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
+name = "exoware-simulator"
 version = "0.0.1"
 dependencies = [
  "axum",
@@ -461,30 +485,6 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "exoware-sdk"
-version = "0.0.1"
-dependencies = [
- "async-trait",
- "base64",
- "exoware-local",
- "exoware-sdk",
- "futures-util",
- "http",
- "portpicker",
- "rand 0.8.5",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.12",
- "tokio",
- "tokio-tungstenite 0.23.1",
- "tracing",
- "tracing-subscriber",
- "url",
 ]
 
 [[package]]

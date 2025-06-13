@@ -36,10 +36,10 @@ pub async fn with_server<F, Fut>(
         .map(char::from)
         .collect();
 
-    let server_task: JoinHandle<Result<(), exoware_local::server::Error>> = tokio::spawn({
+    let server_task: JoinHandle<Result<(), exoware_simulator::server::Error>> = tokio::spawn({
         let auth_token = auth_token.clone();
         async move {
-            exoware_local::server::run(
+            exoware_simulator::server::run(
                 dir.path(),
                 &port,
                 consistency_bound_min,

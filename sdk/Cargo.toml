@@ -13,7 +13,7 @@ documentation = "https://docs.rs/exoware-sdk"
 [dependencies]
 async-trait = { workspace = true }
 base64 = { workspace = true }
-exoware-local = { workspace = true, optional = true }
+exoware-simulator = { workspace = true, optional = true }
 futures-util = { workspace = true }
 http = { workspace = true }
 portpicker = { workspace = true, optional = true }
@@ -34,4 +34,4 @@ tracing-subscriber = { workspace = true }
 
 [features]
 default = []
-testing = ["dep:exoware-local", "dep:portpicker", "dep:tempfile", "dep:rand"]
+testing = ["dep:exoware-simulator", "dep:portpicker", "dep:tempfile", "dep:rand"]

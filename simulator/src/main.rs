@@ -1,4 +1,4 @@
-//! Exoware Local CLI
+//! Exoware Simulator CLI
 
 use clap::{Arg, ArgAction, Command};
 use std::env;
@@ -33,19 +33,19 @@ const AUTH_TOKEN_FLAG: &str = "auth-token";
 /// Flag to allow public, unauthenticated access for read-only methods.
 const ALLOW_PUBLIC_ACCESS_FLAG: &str = "allow-public-access";
 
-/// Entrypoint for the Exoware Local CLI.
+/// Entrypoint for the Exoware Simulator CLI.
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     // Initialize the default directory for the persistent store. This will be
-    // `$HOME/.exoware_local`.
+    // `$HOME/.exoware_simulator`.
     let home_directory = std::env::var("HOME").expect("$HOME is not configured");
-    let default_directory = PathBuf::from(format!("{}/.exoware_local", home_directory));
+    let default_directory = PathBuf::from(format!("{}/.exoware_simulator", home_directory));
     let default_directory: &'static str = default_directory.to_str().unwrap().to_string().leak();
 
     // Define the CLI application and its arguments.
-    let matches = Command::new("local")
+    let matches = Command::new("simulator")
         .version(crate_version())
-        .about("Exoware local development server.")
+        .about("Exoware simulator development server.")
         .arg_required_else_help(true)
         .arg(
             Arg::new(VERBOSE_FLAG)
@@ -56,11 +56,11 @@ async fn main() -> std::process::ExitCode {
         )
         .subcommand(
             Command::new(server::CMD)
-                .about("Commands for the local server.")
+                .about("Commands for the simulator server.")
                 .arg_required_else_help(true)
                 .subcommand(
                     Command::new(server::RUN_CMD)
-                        .about("Run the local server.")
+                        .about("Run the simulator server.")
                         .arg(
                             Arg::new(DIRECTORY_FLAG)
                                 .long(DIRECTORY_FLAG)
@@ -155,7 +155,7 @@ async fn main() -> std::process::ExitCode {
                 )
                 .await
                 {
-                    error!(error = ?e, "failed to run local server");
+                    error!(error = ?e, "failed to run simulator server");
                 } else {
                     return std::process::ExitCode::SUCCESS;
                 }
