@@ -61,7 +61,7 @@ done
 # Recursively find all exoware package.json files and update their versions
 find . -name "package.json" -print0 | while IFS= read -r -d $'\0' pkg_file; do
   # Check if the package.json is an exoware package
-  if grep -q '"name": "exoware-' "$pkg_file"; then
+  if grep -q '"name": "exoware-' "${pkg_file}"; then
     content=()
     changed=false
     while IFS= read -r line || [[ -n "${line}" ]]; do
@@ -82,7 +82,7 @@ find . -name "package.json" -print0 | while IFS= read -r -d $'\0' pkg_file; do
 done
 
 # Update openapi spec
-if [ -f "interface.yaml" ]; then
+if [[ -f "interface.yaml" ]]; then
     content=()
     changed=false
     while IFS= read -r line || [[ -n "${line}" ]]; do
