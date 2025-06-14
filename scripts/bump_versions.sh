@@ -23,7 +23,7 @@ find . -name "Cargo.toml" | while read -r cargo_file; do
 
   # Read the file line by line
   name=""
-  while IFS= read -r line; do
+  while IFS= read -r line || [[ -n "${line}" ]]; do
     # 1) Match workspace deps like: exoware-foo = { version = "0.0.3", path = "foo" }
     if [[ "${line}" =~ ^[[:space:]]*(exoware-[^[:space:]]+)[[:space:]]*=\ {[[:space:]]*version[[:space:]]*=[[:space:]]*\"([0-9]+\.[0-9]+\.[0-9]+)\" ]]; then
       old="${BASH_REMATCH[2]}"
@@ -64,7 +64,7 @@ find . -name "package.json" -print0 | while IFS= read -r -d $'\0' pkg_file; do
   if grep -q '"name": "exoware-' "$pkg_file"; then
     content=()
     changed=false
-    while IFS= read -r line; do
+    while IFS= read -r line || [[ -n "${line}" ]]; do
       if [[ "${line}" =~ ^[[:space:]]*\"version\":[[:space:]]*\"([0-9]+\.[0-9]+\.[0-9]+)\" ]]; then
         old="${BASH_REMATCH[1]}"
         new="$(bump_version "${old}")"
@@ -85,7 +85,7 @@ done
 if [ -f "interface.yaml" ]; then
     content=()
     changed=false
-    while IFS= read -r line; do
+    while IFS= read -r line || [[ -n "${line}" ]]; do
         if [[ "${line}" =~ ^[[:space:]]*version:[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+) ]]; then
             old="${BASH_REMATCH[1]}"
             new="$(bump_version "${old}")"
