@@ -20,17 +20,19 @@
 
 /* Header */
 .header {
-  text-align: center;
-  margin-bottom: 4rem;
-  padding: 2rem 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2rem;
+  padding: 1rem 0;
   border-bottom: 1px solid #f0f0f0;
 }
 
 .header h1 {
-  font-size: 3rem;
-  font-weight: 700;
+  font-size: 1.75rem;
+  font-weight: 600;
   color: #000;
-  margin: 0 0 1rem 0;
+  margin: 0;
   letter-spacing: -0.02em;
   line-height: 1.1;
 }
@@ -259,7 +261,6 @@ button {
   border-radius: 8px;
   font-size: 0.875rem;
   font-weight: 500;
-  margin: 0 auto;
   border: 1px solid;
   transition: all 0.2s ease;
 }
@@ -337,16 +338,15 @@ button {
   }
 
   .header {
-    margin-bottom: 2rem;
-    padding: 1rem 0;
+    margin-bottom: 1.5rem;
+    padding: 0.75rem 0;
+    flex-direction: column;
+    gap: 1rem;
+    align-items: flex-start;
   }
 
   .header h1 {
-    font-size: 2rem;
-  }
-
-  .header p {
-    font-size: 1rem;
+    font-size: 1.5rem;
   }
 
   .card {

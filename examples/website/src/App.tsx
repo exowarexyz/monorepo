@@ -67,7 +67,25 @@ function App() {
     setClient(c);
     setStoreClient(c.store());
     setStreamClient(c.stream());
-    setIsConnected(true);
+
+    // Initial connection test
+    testConnection(c).then(connected => {
+      if (!connected) {
+        setNotifications(prev => [...prev, {
+          id: Math.random().toString(36).substr(2, 9),
+          type: 'error',
+          title: 'Connection Failed',
+          message: 'Unable to connect to the simulator backend'
+        }]);
+      }
+    });
+
+    // Periodic connection check every 30 seconds
+    const healthCheckInterval = setInterval(() => {
+      testConnection(c);
+    }, 30000);
+
+    return () => clearInterval(healthCheckInterval);
   }, []);
 
   // Update current time every second to refresh timestamps
@@ -94,6 +112,19 @@ function App() {
     setNotifications(prev => prev.filter(n => n.id !== id));
   };
 
+  const testConnection = async (client: Client) => {
+    try {
+      // Try a simple query to test if the backend is accessible
+      await client.store().query(undefined, undefined, 1);
+      setIsConnected(true);
+      return true;
+    } catch (e) {
+      console.error('Backend connection failed:', e);
+      setIsConnected(false);
+      return false;
+    }
+  };
+
   const handleSet = async () => {
     if (storeClient && storeKey) {
       setIsSettingValue(true);
@@ -104,6 +135,10 @@ function App() {
         setStoreValue('');
       } catch (e) {
         showNotification('error', 'Error', `Failed to set value: ${e}`);
+        // Update connection status if this looks like a connection error
+        if (e instanceof Error && (e.message.includes('fetch') || e.message.includes('network'))) {
+          setIsConnected(false);
+        }
       } finally {
         setIsSettingValue(false);
       }
@@ -128,6 +163,10 @@ function App() {
         showNotification('error', 'Error', `Failed to get value: ${e}`);
         setStoreGetValue(null); // Clear result on error
         setKeyNotFound(false); // Clear not found state on error
+        // Update connection status if this looks like a connection error
+        if (e instanceof Error && (e.message.includes('fetch') || e.message.includes('network'))) {
+          setIsConnected(false);
+        }
       } finally {
         setIsGettingValue(false);
       }
@@ -263,7 +302,6 @@ function App() {
 
       <div className="header">
         <h1>Exoware Simulator</h1>
-        <p>Modern interface for store and stream operations</p>
         <div className={`status-indicator ${isConnected ? 'status-connected' : 'status-disconnected'}`}>
           <span>●</span>
           {isConnected ? 'Connected' : 'Disconnected'}
