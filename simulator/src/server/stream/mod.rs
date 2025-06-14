@@ -1,3 +1,4 @@
+use crate::server::auth;
 use crate::server::stream::handlers::{publish, subscribe};
 use axum::{
     body::Bytes,
@@ -8,8 +9,6 @@ use axum::{
 use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
-
-use crate::server::auth;
 
 mod handlers;
 

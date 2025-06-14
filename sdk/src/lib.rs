@@ -1,4 +1,3 @@
-pub mod api;
 pub mod error;
 pub mod store;
 pub mod stream;

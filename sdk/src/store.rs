@@ -1,15 +1,26 @@
-use crate::{api, error::Error, Client};
+use crate::{error::Error, Client};
 use base64::{engine::general_purpose, Engine as _};
 use reqwest::header::{HeaderValue, AUTHORIZATION};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
+pub struct GetResultPayload {
+    pub value: String,
+}
+
+#[derive(Debug)]
 pub struct GetResult {
     /// The retrieved value.
     pub value: Vec<u8>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
+pub struct QueryResultItemPayload {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug)]
 pub struct QueryResultItem {
     /// The key of the item.
     pub key: String,
@@ -17,7 +28,12 @@ pub struct QueryResultItem {
     pub value: Vec<u8>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
+pub struct QueryResultPayload {
+    pub results: Vec<QueryResultItemPayload>,
+}
+
+#[derive(Debug)]
 pub struct QueryResult {
     /// A list of key-value pairs.
     pub results: Vec<QueryResultItem>,
@@ -87,7 +103,7 @@ impl StoreClient {
             return Err(Error::Http(res.status()));
         }
 
-        let payload: api::GetResult = res.json().await?;
+        let payload: GetResultPayload = res.json().await?;
         let value = general_purpose::STANDARD.decode(payload.value)?;
 
         Ok(Some(GetResult { value }))
@@ -135,7 +151,7 @@ impl StoreClient {
             return Err(Error::Http(res.status()));
         }
 
-        let payload: api::QueryResult = res.json().await?;
+        let payload: QueryResultPayload = res.json().await?;
         let mut results = Vec::new();
         for item in payload.results {
             results.push(QueryResultItem {
