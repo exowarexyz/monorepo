@@ -3,6 +3,9 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as portfinder from 'portfinder';
+import ws from 'ws';
+
+Object.assign(global, { WebSocket: ws });
 
 const tempDir = path.join(os.tmpdir(), 'exoware-ts-sdk-tests');
 const configFile = path.join(tempDir, 'config.json');

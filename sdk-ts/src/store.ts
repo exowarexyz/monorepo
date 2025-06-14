@@ -1,4 +1,4 @@
-import { Client } from './index';
+import type { Client } from './client';
 import { HttpError } from './error';
 import { Base64 } from 'js-base64';
 import { AxiosError } from 'axios';

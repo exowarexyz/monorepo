@@ -1,14 +1,20 @@
 use crate::server::stream::{StreamMap, StreamState};
 use axum::{
-    body::{Body, Bytes},
-    extract::FromRequest,
-    extract::{ws::Message, ws::WebSocket, Path, State},
-    http::{Request, StatusCode},
+    body::Bytes,
+    extract::{ws::Message, ws::WebSocket, Path, Query, State, WebSocketUpgrade},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use futures::stream::StreamExt;
+use serde::Deserialize;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
+
+/// Query parameters for authentication.
+#[derive(Deserialize)]
+pub(super) struct AuthParams {
+    auth_token: Option<String>,
+}
 
 /// Publishes a message to a stream.
 ///
@@ -37,12 +43,14 @@ pub async fn publish(
 pub async fn subscribe(
     State(state): State<StreamState>,
     Path(name): Path<String>,
-    request: Request<Body>,
+    Query(params): Query<AuthParams>,
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
 ) -> Response {
     let mut authorized = state.allow_public_access;
 
     if !authorized {
-        if let Some(auth_header) = request.headers().get("Authorization") {
+        if let Some(auth_header) = headers.get("Authorization") {
             if let Ok(auth_str) = auth_header.to_str() {
                 if let Some(bearer_token) = auth_str.strip_prefix("Bearer ") {
                     if bearer_token == state.auth_token.as_str() {
@@ -50,14 +58,15 @@ pub async fn subscribe(
                     }
                 }
             }
+        } else if let Some(token) = params.auth_token {
+            if token == *state.auth_token.as_str() {
+                authorized = true;
+            }
         }
     }
 
     if authorized {
-        match axum::extract::WebSocketUpgrade::from_request(request, &state).await {
-            Ok(ws) => ws.on_upgrade(move |socket| handle_socket(socket, state.streams, name)),
-            Err(rejection) => rejection.into_response(),
-        }
+        ws.on_upgrade(move |socket| handle_socket(socket, state.streams, name))
     } else {
         (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
     }

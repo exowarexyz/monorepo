@@ -1,22 +1,28 @@
-import { Client } from './index';
+import type { Client } from './client';
 import { HttpError, WebSocketError } from './error';
-import WebSocket, { Data } from 'ws';
 import { AxiosError } from 'axios';
-import { IncomingMessage } from 'http';
+import WebSocket, { Data } from 'isomorphic-ws';
 
 export class Subscription {
     constructor(public readonly ws: WebSocket) { }
 
     onMessage(listener: (data: Data) => void) {
-        this.ws.on('message', listener);
+        this.ws.onmessage = (event: { data: any; }) => {
+            if (typeof event.data === 'string' || event.data instanceof ArrayBuffer || event.data instanceof Buffer) {
+                listener(event.data);
+            } else if (event.data instanceof Blob) {
+                // If it's a blob, we convert it to a Buffer
+                event.data.arrayBuffer().then((buffer: ArrayBuffer) => listener(Buffer.from(buffer)));
+            }
+        };
     }
 
-    onError(listener: (err: Error) => void) {
-        this.ws.on('error', listener);
+    onError(listener: (err: WebSocket.ErrorEvent) => void) {
+        this.ws.onerror = listener;
     }
 
-    onClose(listener: (code: number, reason: Buffer) => void) {
-        this.ws.on('close', listener);
+    onClose(listener: (ev: WebSocket.CloseEvent) => void) {
+        this.ws.onclose = listener;
     }
 
     close(code?: number, reason?: string): void {
@@ -43,38 +49,41 @@ export class StreamClient {
 
     subscribe(name: string): Promise<Subscription> {
         return new Promise((resolve, reject) => {
-            const url = `${this.client.baseUrl}/stream/${name}`.replace(/^http/, 'ws');
+            const urlStr = `${this.client.baseUrl}/stream/${name}`.replace(/^http/, 'ws');
+            const url = new URL(urlStr);
             const authToken = (this.client as any).authToken;
-            const ws = new WebSocket(url, {
-                headers: {
-                    'Authorization': `Bearer ${authToken}`
-                }
-            });
+            if (authToken) {
+                url.searchParams.set('auth_token', authToken);
+            }
+
+            const ws = new WebSocket(url.toString());
 
             const onOpen = () => {
                 cleanup();
                 resolve(new Subscription(ws));
             };
 
-            const onError = (err: Error) => {
+            const onError = (err: WebSocket.ErrorEvent) => {
                 cleanup();
-                reject(new WebSocketError(err.message));
+                reject(new WebSocketError('WebSocket connection failed'));
             };
 
-            const onUnexpectedResponse = (req: unknown, res: IncomingMessage) => {
+            const onClose = (event: WebSocket.CloseEvent) => {
                 cleanup();
-                reject(new HttpError(res.statusCode || 500, res.statusMessage || 'Unexpected response'));
+                if (!event.wasClean) {
+                    reject(new HttpError(event.code, event.reason || 'WebSocket connection closed unexpectedly'));
+                }
             };
 
             const cleanup = () => {
-                ws.removeListener('open', onOpen);
-                ws.removeListener('error', onError);
-                ws.removeListener('unexpected-response', onUnexpectedResponse);
+                ws.removeEventListener('open', onOpen);
+                ws.removeEventListener('error', onError as any);
+                ws.removeEventListener('close', onClose as any);
             };
 
-            ws.on('open', onOpen);
-            ws.on('error', onError);
-            ws.on('unexpected-response', onUnexpectedResponse);
+            ws.addEventListener('open', onOpen);
+            ws.addEventListener('error', onError as any);
+            ws.addEventListener('close', onClose as any);
         });
     }
 }
