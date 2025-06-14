@@ -1,4 +1,4 @@
-/* Modern, Stripe-inspired design */
+/* v0/Vercel-inspired design */
 * {
   box-sizing: border-box;
 }
@@ -8,7 +8,6 @@
   margin: 0 auto;
   padding: 0;
   min-height: 100vh;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
 }
 
 .App {
@@ -22,48 +21,53 @@
 /* Header */
 .header {
   text-align: center;
-  margin-bottom: 3rem;
+  margin-bottom: 4rem;
+  padding: 2rem 0;
+  border-bottom: 1px solid #f0f0f0;
 }
 
 .header h1 {
   font-size: 3rem;
   font-weight: 700;
-  color: white;
-  margin: 0 0 0.5rem 0;
-  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  color: #000;
+  margin: 0 0 1rem 0;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
 }
 
 .header p {
-  font-size: 1.2rem;
-  color: rgba(255, 255, 255, 0.9);
-  margin: 0;
+  font-size: 1.25rem;
+  color: #666;
+  margin: 0 0 1.5rem 0;
   font-weight: 400;
+  max-width: 600px;
+  margin-left: auto;
+  margin-right: auto;
 }
 
 /* Cards */
 .card {
-  background: white;
-  border-radius: 16px;
+  background: #fff;
+  border: 1px solid #e5e5e5;
+  border-radius: 12px;
   padding: 2rem;
-  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1), 0 4px 10px rgba(0, 0, 0, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  backdrop-filter: blur(10px);
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
 }
 
 .card:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.15), 0 8px 16px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  border-color: #d4d4d4;
 }
 
 .card h2 {
-  font-size: 1.75rem;
+  font-size: 1.5rem;
   font-weight: 600;
-  color: #1a1a1a;
+  color: #000;
   margin: 0 0 1.5rem 0;
   text-align: center;
   padding-bottom: 1rem;
-  border-bottom: 2px solid #f0f0f0;
+  border-bottom: 1px solid #f5f5f5;
 }
 
 /* Form sections */
@@ -71,8 +75,8 @@
   margin-bottom: 2rem;
   padding: 1.5rem;
   background: #fafafa;
-  border-radius: 12px;
-  border: 1px solid #e6e6e6;
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
 }
 
 .form-section:last-child {
@@ -80,9 +84,9 @@
 }
 
 .form-section h3 {
-  font-size: 1.25rem;
+  font-size: 1.125rem;
   font-weight: 600;
-  color: #2d3748;
+  color: #000;
   margin: 0 0 1rem 0;
 }
 
@@ -103,115 +107,122 @@
   display: block;
   font-size: 0.875rem;
   font-weight: 500;
-  color: #4a5568;
+  color: #374151;
   margin-bottom: 0.5rem;
 }
 
 input[type="text"],
 input[type="number"] {
   width: 100%;
-  padding: 0.75rem 1rem;
-  border: 2px solid #e2e8f0;
-  border-radius: 8px;
-  font-size: 1rem;
+  padding: 0.75rem;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 0.875rem;
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
-  background: white;
-  color: #2d3748;
+  background: #fff;
+  color: #111827;
 }
 
 input[type="text"]:focus,
 input[type="number"]:focus {
   outline: none;
-  border-color: #667eea;
-  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+  border-color: #000;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.1);
 }
 
 input[type="text"]::placeholder,
 input[type="number"]::placeholder {
-  color: #a0aec0;
+  color: #9ca3af;
 }
 
 /* Buttons */
 button {
-  padding: 0.75rem 1.5rem;
-  border-radius: 8px;
-  border: none;
-  font-size: 1rem;
+  padding: 0.75rem 1rem;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  font-size: 0.875rem;
   font-weight: 500;
   cursor: pointer;
   transition: all 0.2s ease;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 120px;
+  min-width: 100px;
+  height: 40px;
 }
 
 .btn-primary {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
-  box-shadow: 0 4px 14px rgba(102, 126, 234, 0.3);
+  background: #000;
+  color: #fff;
+  border-color: #000;
 }
 
-.btn-primary:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+.btn-primary:hover:not(:disabled) {
+  background: #333;
+  border-color: #333;
+}
+
+.btn-primary:disabled {
+  background: #666;
+  border-color: #666;
+  cursor: not-allowed;
 }
 
 .btn-secondary {
-  background: #e2e8f0;
-  color: #4a5568;
-  border: 1px solid #cbd5e0;
+  background: #fff;
+  color: #374151;
+  border-color: #d1d5db;
 }
 
-.btn-secondary:hover {
-  background: #cbd5e0;
-  transform: translateY(-1px);
+.btn-secondary:hover:not(:disabled) {
+  background: #f9fafb;
+  border-color: #9ca3af;
 }
 
 .btn-danger {
-  background: #e53e3e;
-  color: white;
-  box-shadow: 0 4px 14px rgba(229, 62, 62, 0.3);
+  background: #dc2626;
+  color: #fff;
+  border-color: #dc2626;
 }
 
-.btn-danger:hover {
-  background: #c53030;
-  transform: translateY(-1px);
-  box-shadow: 0 6px 20px rgba(229, 62, 62, 0.4);
+.btn-danger:hover:not(:disabled) {
+  background: #b91c1c;
+  border-color: #b91c1c;
 }
 
 /* Results */
 .result {
-  background: #f7fafc;
-  border: 2px solid #e2e8f0;
-  border-radius: 12px;
-  padding: 1.5rem;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 1rem;
   margin-top: 1rem;
-  color: #2d3748;
-  font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Roboto Mono', monospace;
+  color: #1e293b;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.875rem;
 }
 
 .result h4 {
-  font-size: 1.1rem;
+  font-size: 0.875rem;
   font-weight: 600;
-  color: #2d3748;
-  margin: 0 0 1rem 0;
+  color: #1e293b;
+  margin: 0 0 0.75rem 0;
   font-family: inherit;
 }
 
 .result p {
-  margin: 0.5rem 0;
+  margin: 0.25rem 0;
   line-height: 1.5;
 }
 
 .result strong {
-  color: #1a202c;
+  color: #0f172a;
   font-weight: 600;
 }
 
 .result ul {
   margin: 0;
-  padding-left: 1.5rem;
+  padding-left: 1rem;
   list-style-type: none;
 }
 
@@ -219,6 +230,7 @@ button {
   padding: 0.5rem 0;
   border-bottom: 1px solid #e2e8f0;
   word-break: break-all;
+  font-size: 0.8125rem;
 }
 
 .result li:last-child {
@@ -226,7 +238,7 @@ button {
 }
 
 .result li strong {
-  color: #667eea;
+  color: #000;
   font-weight: 600;
   margin-right: 0.5rem;
 }
@@ -237,28 +249,89 @@ button {
   align-items: center;
   gap: 0.5rem;
   padding: 0.5rem 1rem;
-  border-radius: 20px;
+  border-radius: 8px;
   font-size: 0.875rem;
   font-weight: 500;
-  margin-bottom: 1rem;
+  margin: 0 auto;
+  border: 1px solid;
+  transition: all 0.2s ease;
 }
 
 .status-connected {
-  background: #c6f6d5;
-  color: #22543d;
-  border: 1px solid #9ae6b4;
+  background: #f0fdf4;
+  color: #166534;
+  border-color: #bbf7d0;
 }
 
 .status-disconnected {
-  background: #fed7d7;
-  color: #742a2a;
-  border: 1px solid #fc8181;
+  background: #fef2f2;
+  color: #991b1b;
+  border-color: #fecaca;
+}
+
+/* Notifications */
+.notification {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  background: #fff;
+  border: 1px solid #e5e5e5;
+  border-radius: 8px;
+  padding: 1rem;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
+  z-index: 1000;
+  min-width: 300px;
+  animation: slideIn 0.3s ease-out;
+}
+
+.notification.success {
+  border-left: 4px solid #10b981;
+}
+
+.notification.error {
+  border-left: 4px solid #ef4444;
+}
+
+.notification-title {
+  font-weight: 600;
+  font-size: 0.875rem;
+  margin: 0 0 0.25rem 0;
+  color: #111827;
+}
+
+.notification-message {
+  font-size: 0.8125rem;
+  color: #6b7280;
+  margin: 0;
+}
+
+.notification-close {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  background: none;
+  border: none;
+  font-size: 1.25rem;
+  color: #9ca3af;
+  cursor: pointer;
+  padding: 0;
+  min-width: auto;
+  height: auto;
+}
+
+.notification-close:hover {
+  color: #6b7280;
 }
 
 /* Responsive design */
 @media (max-width: 768px) {
   .App {
     padding: 1rem;
+  }
+
+  .header {
+    margin-bottom: 2rem;
+    padding: 1rem 0;
   }
 
   .header h1 {
@@ -280,11 +353,18 @@ button {
   .form-group {
     min-width: auto;
   }
+
+  .notification {
+    top: 0.5rem;
+    right: 0.5rem;
+    left: 0.5rem;
+    min-width: auto;
+  }
 }
 
 /* Loading states */
 .loading {
-  opacity: 0.6;
+  opacity: 0.7;
   pointer-events: none;
 }
 
@@ -295,8 +375,8 @@ button {
 .loading button::after {
   content: '';
   position: absolute;
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
   margin: auto;
   border: 2px solid transparent;
   border-top-color: currentColor;
@@ -315,6 +395,18 @@ button {
 }
 
 /* Animations */
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateX(100%);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
 @keyframes fadeIn {
   from {
     opacity: 0;

@@ -4,8 +4,8 @@
   font-weight: 400;
 
   color-scheme: light;
-  color: #2d3748;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: #111827;
+  background: #fff;
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -22,8 +22,7 @@ body {
   margin: 0;
   padding: 0;
   min-height: 100vh;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  background-attachment: fixed;
+  background: #fff;
 }
 
 body {
@@ -35,19 +34,20 @@ body {
 
 a {
   font-weight: 500;
-  color: #667eea;
+  color: #000;
   text-decoration: inherit;
   transition: color 0.2s ease;
 }
 
 a:hover {
-  color: #764ba2;
+  color: #666;
 }
 
 h1 {
-  font-size: 3.2em;
+  font-size: 2.5rem;
   line-height: 1.1;
-  font-weight: 700;
+  font-weight: 600;
+  letter-spacing: -0.025em;
 }
 
 h2,
@@ -60,10 +60,10 @@ h6 {
 }
 
 button {
-  border-radius: 8px;
-  border: none;
-  padding: 0.75em 1.5em;
-  font-size: 1em;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  padding: 0.75em 1em;
+  font-size: 0.875em;
   font-weight: 500;
   font-family: inherit;
   cursor: pointer;
@@ -75,7 +75,7 @@ button {
 
 button:focus,
 button:focus-visible {
-  outline: 2px solid #667eea;
+  outline: 2px solid #000;
   outline-offset: 2px;
 }
 
@@ -84,33 +84,33 @@ button:disabled {
   cursor: not-allowed;
 }
 
-/* Remove default button styles that might interfere */
+/* Default button styles */
 button:not([class]) {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
-  box-shadow: 0 4px 14px rgba(102, 126, 234, 0.3);
+  background: #000;
+  color: #fff;
+  border-color: #000;
 }
 
 button:not([class]):hover:not(:disabled) {
-  transform: translateY(-1px);
-  box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+  background: #333;
+  border-color: #333;
 }
 
 /* Scrollbar styling */
 ::-webkit-scrollbar {
-  width: 8px;
+  width: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 4px;
+  background: #f1f5f9;
+  border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.3);
-  border-radius: 4px;
+  background: #cbd5e1;
+  border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.5);
+  background: #94a3b8;
 }

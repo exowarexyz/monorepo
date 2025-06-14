@@ -22,11 +22,19 @@ window.Buffer = Buffer;
 const SIMULATOR_URL = 'http://localhost:8080';
 const AUTH_TOKEN = 'your-secret-token'; // IMPORTANT: Replace with your actual auth token
 
+interface Notification {
+  id: string;
+  type: 'success' | 'error';
+  title: string;
+  message: string;
+}
+
 function App() {
   const [, setClient] = useState<Client | null>(null);
   const [storeClient, setStoreClient] = useState<StoreClient | null>(null);
   const [streamClient, setStreamClient] = useState<StreamClient | null>(null);
   const [isConnected, setIsConnected] = useState(false);
+  const [notifications, setNotifications] = useState<Notification[]>([]);
 
   // Store state
   const [storeKey, setStoreKey] = useState('');
@@ -60,16 +68,31 @@ function App() {
     setIsConnected(true);
   }, []);
 
+  const showNotification = (type: 'success' | 'error', title: string, message: string) => {
+    const id = Math.random().toString(36).substr(2, 9);
+    const notification: Notification = { id, type, title, message };
+    setNotifications(prev => [...prev, notification]);
+
+    // Auto-remove after 5 seconds
+    setTimeout(() => {
+      setNotifications(prev => prev.filter(n => n.id !== id));
+    }, 5000);
+  };
+
+  const removeNotification = (id: string) => {
+    setNotifications(prev => prev.filter(n => n.id !== id));
+  };
+
   const handleSet = async () => {
     if (storeClient && storeKey) {
       setIsSettingValue(true);
       try {
         await storeClient.set(storeKey, Buffer.from(storeValue));
-        alert('Value set successfully');
+        showNotification('success', 'Success', `Key "${storeKey}" set successfully`);
         setStoreKey('');
         setStoreValue('');
       } catch (e) {
-        alert(`Error setting value: ${e}`);
+        showNotification('error', 'Error', `Failed to set value: ${e}`);
       } finally {
         setIsSettingValue(false);
       }
@@ -79,11 +102,14 @@ function App() {
   const handleGet = async () => {
     if (storeClient && storeGetKey) {
       setIsGettingValue(true);
+      setStoreGetValue(null); // Clear previous result
       try {
         const result = await storeClient.get(storeGetKey);
         setStoreGetValue(result);
+        showNotification('success', 'Success', `Retrieved value for key "${storeGetKey}"`);
       } catch (e) {
-        alert(`Error getting value: ${e}`);
+        showNotification('error', 'Error', `Failed to get value: ${e}`);
+        setStoreGetValue(null); // Clear result on error
       } finally {
         setIsGettingValue(false);
       }
@@ -100,8 +126,9 @@ function App() {
           queryLimit ? parseInt(queryLimit, 10) : undefined
         );
         setQueryResult(result);
+        showNotification('success', 'Success', `Query returned ${result.results.length} results`);
       } catch (e) {
-        alert(`Error querying: ${e}`);
+        showNotification('error', 'Error', `Query failed: ${e}`);
       } finally {
         setIsQuerying(false);
       }
@@ -113,9 +140,9 @@ function App() {
       setIsPublishing(true);
       try {
         await streamClient.publish(streamName, Buffer.from(streamPublishData));
-        alert('Message published successfully');
+        showNotification('success', 'Success', `Message published to "${streamName}"`);
       } catch (e) {
-        alert(`Error publishing message: ${e}`);
+        showNotification('error', 'Error', `Failed to publish message: ${e}`);
       } finally {
         setIsPublishing(false);
       }
@@ -129,6 +156,7 @@ function App() {
         const sub = await streamClient.subscribe(streamSubscribeName);
         setSubscription(sub);
         setStreamMessages([]);
+        showNotification('success', 'Success', `Subscribed to "${streamSubscribeName}"`);
 
         sub.onMessage((data: unknown) => {
           setStreamMessages((prev) => [...prev, data]);
@@ -136,13 +164,15 @@ function App() {
         sub.onClose((ev: any) => {
           console.log('Subscription closed', ev);
           setSubscription(null);
+          showNotification('error', 'Disconnected', 'Subscription was closed');
         });
         sub.onError((err: any) => {
           console.error('Subscription error', err);
+          showNotification('error', 'Error', 'Subscription error occurred');
         });
 
       } catch (e) {
-        alert(`Error subscribing: ${e}`);
+        showNotification('error', 'Error', `Failed to subscribe: ${e}`);
       } finally {
         setIsSubscribing(false);
       }
@@ -153,6 +183,14 @@ function App() {
     if (subscription) {
       subscription.close();
       setSubscription(null);
+      showNotification('success', 'Success', 'Unsubscribed from stream');
+    }
+  };
+
+  const handleGetKeyChange = (value: string) => {
+    setStoreGetKey(value);
+    if (storeGetValue) {
+      setStoreGetValue(null); // Clear result when key changes
     }
   };
 
@@ -173,6 +211,20 @@ function App() {
 
   return (
     <div className="App">
+      {/* Notifications */}
+      {notifications.map((notification) => (
+        <div key={notification.id} className={`notification ${notification.type}`}>
+          <button
+            className="notification-close"
+            onClick={() => removeNotification(notification.id)}
+          >
+            ×
+          </button>
+          <div className="notification-title">{notification.title}</div>
+          <div className="notification-message">{notification.message}</div>
+        </div>
+      ))}
+
       <div className="header">
         <h1>Exoware Simulator</h1>
         <p>Modern interface for store and stream operations</p>
@@ -183,7 +235,7 @@ function App() {
       </div>
 
       <div className="card fade-in">
-        <h2>🗄️ Store Operations</h2>
+        <h2>Store Operations</h2>
 
         <div className="form-section">
           <h3>Set Key-Value Pair</h3>
@@ -228,7 +280,7 @@ function App() {
                 type="text"
                 placeholder="Enter key to retrieve"
                 value={storeGetKey}
-                onChange={(e) => setStoreGetKey(e.target.value)}
+                onChange={(e) => handleGetKeyChange(e.target.value)}
               />
             </div>
           </div>
@@ -309,7 +361,7 @@ function App() {
       </div>
 
       <div className="card fade-in">
-        <h2>📡 Stream Operations</h2>
+        <h2>Stream Operations</h2>
 
         <div className="form-section">
           <h3>Publish Message</h3>
