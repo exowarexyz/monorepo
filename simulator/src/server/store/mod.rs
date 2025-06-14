@@ -7,6 +7,7 @@ use axum::{
 use rocksdb::DB;
 use std::path::Path;
 use std::sync::Arc;
+use tracing::info;
 
 mod handlers;
 
@@ -46,6 +47,14 @@ pub fn router(
     auth_token: Arc<String>,
     allow_public_access: bool,
 ) -> Result<Router, rocksdb::Error> {
+    info!(
+        path = %path.display(),
+        consistency_bound_min = consistency_bound_min,
+        consistency_bound_max = consistency_bound_max,
+        allow_public_access = allow_public_access,
+        "initializing store module"
+    );
+
     let db = Arc::new(DB::open_default(path)?);
     let state = StoreState {
         db,
@@ -64,5 +73,6 @@ pub fn router(
         ))
         .with_state(state);
 
+    info!("store module initialized successfully");
     Ok(router)
 }

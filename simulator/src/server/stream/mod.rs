@@ -9,6 +9,7 @@ use axum::{
 use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
+use tracing::info;
 
 mod handlers;
 
@@ -41,6 +42,11 @@ impl auth::RequireAuth for StreamState {
 /// This function initializes the `StreamState` and sets up the routes for
 /// publishing to and subscribing to streams.
 pub fn router(auth_token: Arc<String>, allow_public_access: bool) -> Router {
+    info!(
+        allow_public_access = allow_public_access,
+        "initializing stream module"
+    );
+
     let state = StreamState {
         streams: StreamMap::new(DashMap::new()),
         auth_token,
@@ -56,5 +62,6 @@ pub fn router(auth_token: Arc<String>, allow_public_access: bool) -> Router {
 
     let get_routes = Router::new().route("/{name}", get(subscribe));
 
+    info!("stream module initialized successfully");
     post_routes.merge(get_routes).with_state(state)
 }

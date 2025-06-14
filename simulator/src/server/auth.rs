@@ -6,6 +6,7 @@ use axum::{
     response::Response,
 };
 use std::sync::Arc;
+use tracing::{debug, warn};
 
 /// A trait for states that require authentication.
 ///
@@ -32,20 +33,70 @@ pub async fn middleware<S>(
 where
     S: RequireAuth,
 {
+    let method = request.method().clone();
+    let uri = request.uri().clone();
+
+    debug!(
+        method = %method,
+        uri = %uri,
+        module = "auth",
+        "processing authentication for request"
+    );
+
     let headers = request.headers();
     if let Some(auth_header) = headers.get("Authorization") {
         if let Ok(auth_str) = auth_header.to_str() {
             if let Some(bearer_token) = auth_str.strip_prefix("Bearer ") {
                 if bearer_token == state.auth_token().as_str() {
+                    debug!(
+                        method = %method,
+                        uri = %uri,
+                        module = "auth",
+                        "authentication successful"
+                    );
                     return Ok(next.run(request).await);
+                } else {
+                    warn!(
+                        method = %method,
+                        uri = %uri,
+                        module = "auth",
+                        "authentication failed: invalid token"
+                    );
                 }
+            } else {
+                warn!(
+                    method = %method,
+                    uri = %uri,
+                    module = "auth",
+                    "authentication failed: malformed authorization header"
+                );
             }
+        } else {
+            warn!(
+                method = %method,
+                uri = %uri,
+                module = "auth",
+                "authentication failed: invalid authorization header encoding"
+            );
         }
     }
 
     if state.allow_public_access() && request.method() == "GET" {
+        debug!(
+            method = %method,
+            uri = %uri,
+            module = "auth",
+            "allowing public access for GET request"
+        );
         return Ok(next.run(request).await);
     }
+
+    warn!(
+        method = %method,
+        uri = %uri,
+        module = "auth",
+        "authentication failed: no valid credentials provided"
+    );
 
     Err(StatusCode::UNAUTHORIZED)
 }

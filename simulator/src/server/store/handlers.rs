@@ -12,6 +12,7 @@ use rocksdb::{Direction, IteratorMode};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+use tracing::{debug, warn};
 
 /// The maximum size of a key in bytes (512 bytes).
 const MAX_KEY_SIZE: usize = 512;
@@ -57,11 +58,24 @@ pub(super) enum AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
-            AppError::KeyTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, self.to_string()),
-            AppError::ValueTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, self.to_string()),
-            AppError::UpdateRateExceeded => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
-            AppError::NotFound => (StatusCode::NOT_FOUND, self.to_string()),
+            AppError::KeyTooLarge => {
+                warn!(module = "store", error = %self, "request failed: key too large");
+                (StatusCode::PAYLOAD_TOO_LARGE, self.to_string())
+            }
+            AppError::ValueTooLarge => {
+                warn!(module = "store", error = %self, "request failed: value too large");
+                (StatusCode::PAYLOAD_TOO_LARGE, self.to_string())
+            }
+            AppError::UpdateRateExceeded => {
+                warn!(module = "store", error = %self, "request failed: update rate exceeded");
+                (StatusCode::TOO_MANY_REQUESTS, self.to_string())
+            }
+            AppError::NotFound => {
+                warn!(module = "store", error = %self, "request failed: key not found");
+                (StatusCode::NOT_FOUND, self.to_string())
+            }
             AppError::DbError(_) | AppError::Bincode(_) => {
+                warn!(module = "store", error = %self, "request failed: internal error");
                 (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
             }
         };
@@ -75,6 +89,14 @@ pub(super) async fn set(
     Path(key): Path<String>,
     value: Bytes,
 ) -> Result<impl IntoResponse, AppError> {
+    debug!(
+        module = "store",
+        operation = "set",
+        key = %key,
+        value_size = value.len(),
+        "processing set request"
+    );
+
     if key.len() > MAX_KEY_SIZE {
         return Err(AppError::KeyTooLarge);
     }
@@ -109,7 +131,16 @@ pub(super) async fn set(
     };
 
     let encoded_value = bincode::serialize(&stored_value)?;
-    state.db.put(key, encoded_value)?;
+    state.db.put(key.clone(), encoded_value)?;
+
+    debug!(
+        module = "store",
+        operation = "set",
+        key = %key,
+        delay_ms = delay_ms,
+        "set request completed successfully"
+    );
+
     Ok(StatusCode::OK)
 }
 
@@ -118,7 +149,14 @@ pub(super) async fn get(
     State(state): State<StoreState>,
     Path(key): Path<String>,
 ) -> Result<Json<GetResultPayload>, AppError> {
-    let db_value = state.db.get(key)?;
+    debug!(
+        module = "store",
+        operation = "get",
+        key = %key,
+        "processing get request"
+    );
+
+    let db_value = state.db.get(&key)?;
     match db_value {
         Some(value) => {
             let stored_value: StoredValue = bincode::deserialize(&value)?;
@@ -127,14 +165,37 @@ pub(super) async fn get(
                 .unwrap()
                 .as_millis();
             if stored_value.visible_at <= now {
+                debug!(
+                    module = "store",
+                    operation = "get",
+                    key = %key,
+                    value_size = stored_value.value.len(),
+                    "get request completed successfully"
+                );
                 Ok(Json(GetResultPayload {
                     value: general_purpose::STANDARD.encode(&stored_value.value),
                 }))
             } else {
+                warn!(
+                    module = "store",
+                    operation = "get",
+                    key = %key,
+                    visible_at = stored_value.visible_at,
+                    current_time = now,
+                    "key not yet visible due to consistency bound"
+                );
                 Err(AppError::NotFound)
             }
         }
-        None => Err(AppError::NotFound),
+        None => {
+            debug!(
+                module = "store",
+                operation = "get",
+                key = %key,
+                "key not found in database"
+            );
+            Err(AppError::NotFound)
+        }
     }
 }
 
@@ -143,6 +204,15 @@ pub(super) async fn query(
     State(state): State<StoreState>,
     Query(params): Query<QueryParams>,
 ) -> Result<Json<QueryResultPayload>, AppError> {
+    debug!(
+        module = "store",
+        operation = "query",
+        start = ?params.start,
+        end = ?params.end,
+        limit = ?params.limit,
+        "processing query request"
+    );
+
     let limit = params.limit.unwrap_or(usize::MAX);
 
     let mode = params.start.as_ref().map_or(IteratorMode::Start, |key| {
@@ -180,6 +250,13 @@ pub(super) async fn query(
             });
         }
     }
+
+    debug!(
+        module = "store",
+        operation = "query",
+        result_count = results.len(),
+        "query request completed successfully"
+    );
 
     Ok(Json(QueryResultPayload { results }))
 }

@@ -9,6 +9,7 @@ use futures::stream::StreamExt;
 use serde::Deserialize;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
+use tracing::{debug, warn};
 
 /// Query parameters for authentication.
 #[derive(Deserialize)]
@@ -25,13 +26,56 @@ pub async fn publish(
     Path(name): Path<String>,
     body: Bytes,
 ) -> impl IntoResponse {
+    debug!(
+        module = "stream",
+        operation = "publish",
+        stream_name = %name,
+        message_size = body.len(),
+        "processing publish request"
+    );
+
     if let Some(tx) = state.streams.get(&name) {
         // Channel exists, send the message, ignoring errors if no subscribers are present.
-        let _ = tx.send(body);
+        match tx.send(body.clone()) {
+            Ok(subscriber_count) => {
+                debug!(
+                    module = "stream",
+                    operation = "publish",
+                    stream_name = %name,
+                    subscriber_count = subscriber_count,
+                    "message published to existing stream"
+                );
+            }
+            Err(_) => {
+                debug!(
+                    module = "stream",
+                    operation = "publish",
+                    stream_name = %name,
+                    "message published to stream with no active subscribers"
+                );
+            }
+        }
     } else {
         // Channel does not exist, create a new one and send the message.
         let (tx, _) = broadcast::channel(1024);
-        let _ = tx.send(body);
+        match tx.send(body.clone()) {
+            Ok(_) => {
+                debug!(
+                    module = "stream",
+                    operation = "publish",
+                    stream_name = %name,
+                    "message published to new stream"
+                );
+            }
+            Err(_) => {
+                debug!(
+                    module = "stream",
+                    operation = "publish",
+                    stream_name = %name,
+                    "created new stream (no initial subscribers)"
+                );
+            }
+        }
         state.streams.insert(name, tx);
     }
 }
@@ -47,6 +91,13 @@ pub async fn subscribe(
     ws: WebSocketUpgrade,
     headers: HeaderMap,
 ) -> Response {
+    debug!(
+        module = "stream",
+        operation = "subscribe",
+        stream_name = %name,
+        "processing websocket upgrade request"
+    );
+
     let mut authorized = state.allow_public_access;
 
     if !authorized {
@@ -55,19 +106,85 @@ pub async fn subscribe(
                 if let Some(bearer_token) = auth_str.strip_prefix("Bearer ") {
                     if bearer_token == state.auth_token.as_str() {
                         authorized = true;
+                        debug!(
+                            module = "stream",
+                            operation = "subscribe",
+                            stream_name = %name,
+                            "websocket authentication successful via header"
+                        );
+                    } else {
+                        warn!(
+                            module = "stream",
+                            operation = "subscribe",
+                            stream_name = %name,
+                            "websocket authentication failed: invalid bearer token"
+                        );
                     }
+                } else {
+                    warn!(
+                        module = "stream",
+                        operation = "subscribe",
+                        stream_name = %name,
+                        "websocket authentication failed: malformed authorization header"
+                    );
                 }
+            } else {
+                warn!(
+                    module = "stream",
+                    operation = "subscribe",
+                    stream_name = %name,
+                    "websocket authentication failed: invalid authorization header encoding"
+                );
             }
         } else if let Some(token) = params.auth_token {
             if token == *state.auth_token.as_str() {
                 authorized = true;
+                debug!(
+                    module = "stream",
+                    operation = "subscribe",
+                    stream_name = %name,
+                    "websocket authentication successful via query parameter"
+                );
+            } else {
+                warn!(
+                    module = "stream",
+                    operation = "subscribe",
+                    stream_name = %name,
+                    "websocket authentication failed: invalid query token"
+                );
             }
+        } else {
+            warn!(
+                module = "stream",
+                operation = "subscribe",
+                stream_name = %name,
+                "websocket authentication failed: no credentials provided"
+            );
         }
+    } else {
+        debug!(
+            module = "stream",
+            operation = "subscribe",
+            stream_name = %name,
+            "websocket connection allowed via public access"
+        );
     }
 
     if authorized {
+        debug!(
+            module = "stream",
+            operation = "subscribe",
+            stream_name = %name,
+            "upgrading connection to websocket"
+        );
         ws.on_upgrade(move |socket| handle_socket(socket, state.streams, name))
     } else {
+        warn!(
+            module = "stream",
+            operation = "subscribe",
+            stream_name = %name,
+            "websocket connection rejected: unauthorized"
+        );
         (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
     }
 }
@@ -77,6 +194,13 @@ pub async fn subscribe(
 /// This function listens for messages from a broadcast channel and forwards them
 /// to the client. It also handles client-side close messages.
 async fn handle_socket(mut socket: WebSocket, streams: StreamMap, name: String) {
+    debug!(
+        module = "stream",
+        operation = "handle_socket",
+        stream_name = %name,
+        "websocket connection established"
+    );
+
     // Subscribe to the broadcast channel for the stream. If the channel does
     // not exist, it is created.
     let rx = {
@@ -93,17 +217,62 @@ async fn handle_socket(mut socket: WebSocket, streams: StreamMap, name: String) 
         tokio::select! {
             // Forward messages from the broadcast channel to the WebSocket client.
             Some(Ok(msg)) = rx_stream.next() => {
+                debug!(
+                    module = "stream",
+                    operation = "handle_socket",
+                    stream_name = %name,
+                    message_size = msg.len(),
+                    "forwarding message to websocket client"
+                );
                 if socket.send(Message::Binary(msg)).await.is_err() {
+                    debug!(
+                        module = "stream",
+                        operation = "handle_socket",
+                        stream_name = %name,
+                        "websocket send failed, closing connection"
+                    );
                     break;
                 }
             },
             // Handle messages from the client (e.g., close connection).
             Some(Ok(msg)) = socket.next() => {
-                if let Message::Close(_) = msg {
-                    break;
+                match msg {
+                    Message::Close(_) => {
+                        debug!(
+                            module = "stream",
+                            operation = "handle_socket",
+                            stream_name = %name,
+                            "received close message from client"
+                        );
+                        break;
+                    }
+                    _ => {
+                        debug!(
+                            module = "stream",
+                            operation = "handle_socket",
+                            stream_name = %name,
+                            message_type = ?msg,
+                            "received unexpected message from client"
+                        );
+                    }
                 }
             }
-            else => { break; }
+            else => {
+                debug!(
+                    module = "stream",
+                    operation = "handle_socket",
+                    stream_name = %name,
+                    "websocket connection terminated"
+                );
+                break;
+            }
         }
     }
+
+    debug!(
+        module = "stream",
+        operation = "handle_socket",
+        stream_name = %name,
+        "websocket connection closed"
+    );
 }

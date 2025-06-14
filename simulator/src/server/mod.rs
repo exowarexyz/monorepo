@@ -4,6 +4,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
+use tracing::info;
 
 mod auth;
 mod store;
@@ -46,8 +47,18 @@ pub async fn run(
     auth_token: String,
     allow_public_access: bool,
 ) -> Result<(), Error> {
+    info!(
+        directory = %directory.display(),
+        port = port,
+        consistency_bound_min = consistency_bound_min,
+        consistency_bound_max = consistency_bound_max,
+        allow_public_access = allow_public_access,
+        "starting exoware simulator server"
+    );
+
     // Create a listener for the server on the specified port.
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
+    info!(address = %listener.local_addr()?, "server listening");
 
     // Create a router for the server.
     let auth_token = Arc::new(auth_token);
@@ -70,6 +81,8 @@ pub async fn run(
         .nest("/store", store_router)
         .nest("/stream", stream_router)
         .layer(cors);
+
+    info!("server routes configured, starting to serve requests");
 
     // Serve the server.
     serve(listener, router.into_make_service())
