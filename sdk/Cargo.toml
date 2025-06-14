@@ -13,7 +13,6 @@ documentation = "https://docs.rs/exoware-sdk"
 [dependencies]
 async-trait = { workspace = true }
 base64 = { workspace = true }
-exoware-simulator = { workspace = true, optional = true }
 futures-util = { workspace = true }
 http = { workspace = true }
 portpicker = { workspace = true, optional = true }
@@ -26,12 +25,3 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-tungstenite = { workspace = true, features = ["native-tls"] }
 url = { workspace = true }
-
-[dev-dependencies]
-exoware-sdk = { path = ".", features = ["testing"] }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-
-[features]
-default = []
-testing = ["dep:exoware-simulator", "dep:portpicker", "dep:tempfile", "dep:rand"]

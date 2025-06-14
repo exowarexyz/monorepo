@@ -7,6 +7,7 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose, Engine as _};
+use exoware_sdk::api;
 use rand::Rng;
 use rocksdb::{Direction, IteratorMode};
 use serde::{Deserialize, Serialize};
@@ -98,29 +99,6 @@ pub struct QueryParams {
     limit: Option<usize>,
 }
 
-/// The result of a `get` request.
-#[derive(Serialize)]
-pub struct GetResult {
-    /// The base64-encoded value.
-    value: String,
-}
-
-/// An individual item in a `query` result.
-#[derive(Serialize)]
-pub struct QueryResultItem {
-    /// The key of the item.
-    key: String,
-    /// The base64-encoded value of the item.
-    value: String,
-}
-
-/// The result of a `query` request.
-#[derive(Serialize)]
-pub struct QueryResults {
-    /// A list of key-value pairs.
-    results: Vec<QueryResultItem>,
-}
-
 /// Sets a key-value pair in the store.
 ///
 /// This handler enforces key and value size limits. It also implements an eventual
@@ -178,7 +156,7 @@ pub async fn set(
 pub async fn get(
     State(state): State<StoreState>,
     Path(key): Path<String>,
-) -> Result<Json<GetResult>, AppError> {
+) -> Result<Json<api::GetResult>, AppError> {
     let db_value = state.db.get(key)?;
     match db_value {
         Some(value) => {
@@ -188,7 +166,7 @@ pub async fn get(
                 .unwrap()
                 .as_millis();
             if stored_value.visible_at <= now {
-                Ok(Json(GetResult {
+                Ok(Json(api::GetResult {
                     value: general_purpose::STANDARD.encode(&stored_value.value),
                 }))
             } else {
@@ -206,7 +184,7 @@ pub async fn get(
 pub async fn query(
     State(state): State<StoreState>,
     Query(params): Query<QueryParams>,
-) -> Result<Json<QueryResults>, AppError> {
+) -> Result<Json<api::QueryResult>, AppError> {
     let limit = params.limit.unwrap_or(usize::MAX);
 
     let mode = params.start.as_ref().map_or(IteratorMode::Start, |key| {
@@ -238,12 +216,12 @@ pub async fn query(
                 }
             }
 
-            results.push(QueryResultItem {
+            results.push(api::QueryResultItem {
                 key: key_str,
                 value: general_purpose::STANDARD.encode(&stored_value.value),
             });
         }
     }
 
-    Ok(Json(QueryResults { results }))
+    Ok(Json(api::QueryResult { results }))
 }

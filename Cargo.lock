@@ -449,8 +449,6 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "base64",
- "exoware-sdk",
- "exoware-simulator",
  "futures-util",
  "http",
  "portpicker",
@@ -462,8 +460,6 @@ dependencies = [
  "thiserror 2.0.12",
  "tokio",
  "tokio-tungstenite 0.23.1",
- "tracing",
- "tracing-subscriber",
  "url",
 ]
 
@@ -476,10 +472,14 @@ dependencies = [
  "bincode",
  "clap",
  "dashmap",
+ "exoware-sdk",
  "futures",
+ "futures-util",
+ "portpicker",
  "rand 0.8.5",
  "rocksdb",
  "serde",
+ "tempfile",
  "thiserror 2.0.12",
  "tokio",
  "tokio-stream",

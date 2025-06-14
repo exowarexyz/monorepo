@@ -11,6 +11,7 @@ repository = "https://github.com/exowarexyz/monorepo/tree/main/simulator"
 documentation = "https://docs.rs/exoware-simulator"
 
 [dependencies]
+exoware-sdk = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 clap = { workspace = true }
 tracing = { workspace = true }
@@ -25,6 +26,9 @@ bincode = { workspace = true }
 dashmap = { workspace = true }
 tokio-stream = { workspace = true, features = ["sync"] }
 futures = { workspace = true }
+tempfile = { workspace = true }
+portpicker = { workspace = true }
+futures-util = { workspace = true }
 
 [[bin]]
 name = "simulator"

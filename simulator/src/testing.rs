@@ -1,4 +1,4 @@
-use crate::Client;
+use exoware_sdk::Client;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
 use std::future::Future;
@@ -36,10 +36,10 @@ pub async fn with_server<F, Fut>(
         .map(char::from)
         .collect();
 
-    let server_task: JoinHandle<Result<(), exoware_simulator::server::Error>> = tokio::spawn({
+    let server_task: JoinHandle<Result<(), crate::server::Error>> = tokio::spawn({
         let auth_token = auth_token.clone();
         async move {
-            exoware_simulator::server::run(
+            crate::server::run(
                 dir.path(),
                 &port,
                 consistency_bound_min,
