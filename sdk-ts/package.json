@@ -6,6 +6,7 @@
     "types": "dist/index.d.ts",
     "scripts": {
         "build": "tsc",
+        "lint": "tsc --noEmit",
         "test": "jest"
     },
     "dependencies": {

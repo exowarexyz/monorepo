@@ -57,6 +57,8 @@ jobs:
         uses: ./.github/actions/setup
       - name: Install dependencies
         run: cd sdk-ts && npm install
+      - name: Lint
+        run: cd sdk-ts && npm run lint
       - name: Run tests
         run: cd sdk-ts && npm test
 
