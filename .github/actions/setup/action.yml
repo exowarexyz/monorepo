@@ -35,3 +35,8 @@ runs:
       run: |
         cargo install cargo-cache || true
         cargo cache --autoclean
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        registry-url: 'https://registry.npmjs.org'

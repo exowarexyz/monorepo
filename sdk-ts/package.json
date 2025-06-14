@@ -1,5 +1,5 @@
 {
-    "name": "exoware-sdk-ts",
+    "name": "exoware-sdk",
     "version": "0.0.1",
     "description": "TypeScript SDK for Exoware",
     "main": "dist/index.js",

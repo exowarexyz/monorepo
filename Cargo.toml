@@ -1,13 +1,13 @@
 [workspace]
 members = [
     "simulator",
-    "sdk",
+    "sdk-rs",
 ]
 resolver = "2"
 
 [workspace.dependencies]
 exoware-simulator = { path = "simulator" }
-exoware-sdk = { path = "sdk" }
+exoware-sdk = { path = "sdk-rs" }
 tokio = "1.43.0"
 clap = "4.5.18"
 tracing = "0.1.41"

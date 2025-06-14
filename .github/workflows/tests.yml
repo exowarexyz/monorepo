@@ -31,16 +31,12 @@ jobs:
       run: cargo doc --no-deps --document-private-items
       env:
         RUSTDOCFLAGS: "-D warnings"
-    - name: Set up Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '20'
     - name: Install speccy
       run: npm install -g speccy
     - name: Lint OpenAPI spec
       run: speccy lint openapi.yaml
 
-  Unit:
+  Rust:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -51,7 +47,7 @@ jobs:
     - name: Run tests
       run: cargo test --verbose
 
-  TypeScript-SDK:
+  TypeScript:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -59,10 +55,6 @@ jobs:
         uses: actions/checkout@v4
       - name: Run setup
         uses: ./.github/actions/setup
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
       - name: Install dependencies
         run: cd sdk-ts && npm install
       - name: Run tests
