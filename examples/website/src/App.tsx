@@ -312,7 +312,7 @@ function App() {
         <h2>Store Operations</h2>
 
         <div className="form-section">
-          <h3>Set Key-Value Pair</h3>
+          <h3>Set Value</h3>
           <div className="form-row">
             <div className="form-group">
               <label htmlFor="store-key">Key</label>
@@ -345,7 +345,7 @@ function App() {
         </div>
 
         <div className="form-section">
-          <h3>Get Value by Key</h3>
+          <h3>Get Value</h3>
           <div className="form-row">
             <div className="form-group">
               <label htmlFor="get-key">Key</label>
@@ -381,7 +381,7 @@ function App() {
         </div>
 
         <div className="form-section">
-          <h3>Query Key Range</h3>
+          <h3>Query Range</h3>
           <div className="form-row">
             <div className="form-group">
               <label htmlFor="query-start">Start Key (optional)</label>
