@@ -218,11 +218,13 @@ function App() {
         sub.onMessage((data: unknown) => {
           setStreamMessages((prev) => [...prev, { data, timestamp: new Date() }]);
         });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         sub.onClose((ev: any) => {
           console.log('Subscription closed', ev);
           setSubscription(null);
           showNotification('error', 'Disconnected', 'Subscription was closed');
         });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         sub.onError((err: any) => {
           console.error('Subscription error', err);
           showNotification('error', 'Error', 'Subscription error occurred');
