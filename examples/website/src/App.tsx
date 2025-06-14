@@ -26,6 +26,7 @@ function App() {
   const [, setClient] = useState<Client | null>(null);
   const [storeClient, setStoreClient] = useState<StoreClient | null>(null);
   const [streamClient, setStreamClient] = useState<StreamClient | null>(null);
+  const [isConnected, setIsConnected] = useState(false);
 
   // Store state
   const [storeKey, setStoreKey] = useState('');
@@ -44,37 +45,54 @@ function App() {
   const [subscription, setSubscription] = useState<Subscription | null>(null);
   const [streamMessages, setStreamMessages] = useState<unknown[]>([]);
 
+  // Loading states
+  const [isSettingValue, setIsSettingValue] = useState(false);
+  const [isGettingValue, setIsGettingValue] = useState(false);
+  const [isQuerying, setIsQuerying] = useState(false);
+  const [isPublishing, setIsPublishing] = useState(false);
+  const [isSubscribing, setIsSubscribing] = useState(false);
+
   useEffect(() => {
     const c = new Client(SIMULATOR_URL, AUTH_TOKEN);
     setClient(c);
     setStoreClient(c.store());
     setStreamClient(c.stream());
+    setIsConnected(true);
   }, []);
 
   const handleSet = async () => {
     if (storeClient && storeKey) {
+      setIsSettingValue(true);
       try {
         await storeClient.set(storeKey, Buffer.from(storeValue));
         alert('Value set successfully');
+        setStoreKey('');
+        setStoreValue('');
       } catch (e) {
         alert(`Error setting value: ${e}`);
+      } finally {
+        setIsSettingValue(false);
       }
     }
   };
 
   const handleGet = async () => {
     if (storeClient && storeGetKey) {
+      setIsGettingValue(true);
       try {
         const result = await storeClient.get(storeGetKey);
         setStoreGetValue(result);
       } catch (e) {
         alert(`Error getting value: ${e}`);
+      } finally {
+        setIsGettingValue(false);
       }
     }
   };
 
   const handleQuery = async () => {
     if (storeClient) {
+      setIsQuerying(true);
       try {
         const result = await storeClient.query(
           queryStart || undefined,
@@ -84,23 +102,29 @@ function App() {
         setQueryResult(result);
       } catch (e) {
         alert(`Error querying: ${e}`);
+      } finally {
+        setIsQuerying(false);
       }
     }
   };
 
   const handlePublish = async () => {
     if (streamClient && streamName) {
+      setIsPublishing(true);
       try {
         await streamClient.publish(streamName, Buffer.from(streamPublishData));
-        alert('Message published');
+        alert('Message published successfully');
       } catch (e) {
         alert(`Error publishing message: ${e}`);
+      } finally {
+        setIsPublishing(false);
       }
     }
   };
 
   const handleSubscribe = async () => {
     if (streamClient && streamSubscribeName && !subscription) {
+      setIsSubscribing(true);
       try {
         const sub = await streamClient.subscribe(streamSubscribeName);
         setSubscription(sub);
@@ -119,6 +143,8 @@ function App() {
 
       } catch (e) {
         alert(`Error subscribing: ${e}`);
+      } finally {
+        setIsSubscribing(false);
       }
     }
   };
@@ -145,74 +171,225 @@ function App() {
     return `[${value.join(', ')}]`;
   }
 
-
   return (
     <div className="App">
-      <h1>Exoware Simulator UI</h1>
+      <div className="header">
+        <h1>Exoware Simulator</h1>
+        <p>Modern interface for store and stream operations</p>
+        <div className={`status-indicator ${isConnected ? 'status-connected' : 'status-disconnected'}`}>
+          <span>●</span>
+          {isConnected ? 'Connected' : 'Disconnected'}
+        </div>
+      </div>
 
-      <div className="card">
-        <h2>Store</h2>
+      <div className="card fade-in">
+        <h2>🗄️ Store Operations</h2>
+
         <div className="form-section">
-          <h3>Set Value</h3>
-          <input type="text" placeholder="Key" value={storeKey} onChange={(e) => setStoreKey(e.target.value)} />
-          <input type="text" placeholder="Value" value={storeValue} onChange={(e) => setStoreValue(e.target.value)} />
-          <button onClick={handleSet}>Set</button>
+          <h3>Set Key-Value Pair</h3>
+          <div className="form-row">
+            <div className="form-group">
+              <label htmlFor="store-key">Key</label>
+              <input
+                id="store-key"
+                type="text"
+                placeholder="Enter key"
+                value={storeKey}
+                onChange={(e) => setStoreKey(e.target.value)}
+              />
+            </div>
+            <div className="form-group">
+              <label htmlFor="store-value">Value</label>
+              <input
+                id="store-value"
+                type="text"
+                placeholder="Enter value"
+                value={storeValue}
+                onChange={(e) => setStoreValue(e.target.value)}
+              />
+            </div>
+          </div>
+          <button
+            className={`btn-primary ${isSettingValue ? 'loading' : ''}`}
+            onClick={handleSet}
+            disabled={isSettingValue || !storeKey}
+          >
+            {isSettingValue ? 'Setting...' : 'Set Value'}
+          </button>
         </div>
 
         <div className="form-section">
-          <h3>Get Value</h3>
-          <input type="text" placeholder="Key" value={storeGetKey} onChange={(e) => setStoreGetKey(e.target.value)} />
-          <button onClick={handleGet}>Get</button>
+          <h3>Get Value by Key</h3>
+          <div className="form-row">
+            <div className="form-group">
+              <label htmlFor="get-key">Key</label>
+              <input
+                id="get-key"
+                type="text"
+                placeholder="Enter key to retrieve"
+                value={storeGetKey}
+                onChange={(e) => setStoreGetKey(e.target.value)}
+              />
+            </div>
+          </div>
+          <button
+            className={`btn-primary ${isGettingValue ? 'loading' : ''}`}
+            onClick={handleGet}
+            disabled={isGettingValue || !storeGetKey}
+          >
+            {isGettingValue ? 'Getting...' : 'Get Value'}
+          </button>
           {storeGetValue && (
-            <div className="result">
+            <div className="result fade-in">
+              <h4>Retrieved Value</h4>
+              <p><strong>Key:</strong> {storeGetKey}</p>
               <p><strong>Value:</strong> {renderValue(storeGetValue.value)}</p>
             </div>
           )}
         </div>
 
         <div className="form-section">
-          <h3>Query</h3>
-          <input type="text" placeholder="Start Key" value={queryStart} onChange={(e) => setQueryStart(e.target.value)} />
-          <input type="text" placeholder="End Key" value={queryEnd} onChange={(e) => setQueryEnd(e.target.value)} />
-          <input type="number" placeholder="Limit" value={queryLimit} onChange={(e) => setQueryLimit(e.target.value)} />
-          <button onClick={handleQuery}>Query</button>
+          <h3>Query Key Range</h3>
+          <div className="form-row">
+            <div className="form-group">
+              <label htmlFor="query-start">Start Key (optional)</label>
+              <input
+                id="query-start"
+                type="text"
+                placeholder="Start key"
+                value={queryStart}
+                onChange={(e) => setQueryStart(e.target.value)}
+              />
+            </div>
+            <div className="form-group">
+              <label htmlFor="query-end">End Key (optional)</label>
+              <input
+                id="query-end"
+                type="text"
+                placeholder="End key"
+                value={queryEnd}
+                onChange={(e) => setQueryEnd(e.target.value)}
+              />
+            </div>
+            <div className="form-group">
+              <label htmlFor="query-limit">Limit</label>
+              <input
+                id="query-limit"
+                type="number"
+                placeholder="10"
+                value={queryLimit}
+                onChange={(e) => setQueryLimit(e.target.value)}
+              />
+            </div>
+          </div>
+          <button
+            className={`btn-primary ${isQuerying ? 'loading' : ''}`}
+            onClick={handleQuery}
+            disabled={isQuerying}
+          >
+            {isQuerying ? 'Querying...' : 'Query Range'}
+          </button>
           {queryResult && (
-            <div className="result">
-              <h4>Results:</h4>
-              <ul>
-                {queryResult.results.map((item: QueryResultItem) => (
-                  <li key={item.key}><strong>{item.key}:</strong> {renderValue(item.value)}</li>
-                ))}
-              </ul>
+            <div className="result fade-in">
+              <h4>Query Results ({queryResult.results.length} items)</h4>
+              {queryResult.results.length > 0 ? (
+                <ul>
+                  {queryResult.results.map((item: QueryResultItem) => (
+                    <li key={item.key}>
+                      <strong>{item.key}:</strong> {renderValue(item.value)}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p>No results found</p>
+              )}
             </div>
           )}
         </div>
       </div>
 
-      <div className="card">
-        <h2>Stream</h2>
+      <div className="card fade-in">
+        <h2>📡 Stream Operations</h2>
+
         <div className="form-section">
           <h3>Publish Message</h3>
-          <input type="text" placeholder="Stream Name" value={streamName} onChange={(e) => setStreamName(e.target.value)} />
-          <input type="text" placeholder="Data" value={streamPublishData} onChange={(e) => setStreamPublishData(e.target.value)} />
-          <button onClick={handlePublish}>Publish</button>
+          <div className="form-row">
+            <div className="form-group">
+              <label htmlFor="stream-name">Stream Name</label>
+              <input
+                id="stream-name"
+                type="text"
+                placeholder="Enter stream name"
+                value={streamName}
+                onChange={(e) => setStreamName(e.target.value)}
+              />
+            </div>
+            <div className="form-group">
+              <label htmlFor="stream-data">Message Data</label>
+              <input
+                id="stream-data"
+                type="text"
+                placeholder="Enter message content"
+                value={streamPublishData}
+                onChange={(e) => setStreamPublishData(e.target.value)}
+              />
+            </div>
+          </div>
+          <button
+            className={`btn-primary ${isPublishing ? 'loading' : ''}`}
+            onClick={handlePublish}
+            disabled={isPublishing || !streamName}
+          >
+            {isPublishing ? 'Publishing...' : 'Publish Message'}
+          </button>
         </div>
 
         <div className="form-section">
           <h3>Subscribe to Stream</h3>
-          <input type="text" placeholder="Stream Name" value={streamSubscribeName} onChange={(e) => setStreamSubscribeName(e.target.value)} />
-          {subscription ? (
-            <button onClick={handleUnsubscribe}>Unsubscribe</button>
-          ) : (
-            <button onClick={handleSubscribe}>Subscribe</button>
-          )}
+          <div className="form-row">
+            <div className="form-group">
+              <label htmlFor="subscribe-stream">Stream Name</label>
+              <input
+                id="subscribe-stream"
+                type="text"
+                placeholder="Enter stream name to subscribe"
+                value={streamSubscribeName}
+                onChange={(e) => setStreamSubscribeName(e.target.value)}
+              />
+            </div>
+          </div>
+          <div className="form-row">
+            {subscription ? (
+              <button
+                className="btn-danger"
+                onClick={handleUnsubscribe}
+              >
+                Unsubscribe
+              </button>
+            ) : (
+              <button
+                className={`btn-primary ${isSubscribing ? 'loading' : ''}`}
+                onClick={handleSubscribe}
+                disabled={isSubscribing || !streamSubscribeName}
+              >
+                {isSubscribing ? 'Subscribing...' : 'Subscribe'}
+              </button>
+            )}
+          </div>
+
           <div className="result">
-            <h4>Messages:</h4>
-            <ul>
-              {streamMessages.map((msg, i) => (
-                <li key={i}>{msg instanceof Blob ? 'Blob' : renderValue(msg as Uint8Array)}</li>
-              ))}
-            </ul>
+            <h4>Live Messages ({streamMessages.length})</h4>
+            {streamMessages.length > 0 ? (
+              <ul>
+                {streamMessages.slice(-10).map((msg, i) => (
+                  <li key={i}>
+                    <strong>#{streamMessages.length - 10 + i + 1}:</strong> {msg instanceof Blob ? 'Blob' : renderValue(msg as Uint8Array)}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p>{subscription ? 'Waiting for messages...' : 'Not subscribed to any stream'}</p>
+            )}
           </div>
         </div>
       </div>
