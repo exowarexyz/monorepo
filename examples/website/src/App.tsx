@@ -1,6 +1,13 @@
 import { useState, useEffect } from 'react';
-import { Client } from 'exoware-sdk';
-import type { StoreClient, StreamClient, Subscription, GetResult, QueryResult, QueryResultItem } from 'exoware-sdk';
+import {
+  Client,
+  type StoreClient,
+  type StreamClient,
+  type Subscription,
+  type GetResult,
+  type QueryResult,
+  type QueryResultItem
+} from 'exoware-sdk';
 import { Buffer } from 'buffer';
 import './App.css';
 
@@ -102,11 +109,11 @@ function App() {
         sub.onMessage((data: unknown) => {
           setStreamMessages((prev) => [...prev, data]);
         });
-        sub.onClose((ev: CloseEvent) => {
+        sub.onClose((ev: any) => {
           console.log('Subscription closed', ev);
           setSubscription(null);
         });
-        sub.onError((err: Event) => {
+        sub.onError((err: any) => {
           console.error('Subscription error', err);
         });
 

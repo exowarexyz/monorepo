@@ -17,7 +17,19 @@ This example provides a basic web interface built with React to interact with th
     cargo run --package exoware-simulator -- server run --auth-token your-secret-token
     ```
 
-2.  **Update Auth Token in the UI:**
+2.  **Build the TypeScript SDK:**
+
+    Before running the web UI, you need to build the TypeScript SDK.
+
+    ```bash
+    # from the root of the monorepo
+    cd sdk-ts
+    npm install
+    npm run build
+    cd ..
+    ```
+
+3.  **Update Auth Token in the UI:**
 
     Open `examples/website/src/App.tsx` and replace `'your-secret-token'` in the `AUTH_TOKEN` constant with the token you used to start the simulator.
 
@@ -25,7 +37,7 @@ This example provides a basic web interface built with React to interact with th
     const AUTH_TOKEN = 'your-secret-token'; // IMPORTANT: Replace with your actual auth token
     ```
 
-3.  **Install Dependencies and Run the Web App:**
+4.  **Install Dependencies and Run the Web App:**
 
     Navigate to the `examples/website` directory and install the dependencies, then start the development server.
 
@@ -36,7 +48,7 @@ This example provides a basic web interface built with React to interact with th
     npm run dev
     ```
 
-4.  **Open the Web UI:**
+5.  **Open the Web UI:**
 
     Open your browser and navigate to the URL provided by Vite (usually `http://localhost:5173`). You should see the UI for interacting with the simulator.
 
