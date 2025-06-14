@@ -241,6 +241,15 @@ pub(super) async fn query(
                 key: key_str,
                 value: general_purpose::STANDARD.encode(&stored_value.value),
             });
+        } else {
+            let key_str = String::from_utf8_lossy(&key);
+            warn!(
+                operation = "query",
+                key = %key_str,
+                visible_at = stored_value.visible_at,
+                current_time = now,
+                "key not yet visible due to consistency bound"
+            );
         }
     }
 
