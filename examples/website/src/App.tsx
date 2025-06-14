@@ -51,7 +51,7 @@ function App() {
   const [streamPublishData, setStreamPublishData] = useState('hello world');
   const [streamSubscribeName, setStreamSubscribeName] = useState('my-stream');
   const [subscription, setSubscription] = useState<Subscription | null>(null);
-  const [streamMessages, setStreamMessages] = useState<unknown[]>([]);
+  const [streamMessages, setStreamMessages] = useState<Array<{ data: unknown; timestamp: Date }>>([]);
 
   // Loading states
   const [isSettingValue, setIsSettingValue] = useState(false);
@@ -59,6 +59,7 @@ function App() {
   const [isQuerying, setIsQuerying] = useState(false);
   const [isPublishing, setIsPublishing] = useState(false);
   const [isSubscribing, setIsSubscribing] = useState(false);
+  const [currentTime, setCurrentTime] = useState(new Date());
 
   useEffect(() => {
     const c = new Client(SIMULATOR_URL, AUTH_TOKEN);
@@ -66,6 +67,15 @@ function App() {
     setStoreClient(c.store());
     setStreamClient(c.stream());
     setIsConnected(true);
+  }, []);
+
+  // Update current time every second to refresh timestamps
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCurrentTime(new Date());
+    }, 1000);
+
+    return () => clearInterval(timer);
   }, []);
 
   const showNotification = (type: 'success' | 'error', title: string, message: string) => {
@@ -159,7 +169,7 @@ function App() {
         showNotification('success', 'Success', `Subscribed to "${streamSubscribeName}"`);
 
         sub.onMessage((data: unknown) => {
-          setStreamMessages((prev) => [...prev, data]);
+          setStreamMessages((prev) => [...prev, { data, timestamp: new Date() }]);
         });
         sub.onClose((ev: any) => {
           console.log('Subscription closed', ev);
@@ -207,6 +217,23 @@ function App() {
       // ignore
     }
     return `[${value.join(', ')}]`;
+  }
+
+  const formatTimeAgo = (timestamp: Date) => {
+    const diffMs = currentTime.getTime() - timestamp.getTime();
+    const diffSeconds = Math.floor(diffMs / 1000);
+
+    if (diffSeconds < 1) return 'just now';
+    if (diffSeconds < 60) return `${diffSeconds}s ago`;
+
+    const diffMinutes = Math.floor(diffSeconds / 60);
+    if (diffMinutes < 60) return `${diffMinutes}m ago`;
+
+    const diffHours = Math.floor(diffMinutes / 60);
+    if (diffHours < 24) return `${diffHours}h ago`;
+
+    const diffDays = Math.floor(diffHours / 24);
+    return `${diffDays}d ago`;
   }
 
   return (
@@ -433,9 +460,12 @@ function App() {
             <h4>Live Messages ({streamMessages.length})</h4>
             {streamMessages.length > 0 ? (
               <ul>
-                {streamMessages.slice(-10).map((msg, i) => (
-                  <li key={i}>
-                    <strong>#{streamMessages.length - 10 + i + 1}:</strong> {msg instanceof Blob ? 'Blob' : renderValue(msg as Uint8Array)}
+                {streamMessages.slice(-10).reverse().map((msg, i) => (
+                  <li key={streamMessages.length - i}>
+                    <span className="message-timestamp">
+                      {formatTimeAgo(msg.timestamp)}
+                    </span>
+                    {msg.data instanceof Blob ? 'Blob' : renderValue(msg.data as Uint8Array)}
                   </li>
                 ))}
               </ul>

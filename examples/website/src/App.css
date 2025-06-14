@@ -243,6 +243,13 @@ button {
   margin-right: 0.5rem;
 }
 
+.message-timestamp {
+  color: #666;
+  font-size: 0.75rem;
+  margin-right: 0.5rem;
+  font-weight: 400;
+}
+
 /* Status indicators */
 .status-indicator {
   display: inline-flex;
