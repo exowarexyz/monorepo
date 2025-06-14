@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Increment patch versions for crates/packages whose name starts with "exoware-"
-# in both package declarations and [workspace.dependencies].
+# in package declarations and [workspace.dependencies], versions
+# in package.json files, and the interface.yaml OpenAPI spec.
 
 set -euo pipefail
 
@@ -56,3 +57,46 @@ find . -name "Cargo.toml" | while read -r cargo_file; do
     echo "Updated ${cargo_file}"
   fi
 done
+
+# Recursively find all exoware package.json files and update their versions
+find . -name "package.json" -print0 | while IFS= read -r -d $'\0' pkg_file; do
+  # Check if the package.json is an exoware package
+  if grep -q '"name": "exoware-' "$pkg_file"; then
+    content=()
+    changed=false
+    while IFS= read -r line; do
+      if [[ "${line}" =~ ^[[:space:]]*\"version\":[[:space:]]*\"([0-9]+\.[0-9]+\.[0-9]+)\" ]]; then
+        old="${BASH_REMATCH[1]}"
+        new="$(bump_version "${old}")"
+        line="${line/${old}/${new}}"
+        changed=true
+      fi
+      content+=("${line}")
+    done < "${pkg_file}"
+
+    if ${changed}; then
+      printf "%s\n" "${content[@]}" > "${pkg_file}"
+      echo "Updated ${pkg_file}"
+    fi
+  fi
+done
+
+# Update openapi spec
+if [ -f "interface.yaml" ]; then
+    content=()
+    changed=false
+    while IFS= read -r line; do
+        if [[ "${line}" =~ ^[[:space:]]*version:[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+            old="${BASH_REMATCH[1]}"
+            new="$(bump_version "${old}")"
+            line="${line/${old}/${new}}"
+            changed=true
+        fi
+        content+=("${line}")
+    done < "interface.yaml"
+
+    if ${changed}; then
+        printf "%s\n" "${content[@]}" > "interface.yaml"
+        echo "Updated interface.yaml"
+    fi
+fi
