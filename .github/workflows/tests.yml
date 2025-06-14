@@ -34,7 +34,7 @@ jobs:
     - name: Install speccy
       run: npm install -g speccy
     - name: Lint OpenAPI spec
-      run: speccy lint openapi.yaml
+      run: speccy lint interface.yaml
 
   Rust:
     runs-on: ubuntu-latest
