@@ -41,6 +41,7 @@ function App() {
   const [storeValue, setStoreValue] = useState('');
   const [storeGetKey, setStoreGetKey] = useState('');
   const [storeGetValue, setStoreGetValue] = useState<GetResult | null>(null);
+  const [keyNotFound, setKeyNotFound] = useState(false);
   const [queryStart, setQueryStart] = useState('');
   const [queryEnd, setQueryEnd] = useState('');
   const [queryLimit, setQueryLimit] = useState('10');
@@ -113,13 +114,20 @@ function App() {
     if (storeClient && storeGetKey) {
       setIsGettingValue(true);
       setStoreGetValue(null); // Clear previous result
+      setKeyNotFound(false); // Clear previous not found state
       try {
         const result = await storeClient.get(storeGetKey);
         setStoreGetValue(result);
+        if (result) {
+          setKeyNotFound(false);
+        } else {
+          setKeyNotFound(true);
+        }
         showNotification('success', 'Success', `Retrieved value for key "${storeGetKey}"`);
       } catch (e) {
         showNotification('error', 'Error', `Failed to get value: ${e}`);
         setStoreGetValue(null); // Clear result on error
+        setKeyNotFound(false); // Clear not found state on error
       } finally {
         setIsGettingValue(false);
       }
@@ -199,8 +207,9 @@ function App() {
 
   const handleGetKeyChange = (value: string) => {
     setStoreGetKey(value);
-    if (storeGetValue) {
+    if (storeGetValue || keyNotFound) {
       setStoreGetValue(null); // Clear result when key changes
+      setKeyNotFound(false); // Clear not found state when key changes
     }
   };
 
@@ -323,6 +332,12 @@ function App() {
               <h4>Retrieved Value</h4>
               <p><strong>Key:</strong> {storeGetKey}</p>
               <p><strong>Value:</strong> {renderValue(storeGetValue.value)}</p>
+            </div>
+          )}
+          {keyNotFound && (
+            <div className="result fade-in">
+              <h4>Not Found</h4>
+              <p><strong>Key:</strong> {storeGetKey}</p>
             </div>
           )}
         </div>
