@@ -16,8 +16,8 @@ use tracing::{debug, warn};
 
 /// The maximum size of a key in bytes (512 bytes).
 const MAX_KEY_SIZE: usize = 512;
-/// The maximum size of a value in bytes (1MB).
-const MAX_VALUE_SIZE: usize = 1024 * 1024;
+/// The maximum size of a value in bytes (20MB).
+const MAX_VALUE_SIZE: usize = 20 * 1024 * 1024;
 
 /// A value stored in the database.
 #[derive(Serialize, Deserialize)]
