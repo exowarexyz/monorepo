@@ -3,8 +3,16 @@ info:
   title: Exoware API
   version: 0.0.1
   description: API for Exoware simulator components (store and stream).
+  contact:
+    name: Exoware Team
+    url: "https://github.com/exoware/exoware"
+tags:
+  - name: store
+    description: "Key-value store operations"
+  - name: stream
+    description: "Stream operations"
 servers:
-  - url: /
+  - url: http://localhost:8080
     description: Local simulator server
 
 components:
@@ -27,6 +35,9 @@ paths:
         description: The key for the store operation.
     get:
       summary: Get a value
+      operationId: getValue
+      tags:
+        - store
       description: Retrieves a value from the store by its key. Respects eventual consistency.
       responses:
         '200':
@@ -48,6 +59,9 @@ paths:
           description: Internal Server Error
     post:
       summary: Set a value
+      operationId: setValue
+      tags:
+        - store
       description: Sets a key-value pair in the store. Enforces size limits and eventual consistency.
       requestBody:
         required: true
@@ -68,9 +82,12 @@ paths:
         '500':
           description: Internal Server Error
 
-  /store/:
+  /store:
     get:
       summary: Query for key-value pairs
+      operationId: queryValues
+      tags:
+        - store
       description: Queries for a range of key-value pairs, respecting eventual consistency.
       parameters:
         - name: start
@@ -124,6 +141,9 @@ paths:
         description: The name of the stream.
     post:
       summary: Publish to a stream
+      operationId: publishToStream
+      tags:
+        - stream
       description: Publishes a message to a stream.
       requestBody:
         required: true
@@ -141,6 +161,9 @@ paths:
           description: Internal Server Error
     get:
       summary: Subscribe to a stream
+      operationId: subscribeToStream
+      tags:
+        - stream
       description: Subscribes to a stream via WebSocket.
       responses:
         '101':
