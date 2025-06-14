@@ -39,7 +39,6 @@ where
     debug!(
         method = %method,
         uri = %uri,
-        module = "auth",
         "processing authentication for request"
     );
 
@@ -51,7 +50,6 @@ where
                     debug!(
                         method = %method,
                         uri = %uri,
-                        module = "auth",
                         "authentication successful"
                     );
                     return Ok(next.run(request).await);
@@ -59,7 +57,6 @@ where
                     warn!(
                         method = %method,
                         uri = %uri,
-                        module = "auth",
                         "authentication failed: invalid token"
                     );
                 }
@@ -67,7 +64,6 @@ where
                 warn!(
                     method = %method,
                     uri = %uri,
-                    module = "auth",
                     "authentication failed: malformed authorization header"
                 );
             }
@@ -75,7 +71,6 @@ where
             warn!(
                 method = %method,
                 uri = %uri,
-                module = "auth",
                 "authentication failed: invalid authorization header encoding"
             );
         }
@@ -85,7 +80,6 @@ where
         debug!(
             method = %method,
             uri = %uri,
-            module = "auth",
             "allowing public access for GET request"
         );
         return Ok(next.run(request).await);
@@ -94,7 +88,6 @@ where
     warn!(
         method = %method,
         uri = %uri,
-        module = "auth",
         "authentication failed: no valid credentials provided"
     );
 

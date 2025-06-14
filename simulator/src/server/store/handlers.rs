@@ -59,23 +59,23 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
             AppError::KeyTooLarge => {
-                warn!(module = "store", error = %self, "request failed: key too large");
+                warn!(error = %self, "request failed: key too large");
                 (StatusCode::PAYLOAD_TOO_LARGE, self.to_string())
             }
             AppError::ValueTooLarge => {
-                warn!(module = "store", error = %self, "request failed: value too large");
+                warn!(error = %self, "request failed: value too large");
                 (StatusCode::PAYLOAD_TOO_LARGE, self.to_string())
             }
             AppError::UpdateRateExceeded => {
-                warn!(module = "store", error = %self, "request failed: update rate exceeded");
+                warn!(error = %self, "request failed: update rate exceeded");
                 (StatusCode::TOO_MANY_REQUESTS, self.to_string())
             }
             AppError::NotFound => {
-                warn!(module = "store", error = %self, "request failed: key not found");
+                warn!(error = %self, "request failed: key not found");
                 (StatusCode::NOT_FOUND, self.to_string())
             }
             AppError::DbError(_) | AppError::Bincode(_) => {
-                warn!(module = "store", error = %self, "request failed: internal error");
+                warn!(error = %self, "request failed: internal error");
                 (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
             }
         };
@@ -90,7 +90,6 @@ pub(super) async fn set(
     value: Bytes,
 ) -> Result<impl IntoResponse, AppError> {
     debug!(
-        module = "store",
         operation = "set",
         key = %key,
         value_size = value.len(),
@@ -134,7 +133,6 @@ pub(super) async fn set(
     state.db.put(key.clone(), encoded_value)?;
 
     debug!(
-        module = "store",
         operation = "set",
         key = %key,
         delay_ms = delay_ms,
@@ -150,7 +148,6 @@ pub(super) async fn get(
     Path(key): Path<String>,
 ) -> Result<Json<GetResultPayload>, AppError> {
     debug!(
-        module = "store",
         operation = "get",
         key = %key,
         "processing get request"
@@ -166,7 +163,6 @@ pub(super) async fn get(
                 .as_millis();
             if stored_value.visible_at <= now {
                 debug!(
-                    module = "store",
                     operation = "get",
                     key = %key,
                     value_size = stored_value.value.len(),
@@ -176,8 +172,7 @@ pub(super) async fn get(
                     value: general_purpose::STANDARD.encode(&stored_value.value),
                 }))
             } else {
-                warn!(
-                    module = "store",
+                debug!(
                     operation = "get",
                     key = %key,
                     visible_at = stored_value.visible_at,
@@ -189,7 +184,6 @@ pub(super) async fn get(
         }
         None => {
             debug!(
-                module = "store",
                 operation = "get",
                 key = %key,
                 "key not found in database"
@@ -205,7 +199,6 @@ pub(super) async fn query(
     Query(params): Query<QueryParams>,
 ) -> Result<Json<QueryResultPayload>, AppError> {
     debug!(
-        module = "store",
         operation = "query",
         start = ?params.start,
         end = ?params.end,
@@ -252,7 +245,6 @@ pub(super) async fn query(
     }
 
     debug!(
-        module = "store",
         operation = "query",
         result_count = results.len(),
         "query request completed successfully"

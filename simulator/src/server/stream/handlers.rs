@@ -27,7 +27,6 @@ pub async fn publish(
     body: Bytes,
 ) -> impl IntoResponse {
     debug!(
-        module = "stream",
         operation = "publish",
         stream_name = %name,
         message_size = body.len(),
@@ -39,7 +38,6 @@ pub async fn publish(
         match tx.send(body.clone()) {
             Ok(subscriber_count) => {
                 debug!(
-                    module = "stream",
                     operation = "publish",
                     stream_name = %name,
                     subscriber_count = subscriber_count,
@@ -48,7 +46,6 @@ pub async fn publish(
             }
             Err(_) => {
                 debug!(
-                    module = "stream",
                     operation = "publish",
                     stream_name = %name,
                     "message published to stream with no active subscribers"
@@ -61,7 +58,6 @@ pub async fn publish(
         match tx.send(body.clone()) {
             Ok(_) => {
                 debug!(
-                    module = "stream",
                     operation = "publish",
                     stream_name = %name,
                     "message published to new stream"
@@ -69,7 +65,6 @@ pub async fn publish(
             }
             Err(_) => {
                 debug!(
-                    module = "stream",
                     operation = "publish",
                     stream_name = %name,
                     "created new stream (no initial subscribers)"
@@ -92,7 +87,6 @@ pub async fn subscribe(
     headers: HeaderMap,
 ) -> Response {
     debug!(
-        module = "stream",
         operation = "subscribe",
         stream_name = %name,
         "processing websocket upgrade request"
@@ -107,14 +101,12 @@ pub async fn subscribe(
                     if bearer_token == state.auth_token.as_str() {
                         authorized = true;
                         debug!(
-                            module = "stream",
                             operation = "subscribe",
                             stream_name = %name,
                             "websocket authentication successful via header"
                         );
                     } else {
                         warn!(
-                            module = "stream",
                             operation = "subscribe",
                             stream_name = %name,
                             "websocket authentication failed: invalid bearer token"
@@ -122,7 +114,6 @@ pub async fn subscribe(
                     }
                 } else {
                     warn!(
-                        module = "stream",
                         operation = "subscribe",
                         stream_name = %name,
                         "websocket authentication failed: malformed authorization header"
@@ -130,7 +121,6 @@ pub async fn subscribe(
                 }
             } else {
                 warn!(
-                    module = "stream",
                     operation = "subscribe",
                     stream_name = %name,
                     "websocket authentication failed: invalid authorization header encoding"
@@ -140,14 +130,12 @@ pub async fn subscribe(
             if token == *state.auth_token.as_str() {
                 authorized = true;
                 debug!(
-                    module = "stream",
                     operation = "subscribe",
                     stream_name = %name,
                     "websocket authentication successful via query parameter"
                 );
             } else {
                 warn!(
-                    module = "stream",
                     operation = "subscribe",
                     stream_name = %name,
                     "websocket authentication failed: invalid query token"
@@ -155,7 +143,6 @@ pub async fn subscribe(
             }
         } else {
             warn!(
-                module = "stream",
                 operation = "subscribe",
                 stream_name = %name,
                 "websocket authentication failed: no credentials provided"
@@ -163,7 +150,6 @@ pub async fn subscribe(
         }
     } else {
         debug!(
-            module = "stream",
             operation = "subscribe",
             stream_name = %name,
             "websocket connection allowed via public access"
@@ -172,7 +158,6 @@ pub async fn subscribe(
 
     if authorized {
         debug!(
-            module = "stream",
             operation = "subscribe",
             stream_name = %name,
             "upgrading connection to websocket"
@@ -180,7 +165,6 @@ pub async fn subscribe(
         ws.on_upgrade(move |socket| handle_socket(socket, state.streams, name))
     } else {
         warn!(
-            module = "stream",
             operation = "subscribe",
             stream_name = %name,
             "websocket connection rejected: unauthorized"
@@ -195,7 +179,6 @@ pub async fn subscribe(
 /// to the client. It also handles client-side close messages.
 async fn handle_socket(mut socket: WebSocket, streams: StreamMap, name: String) {
     debug!(
-        module = "stream",
         operation = "handle_socket",
         stream_name = %name,
         "websocket connection established"
@@ -218,7 +201,6 @@ async fn handle_socket(mut socket: WebSocket, streams: StreamMap, name: String) 
             // Forward messages from the broadcast channel to the WebSocket client.
             Some(Ok(msg)) = rx_stream.next() => {
                 debug!(
-                    module = "stream",
                     operation = "handle_socket",
                     stream_name = %name,
                     message_size = msg.len(),
@@ -226,7 +208,6 @@ async fn handle_socket(mut socket: WebSocket, streams: StreamMap, name: String) 
                 );
                 if socket.send(Message::Binary(msg)).await.is_err() {
                     debug!(
-                        module = "stream",
                         operation = "handle_socket",
                         stream_name = %name,
                         "websocket send failed, closing connection"
@@ -239,7 +220,6 @@ async fn handle_socket(mut socket: WebSocket, streams: StreamMap, name: String) 
                 match msg {
                     Message::Close(_) => {
                         debug!(
-                            module = "stream",
                             operation = "handle_socket",
                             stream_name = %name,
                             "received close message from client"
@@ -248,7 +228,6 @@ async fn handle_socket(mut socket: WebSocket, streams: StreamMap, name: String) 
                     }
                     _ => {
                         debug!(
-                            module = "stream",
                             operation = "handle_socket",
                             stream_name = %name,
                             message_type = ?msg,
@@ -259,7 +238,6 @@ async fn handle_socket(mut socket: WebSocket, streams: StreamMap, name: String) 
             }
             else => {
                 debug!(
-                    module = "stream",
                     operation = "handle_socket",
                     stream_name = %name,
                     "websocket connection terminated"
@@ -270,7 +248,6 @@ async fn handle_socket(mut socket: WebSocket, streams: StreamMap, name: String) 
     }
 
     debug!(
-        module = "stream",
         operation = "handle_socket",
         stream_name = %name,
         "websocket connection closed"
