@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::TcpListener;
+use tower_http::cors::CorsLayer;
 
 mod auth;
 mod store;
@@ -58,9 +59,17 @@ pub async fn run(
         allow_public_access,
     )?;
     let stream_router = stream::router(auth_token, allow_public_access);
+
+    // Create a permissive CORS layer.
+    let cors = CorsLayer::new()
+        .allow_origin(tower_http::cors::Any)
+        .allow_methods(tower_http::cors::Any)
+        .allow_headers(tower_http::cors::Any);
+
     let router = Router::new()
         .nest("/store", store_router)
-        .nest("/stream", stream_router);
+        .nest("/stream", stream_router)
+        .layer(cors);
 
     // Serve the server.
     serve(listener, router.into_make_service())
