@@ -38,7 +38,10 @@ paths:
       operationId: getValue
       tags:
         - store
-      description: Retrieves a value from the store by its key. Respects eventual consistency.
+      description: |
+        Retrieves a value from the store by its key.
+
+        **Consistency Note:** This store is eventually consistent. A key set or updated via a `POST` request may take up to 60 seconds to be available via this endpoint.
       responses:
         '200':
           description: OK
@@ -62,7 +65,29 @@ paths:
       operationId: setValue
       tags:
         - store
-      description: Sets a key-value pair in the store. Enforces size limits and eventual consistency.
+      description: |
+        Sets a key-value pair in the store. Enforces size limits.
+
+        **Consistency Note:** Due to eventual consistency, a key set or updated via this operation may take up to 60 seconds to be available via a `GET` request.
+
+        **Rate Limit Note:** This endpoint can be called at most once per second for a given key.
+
+        **Size Limit Note:** The key must be at most 512 bytes, and the value must be at most 20MB.
+      x-invariants:
+        - type: eventual-consistency
+          description: "A key written by this operation may take up to 60 seconds to be readable from the GET /store/{key} operation."
+          latency_seconds: 60
+        - type: rate-limit
+          description: "This operation can be called at most once per second for each key."
+          limit: 1
+          period_seconds: 1
+          scope: key
+        - type: max-key-size
+          description: "The maximum size of the key is 512 bytes."
+          limit_bytes: 512
+        - type: max-value-size
+          description: "The maximum size of the value is 20MB (20971520 bytes)."
+          limit_bytes: 20971520
       requestBody:
         required: true
         content:
