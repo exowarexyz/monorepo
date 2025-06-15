@@ -1,7 +1,0 @@
-[package]
-name = "exoware-local"
-version = "0.0.1"
-edition = "2021"
-publish = true
-license = "MIT OR Apache-2.0"
-description = "TBA"
