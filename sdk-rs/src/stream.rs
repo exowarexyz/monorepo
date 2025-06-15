@@ -1,3 +1,5 @@
+//! Broadcast realtime data.
+
 use crate::{error::Error, Client as SdkClient};
 use futures_util::{
     stream::{SplitSink, SplitStream},

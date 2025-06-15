@@ -1,6 +1,7 @@
 //! Rust SDK for the Exoware API.
 
-pub mod error;
+mod error;
+pub use error::Error;
 pub mod store;
 pub mod stream;
 
