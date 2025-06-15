@@ -19,13 +19,13 @@ use url::Url;
 /// The maximum size of a message in bytes (20MB).
 const MAX_MESSAGE_SIZE: usize = 20 * 1024 * 1024;
 
-/// A client for interacting with real-time streams.
+/// A client for interacting with realtime streams.
 #[derive(Clone)]
 pub struct StreamClient {
     client: Client,
 }
 
-/// A subscription to a real-time stream.
+/// A subscription to a realtime stream.
 #[derive(Debug)]
 pub struct Subscription {
     write: SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,

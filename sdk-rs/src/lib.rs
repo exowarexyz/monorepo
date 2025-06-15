@@ -35,7 +35,7 @@ impl Client {
         store::StoreClient::new(self.clone())
     }
 
-    /// Returns a `StreamClient` for interacting with real-time streams.
+    /// Returns a `StreamClient` for interacting with realtime streams.
     pub fn stream(&self) -> stream::StreamClient {
         stream::StreamClient::new(self.clone())
     }

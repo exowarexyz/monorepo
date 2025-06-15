@@ -42,4 +42,4 @@ This example provides a basic web interface to interact with the Exoware API. It
     -   Query for a range of keys.
 -   **Stream:**
     -   Publish messages to a named stream.
-    -   Subscribe to a named stream and see messages in real-time.
+    -   Subscribe to a named stream and see messages in realtime.

@@ -54,7 +54,7 @@ export class Subscription {
 }
 
 /**
- * A client for interacting with real-time streams.
+ * A client for interacting with realtime streams.
  */
 export class StreamClient {
     constructor(private client: Client) { }

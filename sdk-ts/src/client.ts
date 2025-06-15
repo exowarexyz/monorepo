@@ -39,7 +39,7 @@ export class Client {
     }
 
     /**
-     * Returns a `StreamClient` for interacting with real-time streams.
+     * Returns a `StreamClient` for interacting with realtime streams.
      */
     public stream(): StreamClient {
         return new StreamClient(this);
