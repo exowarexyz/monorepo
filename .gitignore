@@ -4,9 +4,9 @@
 *.vscode
 
 # TypeScript SDK
-/sdk-ts/node_modules/
-/sdk-ts/dist/
-/sdk-ts/coverage/
+node_modules/
+dist/
+coverage/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
