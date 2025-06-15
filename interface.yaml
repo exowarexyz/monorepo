@@ -36,10 +36,11 @@ paths:
       operationId: getValue
       tags:
         - store
-      description: |
-        Retrieves a value from the store by its key.
-
-        **Consistency Note:** This store is eventually consistent. A key set or updated via a `POST` request may take up to 60 seconds to be available via this endpoint.
+      description: Retrieves a value from the store by its key.
+      x-invariants:
+        - type: eventual-consistency
+          description: "A key written by POST /store/{key} may take up to 60 seconds to be readable from the GET /store/{key} operation."
+          latency_seconds: 60
       responses:
         '200':
           description: OK
