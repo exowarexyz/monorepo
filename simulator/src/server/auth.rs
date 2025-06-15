@@ -23,6 +23,7 @@ pub trait RequireAuth: Clone + Send + Sync + 'static {
 ///
 /// This middleware checks for a bearer token in the `Authorization` header
 /// or a token in the query parameters.
+///
 /// If the token is valid, the request is passed to the next handler.
 /// If `allow_public_access` is true, GET requests are allowed without a token.
 /// Otherwise, an `UNAUTHORIZED` status code is returned.
