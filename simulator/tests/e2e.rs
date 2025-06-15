@@ -128,6 +128,21 @@ async fn test_limits() {
         }
 
         let stream = client.stream();
+        let large_stream_name = "a".repeat(513);
+        let err = stream
+            .publish(&large_stream_name, b"hello".to_vec())
+            .await
+            .unwrap_err();
+        match err {
+            Error::Http(status) => assert_eq!(status, 413),
+            _ => panic!("unexpected error type"),
+        }
+        let err = stream.subscribe(&large_stream_name).await.unwrap_err();
+        match err {
+            Error::WebSocket(_) => {}
+            _ => panic!("unexpected error type"),
+        }
+
         let err = stream
             .publish("test-stream", large_value)
             .await

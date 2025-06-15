@@ -11,6 +11,8 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::{debug, warn};
 
+/// The maximum size of a stream name in bytes (512 bytes).
+const MAX_NAME_SIZE: usize = 512;
 /// The maximum size of a stream message in bytes (20MB).
 const MAX_MESSAGE_SIZE: usize = 20 * 1024 * 1024;
 
@@ -36,6 +38,18 @@ pub async fn publish(
         "processing publish request"
     );
 
+    // Check if the stream name size exceeds the limit.
+    if name.len() > MAX_NAME_SIZE {
+        warn!(
+            operation = "publish",
+            stream_name = %name,
+            name_size = name.len(),
+            max_size = MAX_NAME_SIZE,
+            "stream name size exceeds limit"
+        );
+        return (StatusCode::PAYLOAD_TOO_LARGE, "Stream name too long").into_response();
+    }
+
     // Check if the message size exceeds the limit.
     if body.len() > MAX_MESSAGE_SIZE {
         warn!(
@@ -45,7 +59,7 @@ pub async fn publish(
             max_size = MAX_MESSAGE_SIZE,
             "message size exceeds limit"
         );
-        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+        return (StatusCode::PAYLOAD_TOO_LARGE, "Message too large").into_response();
     }
 
     if let Some(tx) = state.streams.get(&name) {
@@ -109,8 +123,19 @@ pub async fn subscribe(
         "processing websocket upgrade request"
     );
 
-    let mut authorized = state.allow_public_access;
+    // Check if the stream name size exceeds the limit.
+    if name.len() > MAX_NAME_SIZE {
+        warn!(
+            operation = "subscribe",
+            stream_name = %name,
+            name_size = name.len(),
+            max_size = MAX_NAME_SIZE,
+            "stream name size exceeds limit"
+        );
+        return (StatusCode::PAYLOAD_TOO_LARGE, "Stream name too long").into_response();
+    }
 
+    let mut authorized = state.allow_public_access;
     if !authorized {
         if let Some(auth_header) = headers.get("Authorization") {
             if let Ok(auth_str) = auth_header.to_str() {
@@ -212,7 +237,6 @@ async fn handle_socket(mut socket: WebSocket, streams: StreamMap, name: String) 
     };
 
     let mut rx_stream = BroadcastStream::new(rx);
-
     loop {
         tokio::select! {
             // Forward messages from the broadcast channel to the WebSocket client.
