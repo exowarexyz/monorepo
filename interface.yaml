@@ -1,7 +1,7 @@
 openapi: 3.0.0
 info:
   title: Exoware API
-  description: All things Exoware.
+  description: The canonical interface for all Exoware Components.
   version: 0.0.1
   contact:
     name: Commonware, Inc.
