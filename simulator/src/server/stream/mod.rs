@@ -1,11 +1,6 @@
 use crate::server::auth;
 use crate::server::stream::handlers::{publish, subscribe};
-use axum::{
-    body::Bytes,
-    middleware::from_fn_with_state,
-    routing::{get, post},
-    Router,
-};
+use axum::{body::Bytes, middleware::from_fn_with_state, routing::post, Router};
 use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -53,15 +48,14 @@ pub fn router(token: Arc<String>, allow_public_access: bool) -> Router {
         allow_public_access,
     };
 
-    let post_routes = Router::new()
-        .route("/{name}", post(publish))
+    let router = Router::new()
+        .route("/{name}", post(publish).get(subscribe))
         .layer(from_fn_with_state(
             state.clone(),
             auth::middleware::<StreamState>,
-        ));
-
-    let get_routes = Router::new().route("/{name}", get(subscribe));
+        ))
+        .with_state(state);
 
     info!("stream module initialized successfully");
-    post_routes.merge(get_routes).with_state(state)
+    router
 }

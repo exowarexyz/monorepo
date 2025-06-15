@@ -1,12 +1,11 @@
 use crate::server::stream::{StreamMap, StreamState};
 use axum::{
     body::Bytes,
-    extract::{ws::Message, ws::WebSocket, Path, Query, State, WebSocketUpgrade},
-    http::{HeaderMap, StatusCode},
+    extract::{ws::Message, ws::WebSocket, Path, State, WebSocketUpgrade},
+    http::StatusCode,
     response::{IntoResponse, Response},
 };
 use futures::stream::StreamExt;
-use serde::Deserialize;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::{debug, warn};
@@ -15,12 +14,6 @@ use tracing::{debug, warn};
 const MAX_NAME_SIZE: usize = 512;
 /// The maximum size of a stream message in bytes (20MB).
 const MAX_MESSAGE_SIZE: usize = 20 * 1024 * 1024;
-
-/// Query parameters for authentication.
-#[derive(Deserialize)]
-pub(super) struct AuthParams {
-    token: Option<String>,
-}
 
 /// Publishes a message to a stream.
 ///
@@ -113,9 +106,7 @@ pub async fn publish(
 pub async fn subscribe(
     State(state): State<StreamState>,
     Path(name): Path<String>,
-    Query(params): Query<AuthParams>,
     ws: WebSocketUpgrade,
-    headers: HeaderMap,
 ) -> Response {
     debug!(
         operation = "subscribe",
@@ -135,84 +126,12 @@ pub async fn subscribe(
         return (StatusCode::PAYLOAD_TOO_LARGE, "Stream name too long").into_response();
     }
 
-    let mut authorized = state.allow_public_access;
-    if !authorized {
-        if let Some(auth_header) = headers.get("Authorization") {
-            if let Ok(auth_str) = auth_header.to_str() {
-                if let Some(bearer_token) = auth_str.strip_prefix("Bearer ") {
-                    if bearer_token == state.token.as_str() {
-                        authorized = true;
-                        debug!(
-                            operation = "subscribe",
-                            stream_name = %name,
-                            "websocket authentication successful via header"
-                        );
-                    } else {
-                        warn!(
-                            operation = "subscribe",
-                            stream_name = %name,
-                            "websocket authentication failed: invalid bearer token"
-                        );
-                    }
-                } else {
-                    warn!(
-                        operation = "subscribe",
-                        stream_name = %name,
-                        "websocket authentication failed: malformed authorization header"
-                    );
-                }
-            } else {
-                warn!(
-                    operation = "subscribe",
-                    stream_name = %name,
-                    "websocket authentication failed: invalid authorization header encoding"
-                );
-            }
-        } else if let Some(token) = params.token {
-            if token == *state.token.as_str() {
-                authorized = true;
-                debug!(
-                    operation = "subscribe",
-                    stream_name = %name,
-                    "websocket authentication successful via query parameter"
-                );
-            } else {
-                warn!(
-                    operation = "subscribe",
-                    stream_name = %name,
-                    "websocket authentication failed: invalid query token"
-                );
-            }
-        } else {
-            warn!(
-                operation = "subscribe",
-                stream_name = %name,
-                "websocket authentication failed: no credentials provided"
-            );
-        }
-    } else {
-        debug!(
-            operation = "subscribe",
-            stream_name = %name,
-            "websocket connection allowed via public access"
-        );
-    }
-
-    if authorized {
-        debug!(
-            operation = "subscribe",
-            stream_name = %name,
-            "upgrading connection to websocket"
-        );
-        ws.on_upgrade(move |socket| handle_socket(socket, state.streams, name))
-    } else {
-        warn!(
-            operation = "subscribe",
-            stream_name = %name,
-            "websocket connection rejected: unauthorized"
-        );
-        (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
-    }
+    debug!(
+        operation = "subscribe",
+        stream_name = %name,
+        "upgrading connection to websocket"
+    );
+    ws.on_upgrade(move |socket| handle_socket(socket, state.streams, name))
 }
 
 /// Handles an individual WebSocket connection.
