@@ -17,6 +17,8 @@ This example provides a basic web interface built with React to interact with th
     cargo run --package exoware-simulator -- --verbose server run --token your-secret-token
     ```
 
+    _If you opt to use a different token, you must update the `VITE_TOKEN` environment variable in the `examples/sandbox/.env.local` file._
+
 2.  **Install Dependencies and Run the Web App:**
 
     Navigate to the `examples/sandbox` directory and install the dependencies, then start the development server. `npm install` will also automatically build the TypeScript SDK.
