@@ -14,7 +14,7 @@ use tracing::{info, warn};
 
 mod handlers;
 
-/// Application-specific errors for the store handlers.
+/// Application-specific errors for the store handler.
 #[derive(Debug, Error)]
 pub(super) enum Error {
     #[error("key too large")]

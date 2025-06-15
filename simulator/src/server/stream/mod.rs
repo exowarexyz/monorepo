@@ -1,12 +1,34 @@
 use crate::server::auth;
 use crate::server::stream::handlers::{publish, subscribe};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::{body::Bytes, middleware::from_fn_with_state, routing::post, Router};
 use dashmap::DashMap;
 use std::sync::Arc;
+use thiserror::Error;
 use tokio::sync::broadcast;
 use tracing::info;
 
 mod handlers;
+
+/// Application-specific errors for the stream handler.
+#[derive(Debug, Error)]
+pub(super) enum Error {
+    #[error("name too large")]
+    NameTooLarge,
+    #[error("message too large")]
+    MessageTooLarge,
+}
+
+impl IntoResponse for Error {
+    fn into_response(self) -> Response {
+        let (status, message) = match self {
+            Error::NameTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, self.to_string()),
+            Error::MessageTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, self.to_string()),
+        };
+        (status, message).into_response()
+    }
+}
 
 /// A type alias for a map of stream names to their broadcast senders.
 pub type StreamMap = Arc<DashMap<String, broadcast::Sender<Bytes>>>;

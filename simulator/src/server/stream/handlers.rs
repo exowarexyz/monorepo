@@ -1,4 +1,4 @@
-use crate::server::stream::{StreamMap, StreamState};
+use crate::server::stream::{Error, StreamMap, StreamState};
 use axum::{
     body::Bytes,
     extract::{ws::Message, ws::WebSocket, Path, State, WebSocketUpgrade},
@@ -23,7 +23,7 @@ pub async fn publish(
     State(state): State<StreamState>,
     Path(name): Path<String>,
     body: Bytes,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, Error> {
     debug!(
         operation = "publish",
         stream_name = %name,
@@ -40,7 +40,7 @@ pub async fn publish(
             max_size = MAX_NAME_SIZE,
             "stream name size exceeds limit"
         );
-        return (StatusCode::PAYLOAD_TOO_LARGE, "Stream name too long").into_response();
+        return Err(Error::NameTooLarge);
     }
 
     // Check if the message size exceeds the limit.
@@ -52,7 +52,7 @@ pub async fn publish(
             max_size = MAX_MESSAGE_SIZE,
             "message size exceeds limit"
         );
-        return (StatusCode::PAYLOAD_TOO_LARGE, "Message too large").into_response();
+        return Err(Error::MessageTooLarge);
     }
 
     if let Some(tx) = state.streams.get(&name) {
@@ -96,7 +96,7 @@ pub async fn publish(
         state.streams.insert(name, tx);
     }
 
-    StatusCode::OK.into_response()
+    Ok(StatusCode::OK)
 }
 
 /// Upgrades a connection to a WebSocket and subscribes to a stream.
@@ -107,7 +107,7 @@ pub async fn subscribe(
     State(state): State<StreamState>,
     Path(name): Path<String>,
     ws: WebSocketUpgrade,
-) -> Response {
+) -> Result<Response, Error> {
     debug!(
         operation = "subscribe",
         stream_name = %name,
@@ -123,7 +123,7 @@ pub async fn subscribe(
             max_size = MAX_NAME_SIZE,
             "stream name size exceeds limit"
         );
-        return (StatusCode::PAYLOAD_TOO_LARGE, "Stream name too long").into_response();
+        return Err(Error::NameTooLarge);
     }
 
     debug!(
@@ -131,7 +131,7 @@ pub async fn subscribe(
         stream_name = %name,
         "upgrading connection to websocket"
     );
-    ws.on_upgrade(move |socket| handle_socket(socket, state.streams, name))
+    Ok(ws.on_upgrade(move |socket| handle_socket(socket, state.streams, name)))
 }
 
 /// Handles an individual WebSocket connection.
