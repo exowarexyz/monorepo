@@ -1,7 +1,7 @@
-use crate::server::store::{Error, StoreState};
+use crate::server::store::{Error, State};
 use axum::{
     body::Bytes,
-    extract::{Path, Query, State},
+    extract::{Path, Query, State as AxumState},
     http::StatusCode,
     response::{IntoResponse, Json},
 };
@@ -20,7 +20,7 @@ const MAX_VALUE_SIZE: usize = 20 * 1024 * 1024;
 
 /// A value stored in the database.
 #[derive(Serialize, Deserialize)]
-struct StoredValue {
+struct Entry {
     value: Vec<u8>,
     visible_at: u128,
     updated_at: u64,
@@ -39,7 +39,7 @@ pub(super) struct QueryParams {
 
 /// Sets a key-value pair in the store.
 pub(super) async fn set(
-    State(state): State<StoreState>,
+    AxumState(state): AxumState<State>,
     Path(key): Path<String>,
     value: Bytes,
 ) -> Result<impl IntoResponse, Error> {
@@ -64,7 +64,7 @@ pub(super) async fn set(
     let now_secs = (now_millis / 1000) as u64;
 
     if let Some(existing_value) = state.db.get(&key)? {
-        let stored_value: StoredValue = bincode::deserialize(&existing_value)?;
+        let stored_value: Entry = bincode::deserialize(&existing_value)?;
         if now_secs - stored_value.updated_at < 1 {
             return Err(Error::UpdateRateExceeded);
         }
@@ -77,7 +77,7 @@ pub(super) async fn set(
     };
     let visible_at = now_millis + delay_ms as u128;
 
-    let stored_value = StoredValue {
+    let stored_value = Entry {
         value: value.to_vec(),
         visible_at,
         updated_at: now_secs,
@@ -98,7 +98,7 @@ pub(super) async fn set(
 
 /// Retrieves a value from the store by its key.
 pub(super) async fn get(
-    State(state): State<StoreState>,
+    AxumState(state): AxumState<State>,
     Path(key): Path<String>,
 ) -> Result<Json<GetResultPayload>, Error> {
     debug!(
@@ -110,7 +110,7 @@ pub(super) async fn get(
     let db_value = state.db.get(&key)?;
     match db_value {
         Some(value) => {
-            let stored_value: StoredValue = bincode::deserialize(&value)?;
+            let stored_value: Entry = bincode::deserialize(&value)?;
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -149,7 +149,7 @@ pub(super) async fn get(
 
 /// Queries for a range of key-value pairs.
 pub(super) async fn query(
-    State(state): State<StoreState>,
+    AxumState(state): AxumState<State>,
     Query(params): Query<QueryParams>,
 ) -> Result<Json<QueryResultPayload>, Error> {
     debug!(
@@ -180,7 +180,7 @@ pub(super) async fn query(
         }
 
         let (key, value) = item?;
-        let stored_value: StoredValue = bincode::deserialize(&value)?;
+        let stored_value: Entry = bincode::deserialize(&value)?;
 
         if stored_value.visible_at <= now {
             let key_str = String::from_utf8(key.into_vec()).unwrap();

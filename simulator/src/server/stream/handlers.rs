@@ -1,7 +1,7 @@
-use crate::server::stream::{Error, StreamMap, StreamState};
+use crate::server::stream::{Error, Map, State};
 use axum::{
     body::Bytes,
-    extract::{ws::Message, ws::WebSocket, Path, State, WebSocketUpgrade},
+    extract::{ws::Message, ws::WebSocket, Path, State as AxumState, WebSocketUpgrade},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -20,7 +20,7 @@ const MAX_MESSAGE_SIZE: usize = 20 * 1024 * 1024;
 /// If the stream does not exist, it is created. Messages are broadcast to all
 /// active subscribers.
 pub async fn publish(
-    State(state): State<StreamState>,
+    AxumState(state): AxumState<State>,
     Path(name): Path<String>,
     body: Bytes,
 ) -> Result<impl IntoResponse, Error> {
@@ -104,7 +104,7 @@ pub async fn publish(
 /// This handler performs an authentication check before upgrading the connection.
 /// If authentication is successful, the client is subscribed to the specified stream.
 pub async fn subscribe(
-    State(state): State<StreamState>,
+    AxumState(state): AxumState<State>,
     Path(name): Path<String>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, Error> {
@@ -138,7 +138,7 @@ pub async fn subscribe(
 ///
 /// This function listens for messages from a broadcast channel and forwards them
 /// to the client. It also handles client-side close messages.
-async fn handle_socket(mut socket: WebSocket, streams: StreamMap, name: String) {
+async fn handle_socket(mut socket: WebSocket, streams: Map, name: String) {
     debug!(
         operation = "handle_socket",
         stream_name = %name,

@@ -31,20 +31,20 @@ impl IntoResponse for Error {
 }
 
 /// A type alias for a map of stream names to their broadcast senders.
-pub type StreamMap = Arc<DashMap<String, broadcast::Sender<Bytes>>>;
+pub type Map = Arc<DashMap<String, broadcast::Sender<Bytes>>>;
 
 /// The state for the stream routes.
 #[derive(Clone)]
-pub struct StreamState {
+pub struct State {
     /// A map of active streams.
-    pub streams: StreamMap,
+    pub streams: Map,
     /// The authentication token.
     pub token: Arc<String>,
     /// A flag to allow unauthenticated access for read-only methods.
     pub allow_public_access: bool,
 }
 
-impl auth::Require for StreamState {
+impl auth::Require for State {
     fn token(&self) -> Arc<String> {
         self.token.clone()
     }
@@ -64,18 +64,15 @@ pub fn router(token: Arc<String>, allow_public_access: bool) -> Router {
         "initializing stream module"
     );
 
-    let state = StreamState {
-        streams: StreamMap::new(DashMap::new()),
+    let state = State {
+        streams: Map::new(DashMap::new()),
         token,
         allow_public_access,
     };
 
     let router = Router::new()
         .route("/{name}", post(publish).get(subscribe))
-        .layer(from_fn_with_state(
-            state.clone(),
-            auth::middleware::<StreamState>,
-        ))
+        .layer(from_fn_with_state(state.clone(), auth::middleware::<State>))
         .with_state(state);
 
     info!("stream module initialized successfully");

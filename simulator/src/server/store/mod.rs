@@ -61,7 +61,7 @@ impl IntoResponse for Error {
 
 /// The state for the store routes.
 #[derive(Clone)]
-pub struct StoreState {
+pub struct State {
     /// The RocksDB database instance.
     pub db: Arc<DB>,
     /// The minimum eventual consistency delay in milliseconds.
@@ -74,7 +74,7 @@ pub struct StoreState {
     pub allow_public_access: bool,
 }
 
-impl auth::Require for StoreState {
+impl auth::Require for State {
     fn token(&self) -> Arc<String> {
         self.token.clone()
     }
@@ -86,7 +86,7 @@ impl auth::Require for StoreState {
 
 /// Creates a new `Router` for the store endpoints.
 ///
-/// This function initializes the `StoreState` and sets up the routes for
+/// This function initializes the [State] and sets up the routes for
 /// setting, getting, and querying key-value pairs.
 pub fn router(
     path: &Path,
@@ -104,7 +104,7 @@ pub fn router(
     );
 
     let db = Arc::new(DB::open_default(path)?);
-    let state = StoreState {
+    let state = State {
         db,
         consistency_bound_min,
         consistency_bound_max,
@@ -115,10 +115,7 @@ pub fn router(
     let router = Router::new()
         .route("/{key}", post(handlers::set).get(handlers::get))
         .route("/", get(handlers::query))
-        .layer(from_fn_with_state(
-            state.clone(),
-            auth::middleware::<StoreState>,
-        ))
+        .layer(from_fn_with_state(state.clone(), auth::middleware::<State>))
         .with_state(state);
 
     info!("store module initialized successfully");
