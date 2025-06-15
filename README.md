@@ -5,19 +5,21 @@
 
 ## Primitives
 
+* [sdk-rs](./sdk-rs/README.md): Rust SDK for the Exoware API.
+* [sdk-ts](./sdk-ts/README.md): TypeScript SDK for the Exoware API.
 * [simulator](./simulator/README.md): Simulate Exoware Components during local development.
-* [sdk](./sdk/README.md): Interact with Exoware Components.
 
 ## Components
 
 * store: TBA
 * stream: TBA
 
-_Fully described in the [OpenAPI spec](./openapi.yaml)._
+_Fully described in the [OpenAPI spec](./interface.yaml)._
 
 ## Examples
 
 * [alto](https://github.com/commonwarexyz/alto): A minimal (and wicked fast) blockchain built with the Commonware Library.
+* [sandbox](./examples/sandbox): A simple website that interacts with the Exoware API.
 
 ## Licensing
 

@@ -1,4 +1,4 @@
-# Exoware Simulator Web UI Example
+# sandbox
 
 This example provides a basic web interface built with React to interact with the Exoware Simulator. It demonstrates how to use the `exoware-sdk-ts` to connect to and interact with the `store` and `stream` modules of the simulator.
 
