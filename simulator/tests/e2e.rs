@@ -1,4 +1,4 @@
-use exoware_sdk_rs::{error::Error, Client};
+use exoware_sdk_rs::{Client, Error};
 use exoware_simulator::testing::with_server;
 use futures_util::StreamExt;
 use std::time::Duration;

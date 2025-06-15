@@ -1,3 +1,5 @@
+//! Persist and retrieve artifacts.
+
 use crate::{error::Error, Client as SdkClient};
 use base64::{engine::general_purpose, Engine as _};
 use reqwest::header::{HeaderValue, AUTHORIZATION};
