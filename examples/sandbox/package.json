@@ -1,7 +1,7 @@
 {
   "name": "exoware-sandbox",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.0.2",
   "type": "module",
   "scripts": {
     "postinstall": "npm --prefix ../../sdk-ts install && npm --prefix ../../sdk-ts run build",
