@@ -20,7 +20,7 @@ declare global {
 window.Buffer = Buffer;
 
 const SIMULATOR_URL = 'http://localhost:8080';
-const AUTH_TOKEN = 'your-secret-token'; // IMPORTANT: Replace with your actual auth token
+const TOKEN = 'your-secret-token'; // IMPORTANT: Replace with your actual auth token
 
 interface Notification {
   id: string;
@@ -63,7 +63,7 @@ function App() {
   const [currentTime, setCurrentTime] = useState(new Date());
 
   useEffect(() => {
-    const c = new Client(SIMULATOR_URL, AUTH_TOKEN);
+    const c = new Client(SIMULATOR_URL, TOKEN);
     setClient(c);
     setStoreClient(c.store());
     setStreamClient(c.stream());

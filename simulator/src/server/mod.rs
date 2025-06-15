@@ -41,14 +41,14 @@ pub enum Error {
 /// * `port` - The port to bind the server to.
 /// * `consistency_bound_min` - The minimum eventual consistency delay in milliseconds.
 /// * `consistency_bound_max` - The maximum eventual consistency delay in milliseconds.
-/// * `auth_token` - The token to use for bearer authentication.
+/// * `token` - The token to use for bearer authentication.
 /// * `allow_public_access` - A flag to allow unauthenticated access for read-only methods.
 pub async fn run(
     directory: &Path,
     port: &u16,
     consistency_bound_min: u64,
     consistency_bound_max: u64,
-    auth_token: String,
+    token: String,
     allow_public_access: bool,
 ) -> Result<(), Error> {
     info!(
@@ -65,15 +65,15 @@ pub async fn run(
     info!(address = %listener.local_addr()?, "server listening");
 
     // Create a router for the server.
-    let auth_token = Arc::new(auth_token);
+    let token = Arc::new(token);
     let store_router = store::router(
         directory,
         consistency_bound_min,
         consistency_bound_max,
-        auth_token.clone(),
+        token.clone(),
         allow_public_access,
     )?;
-    let stream_router = stream::router(auth_token, allow_public_access);
+    let stream_router = stream::router(token, allow_public_access);
 
     // Create a permissive CORS layer.
     let cors = CorsLayer::new()

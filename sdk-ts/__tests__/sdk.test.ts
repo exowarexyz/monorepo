@@ -13,7 +13,7 @@ describe('Exoware TS SDK', () => {
     beforeAll(() => {
         const config = JSON.parse(fs.readFileSync(configFile, 'utf-8'));
         const baseUrl = `http://127.0.0.1:${config.port}`;
-        client = new Client(baseUrl, config.authToken);
+        client = new Client(baseUrl, config.token);
     });
 
     // Store tests

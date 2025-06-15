@@ -21,7 +21,7 @@ const setup = async () => {
     execSync('cargo build --package exoware-simulator', { stdio: 'inherit', cwd: path.join(__dirname, '..') });
 
     const port = await portfinder.getPortPromise();
-    const authToken = randomString();
+    const token = randomString();
     const storageDir = path.join(tempDir, 'storage');
     if (!fs.existsSync(storageDir)) {
         fs.mkdirSync(storageDir, { recursive: true });
@@ -32,7 +32,7 @@ const setup = async () => {
         'server',
         'run',
         '--port', port.toString(),
-        '--auth-token', authToken,
+        '--token', token,
         '--directory', storageDir,
         '--consistency-bound-min', '0',
         '--consistency-bound-max', '0',
@@ -47,7 +47,7 @@ const setup = async () => {
 
     const config = {
         port,
-        authToken,
+        token,
         pid: simulatorProcess.pid,
     };
 
