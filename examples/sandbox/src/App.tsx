@@ -303,7 +303,7 @@ function App() {
       ))}
 
       <div className="header">
-        <h1>Exoware Simulator</h1>
+        <h1>Exoware Sandbox</h1>
         <div className={`status-indicator ${isConnected ? 'status-connected' : 'status-disconnected'}`}>
           <span>●</span>
           {isConnected ? 'Connected' : 'Disconnected'}
