@@ -86,6 +86,15 @@ async fn test_auth() {
             Error::WebSocket(_) => {}
             _ => panic!("unexpected error type"),
         }
+
+        let err = stream
+            .publish("test-stream", b"hello".to_vec())
+            .await
+            .unwrap_err();
+        match err {
+            Error::Http(status) => assert_eq!(status, 401),
+            _ => panic!("unexpected error type"),
+        }
     })
     .await;
 }
