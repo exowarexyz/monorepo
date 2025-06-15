@@ -2,7 +2,7 @@ use reqwest::StatusCode;
 use thiserror::Error;
 use tokio_tungstenite::tungstenite;
 
-/// The error type for the SDK.
+/// Errors that can occur when interacting with the Exoware API.
 #[derive(Error, Debug)]
 pub enum Error {
     /// An error from the underlying `reqwest` HTTP client.
