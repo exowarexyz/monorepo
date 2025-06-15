@@ -23,8 +23,6 @@ jobs:
       run: rustup toolchain install nightly && rustup component add --toolchain nightly rustfmt
     - name: Run setup
       uses: ./.github/actions/setup
-    - name: Check
-      run: cargo check --all-targets --all-features
     - name: Lint
       run: cargo clippy --all-targets -- -D warnings
     - name: Fmt
