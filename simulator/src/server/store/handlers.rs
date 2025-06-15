@@ -1,9 +1,9 @@
-use crate::server::store::StoreState;
+use crate::server::store::{Error, StoreState};
 use axum::{
     body::Bytes,
     extract::{Path, Query, State},
     http::StatusCode,
-    response::{IntoResponse, Json, Response},
+    response::{IntoResponse, Json},
 };
 use base64::{engine::general_purpose, Engine as _};
 use exoware_sdk::store::{GetResultPayload, QueryResultItemPayload, QueryResultPayload};
@@ -11,7 +11,6 @@ use rand::Rng;
 use rocksdb::{Direction, IteratorMode};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
-use thiserror::Error;
 use tracing::{debug, warn};
 
 /// The maximum size of a key in bytes (512 bytes).
@@ -38,57 +37,12 @@ pub(super) struct QueryParams {
     limit: Option<usize>,
 }
 
-/// Application-specific errors for the store handlers.
-#[derive(Debug, Error)]
-pub(super) enum AppError {
-    #[error("key too large")]
-    KeyTooLarge,
-    #[error("value too large")]
-    ValueTooLarge,
-    #[error("update rate exceeded")]
-    UpdateRateExceeded,
-    #[error("not found")]
-    NotFound,
-    #[error("database error: {0}")]
-    DbError(#[from] rocksdb::Error),
-    #[error("deserialization error: {0}")]
-    Bincode(#[from] Box<bincode::ErrorKind>),
-}
-
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        let (status, message) = match self {
-            AppError::KeyTooLarge => {
-                warn!(error = %self, "request failed: key too large");
-                (StatusCode::PAYLOAD_TOO_LARGE, self.to_string())
-            }
-            AppError::ValueTooLarge => {
-                warn!(error = %self, "request failed: value too large");
-                (StatusCode::PAYLOAD_TOO_LARGE, self.to_string())
-            }
-            AppError::UpdateRateExceeded => {
-                warn!(error = %self, "request failed: update rate exceeded");
-                (StatusCode::TOO_MANY_REQUESTS, self.to_string())
-            }
-            AppError::NotFound => {
-                warn!(error = %self, "request failed: key not found");
-                (StatusCode::NOT_FOUND, self.to_string())
-            }
-            AppError::DbError(_) | AppError::Bincode(_) => {
-                warn!(error = %self, "request failed: internal error");
-                (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
-            }
-        };
-        (status, message).into_response()
-    }
-}
-
 /// Sets a key-value pair in the store.
 pub(super) async fn set(
     State(state): State<StoreState>,
     Path(key): Path<String>,
     value: Bytes,
-) -> Result<impl IntoResponse, AppError> {
+) -> Result<impl IntoResponse, Error> {
     debug!(
         operation = "set",
         key = %key,
@@ -97,10 +51,10 @@ pub(super) async fn set(
     );
 
     if key.len() > MAX_KEY_SIZE {
-        return Err(AppError::KeyTooLarge);
+        return Err(Error::KeyTooLarge);
     }
     if value.len() > MAX_VALUE_SIZE {
-        return Err(AppError::ValueTooLarge);
+        return Err(Error::ValueTooLarge);
     }
 
     let now_millis = SystemTime::now()
@@ -112,7 +66,7 @@ pub(super) async fn set(
     if let Some(existing_value) = state.db.get(&key)? {
         let stored_value: StoredValue = bincode::deserialize(&existing_value)?;
         if now_secs - stored_value.updated_at < 1 {
-            return Err(AppError::UpdateRateExceeded);
+            return Err(Error::UpdateRateExceeded);
         }
     }
 
@@ -146,7 +100,7 @@ pub(super) async fn set(
 pub(super) async fn get(
     State(state): State<StoreState>,
     Path(key): Path<String>,
-) -> Result<Json<GetResultPayload>, AppError> {
+) -> Result<Json<GetResultPayload>, Error> {
     debug!(
         operation = "get",
         key = %key,
@@ -179,7 +133,7 @@ pub(super) async fn get(
                     current_time = now,
                     "key not yet visible due to consistency bound"
                 );
-                Err(AppError::NotFound)
+                Err(Error::NotFound)
             }
         }
         None => {
@@ -188,7 +142,7 @@ pub(super) async fn get(
                 key = %key,
                 "key not found in database"
             );
-            Err(AppError::NotFound)
+            Err(Error::NotFound)
         }
     }
 }
@@ -197,7 +151,7 @@ pub(super) async fn get(
 pub(super) async fn query(
     State(state): State<StoreState>,
     Query(params): Query<QueryParams>,
-) -> Result<Json<QueryResultPayload>, AppError> {
+) -> Result<Json<QueryResultPayload>, Error> {
     debug!(
         operation = "query",
         start = ?params.start,
