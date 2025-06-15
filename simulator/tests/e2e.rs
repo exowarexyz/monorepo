@@ -100,16 +100,18 @@ async fn test_auth() {
 }
 
 #[tokio::test]
-async fn test_limits() {
+async fn test_limits_fail() {
     with_server(true, 0, 0, |client| async move {
+        // Key exceeds limit
         let store = client.store();
-        let large_key = "a".repeat(1024);
+        let large_key = "a".repeat(513);
         let err = store.set(&large_key, b"value".to_vec()).await.unwrap_err();
         match err {
             Error::Http(status) => assert_eq!(status, 413),
             _ => panic!("unexpected error type"),
         }
 
+        // Update rate exceeds limit
         store.set("key", b"value".to_vec()).await.unwrap();
         let err = store.set("key", b"value2".to_vec()).await.unwrap_err();
         match err {
@@ -117,6 +119,7 @@ async fn test_limits() {
             _ => panic!("unexpected error type"),
         }
 
+        // Value exceeds limit
         let large_value = vec![0; 20 * 1024 * 1024 + 1];
         let err = store
             .set("large_value_key", large_value.clone())
@@ -127,6 +130,7 @@ async fn test_limits() {
             _ => panic!("unexpected error type"),
         }
 
+        // Stream name exceeds limit
         let stream = client.stream();
         let large_stream_name = "a".repeat(513);
         let err = stream
@@ -143,6 +147,7 @@ async fn test_limits() {
             _ => panic!("unexpected error type"),
         }
 
+        // Message exceeds limit
         let err = stream
             .publish("test-stream", large_value)
             .await
@@ -151,6 +156,52 @@ async fn test_limits() {
             Error::Http(status) => assert_eq!(status, 413),
             _ => panic!("unexpected error type"),
         }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_limits_ok() {
+    with_server(true, 0, 0, |client| async move {
+        // Key exactly at limit
+        let store = client.store();
+        let key_at_limit = "a".repeat(512);
+        store.set(&key_at_limit, b"value".to_vec()).await.unwrap();
+        let res = store.get(&key_at_limit).await.unwrap().unwrap();
+        assert_eq!(res.value, b"value");
+
+        // Value exactly at limit
+        let value_at_limit = vec![0; 20 * 1024 * 1024];
+        store
+            .set("value_at_limit", value_at_limit.clone())
+            .await
+            .unwrap();
+        let res = store.get("value_at_limit").await.unwrap().unwrap();
+        assert_eq!(res.value, value_at_limit);
+
+        // Stream name exactly at limit
+        let stream = client.stream();
+        let stream_name_at_limit = "s".repeat(512);
+        let mut sub = stream.subscribe(&stream_name_at_limit).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        stream
+            .publish(&stream_name_at_limit, b"hello".to_vec())
+            .await
+            .unwrap();
+        let msg = sub.read.next().await.unwrap().unwrap();
+        assert_eq!(msg.into_data(), b"hello".to_vec());
+        sub.close().await.unwrap();
+
+        // Value exactly at limit
+        let mut sub = stream.subscribe("stream_value_at_limit").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        stream
+            .publish("stream_value_at_limit", value_at_limit.clone())
+            .await
+            .unwrap();
+        let msg = sub.read.next().await.unwrap().unwrap();
+        assert_eq!(msg.into_data(), value_at_limit);
+        sub.close().await.unwrap();
     })
     .await;
 }
