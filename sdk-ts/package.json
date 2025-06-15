@@ -1,6 +1,6 @@
 {
     "name": "exoware-sdk-ts",
-    "version": "0.0.1",
+    "version": "0.0.2",
     "description": "TypeScript SDK for the Exoware API.",
     "license": "(MIT OR Apache-2.0)",
     "homepage": "https://exoware.xyz",

@@ -434,7 +434,7 @@ dependencies = [
 
 [[package]]
 name = "exoware-sdk-rs"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "base64",
  "futures-util",
@@ -450,7 +450,7 @@ dependencies = [
 
 [[package]]
 name = "exoware-simulator"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "axum",
  "base64",
