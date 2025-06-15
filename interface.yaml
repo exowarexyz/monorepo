@@ -13,6 +13,14 @@ tags:
     description: "Stream operations"
 
 components:
+  parameters:
+    tokenQuery:
+      name: token
+      in: query
+      required: false
+      schema:
+        type: string
+      description: "Authentication token, can be used as an alternative to the `Authorization` header."
   securitySchemes:
     bearerAuth:
       type: http
@@ -31,6 +39,7 @@ paths:
         schema:
           type: string
         description: The key for the store operation.
+      - $ref: '#/components/parameters/tokenQuery'
     get:
       summary: Get a value
       operationId: getValue
@@ -111,6 +120,7 @@ paths:
         - store
       description: Queries for a range of key-value pairs, respecting eventual consistency.
       parameters:
+        - $ref: '#/components/parameters/tokenQuery'
         - name: start
           in: query
           required: false
@@ -168,6 +178,7 @@ paths:
         schema:
           type: string
         description: The name of the stream.
+      - $ref: '#/components/parameters/tokenQuery'
     post:
       summary: Publish to a stream
       operationId: publishToStream
@@ -202,13 +213,6 @@ paths:
       tags:
         - stream
       description: Subscribes to a stream via WebSocket.
-      parameters:
-        - name: auth_token
-          in: query
-          required: false
-          schema:
-            type: string
-          description: "Authentication token, can be used as an alternative to the `Authorization` header (necessary to subscribe to streams in the browser)."
       x-invariants:
         - type: max-name-size
           description: "The maximum size of the stream name is 512 bytes."

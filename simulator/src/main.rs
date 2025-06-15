@@ -27,8 +27,8 @@ const CONSISTENCY_BOUND_MIN_FLAG: &str = "consistency-bound-min";
 /// Flag for the maximum consistency bound in milliseconds.
 const CONSISTENCY_BOUND_MAX_FLAG: &str = "consistency-bound-max";
 
-/// Flag for the authentication token.
-const AUTH_TOKEN_FLAG: &str = "auth-token";
+/// Flag for the token.
+const TOKEN_FLAG: &str = "token";
 
 /// Flag to allow public, unauthenticated access for read-only methods.
 const ALLOW_PUBLIC_ACCESS_FLAG: &str = "allow-public-access";
@@ -94,8 +94,8 @@ async fn main() -> std::process::ExitCode {
                                 .action(ArgAction::Set),
                         )
                         .arg(
-                            Arg::new(AUTH_TOKEN_FLAG)
-                                .long(AUTH_TOKEN_FLAG)
+                            Arg::new(TOKEN_FLAG)
+                                .long(TOKEN_FLAG)
                                 .help("The authorization token to use.")
                                 .required(true)
                                 .action(ArgAction::Set),
@@ -133,7 +133,7 @@ async fn main() -> std::process::ExitCode {
                     .get_one::<u64>(CONSISTENCY_BOUND_MAX_FLAG)
                     .copied()
                     .unwrap();
-                let auth_token = matches.get_one::<String>(AUTH_TOKEN_FLAG).unwrap();
+                let token = matches.get_one::<String>(TOKEN_FLAG).unwrap();
                 let allow_public_access = matches.get_flag(ALLOW_PUBLIC_ACCESS_FLAG);
 
                 // Validate that the minimum consistency bound is not greater than the maximum.
@@ -150,7 +150,7 @@ async fn main() -> std::process::ExitCode {
                     port,
                     consistency_bound_min,
                     consistency_bound_max,
-                    auth_token.clone(),
+                    token.to_string(),
                     allow_public_access,
                 )
                 .await

@@ -1,6 +1,6 @@
 # Exoware Simulator Web UI Example
 
-This example provides a basic web interface built with React to interact with the Exoware Simulator. It demonstrates how to use the `@exoware/sdk-ts` to connect to and interact with the `store` and `stream` modules of the simulator.
+This example provides a basic web interface built with React to interact with the Exoware Simulator. It demonstrates how to use the `exoware-sdk-ts` to connect to and interact with the `store` and `stream` modules of the simulator.
 
 ## Prerequisites
 
@@ -14,32 +14,20 @@ This example provides a basic web interface built with React to interact with th
     Open a terminal in the root of the monorepo and run the following command to start the simulator. You can choose any auth token.
 
     ```bash
-    cargo run --package exoware-simulator -- --verbose server run --auth-token your-secret-token
+    cargo run --package exoware-simulator -- --verbose server run --token your-secret-token
     ```
 
-2.  **Build the TypeScript SDK:**
+2.  **Update Auth Token in the UI:**
 
-    Before running the web UI, you need to build the TypeScript SDK.
-
-    ```bash
-    # from the root of the monorepo
-    cd sdk-ts
-    npm install
-    npm run build
-    cd ..
-    ```
-
-3.  **Update Auth Token in the UI:**
-
-    Open `examples/website/src/App.tsx` and replace `'your-secret-token'` in the `AUTH_TOKEN` constant with the token you used to start the simulator.
+    Open `examples/website/src/App.tsx` and replace `'your-secret-token'` in the `TOKEN` constant with the token you used to start the simulator.
 
     ```typescript
-    const AUTH_TOKEN = 'your-secret-token'; // IMPORTANT: Replace with your actual auth token
+    const TOKEN = 'your-secret-token'; // IMPORTANT: Replace with your actual auth token
     ```
 
-4.  **Install Dependencies and Run the Web App:**
+3.  **Install Dependencies and Run the Web App:**
 
-    Navigate to the `examples/website` directory and install the dependencies, then start the development server.
+    Navigate to the `examples/website` directory and install the dependencies, then start the development server. `npm install` will also automatically build the TypeScript SDK.
 
     ```bash
     # from the root of the monorepo
@@ -48,7 +36,7 @@ This example provides a basic web interface built with React to interact with th
     npm run dev
     ```
 
-5.  **Open the Web UI:**
+4.  **Open the Web UI:**
 
     Open your browser and navigate to the URL provided by Vite (usually `http://localhost:5173`). You should see the UI for interacting with the simulator.
 

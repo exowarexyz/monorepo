@@ -1,15 +1,63 @@
 use crate::server::auth;
 use axum::{
+    http::StatusCode,
     middleware::from_fn_with_state,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Router,
 };
 use rocksdb::DB;
 use std::path::Path;
 use std::sync::Arc;
-use tracing::info;
+use thiserror::Error;
+use tracing::{info, warn};
 
 mod handlers;
+
+/// Application-specific errors for the store handler.
+#[derive(Debug, Error)]
+pub(super) enum Error {
+    #[error("key too large")]
+    KeyTooLarge,
+    #[error("value too large")]
+    ValueTooLarge,
+    #[error("update rate exceeded")]
+    UpdateRateExceeded,
+    #[error("not found")]
+    NotFound,
+    #[error("database error: {0}")]
+    Db(#[from] rocksdb::Error),
+    #[error("deserialization error: {0}")]
+    Bincode(#[from] Box<bincode::ErrorKind>),
+}
+
+impl IntoResponse for Error {
+    fn into_response(self) -> Response {
+        let (status, message) = match self {
+            Error::KeyTooLarge => {
+                warn!(error = %self, "request failed: key too large");
+                (StatusCode::PAYLOAD_TOO_LARGE, self.to_string())
+            }
+            Error::ValueTooLarge => {
+                warn!(error = %self, "request failed: value too large");
+                (StatusCode::PAYLOAD_TOO_LARGE, self.to_string())
+            }
+            Error::UpdateRateExceeded => {
+                warn!(error = %self, "request failed: update rate exceeded");
+                (StatusCode::TOO_MANY_REQUESTS, self.to_string())
+            }
+            Error::NotFound => {
+                warn!(error = %self, "request failed: key not found");
+                (StatusCode::NOT_FOUND, self.to_string())
+            }
+            Error::Db(_) | Error::Bincode(_) => {
+                warn!(error = %self, "request failed: internal error");
+                (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
+            }
+        };
+        (status, message).into_response()
+    }
+}
 
 /// The state for the store routes.
 #[derive(Clone)]
@@ -21,14 +69,14 @@ pub struct StoreState {
     /// The maximum eventual consistency delay in milliseconds.
     pub consistency_bound_max: u64,
     /// The authentication token.
-    pub auth_token: Arc<String>,
+    pub token: Arc<String>,
     /// A flag to allow unauthenticated access for read-only methods.
     pub allow_public_access: bool,
 }
 
 impl auth::RequireAuth for StoreState {
-    fn auth_token(&self) -> Arc<String> {
-        self.auth_token.clone()
+    fn token(&self) -> Arc<String> {
+        self.token.clone()
     }
 
     fn allow_public_access(&self) -> bool {
@@ -44,7 +92,7 @@ pub fn router(
     path: &Path,
     consistency_bound_min: u64,
     consistency_bound_max: u64,
-    auth_token: Arc<String>,
+    token: Arc<String>,
     allow_public_access: bool,
 ) -> Result<Router, rocksdb::Error> {
     info!(
@@ -60,7 +108,7 @@ pub fn router(
         db,
         consistency_bound_min,
         consistency_bound_max,
-        auth_token,
+        token,
         allow_public_access,
     };
 

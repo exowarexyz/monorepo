@@ -51,9 +51,9 @@ export class StreamClient {
         return new Promise((resolve, reject) => {
             const urlStr = `${this.client.baseUrl}/stream/${name}`.replace(/^http/, 'ws');
             const url = new URL(urlStr);
-            const authToken = (this.client as any).authToken;
-            if (authToken) {
-                url.searchParams.set('auth_token', authToken);
+            const token = (this.client as any).token;
+            if (token) {
+                url.searchParams.set('token', token);
             }
 
             const ws = new WebSocket(url.toString());
