@@ -30,5 +30,6 @@ jobs:
         cd sdk-ts
         npm install
         npm publish
+      continue-on-error: true
       env:
         NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
