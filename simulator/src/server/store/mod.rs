@@ -84,7 +84,7 @@ impl auth::Require for State {
     }
 }
 
-/// Creates a new `Router` for the store endpoints.
+/// Creates a new [Router] for the store endpoints.
 ///
 /// This function initializes the [State] and sets up the routes for
 /// setting, getting, and querying key-value pairs.

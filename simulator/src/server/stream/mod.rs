@@ -54,9 +54,9 @@ impl auth::Require for State {
     }
 }
 
-/// Creates a new `Router` for the stream endpoints.
+/// Creates a new [Router] for the stream endpoints.
 ///
-/// This function initializes the `StreamState` and sets up the routes for
+/// This function initializes the [State] and sets up the routes for
 /// publishing to and subscribing to streams.
 pub fn router(token: Arc<String>, allow_public_access: bool) -> Router {
     info!(
