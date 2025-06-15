@@ -1,16 +1,16 @@
 openapi: 3.0.0
 info:
   title: Exoware API
+  description: All things Exoware.
   version: 0.0.1
-  description: API for Exoware simulator components (store and stream).
   contact:
-    name: Exoware Team
-    url: "https://github.com/exoware/exoware"
+    name: Commonware, Inc.
+    email: support@commonware.xyz
 tags:
   - name: store
-    description: "Key-value store operations"
+    description: "Persist and retrieve artifacts."
   - name: stream
-    description: "Stream operations"
+    description: "Broadcast realtime data."
 
 components:
   parameters:
@@ -48,7 +48,7 @@ paths:
       description: Retrieves a value from the store by its key.
       x-invariants:
         - type: eventual-consistency
-          description: "A key written by POST /store/{key} may take up to 60 seconds to be readable from the GET /store/{key} operation."
+          description: "A value updated by POST /store/{key} may take up to 60 seconds to be reflected in the GET /store/{key} operation."
           latency_seconds: 60
         - type: max-key-size
           description: "The maximum size of the key is 512 bytes."
@@ -76,11 +76,8 @@ paths:
       operationId: setValue
       tags:
         - store
-      description: Sets a key-value pair in the store.
+      description: Updates a key-value pair in the store (or creates it if it doesn't exist).
       x-invariants:
-        - type: eventual-consistency
-          description: "A key written by this operation may take up to 60 seconds to be readable from the GET /store/{key} operation."
-          latency_seconds: 60
         - type: rate-limit
           description: "This operation can be called at most once per second for each key."
           limit: 1
@@ -118,7 +115,7 @@ paths:
       operationId: queryValues
       tags:
         - store
-      description: Queries for a range of key-value pairs, respecting eventual consistency.
+      description: Queries for a range of key-value pairs.
       parameters:
         - $ref: '#/components/parameters/tokenQuery'
         - name: start
@@ -140,12 +137,12 @@ paths:
             type: integer
           description: The maximum number of results to return.
       x-invariants:
+        - type: eventual-consistency
+          description: "A value updated by POST /store/{key} may take up to 60 seconds to be reflected in the GET /store operation."
+          latency_seconds: 60
         - type: max-key-size
           description: "The maximum size of the key is 512 bytes."
           limit_bytes: 512
-        - type: max-limit
-          description: "The maximum limit is 128."
-          limit: 128
       responses:
         '200':
           description: OK
