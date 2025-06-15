@@ -41,6 +41,9 @@ paths:
         - type: eventual-consistency
           description: "A key written by POST /store/{key} may take up to 60 seconds to be readable from the GET /store/{key} operation."
           latency_seconds: 60
+        - type: max-key-size
+          description: "The maximum size of the key is 512 bytes."
+          limit_bytes: 512
       responses:
         '200':
           description: OK
@@ -126,6 +129,13 @@ paths:
           schema:
             type: integer
           description: The maximum number of results to return.
+      x-invariants:
+        - type: max-key-size
+          description: "The maximum size of the key is 512 bytes."
+          limit_bytes: 512
+        - type: max-limit
+          description: "The maximum limit is 128."
+          limit: 128
       responses:
         '200':
           description: OK
@@ -164,6 +174,13 @@ paths:
       tags:
         - stream
       description: Publishes a message to a stream.
+      x-invariants:
+        - type: max-name-size
+          description: "The maximum size of the stream name is 512 bytes."
+          limit_bytes: 512
+        - type: max-message-size
+          description: "The maximum size of the message is 20MB (20971520 bytes)."
+          limit_bytes: 20971520
       requestBody:
         description: The raw binary message to publish.
         required: true
@@ -184,17 +201,18 @@ paths:
       operationId: subscribeToStream
       tags:
         - stream
-      description: |
-        Subscribes to a stream via WebSocket.
-
-        **Authentication:** This endpoint supports authentication via the standard `Authorization: Bearer <token>` header, or by providing the token in the `auth_token` query parameter. If the server is configured with `--allow-public-access`, this endpoint can be accessed without authentication.
+      description: Subscribes to a stream via WebSocket.
       parameters:
         - name: auth_token
           in: query
           required: false
           schema:
             type: string
-          description: "Authentication token, can be used as an alternative to the `Authorization` header."
+          description: "Authentication token, can be used as an alternative to the `Authorization` header (necessary to subscribe to streams in the browser)."
+      x-invariants:
+        - type: max-name-size
+          description: "The maximum size of the stream name is 512 bytes."
+          limit_bytes: 512
       responses:
         '101':
           description: Switching Protocols
