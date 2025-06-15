@@ -20,6 +20,7 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
+      description: Bearer token authentication.
 
 security:
   - bearerAuth: []
@@ -82,6 +83,7 @@ paths:
           description: "The maximum size of the value is 20MB (20971520 bytes)."
           limit_bytes: 20971520
       requestBody:
+        description: The raw binary value to store.
         required: true
         content:
           application/octet-stream:
@@ -144,6 +146,7 @@ paths:
                         value:
                           type: string
                           format: byte
+                          description: The base64-encoded value.
         '401':
           description: Unauthorized
         '500':
@@ -164,6 +167,7 @@ paths:
         - stream
       description: Publishes a message to a stream.
       requestBody:
+        description: The raw binary message to publish.
         required: true
         content:
           application/octet-stream:
@@ -182,7 +186,17 @@ paths:
       operationId: subscribeToStream
       tags:
         - stream
-      description: Subscribes to a stream via WebSocket.
+      description: |
+        Subscribes to a stream via WebSocket.
+
+        **Authentication:** This endpoint supports authentication via the standard `Authorization: Bearer <token>` header, or by providing the token in the `auth_token` query parameter. If the server is configured with `--allow-public-access`, this endpoint can be accessed without authentication.
+      parameters:
+        - name: auth_token
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Authentication token, can be used as an alternative to the `Authorization` header."
       responses:
         '101':
           description: Switching Protocols
