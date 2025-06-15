@@ -4,6 +4,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
+use tower_http::limit::RequestBodyLimitLayer;
 use tracing::info;
 
 mod auth;
@@ -80,7 +81,8 @@ pub async fn run(
     let router = Router::new()
         .nest("/store", store_router)
         .nest("/stream", stream_router)
-        .layer(cors);
+        .layer(cors)
+        .layer(RequestBodyLimitLayer::new(21 * 1024 * 1024));
 
     info!("server routes configured, starting to serve requests");
 

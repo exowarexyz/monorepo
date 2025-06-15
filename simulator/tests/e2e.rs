@@ -116,6 +116,26 @@ async fn test_limits() {
             Error::Http(status) => assert_eq!(status, 429),
             _ => panic!("unexpected error type"),
         }
+
+        let large_value = vec![0; 20 * 1024 * 1024 + 1];
+        let err = store
+            .set("large_value_key", large_value.clone())
+            .await
+            .unwrap_err();
+        match err {
+            Error::Http(status) => assert_eq!(status, 413),
+            _ => panic!("unexpected error type"),
+        }
+
+        let stream = client.stream();
+        let err = stream
+            .publish("test-stream", large_value)
+            .await
+            .unwrap_err();
+        match err {
+            Error::Http(status) => assert_eq!(status, 413),
+            _ => panic!("unexpected error type"),
+        }
     })
     .await;
 }

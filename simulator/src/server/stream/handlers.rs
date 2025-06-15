@@ -11,6 +11,9 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::{debug, warn};
 
+/// The maximum size of a stream message in bytes (20MB).
+const MAX_MESSAGE_SIZE: usize = 20 * 1024 * 1024;
+
 /// Query parameters for authentication.
 #[derive(Deserialize)]
 pub(super) struct AuthParams {
@@ -32,6 +35,18 @@ pub async fn publish(
         message_size = body.len(),
         "processing publish request"
     );
+
+    // Check if the message size exceeds the limit.
+    if body.len() > MAX_MESSAGE_SIZE {
+        warn!(
+            operation = "publish",
+            stream_name = %name,
+            message_size = body.len(),
+            max_size = MAX_MESSAGE_SIZE,
+            "message size exceeds limit"
+        );
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    }
 
     if let Some(tx) = state.streams.get(&name) {
         // Channel exists, send the message, ignoring errors if no subscribers are present.
@@ -73,6 +88,8 @@ pub async fn publish(
         }
         state.streams.insert(name, tx);
     }
+
+    StatusCode::OK.into_response()
 }
 
 /// Upgrades a connection to a WebSocket and subscribes to a stream.
