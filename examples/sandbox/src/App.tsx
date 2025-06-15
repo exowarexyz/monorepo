@@ -7,7 +7,7 @@ import {
   type GetResult,
   type QueryResult,
   type QueryResultItem
-} from 'exoware-sdk';
+} from 'exoware-sdk-ts';
 import { Buffer } from 'buffer';
 import './App.css';
 
