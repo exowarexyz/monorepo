@@ -2,6 +2,13 @@
     "name": "exoware-sdk-ts",
     "version": "0.0.1",
     "description": "TypeScript SDK for the Exoware API.",
+    "license": "(MIT OR Apache-2.0)",
+    "homepage": "https://exoware.xyz",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/exowarexyz/monorepo.git",
+        "directory": "sdk-ts"
+    },
     "main": "dist/index.js",
     "types": "dist/index.d.ts",
     "scripts": {
