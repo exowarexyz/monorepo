@@ -6,8 +6,7 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-exoware-simulator = { path = "simulator" }
-exoware-sdk-rs = { path = "sdk-rs" }
+exoware-sdk-rs = { version = "0.0.1", path = "sdk-rs" }
 tokio = "1.43.0"
 clap = "4.5.18"
 tracing = "0.1.41"
