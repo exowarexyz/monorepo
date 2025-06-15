@@ -11,9 +11,6 @@ tags:
     description: "Key-value store operations"
   - name: stream
     description: "Stream operations"
-servers:
-  - url: http://localhost:8080
-    description: Local simulator server
 
 components:
   securitySchemes:
