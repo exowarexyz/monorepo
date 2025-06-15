@@ -108,7 +108,7 @@ async fn test_limits_fail() {
         let err = store.set(&large_key, b"value".to_vec()).await.unwrap_err();
         match err {
             Error::Http(status) => assert_eq!(status, 413),
-            _ => panic!("unexpected error type"),
+            _ => panic!("unexpected error type: {:?}", err),
         }
 
         // Update rate exceeds limit
@@ -116,7 +116,7 @@ async fn test_limits_fail() {
         let err = store.set("key", b"value2".to_vec()).await.unwrap_err();
         match err {
             Error::Http(status) => assert_eq!(status, 429),
-            _ => panic!("unexpected error type"),
+            _ => panic!("unexpected error type: {:?}", err),
         }
 
         // Value exceeds limit
@@ -127,7 +127,7 @@ async fn test_limits_fail() {
             .unwrap_err();
         match err {
             Error::Http(status) => assert_eq!(status, 413),
-            _ => panic!("unexpected error type"),
+            _ => panic!("unexpected error type: {:?}", err),
         }
 
         // Stream name exceeds limit
@@ -139,12 +139,12 @@ async fn test_limits_fail() {
             .unwrap_err();
         match err {
             Error::Http(status) => assert_eq!(status, 413),
-            _ => panic!("unexpected error type"),
+            _ => panic!("unexpected error type: {:?}", err),
         }
         let err = stream.subscribe(&large_stream_name).await.unwrap_err();
         match err {
             Error::WebSocket(_) => {}
-            _ => panic!("unexpected error type"),
+            _ => panic!("unexpected error type: {:?}", err),
         }
 
         // Message exceeds limit
@@ -154,7 +154,7 @@ async fn test_limits_fail() {
             .unwrap_err();
         match err {
             Error::Http(status) => assert_eq!(status, 413),
-            _ => panic!("unexpected error type"),
+            _ => panic!("unexpected error type: {:?}", err),
         }
     })
     .await;

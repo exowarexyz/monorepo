@@ -17,8 +17,8 @@ pub const CMD: &str = "server";
 /// Run the simulator server.
 pub const RUN_CMD: &str = "run";
 
-/// The maximum size of any request body in bytes (21MB).
-const MAX_REQUEST_BODY_SIZE: usize = 21 * 1024 * 1024;
+/// The maximum size of any request body in bytes (25MB).
+const MAX_REQUEST_BODY_SIZE: usize = 25 * 1024 * 1024;
 
 /// Errors that can occur when running the simulator server.
 #[derive(Error, Debug)]
