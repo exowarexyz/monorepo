@@ -7,11 +7,17 @@ use http::Request;
 use reqwest::header::{HeaderValue, AUTHORIZATION, CONNECTION, UPGRADE};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    connect_async,
-    tungstenite::{handshake::client::generate_key, protocol::Message},
+    connect_async_with_config,
+    tungstenite::{
+        handshake::client::generate_key,
+        protocol::{Message, WebSocketConfig},
+    },
     MaybeTlsStream, WebSocketStream,
 };
 use url::Url;
+
+/// The maximum size of a message in bytes (20MB).
+const MAX_MESSAGE_SIZE: usize = 20 * 1024 * 1024;
 
 /// A client for interacting with real-time streams.
 #[derive(Clone)]
@@ -94,7 +100,16 @@ impl StreamClient {
             .body(())
             .unwrap();
 
-        let (ws_stream, _) = connect_async(request).await?;
+        let (ws_stream, _) = connect_async_with_config(
+            request,
+            Some(WebSocketConfig {
+                max_message_size: Some(MAX_MESSAGE_SIZE),
+                max_frame_size: Some(MAX_MESSAGE_SIZE),
+                ..Default::default()
+            }),
+            false,
+        )
+        .await?;
         let (write, read) = ws_stream.split();
 
         Ok(Subscription { write, read })
