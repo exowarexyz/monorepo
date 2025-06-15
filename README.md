@@ -16,8 +16,8 @@ _Primitives are designed for production use. If you find an exploit, please refe
 
 _Components are designed for production use. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a component)._
 
-* store: Persist and retrieve artifacts.
-* stream: Broadcast realtime data.
+* **store**: Persist and retrieve artifacts.
+* **stream**: Broadcast realtime data.
 
 _The interface for all components is specified in [OpenAPI format](./interface.yaml)._
 
