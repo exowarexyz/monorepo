@@ -1,10 +1,9 @@
-use axum::{serve, Router};
+use axum::{extract::DefaultBodyLimit, serve, Router};
 use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
-use tower_http::limit::RequestBodyLimitLayer;
 use tracing::info;
 
 mod auth;
@@ -16,9 +15,6 @@ pub const CMD: &str = "server";
 
 /// Run the simulator server.
 pub const RUN_CMD: &str = "run";
-
-/// The maximum size of any request body in bytes (25MB).
-const MAX_REQUEST_BODY_SIZE: usize = 25 * 1024 * 1024;
 
 /// Errors that can occur when running the simulator server.
 #[derive(Error, Debug)]
@@ -66,6 +62,8 @@ pub async fn run(
 
     // Create a router for the server.
     let token = Arc::new(token);
+
+    // Initialize the store and stream modules.
     let store_router = store::router(
         directory,
         consistency_bound_min,
@@ -81,15 +79,15 @@ pub async fn run(
         .allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any);
 
+    // Create a router for the server.
     let router = Router::new()
         .nest("/store", store_router)
         .nest("/stream", stream_router)
         .layer(cors)
-        .layer(RequestBodyLimitLayer::new(MAX_REQUEST_BODY_SIZE));
-
-    info!("server routes configured, starting to serve requests");
+        .layer(DefaultBodyLimit::disable());
 
     // Serve the server.
+    info!("server routes configured, starting to serve requests");
     serve(listener, router.into_make_service())
         .await
         .map_err(Error::Io)
