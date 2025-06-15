@@ -19,7 +19,7 @@ const MAX_MESSAGE_SIZE: usize = 20 * 1024 * 1024;
 /// Query parameters for authentication.
 #[derive(Deserialize)]
 pub(super) struct AuthParams {
-    auth_token: Option<String>,
+    token: Option<String>,
 }
 
 /// Publishes a message to a stream.
@@ -140,7 +140,7 @@ pub async fn subscribe(
         if let Some(auth_header) = headers.get("Authorization") {
             if let Ok(auth_str) = auth_header.to_str() {
                 if let Some(bearer_token) = auth_str.strip_prefix("Bearer ") {
-                    if bearer_token == state.auth_token.as_str() {
+                    if bearer_token == state.token.as_str() {
                         authorized = true;
                         debug!(
                             operation = "subscribe",
@@ -168,8 +168,8 @@ pub async fn subscribe(
                     "websocket authentication failed: invalid authorization header encoding"
                 );
             }
-        } else if let Some(token) = params.auth_token {
-            if token == *state.auth_token.as_str() {
+        } else if let Some(token) = params.token {
+            if token == *state.token.as_str() {
                 authorized = true;
                 debug!(
                     operation = "subscribe",

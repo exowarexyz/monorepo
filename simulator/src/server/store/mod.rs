@@ -21,14 +21,14 @@ pub struct StoreState {
     /// The maximum eventual consistency delay in milliseconds.
     pub consistency_bound_max: u64,
     /// The authentication token.
-    pub auth_token: Arc<String>,
+    pub token: Arc<String>,
     /// A flag to allow unauthenticated access for read-only methods.
     pub allow_public_access: bool,
 }
 
 impl auth::RequireAuth for StoreState {
-    fn auth_token(&self) -> Arc<String> {
-        self.auth_token.clone()
+    fn token(&self) -> Arc<String> {
+        self.token.clone()
     }
 
     fn allow_public_access(&self) -> bool {
@@ -44,7 +44,7 @@ pub fn router(
     path: &Path,
     consistency_bound_min: u64,
     consistency_bound_max: u64,
-    auth_token: Arc<String>,
+    token: Arc<String>,
     allow_public_access: bool,
 ) -> Result<Router, rocksdb::Error> {
     info!(
@@ -60,7 +60,7 @@ pub fn router(
         db,
         consistency_bound_min,
         consistency_bound_max,
-        auth_token,
+        token,
         allow_public_access,
     };
 

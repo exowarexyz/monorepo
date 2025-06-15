@@ -22,14 +22,14 @@ pub struct StreamState {
     /// A map of active streams.
     pub streams: StreamMap,
     /// The authentication token.
-    pub auth_token: Arc<String>,
+    pub token: Arc<String>,
     /// A flag to allow unauthenticated access for read-only methods.
     pub allow_public_access: bool,
 }
 
 impl auth::RequireAuth for StreamState {
-    fn auth_token(&self) -> Arc<String> {
-        self.auth_token.clone()
+    fn token(&self) -> Arc<String> {
+        self.token.clone()
     }
 
     fn allow_public_access(&self) -> bool {
@@ -41,7 +41,7 @@ impl auth::RequireAuth for StreamState {
 ///
 /// This function initializes the `StreamState` and sets up the routes for
 /// publishing to and subscribing to streams.
-pub fn router(auth_token: Arc<String>, allow_public_access: bool) -> Router {
+pub fn router(token: Arc<String>, allow_public_access: bool) -> Router {
     info!(
         allow_public_access = allow_public_access,
         "initializing stream module"
@@ -49,7 +49,7 @@ pub fn router(auth_token: Arc<String>, allow_public_access: bool) -> Router {
 
     let state = StreamState {
         streams: StreamMap::new(DashMap::new()),
-        auth_token,
+        token,
         allow_public_access,
     };
 

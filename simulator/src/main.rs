@@ -133,7 +133,7 @@ async fn main() -> std::process::ExitCode {
                     .get_one::<u64>(CONSISTENCY_BOUND_MAX_FLAG)
                     .copied()
                     .unwrap();
-                let auth_token = matches.get_one::<String>(AUTH_TOKEN_FLAG).unwrap();
+                let token = matches.get_one::<String>(AUTH_TOKEN_FLAG).unwrap();
                 let allow_public_access = matches.get_flag(ALLOW_PUBLIC_ACCESS_FLAG);
 
                 // Validate that the minimum consistency bound is not greater than the maximum.
@@ -150,7 +150,7 @@ async fn main() -> std::process::ExitCode {
                     port,
                     consistency_bound_min,
                     consistency_bound_max,
-                    auth_token.clone(),
+                    token.to_string(),
                     allow_public_access,
                 )
                 .await

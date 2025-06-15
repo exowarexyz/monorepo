@@ -4,15 +4,15 @@ import axios, { AxiosInstance } from 'axios';
 
 export class Client {
     public readonly httpClient: AxiosInstance;
-    private readonly authToken: string;
+    private readonly token: string;
     public readonly baseUrl: string;
 
-    constructor(baseUrl: string, authToken: string) {
+    constructor(baseUrl: string, token: string) {
         this.baseUrl = baseUrl;
-        this.authToken = authToken;
+        this.token = token;
         this.httpClient = axios.create({
             headers: {
-                'Authorization': `Bearer ${this.authToken}`
+                'Authorization': `Bearer ${this.token}`
             }
         });
     }
