@@ -1,5 +1,5 @@
 [package]
-name = "exoware-sdk"
+name = "exoware-sdk-rs"
 version = "0.0.1"
 edition = "2021"
 publish = true
@@ -8,7 +8,7 @@ description = "Rust SDK for the Exoware API."
 readme = "README.md"
 homepage = "https://exoware.xyz"
 repository = "https://github.com/exowarexyz/monorepo/tree/main/sdk-rs"
-documentation = "https://docs.rs/exoware-sdk"
+documentation = "https://docs.rs/exoware-sdk-rs"
 
 [dependencies]
 base64 = { workspace = true }

@@ -1,10 +1,10 @@
-# exoware-sdk
+# exoware-sdk-rs
 
-[![Crates.io](https://img.shields.io/crates/v/exoware-sdk.svg)](https://crates.io/crates/exoware-sdk)
-[![Docs.rs](https://docs.rs/exoware-sdk/badge.svg)](https://docs.rs/exoware-sdk)
+[![Crates.io](https://img.shields.io/crates/v/exoware-sdk-rs.svg)](https://crates.io/crates/exoware-sdk-rs)
+[![Docs.rs](https://docs.rs/exoware-sdk-rs/badge.svg)](https://docs.rs/exoware-sdk-rs)
 
 Rust SDK for the Exoware API.
 
 ## Status
 
-`exoware-sdk` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
+`exoware-sdk-rs` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
