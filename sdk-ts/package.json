@@ -1,7 +1,7 @@
 {
     "name": "exoware-sdk",
     "version": "0.0.1",
-    "description": "TypeScript SDK for Exoware",
+    "description": "TypeScript SDK for the Exoware API.",
     "main": "dist/index.js",
     "types": "dist/index.d.ts",
     "scripts": {
