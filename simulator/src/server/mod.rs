@@ -17,6 +17,9 @@ pub const CMD: &str = "server";
 /// Run the simulator server.
 pub const RUN_CMD: &str = "run";
 
+/// The maximum size of any request body in bytes (21MB).
+const MAX_REQUEST_BODY_SIZE: usize = 21 * 1024 * 1024;
+
 /// Errors that can occur when running the simulator server.
 #[derive(Error, Debug)]
 pub enum Error {
@@ -82,7 +85,7 @@ pub async fn run(
         .nest("/store", store_router)
         .nest("/stream", stream_router)
         .layer(cors)
-        .layer(RequestBodyLimitLayer::new(21 * 1024 * 1024));
+        .layer(RequestBodyLimitLayer::new(MAX_REQUEST_BODY_SIZE));
 
     info!("server routes configured, starting to serve requests");
 
