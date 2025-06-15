@@ -3,22 +3,43 @@ import { HttpError } from './error';
 import { Base64 } from 'js-base64';
 import { AxiosError } from 'axios';
 
+/**
+ * The result of a `get` operation.
+ */
 export interface GetResult {
+    /** The retrieved value. */
     value: Uint8Array;
 }
 
+/**
+ * An item in the result of a `query` operation.
+ */
 export interface QueryResultItem {
+    /** The key of the item. */
     key: string;
+    /** The value of the item. */
     value: Uint8Array;
 }
 
+/**
+ * The result of a `query` operation.
+ */
 export interface QueryResult {
+    /** A list of key-value pairs. */
     results: QueryResultItem[];
 }
 
+/**
+ * A client for interacting with the key-value store.
+ */
 export class StoreClient {
     constructor(private client: Client) { }
 
+    /**
+     * Sets a key-value pair in the store.
+     * @param key The key to set.
+     * @param value The value to set.
+     */
     async set(key: string, value: Uint8Array | Buffer): Promise<void> {
         const url = `${this.client.baseUrl}/store/${key}`;
         try {
@@ -33,6 +54,11 @@ export class StoreClient {
         }
     }
 
+    /**
+     * Retrieves a value from the store by its key.
+     * @param key The key to retrieve.
+     * @returns The value, or `null` if the key does not exist.
+     */
     async get(key: string): Promise<GetResult | null> {
         const url = `${this.client.baseUrl}/store/${key}`;
         try {
@@ -50,6 +76,12 @@ export class StoreClient {
         }
     }
 
+    /**
+     * Queries for a range of key-value pairs.
+     * @param start The key to start the query from (inclusive). If `undefined`, the query starts from the first key.
+     * @param end The key to end the query at (exclusive). If `undefined`, the query continues to the last key.
+     * @param limit The maximum number of results to return. If `undefined`, all results are returned.
+     */
     async query(start?: string, end?: string, limit?: number): Promise<QueryResult> {
         const url = new URL(`${this.client.baseUrl}/store`);
         if (start) url.searchParams.append('start', start);

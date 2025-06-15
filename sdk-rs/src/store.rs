@@ -3,23 +3,27 @@ use base64::{engine::general_purpose, Engine as _};
 use reqwest::header::{HeaderValue, AUTHORIZATION};
 use serde::{Deserialize, Serialize};
 
+/// The JSON payload for a `get` operation response.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct GetResultPayload {
     pub value: String,
 }
 
+/// The result of a `get` operation.
 #[derive(Debug)]
 pub struct GetResult {
     /// The retrieved value.
     pub value: Vec<u8>,
 }
 
+/// An item in the result of a `query` operation. For internal use.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct QueryResultItemPayload {
     pub key: String,
     pub value: String,
 }
 
+/// An item in the result of a `query` operation.
 #[derive(Debug)]
 pub struct QueryResultItem {
     /// The key of the item.
@@ -28,11 +32,13 @@ pub struct QueryResultItem {
     pub value: Vec<u8>,
 }
 
+/// The JSON payload for a `query` operation response.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct QueryResultPayload {
     pub results: Vec<QueryResultItemPayload>,
 }
 
+/// The result of a `query` operation.
 #[derive(Debug)]
 pub struct QueryResult {
     /// A list of key-value pairs.

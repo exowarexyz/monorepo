@@ -3,9 +3,19 @@ import { HttpError, WebSocketError } from './error';
 import { AxiosError } from 'axios';
 import WebSocket, { Data } from 'isomorphic-ws';
 
+/**
+ * A subscription to a realtime stream.
+ */
 export class Subscription {
+    /**
+     * @param ws The underlying WebSocket connection.
+     */
     constructor(public readonly ws: WebSocket) { }
 
+    /**
+     * Sets a listener for incoming messages.
+     * @param listener The listener to call with incoming data.
+     */
     onMessage(listener: (data: Data) => void) {
         this.ws.onmessage = (event: { data: any; }) => {
             if (typeof event.data === 'string' || event.data instanceof ArrayBuffer || event.data instanceof Buffer) {
@@ -17,22 +27,43 @@ export class Subscription {
         };
     }
 
+    /**
+     * Sets a listener for WebSocket errors.
+     * @param listener The listener to call with an error.
+     */
     onError(listener: (err: WebSocket.ErrorEvent) => void) {
         this.ws.onerror = listener;
     }
 
+    /**
+     * Sets a listener for when the WebSocket connection is closed.
+     * @param listener The listener to call with a close event.
+     */
     onClose(listener: (ev: WebSocket.CloseEvent) => void) {
         this.ws.onclose = listener;
     }
 
+    /**
+     * Closes the WebSocket connection.
+     * @param code An optional close code.
+     * @param reason An optional close reason.
+     */
     close(code?: number, reason?: string): void {
         this.ws.close(code, reason);
     }
 }
 
+/**
+ * A client for interacting with real-time streams.
+ */
 export class StreamClient {
     constructor(private client: Client) { }
 
+    /**
+     * Publishes a message to a stream.
+     * @param name The name of the stream to publish to.
+     * @param data The data to publish.
+     */
     async publish(name: string, data: Uint8Array | Buffer): Promise<void> {
         const url = `${this.client.baseUrl}/stream/${name}`;
         try {
@@ -47,6 +78,14 @@ export class StreamClient {
         }
     }
 
+    /**
+     * Subscribes to a stream.
+     *
+     * This function opens a WebSocket connection and returns a `Subscription` object,
+     * which can be used to receive messages and manage the connection.
+     * @param name The name of the stream to subscribe to.
+     * @returns A `Subscription` object.
+     */
     subscribe(name: string): Promise<Subscription> {
         return new Promise((resolve, reject) => {
             const urlStr = `${this.client.baseUrl}/stream/${name}`.replace(/^http/, 'ws');
