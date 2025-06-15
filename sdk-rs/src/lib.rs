@@ -1,3 +1,5 @@
+//! Rust SDK for the Exoware API.
+
 pub mod error;
 pub mod store;
 pub mod stream;
@@ -5,12 +7,12 @@ pub mod stream;
 use reqwest::Client as HttpClient;
 use std::sync::Arc;
 
-/// The main client for interacting with an Exoware server.
+/// The client for interacting with the Exoware API.
 #[derive(Clone)]
 pub struct Client {
     http_client: HttpClient,
     base_url: String,
-    auth_token: Arc<String>,
+    token: Arc<String>,
 }
 
 impl Client {
@@ -19,12 +21,12 @@ impl Client {
     /// # Arguments
     ///
     /// * `base_url` - The base URL of the Exoware server (e.g., `http://localhost:8080`).
-    /// * `auth_token` - The token to use for bearer authentication.
-    pub fn new(base_url: String, auth_token: String) -> Self {
+    /// * `token` - The token to use for bearer authentication.
+    pub fn new(base_url: String, token: String) -> Self {
         Self {
             http_client: HttpClient::new(),
             base_url,
-            auth_token: Arc::new(auth_token),
+            token: Arc::new(token),
         }
     }
 

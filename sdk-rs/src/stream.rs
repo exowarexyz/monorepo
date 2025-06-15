@@ -53,7 +53,7 @@ impl StreamClient {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {}", self.client.auth_token)).unwrap(),
+            HeaderValue::from_str(&format!("Bearer {}", self.client.token)).unwrap(),
         );
 
         let res = self
@@ -95,7 +95,7 @@ impl StreamClient {
             .header("Host", host)
             .header(
                 AUTHORIZATION,
-                HeaderValue::from_str(&format!("Bearer {}", self.client.auth_token)).unwrap(),
+                HeaderValue::from_str(&format!("Bearer {}", self.client.token)).unwrap(),
             )
             .body(())
             .unwrap();

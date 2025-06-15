@@ -45,7 +45,7 @@ async fn main() -> std::process::ExitCode {
     // Define the CLI application and its arguments.
     let matches = Command::new("simulator")
         .version(crate_version())
-        .about("Exoware simulator development server.")
+        .about("Simulate the Exoware API.")
         .arg_required_else_help(true)
         .arg(
             Arg::new(VERBOSE_FLAG)

@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/exoware-simulator.svg)](https://crates.io/crates/exoware-simulator)
 [![Docs.rs](https://docs.rs/exoware-simulator/badge.svg)](https://docs.rs/exoware-simulator)
 
-TBA
+Simulate the Exoware API.
 
 ## Status
 
