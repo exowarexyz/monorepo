@@ -12,7 +12,7 @@ use tracing::{debug, warn};
 ///
 /// This trait provides access to the authentication token and the public access flag,
 /// allowing the authentication middleware to be generic over different states.
-pub trait RequireAuth: Clone + Send + Sync + 'static {
+pub trait Require: Clone + Send + Sync + 'static {
     /// Returns the authentication token.
     fn token(&self) -> Arc<String>;
     /// Returns whether public access is allowed.
@@ -33,7 +33,7 @@ pub async fn middleware<S>(
     next: Next,
 ) -> Result<Response, StatusCode>
 where
-    S: RequireAuth,
+    S: Require,
 {
     let method = request.method().clone();
     let uri = request.uri().clone();

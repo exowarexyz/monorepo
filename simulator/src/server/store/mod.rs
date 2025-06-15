@@ -74,7 +74,7 @@ pub struct StoreState {
     pub allow_public_access: bool,
 }
 
-impl auth::RequireAuth for StoreState {
+impl auth::Require for StoreState {
     fn token(&self) -> Arc<String> {
         self.token.clone()
     }

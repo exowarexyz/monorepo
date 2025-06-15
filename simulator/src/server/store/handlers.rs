@@ -6,7 +6,7 @@ use axum::{
     response::{IntoResponse, Json},
 };
 use base64::{engine::general_purpose, Engine as _};
-use exoware_sdk::store::{GetResultPayload, QueryResultItemPayload, QueryResultPayload};
+use exoware_sdk_rs::store::{GetResultPayload, QueryResultItemPayload, QueryResultPayload};
 use rand::Rng;
 use rocksdb::{Direction, IteratorMode};
 use serde::{Deserialize, Serialize};

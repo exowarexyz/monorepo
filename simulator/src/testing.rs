@@ -1,4 +1,4 @@
-use exoware_sdk::Client;
+use exoware_sdk_rs::Client;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
 use std::future::Future;

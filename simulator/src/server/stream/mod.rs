@@ -44,7 +44,7 @@ pub struct StreamState {
     pub allow_public_access: bool,
 }
 
-impl auth::RequireAuth for StreamState {
+impl auth::Require for StreamState {
     fn token(&self) -> Arc<String> {
         self.token.clone()
     }
