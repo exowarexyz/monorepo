@@ -1,4 +1,4 @@
-use crate::{error::Error, Client};
+use crate::{error::Error, Client as SdkClient};
 use base64::{engine::general_purpose, Engine as _};
 use reqwest::header::{HeaderValue, AUTHORIZATION};
 use serde::{Deserialize, Serialize};
@@ -47,13 +47,13 @@ pub struct QueryResult {
 
 /// A client for interacting with the key-value store.
 #[derive(Clone)]
-pub struct StoreClient {
-    client: Client,
+pub struct Client {
+    client: SdkClient,
 }
 
-impl StoreClient {
-    /// Creates a new `StoreClient`.
-    pub fn new(client: Client) -> Self {
+impl Client {
+    /// Creates a new [Client].
+    pub fn new(client: SdkClient) -> Self {
         Self { client }
     }
 

@@ -1,4 +1,4 @@
-use crate::{error::Error, Client};
+use crate::{error::Error, Client as SdkClient};
 use futures_util::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
@@ -21,8 +21,8 @@ const MAX_MESSAGE_SIZE: usize = 20 * 1024 * 1024;
 
 /// A client for interacting with realtime streams.
 #[derive(Clone)]
-pub struct StreamClient {
-    client: Client,
+pub struct Client {
+    client: SdkClient,
 }
 
 /// A subscription to a realtime stream.
@@ -41,9 +41,9 @@ impl Subscription {
     }
 }
 
-impl StreamClient {
-    /// Creates a new `StreamClient`.
-    pub fn new(client: Client) -> Self {
+impl Client {
+    /// Creates a new [Client].
+    pub fn new(client: SdkClient) -> Self {
         Self { client }
     }
 

@@ -16,7 +16,7 @@ pub struct Client {
 }
 
 impl Client {
-    /// Creates a new `Client`.
+    /// Creates a new [Client].
     ///
     /// # Arguments
     ///
@@ -30,14 +30,14 @@ impl Client {
         }
     }
 
-    /// Returns a `StoreClient` for interacting with the key-value store.
-    pub fn store(&self) -> store::StoreClient {
-        store::StoreClient::new(self.clone())
+    /// Returns a [store::Client] for interacting with the key-value store.
+    pub fn store(&self) -> store::Client {
+        store::Client::new(self.clone())
     }
 
-    /// Returns a `StreamClient` for interacting with realtime streams.
-    pub fn stream(&self) -> stream::StreamClient {
-        stream::StreamClient::new(self.clone())
+    /// Returns a [stream::Client] for interacting with realtime streams.
+    pub fn stream(&self) -> stream::Client {
+        stream::Client::new(self.clone())
     }
 
     /// Returns the base URL of the server.
