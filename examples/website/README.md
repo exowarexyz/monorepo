@@ -14,7 +14,7 @@ This example provides a basic web interface built with React to interact with th
     Open a terminal in the root of the monorepo and run the following command to start the simulator. You can choose any auth token.
 
     ```bash
-    cargo run --package exoware-simulator -- --verbose server run --auth-token your-secret-token
+    cargo run --package exoware-simulator -- --verbose server run --token your-secret-token
     ```
 
 2.  **Build the TypeScript SDK:**
@@ -31,10 +31,10 @@ This example provides a basic web interface built with React to interact with th
 
 3.  **Update Auth Token in the UI:**
 
-    Open `examples/website/src/App.tsx` and replace `'your-secret-token'` in the `AUTH_TOKEN` constant with the token you used to start the simulator.
+    Open `examples/website/src/App.tsx` and replace `'your-secret-token'` in the `TOKEN` constant with the token you used to start the simulator.
 
     ```typescript
-    const AUTH_TOKEN = 'your-secret-token'; // IMPORTANT: Replace with your actual auth token
+    const TOKEN = 'your-secret-token'; // IMPORTANT: Replace with your actual auth token
     ```
 
 4.  **Install Dependencies and Run the Web App:**
