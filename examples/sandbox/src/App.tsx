@@ -19,8 +19,9 @@ declare global {
 }
 window.Buffer = Buffer;
 
-const SIMULATOR_URL = 'http://localhost:8080';
-const TOKEN = 'your-secret-token'; // IMPORTANT: Replace with your actual auth token
+// Load environment variables from .env file
+const SIMULATOR_URL = import.meta.env.VITE_SIMULATOR_URL;
+const TOKEN = import.meta.env.VITE_TOKEN;
 
 interface Notification {
   id: string;
@@ -303,7 +304,7 @@ function App() {
       ))}
 
       <div className="header">
-        <h1>Exoware Sandbox</h1>
+        <h1>Exoware Simulator</h1>
         <div className={`status-indicator ${isConnected ? 'status-connected' : 'status-disconnected'}`}>
           <span>●</span>
           {isConnected ? 'Connected' : 'Disconnected'}
