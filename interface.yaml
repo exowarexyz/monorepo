@@ -65,14 +65,7 @@ paths:
       operationId: setValue
       tags:
         - store
-      description: |
-        Sets a key-value pair in the store. Enforces size limits.
-
-        **Consistency Note:** Due to eventual consistency, a key set or updated via this operation may take up to 60 seconds to be available via a `GET` request.
-
-        **Rate Limit Note:** This endpoint can be called at most once per second for a given key.
-
-        **Size Limit Note:** The key must be at most 512 bytes, and the value must be at most 20MB.
+      description: Sets a key-value pair in the store.
       x-invariants:
         - type: eventual-consistency
           description: "A key written by this operation may take up to 60 seconds to be readable from the GET /store/{key} operation."
