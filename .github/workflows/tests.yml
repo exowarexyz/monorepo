@@ -63,10 +63,10 @@ jobs:
         run: cd sdk-ts && npm test
       - name: Build sdk-ts
         run: cd sdk-ts && npm run build
-      - name: Install examples/website dependencies
-        run: cd examples/website && npm install
-      - name: Lint examples/website
-        run: cd examples/website && npm run lint
+      - name: Install examples/sandbox dependencies
+        run: cd examples/sandbox && npm install
+      - name: Lint examples/sandbox
+        run: cd examples/sandbox && npm run lint
 
   Dependencies:
     runs-on: ubuntu-latest
