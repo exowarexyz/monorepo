@@ -2,3 +2,11 @@
 *.DS_Store
 /target
 *.vscode
+
+# TypeScript SDK
+node_modules/
+dist/
+coverage/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

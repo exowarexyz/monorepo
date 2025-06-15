@@ -1,0 +1,34 @@
+{
+    "name": "exoware-sdk-ts",
+    "version": "0.0.1",
+    "description": "TypeScript SDK for the Exoware API.",
+    "license": "(MIT OR Apache-2.0)",
+    "homepage": "https://exoware.xyz",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/exowarexyz/monorepo.git",
+        "directory": "sdk-ts"
+    },
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "scripts": {
+        "build": "tsc",
+        "lint": "tsc --noEmit",
+        "test": "jest"
+    },
+    "dependencies": {
+        "axios": "^1.7.2",
+        "js-base64": "^3.7.7",
+        "isomorphic-ws": "^5.0.0"
+    },
+    "devDependencies": {
+        "@types/jest": "^29.5.12",
+        "@types/ws": "^8.5.10",
+        "@types/node": "^20.14.9",
+        "portfinder": "^1.0.32",
+        "jest": "^30.0.0",
+        "ts-jest": "^29.2.2",
+        "typescript": "^5.5.3",
+        "exoware-simulator": "file:../simulator"
+    }
+}

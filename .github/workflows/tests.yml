@@ -31,8 +31,12 @@ jobs:
       run: cargo doc --no-deps --document-private-items
       env:
         RUSTDOCFLAGS: "-D warnings"
+    - name: Install speccy
+      run: npm install -g speccy
+    - name: Lint OpenAPI spec
+      run: speccy lint interface.yaml
 
-  Unit:
+  Rust:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -42,6 +46,27 @@ jobs:
       uses: ./.github/actions/setup
     - name: Run tests
       run: cargo test --verbose
+
+  TypeScript:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run setup
+        uses: ./.github/actions/setup
+      - name: Install sdk-ts dependencies
+        run: cd sdk-ts && npm install
+      - name: Lint sdk-ts
+        run: cd sdk-ts && npm run lint
+      - name: Test sdk-ts
+        run: cd sdk-ts && npm test
+      - name: Build sdk-ts
+        run: cd sdk-ts && npm run build
+      - name: Install examples/sandbox dependencies
+        run: cd examples/sandbox && npm install
+      - name: Lint examples/sandbox
+        run: cd examples/sandbox && npm run lint
 
   Dependencies:
     runs-on: ubuntu-latest
