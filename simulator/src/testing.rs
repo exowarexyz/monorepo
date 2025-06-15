@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 ///
 /// It sets up a temporary directory for storage, picks an unused port,
 /// generates a random auth token, and starts the server in the background.
-/// It then runs the provided test function with a configured `Client`.
+/// It then runs the provided test function with a configured [Client]
 /// When the test function completes, the server is aborted.
 ///
 /// # Panics
