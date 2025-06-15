@@ -29,6 +29,7 @@ const setup = async () => {
 
     const simulatorPath = path.join(__dirname, '..', 'target', 'debug', 'simulator');
     const args = [
+        '--verbose',
         'server',
         'run',
         '--port', port.toString(),
