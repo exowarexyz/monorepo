@@ -25,7 +25,7 @@ This example provides a basic web interface to interact with the Exoware API. It
 
     ```bash
     # from the root of the monorepo
-    cd examples/website
+    cd examples/sandbox
     npm install
     npm run dev
     ```
