@@ -6,13 +6,88 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use base64::{engine::general_purpose, Engine};
+use exoware_sdk_rs::store;
 use rocksdb::DB;
-use std::path::Path;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::{
+    path::Path,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use thiserror::Error;
 use tracing::{info, warn};
 
-mod handlers;
+mod adb;
+mod kv;
+
+/// Key prefixes for preventing conflicts between keys in the database.
+/// the underlying KV db.
+pub const KEY_NAMESPACE_PREFIX: u8 = 0x00;
+pub const POS_NAMESPACE_PREFIX: u8 = 0x01;
+
+/// The outer wrapper for any value written to the underlying database.
+#[derive(Serialize, Deserialize, Debug)]
+struct Entry {
+    value: Vec<u8>,
+    visible_at: u128,
+    updated_at: u64,
+}
+
+impl Entry {
+    fn new(value: Vec<u8>) -> Self {
+        let now_millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let now_secs = (now_millis / 1000) as u64;
+        Self {
+            value,
+            visible_at: 0,
+            updated_at: now_secs,
+        }
+    }
+
+    fn deserialize(value: &[u8]) -> Result<Entry, Error> {
+        Ok(bincode::deserialize::<Entry>(value)?)
+    }
+
+    fn serialize(&self) -> Result<Vec<u8>, Error> {
+        Ok(bincode::serialize(self)?)
+    }
+
+    fn write(&self, db: &DB, key: &[u8]) -> Result<(), Error> {
+        let encoded_value = self.serialize()?;
+        db.put(key, encoded_value)?;
+        Ok(())
+    }
+
+    fn read(db: &DB, key: &[u8]) -> Result<Option<Entry>, Error> {
+        match db.get(key)? {
+            Some(value) => Ok(Some(Entry::deserialize(&value)?)),
+            None => Ok(None),
+        }
+    }
+}
+
+/// Decodes a base64-encoded parameter. Returns `None` if the parameter is not present. Returns
+/// [Error] if the parameter could not be decoded.
+fn decode_base64_option(
+    param: Option<&String>,
+    param_name: &str,
+) -> Result<Option<Vec<u8>>, Error> {
+    param
+        .map(|s| general_purpose::STANDARD.decode(s))
+        .transpose()
+        .map_err(|_| Error::InvalidParameter(format!("Invalid base64 in {param_name} parameter")))
+}
+
+/// Decodes a base64-encoded parameter. Returns [Error] if the parameter could not be decoded.
+fn decode_base64_param(param: &String, param_name: &str) -> Result<Vec<u8>, Error> {
+    general_purpose::STANDARD
+        .decode(param)
+        .map_err(|_| Error::InvalidParameter(format!("Invalid base64 in {param_name} parameter")))
+}
 
 /// Application-specific errors for the store handler.
 #[derive(Debug, Error)]
@@ -27,6 +102,12 @@ pub(super) enum Error {
     NotFound,
     #[error("invalid parameter: {0}")]
     InvalidParameter(String),
+    #[error("invalid body: {0}")]
+    InvalidBody(String),
+    #[error("internal error: {0}")]
+    Internal(String),
+    #[error("missing data: {0}")]
+    MissingData(String),
     #[error("database error: {0}")]
     Db(#[from] rocksdb::Error),
     #[error("deserialization error: {0}")]
@@ -56,7 +137,19 @@ impl IntoResponse for Error {
                 warn!(error = %self, "request failed: invalid parameter");
                 (StatusCode::BAD_REQUEST, self.to_string())
             }
+            Error::InvalidBody(_) => {
+                warn!(error = %self, "request failed: invalid body");
+                (StatusCode::BAD_REQUEST, self.to_string())
+            }
+            Error::MissingData(_) => {
+                warn!(error = %self, "request failed: missing data");
+                (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
+            }
             Error::Db(_) | Error::Bincode(_) => {
+                warn!(error = %self, "request failed: internal db error");
+                (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
+            }
+            Error::Internal(_) => {
                 warn!(error = %self, "request failed: internal error");
                 (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
             }
@@ -118,9 +211,22 @@ pub fn router(
         allow_public_access,
     };
 
+    // NOTE: All paths here must match the endpoint urls constructed by the sdk clients.
     let router = Router::new()
-        .route("/{key}", post(handlers::set).get(handlers::get))
-        .route("/", get(handlers::query))
+        .route(
+            format!("{}/{}", store::kv::PATH, "{key}").as_str(),
+            post(kv::set).get(kv::get),
+        )
+        .route(store::kv::PATH, get(kv::query))
+        .route(store::adb::PATH, post(adb::get).get(adb::get))
+        .route(
+            format!("{}/{}", store::adb::PATH, "set_key").as_str(),
+            post(adb::set_key),
+        )
+        .route(
+            format!("{}/{}", store::adb::PATH, "set_node_digest").as_str(),
+            post(adb::set_node_digest),
+        )
         .layer(from_fn_with_state(state.clone(), auth::middleware::<State>))
         .with_state(state);
 

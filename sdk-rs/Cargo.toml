@@ -11,6 +11,9 @@ repository = "https://github.com/exowarexyz/monorepo/tree/main/sdk-rs"
 documentation = "https://docs.rs/exoware-sdk-rs"
 
 [dependencies]
+commonware-cryptography = { workspace = true }
+commonware-storage = { workspace = true }
+commonware-codec = { workspace = true }
 base64 = { workspace = true }
 futures-util = { workspace = true }
 http = { workspace = true }

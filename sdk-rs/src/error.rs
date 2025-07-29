@@ -23,6 +23,9 @@ pub enum Error {
     /// An HTTP error response from the server.
     #[error("http error: {0}")]
     Http(StatusCode),
+    /// Server returned bad / unexpected data.
+    #[error("bad response")]
+    BadResponse,
     /// An internal SDK error.
     #[error("internal error: {0}")]
     Internal(String),

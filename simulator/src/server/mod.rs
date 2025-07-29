@@ -1,4 +1,5 @@
 use axum::{extract::DefaultBodyLimit, serve, Router};
+use exoware_sdk_rs::store::PATH as STORE_PATH;
 use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
@@ -7,7 +8,7 @@ use tower_http::cors::CorsLayer;
 use tracing::info;
 
 mod auth;
-mod store;
+pub mod store;
 mod stream;
 
 /// Subcommand for the server.
@@ -81,7 +82,7 @@ pub async fn run(
 
     // Create a router for the server.
     let router = Router::new()
-        .nest("/store", store_router)
+        .nest(STORE_PATH, store_router)
         .nest("/stream", stream_router)
         .layer(cors)
         .layer(DefaultBodyLimit::disable());

@@ -1,4 +1,4 @@
-use crate::server::store::{Error, State};
+use crate::server::store::{decode_base64_option, decode_base64_param, Entry, Error, State};
 use axum::{
     body::Bytes,
     extract::{Path, Query, State as AxumState},
@@ -6,10 +6,10 @@ use axum::{
     response::{IntoResponse, Json},
 };
 use base64::{engine::general_purpose, Engine as _};
-use exoware_sdk_rs::store::{GetResultPayload, QueryResultItemPayload, QueryResultPayload};
+use exoware_sdk_rs::store::kv;
 use rand::Rng;
 use rocksdb::{Direction, IteratorMode};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
 
@@ -17,14 +17,6 @@ use tracing::{debug, warn};
 const MAX_KEY_SIZE: usize = 512;
 /// The maximum size of a value in bytes (20MB).
 const MAX_VALUE_SIZE: usize = 20 * 1024 * 1024;
-
-/// A value stored in the database.
-#[derive(Serialize, Deserialize)]
-struct Entry {
-    value: Vec<u8>,
-    visible_at: u128,
-    updated_at: u64,
-}
 
 /// Query parameters for the `query` endpoint.
 #[derive(Deserialize)]
@@ -37,24 +29,12 @@ pub(super) struct QueryParams {
     limit: Option<usize>,
 }
 
-fn decode_base64_param(param: Option<&String>, param_name: &str) -> Result<Option<Vec<u8>>, Error> {
-    param
-        .map(|s| general_purpose::STANDARD.decode(s))
-        .transpose()
-        .map_err(|_| Error::InvalidParameter(format!("Invalid base64 in {param_name} parameter")))
-}
-
 /// Sets a key-value pair in the store.
 pub(super) async fn set(
     AxumState(state): AxumState<State>,
     Path(key): Path<String>,
     value: Bytes,
 ) -> Result<impl IntoResponse, Error> {
-    // Decode the base64 key
-    let decoded_key = general_purpose::STANDARD
-        .decode(&key)
-        .map_err(|_| Error::InvalidParameter("Invalid base64 in key parameter".to_string()))?;
-
     debug!(
         operation = "set",
         key = %key,
@@ -62,6 +42,8 @@ pub(super) async fn set(
         "processing set request"
     );
 
+    // Decode the base64 key
+    let decoded_key = decode_base64_param(&key, "key")?;
     if decoded_key.len() > MAX_KEY_SIZE {
         return Err(Error::KeyTooLarge);
     }
@@ -75,9 +57,9 @@ pub(super) async fn set(
         .as_millis();
     let now_secs = (now_millis / 1000) as u64;
 
-    if let Some(existing_value) = state.db.get(&decoded_key)? {
-        let stored_value: Entry = bincode::deserialize(&existing_value)?;
-        if now_secs - stored_value.updated_at < 1 {
+    let entry = Entry::read(&state.db, &decoded_key)?;
+    if let Some(entry) = entry {
+        if now_secs - entry.updated_at < 1 {
             return Err(Error::UpdateRateExceeded);
         }
     }
@@ -89,14 +71,13 @@ pub(super) async fn set(
     };
     let visible_at = now_millis + delay_ms as u128;
 
-    let stored_value = Entry {
+    let entry = Entry {
         value: value.to_vec(),
         visible_at,
         updated_at: now_secs,
     };
 
-    let encoded_value = bincode::serialize(&stored_value)?;
-    state.db.put(decoded_key.clone(), encoded_value)?;
+    entry.write(&state.db, &decoded_key)?;
 
     debug!(
         operation = "set",
@@ -112,11 +93,9 @@ pub(super) async fn set(
 pub(super) async fn get(
     AxumState(state): AxumState<State>,
     Path(key): Path<String>,
-) -> Result<Json<GetResultPayload>, Error> {
+) -> Result<Json<kv::GetResultPayload>, Error> {
     // Decode the base64 key
-    let decoded_key = general_purpose::STANDARD
-        .decode(&key)
-        .map_err(|_| Error::InvalidParameter("Invalid base64 in key parameter".to_string()))?;
+    let decoded_key = decode_base64_param(&key, "key")?;
 
     debug!(
         operation = "get",
@@ -124,51 +103,45 @@ pub(super) async fn get(
         "processing get request"
     );
 
-    let db_value = state.db.get(&decoded_key)?;
-    match db_value {
-        Some(value) => {
-            let stored_value: Entry = bincode::deserialize(&value)?;
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis();
-            if stored_value.visible_at <= now {
-                debug!(
-                    operation = "get",
-                    key = %key,
-                    value_size = stored_value.value.len(),
-                    "get request completed successfully"
-                );
-                Ok(Json(GetResultPayload {
-                    value: stored_value.value,
-                }))
-            } else {
-                debug!(
-                    operation = "get",
-                    key = %key,
-                    visible_at = stored_value.visible_at,
-                    current_time = now,
-                    "key not yet visible due to consistency bound"
-                );
-                Err(Error::NotFound)
-            }
-        }
-        None => {
-            debug!(
-                operation = "get",
-                key = %key,
-                "key not found in database"
-            );
-            Err(Error::NotFound)
-        }
+    let Some(entry) = Entry::read(&state.db, &decoded_key)? else {
+        debug!(
+            operation = "get",
+            key = %key,
+            "key not found in database"
+        );
+        return Err(Error::NotFound);
+    };
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    if entry.visible_at > now {
+        debug!(
+            operation = "get",
+            key = %key,
+            visible_at = entry.visible_at,
+            current_time = now,
+            "key not yet visible due to consistency bound"
+        );
+        return Err(Error::NotFound);
     }
+
+    debug!(
+        operation = "get",
+        key = %key,
+        value_size = entry.value.len(),
+        "get request completed successfully"
+    );
+
+    Ok(Json(kv::GetResultPayload { value: entry.value }))
 }
 
 /// Queries for a range of key-value pairs.
 pub(super) async fn query(
     AxumState(state): AxumState<State>,
     Query(params): Query<QueryParams>,
-) -> Result<Json<QueryResultPayload>, Error> {
+) -> Result<Json<kv::QueryResultPayload>, Error> {
     debug!(
         operation = "query",
         start = ?params.start,
@@ -179,8 +152,8 @@ pub(super) async fn query(
 
     let limit = params.limit.unwrap_or(usize::MAX);
 
-    let start_bytes = decode_base64_param(params.start.as_ref(), "start")?;
-    let end_bytes = decode_base64_param(params.end.as_ref(), "end")?;
+    let start_bytes = decode_base64_option(params.start.as_ref(), "start")?;
+    let end_bytes = decode_base64_option(params.end.as_ref(), "end")?;
 
     let mode = start_bytes.as_ref().map_or(IteratorMode::Start, |key| {
         IteratorMode::From(key, Direction::Forward)
@@ -200,24 +173,24 @@ pub(super) async fn query(
         }
 
         let (key, value) = item?;
-        let stored_value: Entry = bincode::deserialize(&value)?;
+        let entry = Entry::deserialize(&value)?;
 
-        if stored_value.visible_at <= now {
+        if entry.visible_at <= now {
             if let Some(end_key) = &end_bytes {
                 if key.as_ref() >= end_key.as_slice() {
                     break;
                 }
             }
 
-            results.push(QueryResultItemPayload {
+            results.push(kv::QueryResultItemPayload {
                 key: key.to_vec(),
-                value: stored_value.value,
+                value: entry.value,
             });
         } else {
             warn!(
                 operation = "query",
                 key = %general_purpose::STANDARD.encode(&key),
-                visible_at = stored_value.visible_at,
+                visible_at = entry.visible_at,
                 current_time = now,
                 "key not yet visible due to consistency bound"
             );
@@ -230,5 +203,5 @@ pub(super) async fn query(
         "query request completed successfully"
     );
 
-    Ok(Json(QueryResultPayload { results }))
+    Ok(Json(kv::QueryResultPayload { results }))
 }
