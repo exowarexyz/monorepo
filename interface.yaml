@@ -38,7 +38,8 @@ paths:
         required: true
         schema:
           type: string
-        description: The key for the store operation.
+          format: byte
+        description: The base64-encoded key for the store operation.
       - $ref: '#/components/parameters/tokenQuery'
     get:
       summary: Get a value
@@ -123,13 +124,15 @@ paths:
           required: false
           schema:
             type: string
-          description: The key to start the query from (inclusive).
+            format: byte
+          description: The key to start the query from (inclusive), base64-encoded.
         - name: end
           in: query
           required: false
           schema:
             type: string
-          description: The key to end the query at (exclusive).
+            format: byte
+          description: The key to end the query at (exclusive), base64-encoded.
         - name: limit
           in: query
           required: false
