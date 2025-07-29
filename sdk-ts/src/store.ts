@@ -64,8 +64,8 @@ export class StoreClient {
         const encodedKey = Base64.fromUint8Array(key);
         const url = `${this.client.baseUrl}/store/${encodedKey}`;
         try {
-            const response = await this.client.httpClient.get<{ value: string }>(url);
-            const value = Base64.toUint8Array(response.data.value);
+            const response = await this.client.httpClient.get<{ value: number[] }>(url);
+            const value = new Uint8Array(response.data.value);
             return { value };
         } catch (error) {
             if (error instanceof AxiosError && error.response) {
@@ -97,10 +97,10 @@ export class StoreClient {
         if (limit) url.searchParams.append('limit', limit.toString());
 
         try {
-            const response = await this.client.httpClient.get<{ results: { key: string, value: string }[] }>(url.toString());
+            const response = await this.client.httpClient.get<{ results: { key: number[], value: number[] }[] }>(url.toString());
             const results = response.data.results.map(item => ({
-                key: Base64.toUint8Array(item.key),
-                value: Base64.toUint8Array(item.value),
+                key: new Uint8Array(item.key),
+                value: new Uint8Array(item.value)
             }));
             return { results };
         } catch (error) {

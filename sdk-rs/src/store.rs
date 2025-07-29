@@ -8,28 +8,12 @@ use serde::{Deserialize, Serialize};
 /// The JSON payload for a `get` operation response.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct GetResultPayload {
-    pub value: String,
-}
-
-/// The result of a `get` operation.
-#[derive(Debug)]
-pub struct GetResult {
-    /// The retrieved value.
     pub value: Vec<u8>,
 }
 
-/// An item in the result of a `query` operation. For internal use.
+/// An item in the result of a `query` operation.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct QueryResultItemPayload {
-    /// The key of the item (base64 encoded).
-    pub key: String,
-    /// The value of the item (base64 encoded).
-    pub value: String,
-}
-
-/// An item in the result of a `query` operation.
-#[derive(Debug)]
-pub struct QueryResultItem {
     /// The key of the item.
     pub key: Vec<u8>,
     /// The value of the item.
@@ -40,13 +24,6 @@ pub struct QueryResultItem {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct QueryResultPayload {
     pub results: Vec<QueryResultItemPayload>,
-}
-
-/// The result of a `query` operation.
-#[derive(Debug)]
-pub struct QueryResult {
-    /// A list of key-value pairs.
-    pub results: Vec<QueryResultItem>,
 }
 
 /// A client for interacting with the key-value store.
@@ -90,7 +67,7 @@ impl Client {
     /// Retrieves a value from the store by its key.
     ///
     /// If the key does not exist, `Ok(None)` is returned.
-    pub async fn get(&self, key: &[u8]) -> Result<Option<GetResult>, Error> {
+    pub async fn get(&self, key: &[u8]) -> Result<Option<GetResultPayload>, Error> {
         let key_b64 = general_purpose::STANDARD.encode(key);
         let url = format!("{}/store/{}", self.client.base_url, key_b64);
         let mut headers = reqwest::header::HeaderMap::new();
@@ -116,9 +93,8 @@ impl Client {
         }
 
         let payload: GetResultPayload = res.json().await?;
-        let value = general_purpose::STANDARD.decode(payload.value)?;
 
-        Ok(Some(GetResult { value }))
+        Ok(Some(payload))
     }
 
     /// Queries for a range of key-value pairs.
@@ -133,7 +109,7 @@ impl Client {
         start: Option<&[u8]>,
         end: Option<&[u8]>,
         limit: Option<usize>,
-    ) -> Result<QueryResult, Error> {
+    ) -> Result<QueryResultPayload, Error> {
         let mut url = format!("{}/store?", self.client.base_url);
         if let Some(start) = start {
             let start_b64 = general_purpose::STANDARD.encode(start);
@@ -166,14 +142,7 @@ impl Client {
         }
 
         let payload: QueryResultPayload = res.json().await?;
-        let mut results = Vec::new();
-        for item in payload.results {
-            results.push(QueryResultItem {
-                key: general_purpose::STANDARD.decode(item.key)?,
-                value: general_purpose::STANDARD.decode(item.value)?,
-            });
-        }
 
-        Ok(QueryResult { results })
+        Ok(payload)
     }
 }

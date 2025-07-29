@@ -38,21 +38,22 @@ describe('Exoware TS SDK', () => {
 
         it('should query for key-value pairs', async () => {
             const store = client.store();
+            const encoder = new TextEncoder();
             const prefix = 'query-test-';
             const pairs = [
-                { key: `${prefix}a`, value: Buffer.from('a') },
-                { key: `${prefix}b`, value: Buffer.from('b') },
-                { key: `${prefix}c`, value: Buffer.from('c') },
+                { key: encoder.encode(`${prefix}a`), value: Buffer.from('a') },
+                { key: encoder.encode(`${prefix}b`), value: Buffer.from('b') },
+                { key: encoder.encode(`${prefix}c`), value: Buffer.from('c') },
             ];
 
             for (const pair of pairs) {
-                await store.set(new TextEncoder().encode(pair.key), pair.value);
+                await store.set(pair.key, pair.value);
             }
 
-            const result = await store.query(`${prefix}a`, `${prefix}z`);
+            const result = await store.query(encoder.encode(`${prefix}a`), encoder.encode(`${prefix}z`));
             expect(result.results.length).toBe(3);
             expect(result.results.map(r => Buffer.from(r.value))).toEqual(pairs.map(p => p.value));
-            expect(result.results.map(r => new TextDecoder().decode(r.key)).sort()).toEqual(pairs.map(p => p.key).sort());
+            expect(result.results.map(r => r.key).sort()).toEqual(pairs.map(p => p.key).sort());
         });
 
         describe('limits', () => {

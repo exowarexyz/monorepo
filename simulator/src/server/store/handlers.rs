@@ -140,7 +140,7 @@ pub(super) async fn get(
                     "get request completed successfully"
                 );
                 Ok(Json(GetResultPayload {
-                    value: general_purpose::STANDARD.encode(&stored_value.value),
+                    value: stored_value.value,
                 }))
             } else {
                 debug!(
@@ -210,8 +210,8 @@ pub(super) async fn query(
             }
 
             results.push(QueryResultItemPayload {
-                key: general_purpose::STANDARD.encode(&key),
-                value: general_purpose::STANDARD.encode(&stored_value.value),
+                key: key.to_vec(),
+                value: stored_value.value,
             });
         } else {
             warn!(
