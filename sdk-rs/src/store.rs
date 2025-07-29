@@ -4,19 +4,25 @@ use crate::{error::Error, Client as SdkClient};
 use base64::{engine::general_purpose, Engine as _};
 use reqwest::header::{HeaderValue, AUTHORIZATION};
 use serde::{Deserialize, Serialize};
+use serde_with::{base64::Base64, serde_as};
 
 /// The JSON payload for a `get` operation response.
+#[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct GetResultPayload {
+    #[serde_as(as = "Base64")]
     pub value: Vec<u8>,
 }
 
 /// An item in the result of a `query` operation.
+#[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct QueryResultItemPayload {
     /// The key of the item.
+    #[serde_as(as = "Base64")]
     pub key: Vec<u8>,
     /// The value of the item.
+    #[serde_as(as = "Base64")]
     pub value: Vec<u8>,
 }
 
@@ -92,9 +98,7 @@ impl Client {
             return Err(Error::Http(res.status()));
         }
 
-        let payload: GetResultPayload = res.json().await?;
-
-        Ok(Some(payload))
+        Ok(Some(res.json().await?))
     }
 
     /// Queries for a range of key-value pairs.

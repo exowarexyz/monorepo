@@ -19,6 +19,7 @@ tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 axum = { workspace = true, features = ["ws"] }
 serde = { workspace = true, features = ["derive"] }
+serde_with = { workspace = true }
 base64 = { workspace = true }
 rocksdb = { workspace = true }
 rand = { workspace = true }
