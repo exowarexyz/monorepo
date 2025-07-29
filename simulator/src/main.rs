@@ -39,7 +39,7 @@ async fn main() -> std::process::ExitCode {
     // Initialize the default directory for the persistent store. This will be
     // `$HOME/.exoware_simulator`.
     let home_directory = std::env::var("HOME").expect("$HOME is not configured");
-    let default_directory = PathBuf::from(format!("{}/.exoware_simulator", home_directory));
+    let default_directory = PathBuf::from(format!("{home_directory}/.exoware_simulator"));
     let default_directory: &'static str = default_directory.to_str().unwrap().to_string().leak();
 
     // Define the CLI application and its arguments.

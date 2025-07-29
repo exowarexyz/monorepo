@@ -25,6 +25,8 @@ pub(super) enum Error {
     UpdateRateExceeded,
     #[error("not found")]
     NotFound,
+    #[error("invalid parameter: {0}")]
+    InvalidParameter(String),
     #[error("database error: {0}")]
     Db(#[from] rocksdb::Error),
     #[error("deserialization error: {0}")]
@@ -49,6 +51,10 @@ impl IntoResponse for Error {
             Error::NotFound => {
                 warn!(error = %self, "request failed: key not found");
                 (StatusCode::NOT_FOUND, self.to_string())
+            }
+            Error::InvalidParameter(_) => {
+                warn!(error = %self, "request failed: invalid parameter");
+                (StatusCode::BAD_REQUEST, self.to_string())
             }
             Error::Db(_) | Error::Bincode(_) => {
                 warn!(error = %self, "request failed: internal error");
