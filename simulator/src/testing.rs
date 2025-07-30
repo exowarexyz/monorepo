@@ -26,7 +26,7 @@ pub async fn with_server<F, Fut>(
     Fut: Future<Output = ()>,
 {
     let port = portpicker::pick_unused_port().expect("failed to find unused port");
-    let addr = format!("http://127.0.0.1:{}", port);
+    let addr = format!("http://127.0.0.1:{port}");
     let dir = tempdir().unwrap();
     let token: String = rand::thread_rng()
         .sample_iter(&Alphanumeric)

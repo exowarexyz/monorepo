@@ -37,12 +37,24 @@ pub(super) struct QueryParams {
     limit: Option<usize>,
 }
 
+fn decode_base64_param(param: Option<&String>, param_name: &str) -> Result<Option<Vec<u8>>, Error> {
+    param
+        .map(|s| general_purpose::STANDARD.decode(s))
+        .transpose()
+        .map_err(|_| Error::InvalidParameter(format!("Invalid base64 in {param_name} parameter")))
+}
+
 /// Sets a key-value pair in the store.
 pub(super) async fn set(
     AxumState(state): AxumState<State>,
     Path(key): Path<String>,
     value: Bytes,
 ) -> Result<impl IntoResponse, Error> {
+    // Decode the base64 key
+    let decoded_key = general_purpose::STANDARD
+        .decode(&key)
+        .map_err(|_| Error::InvalidParameter("Invalid base64 in key parameter".to_string()))?;
+
     debug!(
         operation = "set",
         key = %key,
@@ -50,7 +62,7 @@ pub(super) async fn set(
         "processing set request"
     );
 
-    if key.len() > MAX_KEY_SIZE {
+    if decoded_key.len() > MAX_KEY_SIZE {
         return Err(Error::KeyTooLarge);
     }
     if value.len() > MAX_VALUE_SIZE {
@@ -63,7 +75,7 @@ pub(super) async fn set(
         .as_millis();
     let now_secs = (now_millis / 1000) as u64;
 
-    if let Some(existing_value) = state.db.get(&key)? {
+    if let Some(existing_value) = state.db.get(&decoded_key)? {
         let stored_value: Entry = bincode::deserialize(&existing_value)?;
         if now_secs - stored_value.updated_at < 1 {
             return Err(Error::UpdateRateExceeded);
@@ -84,7 +96,7 @@ pub(super) async fn set(
     };
 
     let encoded_value = bincode::serialize(&stored_value)?;
-    state.db.put(key.clone(), encoded_value)?;
+    state.db.put(decoded_key.clone(), encoded_value)?;
 
     debug!(
         operation = "set",
@@ -101,13 +113,18 @@ pub(super) async fn get(
     AxumState(state): AxumState<State>,
     Path(key): Path<String>,
 ) -> Result<Json<GetResultPayload>, Error> {
+    // Decode the base64 key
+    let decoded_key = general_purpose::STANDARD
+        .decode(&key)
+        .map_err(|_| Error::InvalidParameter("Invalid base64 in key parameter".to_string()))?;
+
     debug!(
         operation = "get",
         key = %key,
         "processing get request"
     );
 
-    let db_value = state.db.get(&key)?;
+    let db_value = state.db.get(&decoded_key)?;
     match db_value {
         Some(value) => {
             let stored_value: Entry = bincode::deserialize(&value)?;
@@ -123,7 +140,7 @@ pub(super) async fn get(
                     "get request completed successfully"
                 );
                 Ok(Json(GetResultPayload {
-                    value: general_purpose::STANDARD.encode(&stored_value.value),
+                    value: stored_value.value,
                 }))
             } else {
                 debug!(
@@ -162,8 +179,11 @@ pub(super) async fn query(
 
     let limit = params.limit.unwrap_or(usize::MAX);
 
-    let mode = params.start.as_ref().map_or(IteratorMode::Start, |key| {
-        IteratorMode::From(key.as_bytes(), Direction::Forward)
+    let start_bytes = decode_base64_param(params.start.as_ref(), "start")?;
+    let end_bytes = decode_base64_param(params.end.as_ref(), "end")?;
+
+    let mode = start_bytes.as_ref().map_or(IteratorMode::Start, |key| {
+        IteratorMode::From(key, Direction::Forward)
     });
 
     let iter = state.db.iterator(mode);
@@ -183,23 +203,20 @@ pub(super) async fn query(
         let stored_value: Entry = bincode::deserialize(&value)?;
 
         if stored_value.visible_at <= now {
-            let key_str = String::from_utf8(key.into_vec()).unwrap();
-
-            if let Some(end_key) = &params.end {
-                if &key_str >= end_key {
+            if let Some(end_key) = &end_bytes {
+                if key.as_ref() >= end_key.as_slice() {
                     break;
                 }
             }
 
             results.push(QueryResultItemPayload {
-                key: key_str,
-                value: general_purpose::STANDARD.encode(&stored_value.value),
+                key: key.to_vec(),
+                value: stored_value.value,
             });
         } else {
-            let key_str = String::from_utf8_lossy(&key);
             warn!(
                 operation = "query",
-                key = %key_str,
+                key = %general_purpose::STANDARD.encode(&key),
                 visible_at = stored_value.visible_at,
                 current_time = now,
                 "key not yet visible due to consistency bound"

@@ -7,8 +7,8 @@ use std::time::Duration;
 async fn test_store_set_get() {
     with_server(true, 0, 0, |client| async move {
         let store = client.store();
-        store.set("key1", b"value1".to_vec()).await.unwrap();
-        let res = store.get("key1").await.unwrap().unwrap();
+        store.set(b"key1", b"value1".to_vec()).await.unwrap();
+        let res = store.get(b"key1").await.unwrap().unwrap();
         assert_eq!(res.value, b"value1");
     })
     .await;
@@ -18,14 +18,14 @@ async fn test_store_set_get() {
 async fn test_store_query() {
     with_server(true, 0, 0, |client| async move {
         let store = client.store();
-        store.set("a", b"1".to_vec()).await.unwrap();
-        store.set("b", b"2".to_vec()).await.unwrap();
-        store.set("c", b"3".to_vec()).await.unwrap();
+        store.set(b"a", b"1".to_vec()).await.unwrap();
+        store.set(b"b", b"2".to_vec()).await.unwrap();
+        store.set(b"c", b"3".to_vec()).await.unwrap();
 
-        let res = store.query(Some("a"), Some("c"), None).await.unwrap();
+        let res = store.query(Some(b"a"), Some(b"c"), None).await.unwrap();
         assert_eq!(res.results.len(), 2);
-        assert_eq!(res.results[0].key, "a");
-        assert_eq!(res.results[1].key, "b");
+        assert_eq!(res.results[0].key, b"a");
+        assert_eq!(res.results[1].key, b"b");
     })
     .await;
 }
@@ -34,7 +34,7 @@ async fn test_store_query() {
 async fn test_get_not_found() {
     with_server(true, 0, 0, |client| async move {
         let store = client.store();
-        let res = store.get("nonexistent").await.unwrap();
+        let res = store.get(b"nonexistent").await.unwrap();
         assert!(res.is_none());
     })
     .await;
@@ -66,7 +66,7 @@ async fn test_auth() {
     with_server(false, 0, 0, |client| async move {
         let unauth_client = Client::new(client.base_url().to_string(), "".to_string());
         let store = unauth_client.store();
-        let err = store.get("key").await.unwrap_err();
+        let err = store.get(b"key").await.unwrap_err();
         match err {
             Error::Http(status) => assert_eq!(status, 401),
             _ => panic!("unexpected error type"),
@@ -74,7 +74,7 @@ async fn test_auth() {
 
         let bad_client = Client::new(client.base_url().to_string(), "bad_token".to_string());
         let store = bad_client.store();
-        let err = store.set("key", b"value".to_vec()).await.unwrap_err();
+        let err = store.set(b"key", b"value".to_vec()).await.unwrap_err();
         match err {
             Error::Http(status) => assert_eq!(status, 401),
             _ => panic!("unexpected error type"),
@@ -104,30 +104,30 @@ async fn test_limits_fail() {
     with_server(true, 0, 0, |client| async move {
         // Key exceeds limit
         let store = client.store();
-        let large_key = "a".repeat(513);
+        let large_key = b"a".repeat(513);
         let err = store.set(&large_key, b"value".to_vec()).await.unwrap_err();
         match err {
             Error::Http(status) => assert_eq!(status, 413),
-            _ => panic!("unexpected error type: {:?}", err),
+            _ => panic!("unexpected error type: {err:?}"),
         }
 
         // Update rate exceeds limit
-        store.set("key", b"value".to_vec()).await.unwrap();
-        let err = store.set("key", b"value2".to_vec()).await.unwrap_err();
+        store.set(b"key", b"value".to_vec()).await.unwrap();
+        let err = store.set(b"key", b"value2".to_vec()).await.unwrap_err();
         match err {
             Error::Http(status) => assert_eq!(status, 429),
-            _ => panic!("unexpected error type: {:?}", err),
+            _ => panic!("unexpected error type: {err:?}"),
         }
 
         // Value exceeds limit
         let large_value = vec![0; 20 * 1024 * 1024 + 1];
         let err = store
-            .set("large_value_key", large_value.clone())
+            .set(b"large_value_key", large_value.clone())
             .await
             .unwrap_err();
         match err {
             Error::Http(status) => assert_eq!(status, 413),
-            _ => panic!("unexpected error type: {:?}", err),
+            _ => panic!("unexpected error type: {err:?}"),
         }
 
         // Stream name exceeds limit
@@ -139,12 +139,12 @@ async fn test_limits_fail() {
             .unwrap_err();
         match err {
             Error::Http(status) => assert_eq!(status, 413),
-            _ => panic!("unexpected error type: {:?}", err),
+            _ => panic!("unexpected error type: {err:?}"),
         }
         let err = stream.subscribe(&large_stream_name).await.unwrap_err();
         match err {
             Error::WebSocket(_) => {}
-            _ => panic!("unexpected error type: {:?}", err),
+            _ => panic!("unexpected error type: {err:?}"),
         }
 
         // Message exceeds limit
@@ -154,7 +154,7 @@ async fn test_limits_fail() {
             .unwrap_err();
         match err {
             Error::Http(status) => assert_eq!(status, 413),
-            _ => panic!("unexpected error type: {:?}", err),
+            _ => panic!("unexpected error type: {err:?}"),
         }
     })
     .await;
@@ -165,7 +165,7 @@ async fn test_limits_ok() {
     with_server(true, 0, 0, |client| async move {
         // Key exactly at limit
         let store = client.store();
-        let key_at_limit = "a".repeat(512);
+        let key_at_limit = b"a".repeat(512);
         store.set(&key_at_limit, b"value".to_vec()).await.unwrap();
         let res = store.get(&key_at_limit).await.unwrap().unwrap();
         assert_eq!(res.value, b"value");
@@ -173,10 +173,10 @@ async fn test_limits_ok() {
         // Value exactly at limit
         let value_at_limit = vec![0; 20 * 1024 * 1024];
         store
-            .set("value_at_limit", value_at_limit.clone())
+            .set(b"value_at_limit", value_at_limit.clone())
             .await
             .unwrap();
-        let res = store.get("value_at_limit").await.unwrap().unwrap();
+        let res = store.get(b"value_at_limit").await.unwrap().unwrap();
         assert_eq!(res.value, value_at_limit);
 
         // Stream name exactly at limit
@@ -210,17 +210,17 @@ async fn test_limits_ok() {
 async fn test_eventual_consistency() {
     with_server(true, 200, 300, |client| async move {
         let store = client.store();
-        store.set("key", b"value".to_vec()).await.unwrap();
+        store.set(b"key", b"value".to_vec()).await.unwrap();
 
         // Check that the value is not visible before the minimum consistency bound.
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let res = store.get("key").await.unwrap();
+        let res = store.get(b"key").await.unwrap();
         assert!(res.is_none());
 
         // Check that the value is visible after the maximum consistency bound.
         tokio::time::sleep(Duration::from_millis(300)).await;
 
-        let res = store.get("key").await.unwrap().unwrap();
+        let res = store.get(b"key").await.unwrap().unwrap();
         assert_eq!(res.value, b"value");
     })
     .await;
@@ -232,25 +232,25 @@ async fn test_eventual_consistency_query() {
         let store = client.store();
 
         // Set the first key and wait for it to become consistent.
-        store.set("a", b"1".to_vec()).await.unwrap();
+        store.set(b"a", b"1".to_vec()).await.unwrap();
         tokio::time::sleep(Duration::from_millis(400)).await;
 
         // Set the second key, which will not be immediately visible.
-        store.set("c", b"3".to_vec()).await.unwrap();
+        store.set(b"c", b"3".to_vec()).await.unwrap();
 
         // Query for a range of keys. Only "a" should be visible.
-        let res = store.query(Some("a"), Some("d"), None).await.unwrap();
+        let res = store.query(Some(b"a"), Some(b"d"), None).await.unwrap();
         assert_eq!(res.results.len(), 1);
-        assert_eq!(res.results[0].key, "a");
+        assert_eq!(res.results[0].key, b"a");
 
         // Wait for the second key to become consistent.
         tokio::time::sleep(Duration::from_millis(400)).await;
 
         // Query again. Both "a" and "c" should now be visible.
-        let res = store.query(Some("a"), Some("d"), None).await.unwrap();
+        let res = store.query(Some(b"a"), Some(b"d"), None).await.unwrap();
         assert_eq!(res.results.len(), 2);
-        assert_eq!(res.results[0].key, "a");
-        assert_eq!(res.results[1].key, "c");
+        assert_eq!(res.results[0].key, b"a");
+        assert_eq!(res.results[1].key, b"c");
     })
     .await;
 }

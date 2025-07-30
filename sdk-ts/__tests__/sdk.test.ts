@@ -20,7 +20,7 @@ describe('Exoware TS SDK', () => {
     describe('StoreClient', () => {
         it('should set and get a value', async () => {
             const store = client.store();
-            const key = 'test-key';
+            const key = new TextEncoder().encode('test-key');
             const value = Buffer.from('test-value');
 
             await store.set(key, value);
@@ -32,24 +32,25 @@ describe('Exoware TS SDK', () => {
 
         it('should return null for a non-existent key', async () => {
             const store = client.store();
-            const result = await store.get('non-existent-key');
+            const result = await store.get(new TextEncoder().encode('non-existent-key'));
             expect(result).toBeNull();
         });
 
         it('should query for key-value pairs', async () => {
             const store = client.store();
+            const encoder = new TextEncoder();
             const prefix = 'query-test-';
             const pairs = [
-                { key: `${prefix}a`, value: Buffer.from('a') },
-                { key: `${prefix}b`, value: Buffer.from('b') },
-                { key: `${prefix}c`, value: Buffer.from('c') },
+                { key: encoder.encode(`${prefix}a`), value: Buffer.from('a') },
+                { key: encoder.encode(`${prefix}b`), value: Buffer.from('b') },
+                { key: encoder.encode(`${prefix}c`), value: Buffer.from('c') },
             ];
 
             for (const pair of pairs) {
                 await store.set(pair.key, pair.value);
             }
 
-            const result = await store.query(`${prefix}a`, `${prefix}z`);
+            const result = await store.query(encoder.encode(`${prefix}a`), encoder.encode(`${prefix}z`));
             expect(result.results.length).toBe(3);
             expect(result.results.map(r => Buffer.from(r.value))).toEqual(pairs.map(p => p.value));
             expect(result.results.map(r => r.key).sort()).toEqual(pairs.map(p => p.key).sort());
@@ -58,7 +59,7 @@ describe('Exoware TS SDK', () => {
         describe('limits', () => {
             it('should handle key at size limit', async () => {
                 const store = client.store();
-                const key = 'a'.repeat(512);
+                const key = new TextEncoder().encode('a'.repeat(512));
                 const value = Buffer.from('test-value');
 
                 await store.set(key, value);
@@ -70,7 +71,7 @@ describe('Exoware TS SDK', () => {
 
             it('should reject key over size limit', async () => {
                 const store = client.store();
-                const key = 'a'.repeat(513);
+                const key = new TextEncoder().encode('a'.repeat(513));
                 const value = Buffer.from('test-value');
 
                 await expect(store.set(key, value)).rejects.toThrow('HTTP error: 413 Payload Too Large');
@@ -78,7 +79,7 @@ describe('Exoware TS SDK', () => {
 
             it('should handle value at size limit', async () => {
                 const store = client.store();
-                const key = 'value_at_limit';
+                const key = new TextEncoder().encode('value_at_limit');
                 const value = Buffer.alloc(20 * 1024 * 1024);
 
                 await store.set(key, value);
@@ -90,7 +91,7 @@ describe('Exoware TS SDK', () => {
 
             it('should reject value over size limit', async () => {
                 const store = client.store();
-                const key = 'value_over_limit';
+                const key = new TextEncoder().encode('value_over_limit');
                 const value = Buffer.alloc(20 * 1024 * 1024 + 1);
 
                 await expect(store.set(key, value)).rejects.toThrow('HTTP error: 413 Payload Too Large');

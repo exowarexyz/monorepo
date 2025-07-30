@@ -57,7 +57,7 @@ pub async fn run(
     );
 
     // Create a listener for the server on the specified port.
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
+    let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await?;
     info!(address = %listener.local_addr()?, "server listening");
 
     // Create a router for the server.

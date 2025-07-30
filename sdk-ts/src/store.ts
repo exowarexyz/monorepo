@@ -16,7 +16,7 @@ export interface GetResult {
  */
 export interface QueryResultItem {
     /** The key of the item. */
-    key: string;
+    key: Uint8Array;
     /** The value of the item. */
     value: Uint8Array;
 }
@@ -40,8 +40,9 @@ export class StoreClient {
      * @param key The key to set.
      * @param value The value to set.
      */
-    async set(key: string, value: Uint8Array | Buffer): Promise<void> {
-        const url = `${this.client.baseUrl}/store/${key}`;
+    async set(key: Uint8Array, value: Uint8Array | Buffer): Promise<void> {
+        const encodedKey = Base64.fromUint8Array(key);
+        const url = `${this.client.baseUrl}/store/${encodedKey}`;
         try {
             await this.client.httpClient.post(url, value, {
                 headers: { 'Content-Type': 'application/octet-stream' },
@@ -59,8 +60,9 @@ export class StoreClient {
      * @param key The key to retrieve.
      * @returns The value, or `null` if the key does not exist.
      */
-    async get(key: string): Promise<GetResult | null> {
-        const url = `${this.client.baseUrl}/store/${key}`;
+    async get(key: Uint8Array): Promise<GetResult | null> {
+        const encodedKey = Base64.fromUint8Array(key);
+        const url = `${this.client.baseUrl}/store/${encodedKey}`;
         try {
             const response = await this.client.httpClient.get<{ value: string }>(url);
             const value = Base64.toUint8Array(response.data.value);
@@ -82,17 +84,23 @@ export class StoreClient {
      * @param end The key to end the query at (exclusive). If `undefined`, the query continues to the last key.
      * @param limit The maximum number of results to return. If `undefined`, all results are returned.
      */
-    async query(start?: string, end?: string, limit?: number): Promise<QueryResult> {
+    async query(start?: Uint8Array, end?: Uint8Array, limit?: number): Promise<QueryResult> {
         const url = new URL(`${this.client.baseUrl}/store`);
-        if (start) url.searchParams.append('start', start);
-        if (end) url.searchParams.append('end', end);
+        if (start) {
+            const encodedStart = Base64.fromUint8Array(start);
+            url.searchParams.append('start', encodedStart);
+        }
+        if (end) {
+            const encodedEnd = Base64.fromUint8Array(end);
+            url.searchParams.append('end', encodedEnd);
+        }
         if (limit) url.searchParams.append('limit', limit.toString());
 
         try {
             const response = await this.client.httpClient.get<{ results: { key: string, value: string }[] }>(url.toString());
             const results = response.data.results.map(item => ({
-                key: item.key,
-                value: Base64.toUint8Array(item.value),
+                key: Base64.toUint8Array(item.key),
+                value: Base64.toUint8Array(item.value)
             }));
             return { results };
         } catch (error) {

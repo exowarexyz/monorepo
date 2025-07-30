@@ -4,33 +4,25 @@ use crate::{error::Error, Client as SdkClient};
 use base64::{engine::general_purpose, Engine as _};
 use reqwest::header::{HeaderValue, AUTHORIZATION};
 use serde::{Deserialize, Serialize};
+use serde_with::{base64::Base64, serde_as};
 
 /// The JSON payload for a `get` operation response.
+#[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct GetResultPayload {
-    pub value: String,
-}
-
-/// The result of a `get` operation.
-#[derive(Debug)]
-pub struct GetResult {
-    /// The retrieved value.
+    #[serde_as(as = "Base64")]
     pub value: Vec<u8>,
 }
 
-/// An item in the result of a `query` operation. For internal use.
+/// An item in the result of a `query` operation.
+#[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct QueryResultItemPayload {
-    pub key: String,
-    pub value: String,
-}
-
-/// An item in the result of a `query` operation.
-#[derive(Debug)]
-pub struct QueryResultItem {
     /// The key of the item.
-    pub key: String,
+    #[serde_as(as = "Base64")]
+    pub key: Vec<u8>,
     /// The value of the item.
+    #[serde_as(as = "Base64")]
     pub value: Vec<u8>,
 }
 
@@ -38,13 +30,6 @@ pub struct QueryResultItem {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct QueryResultPayload {
     pub results: Vec<QueryResultItemPayload>,
-}
-
-/// The result of a `query` operation.
-#[derive(Debug)]
-pub struct QueryResult {
-    /// A list of key-value pairs.
-    pub results: Vec<QueryResultItem>,
 }
 
 /// A client for interacting with the key-value store.
@@ -60,8 +45,9 @@ impl Client {
     }
 
     /// Sets a key-value pair in the store.
-    pub async fn set(&self, key: &str, value: Vec<u8>) -> Result<(), Error> {
-        let url = format!("{}/store/{}", self.client.base_url, key);
+    pub async fn set(&self, key: &[u8], value: Vec<u8>) -> Result<(), Error> {
+        let key_b64 = general_purpose::STANDARD.encode(key);
+        let url = format!("{}/store/{}", self.client.base_url, key_b64);
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             AUTHORIZATION,
@@ -87,8 +73,9 @@ impl Client {
     /// Retrieves a value from the store by its key.
     ///
     /// If the key does not exist, `Ok(None)` is returned.
-    pub async fn get(&self, key: &str) -> Result<Option<GetResult>, Error> {
-        let url = format!("{}/store/{}", self.client.base_url, key);
+    pub async fn get(&self, key: &[u8]) -> Result<Option<GetResultPayload>, Error> {
+        let key_b64 = general_purpose::STANDARD.encode(key);
+        let url = format!("{}/store/{}", self.client.base_url, key_b64);
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             AUTHORIZATION,
@@ -111,10 +98,7 @@ impl Client {
             return Err(Error::Http(res.status()));
         }
 
-        let payload: GetResultPayload = res.json().await?;
-        let value = general_purpose::STANDARD.decode(payload.value)?;
-
-        Ok(Some(GetResult { value }))
+        Ok(Some(res.json().await?))
     }
 
     /// Queries for a range of key-value pairs.
@@ -126,19 +110,21 @@ impl Client {
     /// * `limit` - The maximum number of results to return. If `None`, all results are returned.
     pub async fn query(
         &self,
-        start: Option<&str>,
-        end: Option<&str>,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
         limit: Option<usize>,
-    ) -> Result<QueryResult, Error> {
+    ) -> Result<QueryResultPayload, Error> {
         let mut url = format!("{}/store?", self.client.base_url);
         if let Some(start) = start {
-            url.push_str(&format!("start={}&", start));
+            let start_b64 = general_purpose::STANDARD.encode(start);
+            url.push_str(&format!("start={start_b64}&"));
         }
         if let Some(end) = end {
-            url.push_str(&format!("end={}&", end));
+            let end_b64 = general_purpose::STANDARD.encode(end);
+            url.push_str(&format!("end={end_b64}&"));
         }
         if let Some(limit) = limit {
-            url.push_str(&format!("limit={}", limit));
+            url.push_str(&format!("limit={limit}"));
         }
 
         let mut headers = reqwest::header::HeaderMap::new();
@@ -160,14 +146,7 @@ impl Client {
         }
 
         let payload: QueryResultPayload = res.json().await?;
-        let mut results = Vec::new();
-        for item in payload.results {
-            results.push(QueryResultItem {
-                key: item.key,
-                value: general_purpose::STANDARD.decode(item.value)?,
-            });
-        }
 
-        Ok(QueryResult { results })
+        Ok(payload)
     }
 }
