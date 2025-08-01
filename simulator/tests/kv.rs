@@ -1,12 +1,12 @@
-use exoware_sdk_rs::{Client, Error};
+use exoware_sdk_rs::{Client as SdkClient, Error};
 use exoware_simulator::testing::with_server;
 use futures_util::StreamExt;
 use std::time::Duration;
 
 #[tokio::test]
-async fn test_store_set_get() {
+async fn test_kv_store_set_get() {
     with_server(true, 0, 0, |client| async move {
-        let store = client.store();
+        let store = client.store().kv();
         store.set(b"key1", b"value1".to_vec()).await.unwrap();
         let res = store.get(b"key1").await.unwrap().unwrap();
         assert_eq!(res.value, b"value1");
@@ -15,9 +15,9 @@ async fn test_store_set_get() {
 }
 
 #[tokio::test]
-async fn test_store_query() {
+async fn test_kv_store_query() {
     with_server(true, 0, 0, |client| async move {
-        let store = client.store();
+        let store = client.store().kv();
         store.set(b"a", b"1".to_vec()).await.unwrap();
         store.set(b"b", b"2".to_vec()).await.unwrap();
         store.set(b"c", b"3".to_vec()).await.unwrap();
@@ -31,9 +31,9 @@ async fn test_store_query() {
 }
 
 #[tokio::test]
-async fn test_get_not_found() {
+async fn test_kv_store_get_not_found() {
     with_server(true, 0, 0, |client| async move {
-        let store = client.store();
+        let store = client.store().kv();
         let res = store.get(b"nonexistent").await.unwrap();
         assert!(res.is_none());
     })
@@ -41,39 +41,18 @@ async fn test_get_not_found() {
 }
 
 #[tokio::test]
-async fn test_stream() {
-    with_server(true, 0, 0, |client| async move {
-        let stream = client.stream();
-        let mut sub = stream.subscribe("test-stream").await.unwrap();
-
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        stream
-            .publish("test-stream", b"hello".to_vec())
-            .await
-            .unwrap();
-
-        let msg = sub.read.next().await.unwrap().unwrap();
-        assert_eq!(msg.into_data(), b"hello".to_vec());
-
-        sub.close().await.unwrap();
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn test_auth() {
+async fn test_kv_store_auth() {
     with_server(false, 0, 0, |client| async move {
-        let unauth_client = Client::new(client.base_url().to_string(), "".to_string());
-        let store = unauth_client.store();
+        let unauth_client = SdkClient::new(client.base_url().to_string(), "".to_string());
+        let store = unauth_client.store().kv();
         let err = store.get(b"key").await.unwrap_err();
         match err {
             Error::Http(status) => assert_eq!(status, 401),
             _ => panic!("unexpected error type"),
         }
 
-        let bad_client = Client::new(client.base_url().to_string(), "bad_token".to_string());
-        let store = bad_client.store();
+        let bad_client = SdkClient::new(client.base_url().to_string(), "bad_token".to_string());
+        let store = bad_client.store().kv();
         let err = store.set(b"key", b"value".to_vec()).await.unwrap_err();
         match err {
             Error::Http(status) => assert_eq!(status, 401),
@@ -100,10 +79,10 @@ async fn test_auth() {
 }
 
 #[tokio::test]
-async fn test_limits_fail() {
+async fn test_kv_store_limits_fail() {
     with_server(true, 0, 0, |client| async move {
         // Key exceeds limit
-        let store = client.store();
+        let store = client.store().kv();
         let large_key = b"a".repeat(513);
         let err = store.set(&large_key, b"value".to_vec()).await.unwrap_err();
         match err {
@@ -161,10 +140,10 @@ async fn test_limits_fail() {
 }
 
 #[tokio::test]
-async fn test_limits_ok() {
+async fn test_kv_store_limits_ok() {
     with_server(true, 0, 0, |client| async move {
         // Key exactly at limit
-        let store = client.store();
+        let store = client.store().kv();
         let key_at_limit = b"a".repeat(512);
         store.set(&key_at_limit, b"value".to_vec()).await.unwrap();
         let res = store.get(&key_at_limit).await.unwrap().unwrap();
@@ -207,9 +186,9 @@ async fn test_limits_ok() {
 }
 
 #[tokio::test]
-async fn test_eventual_consistency() {
+async fn test_kv_store_eventual_consistency() {
     with_server(true, 200, 300, |client| async move {
-        let store = client.store();
+        let store = client.store().kv();
         store.set(b"key", b"value".to_vec()).await.unwrap();
 
         // Check that the value is not visible before the minimum consistency bound.
@@ -227,9 +206,9 @@ async fn test_eventual_consistency() {
 }
 
 #[tokio::test]
-async fn test_eventual_consistency_query() {
+async fn test_kv_store_eventual_consistency_query() {
     with_server(true, 200, 300, |client| async move {
-        let store = client.store();
+        let store = client.store().kv();
 
         // Set the first key and wait for it to become consistent.
         store.set(b"a", b"1".to_vec()).await.unwrap();

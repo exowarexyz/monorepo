@@ -6,6 +6,9 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
+commonware-cryptography = { version = "0.0.56" }
+commonware-storage = { version = "0.0.56" }
+commonware-codec = { version = "0.0.56" }
 exoware-sdk-rs = { version = "0.0.2", path = "sdk-rs" }
 tokio = "1.43.0"
 clap = "4.5.18"
