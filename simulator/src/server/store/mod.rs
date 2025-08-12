@@ -214,17 +214,23 @@ pub fn router(
     // NOTE: All paths here must match the endpoint urls constructed by the sdk clients.
     let router = Router::new()
         .route(
-            format!("{}/{}", store::kv::PATH, "{key}").as_str(),
+            format!("/{}/{}", store::kv::PATH_SEGMENT, "{key}").as_str(),
             post(kv::set).get(kv::get),
         )
-        .route(store::kv::PATH, get(kv::query))
-        .route(store::adb::PATH, post(adb::get).get(adb::get))
         .route(
-            format!("{}/{}", store::adb::PATH, "set_key").as_str(),
+            format!("/{}", store::kv::PATH_SEGMENT).as_str(),
+            get(kv::query),
+        )
+        .route(
+            format!("/{}", store::adb::PATH_SEGMENT).as_str(),
+            post(adb::get).get(adb::get),
+        )
+        .route(
+            format!("/{}/{}", store::adb::PATH_SEGMENT, "set_key").as_str(),
             post(adb::set_key),
         )
         .route(
-            format!("{}/{}", store::adb::PATH, "set_node_digest").as_str(),
+            format!("/{}/{}", store::adb::PATH_SEGMENT, "set_node_digest").as_str(),
             post(adb::set_node_digest),
         )
         .layer(from_fn_with_state(state.clone(), auth::middleware::<State>))

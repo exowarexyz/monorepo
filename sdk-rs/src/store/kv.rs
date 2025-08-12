@@ -4,12 +4,13 @@ use http::HeaderMap;
 use reqwest::Response;
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
+use url::Url;
 
-pub const PATH: &str = "/kv";
+pub const PATH_SEGMENT: &str = "kv";
 
 pub struct Client {
     client: SdkClient,
-    base_url: String,
+    base_url: Url,
 }
 
 /// The JSON payload for a kv `get` operation response.
@@ -40,10 +41,10 @@ pub struct QueryResultItemPayload {
 
 impl Client {
     pub fn new(client: SdkClient, parent_url: &str) -> Self {
-        Self {
-            client,
-            base_url: format!("{parent_url}{PATH}"),
-        }
+        let mut base_url = Url::parse(parent_url).unwrap();
+        base_url.path_segments_mut().unwrap().push(PATH_SEGMENT);
+
+        Self { client, base_url }
     }
 
     /// Retrieves a value from the kv store by its key.
@@ -88,11 +89,12 @@ impl Client {
 
     fn get_request(&self, key: &[u8], mut headers: HeaderMap) -> (String, HeaderMap) {
         let key_b64 = general_purpose::STANDARD.encode(key);
-        let url = format!("{}/{}", self.base_url, key_b64);
+        let mut url = self.base_url.clone();
+        url.path_segments_mut().unwrap().push(&key_b64);
 
         self.client.add_auth_header(&mut headers);
 
-        (url, headers)
+        (url.to_string(), headers)
     }
 
     async fn get_handle_response(res: Response) -> Result<Option<GetResultPayload>, Error> {
@@ -109,11 +111,12 @@ impl Client {
 
     pub fn set_request(&self, key: &[u8], mut headers: HeaderMap) -> (String, HeaderMap) {
         let key_b64 = general_purpose::STANDARD.encode(key);
-        let url = format!("{}/{}", self.base_url, key_b64);
+        let mut url = self.base_url.clone();
+        url.path_segments_mut().unwrap().push(&key_b64);
 
         self.client.add_auth_header(&mut headers);
 
-        (url, headers)
+        (url.to_string(), headers)
     }
 
     pub async fn set_handle_response(res: Response) -> Result<(), Error> {
@@ -131,22 +134,23 @@ impl Client {
         limit: Option<usize>,
         mut headers: HeaderMap,
     ) -> (String, HeaderMap) {
-        let mut url = format!("{}?", self.base_url);
+        let mut url = self.base_url.clone();
+        
         if let Some(start) = start {
             let start_b64 = general_purpose::STANDARD.encode(start);
-            url.push_str(&format!("start={start_b64}&"));
+            url.query_pairs_mut().append_pair("start", &start_b64);
         }
         if let Some(end) = end {
             let end_b64 = general_purpose::STANDARD.encode(end);
-            url.push_str(&format!("end={end_b64}&"));
+            url.query_pairs_mut().append_pair("end", &end_b64);
         }
         if let Some(limit) = limit {
-            url.push_str(&format!("limit={limit}"));
+            url.query_pairs_mut().append_pair("limit", &limit.to_string());
         }
 
         self.client.add_auth_header(&mut headers);
 
-        (url, headers)
+        (url.to_string(), headers)
     }
 
     async fn query_handle_response(res: Response) -> Result<QueryResultPayload, Error> {

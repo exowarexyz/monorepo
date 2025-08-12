@@ -7,14 +7,15 @@ use http::HeaderMap;
 use reqwest::Response;
 use serde::{Deserialize, Serialize};
 use serde_with::{base64::Base64, serde_as};
+use url::Url;
 
 type Sha256Digest = <Sha256 as Hasher>::Digest;
 
-pub const PATH: &str = "/adb";
+pub const PATH_SEGMENT: &str = "adb";
 
 pub struct Client {
     client: SdkClient,
-    base_url: String,
+    base_url: Url,
 }
 
 /// The JSON response payload for a `get` adb operation. The payload provides both the value for the
@@ -38,10 +39,10 @@ pub struct GetResultPayload {
 
 impl Client {
     pub fn new(client: SdkClient, parent_url: &str) -> Self {
-        Self {
-            client,
-            base_url: format!("{parent_url}{PATH}"),
-        }
+        let mut base_url = Url::parse(parent_url).unwrap();
+        base_url.path_segments_mut().unwrap().push(PATH_SEGMENT);
+
+        Self { client, base_url }
     }
 
     pub async fn get_and_verify_proof(
@@ -81,7 +82,7 @@ impl Client {
         let root_digest: Sha256Digest = root.into();
         let _root = proof.verify_range_inclusion(
             &mut hasher,
-            &[payload.value.clone()],
+            std::slice::from_ref(&payload.value),
             payload.position,
             &root_digest,
         );
@@ -111,11 +112,13 @@ impl Client {
     ) -> (String, HeaderMap) {
         let key_b64 = general_purpose::STANDARD.encode(key);
         let mut url = self.base_url.clone();
-        url.push_str(&format!("?key={key_b64}&size={mmr_size}"));
+        url.query_pairs_mut()
+            .append_pair("key", &key_b64)
+            .append_pair("size", &mmr_size.to_string());
 
         self.client.add_auth_header(&mut headers);
 
-        (url, headers)
+        (url.to_string(), headers)
     }
 
     async fn get_handle_response(res: Response) -> Result<Option<GetResultPayload>, crate::Error> {
@@ -145,12 +148,16 @@ impl Client {
         mut headers: HeaderMap,
     ) -> (String, HeaderMap) {
         let key_b64 = general_purpose::STANDARD.encode(key);
+
         let mut url = self.base_url.clone();
-        url.push_str(&format!("/set_key?key={key_b64}&position={position}"));
+        url.path_segments_mut().unwrap().push("set_key");
+        url.query_pairs_mut()
+            .append_pair("key", &key_b64)
+            .append_pair("position", &position.to_string());
 
         self.client.add_auth_header(&mut headers);
 
-        (url, headers)
+        (url.to_string(), headers)
     }
 
     async fn set_key_handle_response(res: Response) -> Result<(), Error> {
@@ -175,11 +182,13 @@ impl Client {
         mut headers: HeaderMap,
     ) -> (String, HeaderMap) {
         let mut url = self.base_url.clone();
-        url.push_str(&format!("/set_node_digest?position={position}"));
+        url.path_segments_mut().unwrap().push("set_node_digest");
+        url.query_pairs_mut()
+            .append_pair("position", &position.to_string());
 
         self.client.add_auth_header(&mut headers);
 
-        (url, headers)
+        (url.to_string(), headers)
     }
 
     async fn set_node_digest_handle_response(res: Response) -> Result<(), Error> {
