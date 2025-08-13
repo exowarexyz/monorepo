@@ -70,21 +70,22 @@ impl Entry {
     }
 }
 
-/// Decodes a base64-encoded parameter. Returns `None` if the parameter is not present. Returns
-/// [Error] if the parameter could not be decoded.
+/// Decodes a "url safe" base64-encoded parameter. Returns `None` if the parameter is not present.
+/// Returns [Error] if the parameter could not be decoded.
 fn decode_base64_option(
     param: Option<&String>,
     param_name: &str,
 ) -> Result<Option<Vec<u8>>, Error> {
     param
-        .map(|s| general_purpose::STANDARD.decode(s))
+        .map(|s| general_purpose::URL_SAFE_NO_PAD.decode(s))
         .transpose()
         .map_err(|_| Error::InvalidParameter(format!("Invalid base64 in {param_name} parameter")))
 }
 
-/// Decodes a base64-encoded parameter. Returns [Error] if the parameter could not be decoded.
+/// Decodes a "url safe" base64-encoded parameter. Returns [Error] if the parameter could not be
+/// decoded.
 fn decode_base64_param(param: &String, param_name: &str) -> Result<Vec<u8>, Error> {
-    general_purpose::STANDARD
+    general_purpose::URL_SAFE_NO_PAD
         .decode(param)
         .map_err(|_| Error::InvalidParameter(format!("Invalid base64 in {param_name} parameter")))
 }

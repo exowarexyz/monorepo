@@ -88,7 +88,7 @@ impl Client {
     }
 
     fn get_request(&self, key: &[u8], mut headers: HeaderMap) -> (String, HeaderMap) {
-        let key_b64 = general_purpose::STANDARD.encode(key);
+        let key_b64 = general_purpose::URL_SAFE_NO_PAD.encode(key);
         let mut url = self.base_url.clone();
         url.path_segments_mut().unwrap().push(&key_b64);
 
@@ -110,7 +110,7 @@ impl Client {
     }
 
     pub fn set_request(&self, key: &[u8], mut headers: HeaderMap) -> (String, HeaderMap) {
-        let key_b64 = general_purpose::STANDARD.encode(key);
+        let key_b64 = general_purpose::URL_SAFE_NO_PAD.encode(key);
         let mut url = self.base_url.clone();
         url.path_segments_mut().unwrap().push(&key_b64);
 
@@ -135,17 +135,18 @@ impl Client {
         mut headers: HeaderMap,
     ) -> (String, HeaderMap) {
         let mut url = self.base_url.clone();
-        
+
         if let Some(start) = start {
-            let start_b64 = general_purpose::STANDARD.encode(start);
+            let start_b64 = general_purpose::URL_SAFE_NO_PAD.encode(start);
             url.query_pairs_mut().append_pair("start", &start_b64);
         }
         if let Some(end) = end {
-            let end_b64 = general_purpose::STANDARD.encode(end);
+            let end_b64 = general_purpose::URL_SAFE_NO_PAD.encode(end);
             url.query_pairs_mut().append_pair("end", &end_b64);
         }
         if let Some(limit) = limit {
-            url.query_pairs_mut().append_pair("limit", &limit.to_string());
+            url.query_pairs_mut()
+                .append_pair("limit", &limit.to_string());
         }
 
         self.client.add_auth_header(&mut headers);
