@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package store.ingest.v1;
 
+import "buf/validate/validate.proto";
+
 service Service {
   rpc Put(PutRequest) returns (PutResponse);
 }
@@ -10,12 +12,12 @@ service Service {
 //
 // Keys must be between 0 and 254 bytes (inclusive). Values have no size limit.
 message KvPair {
-  bytes key = 1;
+  bytes key = 1 [(buf.validate.field).bytes.max_len = 254];
   bytes value = 2;
 }
 
 message PutRequest {
-  repeated KvPair kvs = 1;
+  repeated KvPair kvs = 1 [(buf.validate.field).repeated.min_items = 1];
 }
 
 message PutResponse {

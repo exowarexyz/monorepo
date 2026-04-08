@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package store.compact.v1;
 
+import "buf/validate/validate.proto";
+
 // Prune policy graph and admin RPC (served by the compaction worker).
 
 message PolicyMatchKey {
@@ -26,7 +28,7 @@ message PolicyOrderBy {
 }
 
 message RetainKeepLatest {
-  uint64 count = 1;
+  uint64 count = 1 [(buf.validate.field).uint64.gt = 0];
 }
 
 message RetainGreaterThan {
@@ -60,7 +62,7 @@ service Service {
 }
 
 message PruneRequest {
-  repeated Policy policies = 1;
+  repeated Policy policies = 1 [(buf.validate.field).repeated.min_items = 1];
 }
 
 message PruneResponse {}

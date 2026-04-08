@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package store.query.v1;
 
+import "buf/validate/validate.proto";
+
 // --- Query wire types ---
 
 message RangeEntry {
@@ -216,8 +218,7 @@ service Service {
 }
 
 message GetRequest {
-  // Must be between 0 and 254 bytes (inclusive).
-  bytes key = 1;
+  bytes key = 1 [(buf.validate.field).bytes.max_len = 254];
   optional uint64 min_sequence_number = 2;
 }
 
@@ -233,13 +234,12 @@ message GetResponse {
 // `>= start`). For prefix scans, pass the lexicographic maximum key of the prefix as `end`, or
 // use an empty `end` when scanning through the end of the keyspace is intended.
 message RangeRequest {
-  // Must be between 0 and 254 bytes (inclusive).
-  bytes start = 1;
-  // Must be between 0 and 254 bytes (inclusive). Empty means unbounded above.
-  bytes end = 2;
+  bytes start = 1 [(buf.validate.field).bytes.max_len = 254];
+  // Empty means unbounded above.
+  bytes end = 2 [(buf.validate.field).bytes.max_len = 254];
   optional uint32 limit = 3;
-  uint32 batch_size = 4;
-  TraversalMode mode = 5;
+  uint32 batch_size = 4 [(buf.validate.field).uint32.gt = 0];
+  TraversalMode mode = 5 [(buf.validate.field).enum.defined_only = true];
   optional uint64 min_sequence_number = 6;
 }
 
@@ -252,11 +252,10 @@ message RangeFrame {
 // Same key-range semantics as `RangeRequest`: inclusive `[start, end]` over raw bytes when `end` is
 // non-empty; empty `end` means unbounded above.
 message ReduceRequest {
-  // Must be between 0 and 254 bytes (inclusive).
-  bytes start = 1;
-  // Must be between 0 and 254 bytes (inclusive). Empty means unbounded above.
-  bytes end = 2;
-  ReduceParams params = 3;
+  bytes start = 1 [(buf.validate.field).bytes.max_len = 254];
+  // Empty means unbounded above.
+  bytes end = 2 [(buf.validate.field).bytes.max_len = 254];
+  ReduceParams params = 3 [(buf.validate.field).required = true];
   optional uint64 min_sequence_number = 4;
 }
 
