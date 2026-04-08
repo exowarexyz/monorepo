@@ -133,6 +133,31 @@ impl QueryService for BenchQuery {
         Err(connectrpc::ConnectError::unimplemented("bench"))
     }
 
+    async fn get_many(
+        &self,
+        _ctx: Context,
+        _request: buffa::view::OwnedView<
+            exoware_proto::store::query::v1::GetManyRequestView<'static>,
+        >,
+    ) -> Result<
+        (
+            Pin<
+                Box<
+                    dyn futures::Stream<
+                            Item = Result<
+                                exoware_proto::store::query::v1::GetManyFrame,
+                                connectrpc::ConnectError,
+                            >,
+                        > + Send,
+                >,
+            >,
+            Context,
+        ),
+        connectrpc::ConnectError,
+    > {
+        Err(connectrpc::ConnectError::unimplemented("bench"))
+    }
+
     async fn range(
         &self,
         _ctx: Context,

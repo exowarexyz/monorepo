@@ -200,16 +200,28 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
         encoded_operations: &[Vec<u8>],
         rows: &mut Vec<(Key, Vec<u8>)>,
     ) -> Result<(Position, BTreeMap<Position, D>, D), QmdbError> {
-        let mut peaks = Vec::<(Position, u32, D)>::new();
-        for (peak_pos, height) in PeakIterator::new(previous_ops_size) {
-            let Some(bytes) = session.get(&encode_node_key(peak_pos)).await? else {
+        let peak_entries: Vec<(Position, u32)> = PeakIterator::new(previous_ops_size).collect();
+        let fetched = if peak_entries.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            let peak_keys: Vec<Key> = peak_entries.iter().map(|(pos, _)| encode_node_key(*pos)).collect();
+            let peak_key_refs: Vec<&Key> = peak_keys.iter().collect();
+            session
+                .get_many(&peak_key_refs, peak_key_refs.len() as u32)
+                .await?
+                .collect()
+                .await?
+        };
+        let mut peaks = Vec::<(Position, u32, D)>::with_capacity(peak_entries.len());
+        for (peak_pos, height) in &peak_entries {
+            let Some(bytes) = fetched.get(&encode_node_key(*peak_pos)) else {
                 return Err(QmdbError::CorruptData(format!(
                     "missing prior ops peak node at position {peak_pos}"
                 )));
             };
             peaks.push((
-                peak_pos,
-                height,
+                *peak_pos,
+                *height,
                 decode_digest(bytes.as_ref(), format!("prior ops peak node at {peak_pos}"))?,
             ));
         }
@@ -269,9 +281,21 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
         let leaves = watermark
             .checked_add(1)
             .ok_or_else(|| QmdbError::CorruptData("watermark overflow".to_string()))?;
-        let mut peaks = Vec::new();
-        for (peak_pos, _) in PeakIterator::new(size) {
-            let Some(bytes) = session.get(&encode_node_key(peak_pos)).await? else {
+        let peak_positions: Vec<(Position, u32)> = PeakIterator::new(size).collect();
+        let fetched = if peak_positions.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            let peak_keys: Vec<Key> = peak_positions.iter().map(|(pos, _)| encode_node_key(*pos)).collect();
+            let peak_key_refs: Vec<&Key> = peak_keys.iter().collect();
+            session
+                .get_many(&peak_key_refs, peak_key_refs.len() as u32)
+                .await?
+                .collect()
+                .await?
+        };
+        let mut peaks = Vec::with_capacity(peak_positions.len());
+        for (peak_pos, _) in &peak_positions {
+            let Some(bytes) = fetched.get(&encode_node_key(*peak_pos)) else {
                 return Err(QmdbError::CorruptData(format!(
                     "missing MMR peak node at position {peak_pos}"
                 )));

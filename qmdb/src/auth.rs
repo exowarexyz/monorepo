@@ -392,19 +392,29 @@ pub(crate) async fn append_auth_nodes_incrementally<H: Hasher>(
     delta_operations: &[Vec<u8>],
     rows: &mut Vec<(Key, Vec<u8>)>,
 ) -> Result<(Position, H::Digest), QmdbError> {
-    let mut peaks = Vec::<(Position, u32, H::Digest)>::new();
-    for (peak_pos, height) in PeakIterator::new(previous_ops_size) {
-        let Some(bytes) = session
-            .get(&encode_auth_node_key(namespace, peak_pos))
+    let peak_entries: Vec<(Position, u32)> = PeakIterator::new(previous_ops_size).collect();
+    let fetched = if peak_entries.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        let peak_keys: Vec<Key> = peak_entries.iter().map(|(pos, _)| encode_auth_node_key(namespace, *pos)).collect();
+        let peak_key_refs: Vec<&Key> = peak_keys.iter().collect();
+        session
+            .get_many(&peak_key_refs, peak_key_refs.len() as u32)
             .await?
-        else {
+            .collect()
+            .await?
+    };
+    let mut peaks = Vec::<(Position, u32, H::Digest)>::with_capacity(peak_entries.len());
+    for (peak_pos, height) in &peak_entries {
+        let key = encode_auth_node_key(namespace, *peak_pos);
+        let Some(bytes) = fetched.get(&key) else {
             return Err(QmdbError::CorruptData(format!(
                 "missing authenticated peak node at position {peak_pos}"
             )));
         };
         peaks.push((
-            peak_pos,
-            height,
+            *peak_pos,
+            *height,
             decode_digest(
                 bytes.as_ref(),
                 format!("authenticated peak node at position {peak_pos}"),
@@ -469,12 +479,22 @@ pub(crate) async fn compute_auth_root<H: Hasher>(
     let leaves = watermark
         .checked_add(1)
         .ok_or_else(|| QmdbError::CorruptData("watermark overflow".to_string()))?;
-    let mut peaks = Vec::new();
-    for (peak_pos, _) in PeakIterator::new(size) {
-        let Some(bytes) = session
-            .get(&encode_auth_node_key(namespace, peak_pos))
+    let peak_positions: Vec<(Position, u32)> = PeakIterator::new(size).collect();
+    let fetched = if peak_positions.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        let peak_keys: Vec<Key> = peak_positions.iter().map(|(pos, _)| encode_auth_node_key(namespace, *pos)).collect();
+        let peak_key_refs: Vec<&Key> = peak_keys.iter().collect();
+        session
+            .get_many(&peak_key_refs, peak_key_refs.len() as u32)
             .await?
-        else {
+            .collect()
+            .await?
+    };
+    let mut peaks = Vec::with_capacity(peak_positions.len());
+    for (peak_pos, _) in &peak_positions {
+        let key = encode_auth_node_key(namespace, *peak_pos);
+        let Some(bytes) = fetched.get(&key) else {
             return Err(QmdbError::CorruptData(format!(
                 "missing authenticated MMR peak node at position {peak_pos}"
             )));

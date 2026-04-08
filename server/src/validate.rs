@@ -125,6 +125,35 @@ pub fn validate_range_request(
     Ok(())
 }
 
+pub fn validate_get_many_request(
+    request: &exoware_proto::store::query::v1::GetManyRequestView<'_>,
+) -> Result<(), ConnectError> {
+    if request.keys.is_empty() {
+        return Err(field_error(
+            "store.query",
+            "keys",
+            "at least one key is required",
+            "INVALID_BATCH",
+            "get_many request must contain at least one key",
+            [],
+        ));
+    }
+    for (index, key) in request.keys.iter().enumerate() {
+        validate_key_field("store.query", &format!("keys[{index}]"), key)?;
+    }
+    if request.batch_size == 0 {
+        return Err(field_error(
+            "store.query",
+            "batch_size",
+            "batch_size must be greater than 0",
+            "INVALID_BATCH_SIZE",
+            "get_many batch_size must be positive",
+            [],
+        ));
+    }
+    Ok(())
+}
+
 pub fn validate_reduce_request(
     request: &exoware_proto::store::query::v1::ReduceRequestView<'_>,
 ) -> Result<(), ConnectError> {

@@ -5,6 +5,7 @@ import { HttpError } from './error.js';
 import { PutRequestSchema, KvPairSchema } from './gen/ts/store/v1/ingest_pb.js';
 import {
     GetRequestSchema,
+    GetManyRequestSchema,
     RangeRequestSchema,
     TraversalMode,
 } from './gen/ts/store/v1/query_pb.js';
@@ -15,6 +16,16 @@ import {
 export interface GetResult {
     /** The retrieved value. */
     value: Uint8Array;
+}
+
+/**
+ * An item in the result of a `getMany` operation.
+ */
+export interface GetManyResultItem {
+    /** The key that was looked up. */
+    key: Uint8Array;
+    /** The value, or undefined if the key was not found. */
+    value: Uint8Array | undefined;
 }
 
 /**
@@ -127,6 +138,47 @@ export class StoreClient {
                 return null;
             }
             return { value: res.value };
+        } catch (e) {
+            mapConnectToHttpError(e);
+        }
+    }
+
+    /**
+     * Retrieves multiple values from the store by their keys in a single streaming RPC.
+     * Results stream back as frames; each entry includes its key so results may arrive
+     * in any order. Use the callback to process entries incrementally, or omit it to
+     * collect all results.
+     * @param keys The keys to look up.
+     * @param batchSize Maximum entries per streamed frame; must be positive. Defaults to keys.length.
+     * @param onChunk Optional callback invoked per frame for incremental processing.
+     * @returns All results collected (after all frames have been processed).
+     */
+    async getMany(
+        keys: Uint8Array[],
+        batchSize?: number,
+        onChunk?: (entries: GetManyResultItem[]) => void,
+    ): Promise<GetManyResultItem[]> {
+        const req = create(GetManyRequestSchema, {
+            keys,
+            batchSize: batchSize ?? keys.length,
+        });
+        const results: GetManyResultItem[] = [];
+        try {
+            const stream = this.client.query.getMany(req);
+            for await (const frame of stream) {
+                const chunk: GetManyResultItem[] = [];
+                for (const entry of frame.results) {
+                    chunk.push({
+                        key: entry.key,
+                        value: entry.value,
+                    });
+                }
+                if (onChunk) {
+                    onChunk(chunk);
+                }
+                results.push(...chunk);
+            }
+            return results;
         } catch (e) {
             mapConnectToHttpError(e);
         }

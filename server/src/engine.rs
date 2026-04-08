@@ -23,6 +23,10 @@ pub trait StoreEngine: Send + Sync + 'static {
         forward: bool,
     ) -> Result<Vec<(Bytes, Bytes)>, String>;
 
+    fn get_many(&self, keys: &[&[u8]]) -> Result<Vec<(Vec<u8>, Option<Vec<u8>>)>, String> {
+        keys.iter().map(|k| Ok((k.to_vec(), self.get(k)?))).collect()
+    }
+
     /// Current sequence number visible to readers (used for `min_sequence_number` checks).
     fn current_sequence(&self) -> u64;
 }

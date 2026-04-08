@@ -7232,8 +7232,9 @@ async fn stream_index_lookup_scan(
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))?
         {
+            let mut pk_batch: Vec<Key> = Vec::new();
             for (key, _index_value) in &chunk {
-                if emitted + batch_builder.row_count() >= target_rows {
+                if emitted + batch_builder.row_count() + pk_batch.len() >= target_rows {
                     break;
                 }
                 if !key_predicate_plan.matches_key(key) {
@@ -7250,40 +7251,55 @@ async fn stream_index_lookup_scan(
                 if !seen.insert(primary_key.clone()) {
                     continue;
                 }
-                let base_value = ctx
+                pk_batch.push(primary_key);
+            }
+
+            if !pk_batch.is_empty() {
+                let pk_refs: Vec<&Key> = pk_batch.iter().collect();
+                let mut get_stream = ctx
                     .session
-                    .get(&primary_key)
+                    .get_many(&pk_refs, flush_threshold as u32)
                     .await
                     .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                let Some(base_value) = base_value else {
-                    continue;
-                };
-                let Some(pk_values) = decode_primary_key_selected(
-                    ctx.model.table_prefix,
-                    &primary_key,
-                    ctx.model,
-                    &ctx.access_plan.required_pk_mask,
-                ) else {
-                    continue;
-                };
-                let Ok(archived) = decode_stored_row(&base_value) else {
-                    continue;
-                };
-                if archived.values.len() != ctx.model.columns.len() {
-                    continue;
-                }
-                if !ctx.access_plan.matches_archived_row(&pk_values, &archived) {
-                    continue;
-                }
-                if !batch_builder.append_archived_row(&pk_values, &archived)? {
-                    continue;
-                }
-                if batch_builder.row_count() >= flush_threshold
-                    && !flush_projected_batch(tx, ctx, &mut batch_builder, &mut emitted).await?
+                while let Some(entries) = get_stream
+                    .next_chunk()
+                    .await
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?
                 {
-                    return Ok(());
+                    for (pk_key, base_value) in entries {
+                        let Some(base_value) = base_value else {
+                            continue;
+                        };
+                        let Some(pk_values) = decode_primary_key_selected(
+                            ctx.model.table_prefix,
+                            &pk_key,
+                            ctx.model,
+                            &ctx.access_plan.required_pk_mask,
+                        ) else {
+                            continue;
+                        };
+                        let Ok(archived) = decode_stored_row(&base_value) else {
+                            continue;
+                        };
+                        if archived.values.len() != ctx.model.columns.len() {
+                            continue;
+                        }
+                        if !ctx.access_plan.matches_archived_row(&pk_values, &archived) {
+                            continue;
+                        }
+                        if !batch_builder.append_archived_row(&pk_values, &archived)? {
+                            continue;
+                        }
+                        if batch_builder.row_count() >= flush_threshold
+                            && !flush_projected_batch(tx, ctx, &mut batch_builder, &mut emitted)
+                                .await?
+                        {
+                            return Ok(());
+                        }
+                    }
                 }
             }
+
             if emitted + batch_builder.row_count() >= target_rows {
                 break;
             }
@@ -9146,6 +9162,7 @@ mod tests {
     };
     use exoware_proto::store::query::v1::RangeEntry as ProtoRangeEntry;
     use exoware_proto::store::query::v1::{
+        GetManyEntry as ProtoGetManyEntry, GetManyFrame as ProtoGetManyFrame,
         GetResponse as ProtoGetResponse, RangeFrame as ProtoRangeFrame,
         ReduceResponse as ProtoReduceResponse, Service as QueryService,
         ServiceServer as QueryServiceServer,
@@ -9505,6 +9522,52 @@ mod tests {
             let mut frames: Vec<Result<ProtoRangeFrame, ConnectError>> = Vec::new();
             for chunk in results.chunks(batch) {
                 frames.push(Ok(ProtoRangeFrame {
+                    results: chunk.to_vec(),
+                    ..Default::default()
+                }));
+            }
+            let detail = exoware_proto::store::query::v1::Detail {
+                sequence_number: token,
+                read_stats: Default::default(),
+                ..Default::default()
+            };
+            Ok((
+                Box::pin(stream::iter(frames)),
+                exoware_proto::with_query_detail_trailer(Context::default(), &detail),
+            ))
+        }
+
+        async fn get_many(
+            &self,
+            _ctx: Context,
+            request: buffa::view::OwnedView<
+                exoware_proto::store::query::v1::GetManyRequestView<'static>,
+            >,
+        ) -> Result<
+            (
+                Pin<Box<dyn Stream<Item = Result<ProtoGetManyFrame, ConnectError>> + Send>>,
+                Context,
+            ),
+            ConnectError,
+        > {
+            ensure_min_sequence_number(&self.state.sequence_number, request.min_sequence_number)?;
+            let batch_size = usize::try_from(request.batch_size).unwrap_or(usize::MAX).max(1);
+            let guard = self.state.kv.lock().expect("kv mutex poisoned");
+            let mut entries: Vec<ProtoGetManyEntry> = Vec::new();
+            for key_bytes in request.keys.iter() {
+                let key: Key = key_bytes.to_vec().into();
+                let value = guard.get(&key).cloned();
+                entries.push(ProtoGetManyEntry {
+                    key: key.to_vec(),
+                    value: value.map(|v| v.to_vec()),
+                    ..Default::default()
+                });
+            }
+            drop(guard);
+            let token = self.state.sequence_number.load(AtomicOrdering::Relaxed);
+            let mut frames: Vec<Result<ProtoGetManyFrame, ConnectError>> = Vec::new();
+            for chunk in entries.chunks(batch_size) {
+                frames.push(Ok(ProtoGetManyFrame {
                     results: chunk.to_vec(),
                     ..Default::default()
                 }));
@@ -14575,6 +14638,22 @@ mod tests {
             Err(ConnectError::unimplemented("test harness"))
         }
 
+        async fn get_many(
+            &self,
+            _ctx: Context,
+            _request: buffa::view::OwnedView<
+                exoware_proto::store::query::v1::GetManyRequestView<'static>,
+            >,
+        ) -> Result<
+            (
+                Pin<Box<dyn Stream<Item = Result<ProtoGetManyFrame, ConnectError>> + Send>>,
+                Context,
+            ),
+            ConnectError,
+        > {
+            Err(ConnectError::unimplemented("test harness"))
+        }
+
         async fn range(
             &self,
             _ctx: Context,
@@ -14644,6 +14723,22 @@ mod tests {
             Err(ConnectError::unimplemented("test harness"))
         }
 
+        async fn get_many(
+            &self,
+            _ctx: Context,
+            _request: buffa::view::OwnedView<
+                exoware_proto::store::query::v1::GetManyRequestView<'static>,
+            >,
+        ) -> Result<
+            (
+                Pin<Box<dyn Stream<Item = Result<ProtoGetManyFrame, ConnectError>> + Send>>,
+                Context,
+            ),
+            ConnectError,
+        > {
+            Err(ConnectError::unimplemented("test harness"))
+        }
+
         async fn range(
             &self,
             _ctx: Context,
@@ -14710,6 +14805,22 @@ mod tests {
                 exoware_proto::store::query::v1::GetRequestView<'static>,
             >,
         ) -> Result<(ProtoGetResponse, Context), ConnectError> {
+            Err(ConnectError::unimplemented("test harness"))
+        }
+
+        async fn get_many(
+            &self,
+            _ctx: Context,
+            _request: buffa::view::OwnedView<
+                exoware_proto::store::query::v1::GetManyRequestView<'static>,
+            >,
+        ) -> Result<
+            (
+                Pin<Box<dyn Stream<Item = Result<ProtoGetManyFrame, ConnectError>> + Send>>,
+                Context,
+            ),
+            ConnectError,
+        > {
             Err(ConnectError::unimplemented("test harness"))
         }
 

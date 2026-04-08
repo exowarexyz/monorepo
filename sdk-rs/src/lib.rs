@@ -28,8 +28,8 @@ use exoware_proto::query as proto_query;
 use exoware_proto::query::ServiceClient as QueryServiceClient;
 use exoware_proto::store::ingest::v1::PutRequest as ProtoPutRequest;
 use exoware_proto::store::query::v1::{
-    GetRequest as ProtoGetRequest, RangeRequest as ProtoRangeRequest,
-    ReduceRequest as ProtoWireReduceRequest,
+    GetManyRequest as ProtoGetManyRequest, GetRequest as ProtoGetRequest,
+    RangeRequest as ProtoRangeRequest, ReduceRequest as ProtoWireReduceRequest,
 };
 use exoware_proto::RangeReduceRequest as DomainRangeReduceRequest;
 use exoware_proto::{
@@ -42,6 +42,7 @@ use exoware_proto::{
     QUERY_DETAIL_RESPONSE_HEADER as PROTO_QUERY_DETAIL_RESPONSE_HEADER,
 };
 use http::HeaderMap;
+use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
@@ -257,6 +258,117 @@ impl RangeStream {
             entries.extend(chunk);
         }
         Ok(entries)
+    }
+}
+
+pub struct GetManyStream {
+    stream: ConnectServerStream<
+        hyper::body::Incoming,
+        exoware_proto::query::GetManyFrameView<'static>,
+    >,
+    pending_frame: Option<exoware_proto::query::GetManyFrame>,
+    entries_seen: usize,
+    final_detail: Option<proto_query::Detail>,
+    finished: bool,
+    sequence_number: Option<Arc<AtomicU64>>,
+}
+
+impl GetManyStream {
+    fn from_connect_stream(
+        stream: ConnectServerStream<
+            hyper::body::Incoming,
+            exoware_proto::query::GetManyFrameView<'static>,
+        >,
+        sequence_number: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            stream,
+            pending_frame: None,
+            entries_seen: 0,
+            final_detail: None,
+            finished: false,
+            sequence_number: Some(sequence_number),
+        }
+    }
+
+    fn observe_detail_from_stream_trailers(&mut self) {
+        self.final_detail = self
+            .stream
+            .trailers()
+            .and_then(query_detail_from_header_map);
+        if let (Some(token_store), Some(d)) = (&self.sequence_number, self.final_detail.as_ref()) {
+            token_store.fetch_max(d.sequence_number, Ordering::SeqCst);
+        }
+    }
+
+    async fn prefetch_first_frame(&mut self) -> Result<(), ConnectError> {
+        if self.pending_frame.is_some() || self.finished {
+            return Ok(());
+        }
+        match self.stream.message().await? {
+            Some(frame) => {
+                self.pending_frame = Some(frame.to_owned_message());
+                Ok(())
+            }
+            None => {
+                self.finished = true;
+                if let Some(err) = self.stream.error() {
+                    Err(err.clone())
+                } else {
+                    self.observe_detail_from_stream_trailers();
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    pub async fn next_chunk(&mut self) -> Result<Option<Vec<(Key, Option<Bytes>)>>, ClientError> {
+        if self.finished {
+            return Ok(None);
+        }
+        let frame = if let Some(frame) = self.pending_frame.take() {
+            frame
+        } else {
+            let Some(frame) = self
+                .stream
+                .message()
+                .await
+                .map_err(client_error_from_connect)?
+            else {
+                self.finished = true;
+                if let Some(err) = self.stream.error() {
+                    return Err(client_error_from_connect(err.clone()));
+                }
+                self.observe_detail_from_stream_trailers();
+                return Ok(None);
+            };
+            frame.to_owned_message()
+        };
+
+        self.entries_seen += frame.results.len();
+        Ok(Some(
+            frame
+                .results
+                .iter()
+                .map(|entry| {
+                    let key = Bytes::copy_from_slice(&entry.key);
+                    let value = entry.value.as_ref().map(|v| Bytes::copy_from_slice(v));
+                    (key, value)
+                })
+                .collect(),
+        ))
+    }
+
+    pub async fn collect(mut self) -> Result<HashMap<Key, Bytes>, ClientError> {
+        let mut map = HashMap::new();
+        while let Some(chunk) = self.next_chunk().await? {
+            for (key, value) in chunk {
+                if let Some(v) = value {
+                    map.insert(key, v);
+                }
+            }
+        }
+        Ok(map)
     }
 }
 
@@ -611,6 +723,89 @@ impl StoreClient {
             self.observe_sequence_number(d.sequence_number);
         }
         Ok(response.value.map(Bytes::from))
+    }
+
+    pub async fn get_many(
+        &self,
+        keys: &[&Key],
+        batch_size: u32,
+    ) -> Result<GetManyStream, ClientError> {
+        self.get_many_internal(keys, batch_size, None).await
+    }
+
+    pub async fn get_many_with_min_sequence_number(
+        &self,
+        keys: &[&Key],
+        batch_size: u32,
+        min_sequence_number: u64,
+    ) -> Result<GetManyStream, ClientError> {
+        self.get_many_internal(keys, batch_size, Some(min_sequence_number))
+            .await
+    }
+
+    async fn get_many_internal(
+        &self,
+        keys: &[&Key],
+        batch_size: u32,
+        min_sequence_number: Option<u64>,
+    ) -> Result<GetManyStream, ClientError> {
+        for key in keys {
+            if !is_valid_key_size(key.len()) {
+                return Err(ClientError::WireFormat(format!(
+                    "key length {} exceeds max physical key length",
+                    key.len()
+                )));
+            }
+        }
+
+        let config = store_connect_client_config(
+            self.query_url
+                .parse()
+                .map_err(|e| ClientError::WireFormat(format!("invalid query base URL: {e}")))?,
+            self.connect_request_compression,
+        );
+        let client = QueryServiceClient::new(self.connect_http.clone(), config);
+        let proto_keys: Vec<Vec<u8>> = keys.iter().map(|k| k.to_vec()).collect();
+        let effective_min = self.effective_min_sequence_number(min_sequence_number);
+        let max_attempts = self.retry_config.max_attempts.max(1);
+        let mut attempt = 1usize;
+        loop {
+            match client
+                .get_many(ProtoGetManyRequest {
+                    keys: proto_keys.clone(),
+                    min_sequence_number: effective_min,
+                    batch_size,
+                    ..Default::default()
+                })
+                .await
+            {
+                Ok(stream) => {
+                    let mut gms = GetManyStream::from_connect_stream(
+                        stream,
+                        self.sequence_number.clone(),
+                    );
+                    if let Err(err) = gms.prefetch_first_frame().await {
+                        if attempt < max_attempts && is_retryable_error(&err) {
+                            let delay = retry_delay_for_error(&err, attempt, self.retry_config);
+                            tokio::time::sleep(delay).await;
+                            attempt += 1;
+                            continue;
+                        }
+                        return Err(client_error_from_connect(err));
+                    }
+                    return Ok(gms);
+                }
+                Err(err) => {
+                    if attempt < max_attempts && is_retryable_error(&err) {
+                        let delay = retry_delay_for_error(&err, attempt, self.retry_config);
+                        tokio::time::sleep(delay).await;
+                        attempt += 1;
+                        continue;
+                    }
+                    return Err(client_error_from_connect(err));
+                }
+            }
+        }
     }
 
     /// Key range is inclusive: `start <= key <= end` when `end` is non-empty; empty `end` is
@@ -1096,6 +1291,39 @@ impl SerializableReadSession {
             move || {
                 let client = unseeded_client.clone();
                 async move { client.get(key).await }
+            },
+        )
+        .await
+    }
+
+    pub async fn get_many(
+        &self,
+        keys: &[&Key],
+        batch_size: u32,
+    ) -> Result<GetManyStream, ClientError> {
+        let keys_owned: Vec<Key> = keys.iter().map(|k| Bytes::copy_from_slice(k)).collect();
+        let seeded_client = self.client.clone();
+        let unseeded_client = self.client.clone();
+        let keys_seeded = keys_owned.clone();
+        let keys_unseeded = keys_owned;
+        self.run_read(
+            move |token| {
+                let client = seeded_client.clone();
+                let keys = keys_seeded.clone();
+                async move {
+                    let refs: Vec<&Key> = keys.iter().collect();
+                    client
+                        .get_many_with_min_sequence_number(&refs, batch_size, token)
+                        .await
+                }
+            },
+            move || {
+                let client = unseeded_client.clone();
+                let keys = keys_unseeded.clone();
+                async move {
+                    let refs: Vec<&Key> = keys.iter().collect();
+                    client.get_many(&refs, batch_size).await
+                }
             },
         )
         .await

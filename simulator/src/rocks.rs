@@ -129,6 +129,18 @@ impl StoreEngine for RocksStore {
             .map_err(|e| e.to_string())
     }
 
+    fn get_many(&self, keys: &[&[u8]]) -> Result<Vec<(Vec<u8>, Option<Vec<u8>>)>, String> {
+        let results = self.db.multi_get(keys);
+        keys.iter()
+            .zip(results)
+            .filter(|(k, _)| **k != SEQ_META_KEY)
+            .map(|(k, r)| {
+                let value = r.map_err(|e| e.to_string())?;
+                Ok((k.to_vec(), value))
+            })
+            .collect()
+    }
+
     fn current_sequence(&self) -> u64 {
         self.sequence.load(Ordering::SeqCst)
     }

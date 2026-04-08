@@ -16,8 +16,8 @@ use exoware_proto::ingest::{
     PutResponse as ProtoPutResponse, Service as IngestApi, ServiceServer as IngestServiceServer,
 };
 use exoware_proto::query::{
-    Detail, GetResponse, RangeEntry, RangeFrame, ReduceResponse, Service as QueryApi,
-    ServiceServer as QueryServiceServer,
+    Detail, GetManyEntry, GetManyFrame, GetResponse, RangeEntry, RangeFrame, ReduceResponse,
+    Service as QueryApi, ServiceServer as QueryServiceServer,
 };
 use exoware_proto::{
     connect_compression_registry, encode_query_detail_header_value,
@@ -234,6 +234,69 @@ impl QueryApi for QueryConnect {
             },
             ctx,
         ))
+    }
+
+    async fn get_many(
+        &self,
+        mut ctx: Context,
+        request: buffa::view::OwnedView<
+            exoware_proto::store::query::v1::GetManyRequestView<'static>,
+        >,
+    ) -> Result<
+        (
+            Pin<Box<dyn Stream<Item = Result<GetManyFrame, ConnectError>> + Send>>,
+            Context,
+        ),
+        ConnectError,
+    > {
+        validate::validate_get_many_request(&request)?;
+        self.ensure_min_sequence_number(request.min_sequence_number)?;
+
+        let key_refs: Vec<&[u8]> = request.keys.iter().map(|k| *k).collect();
+        let entries = self
+            .state
+            .engine
+            .get_many(&key_refs)
+            .map_err(ConnectError::internal)?;
+
+        let sequence_number = self.current_sequence_number();
+        let read_bytes: u64 = entries
+            .iter()
+            .map(|(k, v)| k.len() as u64 + v.as_ref().map_or(0u64, |v| v.len() as u64))
+            .sum();
+        let detail = Detail {
+            sequence_number,
+            read_stats: [("read_bytes".to_string(), read_bytes)]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        Self::apply_query_detail_trailer(&mut ctx, &detail);
+
+        let batch_size = request.batch_size as usize;
+        let mut frames = Vec::new();
+        let mut chunk = Vec::new();
+        for (key, value) in entries {
+            chunk.push(GetManyEntry {
+                key,
+                value,
+                ..Default::default()
+            });
+            if chunk.len() >= batch_size {
+                frames.push(Ok(GetManyFrame {
+                    results: chunk.drain(..).collect(),
+                    ..Default::default()
+                }));
+            }
+        }
+        if !chunk.is_empty() {
+            frames.push(Ok(GetManyFrame {
+                results: chunk,
+                ..Default::default()
+            }));
+        }
+
+        Ok((Box::pin(stream::iter(frames)), ctx))
     }
 
     async fn range(
