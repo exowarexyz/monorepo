@@ -6,6 +6,8 @@ QMDB instance backed by the Exoware API.
 
 `exoware-qmdb` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
 
+## Supported backends
+
 The crate supports multiple Commonware authenticated backends:
 
 - **Ordered QMDB** (`OrderedClient`): `qmdb::any` and `qmdb::current::ordered`

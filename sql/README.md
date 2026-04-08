@@ -6,9 +6,9 @@ SQL engine backed by the Exoware API.
 
 `exoware-sql` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
 
-`exoware-sql` is library-first: register `KvSchema` tables against a [`StoreClient`](https://docs.rs/exoware-sdk-rs), then run SQL.
-
 ## Library usage
+
+`exoware-sql` is library-first: register `KvSchema` tables against a [`StoreClient`](https://docs.rs/exoware-sdk-rs), then run SQL.
 
 All table registration goes through `KvSchema`, which auto-assigns compact
 codec prefixes so multiple tables can coexist on a single KV store while still

@@ -5,6 +5,12 @@
 
 Serve the Exoware API.
 
+## Status
+
+`exoware-server` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
+
+## Overview
+
 `exoware-server` provides a backend-less ConnectRPC server for the Exoware API.
 Implement the `StoreEngine` trait for your storage backend, wrap it in
 `AppState`, and call `connect_stack` to get a ready-to-serve router with
@@ -20,7 +26,3 @@ use exoware_server::{AppState, StoreEngine, connect_stack};
 //   fn delete_batch(&self, keys: &[&[u8]]) -> Result<u64, String>;
 //   fn current_sequence(&self) -> u64;
 ```
-
-## Status
-
-`exoware-server` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
