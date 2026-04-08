@@ -85,7 +85,7 @@ use crate::kv_codec::{
     KvReducedValue,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RangeReduceOp {
     CountAll,
     CountField,
@@ -94,40 +94,33 @@ pub enum RangeReduceOp {
     MaxField,
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RangeReducerSpec {
     pub op: RangeReduceOp,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expr: Option<KvExpr>,
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RangeReduceRequest {
     pub reducers: Vec<RangeReducerSpec>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_by: Vec<KvExpr>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter: Option<KvPredicate>,
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RangeReduceResult {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<KvReducedValue>,
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RangeReduceGroup {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_values: Vec<Option<KvReducedValue>>,
     pub results: Vec<RangeReduceResult>,
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RangeReduceResponse {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub results: Vec<RangeReduceResult>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<RangeReduceGroup>,
 }
 

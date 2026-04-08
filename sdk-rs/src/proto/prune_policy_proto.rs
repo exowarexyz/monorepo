@@ -1,5 +1,6 @@
 //! Convert protobuf prune-policy views into `prune_policy` domain types.
 
+use crate::kv_codec::Utf8;
 use crate::prune_policy::{
     GroupBy, MatchKey, OrderBy, OrderEncoding, PrunePolicy, PrunePolicyDocument, RetainPolicy,
     PRUNE_POLICY_DOCUMENT_VERSION,
@@ -55,8 +56,8 @@ fn prune_policy_from_view(p: &PolicyView<'_>) -> Result<PrunePolicy, String> {
     let mk = &*p.match_key;
     let match_key = MatchKey {
         reserved_bits: u8_from_u32("match_key.reserved_bits", mk.reserved_bits)?,
-        family: u16_from_u32("match_key.prefix", mk.prefix)?,
-        payload_regex: mk.payload_regex.to_string(),
+        prefix: u16_from_u32("match_key.prefix", mk.prefix)?,
+        payload_regex: Utf8::from(mk.payload_regex.as_ref()),
     };
 
     let group_by = if p.group_by.is_set() {
@@ -65,7 +66,7 @@ fn prune_policy_from_view(p: &PolicyView<'_>) -> Result<PrunePolicy, String> {
                 .group_by
                 .capture_groups
                 .iter()
-                .map(|s| (*s).to_string())
+                .map(|s| Utf8::from(&**s))
                 .collect(),
         }
     } else {
@@ -75,7 +76,7 @@ fn prune_policy_from_view(p: &PolicyView<'_>) -> Result<PrunePolicy, String> {
     let order_by = if p.order_by.is_set() {
         let o: &PolicyOrderByView<'_> = &p.order_by;
         Some(OrderBy {
-            capture_group: o.capture_group.to_string(),
+            capture_group: Utf8::from(&*o.capture_group),
             encoding: order_encoding_from_proto(&o.encoding)?,
         })
     } else {

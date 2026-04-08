@@ -602,7 +602,7 @@ impl<'a> HistoricalOpsClientCore<'a> {
         &self,
         session: &SerializableReadSession,
     ) -> Result<Option<Location>, QmdbError> {
-        let (start, end) = watermark_codec().family_bounds();
+        let (start, end) = watermark_codec().prefix_bounds();
         let rows = session
             .range_with_mode(&start, &end, 1, RangeMode::Reverse)
             .await?;

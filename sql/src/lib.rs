@@ -40,11 +40,11 @@ use datafusion::physical_plan::{
 };
 use datafusion::prelude::SessionContext;
 use exoware_sdk_rs::keys::{Key, KeyCodec, KeyMut};
+use commonware_codec::Encode;
 use exoware_sdk_rs::kv_codec::{
-    access_stored_row, canonicalize_reduced_group_values, encode_reduced_group_key, eval_predicate,
-    interleave_ordered_key_fields, ArchivedStoredRow, ArchivedStoredValue, KvExpr, KvFieldKind,
-    KvFieldRef, KvPredicate, KvPredicateCheck, KvPredicateConstraint, KvReducedValue, StoredRow,
-    StoredValue,
+    canonicalize_reduced_group_values, decode_stored_row, encode_reduced_group_key, eval_predicate,
+    interleave_ordered_key_fields, KvExpr, KvFieldKind, KvFieldRef, KvPredicate, KvPredicateCheck,
+    KvPredicateConstraint, KvReducedValue, StoredRow, StoredValue,
 };
 use exoware_sdk_rs as exoware_proto;
 use exoware_proto::to_domain_reduce_response;
@@ -1112,7 +1112,7 @@ impl ScanAccessPlan {
         }
     }
 
-    fn matches_archived_row(&self, pk_values: &[CellValue], archived: &ArchivedStoredRow) -> bool {
+    fn matches_archived_row(&self, pk_values: &[CellValue], archived: &StoredRow) -> bool {
         for check in &self.predicate_checks {
             match check {
                 PredicateAccess::Pk { pk_pos, constraint } => {
@@ -2137,43 +2137,43 @@ fn make_column_builder(model: &TableModel, idx: usize) -> ColumnBuilder {
 
 fn archived_non_pk_value_is_valid(
     col: &ResolvedColumn,
-    stored_opt: Option<&ArchivedStoredValue>,
+    stored_opt: Option<&StoredValue>,
 ) -> bool {
     let Some(stored) = stored_opt else {
         return col.nullable;
     };
     match (col.kind, stored) {
-        (ColumnKind::Int64, ArchivedStoredValue::Int64(_)) => true,
-        (ColumnKind::UInt64, ArchivedStoredValue::UInt64(_)) => true,
-        (ColumnKind::Float64, ArchivedStoredValue::Float64(_)) => true,
-        (ColumnKind::Float64, ArchivedStoredValue::Int64(_)) => true,
-        (ColumnKind::Boolean, ArchivedStoredValue::Boolean(_)) => true,
-        (ColumnKind::Date32, ArchivedStoredValue::Int64(_)) => true,
-        (ColumnKind::Date64, ArchivedStoredValue::Int64(_)) => true,
-        (ColumnKind::Timestamp, ArchivedStoredValue::Int64(_)) => true,
-        (ColumnKind::Decimal128, ArchivedStoredValue::Bytes(bytes)) => bytes.as_slice().len() == 16,
-        (ColumnKind::Decimal256, ArchivedStoredValue::Bytes(bytes)) => bytes.as_slice().len() == 32,
-        (ColumnKind::Utf8, ArchivedStoredValue::Utf8(_)) => true,
-        (ColumnKind::FixedSizeBinary(expected), ArchivedStoredValue::Bytes(bytes)) => {
+        (ColumnKind::Int64, StoredValue::Int64(_)) => true,
+        (ColumnKind::UInt64, StoredValue::UInt64(_)) => true,
+        (ColumnKind::Float64, StoredValue::Float64(_)) => true,
+        (ColumnKind::Float64, StoredValue::Int64(_)) => true,
+        (ColumnKind::Boolean, StoredValue::Boolean(_)) => true,
+        (ColumnKind::Date32, StoredValue::Int64(_)) => true,
+        (ColumnKind::Date64, StoredValue::Int64(_)) => true,
+        (ColumnKind::Timestamp, StoredValue::Int64(_)) => true,
+        (ColumnKind::Decimal128, StoredValue::Bytes(bytes)) => bytes.as_slice().len() == 16,
+        (ColumnKind::Decimal256, StoredValue::Bytes(bytes)) => bytes.as_slice().len() == 32,
+        (ColumnKind::Utf8, StoredValue::Utf8(_)) => true,
+        (ColumnKind::FixedSizeBinary(expected), StoredValue::Bytes(bytes)) => {
             bytes.as_slice().len() == expected
         }
-        (ColumnKind::List(ListElementKind::Int64), ArchivedStoredValue::List(items)) => items
+        (ColumnKind::List(ListElementKind::Int64), StoredValue::List(items)) => items
             .iter()
-            .all(|item| matches!(item, ArchivedStoredValue::Int64(_))),
-        (ColumnKind::List(ListElementKind::Float64), ArchivedStoredValue::List(items)) => {
+            .all(|item| matches!(item, StoredValue::Int64(_))),
+        (ColumnKind::List(ListElementKind::Float64), StoredValue::List(items)) => {
             items.iter().all(|item| {
                 matches!(
                     item,
-                    ArchivedStoredValue::Float64(_) | ArchivedStoredValue::Int64(_)
+                    StoredValue::Float64(_) | StoredValue::Int64(_)
                 )
             })
         }
-        (ColumnKind::List(ListElementKind::Boolean), ArchivedStoredValue::List(items)) => items
+        (ColumnKind::List(ListElementKind::Boolean), StoredValue::List(items)) => items
             .iter()
-            .all(|item| matches!(item, ArchivedStoredValue::Boolean(_))),
-        (ColumnKind::List(ListElementKind::Utf8), ArchivedStoredValue::List(items)) => items
+            .all(|item| matches!(item, StoredValue::Boolean(_))),
+        (ColumnKind::List(ListElementKind::Utf8), StoredValue::List(items)) => items
             .iter()
-            .all(|item| matches!(item, ArchivedStoredValue::Utf8(_))),
+            .all(|item| matches!(item, StoredValue::Utf8(_))),
         _ => false,
     }
 }
@@ -2181,40 +2181,40 @@ fn archived_non_pk_value_is_valid(
 fn append_archived_non_pk_value(
     builder: &mut ColumnBuilder,
     col: &ResolvedColumn,
-    stored_opt: Option<&ArchivedStoredValue>,
+    stored_opt: Option<&StoredValue>,
 ) -> DataFusionResult<()> {
     let Some(stored) = stored_opt else {
         return builder.append(&CellValue::Null);
     };
     match (builder, col.kind, stored) {
-        (ColumnBuilder::Int64(b), ColumnKind::Int64, ArchivedStoredValue::Int64(v)) => {
+        (ColumnBuilder::Int64(b), ColumnKind::Int64, StoredValue::Int64(v)) => {
             b.append_value((*v).into())
         }
-        (ColumnBuilder::UInt64(b), ColumnKind::UInt64, ArchivedStoredValue::UInt64(v)) => {
+        (ColumnBuilder::UInt64(b), ColumnKind::UInt64, StoredValue::UInt64(v)) => {
             b.append_value((*v).into())
         }
-        (ColumnBuilder::Float64(b), ColumnKind::Float64, ArchivedStoredValue::Float64(v)) => {
+        (ColumnBuilder::Float64(b), ColumnKind::Float64, StoredValue::Float64(v)) => {
             b.append_value((*v).into())
         }
-        (ColumnBuilder::Float64(b), ColumnKind::Float64, ArchivedStoredValue::Int64(v)) => {
+        (ColumnBuilder::Float64(b), ColumnKind::Float64, StoredValue::Int64(v)) => {
             b.append_value(i64::from(*v) as f64)
         }
-        (ColumnBuilder::Boolean(b), ColumnKind::Boolean, ArchivedStoredValue::Boolean(v)) => {
+        (ColumnBuilder::Boolean(b), ColumnKind::Boolean, StoredValue::Boolean(v)) => {
             b.append_value(*v)
         }
-        (ColumnBuilder::Date32(b), ColumnKind::Date32, ArchivedStoredValue::Int64(v)) => {
+        (ColumnBuilder::Date32(b), ColumnKind::Date32, StoredValue::Int64(v)) => {
             b.append_value(i64::from(*v) as i32)
         }
-        (ColumnBuilder::Date64(b), ColumnKind::Date64, ArchivedStoredValue::Int64(v)) => {
+        (ColumnBuilder::Date64(b), ColumnKind::Date64, StoredValue::Int64(v)) => {
             b.append_value((*v).into())
         }
-        (ColumnBuilder::Timestamp(b), ColumnKind::Timestamp, ArchivedStoredValue::Int64(v)) => {
+        (ColumnBuilder::Timestamp(b), ColumnKind::Timestamp, StoredValue::Int64(v)) => {
             b.append_value((*v).into())
         }
         (
             ColumnBuilder::Decimal128(b),
             ColumnKind::Decimal128,
-            ArchivedStoredValue::Bytes(bytes),
+            StoredValue::Bytes(bytes),
         ) => {
             let arr: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
                 DataFusionError::Execution("invalid Decimal128 byte width".to_string())
@@ -2224,30 +2224,30 @@ fn append_archived_non_pk_value(
         (
             ColumnBuilder::Decimal256(b),
             ColumnKind::Decimal256,
-            ArchivedStoredValue::Bytes(bytes),
+            StoredValue::Bytes(bytes),
         ) => {
             let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
                 DataFusionError::Execution("invalid Decimal256 byte width".to_string())
             })?;
             b.append_value(i256::from_le_bytes(arr))
         }
-        (ColumnBuilder::Utf8 { builder, .. }, ColumnKind::Utf8, ArchivedStoredValue::Utf8(v)) => {
+        (ColumnBuilder::Utf8 { builder, .. }, ColumnKind::Utf8, StoredValue::Utf8(v)) => {
             builder.append_value(v.as_str())
         }
         (
             ColumnBuilder::FixedBinary(b),
             ColumnKind::FixedSizeBinary(_),
-            ArchivedStoredValue::Bytes(v),
+            StoredValue::Bytes(v),
         ) => b
             .append_value(v.as_slice())
             .map_err(|e| DataFusionError::Execution(format!("FixedBinary append error: {e}")))?,
         (
             ColumnBuilder::ListInt64(b),
             ColumnKind::List(ListElementKind::Int64),
-            ArchivedStoredValue::List(items),
+            StoredValue::List(items),
         ) => {
             for item in items.iter() {
-                let ArchivedStoredValue::Int64(v) = item else {
+                let StoredValue::Int64(v) = item else {
                     return Err(DataFusionError::Execution(
                         "list element type mismatch".to_string(),
                     ));
@@ -2259,12 +2259,12 @@ fn append_archived_non_pk_value(
         (
             ColumnBuilder::ListFloat64(b),
             ColumnKind::List(ListElementKind::Float64),
-            ArchivedStoredValue::List(items),
+            StoredValue::List(items),
         ) => {
             for item in items.iter() {
                 match item {
-                    ArchivedStoredValue::Float64(v) => b.values().append_value((*v).into()),
-                    ArchivedStoredValue::Int64(v) => b.values().append_value(i64::from(*v) as f64),
+                    StoredValue::Float64(v) => b.values().append_value((*v).into()),
+                    StoredValue::Int64(v) => b.values().append_value(i64::from(*v) as f64),
                     _ => {
                         return Err(DataFusionError::Execution(
                             "list element type mismatch".to_string(),
@@ -2277,10 +2277,10 @@ fn append_archived_non_pk_value(
         (
             ColumnBuilder::ListBoolean(b),
             ColumnKind::List(ListElementKind::Boolean),
-            ArchivedStoredValue::List(items),
+            StoredValue::List(items),
         ) => {
             for item in items.iter() {
-                let ArchivedStoredValue::Boolean(v) = item else {
+                let StoredValue::Boolean(v) = item else {
                     return Err(DataFusionError::Execution(
                         "list element type mismatch".to_string(),
                     ));
@@ -2292,10 +2292,10 @@ fn append_archived_non_pk_value(
         (
             ColumnBuilder::ListUtf8(b),
             ColumnKind::List(ListElementKind::Utf8),
-            ArchivedStoredValue::List(items),
+            StoredValue::List(items),
         ) => {
             for item in items.iter() {
-                let ArchivedStoredValue::Utf8(v) = item else {
+                let StoredValue::Utf8(v) = item else {
                     return Err(DataFusionError::Execution(
                         "list element type mismatch".to_string(),
                     ));
@@ -2349,7 +2349,7 @@ impl ProjectedBatchBuilder {
     fn append_archived_row(
         &mut self,
         pk_values: &[CellValue],
-        archived: &ArchivedStoredRow,
+        archived: &StoredRow,
     ) -> DataFusionResult<bool> {
         for source in &self.sources {
             match source {
@@ -2687,7 +2687,7 @@ impl KvSchema {
                             hex::encode(base_key)
                         )));
                     };
-                    let archived = access_stored_row(base_value).map_err(|e| {
+                    let archived = decode_stored_row(base_value).map_err(|e| {
                         DataFusionError::Execution(format!(
                             "invalid base row payload while backfilling index (key={}): {e}",
                             hex::encode(base_key)
@@ -2707,10 +2707,10 @@ impl KvSchema {
                             spec,
                             &model,
                             &pk_values,
-                            archived,
+                            &archived,
                         )?;
                         let index_value =
-                            encode_secondary_index_value_from_archived(archived, &model, spec)?;
+                            encode_secondary_index_value_from_archived(&archived, &model, spec)?;
                         pending_keys.push(index_key);
                         pending_values.push(index_value);
                         report.index_entries_written += 1;
@@ -3090,9 +3090,7 @@ fn encode_base_row_value(row: &KvRow, model: &TableModel) -> DataFusionResult<Ve
         values.push(encode_non_pk_cell_value(row.value_at(idx), col)?);
     }
     let stored_row = StoredRow { values };
-    rkyv::to_bytes::<rkyv::rancor::Error>(&stored_row)
-        .map(|v| v.to_vec())
-        .map_err(|e| DataFusionError::Execution(format!("rkyv serialize error: {e}")))
+    Ok(stored_row.encode().to_vec())
 }
 
 fn encode_secondary_index_value(
@@ -3109,13 +3107,11 @@ fn encode_secondary_index_value(
         values.push(encode_non_pk_cell_value(row.value_at(idx), col)?);
     }
     let stored_row = StoredRow { values };
-    rkyv::to_bytes::<rkyv::rancor::Error>(&stored_row)
-        .map(|v| v.to_vec())
-        .map_err(|e| DataFusionError::Execution(format!("rkyv serialize error: {e}")))
+    Ok(stored_row.encode().to_vec())
 }
 
 fn encode_secondary_index_value_from_archived(
-    archived: &ArchivedStoredRow,
+    archived: &StoredRow,
     model: &TableModel,
     spec: &ResolvedIndexSpec,
 ) -> DataFusionResult<Vec<u8>> {
@@ -3140,9 +3136,7 @@ fn encode_secondary_index_value_from_archived(
         values.push(owned_stored_value_from_archived(stored_opt)?);
     }
     let stored_row = StoredRow { values };
-    rkyv::to_bytes::<rkyv::rancor::Error>(&stored_row)
-        .map(|v| v.to_vec())
-        .map_err(|e| DataFusionError::Execution(format!("rkyv serialize error: {e}")))
+    Ok(stored_row.encode().to_vec())
 }
 
 fn encode_non_pk_cell_value(
@@ -3210,19 +3204,19 @@ fn encode_non_pk_cell_value(
 }
 
 fn owned_stored_value_from_archived(
-    stored_opt: Option<&ArchivedStoredValue>,
+    stored_opt: Option<&StoredValue>,
 ) -> DataFusionResult<Option<StoredValue>> {
     let Some(stored) = stored_opt else {
         return Ok(None);
     };
     Ok(Some(match stored {
-        ArchivedStoredValue::Int64(v) => StoredValue::Int64((*v).into()),
-        ArchivedStoredValue::UInt64(v) => StoredValue::UInt64((*v).into()),
-        ArchivedStoredValue::Float64(v) => StoredValue::Float64((*v).into()),
-        ArchivedStoredValue::Boolean(v) => StoredValue::Boolean(*v),
-        ArchivedStoredValue::Utf8(v) => StoredValue::Utf8(v.as_str().to_string()),
-        ArchivedStoredValue::Bytes(v) => StoredValue::Bytes(v.as_slice().to_vec()),
-        ArchivedStoredValue::List(items) => {
+        StoredValue::Int64(v) => StoredValue::Int64((*v).into()),
+        StoredValue::UInt64(v) => StoredValue::UInt64((*v).into()),
+        StoredValue::Float64(v) => StoredValue::Float64((*v).into()),
+        StoredValue::Boolean(v) => StoredValue::Boolean(*v),
+        StoredValue::Utf8(v) => StoredValue::Utf8(v.as_str().to_string()),
+        StoredValue::Bytes(v) => StoredValue::Bytes(v.as_slice().to_vec()),
+        StoredValue::List(items) => {
             let mut out = Vec::with_capacity(items.len());
             for item in items.iter() {
                 let owned = owned_stored_value_from_archived(Some(item))?.ok_or_else(|| {
@@ -3242,7 +3236,7 @@ fn decode_base_row(pk_values: Vec<CellValue>, value: &[u8], model: &TableModel) 
     if pk_values.len() != model.primary_key_indices.len() {
         return None;
     }
-    let archived = access_stored_row(value).ok()?;
+    let archived = decode_stored_row(value).ok()?;
     if archived.values.len() != model.columns.len() {
         return None;
     }
@@ -3263,37 +3257,37 @@ fn decode_base_row(pk_values: Vec<CellValue>, value: &[u8], model: &TableModel) 
             return None;
         };
         values[idx] = match (col.kind, stored) {
-            (ColumnKind::Int64, ArchivedStoredValue::Int64(v)) => CellValue::Int64((*v).into()),
-            (ColumnKind::UInt64, ArchivedStoredValue::UInt64(v)) => CellValue::UInt64((*v).into()),
-            (ColumnKind::Float64, ArchivedStoredValue::Float64(v)) => {
+            (ColumnKind::Int64, StoredValue::Int64(v)) => CellValue::Int64((*v).into()),
+            (ColumnKind::UInt64, StoredValue::UInt64(v)) => CellValue::UInt64((*v).into()),
+            (ColumnKind::Float64, StoredValue::Float64(v)) => {
                 CellValue::Float64((*v).into())
             }
-            (ColumnKind::Float64, ArchivedStoredValue::Int64(v)) => {
+            (ColumnKind::Float64, StoredValue::Int64(v)) => {
                 CellValue::Float64(i64::from(*v) as f64)
             }
-            (ColumnKind::Boolean, ArchivedStoredValue::Boolean(v)) => CellValue::Boolean(*v),
-            (ColumnKind::Date32, ArchivedStoredValue::Int64(v)) => {
+            (ColumnKind::Boolean, StoredValue::Boolean(v)) => CellValue::Boolean(*v),
+            (ColumnKind::Date32, StoredValue::Int64(v)) => {
                 CellValue::Date32(i64::from(*v) as i32)
             }
-            (ColumnKind::Date64, ArchivedStoredValue::Int64(v)) => CellValue::Date64((*v).into()),
-            (ColumnKind::Timestamp, ArchivedStoredValue::Int64(v)) => {
+            (ColumnKind::Date64, StoredValue::Int64(v)) => CellValue::Date64((*v).into()),
+            (ColumnKind::Timestamp, StoredValue::Int64(v)) => {
                 CellValue::Timestamp((*v).into())
             }
-            (ColumnKind::Decimal128, ArchivedStoredValue::Bytes(bytes)) => {
+            (ColumnKind::Decimal128, StoredValue::Bytes(bytes)) => {
                 let arr: [u8; 16] = bytes.as_slice().try_into().ok()?;
                 CellValue::Decimal128(i128::from_le_bytes(arr))
             }
-            (ColumnKind::Decimal256, ArchivedStoredValue::Bytes(bytes)) => {
+            (ColumnKind::Decimal256, StoredValue::Bytes(bytes)) => {
                 let arr: [u8; 32] = bytes.as_slice().try_into().ok()?;
                 CellValue::Decimal256(i256::from_le_bytes(arr))
             }
-            (ColumnKind::Utf8, ArchivedStoredValue::Utf8(v)) => {
+            (ColumnKind::Utf8, StoredValue::Utf8(v)) => {
                 CellValue::Utf8(v.as_str().to_string())
             }
-            (ColumnKind::FixedSizeBinary(_), ArchivedStoredValue::Bytes(v)) => {
+            (ColumnKind::FixedSizeBinary(_), StoredValue::Bytes(v)) => {
                 CellValue::FixedBinary(v.as_slice().to_vec())
             }
-            (ColumnKind::List(elem), ArchivedStoredValue::List(items)) => {
+            (ColumnKind::List(elem), StoredValue::List(items)) => {
                 let mut cells = Vec::with_capacity(items.len());
                 for item in items.iter() {
                     cells.push(decode_list_element_archived(elem, item)?);
@@ -3308,18 +3302,18 @@ fn decode_base_row(pk_values: Vec<CellValue>, value: &[u8], model: &TableModel) 
 
 fn decode_list_element_archived(
     elem: ListElementKind,
-    stored: &ArchivedStoredValue,
+    stored: &StoredValue,
 ) -> Option<CellValue> {
     Some(match (elem, stored) {
-        (ListElementKind::Int64, ArchivedStoredValue::Int64(v)) => CellValue::Int64((*v).into()),
-        (ListElementKind::Float64, ArchivedStoredValue::Float64(v)) => {
+        (ListElementKind::Int64, StoredValue::Int64(v)) => CellValue::Int64((*v).into()),
+        (ListElementKind::Float64, StoredValue::Float64(v)) => {
             CellValue::Float64((*v).into())
         }
-        (ListElementKind::Float64, ArchivedStoredValue::Int64(v)) => {
+        (ListElementKind::Float64, StoredValue::Int64(v)) => {
             CellValue::Float64(i64::from(*v) as f64)
         }
-        (ListElementKind::Boolean, ArchivedStoredValue::Boolean(v)) => CellValue::Boolean(*v),
-        (ListElementKind::Utf8, ArchivedStoredValue::Utf8(v)) => {
+        (ListElementKind::Boolean, StoredValue::Boolean(v)) => CellValue::Boolean(*v),
+        (ListElementKind::Utf8, StoredValue::Utf8(v)) => {
             CellValue::Utf8(v.as_str().to_string())
         }
         _ => return None,
@@ -5622,7 +5616,7 @@ fn matches_constraint(value: &CellValue, constraint: &PredicateConstraint) -> bo
 
 fn matches_archived_non_pk_constraint(
     col: &ResolvedColumn,
-    stored_opt: Option<&ArchivedStoredValue>,
+    stored_opt: Option<&StoredValue>,
     constraint: &PredicateConstraint,
 ) -> bool {
     match stored_opt {
@@ -5637,52 +5631,52 @@ fn matches_archived_non_pk_constraint(
         Some(stored) => match (col.kind, stored, constraint) {
             (
                 ColumnKind::Utf8,
-                ArchivedStoredValue::Utf8(v),
+                StoredValue::Utf8(v),
                 PredicateConstraint::StringEq(expected),
             ) => v.as_str() == expected,
             (
                 ColumnKind::Utf8,
-                ArchivedStoredValue::Utf8(v),
+                StoredValue::Utf8(v),
                 PredicateConstraint::StringIn(values),
             ) => values.iter().any(|candidate| candidate == v.as_str()),
             (
                 ColumnKind::Boolean,
-                ArchivedStoredValue::Boolean(v),
+                StoredValue::Boolean(v),
                 PredicateConstraint::BoolEq(expected),
             ) => *v == *expected,
             (
                 ColumnKind::Int64,
-                ArchivedStoredValue::Int64(v),
+                StoredValue::Int64(v),
                 PredicateConstraint::IntRange { min, max },
             ) => in_i64_bounds((*v).into(), *min, *max),
             (
                 ColumnKind::Date32,
-                ArchivedStoredValue::Int64(v),
+                StoredValue::Int64(v),
                 PredicateConstraint::IntRange { min, max },
             ) => in_i64_bounds(i64::from(*v) as i32 as i64, *min, *max),
             (
                 ColumnKind::Date64,
-                ArchivedStoredValue::Int64(v),
+                StoredValue::Int64(v),
                 PredicateConstraint::IntRange { min, max },
             ) => in_i64_bounds((*v).into(), *min, *max),
             (
                 ColumnKind::Timestamp,
-                ArchivedStoredValue::Int64(v),
+                StoredValue::Int64(v),
                 PredicateConstraint::IntRange { min, max },
             ) => in_i64_bounds((*v).into(), *min, *max),
             (
                 ColumnKind::Float64,
-                ArchivedStoredValue::Float64(v),
+                StoredValue::Float64(v),
                 PredicateConstraint::FloatRange { min, max },
             ) => in_f64_bounds((*v).into(), min, max),
             (
                 ColumnKind::Float64,
-                ArchivedStoredValue::Int64(v),
+                StoredValue::Int64(v),
                 PredicateConstraint::FloatRange { min, max },
             ) => in_f64_bounds(i64::from(*v) as f64, min, max),
             (
                 ColumnKind::Decimal128,
-                ArchivedStoredValue::Bytes(bytes),
+                StoredValue::Bytes(bytes),
                 PredicateConstraint::Decimal128Range { min, max },
             ) => {
                 let Ok(arr) = <[u8; 16]>::try_from(bytes.as_slice()) else {
@@ -5692,7 +5686,7 @@ fn matches_archived_non_pk_constraint(
             }
             (
                 ColumnKind::Decimal256,
-                ArchivedStoredValue::Bytes(bytes),
+                StoredValue::Bytes(bytes),
                 PredicateConstraint::Decimal256Range { min, max },
             ) => {
                 let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) else {
@@ -5713,27 +5707,27 @@ fn matches_archived_non_pk_constraint(
             }
             (
                 ColumnKind::UInt64,
-                ArchivedStoredValue::UInt64(v),
+                StoredValue::UInt64(v),
                 PredicateConstraint::UInt64Range { min, max },
             ) => in_u64_bounds((*v).into(), *min, *max),
             (
                 ColumnKind::UInt64,
-                ArchivedStoredValue::UInt64(v),
+                StoredValue::UInt64(v),
                 PredicateConstraint::UInt64In(values),
             ) => values.iter().any(|candidate| *candidate == u64::from(*v)),
             (
                 ColumnKind::Int64,
-                ArchivedStoredValue::Int64(v),
+                StoredValue::Int64(v),
                 PredicateConstraint::IntIn(values),
             ) => values.iter().any(|candidate| *candidate == i64::from(*v)),
             (
                 ColumnKind::FixedSizeBinary(_),
-                ArchivedStoredValue::Bytes(v),
+                StoredValue::Bytes(v),
                 PredicateConstraint::FixedBinaryEq(expected),
             ) => v.as_slice() == expected.as_slice(),
             (
                 ColumnKind::FixedSizeBinary(_),
-                ArchivedStoredValue::Bytes(v),
+                StoredValue::Bytes(v),
                 PredicateConstraint::FixedBinaryIn(values),
             ) => values
                 .iter()
@@ -6284,7 +6278,7 @@ fn scalar_to_i256(value: &ScalarValue) -> Option<i256> {
 
 fn primary_key_prefix_range(table_prefix: u8) -> KeyRange {
     let codec = primary_key_codec(table_prefix).expect("table prefix should fit primary key codec");
-    let (start, end) = codec.family_bounds();
+    let (start, end) = codec.prefix_bounds();
     KeyRange { start, end }
 }
 
@@ -6756,7 +6750,7 @@ fn encode_secondary_index_key_from_parts(
     spec: &ResolvedIndexSpec,
     model: &TableModel,
     pk_values: &[CellValue],
-    archived: &ArchivedStoredRow,
+    archived: &StoredRow,
 ) -> DataFusionResult<Key> {
     if table_prefix != model.table_prefix {
         return Err(DataFusionError::Execution(
@@ -6835,7 +6829,7 @@ fn encode_index_column_from_parts(
     model: &TableModel,
     col_idx: usize,
     pk_values: &[CellValue],
-    archived: &ArchivedStoredRow,
+    archived: &StoredRow,
 ) -> DataFusionResult<Vec<u8>> {
     let col = model.column(col_idx);
     if let Some(pk_pos) = model.pk_position(col_idx) {
@@ -6870,7 +6864,7 @@ fn encode_index_column_from_parts(
 
 fn cell_value_from_archived_non_pk(
     col: &ResolvedColumn,
-    stored_opt: Option<&ArchivedStoredValue>,
+    stored_opt: Option<&StoredValue>,
 ) -> DataFusionResult<Option<CellValue>> {
     let Some(stored) = stored_opt else {
         if col.nullable {
@@ -6882,19 +6876,19 @@ fn cell_value_from_archived_non_pk(
         )));
     };
     let value = match (col.kind, stored) {
-        (ColumnKind::Int64, ArchivedStoredValue::Int64(v)) => CellValue::Int64((*v).into()),
-        (ColumnKind::UInt64, ArchivedStoredValue::UInt64(v)) => CellValue::UInt64((*v).into()),
-        (ColumnKind::Float64, ArchivedStoredValue::Float64(v)) => CellValue::Float64((*v).into()),
-        (ColumnKind::Float64, ArchivedStoredValue::Int64(v)) => {
+        (ColumnKind::Int64, StoredValue::Int64(v)) => CellValue::Int64((*v).into()),
+        (ColumnKind::UInt64, StoredValue::UInt64(v)) => CellValue::UInt64((*v).into()),
+        (ColumnKind::Float64, StoredValue::Float64(v)) => CellValue::Float64((*v).into()),
+        (ColumnKind::Float64, StoredValue::Int64(v)) => {
             CellValue::Float64(i64::from(*v) as f64)
         }
-        (ColumnKind::Boolean, ArchivedStoredValue::Boolean(v)) => CellValue::Boolean(*v),
-        (ColumnKind::Date32, ArchivedStoredValue::Int64(v)) => {
+        (ColumnKind::Boolean, StoredValue::Boolean(v)) => CellValue::Boolean(*v),
+        (ColumnKind::Date32, StoredValue::Int64(v)) => {
             CellValue::Date32(i64::from(*v) as i32)
         }
-        (ColumnKind::Date64, ArchivedStoredValue::Int64(v)) => CellValue::Date64((*v).into()),
-        (ColumnKind::Timestamp, ArchivedStoredValue::Int64(v)) => CellValue::Timestamp((*v).into()),
-        (ColumnKind::Decimal128, ArchivedStoredValue::Bytes(bytes)) => {
+        (ColumnKind::Date64, StoredValue::Int64(v)) => CellValue::Date64((*v).into()),
+        (ColumnKind::Timestamp, StoredValue::Int64(v)) => CellValue::Timestamp((*v).into()),
+        (ColumnKind::Decimal128, StoredValue::Bytes(bytes)) => {
             let arr: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
                 DataFusionError::Execution(format!(
                     "column '{}' expected Decimal128 archived payload width 16",
@@ -6903,7 +6897,7 @@ fn cell_value_from_archived_non_pk(
             })?;
             CellValue::Decimal128(i128::from_le_bytes(arr))
         }
-        (ColumnKind::Decimal256, ArchivedStoredValue::Bytes(bytes)) => {
+        (ColumnKind::Decimal256, StoredValue::Bytes(bytes)) => {
             let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
                 DataFusionError::Execution(format!(
                     "column '{}' expected Decimal256 archived payload width 32",
@@ -6912,8 +6906,8 @@ fn cell_value_from_archived_non_pk(
             })?;
             CellValue::Decimal256(i256::from_le_bytes(arr))
         }
-        (ColumnKind::Utf8, ArchivedStoredValue::Utf8(v)) => CellValue::Utf8(v.as_str().to_string()),
-        (ColumnKind::FixedSizeBinary(expected), ArchivedStoredValue::Bytes(v)) => {
+        (ColumnKind::Utf8, StoredValue::Utf8(v)) => CellValue::Utf8(v.as_str().to_string()),
+        (ColumnKind::FixedSizeBinary(expected), StoredValue::Bytes(v)) => {
             if v.as_slice().len() != expected {
                 return Err(DataFusionError::Execution(format!(
                     "column '{}' expects FixedSizeBinary({expected}) archived payload width {}, got {}",
@@ -6924,7 +6918,7 @@ fn cell_value_from_archived_non_pk(
             }
             CellValue::FixedBinary(v.as_slice().to_vec())
         }
-        (ColumnKind::List(elem), ArchivedStoredValue::List(items)) => {
+        (ColumnKind::List(elem), StoredValue::List(items)) => {
             let mut cells = Vec::with_capacity(items.len());
             for item in items.iter() {
                 cells.push(decode_list_element_archived(elem, item).ok_or_else(|| {
@@ -7181,16 +7175,16 @@ async fn stream_pk_scan(
                 ) else {
                     continue;
                 };
-                let Ok(archived) = access_stored_row(value) else {
+                let Ok(archived) = decode_stored_row(value) else {
                     continue;
                 };
                 if archived.values.len() != ctx.model.columns.len() {
                     continue;
                 }
-                if !ctx.access_plan.matches_archived_row(&pk, archived) {
+                if !ctx.access_plan.matches_archived_row(&pk, &archived) {
                     continue;
                 }
-                if !batch_builder.append_archived_row(&pk, archived)? {
+                if !batch_builder.append_archived_row(&pk, &archived)? {
                     continue;
                 }
                 if batch_builder.row_count() >= flush_threshold
@@ -7278,7 +7272,7 @@ async fn stream_index_scan(
                 ) else {
                     continue;
                 };
-                let archived = access_stored_row(index_value).map_err(|e| {
+                let archived = decode_stored_row(index_value).map_err(|e| {
                     DataFusionError::Execution(format!(
                         "invalid covering index payload for key {}: {e}",
                         hex::encode(key)
@@ -7287,10 +7281,10 @@ async fn stream_index_scan(
                 if archived.values.len() != ctx.model.columns.len() {
                     continue;
                 }
-                if !ctx.access_plan.matches_archived_row(&pk_values, archived) {
+                if !ctx.access_plan.matches_archived_row(&pk_values, &archived) {
                     continue;
                 }
-                if !batch_builder.append_archived_row(&pk_values, archived)? {
+                if !batch_builder.append_archived_row(&pk_values, &archived)? {
                     continue;
                 }
                 if batch_builder.row_count() >= flush_threshold
@@ -9200,29 +9194,29 @@ mod tests {
                 .as_ref()
                 .is_some_and(exoware_sdk_rs::kv_codec::predicate_needs_value);
         let archived = if needs_value {
-            access_stored_row(value.as_ref()).ok()
+            decode_stored_row(value.as_ref()).ok()
         } else {
             None
         };
 
         if let Some(filter) = &request.filter {
-            if !eval_predicate(key, archived, filter).ok()? {
+            if !eval_predicate(key, archived.as_ref(), filter).ok()? {
                 return None;
             }
         }
 
         let mut group_values = Vec::with_capacity(request.group_by.len());
         for expr in &request.group_by {
-            let extracted_value = eval_expr(key, archived, expr).ok()?;
+            let extracted_value = eval_expr(key, archived.as_ref(), expr).ok()?;
             group_values.push(extracted_value);
         }
         canonicalize_reduced_group_values(&mut group_values);
 
         let mut reducer_values = Vec::with_capacity(request.reducers.len());
         for reducer in &request.reducers {
-            let extracted_value = match (&reducer.expr, archived) {
+            let extracted_value = match (&reducer.expr, archived.as_ref()) {
                 (None, _) => None,
-                (Some(expr), _) => eval_expr(key, archived, expr).ok()?,
+                (Some(expr), _) => eval_expr(key, archived.as_ref(), expr).ok()?,
             };
             reducer_values.push(extracted_value);
         }
@@ -13384,14 +13378,14 @@ mod tests {
             ],
         };
         let encoded_row = encode_base_row_value(&max_row, &model).expect("encode row");
-        let archived = access_stored_row(&encoded_row).expect("archive row");
+        let archived = decode_stored_row(&encoded_row).expect("archive row");
 
         let key = encode_secondary_index_key_from_parts(
             model.table_prefix,
             spec,
             &model,
             &[CellValue::Utf8(max_id.clone())],
-            archived,
+            &archived,
         )
         .expect("backfill path should encode max payload");
         assert_eq!(key.len(), exoware_sdk_rs::keys::MAX_KEY_LEN);
@@ -13401,7 +13395,7 @@ mod tests {
             spec,
             &model,
             &[CellValue::Utf8(overflow_id)],
-            archived,
+            &archived,
         )
         .expect_err("backfill path overflow should be rejected");
         assert!(err
@@ -13591,8 +13585,8 @@ mod tests {
                 .iter()
                 .find(|(key, _)| matches_secondary_index_key(0, 1, key))
                 .expect("backfill should create index entry");
-            let archived = access_stored_row(sample_value.as_ref())
-                .expect("covering value must be valid rkyv");
+            let archived = decode_stored_row(sample_value.as_ref())
+                .expect("covering value must be valid codec");
             assert_eq!(archived.values.len(), 3);
         }
 
@@ -14129,7 +14123,7 @@ mod tests {
                 .find(|key| matches_secondary_index_key(0, 1, key))
                 .expect("index row should exist")
                 .clone();
-            guard.insert(key, Bytes::from_static(b"not-rkyv"));
+            guard.insert(key, Bytes::from_static(b"not-codec"));
         }
 
         let ctx = SessionContext::new();
@@ -14602,9 +14596,7 @@ mod tests {
         let first_chunk_sent = Arc::new(Notify::new());
         let release_second_chunk = Arc::new(Notify::new());
 
-        let encoded_row = rkyv::to_bytes::<rkyv::rancor::Error>(&StoredRow { values: vec![None] })
-            .expect("stored row bytes")
-            .to_vec();
+        let encoded_row = (StoredRow { values: vec![None] }).encode().to_vec();
 
         let first_results = {
             let mut results = Vec::with_capacity(BATCH_FLUSH_ROWS);
@@ -14697,9 +14689,7 @@ mod tests {
         let observed_limit = Arc::new(AtomicUsize::new(0));
         let model = simple_int64_model(0);
 
-        let encoded_row = rkyv::to_bytes::<rkyv::rancor::Error>(&StoredRow { values: vec![None] })
-            .expect("stored row bytes")
-            .to_vec();
+        let encoded_row = (StoredRow { values: vec![None] }).encode().to_vec();
 
         let first_key = encode_primary_key(model.table_prefix, &[&CellValue::Int64(1)], &model)
             .expect("first primary key");

@@ -1,20 +1,86 @@
 use std::cmp::Ordering;
 
+use bytes::{Buf, BufMut};
+use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write};
+
 use crate::keys::{read_bit_be, read_bits_to_bytes, write_bit_be, Key};
 
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    PartialEq,
-    Eq,
-    serde::Serialize,
-    serde::Deserialize,
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-)]
-#[rkyv(derive(Debug))]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Utf8(pub String);
+
+impl std::ops::Deref for Utf8 {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl PartialEq<str> for Utf8 {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for Utf8 {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<String> for Utf8 {
+    fn eq(&self, other: &String) -> bool {
+        self.0 == *other
+    }
+}
+
+impl std::fmt::Display for Utf8 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl From<String> for Utf8 {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for Utf8 {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+impl From<Utf8> for String {
+    fn from(s: Utf8) -> Self {
+        s.0
+    }
+}
+
+impl Write for Utf8 {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.0.as_bytes().write(buf);
+    }
+}
+
+impl EncodeSize for Utf8 {
+    fn encode_size(&self) -> usize {
+        self.0.as_bytes().encode_size()
+    }
+}
+
+impl Read for Utf8 {
+    type Cfg = ();
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let range: RangeCfg<usize> = (..).into();
+        let bytes = Vec::<u8>::read_cfg(buf, &(range, ()))?;
+        let s = String::from_utf8(bytes)
+            .map_err(|_| CodecError::Invalid("Utf8", "invalid utf8"))?;
+        Ok(Utf8(s))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KvFieldKind {
     Int64,
     UInt64,
@@ -28,18 +94,7 @@ pub enum KvFieldKind {
     FixedSizeBinary(u8),
 }
 
-#[derive(
-    Clone,
-    Debug,
-    PartialEq,
-    Eq,
-    serde::Serialize,
-    serde::Deserialize,
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-)]
-#[rkyv(derive(Debug))]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KvFieldRef {
     Key {
         bit_offset: u16,
@@ -58,57 +113,19 @@ pub enum KvFieldRef {
     },
 }
 
-#[derive(
-    Clone,
-    Debug,
-    PartialEq,
-    serde::Serialize,
-    serde::Deserialize,
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-)]
-#[rkyv(derive(Debug))]
-#[rkyv(serialize_bounds(
-    __S: rkyv::ser::Writer + rkyv::ser::Allocator,
-    __S::Error: rkyv::rancor::Source,
-))]
-#[rkyv(deserialize_bounds(__D::Error: rkyv::rancor::Source))]
-#[rkyv(bytecheck(bounds(__C: rkyv::validation::ArchiveContext)))]
+#[derive(Clone, Debug, PartialEq)]
 pub enum KvExpr {
     Field(KvFieldRef),
     Literal(KvReducedValue),
-    Add(
-        #[rkyv(omit_bounds)] Box<KvExpr>,
-        #[rkyv(omit_bounds)] Box<KvExpr>,
-    ),
-    Sub(
-        #[rkyv(omit_bounds)] Box<KvExpr>,
-        #[rkyv(omit_bounds)] Box<KvExpr>,
-    ),
-    Mul(
-        #[rkyv(omit_bounds)] Box<KvExpr>,
-        #[rkyv(omit_bounds)] Box<KvExpr>,
-    ),
-    Div(
-        #[rkyv(omit_bounds)] Box<KvExpr>,
-        #[rkyv(omit_bounds)] Box<KvExpr>,
-    ),
-    Lower(#[rkyv(omit_bounds)] Box<KvExpr>),
-    DateTruncDay(#[rkyv(omit_bounds)] Box<KvExpr>),
+    Add(Box<KvExpr>, Box<KvExpr>),
+    Sub(Box<KvExpr>, Box<KvExpr>),
+    Mul(Box<KvExpr>, Box<KvExpr>),
+    Div(Box<KvExpr>, Box<KvExpr>),
+    Lower(Box<KvExpr>),
+    DateTruncDay(Box<KvExpr>),
 }
 
-#[derive(
-    Clone,
-    Debug,
-    PartialEq,
-    serde::Serialize,
-    serde::Deserialize,
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-)]
-#[rkyv(derive(Debug))]
+#[derive(Clone, Debug, PartialEq)]
 pub enum KvPredicateConstraint {
     StringEq(String),
     BoolEq(bool),
@@ -137,51 +154,19 @@ pub enum KvPredicateConstraint {
     FixedSizeBinaryIn(Vec<Vec<u8>>),
 }
 
-#[derive(
-    Clone,
-    Debug,
-    PartialEq,
-    serde::Serialize,
-    serde::Deserialize,
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-)]
-#[rkyv(derive(Debug))]
+#[derive(Clone, Debug, PartialEq)]
 pub struct KvPredicateCheck {
     pub field: KvFieldRef,
     pub constraint: KvPredicateConstraint,
 }
 
-#[derive(
-    Clone,
-    Debug,
-    PartialEq,
-    serde::Serialize,
-    serde::Deserialize,
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-)]
-#[rkyv(derive(Debug))]
+#[derive(Clone, Debug, PartialEq)]
 pub struct KvPredicate {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<KvPredicateCheck>,
-    #[serde(default, skip_serializing_if = "is_false")]
     pub contradiction: bool,
 }
 
-#[derive(
-    Clone,
-    Debug,
-    PartialEq,
-    serde::Serialize,
-    serde::Deserialize,
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-)]
-#[rkyv(derive(Debug))]
+#[derive(Clone, Debug, PartialEq)]
 pub enum KvReducedValue {
     Int64(i64),
     UInt64(u64),
@@ -193,25 +178,6 @@ pub enum KvReducedValue {
     Timestamp(i64),
     Decimal128(i128),
     FixedSizeBinary(Vec<u8>),
-}
-
-impl From<&ArchivedKvReducedValue> for KvReducedValue {
-    fn from(value: &ArchivedKvReducedValue) -> Self {
-        match value {
-            ArchivedKvReducedValue::Int64(v) => Self::Int64((*v).into()),
-            ArchivedKvReducedValue::UInt64(v) => Self::UInt64((*v).into()),
-            ArchivedKvReducedValue::Float64(v) => Self::Float64((*v).into()),
-            ArchivedKvReducedValue::Boolean(v) => Self::Boolean(*v),
-            ArchivedKvReducedValue::Utf8(v) => Self::Utf8(v.as_str().to_string()),
-            ArchivedKvReducedValue::Date32(v) => Self::Date32((*v).into()),
-            ArchivedKvReducedValue::Date64(v) => Self::Date64((*v).into()),
-            ArchivedKvReducedValue::Timestamp(v) => Self::Timestamp((*v).into()),
-            ArchivedKvReducedValue::Decimal128(v) => Self::Decimal128((*v).into()),
-            ArchivedKvReducedValue::FixedSizeBinary(v) => {
-                Self::FixedSizeBinary(v.as_slice().to_vec())
-            }
-        }
-    }
 }
 
 impl KvReducedValue {
@@ -333,14 +299,7 @@ pub fn encode_reduced_group_key(values: &[Option<KvReducedValue>]) -> Vec<u8> {
     out
 }
 
-#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-#[rkyv(derive(Debug))]
-#[rkyv(serialize_bounds(
-    __S: rkyv::ser::Writer + rkyv::ser::Allocator,
-    __S::Error: rkyv::rancor::Source,
-))]
-#[rkyv(deserialize_bounds(__D::Error: rkyv::rancor::Source))]
-#[rkyv(bytecheck(bounds(__C: rkyv::validation::ArchiveContext)))]
+#[derive(Debug, Clone)]
 pub enum StoredValue {
     Int64(i64),
     UInt64(u64),
@@ -348,22 +307,93 @@ pub enum StoredValue {
     Boolean(bool),
     Utf8(String),
     Bytes(Vec<u8>),
-    List(#[rkyv(omit_bounds)] Vec<StoredValue>),
+    List(Vec<StoredValue>),
 }
 
-#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-#[rkyv(derive(Debug))]
+impl Write for StoredValue {
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            StoredValue::Int64(v) => { 0u8.write(buf); v.write(buf); }
+            StoredValue::UInt64(v) => { 1u8.write(buf); v.write(buf); }
+            StoredValue::Float64(v) => { 2u8.write(buf); v.write(buf); }
+            StoredValue::Boolean(v) => { 3u8.write(buf); v.write(buf); }
+            StoredValue::Utf8(v) => { 4u8.write(buf); v.as_bytes().write(buf); }
+            StoredValue::Bytes(v) => { 5u8.write(buf); v.as_slice().write(buf); }
+            StoredValue::List(items) => { 6u8.write(buf); items.as_slice().write(buf); }
+        }
+    }
+}
+
+impl EncodeSize for StoredValue {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            StoredValue::Int64(_) => i64::SIZE,
+            StoredValue::UInt64(_) => u64::SIZE,
+            StoredValue::Float64(_) => f64::SIZE,
+            StoredValue::Boolean(_) => bool::SIZE,
+            StoredValue::Utf8(v) => v.as_bytes().encode_size(),
+            StoredValue::Bytes(v) => v.as_slice().encode_size(),
+            StoredValue::List(items) => items.as_slice().encode_size(),
+        }
+    }
+}
+
+impl Read for StoredValue {
+    type Cfg = ();
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let range: RangeCfg<usize> = (..).into();
+        match u8::read(buf)? {
+            0 => Ok(StoredValue::Int64(i64::read(buf)?)),
+            1 => Ok(StoredValue::UInt64(u64::read(buf)?)),
+            2 => Ok(StoredValue::Float64(f64::read(buf)?)),
+            3 => Ok(StoredValue::Boolean(bool::read(buf)?)),
+            4 => Ok(StoredValue::Utf8(Utf8::read(buf)?.0)),
+            5 => {
+                let bytes = Vec::<u8>::read_cfg(buf, &(range, ()))?;
+                Ok(StoredValue::Bytes(bytes))
+            }
+            6 => {
+                let items = Vec::<StoredValue>::read_cfg(buf, &(range, ()))?;
+                Ok(StoredValue::List(items))
+            }
+            v => Err(CodecError::InvalidEnum(v)),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct StoredRow {
     pub values: Vec<Option<StoredValue>>,
 }
 
-pub fn access_stored_row(value: &[u8]) -> Result<&ArchivedStoredRow, rkyv::rancor::Error> {
-    rkyv::access::<ArchivedStoredRow, rkyv::rancor::Error>(value)
+impl Write for StoredRow {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.values.as_slice().write(buf);
+    }
+}
+
+impl EncodeSize for StoredRow {
+    fn encode_size(&self) -> usize {
+        self.values.as_slice().encode_size()
+    }
+}
+
+impl Read for StoredRow {
+    type Cfg = ();
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let range: RangeCfg<usize> = (..).into();
+        let values = Vec::<Option<StoredValue>>::read_cfg(buf, &(range, ()))?;
+        Ok(StoredRow { values })
+    }
+}
+
+pub fn decode_stored_row(value: &[u8]) -> Result<StoredRow, CodecError> {
+    StoredRow::read_cfg(&mut &*value, &())
 }
 
 pub fn extract_field(
     key: &Key,
-    archived: &ArchivedStoredRow,
+    archived: &StoredRow,
     field: &KvFieldRef,
 ) -> Result<Option<KvReducedValue>, String> {
     match field {
@@ -409,7 +439,7 @@ pub fn expr_needs_value(expr: &KvExpr) -> bool {
 
 pub fn eval_expr(
     key: &Key,
-    archived: Option<&ArchivedStoredRow>,
+    archived: Option<&StoredRow>,
     expr: &KvExpr,
 ) -> Result<Option<KvReducedValue>, String> {
     match expr {
@@ -564,7 +594,7 @@ pub fn eval_expr(
 
 fn extract_expr_field(
     key: &Key,
-    archived: Option<&ArchivedStoredRow>,
+    archived: Option<&StoredRow>,
     field: &KvFieldRef,
 ) -> Result<Option<KvReducedValue>, String> {
     match (field, archived) {
@@ -597,7 +627,7 @@ fn extract_expr_field(
 
 fn eval_numeric_binary_op(
     key: &Key,
-    archived: Option<&ArchivedStoredRow>,
+    archived: Option<&StoredRow>,
     left: &KvExpr,
     right: &KvExpr,
     op: impl FnOnce(KvReducedValue, KvReducedValue) -> Result<KvReducedValue, String> + Copy,
@@ -620,7 +650,7 @@ pub fn predicate_needs_value(predicate: &KvPredicate) -> bool {
 
 pub fn eval_predicate(
     key: &Key,
-    archived: Option<&ArchivedStoredRow>,
+    archived: Option<&StoredRow>,
     predicate: &KvPredicate,
 ) -> Result<bool, String> {
     if predicate.contradiction {
@@ -732,7 +762,7 @@ fn extract_key_bytes(key: &Key, bit_offset: usize, width: usize) -> Option<Vec<u
 }
 
 pub fn extract_stored_field(
-    archived: &ArchivedStoredRow,
+    archived: &StoredRow,
     index: usize,
     kind: KvFieldKind,
     nullable: bool,
@@ -750,35 +780,35 @@ pub fn extract_stored_field(
     };
 
     let value = match (kind, stored) {
-        (KvFieldKind::Int64, ArchivedStoredValue::Int64(v)) => KvReducedValue::Int64((*v).into()),
-        (KvFieldKind::UInt64, ArchivedStoredValue::UInt64(v)) => {
+        (KvFieldKind::Int64, StoredValue::Int64(v)) => KvReducedValue::Int64((*v).into()),
+        (KvFieldKind::UInt64, StoredValue::UInt64(v)) => {
             KvReducedValue::UInt64((*v).into())
         }
-        (KvFieldKind::Float64, ArchivedStoredValue::Float64(v)) => {
+        (KvFieldKind::Float64, StoredValue::Float64(v)) => {
             KvReducedValue::Float64((*v).into())
         }
-        (KvFieldKind::Float64, ArchivedStoredValue::Int64(v)) => {
+        (KvFieldKind::Float64, StoredValue::Int64(v)) => {
             KvReducedValue::Float64(i64::from(*v) as f64)
         }
-        (KvFieldKind::Boolean, ArchivedStoredValue::Boolean(v)) => KvReducedValue::Boolean(*v),
-        (KvFieldKind::Utf8, ArchivedStoredValue::Utf8(v)) => {
+        (KvFieldKind::Boolean, StoredValue::Boolean(v)) => KvReducedValue::Boolean(*v),
+        (KvFieldKind::Utf8, StoredValue::Utf8(v)) => {
             KvReducedValue::Utf8(v.as_str().to_string())
         }
-        (KvFieldKind::Date32, ArchivedStoredValue::Int64(v)) => {
+        (KvFieldKind::Date32, StoredValue::Int64(v)) => {
             KvReducedValue::Date32(i64::from(*v) as i32)
         }
-        (KvFieldKind::Date64, ArchivedStoredValue::Int64(v)) => KvReducedValue::Date64((*v).into()),
-        (KvFieldKind::Timestamp, ArchivedStoredValue::Int64(v)) => {
+        (KvFieldKind::Date64, StoredValue::Int64(v)) => KvReducedValue::Date64((*v).into()),
+        (KvFieldKind::Timestamp, StoredValue::Int64(v)) => {
             KvReducedValue::Timestamp((*v).into())
         }
-        (KvFieldKind::Decimal128, ArchivedStoredValue::Bytes(bytes)) => {
+        (KvFieldKind::Decimal128, StoredValue::Bytes(bytes)) => {
             let raw: [u8; 16] = bytes
                 .as_slice()
                 .try_into()
                 .map_err(|_| "invalid Decimal128 byte width".to_string())?;
             KvReducedValue::Decimal128(i128::from_le_bytes(raw))
         }
-        (KvFieldKind::FixedSizeBinary(width), ArchivedStoredValue::Bytes(bytes)) => {
+        (KvFieldKind::FixedSizeBinary(width), StoredValue::Bytes(bytes)) => {
             if bytes.as_slice().len() != usize::from(width) {
                 return Err("invalid FixedSizeBinary byte width".to_string());
             }
@@ -932,10 +962,6 @@ fn in_f64_bounds(value: f64, min: &Option<(f64, bool)>, max: &Option<(f64, bool)
     lower_ok && upper_ok
 }
 
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
 fn decode_i64_ordered(bytes: [u8; 8]) -> i64 {
     (u64::from_be_bytes(bytes) ^ 0x8000_0000_0000_0000) as i64
 }
@@ -969,6 +995,7 @@ fn decode_fixed_text(bytes: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
     use crate::keys::MAX_KEY_LEN;
+    use commonware_codec::Encode;
 
     #[test]
     fn fixed_utf8_key_round_trip() {
@@ -994,11 +1021,9 @@ mod tests {
         let row = StoredRow {
             values: vec![Some(StoredValue::Bytes(123i128.to_le_bytes().to_vec()))],
         };
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&row)
-            .expect("row bytes")
-            .to_vec();
-        let archived = access_stored_row(&bytes).expect("archived row");
-        let value = extract_stored_field(archived, 0, KvFieldKind::Decimal128, false)
+        let bytes = row.encode();
+        let decoded = decode_stored_row(&bytes).expect("decoded row");
+        let value = extract_stored_field(&decoded, 0, KvFieldKind::Decimal128, false)
             .expect("valid field")
             .expect("present field");
         assert_eq!(value, KvReducedValue::Decimal128(123));
@@ -1007,11 +1032,9 @@ mod tests {
     #[test]
     fn non_nullable_missing_field_is_invalid() {
         let row = StoredRow { values: vec![None] };
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&row)
-            .expect("row bytes")
-            .to_vec();
-        let archived = access_stored_row(&bytes).expect("archived row");
-        let err = extract_stored_field(archived, 0, KvFieldKind::Int64, false)
+        let bytes = row.encode();
+        let decoded = decode_stored_row(&bytes).expect("decoded row");
+        let err = extract_stored_field(&decoded, 0, KvFieldKind::Int64, false)
             .expect_err("missing non-nullable field should fail");
         assert!(err.contains("non-nullable"));
     }
@@ -1047,40 +1070,13 @@ mod tests {
     }
 
     #[test]
-    fn archived_reduced_value_converts_to_owned_for_all_variants() {
-        let cases = [
-            KvReducedValue::Int64(-42),
-            KvReducedValue::UInt64(42),
-            KvReducedValue::Float64(-3.25),
-            KvReducedValue::Boolean(true),
-            KvReducedValue::Utf8("east".to_string()),
-            KvReducedValue::Date32(12_345),
-            KvReducedValue::Date64(123_456_789),
-            KvReducedValue::Timestamp(987_654_321),
-            KvReducedValue::Decimal128(-987_654_321_123_456_789),
-            KvReducedValue::FixedSizeBinary(vec![0, 1, 2, 3, 4]),
-        ];
-
-        for expected in cases {
-            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&expected)
-                .expect("value bytes")
-                .to_vec();
-            let archived = rkyv::access::<ArchivedKvReducedValue, rkyv::rancor::Error>(&bytes)
-                .expect("archived value");
-            assert_eq!(KvReducedValue::from(archived), expected);
-        }
-    }
-
-    #[test]
     fn eval_expr_multiplies_int64_fields() {
         let key = Key::default();
         let row = StoredRow {
             values: vec![Some(StoredValue::Int64(6)), Some(StoredValue::Int64(7))],
         };
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&row)
-            .expect("row bytes")
-            .to_vec();
-        let archived = access_stored_row(&bytes).expect("archived row");
+        let bytes = row.encode();
+        let archived = decode_stored_row(&bytes).expect("decoded row");
         let expr = KvExpr::Mul(
             Box::new(KvExpr::Field(KvFieldRef::Value {
                 index: 0,
@@ -1094,7 +1090,7 @@ mod tests {
             })),
         );
         assert_eq!(
-            eval_expr(&key, Some(archived), &expr).expect("expr"),
+            eval_expr(&key, Some(&archived), &expr).expect("expr"),
             Some(KvReducedValue::Int64(42))
         );
         assert!(expr_needs_value(&expr));
@@ -1106,10 +1102,8 @@ mod tests {
         let row = StoredRow {
             values: vec![Some(StoredValue::Int64(9)), Some(StoredValue::Int64(4))],
         };
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&row)
-            .expect("row bytes")
-            .to_vec();
-        let archived = access_stored_row(&bytes).expect("archived row");
+        let bytes = row.encode();
+        let archived = decode_stored_row(&bytes).expect("decoded row");
 
         let add = KvExpr::Add(
             Box::new(KvExpr::Field(KvFieldRef::Value {
@@ -1137,11 +1131,11 @@ mod tests {
         );
 
         assert_eq!(
-            eval_expr(&key, Some(archived), &add).expect("add expr"),
+            eval_expr(&key, Some(&archived), &add).expect("add expr"),
             Some(KvReducedValue::Int64(13))
         );
         assert_eq!(
-            eval_expr(&key, Some(archived), &sub).expect("sub expr"),
+            eval_expr(&key, Some(&archived), &sub).expect("sub expr"),
             Some(KvReducedValue::Int64(5))
         );
     }
@@ -1152,10 +1146,8 @@ mod tests {
         let row = StoredRow {
             values: vec![Some(StoredValue::Int64(1_500))],
         };
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&row)
-            .expect("row bytes")
-            .to_vec();
-        let archived = access_stored_row(&bytes).expect("archived row");
+        let bytes = row.encode();
+        let archived = decode_stored_row(&bytes).expect("decoded row");
         let expr = KvExpr::Div(
             Box::new(KvExpr::Field(KvFieldRef::Value {
                 index: 0,
@@ -1165,7 +1157,7 @@ mod tests {
             Box::new(KvExpr::Literal(KvReducedValue::Float64(1000.0))),
         );
         assert_eq!(
-            eval_expr(&key, Some(archived), &expr).expect("expr"),
+            eval_expr(&key, Some(&archived), &expr).expect("expr"),
             Some(KvReducedValue::Float64(1.5))
         );
     }
@@ -1182,10 +1174,8 @@ mod tests {
                 Some(StoredValue::Int64(ts)),
             ],
         };
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&row)
-            .expect("row bytes")
-            .to_vec();
-        let archived = access_stored_row(&bytes).expect("archived row");
+        let bytes = row.encode();
+        let archived = decode_stored_row(&bytes).expect("decoded row");
 
         let lower = KvExpr::Lower(Box::new(KvExpr::Field(KvFieldRef::Value {
             index: 0,
@@ -1193,7 +1183,7 @@ mod tests {
             nullable: false,
         })));
         assert_eq!(
-            eval_expr(&key, Some(archived), &lower).expect("lower expr"),
+            eval_expr(&key, Some(&archived), &lower).expect("lower expr"),
             Some(KvReducedValue::Utf8("mixed".to_string()))
         );
 
@@ -1203,7 +1193,7 @@ mod tests {
             nullable: false,
         })));
         assert_eq!(
-            eval_expr(&key, Some(archived), &trunc).expect("trunc expr"),
+            eval_expr(&key, Some(&archived), &trunc).expect("trunc expr"),
             Some(KvReducedValue::Timestamp(expected_ts))
         );
     }

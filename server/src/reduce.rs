@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use bytes::Bytes;
 use exoware_sdk_rs::keys::Key;
 use exoware_sdk_rs::kv_codec::{
-    access_stored_row, canonicalize_reduced_group_values, encode_reduced_group_key, eval_expr,
+    decode_stored_row, canonicalize_reduced_group_values, encode_reduced_group_key, eval_expr,
     eval_predicate, expr_needs_value, predicate_needs_value, KvReducedValue,
 };
 use exoware_sdk_rs as exoware_proto;
@@ -256,14 +256,15 @@ fn extract_reduce_row(
         )
         .any(expr_needs_value)
         || request.filter.as_ref().is_some_and(predicate_needs_value);
-    let archived = if needs_value {
-        match access_stored_row(value.as_ref()) {
-            Ok(archived) => Some(archived),
+    let decoded = if needs_value {
+        match decode_stored_row(value.as_ref()) {
+            Ok(row) => Some(row),
             Err(_) => return Ok(None),
         }
     } else {
         None
     };
+    let archived = decoded.as_ref();
 
     if let Some(filter) = &request.filter {
         match eval_predicate(key, archived, filter) {

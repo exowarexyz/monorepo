@@ -41,8 +41,8 @@ pub enum KeyValidationError {
 pub enum KeyCodecError {
     #[error("reserved bits must be <= 16, got {bits}")]
     ReservedBitsTooLarge { bits: u8 },
-    #[error("family id {family} does not fit in {reserved_bits} reserved bits")]
-    FamilyOutOfRange { reserved_bits: u8, family: u16 },
+    #[error("prefix id {prefix} does not fit in {reserved_bits} reserved bits")]
+    PrefixOutOfRange { reserved_bits: u8, prefix: u16 },
     #[error("key length {len} is outside valid range [{min}, {max}]")]
     InvalidKeyLength { len: usize, min: usize, max: usize },
     #[error("payload length {payload_len} exceeds codec capacity {max_payload_len}")]
@@ -56,38 +56,38 @@ pub enum KeyCodecError {
         len: usize,
         max_payload_len: usize,
     },
-    #[error("key does not match this codec family")]
-    FamilyMismatch,
+    #[error("key does not match this codec prefix")]
+    PrefixMismatch,
 }
 
-/// Bit-packed key layout: a small family id in the leading reserved bits, payload in the remainder.
+/// Bit-packed key layout: a small prefix id in the leading reserved bits, payload in the remainder.
 ///
-/// For example, with 4 reserved bits the first nibble selects the family and the rest of the key
+/// For example, with 4 reserved bits the first nibble selects the prefix and the rest of the key
 /// carries the encoded logical payload.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct KeyCodec {
     reserved_bits: u8,
-    family: u16,
+    prefix: u16,
 }
 
 impl KeyCodec {
-    /// Build a codec with `reserved_bits` high bits reserved for `family`.
-    pub fn new(reserved_bits: u8, family: u16) -> Result<Self, KeyCodecError> {
+    /// Build a codec with `reserved_bits` high bits reserved for `prefix`.
+    pub fn new(reserved_bits: u8, prefix: u16) -> Result<Self, KeyCodecError> {
         if reserved_bits > 16 {
             return Err(KeyCodecError::ReservedBitsTooLarge {
                 bits: reserved_bits,
             });
         }
-        let max_family = family_bit_mask(reserved_bits);
-        if family > max_family {
-            return Err(KeyCodecError::FamilyOutOfRange {
+        let max_prefix = prefix_bit_mask(reserved_bits);
+        if prefix > max_prefix {
+            return Err(KeyCodecError::PrefixOutOfRange {
                 reserved_bits,
-                family,
+                prefix,
             });
         }
         Ok(Self {
             reserved_bits,
-            family,
+            prefix,
         })
     }
 
@@ -99,8 +99,8 @@ impl KeyCodec {
 
     /// Family id stored in the reserved high bits.
     #[inline]
-    pub const fn family(self) -> u16 {
-        self.family
+    pub const fn prefix(self) -> u16 {
+        self.prefix
     }
 
     /// Minimum key length in bytes needed to store this codec's reserved bits.
@@ -143,16 +143,16 @@ impl KeyCodec {
         self.reserved_bits as usize + (payload_byte_offset * 8)
     }
 
-    /// Create a zero-filled key buffer with the family id written in the reserved bits.
+    /// Create a zero-filled key buffer with the prefix id written in the reserved bits.
     pub fn new_key_with_len(self, total_bytes: usize) -> Result<KeyMut, KeyCodecError> {
         self.validate_key_len(total_bytes)?;
         let mut key = BytesMut::with_capacity(total_bytes);
         key.resize(total_bytes, 0);
-        write_family_bits(&mut key, self.reserved_bits, self.family);
+        write_prefix_bits(&mut key, self.reserved_bits, self.prefix);
         Ok(key)
     }
 
-    /// Create the shortest zero-filled key for this family.
+    /// Create the shortest zero-filled key for this prefix.
     pub fn new_key(self) -> Key {
         Bytes::from(
             self.new_key_with_len(self.min_key_len())
@@ -177,7 +177,7 @@ impl KeyCodec {
     /// Decode `payload_len` bytes from a key that belongs to this codec.
     pub fn decode(self, key: &Key, payload_len: usize) -> Result<Vec<u8>, KeyCodecError> {
         if !self.matches(key) {
-            return Err(KeyCodecError::FamilyMismatch);
+            return Err(KeyCodecError::PrefixMismatch);
         }
         self.read_payload(key, 0, payload_len)
     }
@@ -249,30 +249,30 @@ impl KeyCodec {
         self.write_payload(dst, dst_payload_byte_offset, &bytes)
     }
 
-    /// True when the key belongs to this codec family.
+    /// True when the key belongs to this codec prefix.
     #[inline]
     pub fn matches(self, key: &Key) -> bool {
-        key.len() >= self.min_key_len() && read_family_bits(key, self.reserved_bits) == self.family
+        key.len() >= self.min_key_len() && read_prefix_bits(key, self.reserved_bits) == self.prefix
     }
 
-    /// Inclusive lower and upper bounds for keys in this family with a fixed byte length.
-    pub fn family_bounds_for_len(self, total_bytes: usize) -> Result<(Key, Key), KeyCodecError> {
+    /// Inclusive lower and upper bounds for keys in this prefix with a fixed byte length.
+    pub fn prefix_bounds_for_len(self, total_bytes: usize) -> Result<(Key, Key), KeyCodecError> {
         self.validate_key_len(total_bytes)?;
         let mut start = vec![0u8; total_bytes];
         let mut end = vec![0xFFu8; total_bytes];
-        write_family_bits(&mut start, self.reserved_bits, self.family);
-        write_family_bits(&mut end, self.reserved_bits, self.family);
+        write_prefix_bits(&mut start, self.reserved_bits, self.prefix);
+        write_prefix_bits(&mut end, self.reserved_bits, self.prefix);
         Ok((Bytes::from(start), Bytes::from(end)))
     }
 
-    /// Inclusive lower and upper bounds for this family across the full supported key-length domain.
-    pub fn family_bounds(self) -> (Key, Key) {
+    /// Inclusive lower and upper bounds for this prefix across the full supported key-length domain.
+    pub fn prefix_bounds(self) -> (Key, Key) {
         let start = Bytes::from(
             self.new_key_with_len(self.min_key_len())
                 .expect("minimum codec key length must always be valid"),
         );
         let mut end = vec![0xFFu8; MAX_KEY_LEN];
-        write_family_bits(&mut end, self.reserved_bits, self.family);
+        write_prefix_bits(&mut end, self.reserved_bits, self.prefix);
         (start, Bytes::from(end))
     }
 
@@ -349,7 +349,7 @@ pub fn next_key(key: &Key) -> Option<Key> {
 }
 
 #[inline]
-const fn family_bit_mask(bits: u8) -> u16 {
+const fn prefix_bit_mask(bits: u8) -> u16 {
     if bits == 0 {
         0
     } else if bits >= 16 {
@@ -359,23 +359,23 @@ const fn family_bit_mask(bits: u8) -> u16 {
     }
 }
 
-fn write_family_bits(key: &mut [u8], reserved_bits: u8, family: u16) {
+fn write_prefix_bits(key: &mut [u8], reserved_bits: u8, prefix: u16) {
     for bit_idx in 0..reserved_bits as usize {
         let shift = reserved_bits as usize - 1 - bit_idx;
-        let value = ((family >> shift) & 1) != 0;
+        let value = ((prefix >> shift) & 1) != 0;
         write_bit_be(key, bit_idx, value);
     }
 }
 
-fn read_family_bits(key: &Key, reserved_bits: u8) -> u16 {
-    let mut family = 0u16;
+fn read_prefix_bits(key: &Key, reserved_bits: u8) -> u16 {
+    let mut prefix = 0u16;
     for bit_idx in 0..reserved_bits as usize {
-        family <<= 1;
+        prefix <<= 1;
         if read_bit_be(key, bit_idx) {
-            family |= 1;
+            prefix |= 1;
         }
     }
-    family
+    prefix
 }
 
 pub(crate) fn write_bits_from_bytes(
@@ -495,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn key_codec_preserves_payload_order_within_family() {
+    fn key_codec_preserves_payload_order_within_prefix() {
         let codec = KeyCodec::new(4, 0x3).expect("codec");
         let lower = codec.encode(&[0x10, 0x00]).expect("lower key");
         let mid = codec.encode(&[0x10, 0x01]).expect("mid key");
@@ -505,10 +505,10 @@ mod tests {
     }
 
     #[test]
-    fn key_codec_family_bounds_cover_only_one_family() {
+    fn key_codec_prefix_bounds_cover_only_one_prefix() {
         let codec = KeyCodec::new(4, 0xA).expect("codec");
-        let (start, end) = codec.family_bounds();
-        let key = codec.encode(&[0x11, 0x22]).expect("family key");
+        let (start, end) = codec.prefix_bounds();
+        let key = codec.encode(&[0x11, 0x22]).expect("prefix key");
         assert!(codec.matches(&start));
         assert!(codec.matches(&end));
         assert!(codec.matches(&key));
@@ -542,13 +542,13 @@ mod tests {
     }
 
     #[test]
-    fn key_codec_rejects_out_of_range_family_and_payload() {
-        let family_err = KeyCodec::new(3, 0b1000).expect_err("family should not fit");
+    fn key_codec_rejects_out_of_range_prefix_and_payload() {
+        let prefix_err = KeyCodec::new(3, 0b1000).expect_err("prefix should not fit");
         assert_eq!(
-            family_err,
-            KeyCodecError::FamilyOutOfRange {
+            prefix_err,
+            KeyCodecError::PrefixOutOfRange {
                 reserved_bits: 3,
-                family: 0b1000
+                prefix: 0b1000
             }
         );
 

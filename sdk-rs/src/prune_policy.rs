@@ -1,58 +1,49 @@
 use anyhow::{ensure, Context};
+use bytes::{Buf, BufMut};
+use commonware_codec::{Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write};
 use regex::bytes::Regex;
-use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use crate::keys::KeyCodec;
+use crate::kv_codec::Utf8;
 
-pub const PRUNE_POLICY_CONTROL_KEY: &str = "manifest/control/compaction-prune-policies.yaml";
+pub const PRUNE_POLICY_CONTROL_KEY: &str = "manifest/control/compaction-prune-policies";
 pub const PRUNE_POLICY_DOCUMENT_VERSION: u32 = 1;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrunePolicy {
     pub match_key: MatchKey,
-    #[serde(default)]
     pub group_by: GroupBy,
-    #[serde(default)]
     pub order_by: Option<OrderBy>,
     pub retain: RetainPolicy,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MatchKey {
     pub reserved_bits: u8,
-    /// Family id in the key's reserved high bits (`KeyCodec`).
-    #[serde(alias = "prefix")]
-    pub family: u16,
-    pub payload_regex: String,
+    pub prefix: u16,
+    pub payload_regex: Utf8,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct GroupBy {
-    #[serde(default)]
-    pub capture_groups: Vec<String>,
+    pub capture_groups: Vec<Utf8>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OrderBy {
-    pub capture_group: String,
+    pub capture_group: Utf8,
     pub encoding: OrderEncoding,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OrderEncoding {
     BytesAsc,
     U64Be,
     I64Be,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RetainPolicy {
     KeepLatest { count: usize },
     GreaterThan { threshold_u64: u64 },
@@ -60,21 +51,214 @@ pub enum RetainPolicy {
     DropAll,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrunePolicyDocument {
-    #[serde(default = "default_document_version")]
     pub version: u32,
-    #[serde(default)]
     pub policies: Vec<PrunePolicy>,
 }
 
-const fn default_document_version() -> u32 {
-    PRUNE_POLICY_DOCUMENT_VERSION
+impl Write for OrderEncoding {
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            OrderEncoding::BytesAsc => 0u8.write(buf),
+            OrderEncoding::U64Be => 1u8.write(buf),
+            OrderEncoding::I64Be => 2u8.write(buf),
+        }
+    }
+}
+
+impl FixedSize for OrderEncoding {
+    const SIZE: usize = 1;
+}
+
+impl Read for OrderEncoding {
+    type Cfg = ();
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        match u8::read(buf)? {
+            0 => Ok(OrderEncoding::BytesAsc),
+            1 => Ok(OrderEncoding::U64Be),
+            2 => Ok(OrderEncoding::I64Be),
+            v => Err(CodecError::InvalidEnum(v)),
+        }
+    }
+}
+
+impl Write for RetainPolicy {
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            RetainPolicy::KeepLatest { count } => {
+                0u8.write(buf);
+                (*count as u64).write(buf);
+            }
+            RetainPolicy::GreaterThan { threshold_u64 } => {
+                1u8.write(buf);
+                threshold_u64.write(buf);
+            }
+            RetainPolicy::GreaterThanOrEqual { threshold_u64 } => {
+                2u8.write(buf);
+                threshold_u64.write(buf);
+            }
+            RetainPolicy::DropAll => {
+                3u8.write(buf);
+            }
+        }
+    }
+}
+
+impl EncodeSize for RetainPolicy {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            RetainPolicy::KeepLatest { .. }
+            | RetainPolicy::GreaterThan { .. }
+            | RetainPolicy::GreaterThanOrEqual { .. } => u64::SIZE,
+            RetainPolicy::DropAll => 0,
+        }
+    }
+}
+
+impl Read for RetainPolicy {
+    type Cfg = ();
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        match u8::read(buf)? {
+            0 => Ok(RetainPolicy::KeepLatest {
+                count: u64::read(buf)? as usize,
+            }),
+            1 => Ok(RetainPolicy::GreaterThan {
+                threshold_u64: u64::read(buf)?,
+            }),
+            2 => Ok(RetainPolicy::GreaterThanOrEqual {
+                threshold_u64: u64::read(buf)?,
+            }),
+            3 => Ok(RetainPolicy::DropAll),
+            v => Err(CodecError::InvalidEnum(v)),
+        }
+    }
+}
+
+impl Write for MatchKey {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.reserved_bits.write(buf);
+        self.prefix.write(buf);
+        self.payload_regex.write(buf);
+    }
+}
+
+impl EncodeSize for MatchKey {
+    fn encode_size(&self) -> usize {
+        u8::SIZE + u16::SIZE + self.payload_regex.encode_size()
+    }
+}
+
+impl Read for MatchKey {
+    type Cfg = ();
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        Ok(MatchKey {
+            reserved_bits: u8::read(buf)?,
+            prefix: u16::read(buf)?,
+            payload_regex: Utf8::read(buf)?,
+        })
+    }
+}
+
+impl Write for GroupBy {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.capture_groups.as_slice().write(buf);
+    }
+}
+
+impl EncodeSize for GroupBy {
+    fn encode_size(&self) -> usize {
+        self.capture_groups.as_slice().encode_size()
+    }
+}
+
+impl Read for GroupBy {
+    type Cfg = ();
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let range: RangeCfg<usize> = (..).into();
+        let capture_groups = Vec::<Utf8>::read_cfg(buf, &(range, ()))?;
+        Ok(GroupBy { capture_groups })
+    }
+}
+
+impl Write for OrderBy {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.capture_group.write(buf);
+        self.encoding.write(buf);
+    }
+}
+
+impl EncodeSize for OrderBy {
+    fn encode_size(&self) -> usize {
+        self.capture_group.encode_size() + OrderEncoding::SIZE
+    }
+}
+
+impl Read for OrderBy {
+    type Cfg = ();
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        Ok(OrderBy {
+            capture_group: Utf8::read(buf)?,
+            encoding: OrderEncoding::read(buf)?,
+        })
+    }
+}
+
+impl Write for PrunePolicy {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.match_key.write(buf);
+        self.group_by.write(buf);
+        self.order_by.write(buf);
+        self.retain.write(buf);
+    }
+}
+
+impl EncodeSize for PrunePolicy {
+    fn encode_size(&self) -> usize {
+        self.match_key.encode_size()
+            + self.group_by.encode_size()
+            + self.order_by.encode_size()
+            + self.retain.encode_size()
+    }
+}
+
+impl Read for PrunePolicy {
+    type Cfg = ();
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        Ok(PrunePolicy {
+            match_key: MatchKey::read(buf)?,
+            group_by: GroupBy::read(buf)?,
+            order_by: Option::<OrderBy>::read(buf)?,
+            retain: RetainPolicy::read(buf)?,
+        })
+    }
+}
+
+impl Write for PrunePolicyDocument {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.version.write(buf);
+        self.policies.as_slice().write(buf);
+    }
+}
+
+impl EncodeSize for PrunePolicyDocument {
+    fn encode_size(&self) -> usize {
+        u32::SIZE + self.policies.as_slice().encode_size()
+    }
+}
+
+impl Read for PrunePolicyDocument {
+    type Cfg = ();
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let version = u32::read(buf)?;
+        let range: RangeCfg<usize> = (..).into();
+        let policies = Vec::<PrunePolicy>::read_cfg(buf, &(range, ()))?;
+        Ok(PrunePolicyDocument { version, policies })
+    }
 }
 
 pub fn validate_policy(policy: &PrunePolicy) -> anyhow::Result<()> {
-    KeyCodec::new(policy.match_key.reserved_bits, policy.match_key.family)
+    KeyCodec::new(policy.match_key.reserved_bits, policy.match_key.prefix)
         .map_err(|e| anyhow::anyhow!("invalid prune policy codec: {e}"))?;
     let regex = compile_payload_regex(&policy.match_key.payload_regex)?;
     validate_capture_groups(
@@ -90,7 +274,7 @@ pub fn validate_policy(policy: &PrunePolicy) -> anyhow::Result<()> {
     if let Some(order_by) = &policy.order_by {
         validate_capture_groups(
             &regex,
-            std::slice::from_ref(&order_by.capture_group),
+            &[order_by.capture_group.clone()],
             "order_by capture_group",
         )?;
     }
@@ -123,10 +307,10 @@ pub fn ensure_unique_policy_families(policies: &[PrunePolicy]) -> anyhow::Result
     let mut families = HashSet::new();
     for policy in policies {
         ensure!(
-            families.insert((policy.match_key.reserved_bits, policy.match_key.family)),
+            families.insert((policy.match_key.reserved_bits, policy.match_key.prefix)),
             "duplicate compaction prune policy for reserved_bits={} family={}",
             policy.match_key.reserved_bits,
-            policy.match_key.family
+            policy.match_key.prefix
         );
     }
     Ok(())
@@ -146,22 +330,22 @@ pub fn validate_policy_document(document: &PrunePolicyDocument) -> anyhow::Resul
     Ok(())
 }
 
-pub fn parse_policy_document_yaml(raw: &str) -> anyhow::Result<PrunePolicyDocument> {
-    if raw.trim().is_empty() {
+pub fn decode_policy_document(raw: &[u8]) -> anyhow::Result<PrunePolicyDocument> {
+    if raw.is_empty() {
         return Ok(PrunePolicyDocument {
             version: PRUNE_POLICY_DOCUMENT_VERSION,
             policies: Vec::new(),
         });
     }
-    let document: PrunePolicyDocument =
-        serde_yaml::from_str(raw).context("failed to parse prune policy YAML")?;
+    let document = PrunePolicyDocument::read_cfg(&mut &*raw, &())
+        .context("failed to decode prune policy document")?;
     validate_policy_document(&document)?;
     Ok(document)
 }
 
-pub fn encode_policy_document_yaml(document: &PrunePolicyDocument) -> anyhow::Result<String> {
+pub fn encode_policy_document(document: &PrunePolicyDocument) -> anyhow::Result<Vec<u8>> {
     validate_policy_document(document)?;
-    serde_yaml::to_string(document).context("failed to encode prune policy YAML")
+    Ok(document.encode().to_vec())
 }
 
 pub fn compile_payload_regex(raw: &str) -> anyhow::Result<Regex> {
@@ -172,18 +356,18 @@ pub fn compile_payload_regex(raw: &str) -> anyhow::Result<Regex> {
     Regex::new(raw).with_context(|| format!("invalid match_key payload_regex {raw:?}"))
 }
 
-fn validate_capture_groups(regex: &Regex, groups: &[String], label: &str) -> anyhow::Result<()> {
+fn validate_capture_groups(regex: &Regex, groups: &[Utf8], label: &str) -> anyhow::Result<()> {
     let known: HashSet<&str> = regex.capture_names().flatten().collect();
     for group in groups {
         ensure!(
-            known.contains(group.as_str()),
+            known.contains(&**group),
             "{label} references unknown capture group {group:?}"
         );
     }
     Ok(())
 }
 
-fn capture_groups_are_unique(groups: &[String]) -> bool {
+fn capture_groups_are_unique(groups: &[Utf8]) -> bool {
     let mut seen = HashSet::new();
     groups.iter().all(|group| seen.insert(group))
 }
@@ -191,25 +375,26 @@ fn capture_groups_are_unique(groups: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_policy_document_yaml, parse_policy_document_yaml, GroupBy, MatchKey, OrderBy,
+        decode_policy_document, encode_policy_document, GroupBy, MatchKey, OrderBy,
         OrderEncoding, PrunePolicy, PrunePolicyDocument, RetainPolicy,
         PRUNE_POLICY_CONTROL_KEY,
     };
+    use crate::kv_codec::Utf8;
 
     fn sample_policy() -> PrunePolicy {
         PrunePolicy {
             match_key: MatchKey {
                 reserved_bits: 4,
-                family: 1,
-                payload_regex:
-                    "(?s-u)^(?P<logical>(?:\\x00\\xFF|[^\\x00])*)\\x00\\x00(?P<version>.{8})$"
-                        .to_string(),
+                prefix: 1,
+                payload_regex: Utf8::from(
+                    "(?s-u)^(?P<logical>(?:\\x00\\xFF|[^\\x00])*)\\x00\\x00(?P<version>.{8})$",
+                ),
             },
             group_by: GroupBy {
-                capture_groups: vec!["logical".to_string()],
+                capture_groups: vec![Utf8::from("logical")],
             },
             order_by: Some(OrderBy {
-                capture_group: "version".to_string(),
+                capture_group: Utf8::from("version"),
                 encoding: OrderEncoding::U64Be,
             }),
             retain: RetainPolicy::KeepLatest { count: 10 },
@@ -224,65 +409,75 @@ mod tests {
     }
 
     #[test]
-    fn yaml_round_trip() {
-        let yaml = encode_policy_document_yaml(&sample_document()).expect("encode");
-        let decoded = parse_policy_document_yaml(&yaml).expect("decode");
+    fn codec_round_trip() {
+        let encoded = encode_policy_document(&sample_document()).expect("encode");
+        let decoded = decode_policy_document(&encoded).expect("decode");
         assert_eq!(decoded, sample_document());
     }
 
     #[test]
-    fn empty_yaml_means_no_policies() {
-        let decoded = parse_policy_document_yaml("").expect("empty ok");
+    fn empty_bytes_means_no_policies() {
+        let decoded = decode_policy_document(b"").expect("empty ok");
         assert_eq!(decoded.version, 1);
         assert!(decoded.policies.is_empty());
         assert_eq!(
             PRUNE_POLICY_CONTROL_KEY,
-            "manifest/control/compaction-prune-policies.yaml"
+            "manifest/control/compaction-prune-policies"
         );
     }
 
     #[test]
     fn keep_latest_requires_order_by() {
-        let err = parse_policy_document_yaml(
-            r#"
-version: 1
-policies:
-  - match_key:
-      reserved_bits: 4
-      prefix: 1
-      payload_regex: "(?s-u)^(?P<logical>(?:\\x00\\xFF|[^\\x00])*)\\x00\\x00(?P<version>.{8})$"
-    group_by:
-      capture_groups: ["logical"]
-    retain:
-      kind: keep_latest
-      count: 1
-"#,
-        )
-        .expect_err("keep_latest without order_by should fail");
-        assert!(err.to_string().contains("keep_latest requires order_by"));
+        let doc = PrunePolicyDocument {
+            version: 1,
+            policies: vec![PrunePolicy {
+                match_key: MatchKey {
+                    reserved_bits: 4,
+                    prefix: 1,
+                    payload_regex: Utf8::from(
+                        "(?s-u)^(?P<logical>(?:\\x00\\xFF|[^\\x00])*)\\x00\\x00(?P<version>.{8})$",
+                    ),
+                },
+                group_by: GroupBy {
+                    capture_groups: vec![Utf8::from("logical")],
+                },
+                order_by: None,
+                retain: RetainPolicy::KeepLatest { count: 1 },
+            }],
+        };
+        let encoded = encode_policy_document(&doc);
+        assert!(encoded.is_err());
+        assert!(encoded
+            .unwrap_err()
+            .to_string()
+            .contains("keep_latest requires order_by"));
     }
 
     #[test]
     fn capture_groups_must_exist() {
-        let err = parse_policy_document_yaml(
-            r#"
-version: 1
-policies:
-  - match_key:
-      reserved_bits: 4
-      prefix: 1
-      payload_regex: "(?s)^(?P<logical>.+)$"
-    group_by:
-      capture_groups: ["missing"]
-    order_by:
-      capture_group: "logical"
-      encoding: bytes_asc
-    retain:
-      kind: keep_latest
-      count: 1
-"#,
-        )
-        .expect_err("unknown capture group should fail");
-        assert!(err.to_string().contains("unknown capture group"));
+        let doc = PrunePolicyDocument {
+            version: 1,
+            policies: vec![PrunePolicy {
+                match_key: MatchKey {
+                    reserved_bits: 4,
+                    prefix: 1,
+                    payload_regex: Utf8::from("(?s)^(?P<logical>.+)$"),
+                },
+                group_by: GroupBy {
+                    capture_groups: vec![Utf8::from("missing")],
+                },
+                order_by: Some(OrderBy {
+                    capture_group: Utf8::from("logical"),
+                    encoding: OrderEncoding::BytesAsc,
+                }),
+                retain: RetainPolicy::KeepLatest { count: 1 },
+            }],
+        };
+        let encoded = encode_policy_document(&doc);
+        assert!(encoded.is_err());
+        assert!(encoded
+            .unwrap_err()
+            .to_string()
+            .contains("unknown capture group"));
     }
 }

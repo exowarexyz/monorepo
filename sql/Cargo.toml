@@ -13,7 +13,7 @@ datafusion = "52.2.0"
 futures = "0.3.32"
 hex = { workspace = true }
 regex = { workspace = true }
-rkyv = { workspace = true }
+commonware-codec = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
