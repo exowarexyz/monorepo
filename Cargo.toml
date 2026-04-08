@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    "common",
     "server",
     "sdk-rs",
     "simulator",
@@ -13,7 +12,6 @@ resolver = "2"
 exoware-sdk-rs = { version = "0.0.2", path = "sdk-rs" }
 # Schemas: `proto/`. Rust bindings are embedded in `sdk-rs`; TS bindings live under
 # `sdk-ts/src/gen/ts/` (see `gen/README.md`).
-exoware-common = { path = "common" }
 exoware-server = { path = "server" }
 tokio = "1.43.0"
 clap = "4.5.18"

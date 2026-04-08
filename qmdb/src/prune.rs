@@ -1,4 +1,4 @@
-use exoware_common::prune_policy::{
+use exoware_sdk_rs::prune_policy::{
     GroupBy, MatchKey, OrderBy, OrderEncoding, PrunePolicy, RetainPolicy,
 };
 
@@ -42,7 +42,7 @@ pub fn keep_positions_gte(min_location: u64) -> PrunePolicy {
 mod tests {
     use super::{keep_latest_updates, keep_positions_gte};
     use crate::{RESERVED_BITS, UPDATE_FAMILY};
-    use exoware_common::prune_policy::{OrderEncoding, RetainPolicy};
+    use exoware_sdk_rs::prune_policy::{OrderEncoding, RetainPolicy};
 
     #[test]
     fn keep_latest_updates_matches_update_key_layout() {

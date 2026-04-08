@@ -80,7 +80,7 @@ pub use range_traversal::{
     parse_range_traversal_direction, RangeTraversalDirection, RangeTraversalModeError,
 };
 
-use exoware_common::kv_codec::{
+use crate::kv_codec::{
     KvExpr, KvFieldKind, KvFieldRef, KvPredicate, KvPredicateCheck, KvPredicateConstraint,
     KvReducedValue,
 };

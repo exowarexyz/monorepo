@@ -48,7 +48,7 @@ use commonware_storage::{
     },
 };
 use commonware_utils::{Array, Span};
-use exoware_common::keys::{Key, KeyCodec};
+use exoware_sdk_rs::keys::{Key, KeyCodec};
 
 /// Maximum encoded operation size for QMDB key and value payloads (u16 length on the wire).
 pub const MAX_OPERATION_SIZE: usize = u16::MAX as usize;

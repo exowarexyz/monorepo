@@ -81,7 +81,7 @@ QMDB update-row family. `exoware-qmdb` exposes typed builders in `store_qmdb::pr
 - `store_qmdb::prune::keep_latest_updates(count)`
 - `store_qmdb::prune::keep_positions_gte(min_location)`
 
- These return `exoware_common::prune_policy::PrunePolicy` values using the crate's
+ These return `exoware_sdk_rs::prune_policy::PrunePolicy` values using the crate's
  actual update-key layout:
 
 - ordered raw key bytes where:

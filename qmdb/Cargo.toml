@@ -15,7 +15,6 @@ commonware-storage = "2026.3.0"
 commonware-utils = "2026.3.0"
 connectrpc = { workspace = true }
 exoware-sdk-rs = { workspace = true }
-exoware-common = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 

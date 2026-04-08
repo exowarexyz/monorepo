@@ -28,7 +28,7 @@ enum TraversalMode {
   TRAVERSAL_MODE_REVERSE = 1;
 }
 
-// --- Range-reduction DSL (`Reduce`); mirrors `exoware_common::kv_codec` ---
+// --- Range-reduction DSL (`Reduce`); mirrors `exoware_sdk_rs::kv_codec` ---
 
 enum KvFieldKind {
   KV_FIELD_KIND_INT64 = 0;

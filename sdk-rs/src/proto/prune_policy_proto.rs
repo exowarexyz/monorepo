@@ -1,11 +1,11 @@
-//! Convert protobuf prune-policy views into `exoware_common::prune_policy` domain types.
+//! Convert protobuf prune-policy views into `prune_policy` domain types.
 
-use crate::store::compact::v1::{
-    policy_retain, PolicyOrderByView, PolicyOrderEncoding, PolicyView, PruneRequestView,
-};
-use exoware_common::prune_policy::{
+use crate::prune_policy::{
     GroupBy, MatchKey, OrderBy, OrderEncoding, PrunePolicy, PrunePolicyDocument, RetainPolicy,
     PRUNE_POLICY_DOCUMENT_VERSION,
+};
+use crate::store::compact::v1::{
+    policy_retain, PolicyOrderByView, PolicyOrderEncoding, PolicyView, PruneRequestView,
 };
 
 fn u8_from_u32(field: &str, v: u32) -> Result<u8, String> {
@@ -111,6 +111,6 @@ pub fn prune_policy_document_from_prune_request_view<'a>(
         version: PRUNE_POLICY_DOCUMENT_VERSION,
         policies,
     };
-    exoware_common::prune_policy::validate_policy_document(&out).map_err(|e| e.to_string())?;
+    crate::prune_policy::validate_policy_document(&out).map_err(|e| e.to_string())?;
     Ok(out)
 }

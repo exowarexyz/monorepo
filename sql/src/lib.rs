@@ -39,8 +39,8 @@ use datafusion::physical_plan::{
     SendableRecordBatchStream,
 };
 use datafusion::prelude::SessionContext;
-use exoware_common::keys::{Key, KeyCodec, KeyMut};
-use exoware_common::kv_codec::{
+use exoware_sdk_rs::keys::{Key, KeyCodec, KeyMut};
+use exoware_sdk_rs::kv_codec::{
     access_stored_row, canonicalize_reduced_group_values, encode_reduced_group_key, eval_predicate,
     interleave_ordered_key_fields, ArchivedStoredRow, ArchivedStoredValue, KvExpr, KvFieldKind,
     KvFieldRef, KvPredicate, KvPredicateCheck, KvPredicateConstraint, KvReducedValue, StoredRow,
@@ -6367,11 +6367,11 @@ fn encode_string_variable(value: &str) -> Result<Vec<u8>, String> {
         }
     }
     out.push(STRING_KEY_TERMINATOR);
-    if out.len() > exoware_common::keys::MAX_KEY_LEN {
+    if out.len() > exoware_sdk_rs::keys::MAX_KEY_LEN {
         return Err(format!(
             "indexed string value '{}' exceeds max encoded key length {}",
             value,
-            exoware_common::keys::MAX_KEY_LEN
+            exoware_sdk_rs::keys::MAX_KEY_LEN
         ));
     }
     Ok(out)
@@ -6973,7 +6973,7 @@ fn decode_secondary_index_key_with_masks(
             .codec
             .read_payload(key, 0, spec.key_columns_width)
             .ok()?;
-        Some(exoware_common::kv_codec::deinterleave_ordered_key_fields(
+        Some(exoware_sdk_rs::kv_codec::deinterleave_ordered_key_fields(
             &index_key_bytes,
             &spec
                 .key_columns
@@ -7067,7 +7067,7 @@ fn decode_secondary_index_primary_key(
 }
 
 fn next_key(key: &Key) -> Option<Key> {
-    exoware_common::keys::next_key(key)
+    exoware_sdk_rs::keys::next_key(key)
 }
 
 struct ScanCtx<'a> {
@@ -9037,7 +9037,7 @@ mod tests {
     use axum::Router;
     use bytes::Bytes;
     use connectrpc::{Chain, ConnectError, ConnectRpcService, Context};
-    use exoware_common::kv_codec::{eval_expr, expr_needs_value};
+    use exoware_sdk_rs::kv_codec::{eval_expr, expr_needs_value};
     use exoware_proto::connect_compression_registry;
     use exoware_proto::store::ingest::v1::{
         PutResponse as ProtoPutResponse, Service as IngestService,
@@ -9198,7 +9198,7 @@ mod tests {
             || request
                 .filter
                 .as_ref()
-                .is_some_and(exoware_common::kv_codec::predicate_needs_value);
+                .is_some_and(exoware_sdk_rs::kv_codec::predicate_needs_value);
         let archived = if needs_value {
             access_stored_row(value.as_ref()).ok()
         } else {
@@ -10033,7 +10033,7 @@ mod tests {
 
         let compiled = plan.compile_index_predicate_plan(&model, &spec);
         assert!(!compiled.is_impossible());
-        assert!(compiled.matches_key(&Bytes::from(vec![0u8; exoware_common::keys::KEY_SIZE])));
+        assert!(compiled.matches_key(&Bytes::from(vec![0u8; exoware_sdk_rs::keys::KEY_SIZE])));
     }
 
     #[test]
@@ -13231,7 +13231,7 @@ mod tests {
             &model,
         )
         .expect("max-length UTF-8 PK should encode");
-        assert_eq!(key.len(), exoware_common::keys::MAX_KEY_LEN);
+        assert_eq!(key.len(), exoware_sdk_rs::keys::MAX_KEY_LEN);
         let decoded = decode_primary_key(model.table_prefix, &key, &model)
             .expect("max-length PK should decode");
         assert!(matches!(
@@ -13334,7 +13334,7 @@ mod tests {
             },
         )
         .expect("secondary key at max payload should encode");
-        assert_eq!(key.len(), exoware_common::keys::MAX_KEY_LEN);
+        assert_eq!(key.len(), exoware_sdk_rs::keys::MAX_KEY_LEN);
         let decoded =
             decode_secondary_index_key(model.table_prefix, spec, &model, &key).expect("decode");
         assert!(matches!(
@@ -13394,7 +13394,7 @@ mod tests {
             archived,
         )
         .expect("backfill path should encode max payload");
-        assert_eq!(key.len(), exoware_common::keys::MAX_KEY_LEN);
+        assert_eq!(key.len(), exoware_sdk_rs::keys::MAX_KEY_LEN);
 
         let err = encode_secondary_index_key_from_parts(
             model.table_prefix,

@@ -12,5 +12,4 @@ buffa-types = { workspace = true }
 connectrpc = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
-exoware-common = { workspace = true }
 exoware-sdk-rs = { workspace = true }

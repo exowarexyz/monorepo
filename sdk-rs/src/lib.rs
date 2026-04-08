@@ -10,17 +10,19 @@
 //! protobuf `google.rpc` details (and `store.query.v1.Detail` on query RPC errors), not string parsing.
 //! Idempotent reads honor [`google.rpc.RetryInfo`] when deciding backoff (see `retry_delay_for_error`).
 
+pub mod keys;
+pub mod kv_codec;
 pub mod proto;
+pub mod prune_policy;
+pub use keys::{Key, KeyCodec, KeyCodecError, KeyMut, KeyValidationError, Value, MAX_KEY_LEN};
 pub use proto::*;
 extern crate self as exoware_proto;
 
 use bytes::Bytes;
 use connectrpc::client::{ClientConfig, ServerStream as ConnectServerStream};
 use connectrpc::{ConnectError, ErrorCode};
-use exoware_common::keys::{
-    is_valid_key_size, Key,
-};
-use exoware_common::kv_codec::KvReducedValue;
+use keys::is_valid_key_size;
+use kv_codec::KvReducedValue;
 use exoware_proto::ingest::ServiceClient as IngestServiceClient;
 use exoware_proto::query as proto_query;
 use exoware_proto::query::ServiceClient as QueryServiceClient;

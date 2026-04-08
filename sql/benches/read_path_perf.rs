@@ -11,7 +11,7 @@ use connectrpc::{Chain, ConnectRpcService, Context};
 use criterion::{criterion_group, criterion_main, Criterion};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::prelude::SessionContext;
-use exoware_common::keys::Key;
+use exoware_sdk_rs::keys::Key;
 use exoware_sdk_rs as exoware_proto;
 use exoware_proto::connect_compression_registry;
 use exoware_proto::store::ingest::v1::{

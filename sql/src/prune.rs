@@ -1,4 +1,4 @@
-use exoware_common::prune_policy::{
+use exoware_sdk_rs::prune_policy::{
     GroupBy, MatchKey, OrderBy, OrderEncoding, PrunePolicy, RetainPolicy,
 };
 
@@ -84,7 +84,7 @@ mod tests {
     use super::{keep_latest_versions, keep_latest_versions_utf8, ORDERED_UTF8_REGEX};
     use crate::{encode_primary_key, CellValue, KvTableConfig, TableColumnConfig, TableModel};
     use datafusion::arrow::datatypes::DataType;
-    use exoware_common::prune_policy::{
+    use exoware_sdk_rs::prune_policy::{
         compile_payload_regex, validate_policy, OrderEncoding, RetainPolicy,
     };
 

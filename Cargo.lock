@@ -2313,20 +2313,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "exoware-common"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "chrono",
- "regex",
- "rkyv",
- "serde",
- "serde_yaml",
- "thiserror 2.0.12",
-]
-
-[[package]]
 name = "exoware-qmdb"
 version = "0.1.0"
 dependencies = [
@@ -2338,7 +2324,6 @@ dependencies = [
  "commonware-storage",
  "commonware-utils",
  "connectrpc",
- "exoware-common",
  "exoware-sdk-rs",
  "exoware-server",
  "exoware-simulator",
@@ -2355,21 +2340,25 @@ dependencies = [
 name = "exoware-sdk-rs"
 version = "0.0.2"
 dependencies = [
+ "anyhow",
  "base64",
  "buffa",
  "buffa-types",
  "bytes",
+ "chrono",
  "connectrpc",
  "connectrpc-build",
- "exoware-common",
  "futures",
  "hex",
  "http",
  "http-body",
  "hyper",
+ "regex",
  "reqwest",
+ "rkyv",
  "serde",
  "serde_json",
+ "serde_yaml",
  "thiserror 2.0.12",
  "tokio",
  "tower",
@@ -2384,7 +2373,6 @@ dependencies = [
  "buffa-types",
  "bytes",
  "connectrpc",
- "exoware-common",
  "exoware-sdk-rs",
  "futures",
  "http",
@@ -2418,7 +2406,6 @@ dependencies = [
  "connectrpc",
  "criterion 0.5.1",
  "datafusion",
- "exoware-common",
  "exoware-sdk-rs",
  "exoware-server",
  "exoware-simulator",

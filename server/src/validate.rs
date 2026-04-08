@@ -5,7 +5,7 @@
 //! the first constraint violation.
 
 use connectrpc::ConnectError;
-use exoware_common::keys::{validate_key_size, MAX_KEY_LEN};
+use exoware_sdk_rs::keys::{validate_key_size, MAX_KEY_LEN};
 use exoware_sdk_rs as exoware_proto;
 use exoware_proto::google::rpc::{bad_request::FieldViolation, BadRequest, ErrorInfo};
 use exoware_proto::{

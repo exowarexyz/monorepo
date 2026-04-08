@@ -4,8 +4,8 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
-use exoware_common::keys::Key;
-use exoware_common::kv_codec::{
+use exoware_sdk_rs::keys::Key;
+use exoware_sdk_rs::kv_codec::{
     access_stored_row, canonicalize_reduced_group_values, encode_reduced_group_key, eval_expr,
     eval_predicate, expr_needs_value, predicate_needs_value, KvReducedValue,
 };

@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { Client } from '../src/client';
 
-/** Matches `exoware_common::keys::MAX_KEY_LEN`. */
+/** Matches `exoware_sdk_rs::keys::MAX_KEY_LEN`. */
 const MAX_KEY_LEN = 254;
 
 const tempDir = path.join(os.tmpdir(), 'exoware-ts-sdk-tests');

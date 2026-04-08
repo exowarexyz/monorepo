@@ -90,7 +90,7 @@ let fixed_width = exoware_sql::prune::keep_latest_versions(3, 16, 1)?;
 let utf8 = exoware_sql::prune::keep_latest_versions_utf8(3, 1)?;
 ```
 
-This emits the shared `exoware_common::prune_policy::PrunePolicy` shape expected by
+This emits the shared `exoware_sdk_rs::prune_policy::PrunePolicy` shape expected by
 the ingest admin prune-policy control plane.
 
 Any composite PK (not just versioned) can be created via `table()` with

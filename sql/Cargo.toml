@@ -9,7 +9,6 @@ description = "SQL wrapper over the store Rust client using DataFusion"
 async-trait = { workspace = true }
 bytes = { workspace = true }
 exoware-sdk-rs = { workspace = true }
-exoware-common = { workspace = true }
 datafusion = "52.2.0"
 futures = "0.3.32"
 hex = { workspace = true }

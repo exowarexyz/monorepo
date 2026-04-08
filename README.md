@@ -11,7 +11,7 @@
 - [sdk-rs](./sdk-rs/README.md): Rust SDK for the Exoware store API.
 - [sdk-ts](./sdk-ts/README.md): TypeScript SDK for the Exoware store API.
 - [simulator](./simulator/README.md): Local store API simulator (RocksDB).
-- [exoware-common](./common/Cargo.toml), [sdk-rs](./sdk-rs/README.md): shared types and Rust store SDK; protobuf bindings are generated from [`proto/`](./proto/) and embedded in `sdk-rs` — layout is described in [`gen/README.md`](./gen/README.md).
+- [sdk-rs](./sdk-rs/README.md): Rust store SDK (shared types, key/value codec, prune policy, protobuf bindings generated from [`proto/`](./proto/) -- layout described in [`gen/README.md`](./gen/README.md)).
 - [exoware-server](./server/Cargo.toml): pluggable store server (`StoreEngine`).
 - [exoware-qmdb](./qmdb/README.md), [exoware-sql](./sql/README.md): Commonware QMDB bridge and DataFusion SQL layer.
 

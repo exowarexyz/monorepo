@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use connectrpc::{Chain, ConnectError, ConnectRpcService, Context, Limits};
-use exoware_common::keys::Key;
+use exoware_sdk_rs::keys::Key;
 use exoware_sdk_rs as exoware_proto;
 use exoware_proto::compact::{
     PruneResponse, Service as CompactApi, ServiceServer as CompactServiceServer,
