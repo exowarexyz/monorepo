@@ -8,7 +8,7 @@
 //! RPC failures surface as [`ClientError::Rpc`] carrying a native [`ConnectError`]. Use
 //! [`ClientError::decoded_rpc_error`] or [`StoreClient::decode_error_details`] to unpack
 //! protobuf `google.rpc` details (and `store.query.v1.Detail` on query RPC errors), not string parsing.
-//! Idempotent reads honor [`google.rpc.RetryInfo`] when deciding backoff (see `retry_delay_for_error`).
+//! Idempotent reads honor `google.rpc.RetryInfo` when deciding backoff (see `retry_delay_for_error`).
 
 pub mod keys;
 pub mod kv_codec;
