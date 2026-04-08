@@ -96,7 +96,11 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Install nightly Rust toolchain
-      run: rustup toolchain install ${{ env.NIGHTLY_VERSION }} && rustup default ${{ env.NIGHTLY_VERSION }}
+      run: |
+        rustup toolchain install ${{ env.NIGHTLY_VERSION }}
+        rustup default ${{ env.NIGHTLY_VERSION }}
+        cargo --version
+        rustc --version
     - name: Install cargo-udeps
       uses: taiki-e/install-action@v2
       with:
