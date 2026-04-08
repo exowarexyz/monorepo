@@ -14,6 +14,7 @@ test-utils = []
 [dependencies]
 bytes = { workspace = true }
 commonware-codec = "2026.3.0"
+futures = { workspace = true }
 commonware-cryptography = "2026.3.0"
 commonware-storage = "2026.3.0"
 commonware-utils = "2026.3.0"

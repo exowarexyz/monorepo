@@ -3,7 +3,7 @@ use exoware_sdk_rs::prune_policy::{
     GroupBy, MatchKey, OrderBy, OrderEncoding, PrunePolicy, RetainPolicy,
 };
 
-use crate::{RESERVED_BITS, UPDATE_FAMILY};
+use crate::codec::{RESERVED_BITS, UPDATE_FAMILY};
 
 fn update_payload_regex() -> Utf8 {
     Utf8::from("(?s-u)^(?P<logical>(?:\\x00\\xFF|[^\\x00])*)\\x00\\x00(?P<version>.{8})$")
@@ -42,7 +42,7 @@ pub fn keep_positions_gte(min_location: u64) -> PrunePolicy {
 #[cfg(test)]
 mod tests {
     use super::{keep_latest_updates, keep_positions_gte};
-    use crate::{RESERVED_BITS, UPDATE_FAMILY};
+    use crate::codec::{RESERVED_BITS, UPDATE_FAMILY};
     use exoware_sdk_rs::kv_codec::Utf8;
     use exoware_sdk_rs::prune_policy::{OrderEncoding, RetainPolicy};
 

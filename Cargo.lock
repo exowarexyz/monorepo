@@ -2305,6 +2305,7 @@ dependencies = [
  "exoware-sdk-rs",
  "exoware-server",
  "exoware-simulator",
+ "futures",
  "hex",
  "rand 0.8.5",
  "reqwest",

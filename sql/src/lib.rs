@@ -4426,11 +4426,16 @@ impl QueryPredicate {
         }
 
         let mut ranges = Vec::with_capacity(combos.len());
+        let base_constraints = self.constraints.clone();
         for combo in &combos {
-            let mut tmp = self.clone();
+            let mut tmp_constraints = base_constraints.clone();
             for (col_idx, constraint) in combo {
-                tmp.constraints.insert(*col_idx, constraint.clone());
+                tmp_constraints.insert(*col_idx, constraint.clone());
             }
+            let tmp = QueryPredicate {
+                constraints: tmp_constraints,
+                contradiction: self.contradiction,
+            };
             let start = tmp.encode_index_bound_key(
                 table_prefix,
                 model,
@@ -5585,15 +5590,21 @@ fn matches_constraint(value: &CellValue, constraint: &PredicateConstraint) -> bo
         (CellValue::Decimal128(v), PredicateConstraint::Decimal128Range { min, max }) => {
             in_i128_bounds(*v, *min, *max)
         }
-        (CellValue::Utf8(v), PredicateConstraint::StringIn(values)) => values.contains(v),
-        (CellValue::Int64(v), PredicateConstraint::IntIn(values)) => values.contains(v),
+        (CellValue::Utf8(v), PredicateConstraint::StringIn(values)) => {
+            values.binary_search(v).is_ok()
+        }
+        (CellValue::Int64(v), PredicateConstraint::IntIn(values)) => {
+            values.binary_search(v).is_ok()
+        }
         (CellValue::UInt64(v), PredicateConstraint::UInt64Range { min, max }) => {
             in_u64_bounds(*v, *min, *max)
         }
-        (CellValue::UInt64(v), PredicateConstraint::UInt64In(values)) => values.contains(v),
+        (CellValue::UInt64(v), PredicateConstraint::UInt64In(values)) => {
+            values.binary_search(v).is_ok()
+        }
         (CellValue::FixedBinary(v), PredicateConstraint::FixedBinaryEq(expected)) => v == expected,
         (CellValue::FixedBinary(v), PredicateConstraint::FixedBinaryIn(values)) => {
-            values.contains(v)
+            values.binary_search(v).is_ok()
         }
         (CellValue::Decimal256(v), PredicateConstraint::Decimal256Range { min, max }) => {
             if let Some(mn) = min {
@@ -6501,15 +6512,6 @@ fn decode_cell_from_ordered_key_bytes(bytes: &[u8], kind: ColumnKind) -> Option<
     })
 }
 
-fn decode_cell_from_codec_payload(
-    codec: KeyCodec,
-    key: &Key,
-    payload_offset: usize,
-    kind: ColumnKind,
-) -> Option<CellValue> {
-    decode_cell_from_codec_payload_with_len(codec, key, payload_offset, kind).map(|(cell, _)| cell)
-}
-
 fn decode_cell_from_codec_payload_with_len(
     codec: KeyCodec,
     key: &Key,
@@ -6665,19 +6667,14 @@ fn decode_primary_key_selected(
     let mut values = vec![CellValue::Null; model.primary_key_kinds.len()];
     let mut payload_offset = 0usize;
     for (pk_pos, kind) in model.primary_key_kinds.iter().enumerate() {
-        let (_, consumed) = decode_cell_from_codec_payload_with_len(
+        let (cell, consumed) = decode_cell_from_codec_payload_with_len(
             model.primary_key_codec,
             key,
             payload_offset,
             *kind,
         )?;
         if required_pk_mask[pk_pos] {
-            values[pk_pos] = decode_cell_from_codec_payload(
-                model.primary_key_codec,
-                key,
-                payload_offset,
-                *kind,
-            )?;
+            values[pk_pos] = cell;
         }
         payload_offset += consumed;
     }
@@ -7108,17 +7105,18 @@ async fn stream_kv_scan(
     let flush_threshold = limit.unwrap_or(BATCH_FLUSH_ROWS).min(BATCH_FLUSH_ROWS);
 
     if let Some(plan) = ctx.predicate.choose_index_plan(ctx.model, index_specs)? {
-        if !plan.ranges.is_empty()
-            && ctx
-                .access_plan
-                .index_covers_required_non_pk(&index_specs[plan.spec_idx])
+        if plan.ranges.is_empty() {
+            return Ok(());
+        }
+        if ctx
+            .access_plan
+            .index_covers_required_non_pk(&index_specs[plan.spec_idx])
         {
             return stream_index_scan(tx, ctx, index_specs, &plan, flush_threshold, target_rows)
                 .await;
         }
-        if plan.ranges.is_empty() {
-            return Ok(());
-        }
+        return stream_index_lookup_scan(tx, ctx, index_specs, &plan, flush_threshold, target_rows)
+            .await;
     }
 
     let exact = ctx
@@ -7197,6 +7195,100 @@ async fn stream_pk_scan(
         }
     }
 
+    let _ = flush_projected_batch(tx, ctx, &mut batch_builder, &mut emitted).await?;
+    Ok(())
+}
+
+async fn stream_index_lookup_scan(
+    tx: &mut futures::channel::mpsc::Sender<DataFusionResult<RecordBatch>>,
+    ctx: &ScanCtx<'_>,
+    index_specs: &[ResolvedIndexSpec],
+    plan: &IndexPlan,
+    flush_threshold: usize,
+    target_rows: usize,
+) -> DataFusionResult<()> {
+    let spec = &index_specs[plan.spec_idx];
+    let key_predicate_plan = ctx
+        .access_plan
+        .compile_index_predicate_plan(ctx.model, spec);
+    if key_predicate_plan.is_impossible() {
+        return Ok(());
+    }
+    let mut seen: HashSet<Key> = HashSet::new();
+    let mut emitted = 0usize;
+    let mut batch_builder = ProjectedBatchBuilder::from_access_plan(ctx.model, ctx.access_plan);
+
+    for range in &plan.ranges {
+        if emitted + batch_builder.row_count() >= target_rows {
+            break;
+        }
+        let mut stream = ctx
+            .session
+            .range_stream(&range.start, &range.end, usize::MAX, flush_threshold)
+            .await
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        while let Some(chunk) = stream
+            .next_chunk()
+            .await
+            .map_err(|e| DataFusionError::External(Box::new(e)))?
+        {
+            for (key, _index_value) in &chunk {
+                if emitted + batch_builder.row_count() >= target_rows {
+                    break;
+                }
+                if !key_predicate_plan.matches_key(key) {
+                    continue;
+                }
+                let Some(primary_key) = decode_secondary_index_primary_key(
+                    ctx.model.table_prefix,
+                    spec,
+                    ctx.model,
+                    key,
+                ) else {
+                    continue;
+                };
+                if !seen.insert(primary_key.clone()) {
+                    continue;
+                }
+                let base_value = ctx
+                    .session
+                    .get(&primary_key)
+                    .await
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                let Some(base_value) = base_value else {
+                    continue;
+                };
+                let Some(pk_values) = decode_primary_key_selected(
+                    ctx.model.table_prefix,
+                    &primary_key,
+                    ctx.model,
+                    &ctx.access_plan.required_pk_mask,
+                ) else {
+                    continue;
+                };
+                let Ok(archived) = decode_stored_row(&base_value) else {
+                    continue;
+                };
+                if archived.values.len() != ctx.model.columns.len() {
+                    continue;
+                }
+                if !ctx.access_plan.matches_archived_row(&pk_values, &archived) {
+                    continue;
+                }
+                if !batch_builder.append_archived_row(&pk_values, &archived)? {
+                    continue;
+                }
+                if batch_builder.row_count() >= flush_threshold
+                    && !flush_projected_batch(tx, ctx, &mut batch_builder, &mut emitted).await?
+                {
+                    return Ok(());
+                }
+            }
+            if emitted + batch_builder.row_count() >= target_rows {
+                break;
+            }
+        }
+    }
     let _ = flush_projected_batch(tx, ctx, &mut batch_builder, &mut emitted).await?;
     Ok(())
 }
@@ -14135,6 +14227,102 @@ mod tests {
             .await
             .expect_err("corrupt covering payload must fail closed");
         assert!(err.to_string().contains("invalid covering index payload"));
+
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn non_covering_index_uses_point_lookup_instead_of_full_scan() {
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state.clone()).await;
+        let client = StoreClient::new(&base_url);
+
+        let schema = KvSchema::new(client.clone())
+            .table(
+                "orders",
+                vec![
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("status", DataType::Utf8, false),
+                    TableColumnConfig::new("amount_cents", DataType::Int64, false),
+                    TableColumnConfig::new("notes", DataType::Utf8, true),
+                ],
+                vec!["id".to_string()],
+                vec![IndexSpec::new("status_idx", vec!["status".to_string()]).expect("valid")],
+            )
+            .expect("schema");
+        let mut writer = schema.batch_writer();
+        writer
+            .insert(
+                "orders",
+                vec![
+                    CellValue::Int64(1),
+                    CellValue::Utf8("open".to_string()),
+                    CellValue::Int64(100),
+                    CellValue::Utf8("first".to_string()),
+                ],
+            )
+            .expect("row");
+        writer
+            .insert(
+                "orders",
+                vec![
+                    CellValue::Int64(2),
+                    CellValue::Utf8("closed".to_string()),
+                    CellValue::Int64(200),
+                    CellValue::Utf8("second".to_string()),
+                ],
+            )
+            .expect("row");
+        writer
+            .insert(
+                "orders",
+                vec![
+                    CellValue::Int64(3),
+                    CellValue::Utf8("open".to_string()),
+                    CellValue::Int64(300),
+                    CellValue::Utf8("third".to_string()),
+                ],
+            )
+            .expect("row");
+        writer.flush().await.expect("flush");
+
+        let ctx = SessionContext::new();
+        schema.register_all(&ctx).expect("register");
+
+        let df = ctx
+            .sql("SELECT id, notes FROM orders WHERE status = 'open' ORDER BY id")
+            .await
+            .expect("plan");
+        let batches = df.collect().await.expect("non-covering index lookup");
+        let ids: Vec<i64> = batches
+            .iter()
+            .flat_map(|b| {
+                b.column(0)
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::Int64Array>()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.unwrap())
+            })
+            .collect();
+        let notes: Vec<String> = batches
+            .iter()
+            .flat_map(|b| {
+                b.column(1)
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::StringArray>()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.unwrap().to_string())
+            })
+            .collect();
+        assert_eq!(ids, vec![1, 3]);
+        assert_eq!(notes, vec!["first", "third"]);
 
         let _ = shutdown_tx.send(());
     }
