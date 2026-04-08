@@ -1,0 +1,33 @@
+[package]
+name = "exoware-qmdb"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Store-backed bridge for Commonware QMDB and related authenticated storage proofs"
+
+[lib]
+name = "store_qmdb"
+
+[dependencies]
+commonware-codec = "2026.3.0"
+commonware-cryptography = "2026.3.0"
+commonware-storage = "2026.3.0"
+commonware-utils = "2026.3.0"
+connectrpc = { workspace = true }
+exoware-sdk-rs = { workspace = true }
+exoware-common = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+bytes = { workspace = true }
+commonware-runtime = "2026.3.0"
+exoware-simulator = { path = "../simulator" }
+exoware-server = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

@@ -21,13 +21,3 @@ export class HttpError extends ExowareError {
         this.name = 'HttpError';
     }
 }
-
-/**
- * An error representing a WebSocket error.
- */
-export class WebSocketError extends ExowareError {
-    constructor(message: string) {
-        super(`WebSocket error: ${message}`);
-        this.name = 'WebSocketError';
-    }
-}

@@ -1,34 +1,58 @@
-import { StoreClient } from './store';
-import { StreamClient } from './stream';
-import axios, { AxiosInstance } from 'axios';
+import { createClient, type Client as ConnectClient, type Interceptor } from '@connectrpc/connect';
+import { createConnectTransport } from '@connectrpc/connect-web';
+import { StoreClient } from './store.js';
+import { Service as IngestService } from './gen/ts/store/v1/ingest_pb.js';
+import { Service as QueryService } from './gen/ts/store/v1/query_pb.js';
+
+export type ClientOptions = {
+    /**
+     * Optional bearer token sent as `Authorization: Bearer ...` on every RPC.
+     */
+    token?: string;
+};
 
 /**
- * Client for interacting with the Exoware API.
+ * Client for the Exoware store API (ingest + query on one base URL).
  */
 export class Client {
     /**
-     * The underlying HTTP client.
-     */
-    public readonly httpClient: AxiosInstance;
-    private readonly token: string;
-    /**
-     * The base URL of the Exoware server.
+     * Base URL of the server (e.g. `http://127.0.0.1:8080`).
      */
     public readonly baseUrl: string;
 
     /**
-     * Creates a new `Client`.
-     * @param baseUrl The base URL of the Exoware server (e.g., `http://localhost:8080`).
-     * @param token The token to use for bearer authentication.
+     * Ingest RPC client (`Put`).
      */
-    constructor(baseUrl: string, token: string) {
-        this.baseUrl = baseUrl;
-        this.token = token;
-        this.httpClient = axios.create({
-            headers: {
-                'Authorization': `Bearer ${this.token}`
-            }
+    public readonly ingest: ConnectClient<typeof IngestService>;
+
+    /**
+     * Query RPC client (`Get`, `Range`, `Reduce`).
+     */
+    public readonly query: ConnectClient<typeof QueryService>;
+
+    /**
+     * @param baseUrl The base URL of the Exoware server (e.g. `http://localhost:8080`).
+     * @param tokenOrOptions Legacy second argument: a bearer token string, or options with `token`.
+     */
+    constructor(baseUrl: string, tokenOrOptions?: string | ClientOptions) {
+        const opts: ClientOptions =
+            typeof tokenOrOptions === 'string' ? { token: tokenOrOptions } : tokenOrOptions ?? {};
+        this.baseUrl = baseUrl.replace(/\/$/, '');
+        const interceptors: Interceptor[] =
+            opts.token === undefined
+                ? []
+                : [
+                      (next) => async (req) => {
+                          req.header.set('Authorization', `Bearer ${opts.token}`);
+                          return next(req);
+                      },
+                  ];
+        const transport = createConnectTransport({
+            baseUrl: this.baseUrl,
+            interceptors,
         });
+        this.ingest = createClient(IngestService, transport);
+        this.query = createClient(QueryService, transport);
     }
 
     /**
@@ -36,12 +60,5 @@ export class Client {
      */
     public store(): StoreClient {
         return new StoreClient(this);
-    }
-
-    /**
-     * Returns a `StreamClient` for interacting with realtime streams.
-     */
-    public stream(): StreamClient {
-        return new StreamClient(this);
     }
 }

@@ -4,34 +4,27 @@ version = "0.0.2"
 edition = "2021"
 publish = true
 license = "MIT OR Apache-2.0"
-description = "Simulate the Exoware API."
+description = "RocksDB-backed simulator for the store API."
 readme = "README.md"
 homepage = "https://exoware.xyz"
 repository = "https://github.com/exowarexyz/monorepo/tree/main/simulator"
 documentation = "https://docs.rs/exoware-simulator"
 
 [dependencies]
-exoware-sdk-rs = { workspace = true }
+axum = { workspace = true }
+bytes = { workspace = true }
+exoware-server = { workspace = true }
+reqwest = { workspace = true }
+rocksdb = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-thiserror = { workspace = true }
-axum = { workspace = true, features = ["ws"] }
-serde = { workspace = true, features = ["derive"] }
-serde_with = { workspace = true }
-base64 = { workspace = true }
-rocksdb = { workspace = true }
-rand = { workspace = true }
-bincode = { workspace = true }
-dashmap = { workspace = true }
-tokio-stream = { workspace = true, features = ["sync"] }
-futures = { workspace = true }
-tempfile = { workspace = true }
+clap = { workspace = true }
+
+[dev-dependencies]
+exoware-sdk-rs = { workspace = true }
 portpicker = { workspace = true }
-futures-util = { workspace = true }
-tower-http = { workspace = true, features = ["cors"] }
-url = { workspace = true }
+tempfile = { workspace = true }
 
 [[bin]]
 name = "simulator"

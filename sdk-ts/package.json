@@ -2,6 +2,7 @@
     "name": "exoware-sdk-ts",
     "version": "0.0.2",
     "description": "TypeScript SDK for the Exoware API.",
+    "type": "module",
     "license": "(MIT OR Apache-2.0)",
     "homepage": "https://exoware.xyz",
     "repository": {
@@ -11,24 +12,37 @@
     },
     "main": "dist/index.js",
     "types": "dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js"
+        }
+    },
+    "files": [
+        "dist",
+        "README.md"
+    ],
     "scripts": {
+        "generate": "buf generate ../proto --template buf.gen.yaml",
+        "prebuild": "npm run generate",
+        "prelint": "npm run generate",
+        "pretest": "npm run generate",
         "build": "tsc",
         "lint": "tsc --noEmit",
-        "test": "jest"
+        "test": "jest --config jest.config.cjs",
+        "prepublishOnly": "npm run build"
     },
     "dependencies": {
-        "axios": "^1.7.2",
-        "js-base64": "^3.7.7",
-        "isomorphic-ws": "^5.0.0"
+        "@bufbuild/protobuf": "^2.11.0",
+        "@connectrpc/connect": "^2.1.1",
+        "@connectrpc/connect-web": "^2.1.1"
     },
     "devDependencies": {
         "@types/jest": "^29.5.12",
-        "@types/ws": "^8.5.10",
         "@types/node": "^20.14.9",
-        "portfinder": "^1.0.32",
         "jest": "^30.0.0",
+        "portfinder": "^1.0.32",
         "ts-jest": "^29.2.2",
-        "typescript": "^5.5.3",
-        "exoware-simulator": "file:../simulator"
+        "typescript": "^5.5.3"
     }
 }

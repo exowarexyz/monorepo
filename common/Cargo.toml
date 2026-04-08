@@ -1,0 +1,31 @@
+[package]
+name = "exoware-common"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Shared key layout and KV row codec types for the Exoware store API"
+
+[dependencies]
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+rkyv = { version = "0.8", features = [
+    "bytecheck",
+    "unaligned",
+    "pointer_width_64",
+    "bytes-1",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+thiserror = "2"
+anyhow = "1"
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
+zstd = "0.13"
+uuid = { version = "1", features = ["v4", "serde"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+rand = "0.8"
+criterion = { version = "0.5", features = ["html_reports"] }

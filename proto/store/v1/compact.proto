@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+package store.compact.v1;
+
+// Prune policy graph and admin RPC (served by the compaction worker).
+
+message PolicyMatchKey {
+  uint32 reserved_bits = 1;
+  uint32 prefix = 2;
+  string payload_regex = 3;
+}
+
+message PolicyGroupBy {
+  repeated string capture_groups = 1;
+}
+
+enum PolicyOrderEncoding {
+  POLICY_ORDER_ENCODING_BYTES_ASC = 0;
+  POLICY_ORDER_ENCODING_U64_BE = 1;
+  POLICY_ORDER_ENCODING_I64_BE = 2;
+}
+
+message PolicyOrderBy {
+  string capture_group = 1;
+  PolicyOrderEncoding encoding = 2;
+}
+
+message RetainKeepLatest {
+  uint64 count = 1;
+}
+
+message RetainGreaterThan {
+  uint64 threshold_u64 = 1;
+}
+
+message RetainGreaterThanOrEqual {
+  uint64 threshold_u64 = 1;
+}
+
+message RetainDropAll {}
+
+message PolicyRetain {
+  oneof kind {
+    RetainKeepLatest keep_latest = 1;
+    RetainGreaterThan greater_than = 2;
+    RetainGreaterThanOrEqual greater_than_or_equal = 3;
+    RetainDropAll drop_all = 4;
+  }
+}
+
+message Policy {
+  PolicyMatchKey match_key = 1;
+  PolicyGroupBy group_by = 2;
+  optional PolicyOrderBy order_by = 3;
+  PolicyRetain retain = 4;
+}
+
+service Service {
+  rpc Prune(PruneRequest) returns (PruneResponse);
+}
+
+message PruneRequest {
+  repeated Policy policies = 1;
+}
+
+message PruneResponse {}

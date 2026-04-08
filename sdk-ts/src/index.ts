@@ -1,4 +1,3 @@
-export { Client } from './client';
-export { StoreClient, GetResult, QueryResult, QueryResultItem } from './store';
-export { StreamClient, Subscription } from './stream';
-export { ExowareError, HttpError, WebSocketError } from './error';
+export { Client, type ClientOptions } from './client.js';
+export { StoreClient, type GetResult, type QueryResult, type QueryResultItem } from './store.js';
+export { ExowareError, HttpError } from './error.js';

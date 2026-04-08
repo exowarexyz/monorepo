@@ -7,6 +7,8 @@
 node_modules/
 dist/
 coverage/
+# Protobuf-ES output from `buf generate` (large embedded descriptors; run `npm run generate` in sdk-ts).
+sdk-ts/src/gen/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

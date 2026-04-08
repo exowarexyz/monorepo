@@ -1,0 +1,261 @@
+syntax = "proto3";
+
+package store.query.v1;
+
+// --- Query wire types ---
+
+message RangeEntry {
+  bytes key = 1;
+  bytes value = 2;
+}
+
+// Visible store sequence number plus read counters for query RPCs. On success, carried in unary
+// response metadata (`Get` / `Reduce`) or `Range` trailers; also attached as a `google.rpc` error
+// detail when the RPC fails (same message shape in both cases).
+//
+// The reference RocksDB engine reports `read_bytes`: the sum of key length plus value length for
+// each entry read by the RPC (for `Get`, the looked-up key plus returned value if any).
+message Detail {
+  uint64 sequence_number = 1;
+  map<string, uint64> read_stats = 2;
+}
+
+// Default when `RangeRequest.mode` is unset (proto3 implicit enum).
+enum TraversalMode {
+  TRAVERSAL_MODE_FORWARD = 0;
+  TRAVERSAL_MODE_REVERSE = 1;
+}
+
+// --- Range-reduction DSL (`Reduce`); mirrors `exoware_common::kv_codec` ---
+
+enum KvFieldKind {
+  KV_FIELD_KIND_INT64 = 0;
+  KV_FIELD_KIND_UINT64 = 1;
+  KV_FIELD_KIND_FLOAT64 = 2;
+  KV_FIELD_KIND_BOOLEAN = 3;
+  KV_FIELD_KIND_UTF8 = 4;
+  KV_FIELD_KIND_DATE32 = 5;
+  KV_FIELD_KIND_DATE64 = 6;
+  KV_FIELD_KIND_TIMESTAMP = 7;
+  KV_FIELD_KIND_DECIMAL128 = 8;
+  KV_FIELD_KIND_FIXED_SIZE_BINARY = 9;
+}
+
+message KvFieldRef {
+  message KeyField {
+    uint32 bit_offset = 1;
+    KvFieldKind kind = 2;
+    uint32 fixed_size_binary_len = 3;
+  }
+
+  message ZOrderKeyField {
+    uint32 bit_offset = 1;
+    uint32 field_position = 2;
+    repeated uint32 field_widths = 3;
+    KvFieldKind kind = 4;
+    uint32 fixed_size_binary_len = 5;
+  }
+
+  message ValueField {
+    uint32 index = 1;
+    KvFieldKind kind = 2;
+    bool nullable = 3;
+    uint32 fixed_size_binary_len = 4;
+  }
+
+  oneof field {
+    KeyField key = 1;
+    ZOrderKeyField z_order_key = 2;
+    ValueField value = 3;
+  }
+}
+
+message KvReducedValue {
+  oneof value {
+    int64 int64_value = 1;
+    uint64 uint64_value = 2;
+    double float64_value = 3;
+    bool boolean_value = 4;
+    string utf8_value = 5;
+    int32 date32_value = 6;
+    int64 date64_value = 7;
+    int64 timestamp_value = 8;
+    bytes decimal128_value = 9;
+    bytes fixed_size_binary_value = 10;
+  }
+}
+
+message KvExpr {
+  message BinaryExpr {
+    KvExpr left = 1;
+    KvExpr right = 2;
+  }
+
+  oneof expr {
+    KvFieldRef field = 1;
+    KvReducedValue literal = 2;
+    BinaryExpr add = 3;
+    BinaryExpr sub = 4;
+    BinaryExpr mul = 5;
+    BinaryExpr div = 6;
+    KvExpr lower = 7;
+    KvExpr date_trunc_day = 8;
+  }
+}
+
+message KvPredicateConstraint {
+  message IntRange {
+    optional int64 min = 1;
+    optional int64 max = 2;
+  }
+
+  message UInt64Range {
+    optional uint64 min = 1;
+    optional uint64 max = 2;
+  }
+
+  message FloatBound {
+    double value = 1;
+    bool inclusive = 2;
+  }
+
+  message FloatRange {
+    optional FloatBound min = 1;
+    optional FloatBound max = 2;
+  }
+
+  message Decimal128Range {
+    optional bytes min = 1;
+    optional bytes max = 2;
+  }
+
+  message StringIn {
+    repeated string values = 1;
+  }
+
+  message IntIn {
+    repeated int64 values = 1;
+  }
+
+  message UInt64In {
+    repeated uint64 values = 1;
+  }
+
+  message FixedSizeBinaryIn {
+    repeated bytes values = 1;
+  }
+
+  oneof constraint {
+    string string_eq = 1;
+    bool bool_eq = 2;
+    bytes fixed_size_binary_eq = 3;
+    IntRange int_range = 4;
+    UInt64Range uint64_range = 5;
+    FloatRange float_range = 6;
+    Decimal128Range decimal128_range = 7;
+    bool is_null = 8;
+    bool is_not_null = 9;
+    StringIn string_in = 10;
+    IntIn int_in = 11;
+    UInt64In uint64_in = 12;
+    FixedSizeBinaryIn fixed_size_binary_in = 13;
+  }
+}
+
+message KvPredicateCheck {
+  KvFieldRef field = 1;
+  KvPredicateConstraint constraint = 2;
+}
+
+message KvPredicate {
+  repeated KvPredicateCheck checks = 1;
+  bool contradiction = 2;
+}
+
+enum RangeReduceOp {
+  RANGE_REDUCE_OP_COUNT_ALL = 0;
+  RANGE_REDUCE_OP_COUNT_FIELD = 1;
+  RANGE_REDUCE_OP_SUM_FIELD = 2;
+  RANGE_REDUCE_OP_MIN_FIELD = 3;
+  RANGE_REDUCE_OP_MAX_FIELD = 4;
+}
+
+message RangeReducerSpec {
+  RangeReduceOp op = 1;
+  optional KvExpr expr = 2;
+}
+
+message ReduceParams {
+  repeated RangeReducerSpec reducers = 1;
+  repeated KvExpr group_by = 2;
+  optional KvPredicate filter = 3;
+}
+
+message RangeReduceResult {
+  optional KvReducedValue value = 1;
+}
+
+message RangeReduceGroup {
+  repeated KvReducedValue group_values = 1;
+  repeated bool group_values_present = 2;
+  repeated RangeReduceResult results = 3;
+}
+
+// --- Service ---
+
+service Service {
+  rpc Get(GetRequest) returns (GetResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc Range(RangeRequest) returns (stream RangeFrame) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+  rpc Reduce(ReduceRequest) returns (ReduceResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+message GetRequest {
+  bytes key = 1;
+  optional uint64 min_sequence_number = 2;
+}
+
+message GetResponse {
+  bool found = 1;
+  optional bytes value = 2;
+}
+
+// Range reads keys in lexicographic order over raw `bytes` keys.
+//
+// Semantics match `StoreEngine::range_scan`: keys satisfy `start <= key <= end` when `end` is
+// non-empty (inclusive upper bound). When `end` is empty, the upper bound is unbounded (all keys
+// `>= start`). For prefix scans, pass the lexicographic maximum key of the prefix as `end`, or
+// use an empty `end` when scanning through the end of the keyspace is intended.
+message RangeRequest {
+  bytes start = 1;
+  bytes end = 2;
+  optional uint32 limit = 3;
+  uint32 batch_size = 4;
+  TraversalMode mode = 5;
+  optional uint64 min_sequence_number = 6;
+}
+
+// Each stream message is a batch of rows; the stream ends at HTTP END_STREAM.
+// `Detail` (sequence + read_stats) is carried only in trailers (`x-store-query-detail-bin`).
+message RangeFrame {
+  repeated RangeEntry results = 1;
+}
+
+// Same key-range semantics as `RangeRequest`: inclusive `[start, end]` over raw bytes when `end` is
+// non-empty; empty `end` means unbounded above.
+message ReduceRequest {
+  bytes start = 1;
+  bytes end = 2;
+  ReduceParams params = 3;
+  optional uint64 min_sequence_number = 4;
+}
+
+message ReduceResponse {
+  repeated RangeReduceResult results = 1;
+  repeated RangeReduceGroup groups = 2;
+}

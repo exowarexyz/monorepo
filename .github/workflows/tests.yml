@@ -13,6 +13,31 @@ env:
   UDEPS_VERSION: 0.1.50
 
 jobs:
+  Proto:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install Buf CLI
+        uses: bufbuild/buf-setup-action@v1
+        with:
+          # Pin so `sdk-ts` `buf generate` output matches local/CI (bump when regenerating TS).
+          version: 1.67.0
+      - name: Run setup (Rust + Node)
+        uses: ./.github/actions/setup
+      - name: Buf build (proto module compiles)
+        run: buf build proto
+      # Rust protobuf stubs/helpers are generated into OUT_DIR by sdk-rs/build.rs (not committed).
+      - name: Build exoware-sdk-rs (Rust store SDK + embedded protobuf bindings)
+        run: cargo build -p exoware-sdk-rs --verbose
+      # TS: generated sources are gitignored; this runs buf generate + tsc (no git drift check).
+      - name: sdk-ts generate + build
+        run: |
+          cd sdk-ts
+          npm ci
+          npm run build
+
   Lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -31,20 +56,15 @@ jobs:
       run: cargo doc --no-deps --document-private-items
       env:
         RUSTDOCFLAGS: "-D warnings"
-    - name: Install speccy
-      run: npm install -g speccy
-    - name: Lint OpenAPI spec
-      run: speccy lint interface.yaml
-
   Rust:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
     - name: Run setup
       uses: ./.github/actions/setup
-    - name: Run tests
+    - name: Run tests (workspace; E2E tests spawn local simulator + temp RocksDB)
       run: cargo test --verbose
 
   TypeScript:
@@ -53,6 +73,10 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      - name: Install Buf CLI
+        uses: bufbuild/buf-setup-action@v1
+        with:
+          version: 1.67.0
       - name: Run setup
         uses: ./.github/actions/setup
       - name: Install sdk-ts dependencies

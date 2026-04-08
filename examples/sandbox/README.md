@@ -1,6 +1,6 @@
 # exoware-sandbox
 
-This example provides a basic web interface to interact with the Exoware API. It demonstrates how to use the `exoware-sdk-ts` to connect to and interact with the `store` and `stream` modules of the simulator.
+This example provides a basic web interface to interact with the Exoware **store** API using `exoware-sdk-ts`.
 
 ## Prerequisites
 
@@ -9,37 +9,28 @@ This example provides a basic web interface to interact with the Exoware API. It
 
 ## How to Run
 
-1.  **Start the Simulator:**
+1. **Start the simulator**
 
-    Open a terminal in the root of the monorepo and run the following command to start the simulator. You can choose any auth token.
+   From the monorepo root:
 
-    ```bash
-    cargo run --package exoware-simulator -- --verbose server run --token your-secret-token
-    ```
+   ```bash
+   cargo run --package exoware-simulator -- --verbose server run --port 8080
+   ```
 
-    _If you opt to use a different token, you must update the `VITE_TOKEN` environment variable in the `examples/sandbox/.env.local` file._
+   Point the web app at this URL via `VITE_SIMULATOR_URL` (see below). The simulator does not require a bearer token; optional `VITE_TOKEN` is only used if your SDK client is configured with one.
 
-2.  **Install Dependencies and Run the Web App:**
+2. **Install dependencies and run the web app**
 
-    Navigate to the `examples/sandbox` directory and install the dependencies, then start the development server. `npm install` will also automatically build the TypeScript SDK.
+   ```bash
+   cd examples/sandbox
+   npm install
+   npm run dev
+   ```
 
-    ```bash
-    # from the root of the monorepo
-    cd examples/sandbox
-    npm install
-    npm run dev
-    ```
+3. **Open the web UI**
 
-3.  **Open the Web UI:**
-
-    Open your browser and navigate to the URL provided by Vite (usually `http://localhost:5173`). You should see the UI for interacting with the simulator.
+   Open the URL Vite prints (usually `http://localhost:5173`).
 
 ## Features
 
--   **Store:**
-    -   Set a key-value pair.
-    -   Get a value by key.
-    -   Query for a range of keys.
--   **Stream:**
-    -   Publish messages to a named stream.
-    -   Subscribe to a named stream and see messages in realtime.
+- **Store:** set and get key-value pairs, and run range queries.

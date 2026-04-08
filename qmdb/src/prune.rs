@@ -1,0 +1,75 @@
+use exoware_common::prune_policy::{
+    GroupBy, MatchKey, OrderBy, OrderEncoding, PrunePolicy, RetainPolicy,
+};
+
+use crate::{RESERVED_BITS, UPDATE_FAMILY};
+
+fn update_payload_regex() -> String {
+    "(?s-u)^(?P<logical>(?:\\x00\\xFF|[^\\x00])*)\\x00\\x00(?P<version>.{8})$".to_string()
+}
+
+/// Build a prune policy that keeps the latest `count` update rows per logical raw
+/// key in the standard qmdb update family.
+pub fn keep_latest_updates(count: usize) -> PrunePolicy {
+    PrunePolicy {
+        match_key: MatchKey {
+            reserved_bits: RESERVED_BITS,
+            family: UPDATE_FAMILY,
+            payload_regex: update_payload_regex(),
+        },
+        group_by: GroupBy {
+            capture_groups: vec!["logical".to_string()],
+        },
+        order_by: Some(OrderBy {
+            capture_group: "version".to_string(),
+            encoding: OrderEncoding::U64Be,
+        }),
+        retain: RetainPolicy::KeepLatest { count },
+    }
+}
+
+/// Build a prune policy that keeps only update rows whose uploaded location is
+/// greater than or equal to `min_location`.
+pub fn keep_positions_gte(min_location: u64) -> PrunePolicy {
+    let mut policy = keep_latest_updates(1);
+    policy.retain = RetainPolicy::GreaterThanOrEqual {
+        threshold_u64: min_location,
+    };
+    policy
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{keep_latest_updates, keep_positions_gte};
+    use crate::{RESERVED_BITS, UPDATE_FAMILY};
+    use exoware_common::prune_policy::{OrderEncoding, RetainPolicy};
+
+    #[test]
+    fn keep_latest_updates_matches_update_key_layout() {
+        let policy = keep_latest_updates(3);
+        assert_eq!(policy.match_key.reserved_bits, RESERVED_BITS);
+        assert_eq!(policy.match_key.family, UPDATE_FAMILY);
+        assert_eq!(
+            policy.match_key.payload_regex,
+            "(?s-u)^(?P<logical>(?:\\x00\\xFF|[^\\x00])*)\\x00\\x00(?P<version>.{8})$"
+        );
+        assert_eq!(policy.group_by.capture_groups, ["logical"]);
+        let order_by = policy.order_by.expect("order_by");
+        assert_eq!(order_by.capture_group, "version");
+        assert_eq!(order_by.encoding, OrderEncoding::U64Be);
+        assert_eq!(policy.retain, RetainPolicy::KeepLatest { count: 3 });
+    }
+
+    #[test]
+    fn keep_positions_gte_uses_threshold_retention() {
+        let policy = keep_positions_gte(42);
+        assert_eq!(
+            policy.retain,
+            RetainPolicy::GreaterThanOrEqual { threshold_u64: 42 }
+        );
+        assert_eq!(
+            policy.order_by.expect("order_by").capture_group,
+            "version".to_string()
+        );
+    }
+}

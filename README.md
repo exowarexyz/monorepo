@@ -1,32 +1,35 @@
 # exoware
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE-MIT)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](./LICENSE-APACHE)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/exowarexyz/monorepo)
+[License: MIT](./LICENSE-MIT)
+[License: Apache 2.0](./LICENSE-APACHE)
+[Ask DeepWiki](https://deepwiki.com/exowarexyz/monorepo)
 
 ## Primitives
 
-_Primitives are designed for production use. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a primitive)._
+*Primitives are designed for production use. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a primitive).*
 
-* [sdk-rs](./sdk-rs/README.md): Rust SDK for the Exoware API.
-* [sdk-ts](./sdk-ts/README.md): TypeScript SDK for the Exoware API.
-* [simulator](./simulator/README.md): Simulate the Exoware API.
+- [sdk-rs](./sdk-rs/README.md): Rust SDK for the Exoware store API.
+- [sdk-ts](./sdk-ts/README.md): TypeScript SDK for the Exoware store API.
+- [simulator](./simulator/README.md): Local store API simulator (RocksDB).
+- [exoware-common](./common/Cargo.toml), [sdk-rs](./sdk-rs/README.md): shared types and Rust store SDK; protobuf bindings are generated from [`proto/`](./proto/) and embedded in `sdk-rs` — layout is described in [`gen/README.md`](./gen/README.md).
+- [exoware-server](./server/Cargo.toml): pluggable store server (`StoreEngine`).
+- [exoware-qmdb](./qmdb/README.md), [exoware-sql](./sql/README.md): Commonware QMDB bridge and DataFusion SQL layer.
 
 ## Components
 
-_Components are designed for production use. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a component)._
+*Components are designed for production use. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a component).*
 
-* **store**: Persist and retrieve artifacts.
-* **stream**: Broadcast realtime data.
+- **store**: Persist and retrieve artifacts.
+- **stream**: Broadcast realtime data.
 
-_The interface for all components is specified in [OpenAPI format](./interface.yaml)._
+*The service schema source of truth lives under [`proto/`](./proto).*
 
 ## Examples
 
-_Examples may include insecure code (i.e. deriving keypairs from an integer arguments) to make them easier to run. Examples are not intended to be used directly in production._
+*Examples may include insecure code (i.e. deriving keypairs from an integer arguments) to make them easier to run. Examples are not intended to be used directly in production.*
 
-* [alto](https://github.com/commonwarexyz/alto): A minimal (and wicked fast) blockchain built with the Commonware Library.
-* [sandbox](./examples/sandbox): Explore the Exoware API.
+- [alto](https://github.com/commonwarexyz/alto): A minimal (and wicked fast) blockchain built with the Commonware Library.
+- [sandbox](./examples/sandbox): Explore the Exoware API.
 
 ## Licensing
 

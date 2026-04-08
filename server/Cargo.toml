@@ -1,0 +1,16 @@
+[package]
+name = "exoware-server"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Store API server. Implement `StoreEngine` to plug in storage."
+
+[dependencies]
+bytes = { workspace = true }
+buffa = { workspace = true }
+buffa-types = { workspace = true }
+connectrpc = { workspace = true }
+futures = { workspace = true }
+http = { workspace = true }
+exoware-common = { workspace = true }
+exoware-sdk-rs = { workspace = true }

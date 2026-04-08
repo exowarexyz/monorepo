@@ -1,7 +1,13 @@
-import type { Client } from './client';
-import { HttpError } from './error';
-import { Base64 } from 'js-base64';
-import { AxiosError } from 'axios';
+import { create } from '@bufbuild/protobuf';
+import { Code, ConnectError } from '@connectrpc/connect';
+import type { Client } from './client.js';
+import { HttpError } from './error.js';
+import { PutRequestSchema, KvPairSchema } from './gen/ts/store/v1/ingest_pb.js';
+import {
+    GetRequestSchema,
+    RangeRequestSchema,
+    TraversalMode,
+} from './gen/ts/store/v1/query_pb.js';
 
 /**
  * The result of a `get` operation.
@@ -29,11 +35,63 @@ export interface QueryResult {
     results: QueryResultItem[];
 }
 
+function toUint8Array(value: Uint8Array | Buffer): Uint8Array {
+    return value instanceof Uint8Array ? value : new Uint8Array(value);
+}
+
+function mapConnectToHttpError(err: unknown): never {
+    if (err instanceof ConnectError) {
+        const status = connectCodeToHttpStatus(err.code);
+        throw new HttpError(status, err.message || String(err.code));
+    }
+    throw err;
+}
+
+/** Best-effort mapping for tests and HTTP-oriented callers; prefer `ConnectError` in new code. */
+function connectCodeToHttpStatus(code: Code): number {
+    switch (code) {
+        case Code.Canceled:
+            return 499;
+        case Code.Unknown:
+            return 500;
+        case Code.InvalidArgument:
+            return 400;
+        case Code.DeadlineExceeded:
+            return 504;
+        case Code.NotFound:
+            return 404;
+        case Code.AlreadyExists:
+            return 409;
+        case Code.PermissionDenied:
+            return 403;
+        case Code.ResourceExhausted:
+            return 429;
+        case Code.FailedPrecondition:
+            return 400;
+        case Code.Aborted:
+            return 409;
+        case Code.OutOfRange:
+            return 400;
+        case Code.Unimplemented:
+            return 501;
+        case Code.Internal:
+            return 500;
+        case Code.Unavailable:
+            return 503;
+        case Code.DataLoss:
+            return 500;
+        case Code.Unauthenticated:
+            return 401;
+        default:
+            return 500;
+    }
+}
+
 /**
- * A client for interacting with the key-value store.
+ * A client for the key-value store API.
  */
 export class StoreClient {
-    constructor(private client: Client) { }
+    constructor(private readonly client: Client) {}
 
     /**
      * Sets a key-value pair in the store.
@@ -41,17 +99,18 @@ export class StoreClient {
      * @param value The value to set.
      */
     async set(key: Uint8Array, value: Uint8Array | Buffer): Promise<void> {
-        const encodedKey = Base64.fromUint8Array(key);
-        const url = `${this.client.baseUrl}/store/${encodedKey}`;
+        const req = create(PutRequestSchema, {
+            kvs: [
+                create(KvPairSchema, {
+                    key,
+                    value: toUint8Array(value),
+                }),
+            ],
+        });
         try {
-            await this.client.httpClient.post(url, value, {
-                headers: { 'Content-Type': 'application/octet-stream' },
-            });
-        } catch (error) {
-            if (error instanceof AxiosError && error.response) {
-                throw new HttpError(error.response.status, error.response.statusText);
-            }
-            throw error;
+            await this.client.ingest.put(req);
+        } catch (e) {
+            mapConnectToHttpError(e);
         }
     }
 
@@ -61,53 +120,49 @@ export class StoreClient {
      * @returns The value, or `null` if the key does not exist.
      */
     async get(key: Uint8Array): Promise<GetResult | null> {
-        const encodedKey = Base64.fromUint8Array(key);
-        const url = `${this.client.baseUrl}/store/${encodedKey}`;
+        const req = create(GetRequestSchema, { key });
         try {
-            const response = await this.client.httpClient.get<{ value: string }>(url);
-            const value = Base64.toUint8Array(response.data.value);
-            return { value };
-        } catch (error) {
-            if (error instanceof AxiosError && error.response) {
-                if (error.response.status === 404) {
-                    return null;
-                }
-                throw new HttpError(error.response.status, error.response.statusText);
+            const res = await this.client.query.get(req);
+            if (!res.found || res.value === undefined) {
+                return null;
             }
-            throw error;
+            return { value: res.value };
+        } catch (e) {
+            mapConnectToHttpError(e);
         }
     }
 
     /**
-     * Queries for a range of key-value pairs.
-     * @param start The key to start the query from (inclusive). If `undefined`, the query starts from the first key.
-     * @param end The key to end the query at (exclusive). If `undefined`, the query continues to the last key.
-     * @param limit The maximum number of results to return. If `undefined`, all results are returned.
+     * Queries for a range of key-value pairs (forward scan via `Range` streaming RPC).
+     * @param start The key to start the query from (inclusive). If omitted, starts at the empty key.
+     * @param end The key to end the query at (inclusive when provided). If omitted, ends at the empty key (full range semantics match the server).
+     * @param limit The maximum number of results to return. If omitted, no limit is applied.
+     * @param batchSize Maximum rows per streamed frame; must be positive. Defaults to `4096`.
      */
-    async query(start?: Uint8Array, end?: Uint8Array, limit?: number): Promise<QueryResult> {
-        const url = new URL(`${this.client.baseUrl}/store`);
-        if (start) {
-            const encodedStart = Base64.fromUint8Array(start);
-            url.searchParams.append('start', encodedStart);
-        }
-        if (end) {
-            const encodedEnd = Base64.fromUint8Array(end);
-            url.searchParams.append('end', encodedEnd);
-        }
-        if (limit) url.searchParams.append('limit', limit.toString());
-
+    async query(
+        start?: Uint8Array,
+        end?: Uint8Array,
+        limit?: number,
+        batchSize: number = 4096,
+    ): Promise<QueryResult> {
+        const req = create(RangeRequestSchema, {
+            start: start ?? new Uint8Array(),
+            end: end ?? new Uint8Array(),
+            batchSize,
+            mode: TraversalMode.FORWARD,
+            ...(limit !== undefined ? { limit } : {}),
+        });
+        const results: QueryResultItem[] = [];
         try {
-            const response = await this.client.httpClient.get<{ results: { key: string, value: string }[] }>(url.toString());
-            const results = response.data.results.map(item => ({
-                key: Base64.toUint8Array(item.key),
-                value: Base64.toUint8Array(item.value)
-            }));
-            return { results };
-        } catch (error) {
-            if (error instanceof AxiosError && error.response) {
-                throw new HttpError(error.response.status, error.response.statusText);
+            const stream = this.client.query.range(req);
+            for await (const frame of stream) {
+                for (const row of frame.results) {
+                    results.push({ key: row.key, value: row.value });
+                }
             }
-            throw error;
+            return { results };
+        } catch (e) {
+            mapConnectToHttpError(e);
         }
     }
 }

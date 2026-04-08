@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # Increment patch versions for crates/packages whose name starts with "exoware-"
-# in package declarations and [workspace.dependencies], versions
-# in package.json files, and the interface.yaml OpenAPI spec.
+# in package declarations and [workspace.dependencies], plus versions
+# in package.json files.
 
 set -euo pipefail
 
@@ -80,23 +80,3 @@ find . -name "package.json" -print0 | while IFS= read -r -d $'\0' pkg_file; do
     fi
   fi
 done
-
-# Update openapi spec
-if [[ -f "interface.yaml" ]]; then
-    content=()
-    changed=false
-    while IFS= read -r line || [[ -n "${line}" ]]; do
-        if [[ "${line}" =~ ^[[:space:]]*version:[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+) ]]; then
-            old="${BASH_REMATCH[1]}"
-            new="$(bump_version "${old}")"
-            line="${line/${old}/${new}}"
-            changed=true
-        fi
-        content+=("${line}")
-    done < "interface.yaml"
-
-    if ${changed}; then
-        printf "%s\n" "${content[@]}" > "interface.yaml"
-        echo "Updated interface.yaml"
-    fi
-fi

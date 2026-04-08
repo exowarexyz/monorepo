@@ -1,0 +1,34 @@
+[package]
+name = "exoware-sql"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "SQL wrapper over the store Rust client using DataFusion"
+
+[dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+exoware-sdk-rs = { workspace = true }
+exoware-common = { workspace = true }
+datafusion = "52.2.0"
+futures = "0.3.32"
+hex = { workspace = true }
+regex = { workspace = true }
+rkyv = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+buffa = { workspace = true }
+connectrpc = { workspace = true }
+criterion = { workspace = true }
+exoware-simulator = { path = "../simulator" }
+exoware-server = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+tempfile = { workspace = true }
+
+[[bench]]
+name = "read_path_perf"
+harness = false
