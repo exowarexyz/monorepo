@@ -4,7 +4,6 @@
 mod common;
 
 use std::num::NonZeroU64;
-use std::time::Duration;
 
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
@@ -15,34 +14,15 @@ use commonware_storage::qmdb::{
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use exoware_common::keys::MAX_VALUE_SIZE;
-use store_qmdb::{QmdbError, UnorderedBatchOperation, UnorderedClient};
+use store_qmdb::MAX_OPERATION_SIZE;
+use store_qmdb::{UnorderedBatchOperation, UnorderedClient};
+
+use common::retry;
 
 type Digest = commonware_cryptography::sha256::Digest;
 type BatchProof = commonware_storage::mmr::Proof<Digest>;
 type LocalDb =
     LocalUnorderedDb<cw_tokio::Context, Vec<u8>, Vec<u8>, commonware_cryptography::Sha256, TwoCap>;
-
-async fn retry<F, Fut, T>(f: F, label: &str) -> T
-where
-    F: Fn() -> Fut,
-    Fut: std::future::Future<Output = Result<T, QmdbError>>,
-{
-    for attempt in 1..=15 {
-        match f().await {
-            Ok(v) => return v,
-            Err(QmdbError::DuplicateBatchWatermark { .. }) => {
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
-            Err(e) if attempt < 15 => {
-                eprintln!("{label}: attempt {attempt}/{e}, retrying...");
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
-            Err(e) => panic!("{label}: failed after 15 attempts: {e}"),
-        }
-    }
-    panic!("{label}: exhausted retries");
-}
 
 struct LocalReference {
     latest_location: Location,
@@ -63,8 +43,8 @@ async fn build_local_db() -> LocalReference {
                 log_write_buffer: NZUsize!(1024),
                 log_compression: None,
                 log_codec_config: (
-                    ((0..=MAX_VALUE_SIZE).into(), ()),
-                    ((0..=MAX_VALUE_SIZE).into(), ()),
+                    ((0..=MAX_OPERATION_SIZE).into(), ()),
+                    ((0..=MAX_OPERATION_SIZE).into(), ()),
                 ),
                 log_items_per_blob: NZU64!(8),
                 translator: TwoCap,

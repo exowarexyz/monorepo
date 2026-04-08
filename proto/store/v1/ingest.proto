@@ -6,6 +6,9 @@ service Service {
   rpc Put(PutRequest) returns (PutResponse);
 }
 
+// A key-value pair for ingestion.
+//
+// Keys must be between 0 and 254 bytes (inclusive). Values have no size limit.
 message KvPair {
   bytes key = 1;
   bytes value = 2;

@@ -82,7 +82,7 @@ impl ReductionState {
                 match sum {
                     Some(existing) => existing
                         .checked_add_assign(&value)
-                        .map_err(|e| RangeError::Reduce(e)),
+                        .map_err(RangeError::Reduce),
                     None => {
                         *sum = Some(value);
                         Ok(())
@@ -233,10 +233,9 @@ fn reduce_row_into_response(
     }
 
     let group_key = encode_reduced_group_key(&extracted.group_values);
-    let group_values = extracted.group_values.clone();
     let group = grouped_states
         .entry(group_key)
-        .or_insert_with(|| GroupedReductionState::new(group_values, request));
+        .or_insert_with(|| GroupedReductionState::new(extracted.group_values.clone(), request));
     group.update(request, extracted.reducer_values)?;
     Ok(())
 }

@@ -4,7 +4,6 @@
 mod common;
 
 use std::num::NonZeroU64;
-use std::time::Duration;
 
 use commonware_runtime::{deterministic, Runner as _};
 use commonware_storage::mmr::Location;
@@ -14,34 +13,15 @@ use commonware_storage::qmdb::{
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_sdk_rs::StoreClient;
-use store_qmdb::{KeylessClient, QmdbError};
+use store_qmdb::KeylessClient;
+
+use common::retry;
 
 type Digest = commonware_cryptography::sha256::Digest;
 type LocalDb = Keyless<deterministic::Context, Vec<u8>, commonware_cryptography::Sha256>;
 
 fn fresh_keyless(c: StoreClient) -> KeylessClient<Vec<u8>> {
     KeylessClient::from_client(c, ((0..=10000).into(), ()))
-}
-
-async fn retry<F, Fut, T>(f: F, label: &str) -> T
-where
-    F: Fn() -> Fut,
-    Fut: std::future::Future<Output = Result<T, QmdbError>>,
-{
-    for attempt in 1..=15 {
-        match f().await {
-            Ok(v) => return v,
-            Err(QmdbError::DuplicateBatchWatermark { .. }) => {
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
-            Err(e) if attempt < 15 => {
-                eprintln!("{label}: attempt {attempt}/{e}, retrying...");
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
-            Err(e) => panic!("{label}: failed after 15 attempts: {e}"),
-        }
-    }
-    panic!("{label}: exhausted retries");
 }
 
 struct LocalReference {

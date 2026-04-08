@@ -16435,7 +16435,7 @@ mod tests {
         use datafusion::prelude::SessionContext;
         use exoware_sdk_rs::StoreClient;
         use exoware_server::{connect_stack, AppState};
-        use exoware_simulator::DbState;
+        use exoware_simulator::RocksStore;
         use tempfile::tempdir;
 
         struct TestServers {
@@ -16451,7 +16451,7 @@ mod tests {
 
         async fn spawn_e2e_servers() -> TestServers {
             let dir = tempdir().expect("tempdir");
-            let db = DbState::open(dir.path()).expect("db");
+            let db = RocksStore::open(dir.path()).expect("db");
             let state = AppState::new(std::sync::Arc::new(db));
             let connect = connect_stack(state);
             let app = Router::new()

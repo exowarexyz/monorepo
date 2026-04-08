@@ -18,7 +18,7 @@ use bytes::Bytes;
 use connectrpc::client::{ClientConfig, ServerStream as ConnectServerStream};
 use connectrpc::{ConnectError, ErrorCode};
 use exoware_common::keys::{
-    is_valid_key_size, is_valid_value_size, Key, MAX_VALUE_SIZE, MIN_VALUE_SIZE,
+    is_valid_key_size, Key,
 };
 use exoware_common::kv_codec::KvReducedValue;
 use exoware_proto::ingest::ServiceClient as IngestServiceClient;
@@ -107,8 +107,6 @@ pub enum ClientError {
     Rpc(Box<ConnectError>),
     #[error("invalid key length: expected {expected}, got {got}")]
     InvalidKeyLength { expected: usize, got: usize },
-    #[error("invalid value length: expected {min}-{max}, got {got}")]
-    InvalidValueLength { got: usize, min: usize, max: usize },
     #[error("wire format error: {0}")]
     WireFormat(String),
 }
@@ -553,13 +551,6 @@ impl StoreClient {
                     "key length {} exceeds max physical key length",
                     key.len()
                 )));
-            }
-            if !is_valid_value_size(value.len()) {
-                return Err(ClientError::InvalidValueLength {
-                    got: value.len(),
-                    min: MIN_VALUE_SIZE,
-                    max: MAX_VALUE_SIZE,
-                });
             }
             proto_kvs.push(exoware_proto::ingest::KvPair {
                 key: (*key).to_vec(),
@@ -1346,7 +1337,6 @@ fn retry_backoff_delay(attempt: usize, retry_config: RetryConfig) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use exoware_common::keys::{Key, KEY_SIZE};
     use exoware_proto::query::TraversalMode as ProtoTraversalMode;
 
     #[test]
@@ -1484,29 +1474,10 @@ mod tests {
         assert_eq!(session.fixed_token(), Some(11));
     }
 
-    #[tokio::test]
-    async fn put_rejects_oversized_value_before_http() {
-        let client = StoreClient::new("http://127.0.0.1:1");
-        let key = Key::from(vec![0u8; KEY_SIZE]);
-        let value = vec![0u8; MAX_VALUE_SIZE + 1];
-
-        let err = client.put(&[(&key, &value)]).await.unwrap_err();
-        match err {
-            ClientError::InvalidValueLength { got, min, max } => {
-                assert_eq!(got, MAX_VALUE_SIZE + 1);
-                assert_eq!(min, MIN_VALUE_SIZE);
-                assert_eq!(max, MAX_VALUE_SIZE);
-            }
-            other => panic!("expected InvalidValueLength, got {other:?}"),
-        }
-    }
-
-    #[cfg(test)]
     fn hex_encode(data: &[u8]) -> String {
         hex::encode(data)
     }
 
-    #[cfg(test)]
     fn hex_decode(s: &str) -> Option<Vec<u8>> {
         hex::decode(s).ok()
     }

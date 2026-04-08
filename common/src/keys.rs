@@ -306,18 +306,6 @@ impl KeyCodec {
     }
 }
 
-/// Minimum allowed value size in bytes.
-pub const MIN_VALUE_SIZE: usize = 0;
-
-/// Maximum allowed value size in bytes (u16 length on the wire).
-pub const MAX_VALUE_SIZE: usize = u16::MAX as usize;
-
-/// True when a value size is valid for ingest/storage.
-#[inline]
-pub fn is_valid_value_size(size: usize) -> bool {
-    (MIN_VALUE_SIZE..=MAX_VALUE_SIZE).contains(&size)
-}
-
 /// True when a key size is valid for ingest/storage.
 #[inline]
 pub fn is_valid_key_size(size: usize) -> bool {
@@ -434,14 +422,6 @@ pub(crate) fn write_bit_be(bytes: &mut [u8], bit_idx: usize, value: bool) {
             *byte &= !mask;
         }
     }
-}
-
-/// Tier configuration.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct TierConfig {
-    pub tier: u8,
-    pub block_size: usize,
-    pub bits_per_key: Option<u32>,
 }
 
 /// Target block size for each tier.
@@ -614,11 +594,4 @@ mod tests {
         assert_eq!(compute_tier(chrono::Duration::days(60)), 5);
     }
 
-    #[test]
-    fn value_size_bounds() {
-        assert!(!is_valid_value_size(MAX_VALUE_SIZE + 1));
-        assert!(is_valid_value_size(MIN_VALUE_SIZE));
-        assert!(is_valid_value_size(MAX_VALUE_SIZE));
-        assert!(is_valid_value_size(1));
-    }
 }

@@ -62,8 +62,9 @@ pub async fn spawn_for_test(
 /// Poll until `GET {base}/health` succeeds (same contract as production query workers).
 async fn wait_for_health(base: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let health = format!("{base}/health");
+    let client = reqwest::Client::new();
     for _ in 0..200 {
-        if reqwest::Client::new()
+        if client
             .get(&health)
             .send()
             .await

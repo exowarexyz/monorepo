@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use connectrpc::{Chain, ConnectError, ConnectRpcService, Context, Limits};
-use exoware_common::keys::{validate_key_size, Key, MAX_KEY_LEN, MAX_VALUE_SIZE, MIN_VALUE_SIZE};
+use exoware_common::keys::{validate_key_size, Key, MAX_KEY_LEN};
 use exoware_sdk_rs as exoware_proto;
 use exoware_proto::compact::{
     PruneResponse, Service as CompactApi, ServiceServer as CompactServiceServer,
@@ -140,23 +140,6 @@ impl IngestApi for IngestConnect {
                     [("max_key_len".to_string(), MAX_KEY_LEN.to_string())],
                 )
             })?;
-            if !(MIN_VALUE_SIZE..=MAX_VALUE_SIZE).contains(&kv.value.len()) {
-                return Err(self.invalid_argument_field_error(
-                    format!("kvs[{index}].value"),
-                    format!(
-                        "value size {} out of range [{}, {}]",
-                        kv.value.len(),
-                        MIN_VALUE_SIZE,
-                        MAX_VALUE_SIZE
-                    ),
-                    "INVALID_VALUE_LENGTH",
-                    "request value length is outside store limits",
-                    [
-                        ("min_value_len".to_string(), MIN_VALUE_SIZE.to_string()),
-                        ("max_value_len".to_string(), MAX_VALUE_SIZE.to_string()),
-                    ],
-                ));
-            }
             let key: Key = wire.slice_ref(kv.key);
             let value = wire.slice_ref(kv.value);
             batch.push((key, value));

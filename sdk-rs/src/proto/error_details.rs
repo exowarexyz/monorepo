@@ -79,7 +79,9 @@ fn pack_detail<M: Message>(message: &M, type_url: &str) -> ErrorDetail {
     }
 }
 
-pub fn decode_detail(detail: &ErrorDetail) -> Result<Any, buffa::DecodeError> {
+fn decode_detail(detail: &ErrorDetail) -> Result<Any, buffa::DecodeError> {
+    // InvalidUtf8 is the closest available variant for base64 decode failures
+    // (buffa::DecodeError has no generic/catch-all variant).
     let value = detail
         .value
         .as_deref()

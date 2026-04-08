@@ -216,6 +216,7 @@ service Service {
 }
 
 message GetRequest {
+  // Must be between 0 and 254 bytes (inclusive).
   bytes key = 1;
   optional uint64 min_sequence_number = 2;
 }
@@ -232,7 +233,9 @@ message GetResponse {
 // `>= start`). For prefix scans, pass the lexicographic maximum key of the prefix as `end`, or
 // use an empty `end` when scanning through the end of the keyspace is intended.
 message RangeRequest {
+  // Must be between 0 and 254 bytes (inclusive).
   bytes start = 1;
+  // Must be between 0 and 254 bytes (inclusive). Empty means unbounded above.
   bytes end = 2;
   optional uint32 limit = 3;
   uint32 batch_size = 4;
@@ -249,7 +252,9 @@ message RangeFrame {
 // Same key-range semantics as `RangeRequest`: inclusive `[start, end]` over raw bytes when `end` is
 // non-empty; empty `end` means unbounded above.
 message ReduceRequest {
+  // Must be between 0 and 254 bytes (inclusive).
   bytes start = 1;
+  // Must be between 0 and 254 bytes (inclusive). Empty means unbounded above.
   bytes end = 2;
   ReduceParams params = 3;
   optional uint64 min_sequence_number = 4;

@@ -48,7 +48,10 @@ use commonware_storage::{
     },
 };
 use commonware_utils::{Array, Span};
-use exoware_common::keys::{is_valid_value_size, Key, KeyCodec, MAX_VALUE_SIZE};
+use exoware_common::keys::{Key, KeyCodec};
+
+/// Maximum encoded operation size for QMDB key and value payloads (u16 length on the wire).
+pub const MAX_OPERATION_SIZE: usize = u16::MAX as usize;
 use exoware_sdk_rs::{ClientError, RangeMode, SerializableReadSession, StoreClient};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -136,8 +139,8 @@ pub struct QmdbConfig {
 impl Default for QmdbConfig {
     fn default() -> Self {
         Self {
-            max_operation_key_len: MAX_VALUE_SIZE,
-            max_operation_value_len: MAX_VALUE_SIZE,
+            max_operation_key_len: MAX_OPERATION_SIZE,
+            max_operation_value_len: MAX_OPERATION_SIZE,
         }
     }
 }
@@ -2261,12 +2264,12 @@ fn mmr_size_for_watermark(watermark: Location) -> Result<Position, QmdbError> {
 }
 
 fn ensure_encoded_value_size(len: usize) -> Result<(), QmdbError> {
-    if is_valid_value_size(len) {
+    if len <= MAX_OPERATION_SIZE {
         Ok(())
     } else {
         Err(QmdbError::EncodedValueTooLarge {
             len,
-            max: MAX_VALUE_SIZE,
+            max: MAX_OPERATION_SIZE,
         })
     }
 }
@@ -2820,8 +2823,8 @@ impl UnorderedClient {
             .load_operation_bytes_range(&session, start_location, end)
             .await?;
         let cfg = (
-            ((0..=MAX_VALUE_SIZE).into(), ()),
-            ((0..=MAX_VALUE_SIZE).into(), ()),
+            ((0..=MAX_OPERATION_SIZE).into(), ()),
+            ((0..=MAX_OPERATION_SIZE).into(), ()),
         );
         let mut operations = Vec::with_capacity(rows.len());
         for (offset, value) in rows.iter().enumerate() {
@@ -3973,12 +3976,12 @@ mod tests {
     async fn spawn_test_server_with_query_tick(_query_tick: Duration) -> TestStoreBridgeServers {
         use axum::{routing::get, Router};
         use exoware_server::{connect_stack, AppState};
-        use exoware_simulator::DbState;
+        use exoware_simulator::RocksStore;
         use tempfile::tempdir;
 
         let dir = tempdir().expect("tempdir");
         let visible_for_clients = Arc::new(AtomicU64::new(0));
-        let db = DbState::open_with_observer(dir.path(), Some(visible_for_clients.clone()))
+        let db = RocksStore::open_with_observer(dir.path(), Some(visible_for_clients.clone()))
             .expect("rocksdb");
         let state = AppState::new(Arc::new(db));
         let connect = connect_stack(state);
@@ -4019,8 +4022,8 @@ mod tests {
             log_write_buffer: NonZeroUsize::new(1024).expect("non-zero"),
             log_compression: None,
             log_codec_config: (
-                ((0..=MAX_VALUE_SIZE).into(), ()),
-                ((0..=MAX_VALUE_SIZE).into(), ()),
+                ((0..=MAX_OPERATION_SIZE).into(), ()),
+                ((0..=MAX_OPERATION_SIZE).into(), ()),
             ),
             log_items_per_blob: NonZeroU64::new(8).expect("non-zero"),
             grafted_mmr_metadata_partition: "grafted-metadata".to_string(),
@@ -6103,8 +6106,8 @@ mod tests {
         let store = client.inner();
         let session = store.create_session();
         let decode_cfg = (
-            ((0..=MAX_VALUE_SIZE).into(), ()),
-            ((0..=MAX_VALUE_SIZE).into(), ()),
+            ((0..=MAX_OPERATION_SIZE).into(), ()),
+            ((0..=MAX_OPERATION_SIZE).into(), ()),
         );
 
         let full = harness_load_operation_bytes_range(store, &session, Location::new(0), Location::new(5))

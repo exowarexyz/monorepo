@@ -1,14 +1,11 @@
-//! Contract tests for `StoreEngine::range_scan` (RocksDB simulator): inclusive `[start, end]`.
+//! Contract tests for `StoreEngine` (RocksDB simulator).
 
 use bytes::Bytes;
 use exoware_server::StoreEngine;
 use exoware_simulator::RocksStore;
 use tempfile::tempdir;
 
-#[test]
-fn range_scan_inclusive_end_includes_end_key() {
-    let dir = tempdir().expect("tempdir");
-    let store = RocksStore::open(dir.path()).expect("open db");
+fn seed_abc(store: &RocksStore) {
     store
         .put_batch(&[
             (Bytes::from_static(b"a"), Bytes::from_static(b"1")),
@@ -16,15 +13,68 @@ fn range_scan_inclusive_end_includes_end_key() {
             (Bytes::from_static(b"c"), Bytes::from_static(b"3")),
         ])
         .expect("put_batch");
+}
 
-    let rows = store
-        .range_scan(b"a", b"c", usize::MAX, true)
-        .expect("range_scan");
-    let keys: Vec<&[u8]> = rows.iter().map(|(k, _)| k.as_ref()).collect();
-    assert_eq!(
-        keys,
-        vec![b"a".as_slice(), b"b".as_slice(), b"c".as_slice()]
-    );
+fn keys(rows: &[(Bytes, Bytes)]) -> Vec<&[u8]> {
+    rows.iter().map(|(k, _)| k.as_ref()).collect()
+}
+
+// -- get --
+
+#[test]
+fn get_returns_none_for_missing_key() {
+    let dir = tempdir().expect("tempdir");
+    let store = RocksStore::open(dir.path()).expect("open db");
+    assert!(store.get(b"missing").expect("get").is_none());
+}
+
+#[test]
+fn get_returns_value_after_put() {
+    let dir = tempdir().expect("tempdir");
+    let store = RocksStore::open(dir.path()).expect("open db");
+    store
+        .put_batch(&[(Bytes::from_static(b"k"), Bytes::from_static(b"v"))])
+        .expect("put_batch");
+    assert_eq!(store.get(b"k").expect("get").as_deref(), Some(b"v".as_slice()));
+}
+
+#[test]
+fn get_hides_internal_seq_meta_key() {
+    let dir = tempdir().expect("tempdir");
+    let store = RocksStore::open(dir.path()).expect("open db");
+    store
+        .put_batch(&[(Bytes::from_static(b"x"), Bytes::from_static(b"y"))])
+        .expect("put_batch");
+    assert!(store.get(b"__simulator_seq__").expect("get").is_none());
+}
+
+// -- put_batch / sequence --
+
+#[test]
+fn put_batch_returns_monotonic_sequence_numbers() {
+    let dir = tempdir().expect("tempdir");
+    let store = RocksStore::open(dir.path()).expect("open db");
+    let s1 = store
+        .put_batch(&[(Bytes::from_static(b"a"), Bytes::from_static(b"1"))])
+        .expect("put1");
+    let s2 = store
+        .put_batch(&[(Bytes::from_static(b"b"), Bytes::from_static(b"2"))])
+        .expect("put2");
+    assert_eq!(s1, 1);
+    assert_eq!(s2, 2);
+    assert_eq!(store.current_sequence(), 2);
+}
+
+// -- forward range_scan --
+
+#[test]
+fn range_scan_inclusive_end_includes_end_key() {
+    let dir = tempdir().expect("tempdir");
+    let store = RocksStore::open(dir.path()).expect("open db");
+    seed_abc(&store);
+
+    let rows = store.range_scan(b"a", b"c", usize::MAX, true).expect("scan");
+    assert_eq!(keys(&rows), vec![b"a".as_slice(), b"b", b"c"]);
 }
 
 #[test]
@@ -38,8 +88,95 @@ fn range_scan_empty_end_is_unbounded_above() {
         ])
         .expect("put_batch");
 
-    let rows = store
-        .range_scan(b"m", b"", usize::MAX, true)
-        .expect("range_scan");
+    let rows = store.range_scan(b"m", b"", usize::MAX, true).expect("scan");
     assert_eq!(rows.len(), 2);
+}
+
+#[test]
+fn range_scan_forward_respects_limit() {
+    let dir = tempdir().expect("tempdir");
+    let store = RocksStore::open(dir.path()).expect("open db");
+    seed_abc(&store);
+
+    let rows = store.range_scan(b"a", b"c", 2, true).expect("scan");
+    assert_eq!(keys(&rows), vec![b"a".as_slice(), b"b"]);
+}
+
+#[test]
+fn range_scan_returns_empty_when_no_keys_match() {
+    let dir = tempdir().expect("tempdir");
+    let store = RocksStore::open(dir.path()).expect("open db");
+    seed_abc(&store);
+
+    let rows = store.range_scan(b"d", b"f", usize::MAX, true).expect("scan");
+    assert!(rows.is_empty());
+}
+
+#[test]
+fn range_scan_limit_zero_returns_empty() {
+    let dir = tempdir().expect("tempdir");
+    let store = RocksStore::open(dir.path()).expect("open db");
+    seed_abc(&store);
+
+    let rows = store.range_scan(b"a", b"c", 0, true).expect("scan");
+    assert!(rows.is_empty());
+}
+
+#[test]
+fn range_scan_excludes_seq_meta_key() {
+    let dir = tempdir().expect("tempdir");
+    let store = RocksStore::open(dir.path()).expect("open db");
+    store
+        .put_batch(&[(
+            Bytes::from_static(b"__simulator_seq_neighbor__"),
+            Bytes::from_static(b"v"),
+        )])
+        .expect("put_batch");
+
+    let rows = store.range_scan(b"", b"", usize::MAX, true).expect("scan");
+    for (k, _) in &rows {
+        assert_ne!(k.as_ref(), b"__simulator_seq__");
+    }
+}
+
+// -- reverse range_scan --
+
+#[test]
+fn range_scan_reverse_returns_descending_order() {
+    let dir = tempdir().expect("tempdir");
+    let store = RocksStore::open(dir.path()).expect("open db");
+    seed_abc(&store);
+
+    let rows = store.range_scan(b"a", b"c", usize::MAX, false).expect("scan");
+    assert_eq!(keys(&rows), vec![b"c".as_slice(), b"b", b"a"]);
+}
+
+#[test]
+fn range_scan_reverse_respects_limit() {
+    let dir = tempdir().expect("tempdir");
+    let store = RocksStore::open(dir.path()).expect("open db");
+    seed_abc(&store);
+
+    let rows = store.range_scan(b"a", b"c", 2, false).expect("scan");
+    assert_eq!(keys(&rows), vec![b"c".as_slice(), b"b"]);
+}
+
+#[test]
+fn range_scan_reverse_unbounded_end() {
+    let dir = tempdir().expect("tempdir");
+    let store = RocksStore::open(dir.path()).expect("open db");
+    seed_abc(&store);
+
+    let rows = store.range_scan(b"a", b"", usize::MAX, false).expect("scan");
+    assert_eq!(keys(&rows), vec![b"c".as_slice(), b"b", b"a"]);
+}
+
+#[test]
+fn range_scan_single_key() {
+    let dir = tempdir().expect("tempdir");
+    let store = RocksStore::open(dir.path()).expect("open db");
+    seed_abc(&store);
+
+    let rows = store.range_scan(b"b", b"b", usize::MAX, true).expect("scan");
+    assert_eq!(keys(&rows), vec![b"b".as_slice()]);
 }

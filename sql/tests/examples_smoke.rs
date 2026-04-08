@@ -166,10 +166,7 @@ async fn orders_example_queries_work_end_to_end() {
     assert_eq!(collect_i64_pairs(&filtered, 0, 1), vec![(1002, 2), (1005, 5)]);
     assert_eq!(collect_i64_rows(&filtered, 2), vec![1799, 4599]);
     assert_eq!(
-        collect_string_i64_rows(&filtered, 3, 1)
-            .into_iter()
-            .map(|(status, order_id)| (status, order_id))
-            .collect::<Vec<_>>(),
+        collect_string_i64_rows(&filtered, 3, 1),
         vec![("paid".to_string(), 2), ("refunded".to_string(), 5)]
     );
 }

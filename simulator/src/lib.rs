@@ -4,5 +4,5 @@ pub mod rocks;
 pub mod server;
 
 pub use exoware_server::{connect_stack, AppState, StoreEngine};
-pub use rocks::{DbState, RocksStore};
+pub use rocks::RocksStore;
 pub use server::{run, spawn_for_test, CMD, RUN_CMD};

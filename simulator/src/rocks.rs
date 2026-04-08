@@ -45,14 +45,13 @@ impl RocksStore {
     }
 
     fn batch_put_rocksdb(&self, kvs: &[(Bytes, Bytes)]) -> Result<u64, rocksdb::Error> {
+        let next = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
         let mut batch = rocksdb::WriteBatch::default();
         for (k, v) in kvs {
             batch.put(k.as_ref(), v.as_ref());
         }
-        let next = self.sequence.load(Ordering::SeqCst).saturating_add(1);
         batch.put(SEQ_META_KEY, next.to_le_bytes());
         self.db.write(batch)?;
-        self.sequence.store(next, Ordering::SeqCst);
         if let Some(obs) = &self.observer {
             obs.store(next, Ordering::SeqCst);
         }
@@ -134,6 +133,3 @@ impl StoreEngine for RocksStore {
         self.sequence.load(Ordering::SeqCst)
     }
 }
-
-/// Backwards-compatible name for tooling and tests.
-pub type DbState = RocksStore;

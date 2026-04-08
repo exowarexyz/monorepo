@@ -501,9 +501,12 @@ pub fn eval_expr(
         }
         KvExpr::Div(left, right) => {
             eval_numeric_binary_op(key, archived, left, right, |lhs, rhs| match (lhs, rhs) {
-                (_, KvReducedValue::Int64(0))
-                | (_, KvReducedValue::UInt64(0))
-                | (_, KvReducedValue::Float64(0.0)) => Err("division by zero".to_string()),
+                (_, KvReducedValue::Int64(0)) | (_, KvReducedValue::UInt64(0)) => {
+                    Err("division by zero".to_string())
+                }
+                (_, KvReducedValue::Float64(v)) if v == 0.0 => {
+                    Err("division by zero".to_string())
+                }
                 (KvReducedValue::Int64(lhs), KvReducedValue::Int64(rhs)) => {
                     Ok(KvReducedValue::Float64(lhs as f64 / rhs as f64))
                 }
@@ -1258,5 +1261,44 @@ mod tests {
         };
 
         assert!(eval_predicate(&key, None, &predicate).expect("predicate eval"));
+    }
+
+    #[test]
+    fn eval_expr_div_by_negative_zero_is_error() {
+        let key = Key::default();
+        let expr = KvExpr::Div(
+            Box::new(KvExpr::Literal(KvReducedValue::Float64(1.0))),
+            Box::new(KvExpr::Literal(KvReducedValue::Float64(-0.0))),
+        );
+        assert_eq!(
+            eval_expr(&key, None, &expr),
+            Err("division by zero".to_string())
+        );
+    }
+
+    #[test]
+    fn eval_expr_div_by_positive_zero_is_error() {
+        let key = Key::default();
+        let expr = KvExpr::Div(
+            Box::new(KvExpr::Literal(KvReducedValue::Float64(1.0))),
+            Box::new(KvExpr::Literal(KvReducedValue::Float64(0.0))),
+        );
+        assert_eq!(
+            eval_expr(&key, None, &expr),
+            Err("division by zero".to_string())
+        );
+    }
+
+    #[test]
+    fn eval_expr_div_int_by_zero_is_error() {
+        let key = Key::default();
+        let expr = KvExpr::Div(
+            Box::new(KvExpr::Literal(KvReducedValue::Int64(10))),
+            Box::new(KvExpr::Literal(KvReducedValue::Int64(0))),
+        );
+        assert_eq!(
+            eval_expr(&key, None, &expr),
+            Err("division by zero".to_string())
+        );
     }
 }

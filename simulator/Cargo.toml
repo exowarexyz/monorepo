@@ -23,7 +23,6 @@ clap = { workspace = true }
 
 [dev-dependencies]
 exoware-sdk-rs = { workspace = true }
-portpicker = { workspace = true }
 tempfile = { workspace = true }
 
 [[bin]]

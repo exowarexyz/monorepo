@@ -5,8 +5,6 @@ import { Client } from '../src/client';
 
 /** Matches `exoware_common::keys::MAX_KEY_LEN`. */
 const MAX_KEY_LEN = 254;
-/** Matches `exoware_common::keys::MAX_VALUE_SIZE` (`u16::MAX`). */
-const MAX_VALUE_SIZE = 65535;
 
 const tempDir = path.join(os.tmpdir(), 'exoware-ts-sdk-tests');
 const configFile = path.join(tempDir, 'config.json');
@@ -83,27 +81,16 @@ describe('Exoware TS SDK', () => {
                 });
             });
 
-            it('should handle value at size limit', async () => {
+            it('should handle large values', async () => {
                 const store = client.store();
-                const key = new TextEncoder().encode('value_at_limit');
-                const value = Buffer.alloc(MAX_VALUE_SIZE);
+                const key = new TextEncoder().encode('large_value');
+                const value = Buffer.alloc(128 * 1024);
 
                 await store.set(key, value);
                 const result = await store.get(key);
 
                 expect(result).not.toBeNull();
                 expect(result!.value).toEqual(value);
-            });
-
-            it('should reject value over size limit', async () => {
-                const store = client.store();
-                const key = new TextEncoder().encode('value_over_limit');
-                const value = Buffer.alloc(MAX_VALUE_SIZE + 1);
-
-                await expect(store.set(key, value)).rejects.toMatchObject({
-                    name: 'HttpError',
-                    status: 400,
-                });
             });
         });
     });

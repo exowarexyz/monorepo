@@ -2319,19 +2319,11 @@ dependencies = [
  "anyhow",
  "bytes",
  "chrono",
- "criterion 0.5.1",
- "rand 0.8.5",
  "regex",
  "rkyv",
  "serde",
- "serde_json",
  "serde_yaml",
  "thiserror 2.0.12",
- "tokio",
- "tracing",
- "uuid",
- "xxhash-rust",
- "zstd",
 ]
 
 [[package]]
@@ -2407,7 +2399,6 @@ dependencies = [
  "clap",
  "exoware-sdk-rs",
  "exoware-server",
- "portpicker",
  "reqwest",
  "rocksdb",
  "tempfile",
@@ -3985,15 +3976,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c33a9471896f1c69cecef8d20cbe2f7accd12527ce60845ff44c153bb2a21b49"
 
 [[package]]
-name = "portpicker"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be97d76faf1bfab666e1375477b23fde79eccf0276e9b63b92a39d676a889ba9"
-dependencies = [
- "rand 0.8.5",
-]
-
-[[package]]
 name = "potential_utf"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5466,7 +5448,6 @@ checksum = "5ac8b6f42ead25368cf5b098aeb3dc8a1a2c05a3eee8a9a1a68c640edbfc79d9"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
- "serde_core",
  "wasm-bindgen",
 ]
 
@@ -6044,12 +6025,6 @@ dependencies = [
  "serde",
  "zeroize",
 ]
-
-[[package]]
-name = "xxhash-rust"
-version = "0.8.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdd20c5420375476fbd4394763288da7eb0cc0b8c11deed431a91562af7335d3"
 
 [[package]]
 name = "yoke"
