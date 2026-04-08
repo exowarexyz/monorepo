@@ -12,7 +12,7 @@ message RangeEntry {
 }
 
 // Visible store sequence number plus read counters for query RPCs. On success, carried in unary
-// response metadata (`Get` / `Reduce`) or `Range` trailers; also attached as a `google.rpc` error
+// response metadata (`Get` / `Reduce`) or streaming trailers (`Range` / `GetMany`); also attached as a `google.rpc` error
 // detail when the RPC fails (same message shape in both cases).
 //
 // The reference RocksDB engine reports `read_bytes`: the sum of key length plus value length for

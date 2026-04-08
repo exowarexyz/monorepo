@@ -12,7 +12,7 @@ import {
     KvFieldRefSchema,
     KvFieldRef_ValueFieldSchema,
     KvFieldKind,
-} from '../src/gen/ts/store/v1/query_pb';
+} from '../src/index';
 
 const MAX_KEY_LEN = 254;
 

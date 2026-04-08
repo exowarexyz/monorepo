@@ -199,6 +199,22 @@ pub fn validate_prune_request(
             [],
         ));
     }
+    for (i, policy) in request.policies.iter().enumerate() {
+        if let Some(exoware_proto::compact::policy_retain::KindView::KeepLatest(kl)) =
+            &policy.retain.kind
+        {
+            if kl.count == 0 {
+                return Err(field_error(
+                    "store.compact",
+                    format!("policies[{i}].retain.keep_latest.count"),
+                    "count must be greater than 0",
+                    "INVALID_PRUNE_REQUEST",
+                    "keep_latest count must be positive",
+                    [],
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -352,6 +368,32 @@ mod tests {
         let view = exoware_proto::store::compact::v1::PruneRequestView::decode_view(&bytes)
             .expect("parse");
         validate_prune_request(&view).expect("should be valid");
+    }
+
+    #[test]
+    fn prune_rejects_keep_latest_count_zero() {
+        use buffa::Message;
+        let bytes = exoware_proto::compact::PruneRequest {
+            policies: vec![exoware_proto::compact::Policy {
+                retain: Some(exoware_proto::compact::PolicyRetain {
+                    kind: Some(exoware_proto::compact::policy_retain::Kind::KeepLatest(
+                        Box::new(exoware_proto::compact::RetainKeepLatest {
+                            count: 0,
+                            ..Default::default()
+                        }),
+                    )),
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let view = exoware_proto::store::compact::v1::PruneRequestView::decode_view(&bytes)
+            .expect("parse");
+        let err = validate_prune_request(&view).unwrap_err();
+        assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
     }
 
     // -- get_many --

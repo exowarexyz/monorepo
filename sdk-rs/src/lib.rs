@@ -570,10 +570,10 @@ pub struct StoreClient {
 
 /// A session that enforces monotonic read consistency via a fixed `min_sequence_number` floor.
 ///
-/// Every read in the session passes the same `min_sequence_number` so the server
-/// guarantees all responses reflect at least that point in the write log. The first
-/// read either inherits the parent `StoreClient`'s observed sequence number (if nonzero)
-/// or issues an unseeded read and seeds from the response.
+/// The first read either inherits the parent `StoreClient`'s observed sequence number
+/// (if nonzero) or issues an unseeded read and seeds from the response. Every
+/// subsequent read passes that fixed floor so the server guarantees all responses
+/// reflect at least that point in the write log.
 #[derive(Clone, Debug)]
 pub struct SerializableReadSession {
     client: StoreClient,
