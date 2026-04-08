@@ -42,10 +42,10 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-    - name: Install nightly Rust toolchain
-      run: rustup toolchain install ${{ env.NIGHTLY_VERSION }} && rustup component add --toolchain ${{ env.NIGHTLY_VERSION }} rustfmt
     - name: Run setup
       uses: ./.github/actions/setup
+    - name: Install nightly Rust toolchain
+      run: rustup toolchain install ${{ env.NIGHTLY_VERSION }} && rustup component add --toolchain ${{ env.NIGHTLY_VERSION }} rustfmt
     - name: Lint
       run: cargo clippy --all-targets -- -D warnings
     - name: Fmt
@@ -89,7 +89,7 @@ jobs:
 
   Dependencies:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
