@@ -2,8 +2,6 @@ name: 'Setup'
 runs:
   using: 'composite'
   steps:
-    - name: Install stable Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
     - name: Run sccache-cache
       uses: mozilla-actions/sccache-action@v0.0.9
     - name: Configure sccache
