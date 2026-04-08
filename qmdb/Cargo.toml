@@ -1,0 +1,39 @@
+[package]
+name = "exoware-qmdb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "QMDB instance backed by the Exoware API."
+readme = "README.md"
+
+[lib]
+name = "store_qmdb"
+
+[features]
+test-utils = []
+
+[dependencies]
+bytes = { workspace = true }
+commonware-codec = "2026.3.0"
+futures = { workspace = true }
+commonware-cryptography = "2026.3.0"
+commonware-storage = "2026.3.0"
+commonware-utils = "2026.3.0"
+connectrpc = { workspace = true }
+exoware-sdk-rs = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+exoware-qmdb = { path = ".", features = ["test-utils"] }
+axum = { workspace = true }
+bytes = { workspace = true }
+commonware-runtime = "2026.3.0"
+exoware-simulator = { path = "../examples/simulator" }
+exoware-server = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

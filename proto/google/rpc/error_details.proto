@@ -1,0 +1,27 @@
+// Vendored subset of google/rpc/error_details.proto.
+// Wire-compatible with the original (same field numbers and types).
+// Only the types used by the store API are included here.
+
+syntax = "proto3";
+
+package google.rpc;
+
+import "google/protobuf/duration.proto";
+
+message ErrorInfo {
+  string reason = 1;
+  string domain = 2;
+  map<string, string> metadata = 3;
+}
+
+message RetryInfo {
+  google.protobuf.Duration retry_delay = 1;
+}
+
+message BadRequest {
+  message FieldViolation {
+    string field = 1;
+    string description = 2;
+  }
+  repeated FieldViolation field_violations = 1;
+}

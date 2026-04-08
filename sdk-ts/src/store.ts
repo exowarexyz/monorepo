@@ -1,113 +1,305 @@
-import type { Client } from './client';
-import { HttpError } from './error';
-import { Base64 } from 'js-base64';
-import { AxiosError } from 'axios';
+import { create, fromBinary } from '@bufbuild/protobuf';
+import { Code, ConnectError } from '@connectrpc/connect';
+import type { CallOptions } from '@connectrpc/connect';
+import type { Client } from './client.js';
+import { HttpError } from './error.js';
+import { PruneRequestSchema } from './gen/ts/store/v1/compact_pb.js';
+import type { Policy } from './gen/ts/store/v1/compact_pb.js';
+import { PutRequestSchema, KvPairSchema } from './gen/ts/store/v1/ingest_pb.js';
+import {
+    GetRequestSchema,
+    GetManyRequestSchema,
+    RangeRequestSchema,
+    ReduceRequestSchema,
+    DetailSchema,
+    TraversalMode,
+} from './gen/ts/store/v1/query_pb.js';
+import type {
+    ReduceParams,
+    ReduceResponse,
+    Detail,
+} from './gen/ts/store/v1/query_pb.js';
 
-/**
- * The result of a `get` operation.
- */
+const QUERY_DETAIL_HEADER = 'x-store-query-detail-bin';
+
+export { TraversalMode };
+
+export type { ReduceParams, ReduceResponse };
+
 export interface GetResult {
-    /** The retrieved value. */
     value: Uint8Array;
 }
 
-/**
- * An item in the result of a `query` operation.
- */
-export interface QueryResultItem {
-    /** The key of the item. */
+export interface GetManyResultItem {
     key: Uint8Array;
-    /** The value of the item. */
+    value: Uint8Array | undefined;
+}
+
+export interface QueryResultItem {
+    key: Uint8Array;
     value: Uint8Array;
 }
 
-/**
- * The result of a `query` operation.
- */
 export interface QueryResult {
-    /** A list of key-value pairs. */
     results: QueryResultItem[];
 }
 
-/**
- * A client for interacting with the key-value store.
- */
+function toUint8Array(value: Uint8Array | Buffer): Uint8Array {
+    return value instanceof Uint8Array ? value : new Uint8Array(value);
+}
+
+function mapConnectToHttpError(err: unknown): never {
+    if (err instanceof ConnectError) {
+        const status = connectCodeToHttpStatus(err.code);
+        throw new HttpError(status, err.message || String(err.code), err.code, err);
+    }
+    throw err;
+}
+
+function connectCodeToHttpStatus(code: Code): number {
+    switch (code) {
+        case Code.Canceled:
+            return 499;
+        case Code.Unknown:
+            return 500;
+        case Code.InvalidArgument:
+            return 400;
+        case Code.DeadlineExceeded:
+            return 504;
+        case Code.NotFound:
+            return 404;
+        case Code.AlreadyExists:
+            return 409;
+        case Code.PermissionDenied:
+            return 403;
+        case Code.ResourceExhausted:
+            return 429;
+        case Code.FailedPrecondition:
+            return 400;
+        case Code.Aborted:
+            return 409;
+        case Code.OutOfRange:
+            return 400;
+        case Code.Unimplemented:
+            return 501;
+        case Code.Internal:
+            return 500;
+        case Code.Unavailable:
+            return 503;
+        case Code.DataLoss:
+            return 500;
+        case Code.Unauthenticated:
+            return 401;
+        default:
+            return 500;
+    }
+}
+
+function parseDetailFromHeaders(headers: Headers): Detail | undefined {
+    const raw = headers.get(QUERY_DETAIL_HEADER);
+    if (!raw) return undefined;
+    try {
+        const binaryStr = atob(raw);
+        const bytes = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) {
+            bytes[i] = binaryStr.charCodeAt(i);
+        }
+        return fromBinary(DetailSchema, bytes);
+    } catch {
+        return undefined;
+    }
+}
+
 export class StoreClient {
-    constructor(private client: Client) { }
+    private _sequenceNumber = 0n;
 
-    /**
-     * Sets a key-value pair in the store.
-     * @param key The key to set.
-     * @param value The value to set.
-     */
-    async set(key: Uint8Array, value: Uint8Array | Buffer): Promise<void> {
-        const encodedKey = Base64.fromUint8Array(key);
-        const url = `${this.client.baseUrl}/store/${encodedKey}`;
-        try {
-            await this.client.httpClient.post(url, value, {
-                headers: { 'Content-Type': 'application/octet-stream' },
-            });
-        } catch (error) {
-            if (error instanceof AxiosError && error.response) {
-                throw new HttpError(error.response.status, error.response.statusText);
-            }
-            throw error;
+    constructor(private readonly client: Client) {}
+
+    get sequenceNumber(): bigint {
+        return this._sequenceNumber;
+    }
+
+    observeSequenceNumber(sn: bigint): void {
+        if (sn > this._sequenceNumber) {
+            this._sequenceNumber = sn;
         }
     }
 
-    /**
-     * Retrieves a value from the store by its key.
-     * @param key The key to retrieve.
-     * @returns The value, or `null` if the key does not exist.
-     */
-    async get(key: Uint8Array): Promise<GetResult | null> {
-        const encodedKey = Base64.fromUint8Array(key);
-        const url = `${this.client.baseUrl}/store/${encodedKey}`;
+    private effectiveMinSequenceNumber(override?: bigint): bigint | undefined {
+        const sn = override ?? this._sequenceNumber;
+        return sn > 0n ? sn : undefined;
+    }
+
+    private observeDetailFromHeaders(headers: Headers): void {
+        const detail = parseDetailFromHeaders(headers);
+        if (detail) {
+            this.observeSequenceNumber(detail.sequenceNumber);
+        }
+    }
+
+    async set(key: Uint8Array, value: Uint8Array | Buffer): Promise<bigint> {
+        const req = create(PutRequestSchema, {
+            kvs: [
+                create(KvPairSchema, {
+                    key,
+                    value: toUint8Array(value),
+                }),
+            ],
+        });
         try {
-            const response = await this.client.httpClient.get<{ value: string }>(url);
-            const value = Base64.toUint8Array(response.data.value);
-            return { value };
-        } catch (error) {
-            if (error instanceof AxiosError && error.response) {
-                if (error.response.status === 404) {
-                    return null;
+            const res = await this.client.ingest.put(req);
+            this.observeSequenceNumber(res.sequenceNumber);
+            return res.sequenceNumber;
+        } catch (e) {
+            mapConnectToHttpError(e);
+        }
+    }
+
+    async setMany(kvs: { key: Uint8Array; value: Uint8Array | Buffer }[]): Promise<bigint> {
+        const req = create(PutRequestSchema, {
+            kvs: kvs.map((kv) =>
+                create(KvPairSchema, {
+                    key: kv.key,
+                    value: toUint8Array(kv.value),
+                }),
+            ),
+        });
+        try {
+            const res = await this.client.ingest.put(req);
+            this.observeSequenceNumber(res.sequenceNumber);
+            return res.sequenceNumber;
+        } catch (e) {
+            mapConnectToHttpError(e);
+        }
+    }
+
+    async get(
+        key: Uint8Array,
+        minSequenceNumber?: bigint,
+    ): Promise<GetResult | null> {
+        const effective = this.effectiveMinSequenceNumber(minSequenceNumber);
+        const req = create(GetRequestSchema, {
+            key,
+            ...(effective !== undefined ? { minSequenceNumber: effective } : {}),
+        });
+        try {
+            const callOpts: CallOptions = {
+                onHeader: (h) => this.observeDetailFromHeaders(h),
+                onTrailer: (t) => this.observeDetailFromHeaders(t),
+            };
+            const res = await this.client.query.get(req, callOpts);
+            if (res.value === undefined) {
+                return null;
+            }
+            return { value: res.value };
+        } catch (e) {
+            mapConnectToHttpError(e);
+        }
+    }
+
+    async getMany(
+        keys: Uint8Array[],
+        batchSize?: number,
+        onChunk?: (entries: GetManyResultItem[]) => void,
+        minSequenceNumber?: bigint,
+    ): Promise<GetManyResultItem[]> {
+        const effective = this.effectiveMinSequenceNumber(minSequenceNumber);
+        const req = create(GetManyRequestSchema, {
+            keys,
+            batchSize: batchSize ?? keys.length,
+            ...(effective !== undefined ? { minSequenceNumber: effective } : {}),
+        });
+        const results: GetManyResultItem[] = [];
+        try {
+            const callOpts: CallOptions = {
+                onHeader: (h) => this.observeDetailFromHeaders(h),
+                onTrailer: (t) => this.observeDetailFromHeaders(t),
+            };
+            const stream = this.client.query.getMany(req, callOpts);
+            for await (const frame of stream) {
+                const chunk: GetManyResultItem[] = [];
+                for (const entry of frame.results) {
+                    chunk.push({
+                        key: entry.key,
+                        value: entry.value,
+                    });
                 }
-                throw new HttpError(error.response.status, error.response.statusText);
+                if (onChunk) {
+                    onChunk(chunk);
+                }
+                results.push(...chunk);
             }
-            throw error;
+            return results;
+        } catch (e) {
+            mapConnectToHttpError(e);
         }
     }
 
-    /**
-     * Queries for a range of key-value pairs.
-     * @param start The key to start the query from (inclusive). If `undefined`, the query starts from the first key.
-     * @param end The key to end the query at (exclusive). If `undefined`, the query continues to the last key.
-     * @param limit The maximum number of results to return. If `undefined`, all results are returned.
-     */
-    async query(start?: Uint8Array, end?: Uint8Array, limit?: number): Promise<QueryResult> {
-        const url = new URL(`${this.client.baseUrl}/store`);
-        if (start) {
-            const encodedStart = Base64.fromUint8Array(start);
-            url.searchParams.append('start', encodedStart);
-        }
-        if (end) {
-            const encodedEnd = Base64.fromUint8Array(end);
-            url.searchParams.append('end', encodedEnd);
-        }
-        if (limit) url.searchParams.append('limit', limit.toString());
-
+    async query(
+        start?: Uint8Array,
+        end?: Uint8Array,
+        limit?: number,
+        batchSize: number = 4096,
+        mode: TraversalMode = TraversalMode.FORWARD,
+        minSequenceNumber?: bigint,
+    ): Promise<QueryResult> {
+        const effective = this.effectiveMinSequenceNumber(minSequenceNumber);
+        const req = create(RangeRequestSchema, {
+            start: start ?? new Uint8Array(),
+            end: end ?? new Uint8Array(),
+            batchSize,
+            mode,
+            ...(limit !== undefined ? { limit } : {}),
+            ...(effective !== undefined ? { minSequenceNumber: effective } : {}),
+        });
+        const results: QueryResultItem[] = [];
         try {
-            const response = await this.client.httpClient.get<{ results: { key: string, value: string }[] }>(url.toString());
-            const results = response.data.results.map(item => ({
-                key: Base64.toUint8Array(item.key),
-                value: Base64.toUint8Array(item.value)
-            }));
-            return { results };
-        } catch (error) {
-            if (error instanceof AxiosError && error.response) {
-                throw new HttpError(error.response.status, error.response.statusText);
+            const callOpts: CallOptions = {
+                onHeader: (h) => this.observeDetailFromHeaders(h),
+                onTrailer: (t) => this.observeDetailFromHeaders(t),
+            };
+            const stream = this.client.query.range(req, callOpts);
+            for await (const frame of stream) {
+                for (const row of frame.results) {
+                    results.push({ key: row.key, value: row.value });
+                }
             }
-            throw error;
+            return { results };
+        } catch (e) {
+            mapConnectToHttpError(e);
+        }
+    }
+
+    async prune(policies: Policy[]): Promise<void> {
+        const req = create(PruneRequestSchema, { policies });
+        try {
+            await this.client.compact.prune(req);
+        } catch (e) {
+            mapConnectToHttpError(e);
+        }
+    }
+
+    async reduce(
+        start: Uint8Array,
+        end: Uint8Array,
+        params: ReduceParams,
+        minSequenceNumber?: bigint,
+    ): Promise<ReduceResponse> {
+        const effective = this.effectiveMinSequenceNumber(minSequenceNumber);
+        const req = create(ReduceRequestSchema, {
+            start,
+            end,
+            params,
+            ...(effective !== undefined ? { minSequenceNumber: effective } : {}),
+        });
+        try {
+            const callOpts: CallOptions = {
+                onHeader: (h) => this.observeDetailFromHeaders(h),
+                onTrailer: (t) => this.observeDetailFromHeaders(t),
+            };
+            return await this.client.query.reduce(req, callOpts);
+        } catch (e) {
+            mapConnectToHttpError(e);
         }
     }
 }

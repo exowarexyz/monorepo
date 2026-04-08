@@ -1,0 +1,34 @@
+[package]
+name = "exoware-sql"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SQL engine backed by the Exoware API."
+readme = "README.md"
+
+[dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+exoware-sdk-rs = { workspace = true }
+datafusion = "52.2.0"
+futures = "0.3.32"
+hex = { workspace = true }
+regex = { workspace = true }
+commonware-codec = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+buffa = { workspace = true }
+connectrpc = { workspace = true }
+criterion = { workspace = true }
+exoware-simulator = { path = "../examples/simulator" }
+exoware-server = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+tempfile = { workspace = true }
+
+[[bench]]
+name = "read_path_perf"
+harness = false

@@ -1,12 +1,22 @@
 [workspace]
 members = [
-    "simulator",
+    "server",
     "sdk-rs",
+    "examples/simulator",
+    "qmdb",
+    "sql",
 ]
 resolver = "2"
 
+[workspace.package]
+version = "2026.4.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+homepage = "https://exoware.xyz"
+
 [workspace.dependencies]
-exoware-sdk-rs = { version = "0.0.2", path = "sdk-rs" }
+exoware-sdk-rs = { version = "2026.4.0", path = "sdk-rs" }
+exoware-server = { version = "2026.4.0", path = "server" }
 tokio = "1.43.0"
 clap = "4.5.18"
 tracing = "0.1.41"
@@ -14,6 +24,9 @@ tracing-subscriber = "0.3.19"
 thiserror = "2.0.12"
 axum = "0.8.1"
 base64 = "0.22.1"
+hex = "0.4"
+regex = "1"
+commonware-codec = "2026.3.0"
 rocksdb = "0.22.0"
 rand = "0.8.5"
 bincode = "1.3.3"
@@ -21,38 +34,35 @@ dashmap = "5.5.3"
 tokio-stream = "0.1.15"
 futures = "0.3.30"
 reqwest = "0.12.5"
-tokio-tungstenite = "0.23.1"
-url = "2.5.2"
-futures-util = "0.3.30"
 serde = "1.0.219"
-serde_json = "1.0.120"
 serde_with = { version = "3.14.0" }
 tempfile = "3.10.1"
 portpicker = "0.1.1"
 http = "1.3.1"
-tower-http = "0.5.2"
+tower-http = { version = "0.5.2", features = ["cors"] }
+bytes = "1"
+connectrpc = { version = "0.3.1", features = ["client", "axum"] }
+hyper = { version = "1", features = ["full"] }
+buffa = { version = "0.3", features = ["json"] }
+buffa-types = { version = "0.3", features = ["json"] }
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+anyhow = "1"
+async-trait = "0.1"
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [profile.bench]
-# Because we enable overflow checks in "release," we should benchmark with them.
 overflow-checks = true
 
 [profile.dev]
-# Although overflow checks are enabled by default in "dev", we explicitly
-# enable them here for clarity.
 overflow-checks = true
 
 [profile.release]
-# To guard against unexpected behavior in production, we enable overflow checks in
-# "release" although they incur some performance penalty.
 overflow-checks = true
 
 [profile.release-with-debug]
 inherits = "release"
-# Setting debug to true instructs cargo to include debug symbols in the release
-# binary (not to disable optimizations).
 debug = true
 
 [profile.test]
-# Although overflow checks are enabled by default in "test", we explicitly
-# enable them here for clarity.
 overflow-checks = true

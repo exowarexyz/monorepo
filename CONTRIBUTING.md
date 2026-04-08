@@ -16,7 +16,7 @@ The Exoware Library provides robust, high-performance primitives for interacting
 This repository uses the default cargo and clippy formatting rules for `.rs` files, treating warnings as errors. To check linting, run:
 
 ```bash
-$ cargo clippy --all-targets --all-features -- -D warnings
+$ cargo clippy --all-targets -- -D warnings
 $ cargo +nightly fmt --all -- --check
 ```
 
@@ -29,12 +29,6 @@ $ cargo +nightly fmt --all
 # Releases
 
 Releases are automatically published to `cargo` by [GitHub Actions](.github/workflows/publish.yml) whenever a version update is merged into the `main` branch.
-
-To increment the patch version of all crates (and update the corresponding minimum required version in `workspace.dependencies`), run:
-
-```bash
-./scripts/bump_versions.sh
-```
 
 # Licensing and Copyright
 

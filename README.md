@@ -8,25 +8,26 @@
 
 _Primitives are designed for production use. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a primitive)._
 
-* [sdk-rs](./sdk-rs/README.md): Rust SDK for the Exoware API.
-* [sdk-ts](./sdk-ts/README.md): TypeScript SDK for the Exoware API.
-* [simulator](./simulator/README.md): Simulate the Exoware API.
+* [sdk-rs](./sdk-rs/README.md): Interact with the Exoware API in Rust.
+* [sdk-ts](./sdk-ts/README.md): Interact with the Exoware API in TypeScript.
+* [server](./server/Cargo.toml): Serve the Exoware API.
+* [qmdb](./qmdb/README.md): QMDB instance backed by the Exoware API.
+* [sql](./sql/README.md): SQL engine backed by the Exoware API.
 
 ## Components
 
 _Components are designed for production use. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a component)._
 
-* **store**: Persist and retrieve artifacts.
-* **stream**: Broadcast realtime data.
+* **store**: Persist immutable artifacts.
 
-_The interface for all components is specified in [OpenAPI format](./interface.yaml)._
+_The interface for all components is specified in [Protobuf](./proto/)._
 
 ## Examples
 
 _Examples may include insecure code (i.e. deriving keypairs from an integer arguments) to make them easier to run. Examples are not intended to be used directly in production._
 
-* [alto](https://github.com/commonwarexyz/alto): A minimal (and wicked fast) blockchain built with the Commonware Library.
 * [sandbox](./examples/sandbox): Explore the Exoware API.
+* [simulator](./examples/simulator/README.md): Simulate the Exoware API.
 
 ## Licensing
 

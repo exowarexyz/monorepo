@@ -1,0 +1,22 @@
+[package]
+name = "exoware-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+description = "Serve the Exoware API."
+repository = "https://github.com/exowarexyz/monorepo/tree/main/server"
+documentation = "https://docs.rs/exoware-server"
+
+[dependencies]
+bytes = { workspace = true }
+buffa = { workspace = true }
+buffa-types = { workspace = true }
+connectrpc = { workspace = true }
+futures = { workspace = true }
+http = { workspace = true }
+regex = { workspace = true }
+exoware-sdk-rs = { workspace = true }
+
+[dev-dependencies]
+commonware-codec = { workspace = true }

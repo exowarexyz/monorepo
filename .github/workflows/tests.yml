@@ -10,35 +10,54 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  UDEPS_VERSION: 0.1.50
+  UDEPS_VERSION: 0.1.57
+  NIGHTLY_VERSION: nightly-2025-11-15
 
 jobs:
+  Proto:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install Buf CLI
+        uses: bufbuild/buf-setup-action@v1
+        with:
+          version: 1.67.0
+      - name: Run setup (Rust + Node)
+        uses: ./.github/actions/setup
+      - name: Buf build
+        run: buf build proto
+      - name: Buf lint
+        run: buf lint proto
+      - name: Verify generated code is up to date
+        run: |
+          ./gen.sh
+          git diff --exit-code sdk-rs/src/gen/ sdk-ts/src/gen/ || \
+            (echo "Generated code is stale. Run ./gen.sh and commit." && exit 1)
+
   Lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-    - name: Install nightly Rust toolchain
-      run: rustup toolchain install nightly && rustup component add --toolchain nightly rustfmt
     - name: Run setup
       uses: ./.github/actions/setup
+    - name: Install nightly Rust toolchain
+      run: rustup toolchain install ${{ env.NIGHTLY_VERSION }} && rustup component add --toolchain ${{ env.NIGHTLY_VERSION }} rustfmt
     - name: Lint
       run: cargo clippy --all-targets -- -D warnings
     - name: Fmt
-      run: cargo +nightly fmt --all -- --check
+      run: cargo +${{ env.NIGHTLY_VERSION }} fmt --all -- --check
     - name: Check docs
       run: cargo doc --no-deps --document-private-items
       env:
         RUSTDOCFLAGS: "-D warnings"
-    - name: Install speccy
-      run: npm install -g speccy
-    - name: Lint OpenAPI spec
-      run: speccy lint interface.yaml
 
   Rust:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -70,28 +89,22 @@ jobs:
 
   Dependencies:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
     - name: Install nightly Rust toolchain
-      run: rustup toolchain install nightly
-    - name: Get Rust version
-      id: rust-version
-      run: echo "rust_version=$(rustc +nightly --version)" >> "$GITHUB_OUTPUT"
+      run: rustup toolchain install ${{ env.NIGHTLY_VERSION }}
+    - name: Verify toolchain
+      run: cargo +${{ env.NIGHTLY_VERSION }} --version && rustc +${{ env.NIGHTLY_VERSION }} --version
     - name: Run setup
       uses: ./.github/actions/setup
-    - name: Cache cargo-udeps
-      id: cargo-udeps-cache
-      uses: actions/cache@v4
-      with:
-        path: ~/.cargo/bin/cargo-udeps
-        key: ${{ runner.os }}-${{ env.UDEPS_VERSION }}-cargo-udeps-${{ steps.rust-version.outputs.rust_version }}
     - name: Install cargo-udeps
-      if: steps.cargo-udeps-cache.outputs.cache-hit != 'true'
-      run: cargo +nightly install cargo-udeps --version ${{ env.UDEPS_VERSION }}
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-udeps@${{ env.UDEPS_VERSION }}
     - name: Check for unused dependencies
-      run: cargo +nightly udeps --all-targets
+      run: cargo +${{ env.NIGHTLY_VERSION }} udeps --all-targets
 
   Scripts:
     runs-on: ubuntu-latest
@@ -99,4 +112,4 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
     - name: Run shellcheck
-      run: find scripts -name "*.sh" -exec shellcheck -o all {} +
+      run: shellcheck gen.sh

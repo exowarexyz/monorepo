@@ -1,11 +1,40 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
-import { Data } from 'ws';
+import { create } from '@bufbuild/protobuf';
 import { Client } from '../src/client';
+import { TraversalMode } from '../src/store';
+import {
+    ReduceParamsSchema,
+    RangeReducerSpecSchema,
+    RangeReduceOp,
+    KvExprSchema,
+    KvFieldRefSchema,
+    KvFieldRef_ValueFieldSchema,
+    KvFieldKind,
+    PolicySchema,
+    PolicyMatchKeySchema,
+    PolicyGroupBySchema,
+    PolicyOrderBySchema,
+    PolicyRetainSchema,
+    RetainKeepLatestSchema,
+    PolicyOrderEncoding,
+} from '../src/index';
+
+const MAX_KEY_LEN = 254;
 
 const tempDir = path.join(os.tmpdir(), 'exoware-ts-sdk-tests');
 const configFile = path.join(tempDir, 'config.json');
+
+function encodeStoredRowInt64(value: bigint): Uint8Array {
+    const buf = new ArrayBuffer(11);
+    const view = new DataView(buf);
+    view.setUint8(0, 0x01);
+    view.setUint8(1, 0x01);
+    view.setUint8(2, 0x00);
+    view.setBigInt64(3, value, false);
+    return new Uint8Array(buf);
+}
 
 describe('Exoware TS SDK', () => {
     let client: Client;
@@ -13,10 +42,9 @@ describe('Exoware TS SDK', () => {
     beforeAll(() => {
         const config = JSON.parse(fs.readFileSync(configFile, 'utf-8'));
         const baseUrl = `http://127.0.0.1:${config.port}`;
-        client = new Client(baseUrl, config.token);
+        client = new Client(baseUrl);
     });
 
-    // Store tests
     describe('StoreClient', () => {
         it('should set and get a value', async () => {
             const store = client.store();
@@ -56,10 +84,274 @@ describe('Exoware TS SDK', () => {
             expect(result.results.map(r => r.key).sort()).toEqual(pairs.map(p => p.key).sort());
         });
 
+        it('should setMany with multiple KVs', async () => {
+            const store = client.store();
+            const encoder = new TextEncoder();
+            const prefix = 'setmany-test-';
+            const kvs = [
+                { key: encoder.encode(`${prefix}x`), value: Buffer.from('val-x') },
+                { key: encoder.encode(`${prefix}y`), value: Buffer.from('val-y') },
+                { key: encoder.encode(`${prefix}z`), value: Buffer.from('val-z') },
+            ];
+
+            const sn = await store.setMany(kvs);
+            expect(sn).toBeGreaterThan(0n);
+
+            for (const kv of kvs) {
+                const result = await store.get(kv.key);
+                expect(result).not.toBeNull();
+                expect(Buffer.from(result!.value)).toEqual(kv.value);
+            }
+        });
+
+        it('should getMany', async () => {
+            const store = client.store();
+            const encoder = new TextEncoder();
+            const prefix = 'getmany-test-';
+            const kvs = [
+                { key: encoder.encode(`${prefix}a`), value: Buffer.from('ga') },
+                { key: encoder.encode(`${prefix}b`), value: Buffer.from('gb') },
+            ];
+
+            await store.setMany(kvs);
+
+            const missingKey = encoder.encode(`${prefix}missing`);
+            const results = await store.getMany(
+                [kvs[0].key, kvs[1].key, missingKey],
+            );
+
+            expect(results.length).toBe(3);
+            const byKey = new Map(results.map(r => [
+                new TextDecoder().decode(r.key),
+                r.value ? Buffer.from(r.value) : undefined,
+            ]));
+            expect(byKey.get(`${prefix}a`)).toEqual(Buffer.from('ga'));
+            expect(byKey.get(`${prefix}b`)).toEqual(Buffer.from('gb'));
+            expect(byKey.get(`${prefix}missing`)).toBeUndefined();
+        });
+
+        it('should query with reverse mode', async () => {
+            const store = client.store();
+            const encoder = new TextEncoder();
+            const prefix = 'reverse-test-';
+            const pairs = [
+                { key: encoder.encode(`${prefix}a`), value: Buffer.from('ra') },
+                { key: encoder.encode(`${prefix}b`), value: Buffer.from('rb') },
+                { key: encoder.encode(`${prefix}c`), value: Buffer.from('rc') },
+            ];
+
+            for (const pair of pairs) {
+                await store.set(pair.key, pair.value);
+            }
+
+            const forward = await store.query(
+                encoder.encode(`${prefix}a`),
+                encoder.encode(`${prefix}z`),
+                undefined,
+                4096,
+                TraversalMode.FORWARD,
+            );
+            const reverse = await store.query(
+                encoder.encode(`${prefix}a`),
+                encoder.encode(`${prefix}z`),
+                undefined,
+                4096,
+                TraversalMode.REVERSE,
+            );
+
+            expect(forward.results.length).toBe(3);
+            expect(reverse.results.length).toBe(3);
+            expect(reverse.results.map(r => Buffer.from(r.value))).toEqual(
+                [...forward.results].reverse().map(r => Buffer.from(r.value)),
+            );
+        });
+
+        it('should reduce with COUNT_ALL', async () => {
+            const store = client.store();
+            const encoder = new TextEncoder();
+            const prefix = 'reduce-count-';
+            const kvs = [
+                { key: encoder.encode(`${prefix}1`), value: Buffer.from('v1') },
+                { key: encoder.encode(`${prefix}2`), value: Buffer.from('v2') },
+                { key: encoder.encode(`${prefix}3`), value: Buffer.from('v3') },
+            ];
+
+            await store.setMany(kvs);
+
+            const params = create(ReduceParamsSchema, {
+                reducers: [
+                    create(RangeReducerSpecSchema, {
+                        op: RangeReduceOp.COUNT_ALL,
+                    }),
+                ],
+            });
+
+            const response = await store.reduce(
+                encoder.encode(`${prefix}1`),
+                encoder.encode(`${prefix}z`),
+                params,
+            );
+
+            expect(response.results.length).toBe(1);
+            const countValue = response.results[0].value;
+            expect(countValue).toBeDefined();
+            expect(countValue!.value.case).toBe('uint64Value');
+            expect(countValue!.value.value).toBe(3n);
+        });
+
+        it('should reduce with SUM on a value field', async () => {
+            const store = client.store();
+            const encoder = new TextEncoder();
+            const prefix = 'reduce-sum-';
+
+            const kvs = [1, 2, 3].map((n) => ({
+                key: encoder.encode(`${prefix}${n}`),
+                value: encodeStoredRowInt64(BigInt(n * 10)),
+            }));
+
+            await store.setMany(kvs);
+
+            const params = create(ReduceParamsSchema, {
+                reducers: [
+                    create(RangeReducerSpecSchema, {
+                        op: RangeReduceOp.SUM_FIELD,
+                        expr: create(KvExprSchema, {
+                            expr: {
+                                case: 'field',
+                                value: create(KvFieldRefSchema, {
+                                    field: {
+                                        case: 'value',
+                                        value: create(KvFieldRef_ValueFieldSchema, {
+                                            index: 0,
+                                            kind: KvFieldKind.INT64,
+                                        }),
+                                    },
+                                }),
+                            },
+                        }),
+                    }),
+                ],
+            });
+
+            const response = await store.reduce(
+                encoder.encode(`${prefix}1`),
+                encoder.encode(`${prefix}z`),
+                params,
+            );
+
+            expect(response.results.length).toBe(1);
+            const sumValue = response.results[0].value;
+            expect(sumValue).toBeDefined();
+            expect(sumValue!.value.case).toBe('int64Value');
+            expect(sumValue!.value.value).toBe(60n);
+        });
+
+        it('should track sequence numbers from put', async () => {
+            const store = client.store();
+            const encoder = new TextEncoder();
+
+            const sn1 = await store.set(encoder.encode('sn-test-1'), Buffer.from('v1'));
+            expect(sn1).toBeGreaterThan(0n);
+            expect(store.sequenceNumber).toBe(sn1);
+
+            const sn2 = await store.set(encoder.encode('sn-test-2'), Buffer.from('v2'));
+            expect(sn2).toBeGreaterThan(sn1);
+            expect(store.sequenceNumber).toBe(sn2);
+        });
+
+        describe('retry config', () => {
+            it('should accept retry config in client constructor', () => {
+                const c = new Client('http://localhost:1234', {
+                    retry: { maxAttempts: 5, initialBackoffMs: 200, maxBackoffMs: 5000 },
+                });
+                expect(c.retryConfig.maxAttempts).toBe(5);
+                expect(c.retryConfig.initialBackoffMs).toBe(200);
+                expect(c.retryConfig.maxBackoffMs).toBe(5000);
+            });
+
+            it('should use default retry config when not specified', () => {
+                const c = new Client('http://localhost:1234');
+                expect(c.retryConfig.maxAttempts).toBe(3);
+                expect(c.retryConfig.initialBackoffMs).toBe(100);
+                expect(c.retryConfig.maxBackoffMs).toBe(2000);
+            });
+        });
+
+        it('should prune keys per KeepLatest policy', async () => {
+            const store = client.store();
+            const encoder = new TextEncoder();
+
+            function makePruneKey(group: string, version: bigint): Uint8Array {
+                const groupBytes = encoder.encode(group);
+                const prefix = encoder.encode('prune-test-');
+                const separator = new Uint8Array([0x00, 0x00]);
+                const versionBytes = new Uint8Array(8);
+                new DataView(versionBytes.buffer).setBigUint64(0, version, false);
+                const key = new Uint8Array(prefix.length + groupBytes.length + separator.length + versionBytes.length);
+                key.set(prefix, 0);
+                key.set(groupBytes, prefix.length);
+                key.set(separator, prefix.length + groupBytes.length);
+                key.set(versionBytes, prefix.length + groupBytes.length + separator.length);
+                return key;
+            }
+
+            const alphaV1 = makePruneKey('alpha', 1n);
+            const alphaV2 = makePruneKey('alpha', 2n);
+            const alphaV3 = makePruneKey('alpha', 3n);
+            const betaV1 = makePruneKey('beta', 1n);
+            const betaV2 = makePruneKey('beta', 2n);
+
+            await store.setMany([
+                { key: alphaV1, value: Buffer.from('a1') },
+                { key: alphaV2, value: Buffer.from('a2') },
+                { key: alphaV3, value: Buffer.from('a3') },
+                { key: betaV1, value: Buffer.from('b1') },
+                { key: betaV2, value: Buffer.from('b2') },
+            ]);
+
+            for (const k of [alphaV1, alphaV2, alphaV3, betaV1, betaV2]) {
+                expect(await store.get(k)).not.toBeNull();
+            }
+
+            const policy = create(PolicySchema, {
+                matchKey: create(PolicyMatchKeySchema, {
+                    reservedBits: 0,
+                    prefix: 0,
+                    payloadRegex: '(?s-u)^prune-test-(?P<group>[a-z]+)\\x00\\x00(?P<version>.{8})$',
+                }),
+                groupBy: create(PolicyGroupBySchema, {
+                    captureGroups: ['group'],
+                }),
+                orderBy: create(PolicyOrderBySchema, {
+                    captureGroup: 'version',
+                    encoding: PolicyOrderEncoding.U64_BE,
+                }),
+                retain: create(PolicyRetainSchema, {
+                    kind: {
+                        case: 'keepLatest',
+                        value: create(RetainKeepLatestSchema, { count: 1n }),
+                    },
+                }),
+            });
+
+            await store.prune([policy]);
+
+            expect(await store.get(alphaV1)).toBeNull();
+            expect(await store.get(alphaV2)).toBeNull();
+            const a3 = await store.get(alphaV3);
+            expect(a3).not.toBeNull();
+            expect(Buffer.from(a3!.value)).toEqual(Buffer.from('a3'));
+
+            expect(await store.get(betaV1)).toBeNull();
+            const b2 = await store.get(betaV2);
+            expect(b2).not.toBeNull();
+            expect(Buffer.from(b2!.value)).toEqual(Buffer.from('b2'));
+        });
+
         describe('limits', () => {
             it('should handle key at size limit', async () => {
                 const store = client.store();
-                const key = new TextEncoder().encode('a'.repeat(512));
+                const key = new TextEncoder().encode('a'.repeat(MAX_KEY_LEN));
                 const value = Buffer.from('test-value');
 
                 await store.set(key, value);
@@ -71,113 +363,26 @@ describe('Exoware TS SDK', () => {
 
             it('should reject key over size limit', async () => {
                 const store = client.store();
-                const key = new TextEncoder().encode('a'.repeat(513));
+                const key = new TextEncoder().encode('a'.repeat(MAX_KEY_LEN + 1));
                 const value = Buffer.from('test-value');
 
-                await expect(store.set(key, value)).rejects.toThrow('HTTP error: 413 Payload Too Large');
+                await expect(store.set(key, value)).rejects.toMatchObject({
+                    name: 'HttpError',
+                    status: 400,
+                });
             });
 
-            it('should handle value at size limit', async () => {
+            it('should handle large values', async () => {
                 const store = client.store();
-                const key = new TextEncoder().encode('value_at_limit');
-                const value = Buffer.alloc(20 * 1024 * 1024);
+                const key = new TextEncoder().encode('large_value');
+                const value = Buffer.alloc(128 * 1024);
 
                 await store.set(key, value);
                 const result = await store.get(key);
 
                 expect(result).not.toBeNull();
-                expect(result!.value).toEqual(value);
-            }, 60000);
-
-            it('should reject value over size limit', async () => {
-                const store = client.store();
-                const key = new TextEncoder().encode('value_over_limit');
-                const value = Buffer.alloc(20 * 1024 * 1024 + 1);
-
-                await expect(store.set(key, value)).rejects.toThrow('HTTP error: 413 Payload Too Large');
-            }, 60000);
-        });
-    });
-
-    // Stream tests
-    describe('StreamClient', () => {
-        it('should publish and subscribe to a stream', async () => {
-            const stream = client.stream();
-            const streamName = 'test-stream';
-            const message = Buffer.from('hello stream');
-
-            const subscription = await stream.subscribe(streamName);
-
-            const received = new Promise<Data>(resolve => {
-                subscription.onMessage(data => {
-                    resolve(data);
-                    subscription.close();
-                });
+                expect(new Uint8Array(result!.value)).toEqual(new Uint8Array(value));
             });
-
-            // Need a small delay to ensure subscription is active before publishing
-            await new Promise(resolve => setTimeout(resolve, 100));
-
-            await stream.publish(streamName, message);
-
-            const receivedMessage = await received;
-            expect(receivedMessage.toString()).toEqual(message.toString());
-        });
-
-        describe('limits', () => {
-            it('should handle stream name at size limit', async () => {
-                const stream = client.stream();
-                const streamName = 'a'.repeat(512);
-                const message = Buffer.from('hello stream');
-                const subscription = await stream.subscribe(streamName);
-                const received = new Promise<Data>(resolve => {
-                    subscription.onMessage(data => {
-                        resolve(data);
-                        subscription.close();
-                    });
-                });
-                await new Promise(resolve => setTimeout(resolve, 100));
-                await stream.publish(streamName, message);
-                const receivedMessage = await received;
-                expect(receivedMessage.toString()).toEqual(message.toString());
-            });
-
-            it('should reject stream name over size limit for publish', async () => {
-                const stream = client.stream();
-                const streamName = 'a'.repeat(513);
-                const message = Buffer.from('hello stream');
-                await expect(stream.publish(streamName, message)).rejects.toThrow('HTTP error: 413 Payload Too Large');
-            });
-
-            it('should reject stream name over size limit for subscribe', async () => {
-                const stream = client.stream();
-                const streamName = 'a'.repeat(513);
-                await expect(stream.subscribe(streamName)).rejects.toThrow('WebSocket connection failed');
-            });
-
-            it('should handle stream message at size limit', async () => {
-                const stream = client.stream();
-                const streamName = 'stream-value-at-limit';
-                const message = Buffer.alloc(20 * 1024 * 1024);
-                const subscription = await stream.subscribe(streamName);
-                const received = new Promise<Data>(resolve => {
-                    subscription.onMessage(data => {
-                        resolve(data);
-                        subscription.close();
-                    });
-                });
-                await new Promise(resolve => setTimeout(resolve, 100));
-                await stream.publish(streamName, message);
-                const receivedMessage = await received;
-                expect(receivedMessage).toEqual(message);
-            }, 60000);
-
-            it('should reject stream message over size limit', async () => {
-                const stream = client.stream();
-                const streamName = 'stream-value-over-limit';
-                const message = Buffer.alloc(20 * 1024 * 1024 + 1);
-                await expect(stream.publish(streamName, message)).rejects.toThrow('HTTP error: 413 Payload Too Large');
-            }, 60000);
         });
     });
 });

@@ -1,0 +1,8 @@
+//! In-process store API simulator (naive RocksDB).
+
+pub mod rocks;
+pub mod server;
+
+pub use exoware_server::{connect_stack, AppState, StoreEngine};
+pub use rocks::RocksStore;
+pub use server::{run, spawn_for_test, CMD, RUN_CMD};

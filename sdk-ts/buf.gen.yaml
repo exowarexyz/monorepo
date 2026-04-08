@@ -1,0 +1,11 @@
+version: v2
+plugins:
+  - remote: buf.build/bufbuild/es:v2.2.3
+    out: src/gen/ts
+    opt:
+      - target=ts
+inputs:
+  - directory: ../proto
+  - module: buf.build/bufbuild/protovalidate
+    paths:
+      - buf/validate/validate.proto

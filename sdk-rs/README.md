@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/exoware-sdk-rs.svg)](https://crates.io/crates/exoware-sdk-rs)
 [![Docs.rs](https://docs.rs/exoware-sdk-rs/badge.svg)](https://docs.rs/exoware-sdk-rs)
 
-Rust SDK for the Exoware API.
+Interact with the Exoware API in Rust.
 
 ## Status
 
