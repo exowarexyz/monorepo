@@ -22,23 +22,18 @@ jobs:
       - name: Install Buf CLI
         uses: bufbuild/buf-setup-action@v1
         with:
-          # Pin so `sdk-ts` `buf generate` output matches local/CI (bump when regenerating TS).
           version: 1.67.0
       - name: Run setup (Rust + Node)
         uses: ./.github/actions/setup
-      - name: Buf build (proto module compiles)
+      - name: Buf build
         run: buf build proto
-      - name: Buf lint (proto style and validation rules)
+      - name: Buf lint
         run: buf lint proto
-      # Rust protobuf stubs/helpers are generated into OUT_DIR by sdk-rs/build.rs (not committed).
-      - name: Build exoware-sdk-rs (Rust store SDK + embedded protobuf bindings)
-        run: cargo build -p exoware-sdk-rs --verbose
-      # TS: generated sources are gitignored; this runs buf generate + tsc (no git drift check).
-      - name: sdk-ts generate + build
+      - name: Verify generated code is up to date
         run: |
-          cd sdk-ts
-          npm ci
-          npm run build
+          ./gen.sh
+          git diff --exit-code sdk-rs/src/gen/ sdk-ts/src/gen/ || \
+            (echo "Generated code is stale. Run ./gen.sh and commit." && exit 1)
 
   Lint:
     runs-on: ubuntu-latest
@@ -58,6 +53,7 @@ jobs:
       run: cargo doc --no-deps --document-private-items
       env:
         RUSTDOCFLAGS: "-D warnings"
+
   Rust:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -66,7 +62,7 @@ jobs:
       uses: actions/checkout@v4
     - name: Run setup
       uses: ./.github/actions/setup
-    - name: Run tests (workspace; E2E tests spawn local simulator + temp RocksDB)
+    - name: Run tests
       run: cargo test --verbose
 
   TypeScript:
@@ -75,10 +71,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Install Buf CLI
-        uses: bufbuild/buf-setup-action@v1
-        with:
-          version: 1.67.0
       - name: Run setup
         uses: ./.github/actions/setup
       - name: Install sdk-ts dependencies
@@ -125,4 +117,4 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
     - name: Run shellcheck
-      run: find scripts -name "*.sh" -exec shellcheck -o all {} +
+      run: shellcheck gen.sh

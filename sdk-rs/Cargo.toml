@@ -1,12 +1,12 @@
 [package]
 name = "exoware-sdk-rs"
-version = "0.0.2"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 publish = true
-license = "MIT OR Apache-2.0"
+license.workspace = true
 description = "Rust SDK for the Exoware store API."
 readme = "README.md"
-homepage = "https://exoware.xyz"
+homepage.workspace = true
 repository = "https://github.com/exowarexyz/monorepo/tree/main/sdk-rs"
 documentation = "https://docs.rs/exoware-sdk-rs"
 

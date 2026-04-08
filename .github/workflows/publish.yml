@@ -40,10 +40,6 @@ jobs:
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-    - name: Install Buf CLI (sdk-ts prebuild runs buf generate)
-      uses: bufbuild/buf-setup-action@v1
-      with:
-        version: 1.67.0
     - name: Publish sdk-ts
       run: |
         cd sdk-ts

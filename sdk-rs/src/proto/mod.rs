@@ -1,8 +1,6 @@
-//! Protobuf types and service stubs for the store API (`store.*.v1`), embedded in `sdk-rs`.
+//! Protobuf types and service stubs for the store API (`store.*.v1`).
 //!
-//! Service `.proto` sources live under **`proto/store/v1/`** (`compact.proto`, `ingest.proto`,
-//! `query.proto`). TypeScript protobuf-es output for the same module tree lives under
-//! **`sdk-ts/src/gen/ts/`** (see `sdk-ts/buf.gen.yaml`, repo `gen/README.md`).
+//! Proto sources: `proto/`. Run `./gen.sh` to regenerate all bindings.
 
 pub mod store {
     pub mod compact {
@@ -11,7 +9,7 @@ pub mod store {
             #![allow(unused_imports)]
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
-            include!(concat!(env!("OUT_DIR"), "/store.v1.compact.rs"));
+            include!("../gen/store.v1.compact.rs");
         }
     }
 
@@ -21,7 +19,7 @@ pub mod store {
             #![allow(unused_imports)]
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
-            include!(concat!(env!("OUT_DIR"), "/store.v1.ingest.rs"));
+            include!("../gen/store.v1.ingest.rs");
         }
     }
 
@@ -31,7 +29,7 @@ pub mod store {
             #![allow(unused_imports)]
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
-            include!(concat!(env!("OUT_DIR"), "/store.v1.query.rs"));
+            include!("../gen/store.v1.query.rs");
         }
     }
 }
@@ -42,7 +40,7 @@ pub mod google {
         #![allow(unused_imports)]
         #![allow(clippy::derivable_impls)]
         #![allow(clippy::match_single_binding)]
-        include!(concat!(env!("OUT_DIR"), "/google.rpc.error_details.rs"));
+        include!("../gen/google.rpc.error_details.rs");
     }
 }
 

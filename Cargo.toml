@@ -8,10 +8,14 @@ members = [
 ]
 resolver = "2"
 
+[workspace.package]
+version = "2026.4.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+homepage = "https://exoware.xyz"
+
 [workspace.dependencies]
-exoware-sdk-rs = { version = "0.0.2", path = "sdk-rs" }
-# Schemas: `proto/`. Rust bindings are embedded in `sdk-rs`; TS bindings live under
-# `sdk-ts/src/gen/ts/` (see `gen/README.md`).
+exoware-sdk-rs = { version = "2026.4.0", path = "sdk-rs" }
 exoware-server = { path = "server" }
 tokio = "1.43.0"
 clap = "4.5.18"

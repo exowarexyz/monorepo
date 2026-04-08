@@ -17,6 +17,8 @@ lint:
     - ENUM_ZERO_VALUE_SUFFIX
     # RangeFrame is a streaming frame, not a unary response.
     - RPC_RESPONSE_STANDARD_NAME
+    # Vendored google.rpc types use the canonical package name (no version suffix).
+    - PACKAGE_VERSION_SUFFIX
 breaking:
   use:
     - FILE

@@ -1,6 +1,6 @@
 {
     "name": "exoware-sdk-ts",
-    "version": "0.0.2",
+    "version": "2026.4.0",
     "description": "TypeScript SDK for the Exoware API.",
     "type": "module",
     "license": "(MIT OR Apache-2.0)",
@@ -23,10 +23,6 @@
         "README.md"
     ],
     "scripts": {
-        "generate": "buf generate ../proto --template buf.gen.yaml",
-        "prebuild": "npm run generate",
-        "prelint": "npm run generate",
-        "pretest": "npm run generate",
         "build": "tsc",
         "lint": "tsc --noEmit",
         "test": "jest --config jest.config.cjs",
