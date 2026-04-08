@@ -94,7 +94,7 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
     - name: Install nightly Rust toolchain
-      run: rustup toolchain install ${{ env.NIGHTLY_VERSION }}
+      run: rustup toolchain install ${{ env.NIGHTLY_VERSION }} && rustup default ${{ env.NIGHTLY_VERSION }}
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Install cargo-udeps
