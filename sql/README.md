@@ -412,7 +412,7 @@ If you see a warning-sign plan, consider:
 | `Decimal128(p, s)` | -- | yes | yes | 16 bytes |
 | `Decimal256(p, s)` | -- | yes | yes | 32 bytes |
 | `FixedSizeBinary(n)` | yes | yes | yes | n bytes |
-| `List<T>` | -- | -- | yes | -- |
+| `List<T>` / `LargeList<T>` | -- | -- | yes | -- |
 
 PK-eligible types: `Int64`, `UInt64`, `Utf8`, `FixedSizeBinary`.
 Composite PKs may combine any PK-eligible types. For the current
