@@ -20,8 +20,10 @@ use common::retry;
 type Digest = commonware_cryptography::sha256::Digest;
 type LocalDb = Keyless<deterministic::Context, Vec<u8>, commonware_cryptography::Sha256>;
 
-fn fresh_keyless(c: StoreClient) -> KeylessClient<Vec<u8>> {
-    KeylessClient::from_client(c, ((0..=10000).into(), ()))
+type TestKeylessClient = KeylessClient<commonware_cryptography::Sha256, Vec<u8>>;
+
+fn fresh_keyless(c: StoreClient) -> TestKeylessClient {
+    TestKeylessClient::from_client(c, ((0..=10000).into(), ()))
 }
 
 struct LocalReference {
@@ -146,7 +148,7 @@ async fn keyless_round_trip() {
         )
         .await
         .expect("proof");
-    assert!(proof.verify(), "proof must verify");
+    assert!(proof.verify::<commonware_cryptography::Sha256>(), "proof must verify");
     assert_eq!(proof.root, local.root);
     assert_eq!(proof.operations, local.operations);
 }

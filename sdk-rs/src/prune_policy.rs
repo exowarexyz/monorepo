@@ -258,8 +258,7 @@ impl Read for PrunePolicyDocument {
 }
 
 pub fn validate_policy(policy: &PrunePolicy) -> anyhow::Result<()> {
-    KeyCodec::new(policy.match_key.reserved_bits, policy.match_key.prefix)
-        .map_err(|e| anyhow::anyhow!("invalid prune policy codec: {e}"))?;
+    KeyCodec::new(policy.match_key.reserved_bits, policy.match_key.prefix);
     let regex = compile_payload_regex(&policy.match_key.payload_regex)?;
     validate_capture_groups(
         &regex,

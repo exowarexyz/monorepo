@@ -15,29 +15,35 @@ use commonware_storage::qmdb::{
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_cryptography::Sha256;
+use commonware_storage::qmdb::any::ordered::variable::Operation as QmdbOperation;
 use store_qmdb::MAX_OPERATION_SIZE;
-use store_qmdb::{
-    build_current_boundary_state, BatchOperation, CurrentBoundaryState, OrderedClient,
-    BITMAP_CHUNK_BYTES,
-};
+use store_qmdb::{build_current_boundary_state, CurrentBoundaryState, OrderedClient};
 
 use common::retry;
 
+const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
 type BatchProof = commonware_storage::mmr::Proof<Digest>;
-type LocalDb = LocalQmdbDb<
-    cw_tokio::Context,
-    Vec<u8>,
-    Vec<u8>,
-    commonware_cryptography::Sha256,
-    TwoCap,
-    BITMAP_CHUNK_BYTES,
->;
+type BatchOperation = QmdbOperation<Vec<u8>, Vec<u8>>;
+type TestOrderedClient = OrderedClient<Sha256, Vec<u8>, Vec<u8>, N>;
+type LocalDb = LocalQmdbDb<cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>;
+
+fn op_cfg() -> <BatchOperation as commonware_codec::Read>::Cfg {
+    (
+        ((0..=MAX_OPERATION_SIZE).into(), ()),
+        ((0..=MAX_OPERATION_SIZE).into(), ()),
+    )
+}
+
+fn update_row_cfg() -> (<Vec<u8> as commonware_codec::Read>::Cfg, <Vec<u8> as commonware_codec::Read>::Cfg) {
+    (((0..=MAX_OPERATION_SIZE).into(), ()), ((0..=MAX_OPERATION_SIZE).into(), ()))
+}
 
 struct LocalReference {
     latest_location: Location,
     operations: Vec<BatchOperation>,
-    current_boundary: CurrentBoundaryState,
+    current_boundary: CurrentBoundaryState<Digest, N>,
     values: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 }
 
@@ -82,7 +88,7 @@ async fn build_local_db() -> LocalReference {
                 .await
                 .expect("proof");
 
-            let boundary = build_current_boundary_state(None, &ops).await;
+            let boundary = build_current_boundary_state::<Sha256, _, _, N>(None, &ops).await;
 
             let mut values = std::collections::BTreeMap::new();
             values.insert(
@@ -116,7 +122,7 @@ async fn ordered_round_trip() {
 
     retry(
         || {
-            let c = OrderedClient::from_client(client.clone());
+            let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
             let ops = local.operations.clone();
             let loc = local.latest_location;
             async move { c.upload_operations(loc, &ops).await.map(|_| ()) }
@@ -127,7 +133,7 @@ async fn ordered_round_trip() {
 
     retry(
         || {
-            let c = OrderedClient::from_client(client.clone());
+            let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
             let boundary = local.current_boundary.clone();
             let loc = local.latest_location;
             async move { c.upload_current_boundary_state(loc, &boundary).await }
@@ -138,7 +144,7 @@ async fn ordered_round_trip() {
 
     retry(
         || {
-            let c = OrderedClient::from_client(client.clone());
+            let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
             let loc = local.latest_location;
             async move { c.publish_writer_location_watermark(loc).await.map(|_| ()) }
         },
@@ -146,7 +152,7 @@ async fn ordered_round_trip() {
     )
     .await;
 
-    let c = OrderedClient::from_client(client.clone());
+    let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
     let watermark = c.writer_location_watermark().await.expect("watermark");
     assert_eq!(watermark, Some(local.latest_location));
 
@@ -174,6 +180,6 @@ async fn ordered_round_trip() {
         )
         .await
         .expect("proof");
-    assert!(proof.verify(), "proof must verify");
+    assert!(proof.verify::<Sha256>(), "proof must verify");
     assert_eq!(proof.operations, local.operations);
 }

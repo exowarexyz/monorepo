@@ -39,10 +39,6 @@ pub enum KeyValidationError {
 /// Errors returned by [`KeyCodec`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KeyCodecError {
-    #[error("reserved bits must be <= 16, got {bits}")]
-    ReservedBitsTooLarge { bits: u8 },
-    #[error("prefix id {prefix} does not fit in {reserved_bits} reserved bits")]
-    PrefixOutOfRange { reserved_bits: u8, prefix: u16 },
     #[error("key length {len} is outside valid range [{min}, {max}]")]
     InvalidKeyLength { len: usize, min: usize, max: usize },
     #[error("payload length {payload_len} exceeds codec capacity {max_payload_len}")]
@@ -72,23 +68,14 @@ pub struct KeyCodec {
 
 impl KeyCodec {
     /// Build a codec with `reserved_bits` high bits reserved for `prefix`.
-    pub fn new(reserved_bits: u8, prefix: u16) -> Result<Self, KeyCodecError> {
-        if reserved_bits > 16 {
-            return Err(KeyCodecError::ReservedBitsTooLarge {
-                bits: reserved_bits,
-            });
-        }
+    pub const fn new(reserved_bits: u8, prefix: u16) -> Self {
+        assert!(reserved_bits <= 16, "reserved bits must be <= 16");
         let max_prefix = prefix_bit_mask(reserved_bits);
-        if prefix > max_prefix {
-            return Err(KeyCodecError::PrefixOutOfRange {
-                reserved_bits,
-                prefix,
-            });
-        }
-        Ok(Self {
+        assert!(prefix <= max_prefix, "prefix does not fit in reserved bits");
+        Self {
             reserved_bits,
             prefix,
-        })
+        }
     }
 
     /// The number of reserved high bits at the start of the key.
@@ -484,7 +471,7 @@ mod tests {
 
     #[test]
     fn key_codec_uses_4_reserved_bits_plus_payload() {
-        let codec = KeyCodec::new(4, 0x5).expect("codec");
+        let codec = KeyCodec::new(4, 0x5);
         let key = codec.encode(&[0xAB, 0xCD]).expect("encoded key");
         assert_eq!(key[0], 0x5A);
         assert_eq!(key[1], 0xBC);
@@ -496,7 +483,7 @@ mod tests {
 
     #[test]
     fn key_codec_preserves_payload_order_within_prefix() {
-        let codec = KeyCodec::new(4, 0x3).expect("codec");
+        let codec = KeyCodec::new(4, 0x3);
         let lower = codec.encode(&[0x10, 0x00]).expect("lower key");
         let mid = codec.encode(&[0x10, 0x01]).expect("mid key");
         let upper = codec.encode(&[0x20, 0x00]).expect("upper key");
@@ -506,7 +493,7 @@ mod tests {
 
     #[test]
     fn key_codec_prefix_bounds_cover_only_one_prefix() {
-        let codec = KeyCodec::new(4, 0xA).expect("codec");
+        let codec = KeyCodec::new(4, 0xA);
         let (start, end) = codec.prefix_bounds();
         let key = codec.encode(&[0x11, 0x22]).expect("prefix key");
         assert!(codec.matches(&start));
@@ -515,7 +502,6 @@ mod tests {
         assert!(start <= key && key <= end);
 
         let other = KeyCodec::new(4, 0xB)
-            .expect("other codec")
             .encode(&[0x11, 0x22])
             .expect("other key");
         assert!(!codec.matches(&other));
@@ -525,7 +511,7 @@ mod tests {
 
     #[test]
     fn key_codec_reads_and_writes_payload_at_byte_offsets() {
-        let codec = KeyCodec::new(3, 0b101).expect("codec");
+        let codec = KeyCodec::new(3, 0b101);
         let mut key = codec.new_key_with_len(4).expect("new key");
         codec
             .write_payload(&mut key, 0, &[0xDE, 0xAD])
@@ -542,17 +528,14 @@ mod tests {
     }
 
     #[test]
-    fn key_codec_rejects_out_of_range_prefix_and_payload() {
-        let prefix_err = KeyCodec::new(3, 0b1000).expect_err("prefix should not fit");
-        assert_eq!(
-            prefix_err,
-            KeyCodecError::PrefixOutOfRange {
-                reserved_bits: 3,
-                prefix: 0b1000
-            }
-        );
+    #[should_panic(expected = "prefix does not fit in reserved bits")]
+    fn key_codec_rejects_out_of_range_prefix() {
+        KeyCodec::new(3, 0b1000);
+    }
 
-        let codec = KeyCodec::new(4, 0).expect("codec");
+    #[test]
+    fn key_codec_rejects_oversized_payload() {
+        let codec = KeyCodec::new(4, 0);
         let payload = vec![0u8; codec.max_payload_capacity_bytes() + 1];
         let err = codec.encode(&payload).expect_err("payload should not fit");
         assert!(matches!(err, KeyCodecError::PayloadTooLarge { .. }));

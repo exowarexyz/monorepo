@@ -26,8 +26,8 @@
 
 pub mod prune;
 
-use commonware_codec::{Codec, Decode, DecodeExt, Encode, RangeCfg};
-use commonware_cryptography::{sha256::Digest as QmdbDigest, Hasher as _, Sha256};
+use commonware_codec::{Codec, Decode, DecodeExt, Encode, Read as CodecRead};
+use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::{
     mmr::{
         self, iterator::PeakIterator, storage::Storage as MmrStorage, verification, Location,
@@ -44,10 +44,11 @@ use commonware_storage::{
         },
         immutable::Operation as ImmutableOperation,
         keyless::Operation as KeylessOperation,
+        operation::Key as QmdbKey,
         verify::{verify_multi_proof, verify_proof},
     },
 };
-use commonware_utils::{Array, Span};
+use commonware_utils::Array;
 use exoware_sdk_rs::keys::{Key, KeyCodec};
 
 /// Maximum encoded operation size for QMDB key and value payloads (u16 length on the wire).
@@ -76,7 +77,6 @@ const AUTH_NODE_FAMILY: u16 = 0xA;
 const AUTH_WATERMARK_FAMILY: u16 = 0xB;
 const AUTH_INDEX_FAMILY: u16 = 0xC;
 const AUTH_IMMUTABLE_UPDATE_FAMILY: u16 = 0xD;
-const DIGEST_LEN: usize = 32;
 const UPDATE_VERSION_LEN: usize = 8;
 const AUTH_NAMESPACE_LEN: usize = 1;
 const ORDERED_KEY_ESCAPE_BYTE: u8 = 0x00;
@@ -85,10 +85,15 @@ const ORDERED_KEY_TERMINATOR_LEN: usize = 2;
 const POST_INGEST_QUERY_RETRY_MAX_ATTEMPTS: usize = 6;
 const POST_INGEST_QUERY_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 const POST_INGEST_QUERY_RETRY_MAX_BACKOFF: Duration = Duration::from_millis(1_000);
-pub const BITMAP_CHUNK_BYTES: usize = 32;
-const BITMAP_CHUNK_BITS: u64 = (BITMAP_CHUNK_BYTES as u64) * 8;
-const GRAFTING_HEIGHT: u32 = BITMAP_CHUNK_BITS.trailing_zeros();
 const NO_PARTIAL_CHUNK: u64 = 0;
+
+const fn bitmap_chunk_bits<const N: usize>() -> u64 {
+    (N as u64) * 8
+}
+
+const fn grafting_height_for<const N: usize>() -> u32 {
+    bitmap_chunk_bits::<N>().trailing_zeros()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AuthenticatedBackendNamespace {
@@ -102,24 +107,6 @@ impl AuthenticatedBackendNamespace {
     }
 }
 
-/// Exact Commonware QMDB operation type used by this crate.
-pub type BatchOperation = QmdbOperation<Vec<u8>, Vec<u8>>;
-
-/// Exact Commonware unordered QMDB operation type used by this crate.
-pub type UnorderedBatchOperation = UnorderedQmdbOperation<Vec<u8>, Vec<u8>>;
-
-/// Exact Commonware MMR proof type used by this crate.
-pub type BatchProof = mmr::Proof<QmdbDigest>;
-
-/// Exact Commonware current-state range proof type used by this crate.
-pub type BatchCurrentRangeProof = CurrentRangeProof<QmdbDigest>;
-
-/// Exact Commonware current-state operation proof type used by this crate.
-pub type BatchCurrentOperationProof = CurrentOperationProof<QmdbDigest, BITMAP_CHUNK_BYTES>;
-
-/// Exact Commonware current ordered key-value proof type used by this crate.
-pub type BatchCurrentKeyValueProof = CurrentKeyValueProof<Vec<u8>, QmdbDigest, BITMAP_CHUNK_BYTES>;
-
 /// QMDB proof/root variant supported by `exoware-qmdb`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QmdbVariant {
@@ -127,22 +114,6 @@ pub enum QmdbVariant {
     Any,
     /// Current-state `qmdb::current::ordered` root / proof at an uploaded batch boundary.
     Current,
-}
-
-/// Limits used when decoding QMDB `any::variable` operations from storage.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct QmdbConfig {
-    pub max_operation_key_len: usize,
-    pub max_operation_value_len: usize,
-}
-
-impl Default for QmdbConfig {
-    fn default() -> Self {
-        Self {
-            max_operation_key_len: MAX_OPERATION_SIZE,
-            max_operation_value_len: MAX_OPERATION_SIZE,
-        }
-    }
 }
 
 async fn wait_until_query_visible_sequence(
@@ -214,57 +185,9 @@ where
     }
 }
 
-/// Convenience input for `upload_batch`.
-#[derive(Clone, Copy, Debug)]
-pub struct BatchEntry<'a> {
-    pub key: &'a [u8],
-    pub value: Option<&'a [u8]>,
-}
-
-impl<'a> BatchEntry<'a> {
-    pub const fn put(key: &'a [u8], value: &'a [u8]) -> Self {
-        Self {
-            key,
-            value: Some(value),
-        }
-    }
-
-    pub const fn delete(key: &'a [u8]) -> Self {
-        Self { key, value: None }
-    }
-}
-
-/// Typed convenience input for `upload_typed_batch`.
-#[derive(Clone, Copy, Debug)]
-pub struct TypedBatchEntry<'a, K, V> {
-    pub key: &'a K,
-    pub value: Option<&'a V>,
-}
-
-impl<'a, K, V> TypedBatchEntry<'a, K, V> {
-    pub const fn put(key: &'a K, value: &'a V) -> Self {
-        Self {
-            key,
-            value: Some(value),
-        }
-    }
-
-    pub const fn delete(key: &'a K) -> Self {
-        Self { key, value: None }
-    }
-}
-
 /// Historical value resolved for one logical key.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VersionedValue {
-    pub key: Vec<u8>,
-    pub location: Location,
-    pub value: Option<Vec<u8>>,
-}
-
-/// Historical value resolved and decoded into caller-provided Commonware types.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TypedVersionedValue<K, V> {
+pub struct VersionedValue<K, V> {
     pub key: K,
     pub location: Location,
     pub value: Option<V>,
@@ -280,25 +203,23 @@ pub struct UploadReceipt {
     pub sequence_number: u64,
 }
 
-pub type BatchUploadReceipt = UploadReceipt;
-
 /// Current-state rows for one uploaded batch boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CurrentBoundaryState {
+pub struct CurrentBoundaryState<D: Digest, const N: usize> {
     /// Canonical current::ordered root for this uploaded batch boundary.
-    pub root: QmdbDigest,
+    pub root: D,
 
     /// Sparse chunk delta for this boundary.
     ///
     /// Only chunks that changed relative to the previous uploaded batch
     /// boundary need to be included.
-    pub chunks: Vec<(u64, [u8; BITMAP_CHUNK_BYTES])>,
+    pub chunks: Vec<(u64, [u8; N])>,
 
     /// Sparse grafted-node delta for this boundary.
     ///
     /// Only grafted nodes whose digests changed relative to the previous
     /// uploaded batch boundary need to be included.
-    pub grafted_nodes: Vec<(Position, QmdbDigest)>,
+    pub grafted_nodes: Vec<(Position, D)>,
 }
 
 /// Build the [`CurrentBoundaryState`] needed by
@@ -306,20 +227,27 @@ pub struct CurrentBoundaryState {
 ///
 /// `previous_operations` is `None` for the first batch; for subsequent batches
 /// pass the operations from the prior uploaded batch so the delta is sparse.
-pub async fn build_current_boundary_state(
-    previous_operations: Option<&[BatchOperation]>,
-    operations: &[BatchOperation],
-) -> CurrentBoundaryState {
-    let state = RebuiltCurrentState::build(operations.to_vec()).expect("rebuild current state");
+pub async fn build_current_boundary_state<H, K, V, const N: usize>(
+    previous_operations: Option<&[QmdbOperation<K, V>]>,
+    operations: &[QmdbOperation<K, V>],
+) -> CurrentBoundaryState<H::Digest, N>
+where
+    H: Hasher,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+    QmdbOperation<K, V>: Encode,
+{
+    let state =
+        RebuiltCurrentState::<H, K, V, N>::build(operations.to_vec()).expect("rebuild current state");
 
-    let storage = RebuiltCurrentStorage {
+    let storage = RebuiltCurrentStorage::<H::Digest, N> {
         ops_mmr: &state.ops_mmr,
         grafted_mmr: &state.grafted_mmr,
     };
-    let grafted_root = compute_storage_root(&storage)
+    let grafted_root = compute_storage_root::<H>(&storage)
         .await
         .expect("compute rebuilt grafted root");
-    let root = combine_current_roots(
+    let root = combine_current_roots::<H>(
         &state.ops_root,
         &grafted_root,
         state
@@ -329,7 +257,8 @@ pub async fn build_current_boundary_state(
     );
 
     let previous_state = previous_operations.map(|ops| {
-        RebuiltCurrentState::build(ops.to_vec()).expect("rebuild previous current state")
+        RebuiltCurrentState::<H, K, V, N>::build(ops.to_vec())
+            .expect("rebuild previous current state")
     });
 
     let chunks = state
@@ -367,37 +296,41 @@ pub async fn build_current_boundary_state(
 
 /// Multi-proof over arbitrary keyed operations against one published watermark.
 #[derive(Clone, Debug, PartialEq)]
-pub struct MultiProofResult {
+#[must_use]
+pub struct MultiProofResult<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> {
     pub watermark: Location,
-    /// Historical ops-MMR root for this watermark.
-    pub root: QmdbDigest,
-    pub proof: BatchProof,
-    pub operations: Vec<(Location, BatchOperation)>,
+    pub root: D,
+    pub proof: mmr::Proof<D>,
+    pub operations: Vec<(Location, QmdbOperation<K, V>)>,
 }
 
-impl MultiProofResult {
-    pub fn verify(&self) -> bool {
-        let mut hasher = StandardHasher::<Sha256>::new();
+impl<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> MultiProofResult<D, K, V>
+where
+    QmdbOperation<K, V>: Encode,
+{
+    pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
+        let mut hasher = StandardHasher::<H>::new();
         verify_multi_proof(&mut hasher, &self.proof, &self.operations, &self.root)
     }
 }
 
-pub type BatchMultiProofResult = MultiProofResult;
-
 /// Contiguous range proof over global operations against one published watermark.
 #[derive(Clone, Debug, PartialEq)]
-pub struct OperationRangeProof {
+#[must_use]
+pub struct OperationRangeProof<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> {
     pub watermark: Location,
-    /// Historical ops-MMR root for this watermark.
-    pub root: QmdbDigest,
+    pub root: D,
     pub start_location: Location,
-    pub proof: BatchProof,
-    pub operations: Vec<BatchOperation>,
+    pub proof: mmr::Proof<D>,
+    pub operations: Vec<QmdbOperation<K, V>>,
 }
 
-impl OperationRangeProof {
-    pub fn verify(&self) -> bool {
-        let mut hasher = StandardHasher::<Sha256>::new();
+impl<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> OperationRangeProof<D, K, V>
+where
+    QmdbOperation<K, V>: Encode,
+{
+    pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
+        let mut hasher = StandardHasher::<H>::new();
         verify_proof(
             &mut hasher,
             &self.proof,
@@ -408,21 +341,23 @@ impl OperationRangeProof {
     }
 }
 
-pub type BatchOperationRangeProof = OperationRangeProof;
-
 /// Contiguous range proof over unordered operations against one published watermark.
 #[derive(Clone, Debug, PartialEq)]
-pub struct UnorderedOperationRangeProof {
+#[must_use]
+pub struct UnorderedOperationRangeProof<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> {
     pub watermark: Location,
-    pub root: QmdbDigest,
+    pub root: D,
     pub start_location: Location,
-    pub proof: BatchProof,
-    pub operations: Vec<UnorderedBatchOperation>,
+    pub proof: mmr::Proof<D>,
+    pub operations: Vec<UnorderedQmdbOperation<K, V>>,
 }
 
-impl UnorderedOperationRangeProof {
-    pub fn verify(&self) -> bool {
-        let mut hasher = StandardHasher::<Sha256>::new();
+impl<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> UnorderedOperationRangeProof<D, K, V>
+where
+    UnorderedQmdbOperation<K, V>: Encode,
+{
+    pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
+        let mut hasher = StandardHasher::<H>::new();
         verify_proof(
             &mut hasher,
             &self.proof,
@@ -435,18 +370,22 @@ impl UnorderedOperationRangeProof {
 
 /// Contiguous current-state range proof over global operations against one published watermark.
 #[derive(Clone, Debug, PartialEq)]
-pub struct CurrentOperationRangeProofResult {
+#[must_use]
+pub struct CurrentOperationRangeProofResult<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync, const N: usize> {
     pub watermark: Location,
-    pub root: QmdbDigest,
+    pub root: D,
     pub start_location: Location,
-    pub proof: BatchCurrentRangeProof,
-    pub operations: Vec<BatchOperation>,
-    pub chunks: Vec<[u8; BITMAP_CHUNK_BYTES]>,
+    pub proof: CurrentRangeProof<D>,
+    pub operations: Vec<QmdbOperation<K, V>>,
+    pub chunks: Vec<[u8; N]>,
 }
 
-impl CurrentOperationRangeProofResult {
-    pub fn verify(&self) -> bool {
-        let mut hasher = Sha256::default();
+impl<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync, const N: usize> CurrentOperationRangeProofResult<D, K, V, N>
+where
+    QmdbOperation<K, V>: Encode,
+{
+    pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
+        let mut hasher = H::default();
         self.proof.verify(
             &mut hasher,
             self.start_location,
@@ -459,24 +398,28 @@ impl CurrentOperationRangeProofResult {
 
 /// Variant-selected root returned by `root_for_variant`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VariantRoot {
+pub struct VariantRoot<D: Digest> {
     pub watermark: Location,
     pub variant: QmdbVariant,
-    pub root: QmdbDigest,
+    pub root: D,
 }
 
 /// Variant-selected contiguous range proof returned by `operation_range_proof_for_variant`.
 #[derive(Clone, Debug, PartialEq)]
-pub enum VariantOperationRangeProof {
-    Any(OperationRangeProof),
-    Current(CurrentOperationRangeProofResult),
+#[must_use]
+pub enum VariantOperationRangeProof<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync, const N: usize> {
+    Any(OperationRangeProof<D, K, V>),
+    Current(CurrentOperationRangeProofResult<D, K, V, N>),
 }
 
-impl VariantOperationRangeProof {
-    pub fn verify(&self) -> bool {
+impl<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync, const N: usize> VariantOperationRangeProof<D, K, V, N>
+where
+    QmdbOperation<K, V>: Encode,
+{
+    pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
         match self {
-            Self::Any(proof) => proof.verify(),
-            Self::Current(proof) => proof.verify(),
+            Self::Any(proof) => proof.verify::<H>(),
+            Self::Current(proof) => proof.verify::<H>(),
         }
     }
 
@@ -497,24 +440,29 @@ impl VariantOperationRangeProof {
 
 /// Proof that a key currently has the uploaded value at one published watermark.
 #[derive(Clone, Debug, PartialEq)]
-pub struct KeyValueProofResult {
+#[must_use]
+pub struct KeyValueProofResult<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync, const N: usize> {
     pub watermark: Location,
-    pub root: QmdbDigest,
-    pub proof: BatchCurrentKeyValueProof,
-    pub operation: BatchOperation,
+    pub root: D,
+    pub proof: CurrentKeyValueProof<K, D, N>,
+    pub operation: QmdbOperation<K, V>,
 }
 
-impl KeyValueProofResult {
-    pub fn verify(&self) -> bool {
-        let BatchOperation::Update(update) = &self.operation else {
+impl<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync, const N: usize>
+    KeyValueProofResult<D, K, V, N>
+where
+    QmdbOperation<K, V>: Encode,
+{
+    pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
+        let QmdbOperation::Update(update) = &self.operation else {
             return false;
         };
-        let operation = BatchOperation::Update(QmdbUpdate {
+        let operation = QmdbOperation::Update(QmdbUpdate {
             key: update.key.clone(),
             value: update.value.clone(),
             next_key: self.proof.next_key.clone(),
         });
-        let mut hasher = Sha256::default();
+        let mut hasher = H::default();
         self.proof.proof.verify(&mut hasher, operation, &self.root)
     }
 }
@@ -555,8 +503,6 @@ pub enum QmdbError {
     CurrentBoundaryStateMissing { location: Location },
     #[error("range proof start {start} is out of bounds for watermark with {count} leaves")]
     RangeStartOutOfBounds { start: Location, count: Location },
-    #[error("ordered exoware-qmdb requires exact ordered operations; use upload_operations")]
-    ExactOrderedOperationsRequired,
     #[error("encoded value exceeds store value limit ({len} > {max})")]
     EncodedValueTooLarge { len: usize, max: usize },
     #[error("raw key length {len} exceeds supported limit {max}")]
@@ -575,16 +521,15 @@ pub enum QmdbError {
     CommonwareMmr(String),
 }
 
-pub type AuthenticatedStorageError = QmdbError;
-
-#[derive(Clone, Copy, Debug)]
-struct HistoricalOpsClientCore<'a> {
+#[derive(Clone, Debug)]
+struct HistoricalOpsClientCore<'a, D: Digest, K: Codec, V: Codec> {
     client: &'a StoreClient,
-    config: &'a QmdbConfig,
     query_visible_sequence: Option<&'a Arc<AtomicU64>>,
+    update_row_cfg: (K::Cfg, V::Cfg),
+    _marker: PhantomData<(D, K, V)>,
 }
 
-impl<'a> HistoricalOpsClientCore<'a> {
+impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
     async fn sync_after_ingest(&self) -> Result<(), QmdbError> {
         let token = self.client.sequence_number();
         wait_until_query_visible_sequence(self.query_visible_sequence, token).await
@@ -602,7 +547,7 @@ impl<'a> HistoricalOpsClientCore<'a> {
         &self,
         session: &SerializableReadSession,
     ) -> Result<Option<Location>, QmdbError> {
-        let (start, end) = watermark_codec().prefix_bounds();
+        let (start, end) = WATERMARK_CODEC.prefix_bounds();
         let rows = session
             .range_with_mode(&start, &end, 1, RangeMode::Reverse)
             .await?;
@@ -665,21 +610,14 @@ impl<'a> HistoricalOpsClientCore<'a> {
             .map(|(key, value)| (key, value.to_vec())))
     }
 
-    fn operation_codec_cfg(&self) -> ((RangeCfg<usize>, ()), (RangeCfg<usize>, ())) {
-        (
-            ((0..=self.config.max_operation_key_len).into(), ()),
-            ((0..=self.config.max_operation_value_len).into(), ()),
-        )
-    }
-
-    async fn append_encoded_ops_nodes_incrementally(
+    async fn append_encoded_ops_nodes_incrementally<H: Hasher<Digest = D>>(
         &self,
         session: &SerializableReadSession,
         previous_ops_size: Position,
         encoded_operations: &[Vec<u8>],
         rows: &mut Vec<(Key, Vec<u8>)>,
-    ) -> Result<(Position, BTreeMap<Position, QmdbDigest>, QmdbDigest), QmdbError> {
-        let mut peaks = Vec::<(Position, u32, QmdbDigest)>::new();
+    ) -> Result<(Position, BTreeMap<Position, D>, D), QmdbError> {
+        let mut peaks = Vec::<(Position, u32, D)>::new();
         for (peak_pos, height) in PeakIterator::new(previous_ops_size) {
             let Some(bytes) = session.get(&encode_node_key(peak_pos)).await? else {
                 return Err(QmdbError::CorruptData(format!(
@@ -694,8 +632,8 @@ impl<'a> HistoricalOpsClientCore<'a> {
         }
 
         let mut current_size = previous_ops_size;
-        let mut overlay = BTreeMap::<Position, QmdbDigest>::new();
-        let mut hasher = StandardHasher::<Sha256>::new();
+        let mut overlay = BTreeMap::<Position, D>::new();
+        let mut hasher = StandardHasher::<H>::new();
         for encoded in encoded_operations {
             ensure_encoded_value_size(encoded.len())?;
             let leaf_pos = current_size;
@@ -739,11 +677,11 @@ impl<'a> HistoricalOpsClientCore<'a> {
         Ok((current_size, overlay, ops_root))
     }
 
-    pub(crate) async fn compute_ops_root(
+    pub(crate) async fn compute_ops_root<H: Hasher<Digest = D>>(
         &self,
         session: &SerializableReadSession,
         watermark: Location,
-    ) -> Result<QmdbDigest, QmdbError> {
+    ) -> Result<D, QmdbError> {
         let size = mmr_size_for_watermark(watermark)?;
         let leaves = watermark
             .checked_add(1)
@@ -760,7 +698,7 @@ impl<'a> HistoricalOpsClientCore<'a> {
                 format!("MMR peak node at position {peak_pos}"),
             )?);
         }
-        let mut hasher = StandardHasher::<Sha256>::new();
+        let mut hasher = StandardHasher::<H>::new();
         Ok(mmr::hasher::Hasher::root(&mut hasher, leaves, peaks.iter()))
     }
 
@@ -818,11 +756,11 @@ impl<'a> HistoricalOpsClientCore<'a> {
         Ok(encoded)
     }
 
-    async fn query_many_at<K: AsRef<[u8]>>(
+    async fn query_many_at<Q: AsRef<[u8]>>(
         &self,
-        keys: &[K],
+        keys: &[Q],
         max_location: Location,
-    ) -> Result<Vec<Option<VersionedValue>>, QmdbError> {
+    ) -> Result<Vec<Option<VersionedValue<K, V>>>, QmdbError> {
         let session = self.client.create_session();
         self.require_published_watermark(&session, max_location)
             .await?;
@@ -838,7 +776,8 @@ impl<'a> HistoricalOpsClientCore<'a> {
                 continue;
             };
             let location = decode_update_location(&row_key)?;
-            let decoded = decode_update_row(row_value.as_ref())?;
+            let decoded = <UpdateRow<K, V> as CodecRead>::read_cfg(&mut row_value.as_ref(), &self.update_row_cfg)
+                .map_err(|e| QmdbError::CorruptData(format!("update row decode: {e}")))?;
             results.push(Some(VersionedValue {
                 key: decoded.key,
                 location,
@@ -848,7 +787,7 @@ impl<'a> HistoricalOpsClientCore<'a> {
         Ok(results)
     }
 
-    async fn publish_writer_location_watermark_with_encoded_ops(
+    async fn publish_writer_location_watermark_with_encoded_ops<H: Hasher<Digest = D>>(
         &self,
         session: &SerializableReadSession,
         latest_watermark: Option<Location>,
@@ -861,7 +800,7 @@ impl<'a> HistoricalOpsClientCore<'a> {
             None => Position::new(0),
         };
         let mut rows = Vec::<(Key, Vec<u8>)>::new();
-        self.append_encoded_ops_nodes_incrementally(
+        self.append_encoded_ops_nodes_incrementally::<H>(
             session,
             previous_ops_size,
             encoded_delta_ops,
@@ -886,34 +825,53 @@ impl<'a> HistoricalOpsClientCore<'a> {
 }
 
 /// Operation-indexed client backed by the Exoware store and exact Commonware QMDB ops.
-#[derive(Clone, Debug)]
-pub struct OrderedClient {
+#[derive(Clone)]
+pub struct OrderedClient<H: Hasher, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync, const N: usize> {
     client: StoreClient,
-    config: QmdbConfig,
+    op_cfg: <QmdbOperation<K, V> as commonware_codec::Read>::Cfg,
+    update_row_cfg: (K::Cfg, V::Cfg),
     query_visible_sequence: Option<Arc<AtomicU64>>,
+    _marker: PhantomData<(H, K)>,
 }
 
-/// Backward-compatible alias.
-pub type QmdbClient = OrderedClient;
+impl<H: Hasher, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync, const N: usize> std::fmt::Debug for OrderedClient<H, K, V, N> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OrderedClient").finish_non_exhaustive()
+    }
+}
 
-impl OrderedClient {
-    fn core(&self) -> HistoricalOpsClientCore<'_> {
+impl<H, K, V, const N: usize> OrderedClient<H, K, V, N>
+where
+    H: Hasher,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+    V::Cfg: Clone,
+    QmdbOperation<K, V>: Encode + Decode,
+{
+    fn core(&self) -> HistoricalOpsClientCore<'_, H::Digest, K, V> {
         HistoricalOpsClientCore {
             client: &self.client,
-            config: &self.config,
             query_visible_sequence: self.query_visible_sequence.as_ref(),
+            update_row_cfg: self.update_row_cfg.clone(),
+            _marker: PhantomData,
         }
     }
 
-    pub fn new(url: &str) -> Self {
-        Self::from_client(StoreClient::new(url))
+    pub fn new(url: &str, op_cfg: <QmdbOperation<K, V> as commonware_codec::Read>::Cfg, update_row_cfg: (K::Cfg, V::Cfg)) -> Self {
+        Self::from_client(StoreClient::new(url), op_cfg, update_row_cfg)
     }
 
-    pub fn from_client(client: StoreClient) -> Self {
+    pub fn from_client(
+        client: StoreClient,
+        op_cfg: <QmdbOperation<K, V> as commonware_codec::Read>::Cfg,
+        update_row_cfg: (K::Cfg, V::Cfg),
+    ) -> Self {
         Self {
             client,
-            config: QmdbConfig::default(),
+            op_cfg,
+            update_row_cfg,
             query_visible_sequence: None,
+            _marker: PhantomData,
         }
     }
 
@@ -921,11 +879,6 @@ impl OrderedClient {
     /// to at least the client's observed consistency token (test harness synchronization).
     pub fn with_query_visible_sequence(mut self, seq: Arc<AtomicU64>) -> Self {
         self.query_visible_sequence = Some(seq);
-        self
-    }
-
-    pub fn with_config(mut self, config: QmdbConfig) -> Self {
-        self.config = config;
         self
     }
 
@@ -1002,39 +955,12 @@ impl OrderedClient {
     }
 
     /// Ordered exoware-qmdb requires callers to provide exact ordered operations.
-    pub async fn upload_batch(
-        &self,
-        _latest_location: Location,
-        entries: &[BatchEntry<'_>],
-    ) -> Result<UploadReceipt, QmdbError> {
-        if entries.is_empty() {
-            return Err(QmdbError::EmptyBatch);
-        }
-        Err(QmdbError::ExactOrderedOperationsRequired)
-    }
-
-    /// Ordered exoware-qmdb requires callers to provide exact ordered operations.
-    pub async fn upload_typed_batch<K, V>(
-        &self,
-        _latest_location: Location,
-        entries: &[TypedBatchEntry<'_, K, V>],
-    ) -> Result<UploadReceipt, QmdbError>
-    where
-        K: Span,
-        V: Codec<Cfg = ()> + Clone,
-    {
-        if entries.is_empty() {
-            return Err(QmdbError::EmptyBatch);
-        }
-        Err(QmdbError::ExactOrderedOperationsRequired)
-    }
-
     /// Upload the exact Commonware QMDB operation sequence for one batch whose
     /// final global location is `latest_location`.
     pub async fn upload_operations(
         &self,
         latest_location: Location,
-        operations: &[BatchOperation],
+        operations: &[QmdbOperation<K, V>],
     ) -> Result<UploadReceipt, QmdbError> {
         if operations.is_empty() {
             return Err(QmdbError::EmptyBatch);
@@ -1072,8 +998,8 @@ impl OrderedClient {
     pub async fn upload_operations_with_current_boundary(
         &self,
         latest_location: Location,
-        operations: &[BatchOperation],
-        current_boundary: &CurrentBoundaryState,
+        operations: &[QmdbOperation<K, V>],
+        current_boundary: &CurrentBoundaryState<H::Digest, N>,
     ) -> Result<UploadReceipt, QmdbError> {
         if operations.is_empty() {
             return Err(QmdbError::EmptyBatch);
@@ -1114,7 +1040,7 @@ impl OrderedClient {
     pub async fn upload_current_boundary_state(
         &self,
         latest_location: Location,
-        current_boundary: &CurrentBoundaryState,
+        current_boundary: &CurrentBoundaryState<H::Digest, N>,
     ) -> Result<(), QmdbError> {
         let prepared = PreparedCurrentBoundaryUpload::build(latest_location, current_boundary)?;
         let refs = prepared
@@ -1128,14 +1054,14 @@ impl OrderedClient {
     }
 
     /// Return the historical ops-MMR root for one published watermark.
-    pub async fn root_at(&self, watermark: Location) -> Result<QmdbDigest, QmdbError> {
+    pub async fn root_at(&self, watermark: Location) -> Result<H::Digest, QmdbError> {
         Ok(self
             .root_for_variant(watermark, QmdbVariant::Any)
             .await?
             .root)
     }
 
-    pub async fn batch_root(&self, latest_location: Location) -> Result<QmdbDigest, QmdbError> {
+    pub async fn batch_root(&self, latest_location: Location) -> Result<H::Digest, QmdbError> {
         self.root_at(latest_location).await
     }
 
@@ -1143,7 +1069,7 @@ impl OrderedClient {
     ///
     /// Current-state proofs are only available at uploaded batch locations
     /// (the `latest_location` used for an `upload_operations` call).
-    pub async fn current_root_at(&self, watermark: Location) -> Result<QmdbDigest, QmdbError> {
+    pub async fn current_root_at(&self, watermark: Location) -> Result<H::Digest, QmdbError> {
         Ok(self
             .root_for_variant(watermark, QmdbVariant::Current)
             .await?
@@ -1155,7 +1081,7 @@ impl OrderedClient {
         &self,
         watermark: Location,
         variant: QmdbVariant,
-    ) -> Result<VariantRoot, QmdbError> {
+    ) -> Result<VariantRoot<H::Digest>, QmdbError> {
         let session = self.client.create_session();
         self.core()
             .require_published_watermark(&session, watermark)
@@ -1180,61 +1106,21 @@ impl OrderedClient {
     ///
     /// This only succeeds when the published writer watermark is at least
     /// `max_location`.
-    pub async fn query_many_at<K: AsRef<[u8]>>(
+    pub async fn query_many_at<Q: AsRef<[u8]>>(
         &self,
-        keys: &[K],
+        keys: &[Q],
         max_location: Location,
-    ) -> Result<Vec<Option<VersionedValue>>, QmdbError> {
+    ) -> Result<Vec<Option<VersionedValue<K, V>>>, QmdbError> {
         self.core().query_many_at(keys, max_location).await
-    }
-
-    /// Typed historical query for Commonware `Span` keys and `Codec` values.
-    pub async fn query_many_at_typed<K, V>(
-        &self,
-        keys: &[K],
-        max_location: Location,
-    ) -> Result<Vec<Option<TypedVersionedValue<K, V>>>, QmdbError>
-    where
-        K: Span,
-        V: Codec<Cfg = ()> + Clone,
-    {
-        let encoded_keys = keys
-            .iter()
-            .map(|key| key.encode().to_vec())
-            .collect::<Vec<_>>();
-        let raw = self.query_many_at(&encoded_keys, max_location).await?;
-        raw.into_iter()
-            .map(|item| match item {
-                Some(item) => {
-                    let key = K::decode(item.key.as_slice()).map_err(|e| {
-                        QmdbError::CorruptData(format!("failed to decode typed key: {e}"))
-                    })?;
-                    let value = item
-                        .value
-                        .map(|bytes| {
-                            V::decode(bytes.as_slice()).map_err(|e| {
-                                QmdbError::CorruptData(format!("failed to decode typed value: {e}"))
-                            })
-                        })
-                        .transpose()?;
-                    Ok(Some(TypedVersionedValue {
-                        key,
-                        location: item.location,
-                        value,
-                    }))
-                }
-                None => Ok(None),
-            })
-            .collect()
     }
 
     /// Generate a QMDB multi-proof for the latest keyed operation for each
     /// requested key at or below one published watermark.
-    pub async fn multi_proof_at<K: AsRef<[u8]>>(
+    pub async fn multi_proof_at<Q: AsRef<[u8]>>(
         &self,
         watermark: Location,
-        keys: &[K],
-    ) -> Result<MultiProofResult, QmdbError> {
+        keys: &[Q],
+    ) -> Result<MultiProofResult<H::Digest, K, V>, QmdbError> {
         if keys.is_empty() {
             return Err(QmdbError::EmptyProofRequest);
         }
@@ -1243,15 +1129,16 @@ impl OrderedClient {
         self.core()
             .require_published_watermark(&session, watermark)
             .await?;
-        let storage = KvMmrStorage {
+        let storage = KvMmrStorage::<H::Digest> {
             session: &session,
             mmr_size: mmr_size_for_watermark(watermark)?,
+            _marker: PhantomData,
         };
         let root = self.compute_ops_root(&session, watermark).await?;
 
         let mut seen = BTreeSet::<Vec<u8>>::new();
         let mut locations = Vec::<Location>::with_capacity(keys.len());
-        let mut operations = Vec::<(Location, BatchOperation)>::with_capacity(keys.len());
+        let mut operations = Vec::<(Location, QmdbOperation<K, V>)>::with_capacity(keys.len());
         for key in keys {
             let key_bytes = key.as_ref().to_vec();
             if !seen.insert(key_bytes.clone()) {
@@ -1269,8 +1156,9 @@ impl OrderedClient {
                 });
             };
             let global_loc = decode_update_location(&row_key)?;
-            let decoded = decode_update_row(row_value.as_ref())?;
-            if decoded.key != key.as_ref() {
+            let decoded = <UpdateRow<K, V> as CodecRead>::read_cfg(&mut row_value.as_ref(), &self.update_row_cfg)
+                .map_err(|e| QmdbError::CorruptData(format!("update row decode: {e}")))?;
+            if <K as AsRef<[u8]>>::as_ref(&decoded.key) != key.as_ref() {
                 return Err(QmdbError::ProofKeyNotFound {
                     watermark,
                     key: key.as_ref().to_vec(),
@@ -1294,35 +1182,6 @@ impl OrderedClient {
         })
     }
 
-    /// Typed convenience wrapper for `multi_proof_at`.
-    pub async fn multi_proof_at_typed<K: Span>(
-        &self,
-        watermark: Location,
-        keys: &[K],
-    ) -> Result<MultiProofResult, QmdbError> {
-        let encoded_keys = keys
-            .iter()
-            .map(|key| key.encode().to_vec())
-            .collect::<Vec<_>>();
-        self.multi_proof_at(watermark, &encoded_keys).await
-    }
-
-    pub async fn batch_multi_proof<K: AsRef<[u8]>>(
-        &self,
-        latest_location: Location,
-        keys: &[K],
-    ) -> Result<BatchMultiProofResult, QmdbError> {
-        self.multi_proof_at(latest_location, keys).await
-    }
-
-    pub async fn batch_multi_proof_typed<K: Span>(
-        &self,
-        latest_location: Location,
-        keys: &[K],
-    ) -> Result<BatchMultiProofResult, QmdbError> {
-        self.multi_proof_at_typed(latest_location, keys).await
-    }
-
     /// Generate a contiguous historical ops-MMR proof over global operation
     /// locations against one published watermark.
     pub async fn operation_range_proof(
@@ -1330,7 +1189,7 @@ impl OrderedClient {
         watermark: Location,
         start_location: Location,
         max_locations: u32,
-    ) -> Result<OperationRangeProof, QmdbError> {
+    ) -> Result<OperationRangeProof<H::Digest, K, V>, QmdbError> {
         match self
             .operation_range_proof_for_variant(
                 watermark,
@@ -1355,7 +1214,7 @@ impl OrderedClient {
         variant: QmdbVariant,
         start_location: Location,
         max_locations: u32,
-    ) -> Result<VariantOperationRangeProof, QmdbError> {
+    ) -> Result<VariantOperationRangeProof<H::Digest, K, V, N>, QmdbError> {
         if max_locations == 0 {
             return Err(QmdbError::InvalidRangeLength);
         }
@@ -1378,9 +1237,10 @@ impl OrderedClient {
             .min(count);
         match variant {
             QmdbVariant::Any => {
-                let storage = KvMmrStorage {
+                let storage = KvMmrStorage::<H::Digest> {
                     session: &session,
                     mmr_size: mmr_size_for_watermark(watermark)?,
+                    _marker: PhantomData,
                 };
                 let proof = verification::range_proof(&storage, start_location..end)
                     .await
@@ -1427,16 +1287,6 @@ impl OrderedClient {
         }
     }
 
-    pub async fn batch_operation_range_proof(
-        &self,
-        latest_location: Location,
-        start_location: Location,
-        max_locations: u32,
-    ) -> Result<BatchOperationRangeProof, QmdbError> {
-        self.operation_range_proof(latest_location, start_location, max_locations)
-            .await
-    }
-
     /// Generate a contiguous current-state ordered proof over global operation
     /// locations against one published batch location.
     pub async fn current_operation_range_proof(
@@ -1444,7 +1294,7 @@ impl OrderedClient {
         watermark: Location,
         start_location: Location,
         max_locations: u32,
-    ) -> Result<CurrentOperationRangeProofResult, QmdbError> {
+    ) -> Result<CurrentOperationRangeProofResult<H::Digest, K, V, N>, QmdbError> {
         match self
             .operation_range_proof_for_variant(
                 watermark,
@@ -1463,11 +1313,11 @@ impl OrderedClient {
 
     /// Generate a current-state ordered proof for the latest active value of one
     /// key at one published batch location.
-    pub async fn key_value_proof_at<K: AsRef<[u8]>>(
+    pub async fn key_value_proof_at<Q: AsRef<[u8]>>(
         &self,
         watermark: Location,
-        key: K,
-    ) -> Result<KeyValueProofResult, QmdbError> {
+        key: Q,
+    ) -> Result<KeyValueProofResult<H::Digest, K, V, N>, QmdbError> {
         let session = self.client.create_session();
         self.core()
             .require_published_watermark(&session, watermark)
@@ -1487,8 +1337,9 @@ impl OrderedClient {
             });
         };
         let location = decode_update_location(&row_key)?;
-        let decoded = decode_update_row(row_value.as_ref())?;
-        if decoded.key != key.as_ref() {
+        let decoded = <UpdateRow<K, V> as CodecRead>::read_cfg(&mut row_value.as_ref(), &self.update_row_cfg)
+                .map_err(|e| QmdbError::CorruptData(format!("update row decode: {e}")))?;
+        if <K as AsRef<[u8]>>::as_ref(&decoded.key) != key.as_ref() {
             return Err(QmdbError::ProofKeyNotFound {
                 watermark,
                 key: key.as_ref().to_vec(),
@@ -1502,7 +1353,7 @@ impl OrderedClient {
         }
 
         let operation = self.load_operation_at(&session, location).await?;
-        let BatchOperation::Update(update) = &operation else {
+        let QmdbOperation::Update(update) = &operation else {
             return Err(QmdbError::KeyNotActive {
                 watermark,
                 key: key.as_ref().to_vec(),
@@ -1512,15 +1363,15 @@ impl OrderedClient {
             .build_current_range_proof(&session, watermark, location, location + 1)
             .await?;
         let chunk = self
-            .load_bitmap_chunk(&session, watermark, chunk_index_for_location(location))
+            .load_bitmap_chunk(&session, watermark, chunk_index_for_location::<N>(location))
             .await?;
         let root = self.load_current_boundary_root(&session, watermark).await?;
 
         Ok(KeyValueProofResult {
             watermark,
             root,
-            proof: BatchCurrentKeyValueProof {
-                proof: BatchCurrentOperationProof {
+            proof: CurrentKeyValueProof {
+                proof: CurrentOperationProof {
                     loc: location,
                     chunk,
                     range_proof,
@@ -1551,7 +1402,7 @@ impl OrderedClient {
         &self,
         session: &SerializableReadSession,
         location: Location,
-    ) -> Result<QmdbDigest, QmdbError> {
+    ) -> Result<H::Digest, QmdbError> {
         self.require_current_boundary_state(session, location)
             .await?;
         let Some(bytes) = session.get(&encode_current_meta_key(location)).await? else {
@@ -1569,7 +1420,7 @@ impl OrderedClient {
         previous_ops_size: Position,
         delta_operations: &[Op],
         rows: &mut Vec<(Key, Vec<u8>)>,
-    ) -> Result<(Position, BTreeMap<Position, QmdbDigest>, QmdbDigest), QmdbError> {
+    ) -> Result<(Position, BTreeMap<Position, H::Digest>, H::Digest), QmdbError> {
         let encoded = delta_operations
             .iter()
             .map(|operation| {
@@ -1579,7 +1430,7 @@ impl OrderedClient {
             })
             .collect::<Result<Vec<_>, QmdbError>>()?;
         self.core()
-            .append_encoded_ops_nodes_incrementally(session, previous_ops_size, &encoded, rows)
+            .append_encoded_ops_nodes_incrementally::<H>(session, previous_ops_size, &encoded, rows)
             .await
     }
 
@@ -1587,8 +1438,8 @@ impl OrderedClient {
         &self,
         session: &SerializableReadSession,
         watermark: Location,
-    ) -> Result<QmdbDigest, QmdbError> {
-        self.core().compute_ops_root(session, watermark).await
+    ) -> Result<H::Digest, QmdbError> {
+        self.core().compute_ops_root::<H>(session, watermark).await
     }
 
     async fn build_current_range_proof(
@@ -1597,16 +1448,17 @@ impl OrderedClient {
         watermark: Location,
         start_location: Location,
         end_location_exclusive: Location,
-    ) -> Result<BatchCurrentRangeProof, QmdbError> {
-        let storage = KvCurrentStorage {
+    ) -> Result<CurrentRangeProof<H::Digest>, QmdbError> {
+        let storage = KvCurrentStorage::<H::Digest, N> {
             session,
             watermark,
             mmr_size: mmr_size_for_watermark(watermark)?,
+            _marker: PhantomData,
         };
         let proof = verification::range_proof(&storage, start_location..end_location_exclusive)
             .await
             .map_err(|e| QmdbError::CommonwareMmr(e.to_string()))?;
-        Ok(BatchCurrentRangeProof {
+        Ok(CurrentRangeProof {
             proof,
             partial_chunk_digest: self
                 .load_partial_chunk_digest(session, watermark)
@@ -1621,7 +1473,7 @@ impl OrderedClient {
         session: &SerializableReadSession,
         watermark: Location,
         chunk_index: u64,
-    ) -> Result<[u8; BITMAP_CHUNK_BYTES], QmdbError> {
+    ) -> Result<[u8; N], QmdbError> {
         let start = encode_chunk_key(chunk_index, Location::new(0));
         let end = encode_chunk_key(chunk_index, watermark);
         let rows = session
@@ -1632,13 +1484,13 @@ impl OrderedClient {
                 "missing bitmap chunk {chunk_index} at watermark {watermark}"
             )));
         };
-        if bytes.len() != BITMAP_CHUNK_BYTES {
+        if bytes.len() != N {
             return Err(QmdbError::CorruptData(format!(
                 "bitmap chunk {chunk_index} has invalid length {}",
                 bytes.len()
             )));
         }
-        let mut chunk = [0u8; BITMAP_CHUNK_BYTES];
+        let mut chunk = [0u8; N];
         chunk.copy_from_slice(bytes.as_ref());
         Ok(chunk)
     }
@@ -1649,9 +1501,9 @@ impl OrderedClient {
         watermark: Location,
         start_location: Location,
         end_location_exclusive: Location,
-    ) -> Result<Vec<[u8; BITMAP_CHUNK_BYTES]>, QmdbError> {
-        let start_chunk = chunk_index_for_location(start_location);
-        let end_chunk = chunk_index_for_location(end_location_exclusive - 1);
+    ) -> Result<Vec<[u8; N]>, QmdbError> {
+        let start_chunk = chunk_index_for_location::<N>(start_location);
+        let end_chunk = chunk_index_for_location::<N>(end_location_exclusive - 1);
         let mut chunks = Vec::with_capacity((end_chunk - start_chunk + 1) as usize);
         for chunk_index in start_chunk..=end_chunk {
             chunks.push(
@@ -1666,19 +1518,19 @@ impl OrderedClient {
         &self,
         session: &SerializableReadSession,
         watermark: Location,
-    ) -> Result<Option<(u64, QmdbDigest)>, QmdbError> {
+    ) -> Result<Option<(u64, H::Digest)>, QmdbError> {
         let leaves = watermark
             .checked_add(1)
             .ok_or_else(|| QmdbError::CorruptData("watermark overflow".to_string()))?;
-        let next_bit = *leaves % BITMAP_CHUNK_BITS;
+        let next_bit = *leaves % bitmap_chunk_bits::<N>();
         if next_bit == NO_PARTIAL_CHUNK {
             return Ok(None);
         }
-        let chunk_index = *leaves / BITMAP_CHUNK_BITS;
+        let chunk_index = *leaves / bitmap_chunk_bits::<N>();
         let chunk = self
             .load_bitmap_chunk(session, watermark, chunk_index)
             .await?;
-        let mut hasher = Sha256::default();
+        let mut hasher = H::default();
         hasher.update(&chunk);
         Ok(Some((next_bit, hasher.finalize())))
     }
@@ -1687,18 +1539,16 @@ impl OrderedClient {
         &self,
         session: &SerializableReadSession,
         location: Location,
-    ) -> Result<BatchOperation, QmdbError> {
+    ) -> Result<QmdbOperation<K, V>, QmdbError> {
         let bytes = self
             .core()
             .load_operation_bytes_at(session, location)
             .await?;
-        BatchOperation::decode_cfg(bytes.as_slice(), &self.core().operation_codec_cfg()).map_err(
-            |e| {
-                QmdbError::CorruptData(format!(
-                    "failed to decode qmdb operation at location {location}: {e}"
-                ))
-            },
-        )
+        QmdbOperation::<K, V>::decode_cfg(bytes.as_slice(), &self.op_cfg).map_err(|e| {
+            QmdbError::CorruptData(format!(
+                "failed to decode qmdb operation at location {location}: {e}"
+            ))
+        })
     }
 
     async fn load_operation_range(
@@ -1706,7 +1556,7 @@ impl OrderedClient {
         session: &SerializableReadSession,
         start_location: Location,
         end_location_exclusive: Location,
-    ) -> Result<Vec<BatchOperation>, QmdbError> {
+    ) -> Result<Vec<QmdbOperation<K, V>>, QmdbError> {
         let rows = self
             .core()
             .load_operation_bytes_range(session, start_location, end_location_exclusive)
@@ -1715,12 +1565,11 @@ impl OrderedClient {
             .enumerate()
             .map(|(offset, bytes)| {
                 let location = start_location + offset as u64;
-                BatchOperation::decode_cfg(bytes.as_slice(), &self.core().operation_codec_cfg())
-                    .map_err(|e| {
-                        QmdbError::CorruptData(format!(
-                            "failed to decode qmdb operation at location {location}: {e}"
-                        ))
-                    })
+                QmdbOperation::<K, V>::decode_cfg(bytes.as_slice(), &self.op_cfg).map_err(|e| {
+                    QmdbError::CorruptData(format!(
+                        "failed to decode qmdb operation at location {location}: {e}"
+                    ))
+                })
             })
             .collect()
     }
@@ -1745,35 +1594,44 @@ struct PreparedUpload {
 }
 
 impl PreparedUpload {
-    fn build(latest_location: Location, operations: &[BatchOperation]) -> Result<Self, QmdbError> {
+    fn build<K: QmdbKey + Codec, V: Codec + Clone + Send + Sync>(
+        latest_location: Location,
+        operations: &[QmdbOperation<K, V>],
+    ) -> Result<Self, QmdbError>
+    where
+        QmdbOperation<K, V>: Encode,
+    {
         Self::build_from_ops(latest_location, operations, |op| match op {
-            BatchOperation::Update(QmdbUpdate {
+            QmdbOperation::Update(QmdbUpdate {
                 key,
                 value,
                 next_key: _,
             }) => Some((key, Some(value))),
-            BatchOperation::Delete(key) => Some((key, None)),
-            BatchOperation::CommitFloor(_, _) => None,
+            QmdbOperation::Delete(key) => Some((key, None)),
+            QmdbOperation::CommitFloor(_, _) => None,
         })
     }
 
-    fn build_unordered(
+    fn build_unordered<K: QmdbKey + Codec, V: Codec + Clone + Send + Sync>(
         latest_location: Location,
-        operations: &[UnorderedBatchOperation],
-    ) -> Result<Self, QmdbError> {
+        operations: &[UnorderedQmdbOperation<K, V>],
+    ) -> Result<Self, QmdbError>
+    where
+        UnorderedQmdbOperation<K, V>: Encode,
+    {
         Self::build_from_ops(latest_location, operations, |op| match op {
-            UnorderedBatchOperation::Update(UnorderedUpdate(key, value)) => {
+            UnorderedQmdbOperation::Update(UnorderedUpdate(key, value)) => {
                 Some((key, Some(value)))
             }
-            UnorderedBatchOperation::Delete(key) => Some((key, None)),
-            UnorderedBatchOperation::CommitFloor(_, _) => None,
+            UnorderedQmdbOperation::Delete(key) => Some((key, None)),
+            UnorderedQmdbOperation::CommitFloor(_, _) => None,
         })
     }
 
-    fn build_from_ops<Op: Encode>(
+    fn build_from_ops<Op: Encode, K: AsRef<[u8]> + Encode + Clone, V: Encode + Clone>(
         latest_location: Location,
         operations: &[Op],
-        extract_keyed: impl Fn(&Op) -> Option<(&Vec<u8>, Option<&Vec<u8>>)>,
+        extract_keyed: impl Fn(&Op) -> Option<(&K, Option<&V>)>,
     ) -> Result<Self, QmdbError> {
         let mut rows = Vec::<(Key, Vec<u8>)>::with_capacity(operations.len() * 2 + 1);
         let mut keyed_operation_count = 0u32;
@@ -1797,9 +1655,13 @@ impl PreparedUpload {
 
             if let Some((key, value)) = extract_keyed(op) {
                 keyed_operation_count += 1;
+                let update_row = UpdateRow {
+                    key: key.clone(),
+                    value: value.cloned(),
+                };
                 rows.push((
-                    encode_update_key(key, location)?,
-                    encode_update_row(key, value.map(|v| v.as_slice()))?,
+                    encode_update_key(key.as_ref(), location)?,
+                    update_row.encode().to_vec(),
                 ));
             }
         }
@@ -1823,9 +1685,9 @@ struct PreparedCurrentBoundaryUpload {
 }
 
 impl PreparedCurrentBoundaryUpload {
-    fn build(
+    fn build<D: Digest, const N: usize>(
         latest_location: Location,
-        current_boundary: &CurrentBoundaryState,
+        current_boundary: &CurrentBoundaryState<D, N>,
     ) -> Result<Self, QmdbError> {
         let mut rows = Vec::with_capacity(
             1 + current_boundary.chunks.len() + current_boundary.grafted_nodes.len(),
@@ -1850,17 +1712,18 @@ impl PreparedCurrentBoundaryUpload {
     }
 }
 
-struct KvMmrStorage<'a> {
+struct KvMmrStorage<'a, D: Digest> {
     session: &'a SerializableReadSession,
     mmr_size: Position,
+    _marker: PhantomData<D>,
 }
 
-impl MmrStorage<QmdbDigest> for KvMmrStorage<'_> {
+impl<D: Digest> MmrStorage<D> for KvMmrStorage<'_, D> {
     async fn size(&self) -> Position {
         self.mmr_size
     }
 
-    async fn get_node(&self, position: Position) -> Result<Option<QmdbDigest>, mmr::Error> {
+    async fn get_node(&self, position: Position) -> Result<Option<D>, mmr::Error> {
         let key = encode_node_key(position);
         let bytes = self
             .session
@@ -1870,30 +1733,31 @@ impl MmrStorage<QmdbDigest> for KvMmrStorage<'_> {
         let Some(bytes) = bytes else {
             return Ok(None);
         };
-        if bytes.len() != DIGEST_LEN {
+        if bytes.len() != D::SIZE {
             return Err(mmr::Error::DataCorrupted(
                 "exoware-qmdb node digest has invalid length",
             ));
         }
-        let mut digest = [0u8; DIGEST_LEN];
-        digest.copy_from_slice(bytes.as_ref());
-        Ok(Some(QmdbDigest::from(digest)))
+        D::decode(bytes.as_ref())
+            .map(Some)
+            .map_err(|_| mmr::Error::DataCorrupted("exoware-qmdb node digest decode failed"))
     }
 }
 
-struct KvCurrentStorage<'a> {
+struct KvCurrentStorage<'a, D: Digest, const N: usize> {
     session: &'a SerializableReadSession,
     watermark: Location,
     mmr_size: Position,
+    _marker: PhantomData<D>,
 }
 
-impl MmrStorage<QmdbDigest> for KvCurrentStorage<'_> {
+impl<D: Digest, const N: usize> MmrStorage<D> for KvCurrentStorage<'_, D, N> {
     async fn size(&self) -> Position {
         self.mmr_size
     }
 
-    async fn get_node(&self, position: Position) -> Result<Option<QmdbDigest>, mmr::Error> {
-        if position_height(position) < GRAFTING_HEIGHT {
+    async fn get_node(&self, position: Position) -> Result<Option<D>, mmr::Error> {
+        if position_height(position) < grafting_height_for::<N>() {
             let key = encode_node_key(position);
             let bytes = self.session.get(&key).await.map_err(|_| {
                 mmr::Error::DataCorrupted("exoware-qmdb current ops node fetch failed")
@@ -1901,17 +1765,17 @@ impl MmrStorage<QmdbDigest> for KvCurrentStorage<'_> {
             let Some(bytes) = bytes else {
                 return Ok(None);
             };
-            if bytes.len() != DIGEST_LEN {
+            if bytes.len() != D::SIZE {
                 return Err(mmr::Error::DataCorrupted(
                     "exoware-qmdb current ops node has invalid length",
                 ));
             }
-            let mut digest = [0u8; DIGEST_LEN];
-            digest.copy_from_slice(bytes.as_ref());
-            return Ok(Some(QmdbDigest::from(digest)));
+            return D::decode(bytes.as_ref())
+                .map(Some)
+                .map_err(|_| mmr::Error::DataCorrupted("exoware-qmdb current ops node decode failed"));
         }
 
-        let grafted_position = ops_to_grafted_pos(position, GRAFTING_HEIGHT);
+        let grafted_position = ops_to_grafted_pos(position, grafting_height_for::<N>());
         let start = encode_grafted_node_key(grafted_position, Location::new(0));
         let end = encode_grafted_node_key(grafted_position, self.watermark);
         let rows = self
@@ -1924,27 +1788,34 @@ impl MmrStorage<QmdbDigest> for KvCurrentStorage<'_> {
         let Some((_, bytes)) = rows.into_iter().next() else {
             return Ok(None);
         };
-        if bytes.len() != DIGEST_LEN {
+        if bytes.len() != D::SIZE {
             return Err(mmr::Error::DataCorrupted(
                 "exoware-qmdb current grafted node has invalid length",
             ));
         }
-        let mut digest = [0u8; DIGEST_LEN];
-        digest.copy_from_slice(bytes.as_ref());
-        Ok(Some(QmdbDigest::from(digest)))
+        D::decode(bytes.as_ref())
+            .map(Some)
+            .map_err(|_| mmr::Error::DataCorrupted("exoware-qmdb current grafted node decode failed"))
     }
 }
 
-struct RebuiltCurrentState {
-    ops_mmr: Mmr<QmdbDigest>,
-    ops_root: QmdbDigest,
-    chunks: Vec<[u8; BITMAP_CHUNK_BYTES]>,
-    grafted_mmr: Mmr<QmdbDigest>,
-    partial_chunk_digest: Option<(u64, QmdbDigest)>,
+struct RebuiltCurrentState<H: Hasher, K, V, const N: usize> {
+    ops_mmr: Mmr<H::Digest>,
+    ops_root: H::Digest,
+    chunks: Vec<[u8; N]>,
+    grafted_mmr: Mmr<H::Digest>,
+    partial_chunk_digest: Option<(u64, H::Digest)>,
+    _marker: PhantomData<(K, V)>,
 }
 
-impl RebuiltCurrentState {
-    fn build(operations: Vec<BatchOperation>) -> Result<Self, QmdbError> {
+impl<H, K, V, const N: usize> RebuiltCurrentState<H, K, V, N>
+where
+    H: Hasher,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+    QmdbOperation<K, V>: Encode,
+{
+    fn build(operations: Vec<QmdbOperation<K, V>>) -> Result<Self, QmdbError> {
         let encoded_operations = operations
             .iter()
             .map(|operation| {
@@ -1953,59 +1824,85 @@ impl RebuiltCurrentState {
                 Ok(encoded)
             })
             .collect::<Result<Vec<_>, QmdbError>>()?;
-        let ops_mmr = build_operation_mmr(&encoded_operations)?;
+        let ops_mmr = build_operation_mmr::<H>(&encoded_operations)?;
         let ops_root = *ops_mmr.root();
-        let chunks = build_bitmap_chunks(&operations);
-        let complete_chunks = operations.len() / BITMAP_CHUNK_BITS as usize;
-        let grafted_mmr = build_grafted_mmr(&ops_mmr, &chunks[..complete_chunks])?;
-        let partial_chunk_digest =
-            if operations.len().is_multiple_of(BITMAP_CHUNK_BITS as usize) || chunks.is_empty() {
-                None
-            } else {
-                let next_bit = (operations.len() % BITMAP_CHUNK_BITS as usize) as u64;
-                let mut hasher = Sha256::default();
-                hasher.update(&chunks[chunks.len() - 1]);
-                Some((next_bit, hasher.finalize()))
-            };
+        let chunks = build_bitmap_chunks::<K, V, N>(&operations);
+        let complete_chunks = operations.len() / bitmap_chunk_bits::<N>() as usize;
+        let grafted_mmr = build_grafted_mmr::<H, N>(&ops_mmr, &chunks[..complete_chunks])?;
+        let partial_chunk_digest = if operations
+            .len()
+            .is_multiple_of(bitmap_chunk_bits::<N>() as usize)
+            || chunks.is_empty()
+        {
+            None
+        } else {
+            let next_bit = (operations.len() % bitmap_chunk_bits::<N>() as usize) as u64;
+            let mut hasher = H::default();
+            hasher.update(&chunks[chunks.len() - 1]);
+            Some((next_bit, hasher.finalize()))
+        };
         Ok(Self {
             ops_mmr,
             ops_root,
             chunks,
             grafted_mmr,
             partial_chunk_digest,
+            _marker: PhantomData,
         })
     }
 }
 
-struct RebuiltCurrentStorage<'a> {
-    ops_mmr: &'a Mmr<QmdbDigest>,
-    grafted_mmr: &'a Mmr<QmdbDigest>,
+struct RebuiltCurrentStorage<'a, D: Digest, const N: usize> {
+    ops_mmr: &'a Mmr<D>,
+    grafted_mmr: &'a Mmr<D>,
 }
 
-impl MmrStorage<QmdbDigest> for RebuiltCurrentStorage<'_> {
+impl<D: Digest, const N: usize> MmrStorage<D> for RebuiltCurrentStorage<'_, D, N> {
     async fn size(&self) -> Position {
         self.ops_mmr.size()
     }
 
-    async fn get_node(&self, position: Position) -> Result<Option<QmdbDigest>, mmr::Error> {
-        if position_height(position) < GRAFTING_HEIGHT {
+    async fn get_node(&self, position: Position) -> Result<Option<D>, mmr::Error> {
+        if position_height(position) < grafting_height_for::<N>() {
             return Ok(self.ops_mmr.get_node(position));
         }
-        let grafted_position = ops_to_grafted_pos(position, GRAFTING_HEIGHT);
+        let grafted_position = ops_to_grafted_pos(position, grafting_height_for::<N>());
         Ok(self.grafted_mmr.get_node(grafted_position))
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct DecodedUpdate {
-    key: Vec<u8>,
-    value: Option<Vec<u8>>,
+struct UpdateRow<K, V> {
+    key: K,
+    value: Option<V>,
 }
 
-fn build_operation_mmr(
+impl<K: Encode, V: Encode> commonware_codec::Write for UpdateRow<K, V> {
+    fn write(&self, buf: &mut impl ::bytes::BufMut) {
+        self.key.write(buf);
+        self.value.write(buf);
+    }
+}
+
+impl<K: Encode, V: Encode> commonware_codec::EncodeSize for UpdateRow<K, V> {
+    fn encode_size(&self) -> usize {
+        self.key.encode_size() + self.value.encode_size()
+    }
+}
+
+impl<K: commonware_codec::Read, V: commonware_codec::Read> commonware_codec::Read for UpdateRow<K, V> {
+    type Cfg = (K::Cfg, V::Cfg);
+    fn read_cfg(buf: &mut impl ::bytes::Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let key = K::read_cfg(buf, &cfg.0)?;
+        let value = Option::<V>::read_cfg(buf, &cfg.1)?;
+        Ok(UpdateRow { key, value })
+    }
+}
+
+fn build_operation_mmr<H: Hasher>(
     encoded_operations: &[Vec<u8>],
-) -> Result<mmr::mem::Mmr<QmdbDigest>, QmdbError> {
-    let mut hasher = StandardHasher::<Sha256>::new();
+) -> Result<mmr::mem::Mmr<H::Digest>, QmdbError> {
+    let mut hasher = StandardHasher::<H>::new();
     let mut mmr = mmr::mem::Mmr::new(&mut hasher);
     let changeset = {
         let mut batch = UnmerkleizedBatch::new(&mmr);
@@ -2019,25 +1916,31 @@ fn build_operation_mmr(
     Ok(mmr)
 }
 
-fn build_bitmap_chunks(operations: &[BatchOperation]) -> Vec<[u8; BITMAP_CHUNK_BYTES]> {
+fn build_bitmap_chunks<K, V, const N: usize>(
+    operations: &[QmdbOperation<K, V>],
+) -> Vec<[u8; N]>
+where
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+{
     let mut latest_active = BTreeMap::<Vec<u8>, usize>::new();
     let mut latest_commit = None::<usize>;
     let mut bits = vec![false; operations.len()];
 
     for (index, operation) in operations.iter().enumerate() {
         match operation {
-            BatchOperation::Update(update) => {
+            QmdbOperation::Update(update) => {
                 bits[index] = true;
-                if let Some(previous) = latest_active.insert(update.key.clone(), index) {
+                if let Some(previous) = latest_active.insert(update.key.as_ref().to_vec(), index) {
                     bits[previous] = false;
                 }
             }
-            BatchOperation::Delete(key) => {
-                if let Some(previous) = latest_active.remove(key) {
+            QmdbOperation::Delete(key) => {
+                if let Some(previous) = latest_active.remove(key.as_ref()) {
                     bits[previous] = false;
                 }
             }
-            BatchOperation::CommitFloor(_, _) => {
+            QmdbOperation::CommitFloor(_, _) => {
                 bits[index] = true;
                 if let Some(previous) = latest_commit.replace(index) {
                     bits[previous] = false;
@@ -2046,34 +1949,36 @@ fn build_bitmap_chunks(operations: &[BatchOperation]) -> Vec<[u8; BITMAP_CHUNK_B
         }
     }
 
-    let chunk_count = operations.len().div_ceil(BITMAP_CHUNK_BITS as usize);
-    let mut chunks = vec![[0u8; BITMAP_CHUNK_BYTES]; chunk_count];
+    let chunk_count = operations.len().div_ceil(bitmap_chunk_bits::<N>() as usize);
+    let mut chunks = vec![[0u8; N]; chunk_count];
     for (bit_index, is_set) in bits.into_iter().enumerate() {
         if !is_set {
             continue;
         }
-        let chunk_index = bit_index / BITMAP_CHUNK_BITS as usize;
-        let bit_in_chunk = bit_index % BITMAP_CHUNK_BITS as usize;
+        let chunk_index = bit_index / bitmap_chunk_bits::<N>() as usize;
+        let bit_in_chunk = bit_index % bitmap_chunk_bits::<N>() as usize;
         chunks[chunk_index][bit_in_chunk / 8] |= 1 << (bit_in_chunk % 8);
     }
     chunks
 }
 
-fn build_grafted_mmr(
-    ops_mmr: &Mmr<QmdbDigest>,
-    complete_chunks: &[[u8; BITMAP_CHUNK_BYTES]],
-) -> Result<Mmr<QmdbDigest>, QmdbError> {
-    let mut grafted_hasher = GraftedHasher::new(StandardHasher::<Sha256>::new(), GRAFTING_HEIGHT);
+fn build_grafted_mmr<H: Hasher, const N: usize>(
+    ops_mmr: &Mmr<H::Digest>,
+    complete_chunks: &[[u8; N]],
+) -> Result<Mmr<H::Digest>, QmdbError> {
+    let mut grafted_hasher =
+        GraftedHasher::new(StandardHasher::<H>::new(), grafting_height_for::<N>());
     let mut grafted_mmr = Mmr::new(&mut grafted_hasher);
     if complete_chunks.is_empty() {
         return Ok(grafted_mmr);
     }
 
-    let zero_chunk = [0u8; BITMAP_CHUNK_BYTES];
+    let zero_chunk = [0u8; N];
     let changeset = {
         let mut batch = grafted_mmr.new_batch();
         for (chunk_index, chunk) in complete_chunks.iter().enumerate() {
-            let ops_position = chunk_idx_to_ops_pos(chunk_index as u64, GRAFTING_HEIGHT);
+            let ops_position =
+                chunk_idx_to_ops_pos(chunk_index as u64, grafting_height_for::<N>());
             let ops_digest = ops_mmr.get_node(ops_position).ok_or_else(|| {
                 QmdbError::CorruptData(format!(
                     "missing ops subtree root at position {ops_position} for chunk {chunk_index}"
@@ -2082,7 +1987,7 @@ fn build_grafted_mmr(
             let digest = if *chunk == zero_chunk {
                 ops_digest
             } else {
-                let mut hasher = Sha256::default();
+                let mut hasher = H::default();
                 hasher.update(chunk);
                 hasher.update(&ops_digest);
                 hasher.finalize()
@@ -2097,9 +2002,9 @@ fn build_grafted_mmr(
     Ok(grafted_mmr)
 }
 
-async fn compute_storage_root(
-    storage: &impl MmrStorage<QmdbDigest>,
-) -> Result<QmdbDigest, QmdbError> {
+async fn compute_storage_root<H: Hasher>(
+    storage: &impl MmrStorage<H::Digest>,
+) -> Result<H::Digest, QmdbError> {
     let size = storage.size().await;
     let leaves = Location::try_from(size)
         .map_err(|e| QmdbError::CorruptData(format!("invalid storage size: {e}")))?;
@@ -2114,16 +2019,16 @@ async fn compute_storage_root(
             })?;
         peaks.push(digest);
     }
-    let mut hasher = StandardHasher::<Sha256>::new();
+    let mut hasher = StandardHasher::<H>::new();
     Ok(mmr::hasher::Hasher::root(&mut hasher, leaves, peaks.iter()))
 }
 
-fn combine_current_roots(
-    ops_root: &QmdbDigest,
-    grafted_root: &QmdbDigest,
-    partial_chunk: Option<(u64, &QmdbDigest)>,
-) -> QmdbDigest {
-    let mut hasher = Sha256::default();
+fn combine_current_roots<H: Hasher>(
+    ops_root: &H::Digest,
+    grafted_root: &H::Digest,
+    partial_chunk: Option<(u64, &H::Digest)>,
+) -> H::Digest {
+    let mut hasher = H::default();
     hasher.update(ops_root);
     hasher.update(grafted_root);
     if let Some((next_bit, digest)) = partial_chunk {
@@ -2133,20 +2038,18 @@ fn combine_current_roots(
     hasher.finalize()
 }
 
-fn decode_digest(bytes: &[u8], label: String) -> Result<QmdbDigest, QmdbError> {
-    if bytes.len() != DIGEST_LEN {
+fn decode_digest<D: Digest>(bytes: &[u8], label: String) -> Result<D, QmdbError> {
+    if bytes.len() != D::SIZE {
         return Err(QmdbError::CorruptData(format!(
             "{label} has invalid length {}",
             bytes.len()
         )));
     }
-    let mut digest = [0u8; DIGEST_LEN];
-    digest.copy_from_slice(bytes);
-    Ok(QmdbDigest::from(digest))
+    D::decode(bytes).map_err(|e| QmdbError::CorruptData(format!("{label} decode error: {e}")))
 }
 
-fn chunk_index_for_location(location: Location) -> u64 {
-    *location / BITMAP_CHUNK_BITS
+fn chunk_index_for_location<const N: usize>(location: Location) -> u64 {
+    *location / bitmap_chunk_bits::<N>()
 }
 
 fn chunk_idx_to_ops_pos(chunk_idx: u64, grafting_height: u32) -> Position {
@@ -2199,13 +2102,13 @@ fn position_height(pos: Position) -> u32 {
     pos as u32
 }
 
-struct GraftedHasher {
-    inner: StandardHasher<Sha256>,
+struct GraftedHasher<H: Hasher> {
+    inner: StandardHasher<H>,
     grafting_height: u32,
 }
 
-impl GraftedHasher {
-    const fn new(inner: StandardHasher<Sha256>, grafting_height: u32) -> Self {
+impl<H: Hasher> GraftedHasher<H> {
+    const fn new(inner: StandardHasher<H>, grafting_height: u32) -> Self {
         Self {
             inner,
             grafting_height,
@@ -2213,9 +2116,9 @@ impl GraftedHasher {
     }
 }
 
-impl mmr::hasher::Hasher for GraftedHasher {
-    type Digest = QmdbDigest;
-    type Inner = Sha256;
+impl<H: Hasher> mmr::hasher::Hasher for GraftedHasher<H> {
+    type Digest = H::Digest;
+    type Inner = H;
 
     fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> Self::Digest {
         self.inner.leaf_digest(pos, element)
@@ -2249,7 +2152,7 @@ impl mmr::hasher::Hasher for GraftedHasher {
 
     fn fork(&self) -> impl mmr::hasher::Hasher<Digest = Self::Digest> {
         Self {
-            inner: StandardHasher::<Sha256>::new(),
+            inner: StandardHasher::<H>::new(),
             grafting_height: self.grafting_height,
         }
     }
@@ -2274,80 +2177,6 @@ fn ensure_encoded_value_size(len: usize) -> Result<(), QmdbError> {
     }
 }
 
-fn encode_update_row(raw_key: &[u8], value: Option<&[u8]>) -> Result<Vec<u8>, QmdbError> {
-    if raw_key.len() > u16::MAX as usize {
-        return Err(QmdbError::RawKeyTooLarge {
-            len: raw_key.len(),
-            max: u16::MAX as usize,
-        });
-    }
-    let value_len = value.map_or(0usize, |value| value.len());
-    if value_len > u16::MAX as usize {
-        return Err(QmdbError::EncodedValueTooLarge {
-            len: value_len,
-            max: u16::MAX as usize,
-        });
-    }
-
-    let mut out = Vec::with_capacity(2 + raw_key.len() + 1 + 2 + value_len);
-    out.extend_from_slice(&(raw_key.len() as u16).to_be_bytes());
-    out.extend_from_slice(raw_key);
-    match value {
-        Some(bytes) => {
-            out.push(1);
-            out.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
-            out.extend_from_slice(bytes);
-        }
-        None => {
-            out.push(0);
-            out.extend_from_slice(&0u16.to_be_bytes());
-        }
-    }
-    ensure_encoded_value_size(out.len())?;
-    Ok(out)
-}
-
-fn decode_update_row(bytes: &[u8]) -> Result<DecodedUpdate, QmdbError> {
-    if bytes.len() < 5 {
-        return Err(QmdbError::CorruptData(
-            "update row shorter than minimum header".to_string(),
-        ));
-    }
-    let key_len = u16::from_be_bytes([bytes[0], bytes[1]]) as usize;
-    let key_end = 2 + key_len;
-    if bytes.len() < key_end + 3 {
-        return Err(QmdbError::CorruptData(
-            "update row truncated while reading key".to_string(),
-        ));
-    }
-    let key = bytes[2..key_end].to_vec();
-    let has_value = bytes[key_end];
-    let value_len = u16::from_be_bytes([bytes[key_end + 1], bytes[key_end + 2]]) as usize;
-    let value_start = key_end + 3;
-    if bytes.len() != value_start + value_len {
-        return Err(QmdbError::CorruptData(
-            "update row length does not match encoded payload".to_string(),
-        ));
-    }
-
-    let value = match has_value {
-        0 => {
-            if value_len != 0 {
-                return Err(QmdbError::CorruptData(
-                    "tombstone row encoded with non-zero value length".to_string(),
-                ));
-            }
-            None
-        }
-        1 => Some(bytes[value_start..].to_vec()),
-        other => {
-            return Err(QmdbError::CorruptData(format!(
-                "invalid value presence marker {other}"
-            )))
-        }
-    };
-    Ok(DecodedUpdate { key, value })
-}
 
 fn ordered_key_encoded_len(raw_key: &[u8]) -> usize {
     raw_key.len()
@@ -2427,7 +2256,7 @@ fn encode_ordered_update_payload(
 }
 
 fn encode_update_key(raw_key: &[u8], location: Location) -> Result<Key, QmdbError> {
-    let codec = update_codec();
+    let codec = UPDATE_CODEC;
     let ordered_key = encode_ordered_update_payload(codec, raw_key, UPDATE_VERSION_LEN)?;
     let total_len = codec.min_key_len_for_payload(ordered_key.len() + UPDATE_VERSION_LEN);
     let mut key = codec
@@ -2447,7 +2276,7 @@ fn encode_update_key(raw_key: &[u8], location: Location) -> Result<Key, QmdbErro
 }
 
 fn decode_update_location(key: &Key) -> Result<Location, QmdbError> {
-    let codec = update_codec();
+    let codec = UPDATE_CODEC;
     if !codec.matches(key) {
         return Err(QmdbError::CorruptData(
             "update key prefix mismatch".to_string(),
@@ -2471,7 +2300,7 @@ fn decode_update_location(key: &Key) -> Result<Location, QmdbError> {
 }
 
 fn encode_presence_key(latest_location: Location) -> Key {
-    let codec = presence_codec();
+    let codec = PRESENCE_CODEC;
     let mut key = codec
         .new_key_with_len(codec.min_key_len_for_payload(8))
         .expect("presence key length should fit");
@@ -2482,7 +2311,7 @@ fn encode_presence_key(latest_location: Location) -> Key {
 }
 
 fn encode_watermark_key(location: Location) -> Key {
-    let codec = watermark_codec();
+    let codec = WATERMARK_CODEC;
     let mut key = codec
         .new_key_with_len(codec.min_key_len_for_payload(8))
         .expect("watermark key length should fit");
@@ -2493,7 +2322,7 @@ fn encode_watermark_key(location: Location) -> Key {
 }
 
 fn decode_watermark_location(key: &Key) -> Result<Location, QmdbError> {
-    let codec = watermark_codec();
+    let codec = WATERMARK_CODEC;
     if !codec.matches(key) {
         return Err(QmdbError::CorruptData(
             "watermark key prefix mismatch".to_string(),
@@ -2506,7 +2335,7 @@ fn decode_watermark_location(key: &Key) -> Result<Location, QmdbError> {
 }
 
 fn encode_operation_key(location: Location) -> Key {
-    let codec = operation_codec();
+    let codec = OPERATION_CODEC;
     let mut key = codec
         .new_key_with_len(codec.min_key_len_for_payload(8))
         .expect("operation key length should fit");
@@ -2517,7 +2346,7 @@ fn encode_operation_key(location: Location) -> Key {
 }
 
 fn encode_node_key(position: Position) -> Key {
-    let codec = node_codec();
+    let codec = NODE_CODEC;
     let mut key = codec
         .new_key_with_len(codec.min_key_len_for_payload(8))
         .expect("node key length should fit");
@@ -2528,7 +2357,7 @@ fn encode_node_key(position: Position) -> Key {
 }
 
 fn encode_current_meta_key(location: Location) -> Key {
-    let codec = current_meta_codec();
+    let codec = CURRENT_META_CODEC;
     let mut key = codec
         .new_key_with_len(codec.min_key_len_for_payload(8))
         .expect("current meta key length should fit");
@@ -2539,7 +2368,7 @@ fn encode_current_meta_key(location: Location) -> Key {
 }
 
 fn encode_grafted_node_key(position: Position, watermark: Location) -> Key {
-    let codec = grafted_node_codec();
+    let codec = GRAFTED_NODE_CODEC;
     let mut key = codec
         .new_key_with_len(codec.min_key_len_for_payload(16))
         .expect("grafted node key length should fit");
@@ -2553,7 +2382,7 @@ fn encode_grafted_node_key(position: Position, watermark: Location) -> Key {
 }
 
 fn encode_chunk_key(chunk_index: u64, watermark: Location) -> Key {
-    let codec = chunk_codec();
+    let codec = CHUNK_CODEC;
     let mut key = codec
         .new_key_with_len(codec.min_key_len_for_payload(16))
         .expect("chunk key length should fit");
@@ -2567,7 +2396,7 @@ fn encode_chunk_key(chunk_index: u64, watermark: Location) -> Key {
 }
 
 fn decode_operation_location_key(key: &Key) -> Result<Location, QmdbError> {
-    let codec = operation_codec();
+    let codec = OPERATION_CODEC;
     if !codec.matches(key) {
         return Err(QmdbError::CorruptData(
             "operation key prefix mismatch".to_string(),
@@ -2579,54 +2408,29 @@ fn decode_operation_location_key(key: &Key) -> Result<Location, QmdbError> {
     Ok(Location::new(u64::from_be_bytes(bytes)))
 }
 
-fn update_codec() -> KeyCodec {
-    KeyCodec::new(RESERVED_BITS, UPDATE_FAMILY).expect("static update codec")
-}
-
-fn presence_codec() -> KeyCodec {
-    KeyCodec::new(RESERVED_BITS, PRESENCE_FAMILY).expect("static presence codec")
-}
-
-fn watermark_codec() -> KeyCodec {
-    KeyCodec::new(RESERVED_BITS, WATERMARK_FAMILY).expect("static watermark codec")
-}
-
-fn operation_codec() -> KeyCodec {
-    KeyCodec::new(RESERVED_BITS, OP_FAMILY).expect("static operation codec")
-}
-
-fn node_codec() -> KeyCodec {
-    KeyCodec::new(RESERVED_BITS, NODE_FAMILY).expect("static node codec")
-}
-
-fn current_meta_codec() -> KeyCodec {
-    KeyCodec::new(RESERVED_BITS, CURRENT_META_FAMILY).expect("static current meta codec")
-}
-
-fn grafted_node_codec() -> KeyCodec {
-    KeyCodec::new(RESERVED_BITS, GRAFTED_NODE_FAMILY).expect("static grafted node codec")
-}
-
-fn chunk_codec() -> KeyCodec {
-    KeyCodec::new(RESERVED_BITS, CHUNK_FAMILY).expect("static chunk codec")
-}
-
-/// Common alias for the crate's public error surface.
-pub type AuthenticatedError = QmdbError;
+const UPDATE_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, UPDATE_FAMILY);
+const PRESENCE_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, PRESENCE_FAMILY);
+const WATERMARK_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, WATERMARK_FAMILY);
+const OPERATION_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, OP_FAMILY);
+const NODE_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, NODE_FAMILY);
+const CURRENT_META_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, CURRENT_META_FAMILY);
+const GRAFTED_NODE_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, GRAFTED_NODE_FAMILY);
+const CHUNK_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, CHUNK_FAMILY);
 
 /// Generic contiguous historical proof for one authenticated backend.
 #[derive(Clone, Debug, PartialEq)]
-pub struct AuthenticatedOperationRangeProof<Op> {
+#[must_use]
+pub struct AuthenticatedOperationRangeProof<D: Digest, Op> {
     pub watermark: Location,
-    pub root: QmdbDigest,
+    pub root: D,
     pub start_location: Location,
-    pub proof: BatchProof,
+    pub proof: mmr::Proof<D>,
     pub operations: Vec<Op>,
 }
 
-impl<Op: Encode> AuthenticatedOperationRangeProof<Op> {
-    pub fn verify(&self) -> bool {
-        let mut hasher = StandardHasher::<Sha256>::new();
+impl<D: Digest, Op: Encode> AuthenticatedOperationRangeProof<D, Op> {
+    pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
+        let mut hasher = StandardHasher::<H>::new();
         verify_proof(
             &mut hasher,
             &self.proof,
@@ -2639,44 +2443,63 @@ impl<Op: Encode> AuthenticatedOperationRangeProof<Op> {
 
 /// Unordered QMDB client backed by the Exoware store.
 ///
-/// Wraps [`OrderedClient`] for watermark/query/node logic but uses
-/// [`UnorderedBatchOperation`] for uploads and proof decoding.
 /// Does not support exclusion proofs or current-state boundary uploads.
-#[derive(Clone, Debug)]
-pub struct UnorderedClient {
+#[derive(Clone)]
+pub struct UnorderedClient<H: Hasher, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> {
     client: StoreClient,
-    config: QmdbConfig,
+    op_cfg: <UnorderedQmdbOperation<K, V> as commonware_codec::Read>::Cfg,
+    update_row_cfg: (K::Cfg, V::Cfg),
     query_visible_sequence: Option<Arc<AtomicU64>>,
+    _marker: PhantomData<(H, K)>,
 }
 
-impl UnorderedClient {
-    fn core(&self) -> HistoricalOpsClientCore<'_> {
+impl<H: Hasher, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> std::fmt::Debug for UnorderedClient<H, K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnorderedClient").finish_non_exhaustive()
+    }
+}
+
+impl<H, K, V> UnorderedClient<H, K, V>
+where
+    H: Hasher,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+    V::Cfg: Clone,
+    UnorderedQmdbOperation<K, V>: Encode + Decode,
+{
+    fn core(&self) -> HistoricalOpsClientCore<'_, H::Digest, K, V> {
         HistoricalOpsClientCore {
             client: &self.client,
-            config: &self.config,
             query_visible_sequence: self.query_visible_sequence.as_ref(),
+            update_row_cfg: self.update_row_cfg.clone(),
+            _marker: PhantomData,
         }
     }
 
-    pub fn new(url: &str) -> Self {
-        Self::from_client(StoreClient::new(url))
+    pub fn new(
+        url: &str,
+        op_cfg: <UnorderedQmdbOperation<K, V> as commonware_codec::Read>::Cfg,
+        update_row_cfg: (K::Cfg, V::Cfg),
+    ) -> Self {
+        Self::from_client(StoreClient::new(url), op_cfg, update_row_cfg)
     }
 
-    pub fn from_client(client: StoreClient) -> Self {
+    pub fn from_client(
+        client: StoreClient,
+        op_cfg: <UnorderedQmdbOperation<K, V> as commonware_codec::Read>::Cfg,
+        update_row_cfg: (K::Cfg, V::Cfg),
+    ) -> Self {
         Self {
             client,
-            config: QmdbConfig::default(),
+            op_cfg,
+            update_row_cfg,
             query_visible_sequence: None,
+            _marker: PhantomData,
         }
     }
 
     pub fn with_query_visible_sequence(mut self, seq: Arc<AtomicU64>) -> Self {
         self.query_visible_sequence = Some(seq);
-        self
-    }
-
-    pub fn with_config(mut self, config: QmdbConfig) -> Self {
-        self.config = config;
         self
     }
 
@@ -2710,20 +2533,17 @@ impl UnorderedClient {
             .core()
             .load_operation_bytes_range(&session, delta_start_location, end_location_exclusive)
             .await?;
-        let cfg = (
-            ((0..=self.config.max_operation_key_len).into(), ()),
-            ((0..=self.config.max_operation_value_len).into(), ()),
-        );
         for (offset, bytes) in op_rows.iter().enumerate() {
             let op_location = delta_start_location + offset as u64;
-            let _ = UnorderedBatchOperation::decode_cfg(bytes.as_slice(), &cfg).map_err(|e| {
-                QmdbError::CorruptData(format!(
-                    "failed to decode unordered operation at location {op_location}: {e}"
-                ))
-            })?;
+            let _ = UnorderedQmdbOperation::<K, V>::decode_cfg(bytes.as_slice(), &self.op_cfg)
+                .map_err(|e| {
+                    QmdbError::CorruptData(format!(
+                        "failed to decode unordered operation at location {op_location}: {e}"
+                    ))
+                })?;
         }
         self.core()
-            .publish_writer_location_watermark_with_encoded_ops(
+            .publish_writer_location_watermark_with_encoded_ops::<H>(
                 &session,
                 latest_watermark,
                 location,
@@ -2736,7 +2556,7 @@ impl UnorderedClient {
     pub async fn upload_operations(
         &self,
         latest_location: Location,
-        operations: &[UnorderedBatchOperation],
+        operations: &[UnorderedQmdbOperation<K, V>],
     ) -> Result<UploadReceipt, QmdbError> {
         if operations.is_empty() {
             return Err(QmdbError::EmptyBatch);
@@ -2769,20 +2589,20 @@ impl UnorderedClient {
         })
     }
 
-    pub async fn query_many_at<K: AsRef<[u8]>>(
+    pub async fn query_many_at<Q: AsRef<[u8]>>(
         &self,
-        keys: &[K],
+        keys: &[Q],
         watermark: Location,
-    ) -> Result<Vec<Option<VersionedValue>>, QmdbError> {
+    ) -> Result<Vec<Option<VersionedValue<K, V>>>, QmdbError> {
         self.core().query_many_at(keys, watermark).await
     }
 
-    pub async fn root_at(&self, watermark: Location) -> Result<QmdbDigest, QmdbError> {
+    pub async fn root_at(&self, watermark: Location) -> Result<H::Digest, QmdbError> {
         let session = self.client.create_session();
         self.core()
             .require_published_watermark(&session, watermark)
             .await?;
-        self.core().compute_ops_root(&session, watermark).await
+        self.core().compute_ops_root::<H>(&session, watermark).await
     }
 
     pub async fn operation_range_proof(
@@ -2790,7 +2610,7 @@ impl UnorderedClient {
         watermark: Location,
         start_location: Location,
         max_locations: u32,
-    ) -> Result<UnorderedOperationRangeProof, QmdbError> {
+    ) -> Result<UnorderedOperationRangeProof<H::Digest, K, V>, QmdbError> {
         if max_locations == 0 {
             return Err(QmdbError::InvalidRangeLength);
         }
@@ -2810,30 +2630,28 @@ impl UnorderedClient {
         let end = start_location
             .saturating_add(max_locations as u64)
             .min(count);
-        let storage = KvMmrStorage {
+        let storage = KvMmrStorage::<H::Digest> {
             session: &session,
             mmr_size: mmr_size_for_watermark(watermark)?,
+            _marker: PhantomData,
         };
         let proof = verification::range_proof(&storage, start_location..end)
             .await
             .map_err(|e| QmdbError::CommonwareMmr(e.to_string()))?;
-        let root = self.core().compute_ops_root(&session, watermark).await?;
+        let root = self.core().compute_ops_root::<H>(&session, watermark).await?;
         let rows = self
             .core()
             .load_operation_bytes_range(&session, start_location, end)
             .await?;
-        let cfg = (
-            ((0..=MAX_OPERATION_SIZE).into(), ()),
-            ((0..=MAX_OPERATION_SIZE).into(), ()),
-        );
         let mut operations = Vec::with_capacity(rows.len());
         for (offset, value) in rows.iter().enumerate() {
             let location = start_location + offset as u64;
-            let op = UnorderedBatchOperation::decode_cfg(value.as_slice(), &cfg).map_err(|e| {
-                QmdbError::CorruptData(format!(
-                    "failed to decode unordered operation at location {location}: {e}"
-                ))
-            })?;
+            let op = UnorderedQmdbOperation::<K, V>::decode_cfg(value.as_slice(), &self.op_cfg)
+                .map_err(|e| {
+                    QmdbError::CorruptData(format!(
+                        "failed to decode unordered operation at location {location}: {e}"
+                    ))
+                })?;
             operations.push(op);
         }
 
@@ -2848,28 +2666,32 @@ impl UnorderedClient {
 }
 
 #[derive(Clone, Debug)]
-pub struct ImmutableClient<K, V: Codec + Send + Sync> {
+pub struct ImmutableClient<H: Hasher, K: AsRef<[u8]> + Codec, V: Codec + Send + Sync> {
     client: StoreClient,
     value_cfg: V::Cfg,
+    update_row_cfg: (K::Cfg, V::Cfg),
     query_visible_sequence: Option<Arc<AtomicU64>>,
-    _marker: PhantomData<K>,
+    _marker: PhantomData<(H, K)>,
 }
 
-impl<K, V> ImmutableClient<K, V>
+impl<H, K, V> ImmutableClient<H, K, V>
 where
-    K: Array + Clone + AsRef<[u8]>,
+    H: Hasher,
+    K: Array + Codec + Clone + AsRef<[u8]>,
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
+    K::Cfg: Clone,
     ImmutableOperation<K, V>: Encode + Decode<Cfg = V::Cfg> + Clone,
 {
-    pub fn new(url: &str, value_cfg: V::Cfg) -> Self {
-        Self::from_client(StoreClient::new(url), value_cfg)
+    pub fn new(url: &str, value_cfg: V::Cfg, update_row_cfg: (K::Cfg, V::Cfg)) -> Self {
+        Self::from_client(StoreClient::new(url), value_cfg, update_row_cfg)
     }
 
-    pub fn from_client(client: StoreClient, value_cfg: V::Cfg) -> Self {
+    pub fn from_client(client: StoreClient, value_cfg: V::Cfg, update_row_cfg: (K::Cfg, V::Cfg)) -> Self {
         Self {
             client,
             value_cfg,
+            update_row_cfg,
             query_visible_sequence: None,
             _marker: PhantomData,
         }
@@ -2962,7 +2784,7 @@ where
             load_auth_operation_bytes_range(&session, namespace, delta_start, end_exclusive)
                 .await?;
         let mut rows = Vec::new();
-        append_auth_nodes_incrementally(
+        append_auth_nodes_incrementally::<H>(
             &session,
             namespace,
             previous_ops_size,
@@ -2986,18 +2808,18 @@ where
         Ok(location)
     }
 
-    pub async fn root_at(&self, watermark: Location) -> Result<QmdbDigest, QmdbError> {
+    pub async fn root_at(&self, watermark: Location) -> Result<H::Digest, QmdbError> {
         let namespace = AuthenticatedBackendNamespace::Immutable;
         let session = self.client.create_session();
         require_published_auth_watermark(&session, namespace, watermark).await?;
-        compute_auth_root(&session, namespace, watermark).await
+        compute_auth_root::<H>(&session, namespace, watermark).await
     }
 
     pub async fn get_at(
         &self,
         key: &K,
         watermark: Location,
-    ) -> Result<Option<TypedVersionedValue<K, V>>, QmdbError> {
+    ) -> Result<Option<VersionedValue<K, V>>, QmdbError> {
         let namespace = AuthenticatedBackendNamespace::Immutable;
         let session = self.client.create_session();
         require_published_auth_watermark(&session, namespace, watermark).await?;
@@ -3007,8 +2829,9 @@ where
             return Ok(None);
         };
         let location = decode_auth_immutable_update_location(&row_key)?;
-        let decoded = decode_update_row(row_value.as_ref())?;
-        if decoded.key != key.as_ref() {
+        let decoded = <UpdateRow<K, V> as CodecRead>::read_cfg(&mut row_value.as_ref(), &self.update_row_cfg)
+                .map_err(|e| QmdbError::CorruptData(format!("update row decode: {e}")))?;
+        if <K as AsRef<[u8]>>::as_ref(&decoded.key) != key.as_ref() {
             return Err(QmdbError::CorruptData(format!(
                 "authenticated immutable update row key mismatch at location {location}"
             )));
@@ -3022,7 +2845,7 @@ where
         .await?;
         match operation {
             ImmutableOperation::Set(operation_key, value) if operation_key == *key => {
-                Ok(Some(TypedVersionedValue {
+                Ok(Some(VersionedValue {
                     key: operation_key,
                     location,
                     value: Some(value),
@@ -3042,7 +2865,8 @@ where
         watermark: Location,
         start_location: Location,
         max_locations: u32,
-    ) -> Result<AuthenticatedOperationRangeProof<ImmutableOperation<K, V>>, QmdbError> {
+    ) -> Result<AuthenticatedOperationRangeProof<H::Digest, ImmutableOperation<K, V>>, QmdbError>
+    {
         if max_locations == 0 {
             return Err(QmdbError::InvalidRangeLength);
         }
@@ -3065,13 +2889,14 @@ where
             session: &session,
             namespace,
             mmr_size: mmr_size_for_watermark(watermark)?,
+            _marker: PhantomData::<H::Digest>,
         };
         let proof = verification::range_proof(&storage, start_location..end)
             .await
             .map_err(|e| QmdbError::CommonwareMmr(e.to_string()))?;
         Ok(AuthenticatedOperationRangeProof {
             watermark,
-            root: compute_auth_root(&session, namespace, watermark).await?,
+            root: compute_auth_root::<H>(&session, namespace, watermark).await?,
             start_location,
             proof,
             operations: load_auth_operation_range::<ImmutableOperation<K, V>>(
@@ -3087,14 +2912,16 @@ where
 }
 
 #[derive(Clone, Debug)]
-pub struct KeylessClient<V: Codec + Send + Sync> {
+pub struct KeylessClient<H: Hasher, V: Codec + Send + Sync> {
     client: StoreClient,
     value_cfg: V::Cfg,
     query_visible_sequence: Option<Arc<AtomicU64>>,
+    _marker: PhantomData<H>,
 }
 
-impl<V> KeylessClient<V>
+impl<H, V> KeylessClient<H, V>
 where
+    H: Hasher,
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
     KeylessOperation<V>: Encode + Decode<Cfg = V::Cfg> + Clone,
@@ -3108,11 +2935,10 @@ where
             client,
             value_cfg,
             query_visible_sequence: None,
+            _marker: PhantomData,
         }
     }
 
-    /// When set, blocks after each ingest until the query worker advances `visible_sequence`
-    /// to at least the client's observed consistency token (test harness synchronization).
     pub fn with_query_visible_sequence(mut self, seq: Arc<AtomicU64>) -> Self {
         self.query_visible_sequence = Some(seq);
         self
@@ -3208,7 +3034,7 @@ where
             load_auth_operation_bytes_range(&session, namespace, delta_start, end_exclusive)
                 .await?;
         let mut rows = Vec::new();
-        append_auth_nodes_incrementally(
+        append_auth_nodes_incrementally::<H>(
             &session,
             namespace,
             previous_ops_size,
@@ -3232,11 +3058,11 @@ where
         Ok(location)
     }
 
-    pub async fn root_at(&self, watermark: Location) -> Result<QmdbDigest, QmdbError> {
+    pub async fn root_at(&self, watermark: Location) -> Result<H::Digest, QmdbError> {
         let namespace = AuthenticatedBackendNamespace::Keyless;
         let session = self.client.create_session();
         require_published_auth_watermark(&session, namespace, watermark).await?;
-        compute_auth_root(&session, namespace, watermark).await
+        compute_auth_root::<H>(&session, namespace, watermark).await
     }
 
     pub async fn get_at(
@@ -3271,7 +3097,7 @@ where
         watermark: Location,
         start_location: Location,
         max_locations: u32,
-    ) -> Result<AuthenticatedOperationRangeProof<KeylessOperation<V>>, QmdbError> {
+    ) -> Result<AuthenticatedOperationRangeProof<H::Digest, KeylessOperation<V>>, QmdbError> {
         if max_locations == 0 {
             return Err(QmdbError::InvalidRangeLength);
         }
@@ -3294,13 +3120,14 @@ where
             session: &session,
             namespace,
             mmr_size: mmr_size_for_watermark(watermark)?,
+            _marker: PhantomData::<H::Digest>,
         };
         let proof = verification::range_proof(&storage, start_location..end)
             .await
             .map_err(|e| QmdbError::CommonwareMmr(e.to_string()))?;
         Ok(AuthenticatedOperationRangeProof {
             watermark,
-            root: compute_auth_root(&session, namespace, watermark).await?,
+            root: compute_auth_root::<H>(&session, namespace, watermark).await?,
             start_location,
             proof,
             operations: load_auth_operation_range::<KeylessOperation<V>>(
@@ -3315,18 +3142,19 @@ where
     }
 }
 
-struct AuthKvMmrStorage<'a> {
+struct AuthKvMmrStorage<'a, D: Digest> {
     session: &'a SerializableReadSession,
     namespace: AuthenticatedBackendNamespace,
     mmr_size: Position,
+    _marker: PhantomData<D>,
 }
 
-impl MmrStorage<QmdbDigest> for AuthKvMmrStorage<'_> {
+impl<D: Digest> MmrStorage<D> for AuthKvMmrStorage<'_, D> {
     async fn size(&self) -> Position {
         self.mmr_size
     }
 
-    async fn get_node(&self, position: Position) -> Result<Option<QmdbDigest>, mmr::Error> {
+    async fn get_node(&self, position: Position) -> Result<Option<D>, mmr::Error> {
         let key = encode_auth_node_key(self.namespace, position);
         let bytes = self
             .session
@@ -3336,14 +3164,14 @@ impl MmrStorage<QmdbDigest> for AuthKvMmrStorage<'_> {
         let Some(bytes) = bytes else {
             return Ok(None);
         };
-        if bytes.len() != DIGEST_LEN {
+        if bytes.len() != D::SIZE {
             return Err(mmr::Error::DataCorrupted(
                 "exoware-qmdb node digest has invalid length",
             ));
         }
-        let mut digest = [0u8; DIGEST_LEN];
-        digest.copy_from_slice(bytes.as_ref());
-        Ok(Some(QmdbDigest::from(digest)))
+        let digest = D::decode(bytes.as_ref())
+            .map_err(|_| mmr::Error::DataCorrupted("exoware-qmdb node digest decode failed"))?;
+        Ok(Some(digest))
     }
 }
 
@@ -3351,7 +3179,7 @@ async fn read_latest_auth_watermark(
     session: &SerializableReadSession,
     namespace: AuthenticatedBackendNamespace,
 ) -> Result<Option<Location>, QmdbError> {
-    let (start, end) = auth_namespace_bounds(auth_watermark_codec(), namespace);
+    let (start, end) = auth_namespace_bounds(AUTH_WATERMARK_CODEC, namespace);
     let rows = session
         .range_with_mode(&start, &end, 1, RangeMode::Reverse)
         .await?;
@@ -3438,14 +3266,14 @@ fn build_auth_upload_rows(
 
 type AuthRows = Vec<(Key, Vec<u8>)>;
 
-async fn append_auth_nodes_incrementally(
+async fn append_auth_nodes_incrementally<H: Hasher>(
     session: &SerializableReadSession,
     namespace: AuthenticatedBackendNamespace,
     previous_ops_size: Position,
     delta_operations: &[Vec<u8>],
     rows: &mut Vec<(Key, Vec<u8>)>,
-) -> Result<(Position, QmdbDigest), QmdbError> {
-    let mut peaks = Vec::<(Position, u32, QmdbDigest)>::new();
+) -> Result<(Position, H::Digest), QmdbError> {
+    let mut peaks = Vec::<(Position, u32, H::Digest)>::new();
     for (peak_pos, height) in PeakIterator::new(previous_ops_size) {
         let Some(bytes) = session
             .get(&encode_auth_node_key(namespace, peak_pos))
@@ -3466,7 +3294,7 @@ async fn append_auth_nodes_incrementally(
     }
 
     let mut current_size = previous_ops_size;
-    let mut hasher = StandardHasher::<Sha256>::new();
+    let mut hasher = StandardHasher::<H>::new();
     for encoded in delta_operations {
         let leaf_pos = current_size;
         let leaf_digest = mmr::hasher::Hasher::leaf_digest(&mut hasher, leaf_pos, encoded);
@@ -3513,11 +3341,11 @@ async fn append_auth_nodes_incrementally(
     Ok((current_size, root))
 }
 
-async fn compute_auth_root(
+async fn compute_auth_root<H: Hasher>(
     session: &SerializableReadSession,
     namespace: AuthenticatedBackendNamespace,
     watermark: Location,
-) -> Result<QmdbDigest, QmdbError> {
+) -> Result<H::Digest, QmdbError> {
     let size = mmr_size_for_watermark(watermark)?;
     let leaves = watermark
         .checked_add(1)
@@ -3537,7 +3365,7 @@ async fn compute_auth_root(
             format!("authenticated peak node at position {peak_pos}"),
         )?);
     }
-    let mut hasher = StandardHasher::<Sha256>::new();
+    let mut hasher = StandardHasher::<H>::new();
     Ok(mmr::hasher::Hasher::root(&mut hasher, leaves, peaks.iter()))
 }
 
@@ -3629,27 +3457,11 @@ where
         .collect()
 }
 
-fn auth_operation_codec() -> KeyCodec {
-    KeyCodec::new(RESERVED_BITS, AUTH_OP_FAMILY).expect("static authenticated op codec")
-}
-
-fn auth_node_codec() -> KeyCodec {
-    KeyCodec::new(RESERVED_BITS, AUTH_NODE_FAMILY).expect("static authenticated node codec")
-}
-
-fn auth_watermark_codec() -> KeyCodec {
-    KeyCodec::new(RESERVED_BITS, AUTH_WATERMARK_FAMILY)
-        .expect("static authenticated watermark codec")
-}
-
-fn auth_presence_codec() -> KeyCodec {
-    KeyCodec::new(RESERVED_BITS, AUTH_INDEX_FAMILY).expect("static authenticated presence codec")
-}
-
-fn auth_immutable_update_codec() -> KeyCodec {
-    KeyCodec::new(RESERVED_BITS, AUTH_IMMUTABLE_UPDATE_FAMILY)
-        .expect("static authenticated immutable update codec")
-}
+const AUTH_OPERATION_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, AUTH_OP_FAMILY);
+const AUTH_NODE_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, AUTH_NODE_FAMILY);
+const AUTH_WATERMARK_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, AUTH_WATERMARK_FAMILY);
+const AUTH_PRESENCE_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, AUTH_INDEX_FAMILY);
+const AUTH_IMMUTABLE_UPDATE_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, AUTH_IMMUTABLE_UPDATE_FAMILY);
 
 fn auth_namespace_bounds(codec: KeyCodec, namespace: AuthenticatedBackendNamespace) -> (Key, Key) {
     let tail_len = 8usize;
@@ -3699,7 +3511,7 @@ fn ensure_auth_namespace(
 }
 
 fn encode_auth_operation_key(namespace: AuthenticatedBackendNamespace, location: Location) -> Key {
-    let codec = auth_operation_codec();
+    let codec = AUTH_OPERATION_CODEC;
     let mut key = codec
         .new_key_with_len(codec.min_key_len_for_payload(AUTH_NAMESPACE_LEN + 8))
         .expect("authenticated operation key length should fit");
@@ -3717,7 +3529,7 @@ fn encode_auth_operation_key(namespace: AuthenticatedBackendNamespace, location:
 }
 
 fn encode_auth_node_key(namespace: AuthenticatedBackendNamespace, position: Position) -> Key {
-    let codec = auth_node_codec();
+    let codec = AUTH_NODE_CODEC;
     let mut key = codec
         .new_key_with_len(codec.min_key_len_for_payload(AUTH_NAMESPACE_LEN + 8))
         .expect("authenticated node key length should fit");
@@ -3735,7 +3547,7 @@ fn encode_auth_node_key(namespace: AuthenticatedBackendNamespace, position: Posi
 }
 
 fn encode_auth_watermark_key(namespace: AuthenticatedBackendNamespace, location: Location) -> Key {
-    let codec = auth_watermark_codec();
+    let codec = AUTH_WATERMARK_CODEC;
     let mut key = codec
         .new_key_with_len(codec.min_key_len_for_payload(AUTH_NAMESPACE_LEN + 8))
         .expect("authenticated watermark key length should fit");
@@ -3753,7 +3565,7 @@ fn encode_auth_watermark_key(namespace: AuthenticatedBackendNamespace, location:
 }
 
 fn encode_auth_presence_key(namespace: AuthenticatedBackendNamespace, location: Location) -> Key {
-    let codec = auth_presence_codec();
+    let codec = AUTH_PRESENCE_CODEC;
     let mut key = codec
         .new_key_with_len(codec.min_key_len_for_payload(AUTH_NAMESPACE_LEN + 8))
         .expect("authenticated presence key length should fit");
@@ -3771,7 +3583,7 @@ fn encode_auth_presence_key(namespace: AuthenticatedBackendNamespace, location: 
 }
 
 fn encode_auth_immutable_update_key(raw_key: &[u8], location: Location) -> Result<Key, QmdbError> {
-    let codec = auth_immutable_update_codec();
+    let codec = AUTH_IMMUTABLE_UPDATE_CODEC;
     let ordered_key = encode_ordered_update_payload(codec, raw_key, UPDATE_VERSION_LEN)?;
     let total_len = codec.min_key_len_for_payload(ordered_key.len() + UPDATE_VERSION_LEN);
     let mut key = codec
@@ -3791,7 +3603,7 @@ fn encode_auth_immutable_update_key(raw_key: &[u8], location: Location) -> Resul
 }
 
 fn decode_auth_immutable_update_location(key: &Key) -> Result<Location, QmdbError> {
-    let codec = auth_immutable_update_codec();
+    let codec = AUTH_IMMUTABLE_UPDATE_CODEC;
     if !codec.matches(key) {
         return Err(QmdbError::CorruptData(
             "authenticated immutable update key prefix mismatch".to_string(),
@@ -3867,9 +3679,10 @@ where
         ));
         if let ImmutableOperation::Set(key, value) = operation {
             keyed_operation_count += 1;
+            let update_row = UpdateRow { key: key.clone(), value: Some(value.clone()) };
             rows.push((
                 encode_auth_immutable_update_key(key.as_ref(), location)?,
-                encode_update_row(key.as_ref(), Some(value.encode().as_ref()))?,
+                update_row.encode().to_vec(),
             ));
         }
     }
@@ -3884,7 +3697,7 @@ fn decode_auth_operation_location(
     namespace: AuthenticatedBackendNamespace,
     key: &Key,
 ) -> Result<Location, QmdbError> {
-    let codec = auth_operation_codec();
+    let codec = AUTH_OPERATION_CODEC;
     ensure_auth_namespace(codec, namespace, key, "authenticated operation")?;
     let bytes = codec
         .read_payload_exact::<8>(key, AUTH_NAMESPACE_LEN)
@@ -3900,7 +3713,7 @@ fn decode_auth_watermark_location(
     namespace: AuthenticatedBackendNamespace,
     key: &Key,
 ) -> Result<Location, QmdbError> {
-    let codec = auth_watermark_codec();
+    let codec = AUTH_WATERMARK_CODEC;
     ensure_auth_namespace(codec, namespace, key, "authenticated watermark")?;
     let bytes = codec
         .read_payload_exact::<8>(key, AUTH_NAMESPACE_LEN)
@@ -3915,13 +3728,19 @@ fn decode_auth_watermark_location(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_codec::RangeCfg;
+    use commonware_cryptography::Sha256;
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, tokio as cw_tokio, Metrics as _, Runner as _,
     };
     use commonware_storage::{
         mmr::hasher::Hasher as _,
         qmdb::{
-            current::{ordered::variable::Db as LocalQmdbDb, VariableConfig},
+            current::{
+                ordered::db::KeyValueProof,
+                ordered::variable::Db as LocalQmdbDb,
+                proof::RangeProof, VariableConfig,
+            },
             immutable::{Config as ImmutableConfig, Immutable as LocalImmutableDb},
             keyless::{Config as KeylessConfig, Keyless as LocalKeylessDb},
             operation::Operation as _,
@@ -3936,6 +3755,16 @@ mod tests {
     use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
     use std::sync::{atomic::AtomicU64, Arc};
 
+    type TestDigest = commonware_cryptography::sha256::Digest;
+    type BatchOperation = QmdbOperation<Vec<u8>, Vec<u8>>;
+    type BatchProof = mmr::Proof<TestDigest>;
+    type UnorderedBatchOperation = UnorderedQmdbOperation<Vec<u8>, Vec<u8>>;
+    const BITMAP_CHUNK_BYTES: usize = 32;
+    type TestOrderedClient = OrderedClient<Sha256, Vec<u8>, Vec<u8>, BITMAP_CHUNK_BYTES>;
+    type TestUnorderedClient = UnorderedClient<Sha256, Vec<u8>, Vec<u8>>;
+    type TestImmutableClient = ImmutableClient<Sha256, FixedBytes<32>, Vec<u8>>;
+    type TestKeylessClient = KeylessClient<Sha256, Vec<u8>>;
+
     type LocalVariableQmdb =
         LocalQmdbDb<cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, BITMAP_CHUNK_BYTES>;
     type LocalImmutable =
@@ -3948,23 +3777,41 @@ mod tests {
         visible_sequence: Arc<AtomicU64>,
     }
 
+    fn test_ordered_op_cfg() -> <BatchOperation as commonware_codec::Read>::Cfg {
+        (
+            ((0..=MAX_OPERATION_SIZE).into(), ()),
+            ((0..=MAX_OPERATION_SIZE).into(), ()),
+        )
+    }
+
+    fn test_unordered_op_cfg() -> <UnorderedBatchOperation as commonware_codec::Read>::Cfg {
+        (
+            ((0..=MAX_OPERATION_SIZE).into(), ()),
+            ((0..=MAX_OPERATION_SIZE).into(), ()),
+        )
+    }
+
+    fn test_update_row_cfg() -> (<Vec<u8> as commonware_codec::Read>::Cfg, <Vec<u8> as commonware_codec::Read>::Cfg) {
+        (((0..=MAX_OPERATION_SIZE).into(), ()), ((0..=MAX_OPERATION_SIZE).into(), ()))
+    }
+
     impl TestStoreBridgeServers {
         fn client(&self) -> StoreClient {
             StoreClient::with_split_urls(&self.query_url, &self.ingest_url, &self.query_url)
         }
 
-        fn qmdb_client(&self) -> OrderedClient {
-            OrderedClient::from_client(self.client())
+        fn qmdb_client(&self) -> TestOrderedClient {
+            TestOrderedClient::from_client(self.client(), test_ordered_op_cfg(), test_update_row_cfg())
                 .with_query_visible_sequence(self.visible_sequence.clone())
         }
 
-        fn immutable_client(&self) -> ImmutableClient<FixedBytes<32>, Vec<u8>> {
-            ImmutableClient::from_client(self.client(), ((0..=10000).into(), ()))
+        fn immutable_client(&self) -> TestImmutableClient {
+            TestImmutableClient::from_client(self.client(), ((0..=10000).into(), ()), ((), ((0..=10000).into(), ())))
                 .with_query_visible_sequence(self.visible_sequence.clone())
         }
 
-        fn keyless_client(&self) -> KeylessClient<Vec<u8>> {
-            KeylessClient::from_client(self.client(), ((0..=10000).into(), ()))
+        fn keyless_client(&self) -> TestKeylessClient {
+            TestKeylessClient::from_client(self.client(), ((0..=10000).into(), ()))
                 .with_query_visible_sequence(self.visible_sequence.clone())
         }
     }
@@ -4102,7 +3949,7 @@ mod tests {
     #[derive(Clone, Debug)]
     struct LocalImmutableReference {
         latest_location: Location,
-        root: QmdbDigest,
+        root: TestDigest,
         proof: BatchProof,
         operations: Vec<ImmutableOperation<FixedBytes<32>, Vec<u8>>>,
         queried_key: FixedBytes<32>,
@@ -4160,7 +4007,7 @@ mod tests {
     #[derive(Clone, Debug)]
     struct LocalKeylessReference {
         latest_location: Location,
-        root: QmdbDigest,
+        root: TestDigest,
         proof: BatchProof,
         operations: Vec<KeylessOperation<Vec<u8>>>,
         queried_location: Location,
@@ -4254,7 +4101,7 @@ mod tests {
 
     #[derive(Clone, Debug)]
     struct LocalKeyProofReference {
-        proof: BatchCurrentKeyValueProof,
+        proof: KeyValueProof<Vec<u8>, TestDigest, BITMAP_CHUNK_BYTES>,
         operation: BatchOperation,
     }
 
@@ -4270,10 +4117,10 @@ mod tests {
         latest_location: Location,
         operations: Vec<BatchOperation>,
         historical_range_proof: BatchProof,
-        ops_root: QmdbDigest,
-        current_range_proof: BatchCurrentRangeProof,
+        ops_root: TestDigest,
+        current_range_proof: RangeProof<TestDigest>,
         current_chunks: Vec<[u8; BITMAP_CHUNK_BYTES]>,
-        current_root: QmdbDigest,
+        current_root: TestDigest,
         multi_proof: BatchProof,
         multi_operations: Vec<(Location, BatchOperation)>,
         key_proofs: BTreeMap<Vec<u8>, LocalKeyProofReference>,
@@ -4282,11 +4129,11 @@ mod tests {
 
     #[derive(Clone, Debug)]
     struct LocalBoundaryReference {
-        ops_root: QmdbDigest,
+        ops_root: TestDigest,
         historical_range_proof: BatchProof,
         historical_range_operations: Vec<BatchOperation>,
-        current_root: QmdbDigest,
-        current_range_proof: BatchCurrentRangeProof,
+        current_root: TestDigest,
+        current_range_proof: RangeProof<TestDigest>,
         current_range_operations: Vec<BatchOperation>,
         current_chunks: Vec<[u8; BITMAP_CHUNK_BYTES]>,
         multi_proof: BatchProof,
@@ -4298,7 +4145,7 @@ mod tests {
     struct RandomUploadWindow {
         latest_location: Location,
         operations: Vec<BatchOperation>,
-        current_boundary: CurrentBoundaryState,
+        current_boundary: CurrentBoundaryState<TestDigest, BITMAP_CHUNK_BYTES>,
     }
 
     #[derive(Clone, Debug)]
@@ -4371,7 +4218,7 @@ mod tests {
                     .map(|op| op.encode().to_vec())
                     .collect::<Vec<_>>();
                 let ops_mmr =
-                    build_operation_mmr(&encoded_operations).expect("build local batch mmr");
+                    build_operation_mmr::<Sha256>(&encoded_operations).expect("build local batch mmr");
                 let ops_root = *ops_mmr.root();
                 let mut range_hasher = StandardHasher::<Sha256>::new();
                 let (current_range_proof, current_operations, current_chunks) = db
@@ -4653,7 +4500,7 @@ mod tests {
                         .map(|operation| operation.encode().to_vec())
                         .collect::<Vec<_>>();
                     let ops_mmr =
-                        build_operation_mmr(&encoded_operations).expect("build local ops mmr");
+                        build_operation_mmr::<Sha256>(&encoded_operations).expect("build local ops mmr");
                     let ops_root = *ops_mmr.root();
                     let current_root = db.root();
 
@@ -4736,16 +4583,18 @@ mod tests {
         .expect("join local boundary reference builder")
     }
 
-    async fn rebuilt_current_root(operations: &[BatchOperation]) -> QmdbDigest {
-        let state = RebuiltCurrentState::build(operations.to_vec()).expect("rebuild current state");
-        let storage = RebuiltCurrentStorage {
+    async fn rebuilt_current_root(operations: &[BatchOperation]) -> TestDigest {
+        let state =
+            RebuiltCurrentState::<Sha256, Vec<u8>, Vec<u8>, BITMAP_CHUNK_BYTES>::build(operations.to_vec())
+                .expect("rebuild current state");
+        let storage: RebuiltCurrentStorage<'_, _, BITMAP_CHUNK_BYTES> = RebuiltCurrentStorage {
             ops_mmr: &state.ops_mmr,
             grafted_mmr: &state.grafted_mmr,
         };
-        let grafted_root = compute_storage_root(&storage)
+        let grafted_root = compute_storage_root::<Sha256>(&storage)
             .await
             .expect("compute rebuilt grafted root");
-        combine_current_roots(
+        combine_current_roots::<Sha256>(
             &state.ops_root,
             &grafted_root,
             state
@@ -4758,8 +4607,12 @@ mod tests {
     async fn current_boundary_state_from_operations(
         previous_operations: Option<&[BatchOperation]>,
         operations: &[BatchOperation],
-    ) -> CurrentBoundaryState {
-        crate::build_current_boundary_state(previous_operations, operations).await
+    ) -> CurrentBoundaryState<TestDigest, BITMAP_CHUNK_BYTES> {
+        crate::build_current_boundary_state::<Sha256, Vec<u8>, Vec<u8>, BITMAP_CHUNK_BYTES>(
+            previous_operations,
+            operations,
+        )
+        .await
     }
 
     #[tokio::test]
@@ -4803,7 +4656,7 @@ mod tests {
         assert_eq!(remote.root, reference.root);
         assert_eq!(remote.proof, reference.proof);
         assert_eq!(remote.operations, reference.operations);
-        assert!(remote.verify());
+        assert!(remote.verify::<Sha256>());
     }
 
     #[tokio::test]
@@ -4847,7 +4700,7 @@ mod tests {
         assert_eq!(remote.root, reference.root);
         assert_eq!(remote.proof, reference.proof);
         assert_eq!(remote.operations, reference.operations);
-        assert!(remote.verify());
+        assert!(remote.verify::<Sha256>());
     }
 
     #[tokio::test]
@@ -4855,24 +4708,24 @@ mod tests {
         let servers = spawn_test_server_with_query_tick(Duration::from_millis(100)).await;
         let reference = build_local_keyless_reference().await;
 
-        KeylessClient::<Vec<u8>>::from_client(servers.client(), ((0..=10000).into(), ()))
+        TestKeylessClient::from_client(servers.client(), ((0..=10000).into(), ()))
             .upload_operations(reference.latest_location, &reference.operations)
             .await
             .expect("upload keyless ops");
-        KeylessClient::<Vec<u8>>::from_client(servers.client(), ((0..=10000).into(), ()))
+        TestKeylessClient::from_client(servers.client(), ((0..=10000).into(), ()))
             .publish_writer_location_watermark(reference.latest_location)
             .await
             .expect("publish keyless watermark");
 
         assert_eq!(
-            KeylessClient::<Vec<u8>>::from_client(servers.client(), ((0..=10000).into(), ()))
+            TestKeylessClient::from_client(servers.client(), ((0..=10000).into(), ()))
                 .root_at(reference.latest_location)
                 .await
                 .expect("keyless root"),
             reference.root
         );
         assert_eq!(
-            KeylessClient::<Vec<u8>>::from_client(servers.client(), ((0..=10000).into(), ()))
+            TestKeylessClient::from_client(servers.client(), ((0..=10000).into(), ()))
                 .get_at(reference.queried_location, reference.latest_location)
                 .await
                 .expect("keyless get"),
@@ -4880,7 +4733,7 @@ mod tests {
         );
 
         let remote =
-            KeylessClient::<Vec<u8>>::from_client(servers.client(), ((0..=10000).into(), ()))
+            TestKeylessClient::from_client(servers.client(), ((0..=10000).into(), ()))
                 .operation_range_proof(
                     reference.latest_location,
                     Location::new(0),
@@ -4891,13 +4744,13 @@ mod tests {
         assert_eq!(remote.root, reference.root);
         assert_eq!(remote.proof, reference.proof);
         assert_eq!(remote.operations, reference.operations);
-        assert!(remote.verify());
+        assert!(remote.verify::<Sha256>());
     }
 
     #[tokio::test]
     async fn ordered_upload_receipt_retries_until_slow_query_tick_catches_up() {
         let servers = spawn_test_server_with_query_tick(Duration::from_millis(500)).await;
-        let client = OrderedClient::from_client(servers.client());
+        let client = TestOrderedClient::from_client(servers.client(), test_ordered_op_cfg(), test_update_row_cfg());
         let reference = build_local_qmdb_reference().await;
 
         let receipt = client
@@ -4919,22 +4772,22 @@ mod tests {
             UnorderedBatchOperation::Update(UnorderedUpdate(b"beta".to_vec(), b"two".to_vec())),
         ];
 
-        UnorderedClient::from_client(servers.client())
+        TestUnorderedClient::from_client(servers.client(), test_unordered_op_cfg(), test_update_row_cfg())
             .upload_operations(latest_location, &operations)
             .await
             .expect("upload unordered ops");
-        UnorderedClient::from_client(servers.client())
+        TestUnorderedClient::from_client(servers.client(), test_unordered_op_cfg(), test_update_row_cfg())
             .publish_writer_location_watermark(latest_location)
             .await
             .expect("publish unordered watermark");
 
-        let watermark = UnorderedClient::from_client(servers.client())
+        let watermark = TestUnorderedClient::from_client(servers.client(), test_unordered_op_cfg(), test_update_row_cfg())
             .writer_location_watermark()
             .await
             .expect("unordered watermark");
         assert_eq!(watermark, Some(latest_location));
 
-        let queried = UnorderedClient::from_client(servers.client())
+        let queried = TestUnorderedClient::from_client(servers.client(), test_unordered_op_cfg(), test_update_row_cfg())
             .query_many_at(&[b"alpha".as_slice(), b"beta".as_slice()], latest_location)
             .await
             .expect("unordered query_many_at");
@@ -4951,7 +4804,7 @@ mod tests {
     #[tokio::test]
     async fn immutable_upload_receipt_retries_until_slow_query_tick_catches_up() {
         let servers = spawn_test_server_with_query_tick(Duration::from_millis(500)).await;
-        let client = ImmutableClient::from_client(servers.client(), ((0..=10000).into(), ()));
+        let client = TestImmutableClient::from_client(servers.client(), ((0..=10000).into(), ()), ((), ((0..=10000).into(), ())));
         let reference = build_local_immutable_reference().await;
 
         let receipt = client
@@ -4967,7 +4820,7 @@ mod tests {
     #[tokio::test]
     async fn keyless_upload_receipt_retries_until_slow_query_tick_catches_up() {
         let servers = spawn_test_server_with_query_tick(Duration::from_millis(500)).await;
-        let client = KeylessClient::from_client(servers.client(), ((0..=10000).into(), ()));
+        let client = TestKeylessClient::from_client(servers.client(), ((0..=10000).into(), ()));
         let reference = build_local_keyless_reference().await;
 
         let receipt = client
@@ -5143,7 +4996,7 @@ mod tests {
             immutable_partial.operations,
             immutable_reference.operations[1..2].to_vec()
         );
-        assert!(immutable_partial.verify());
+        assert!(immutable_partial.verify::<Sha256>());
 
         let keyless_partial = keyless
             .operation_range_proof(keyless_reference.latest_location, Location::new(1), 1)
@@ -5154,7 +5007,7 @@ mod tests {
             keyless_partial.operations,
             keyless_reference.operations[1..2].to_vec()
         );
-        assert!(keyless_partial.verify());
+        assert!(keyless_partial.verify::<Sha256>());
 
         assert!(matches!(
             immutable
@@ -5287,8 +5140,16 @@ mod tests {
 
     #[test]
     fn update_row_round_trip() {
-        let encoded = encode_update_row(b"alpha", Some(b"bravo")).expect("encode");
-        let decoded = decode_update_row(&encoded).expect("decode");
+        let row = UpdateRow {
+            key: b"alpha".to_vec(),
+            value: Some(b"bravo".to_vec()),
+        };
+        let encoded = row.encode().to_vec();
+        let decoded = <UpdateRow<Vec<u8>, Vec<u8>> as CodecRead>::read_cfg(
+            &mut encoded.as_slice(),
+            &(((0..=MAX_OPERATION_SIZE).into(), ()), ((0..=MAX_OPERATION_SIZE).into(), ())),
+        )
+        .expect("decode");
         assert_eq!(decoded.key, b"alpha");
         assert_eq!(decoded.value.as_deref(), Some(b"bravo".as_slice()));
     }
@@ -5347,24 +5208,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upload_batch_requires_exact_ordered_operations() {
-        let servers = spawn_test_server().await;
-        let client = servers.qmdb_client();
-        let err = client
-            .upload_batch(Location::new(1), &[BatchEntry::put(b"dup", b"v1")])
-            .await
-            .expect_err("ordered convenience upload should fail");
-        assert!(matches!(err, QmdbError::ExactOrderedOperationsRequired));
-
-        let typed = [TypedBatchEntry::put(&7u64, &11u32)];
-        let err = client
-            .upload_typed_batch(Location::new(1), &typed)
-            .await
-            .expect_err("typed ordered convenience upload should fail");
-        assert!(matches!(err, QmdbError::ExactOrderedOperationsRequired));
-    }
-
-    #[tokio::test]
     async fn local_current_ordered_reference_matches_qmdb_queries_and_proofs() {
         let reference = build_local_qmdb_reference().await;
         let servers = spawn_test_server().await;
@@ -5392,18 +5235,11 @@ mod tests {
             )
             .await
             .expect("query many");
-        assert_eq!(
-            queried[0].as_ref().and_then(|value| value.value.clone()),
-            reference.values.get(b"alpha".as_slice()).cloned().flatten()
-        );
-        assert_eq!(
-            queried[1].as_ref().and_then(|value| value.value.clone()),
-            reference.values.get(b"beta".as_slice()).cloned().flatten()
-        );
-        assert_eq!(
-            queried[2].as_ref().and_then(|value| value.value.clone()),
-            reference.values.get(b"gamma".as_slice()).cloned().flatten()
-        );
+        for (i, key) in [b"alpha".as_slice(), b"beta", b"gamma"].iter().enumerate() {
+            let queried_value = queried[i].as_ref().and_then(|v| v.value.clone());
+            let expected = reference.values.get(*key).cloned().flatten();
+            assert_eq!(queried_value, expected);
+        }
 
         let historical_range = client
             .operation_range_proof(
@@ -5416,7 +5252,7 @@ mod tests {
         assert_eq!(historical_range.root, reference.ops_root);
         assert_eq!(historical_range.proof, reference.historical_range_proof);
         assert_eq!(historical_range.operations, reference.operations);
-        assert!(historical_range.verify());
+        assert!(historical_range.verify::<Sha256>());
 
         let remote_multi = client
             .multi_proof_at(
@@ -5428,7 +5264,7 @@ mod tests {
         assert_eq!(remote_multi.root, reference.ops_root);
         assert_eq!(remote_multi.proof, reference.multi_proof);
         assert_eq!(remote_multi.operations, reference.multi_operations);
-        assert!(remote_multi.verify());
+        assert!(remote_multi.verify::<Sha256>());
 
         assert_eq!(
             client
@@ -5450,7 +5286,7 @@ mod tests {
         assert_eq!(current_range.proof, reference.current_range_proof);
         assert_eq!(current_range.operations, reference.operations);
         assert_eq!(current_range.chunks, reference.current_chunks);
-        assert!(current_range.verify());
+        assert!(current_range.verify::<Sha256>());
 
         for key in [b"alpha".as_slice(), b"gamma".as_slice()] {
             let remote = client
@@ -5461,7 +5297,7 @@ mod tests {
             assert_eq!(remote.root, reference.current_root);
             assert_eq!(remote.proof, expected.proof);
             assert_eq!(remote.operation, expected.operation);
-            assert!(remote.verify());
+            assert!(remote.verify::<Sha256>());
         }
     }
 
@@ -5540,7 +5376,7 @@ mod tests {
                 .await
                 .expect("specific any range proof")
         );
-        assert!(any_range.verify());
+        assert!(any_range.verify::<Sha256>());
 
         let current_range = client
             .operation_range_proof_for_variant(
@@ -5569,7 +5405,7 @@ mod tests {
                 .await
                 .expect("specific current range proof")
         );
-        assert!(current_range.verify());
+        assert!(current_range.verify::<Sha256>());
     }
 
     #[tokio::test]
@@ -5599,7 +5435,7 @@ mod tests {
             .iter()
             .map(|op| op.encode().to_vec())
             .collect::<Vec<_>>();
-        let ops_mmr = build_operation_mmr(&encoded_prefix).expect("build prefix mmr");
+        let ops_mmr = build_operation_mmr::<Sha256>(&encoded_prefix).expect("build prefix mmr");
         let expected_root = *ops_mmr.root();
         let start = Location::new(1);
         let expected_end = Location::new((prefix_operations.len()).min(4) as u64);
@@ -5626,7 +5462,7 @@ mod tests {
             any_range.operations,
             prefix_operations[*start as usize..*expected_end as usize].to_vec()
         );
-        assert!(any_range.verify());
+        assert!(any_range.verify::<Sha256>());
 
         assert!(matches!(
             client
@@ -5807,7 +5643,7 @@ mod tests {
                 historical_range.operations,
                 reference.historical_range_operations
             );
-            assert!(historical_range.verify());
+            assert!(historical_range.verify::<Sha256>());
 
             let multi_key_refs = case
                 .plan
@@ -5822,7 +5658,7 @@ mod tests {
             assert_eq!(remote_multi.root, reference.ops_root);
             assert_eq!(remote_multi.proof, reference.multi_proof);
             assert_eq!(remote_multi.operations, reference.multi_operations);
-            assert!(remote_multi.verify());
+            assert!(remote_multi.verify::<Sha256>());
 
             assert_eq!(
                 client
@@ -5844,7 +5680,7 @@ mod tests {
             assert_eq!(current_range.proof, reference.current_range_proof);
             assert_eq!(current_range.operations, reference.current_range_operations);
             assert_eq!(current_range.chunks, reference.current_chunks);
-            assert!(current_range.verify());
+            assert!(current_range.verify::<Sha256>());
 
             for key in &case.plan.key_proof_keys {
                 let remote = client
@@ -5855,7 +5691,7 @@ mod tests {
                 assert_eq!(remote.root, reference.current_root);
                 assert_eq!(remote.proof, expected.proof);
                 assert_eq!(remote.operation, expected.operation);
-                assert!(remote.verify());
+                assert!(remote.verify::<Sha256>());
             }
         }
     }
@@ -5933,27 +5769,27 @@ mod tests {
             .await
             .expect("range proof");
         assert_eq!(range.root, expected_root);
-        assert!(range.verify());
+        assert!(range.verify::<Sha256>());
 
         let alpha = client
             .key_value_proof_at(lower_watermark, b"alpha".as_slice())
             .await
             .expect("alpha key proof at lower watermark");
         assert_eq!(alpha.root, expected_root);
-        assert!(alpha.verify());
+        assert!(alpha.verify::<Sha256>());
 
         let gamma = client
             .key_value_proof_at(lower_watermark, b"gamma".as_slice())
             .await
             .expect("gamma key proof at lower watermark");
         assert_eq!(gamma.root, expected_root);
-        assert!(gamma.verify());
+        assert!(gamma.verify::<Sha256>());
 
         let historical = client
             .multi_proof_at(lower_watermark, &[b"alpha".as_slice(), b"gamma".as_slice()])
             .await
             .expect("historical proof below low watermark");
-        assert!(historical.verify());
+        assert!(historical.verify::<Sha256>());
     }
 
     #[tokio::test]
@@ -6068,7 +5904,7 @@ mod tests {
             .operation_range_proof(loc_2, Location::new(0), 4)
             .await
             .expect("full range proof");
-        assert!(proof.verify());
+        assert!(proof.verify::<Sha256>());
     }
 
     /// `load_operation_bytes_range` uses an inclusive store `end` key at
@@ -6205,11 +6041,13 @@ async fn harness_load_operation_bytes_range(
     start: Location,
     end_location_exclusive: Location,
 ) -> Result<Vec<Vec<u8>>, QmdbError> {
-    let core = HistoricalOpsClientCore {
-        client,
-        config: &QmdbConfig::default(),
-        query_visible_sequence: None,
-    };
+    let core: HistoricalOpsClientCore<'_, commonware_cryptography::sha256::Digest, Vec<u8>, Vec<u8>> =
+        HistoricalOpsClientCore {
+            client,
+            query_visible_sequence: None,
+            update_row_cfg: (((0..=MAX_OPERATION_SIZE).into(), ()), ((0..=MAX_OPERATION_SIZE).into(), ())),
+            _marker: PhantomData,
+        };
     core.load_operation_bytes_range(session, start, end_location_exclusive)
         .await
 }

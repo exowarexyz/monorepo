@@ -9,6 +9,7 @@ description = "Store-backed bridge for Commonware QMDB and related authenticated
 name = "store_qmdb"
 
 [dependencies]
+bytes = { workspace = true }
 commonware-codec = "2026.3.0"
 commonware-cryptography = "2026.3.0"
 commonware-storage = "2026.3.0"

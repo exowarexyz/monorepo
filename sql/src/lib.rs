@@ -79,11 +79,10 @@ fn primary_key_codec(table_prefix: u8) -> Result<KeyCodec, String> {
             MAX_TABLES - 1
         ));
     }
-    KeyCodec::new(
+    Ok(KeyCodec::new(
         PRIMARY_RESERVED_BITS,
         u16::from(table_prefix) << KEY_KIND_BITS,
-    )
-    .map_err(|e| format!("invalid primary key codec: {e}"))
+    ))
 }
 
 fn secondary_index_codec(table_prefix: u8, index_id: u8) -> Result<KeyCodec, String> {
@@ -102,8 +101,7 @@ fn secondary_index_codec(table_prefix: u8, index_id: u8) -> Result<KeyCodec, Str
     let family = (u16::from(table_prefix) << (KEY_KIND_BITS + INDEX_SLOT_BITS))
         | (1u16 << INDEX_SLOT_BITS)
         | u16::from(index_id);
-    KeyCodec::new(INDEX_FAMILY_BITS, family)
-        .map_err(|e| format!("invalid secondary index codec: {e}"))
+    Ok(KeyCodec::new(INDEX_FAMILY_BITS, family))
 }
 
 fn allocate_codec_key(codec: KeyCodec, payload_len: usize) -> Result<KeyMut, String> {

@@ -14,15 +14,29 @@ use commonware_storage::qmdb::{
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_cryptography::Sha256;
+use commonware_storage::qmdb::any::unordered::variable::Operation as UnorderedQmdbOperation;
 use store_qmdb::MAX_OPERATION_SIZE;
-use store_qmdb::{UnorderedBatchOperation, UnorderedClient};
+use store_qmdb::UnorderedClient;
 
 use common::retry;
 
 type Digest = commonware_cryptography::sha256::Digest;
 type BatchProof = commonware_storage::mmr::Proof<Digest>;
-type LocalDb =
-    LocalUnorderedDb<cw_tokio::Context, Vec<u8>, Vec<u8>, commonware_cryptography::Sha256, TwoCap>;
+type UnorderedBatchOperation = UnorderedQmdbOperation<Vec<u8>, Vec<u8>>;
+type TestUnorderedClient = UnorderedClient<Sha256, Vec<u8>, Vec<u8>>;
+type LocalDb = LocalUnorderedDb<cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap>;
+
+fn op_cfg() -> <UnorderedBatchOperation as commonware_codec::Read>::Cfg {
+    (
+        ((0..=MAX_OPERATION_SIZE).into(), ()),
+        ((0..=MAX_OPERATION_SIZE).into(), ()),
+    )
+}
+
+fn update_row_cfg() -> (<Vec<u8> as commonware_codec::Read>::Cfg, <Vec<u8> as commonware_codec::Read>::Cfg) {
+    (((0..=MAX_OPERATION_SIZE).into(), ()), ((0..=MAX_OPERATION_SIZE).into(), ()))
+}
 
 struct LocalReference {
     latest_location: Location,
@@ -101,7 +115,7 @@ async fn unordered_round_trip() {
 
     retry(
         || {
-            let c = UnorderedClient::from_client(client.clone());
+            let c = TestUnorderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
             let ops = local.operations.clone();
             let loc = local.latest_location;
             async move {
@@ -115,7 +129,7 @@ async fn unordered_round_trip() {
 
     retry(
         || {
-            let c = UnorderedClient::from_client(client.clone());
+            let c = TestUnorderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
             let loc = local.latest_location;
             async move {
                 c.publish_writer_location_watermark(loc).await?;
@@ -126,7 +140,7 @@ async fn unordered_round_trip() {
     )
     .await;
 
-    let c = UnorderedClient::from_client(client.clone());
+    let c = TestUnorderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
     let watermark = c.writer_location_watermark().await.expect("watermark");
     assert_eq!(watermark, Some(local.latest_location));
 
@@ -154,6 +168,6 @@ async fn unordered_round_trip() {
         )
         .await
         .expect("proof");
-    assert!(proof.verify(), "proof must verify");
+    assert!(proof.verify::<Sha256>(), "proof must verify");
     assert_eq!(proof.operations, local.operations);
 }
