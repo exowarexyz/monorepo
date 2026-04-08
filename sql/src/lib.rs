@@ -352,7 +352,6 @@ mod tests {
             };
             Ok((
                 ProtoGetResponse {
-                    found: value.is_some(),
                     value: value.map(|v| v.to_vec()),
                     ..Default::default()
                 },
@@ -7615,7 +7614,7 @@ mod tests {
 
         impl TestServers {
             fn client(&self) -> StoreClient {
-                StoreClient::with_split_urls(&self.query_url, &self.ingest_url, &self.query_url)
+                StoreClient::with_split_urls(&self.query_url, &self.ingest_url, &self.query_url, &self.ingest_url)
             }
         }
 

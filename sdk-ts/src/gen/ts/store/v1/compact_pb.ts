@@ -14,20 +14,34 @@ export const file_store_v1_compact: GenFile = /*@__PURE__*/
   fileDesc("ChZzdG9yZS92MS9jb21wYWN0LnByb3RvEhBzdG9yZS5jb21wYWN0LnYxIk4KDlBvbGljeU1hdGNoS2V5EhUKDXJlc2VydmVkX2JpdHMYASABKA0SDgoGcHJlZml4GAIgASgNEhUKDXBheWxvYWRfcmVnZXgYAyABKAkiJwoNUG9saWN5R3JvdXBCeRIWCg5jYXB0dXJlX2dyb3VwcxgBIAMoCSJfCg1Qb2xpY3lPcmRlckJ5EhUKDWNhcHR1cmVfZ3JvdXAYASABKAkSNwoIZW5jb2RpbmcYAiABKA4yJS5zdG9yZS5jb21wYWN0LnYxLlBvbGljeU9yZGVyRW5jb2RpbmciKgoQUmV0YWluS2VlcExhdGVzdBIWCgVjb3VudBgBIAEoBEIHukgEMgIgACIqChFSZXRhaW5HcmVhdGVyVGhhbhIVCg10aHJlc2hvbGRfdTY0GAEgASgEIjEKGFJldGFpbkdyZWF0ZXJUaGFuT3JFcXVhbBIVCg10aHJlc2hvbGRfdTY0GAEgASgEIg8KDVJldGFpbkRyb3BBbGwikAIKDFBvbGljeVJldGFpbhI5CgtrZWVwX2xhdGVzdBgBIAEoCzIiLnN0b3JlLmNvbXBhY3QudjEuUmV0YWluS2VlcExhdGVzdEgAEjsKDGdyZWF0ZXJfdGhhbhgCIAEoCzIjLnN0b3JlLmNvbXBhY3QudjEuUmV0YWluR3JlYXRlclRoYW5IABJLChVncmVhdGVyX3RoYW5fb3JfZXF1YWwYAyABKAsyKi5zdG9yZS5jb21wYWN0LnYxLlJldGFpbkdyZWF0ZXJUaGFuT3JFcXVhbEgAEjMKCGRyb3BfYWxsGAQgASgLMh8uc3RvcmUuY29tcGFjdC52MS5SZXRhaW5Ecm9wQWxsSABCBgoEa2luZCLlAQoGUG9saWN5EjMKCW1hdGNoX2tleRgBIAEoCzIgLnN0b3JlLmNvbXBhY3QudjEuUG9saWN5TWF0Y2hLZXkSMQoIZ3JvdXBfYnkYAiABKAsyHy5zdG9yZS5jb21wYWN0LnYxLlBvbGljeUdyb3VwQnkSNgoIb3JkZXJfYnkYAyABKAsyHy5zdG9yZS5jb21wYWN0LnYxLlBvbGljeU9yZGVyQnlIAIgBARIuCgZyZXRhaW4YBCABKAsyHi5zdG9yZS5jb21wYWN0LnYxLlBvbGljeVJldGFpbkILCglfb3JkZXJfYnkiRAoMUHJ1bmVSZXF1ZXN0EjQKCHBvbGljaWVzGAEgAygLMhguc3RvcmUuY29tcGFjdC52MS5Qb2xpY3lCCLpIBZIBAggBIg8KDVBydW5lUmVzcG9uc2UqfgoTUG9saWN5T3JkZXJFbmNvZGluZxIjCh9QT0xJQ1lfT1JERVJfRU5DT0RJTkdfQllURVNfQVNDEAASIAocUE9MSUNZX09SREVSX0VOQ09ESU5HX1U2NF9CRRABEiAKHFBPTElDWV9PUkRFUl9FTkNPRElOR19JNjRfQkUQAjJTCgdTZXJ2aWNlEkgKBVBydW5lEh4uc3RvcmUuY29tcGFjdC52MS5QcnVuZVJlcXVlc3QaHy5zdG9yZS5jb21wYWN0LnYxLlBydW5lUmVzcG9uc2ViBnByb3RvMw", [file_buf_validate_validate]);
 
 /**
+ * Identifies which keys a prune policy applies to. Keys are selected by their
+ * `KeyCodec` family (reserved_bits + prefix) and an optional regex over the
+ * key payload bytes.
+ *
  * @generated from message store.compact.v1.PolicyMatchKey
  */
 export type PolicyMatchKey = Message<"store.compact.v1.PolicyMatchKey"> & {
   /**
+   * Number of high bits in the key reserved for internal routing. Together with
+   * `prefix`, this selects the `KeyCodec` family to scan.
+   *
    * @generated from field: uint32 reserved_bits = 1;
    */
   reservedBits: number;
 
   /**
+   * Key family prefix. Combined with `reserved_bits` to derive the scan range
+   * via `KeyCodec::prefix_bounds`.
+   *
    * @generated from field: uint32 prefix = 2;
    */
   prefix: number;
 
   /**
+   * Regex applied to the payload portion of each key (the bytes after the
+   * reserved/prefix header). Must be non-empty. Named capture groups referenced
+   * by `PolicyGroupBy` and `PolicyOrderBy` must exist in this regex.
+   *
    * @generated from field: string payload_regex = 3;
    */
   payloadRegex: string;
@@ -41,10 +55,18 @@ export const PolicyMatchKeySchema: GenMessage<PolicyMatchKey> = /*@__PURE__*/
   messageDesc(file_store_v1_compact, 0);
 
 /**
+ * Controls how matched keys are partitioned into independent groups before
+ * the retain policy is applied. Each group is pruned independently.
+ *
  * @generated from message store.compact.v1.PolicyGroupBy
  */
 export type PolicyGroupBy = Message<"store.compact.v1.PolicyGroupBy"> & {
   /**
+   * Named capture groups from `PolicyMatchKey.payload_regex` whose matched
+   * bytes are concatenated (length-prefixed) to form each group's identity.
+   * Must not contain duplicates. When empty, all matched keys belong to a
+   * single group.
+   *
    * @generated from field: repeated string capture_groups = 1;
    */
   captureGroups: string[];
@@ -58,15 +80,24 @@ export const PolicyGroupBySchema: GenMessage<PolicyGroupBy> = /*@__PURE__*/
   messageDesc(file_store_v1_compact, 1);
 
 /**
+ * Defines the sort order within each group. The named capture group is
+ * extracted from the payload regex and decoded according to `encoding`.
+ * Required for `RetainKeepLatest` and threshold-based retain policies.
+ *
  * @generated from message store.compact.v1.PolicyOrderBy
  */
 export type PolicyOrderBy = Message<"store.compact.v1.PolicyOrderBy"> & {
   /**
+   * Name of the capture group in `PolicyMatchKey.payload_regex` that provides
+   * the ordering value.
+   *
    * @generated from field: string capture_group = 1;
    */
   captureGroup: string;
 
   /**
+   * How to decode and compare the captured bytes.
+   *
    * @generated from field: store.compact.v1.PolicyOrderEncoding encoding = 2;
    */
   encoding: PolicyOrderEncoding;
@@ -80,10 +111,15 @@ export const PolicyOrderBySchema: GenMessage<PolicyOrderBy> = /*@__PURE__*/
   messageDesc(file_store_v1_compact, 2);
 
 /**
+ * Retain the N entries with the highest order values within each group.
+ * Requires `PolicyOrderBy` to be set on the parent `Policy`.
+ *
  * @generated from message store.compact.v1.RetainKeepLatest
  */
 export type RetainKeepLatest = Message<"store.compact.v1.RetainKeepLatest"> & {
   /**
+   * Number of entries to keep per group. Must be > 0.
+   *
    * @generated from field: uint64 count = 1;
    */
   count: bigint;
@@ -97,10 +133,15 @@ export const RetainKeepLatestSchema: GenMessage<RetainKeepLatest> = /*@__PURE__*
   messageDesc(file_store_v1_compact, 3);
 
 /**
+ * Delete entries whose order value is less than or equal to `threshold_u64`.
+ * Requires `PolicyOrderBy` with `POLICY_ORDER_ENCODING_U64_BE`.
+ *
  * @generated from message store.compact.v1.RetainGreaterThan
  */
 export type RetainGreaterThan = Message<"store.compact.v1.RetainGreaterThan"> & {
   /**
+   * Entries with order value > this threshold are retained.
+   *
    * @generated from field: uint64 threshold_u64 = 1;
    */
   thresholdU64: bigint;
@@ -114,10 +155,15 @@ export const RetainGreaterThanSchema: GenMessage<RetainGreaterThan> = /*@__PURE_
   messageDesc(file_store_v1_compact, 4);
 
 /**
+ * Delete entries whose order value is strictly less than `threshold_u64`.
+ * Requires `PolicyOrderBy` with `POLICY_ORDER_ENCODING_U64_BE`.
+ *
  * @generated from message store.compact.v1.RetainGreaterThanOrEqual
  */
 export type RetainGreaterThanOrEqual = Message<"store.compact.v1.RetainGreaterThanOrEqual"> & {
   /**
+   * Entries with order value >= this threshold are retained.
+   *
    * @generated from field: uint64 threshold_u64 = 1;
    */
   thresholdU64: bigint;
@@ -131,6 +177,8 @@ export const RetainGreaterThanOrEqualSchema: GenMessage<RetainGreaterThanOrEqual
   messageDesc(file_store_v1_compact, 5);
 
 /**
+ * Delete all matched entries in each group unconditionally.
+ *
  * @generated from message store.compact.v1.RetainDropAll
  */
 export type RetainDropAll = Message<"store.compact.v1.RetainDropAll"> & {
@@ -144,6 +192,8 @@ export const RetainDropAllSchema: GenMessage<RetainDropAll> = /*@__PURE__*/
   messageDesc(file_store_v1_compact, 6);
 
 /**
+ * Selects which entries survive pruning within each group.
+ *
  * @generated from message store.compact.v1.PolicyRetain
  */
 export type PolicyRetain = Message<"store.compact.v1.PolicyRetain"> & {
@@ -185,25 +235,38 @@ export const PolicyRetainSchema: GenMessage<PolicyRetain> = /*@__PURE__*/
   messageDesc(file_store_v1_compact, 7);
 
 /**
+ * A single prune policy: scan a key family, partition into groups, order
+ * within each group, then apply the retain rule to decide which keys to
+ * delete.
+ *
  * @generated from message store.compact.v1.Policy
  */
 export type Policy = Message<"store.compact.v1.Policy"> & {
   /**
+   * Selects the key family and payload filter for this policy.
+   *
    * @generated from field: store.compact.v1.PolicyMatchKey match_key = 1;
    */
   matchKey?: PolicyMatchKey;
 
   /**
+   * How to partition matched keys into independent groups.
+   *
    * @generated from field: store.compact.v1.PolicyGroupBy group_by = 2;
    */
   groupBy?: PolicyGroupBy;
 
   /**
+   * Sort order within each group. Required for `keep_latest` and threshold
+   * retain policies; optional for `drop_all`.
+   *
    * @generated from field: optional store.compact.v1.PolicyOrderBy order_by = 3;
    */
   orderBy?: PolicyOrderBy;
 
   /**
+   * Which entries to keep after sorting within each group.
+   *
    * @generated from field: store.compact.v1.PolicyRetain retain = 4;
    */
   retain?: PolicyRetain;
@@ -217,10 +280,15 @@ export const PolicySchema: GenMessage<Policy> = /*@__PURE__*/
   messageDesc(file_store_v1_compact, 8);
 
 /**
+ * Request to execute prune policies.
+ *
  * @generated from message store.compact.v1.PruneRequest
  */
 export type PruneRequest = Message<"store.compact.v1.PruneRequest"> & {
   /**
+   * One or more prune policies to apply. At least one is required. Policies
+   * must not share the same (reserved_bits, prefix) pair.
+   *
    * @generated from field: repeated store.compact.v1.Policy policies = 1;
    */
   policies: Policy[];
@@ -234,6 +302,8 @@ export const PruneRequestSchema: GenMessage<PruneRequest> = /*@__PURE__*/
   messageDesc(file_store_v1_compact, 9);
 
 /**
+ * Empty response returned on successful prune execution.
+ *
  * @generated from message store.compact.v1.PruneResponse
  */
 export type PruneResponse = Message<"store.compact.v1.PruneResponse"> & {
@@ -247,20 +317,29 @@ export const PruneResponseSchema: GenMessage<PruneResponse> = /*@__PURE__*/
   messageDesc(file_store_v1_compact, 10);
 
 /**
+ * Interpretation of the order-by capture group bytes when comparing keys
+ * within a group.
+ *
  * @generated from enum store.compact.v1.PolicyOrderEncoding
  */
 export enum PolicyOrderEncoding {
   /**
+   * Raw byte-wise ascending comparison (the default).
+   *
    * @generated from enum value: POLICY_ORDER_ENCODING_BYTES_ASC = 0;
    */
   BYTES_ASC = 0,
 
   /**
+   * Interpret the captured bytes as a big-endian u64 (must be exactly 8 bytes).
+   *
    * @generated from enum value: POLICY_ORDER_ENCODING_U64_BE = 1;
    */
   U64_BE = 1,
 
   /**
+   * Interpret the captured bytes as a big-endian i64 (must be exactly 8 bytes).
+   *
    * @generated from enum value: POLICY_ORDER_ENCODING_I64_BE = 2;
    */
   I64_BE = 2,
@@ -273,10 +352,16 @@ export const PolicyOrderEncodingSchema: GenEnum<PolicyOrderEncoding> = /*@__PURE
   enumDesc(file_store_v1_compact, 0);
 
 /**
+ * Compaction service, typically served by the compaction worker.
+ *
  * @generated from service store.compact.v1.Service
  */
 export const Service: GenService<{
   /**
+   * Execute one or more prune policies against the store. Each policy is
+   * applied sequentially: matching keys are scanned, grouped, ordered, and
+   * entries that do not survive the retain rule are deleted.
+   *
    * @generated from rpc store.compact.v1.Service.Prune
    */
   prune: {

@@ -3,7 +3,7 @@
 
 /// A key-value pair for ingestion.
 ///
-/// Keys must be between 0 and 254 bytes (inclusive). Values have no size limit.
+/// Keys must be between 0 and 254 bytes (inclusive).
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
@@ -170,7 +170,7 @@ pub const __KV_PAIR_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::ty
 };
 /// A key-value pair for ingestion.
 ///
-/// Keys must be between 0 and 254 bytes (inclusive). Values have no size limit.
+/// Keys must be between 0 and 254 bytes (inclusive).
 #[derive(Clone, Debug, Default)]
 pub struct KvPairView<'a> {
     /// Field 1: `key`
@@ -284,10 +284,13 @@ unsafe impl ::buffa::DefaultViewInstance for KvPairView<'static> {
 unsafe impl<'a> ::buffa::HasDefaultViewInstance for KvPairView<'a> {
     type Static = KvPairView<'static>;
 }
+/// Batch write request. All pairs are applied atomically.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct PutRequest {
+    /// Key-value pairs to write. At least one pair is required.
+    ///
     /// Field 1: `kvs`
     #[serde(
         rename = "kvs",
@@ -422,8 +425,11 @@ pub const __PUT_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa
     from_json: ::buffa::type_registry::any_from_json::<PutRequest>,
     is_wkt: false,
 };
+/// Batch write request. All pairs are applied atomically.
 #[derive(Clone, Debug, Default)]
 pub struct PutRequestView<'a> {
+    /// Key-value pairs to write. At least one pair is required.
+    ///
     /// Field 1: `kvs`
     pub kvs: ::buffa::RepeatedView<'a, KvPairView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -526,10 +532,15 @@ unsafe impl ::buffa::DefaultViewInstance for PutRequestView<'static> {
 unsafe impl<'a> ::buffa::HasDefaultViewInstance for PutRequestView<'a> {
     type Static = PutRequestView<'static>;
 }
+/// Response from a successful Put.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct PutResponse {
+    /// Monotonically increasing store sequence number assigned to this write
+    /// batch. Pass to query RPCs as `min_sequence_number` to ensure subsequent
+    /// reads reflect this write.
+    ///
     /// Field 1: `sequence_number`
     #[serde(
         rename = "sequenceNumber",
@@ -660,8 +671,13 @@ pub const __PUT_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buff
     from_json: ::buffa::type_registry::any_from_json::<PutResponse>,
     is_wkt: false,
 };
+/// Response from a successful Put.
 #[derive(Clone, Debug, Default)]
 pub struct PutResponseView<'a> {
+    /// Monotonically increasing store sequence number assigned to this write
+    /// batch. Pass to query RPCs as `min_sequence_number` to ensure subsequent
+    /// reads reflect this write.
+    ///
     /// Field 1: `sequence_number`
     pub sequence_number: u64,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -763,7 +779,7 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for PutResponseView<'a> {
 
 /// Full service name for this service.
 pub const SERVICE_SERVICE_NAME: &str = "store.ingest.v1.Service";
-/// Server trait for Service.
+/// Ingest service for writing key-value pairs into the store.
 ///
 /// # Implementing handlers
 ///
@@ -777,7 +793,10 @@ pub const SERVICE_SERVICE_NAME: &str = "store.ingest.v1.Service";
 /// for zero-copy access patterns and when `to_owned_message()` is needed.
 #[allow(clippy::type_complexity)]
 pub trait Service: Send + Sync + 'static {
-    /// Handle the Put RPC.
+    /// Atomically write a batch of key-value pairs. On success the entire batch
+    /// is persisted and the response carries the store sequence number that
+    /// covers this write. Clients can pass that sequence number to query RPCs
+    /// (via `min_sequence_number`) for read-after-write consistency.
     fn put(
         &self,
         ctx: ::connectrpc::Context,

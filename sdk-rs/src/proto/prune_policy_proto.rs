@@ -100,6 +100,80 @@ fn prune_policy_from_view(p: &PolicyView<'_>) -> Result<PrunePolicy, String> {
     })
 }
 
+pub fn prune_policies_to_proto(policies: &[PrunePolicy]) -> Vec<crate::store::compact::v1::Policy> {
+    policies.iter().map(prune_policy_to_proto).collect()
+}
+
+fn prune_policy_to_proto(p: &PrunePolicy) -> crate::store::compact::v1::Policy {
+    use crate::store::compact::v1::{
+        policy_retain, Policy, PolicyGroupBy, PolicyMatchKey, PolicyOrderBy, PolicyRetain,
+        RetainDropAll, RetainGreaterThan, RetainGreaterThanOrEqual, RetainKeepLatest,
+    };
+
+    let match_key = PolicyMatchKey {
+        reserved_bits: u32::from(p.match_key.reserved_bits),
+        prefix: u32::from(p.match_key.prefix),
+        payload_regex: p.match_key.payload_regex.0.clone(),
+        ..Default::default()
+    };
+    let group_by = PolicyGroupBy {
+        capture_groups: p
+            .group_by
+            .capture_groups
+            .iter()
+            .map(|s| s.0.clone())
+            .collect(),
+        ..Default::default()
+    };
+    let order_by = p.order_by.as_ref().map(|o| PolicyOrderBy {
+        capture_group: o.capture_group.0.clone(),
+        encoding: order_encoding_to_proto(&o.encoding).into(),
+        ..Default::default()
+    });
+    let retain_kind = match &p.retain {
+        RetainPolicy::KeepLatest { count } => policy_retain::Kind::KeepLatest(Box::new(
+            RetainKeepLatest {
+                count: *count as u64,
+                ..Default::default()
+            },
+        )),
+        RetainPolicy::GreaterThan { threshold_u64 } => {
+            policy_retain::Kind::GreaterThan(Box::new(RetainGreaterThan {
+                threshold_u64: *threshold_u64,
+                ..Default::default()
+            }))
+        }
+        RetainPolicy::GreaterThanOrEqual { threshold_u64 } => {
+            policy_retain::Kind::GreaterThanOrEqual(Box::new(RetainGreaterThanOrEqual {
+                threshold_u64: *threshold_u64,
+                ..Default::default()
+            }))
+        }
+        RetainPolicy::DropAll => {
+            policy_retain::Kind::DropAll(Box::new(RetainDropAll::default()))
+        }
+    };
+    Policy {
+        match_key: Some(match_key).into(),
+        group_by: Some(group_by).into(),
+        order_by: order_by.into(),
+        retain: Some(PolicyRetain {
+            kind: Some(retain_kind),
+            ..Default::default()
+        })
+        .into(),
+        ..Default::default()
+    }
+}
+
+fn order_encoding_to_proto(enc: &OrderEncoding) -> PolicyOrderEncoding {
+    match enc {
+        OrderEncoding::BytesAsc => PolicyOrderEncoding::POLICY_ORDER_ENCODING_BYTES_ASC,
+        OrderEncoding::U64Be => PolicyOrderEncoding::POLICY_ORDER_ENCODING_U64_BE,
+        OrderEncoding::I64Be => PolicyOrderEncoding::POLICY_ORDER_ENCODING_I64_BE,
+    }
+}
+
 /// Converts a `Prune` RPC request into the shared Rust document model (fixed document version).
 pub fn prune_policy_document_from_prune_request_view<'a>(
     req: &PruneRequestView<'a>,

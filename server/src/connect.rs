@@ -229,7 +229,6 @@ impl QueryApi for QueryConnect {
         Self::apply_query_detail_header(&mut ctx, &detail);
         Ok((
             GetResponse {
-                found: value.is_some(),
                 value,
                 ..Default::default()
             },

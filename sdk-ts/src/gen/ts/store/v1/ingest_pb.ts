@@ -16,7 +16,7 @@ export const file_store_v1_ingest: GenFile = /*@__PURE__*/
 /**
  * A key-value pair for ingestion.
  *
- * Keys must be between 0 and 254 bytes (inclusive). Values have no size limit.
+ * Keys must be between 0 and 254 bytes (inclusive).
  *
  * @generated from message store.ingest.v1.KvPair
  */
@@ -40,10 +40,14 @@ export const KvPairSchema: GenMessage<KvPair> = /*@__PURE__*/
   messageDesc(file_store_v1_ingest, 0);
 
 /**
+ * Batch write request. All pairs are applied atomically.
+ *
  * @generated from message store.ingest.v1.PutRequest
  */
 export type PutRequest = Message<"store.ingest.v1.PutRequest"> & {
   /**
+   * Key-value pairs to write. At least one pair is required.
+   *
    * @generated from field: repeated store.ingest.v1.KvPair kvs = 1;
    */
   kvs: KvPair[];
@@ -57,10 +61,16 @@ export const PutRequestSchema: GenMessage<PutRequest> = /*@__PURE__*/
   messageDesc(file_store_v1_ingest, 1);
 
 /**
+ * Response from a successful Put.
+ *
  * @generated from message store.ingest.v1.PutResponse
  */
 export type PutResponse = Message<"store.ingest.v1.PutResponse"> & {
   /**
+   * Monotonically increasing store sequence number assigned to this write
+   * batch. Pass to query RPCs as `min_sequence_number` to ensure subsequent
+   * reads reflect this write.
+   *
    * @generated from field: uint64 sequence_number = 1;
    */
   sequenceNumber: bigint;
@@ -74,10 +84,17 @@ export const PutResponseSchema: GenMessage<PutResponse> = /*@__PURE__*/
   messageDesc(file_store_v1_ingest, 2);
 
 /**
+ * Ingest service for writing key-value pairs into the store.
+ *
  * @generated from service store.ingest.v1.Service
  */
 export const Service: GenService<{
   /**
+   * Atomically write a batch of key-value pairs. On success the entire batch
+   * is persisted and the response carries the store sequence number that
+   * covers this write. Clients can pass that sequence number to query RPCs
+   * (via `min_sequence_number`) for read-after-write consistency.
+   *
    * @generated from rpc store.ingest.v1.Service.Put
    */
   put: {

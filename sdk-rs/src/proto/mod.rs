@@ -1102,7 +1102,9 @@ mod range_reduce_response;
 pub use range_reduce_response::to_domain_reduce_response;
 
 mod prune_policy_proto;
-pub use prune_policy_proto::prune_policy_document_from_prune_request_view;
+pub use prune_policy_proto::{
+    prune_policies_to_proto, prune_policy_document_from_prune_request_view,
+};
 
 mod error_details;
 pub use error_details::{

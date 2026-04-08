@@ -129,6 +129,8 @@ impl ::buffa::Enumeration for TraversalMode {
     }
 }
 /// --- Range-reduction DSL (`Reduce`); mirrors `exoware_sdk_rs::kv_codec` ---
+///
+/// Scalar type of a field extracted from a stored key or value.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[repr(i32)]
 pub enum KvFieldKind {
@@ -137,11 +139,17 @@ pub enum KvFieldKind {
     KV_FIELD_KIND_FLOAT64 = 2i32,
     KV_FIELD_KIND_BOOLEAN = 3i32,
     KV_FIELD_KIND_UTF8 = 4i32,
+    /// Days since Unix epoch.
     KV_FIELD_KIND_DATE32 = 5i32,
+    /// Milliseconds since Unix epoch.
     KV_FIELD_KIND_DATE64 = 6i32,
+    /// Microseconds since Unix epoch.
     KV_FIELD_KIND_TIMESTAMP = 7i32,
+    /// 16-byte little-endian decimal (Arrow Decimal128).
     KV_FIELD_KIND_DECIMAL128 = 8i32,
+    /// Fixed-width binary; length given by `fixed_size_binary_len`.
     KV_FIELD_KIND_FIXED_SIZE_BINARY = 9i32,
+    /// 32-byte little-endian decimal (Arrow Decimal256).
     KV_FIELD_KIND_DECIMAL256 = 10i32,
 }
 impl ::core::default::Default for KvFieldKind {
@@ -309,13 +317,19 @@ impl ::buffa::Enumeration for KvFieldKind {
         }
     }
 }
+/// Aggregation operation applied by a reducer.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[repr(i32)]
 pub enum RangeReduceOp {
+    /// Count every row (ignores `expr`; `expr` must not be set).
     RANGE_REDUCE_OP_COUNT_ALL = 0i32,
+    /// Count rows where `expr` evaluates to a non-NULL value.
     RANGE_REDUCE_OP_COUNT_FIELD = 1i32,
+    /// Sum of `expr` across rows (numeric types only).
     RANGE_REDUCE_OP_SUM_FIELD = 2i32,
+    /// Minimum value of `expr` across rows.
     RANGE_REDUCE_OP_MIN_FIELD = 3i32,
+    /// Maximum value of `expr` across rows.
     RANGE_REDUCE_OP_MAX_FIELD = 4i32,
 }
 impl ::core::default::Default for RangeReduceOp {
@@ -454,6 +468,8 @@ impl ::buffa::Enumeration for RangeReduceOp {
     }
 }
 /// --- Query wire types ---
+///
+/// A single key-value row returned by Range scans.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
@@ -619,6 +635,8 @@ pub const __RANGE_ENTRY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa
     is_wkt: false,
 };
 /// --- Query wire types ---
+///
+/// A single key-value row returned by Range scans.
 #[derive(Clone, Debug, Default)]
 pub struct RangeEntryView<'a> {
     /// Field 1: `key`
@@ -733,7 +751,7 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for RangeEntryView<'a> {
     type Static = RangeEntryView<'static>;
 }
 /// Visible store sequence number plus read counters for query RPCs. On success, carried in unary
-/// response metadata (`Get` / `Reduce`) or `Range` trailers; also attached as a `google.rpc` error
+/// response metadata (`Get` / `Reduce`) or streaming trailers (`Range` / `GetMany`); also attached as a `google.rpc` error
 /// detail when the RPC fails (same message shape in both cases).
 ///
 /// The reference RocksDB engine reports `read_bytes`: the sum of key length plus value length for
@@ -972,7 +990,7 @@ pub const __DETAIL_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::typ
     is_wkt: false,
 };
 /// Visible store sequence number plus read counters for query RPCs. On success, carried in unary
-/// response metadata (`Get` / `Reduce`) or `Range` trailers; also attached as a `google.rpc` error
+/// response metadata (`Get` / `Reduce`) or streaming trailers (`Range` / `GetMany`); also attached as a `google.rpc` error
 /// detail when the RPC fails (same message shape in both cases).
 ///
 /// The reference RocksDB engine reports `read_bytes`: the sum of key length plus value length for
@@ -1134,6 +1152,8 @@ unsafe impl ::buffa::DefaultViewInstance for DetailView<'static> {
 unsafe impl<'a> ::buffa::HasDefaultViewInstance for DetailView<'a> {
     type Static = DetailView<'static>;
 }
+/// Reference to a typed field inside a stored key or value. Used by KvExpr
+/// and KvPredicateCheck to locate the data to evaluate.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize)]
 #[serde(default)]
@@ -1469,6 +1489,8 @@ pub const __KV_FIELD_REF_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buff
     from_json: ::buffa::type_registry::any_from_json::<KvFieldRef>,
     is_wkt: false,
 };
+/// Reference to a typed field inside a stored key or value. Used by KvExpr
+/// and KvPredicateCheck to locate the data to evaluate.
 #[derive(Clone, Debug, Default)]
 pub struct KvFieldRefView<'a> {
     pub field: ::core::option::Option<kv_field_ref::FieldView<'a>>,
@@ -1661,10 +1683,13 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for KvFieldRefView<'a> {
 pub mod kv_field_ref {
     #[allow(unused_imports)]
     use super::*;
+    /// A field extracted from the key bytes at a fixed bit offset.
     #[derive(Clone, PartialEq, Default)]
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct KeyField {
+        /// Bit offset into the key payload where this field starts.
+        ///
         /// Field 1: `bit_offset`
         #[serde(
             rename = "bitOffset",
@@ -1673,6 +1698,8 @@ pub mod kv_field_ref {
             skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u32"
         )]
         pub bit_offset: u32,
+        /// Scalar type used to decode the field bytes.
+        ///
         /// Field 2: `kind`
         #[serde(
             rename = "kind",
@@ -1680,6 +1707,8 @@ pub mod kv_field_ref {
             skip_serializing_if = "::buffa::json_helpers::skip_if::is_default_enum_value"
         )]
         pub kind: ::buffa::EnumValue<KvFieldKind>,
+        /// Length in bytes when `kind` is `FIXED_SIZE_BINARY`; ignored otherwise.
+        ///
         /// Field 3: `fixed_size_binary_len`
         #[serde(
             rename = "fixedSizeBinaryLen",
@@ -1863,12 +1892,19 @@ pub mod kv_field_ref {
         from_json: ::buffa::type_registry::any_from_json::<KeyField>,
         is_wkt: false,
     };
+    /// A field extracted from the key bytes at a fixed bit offset.
     #[derive(Clone, Debug, Default)]
     pub struct KeyFieldView<'a> {
+        /// Bit offset into the key payload where this field starts.
+        ///
         /// Field 1: `bit_offset`
         pub bit_offset: u32,
+        /// Scalar type used to decode the field bytes.
+        ///
         /// Field 2: `kind`
         pub kind: ::buffa::EnumValue<KvFieldKind>,
+        /// Length in bytes when `kind` is `FIXED_SIZE_BINARY`; ignored otherwise.
+        ///
         /// Field 3: `fixed_size_binary_len`
         pub fixed_size_binary_len: u32,
         pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -1995,10 +2031,14 @@ pub mod kv_field_ref {
     unsafe impl<'a> ::buffa::HasDefaultViewInstance for KeyFieldView<'a> {
         type Static = KeyFieldView<'static>;
     }
+    /// A field extracted from a Z-order (Morton) interleaved key. The field
+    /// is de-interleaved from the composite key using the position and widths.
     #[derive(Clone, PartialEq, Default)]
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct ZOrderKeyField {
+        /// Bit offset into the key payload where the Z-order block starts.
+        ///
         /// Field 1: `bit_offset`
         #[serde(
             rename = "bitOffset",
@@ -2007,6 +2047,8 @@ pub mod kv_field_ref {
             skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u32"
         )]
         pub bit_offset: u32,
+        /// Zero-based position of this dimension within the Z-order interleaving.
+        ///
         /// Field 2: `field_position`
         #[serde(
             rename = "fieldPosition",
@@ -2015,6 +2057,8 @@ pub mod kv_field_ref {
             skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u32"
         )]
         pub field_position: u32,
+        /// Bit widths of each dimension in the Z-order curve, in order.
+        ///
         /// Field 3: `field_widths`
         #[serde(
             rename = "fieldWidths",
@@ -2023,6 +2067,8 @@ pub mod kv_field_ref {
             deserialize_with = "::buffa::json_helpers::null_as_default"
         )]
         pub field_widths: ::buffa::alloc::vec::Vec<u32>,
+        /// Scalar type used to decode the de-interleaved value.
+        ///
         /// Field 4: `kind`
         #[serde(
             rename = "kind",
@@ -2030,6 +2076,8 @@ pub mod kv_field_ref {
             skip_serializing_if = "::buffa::json_helpers::skip_if::is_default_enum_value"
         )]
         pub kind: ::buffa::EnumValue<KvFieldKind>,
+        /// Length in bytes when `kind` is `FIXED_SIZE_BINARY`; ignored otherwise.
+        ///
         /// Field 5: `fixed_size_binary_len`
         #[serde(
             rename = "fixedSizeBinaryLen",
@@ -2293,16 +2341,28 @@ pub mod kv_field_ref {
         from_json: ::buffa::type_registry::any_from_json::<ZOrderKeyField>,
         is_wkt: false,
     };
+    /// A field extracted from a Z-order (Morton) interleaved key. The field
+    /// is de-interleaved from the composite key using the position and widths.
     #[derive(Clone, Debug, Default)]
     pub struct ZOrderKeyFieldView<'a> {
+        /// Bit offset into the key payload where the Z-order block starts.
+        ///
         /// Field 1: `bit_offset`
         pub bit_offset: u32,
+        /// Zero-based position of this dimension within the Z-order interleaving.
+        ///
         /// Field 2: `field_position`
         pub field_position: u32,
+        /// Bit widths of each dimension in the Z-order curve, in order.
+        ///
         /// Field 3: `field_widths`
         pub field_widths: ::buffa::RepeatedView<'a, u32>,
+        /// Scalar type used to decode the de-interleaved value.
+        ///
         /// Field 4: `kind`
         pub kind: ::buffa::EnumValue<KvFieldKind>,
+        /// Length in bytes when `kind` is `FIXED_SIZE_BINARY`; ignored otherwise.
+        ///
         /// Field 5: `fixed_size_binary_len`
         pub fixed_size_binary_len: u32,
         pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -2463,10 +2523,13 @@ pub mod kv_field_ref {
     unsafe impl<'a> ::buffa::HasDefaultViewInstance for ZOrderKeyFieldView<'a> {
         type Static = ZOrderKeyFieldView<'static>;
     }
+    /// A field extracted from the stored value (the encoded `StoredRow`).
     #[derive(Clone, PartialEq, Default)]
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct ValueField {
+        /// Zero-based column index within the `StoredRow`.
+        ///
         /// Field 1: `index`
         #[serde(
             rename = "index",
@@ -2474,6 +2537,8 @@ pub mod kv_field_ref {
             skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u32"
         )]
         pub index: u32,
+        /// Scalar type of this column.
+        ///
         /// Field 2: `kind`
         #[serde(
             rename = "kind",
@@ -2481,6 +2546,9 @@ pub mod kv_field_ref {
             skip_serializing_if = "::buffa::json_helpers::skip_if::is_default_enum_value"
         )]
         pub kind: ::buffa::EnumValue<KvFieldKind>,
+        /// Whether the column is nullable. When true, a missing value yields NULL
+        /// rather than an error.
+        ///
         /// Field 3: `nullable`
         #[serde(
             rename = "nullable",
@@ -2488,6 +2556,8 @@ pub mod kv_field_ref {
             skip_serializing_if = "::buffa::json_helpers::skip_if::is_false"
         )]
         pub nullable: bool,
+        /// Length in bytes when `kind` is `FIXED_SIZE_BINARY`; ignored otherwise.
+        ///
         /// Field 4: `fixed_size_binary_len`
         #[serde(
             rename = "fixedSizeBinaryLen",
@@ -2690,14 +2760,24 @@ pub mod kv_field_ref {
         from_json: ::buffa::type_registry::any_from_json::<ValueField>,
         is_wkt: false,
     };
+    /// A field extracted from the stored value (the encoded `StoredRow`).
     #[derive(Clone, Debug, Default)]
     pub struct ValueFieldView<'a> {
+        /// Zero-based column index within the `StoredRow`.
+        ///
         /// Field 1: `index`
         pub index: u32,
+        /// Scalar type of this column.
+        ///
         /// Field 2: `kind`
         pub kind: ::buffa::EnumValue<KvFieldKind>,
+        /// Whether the column is nullable. When true, a missing value yields NULL
+        /// rather than an error.
+        ///
         /// Field 3: `nullable`
         pub nullable: bool,
+        /// Length in bytes when `kind` is `FIXED_SIZE_BINARY`; ignored otherwise.
+        ///
         /// Field 4: `fixed_size_binary_len`
         pub fixed_size_binary_len: u32,
         pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -2902,6 +2982,9 @@ pub mod kv_field_ref {
         Value(::buffa::alloc::boxed::Box<super::kv_field_ref::ValueFieldView<'a>>),
     }
 }
+/// A single scalar value produced by reduction or used as a literal in
+/// expressions. The variant must match the `KvFieldKind` of the expression
+/// it participates in.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize)]
 #[serde(default)]
@@ -3621,6 +3704,9 @@ pub const __KV_REDUCED_VALUE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::
     from_json: ::buffa::type_registry::any_from_json::<KvReducedValue>,
     is_wkt: false,
 };
+/// A single scalar value produced by reduction or used as a literal in
+/// expressions. The variant must match the `KvFieldKind` of the expression
+/// it participates in.
 #[derive(Clone, Debug, Default)]
 pub struct KvReducedValueView<'a> {
     pub value: ::core::option::Option<kv_reduced_value::ValueView<'a>>,
@@ -4060,6 +4146,9 @@ pub mod kv_reduced_value {
         Decimal256Value(&'a [u8]),
     }
 }
+/// An expression tree evaluated per row during reduction. Leaf nodes are field
+/// references or literal values; interior nodes are arithmetic or transform
+/// operations.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize)]
 #[serde(default)]
@@ -4701,6 +4790,9 @@ pub const __KV_EXPR_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::ty
     from_json: ::buffa::type_registry::any_from_json::<KvExpr>,
     is_wkt: false,
 };
+/// An expression tree evaluated per row during reduction. Leaf nodes are field
+/// references or literal values; interior nodes are arithmetic or transform
+/// operations.
 #[derive(Clone, Debug, Default)]
 pub struct KvExprView<'a> {
     pub expr: ::core::option::Option<kv_expr::ExprView<'a>>,
@@ -5032,6 +5124,7 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for KvExprView<'a> {
 pub mod kv_expr {
     #[allow(unused_imports)]
     use super::*;
+    /// Binary arithmetic operation on two sub-expressions.
     #[derive(Clone, PartialEq, Default)]
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
@@ -5210,6 +5303,7 @@ pub mod kv_expr {
         from_json: ::buffa::type_registry::any_from_json::<BinaryExpr>,
         is_wkt: false,
     };
+    /// Binary arithmetic operation on two sub-expressions.
     #[derive(Clone, Debug, Default)]
     pub struct BinaryExprView<'a> {
         /// Field 1: `left`
@@ -5441,6 +5535,8 @@ pub mod kv_expr {
         DateTruncDay(::buffa::alloc::boxed::Box<super::KvExprView<'a>>),
     }
 }
+/// A constraint applied to a single field value during predicate evaluation.
+/// Exactly one variant must be set.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize)]
 #[serde(default)]
@@ -6426,6 +6522,8 @@ pub const __KV_PREDICATE_CONSTRAINT_JSON_ANY: ::buffa::type_registry::JsonAnyEnt
     from_json: ::buffa::type_registry::any_from_json::<KvPredicateConstraint>,
     is_wkt: false,
 };
+/// A constraint applied to a single field value during predicate evaluation.
+/// Exactly one variant must be set.
 #[derive(Clone, Debug, Default)]
 pub struct KvPredicateConstraintView<'a> {
     pub constraint: ::core::option::Option<kv_predicate_constraint::ConstraintView<'a>>,
@@ -6940,6 +7038,7 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for KvPredicateConstraintView<'a
 pub mod kv_predicate_constraint {
     #[allow(unused_imports)]
     use super::*;
+    /// Inclusive integer range. Omit `min` or `max` for a one-sided bound.
     #[derive(Clone, PartialEq, Default)]
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
@@ -7102,6 +7201,7 @@ pub mod kv_predicate_constraint {
         from_json: ::buffa::type_registry::any_from_json::<IntRange>,
         is_wkt: false,
     };
+    /// Inclusive integer range. Omit `min` or `max` for a one-sided bound.
     #[derive(Clone, Debug, Default)]
     pub struct IntRangeView<'a> {
         /// Field 1: `min`
@@ -7217,6 +7317,7 @@ pub mod kv_predicate_constraint {
     unsafe impl<'a> ::buffa::HasDefaultViewInstance for IntRangeView<'a> {
         type Static = IntRangeView<'static>;
     }
+    /// Inclusive uint64 range. Omit `min` or `max` for a one-sided bound.
     #[derive(Clone, PartialEq, Default)]
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
@@ -7379,6 +7480,7 @@ pub mod kv_predicate_constraint {
         from_json: ::buffa::type_registry::any_from_json::<UInt64Range>,
         is_wkt: false,
     };
+    /// Inclusive uint64 range. Omit `min` or `max` for a one-sided bound.
     #[derive(Clone, Debug, Default)]
     pub struct UInt64RangeView<'a> {
         /// Field 1: `min`
@@ -7494,6 +7596,7 @@ pub mod kv_predicate_constraint {
     unsafe impl<'a> ::buffa::HasDefaultViewInstance for UInt64RangeView<'a> {
         type Static = UInt64RangeView<'static>;
     }
+    /// A single bound for a float range, with an inclusivity flag.
     #[derive(Clone, PartialEq, Default)]
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
@@ -7505,6 +7608,8 @@ pub mod kv_predicate_constraint {
             skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_f64"
         )]
         pub value: f64,
+        /// When true the bound includes `value` itself (\<=/\>= semantics).
+        ///
         /// Field 2: `inclusive`
         #[serde(
             rename = "inclusive",
@@ -7652,10 +7757,13 @@ pub mod kv_predicate_constraint {
         from_json: ::buffa::type_registry::any_from_json::<FloatBound>,
         is_wkt: false,
     };
+    /// A single bound for a float range, with an inclusivity flag.
     #[derive(Clone, Debug, Default)]
     pub struct FloatBoundView<'a> {
         /// Field 1: `value`
         pub value: f64,
+        /// When true the bound includes `value` itself (\<=/\>= semantics).
+        ///
         /// Field 2: `inclusive`
         pub inclusive: bool,
         pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -7767,6 +7875,7 @@ pub mod kv_predicate_constraint {
     unsafe impl<'a> ::buffa::HasDefaultViewInstance for FloatBoundView<'a> {
         type Static = FloatBoundView<'static>;
     }
+    /// Float range with independently inclusive/exclusive bounds.
     #[derive(Clone, PartialEq, Default)]
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
@@ -7945,6 +8054,7 @@ pub mod kv_predicate_constraint {
         from_json: ::buffa::type_registry::any_from_json::<FloatRange>,
         is_wkt: false,
     };
+    /// Float range with independently inclusive/exclusive bounds.
     #[derive(Clone, Debug, Default)]
     pub struct FloatRangeView<'a> {
         /// Field 1: `min`
@@ -8106,6 +8216,7 @@ pub mod kv_predicate_constraint {
     unsafe impl<'a> ::buffa::HasDefaultViewInstance for FloatRangeView<'a> {
         type Static = FloatRangeView<'static>;
     }
+    /// Inclusive Decimal128 range (16-byte little-endian).
     #[derive(Clone, PartialEq, Default)]
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
@@ -8276,6 +8387,7 @@ pub mod kv_predicate_constraint {
         from_json: ::buffa::type_registry::any_from_json::<Decimal128Range>,
         is_wkt: false,
     };
+    /// Inclusive Decimal128 range (16-byte little-endian).
     #[derive(Clone, Debug, Default)]
     pub struct Decimal128RangeView<'a> {
         /// Field 1: `min`
@@ -8395,6 +8507,7 @@ pub mod kv_predicate_constraint {
     unsafe impl<'a> ::buffa::HasDefaultViewInstance for Decimal128RangeView<'a> {
         type Static = Decimal128RangeView<'static>;
     }
+    /// Inclusive Decimal256 range (32-byte little-endian).
     #[derive(Clone, PartialEq, Default)]
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
@@ -8565,6 +8678,7 @@ pub mod kv_predicate_constraint {
         from_json: ::buffa::type_registry::any_from_json::<Decimal256Range>,
         is_wkt: false,
     };
+    /// Inclusive Decimal256 range (32-byte little-endian).
     #[derive(Clone, Debug, Default)]
     pub struct Decimal256RangeView<'a> {
         /// Field 1: `min`
@@ -8684,6 +8798,7 @@ pub mod kv_predicate_constraint {
     unsafe impl<'a> ::buffa::HasDefaultViewInstance for Decimal256RangeView<'a> {
         type Static = Decimal256RangeView<'static>;
     }
+    /// Set membership test for UTF-8 strings.
     #[derive(Clone, PartialEq, Default)]
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
@@ -8816,6 +8931,7 @@ pub mod kv_predicate_constraint {
         from_json: ::buffa::type_registry::any_from_json::<StringIn>,
         is_wkt: false,
     };
+    /// Set membership test for UTF-8 strings.
     #[derive(Clone, Debug, Default)]
     pub struct StringInView<'a> {
         /// Field 1: `values`
@@ -8920,6 +9036,7 @@ pub mod kv_predicate_constraint {
     unsafe impl<'a> ::buffa::HasDefaultViewInstance for StringInView<'a> {
         type Static = StringInView<'static>;
     }
+    /// Set membership test for int64 values.
     #[derive(Clone, PartialEq, Default)]
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
@@ -9087,6 +9204,7 @@ pub mod kv_predicate_constraint {
         from_json: ::buffa::type_registry::any_from_json::<IntIn>,
         is_wkt: false,
     };
+    /// Set membership test for int64 values.
     #[derive(Clone, Debug, Default)]
     pub struct IntInView<'a> {
         /// Field 1: `values`
@@ -9199,6 +9317,7 @@ pub mod kv_predicate_constraint {
     unsafe impl<'a> ::buffa::HasDefaultViewInstance for IntInView<'a> {
         type Static = IntInView<'static>;
     }
+    /// Set membership test for uint64 values.
     #[derive(Clone, PartialEq, Default)]
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
@@ -9366,6 +9485,7 @@ pub mod kv_predicate_constraint {
         from_json: ::buffa::type_registry::any_from_json::<UInt64In>,
         is_wkt: false,
     };
+    /// Set membership test for uint64 values.
     #[derive(Clone, Debug, Default)]
     pub struct UInt64InView<'a> {
         /// Field 1: `values`
@@ -9478,6 +9598,7 @@ pub mod kv_predicate_constraint {
     unsafe impl<'a> ::buffa::HasDefaultViewInstance for UInt64InView<'a> {
         type Static = UInt64InView<'static>;
     }
+    /// Set membership test for fixed-size binary values.
     #[derive(Clone, PartialEq, Default)]
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
@@ -9610,6 +9731,7 @@ pub mod kv_predicate_constraint {
         from_json: ::buffa::type_registry::any_from_json::<FixedSizeBinaryIn>,
         is_wkt: false,
     };
+    /// Set membership test for fixed-size binary values.
     #[derive(Clone, Debug, Default)]
     pub struct FixedSizeBinaryInView<'a> {
         /// Field 1: `values`
@@ -9948,16 +10070,22 @@ pub mod kv_predicate_constraint {
         ),
     }
 }
+/// A single predicate check: extract the field, then test it against the
+/// constraint.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct KvPredicateCheck {
+    /// The field to extract from each row.
+    ///
     /// Field 1: `field`
     #[serde(
         rename = "field",
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
     )]
     pub field: ::buffa::MessageField<KvFieldRef>,
+    /// The constraint the field value must satisfy.
+    ///
     /// Field 2: `constraint`
     #[serde(
         rename = "constraint",
@@ -10126,10 +10254,16 @@ pub const __KV_PREDICATE_CHECK_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = 
     from_json: ::buffa::type_registry::any_from_json::<KvPredicateCheck>,
     is_wkt: false,
 };
+/// A single predicate check: extract the field, then test it against the
+/// constraint.
 #[derive(Clone, Debug, Default)]
 pub struct KvPredicateCheckView<'a> {
+    /// The field to extract from each row.
+    ///
     /// Field 1: `field`
     pub field: ::buffa::MessageFieldView<KvFieldRefView<'a>>,
+    /// The constraint the field value must satisfy.
+    ///
     /// Field 2: `constraint`
     pub constraint: ::buffa::MessageFieldView<KvPredicateConstraintView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -10273,10 +10407,13 @@ unsafe impl ::buffa::DefaultViewInstance for KvPredicateCheckView<'static> {
 unsafe impl<'a> ::buffa::HasDefaultViewInstance for KvPredicateCheckView<'a> {
     type Static = KvPredicateCheckView<'static>;
 }
+/// Conjunction (AND) of predicate checks used to filter rows before reduction.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct KvPredicate {
+    /// All checks must pass for a row to be included.
+    ///
     /// Field 1: `checks`
     #[serde(
         rename = "checks",
@@ -10284,6 +10421,9 @@ pub struct KvPredicate {
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
     pub checks: ::buffa::alloc::vec::Vec<KvPredicateCheck>,
+    /// When true, the predicate is statically unsatisfiable and the server may
+    /// short-circuit evaluation (returns zero rows).
+    ///
     /// Field 2: `contradiction`
     #[serde(
         rename = "contradiction",
@@ -10440,10 +10580,16 @@ pub const __KV_PREDICATE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buff
     from_json: ::buffa::type_registry::any_from_json::<KvPredicate>,
     is_wkt: false,
 };
+/// Conjunction (AND) of predicate checks used to filter rows before reduction.
 #[derive(Clone, Debug, Default)]
 pub struct KvPredicateView<'a> {
+    /// All checks must pass for a row to be included.
+    ///
     /// Field 1: `checks`
     pub checks: ::buffa::RepeatedView<'a, KvPredicateCheckView<'a>>,
+    /// When true, the predicate is statically unsatisfiable and the server may
+    /// short-circuit evaluation (returns zero rows).
+    ///
     /// Field 2: `contradiction`
     pub contradiction: bool,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -10558,10 +10704,13 @@ unsafe impl ::buffa::DefaultViewInstance for KvPredicateView<'static> {
 unsafe impl<'a> ::buffa::HasDefaultViewInstance for KvPredicateView<'a> {
     type Static = KvPredicateView<'static>;
 }
+/// A single aggregation to compute over the scanned range.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct RangeReducerSpec {
+    /// The aggregation operation.
+    ///
     /// Field 1: `op`
     #[serde(
         rename = "op",
@@ -10569,6 +10718,9 @@ pub struct RangeReducerSpec {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_default_enum_value"
     )]
     pub op: ::buffa::EnumValue<RangeReduceOp>,
+    /// Expression to evaluate per row. Required for all ops except
+    /// `COUNT_ALL` (where it must be absent).
+    ///
     /// Field 2: `expr`
     #[serde(
         rename = "expr",
@@ -10732,10 +10884,16 @@ pub const __RANGE_REDUCER_SPEC_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = 
     from_json: ::buffa::type_registry::any_from_json::<RangeReducerSpec>,
     is_wkt: false,
 };
+/// A single aggregation to compute over the scanned range.
 #[derive(Clone, Debug, Default)]
 pub struct RangeReducerSpecView<'a> {
+    /// The aggregation operation.
+    ///
     /// Field 1: `op`
     pub op: ::buffa::EnumValue<RangeReduceOp>,
+    /// Expression to evaluate per row. Required for all ops except
+    /// `COUNT_ALL` (where it must be absent).
+    ///
     /// Field 2: `expr`
     pub expr: ::buffa::MessageFieldView<KvExprView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -10861,10 +11019,15 @@ unsafe impl ::buffa::DefaultViewInstance for RangeReducerSpecView<'static> {
 unsafe impl<'a> ::buffa::HasDefaultViewInstance for RangeReducerSpecView<'a> {
     type Static = RangeReducerSpecView<'static>;
 }
+/// Parameters for a Reduce RPC: what to aggregate, how to group, and an
+/// optional row filter.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct ReduceParams {
+    /// Aggregations to compute. At least one reducer or one `group_by`
+    /// expression is required.
+    ///
     /// Field 1: `reducers`
     #[serde(
         rename = "reducers",
@@ -10872,6 +11035,10 @@ pub struct ReduceParams {
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
     pub reducers: ::buffa::alloc::vec::Vec<RangeReducerSpec>,
+    /// Expressions whose values partition rows into groups. When non-empty,
+    /// results are returned per-group in `ReduceResponse.groups` instead of as
+    /// flat scalar results.
+    ///
     /// Field 2: `group_by`
     #[serde(
         rename = "groupBy",
@@ -10880,6 +11047,8 @@ pub struct ReduceParams {
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
     pub group_by: ::buffa::alloc::vec::Vec<KvExpr>,
+    /// Optional predicate to exclude rows before aggregation.
+    ///
     /// Field 3: `filter`
     #[serde(
         rename = "filter",
@@ -11075,12 +11244,23 @@ pub const __REDUCE_PARAMS_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buf
     from_json: ::buffa::type_registry::any_from_json::<ReduceParams>,
     is_wkt: false,
 };
+/// Parameters for a Reduce RPC: what to aggregate, how to group, and an
+/// optional row filter.
 #[derive(Clone, Debug, Default)]
 pub struct ReduceParamsView<'a> {
+    /// Aggregations to compute. At least one reducer or one `group_by`
+    /// expression is required.
+    ///
     /// Field 1: `reducers`
     pub reducers: ::buffa::RepeatedView<'a, RangeReducerSpecView<'a>>,
+    /// Expressions whose values partition rows into groups. When non-empty,
+    /// results are returned per-group in `ReduceResponse.groups` instead of as
+    /// flat scalar results.
+    ///
     /// Field 2: `group_by`
     pub group_by: ::buffa::RepeatedView<'a, KvExprView<'a>>,
+    /// Optional predicate to exclude rows before aggregation.
+    ///
     /// Field 3: `filter`
     pub filter: ::buffa::MessageFieldView<KvPredicateView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -11226,6 +11406,8 @@ unsafe impl ::buffa::DefaultViewInstance for ReduceParamsView<'static> {
 unsafe impl<'a> ::buffa::HasDefaultViewInstance for ReduceParamsView<'a> {
     type Static = ReduceParamsView<'static>;
 }
+/// The result of a single reducer. Absent when no rows contributed (e.g. SUM
+/// over zero matching rows).
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
@@ -11365,6 +11547,8 @@ pub const __RANGE_REDUCE_RESULT_JSON_ANY: ::buffa::type_registry::JsonAnyEntry =
     from_json: ::buffa::type_registry::any_from_json::<RangeReduceResult>,
     is_wkt: false,
 };
+/// The result of a single reducer. Absent when no rows contributed (e.g. SUM
+/// over zero matching rows).
 #[derive(Clone, Debug, Default)]
 pub struct RangeReduceResultView<'a> {
     /// Field 1: `value`
@@ -11481,10 +11665,14 @@ unsafe impl ::buffa::DefaultViewInstance for RangeReduceResultView<'static> {
 unsafe impl<'a> ::buffa::HasDefaultViewInstance for RangeReduceResultView<'a> {
     type Static = RangeReduceResultView<'static>;
 }
+/// Aggregation results for one distinct combination of group-by values.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct RangeReduceGroup {
+    /// The evaluated group-by expression values for this group, in the same
+    /// order as `ReduceParams.group_by`.
+    ///
     /// Field 1: `group_values`
     #[serde(
         rename = "groupValues",
@@ -11493,6 +11681,9 @@ pub struct RangeReduceGroup {
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
     pub group_values: ::buffa::alloc::vec::Vec<KvReducedValue>,
+    /// Parallel to `group_values`; false when the corresponding group value is
+    /// NULL (the proto value is a default zero, but should be treated as absent).
+    ///
     /// Field 2: `group_values_present`
     #[serde(
         rename = "groupValuesPresent",
@@ -11501,6 +11692,9 @@ pub struct RangeReduceGroup {
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
     pub group_values_present: ::buffa::alloc::vec::Vec<bool>,
+    /// Reducer results for this group, in the same order as
+    /// `ReduceParams.reducers`.
+    ///
     /// Field 3: `results`
     #[serde(
         rename = "results",
@@ -11717,12 +11911,22 @@ pub const __RANGE_REDUCE_GROUP_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = 
     from_json: ::buffa::type_registry::any_from_json::<RangeReduceGroup>,
     is_wkt: false,
 };
+/// Aggregation results for one distinct combination of group-by values.
 #[derive(Clone, Debug, Default)]
 pub struct RangeReduceGroupView<'a> {
+    /// The evaluated group-by expression values for this group, in the same
+    /// order as `ReduceParams.group_by`.
+    ///
     /// Field 1: `group_values`
     pub group_values: ::buffa::RepeatedView<'a, KvReducedValueView<'a>>,
+    /// Parallel to `group_values`; false when the corresponding group value is
+    /// NULL (the proto value is a default zero, but should be treated as absent).
+    ///
     /// Field 2: `group_values_present`
     pub group_values_present: ::buffa::RepeatedView<'a, bool>,
+    /// Reducer results for this group, in the same order as
+    /// `ReduceParams.reducers`.
+    ///
     /// Field 3: `results`
     pub results: ::buffa::RepeatedView<'a, RangeReduceResultView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -11866,10 +12070,13 @@ unsafe impl ::buffa::DefaultViewInstance for RangeReduceGroupView<'static> {
 unsafe impl<'a> ::buffa::HasDefaultViewInstance for RangeReduceGroupView<'a> {
     type Static = RangeReduceGroupView<'static>;
 }
+/// Point lookup request for a single key.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct GetRequest {
+    /// The key to look up (max 254 bytes).
+    ///
     /// Field 1: `key`
     #[serde(
         rename = "key",
@@ -11877,6 +12084,8 @@ pub struct GetRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
     pub key: ::buffa::alloc::vec::Vec<u8>,
+    /// Optional freshness gate. See service-level comment.
+    ///
     /// Field 2: `min_sequence_number`
     #[serde(
         rename = "minSequenceNumber",
@@ -12030,10 +12239,15 @@ pub const __GET_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa
     from_json: ::buffa::type_registry::any_from_json::<GetRequest>,
     is_wkt: false,
 };
+/// Point lookup request for a single key.
 #[derive(Clone, Debug, Default)]
 pub struct GetRequestView<'a> {
+    /// The key to look up (max 254 bytes).
+    ///
     /// Field 1: `key`
     pub key: &'a [u8],
+    /// Optional freshness gate. See service-level comment.
+    ///
     /// Field 2: `min_sequence_number`
     pub min_sequence_number: ::core::option::Option<u64>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -12145,17 +12359,13 @@ unsafe impl ::buffa::DefaultViewInstance for GetRequestView<'static> {
 unsafe impl<'a> ::buffa::HasDefaultViewInstance for GetRequestView<'a> {
     type Static = GetRequestView<'static>;
 }
+/// Point lookup response.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct GetResponse {
-    /// Field 1: `found`
-    #[serde(
-        rename = "found",
-        with = "::buffa::json_helpers::proto_bool",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_false"
-    )]
-    pub found: bool,
+    /// The value associated with the key; absent when the key does not exist.
+    ///
     /// Field 2: `value`
     #[serde(
         rename = "value",
@@ -12172,10 +12382,7 @@ pub struct GetResponse {
 }
 impl ::core::fmt::Debug for GetResponse {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("GetResponse")
-            .field("found", &self.found)
-            .field("value", &self.value)
-            .finish()
+        f.debug_struct("GetResponse").field("value", &self.value).finish()
     }
 }
 impl GetResponse {
@@ -12201,9 +12408,6 @@ impl ::buffa::Message for GetResponse {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
-        if self.found {
-            size += 1u32 + ::buffa::types::BOOL_ENCODED_LEN as u32;
-        }
         if let Some(ref v) = self.value {
             size += 1u32 + ::buffa::types::bytes_encoded_len(v) as u32;
         }
@@ -12214,11 +12418,6 @@ impl ::buffa::Message for GetResponse {
     fn write_to(&self, buf: &mut impl ::buffa::bytes::BufMut) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.found {
-            ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Varint)
-                .encode(buf);
-            ::buffa::types::encode_bool(self.found, buf);
-        }
         if let Some(ref v) = self.value {
             ::buffa::encoding::Tag::new(
                     2u32,
@@ -12240,16 +12439,6 @@ impl ::buffa::Message for GetResponse {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         match tag.field_number() {
-            1u32 => {
-                if tag.wire_type() != ::buffa::encoding::WireType::Varint {
-                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                        field_number: 1u32,
-                        expected: 0u8,
-                        actual: tag.wire_type() as u8,
-                    });
-                }
-                self.found = ::buffa::types::decode_bool(buf)?;
-            }
             2u32 => {
                 if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                     return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
@@ -12274,7 +12463,6 @@ impl ::buffa::Message for GetResponse {
         self.__buffa_cached_size.get()
     }
     fn clear(&mut self) {
-        self.found = false;
         self.value = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
         self.__buffa_cached_size.set(0);
@@ -12309,10 +12497,11 @@ pub const __GET_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buff
     from_json: ::buffa::type_registry::any_from_json::<GetResponse>,
     is_wkt: false,
 };
+/// Point lookup response.
 #[derive(Clone, Debug, Default)]
 pub struct GetResponseView<'a> {
-    /// Field 1: `found`
-    pub found: bool,
+    /// The value associated with the key; absent when the key does not exist.
+    ///
     /// Field 2: `value`
     pub value: ::core::option::Option<&'a [u8]>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -12355,16 +12544,6 @@ impl<'a> GetResponseView<'a> {
             let before_tag = cur;
             let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
             match tag.field_number() {
-                1u32 => {
-                    if tag.wire_type() != ::buffa::encoding::WireType::Varint {
-                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                            field_number: 1u32,
-                            expected: 0u8,
-                            actual: tag.wire_type() as u8,
-                        });
-                    }
-                    view.found = ::buffa::types::decode_bool(&mut cur)?;
-                }
                 2u32 => {
                     if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                         return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
@@ -12402,7 +12581,6 @@ impl<'a> ::buffa::MessageView<'a> for GetResponseView<'a> {
         #[allow(unused_imports)]
         use ::buffa::alloc::string::ToString as _;
         GetResponse {
-            found: self.found,
             value: self.value.map(|b| (b).to_vec()),
             __buffa_unknown_fields: self
                 .__buffa_unknown_fields
@@ -12748,10 +12926,13 @@ unsafe impl ::buffa::DefaultViewInstance for GetManyRequestView<'static> {
 unsafe impl<'a> ::buffa::HasDefaultViewInstance for GetManyRequestView<'a> {
     type Static = GetManyRequestView<'static>;
 }
+/// A single entry in a GetMany response frame.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct GetManyEntry {
+    /// The looked-up key.
+    ///
     /// Field 1: `key`
     #[serde(
         rename = "key",
@@ -12759,6 +12940,8 @@ pub struct GetManyEntry {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
     pub key: ::buffa::alloc::vec::Vec<u8>,
+    /// The value if the key exists; absent for missing keys.
+    ///
     /// Field 2: `value`
     #[serde(
         rename = "value",
@@ -12915,10 +13098,15 @@ pub const __GET_MANY_ENTRY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::bu
     from_json: ::buffa::type_registry::any_from_json::<GetManyEntry>,
     is_wkt: false,
 };
+/// A single entry in a GetMany response frame.
 #[derive(Clone, Debug, Default)]
 pub struct GetManyEntryView<'a> {
+    /// The looked-up key.
+    ///
     /// Field 1: `key`
     pub key: &'a [u8],
+    /// The value if the key exists; absent for missing keys.
+    ///
     /// Field 2: `value`
     pub value: ::core::option::Option<&'a [u8]>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -13028,6 +13216,7 @@ unsafe impl ::buffa::DefaultViewInstance for GetManyEntryView<'static> {
 unsafe impl<'a> ::buffa::HasDefaultViewInstance for GetManyEntryView<'a> {
     type Static = GetManyEntryView<'static>;
 }
+/// A batch of GetMany lookup results.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
@@ -13166,6 +13355,7 @@ pub const __GET_MANY_FRAME_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::bu
     from_json: ::buffa::type_registry::any_from_json::<GetManyFrame>,
     is_wkt: false,
 };
+/// A batch of GetMany lookup results.
 #[derive(Clone, Debug, Default)]
 pub struct GetManyFrameView<'a> {
     /// Field 1: `results`
@@ -14381,10 +14571,15 @@ unsafe impl ::buffa::DefaultViewInstance for ReduceRequestView<'static> {
 unsafe impl<'a> ::buffa::HasDefaultViewInstance for ReduceRequestView<'a> {
     type Static = ReduceRequestView<'static>;
 }
+/// Response from a Reduce RPC. Exactly one of `results` or `groups` is
+/// populated depending on whether `ReduceParams.group_by` was empty.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct ReduceResponse {
+    /// Scalar reducer results (one per `ReduceParams.reducers` entry). Populated
+    /// only when `group_by` is empty.
+    ///
     /// Field 1: `results`
     #[serde(
         rename = "results",
@@ -14392,6 +14587,8 @@ pub struct ReduceResponse {
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
     pub results: ::buffa::alloc::vec::Vec<RangeReduceResult>,
+    /// Per-group reducer results. Populated only when `group_by` is non-empty.
+    ///
     /// Field 2: `groups`
     #[serde(
         rename = "groups",
@@ -14557,10 +14754,17 @@ pub const __REDUCE_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::b
     from_json: ::buffa::type_registry::any_from_json::<ReduceResponse>,
     is_wkt: false,
 };
+/// Response from a Reduce RPC. Exactly one of `results` or `groups` is
+/// populated depending on whether `ReduceParams.group_by` was empty.
 #[derive(Clone, Debug, Default)]
 pub struct ReduceResponseView<'a> {
+    /// Scalar reducer results (one per `ReduceParams.reducers` entry). Populated
+    /// only when `group_by` is empty.
+    ///
     /// Field 1: `results`
     pub results: ::buffa::RepeatedView<'a, RangeReduceResultView<'a>>,
+    /// Per-group reducer results. Populated only when `group_by` is non-empty.
+    ///
     /// Field 2: `groups`
     pub groups: ::buffa::RepeatedView<'a, RangeReduceGroupView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -14697,7 +14901,7 @@ pub const SERVICE_SERVICE_NAME: &str = "store.query.v1.Service";
 /// for zero-copy access patterns and when `to_owned_message()` is needed.
 #[allow(clippy::type_complexity)]
 pub trait Service: Send + Sync + 'static {
-    /// Handle the Get RPC.
+    /// Point lookup of a single key.
     fn get(
         &self,
         ctx: ::connectrpc::Context,
@@ -14705,7 +14909,7 @@ pub trait Service: Send + Sync + 'static {
     ) -> impl ::std::future::Future<
         Output = Result<(GetResponse, ::connectrpc::Context), ::connectrpc::ConnectError>,
     > + Send;
-    /// Handle the GetMany RPC.
+    /// Batch point lookup of multiple keys, streamed back in frames.
     fn get_many(
         &self,
         ctx: ::connectrpc::Context,
@@ -14725,7 +14929,7 @@ pub trait Service: Send + Sync + 'static {
             ::connectrpc::ConnectError,
         >,
     > + Send;
-    /// Handle the Range RPC.
+    /// Lexicographic range scan, streamed back in batched frames.
     fn range(
         &self,
         ctx: ::connectrpc::Context,
@@ -14745,7 +14949,8 @@ pub trait Service: Send + Sync + 'static {
             ::connectrpc::ConnectError,
         >,
     > + Send;
-    /// Handle the Reduce RPC.
+    /// Server-side aggregation over a key range with optional grouping and
+    /// filtering.
     fn reduce(
         &self,
         ctx: ::connectrpc::Context,

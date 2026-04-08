@@ -188,7 +188,7 @@ export class StoreClient {
                 onTrailer: (t) => this.observeDetailFromHeaders(t),
             };
             const res = await this.client.query.get(req, callOpts);
-            if (!res.found || res.value === undefined) {
+            if (res.value === undefined) {
                 return null;
             }
             return { value: res.value };

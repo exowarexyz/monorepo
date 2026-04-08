@@ -354,9 +354,8 @@ message GetRequest {
 
 // Point lookup response.
 message GetResponse {
-  // True if the key exists in the store.
-  bool found = 1;
-  // The value associated with the key, present only when `found` is true.
+  reserved 1;
+  // The value associated with the key; absent when the key does not exist.
   optional bytes value = 2;
 }
 

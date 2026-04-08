@@ -3,9 +3,10 @@ use commonware_codec::Encode;
 use connectrpc::client::ClientConfig;
 use exoware_sdk_rs::compact::{
     policy_retain, Policy, PolicyGroupBy, PolicyMatchKey, PolicyOrderBy, PolicyOrderEncoding,
-    PolicyRetain, PruneRequest, RetainDropAll, RetainKeepLatest,
+    PolicyRetain, PruneRequest, RetainDropAll, RetainGreaterThan, RetainKeepLatest,
     ServiceClient as CompactServiceClient,
 };
+use exoware_sdk_rs::prune_policy;
 use exoware_sdk_rs::keys::{Key, KeyCodec};
 use exoware_sdk_rs::kv_codec::{
     KvExpr, KvFieldKind, KvFieldRef, KvReducedValue, StoredRow, StoredValue,
@@ -466,4 +467,202 @@ async fn prune_keep_latest_retains_newest() {
         client.get(&k_b1).await.expect("get b1").as_deref(),
         Some(b"b-v1".as_slice())
     );
+}
+
+// -- reduce count_field, min_field, max_field --
+
+#[tokio::test]
+async fn reduce_count_min_max_field() {
+    let (_h, client, _url) = spawn_client().await;
+    let encode_row = |v: i64| -> Vec<u8> {
+        StoredRow {
+            values: vec![Some(StoredValue::Int64(v))],
+        }
+        .encode()
+        .to_vec()
+    };
+    client
+        .put(&[
+            (&key(b"fa"), encode_row(10).as_slice()),
+            (&key(b"fb"), encode_row(30).as_slice()),
+            (&key(b"fc"), encode_row(20).as_slice()),
+        ])
+        .await
+        .expect("put");
+
+    let field = KvExpr::Field(KvFieldRef::Value {
+        index: 0,
+        kind: KvFieldKind::Int64,
+        nullable: true,
+    });
+    let request = RangeReduceRequest {
+        reducers: vec![
+            RangeReducerSpec {
+                op: RangeReduceOp::CountField,
+                expr: Some(field.clone()),
+            },
+            RangeReducerSpec {
+                op: RangeReduceOp::MinField,
+                expr: Some(field.clone()),
+            },
+            RangeReducerSpec {
+                op: RangeReduceOp::MaxField,
+                expr: Some(field),
+            },
+        ],
+        group_by: vec![],
+        filter: None,
+    };
+    let results = client
+        .range_reduce(&key(b"fa"), &key(b"fc"), &request)
+        .await
+        .expect("reduce");
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0], Some(KvReducedValue::UInt64(3)));
+    assert_eq!(results[1], Some(KvReducedValue::Int64(10)));
+    assert_eq!(results[2], Some(KvReducedValue::Int64(30)));
+}
+
+// -- reduce with group_by --
+
+#[tokio::test]
+async fn reduce_grouped_count() {
+    let (_h, client, _url) = spawn_client().await;
+    let codec = KeyCodec::new(4, 1);
+    let encode_row = |v: i64| -> Vec<u8> {
+        StoredRow {
+            values: vec![Some(StoredValue::Int64(v))],
+        }
+        .encode()
+        .to_vec()
+    };
+    let ka1 = codec.encode(b"a\x01").expect("encode");
+    let ka2 = codec.encode(b"a\x02").expect("encode");
+    let kb1 = codec.encode(b"b\x01").expect("encode");
+
+    client
+        .put(&[
+            (&ka1, encode_row(1).as_slice()),
+            (&ka2, encode_row(2).as_slice()),
+            (&kb1, encode_row(3).as_slice()),
+        ])
+        .await
+        .expect("put");
+
+    let request = RangeReduceRequest {
+        reducers: vec![RangeReducerSpec {
+            op: RangeReduceOp::CountAll,
+            expr: None,
+        }],
+        group_by: vec![KvExpr::Field(KvFieldRef::Key {
+            bit_offset: 4 + 1,
+            kind: KvFieldKind::FixedSizeBinary(1),
+        })],
+        filter: None,
+    };
+    let response = client
+        .range_reduce_response(&ka1, &kb1, &request)
+        .await
+        .expect("reduce");
+    assert_eq!(response.groups.len(), 2);
+}
+
+// -- prune via StoreClient::prune() --
+
+#[tokio::test]
+async fn store_client_prune_drop_all() {
+    let (_h, client, _url) = spawn_client().await;
+
+    let codec = KeyCodec::new(4, 5);
+    let ka = codec.encode(b"pa").expect("encode");
+    let kb = codec.encode(b"pb").expect("encode");
+    client.put(&[(&ka, b"v1"), (&kb, b"v2")]).await.expect("put");
+    assert!(client.get(&ka).await.expect("get").is_some());
+
+    client
+        .prune(&[prune_policy::PrunePolicy {
+            match_key: prune_policy::MatchKey {
+                reserved_bits: 4,
+                prefix: 5,
+                payload_regex: ".*".into(),
+            },
+            group_by: prune_policy::GroupBy::default(),
+            order_by: None,
+            retain: prune_policy::RetainPolicy::DropAll,
+        }])
+        .await
+        .expect("prune");
+
+    assert!(client.get(&ka).await.expect("get").is_none());
+    assert!(client.get(&kb).await.expect("get").is_none());
+}
+
+// -- prune with GreaterThan retain --
+
+#[tokio::test]
+async fn prune_greater_than_retains_above_threshold() {
+    let (_h, client, url) = spawn_client().await;
+
+    let codec = KeyCodec::new(4, 3);
+    let make_key = |logical: &[u8; 2], version: u64| -> Key {
+        let mut payload = Vec::with_capacity(2 + 8);
+        payload.extend_from_slice(logical);
+        payload.extend_from_slice(&version.to_be_bytes());
+        codec.encode(&payload).expect("encode")
+    };
+
+    let k_a10 = make_key(b"aa", 10);
+    let k_a20 = make_key(b"aa", 20);
+    let k_a30 = make_key(b"aa", 30);
+
+    client
+        .put(&[(&k_a10, b"v10"), (&k_a20, b"v20"), (&k_a30, b"v30")])
+        .await
+        .expect("put");
+
+    let compact_config = ClientConfig::new(url.parse::<http::Uri>().unwrap())
+        .compression(connect_compression_registry());
+    let compact_client =
+        CompactServiceClient::new(PreferZstdHttpClient::plaintext(), compact_config);
+    compact_client
+        .prune(PruneRequest {
+            policies: vec![Policy {
+                match_key: Some(PolicyMatchKey {
+                    reserved_bits: 4,
+                    prefix: 3,
+                    payload_regex: "(?s-u)^(?P<logical>.{2})(?P<version>.{8})$".to_string(),
+                    ..Default::default()
+                })
+                .into(),
+                group_by: Some(PolicyGroupBy {
+                    capture_groups: vec!["logical".to_string()],
+                    ..Default::default()
+                })
+                .into(),
+                order_by: Some(PolicyOrderBy {
+                    capture_group: "version".to_string(),
+                    encoding: PolicyOrderEncoding::POLICY_ORDER_ENCODING_U64_BE.into(),
+                    ..Default::default()
+                })
+                .into(),
+                retain: Some(PolicyRetain {
+                    kind: Some(policy_retain::Kind::GreaterThan(Box::new(
+                        RetainGreaterThan {
+                            threshold_u64: 15,
+                            ..Default::default()
+                        },
+                    ))),
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("prune greater_than");
+
+    assert!(client.get(&k_a10).await.expect("get a10").is_none());
+    assert!(client.get(&k_a20).await.expect("get a20").is_some());
+    assert!(client.get(&k_a30).await.expect("get a30").is_some());
 }

@@ -23,9 +23,11 @@ use connectrpc::client::{ClientConfig, ServerStream as ConnectServerStream};
 use connectrpc::{ConnectError, ErrorCode};
 use keys::is_valid_key_size;
 use kv_codec::KvReducedValue;
+use exoware_proto::compact::ServiceClient as CompactServiceClient;
 use exoware_proto::ingest::ServiceClient as IngestServiceClient;
 use exoware_proto::query as proto_query;
 use exoware_proto::query::ServiceClient as QueryServiceClient;
+use exoware_proto::store::compact::v1::PruneRequest as ProtoPruneRequest;
 use exoware_proto::store::ingest::v1::PutRequest as ProtoPutRequest;
 use exoware_proto::store::query::v1::{
     GetManyRequest as ProtoGetManyRequest, GetRequest as ProtoGetRequest,
@@ -274,6 +276,10 @@ pub struct GetManyStream {
 }
 
 impl GetManyStream {
+    pub fn final_detail(&self) -> Option<proto_query::Detail> {
+        self.final_detail.clone()
+    }
+
     fn from_connect_stream(
         stream: ConnectServerStream<
             hyper::body::Incoming,
@@ -468,6 +474,8 @@ pub enum ClientBuildError {
     MissingIngestUrl,
     #[error("StoreClientBuilder: missing query URL (set query_url or url)")]
     MissingQueryUrl,
+    #[error("StoreClientBuilder: missing compact URL (set compact_url or url)")]
+    MissingCompactUrl,
     #[error("StoreClientBuilder: invalid URL \"{url}\": {source}")]
     InvalidUrl {
         url: String,
@@ -484,17 +492,19 @@ pub struct StoreClientBuilder {
     health_url: Option<String>,
     ingest_url: Option<String>,
     query_url: Option<String>,
+    compact_url: Option<String>,
     retry_config: RetryConfig,
     connect_request_compression: ConnectRequestCompression,
 }
 
 impl StoreClientBuilder {
-    /// Sets the same base URL for [`Self::health_url`], [`Self::ingest_url`], and [`Self::query_url`].
+    /// Sets the same base URL for all services (health, ingest, query, compact).
     pub fn url(mut self, url: &str) -> Self {
         let u = trim_connect_base(url);
         self.health_url = Some(u.clone());
         self.ingest_url = Some(u.clone());
-        self.query_url = Some(u);
+        self.query_url = Some(u.clone());
+        self.compact_url = Some(u);
         self
     }
 
@@ -516,6 +526,12 @@ impl StoreClientBuilder {
         self
     }
 
+    /// Base URL for the compact service (`store.compact.v1.Service`).
+    pub fn compact_url(mut self, url: &str) -> Self {
+        self.compact_url = Some(trim_connect_base(url));
+        self
+    }
+
     /// Retry policy for idempotent read operations (get / range / reduce).
     pub fn retry_config(mut self, retry: RetryConfig) -> Self {
         self.retry_config = retry.sanitized();
@@ -533,6 +549,7 @@ impl StoreClientBuilder {
         let health_url = self.health_url.ok_or(ClientBuildError::MissingHealthUrl)?;
         let ingest_url = self.ingest_url.ok_or(ClientBuildError::MissingIngestUrl)?;
         let query_url = self.query_url.ok_or(ClientBuildError::MissingQueryUrl)?;
+        let compact_url = self.compact_url.ok_or(ClientBuildError::MissingCompactUrl)?;
         let ingest_uri: http::Uri = ingest_url.parse().map_err(|e| ClientBuildError::InvalidUrl {
             url: ingest_url.clone(),
             source: e,
@@ -541,10 +558,18 @@ impl StoreClientBuilder {
             url: query_url.clone(),
             source: e,
         })?;
+        let compact_uri: http::Uri =
+            compact_url
+                .parse()
+                .map_err(|e| ClientBuildError::InvalidUrl {
+                    url: compact_url.clone(),
+                    source: e,
+                })?;
         Ok(StoreClient {
             health_url,
             ingest_uri,
             query_uri,
+            compact_uri,
             http: new_http_client(),
             connect_http: ProtoPreferZstdHttpClient::plaintext(),
             sequence_number: Arc::new(AtomicU64::new(0)),
@@ -561,6 +586,7 @@ pub struct StoreClient {
     pub(crate) health_url: String,
     ingest_uri: http::Uri,
     query_uri: http::Uri,
+    compact_uri: http::Uri,
     http: reqwest::Client,
     connect_http: ProtoPreferZstdHttpClient,
     sequence_number: Arc<AtomicU64>,
@@ -605,19 +631,18 @@ impl StoreClient {
             .expect("url sets health, ingest, and query URLs")
     }
 
-    /// Split endpoints for deployments where ingest and query run on different ports or hosts.
-    ///
-    /// Prefer [`StoreClient::builder`] for clarity. This is equivalent to
-    /// `builder().health_url(health_base).ingest_url(ingest_base).query_url(query_base).build().unwrap()`.
-    ///
-    /// - `health_base`: used for plain HTTP `GET /health` and `GET /ready` (use the query worker URL).
-    /// - `ingest_base`: base URL for `store.ingest.v1.Service`.
-    /// - `query_base`: base URL for `store.query.v1.Service`.
-    pub fn with_split_urls(health_base: &str, ingest_base: &str, query_base: &str) -> Self {
+    /// Split endpoints for deployments where services run on different ports or hosts.
+    pub fn with_split_urls(
+        health_base: &str,
+        ingest_base: &str,
+        query_base: &str,
+        compact_base: &str,
+    ) -> Self {
         Self::with_split_urls_and_retry(
             health_base,
             ingest_base,
             query_base,
+            compact_base,
             RetryConfig::standard(),
         )
     }
@@ -626,15 +651,17 @@ impl StoreClient {
         health_base: &str,
         ingest_base: &str,
         query_base: &str,
+        compact_base: &str,
         retry_config: RetryConfig,
     ) -> Self {
         Self::builder()
             .health_url(health_base)
             .ingest_url(ingest_base)
             .query_url(query_base)
+            .compact_url(compact_base)
             .retry_config(retry_config)
             .build()
-            .expect("health, ingest, and query URLs are set")
+            .expect("all service URLs are set")
     }
 
     pub fn sequence_number(&self) -> u64 {
@@ -1014,6 +1041,25 @@ impl StoreClient {
     > {
         self.range_reduce_response_internal(start, end, request, None)
             .await
+    }
+
+    pub async fn prune(
+        &self,
+        policies: &[crate::prune_policy::PrunePolicy],
+    ) -> Result<(), ClientError> {
+        let config = store_connect_client_config(
+            self.compact_uri.clone(),
+            self.connect_request_compression,
+        );
+        let client = CompactServiceClient::new(self.connect_http.clone(), config);
+        client
+            .prune(ProtoPruneRequest {
+                policies: exoware_proto::prune_policies_to_proto(policies),
+                ..Default::default()
+            })
+            .await
+            .map_err(client_error_from_connect)?;
+        Ok(())
     }
 
     pub async fn health(&self) -> Result<bool, ClientError> {
@@ -1596,16 +1642,21 @@ mod tests {
         assert_eq!(single.ingest_uri.to_string(), built.ingest_uri.to_string());
         assert_eq!(single.query_uri.to_string(), built.query_uri.to_string());
 
-        let split = StoreClient::with_split_urls("http://h", "http://i", "http://q");
+        let split = StoreClient::with_split_urls("http://h", "http://i", "http://q", "http://c");
         let split_b = StoreClient::builder()
             .health_url("http://h")
             .ingest_url("http://i")
             .query_url("http://q")
+            .compact_url("http://c")
             .build()
             .unwrap();
         assert_eq!(split.health_url, split_b.health_url);
         assert_eq!(split.ingest_uri.to_string(), split_b.ingest_uri.to_string());
         assert_eq!(split.query_uri.to_string(), split_b.query_uri.to_string());
+        assert_eq!(
+            split.compact_uri.to_string(),
+            split_b.compact_uri.to_string()
+        );
     }
 
     #[test]
@@ -1620,6 +1671,14 @@ mod tests {
                 .ingest_url("http://i")
                 .build(),
             Err(ClientBuildError::MissingQueryUrl)
+        ));
+        assert!(matches!(
+            StoreClient::builder()
+                .health_url("http://h")
+                .ingest_url("http://i")
+                .query_url("http://q")
+                .build(),
+            Err(ClientBuildError::MissingCompactUrl)
         ));
     }
 

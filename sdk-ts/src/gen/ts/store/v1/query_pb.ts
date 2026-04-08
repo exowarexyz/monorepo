@@ -11,9 +11,11 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file store/v1/query.proto.
  */
 export const file_store_v1_query: GenFile = /*@__PURE__*/
-  fileDesc("ChRzdG9yZS92MS9xdWVyeS5wcm90bxIOc3RvcmUucXVlcnkudjEiKAoKUmFuZ2VFbnRyeRILCgNrZXkYASABKAwSDQoFdmFsdWUYAiABKAwijgEKBkRldGFpbBIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQSOQoKcmVhZF9zdGF0cxgCIAMoCzIlLnN0b3JlLnF1ZXJ5LnYxLkRldGFpbC5SZWFkU3RhdHNFbnRyeRowCg5SZWFkU3RhdHNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAQ6AjgBIsUECgpLdkZpZWxkUmVmEjIKA2tleRgBIAEoCzIjLnN0b3JlLnF1ZXJ5LnYxLkt2RmllbGRSZWYuS2V5RmllbGRIABJACgt6X29yZGVyX2tleRgCIAEoCzIpLnN0b3JlLnF1ZXJ5LnYxLkt2RmllbGRSZWYuWk9yZGVyS2V5RmllbGRIABI2CgV2YWx1ZRgDIAEoCzIlLnN0b3JlLnF1ZXJ5LnYxLkt2RmllbGRSZWYuVmFsdWVGaWVsZEgAGmgKCEtleUZpZWxkEhIKCmJpdF9vZmZzZXQYASABKA0SKQoEa2luZBgCIAEoDjIbLnN0b3JlLnF1ZXJ5LnYxLkt2RmllbGRLaW5kEh0KFWZpeGVkX3NpemVfYmluYXJ5X2xlbhgDIAEoDRqcAQoOWk9yZGVyS2V5RmllbGQSEgoKYml0X29mZnNldBgBIAEoDRIWCg5maWVsZF9wb3NpdGlvbhgCIAEoDRIUCgxmaWVsZF93aWR0aHMYAyADKA0SKQoEa2luZBgEIAEoDjIbLnN0b3JlLnF1ZXJ5LnYxLkt2RmllbGRLaW5kEh0KFWZpeGVkX3NpemVfYmluYXJ5X2xlbhgFIAEoDRp3CgpWYWx1ZUZpZWxkEg0KBWluZGV4GAEgASgNEikKBGtpbmQYAiABKA4yGy5zdG9yZS5xdWVyeS52MS5LdkZpZWxkS2luZBIQCghudWxsYWJsZRgDIAEoCBIdChVmaXhlZF9zaXplX2JpbmFyeV9sZW4YBCABKA1CBwoFZmllbGQitgIKDkt2UmVkdWNlZFZhbHVlEhUKC2ludDY0X3ZhbHVlGAEgASgDSAASFgoMdWludDY0X3ZhbHVlGAIgASgESAASFwoNZmxvYXQ2NF92YWx1ZRgDIAEoAUgAEhcKDWJvb2xlYW5fdmFsdWUYBCABKAhIABIUCgp1dGY4X3ZhbHVlGAUgASgJSAASFgoMZGF0ZTMyX3ZhbHVlGAYgASgFSAASFgoMZGF0ZTY0X3ZhbHVlGAcgASgDSAASGQoPdGltZXN0YW1wX3ZhbHVlGAggASgDSAASGgoQZGVjaW1hbDEyOF92YWx1ZRgJIAEoDEgAEiEKF2ZpeGVkX3NpemVfYmluYXJ5X3ZhbHVlGAogASgMSAASGgoQZGVjaW1hbDI1Nl92YWx1ZRgLIAEoDEgAQgcKBXZhbHVlIu4DCgZLdkV4cHISKwoFZmllbGQYASABKAsyGi5zdG9yZS5xdWVyeS52MS5LdkZpZWxkUmVmSAASMQoHbGl0ZXJhbBgCIAEoCzIeLnN0b3JlLnF1ZXJ5LnYxLkt2UmVkdWNlZFZhbHVlSAASMAoDYWRkGAMgASgLMiEuc3RvcmUucXVlcnkudjEuS3ZFeHByLkJpbmFyeUV4cHJIABIwCgNzdWIYBCABKAsyIS5zdG9yZS5xdWVyeS52MS5LdkV4cHIuQmluYXJ5RXhwckgAEjAKA211bBgFIAEoCzIhLnN0b3JlLnF1ZXJ5LnYxLkt2RXhwci5CaW5hcnlFeHBySAASMAoDZGl2GAYgASgLMiEuc3RvcmUucXVlcnkudjEuS3ZFeHByLkJpbmFyeUV4cHJIABInCgVsb3dlchgHIAEoCzIWLnN0b3JlLnF1ZXJ5LnYxLkt2RXhwckgAEjAKDmRhdGVfdHJ1bmNfZGF5GAggASgLMhYuc3RvcmUucXVlcnkudjEuS3ZFeHBySAAaWQoKQmluYXJ5RXhwchIkCgRsZWZ0GAEgASgLMhYuc3RvcmUucXVlcnkudjEuS3ZFeHByEiUKBXJpZ2h0GAIgASgLMhYuc3RvcmUucXVlcnkudjEuS3ZFeHByQgYKBGV4cHIilgsKFUt2UHJlZGljYXRlQ29uc3RyYWludBITCglzdHJpbmdfZXEYASABKAlIABIRCgdib29sX2VxGAIgASgISAASHgoUZml4ZWRfc2l6ZV9iaW5hcnlfZXEYAyABKAxIABJDCglpbnRfcmFuZ2UYBCABKAsyLi5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuSW50UmFuZ2VIABJJCgx1aW50NjRfcmFuZ2UYBSABKAsyMS5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuVUludDY0UmFuZ2VIABJHCgtmbG9hdF9yYW5nZRgGIAEoCzIwLnN0b3JlLnF1ZXJ5LnYxLkt2UHJlZGljYXRlQ29uc3RyYWludC5GbG9hdFJhbmdlSAASUQoQZGVjaW1hbDEyOF9yYW5nZRgHIAEoCzI1LnN0b3JlLnF1ZXJ5LnYxLkt2UHJlZGljYXRlQ29uc3RyYWludC5EZWNpbWFsMTI4UmFuZ2VIABIRCgdpc19udWxsGAggASgISAASFQoLaXNfbm90X251bGwYCSABKAhIABJDCglzdHJpbmdfaW4YCiABKAsyLi5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuU3RyaW5nSW5IABI9CgZpbnRfaW4YCyABKAsyKy5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuSW50SW5IABJDCgl1aW50NjRfaW4YDCABKAsyLi5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuVUludDY0SW5IABJXChRmaXhlZF9zaXplX2JpbmFyeV9pbhgNIAEoCzI3LnN0b3JlLnF1ZXJ5LnYxLkt2UHJlZGljYXRlQ29uc3RyYWludC5GaXhlZFNpemVCaW5hcnlJbkgAElEKEGRlY2ltYWwyNTZfcmFuZ2UYDiABKAsyNS5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuRGVjaW1hbDI1NlJhbmdlSAAaPgoISW50UmFuZ2USEAoDbWluGAEgASgDSACIAQESEAoDbWF4GAIgASgDSAGIAQFCBgoEX21pbkIGCgRfbWF4GkEKC1VJbnQ2NFJhbmdlEhAKA21pbhgBIAEoBEgAiAEBEhAKA21heBgCIAEoBEgBiAEBQgYKBF9taW5CBgoEX21heBouCgpGbG9hdEJvdW5kEg0KBXZhbHVlGAEgASgBEhEKCWluY2x1c2l2ZRgCIAEoCBqkAQoKRmxvYXRSYW5nZRJCCgNtaW4YASABKAsyMC5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuRmxvYXRCb3VuZEgAiAEBEkIKA21heBgCIAEoCzIwLnN0b3JlLnF1ZXJ5LnYxLkt2UHJlZGljYXRlQ29uc3RyYWludC5GbG9hdEJvdW5kSAGIAQFCBgoEX21pbkIGCgRfbWF4GkUKD0RlY2ltYWwxMjhSYW5nZRIQCgNtaW4YASABKAxIAIgBARIQCgNtYXgYAiABKAxIAYgBAUIGCgRfbWluQgYKBF9tYXgaRQoPRGVjaW1hbDI1NlJhbmdlEhAKA21pbhgBIAEoDEgAiAEBEhAKA21heBgCIAEoDEgBiAEBQgYKBF9taW5CBgoEX21heBoaCghTdHJpbmdJbhIOCgZ2YWx1ZXMYASADKAkaFwoFSW50SW4SDgoGdmFsdWVzGAEgAygDGhoKCFVJbnQ2NEluEg4KBnZhbHVlcxgBIAMoBBojChFGaXhlZFNpemVCaW5hcnlJbhIOCgZ2YWx1ZXMYASADKAxCDAoKY29uc3RyYWludCJ4ChBLdlByZWRpY2F0ZUNoZWNrEikKBWZpZWxkGAEgASgLMhouc3RvcmUucXVlcnkudjEuS3ZGaWVsZFJlZhI5Cgpjb25zdHJhaW50GAIgASgLMiUuc3RvcmUucXVlcnkudjEuS3ZQcmVkaWNhdGVDb25zdHJhaW50IlYKC0t2UHJlZGljYXRlEjAKBmNoZWNrcxgBIAMoCzIgLnN0b3JlLnF1ZXJ5LnYxLkt2UHJlZGljYXRlQ2hlY2sSFQoNY29udHJhZGljdGlvbhgCIAEoCCJxChBSYW5nZVJlZHVjZXJTcGVjEikKAm9wGAEgASgOMh0uc3RvcmUucXVlcnkudjEuUmFuZ2VSZWR1Y2VPcBIpCgRleHByGAIgASgLMhYuc3RvcmUucXVlcnkudjEuS3ZFeHBySACIAQFCBwoFX2V4cHIiqQEKDFJlZHVjZVBhcmFtcxIyCghyZWR1Y2VycxgBIAMoCzIgLnN0b3JlLnF1ZXJ5LnYxLlJhbmdlUmVkdWNlclNwZWMSKAoIZ3JvdXBfYnkYAiADKAsyFi5zdG9yZS5xdWVyeS52MS5LdkV4cHISMAoGZmlsdGVyGAMgASgLMhsuc3RvcmUucXVlcnkudjEuS3ZQcmVkaWNhdGVIAIgBAUIJCgdfZmlsdGVyIlEKEVJhbmdlUmVkdWNlUmVzdWx0EjIKBXZhbHVlGAEgASgLMh4uc3RvcmUucXVlcnkudjEuS3ZSZWR1Y2VkVmFsdWVIAIgBAUIICgZfdmFsdWUimgEKEFJhbmdlUmVkdWNlR3JvdXASNAoMZ3JvdXBfdmFsdWVzGAEgAygLMh4uc3RvcmUucXVlcnkudjEuS3ZSZWR1Y2VkVmFsdWUSHAoUZ3JvdXBfdmFsdWVzX3ByZXNlbnQYAiADKAgSMgoHcmVzdWx0cxgDIAMoCzIhLnN0b3JlLnF1ZXJ5LnYxLlJhbmdlUmVkdWNlUmVzdWx0Il0KCkdldFJlcXVlc3QSFQoDa2V5GAEgASgMQgi6SAV6Axj+ARIgChNtaW5fc2VxdWVuY2VfbnVtYmVyGAIgASgESACIAQFCFgoUX21pbl9zZXF1ZW5jZV9udW1iZXIiOgoLR2V0UmVzcG9uc2USDQoFZm91bmQYASABKAgSEgoFdmFsdWUYAiABKAxIAIgBAUIICgZfdmFsdWUihgEKDkdldE1hbnlSZXF1ZXN0Eh0KBGtleXMYASADKAxCD7pIDJIBCQgBIgV6Axj+ARIgChNtaW5fc2VxdWVuY2VfbnVtYmVyGAIgASgESACIAQESGwoKYmF0Y2hfc2l6ZRgDIAEoDUIHukgEKgIgAEIWChRfbWluX3NlcXVlbmNlX251bWJlciI5CgxHZXRNYW55RW50cnkSCwoDa2V5GAEgASgMEhIKBXZhbHVlGAIgASgMSACIAQFCCAoGX3ZhbHVlIj0KDEdldE1hbnlGcmFtZRItCgdyZXN1bHRzGAEgAygLMhwuc3RvcmUucXVlcnkudjEuR2V0TWFueUVudHJ5IuoBCgxSYW5nZVJlcXVlc3QSFwoFc3RhcnQYASABKAxCCLpIBXoDGP4BEhUKA2VuZBgCIAEoDEIIukgFegMY/gESEgoFbGltaXQYAyABKA1IAIgBARIbCgpiYXRjaF9zaXplGAQgASgNQge6SAQqAiAAEjUKBG1vZGUYBSABKA4yHS5zdG9yZS5xdWVyeS52MS5UcmF2ZXJzYWxNb2RlQgi6SAWCAQIQARIgChNtaW5fc2VxdWVuY2VfbnVtYmVyGAYgASgESAGIAQFCCAoGX2xpbWl0QhYKFF9taW5fc2VxdWVuY2VfbnVtYmVyIjkKClJhbmdlRnJhbWUSKwoHcmVzdWx0cxgBIAMoCzIaLnN0b3JlLnF1ZXJ5LnYxLlJhbmdlRW50cnkirwEKDVJlZHVjZVJlcXVlc3QSFwoFc3RhcnQYASABKAxCCLpIBXoDGP4BEhUKA2VuZBgCIAEoDEIIukgFegMY/gESNAoGcGFyYW1zGAMgASgLMhwuc3RvcmUucXVlcnkudjEuUmVkdWNlUGFyYW1zQga6SAPIAQESIAoTbWluX3NlcXVlbmNlX251bWJlchgEIAEoBEgAiAEBQhYKFF9taW5fc2VxdWVuY2VfbnVtYmVyInYKDlJlZHVjZVJlc3BvbnNlEjIKB3Jlc3VsdHMYASADKAsyIS5zdG9yZS5xdWVyeS52MS5SYW5nZVJlZHVjZVJlc3VsdBIwCgZncm91cHMYAiADKAsyIC5zdG9yZS5xdWVyeS52MS5SYW5nZVJlZHVjZUdyb3VwKkcKDVRyYXZlcnNhbE1vZGUSGgoWVFJBVkVSU0FMX01PREVfRk9SV0FSRBAAEhoKFlRSQVZFUlNBTF9NT0RFX1JFVkVSU0UQASrAAgoLS3ZGaWVsZEtpbmQSFwoTS1ZfRklFTERfS0lORF9JTlQ2NBAAEhgKFEtWX0ZJRUxEX0tJTkRfVUlOVDY0EAESGQoVS1ZfRklFTERfS0lORF9GTE9BVDY0EAISGQoVS1ZfRklFTERfS0lORF9CT09MRUFOEAMSFgoSS1ZfRklFTERfS0lORF9VVEY4EAQSGAoUS1ZfRklFTERfS0lORF9EQVRFMzIQBRIYChRLVl9GSUVMRF9LSU5EX0RBVEU2NBAGEhsKF0tWX0ZJRUxEX0tJTkRfVElNRVNUQU1QEAcSHAoYS1ZfRklFTERfS0lORF9ERUNJTUFMMTI4EAgSIwofS1ZfRklFTERfS0lORF9GSVhFRF9TSVpFX0JJTkFSWRAJEhwKGEtWX0ZJRUxEX0tJTkRfREVDSU1BTDI1NhAKKqwBCg1SYW5nZVJlZHVjZU9wEh0KGVJBTkdFX1JFRFVDRV9PUF9DT1VOVF9BTEwQABIfChtSQU5HRV9SRURVQ0VfT1BfQ09VTlRfRklFTEQQARIdChlSQU5HRV9SRURVQ0VfT1BfU1VNX0ZJRUxEEAISHQoZUkFOR0VfUkVEVUNFX09QX01JTl9GSUVMRBADEh0KGVJBTkdFX1JFRFVDRV9PUF9NQVhfRklFTEQQBDK2AgoHU2VydmljZRJDCgNHZXQSGi5zdG9yZS5xdWVyeS52MS5HZXRSZXF1ZXN0Ghsuc3RvcmUucXVlcnkudjEuR2V0UmVzcG9uc2UiA5ACARJOCgdHZXRNYW55Eh4uc3RvcmUucXVlcnkudjEuR2V0TWFueVJlcXVlc3QaHC5zdG9yZS5xdWVyeS52MS5HZXRNYW55RnJhbWUiA5ACATABEkgKBVJhbmdlEhwuc3RvcmUucXVlcnkudjEuUmFuZ2VSZXF1ZXN0Ghouc3RvcmUucXVlcnkudjEuUmFuZ2VGcmFtZSIDkAIBMAESTAoGUmVkdWNlEh0uc3RvcmUucXVlcnkudjEuUmVkdWNlUmVxdWVzdBoeLnN0b3JlLnF1ZXJ5LnYxLlJlZHVjZVJlc3BvbnNlIgOQAgFiBnByb3RvMw", [file_buf_validate_validate]);
+  fileDesc("ChRzdG9yZS92MS9xdWVyeS5wcm90bxIOc3RvcmUucXVlcnkudjEiKAoKUmFuZ2VFbnRyeRILCgNrZXkYASABKAwSDQoFdmFsdWUYAiABKAwijgEKBkRldGFpbBIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQSOQoKcmVhZF9zdGF0cxgCIAMoCzIlLnN0b3JlLnF1ZXJ5LnYxLkRldGFpbC5SZWFkU3RhdHNFbnRyeRowCg5SZWFkU3RhdHNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAQ6AjgBIsUECgpLdkZpZWxkUmVmEjIKA2tleRgBIAEoCzIjLnN0b3JlLnF1ZXJ5LnYxLkt2RmllbGRSZWYuS2V5RmllbGRIABJACgt6X29yZGVyX2tleRgCIAEoCzIpLnN0b3JlLnF1ZXJ5LnYxLkt2RmllbGRSZWYuWk9yZGVyS2V5RmllbGRIABI2CgV2YWx1ZRgDIAEoCzIlLnN0b3JlLnF1ZXJ5LnYxLkt2RmllbGRSZWYuVmFsdWVGaWVsZEgAGmgKCEtleUZpZWxkEhIKCmJpdF9vZmZzZXQYASABKA0SKQoEa2luZBgCIAEoDjIbLnN0b3JlLnF1ZXJ5LnYxLkt2RmllbGRLaW5kEh0KFWZpeGVkX3NpemVfYmluYXJ5X2xlbhgDIAEoDRqcAQoOWk9yZGVyS2V5RmllbGQSEgoKYml0X29mZnNldBgBIAEoDRIWCg5maWVsZF9wb3NpdGlvbhgCIAEoDRIUCgxmaWVsZF93aWR0aHMYAyADKA0SKQoEa2luZBgEIAEoDjIbLnN0b3JlLnF1ZXJ5LnYxLkt2RmllbGRLaW5kEh0KFWZpeGVkX3NpemVfYmluYXJ5X2xlbhgFIAEoDRp3CgpWYWx1ZUZpZWxkEg0KBWluZGV4GAEgASgNEikKBGtpbmQYAiABKA4yGy5zdG9yZS5xdWVyeS52MS5LdkZpZWxkS2luZBIQCghudWxsYWJsZRgDIAEoCBIdChVmaXhlZF9zaXplX2JpbmFyeV9sZW4YBCABKA1CBwoFZmllbGQitgIKDkt2UmVkdWNlZFZhbHVlEhUKC2ludDY0X3ZhbHVlGAEgASgDSAASFgoMdWludDY0X3ZhbHVlGAIgASgESAASFwoNZmxvYXQ2NF92YWx1ZRgDIAEoAUgAEhcKDWJvb2xlYW5fdmFsdWUYBCABKAhIABIUCgp1dGY4X3ZhbHVlGAUgASgJSAASFgoMZGF0ZTMyX3ZhbHVlGAYgASgFSAASFgoMZGF0ZTY0X3ZhbHVlGAcgASgDSAASGQoPdGltZXN0YW1wX3ZhbHVlGAggASgDSAASGgoQZGVjaW1hbDEyOF92YWx1ZRgJIAEoDEgAEiEKF2ZpeGVkX3NpemVfYmluYXJ5X3ZhbHVlGAogASgMSAASGgoQZGVjaW1hbDI1Nl92YWx1ZRgLIAEoDEgAQgcKBXZhbHVlIu4DCgZLdkV4cHISKwoFZmllbGQYASABKAsyGi5zdG9yZS5xdWVyeS52MS5LdkZpZWxkUmVmSAASMQoHbGl0ZXJhbBgCIAEoCzIeLnN0b3JlLnF1ZXJ5LnYxLkt2UmVkdWNlZFZhbHVlSAASMAoDYWRkGAMgASgLMiEuc3RvcmUucXVlcnkudjEuS3ZFeHByLkJpbmFyeUV4cHJIABIwCgNzdWIYBCABKAsyIS5zdG9yZS5xdWVyeS52MS5LdkV4cHIuQmluYXJ5RXhwckgAEjAKA211bBgFIAEoCzIhLnN0b3JlLnF1ZXJ5LnYxLkt2RXhwci5CaW5hcnlFeHBySAASMAoDZGl2GAYgASgLMiEuc3RvcmUucXVlcnkudjEuS3ZFeHByLkJpbmFyeUV4cHJIABInCgVsb3dlchgHIAEoCzIWLnN0b3JlLnF1ZXJ5LnYxLkt2RXhwckgAEjAKDmRhdGVfdHJ1bmNfZGF5GAggASgLMhYuc3RvcmUucXVlcnkudjEuS3ZFeHBySAAaWQoKQmluYXJ5RXhwchIkCgRsZWZ0GAEgASgLMhYuc3RvcmUucXVlcnkudjEuS3ZFeHByEiUKBXJpZ2h0GAIgASgLMhYuc3RvcmUucXVlcnkudjEuS3ZFeHByQgYKBGV4cHIilgsKFUt2UHJlZGljYXRlQ29uc3RyYWludBITCglzdHJpbmdfZXEYASABKAlIABIRCgdib29sX2VxGAIgASgISAASHgoUZml4ZWRfc2l6ZV9iaW5hcnlfZXEYAyABKAxIABJDCglpbnRfcmFuZ2UYBCABKAsyLi5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuSW50UmFuZ2VIABJJCgx1aW50NjRfcmFuZ2UYBSABKAsyMS5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuVUludDY0UmFuZ2VIABJHCgtmbG9hdF9yYW5nZRgGIAEoCzIwLnN0b3JlLnF1ZXJ5LnYxLkt2UHJlZGljYXRlQ29uc3RyYWludC5GbG9hdFJhbmdlSAASUQoQZGVjaW1hbDEyOF9yYW5nZRgHIAEoCzI1LnN0b3JlLnF1ZXJ5LnYxLkt2UHJlZGljYXRlQ29uc3RyYWludC5EZWNpbWFsMTI4UmFuZ2VIABIRCgdpc19udWxsGAggASgISAASFQoLaXNfbm90X251bGwYCSABKAhIABJDCglzdHJpbmdfaW4YCiABKAsyLi5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuU3RyaW5nSW5IABI9CgZpbnRfaW4YCyABKAsyKy5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuSW50SW5IABJDCgl1aW50NjRfaW4YDCABKAsyLi5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuVUludDY0SW5IABJXChRmaXhlZF9zaXplX2JpbmFyeV9pbhgNIAEoCzI3LnN0b3JlLnF1ZXJ5LnYxLkt2UHJlZGljYXRlQ29uc3RyYWludC5GaXhlZFNpemVCaW5hcnlJbkgAElEKEGRlY2ltYWwyNTZfcmFuZ2UYDiABKAsyNS5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuRGVjaW1hbDI1NlJhbmdlSAAaPgoISW50UmFuZ2USEAoDbWluGAEgASgDSACIAQESEAoDbWF4GAIgASgDSAGIAQFCBgoEX21pbkIGCgRfbWF4GkEKC1VJbnQ2NFJhbmdlEhAKA21pbhgBIAEoBEgAiAEBEhAKA21heBgCIAEoBEgBiAEBQgYKBF9taW5CBgoEX21heBouCgpGbG9hdEJvdW5kEg0KBXZhbHVlGAEgASgBEhEKCWluY2x1c2l2ZRgCIAEoCBqkAQoKRmxvYXRSYW5nZRJCCgNtaW4YASABKAsyMC5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuRmxvYXRCb3VuZEgAiAEBEkIKA21heBgCIAEoCzIwLnN0b3JlLnF1ZXJ5LnYxLkt2UHJlZGljYXRlQ29uc3RyYWludC5GbG9hdEJvdW5kSAGIAQFCBgoEX21pbkIGCgRfbWF4GkUKD0RlY2ltYWwxMjhSYW5nZRIQCgNtaW4YASABKAxIAIgBARIQCgNtYXgYAiABKAxIAYgBAUIGCgRfbWluQgYKBF9tYXgaRQoPRGVjaW1hbDI1NlJhbmdlEhAKA21pbhgBIAEoDEgAiAEBEhAKA21heBgCIAEoDEgBiAEBQgYKBF9taW5CBgoEX21heBoaCghTdHJpbmdJbhIOCgZ2YWx1ZXMYASADKAkaFwoFSW50SW4SDgoGdmFsdWVzGAEgAygDGhoKCFVJbnQ2NEluEg4KBnZhbHVlcxgBIAMoBBojChFGaXhlZFNpemVCaW5hcnlJbhIOCgZ2YWx1ZXMYASADKAxCDAoKY29uc3RyYWludCJ4ChBLdlByZWRpY2F0ZUNoZWNrEikKBWZpZWxkGAEgASgLMhouc3RvcmUucXVlcnkudjEuS3ZGaWVsZFJlZhI5Cgpjb25zdHJhaW50GAIgASgLMiUuc3RvcmUucXVlcnkudjEuS3ZQcmVkaWNhdGVDb25zdHJhaW50IlYKC0t2UHJlZGljYXRlEjAKBmNoZWNrcxgBIAMoCzIgLnN0b3JlLnF1ZXJ5LnYxLkt2UHJlZGljYXRlQ2hlY2sSFQoNY29udHJhZGljdGlvbhgCIAEoCCJxChBSYW5nZVJlZHVjZXJTcGVjEikKAm9wGAEgASgOMh0uc3RvcmUucXVlcnkudjEuUmFuZ2VSZWR1Y2VPcBIpCgRleHByGAIgASgLMhYuc3RvcmUucXVlcnkudjEuS3ZFeHBySACIAQFCBwoFX2V4cHIiqQEKDFJlZHVjZVBhcmFtcxIyCghyZWR1Y2VycxgBIAMoCzIgLnN0b3JlLnF1ZXJ5LnYxLlJhbmdlUmVkdWNlclNwZWMSKAoIZ3JvdXBfYnkYAiADKAsyFi5zdG9yZS5xdWVyeS52MS5LdkV4cHISMAoGZmlsdGVyGAMgASgLMhsuc3RvcmUucXVlcnkudjEuS3ZQcmVkaWNhdGVIAIgBAUIJCgdfZmlsdGVyIlEKEVJhbmdlUmVkdWNlUmVzdWx0EjIKBXZhbHVlGAEgASgLMh4uc3RvcmUucXVlcnkudjEuS3ZSZWR1Y2VkVmFsdWVIAIgBAUIICgZfdmFsdWUimgEKEFJhbmdlUmVkdWNlR3JvdXASNAoMZ3JvdXBfdmFsdWVzGAEgAygLMh4uc3RvcmUucXVlcnkudjEuS3ZSZWR1Y2VkVmFsdWUSHAoUZ3JvdXBfdmFsdWVzX3ByZXNlbnQYAiADKAgSMgoHcmVzdWx0cxgDIAMoCzIhLnN0b3JlLnF1ZXJ5LnYxLlJhbmdlUmVkdWNlUmVzdWx0Il0KCkdldFJlcXVlc3QSFQoDa2V5GAEgASgMQgi6SAV6Axj+ARIgChNtaW5fc2VxdWVuY2VfbnVtYmVyGAIgASgESACIAQFCFgoUX21pbl9zZXF1ZW5jZV9udW1iZXIiMQoLR2V0UmVzcG9uc2USEgoFdmFsdWUYAiABKAxIAIgBAUIICgZfdmFsdWVKBAgBEAIihgEKDkdldE1hbnlSZXF1ZXN0Eh0KBGtleXMYASADKAxCD7pIDJIBCQgBIgV6Axj+ARIgChNtaW5fc2VxdWVuY2VfbnVtYmVyGAIgASgESACIAQESGwoKYmF0Y2hfc2l6ZRgDIAEoDUIHukgEKgIgAEIWChRfbWluX3NlcXVlbmNlX251bWJlciI5CgxHZXRNYW55RW50cnkSCwoDa2V5GAEgASgMEhIKBXZhbHVlGAIgASgMSACIAQFCCAoGX3ZhbHVlIj0KDEdldE1hbnlGcmFtZRItCgdyZXN1bHRzGAEgAygLMhwuc3RvcmUucXVlcnkudjEuR2V0TWFueUVudHJ5IuoBCgxSYW5nZVJlcXVlc3QSFwoFc3RhcnQYASABKAxCCLpIBXoDGP4BEhUKA2VuZBgCIAEoDEIIukgFegMY/gESEgoFbGltaXQYAyABKA1IAIgBARIbCgpiYXRjaF9zaXplGAQgASgNQge6SAQqAiAAEjUKBG1vZGUYBSABKA4yHS5zdG9yZS5xdWVyeS52MS5UcmF2ZXJzYWxNb2RlQgi6SAWCAQIQARIgChNtaW5fc2VxdWVuY2VfbnVtYmVyGAYgASgESAGIAQFCCAoGX2xpbWl0QhYKFF9taW5fc2VxdWVuY2VfbnVtYmVyIjkKClJhbmdlRnJhbWUSKwoHcmVzdWx0cxgBIAMoCzIaLnN0b3JlLnF1ZXJ5LnYxLlJhbmdlRW50cnkirwEKDVJlZHVjZVJlcXVlc3QSFwoFc3RhcnQYASABKAxCCLpIBXoDGP4BEhUKA2VuZBgCIAEoDEIIukgFegMY/gESNAoGcGFyYW1zGAMgASgLMhwuc3RvcmUucXVlcnkudjEuUmVkdWNlUGFyYW1zQga6SAPIAQESIAoTbWluX3NlcXVlbmNlX251bWJlchgEIAEoBEgAiAEBQhYKFF9taW5fc2VxdWVuY2VfbnVtYmVyInYKDlJlZHVjZVJlc3BvbnNlEjIKB3Jlc3VsdHMYASADKAsyIS5zdG9yZS5xdWVyeS52MS5SYW5nZVJlZHVjZVJlc3VsdBIwCgZncm91cHMYAiADKAsyIC5zdG9yZS5xdWVyeS52MS5SYW5nZVJlZHVjZUdyb3VwKkcKDVRyYXZlcnNhbE1vZGUSGgoWVFJBVkVSU0FMX01PREVfRk9SV0FSRBAAEhoKFlRSQVZFUlNBTF9NT0RFX1JFVkVSU0UQASrAAgoLS3ZGaWVsZEtpbmQSFwoTS1ZfRklFTERfS0lORF9JTlQ2NBAAEhgKFEtWX0ZJRUxEX0tJTkRfVUlOVDY0EAESGQoVS1ZfRklFTERfS0lORF9GTE9BVDY0EAISGQoVS1ZfRklFTERfS0lORF9CT09MRUFOEAMSFgoSS1ZfRklFTERfS0lORF9VVEY4EAQSGAoUS1ZfRklFTERfS0lORF9EQVRFMzIQBRIYChRLVl9GSUVMRF9LSU5EX0RBVEU2NBAGEhsKF0tWX0ZJRUxEX0tJTkRfVElNRVNUQU1QEAcSHAoYS1ZfRklFTERfS0lORF9ERUNJTUFMMTI4EAgSIwofS1ZfRklFTERfS0lORF9GSVhFRF9TSVpFX0JJTkFSWRAJEhwKGEtWX0ZJRUxEX0tJTkRfREVDSU1BTDI1NhAKKqwBCg1SYW5nZVJlZHVjZU9wEh0KGVJBTkdFX1JFRFVDRV9PUF9DT1VOVF9BTEwQABIfChtSQU5HRV9SRURVQ0VfT1BfQ09VTlRfRklFTEQQARIdChlSQU5HRV9SRURVQ0VfT1BfU1VNX0ZJRUxEEAISHQoZUkFOR0VfUkVEVUNFX09QX01JTl9GSUVMRBADEh0KGVJBTkdFX1JFRFVDRV9PUF9NQVhfRklFTEQQBDK2AgoHU2VydmljZRJDCgNHZXQSGi5zdG9yZS5xdWVyeS52MS5HZXRSZXF1ZXN0Ghsuc3RvcmUucXVlcnkudjEuR2V0UmVzcG9uc2UiA5ACARJOCgdHZXRNYW55Eh4uc3RvcmUucXVlcnkudjEuR2V0TWFueVJlcXVlc3QaHC5zdG9yZS5xdWVyeS52MS5HZXRNYW55RnJhbWUiA5ACATABEkgKBVJhbmdlEhwuc3RvcmUucXVlcnkudjEuUmFuZ2VSZXF1ZXN0Ghouc3RvcmUucXVlcnkudjEuUmFuZ2VGcmFtZSIDkAIBMAESTAoGUmVkdWNlEh0uc3RvcmUucXVlcnkudjEuUmVkdWNlUmVxdWVzdBoeLnN0b3JlLnF1ZXJ5LnYxLlJlZHVjZVJlc3BvbnNlIgOQAgFiBnByb3RvMw", [file_buf_validate_validate]);
 
 /**
+ * A single key-value row returned by Range scans.
+ *
  * @generated from message store.query.v1.RangeEntry
  */
 export type RangeEntry = Message<"store.query.v1.RangeEntry"> & {
@@ -37,7 +39,7 @@ export const RangeEntrySchema: GenMessage<RangeEntry> = /*@__PURE__*/
 
 /**
  * Visible store sequence number plus read counters for query RPCs. On success, carried in unary
- * response metadata (`Get` / `Reduce`) or `Range` trailers; also attached as a `google.rpc` error
+ * response metadata (`Get` / `Reduce`) or streaming trailers (`Range` / `GetMany`); also attached as a `google.rpc` error
  * detail when the RPC fails (same message shape in both cases).
  *
  * The reference RocksDB engine reports `read_bytes`: the sum of key length plus value length for
@@ -65,6 +67,9 @@ export const DetailSchema: GenMessage<Detail> = /*@__PURE__*/
   messageDesc(file_store_v1_query, 1);
 
 /**
+ * Reference to a typed field inside a stored key or value. Used by KvExpr
+ * and KvPredicateCheck to locate the data to evaluate.
+ *
  * @generated from message store.query.v1.KvFieldRef
  */
 export type KvFieldRef = Message<"store.query.v1.KvFieldRef"> & {
@@ -100,20 +105,28 @@ export const KvFieldRefSchema: GenMessage<KvFieldRef> = /*@__PURE__*/
   messageDesc(file_store_v1_query, 2);
 
 /**
+ * A field extracted from the key bytes at a fixed bit offset.
+ *
  * @generated from message store.query.v1.KvFieldRef.KeyField
  */
 export type KvFieldRef_KeyField = Message<"store.query.v1.KvFieldRef.KeyField"> & {
   /**
+   * Bit offset into the key payload where this field starts.
+   *
    * @generated from field: uint32 bit_offset = 1;
    */
   bitOffset: number;
 
   /**
+   * Scalar type used to decode the field bytes.
+   *
    * @generated from field: store.query.v1.KvFieldKind kind = 2;
    */
   kind: KvFieldKind;
 
   /**
+   * Length in bytes when `kind` is `FIXED_SIZE_BINARY`; ignored otherwise.
+   *
    * @generated from field: uint32 fixed_size_binary_len = 3;
    */
   fixedSizeBinaryLen: number;
@@ -127,30 +140,43 @@ export const KvFieldRef_KeyFieldSchema: GenMessage<KvFieldRef_KeyField> = /*@__P
   messageDesc(file_store_v1_query, 2, 0);
 
 /**
+ * A field extracted from a Z-order (Morton) interleaved key. The field
+ * is de-interleaved from the composite key using the position and widths.
+ *
  * @generated from message store.query.v1.KvFieldRef.ZOrderKeyField
  */
 export type KvFieldRef_ZOrderKeyField = Message<"store.query.v1.KvFieldRef.ZOrderKeyField"> & {
   /**
+   * Bit offset into the key payload where the Z-order block starts.
+   *
    * @generated from field: uint32 bit_offset = 1;
    */
   bitOffset: number;
 
   /**
+   * Zero-based position of this dimension within the Z-order interleaving.
+   *
    * @generated from field: uint32 field_position = 2;
    */
   fieldPosition: number;
 
   /**
+   * Bit widths of each dimension in the Z-order curve, in order.
+   *
    * @generated from field: repeated uint32 field_widths = 3;
    */
   fieldWidths: number[];
 
   /**
+   * Scalar type used to decode the de-interleaved value.
+   *
    * @generated from field: store.query.v1.KvFieldKind kind = 4;
    */
   kind: KvFieldKind;
 
   /**
+   * Length in bytes when `kind` is `FIXED_SIZE_BINARY`; ignored otherwise.
+   *
    * @generated from field: uint32 fixed_size_binary_len = 5;
    */
   fixedSizeBinaryLen: number;
@@ -164,25 +190,36 @@ export const KvFieldRef_ZOrderKeyFieldSchema: GenMessage<KvFieldRef_ZOrderKeyFie
   messageDesc(file_store_v1_query, 2, 1);
 
 /**
+ * A field extracted from the stored value (the encoded `StoredRow`).
+ *
  * @generated from message store.query.v1.KvFieldRef.ValueField
  */
 export type KvFieldRef_ValueField = Message<"store.query.v1.KvFieldRef.ValueField"> & {
   /**
+   * Zero-based column index within the `StoredRow`.
+   *
    * @generated from field: uint32 index = 1;
    */
   index: number;
 
   /**
+   * Scalar type of this column.
+   *
    * @generated from field: store.query.v1.KvFieldKind kind = 2;
    */
   kind: KvFieldKind;
 
   /**
+   * Whether the column is nullable. When true, a missing value yields NULL
+   * rather than an error.
+   *
    * @generated from field: bool nullable = 3;
    */
   nullable: boolean;
 
   /**
+   * Length in bytes when `kind` is `FIXED_SIZE_BINARY`; ignored otherwise.
+   *
    * @generated from field: uint32 fixed_size_binary_len = 4;
    */
   fixedSizeBinaryLen: number;
@@ -196,6 +233,10 @@ export const KvFieldRef_ValueFieldSchema: GenMessage<KvFieldRef_ValueField> = /*
   messageDesc(file_store_v1_query, 2, 2);
 
 /**
+ * A single scalar value produced by reduction or used as a literal in
+ * expressions. The variant must match the `KvFieldKind` of the expression
+ * it participates in.
+ *
  * @generated from message store.query.v1.KvReducedValue
  */
 export type KvReducedValue = Message<"store.query.v1.KvReducedValue"> & {
@@ -279,6 +320,10 @@ export const KvReducedValueSchema: GenMessage<KvReducedValue> = /*@__PURE__*/
   messageDesc(file_store_v1_query, 3);
 
 /**
+ * An expression tree evaluated per row during reduction. Leaf nodes are field
+ * references or literal values; interior nodes are arithmetic or transform
+ * operations.
+ *
  * @generated from message store.query.v1.KvExpr
  */
 export type KvExpr = Message<"store.query.v1.KvExpr"> & {
@@ -287,48 +332,64 @@ export type KvExpr = Message<"store.query.v1.KvExpr"> & {
    */
   expr: {
     /**
+     * Read a field from the key or value.
+     *
      * @generated from field: store.query.v1.KvFieldRef field = 1;
      */
     value: KvFieldRef;
     case: "field";
   } | {
     /**
+     * A constant scalar value.
+     *
      * @generated from field: store.query.v1.KvReducedValue literal = 2;
      */
     value: KvReducedValue;
     case: "literal";
   } | {
     /**
+     * Addition (both operands must be the same numeric kind).
+     *
      * @generated from field: store.query.v1.KvExpr.BinaryExpr add = 3;
      */
     value: KvExpr_BinaryExpr;
     case: "add";
   } | {
     /**
+     * Subtraction.
+     *
      * @generated from field: store.query.v1.KvExpr.BinaryExpr sub = 4;
      */
     value: KvExpr_BinaryExpr;
     case: "sub";
   } | {
     /**
+     * Multiplication.
+     *
      * @generated from field: store.query.v1.KvExpr.BinaryExpr mul = 5;
      */
     value: KvExpr_BinaryExpr;
     case: "mul";
   } | {
     /**
+     * Division.
+     *
      * @generated from field: store.query.v1.KvExpr.BinaryExpr div = 6;
      */
     value: KvExpr_BinaryExpr;
     case: "div";
   } | {
     /**
+     * Convert a UTF-8 string to lowercase.
+     *
      * @generated from field: store.query.v1.KvExpr lower = 7;
      */
     value: KvExpr;
     case: "lower";
   } | {
     /**
+     * Truncate a DATE32/DATE64/TIMESTAMP to the start of its day.
+     *
      * @generated from field: store.query.v1.KvExpr date_trunc_day = 8;
      */
     value: KvExpr;
@@ -344,6 +405,8 @@ export const KvExprSchema: GenMessage<KvExpr> = /*@__PURE__*/
   messageDesc(file_store_v1_query, 4);
 
 /**
+ * Binary arithmetic operation on two sub-expressions.
+ *
  * @generated from message store.query.v1.KvExpr.BinaryExpr
  */
 export type KvExpr_BinaryExpr = Message<"store.query.v1.KvExpr.BinaryExpr"> & {
@@ -366,6 +429,9 @@ export const KvExpr_BinaryExprSchema: GenMessage<KvExpr_BinaryExpr> = /*@__PURE_
   messageDesc(file_store_v1_query, 4, 0);
 
 /**
+ * A constraint applied to a single field value during predicate evaluation.
+ * Exactly one variant must be set.
+ *
  * @generated from message store.query.v1.KvPredicateConstraint
  */
 export type KvPredicateConstraint = Message<"store.query.v1.KvPredicateConstraint"> & {
@@ -374,84 +440,112 @@ export type KvPredicateConstraint = Message<"store.query.v1.KvPredicateConstrain
    */
   constraint: {
     /**
+     * Exact UTF-8 string equality.
+     *
      * @generated from field: string string_eq = 1;
      */
     value: string;
     case: "stringEq";
   } | {
     /**
+     * Exact boolean equality.
+     *
      * @generated from field: bool bool_eq = 2;
      */
     value: boolean;
     case: "boolEq";
   } | {
     /**
+     * Exact fixed-size binary equality.
+     *
      * @generated from field: bytes fixed_size_binary_eq = 3;
      */
     value: Uint8Array;
     case: "fixedSizeBinaryEq";
   } | {
     /**
+     * Inclusive int64 range.
+     *
      * @generated from field: store.query.v1.KvPredicateConstraint.IntRange int_range = 4;
      */
     value: KvPredicateConstraint_IntRange;
     case: "intRange";
   } | {
     /**
+     * Inclusive uint64 range.
+     *
      * @generated from field: store.query.v1.KvPredicateConstraint.UInt64Range uint64_range = 5;
      */
     value: KvPredicateConstraint_UInt64Range;
     case: "uint64Range";
   } | {
     /**
+     * Float range with per-bound inclusivity.
+     *
      * @generated from field: store.query.v1.KvPredicateConstraint.FloatRange float_range = 6;
      */
     value: KvPredicateConstraint_FloatRange;
     case: "floatRange";
   } | {
     /**
+     * Inclusive Decimal128 range.
+     *
      * @generated from field: store.query.v1.KvPredicateConstraint.Decimal128Range decimal128_range = 7;
      */
     value: KvPredicateConstraint_Decimal128Range;
     case: "decimal128Range";
   } | {
     /**
+     * True if the field must be NULL.
+     *
      * @generated from field: bool is_null = 8;
      */
     value: boolean;
     case: "isNull";
   } | {
     /**
+     * True if the field must be non-NULL.
+     *
      * @generated from field: bool is_not_null = 9;
      */
     value: boolean;
     case: "isNotNull";
   } | {
     /**
+     * UTF-8 set membership.
+     *
      * @generated from field: store.query.v1.KvPredicateConstraint.StringIn string_in = 10;
      */
     value: KvPredicateConstraint_StringIn;
     case: "stringIn";
   } | {
     /**
+     * Int64 set membership.
+     *
      * @generated from field: store.query.v1.KvPredicateConstraint.IntIn int_in = 11;
      */
     value: KvPredicateConstraint_IntIn;
     case: "intIn";
   } | {
     /**
+     * UInt64 set membership.
+     *
      * @generated from field: store.query.v1.KvPredicateConstraint.UInt64In uint64_in = 12;
      */
     value: KvPredicateConstraint_UInt64In;
     case: "uint64In";
   } | {
     /**
+     * Fixed-size binary set membership.
+     *
      * @generated from field: store.query.v1.KvPredicateConstraint.FixedSizeBinaryIn fixed_size_binary_in = 13;
      */
     value: KvPredicateConstraint_FixedSizeBinaryIn;
     case: "fixedSizeBinaryIn";
   } | {
     /**
+     * Inclusive Decimal256 range.
+     *
      * @generated from field: store.query.v1.KvPredicateConstraint.Decimal256Range decimal256_range = 14;
      */
     value: KvPredicateConstraint_Decimal256Range;
@@ -467,6 +561,8 @@ export const KvPredicateConstraintSchema: GenMessage<KvPredicateConstraint> = /*
   messageDesc(file_store_v1_query, 5);
 
 /**
+ * Inclusive integer range. Omit `min` or `max` for a one-sided bound.
+ *
  * @generated from message store.query.v1.KvPredicateConstraint.IntRange
  */
 export type KvPredicateConstraint_IntRange = Message<"store.query.v1.KvPredicateConstraint.IntRange"> & {
@@ -489,6 +585,8 @@ export const KvPredicateConstraint_IntRangeSchema: GenMessage<KvPredicateConstra
   messageDesc(file_store_v1_query, 5, 0);
 
 /**
+ * Inclusive uint64 range. Omit `min` or `max` for a one-sided bound.
+ *
  * @generated from message store.query.v1.KvPredicateConstraint.UInt64Range
  */
 export type KvPredicateConstraint_UInt64Range = Message<"store.query.v1.KvPredicateConstraint.UInt64Range"> & {
@@ -511,6 +609,8 @@ export const KvPredicateConstraint_UInt64RangeSchema: GenMessage<KvPredicateCons
   messageDesc(file_store_v1_query, 5, 1);
 
 /**
+ * A single bound for a float range, with an inclusivity flag.
+ *
  * @generated from message store.query.v1.KvPredicateConstraint.FloatBound
  */
 export type KvPredicateConstraint_FloatBound = Message<"store.query.v1.KvPredicateConstraint.FloatBound"> & {
@@ -520,6 +620,8 @@ export type KvPredicateConstraint_FloatBound = Message<"store.query.v1.KvPredica
   value: number;
 
   /**
+   * When true the bound includes `value` itself (<=/>= semantics).
+   *
    * @generated from field: bool inclusive = 2;
    */
   inclusive: boolean;
@@ -533,6 +635,8 @@ export const KvPredicateConstraint_FloatBoundSchema: GenMessage<KvPredicateConst
   messageDesc(file_store_v1_query, 5, 2);
 
 /**
+ * Float range with independently inclusive/exclusive bounds.
+ *
  * @generated from message store.query.v1.KvPredicateConstraint.FloatRange
  */
 export type KvPredicateConstraint_FloatRange = Message<"store.query.v1.KvPredicateConstraint.FloatRange"> & {
@@ -555,6 +659,8 @@ export const KvPredicateConstraint_FloatRangeSchema: GenMessage<KvPredicateConst
   messageDesc(file_store_v1_query, 5, 3);
 
 /**
+ * Inclusive Decimal128 range (16-byte little-endian).
+ *
  * @generated from message store.query.v1.KvPredicateConstraint.Decimal128Range
  */
 export type KvPredicateConstraint_Decimal128Range = Message<"store.query.v1.KvPredicateConstraint.Decimal128Range"> & {
@@ -577,6 +683,8 @@ export const KvPredicateConstraint_Decimal128RangeSchema: GenMessage<KvPredicate
   messageDesc(file_store_v1_query, 5, 4);
 
 /**
+ * Inclusive Decimal256 range (32-byte little-endian).
+ *
  * @generated from message store.query.v1.KvPredicateConstraint.Decimal256Range
  */
 export type KvPredicateConstraint_Decimal256Range = Message<"store.query.v1.KvPredicateConstraint.Decimal256Range"> & {
@@ -599,6 +707,8 @@ export const KvPredicateConstraint_Decimal256RangeSchema: GenMessage<KvPredicate
   messageDesc(file_store_v1_query, 5, 5);
 
 /**
+ * Set membership test for UTF-8 strings.
+ *
  * @generated from message store.query.v1.KvPredicateConstraint.StringIn
  */
 export type KvPredicateConstraint_StringIn = Message<"store.query.v1.KvPredicateConstraint.StringIn"> & {
@@ -616,6 +726,8 @@ export const KvPredicateConstraint_StringInSchema: GenMessage<KvPredicateConstra
   messageDesc(file_store_v1_query, 5, 6);
 
 /**
+ * Set membership test for int64 values.
+ *
  * @generated from message store.query.v1.KvPredicateConstraint.IntIn
  */
 export type KvPredicateConstraint_IntIn = Message<"store.query.v1.KvPredicateConstraint.IntIn"> & {
@@ -633,6 +745,8 @@ export const KvPredicateConstraint_IntInSchema: GenMessage<KvPredicateConstraint
   messageDesc(file_store_v1_query, 5, 7);
 
 /**
+ * Set membership test for uint64 values.
+ *
  * @generated from message store.query.v1.KvPredicateConstraint.UInt64In
  */
 export type KvPredicateConstraint_UInt64In = Message<"store.query.v1.KvPredicateConstraint.UInt64In"> & {
@@ -650,6 +764,8 @@ export const KvPredicateConstraint_UInt64InSchema: GenMessage<KvPredicateConstra
   messageDesc(file_store_v1_query, 5, 8);
 
 /**
+ * Set membership test for fixed-size binary values.
+ *
  * @generated from message store.query.v1.KvPredicateConstraint.FixedSizeBinaryIn
  */
 export type KvPredicateConstraint_FixedSizeBinaryIn = Message<"store.query.v1.KvPredicateConstraint.FixedSizeBinaryIn"> & {
@@ -667,15 +783,22 @@ export const KvPredicateConstraint_FixedSizeBinaryInSchema: GenMessage<KvPredica
   messageDesc(file_store_v1_query, 5, 9);
 
 /**
+ * A single predicate check: extract the field, then test it against the
+ * constraint.
+ *
  * @generated from message store.query.v1.KvPredicateCheck
  */
 export type KvPredicateCheck = Message<"store.query.v1.KvPredicateCheck"> & {
   /**
+   * The field to extract from each row.
+   *
    * @generated from field: store.query.v1.KvFieldRef field = 1;
    */
   field?: KvFieldRef;
 
   /**
+   * The constraint the field value must satisfy.
+   *
    * @generated from field: store.query.v1.KvPredicateConstraint constraint = 2;
    */
   constraint?: KvPredicateConstraint;
@@ -689,15 +812,22 @@ export const KvPredicateCheckSchema: GenMessage<KvPredicateCheck> = /*@__PURE__*
   messageDesc(file_store_v1_query, 6);
 
 /**
+ * Conjunction (AND) of predicate checks used to filter rows before reduction.
+ *
  * @generated from message store.query.v1.KvPredicate
  */
 export type KvPredicate = Message<"store.query.v1.KvPredicate"> & {
   /**
+   * All checks must pass for a row to be included.
+   *
    * @generated from field: repeated store.query.v1.KvPredicateCheck checks = 1;
    */
   checks: KvPredicateCheck[];
 
   /**
+   * When true, the predicate is statically unsatisfiable and the server may
+   * short-circuit evaluation (returns zero rows).
+   *
    * @generated from field: bool contradiction = 2;
    */
   contradiction: boolean;
@@ -711,15 +841,22 @@ export const KvPredicateSchema: GenMessage<KvPredicate> = /*@__PURE__*/
   messageDesc(file_store_v1_query, 7);
 
 /**
+ * A single aggregation to compute over the scanned range.
+ *
  * @generated from message store.query.v1.RangeReducerSpec
  */
 export type RangeReducerSpec = Message<"store.query.v1.RangeReducerSpec"> & {
   /**
+   * The aggregation operation.
+   *
    * @generated from field: store.query.v1.RangeReduceOp op = 1;
    */
   op: RangeReduceOp;
 
   /**
+   * Expression to evaluate per row. Required for all ops except
+   * `COUNT_ALL` (where it must be absent).
+   *
    * @generated from field: optional store.query.v1.KvExpr expr = 2;
    */
   expr?: KvExpr;
@@ -733,20 +870,32 @@ export const RangeReducerSpecSchema: GenMessage<RangeReducerSpec> = /*@__PURE__*
   messageDesc(file_store_v1_query, 8);
 
 /**
+ * Parameters for a Reduce RPC: what to aggregate, how to group, and an
+ * optional row filter.
+ *
  * @generated from message store.query.v1.ReduceParams
  */
 export type ReduceParams = Message<"store.query.v1.ReduceParams"> & {
   /**
+   * Aggregations to compute. At least one reducer or one `group_by`
+   * expression is required.
+   *
    * @generated from field: repeated store.query.v1.RangeReducerSpec reducers = 1;
    */
   reducers: RangeReducerSpec[];
 
   /**
+   * Expressions whose values partition rows into groups. When non-empty,
+   * results are returned per-group in `ReduceResponse.groups` instead of as
+   * flat scalar results.
+   *
    * @generated from field: repeated store.query.v1.KvExpr group_by = 2;
    */
   groupBy: KvExpr[];
 
   /**
+   * Optional predicate to exclude rows before aggregation.
+   *
    * @generated from field: optional store.query.v1.KvPredicate filter = 3;
    */
   filter?: KvPredicate;
@@ -760,6 +909,9 @@ export const ReduceParamsSchema: GenMessage<ReduceParams> = /*@__PURE__*/
   messageDesc(file_store_v1_query, 9);
 
 /**
+ * The result of a single reducer. Absent when no rows contributed (e.g. SUM
+ * over zero matching rows).
+ *
  * @generated from message store.query.v1.RangeReduceResult
  */
 export type RangeReduceResult = Message<"store.query.v1.RangeReduceResult"> & {
@@ -777,20 +929,31 @@ export const RangeReduceResultSchema: GenMessage<RangeReduceResult> = /*@__PURE_
   messageDesc(file_store_v1_query, 10);
 
 /**
+ * Aggregation results for one distinct combination of group-by values.
+ *
  * @generated from message store.query.v1.RangeReduceGroup
  */
 export type RangeReduceGroup = Message<"store.query.v1.RangeReduceGroup"> & {
   /**
+   * The evaluated group-by expression values for this group, in the same
+   * order as `ReduceParams.group_by`.
+   *
    * @generated from field: repeated store.query.v1.KvReducedValue group_values = 1;
    */
   groupValues: KvReducedValue[];
 
   /**
+   * Parallel to `group_values`; false when the corresponding group value is
+   * NULL (the proto value is a default zero, but should be treated as absent).
+   *
    * @generated from field: repeated bool group_values_present = 2;
    */
   groupValuesPresent: boolean[];
 
   /**
+   * Reducer results for this group, in the same order as
+   * `ReduceParams.reducers`.
+   *
    * @generated from field: repeated store.query.v1.RangeReduceResult results = 3;
    */
   results: RangeReduceResult[];
@@ -804,15 +967,21 @@ export const RangeReduceGroupSchema: GenMessage<RangeReduceGroup> = /*@__PURE__*
   messageDesc(file_store_v1_query, 11);
 
 /**
+ * Point lookup request for a single key.
+ *
  * @generated from message store.query.v1.GetRequest
  */
 export type GetRequest = Message<"store.query.v1.GetRequest"> & {
   /**
+   * The key to look up (max 254 bytes).
+   *
    * @generated from field: bytes key = 1;
    */
   key: Uint8Array;
 
   /**
+   * Optional freshness gate. See service-level comment.
+   *
    * @generated from field: optional uint64 min_sequence_number = 2;
    */
   minSequenceNumber?: bigint;
@@ -826,15 +995,14 @@ export const GetRequestSchema: GenMessage<GetRequest> = /*@__PURE__*/
   messageDesc(file_store_v1_query, 12);
 
 /**
+ * Point lookup response.
+ *
  * @generated from message store.query.v1.GetResponse
  */
 export type GetResponse = Message<"store.query.v1.GetResponse"> & {
   /**
-   * @generated from field: bool found = 1;
-   */
-  found: boolean;
-
-  /**
+   * The value associated with the key; absent when the key does not exist.
+   *
    * @generated from field: optional bytes value = 2;
    */
   value?: Uint8Array;
@@ -879,15 +1047,21 @@ export const GetManyRequestSchema: GenMessage<GetManyRequest> = /*@__PURE__*/
   messageDesc(file_store_v1_query, 14);
 
 /**
+ * A single entry in a GetMany response frame.
+ *
  * @generated from message store.query.v1.GetManyEntry
  */
 export type GetManyEntry = Message<"store.query.v1.GetManyEntry"> & {
   /**
+   * The looked-up key.
+   *
    * @generated from field: bytes key = 1;
    */
   key: Uint8Array;
 
   /**
+   * The value if the key exists; absent for missing keys.
+   *
    * @generated from field: optional bytes value = 2;
    */
   value?: Uint8Array;
@@ -901,6 +1075,8 @@ export const GetManyEntrySchema: GenMessage<GetManyEntry> = /*@__PURE__*/
   messageDesc(file_store_v1_query, 15);
 
 /**
+ * A batch of GetMany lookup results.
+ *
  * @generated from message store.query.v1.GetManyFrame
  */
 export type GetManyFrame = Message<"store.query.v1.GetManyFrame"> & {
@@ -1026,15 +1202,23 @@ export const ReduceRequestSchema: GenMessage<ReduceRequest> = /*@__PURE__*/
   messageDesc(file_store_v1_query, 19);
 
 /**
+ * Response from a Reduce RPC. Exactly one of `results` or `groups` is
+ * populated depending on whether `ReduceParams.group_by` was empty.
+ *
  * @generated from message store.query.v1.ReduceResponse
  */
 export type ReduceResponse = Message<"store.query.v1.ReduceResponse"> & {
   /**
+   * Scalar reducer results (one per `ReduceParams.reducers` entry). Populated
+   * only when `group_by` is empty.
+   *
    * @generated from field: repeated store.query.v1.RangeReduceResult results = 1;
    */
   results: RangeReduceResult[];
 
   /**
+   * Per-group reducer results. Populated only when `group_by` is non-empty.
+   *
    * @generated from field: repeated store.query.v1.RangeReduceGroup groups = 2;
    */
   groups: RangeReduceGroup[];
@@ -1071,6 +1255,8 @@ export const TraversalModeSchema: GenEnum<TraversalMode> = /*@__PURE__*/
   enumDesc(file_store_v1_query, 0);
 
 /**
+ * Scalar type of a field extracted from a stored key or value.
+ *
  * @generated from enum store.query.v1.KvFieldKind
  */
 export enum KvFieldKind {
@@ -1100,31 +1286,43 @@ export enum KvFieldKind {
   UTF8 = 4,
 
   /**
+   * Days since Unix epoch.
+   *
    * @generated from enum value: KV_FIELD_KIND_DATE32 = 5;
    */
   DATE32 = 5,
 
   /**
+   * Milliseconds since Unix epoch.
+   *
    * @generated from enum value: KV_FIELD_KIND_DATE64 = 6;
    */
   DATE64 = 6,
 
   /**
+   * Microseconds since Unix epoch.
+   *
    * @generated from enum value: KV_FIELD_KIND_TIMESTAMP = 7;
    */
   TIMESTAMP = 7,
 
   /**
+   * 16-byte little-endian decimal (Arrow Decimal128).
+   *
    * @generated from enum value: KV_FIELD_KIND_DECIMAL128 = 8;
    */
   DECIMAL128 = 8,
 
   /**
+   * Fixed-width binary; length given by `fixed_size_binary_len`.
+   *
    * @generated from enum value: KV_FIELD_KIND_FIXED_SIZE_BINARY = 9;
    */
   FIXED_SIZE_BINARY = 9,
 
   /**
+   * 32-byte little-endian decimal (Arrow Decimal256).
+   *
    * @generated from enum value: KV_FIELD_KIND_DECIMAL256 = 10;
    */
   DECIMAL256 = 10,
@@ -1137,30 +1335,42 @@ export const KvFieldKindSchema: GenEnum<KvFieldKind> = /*@__PURE__*/
   enumDesc(file_store_v1_query, 1);
 
 /**
+ * Aggregation operation applied by a reducer.
+ *
  * @generated from enum store.query.v1.RangeReduceOp
  */
 export enum RangeReduceOp {
   /**
+   * Count every row (ignores `expr`; `expr` must not be set).
+   *
    * @generated from enum value: RANGE_REDUCE_OP_COUNT_ALL = 0;
    */
   COUNT_ALL = 0,
 
   /**
+   * Count rows where `expr` evaluates to a non-NULL value.
+   *
    * @generated from enum value: RANGE_REDUCE_OP_COUNT_FIELD = 1;
    */
   COUNT_FIELD = 1,
 
   /**
+   * Sum of `expr` across rows (numeric types only).
+   *
    * @generated from enum value: RANGE_REDUCE_OP_SUM_FIELD = 2;
    */
   SUM_FIELD = 2,
 
   /**
+   * Minimum value of `expr` across rows.
+   *
    * @generated from enum value: RANGE_REDUCE_OP_MIN_FIELD = 3;
    */
   MIN_FIELD = 3,
 
   /**
+   * Maximum value of `expr` across rows.
+   *
    * @generated from enum value: RANGE_REDUCE_OP_MAX_FIELD = 4;
    */
   MAX_FIELD = 4,
@@ -1177,6 +1387,8 @@ export const RangeReduceOpSchema: GenEnum<RangeReduceOp> = /*@__PURE__*/
  */
 export const Service: GenService<{
   /**
+   * Point lookup of a single key.
+   *
    * @generated from rpc store.query.v1.Service.Get
    */
   get: {
@@ -1185,6 +1397,8 @@ export const Service: GenService<{
     output: typeof GetResponseSchema;
   },
   /**
+   * Batch point lookup of multiple keys, streamed back in frames.
+   *
    * @generated from rpc store.query.v1.Service.GetMany
    */
   getMany: {
@@ -1193,6 +1407,8 @@ export const Service: GenService<{
     output: typeof GetManyFrameSchema;
   },
   /**
+   * Lexicographic range scan, streamed back in batched frames.
+   *
    * @generated from rpc store.query.v1.Service.Range
    */
   range: {
@@ -1201,6 +1417,9 @@ export const Service: GenService<{
     output: typeof RangeFrameSchema;
   },
   /**
+   * Server-side aggregation over a key range with optional grouping and
+   * filtering.
+   *
    * @generated from rpc store.query.v1.Service.Reduce
    */
   reduce: {
