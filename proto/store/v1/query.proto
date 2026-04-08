@@ -41,6 +41,7 @@ enum KvFieldKind {
   KV_FIELD_KIND_TIMESTAMP = 7;
   KV_FIELD_KIND_DECIMAL128 = 8;
   KV_FIELD_KIND_FIXED_SIZE_BINARY = 9;
+  KV_FIELD_KIND_DECIMAL256 = 10;
 }
 
 message KvFieldRef {
@@ -84,6 +85,7 @@ message KvReducedValue {
     int64 timestamp_value = 8;
     bytes decimal128_value = 9;
     bytes fixed_size_binary_value = 10;
+    bytes decimal256_value = 11;
   }
 }
 
@@ -131,6 +133,11 @@ message KvPredicateConstraint {
     optional bytes max = 2;
   }
 
+  message Decimal256Range {
+    optional bytes min = 1;
+    optional bytes max = 2;
+  }
+
   message StringIn {
     repeated string values = 1;
   }
@@ -161,6 +168,7 @@ message KvPredicateConstraint {
     IntIn int_in = 11;
     UInt64In uint64_in = 12;
     FixedSizeBinaryIn fixed_size_binary_in = 13;
+    Decimal256Range decimal256_range = 14;
   }
 }
 

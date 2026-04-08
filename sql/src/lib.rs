@@ -7540,6 +7540,17 @@ fn reduced_value_to_scalar(
                 )))
             }
         },
+        (_, Some(KvReducedValue::Decimal256(v))) => match data_type {
+            DataType::Decimal256(precision, scale) => {
+                ScalarValue::Decimal256(Some(i256::from_le_bytes(v)), *precision, *scale)
+            }
+            _ => {
+                return Err(DataFusionError::Execution(format!(
+                    "unsupported reduced scalar conversion to {:?}",
+                    data_type
+                )))
+            }
+        },
         (_, Some(KvReducedValue::FixedSizeBinary(v))) => cast_scalar_value(
             ScalarValue::FixedSizeBinary(v.len() as i32, Some(v)),
             data_type,
@@ -8444,7 +8455,12 @@ fn compile_kv_predicate_constraint(
         PredicateConstraint::FixedBinaryIn(values) => {
             KvPredicateConstraint::FixedSizeBinaryIn(values.clone())
         }
-        PredicateConstraint::Decimal256Range { .. } => return None,
+        PredicateConstraint::Decimal256Range { min, max } => {
+            KvPredicateConstraint::Decimal256Range {
+                min: min.map(|v| v.to_le_bytes()),
+                max: max.map(|v| v.to_le_bytes()),
+            }
+        }
     })
 }
 
@@ -9104,7 +9120,8 @@ fn kv_field_kind(kind: ColumnKind) -> Option<KvFieldKind> {
         ColumnKind::Timestamp => Some(KvFieldKind::Timestamp),
         ColumnKind::FixedSizeBinary(width) => Some(KvFieldKind::FixedSizeBinary(width as u8)),
         ColumnKind::Decimal128 => Some(KvFieldKind::Decimal128),
-        ColumnKind::Decimal256 | ColumnKind::List(_) => None,
+        ColumnKind::Decimal256 => Some(KvFieldKind::Decimal256),
+        ColumnKind::List(_) => None,
     }
 }
 
@@ -10080,44 +10097,6 @@ mod tests {
 
         assert!(!plan.index_covers_required_non_pk(&no_cover_resolved[0]));
         assert!(plan.index_covers_required_non_pk(&with_cover_resolved[0]));
-    }
-
-    #[test]
-    fn zorder_shared_predicate_skips_non_compilable_field_refs_without_contradiction() {
-        let config = KvTableConfig::new(
-            0,
-            vec![
-                TableColumnConfig::new("id", DataType::Int64, false),
-                TableColumnConfig::new("big_val", DataType::Decimal256(76, 0), false),
-            ],
-            vec!["id".to_string()],
-            vec![IndexSpec::z_order("big_idx", vec!["big_val".to_string()]).expect("valid")],
-        )
-        .expect("config");
-        let model = TableModel::from_config(&config).expect("model");
-        let spec = model
-            .resolve_index_specs(&config.index_specs)
-            .expect("specs")
-            .remove(0);
-        let plan = ScanAccessPlan {
-            required_pk_mask: vec![false],
-            required_non_pk_columns: vec![false; model.columns.len()],
-            projection_sources: Vec::new(),
-            predicate_checks: vec![PredicateAccess::NonPk {
-                col_idx: *model.columns_by_name.get("big_val").unwrap(),
-                col: model
-                    .column(*model.columns_by_name.get("big_val").unwrap())
-                    .clone(),
-                constraint: PredicateConstraint::IntRange {
-                    min: Some(1),
-                    max: Some(2),
-                },
-            }],
-        };
-
-        let compiled = plan.compile_index_predicate_plan(&model, &spec);
-        assert!(!compiled.is_impossible());
-        assert!(compiled.matches_key(&Bytes::from(vec![0u8; exoware_sdk_rs::keys::KEY_SIZE])));
     }
 
     #[test]

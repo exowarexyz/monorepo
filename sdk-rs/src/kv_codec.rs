@@ -91,6 +91,7 @@ pub enum KvFieldKind {
     Date64,
     Timestamp,
     Decimal128,
+    Decimal256,
     FixedSizeBinary(u8),
 }
 
@@ -146,6 +147,10 @@ pub enum KvPredicateConstraint {
         min: Option<i128>,
         max: Option<i128>,
     },
+    Decimal256Range {
+        min: Option<[u8; 32]>,
+        max: Option<[u8; 32]>,
+    },
     IsNull,
     IsNotNull,
     StringIn(Vec<String>),
@@ -177,6 +182,7 @@ pub enum KvReducedValue {
     Date64(i64),
     Timestamp(i64),
     Decimal128(i128),
+    Decimal256([u8; 32]),
     FixedSizeBinary(Vec<u8>),
 }
 
@@ -205,6 +211,21 @@ impl KvReducedValue {
                     .ok_or_else(|| "Decimal128 sum overflow".to_string())?;
                 Ok(())
             }
+            (Self::Decimal256(lhs), Self::Decimal256(rhs)) => {
+                let lhs_neg = lhs[31] & 0x80 != 0;
+                let rhs_neg = rhs[31] & 0x80 != 0;
+                let mut carry = 0u16;
+                for i in 0..32 {
+                    let sum = lhs[i] as u16 + rhs[i] as u16 + carry;
+                    lhs[i] = sum as u8;
+                    carry = sum >> 8;
+                }
+                let result_neg = lhs[31] & 0x80 != 0;
+                if lhs_neg == rhs_neg && result_neg != lhs_neg {
+                    return Err("Decimal256 sum overflow".to_string());
+                }
+                Ok(())
+            }
             _ => Err("sum type mismatch".to_string()),
         }
     }
@@ -220,6 +241,7 @@ impl KvReducedValue {
             (Self::Date64(lhs), Self::Date64(rhs)) => Some(lhs.cmp(rhs)),
             (Self::Timestamp(lhs), Self::Timestamp(rhs)) => Some(lhs.cmp(rhs)),
             (Self::Decimal128(lhs), Self::Decimal128(rhs)) => Some(lhs.cmp(rhs)),
+            (Self::Decimal256(lhs), Self::Decimal256(rhs)) => Some(cmp_i256_le_bytes(lhs, rhs)),
             (Self::FixedSizeBinary(lhs), Self::FixedSizeBinary(rhs)) => Some(lhs.cmp(rhs)),
             _ => None,
         }
@@ -287,8 +309,12 @@ pub fn encode_reduced_group_key(values: &[Option<KvReducedValue>]) -> Vec<u8> {
                 out.push(9);
                 out.extend_from_slice(&v.to_be_bytes());
             }
-            Some(KvReducedValue::FixedSizeBinary(v)) => {
+            Some(KvReducedValue::Decimal256(v)) => {
                 out.push(10);
+                out.extend_from_slice(v);
+            }
+            Some(KvReducedValue::FixedSizeBinary(v)) => {
+                out.push(11);
                 let len = u32::try_from(v.len()).unwrap_or(u32::MAX);
                 out.extend_from_slice(&len.to_be_bytes());
                 out.extend_from_slice(v);
@@ -808,6 +834,13 @@ pub fn extract_stored_field(
                 .map_err(|_| "invalid Decimal128 byte width".to_string())?;
             KvReducedValue::Decimal128(i128::from_le_bytes(raw))
         }
+        (KvFieldKind::Decimal256, StoredValue::Bytes(bytes)) => {
+            let raw: [u8; 32] = bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| "invalid Decimal256 byte width".to_string())?;
+            KvReducedValue::Decimal256(raw)
+        }
         (KvFieldKind::FixedSizeBinary(width), StoredValue::Bytes(bytes)) => {
             if bytes.as_slice().len() != usize::from(width) {
                 return Err("invalid FixedSizeBinary byte width".to_string());
@@ -830,6 +863,7 @@ fn key_field_width(kind: KvFieldKind) -> usize {
         KvFieldKind::Utf8 => 16,
         KvFieldKind::Date32 => 4,
         KvFieldKind::Decimal128 => 16,
+        KvFieldKind::Decimal256 => 32,
         KvFieldKind::FixedSizeBinary(width) => usize::from(width),
     }
 }
@@ -865,6 +899,10 @@ fn decode_ordered_key_field_bytes(bytes: &[u8], kind: KvFieldKind) -> Option<KvR
         KvFieldKind::Decimal128 => {
             let raw = bytes.try_into().ok()?;
             KvReducedValue::Decimal128(decode_i128_ordered(raw))
+        }
+        KvFieldKind::Decimal256 => {
+            let raw = bytes.try_into().ok()?;
+            KvReducedValue::Decimal256(decode_i256_ordered(raw))
         }
         KvFieldKind::FixedSizeBinary(width) => {
             if bytes.len() != usize::from(width) {
@@ -908,6 +946,9 @@ fn matches_predicate_constraint(
         }
         (KvReducedValue::Decimal128(v), KvPredicateConstraint::Decimal128Range { min, max }) => {
             in_i128_bounds(*v, *min, *max)
+        }
+        (KvReducedValue::Decimal256(v), KvPredicateConstraint::Decimal256Range { min, max }) => {
+            in_i256_le_bounds(v, min.as_ref(), max.as_ref())
         }
         (KvReducedValue::Utf8(v), KvPredicateConstraint::StringIn(values)) => values.contains(v),
         (KvReducedValue::Int64(v), KvPredicateConstraint::IntIn(values)) => values.contains(v),
@@ -982,6 +1023,42 @@ fn decode_i32_ordered(bytes: [u8; 4]) -> i32 {
 
 fn decode_i128_ordered(bytes: [u8; 16]) -> i128 {
     (u128::from_be_bytes(bytes) ^ (1u128 << 127)) as i128
+}
+
+fn decode_i256_ordered(mut bytes: [u8; 32]) -> [u8; 32] {
+    bytes[0] ^= 0x80;
+    let mut le = [0u8; 32];
+    for i in 0..32 {
+        le[i] = bytes[31 - i];
+    }
+    le
+}
+
+fn cmp_i256_le_bytes(a: &[u8; 32], b: &[u8; 32]) -> Ordering {
+    let a_neg = a[31] & 0x80 != 0;
+    let b_neg = b[31] & 0x80 != 0;
+    match (a_neg, b_neg) {
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        _ => {
+            for i in (0..32).rev() {
+                match a[i].cmp(&b[i]) {
+                    Ordering::Equal => continue,
+                    ord => return ord,
+                }
+            }
+            Ordering::Equal
+        }
+    }
+}
+
+fn in_i256_le_bounds(
+    value: &[u8; 32],
+    min: Option<&[u8; 32]>,
+    max: Option<&[u8; 32]>,
+) -> bool {
+    min.is_none_or(|lower| cmp_i256_le_bytes(value, lower) != Ordering::Less)
+        && max.is_none_or(|upper| cmp_i256_le_bytes(value, upper) != Ordering::Greater)
 }
 
 fn decode_fixed_text(bytes: &[u8]) -> Option<String> {

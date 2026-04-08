@@ -142,6 +142,7 @@ fn proto_field_kind(kind: &KvFieldKind) -> query::KvFieldKind {
         KvFieldKind::Date64 => query::KvFieldKind::KV_FIELD_KIND_DATE64,
         KvFieldKind::Timestamp => query::KvFieldKind::KV_FIELD_KIND_TIMESTAMP,
         KvFieldKind::Decimal128 => query::KvFieldKind::KV_FIELD_KIND_DECIMAL128,
+        KvFieldKind::Decimal256 => query::KvFieldKind::KV_FIELD_KIND_DECIMAL256,
         KvFieldKind::FixedSizeBinary(_) => query::KvFieldKind::KV_FIELD_KIND_FIXED_SIZE_BINARY,
     }
 }
@@ -160,6 +161,7 @@ fn domain_field_kind(
         Some(query::KvFieldKind::KV_FIELD_KIND_DATE64) => Ok(KvFieldKind::Date64),
         Some(query::KvFieldKind::KV_FIELD_KIND_TIMESTAMP) => Ok(KvFieldKind::Timestamp),
         Some(query::KvFieldKind::KV_FIELD_KIND_DECIMAL128) => Ok(KvFieldKind::Decimal128),
+        Some(query::KvFieldKind::KV_FIELD_KIND_DECIMAL256) => Ok(KvFieldKind::Decimal256),
         Some(query::KvFieldKind::KV_FIELD_KIND_FIXED_SIZE_BINARY) => {
             let len = u8::try_from(fixed_size_binary_len).map_err(|_| {
                 format!("fixed_size_binary_len {fixed_size_binary_len} does not fit in u8")
@@ -182,6 +184,9 @@ pub fn to_proto_reduced_value(value: KvReducedValue) -> query::KvReducedValue {
         KvReducedValue::Timestamp(v) => query::kv_reduced_value::Value::TimestampValue(v),
         KvReducedValue::Decimal128(v) => {
             query::kv_reduced_value::Value::Decimal128Value(v.to_be_bytes().to_vec())
+        }
+        KvReducedValue::Decimal256(v) => {
+            query::kv_reduced_value::Value::Decimal256Value(v.to_vec())
         }
         KvReducedValue::FixedSizeBinary(v) => {
             query::kv_reduced_value::Value::FixedSizeBinaryValue(v)
@@ -216,6 +221,13 @@ pub fn to_domain_reduced_value(value: &query::KvReducedValue) -> Result<KvReduce
                 .map_err(|_| "decimal128 must be exactly 16 bytes".to_string())?;
             Ok(KvReducedValue::Decimal128(i128::from_be_bytes(raw)))
         }
+        Some(query::kv_reduced_value::Value::Decimal256Value(bytes)) => {
+            let raw: [u8; 32] = bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| "decimal256 must be exactly 32 bytes".to_string())?;
+            Ok(KvReducedValue::Decimal256(raw))
+        }
         Some(query::kv_reduced_value::Value::FixedSizeBinaryValue(v)) => {
             Ok(KvReducedValue::FixedSizeBinary(v.clone()))
         }
@@ -243,6 +255,12 @@ pub fn to_domain_reduced_value_from_proto(
                 .try_into()
                 .map_err(|_| "decimal128 must be exactly 16 bytes".to_string())?;
             Ok(KvReducedValue::Decimal128(i128::from_be_bytes(raw)))
+        }
+        Some(query::kv_reduced_value::Value::Decimal256Value(bytes)) => {
+            let raw: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| "decimal256 must be exactly 32 bytes".to_string())?;
+            Ok(KvReducedValue::Decimal256(raw))
         }
         Some(query::kv_reduced_value::Value::FixedSizeBinaryValue(v)) => {
             Ok(KvReducedValue::FixedSizeBinary(v))
@@ -479,6 +497,15 @@ fn to_proto_predicate_constraint(
                 },
             ))
         }
+        KvPredicateConstraint::Decimal256Range { min, max } => {
+            query::kv_predicate_constraint::Constraint::Decimal256Range(Box::new(
+                query::kv_predicate_constraint::Decimal256Range {
+                    min: min.map(|v| v.to_vec()),
+                    max: max.map(|v| v.to_vec()),
+                    ..Default::default()
+                },
+            ))
+        }
         KvPredicateConstraint::IsNull => query::kv_predicate_constraint::Constraint::IsNull(true),
         KvPredicateConstraint::IsNotNull => {
             query::kv_predicate_constraint::Constraint::IsNotNull(true)
@@ -581,6 +608,31 @@ fn to_domain_predicate_constraint(
                 })
                 .transpose()?;
             Ok(KvPredicateConstraint::Decimal128Range { min, max })
+        }
+        Some(query::kv_predicate_constraint::Constraint::Decimal256Range(v)) => {
+            let min = v
+                .min
+                .as_ref()
+                .map(|raw| {
+                    let bytes: [u8; 32] = raw
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| "decimal256 min must be exactly 32 bytes".to_string())?;
+                    Ok::<[u8; 32], String>(bytes)
+                })
+                .transpose()?;
+            let max = v
+                .max
+                .as_ref()
+                .map(|raw| {
+                    let bytes: [u8; 32] = raw
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| "decimal256 max must be exactly 32 bytes".to_string())?;
+                    Ok::<[u8; 32], String>(bytes)
+                })
+                .transpose()?;
+            Ok(KvPredicateConstraint::Decimal256Range { min, max })
         }
         Some(query::kv_predicate_constraint::Constraint::IsNull(_)) => {
             Ok(KvPredicateConstraint::IsNull)
@@ -735,6 +787,12 @@ fn to_domain_reduced_value_from_view(
                 .map_err(|_| "decimal128 must be exactly 16 bytes".to_string())?;
             Ok(KvReducedValue::Decimal128(i128::from_be_bytes(raw)))
         }
+        Some(query::kv_reduced_value::ValueView::Decimal256Value(bytes)) => {
+            let raw: [u8; 32] = (*bytes)
+                .try_into()
+                .map_err(|_| "decimal256 must be exactly 32 bytes".to_string())?;
+            Ok(KvReducedValue::Decimal256(raw))
+        }
         Some(query::kv_reduced_value::ValueView::FixedSizeBinaryValue(v)) => {
             Ok(KvReducedValue::FixedSizeBinary(v.to_vec()))
         }
@@ -883,6 +941,29 @@ fn to_domain_predicate_constraint_from_view(
                 })
                 .transpose()?;
             Ok(KvPredicateConstraint::Decimal128Range { min, max })
+        }
+        Some(query::kv_predicate_constraint::ConstraintView::Decimal256Range(v)) => {
+            let min = v
+                .min
+                .as_ref()
+                .map(|raw| {
+                    let bytes: [u8; 32] = (*raw)
+                        .try_into()
+                        .map_err(|_| "decimal256 min must be exactly 32 bytes".to_string())?;
+                    Ok::<[u8; 32], String>(bytes)
+                })
+                .transpose()?;
+            let max = v
+                .max
+                .as_ref()
+                .map(|raw| {
+                    let bytes: [u8; 32] = (*raw)
+                        .try_into()
+                        .map_err(|_| "decimal256 max must be exactly 32 bytes".to_string())?;
+                    Ok::<[u8; 32], String>(bytes)
+                })
+                .transpose()?;
+            Ok(KvPredicateConstraint::Decimal256Range { min, max })
         }
         Some(query::kv_predicate_constraint::ConstraintView::IsNull(_)) => {
             Ok(KvPredicateConstraint::IsNull)
