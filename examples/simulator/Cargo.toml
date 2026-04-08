@@ -7,7 +7,7 @@ license.workspace = true
 description = "RocksDB-backed simulator for the store API."
 readme = "README.md"
 homepage.workspace = true
-repository = "https://github.com/exowarexyz/monorepo/tree/main/simulator"
+repository = "https://github.com/exowarexyz/monorepo/tree/main/examples/simulator"
 documentation = "https://docs.rs/exoware-simulator"
 
 [dependencies]

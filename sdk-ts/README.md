@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/exoware-sdk-ts.svg)](https://www.npmjs.com/package/exoware-sdk-ts)
 
-TypeScript SDK for the Exoware **store** API, aligned with [`exoware-sdk-rs`](../sdk-rs/README.md) and [`exoware-simulator`](../simulator/README.md).
+TypeScript SDK for the Exoware **store** API, aligned with [`exoware-sdk-rs`](../sdk-rs/README.md) and [`exoware-simulator`](../examples/simulator/README.md).
 
 ## Status
 

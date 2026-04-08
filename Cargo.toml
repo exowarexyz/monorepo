@@ -2,7 +2,7 @@
 members = [
     "server",
     "sdk-rs",
-    "simulator",
+    "examples/simulator",
     "qmdb",
     "sql",
 ]

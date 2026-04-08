@@ -22,7 +22,7 @@ axum = { workspace = true }
 buffa = { workspace = true }
 connectrpc = { workspace = true }
 criterion = { workspace = true }
-exoware-simulator = { path = "../simulator" }
+exoware-simulator = { path = "../examples/simulator" }
 exoware-server = { workspace = true }
 futures = { workspace = true }
 reqwest = { workspace = true }

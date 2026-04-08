@@ -27,7 +27,7 @@ _The interface for all components is specified in [Protobuf](./proto/)._
 _Examples may include insecure code (i.e. deriving keypairs from an integer arguments) to make them easier to run. Examples are not intended to be used directly in production._
 
 * [sandbox](./examples/sandbox): Explore the Exoware API.
-* [simulator](./simulator/README.md): Simulate the Exoware API.
+* [simulator](./examples/simulator/README.md): Simulate the Exoware API.
 
 ## Licensing
 
