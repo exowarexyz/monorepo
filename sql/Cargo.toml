@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "SQL wrapper over the store Rust client using DataFusion"
+readme = "README.md"
 
 [dependencies]
 async-trait = { workspace = true }
