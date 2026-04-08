@@ -1276,7 +1276,7 @@ unsafe impl ::buffa::DefaultViewInstance for RetainKeepLatestView<'static> {
 unsafe impl<'a> ::buffa::HasDefaultViewInstance for RetainKeepLatestView<'a> {
     type Static = RetainKeepLatestView<'static>;
 }
-/// Delete entries whose order value is less than or equal to `threshold_u64`.
+/// Delete entries whose order value is less than or equal to `threshold`.
 /// Requires `PolicyOrderBy` with `POLICY_ORDER_ENCODING_U64_BE`.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
@@ -1284,14 +1284,13 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for RetainKeepLatestView<'a> {
 pub struct RetainGreaterThan {
     /// Entries with order value \> this threshold are retained.
     ///
-    /// Field 1: `threshold_u64`
+    /// Field 1: `threshold`
     #[serde(
-        rename = "thresholdU64",
-        alias = "threshold_u64",
+        rename = "threshold",
         with = "::buffa::json_helpers::uint64",
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
     )]
-    pub threshold_u64: u64,
+    pub threshold: u64,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -1301,9 +1300,7 @@ pub struct RetainGreaterThan {
 }
 impl ::core::fmt::Debug for RetainGreaterThan {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("RetainGreaterThan")
-            .field("threshold_u64", &self.threshold_u64)
-            .finish()
+        f.debug_struct("RetainGreaterThan").field("threshold", &self.threshold).finish()
     }
 }
 impl RetainGreaterThan {
@@ -1329,8 +1326,8 @@ impl ::buffa::Message for RetainGreaterThan {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
-        if self.threshold_u64 != 0u64 {
-            size += 1u32 + ::buffa::types::uint64_encoded_len(self.threshold_u64) as u32;
+        if self.threshold != 0u64 {
+            size += 1u32 + ::buffa::types::uint64_encoded_len(self.threshold) as u32;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
         self.__buffa_cached_size.set(size);
@@ -1339,10 +1336,10 @@ impl ::buffa::Message for RetainGreaterThan {
     fn write_to(&self, buf: &mut impl ::buffa::bytes::BufMut) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.threshold_u64 != 0u64 {
+        if self.threshold != 0u64 {
             ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Varint)
                 .encode(buf);
-            ::buffa::types::encode_uint64(self.threshold_u64, buf);
+            ::buffa::types::encode_uint64(self.threshold, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -1365,7 +1362,7 @@ impl ::buffa::Message for RetainGreaterThan {
                         actual: tag.wire_type() as u8,
                     });
                 }
-                self.threshold_u64 = ::buffa::types::decode_uint64(buf)?;
+                self.threshold = ::buffa::types::decode_uint64(buf)?;
             }
             _ => {
                 self.__buffa_unknown_fields
@@ -1378,7 +1375,7 @@ impl ::buffa::Message for RetainGreaterThan {
         self.__buffa_cached_size.get()
     }
     fn clear(&mut self) {
-        self.threshold_u64 = 0u64;
+        self.threshold = 0u64;
         self.__buffa_unknown_fields.clear();
         self.__buffa_cached_size.set(0);
     }
@@ -1412,14 +1409,14 @@ pub const __RETAIN_GREATER_THAN_JSON_ANY: ::buffa::type_registry::JsonAnyEntry =
     from_json: ::buffa::type_registry::any_from_json::<RetainGreaterThan>,
     is_wkt: false,
 };
-/// Delete entries whose order value is less than or equal to `threshold_u64`.
+/// Delete entries whose order value is less than or equal to `threshold`.
 /// Requires `PolicyOrderBy` with `POLICY_ORDER_ENCODING_U64_BE`.
 #[derive(Clone, Debug, Default)]
 pub struct RetainGreaterThanView<'a> {
     /// Entries with order value \> this threshold are retained.
     ///
-    /// Field 1: `threshold_u64`
-    pub threshold_u64: u64,
+    /// Field 1: `threshold`
+    pub threshold: u64,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> RetainGreaterThanView<'a> {
@@ -1468,7 +1465,7 @@ impl<'a> RetainGreaterThanView<'a> {
                             actual: tag.wire_type() as u8,
                         });
                     }
-                    view.threshold_u64 = ::buffa::types::decode_uint64(&mut cur)?;
+                    view.threshold = ::buffa::types::decode_uint64(&mut cur)?;
                 }
                 _ => {
                     ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
@@ -1497,7 +1494,7 @@ impl<'a> ::buffa::MessageView<'a> for RetainGreaterThanView<'a> {
         #[allow(unused_imports)]
         use ::buffa::alloc::string::ToString as _;
         RetainGreaterThan {
-            threshold_u64: self.threshold_u64,
+            threshold: self.threshold,
             __buffa_unknown_fields: self
                 .__buffa_unknown_fields
                 .to_owned()
@@ -1516,7 +1513,7 @@ unsafe impl ::buffa::DefaultViewInstance for RetainGreaterThanView<'static> {
 unsafe impl<'a> ::buffa::HasDefaultViewInstance for RetainGreaterThanView<'a> {
     type Static = RetainGreaterThanView<'static>;
 }
-/// Delete entries whose order value is strictly less than `threshold_u64`.
+/// Delete entries whose order value is strictly less than `threshold`.
 /// Requires `PolicyOrderBy` with `POLICY_ORDER_ENCODING_U64_BE`.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
@@ -1524,14 +1521,13 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for RetainGreaterThanView<'a> {
 pub struct RetainGreaterThanOrEqual {
     /// Entries with order value \>= this threshold are retained.
     ///
-    /// Field 1: `threshold_u64`
+    /// Field 1: `threshold`
     #[serde(
-        rename = "thresholdU64",
-        alias = "threshold_u64",
+        rename = "threshold",
         with = "::buffa::json_helpers::uint64",
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
     )]
-    pub threshold_u64: u64,
+    pub threshold: u64,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -1542,7 +1538,7 @@ pub struct RetainGreaterThanOrEqual {
 impl ::core::fmt::Debug for RetainGreaterThanOrEqual {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         f.debug_struct("RetainGreaterThanOrEqual")
-            .field("threshold_u64", &self.threshold_u64)
+            .field("threshold", &self.threshold)
             .finish()
     }
 }
@@ -1569,8 +1565,8 @@ impl ::buffa::Message for RetainGreaterThanOrEqual {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
-        if self.threshold_u64 != 0u64 {
-            size += 1u32 + ::buffa::types::uint64_encoded_len(self.threshold_u64) as u32;
+        if self.threshold != 0u64 {
+            size += 1u32 + ::buffa::types::uint64_encoded_len(self.threshold) as u32;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
         self.__buffa_cached_size.set(size);
@@ -1579,10 +1575,10 @@ impl ::buffa::Message for RetainGreaterThanOrEqual {
     fn write_to(&self, buf: &mut impl ::buffa::bytes::BufMut) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.threshold_u64 != 0u64 {
+        if self.threshold != 0u64 {
             ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Varint)
                 .encode(buf);
-            ::buffa::types::encode_uint64(self.threshold_u64, buf);
+            ::buffa::types::encode_uint64(self.threshold, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -1605,7 +1601,7 @@ impl ::buffa::Message for RetainGreaterThanOrEqual {
                         actual: tag.wire_type() as u8,
                     });
                 }
-                self.threshold_u64 = ::buffa::types::decode_uint64(buf)?;
+                self.threshold = ::buffa::types::decode_uint64(buf)?;
             }
             _ => {
                 self.__buffa_unknown_fields
@@ -1618,7 +1614,7 @@ impl ::buffa::Message for RetainGreaterThanOrEqual {
         self.__buffa_cached_size.get()
     }
     fn clear(&mut self) {
-        self.threshold_u64 = 0u64;
+        self.threshold = 0u64;
         self.__buffa_unknown_fields.clear();
         self.__buffa_cached_size.set(0);
     }
@@ -1652,14 +1648,14 @@ pub const __RETAIN_GREATER_THAN_OR_EQUAL_JSON_ANY: ::buffa::type_registry::JsonA
     from_json: ::buffa::type_registry::any_from_json::<RetainGreaterThanOrEqual>,
     is_wkt: false,
 };
-/// Delete entries whose order value is strictly less than `threshold_u64`.
+/// Delete entries whose order value is strictly less than `threshold`.
 /// Requires `PolicyOrderBy` with `POLICY_ORDER_ENCODING_U64_BE`.
 #[derive(Clone, Debug, Default)]
 pub struct RetainGreaterThanOrEqualView<'a> {
     /// Entries with order value \>= this threshold are retained.
     ///
-    /// Field 1: `threshold_u64`
-    pub threshold_u64: u64,
+    /// Field 1: `threshold`
+    pub threshold: u64,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> RetainGreaterThanOrEqualView<'a> {
@@ -1708,7 +1704,7 @@ impl<'a> RetainGreaterThanOrEqualView<'a> {
                             actual: tag.wire_type() as u8,
                         });
                     }
-                    view.threshold_u64 = ::buffa::types::decode_uint64(&mut cur)?;
+                    view.threshold = ::buffa::types::decode_uint64(&mut cur)?;
                 }
                 _ => {
                     ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
@@ -1737,7 +1733,7 @@ impl<'a> ::buffa::MessageView<'a> for RetainGreaterThanOrEqualView<'a> {
         #[allow(unused_imports)]
         use ::buffa::alloc::string::ToString as _;
         RetainGreaterThanOrEqual {
-            threshold_u64: self.threshold_u64,
+            threshold: self.threshold,
             __buffa_unknown_fields: self
                 .__buffa_unknown_fields
                 .to_owned()

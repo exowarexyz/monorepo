@@ -61,18 +61,18 @@ message RetainKeepLatest {
   uint64 count = 1 [(buf.validate.field).uint64.gt = 0];
 }
 
-// Delete entries whose order value is less than or equal to `threshold_u64`.
+// Delete entries whose order value is less than or equal to `threshold`.
 // Requires `PolicyOrderBy` with `POLICY_ORDER_ENCODING_U64_BE`.
 message RetainGreaterThan {
   // Entries with order value > this threshold are retained.
-  uint64 threshold_u64 = 1;
+  uint64 threshold = 1;
 }
 
-// Delete entries whose order value is strictly less than `threshold_u64`.
+// Delete entries whose order value is strictly less than `threshold`.
 // Requires `PolicyOrderBy` with `POLICY_ORDER_ENCODING_U64_BE`.
 message RetainGreaterThanOrEqual {
   // Entries with order value >= this threshold are retained.
-  uint64 threshold_u64 = 1;
+  uint64 threshold = 1;
 }
 
 // Delete all matched entries in each group unconditionally.

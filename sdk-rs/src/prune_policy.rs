@@ -46,8 +46,8 @@ pub enum OrderEncoding {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RetainPolicy {
     KeepLatest { count: usize },
-    GreaterThan { threshold_u64: u64 },
-    GreaterThanOrEqual { threshold_u64: u64 },
+    GreaterThan { threshold: u64 },
+    GreaterThanOrEqual { threshold: u64 },
     DropAll,
 }
 
@@ -90,13 +90,13 @@ impl Write for RetainPolicy {
                 0u8.write(buf);
                 (*count as u64).write(buf);
             }
-            RetainPolicy::GreaterThan { threshold_u64 } => {
+            RetainPolicy::GreaterThan { threshold } => {
                 1u8.write(buf);
-                threshold_u64.write(buf);
+                threshold.write(buf);
             }
-            RetainPolicy::GreaterThanOrEqual { threshold_u64 } => {
+            RetainPolicy::GreaterThanOrEqual { threshold } => {
                 2u8.write(buf);
-                threshold_u64.write(buf);
+                threshold.write(buf);
             }
             RetainPolicy::DropAll => {
                 3u8.write(buf);
@@ -124,10 +124,10 @@ impl Read for RetainPolicy {
                 count: u64::read(buf)? as usize,
             }),
             1 => Ok(RetainPolicy::GreaterThan {
-                threshold_u64: u64::read(buf)?,
+                threshold: u64::read(buf)?,
             }),
             2 => Ok(RetainPolicy::GreaterThanOrEqual {
-                threshold_u64: u64::read(buf)?,
+                threshold: u64::read(buf)?,
             }),
             3 => Ok(RetainPolicy::DropAll),
             v => Err(CodecError::InvalidEnum(v)),

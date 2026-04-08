@@ -34,7 +34,7 @@ pub fn keep_latest_updates(count: usize) -> PrunePolicy {
 pub fn keep_positions_gte(min_location: u64) -> PrunePolicy {
     let mut policy = keep_latest_updates(1);
     policy.retain = RetainPolicy::GreaterThanOrEqual {
-        threshold_u64: min_location,
+        threshold: min_location,
     };
     policy
 }
@@ -70,7 +70,7 @@ mod tests {
         let policy = keep_positions_gte(42);
         assert_eq!(
             policy.retain,
-            RetainPolicy::GreaterThanOrEqual { threshold_u64: 42 }
+            RetainPolicy::GreaterThanOrEqual { threshold: 42 }
         );
         assert_eq!(
             &*policy.order_by.expect("order_by").capture_group,

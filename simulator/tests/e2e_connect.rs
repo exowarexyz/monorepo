@@ -3,7 +3,7 @@ use commonware_codec::Encode;
 use connectrpc::client::ClientConfig;
 use exoware_sdk_rs::compact::{
     policy_retain, Policy, PolicyGroupBy, PolicyMatchKey, PolicyOrderBy, PolicyOrderEncoding,
-    PolicyRetain, PruneRequest, RetainDropAll, RetainGreaterThan, RetainKeepLatest,
+    PolicyRetain, PruneRequest, RetainGreaterThan, RetainKeepLatest,
     ServiceClient as CompactServiceClient,
 };
 use exoware_sdk_rs::prune_policy;
@@ -275,9 +275,7 @@ async fn prune_drop_all_removes_keys() {
                 .into(),
                 order_by: Default::default(),
                 retain: Some(PolicyRetain {
-                    kind: Some(policy_retain::Kind::DropAll(Box::new(
-                        RetainDropAll::default(),
-                    ))),
+                    kind: Some(policy_retain::Kind::DropAll(Box::default())),
                     ..Default::default()
                 })
                 .into(),
@@ -648,7 +646,7 @@ async fn prune_greater_than_retains_above_threshold() {
                 retain: Some(PolicyRetain {
                     kind: Some(policy_retain::Kind::GreaterThan(Box::new(
                         RetainGreaterThan {
-                            threshold_u64: 15,
+                            threshold: 15,
                             ..Default::default()
                         },
                     ))),

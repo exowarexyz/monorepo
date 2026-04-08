@@ -40,10 +40,10 @@ fn retain_from_view(kind: &policy_retain::KindView<'_>) -> Result<RetainPolicy, 
             count: usize_from_u64("keep_latest.count", k.count)?,
         }),
         policy_retain::KindView::GreaterThan(g) => Ok(RetainPolicy::GreaterThan {
-            threshold_u64: g.threshold_u64,
+            threshold: g.threshold,
         }),
         policy_retain::KindView::GreaterThanOrEqual(g) => Ok(RetainPolicy::GreaterThanOrEqual {
-            threshold_u64: g.threshold_u64,
+            threshold: g.threshold,
         }),
         policy_retain::KindView::DropAll(_) => Ok(RetainPolicy::DropAll),
     }
@@ -107,7 +107,7 @@ pub fn prune_policies_to_proto(policies: &[PrunePolicy]) -> Vec<crate::store::co
 fn prune_policy_to_proto(p: &PrunePolicy) -> crate::store::compact::v1::Policy {
     use crate::store::compact::v1::{
         policy_retain, Policy, PolicyGroupBy, PolicyMatchKey, PolicyOrderBy, PolicyRetain,
-        RetainDropAll, RetainGreaterThan, RetainGreaterThanOrEqual, RetainKeepLatest,
+        RetainGreaterThan, RetainGreaterThanOrEqual, RetainKeepLatest,
     };
 
     let match_key = PolicyMatchKey {
@@ -137,20 +137,20 @@ fn prune_policy_to_proto(p: &PrunePolicy) -> crate::store::compact::v1::Policy {
                 ..Default::default()
             },
         )),
-        RetainPolicy::GreaterThan { threshold_u64 } => {
+        RetainPolicy::GreaterThan { threshold } => {
             policy_retain::Kind::GreaterThan(Box::new(RetainGreaterThan {
-                threshold_u64: *threshold_u64,
+                threshold: *threshold,
                 ..Default::default()
             }))
         }
-        RetainPolicy::GreaterThanOrEqual { threshold_u64 } => {
+        RetainPolicy::GreaterThanOrEqual { threshold } => {
             policy_retain::Kind::GreaterThanOrEqual(Box::new(RetainGreaterThanOrEqual {
-                threshold_u64: *threshold_u64,
+                threshold: *threshold,
                 ..Default::default()
             }))
         }
         RetainPolicy::DropAll => {
-            policy_retain::Kind::DropAll(Box::new(RetainDropAll::default()))
+            policy_retain::Kind::DropAll(Box::default())
         }
     };
     Policy {

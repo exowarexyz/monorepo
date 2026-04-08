@@ -130,16 +130,16 @@ fn keys_to_delete(
                 .map(|e| e.key.clone())
                 .collect()
         }
-        RetainPolicy::GreaterThan { threshold_u64 } => {
-            let threshold = threshold_u64.to_be_bytes();
+        RetainPolicy::GreaterThan { threshold } => {
+            let threshold = threshold.to_be_bytes();
             entries
                 .iter()
                 .filter(|e| compare_order_values(&e.order_value, &threshold, policy) != Ordering::Greater)
                 .map(|e| e.key.clone())
                 .collect()
         }
-        RetainPolicy::GreaterThanOrEqual { threshold_u64 } => {
-            let threshold = threshold_u64.to_be_bytes();
+        RetainPolicy::GreaterThanOrEqual { threshold } => {
+            let threshold = threshold.to_be_bytes();
             entries
                 .iter()
                 .filter(|e| compare_order_values(&e.order_value, &threshold, policy) == Ordering::Less)
@@ -274,7 +274,7 @@ mod tests {
 
     #[test]
     fn greater_than_threshold() {
-        let policy = make_policy(RetainPolicy::GreaterThan { threshold_u64: 5 });
+        let policy = make_policy(RetainPolicy::GreaterThan { threshold: 5 });
         let entries = vec![make_entry(3), make_entry(5), make_entry(7)];
         let deletes = keys_to_delete(entries, &policy);
         assert_eq!(deletes.len(), 2);
@@ -282,7 +282,7 @@ mod tests {
 
     #[test]
     fn greater_than_or_equal_threshold() {
-        let policy = make_policy(RetainPolicy::GreaterThanOrEqual { threshold_u64: 5 });
+        let policy = make_policy(RetainPolicy::GreaterThanOrEqual { threshold: 5 });
         let entries = vec![make_entry(3), make_entry(5), make_entry(7)];
         let deletes = keys_to_delete(entries, &policy);
         assert_eq!(deletes.len(), 1);

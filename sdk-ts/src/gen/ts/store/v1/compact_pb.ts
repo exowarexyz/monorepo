@@ -11,7 +11,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file store/v1/compact.proto.
  */
 export const file_store_v1_compact: GenFile = /*@__PURE__*/
-  fileDesc("ChZzdG9yZS92MS9jb21wYWN0LnByb3RvEhBzdG9yZS5jb21wYWN0LnYxIk4KDlBvbGljeU1hdGNoS2V5EhUKDXJlc2VydmVkX2JpdHMYASABKA0SDgoGcHJlZml4GAIgASgNEhUKDXBheWxvYWRfcmVnZXgYAyABKAkiJwoNUG9saWN5R3JvdXBCeRIWCg5jYXB0dXJlX2dyb3VwcxgBIAMoCSJfCg1Qb2xpY3lPcmRlckJ5EhUKDWNhcHR1cmVfZ3JvdXAYASABKAkSNwoIZW5jb2RpbmcYAiABKA4yJS5zdG9yZS5jb21wYWN0LnYxLlBvbGljeU9yZGVyRW5jb2RpbmciKgoQUmV0YWluS2VlcExhdGVzdBIWCgVjb3VudBgBIAEoBEIHukgEMgIgACIqChFSZXRhaW5HcmVhdGVyVGhhbhIVCg10aHJlc2hvbGRfdTY0GAEgASgEIjEKGFJldGFpbkdyZWF0ZXJUaGFuT3JFcXVhbBIVCg10aHJlc2hvbGRfdTY0GAEgASgEIg8KDVJldGFpbkRyb3BBbGwikAIKDFBvbGljeVJldGFpbhI5CgtrZWVwX2xhdGVzdBgBIAEoCzIiLnN0b3JlLmNvbXBhY3QudjEuUmV0YWluS2VlcExhdGVzdEgAEjsKDGdyZWF0ZXJfdGhhbhgCIAEoCzIjLnN0b3JlLmNvbXBhY3QudjEuUmV0YWluR3JlYXRlclRoYW5IABJLChVncmVhdGVyX3RoYW5fb3JfZXF1YWwYAyABKAsyKi5zdG9yZS5jb21wYWN0LnYxLlJldGFpbkdyZWF0ZXJUaGFuT3JFcXVhbEgAEjMKCGRyb3BfYWxsGAQgASgLMh8uc3RvcmUuY29tcGFjdC52MS5SZXRhaW5Ecm9wQWxsSABCBgoEa2luZCLlAQoGUG9saWN5EjMKCW1hdGNoX2tleRgBIAEoCzIgLnN0b3JlLmNvbXBhY3QudjEuUG9saWN5TWF0Y2hLZXkSMQoIZ3JvdXBfYnkYAiABKAsyHy5zdG9yZS5jb21wYWN0LnYxLlBvbGljeUdyb3VwQnkSNgoIb3JkZXJfYnkYAyABKAsyHy5zdG9yZS5jb21wYWN0LnYxLlBvbGljeU9yZGVyQnlIAIgBARIuCgZyZXRhaW4YBCABKAsyHi5zdG9yZS5jb21wYWN0LnYxLlBvbGljeVJldGFpbkILCglfb3JkZXJfYnkiRAoMUHJ1bmVSZXF1ZXN0EjQKCHBvbGljaWVzGAEgAygLMhguc3RvcmUuY29tcGFjdC52MS5Qb2xpY3lCCLpIBZIBAggBIg8KDVBydW5lUmVzcG9uc2UqfgoTUG9saWN5T3JkZXJFbmNvZGluZxIjCh9QT0xJQ1lfT1JERVJfRU5DT0RJTkdfQllURVNfQVNDEAASIAocUE9MSUNZX09SREVSX0VOQ09ESU5HX1U2NF9CRRABEiAKHFBPTElDWV9PUkRFUl9FTkNPRElOR19JNjRfQkUQAjJTCgdTZXJ2aWNlEkgKBVBydW5lEh4uc3RvcmUuY29tcGFjdC52MS5QcnVuZVJlcXVlc3QaHy5zdG9yZS5jb21wYWN0LnYxLlBydW5lUmVzcG9uc2ViBnByb3RvMw", [file_buf_validate_validate]);
+  fileDesc("ChZzdG9yZS92MS9jb21wYWN0LnByb3RvEhBzdG9yZS5jb21wYWN0LnYxIk4KDlBvbGljeU1hdGNoS2V5EhUKDXJlc2VydmVkX2JpdHMYASABKA0SDgoGcHJlZml4GAIgASgNEhUKDXBheWxvYWRfcmVnZXgYAyABKAkiJwoNUG9saWN5R3JvdXBCeRIWCg5jYXB0dXJlX2dyb3VwcxgBIAMoCSJfCg1Qb2xpY3lPcmRlckJ5EhUKDWNhcHR1cmVfZ3JvdXAYASABKAkSNwoIZW5jb2RpbmcYAiABKA4yJS5zdG9yZS5jb21wYWN0LnYxLlBvbGljeU9yZGVyRW5jb2RpbmciKgoQUmV0YWluS2VlcExhdGVzdBIWCgVjb3VudBgBIAEoBEIHukgEMgIgACImChFSZXRhaW5HcmVhdGVyVGhhbhIRCgl0aHJlc2hvbGQYASABKAQiLQoYUmV0YWluR3JlYXRlclRoYW5PckVxdWFsEhEKCXRocmVzaG9sZBgBIAEoBCIPCg1SZXRhaW5Ecm9wQWxsIpACCgxQb2xpY3lSZXRhaW4SOQoLa2VlcF9sYXRlc3QYASABKAsyIi5zdG9yZS5jb21wYWN0LnYxLlJldGFpbktlZXBMYXRlc3RIABI7CgxncmVhdGVyX3RoYW4YAiABKAsyIy5zdG9yZS5jb21wYWN0LnYxLlJldGFpbkdyZWF0ZXJUaGFuSAASSwoVZ3JlYXRlcl90aGFuX29yX2VxdWFsGAMgASgLMiouc3RvcmUuY29tcGFjdC52MS5SZXRhaW5HcmVhdGVyVGhhbk9yRXF1YWxIABIzCghkcm9wX2FsbBgEIAEoCzIfLnN0b3JlLmNvbXBhY3QudjEuUmV0YWluRHJvcEFsbEgAQgYKBGtpbmQi5QEKBlBvbGljeRIzCgltYXRjaF9rZXkYASABKAsyIC5zdG9yZS5jb21wYWN0LnYxLlBvbGljeU1hdGNoS2V5EjEKCGdyb3VwX2J5GAIgASgLMh8uc3RvcmUuY29tcGFjdC52MS5Qb2xpY3lHcm91cEJ5EjYKCG9yZGVyX2J5GAMgASgLMh8uc3RvcmUuY29tcGFjdC52MS5Qb2xpY3lPcmRlckJ5SACIAQESLgoGcmV0YWluGAQgASgLMh4uc3RvcmUuY29tcGFjdC52MS5Qb2xpY3lSZXRhaW5CCwoJX29yZGVyX2J5IkQKDFBydW5lUmVxdWVzdBI0Cghwb2xpY2llcxgBIAMoCzIYLnN0b3JlLmNvbXBhY3QudjEuUG9saWN5Qgi6SAWSAQIIASIPCg1QcnVuZVJlc3BvbnNlKn4KE1BvbGljeU9yZGVyRW5jb2RpbmcSIwofUE9MSUNZX09SREVSX0VOQ09ESU5HX0JZVEVTX0FTQxAAEiAKHFBPTElDWV9PUkRFUl9FTkNPRElOR19VNjRfQkUQARIgChxQT0xJQ1lfT1JERVJfRU5DT0RJTkdfSTY0X0JFEAIyUwoHU2VydmljZRJICgVQcnVuZRIeLnN0b3JlLmNvbXBhY3QudjEuUHJ1bmVSZXF1ZXN0Gh8uc3RvcmUuY29tcGFjdC52MS5QcnVuZVJlc3BvbnNlYgZwcm90bzM", [file_buf_validate_validate]);
 
 /**
  * Identifies which keys a prune policy applies to. Keys are selected by their
@@ -133,7 +133,7 @@ export const RetainKeepLatestSchema: GenMessage<RetainKeepLatest> = /*@__PURE__*
   messageDesc(file_store_v1_compact, 3);
 
 /**
- * Delete entries whose order value is less than or equal to `threshold_u64`.
+ * Delete entries whose order value is less than or equal to `threshold`.
  * Requires `PolicyOrderBy` with `POLICY_ORDER_ENCODING_U64_BE`.
  *
  * @generated from message store.compact.v1.RetainGreaterThan
@@ -142,9 +142,9 @@ export type RetainGreaterThan = Message<"store.compact.v1.RetainGreaterThan"> & 
   /**
    * Entries with order value > this threshold are retained.
    *
-   * @generated from field: uint64 threshold_u64 = 1;
+   * @generated from field: uint64 threshold = 1;
    */
-  thresholdU64: bigint;
+  threshold: bigint;
 };
 
 /**
@@ -155,7 +155,7 @@ export const RetainGreaterThanSchema: GenMessage<RetainGreaterThan> = /*@__PURE_
   messageDesc(file_store_v1_compact, 4);
 
 /**
- * Delete entries whose order value is strictly less than `threshold_u64`.
+ * Delete entries whose order value is strictly less than `threshold`.
  * Requires `PolicyOrderBy` with `POLICY_ORDER_ENCODING_U64_BE`.
  *
  * @generated from message store.compact.v1.RetainGreaterThanOrEqual
@@ -164,9 +164,9 @@ export type RetainGreaterThanOrEqual = Message<"store.compact.v1.RetainGreaterTh
   /**
    * Entries with order value >= this threshold are retained.
    *
-   * @generated from field: uint64 threshold_u64 = 1;
+   * @generated from field: uint64 threshold = 1;
    */
-  thresholdU64: bigint;
+  threshold: bigint;
 };
 
 /**
