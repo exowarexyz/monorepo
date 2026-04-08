@@ -102,7 +102,9 @@ jobs:
     - name: Install cargo-udeps
       run: cargo install cargo-udeps --version ${{ env.UDEPS_VERSION }} --locked
     - name: Check for unused dependencies
-      run: cargo udeps --all-targets
+      run: cargo +${{ env.NIGHTLY_VERSION }} udeps --all-targets
+      env:
+        RUSTUP_TOOLCHAIN: ${{ env.NIGHTLY_VERSION }}
 
   Scripts:
     runs-on: ubuntu-latest
