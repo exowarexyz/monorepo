@@ -3,3 +3,20 @@ modules:
   - path: proto
 deps:
   - buf.build/bufbuild/protovalidate
+lint:
+  use:
+    - STANDARD
+  except:
+    # Three logically separate services share one directory for convenience.
+    # The generated code uses the distinct package names for proper namespacing.
+    - PACKAGE_DIRECTORY_MATCH
+    - PACKAGE_SAME_DIRECTORY
+    - DIRECTORY_SAME_PACKAGE
+    # Proto3 zero values are used as intentional defaults (e.g., FORWARD is the
+    # natural default traversal, COUNT_ALL is the natural default reduce op).
+    - ENUM_ZERO_VALUE_SUFFIX
+    # RangeFrame is a streaming frame, not a unary response.
+    - RPC_RESPONSE_STANDARD_NAME
+breaking:
+  use:
+    - FILE

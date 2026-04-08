@@ -28,6 +28,8 @@ jobs:
         uses: ./.github/actions/setup
       - name: Buf build (proto module compiles)
         run: buf build proto
+      - name: Buf lint (proto style and validation rules)
+        run: buf lint proto
       # Rust protobuf stubs/helpers are generated into OUT_DIR by sdk-rs/build.rs (not committed).
       - name: Build exoware-sdk-rs (Rust store SDK + embedded protobuf bindings)
         run: cargo build -p exoware-sdk-rs --verbose

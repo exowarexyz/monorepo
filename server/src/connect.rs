@@ -6,12 +6,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use connectrpc::{Chain, ConnectError, ConnectRpcService, Context, Limits};
-use exoware_common::keys::{validate_key_size, Key, MAX_KEY_LEN};
+use exoware_common::keys::Key;
 use exoware_sdk_rs as exoware_proto;
 use exoware_proto::compact::{
     PruneResponse, Service as CompactApi, ServiceServer as CompactServiceServer,
 };
-use exoware_proto::google::rpc::{bad_request::FieldViolation, BadRequest, ErrorInfo, RetryInfo};
+use exoware_proto::google::rpc::{ErrorInfo, RetryInfo};
 use exoware_proto::ingest::{
     PutResponse as ProtoPutResponse, Service as IngestApi, ServiceServer as IngestServiceServer,
 };
@@ -22,15 +22,16 @@ use exoware_proto::query::{
 use exoware_proto::{
     connect_compression_registry, encode_query_detail_header_value,
     parse_range_traversal_direction, to_domain_reduce_request_from_view,
-    to_proto_optional_reduced_value, to_proto_reduced_value, with_bad_request_detail,
-    with_error_info_detail, with_query_detail, with_retry_info_detail, RangeTraversalDirection,
-    RangeTraversalModeError, QUERY_DETAIL_RESPONSE_HEADER,
+    to_proto_optional_reduced_value, to_proto_reduced_value, with_error_info_detail,
+    with_query_detail, with_retry_info_detail, RangeTraversalDirection,
+    QUERY_DETAIL_RESPONSE_HEADER,
 };
 use futures::{stream, Stream};
 use http::header::HeaderValue;
 use http::HeaderName;
 
 use crate::reduce::reduce_over_rows;
+use crate::validate;
 use crate::StoreEngine;
 
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
@@ -75,40 +76,6 @@ impl IngestConnect {
     pub fn new(state: AppState) -> Self {
         Self { state }
     }
-
-    fn invalid_argument_field_error(
-        &self,
-        field: impl Into<String>,
-        description: impl Into<String>,
-        reason: &'static str,
-        message: impl Into<String>,
-        metadata: impl IntoIterator<Item = (String, String)>,
-    ) -> ConnectError {
-        let description = description.into();
-        let err = with_bad_request_detail(
-            ConnectError::invalid_argument(message),
-            BadRequest {
-                field_violations: vec![FieldViolation {
-                    field: field.into(),
-                    description: description.clone(),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-        );
-        with_error_info_detail(
-            err,
-            ErrorInfo {
-                reason: reason.to_string(),
-                domain: "store.ingest".to_string(),
-                metadata: metadata
-                    .into_iter()
-                    .chain(std::iter::once(("description".to_string(), description)))
-                    .collect(),
-                ..Default::default()
-            },
-        )
-    }
 }
 
 impl IngestApi for IngestConnect {
@@ -128,18 +95,11 @@ impl IngestApi for IngestConnect {
             ));
         }
 
+        validate::validate_put_request(&request)?;
+
         let wire = request.bytes();
         let mut batch = Vec::new();
-        for (index, kv) in request.kvs.iter().enumerate() {
-            validate_key_size(kv.key.len()).map_err(|e| {
-                self.invalid_argument_field_error(
-                    format!("kvs[{index}].key"),
-                    e.to_string(),
-                    "INVALID_KEY_LENGTH",
-                    "request key length is outside store limits",
-                    [("max_key_len".to_string(), MAX_KEY_LEN.to_string())],
-                )
-            })?;
+        for kv in request.kvs.iter() {
             let key: Key = wire.slice_ref(kv.key);
             let value = wire.slice_ref(kv.value);
             batch.push((key, value));
@@ -223,38 +183,6 @@ impl QueryConnect {
         Ok(current)
     }
 
-    fn invalid_argument_field_error(
-        &self,
-        field: impl Into<String>,
-        description: impl Into<String>,
-        reason: &'static str,
-        message: impl Into<String>,
-    ) -> ConnectError {
-        let description = description.into();
-        let err = with_bad_request_detail(
-            ConnectError::invalid_argument(message),
-            BadRequest {
-                field_violations: vec![FieldViolation {
-                    field: field.into(),
-                    description: description.clone(),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-        );
-        with_error_info_detail(
-            err,
-            ErrorInfo {
-                reason: reason.to_string(),
-                domain: "store.query".to_string(),
-                metadata: [("description".to_string(), description)]
-                    .into_iter()
-                    .collect(),
-                ..Default::default()
-            },
-        )
-    }
-
     fn apply_query_detail_header(ctx: &mut Context, detail: &Detail) {
         if let Ok(value) = HeaderValue::from_str(&encode_query_detail_header_value(detail)) {
             if let Ok(name) = HeaderName::from_bytes(QUERY_DETAIL_RESPONSE_HEADER.as_bytes()) {
@@ -278,15 +206,8 @@ impl QueryApi for QueryConnect {
         mut ctx: Context,
         request: buffa::view::OwnedView<exoware_proto::store::query::v1::GetRequestView<'static>>,
     ) -> Result<(GetResponse, Context), ConnectError> {
+        validate::validate_get_request(&request)?;
         self.ensure_min_sequence_number(request.min_sequence_number)?;
-        validate_key_size(request.key.len()).map_err(|e| {
-            self.invalid_argument_field_error(
-                "key",
-                e.to_string(),
-                "INVALID_KEY_LENGTH",
-                "request key length is outside store limits",
-            )
-        })?;
         let wire = request.bytes();
         let key: Key = wire.slice_ref(request.key);
         let value = self
@@ -326,39 +247,17 @@ impl QueryApi for QueryConnect {
         ),
         ConnectError,
     > {
+        validate::validate_range_request(&request)?;
         self.ensure_min_sequence_number(request.min_sequence_number)?;
-        validate_key_size(request.start.len()).map_err(|e| {
-            self.invalid_argument_field_error(
-                "start",
-                e.to_string(),
-                "INVALID_KEY_LENGTH",
-                "range start key length is outside store limits",
-            )
-        })?;
-        validate_key_size(request.end.len()).map_err(|e| {
-            self.invalid_argument_field_error(
-                "end",
-                e.to_string(),
-                "INVALID_KEY_LENGTH",
-                "range end key length is outside store limits",
-            )
-        })?;
         let wire = request.bytes();
         let start_key: Key = wire.slice_ref(request.start);
         let end_key: Key = wire.slice_ref(request.end);
         let limit = request.limit.map(|v| v as usize).unwrap_or(usize::MAX);
-        let batch_size = request.batch_size.max(1) as usize;
+        let batch_size = request.batch_size as usize;
         let forward = match parse_range_traversal_direction(request.mode) {
             Ok(RangeTraversalDirection::Forward) => true,
             Ok(RangeTraversalDirection::Reverse) => false,
-            Err(RangeTraversalModeError::UnknownWireValue(v)) => {
-                return Err(self.invalid_argument_field_error(
-                    "mode",
-                    format!("unknown TraversalMode enum value {v}"),
-                    "INVALID_TRAVERSAL_MODE",
-                    "range mode must be TRAVERSAL_MODE_FORWARD (0) or TRAVERSAL_MODE_REVERSE (1)",
-                ));
-            }
+            Err(_) => unreachable!("validated above"),
         };
 
         let entries = self
@@ -417,34 +316,13 @@ impl QueryApi for QueryConnect {
             exoware_proto::store::query::v1::ReduceRequestView<'static>,
         >,
     ) -> Result<(ReduceResponse, Context), ConnectError> {
+        validate::validate_reduce_request(&request)?;
         self.ensure_min_sequence_number(request.min_sequence_number)?;
-        validate_key_size(request.start.len()).map_err(|e| {
-            self.invalid_argument_field_error(
-                "start",
-                e.to_string(),
-                "INVALID_KEY_LENGTH",
-                "reduce start key length is outside store limits",
-            )
-        })?;
-        validate_key_size(request.end.len()).map_err(|e| {
-            self.invalid_argument_field_error(
-                "end",
-                e.to_string(),
-                "INVALID_KEY_LENGTH",
-                "reduce end key length is outside store limits",
-            )
-        })?;
         let wire = request.bytes();
         let start_key: Key = wire.slice_ref(request.start);
         let end_key: Key = wire.slice_ref(request.end);
-        let domain = to_domain_reduce_request_from_view(&request.params).map_err(|e| {
-            self.invalid_argument_field_error(
-                "params",
-                e,
-                "INVALID_REDUCE_PARAMS",
-                "reduce params are invalid",
-            )
-        })?;
+        let domain = to_domain_reduce_request_from_view(&request.params)
+            .map_err(validate::reduce_params_error)?;
 
         let rows = self
             .state
@@ -520,10 +398,11 @@ impl CompactApi for CompactConnect {
     async fn prune(
         &self,
         ctx: Context,
-        _request: buffa::view::OwnedView<
+        request: buffa::view::OwnedView<
             exoware_proto::store::compact::v1::PruneRequestView<'static>,
         >,
     ) -> Result<(PruneResponse, Context), ConnectError> {
+        validate::validate_prune_request(&request)?;
         Ok((PruneResponse::default(), ctx))
     }
 }

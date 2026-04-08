@@ -5,6 +5,7 @@
 mod connect;
 mod engine;
 mod reduce;
+mod validate;
 
 pub use connect::{connect_stack, AppState, CompactConnect, IngestConnect, QueryConnect};
 pub use engine::StoreEngine;
