@@ -10,8 +10,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  UDEPS_VERSION: 0.1.50
-  NIGHTLY_VERSION: nightly-2026-04-07
+  UDEPS_VERSION: 0.1.57
+  NIGHTLY_VERSION: nightly-2025-11-15
 
 jobs:
   Proto:
@@ -90,21 +90,21 @@ jobs:
   Dependencies:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    env:
-      RUSTUP_TOOLCHAIN: ${{ env.NIGHTLY_VERSION }}
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
     - name: Install nightly Rust toolchain
-      run: rustup toolchain install ${{ env.NIGHTLY_VERSION }} && rustup default ${{ env.NIGHTLY_VERSION }}
+      run: rustup toolchain install ${{ env.NIGHTLY_VERSION }}
     - name: Verify toolchain
-      run: cargo --version && rustc --version
+      run: cargo +${{ env.NIGHTLY_VERSION }} --version && rustc +${{ env.NIGHTLY_VERSION }} --version
+    - name: Run setup
+      uses: ./.github/actions/setup
     - name: Install cargo-udeps
       uses: taiki-e/install-action@v2
       with:
         tool: cargo-udeps@${{ env.UDEPS_VERSION }}
     - name: Check for unused dependencies
-      run: cargo udeps --all-targets
+      run: cargo +${{ env.NIGHTLY_VERSION }} udeps --all-targets
 
   Scripts:
     runs-on: ubuntu-latest
