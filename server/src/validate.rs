@@ -160,10 +160,16 @@ pub fn validate_reduce_request(
     // buf.validate: bytes.max_len = 254
     validate_key_field("store.query", "start", request.start)?;
     validate_key_field("store.query", "end", request.end)?;
-    // buf.validate: required = true (params must be present)
-    // The view always deserializes an empty sub-message for unset fields, so we
-    // check whether at least one reducer or group_by is specified (the real
-    // constraint from reduce.rs validate_reduce_request).
+    if request.params.reducers.is_empty() && request.params.group_by.is_empty() {
+        return Err(field_error(
+            "store.query",
+            "params",
+            "at least one reducer or group_by field is required",
+            "INVALID_REDUCE_PARAMS",
+            "reduce request must specify at least one reducer or group_by",
+            [],
+        ));
+    }
     Ok(())
 }
 
@@ -346,5 +352,115 @@ mod tests {
         let view = exoware_proto::store::compact::v1::PruneRequestView::decode_view(&bytes)
             .expect("parse");
         validate_prune_request(&view).expect("should be valid");
+    }
+
+    // -- get_many --
+
+    fn get_many_request_bytes(keys: &[&[u8]], batch_size: u32) -> Vec<u8> {
+        use buffa::Message;
+        exoware_proto::query::GetManyRequest {
+            keys: keys.iter().map(|k| k.to_vec()).collect(),
+            batch_size,
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
+    #[test]
+    fn get_many_rejects_empty_keys() {
+        let bytes = get_many_request_bytes(&[], 10);
+        let view = exoware_proto::store::query::v1::GetManyRequestView::decode_view(&bytes)
+            .expect("parse");
+        let err = validate_get_many_request(&view).unwrap_err();
+        assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn get_many_rejects_zero_batch_size() {
+        let bytes = get_many_request_bytes(&[b"a"], 0);
+        let view = exoware_proto::store::query::v1::GetManyRequestView::decode_view(&bytes)
+            .expect("parse");
+        let err = validate_get_many_request(&view).unwrap_err();
+        assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn get_many_rejects_oversized_key() {
+        let big = vec![0u8; 255];
+        let bytes = get_many_request_bytes(&[&big], 10);
+        let view = exoware_proto::store::query::v1::GetManyRequestView::decode_view(&bytes)
+            .expect("parse");
+        let err = validate_get_many_request(&view).unwrap_err();
+        assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn get_many_accepts_valid_request() {
+        let bytes = get_many_request_bytes(&[b"a", b"b"], 10);
+        let view = exoware_proto::store::query::v1::GetManyRequestView::decode_view(&bytes)
+            .expect("parse");
+        validate_get_many_request(&view).expect("should be valid");
+    }
+
+    // -- reduce --
+
+    fn reduce_request_bytes(n_reducers: usize) -> Vec<u8> {
+        use buffa::Message;
+        exoware_proto::query::ReduceRequest {
+            start: vec![0u8; 1],
+            end: vec![0u8; 1],
+            params: Some(exoware_proto::query::ReduceParams {
+                reducers: (0..n_reducers)
+                    .map(|_| exoware_proto::query::RangeReducerSpec {
+                        op: exoware_proto::query::RangeReduceOp::RANGE_REDUCE_OP_COUNT_ALL.into(),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
+    #[test]
+    fn reduce_rejects_empty_params() {
+        let bytes = reduce_request_bytes(0);
+        let view = exoware_proto::store::query::v1::ReduceRequestView::decode_view(&bytes)
+            .expect("parse");
+        let err = validate_reduce_request(&view).unwrap_err();
+        assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn reduce_rejects_oversized_key() {
+        use buffa::Message;
+        let bytes = exoware_proto::query::ReduceRequest {
+            start: vec![0u8; 255],
+            end: vec![0u8; 1],
+            params: Some(exoware_proto::query::ReduceParams {
+                reducers: vec![exoware_proto::query::RangeReducerSpec {
+                    op: exoware_proto::query::RangeReduceOp::RANGE_REDUCE_OP_COUNT_ALL.into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let view = exoware_proto::store::query::v1::ReduceRequestView::decode_view(&bytes)
+            .expect("parse");
+        let err = validate_reduce_request(&view).unwrap_err();
+        assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn reduce_accepts_valid_request() {
+        let bytes = reduce_request_bytes(1);
+        let view = exoware_proto::store::query::v1::ReduceRequestView::decode_view(&bytes)
+            .expect("parse");
+        validate_reduce_request(&view).expect("should be valid");
     }
 }

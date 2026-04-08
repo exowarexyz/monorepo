@@ -180,3 +180,60 @@ fn range_scan_single_key() {
     let rows = store.range_scan(b"b", b"b", usize::MAX, true).expect("scan");
     assert_eq!(keys(&rows), vec![b"b".as_slice()]);
 }
+
+// -- get_many --
+
+#[test]
+fn get_many_returns_found_and_missing() {
+    let dir = tempdir().expect("tempdir");
+    let store = RocksStore::open(dir.path()).expect("open db");
+    seed_abc(&store);
+
+    let results = store
+        .get_many(&[b"a", b"missing", b"c"])
+        .expect("get_many");
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0], (b"a".to_vec(), Some(b"1".to_vec())));
+    assert_eq!(results[1], (b"missing".to_vec(), None));
+    assert_eq!(results[2], (b"c".to_vec(), Some(b"3".to_vec())));
+}
+
+#[test]
+fn get_many_returns_none_for_seq_meta_key() {
+    let dir = tempdir().expect("tempdir");
+    let store = RocksStore::open(dir.path()).expect("open db");
+    seed_abc(&store);
+
+    let results = store
+        .get_many(&[b"__simulator_seq__", b"a"])
+        .expect("get_many");
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].1, None);
+    assert_eq!(results[1], (b"a".to_vec(), Some(b"1".to_vec())));
+}
+
+// -- delete_batch --
+
+#[test]
+fn delete_batch_removes_keys() {
+    let dir = tempdir().expect("tempdir");
+    let store = RocksStore::open(dir.path()).expect("open db");
+    seed_abc(&store);
+
+    store.delete_batch(&[b"a", b"c"]).expect("delete_batch");
+    assert!(store.get(b"a").expect("get").is_none());
+    assert_eq!(store.get(b"b").expect("get").as_deref(), Some(b"2".as_slice()));
+    assert!(store.get(b"c").expect("get").is_none());
+}
+
+#[test]
+fn delete_batch_advances_sequence() {
+    let dir = tempdir().expect("tempdir");
+    let store = RocksStore::open(dir.path()).expect("open db");
+    let s1 = store
+        .put_batch(&[(Bytes::from_static(b"x"), Bytes::from_static(b"y"))])
+        .expect("put");
+    let s2 = store.delete_batch(&[b"x"]).expect("delete");
+    assert!(s2 > s1);
+    assert_eq!(store.current_sequence(), s2);
+}

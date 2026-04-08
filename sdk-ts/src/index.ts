@@ -3,6 +3,7 @@ export { StoreClient, TraversalMode, type GetResult, type GetManyResultItem, typ
 export { ExowareError, HttpError } from './error.js';
 export {
     RangeReduceOp,
+    KvFieldKind,
     ReduceParamsSchema,
     RangeReducerSpecSchema,
     KvExprSchema,
@@ -10,6 +11,10 @@ export {
     KvFieldRef_ValueFieldSchema,
     KvFieldRef_KeyFieldSchema,
     KvReducedValueSchema,
+    KvFieldKindSchema,
+    KvPredicateSchema,
+    KvPredicateCheckSchema,
+    KvPredicateConstraintSchema,
 } from './gen/ts/store/v1/query_pb.js';
 export type {
     RangeReducerSpec,
@@ -20,4 +25,30 @@ export type {
     KvReducedValue,
     RangeReduceResult,
     RangeReduceGroup,
+    KvPredicate,
+    KvPredicateCheck,
+    KvPredicateConstraint,
 } from './gen/ts/store/v1/query_pb.js';
+export {
+    PolicySchema,
+    PolicyMatchKeySchema,
+    PolicyGroupBySchema,
+    PolicyOrderBySchema,
+    PolicyRetainSchema,
+    RetainKeepLatestSchema,
+    RetainDropAllSchema,
+    PruneRequestSchema,
+    PolicyOrderEncoding,
+    PolicyOrderEncodingSchema,
+} from './gen/ts/store/v1/compact_pb.js';
+export type {
+    Policy,
+    PolicyMatchKey,
+    PolicyGroupBy,
+    PolicyOrderBy,
+    PolicyRetain,
+    RetainKeepLatest,
+    RetainDropAll,
+    PruneRequest,
+    PruneResponse,
+} from './gen/ts/store/v1/compact_pb.js';

@@ -41,7 +41,7 @@ This crate now requires exact Commonware ordered-variable operations:
 
 - `qmdb::any::ordered::variable::Operation<Vec<u8>, Vec<u8>>`
 
-That is why `upload_batch` and `upload_typed_batch` reject for this crate shape:
+That is why plain key-value batch uploads are rejected for this crate shape:
 the client cannot safely invent the predecessor-repair operations or `next_key`
 links required by `qmdb::current::ordered`.
 

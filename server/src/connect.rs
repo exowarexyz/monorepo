@@ -317,7 +317,7 @@ impl QueryApi for QueryConnect {
         let forward = match parse_range_traversal_direction(request.mode) {
             Ok(RangeTraversalDirection::Forward) => true,
             Ok(RangeTraversalDirection::Reverse) => false,
-            Err(_) => unreachable!("validated above"),
+            Err(e) => return Err(ConnectError::internal(format!("traversal mode: {e:?}"))),
         };
 
         let entries = self

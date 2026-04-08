@@ -3,6 +3,8 @@ import { Code, ConnectError } from '@connectrpc/connect';
 import type { CallOptions } from '@connectrpc/connect';
 import type { Client } from './client.js';
 import { HttpError } from './error.js';
+import { PruneRequestSchema } from './gen/ts/store/v1/compact_pb.js';
+import type { Policy } from './gen/ts/store/v1/compact_pb.js';
 import { PutRequestSchema, KvPairSchema } from './gen/ts/store/v1/ingest_pb.js';
 import {
     GetRequestSchema,
@@ -49,7 +51,7 @@ function toUint8Array(value: Uint8Array | Buffer): Uint8Array {
 function mapConnectToHttpError(err: unknown): never {
     if (err instanceof ConnectError) {
         const status = connectCodeToHttpStatus(err.code);
-        throw new HttpError(status, err.message || String(err.code));
+        throw new HttpError(status, err.message || String(err.code), err.code, err);
     }
     throw err;
 }
@@ -263,6 +265,15 @@ export class StoreClient {
                 }
             }
             return { results };
+        } catch (e) {
+            mapConnectToHttpError(e);
+        }
+    }
+
+    async prune(policies: Policy[]): Promise<void> {
+        const req = create(PruneRequestSchema, { policies });
+        try {
+            await this.client.compact.prune(req);
         } catch (e) {
             mapConnectToHttpError(e);
         }

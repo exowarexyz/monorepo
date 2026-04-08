@@ -16,7 +16,7 @@ The Exoware Library provides robust, high-performance primitives for interacting
 This repository uses the default cargo and clippy formatting rules for `.rs` files, treating warnings as errors. To check linting, run:
 
 ```bash
-$ cargo clippy --all-targets --all-features -- -D warnings
+$ cargo clippy --all-targets -- -D warnings
 $ cargo +nightly fmt --all -- --check
 ```
 

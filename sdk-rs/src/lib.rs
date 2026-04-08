@@ -468,6 +468,11 @@ pub enum ClientBuildError {
     MissingIngestUrl,
     #[error("StoreClientBuilder: missing query URL (set query_url or url)")]
     MissingQueryUrl,
+    #[error("StoreClientBuilder: invalid URL \"{url}\": {source}")]
+    InvalidUrl {
+        url: String,
+        source: http::uri::InvalidUri,
+    },
 }
 
 /// Configures a [`StoreClient`] with explicit bases for health probes and store services.
@@ -528,10 +533,18 @@ impl StoreClientBuilder {
         let health_url = self.health_url.ok_or(ClientBuildError::MissingHealthUrl)?;
         let ingest_url = self.ingest_url.ok_or(ClientBuildError::MissingIngestUrl)?;
         let query_url = self.query_url.ok_or(ClientBuildError::MissingQueryUrl)?;
+        let ingest_uri: http::Uri = ingest_url.parse().map_err(|e| ClientBuildError::InvalidUrl {
+            url: ingest_url.clone(),
+            source: e,
+        })?;
+        let query_uri: http::Uri = query_url.parse().map_err(|e| ClientBuildError::InvalidUrl {
+            url: query_url.clone(),
+            source: e,
+        })?;
         Ok(StoreClient {
             health_url,
-            ingest_url,
-            query_url,
+            ingest_uri,
+            query_uri,
             http: new_http_client(),
             connect_http: ProtoPreferZstdHttpClient::plaintext(),
             sequence_number: Arc::new(AtomicU64::new(0)),
@@ -546,10 +559,8 @@ impl StoreClientBuilder {
 pub struct StoreClient {
     /// Base URL for `health()` / `ready()` (typically the query worker).
     pub(crate) health_url: String,
-    /// Base URL for the ingest service (`store.ingest.v1.Service`).
-    pub(crate) ingest_url: String,
-    /// Base URL for the query service (`store.query.v1.Service`).
-    pub(crate) query_url: String,
+    ingest_uri: http::Uri,
+    query_uri: http::Uri,
     http: reqwest::Client,
     connect_http: ProtoPreferZstdHttpClient,
     sequence_number: Arc<AtomicU64>,
@@ -557,6 +568,12 @@ pub struct StoreClient {
     connect_request_compression: ConnectRequestCompression,
 }
 
+/// A session that enforces monotonic read consistency via a fixed `min_sequence_number` floor.
+///
+/// Every read in the session passes the same `min_sequence_number` so the server
+/// guarantees all responses reflect at least that point in the write log. The first
+/// read either inherits the parent `StoreClient`'s observed sequence number (if nonzero)
+/// or issues an unseeded read and seeds from the response.
 #[derive(Clone, Debug)]
 pub struct SerializableReadSession {
     client: StoreClient,
@@ -662,8 +679,8 @@ impl StoreClient {
         for (key, value) in kvs {
             if !is_valid_key_size(key.len()) {
                 return Err(ClientError::WireFormat(format!(
-                    "key length {} exceeds max physical key length",
-                    key.len()
+                    "key length {} is outside valid store key range ({}..={})",
+                    key.len(), keys::MIN_KEY_LEN, MAX_KEY_LEN
                 )));
             }
             proto_kvs.push(exoware_proto::ingest::KvPair {
@@ -674,9 +691,7 @@ impl StoreClient {
         }
 
         let config = store_connect_client_config(
-            self.ingest_url
-                .parse()
-                .map_err(|e| ClientError::WireFormat(format!("invalid ingest base URL: {e}")))?,
+            self.ingest_uri.clone(),
             self.connect_request_compression,
         );
         let client = IngestServiceClient::new(self.connect_http.clone(), config);
@@ -746,16 +761,14 @@ impl StoreClient {
         for key in keys {
             if !is_valid_key_size(key.len()) {
                 return Err(ClientError::WireFormat(format!(
-                    "key length {} exceeds max physical key length",
-                    key.len()
+                    "key length {} is outside valid store key range ({}..={})",
+                    key.len(), keys::MIN_KEY_LEN, MAX_KEY_LEN
                 )));
             }
         }
 
         let config = store_connect_client_config(
-            self.query_url
-                .parse()
-                .map_err(|e| ClientError::WireFormat(format!("invalid query base URL: {e}")))?,
+            self.query_uri.clone(),
             self.connect_request_compression,
         );
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
@@ -986,6 +999,7 @@ impl StoreClient {
         Ok(body)
     }
 
+    #[cfg(test)]
     pub async fn range_reduce_response_for_tests(
         &self,
         start: &Key,
@@ -1038,15 +1052,13 @@ impl StoreClient {
     > {
         if !is_valid_key_size(key.len()) {
             return Err(ClientError::WireFormat(format!(
-                "key length {} exceeds max physical key length",
-                key.len()
+                "key length {} is outside valid store key range ({}..={})",
+                key.len(), keys::MIN_KEY_LEN, MAX_KEY_LEN
             )));
         }
 
         let config = store_connect_client_config(
-            self.query_url
-                .parse()
-                .map_err(|e| ClientError::WireFormat(format!("invalid query base URL: {e}")))?,
+            self.query_uri.clone(),
             self.connect_request_compression,
         );
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
@@ -1061,7 +1073,6 @@ impl StoreClient {
                         })
                         .await
                 },
-                false,
             )
             .await?;
         let detail = query_detail_from_unary_metadata(response.headers(), response.trailers());
@@ -1069,6 +1080,7 @@ impl StoreClient {
         Ok((owned, detail))
     }
 
+    #[cfg(test)]
     pub async fn send_get_for_tests(
         &self,
         key: &Key,
@@ -1108,7 +1120,7 @@ impl StoreClient {
     ) -> Result<RangeStream, ClientError> {
         if !is_valid_key_size(start.len()) || !is_valid_key_size(end.len()) {
             return Err(ClientError::WireFormat(
-                "range start/end exceed max physical key length".to_string(),
+                "range start/end key length is outside valid store key range".to_string(),
             ));
         }
         if batch_size == 0 {
@@ -1118,9 +1130,7 @@ impl StoreClient {
         }
 
         let config = store_connect_client_config(
-            self.query_url
-                .parse()
-                .map_err(|e| ClientError::WireFormat(format!("invalid query base URL: {e}")))?,
+            self.query_uri.clone(),
             self.connect_request_compression,
         );
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
@@ -1198,9 +1208,7 @@ impl StoreClient {
         ClientError,
     > {
         let config = store_connect_client_config(
-            self.query_url
-                .parse()
-                .map_err(|e| ClientError::WireFormat(format!("invalid query base URL: {e}")))?,
+            self.query_uri.clone(),
             self.connect_request_compression,
         );
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
@@ -1218,7 +1226,6 @@ impl StoreClient {
                         })
                         .await
                 },
-                false,
             )
             .await?;
         let detail = query_detail_from_unary_metadata(response.headers(), response.trailers());
@@ -1232,7 +1239,6 @@ impl StoreClient {
     async fn send_with_retry<F, Fut, T>(
         &self,
         mut make_request: F,
-        streaming: bool,
     ) -> Result<T, ClientError>
     where
         F: FnMut() -> Fut,
@@ -1250,7 +1256,6 @@ impl StoreClient {
                             attempt,
                             max_attempts,
                             code = err.code.as_str(),
-                            streaming,
                             delay_ms = delay.as_millis() as u64,
                             "store client retrying transient RPC error",
                         );
@@ -1576,8 +1581,8 @@ mod tests {
     fn client_creation() {
         let client = StoreClient::new("http://localhost:10000");
         assert_eq!(client.health_url, "http://localhost:10000");
-        assert_eq!(client.ingest_url, "http://localhost:10000");
-        assert_eq!(client.query_url, "http://localhost:10000");
+        assert_eq!(client.ingest_uri.to_string(), "http://localhost:10000/");
+        assert_eq!(client.query_uri.to_string(), "http://localhost:10000/");
     }
 
     #[test]
@@ -1588,8 +1593,8 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(single.health_url, built.health_url);
-        assert_eq!(single.ingest_url, built.ingest_url);
-        assert_eq!(single.query_url, built.query_url);
+        assert_eq!(single.ingest_uri.to_string(), built.ingest_uri.to_string());
+        assert_eq!(single.query_uri.to_string(), built.query_uri.to_string());
 
         let split = StoreClient::with_split_urls("http://h", "http://i", "http://q");
         let split_b = StoreClient::builder()
@@ -1599,8 +1604,8 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(split.health_url, split_b.health_url);
-        assert_eq!(split.ingest_url, split_b.ingest_url);
-        assert_eq!(split.query_url, split_b.query_url);
+        assert_eq!(split.ingest_uri.to_string(), split_b.ingest_uri.to_string());
+        assert_eq!(split.query_uri.to_string(), split_b.query_uri.to_string());
     }
 
     #[test]

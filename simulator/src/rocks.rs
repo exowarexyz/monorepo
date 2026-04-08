@@ -133,8 +133,10 @@ impl StoreEngine for RocksStore {
         let results = self.db.multi_get(keys);
         keys.iter()
             .zip(results)
-            .filter(|(k, _)| **k != SEQ_META_KEY)
             .map(|(k, r)| {
+                if *k == SEQ_META_KEY {
+                    return Ok((k.to_vec(), None));
+                }
                 let value = r.map_err(|e| e.to_string())?;
                 Ok((k.to_vec(), value))
             })

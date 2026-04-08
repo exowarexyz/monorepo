@@ -212,6 +212,13 @@ message RangeReduceGroup {
 }
 
 // --- Service ---
+//
+// All query RPCs accept an optional `min_sequence_number` freshness gate.
+// If set, the server rejects the query with ABORTED unless its current
+// sequence number is >= the requested value. This ensures the response
+// reflects at least all writes up through that batch but does not filter
+// the data returned. Clients typically set this to the sequence number
+// from a prior Put response to get read-after-write consistency.
 
 service Service {
   rpc Get(GetRequest) returns (GetResponse) {

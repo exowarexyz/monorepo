@@ -1,6 +1,7 @@
 import { createClient, type Client as ConnectClient, type Interceptor, Code, ConnectError } from '@connectrpc/connect';
 import { createConnectTransport } from '@connectrpc/connect-web';
 import { StoreClient } from './store.js';
+import { Service as CompactService } from './gen/ts/store/v1/compact_pb.js';
 import { Service as IngestService } from './gen/ts/store/v1/ingest_pb.js';
 import { Service as QueryService } from './gen/ts/store/v1/query_pb.js';
 
@@ -20,13 +21,14 @@ const RETRYABLE_CODES = new Set<Code>([
     Code.Aborted,
     Code.Unavailable,
     Code.ResourceExhausted,
-    Code.Internal,
 ]);
 
 function retryBackoffDelay(attempt: number, config: RetryConfig): number {
     const exponent = Math.min(Math.max(attempt - 1, 0), 20);
     const baseMs = config.initialBackoffMs * (1 << exponent);
-    return Math.min(baseMs, config.maxBackoffMs);
+    const cappedMs = Math.min(baseMs, config.maxBackoffMs);
+    const jitter = cappedMs * (0.5 + 0.5 * Math.random());
+    return Math.round(jitter);
 }
 
 function makeRetryInterceptor(config: RetryConfig): Interceptor {
@@ -60,6 +62,7 @@ export type ClientOptions = {
 
 export class Client {
     public readonly baseUrl: string;
+    public readonly compact: ConnectClient<typeof CompactService>;
     public readonly ingest: ConnectClient<typeof IngestService>;
     public readonly query: ConnectClient<typeof QueryService>;
     public readonly retryConfig: RetryConfig;
@@ -82,6 +85,7 @@ export class Client {
             baseUrl: this.baseUrl,
             interceptors,
         });
+        this.compact = createClient(CompactService, transport);
         this.ingest = createClient(IngestService, transport);
         this.query = createClient(QueryService, transport);
     }
