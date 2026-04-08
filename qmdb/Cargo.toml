@@ -3,7 +3,7 @@ name = "exoware-qmdb"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Store-backed bridge for Commonware QMDB and related authenticated storage proofs"
+description = "QMDB instance backed by the Exoware API."
 readme = "README.md"
 
 [lib]

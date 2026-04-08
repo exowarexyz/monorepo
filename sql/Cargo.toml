@@ -3,7 +3,7 @@ name = "exoware-sql"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "SQL wrapper over the store Rust client using DataFusion"
+description = "SQL engine backed by the Exoware API."
 readme = "README.md"
 
 [dependencies]

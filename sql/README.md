@@ -1,6 +1,6 @@
 # exoware-sql
 
-SQL wrapper over [`exoware-sdk-rs`](https://github.com/exowarexyz/monorepo/tree/main/sdk-rs) using Apache DataFusion.
+SQL engine backed by the Exoware API.
 
 `exoware-sql` is library-first: register `KvSchema` tables against a [`StoreClient`](https://docs.rs/exoware-sdk-rs), then run SQL.
 

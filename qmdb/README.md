@@ -1,7 +1,6 @@
 # exoware-qmdb
 
-`exoware-qmdb` is a store-backed bridge for Commonware authenticated storage
-proofs.
+QMDB instance backed by the Exoware API.
 
 It stores:
 - exact ordered QMDB operations by global `Location`

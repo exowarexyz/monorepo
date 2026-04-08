@@ -1,6 +1,6 @@
 # exoware-sandbox
 
-This example provides a basic web interface to interact with the Exoware **store** API using `exoware-sdk-ts`.
+Explore the Exoware API.
 
 ## Prerequisites
 
