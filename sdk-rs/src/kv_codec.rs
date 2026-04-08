@@ -560,7 +560,7 @@ pub fn eval_expr(
                 (_, KvReducedValue::Int64(0)) | (_, KvReducedValue::UInt64(0)) => {
                     Err("division by zero".to_string())
                 }
-                (_, KvReducedValue::Float64(v)) if v == 0.0 => {
+                (_, KvReducedValue::Float64(0.0)) => {
                     Err("division by zero".to_string())
                 }
                 (KvReducedValue::Int64(lhs), KvReducedValue::Int64(rhs)) => {
@@ -806,26 +806,26 @@ pub fn extract_stored_field(
     };
 
     let value = match (kind, stored) {
-        (KvFieldKind::Int64, StoredValue::Int64(v)) => KvReducedValue::Int64((*v).into()),
+        (KvFieldKind::Int64, StoredValue::Int64(v)) => KvReducedValue::Int64(*v),
         (KvFieldKind::UInt64, StoredValue::UInt64(v)) => {
-            KvReducedValue::UInt64((*v).into())
+            KvReducedValue::UInt64(*v)
         }
         (KvFieldKind::Float64, StoredValue::Float64(v)) => {
-            KvReducedValue::Float64((*v).into())
+            KvReducedValue::Float64(*v)
         }
         (KvFieldKind::Float64, StoredValue::Int64(v)) => {
-            KvReducedValue::Float64(i64::from(*v) as f64)
+            KvReducedValue::Float64(*v as f64)
         }
         (KvFieldKind::Boolean, StoredValue::Boolean(v)) => KvReducedValue::Boolean(*v),
         (KvFieldKind::Utf8, StoredValue::Utf8(v)) => {
             KvReducedValue::Utf8(v.as_str().to_string())
         }
         (KvFieldKind::Date32, StoredValue::Int64(v)) => {
-            KvReducedValue::Date32(i64::from(*v) as i32)
+            KvReducedValue::Date32(*v as i32)
         }
-        (KvFieldKind::Date64, StoredValue::Int64(v)) => KvReducedValue::Date64((*v).into()),
+        (KvFieldKind::Date64, StoredValue::Int64(v)) => KvReducedValue::Date64(*v),
         (KvFieldKind::Timestamp, StoredValue::Int64(v)) => {
-            KvReducedValue::Timestamp((*v).into())
+            KvReducedValue::Timestamp(*v)
         }
         (KvFieldKind::Decimal128, StoredValue::Bytes(bytes)) => {
             let raw: [u8; 16] = bytes

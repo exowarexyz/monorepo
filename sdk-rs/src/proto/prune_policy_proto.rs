@@ -57,7 +57,7 @@ fn prune_policy_from_view(p: &PolicyView<'_>) -> Result<PrunePolicy, String> {
     let match_key = MatchKey {
         reserved_bits: u8_from_u32("match_key.reserved_bits", mk.reserved_bits)?,
         prefix: u16_from_u32("match_key.prefix", mk.prefix)?,
-        payload_regex: Utf8::from(mk.payload_regex.as_ref()),
+        payload_regex: Utf8::from(mk.payload_regex),
     };
 
     let group_by = if p.group_by.is_set() {
@@ -76,7 +76,7 @@ fn prune_policy_from_view(p: &PolicyView<'_>) -> Result<PrunePolicy, String> {
     let order_by = if p.order_by.is_set() {
         let o: &PolicyOrderByView<'_> = &p.order_by;
         Some(OrderBy {
-            capture_group: Utf8::from(&*o.capture_group),
+            capture_group: Utf8::from(o.capture_group),
             encoding: order_encoding_from_proto(&o.encoding)?,
         })
     } else {

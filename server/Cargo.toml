@@ -12,4 +12,8 @@ buffa-types = { workspace = true }
 connectrpc = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
+regex = { workspace = true }
 exoware-sdk-rs = { workspace = true }
+
+[dev-dependencies]
+commonware-codec = { workspace = true }

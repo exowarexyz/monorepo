@@ -27,6 +27,9 @@ pub trait StoreEngine: Send + Sync + 'static {
         keys.iter().map(|k| Ok((k.to_vec(), self.get(k)?))).collect()
     }
 
+    /// Delete a batch of keys atomically. Returns the new global sequence number.
+    fn delete_batch(&self, keys: &[&[u8]]) -> Result<u64, String>;
+
     /// Current sequence number visible to readers (used for `min_sequence_number` checks).
     fn current_sequence(&self) -> u64;
 }

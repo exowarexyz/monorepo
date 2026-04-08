@@ -30,12 +30,6 @@ $ cargo +nightly fmt --all
 
 Releases are automatically published to `cargo` by [GitHub Actions](.github/workflows/publish.yml) whenever a version update is merged into the `main` branch.
 
-To increment the patch version of all crates (and update the corresponding minimum required version in `workspace.dependencies`), run:
-
-```bash
-./scripts/bump_versions.sh
-```
-
 # Licensing and Copyright
 
 You agree that any work submitted to this repository shall be dual-licensed under the included [Apache 2.0](./LICENSE-APACHE) and [MIT](./LICENSE-MIT) licenses, without any additional terms or conditions. Additionally, you agree to release your copyright interest in said work to the public domain, such that anyone is free to use, modify, and distribute your contributions without restriction.

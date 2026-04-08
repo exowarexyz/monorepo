@@ -183,7 +183,6 @@ pub fn reduce_params_error(description: impl Into<String>) -> ConnectError {
 pub fn validate_prune_request(
     request: &exoware_proto::store::compact::v1::PruneRequestView<'_>,
 ) -> Result<(), ConnectError> {
-    // buf.validate: repeated.min_items = 1
     if request.policies.is_empty() {
         return Err(field_error(
             "store.compact",

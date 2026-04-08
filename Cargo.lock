@@ -2348,10 +2348,12 @@ dependencies = [
  "buffa",
  "buffa-types",
  "bytes",
+ "commonware-codec",
  "connectrpc",
  "exoware-sdk-rs",
  "futures",
  "http",
+ "regex",
 ]
 
 [[package]]

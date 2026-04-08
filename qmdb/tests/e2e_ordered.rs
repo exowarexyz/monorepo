@@ -183,3 +183,175 @@ async fn ordered_round_trip() {
     assert!(proof.verify::<Sha256>(), "proof must verify");
     assert_eq!(proof.operations, local.operations);
 }
+
+#[tokio::test]
+async fn current_root_at() {
+    let (_dir, _server, client) = common::local_store_client().await;
+    let local = build_local_db().await;
+
+    retry(
+        || {
+            let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
+            let ops = local.operations.clone();
+            let boundary = local.current_boundary.clone();
+            let loc = local.latest_location;
+            async move {
+                c.upload_operations_with_current_boundary(loc, &ops, &boundary)
+                    .await
+                    .map(|_| ())
+            }
+        },
+        "upload_operations_with_current_boundary",
+    )
+    .await;
+
+    retry(
+        || {
+            let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
+            let loc = local.latest_location;
+            async move { c.publish_writer_location_watermark(loc).await.map(|_| ()) }
+        },
+        "publish_watermark",
+    )
+    .await;
+
+    let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
+    let root = c
+        .current_root_at(local.latest_location)
+        .await
+        .expect("current_root_at");
+    assert!(!root.as_ref().iter().all(|&b| b == 0));
+}
+
+#[tokio::test]
+async fn current_operation_range_proof() {
+    let (_dir, _server, client) = common::local_store_client().await;
+    let local = build_local_db().await;
+
+    retry(
+        || {
+            let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
+            let ops = local.operations.clone();
+            let boundary = local.current_boundary.clone();
+            let loc = local.latest_location;
+            async move {
+                c.upload_operations_with_current_boundary(loc, &ops, &boundary)
+                    .await
+                    .map(|_| ())
+            }
+        },
+        "upload_operations_with_current_boundary",
+    )
+    .await;
+
+    retry(
+        || {
+            let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
+            let loc = local.latest_location;
+            async move { c.publish_writer_location_watermark(loc).await.map(|_| ()) }
+        },
+        "publish_watermark",
+    )
+    .await;
+
+    let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
+    let proof = c
+        .current_operation_range_proof(
+            local.latest_location,
+            Location::new(0),
+            local.operations.len() as u32,
+        )
+        .await
+        .expect("current_operation_range_proof");
+    assert!(proof.verify::<Sha256>(), "current range proof must verify");
+    assert_eq!(proof.operations, local.operations);
+}
+
+#[tokio::test]
+async fn key_value_proof() {
+    let (_dir, _server, client) = common::local_store_client().await;
+    let local = build_local_db().await;
+
+    retry(
+        || {
+            let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
+            let ops = local.operations.clone();
+            let boundary = local.current_boundary.clone();
+            let loc = local.latest_location;
+            async move {
+                c.upload_operations_with_current_boundary(loc, &ops, &boundary)
+                    .await
+                    .map(|_| ())
+            }
+        },
+        "upload_operations_with_current_boundary",
+    )
+    .await;
+
+    retry(
+        || {
+            let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
+            let loc = local.latest_location;
+            async move { c.publish_writer_location_watermark(loc).await.map(|_| ()) }
+        },
+        "publish_watermark",
+    )
+    .await;
+
+    let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
+    let result = c
+        .key_value_proof_at(local.latest_location, b"alpha".as_slice())
+        .await
+        .expect("key_value_proof_at");
+    assert!(result.verify::<Sha256>(), "key-value proof must verify");
+    match &result.operation {
+        QmdbOperation::Update(u) => {
+            assert_eq!(u.key, b"alpha".to_vec());
+            assert_eq!(u.value, b"one".to_vec());
+        }
+        _ => panic!("expected Update operation"),
+    }
+}
+
+#[tokio::test]
+async fn multi_proof() {
+    let (_dir, _server, client) = common::local_store_client().await;
+    let local = build_local_db().await;
+
+    retry(
+        || {
+            let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
+            let ops = local.operations.clone();
+            let boundary = local.current_boundary.clone();
+            let loc = local.latest_location;
+            async move {
+                c.upload_operations_with_current_boundary(loc, &ops, &boundary)
+                    .await
+                    .map(|_| ())
+            }
+        },
+        "upload_operations_with_current_boundary",
+    )
+    .await;
+
+    retry(
+        || {
+            let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
+            let loc = local.latest_location;
+            async move { c.publish_writer_location_watermark(loc).await.map(|_| ()) }
+        },
+        "publish_watermark",
+    )
+    .await;
+
+    let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
+    let result = c
+        .multi_proof_at(
+            local.latest_location,
+            &[b"alpha".as_slice(), b"beta".as_slice()],
+        )
+        .await
+        .expect("multi_proof_at");
+    assert!(result.verify::<Sha256>(), "multi proof must verify");
+    assert_eq!(result.operations.len(), 2);
+}

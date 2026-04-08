@@ -207,7 +207,7 @@ impl QueryApi for QueryConnect {
         request: buffa::view::OwnedView<exoware_proto::store::query::v1::GetRequestView<'static>>,
     ) -> Result<(GetResponse, Context), ConnectError> {
         validate::validate_get_request(&request)?;
-        self.ensure_min_sequence_number(request.min_sequence_number)?;
+        let token = self.ensure_min_sequence_number(request.min_sequence_number)?;
         let wire = request.bytes();
         let key: Key = wire.slice_ref(request.key);
         let value = self
@@ -215,7 +215,6 @@ impl QueryApi for QueryConnect {
             .engine
             .get(key.as_ref())
             .map_err(ConnectError::internal)?;
-        let token = self.current_sequence_number();
         let read_bytes =
             key.as_ref().len() as u64 + value.as_ref().map_or(0u64, |v| v.len() as u64);
         let detail = Detail {
@@ -229,7 +228,7 @@ impl QueryApi for QueryConnect {
         Ok((
             GetResponse {
                 found: value.is_some(),
-                value: value.map(Into::into),
+                value,
                 ..Default::default()
             },
             ctx,
@@ -250,16 +249,14 @@ impl QueryApi for QueryConnect {
         ConnectError,
     > {
         validate::validate_get_many_request(&request)?;
-        self.ensure_min_sequence_number(request.min_sequence_number)?;
+        let sequence_number = self.ensure_min_sequence_number(request.min_sequence_number)?;
 
-        let key_refs: Vec<&[u8]> = request.keys.iter().map(|k| *k).collect();
+        let key_refs: Vec<&[u8]> = request.keys.iter().copied().collect();
         let entries = self
             .state
             .engine
             .get_many(&key_refs)
             .map_err(ConnectError::internal)?;
-
-        let sequence_number = self.current_sequence_number();
         let read_bytes: u64 = entries
             .iter()
             .map(|(k, v)| k.len() as u64 + v.as_ref().map_or(0u64, |v| v.len() as u64))
@@ -284,7 +281,7 @@ impl QueryApi for QueryConnect {
             });
             if chunk.len() >= batch_size {
                 frames.push(Ok(GetManyFrame {
-                    results: chunk.drain(..).collect(),
+                    results: std::mem::take(&mut chunk),
                     ..Default::default()
                 }));
             }
@@ -311,7 +308,7 @@ impl QueryApi for QueryConnect {
         ConnectError,
     > {
         validate::validate_range_request(&request)?;
-        self.ensure_min_sequence_number(request.min_sequence_number)?;
+        let sequence_number = self.ensure_min_sequence_number(request.min_sequence_number)?;
         let wire = request.bytes();
         let start_key: Key = wire.slice_ref(request.start);
         let end_key: Key = wire.slice_ref(request.end);
@@ -328,8 +325,6 @@ impl QueryApi for QueryConnect {
             .engine
             .range_scan(start_key.as_ref(), end_key.as_ref(), limit, forward)
             .map_err(ConnectError::internal)?;
-
-        let sequence_number = self.current_sequence_number();
         let detail = Detail {
             sequence_number,
             read_stats: read_stats_read_bytes(&entries),
@@ -380,7 +375,7 @@ impl QueryApi for QueryConnect {
         >,
     ) -> Result<(ReduceResponse, Context), ConnectError> {
         validate::validate_reduce_request(&request)?;
-        self.ensure_min_sequence_number(request.min_sequence_number)?;
+        let token = self.ensure_min_sequence_number(request.min_sequence_number)?;
         let wire = request.bytes();
         let start_key: Key = wire.slice_ref(request.start);
         let end_key: Key = wire.slice_ref(request.end);
@@ -395,8 +390,6 @@ impl QueryApi for QueryConnect {
 
         let response = reduce_over_rows(&rows, &domain)
             .map_err(|e: crate::RangeError| ConnectError::internal(e.to_string()))?;
-
-        let token = self.current_sequence_number();
         let detail = Detail {
             sequence_number: token,
             read_stats: read_stats_read_bytes(&rows),
@@ -448,12 +441,12 @@ impl QueryApi for QueryConnect {
 
 #[derive(Clone)]
 pub struct CompactConnect {
-    _state: AppState,
+    state: AppState,
 }
 
 impl CompactConnect {
     pub fn new(state: AppState) -> Self {
-        Self { _state: state }
+        Self { state }
     }
 }
 
@@ -466,6 +459,11 @@ impl CompactApi for CompactConnect {
         >,
     ) -> Result<(PruneResponse, Context), ConnectError> {
         validate::validate_prune_request(&request)?;
+        let document =
+            exoware_proto::prune_policy_document_from_prune_request_view(&request)
+                .map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
+        crate::prune::execute_prune(&self.state.engine, &document)
+            .map_err(|e| ConnectError::internal(e.to_string()))?;
         Ok((PruneResponse::default(), ctx))
     }
 }

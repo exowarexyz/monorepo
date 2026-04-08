@@ -267,10 +267,6 @@ where
             .root)
     }
 
-    pub async fn batch_root(&self, latest_location: Location) -> Result<H::Digest, QmdbError> {
-        self.root_at(latest_location).await
-    }
-
     pub async fn current_root_at(&self, watermark: Location) -> Result<H::Digest, QmdbError> {
         Ok(self
             .root_for_variant(watermark, QmdbVariant::Current)

@@ -273,7 +273,7 @@ pub fn validate_policy(policy: &PrunePolicy) -> anyhow::Result<()> {
     if let Some(order_by) = &policy.order_by {
         validate_capture_groups(
             &regex,
-            &[order_by.capture_group.clone()],
+            std::slice::from_ref(&order_by.capture_group),
             "order_by capture_group",
         )?;
     }

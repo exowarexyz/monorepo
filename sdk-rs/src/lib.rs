@@ -680,19 +680,13 @@ impl StoreClient {
             self.connect_request_compression,
         );
         let client = IngestServiceClient::new(self.connect_http.clone(), config);
-        let response = self
-            .send_with_retry(
-                || async {
-                    client
-                        .put(ProtoPutRequest {
-                            kvs: proto_kvs.clone(),
-                            ..Default::default()
-                        })
-                        .await
-                },
-                false,
-            )
-            .await?;
+        let response = client
+            .put(ProtoPutRequest {
+                kvs: proto_kvs,
+                ..Default::default()
+            })
+            .await
+            .map_err(client_error_from_connect)?;
         let owned = response.into_owned();
         let token = owned.sequence_number;
         self.observe_sequence_number(token);

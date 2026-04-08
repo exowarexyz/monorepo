@@ -1,5 +1,6 @@
-import { create } from '@bufbuild/protobuf';
+import { create, fromBinary } from '@bufbuild/protobuf';
 import { Code, ConnectError } from '@connectrpc/connect';
+import type { CallOptions } from '@connectrpc/connect';
 import type { Client } from './client.js';
 import { HttpError } from './error.js';
 import { PutRequestSchema, KvPairSchema } from './gen/ts/store/v1/ingest_pb.js';
@@ -7,42 +8,37 @@ import {
     GetRequestSchema,
     GetManyRequestSchema,
     RangeRequestSchema,
+    ReduceRequestSchema,
+    DetailSchema,
     TraversalMode,
 } from './gen/ts/store/v1/query_pb.js';
+import type {
+    ReduceParams,
+    ReduceResponse,
+    Detail,
+} from './gen/ts/store/v1/query_pb.js';
 
-/**
- * The result of a `get` operation.
- */
+const QUERY_DETAIL_HEADER = 'x-store-query-detail-bin';
+
+export { TraversalMode };
+
+export type { ReduceParams, ReduceResponse };
+
 export interface GetResult {
-    /** The retrieved value. */
     value: Uint8Array;
 }
 
-/**
- * An item in the result of a `getMany` operation.
- */
 export interface GetManyResultItem {
-    /** The key that was looked up. */
     key: Uint8Array;
-    /** The value, or undefined if the key was not found. */
     value: Uint8Array | undefined;
 }
 
-/**
- * An item in the result of a `query` operation.
- */
 export interface QueryResultItem {
-    /** The key of the item. */
     key: Uint8Array;
-    /** The value of the item. */
     value: Uint8Array;
 }
 
-/**
- * The result of a `query` operation.
- */
 export interface QueryResult {
-    /** A list of key-value pairs. */
     results: QueryResultItem[];
 }
 
@@ -58,7 +54,6 @@ function mapConnectToHttpError(err: unknown): never {
     throw err;
 }
 
-/** Best-effort mapping for tests and HTTP-oriented callers; prefer `ConnectError` in new code. */
 function connectCodeToHttpStatus(code: Code): number {
     switch (code) {
         case Code.Canceled:
@@ -98,18 +93,49 @@ function connectCodeToHttpStatus(code: Code): number {
     }
 }
 
-/**
- * A client for the key-value store API.
- */
+function parseDetailFromHeaders(headers: Headers): Detail | undefined {
+    const raw = headers.get(QUERY_DETAIL_HEADER);
+    if (!raw) return undefined;
+    try {
+        const binaryStr = atob(raw);
+        const bytes = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) {
+            bytes[i] = binaryStr.charCodeAt(i);
+        }
+        return fromBinary(DetailSchema, bytes);
+    } catch {
+        return undefined;
+    }
+}
+
 export class StoreClient {
+    private _sequenceNumber = 0n;
+
     constructor(private readonly client: Client) {}
 
-    /**
-     * Sets a key-value pair in the store.
-     * @param key The key to set.
-     * @param value The value to set.
-     */
-    async set(key: Uint8Array, value: Uint8Array | Buffer): Promise<void> {
+    get sequenceNumber(): bigint {
+        return this._sequenceNumber;
+    }
+
+    observeSequenceNumber(sn: bigint): void {
+        if (sn > this._sequenceNumber) {
+            this._sequenceNumber = sn;
+        }
+    }
+
+    private effectiveMinSequenceNumber(override?: bigint): bigint | undefined {
+        const sn = override ?? this._sequenceNumber;
+        return sn > 0n ? sn : undefined;
+    }
+
+    private observeDetailFromHeaders(headers: Headers): void {
+        const detail = parseDetailFromHeaders(headers);
+        if (detail) {
+            this.observeSequenceNumber(detail.sequenceNumber);
+        }
+    }
+
+    async set(key: Uint8Array, value: Uint8Array | Buffer): Promise<bigint> {
         const req = create(PutRequestSchema, {
             kvs: [
                 create(KvPairSchema, {
@@ -119,21 +145,47 @@ export class StoreClient {
             ],
         });
         try {
-            await this.client.ingest.put(req);
+            const res = await this.client.ingest.put(req);
+            this.observeSequenceNumber(res.sequenceNumber);
+            return res.sequenceNumber;
         } catch (e) {
             mapConnectToHttpError(e);
         }
     }
 
-    /**
-     * Retrieves a value from the store by its key.
-     * @param key The key to retrieve.
-     * @returns The value, or `null` if the key does not exist.
-     */
-    async get(key: Uint8Array): Promise<GetResult | null> {
-        const req = create(GetRequestSchema, { key });
+    async setMany(kvs: { key: Uint8Array; value: Uint8Array | Buffer }[]): Promise<bigint> {
+        const req = create(PutRequestSchema, {
+            kvs: kvs.map((kv) =>
+                create(KvPairSchema, {
+                    key: kv.key,
+                    value: toUint8Array(kv.value),
+                }),
+            ),
+        });
         try {
-            const res = await this.client.query.get(req);
+            const res = await this.client.ingest.put(req);
+            this.observeSequenceNumber(res.sequenceNumber);
+            return res.sequenceNumber;
+        } catch (e) {
+            mapConnectToHttpError(e);
+        }
+    }
+
+    async get(
+        key: Uint8Array,
+        minSequenceNumber?: bigint,
+    ): Promise<GetResult | null> {
+        const effective = this.effectiveMinSequenceNumber(minSequenceNumber);
+        const req = create(GetRequestSchema, {
+            key,
+            ...(effective !== undefined ? { minSequenceNumber: effective } : {}),
+        });
+        try {
+            const callOpts: CallOptions = {
+                onHeader: (h) => this.observeDetailFromHeaders(h),
+                onTrailer: (t) => this.observeDetailFromHeaders(t),
+            };
+            const res = await this.client.query.get(req, callOpts);
             if (!res.found || res.value === undefined) {
                 return null;
             }
@@ -143,28 +195,25 @@ export class StoreClient {
         }
     }
 
-    /**
-     * Retrieves multiple values from the store by their keys in a single streaming RPC.
-     * Results stream back as frames; each entry includes its key so results may arrive
-     * in any order. Use the callback to process entries incrementally, or omit it to
-     * collect all results.
-     * @param keys The keys to look up.
-     * @param batchSize Maximum entries per streamed frame; must be positive. Defaults to keys.length.
-     * @param onChunk Optional callback invoked per frame for incremental processing.
-     * @returns All results collected (after all frames have been processed).
-     */
     async getMany(
         keys: Uint8Array[],
         batchSize?: number,
         onChunk?: (entries: GetManyResultItem[]) => void,
+        minSequenceNumber?: bigint,
     ): Promise<GetManyResultItem[]> {
+        const effective = this.effectiveMinSequenceNumber(minSequenceNumber);
         const req = create(GetManyRequestSchema, {
             keys,
             batchSize: batchSize ?? keys.length,
+            ...(effective !== undefined ? { minSequenceNumber: effective } : {}),
         });
         const results: GetManyResultItem[] = [];
         try {
-            const stream = this.client.query.getMany(req);
+            const callOpts: CallOptions = {
+                onHeader: (h) => this.observeDetailFromHeaders(h),
+                onTrailer: (t) => this.observeDetailFromHeaders(t),
+            };
+            const stream = this.client.query.getMany(req, callOpts);
             for await (const frame of stream) {
                 const chunk: GetManyResultItem[] = [];
                 for (const entry of frame.results) {
@@ -184,35 +233,60 @@ export class StoreClient {
         }
     }
 
-    /**
-     * Queries for a range of key-value pairs (forward scan via `Range` streaming RPC).
-     * @param start The key to start the query from (inclusive). If omitted, starts at the empty key.
-     * @param end The key to end the query at (inclusive when provided). If omitted, ends at the empty key (full range semantics match the server).
-     * @param limit The maximum number of results to return. If omitted, no limit is applied.
-     * @param batchSize Maximum rows per streamed frame; must be positive. Defaults to `4096`.
-     */
     async query(
         start?: Uint8Array,
         end?: Uint8Array,
         limit?: number,
         batchSize: number = 4096,
+        mode: TraversalMode = TraversalMode.FORWARD,
+        minSequenceNumber?: bigint,
     ): Promise<QueryResult> {
+        const effective = this.effectiveMinSequenceNumber(minSequenceNumber);
         const req = create(RangeRequestSchema, {
             start: start ?? new Uint8Array(),
             end: end ?? new Uint8Array(),
             batchSize,
-            mode: TraversalMode.FORWARD,
+            mode,
             ...(limit !== undefined ? { limit } : {}),
+            ...(effective !== undefined ? { minSequenceNumber: effective } : {}),
         });
         const results: QueryResultItem[] = [];
         try {
-            const stream = this.client.query.range(req);
+            const callOpts: CallOptions = {
+                onHeader: (h) => this.observeDetailFromHeaders(h),
+                onTrailer: (t) => this.observeDetailFromHeaders(t),
+            };
+            const stream = this.client.query.range(req, callOpts);
             for await (const frame of stream) {
                 for (const row of frame.results) {
                     results.push({ key: row.key, value: row.value });
                 }
             }
             return { results };
+        } catch (e) {
+            mapConnectToHttpError(e);
+        }
+    }
+
+    async reduce(
+        start: Uint8Array,
+        end: Uint8Array,
+        params: ReduceParams,
+        minSequenceNumber?: bigint,
+    ): Promise<ReduceResponse> {
+        const effective = this.effectiveMinSequenceNumber(minSequenceNumber);
+        const req = create(ReduceRequestSchema, {
+            start,
+            end,
+            params,
+            ...(effective !== undefined ? { minSequenceNumber: effective } : {}),
+        });
+        try {
+            const callOpts: CallOptions = {
+                onHeader: (h) => this.observeDetailFromHeaders(h),
+                onTrailer: (t) => this.observeDetailFromHeaders(t),
+            };
+            return await this.client.query.reduce(req, callOpts);
         } catch (e) {
             mapConnectToHttpError(e);
         }

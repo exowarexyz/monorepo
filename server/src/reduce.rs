@@ -353,3 +353,307 @@ pub fn reduce_over_rows(
 
     Ok(finalize_reduce_response(scalar_states, grouped_states))
 }
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use commonware_codec::Encode as _;
+    use exoware_sdk_rs::keys::Key;
+    use exoware_sdk_rs::kv_codec::{
+        KvExpr, KvFieldKind, KvFieldRef, KvPredicate, KvPredicateCheck,
+        KvPredicateConstraint, KvReducedValue, StoredRow, StoredValue,
+    };
+    use exoware_sdk_rs::{RangeReduceOp, RangeReduceRequest, RangeReducerSpec};
+
+    use super::reduce_over_rows;
+
+    fn make_row(key: &[u8], values: Vec<Option<StoredValue>>) -> (Key, Bytes) {
+        let encoded = StoredRow { values }.encode();
+        (Key::from(key.to_vec()), encoded)
+    }
+
+    fn reducer(op: RangeReduceOp, expr: Option<KvExpr>) -> RangeReducerSpec {
+        RangeReducerSpec { op, expr }
+    }
+
+    fn int64_value_field(index: u16) -> KvExpr {
+        KvExpr::Field(KvFieldRef::Value {
+            index,
+            kind: KvFieldKind::Int64,
+            nullable: true,
+        })
+    }
+
+    fn float64_value_field(index: u16) -> KvExpr {
+        KvExpr::Field(KvFieldRef::Value {
+            index,
+            kind: KvFieldKind::Float64,
+            nullable: true,
+        })
+    }
+
+    fn utf8_value_field(index: u16) -> KvExpr {
+        KvExpr::Field(KvFieldRef::Value {
+            index,
+            kind: KvFieldKind::Utf8,
+            nullable: true,
+        })
+    }
+
+    fn scalar_request(reducers: Vec<RangeReducerSpec>) -> RangeReduceRequest {
+        RangeReduceRequest {
+            reducers,
+            group_by: Vec::new(),
+            filter: None,
+        }
+    }
+
+    fn result_u64(v: u64) -> Option<KvReducedValue> {
+        Some(KvReducedValue::UInt64(v))
+    }
+
+    fn result_i64(v: i64) -> Option<KvReducedValue> {
+        Some(KvReducedValue::Int64(v))
+    }
+
+    fn result_f64(v: f64) -> Option<KvReducedValue> {
+        Some(KvReducedValue::Float64(v))
+    }
+
+    #[test]
+    fn count_all_over_empty_rows() {
+        let request = scalar_request(vec![reducer(RangeReduceOp::CountAll, None)]);
+        let response = reduce_over_rows(&[], &request).unwrap();
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].value, result_u64(0));
+    }
+
+    #[test]
+    fn count_all_over_multiple_rows() {
+        let rows = vec![
+            make_row(b"a", vec![]),
+            make_row(b"b", vec![]),
+            make_row(b"c", vec![]),
+        ];
+        let request = scalar_request(vec![reducer(RangeReduceOp::CountAll, None)]);
+        let response = reduce_over_rows(&rows, &request).unwrap();
+        assert_eq!(response.results[0].value, result_u64(3));
+    }
+
+    #[test]
+    fn count_field_skips_nulls() {
+        let rows = vec![
+            make_row(b"a", vec![Some(StoredValue::Int64(1))]),
+            make_row(b"b", vec![None]),
+            make_row(b"c", vec![Some(StoredValue::Int64(3))]),
+        ];
+        let request = scalar_request(vec![reducer(
+            RangeReduceOp::CountField,
+            Some(int64_value_field(0)),
+        )]);
+        let response = reduce_over_rows(&rows, &request).unwrap();
+        assert_eq!(response.results[0].value, result_u64(2));
+    }
+
+    #[test]
+    fn sum_int64_values() {
+        let rows = vec![
+            make_row(b"a", vec![Some(StoredValue::Int64(10))]),
+            make_row(b"b", vec![Some(StoredValue::Int64(20))]),
+            make_row(b"c", vec![Some(StoredValue::Int64(-5))]),
+        ];
+        let request = scalar_request(vec![reducer(
+            RangeReduceOp::SumField,
+            Some(int64_value_field(0)),
+        )]);
+        let response = reduce_over_rows(&rows, &request).unwrap();
+        assert_eq!(response.results[0].value, result_i64(25));
+    }
+
+    #[test]
+    fn sum_float64_values() {
+        let rows = vec![
+            make_row(b"a", vec![Some(StoredValue::Float64(1.5))]),
+            make_row(b"b", vec![Some(StoredValue::Float64(2.5))]),
+        ];
+        let request = scalar_request(vec![reducer(
+            RangeReduceOp::SumField,
+            Some(float64_value_field(0)),
+        )]);
+        let response = reduce_over_rows(&rows, &request).unwrap();
+        assert_eq!(response.results[0].value, result_f64(4.0));
+    }
+
+    #[test]
+    fn min_selects_smallest() {
+        let rows = vec![
+            make_row(b"a", vec![Some(StoredValue::Int64(30))]),
+            make_row(b"b", vec![Some(StoredValue::Int64(10))]),
+            make_row(b"c", vec![Some(StoredValue::Int64(20))]),
+        ];
+        let request = scalar_request(vec![reducer(
+            RangeReduceOp::MinField,
+            Some(int64_value_field(0)),
+        )]);
+        let response = reduce_over_rows(&rows, &request).unwrap();
+        assert_eq!(response.results[0].value, result_i64(10));
+    }
+
+    #[test]
+    fn max_selects_largest() {
+        let rows = vec![
+            make_row(b"a", vec![Some(StoredValue::Int64(30))]),
+            make_row(b"b", vec![Some(StoredValue::Int64(10))]),
+            make_row(b"c", vec![Some(StoredValue::Int64(50))]),
+        ];
+        let request = scalar_request(vec![reducer(
+            RangeReduceOp::MaxField,
+            Some(int64_value_field(0)),
+        )]);
+        let response = reduce_over_rows(&rows, &request).unwrap();
+        assert_eq!(response.results[0].value, result_i64(50));
+    }
+
+    #[test]
+    fn grouped_count() {
+        let rows = vec![
+            make_row(b"a", vec![Some(StoredValue::Utf8("x".into()))]),
+            make_row(b"b", vec![Some(StoredValue::Utf8("y".into()))]),
+            make_row(b"c", vec![Some(StoredValue::Utf8("x".into()))]),
+            make_row(b"d", vec![Some(StoredValue::Utf8("y".into()))]),
+            make_row(b"e", vec![Some(StoredValue::Utf8("x".into()))]),
+        ];
+        let request = RangeReduceRequest {
+            reducers: vec![reducer(RangeReduceOp::CountAll, None)],
+            group_by: vec![utf8_value_field(0)],
+            filter: None,
+        };
+        let response = reduce_over_rows(&rows, &request).unwrap();
+        assert!(response.results.is_empty());
+        assert_eq!(response.groups.len(), 2);
+
+        let mut counts: Vec<(Option<KvReducedValue>, Option<KvReducedValue>)> = response
+            .groups
+            .iter()
+            .map(|g| (g.group_values[0].clone(), g.results[0].value.clone()))
+            .collect();
+        counts.sort_by(|a, b| {
+            let a_str = match &a.0 {
+                Some(KvReducedValue::Utf8(s)) => s.clone(),
+                _ => String::new(),
+            };
+            let b_str = match &b.0 {
+                Some(KvReducedValue::Utf8(s)) => s.clone(),
+                _ => String::new(),
+            };
+            a_str.cmp(&b_str)
+        });
+        assert_eq!(
+            counts,
+            vec![
+                (
+                    Some(KvReducedValue::Utf8("x".into())),
+                    result_u64(3),
+                ),
+                (
+                    Some(KvReducedValue::Utf8("y".into())),
+                    result_u64(2),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn validates_empty_request() {
+        let request = RangeReduceRequest {
+            reducers: Vec::new(),
+            group_by: Vec::new(),
+            filter: None,
+        };
+        let err = reduce_over_rows(&[], &request).unwrap_err();
+        assert!(
+            err.to_string().contains("at least one reducer"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn count_all_rejects_expression() {
+        let request = scalar_request(vec![reducer(
+            RangeReduceOp::CountAll,
+            Some(int64_value_field(0)),
+        )]);
+        let err = reduce_over_rows(&[], &request).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("count_all reducer must not specify an expression"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn expression_reducer_requires_expression() {
+        for op in [
+            RangeReduceOp::SumField,
+            RangeReduceOp::MinField,
+            RangeReduceOp::MaxField,
+            RangeReduceOp::CountField,
+        ] {
+            let request = scalar_request(vec![reducer(op, None)]);
+            let err = reduce_over_rows(&[], &request).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("expression reducer requires an expression"),
+                "op {op:?} should require an expression, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn filter_excludes_rows() {
+        let rows = vec![
+            make_row(b"a", vec![Some(StoredValue::Int64(10))]),
+            make_row(b"b", vec![Some(StoredValue::Int64(20))]),
+            make_row(b"c", vec![Some(StoredValue::Int64(30))]),
+        ];
+        let request = RangeReduceRequest {
+            reducers: vec![reducer(
+                RangeReduceOp::SumField,
+                Some(int64_value_field(0)),
+            )],
+            group_by: Vec::new(),
+            filter: Some(KvPredicate {
+                checks: vec![KvPredicateCheck {
+                    field: KvFieldRef::Value {
+                        index: 0,
+                        kind: KvFieldKind::Int64,
+                        nullable: false,
+                    },
+                    constraint: KvPredicateConstraint::IntRange {
+                        min: Some(15),
+                        max: None,
+                    },
+                }],
+                contradiction: false,
+            }),
+        };
+        let response = reduce_over_rows(&rows, &request).unwrap();
+        assert_eq!(response.results[0].value, result_i64(50));
+    }
+
+    #[test]
+    fn mixed_type_min_max_returns_error() {
+        use super::ReductionState;
+
+        let mut state = ReductionState::Min(Some(KvReducedValue::Int64(10)));
+        let result = state.update(
+            RangeReduceOp::MinField,
+            Some(KvReducedValue::Utf8("hello".into())),
+        );
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("type mismatch"),
+            "expected type mismatch error"
+        );
+    }
+}

@@ -2186,28 +2186,28 @@ fn append_archived_non_pk_value(
     };
     match (builder, col.kind, stored) {
         (ColumnBuilder::Int64(b), ColumnKind::Int64, StoredValue::Int64(v)) => {
-            b.append_value((*v).into())
+            b.append_value(*v)
         }
         (ColumnBuilder::UInt64(b), ColumnKind::UInt64, StoredValue::UInt64(v)) => {
-            b.append_value((*v).into())
+            b.append_value(*v)
         }
         (ColumnBuilder::Float64(b), ColumnKind::Float64, StoredValue::Float64(v)) => {
-            b.append_value((*v).into())
+            b.append_value(*v)
         }
         (ColumnBuilder::Float64(b), ColumnKind::Float64, StoredValue::Int64(v)) => {
-            b.append_value(i64::from(*v) as f64)
+            b.append_value(*v as f64)
         }
         (ColumnBuilder::Boolean(b), ColumnKind::Boolean, StoredValue::Boolean(v)) => {
             b.append_value(*v)
         }
         (ColumnBuilder::Date32(b), ColumnKind::Date32, StoredValue::Int64(v)) => {
-            b.append_value(i64::from(*v) as i32)
+            b.append_value(*v as i32)
         }
         (ColumnBuilder::Date64(b), ColumnKind::Date64, StoredValue::Int64(v)) => {
-            b.append_value((*v).into())
+            b.append_value(*v)
         }
         (ColumnBuilder::Timestamp(b), ColumnKind::Timestamp, StoredValue::Int64(v)) => {
-            b.append_value((*v).into())
+            b.append_value(*v)
         }
         (
             ColumnBuilder::Decimal128(b),
@@ -2250,7 +2250,7 @@ fn append_archived_non_pk_value(
                         "list element type mismatch".to_string(),
                     ));
                 };
-                b.values().append_value((*v).into());
+                b.values().append_value(*v);
             }
             b.append(true);
         }
@@ -2261,8 +2261,8 @@ fn append_archived_non_pk_value(
         ) => {
             for item in items.iter() {
                 match item {
-                    StoredValue::Float64(v) => b.values().append_value((*v).into()),
-                    StoredValue::Int64(v) => b.values().append_value(i64::from(*v) as f64),
+                    StoredValue::Float64(v) => b.values().append_value(*v),
+                    StoredValue::Int64(v) => b.values().append_value(*v as f64),
                     _ => {
                         return Err(DataFusionError::Execution(
                             "list element type mismatch".to_string(),
@@ -3208,9 +3208,9 @@ fn owned_stored_value_from_archived(
         return Ok(None);
     };
     Ok(Some(match stored {
-        StoredValue::Int64(v) => StoredValue::Int64((*v).into()),
-        StoredValue::UInt64(v) => StoredValue::UInt64((*v).into()),
-        StoredValue::Float64(v) => StoredValue::Float64((*v).into()),
+        StoredValue::Int64(v) => StoredValue::Int64(*v),
+        StoredValue::UInt64(v) => StoredValue::UInt64(*v),
+        StoredValue::Float64(v) => StoredValue::Float64(*v),
         StoredValue::Boolean(v) => StoredValue::Boolean(*v),
         StoredValue::Utf8(v) => StoredValue::Utf8(v.as_str().to_string()),
         StoredValue::Bytes(v) => StoredValue::Bytes(v.as_slice().to_vec()),
@@ -3255,21 +3255,21 @@ fn decode_base_row(pk_values: Vec<CellValue>, value: &[u8], model: &TableModel) 
             return None;
         };
         values[idx] = match (col.kind, stored) {
-            (ColumnKind::Int64, StoredValue::Int64(v)) => CellValue::Int64((*v).into()),
-            (ColumnKind::UInt64, StoredValue::UInt64(v)) => CellValue::UInt64((*v).into()),
+            (ColumnKind::Int64, StoredValue::Int64(v)) => CellValue::Int64(*v),
+            (ColumnKind::UInt64, StoredValue::UInt64(v)) => CellValue::UInt64(*v),
             (ColumnKind::Float64, StoredValue::Float64(v)) => {
-                CellValue::Float64((*v).into())
+                CellValue::Float64(*v)
             }
             (ColumnKind::Float64, StoredValue::Int64(v)) => {
-                CellValue::Float64(i64::from(*v) as f64)
+                CellValue::Float64(*v as f64)
             }
             (ColumnKind::Boolean, StoredValue::Boolean(v)) => CellValue::Boolean(*v),
             (ColumnKind::Date32, StoredValue::Int64(v)) => {
-                CellValue::Date32(i64::from(*v) as i32)
+                CellValue::Date32(*v as i32)
             }
-            (ColumnKind::Date64, StoredValue::Int64(v)) => CellValue::Date64((*v).into()),
+            (ColumnKind::Date64, StoredValue::Int64(v)) => CellValue::Date64(*v),
             (ColumnKind::Timestamp, StoredValue::Int64(v)) => {
-                CellValue::Timestamp((*v).into())
+                CellValue::Timestamp(*v)
             }
             (ColumnKind::Decimal128, StoredValue::Bytes(bytes)) => {
                 let arr: [u8; 16] = bytes.as_slice().try_into().ok()?;
@@ -3303,12 +3303,12 @@ fn decode_list_element_archived(
     stored: &StoredValue,
 ) -> Option<CellValue> {
     Some(match (elem, stored) {
-        (ListElementKind::Int64, StoredValue::Int64(v)) => CellValue::Int64((*v).into()),
+        (ListElementKind::Int64, StoredValue::Int64(v)) => CellValue::Int64(*v),
         (ListElementKind::Float64, StoredValue::Float64(v)) => {
-            CellValue::Float64((*v).into())
+            CellValue::Float64(*v)
         }
         (ListElementKind::Float64, StoredValue::Int64(v)) => {
-            CellValue::Float64(i64::from(*v) as f64)
+            CellValue::Float64(*v as f64)
         }
         (ListElementKind::Boolean, StoredValue::Boolean(v)) => CellValue::Boolean(*v),
         (ListElementKind::Utf8, StoredValue::Utf8(v)) => {
@@ -5657,32 +5657,32 @@ fn matches_archived_non_pk_constraint(
                 ColumnKind::Int64,
                 StoredValue::Int64(v),
                 PredicateConstraint::IntRange { min, max },
-            ) => in_i64_bounds((*v).into(), *min, *max),
+            ) => in_i64_bounds(*v, *min, *max),
             (
                 ColumnKind::Date32,
                 StoredValue::Int64(v),
                 PredicateConstraint::IntRange { min, max },
-            ) => in_i64_bounds(i64::from(*v) as i32 as i64, *min, *max),
+            ) => in_i64_bounds(*v as i32 as i64, *min, *max),
             (
                 ColumnKind::Date64,
                 StoredValue::Int64(v),
                 PredicateConstraint::IntRange { min, max },
-            ) => in_i64_bounds((*v).into(), *min, *max),
+            ) => in_i64_bounds(*v, *min, *max),
             (
                 ColumnKind::Timestamp,
                 StoredValue::Int64(v),
                 PredicateConstraint::IntRange { min, max },
-            ) => in_i64_bounds((*v).into(), *min, *max),
+            ) => in_i64_bounds(*v, *min, *max),
             (
                 ColumnKind::Float64,
                 StoredValue::Float64(v),
                 PredicateConstraint::FloatRange { min, max },
-            ) => in_f64_bounds((*v).into(), min, max),
+            ) => in_f64_bounds(*v, min, max),
             (
                 ColumnKind::Float64,
                 StoredValue::Int64(v),
                 PredicateConstraint::FloatRange { min, max },
-            ) => in_f64_bounds(i64::from(*v) as f64, min, max),
+            ) => in_f64_bounds(*v as f64, min, max),
             (
                 ColumnKind::Decimal128,
                 StoredValue::Bytes(bytes),
@@ -5718,17 +5718,17 @@ fn matches_archived_non_pk_constraint(
                 ColumnKind::UInt64,
                 StoredValue::UInt64(v),
                 PredicateConstraint::UInt64Range { min, max },
-            ) => in_u64_bounds((*v).into(), *min, *max),
+            ) => in_u64_bounds(*v, *min, *max),
             (
                 ColumnKind::UInt64,
                 StoredValue::UInt64(v),
                 PredicateConstraint::UInt64In(values),
-            ) => values.iter().any(|candidate| *candidate == u64::from(*v)),
+            ) => values.contains(v),
             (
                 ColumnKind::Int64,
                 StoredValue::Int64(v),
                 PredicateConstraint::IntIn(values),
-            ) => values.iter().any(|candidate| *candidate == i64::from(*v)),
+            ) => values.contains(v),
             (
                 ColumnKind::FixedSizeBinary(_),
                 StoredValue::Bytes(v),
@@ -6871,18 +6871,18 @@ fn cell_value_from_archived_non_pk(
         )));
     };
     let value = match (col.kind, stored) {
-        (ColumnKind::Int64, StoredValue::Int64(v)) => CellValue::Int64((*v).into()),
-        (ColumnKind::UInt64, StoredValue::UInt64(v)) => CellValue::UInt64((*v).into()),
-        (ColumnKind::Float64, StoredValue::Float64(v)) => CellValue::Float64((*v).into()),
+        (ColumnKind::Int64, StoredValue::Int64(v)) => CellValue::Int64(*v),
+        (ColumnKind::UInt64, StoredValue::UInt64(v)) => CellValue::UInt64(*v),
+        (ColumnKind::Float64, StoredValue::Float64(v)) => CellValue::Float64(*v),
         (ColumnKind::Float64, StoredValue::Int64(v)) => {
-            CellValue::Float64(i64::from(*v) as f64)
+            CellValue::Float64(*v as f64)
         }
         (ColumnKind::Boolean, StoredValue::Boolean(v)) => CellValue::Boolean(*v),
         (ColumnKind::Date32, StoredValue::Int64(v)) => {
-            CellValue::Date32(i64::from(*v) as i32)
+            CellValue::Date32(*v as i32)
         }
-        (ColumnKind::Date64, StoredValue::Int64(v)) => CellValue::Date64((*v).into()),
-        (ColumnKind::Timestamp, StoredValue::Int64(v)) => CellValue::Timestamp((*v).into()),
+        (ColumnKind::Date64, StoredValue::Int64(v)) => CellValue::Date64(*v),
+        (ColumnKind::Timestamp, StoredValue::Int64(v)) => CellValue::Timestamp(*v),
         (ColumnKind::Decimal128, StoredValue::Bytes(bytes)) => {
             let arr: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
                 DataFusionError::Execution(format!(

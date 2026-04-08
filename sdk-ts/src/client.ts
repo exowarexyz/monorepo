@@ -1,52 +1,83 @@
-import { createClient, type Client as ConnectClient, type Interceptor } from '@connectrpc/connect';
+import { createClient, type Client as ConnectClient, type Interceptor, Code, ConnectError } from '@connectrpc/connect';
 import { createConnectTransport } from '@connectrpc/connect-web';
 import { StoreClient } from './store.js';
 import { Service as IngestService } from './gen/ts/store/v1/ingest_pb.js';
 import { Service as QueryService } from './gen/ts/store/v1/query_pb.js';
 
-export type ClientOptions = {
-    /**
-     * Optional bearer token sent as `Authorization: Bearer ...` on every RPC.
-     */
-    token?: string;
+export type RetryConfig = {
+    maxAttempts: number;
+    initialBackoffMs: number;
+    maxBackoffMs: number;
 };
 
-/**
- * Client for the Exoware store API (ingest + query on one base URL).
- */
+const DEFAULT_RETRY_CONFIG: RetryConfig = {
+    maxAttempts: 3,
+    initialBackoffMs: 100,
+    maxBackoffMs: 2000,
+};
+
+const RETRYABLE_CODES = new Set<Code>([
+    Code.Aborted,
+    Code.Unavailable,
+    Code.ResourceExhausted,
+    Code.Internal,
+]);
+
+function retryBackoffDelay(attempt: number, config: RetryConfig): number {
+    const exponent = Math.min(Math.max(attempt - 1, 0), 20);
+    const baseMs = config.initialBackoffMs * (1 << exponent);
+    return Math.min(baseMs, config.maxBackoffMs);
+}
+
+function makeRetryInterceptor(config: RetryConfig): Interceptor {
+    const maxAttempts = Math.max(config.maxAttempts, 1);
+    return (next) => async (req) => {
+        let attempt = 1;
+        for (;;) {
+            try {
+                return await next(req);
+            } catch (err) {
+                if (
+                    attempt < maxAttempts &&
+                    err instanceof ConnectError &&
+                    RETRYABLE_CODES.has(err.code)
+                ) {
+                    const delay = retryBackoffDelay(attempt, config);
+                    await new Promise((resolve) => setTimeout(resolve, delay));
+                    attempt++;
+                    continue;
+                }
+                throw err;
+            }
+        }
+    };
+}
+
+export type ClientOptions = {
+    token?: string;
+    retry?: RetryConfig;
+};
+
 export class Client {
-    /**
-     * Base URL of the server (e.g. `http://127.0.0.1:8080`).
-     */
     public readonly baseUrl: string;
-
-    /**
-     * Ingest RPC client (`Put`).
-     */
     public readonly ingest: ConnectClient<typeof IngestService>;
-
-    /**
-     * Query RPC client (`Get`, `Range`, `Reduce`).
-     */
     public readonly query: ConnectClient<typeof QueryService>;
+    public readonly retryConfig: RetryConfig;
 
-    /**
-     * @param baseUrl The base URL of the Exoware server (e.g. `http://localhost:8080`).
-     * @param tokenOrOptions Legacy second argument: a bearer token string, or options with `token`.
-     */
     constructor(baseUrl: string, tokenOrOptions?: string | ClientOptions) {
         const opts: ClientOptions =
             typeof tokenOrOptions === 'string' ? { token: tokenOrOptions } : tokenOrOptions ?? {};
         this.baseUrl = baseUrl.replace(/\/$/, '');
-        const interceptors: Interceptor[] =
-            opts.token === undefined
-                ? []
-                : [
-                      (next) => async (req) => {
-                          req.header.set('Authorization', `Bearer ${opts.token}`);
-                          return next(req);
-                      },
-                  ];
+        this.retryConfig = opts.retry ?? DEFAULT_RETRY_CONFIG;
+        const interceptors: Interceptor[] = [];
+        if (opts.token !== undefined) {
+            const token = opts.token;
+            interceptors.push((next) => async (req) => {
+                req.header.set('Authorization', `Bearer ${token}`);
+                return next(req);
+            });
+        }
+        interceptors.push(makeRetryInterceptor(this.retryConfig));
         const transport = createConnectTransport({
             baseUrl: this.baseUrl,
             interceptors,
@@ -55,9 +86,6 @@ export class Client {
         this.query = createClient(QueryService, transport);
     }
 
-    /**
-     * Returns a `StoreClient` for interacting with the key-value store.
-     */
     public store(): StoreClient {
         return new StoreClient(this);
     }

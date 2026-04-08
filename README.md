@@ -8,19 +8,12 @@
 
 *Primitives are designed for production use. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a primitive).*
 
-- [sdk-rs](./sdk-rs/README.md): Rust SDK for the Exoware store API.
+- [sdk-rs](./sdk-rs/README.md): Rust store SDK (shared types, key/value codec, prune policy, protobuf bindings generated from [`proto/`](./proto/)).
 - [sdk-ts](./sdk-ts/README.md): TypeScript SDK for the Exoware store API.
+- [exoware-server](./server/Cargo.toml): Pluggable store server (`StoreEngine`).
 - [simulator](./simulator/README.md): Local store API simulator (RocksDB).
-- [sdk-rs](./sdk-rs/README.md): Rust store SDK (shared types, key/value codec, prune policy, protobuf bindings generated from [`proto/`](./proto/) -- layout described in [`gen/README.md`](./gen/README.md)).
-- [exoware-server](./server/Cargo.toml): pluggable store server (`StoreEngine`).
-- [exoware-qmdb](./qmdb/README.md), [exoware-sql](./sql/README.md): Commonware QMDB bridge and DataFusion SQL layer.
-
-## Components
-
-*Components are designed for production use. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a component).*
-
-- **store**: Persist and retrieve artifacts.
-- **stream**: Broadcast realtime data.
+- [exoware-qmdb](./qmdb/README.md): Commonware QMDB bridge.
+- [exoware-sql](./sql/README.md): DataFusion SQL layer.
 
 *The service schema source of truth lives under [`proto/`](./proto).*
 

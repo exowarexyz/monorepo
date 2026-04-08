@@ -141,6 +141,20 @@ impl StoreEngine for RocksStore {
             .collect()
     }
 
+    fn delete_batch(&self, keys: &[&[u8]]) -> Result<u64, String> {
+        let next = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut batch = rocksdb::WriteBatch::default();
+        for k in keys {
+            batch.delete(k);
+        }
+        batch.put(SEQ_META_KEY, next.to_le_bytes());
+        self.db.write(batch).map_err(|e| e.to_string())?;
+        if let Some(obs) = &self.observer {
+            obs.store(next, Ordering::SeqCst);
+        }
+        Ok(next)
+    }
+
     fn current_sequence(&self) -> u64 {
         self.sequence.load(Ordering::SeqCst)
     }
