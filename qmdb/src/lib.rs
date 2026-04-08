@@ -61,6 +61,7 @@ use std::{
     time::Duration,
 };
 
+#[cfg(any(test, feature = "test-utils"))]
 use commonware_storage::mmr::{mem::Mmr, UnmerkleizedBatch};
 
 pub(crate) const RESERVED_BITS: u8 = 4;
@@ -227,6 +228,10 @@ pub struct CurrentBoundaryState<D: Digest, const N: usize> {
 ///
 /// `previous_operations` is `None` for the first batch; for subsequent batches
 /// pass the operations from the prior uploaded batch so the delta is sparse.
+///
+/// This is a test helper that rebuilds the full state from operations. Production
+/// callers should extract boundary state from the local Commonware QMDB instead.
+#[cfg(any(test, feature = "test-utils"))]
 pub async fn build_current_boundary_state<H, K, V, const N: usize>(
     previous_operations: Option<&[QmdbOperation<K, V>]>,
     operations: &[QmdbOperation<K, V>],
@@ -1799,6 +1804,7 @@ impl<D: Digest, const N: usize> MmrStorage<D> for KvCurrentStorage<'_, D, N> {
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 struct RebuiltCurrentState<H: Hasher, K, V, const N: usize> {
     ops_mmr: Mmr<H::Digest>,
     ops_root: H::Digest,
@@ -1808,6 +1814,7 @@ struct RebuiltCurrentState<H: Hasher, K, V, const N: usize> {
     _marker: PhantomData<(K, V)>,
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 impl<H, K, V, const N: usize> RebuiltCurrentState<H, K, V, N>
 where
     H: Hasher,
@@ -1852,11 +1859,13 @@ where
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 struct RebuiltCurrentStorage<'a, D: Digest, const N: usize> {
     ops_mmr: &'a Mmr<D>,
     grafted_mmr: &'a Mmr<D>,
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 impl<D: Digest, const N: usize> MmrStorage<D> for RebuiltCurrentStorage<'_, D, N> {
     async fn size(&self) -> Position {
         self.ops_mmr.size()
@@ -1899,6 +1908,7 @@ impl<K: commonware_codec::Read, V: commonware_codec::Read> commonware_codec::Rea
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 fn build_operation_mmr<H: Hasher>(
     encoded_operations: &[Vec<u8>],
 ) -> Result<mmr::mem::Mmr<H::Digest>, QmdbError> {
@@ -1916,6 +1926,7 @@ fn build_operation_mmr<H: Hasher>(
     Ok(mmr)
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 fn build_bitmap_chunks<K, V, const N: usize>(
     operations: &[QmdbOperation<K, V>],
 ) -> Vec<[u8; N]>
@@ -1962,6 +1973,7 @@ where
     chunks
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 fn build_grafted_mmr<H: Hasher, const N: usize>(
     ops_mmr: &Mmr<H::Digest>,
     complete_chunks: &[[u8; N]],
@@ -2002,6 +2014,7 @@ fn build_grafted_mmr<H: Hasher, const N: usize>(
     Ok(grafted_mmr)
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 async fn compute_storage_root<H: Hasher>(
     storage: &impl MmrStorage<H::Digest>,
 ) -> Result<H::Digest, QmdbError> {
@@ -2023,6 +2036,7 @@ async fn compute_storage_root<H: Hasher>(
     Ok(mmr::hasher::Hasher::root(&mut hasher, leaves, peaks.iter()))
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 fn combine_current_roots<H: Hasher>(
     ops_root: &H::Digest,
     grafted_root: &H::Digest,
@@ -2052,6 +2066,7 @@ fn chunk_index_for_location<const N: usize>(location: Location) -> u64 {
     *location / bitmap_chunk_bits::<N>()
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 fn chunk_idx_to_ops_pos(chunk_idx: u64, grafting_height: u32) -> Position {
     let first_leaf_loc = Location::new(chunk_idx << grafting_height);
     let first_leaf_pos = Position::try_from(first_leaf_loc).expect("chunk_idx_to_ops_pos overflow");
@@ -2074,6 +2089,7 @@ fn ops_to_grafted_pos(ops_pos: Position, grafting_height: u32) -> Position {
     Position::new(*grafted_leaf_pos + (1u64 << (grafted_height + 1)) - 2)
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 fn grafted_to_ops_pos(grafted_pos: Position, grafting_height: u32) -> Position {
     let grafted_height = position_height(grafted_pos);
     let leftmost_grafted_leaf_pos = grafted_pos + 2 - (1u64 << (grafted_height + 1));
@@ -2102,11 +2118,13 @@ fn position_height(pos: Position) -> u32 {
     pos as u32
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 struct GraftedHasher<H: Hasher> {
     inner: StandardHasher<H>,
     grafting_height: u32,
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 impl<H: Hasher> GraftedHasher<H> {
     const fn new(inner: StandardHasher<H>, grafting_height: u32) -> Self {
         Self {
@@ -2116,6 +2134,7 @@ impl<H: Hasher> GraftedHasher<H> {
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 impl<H: Hasher> mmr::hasher::Hasher for GraftedHasher<H> {
     type Digest = H::Digest;
     type Inner = H;

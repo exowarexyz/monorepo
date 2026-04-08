@@ -2301,6 +2301,7 @@ dependencies = [
  "commonware-storage",
  "commonware-utils",
  "connectrpc",
+ "exoware-qmdb",
  "exoware-sdk-rs",
  "exoware-server",
  "exoware-simulator",

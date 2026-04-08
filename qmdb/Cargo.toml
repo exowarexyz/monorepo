@@ -8,6 +8,9 @@ description = "Store-backed bridge for Commonware QMDB and related authenticated
 [lib]
 name = "store_qmdb"
 
+[features]
+test-utils = []
+
 [dependencies]
 bytes = { workspace = true }
 commonware-codec = "2026.3.0"
@@ -20,6 +23,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+exoware-qmdb = { path = ".", features = ["test-utils"] }
 axum = { workspace = true }
 bytes = { workspace = true }
 commonware-runtime = "2026.3.0"
