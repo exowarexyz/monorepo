@@ -424,7 +424,10 @@ impl TableModel {
             .position(|&idx| idx == col_idx)
     }
 
-    pub(crate) fn resolve_index_specs(&self, specs: &[IndexSpec]) -> Result<Vec<ResolvedIndexSpec>, String> {
+    pub(crate) fn resolve_index_specs(
+        &self,
+        specs: &[IndexSpec],
+    ) -> Result<Vec<ResolvedIndexSpec>, String> {
         let mut out = Vec::with_capacity(specs.len());
         let mut names = HashSet::new();
 

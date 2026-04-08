@@ -5,13 +5,13 @@
 //! the first constraint violation.
 
 use connectrpc::ConnectError;
-use exoware_sdk_rs::keys::{validate_key_size, MAX_KEY_LEN};
-use exoware_sdk_rs as exoware_proto;
 use exoware_proto::google::rpc::{bad_request::FieldViolation, BadRequest, ErrorInfo};
 use exoware_proto::{
     parse_range_traversal_direction, with_bad_request_detail, with_error_info_detail,
     RangeTraversalModeError,
 };
+use exoware_sdk_rs as exoware_proto;
+use exoware_sdk_rs::keys::{validate_key_size, MAX_KEY_LEN};
 
 pub const MAX_VALUE_LEN: usize = 10 * 1024 * 1024;
 
@@ -290,8 +290,8 @@ mod tests {
     #[test]
     fn put_rejects_empty_batch() {
         let bytes = empty_put_request_bytes();
-        let view = exoware_proto::store::ingest::v1::PutRequestView::decode_view(&bytes)
-            .expect("parse");
+        let view =
+            exoware_proto::store::ingest::v1::PutRequestView::decode_view(&bytes).expect("parse");
         let err = validate_put_request(&view).unwrap_err();
         assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
     }
@@ -299,8 +299,8 @@ mod tests {
     #[test]
     fn put_rejects_oversized_key() {
         let bytes = put_request_with_oversized_key();
-        let view = exoware_proto::store::ingest::v1::PutRequestView::decode_view(&bytes)
-            .expect("parse");
+        let view =
+            exoware_proto::store::ingest::v1::PutRequestView::decode_view(&bytes).expect("parse");
         let err = validate_put_request(&view).unwrap_err();
         assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
     }
@@ -308,8 +308,8 @@ mod tests {
     #[test]
     fn put_rejects_oversized_value() {
         let bytes = put_request_with_oversized_value();
-        let view = exoware_proto::store::ingest::v1::PutRequestView::decode_view(&bytes)
-            .expect("parse");
+        let view =
+            exoware_proto::store::ingest::v1::PutRequestView::decode_view(&bytes).expect("parse");
         let err = validate_put_request(&view).unwrap_err();
         assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
     }
@@ -317,8 +317,8 @@ mod tests {
     #[test]
     fn put_accepts_valid_request() {
         let bytes = valid_put_request();
-        let view = exoware_proto::store::ingest::v1::PutRequestView::decode_view(&bytes)
-            .expect("parse");
+        let view =
+            exoware_proto::store::ingest::v1::PutRequestView::decode_view(&bytes).expect("parse");
         validate_put_request(&view).expect("should be valid");
     }
 
@@ -334,20 +334,23 @@ mod tests {
     #[test]
     fn get_rejects_oversized_key() {
         let bytes = get_request_bytes(&[0u8; 255]);
-        let view = exoware_proto::store::query::v1::GetRequestView::decode_view(&bytes)
-            .expect("parse");
+        let view =
+            exoware_proto::store::query::v1::GetRequestView::decode_view(&bytes).expect("parse");
         assert!(validate_get_request(&view).is_err());
     }
 
     #[test]
     fn get_accepts_max_key() {
         let bytes = get_request_bytes(&[0u8; 254]);
-        let view = exoware_proto::store::query::v1::GetRequestView::decode_view(&bytes)
-            .expect("parse");
+        let view =
+            exoware_proto::store::query::v1::GetRequestView::decode_view(&bytes).expect("parse");
         validate_get_request(&view).expect("should be valid");
     }
 
-    fn range_request_bytes(batch_size: u32, mode: impl Into<buffa::EnumValue<exoware_proto::query::TraversalMode>>) -> Vec<u8> {
+    fn range_request_bytes(
+        batch_size: u32,
+        mode: impl Into<buffa::EnumValue<exoware_proto::query::TraversalMode>>,
+    ) -> Vec<u8> {
         use buffa::Message;
         exoware_proto::query::RangeRequest {
             start: vec![0u8; 1],
@@ -362,17 +365,20 @@ mod tests {
     fn range_rejects_zero_batch_size() {
         use exoware_proto::query::TraversalMode;
         let bytes = range_request_bytes(0, TraversalMode::TRAVERSAL_MODE_FORWARD);
-        let view = exoware_proto::store::query::v1::RangeRequestView::decode_view(&bytes)
-            .expect("parse");
+        let view =
+            exoware_proto::store::query::v1::RangeRequestView::decode_view(&bytes).expect("parse");
         let err = validate_range_request(&view).unwrap_err();
         assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
     }
 
     #[test]
     fn range_rejects_unknown_traversal_mode() {
-        let bytes = range_request_bytes(1, buffa::EnumValue::<exoware_proto::query::TraversalMode>::Unknown(99));
-        let view = exoware_proto::store::query::v1::RangeRequestView::decode_view(&bytes)
-            .expect("parse");
+        let bytes = range_request_bytes(
+            1,
+            buffa::EnumValue::<exoware_proto::query::TraversalMode>::Unknown(99),
+        );
+        let view =
+            exoware_proto::store::query::v1::RangeRequestView::decode_view(&bytes).expect("parse");
         let err = validate_range_request(&view).unwrap_err();
         assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
     }
@@ -381,8 +387,8 @@ mod tests {
     fn range_accepts_valid_request() {
         use exoware_proto::query::TraversalMode;
         let bytes = range_request_bytes(100, TraversalMode::TRAVERSAL_MODE_FORWARD);
-        let view = exoware_proto::store::query::v1::RangeRequestView::decode_view(&bytes)
-            .expect("parse");
+        let view =
+            exoware_proto::store::query::v1::RangeRequestView::decode_view(&bytes).expect("parse");
         validate_range_request(&view).expect("should be valid");
     }
 
@@ -512,8 +518,8 @@ mod tests {
     #[test]
     fn reduce_rejects_empty_params() {
         let bytes = reduce_request_bytes(0);
-        let view = exoware_proto::store::query::v1::ReduceRequestView::decode_view(&bytes)
-            .expect("parse");
+        let view =
+            exoware_proto::store::query::v1::ReduceRequestView::decode_view(&bytes).expect("parse");
         let err = validate_reduce_request(&view).unwrap_err();
         assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
     }
@@ -535,8 +541,8 @@ mod tests {
             ..Default::default()
         }
         .encode_to_vec();
-        let view = exoware_proto::store::query::v1::ReduceRequestView::decode_view(&bytes)
-            .expect("parse");
+        let view =
+            exoware_proto::store::query::v1::ReduceRequestView::decode_view(&bytes).expect("parse");
         let err = validate_reduce_request(&view).unwrap_err();
         assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
     }
@@ -544,8 +550,8 @@ mod tests {
     #[test]
     fn reduce_accepts_valid_request() {
         let bytes = reduce_request_bytes(1);
-        let view = exoware_proto::store::query::v1::ReduceRequestView::decode_view(&bytes)
-            .expect("parse");
+        let view =
+            exoware_proto::store::query::v1::ReduceRequestView::decode_view(&bytes).expect("parse");
         validate_reduce_request(&view).expect("should be valid");
     }
 }

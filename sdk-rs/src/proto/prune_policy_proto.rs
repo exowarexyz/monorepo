@@ -131,12 +131,12 @@ fn prune_policy_to_proto(p: &PrunePolicy) -> crate::store::compact::v1::Policy {
         ..Default::default()
     });
     let retain_kind = match &p.retain {
-        RetainPolicy::KeepLatest { count } => policy_retain::Kind::KeepLatest(Box::new(
-            RetainKeepLatest {
+        RetainPolicy::KeepLatest { count } => {
+            policy_retain::Kind::KeepLatest(Box::new(RetainKeepLatest {
                 count: *count as u64,
                 ..Default::default()
-            },
-        )),
+            }))
+        }
         RetainPolicy::GreaterThan { threshold } => {
             policy_retain::Kind::GreaterThan(Box::new(RetainGreaterThan {
                 threshold: *threshold,
@@ -149,9 +149,7 @@ fn prune_policy_to_proto(p: &PrunePolicy) -> crate::store::compact::v1::Policy {
                 ..Default::default()
             }))
         }
-        RetainPolicy::DropAll => {
-            policy_retain::Kind::DropAll(Box::default())
-        }
+        RetainPolicy::DropAll => policy_retain::Kind::DropAll(Box::default()),
     };
     Policy {
         match_key: Some(match_key).into(),

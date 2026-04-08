@@ -1,10 +1,10 @@
 use datafusion::common::Result as DataFusionResult;
 
-use crate::types::*;
-use crate::predicate::*;
-use crate::filter::*;
-use crate::codec::*;
 use crate::aggregate::{AggregateAccessPath, AggregatePushdownSpec};
+use crate::codec::*;
+use crate::filter::*;
+use crate::predicate::*;
+use crate::types::*;
 
 #[derive(Debug, Clone)]
 pub(crate) struct AccessPathDiagnostics {
@@ -24,7 +24,8 @@ pub(crate) struct AggregatePushdownDiagnostics {
     pub(crate) aggregate_jobs: Vec<AccessPathDiagnostics>,
 }
 
-pub(crate) type ChosenAggregateAccessPath = (Vec<KeyRange>, AggregateAccessPath, Option<usize>, bool);
+pub(crate) type ChosenAggregateAccessPath =
+    (Vec<KeyRange>, AggregateAccessPath, Option<usize>, bool);
 
 #[derive(Debug)]
 pub(crate) struct KvAggregateTable {

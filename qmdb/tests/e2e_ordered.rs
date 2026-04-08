@@ -6,17 +6,17 @@ mod common;
 
 use std::num::NonZeroU64;
 
+use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
 use commonware_storage::mmr::Location;
+use commonware_storage::qmdb::any::ordered::variable::Operation as QmdbOperation;
 use commonware_storage::qmdb::{
     current::{ordered::variable::Db as LocalQmdbDb, VariableConfig},
     store::LogStore as _,
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use commonware_cryptography::Sha256;
-use commonware_storage::qmdb::any::ordered::variable::Operation as QmdbOperation;
 use store_qmdb::MAX_OPERATION_SIZE;
 use store_qmdb::{build_current_boundary_state, CurrentBoundaryState, OrderedClient};
 
@@ -36,8 +36,14 @@ fn op_cfg() -> <BatchOperation as commonware_codec::Read>::Cfg {
     )
 }
 
-fn update_row_cfg() -> (<Vec<u8> as commonware_codec::Read>::Cfg, <Vec<u8> as commonware_codec::Read>::Cfg) {
-    (((0..=MAX_OPERATION_SIZE).into(), ()), ((0..=MAX_OPERATION_SIZE).into(), ()))
+fn update_row_cfg() -> (
+    <Vec<u8> as commonware_codec::Read>::Cfg,
+    <Vec<u8> as commonware_codec::Read>::Cfg,
+) {
+    (
+        ((0..=MAX_OPERATION_SIZE).into(), ()),
+        ((0..=MAX_OPERATION_SIZE).into(), ()),
+    )
 }
 
 struct LocalReference {

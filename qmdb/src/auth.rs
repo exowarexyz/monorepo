@@ -1,16 +1,14 @@
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Hasher;
-use commonware_storage::mmr::{
-    self, iterator::PeakIterator, Location, Position, StandardHasher,
-};
+use commonware_storage::mmr::{self, iterator::PeakIterator, Location, Position, StandardHasher};
 use commonware_utils::Array;
 use exoware_sdk_rs::keys::{Key, KeyCodec};
 use exoware_sdk_rs::{RangeMode, SerializableReadSession};
 
 use crate::codec::{
-    decode_digest, encode_ordered_update_payload, ensure_encoded_value_size, mmr_size_for_watermark,
-    validate_ordered_key_bytes, UpdateRow, ORDERED_KEY_TERMINATOR_LEN, RESERVED_BITS,
-    UPDATE_VERSION_LEN,
+    decode_digest, encode_ordered_update_payload, ensure_encoded_value_size,
+    mmr_size_for_watermark, validate_ordered_key_bytes, UpdateRow, ORDERED_KEY_TERMINATOR_LEN,
+    RESERVED_BITS, UPDATE_VERSION_LEN,
 };
 use crate::error::QmdbError;
 
@@ -396,7 +394,10 @@ pub(crate) async fn append_auth_nodes_incrementally<H: Hasher>(
     let fetched = if peak_entries.is_empty() {
         std::collections::HashMap::new()
     } else {
-        let peak_keys: Vec<Key> = peak_entries.iter().map(|(pos, _)| encode_auth_node_key(namespace, *pos)).collect();
+        let peak_keys: Vec<Key> = peak_entries
+            .iter()
+            .map(|(pos, _)| encode_auth_node_key(namespace, *pos))
+            .collect();
         let peak_key_refs: Vec<&Key> = peak_keys.iter().collect();
         session
             .get_many(&peak_key_refs, peak_key_refs.len() as u32)
@@ -483,7 +484,10 @@ pub(crate) async fn compute_auth_root<H: Hasher>(
     let fetched = if peak_positions.is_empty() {
         std::collections::HashMap::new()
     } else {
-        let peak_keys: Vec<Key> = peak_positions.iter().map(|(pos, _)| encode_auth_node_key(namespace, *pos)).collect();
+        let peak_keys: Vec<Key> = peak_positions
+            .iter()
+            .map(|(pos, _)| encode_auth_node_key(namespace, *pos))
+            .collect();
         let peak_key_refs: Vec<&Key> = peak_keys.iter().collect();
         session
             .get_many(&peak_key_refs, peak_key_refs.len() as u32)

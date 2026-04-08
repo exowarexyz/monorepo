@@ -6,11 +6,11 @@ use commonware_storage::mmr::{self, storage::Storage as MmrStorage, Location, Po
 use exoware_sdk_rs::{RangeMode, SerializableReadSession};
 
 use crate::auth::encode_auth_node_key;
+use crate::auth::AuthenticatedBackendNamespace;
 use crate::codec::{
     encode_grafted_node_key, encode_node_key, grafting_height_for, ops_to_grafted_pos,
     position_height,
 };
-use crate::auth::AuthenticatedBackendNamespace;
 
 pub(crate) struct KvMmrStorage<'a, D: Digest> {
     pub(crate) session: &'a SerializableReadSession,

@@ -576,5 +576,4 @@ mod tests {
         assert_eq!(compute_tier(chrono::Duration::days(15)), 4);
         assert_eq!(compute_tier(chrono::Duration::days(60)), 5);
     }
-
 }

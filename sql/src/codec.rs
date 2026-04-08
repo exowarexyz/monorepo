@@ -1,12 +1,10 @@
-use exoware_sdk_rs::keys::{Key, KeyCodec, KeyMut};
-use exoware_sdk_rs::kv_codec::{
-    interleave_ordered_key_fields, StoredRow, StoredValue,
-};
 use datafusion::arrow::datatypes::i256;
 use datafusion::common::{DataFusionError, Result as DataFusionResult};
+use exoware_sdk_rs::keys::{Key, KeyCodec, KeyMut};
+use exoware_sdk_rs::kv_codec::{interleave_ordered_key_fields, StoredRow, StoredValue};
 
-use crate::types::*;
 use crate::builder::archived_non_pk_value_is_valid;
+use crate::types::*;
 use crate::writer::decode_list_element_archived;
 
 pub(crate) fn primary_key_codec(table_prefix: u8) -> Result<KeyCodec, String> {
@@ -61,7 +59,6 @@ pub(crate) fn ensure_codec_payload_fits(
     }
     Ok(())
 }
-
 
 pub(crate) fn primary_key_prefix_range(table_prefix: u8) -> KeyRange {
     let codec = primary_key_codec(table_prefix).expect("table prefix should fit primary key codec");
@@ -244,7 +241,10 @@ pub(crate) fn encode_cell_into_ordered_key_bytes(
     }
 }
 
-pub(crate) fn decode_cell_from_ordered_key_bytes(bytes: &[u8], kind: ColumnKind) -> Option<CellValue> {
+pub(crate) fn decode_cell_from_ordered_key_bytes(
+    bytes: &[u8],
+    kind: ColumnKind,
+) -> Option<CellValue> {
     Some(match kind {
         ColumnKind::Int64 => {
             let raw = bytes.try_into().ok()?;
@@ -408,7 +408,11 @@ pub(crate) fn encode_primary_key_bound(
 }
 
 #[cfg(test)]
-pub(crate) fn decode_primary_key(table_prefix: u8, key: &Key, model: &TableModel) -> Option<Vec<CellValue>> {
+pub(crate) fn decode_primary_key(
+    table_prefix: u8,
+    key: &Key,
+    model: &TableModel,
+) -> Option<Vec<CellValue>> {
     if table_prefix != model.table_prefix || !model.primary_key_codec.matches(key) {
         return None;
     }
@@ -652,13 +656,9 @@ pub(crate) fn cell_value_from_archived_non_pk(
         (ColumnKind::Int64, StoredValue::Int64(v)) => CellValue::Int64(*v),
         (ColumnKind::UInt64, StoredValue::UInt64(v)) => CellValue::UInt64(*v),
         (ColumnKind::Float64, StoredValue::Float64(v)) => CellValue::Float64(*v),
-        (ColumnKind::Float64, StoredValue::Int64(v)) => {
-            CellValue::Float64(*v as f64)
-        }
+        (ColumnKind::Float64, StoredValue::Int64(v)) => CellValue::Float64(*v as f64),
         (ColumnKind::Boolean, StoredValue::Boolean(v)) => CellValue::Boolean(*v),
-        (ColumnKind::Date32, StoredValue::Int64(v)) => {
-            CellValue::Date32(*v as i32)
-        }
+        (ColumnKind::Date32, StoredValue::Int64(v)) => CellValue::Date32(*v as i32),
         (ColumnKind::Date64, StoredValue::Int64(v)) => CellValue::Date64(*v),
         (ColumnKind::Timestamp, StoredValue::Int64(v)) => CellValue::Timestamp(*v),
         (ColumnKind::Decimal128, StoredValue::Bytes(bytes)) => {

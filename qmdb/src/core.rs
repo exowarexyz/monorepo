@@ -5,22 +5,20 @@ use std::time::Duration;
 
 use commonware_codec::{Codec, Encode, Read as CodecRead};
 use commonware_cryptography::{Digest, Hasher};
-use commonware_storage::mmr::{
-    self, iterator::PeakIterator, Location, Position, StandardHasher,
-};
+use commonware_storage::mmr::{self, iterator::PeakIterator, Location, Position, StandardHasher};
 use commonware_storage::qmdb::{
     any::ordered::variable::Operation as QmdbOperation,
-    any::unordered::variable::Operation as UnorderedQmdbOperation,
-    operation::Key as QmdbKey,
+    any::unordered::variable::Operation as UnorderedQmdbOperation, operation::Key as QmdbKey,
 };
 use exoware_sdk_rs::keys::Key;
 use exoware_sdk_rs::{ClientError, RangeMode, SerializableReadSession, StoreClient};
 
 use crate::codec::{
-    decode_digest, decode_operation_location_key, decode_update_location, decode_watermark_location,
-    encode_chunk_key, encode_current_meta_key, encode_grafted_node_key, encode_node_key,
-    encode_operation_key, encode_presence_key, encode_update_key, encode_watermark_key,
-    ensure_encoded_value_size, mmr_size_for_watermark, UpdateRow, WATERMARK_CODEC,
+    decode_digest, decode_operation_location_key, decode_update_location,
+    decode_watermark_location, encode_chunk_key, encode_current_meta_key, encode_grafted_node_key,
+    encode_node_key, encode_operation_key, encode_presence_key, encode_update_key,
+    encode_watermark_key, ensure_encoded_value_size, mmr_size_for_watermark, UpdateRow,
+    WATERMARK_CODEC,
 };
 use crate::error::QmdbError;
 use crate::VersionedValue;
@@ -148,9 +146,7 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
             .await?
             .is_some();
         if available < watermark
-            || (!watermark_exists
-                && available == Location::new(0)
-                && watermark == Location::new(0))
+            || (!watermark_exists && available == Location::new(0) && watermark == Location::new(0))
         {
             return Err(QmdbError::WatermarkTooLow {
                 requested: watermark,
@@ -165,11 +161,7 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
         session: &SerializableReadSession,
         location: Location,
     ) -> Result<(), QmdbError> {
-        if session
-            .get(&encode_presence_key(location))
-            .await?
-            .is_some()
-        {
+        if session.get(&encode_presence_key(location)).await?.is_some() {
             Ok(())
         } else {
             Err(QmdbError::CurrentProofRequiresBatchBoundary { location })
@@ -204,7 +196,10 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
         let fetched = if peak_entries.is_empty() {
             std::collections::HashMap::new()
         } else {
-            let peak_keys: Vec<Key> = peak_entries.iter().map(|(pos, _)| encode_node_key(*pos)).collect();
+            let peak_keys: Vec<Key> = peak_entries
+                .iter()
+                .map(|(pos, _)| encode_node_key(*pos))
+                .collect();
             let peak_key_refs: Vec<&Key> = peak_keys.iter().collect();
             session
                 .get_many(&peak_key_refs, peak_key_refs.len() as u32)
@@ -285,7 +280,10 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
         let fetched = if peak_positions.is_empty() {
             std::collections::HashMap::new()
         } else {
-            let peak_keys: Vec<Key> = peak_positions.iter().map(|(pos, _)| encode_node_key(*pos)).collect();
+            let peak_keys: Vec<Key> = peak_positions
+                .iter()
+                .map(|(pos, _)| encode_node_key(*pos))
+                .collect();
             let peak_key_refs: Vec<&Key> = peak_keys.iter().collect();
             session
                 .get_many(&peak_key_refs, peak_key_refs.len() as u32)
@@ -392,10 +390,7 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
                 }))
             }
         });
-        futures::future::join_all(futs)
-            .await
-            .into_iter()
-            .collect()
+        futures::future::join_all(futs).await.into_iter().collect()
     }
 
     pub(crate) async fn publish_writer_location_watermark_with_encoded_ops<
@@ -473,9 +468,7 @@ impl PreparedUpload {
     {
         use commonware_storage::qmdb::any::unordered::Update as UnorderedUpdate;
         Self::build_from_ops(latest_location, operations, |op| match op {
-            UnorderedQmdbOperation::Update(UnorderedUpdate(key, value)) => {
-                Some((key, Some(value)))
-            }
+            UnorderedQmdbOperation::Update(UnorderedUpdate(key, value)) => Some((key, Some(value))),
             UnorderedQmdbOperation::Delete(key) => Some((key, None)),
             UnorderedQmdbOperation::CommitFloor(_, _) => None,
         })

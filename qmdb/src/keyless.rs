@@ -9,18 +9,18 @@ use commonware_storage::{
 };
 use exoware_sdk_rs::StoreClient;
 
+use crate::auth::AuthenticatedBackendNamespace;
 use crate::auth::{
     append_auth_nodes_incrementally, build_auth_upload_rows, compute_auth_root,
     encode_auth_presence_key, encode_auth_watermark_key, load_auth_operation_at,
     load_auth_operation_bytes_range, load_auth_operation_range, read_latest_auth_watermark,
-    require_published_auth_watermark, require_auth_uploaded_boundary,
+    require_auth_uploaded_boundary, require_published_auth_watermark,
 };
 use crate::codec::{ensure_encoded_value_size, mmr_size_for_watermark};
 use crate::core::{retry_transient_post_ingest_query, wait_until_query_visible_sequence};
 use crate::error::QmdbError;
 use crate::proof::AuthenticatedOperationRangeProof;
 use crate::storage::AuthKvMmrStorage;
-use crate::auth::AuthenticatedBackendNamespace;
 use crate::UploadReceipt;
 
 #[derive(Clone, Debug)]

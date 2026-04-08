@@ -35,7 +35,10 @@ fn get_returns_value_after_put() {
     store
         .put_batch(&[(Bytes::from_static(b"k"), Bytes::from_static(b"v"))])
         .expect("put_batch");
-    assert_eq!(store.get(b"k").expect("get").as_deref(), Some(b"v".as_slice()));
+    assert_eq!(
+        store.get(b"k").expect("get").as_deref(),
+        Some(b"v".as_slice())
+    );
 }
 
 #[test]
@@ -73,7 +76,9 @@ fn range_scan_inclusive_end_includes_end_key() {
     let store = RocksStore::open(dir.path()).expect("open db");
     seed_abc(&store);
 
-    let rows = store.range_scan(b"a", b"c", usize::MAX, true).expect("scan");
+    let rows = store
+        .range_scan(b"a", b"c", usize::MAX, true)
+        .expect("scan");
     assert_eq!(keys(&rows), vec![b"a".as_slice(), b"b", b"c"]);
 }
 
@@ -108,7 +113,9 @@ fn range_scan_returns_empty_when_no_keys_match() {
     let store = RocksStore::open(dir.path()).expect("open db");
     seed_abc(&store);
 
-    let rows = store.range_scan(b"d", b"f", usize::MAX, true).expect("scan");
+    let rows = store
+        .range_scan(b"d", b"f", usize::MAX, true)
+        .expect("scan");
     assert!(rows.is_empty());
 }
 
@@ -147,7 +154,9 @@ fn range_scan_reverse_returns_descending_order() {
     let store = RocksStore::open(dir.path()).expect("open db");
     seed_abc(&store);
 
-    let rows = store.range_scan(b"a", b"c", usize::MAX, false).expect("scan");
+    let rows = store
+        .range_scan(b"a", b"c", usize::MAX, false)
+        .expect("scan");
     assert_eq!(keys(&rows), vec![b"c".as_slice(), b"b", b"a"]);
 }
 
@@ -167,7 +176,9 @@ fn range_scan_reverse_unbounded_end() {
     let store = RocksStore::open(dir.path()).expect("open db");
     seed_abc(&store);
 
-    let rows = store.range_scan(b"a", b"", usize::MAX, false).expect("scan");
+    let rows = store
+        .range_scan(b"a", b"", usize::MAX, false)
+        .expect("scan");
     assert_eq!(keys(&rows), vec![b"c".as_slice(), b"b", b"a"]);
 }
 
@@ -177,7 +188,9 @@ fn range_scan_single_key() {
     let store = RocksStore::open(dir.path()).expect("open db");
     seed_abc(&store);
 
-    let rows = store.range_scan(b"b", b"b", usize::MAX, true).expect("scan");
+    let rows = store
+        .range_scan(b"b", b"b", usize::MAX, true)
+        .expect("scan");
     assert_eq!(keys(&rows), vec![b"b".as_slice()]);
 }
 
@@ -189,9 +202,7 @@ fn get_many_returns_found_and_missing() {
     let store = RocksStore::open(dir.path()).expect("open db");
     seed_abc(&store);
 
-    let results = store
-        .get_many(&[b"a", b"missing", b"c"])
-        .expect("get_many");
+    let results = store.get_many(&[b"a", b"missing", b"c"]).expect("get_many");
     assert_eq!(results.len(), 3);
     assert_eq!(results[0], (b"a".to_vec(), Some(b"1".to_vec())));
     assert_eq!(results[1], (b"missing".to_vec(), None));
@@ -222,7 +233,10 @@ fn delete_batch_removes_keys() {
 
     store.delete_batch(&[b"a", b"c"]).expect("delete_batch");
     assert!(store.get(b"a").expect("get").is_none());
-    assert_eq!(store.get(b"b").expect("get").as_deref(), Some(b"2".as_slice()));
+    assert_eq!(
+        store.get(b"b").expect("get").as_deref(),
+        Some(b"2".as_slice())
+    );
     assert!(store.get(b"c").expect("get").is_none());
 }
 

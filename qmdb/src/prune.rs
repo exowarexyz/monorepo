@@ -55,10 +55,7 @@ mod tests {
             &*policy.match_key.payload_regex,
             "(?s-u)^(?P<logical>(?:\\x00\\xFF|[^\\x00])*)\\x00\\x00(?P<version>.{8})$"
         );
-        assert_eq!(
-            policy.group_by.capture_groups,
-            vec![Utf8::from("logical")]
-        );
+        assert_eq!(policy.group_by.capture_groups, vec![Utf8::from("logical")]);
         let order_by = policy.order_by.expect("order_by");
         assert_eq!(&*order_by.capture_group, "version");
         assert_eq!(order_by.encoding, OrderEncoding::U64Be);

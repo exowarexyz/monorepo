@@ -30,25 +30,25 @@ mod boundary;
 pub(crate) mod codec;
 mod core;
 pub mod error;
-pub(crate) mod storage;
 pub mod proof;
 pub mod prune;
+pub(crate) mod storage;
 
-mod ordered;
-mod unordered;
 mod immutable;
 mod keyless;
+mod ordered;
+mod unordered;
 
 pub use error::QmdbError;
+pub use immutable::ImmutableClient;
+pub use keyless::KeylessClient;
+pub use ordered::OrderedClient;
 pub use proof::{
     AuthenticatedOperationRangeProof, CurrentOperationRangeProofResult, KeyValueProofResult,
     MultiProofResult, OperationRangeProof, UnorderedOperationRangeProof,
     VariantOperationRangeProof, VariantRoot,
 };
-pub use ordered::OrderedClient;
 pub use unordered::UnorderedClient;
-pub use immutable::ImmutableClient;
-pub use keyless::KeylessClient;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub use boundary::build_current_boundary_state;

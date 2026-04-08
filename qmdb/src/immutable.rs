@@ -10,19 +10,18 @@ use commonware_storage::{
 use commonware_utils::Array;
 use exoware_sdk_rs::StoreClient;
 
+use crate::auth::AuthenticatedBackendNamespace;
 use crate::auth::{
     append_auth_nodes_incrementally, build_auth_immutable_upload_rows, compute_auth_root,
     decode_auth_immutable_update_location, encode_auth_presence_key, encode_auth_watermark_key,
     load_auth_operation_at, load_auth_operation_range, load_latest_auth_immutable_update_row,
-    read_latest_auth_watermark, require_published_auth_watermark,
-    require_auth_uploaded_boundary,
+    read_latest_auth_watermark, require_auth_uploaded_boundary, require_published_auth_watermark,
 };
 use crate::codec::{mmr_size_for_watermark, UpdateRow};
 use crate::core::{retry_transient_post_ingest_query, wait_until_query_visible_sequence};
 use crate::error::QmdbError;
 use crate::proof::AuthenticatedOperationRangeProof;
 use crate::storage::AuthKvMmrStorage;
-use crate::auth::AuthenticatedBackendNamespace;
 use crate::{UploadReceipt, VersionedValue};
 
 #[derive(Clone, Debug)]
@@ -197,11 +196,9 @@ where
             return Ok(None);
         };
         let location = decode_auth_immutable_update_location(&row_key)?;
-        let decoded = <UpdateRow<K, V> as CodecRead>::read_cfg(
-            &mut row_value.as_ref(),
-            &self.update_row_cfg,
-        )
-        .map_err(|e| QmdbError::CorruptData(format!("update row decode: {e}")))?;
+        let decoded =
+            <UpdateRow<K, V> as CodecRead>::read_cfg(&mut row_value.as_ref(), &self.update_row_cfg)
+                .map_err(|e| QmdbError::CorruptData(format!("update row decode: {e}")))?;
         if <K as AsRef<[u8]>>::as_ref(&decoded.key) != key.as_ref() {
             return Err(QmdbError::CorruptData(format!(
                 "authenticated immutable update row key mismatch at location {location}"

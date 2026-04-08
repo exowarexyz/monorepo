@@ -1,54 +1,51 @@
 pub mod prune;
 
-mod types;
-mod codec;
-mod predicate;
-mod filter;
-mod diagnostics;
-mod builder;
-mod writer;
-mod scan;
 mod aggregate;
+mod builder;
+mod codec;
+mod diagnostics;
+mod filter;
+mod predicate;
+mod scan;
 mod schema;
+mod types;
+mod writer;
 
+pub use schema::KvSchema;
+pub use types::default_orders_index_specs;
 pub use types::{
     CellValue, IndexBackfillEvent, IndexBackfillOptions, IndexBackfillReport, IndexLayout,
     IndexSpec, TableColumnConfig,
 };
-pub use types::default_orders_index_specs;
-pub use schema::KvSchema;
 pub use writer::{BatchWriter, TableWriter};
-
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::types::*;
-    use super::codec::*;
-    use super::predicate::*;
-    use super::filter::*;
-    use super::writer::*;
-    use super::builder::*;
-    use super::diagnostics::*;
-    use super::scan::*;
     use super::aggregate::*;
-    use std::collections::{BTreeMap, HashSet};
-    use datafusion::arrow::datatypes::{DataType, TimeUnit, i256};
+    use super::builder::*;
+    use super::codec::*;
+    use super::diagnostics::*;
+    use super::filter::*;
+    use super::predicate::*;
+    use super::scan::*;
+    use super::types::*;
+    use super::writer::*;
+    use super::*;
+    use commonware_codec::Encode;
+    use datafusion::arrow::array::{Float64Array, Int64Array, LargeStringArray, StringViewArray};
+    use datafusion::arrow::datatypes::{i256, DataType, TimeUnit};
+    use datafusion::arrow::record_batch::RecordBatch;
     use datafusion::common::ScalarValue;
     use datafusion::logical_expr::{Expr, Operator};
+    use datafusion::physical_plan::ExecutionPlan;
     use datafusion::prelude::SessionContext;
-    use commonware_codec::Encode;
     use exoware_sdk_rs::keys::{Key, KeyCodec};
     use exoware_sdk_rs::kv_codec::{
         canonicalize_reduced_group_values, decode_stored_row, encode_reduced_group_key,
         eval_predicate, KvReducedValue, StoredRow,
     };
     use exoware_sdk_rs::{RangeReduceOp, RangeReduceRequest, StoreClient};
-    use datafusion::arrow::array::{
-        Float64Array, Int64Array, LargeStringArray, StringViewArray,
-    };
-    use datafusion::arrow::record_batch::RecordBatch;
-    use datafusion::physical_plan::ExecutionPlan;
+    use std::collections::{BTreeMap, HashSet};
     use std::ops::Bound::{Included, Unbounded};
     use std::pin::Pin;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
@@ -58,8 +55,8 @@ mod tests {
     use axum::Router;
     use bytes::Bytes;
     use connectrpc::{Chain, ConnectError, ConnectRpcService, Context};
-    use exoware_sdk_rs::kv_codec::{eval_expr, expr_needs_value};
     use exoware_sdk_rs::connect_compression_registry;
+    use exoware_sdk_rs::kv_codec::{eval_expr, expr_needs_value};
     use exoware_sdk_rs::store::ingest::v1::{
         PutResponse as ProtoPutResponse, Service as IngestService,
         ServiceServer as IngestServiceServer,
@@ -71,12 +68,12 @@ mod tests {
         ReduceResponse as ProtoReduceResponse, Service as QueryService,
         ServiceServer as QueryServiceServer,
     };
+    use exoware_sdk_rs::RangeMode;
     use exoware_sdk_rs::{
         parse_range_traversal_direction, to_domain_reduce_request, to_proto_optional_reduced_value,
         to_proto_reduced_value, RangeTraversalDirection, RangeTraversalModeError,
     };
     use exoware_sdk_rs::{RangeReduceGroup, RangeReduceResponse, RangeReduceResult};
-    use exoware_sdk_rs::RangeMode;
     use futures::{stream, Stream, TryStreamExt};
     use tokio::sync::{mpsc, oneshot, Notify};
 
@@ -454,7 +451,9 @@ mod tests {
             ConnectError,
         > {
             ensure_min_sequence_number(&self.state.sequence_number, request.min_sequence_number)?;
-            let batch_size = usize::try_from(request.batch_size).unwrap_or(usize::MAX).max(1);
+            let batch_size = usize::try_from(request.batch_size)
+                .unwrap_or(usize::MAX)
+                .max(1);
             let guard = self.state.kv.lock().expect("kv mutex poisoned");
             let mut entries: Vec<ProtoGetManyEntry> = Vec::new();
             for key_bytes in request.keys.iter() {
@@ -6371,9 +6370,7 @@ mod tests {
         state.range_reduce_calls.store(0, AtomicOrdering::SeqCst);
 
         let batches = ctx
-            .sql(
-                "SELECT COUNT(*) AS c, SUM(amount) AS s FROM inc_pk WHERE id <= 3",
-            )
+            .sql("SELECT COUNT(*) AS c, SUM(amount) AS s FROM inc_pk WHERE id <= 3")
             .await
             .expect("lte agg")
             .collect()
@@ -6383,7 +6380,10 @@ mod tests {
         let batch = &batches[0];
         let c = ScalarValue::try_from_array(batch.column(0), 0).expect("count");
         assert!(
-            matches!(c, ScalarValue::UInt64(Some(3)) | ScalarValue::Int64(Some(3))),
+            matches!(
+                c,
+                ScalarValue::UInt64(Some(3)) | ScalarValue::Int64(Some(3))
+            ),
             "count should include id=3"
         );
         assert_eq!(
@@ -7614,7 +7614,12 @@ mod tests {
 
         impl TestServers {
             fn client(&self) -> StoreClient {
-                StoreClient::with_split_urls(&self.query_url, &self.ingest_url, &self.query_url, &self.ingest_url)
+                StoreClient::with_split_urls(
+                    &self.query_url,
+                    &self.ingest_url,
+                    &self.query_url,
+                    &self.ingest_url,
+                )
             }
         }
 

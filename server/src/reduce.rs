@@ -4,14 +4,14 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
-use exoware_sdk_rs::keys::Key;
-use exoware_sdk_rs::kv_codec::{
-    decode_stored_row, canonicalize_reduced_group_values, encode_reduced_group_key, eval_expr,
-    eval_predicate, expr_needs_value, predicate_needs_value, KvReducedValue,
-};
-use exoware_sdk_rs as exoware_proto;
 use exoware_proto::{
     RangeReduceGroup, RangeReduceOp, RangeReduceRequest, RangeReduceResponse, RangeReduceResult,
+};
+use exoware_sdk_rs as exoware_proto;
+use exoware_sdk_rs::keys::Key;
+use exoware_sdk_rs::kv_codec::{
+    canonicalize_reduced_group_values, decode_stored_row, encode_reduced_group_key, eval_expr,
+    eval_predicate, expr_needs_value, predicate_needs_value, KvReducedValue,
 };
 
 #[derive(Debug)]
@@ -360,8 +360,8 @@ mod tests {
     use commonware_codec::Encode as _;
     use exoware_sdk_rs::keys::Key;
     use exoware_sdk_rs::kv_codec::{
-        KvExpr, KvFieldKind, KvFieldRef, KvPredicate, KvPredicateCheck,
-        KvPredicateConstraint, KvReducedValue, StoredRow, StoredValue,
+        KvExpr, KvFieldKind, KvFieldRef, KvPredicate, KvPredicateCheck, KvPredicateConstraint,
+        KvReducedValue, StoredRow, StoredValue,
     };
     use exoware_sdk_rs::{RangeReduceOp, RangeReduceRequest, RangeReducerSpec};
 
@@ -551,14 +551,8 @@ mod tests {
         assert_eq!(
             counts,
             vec![
-                (
-                    Some(KvReducedValue::Utf8("x".into())),
-                    result_u64(3),
-                ),
-                (
-                    Some(KvReducedValue::Utf8("y".into())),
-                    result_u64(2),
-                ),
+                (Some(KvReducedValue::Utf8("x".into())), result_u64(3),),
+                (Some(KvReducedValue::Utf8("y".into())), result_u64(2),),
             ]
         );
     }
@@ -617,10 +611,7 @@ mod tests {
             make_row(b"c", vec![Some(StoredValue::Int64(30))]),
         ];
         let request = RangeReduceRequest {
-            reducers: vec![reducer(
-                RangeReduceOp::SumField,
-                Some(int64_value_field(0)),
-            )],
+            reducers: vec![reducer(RangeReduceOp::SumField, Some(int64_value_field(0)))],
             group_by: Vec::new(),
             filter: Some(KvPredicate {
                 checks: vec![KvPredicateCheck {

@@ -32,22 +32,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn build_schema(client: StoreClient) -> Result<KvSchema, String> {
-    KvSchema::new(client)
-        .table_versioned(
-            "documents",
-            vec![
-                TableColumnConfig::new("doc_id", DataType::FixedSizeBinary(16), false),
-                // Monotonically increasing version number
-                TableColumnConfig::new("version", DataType::UInt64, false),
-                // Document metadata
-                TableColumnConfig::new("title", DataType::Utf8, false),
-                TableColumnConfig::new("body", DataType::Utf8, true),
-                TableColumnConfig::new("author", DataType::Utf8, true),
-            ],
-            "doc_id",
-            "version", // version column (UInt64)
-            vec![],
-        )
+    KvSchema::new(client).table_versioned(
+        "documents",
+        vec![
+            TableColumnConfig::new("doc_id", DataType::FixedSizeBinary(16), false),
+            // Monotonically increasing version number
+            TableColumnConfig::new("version", DataType::UInt64, false),
+            // Document metadata
+            TableColumnConfig::new("title", DataType::Utf8, false),
+            TableColumnConfig::new("body", DataType::Utf8, true),
+            TableColumnConfig::new("author", DataType::Utf8, true),
+        ],
+        "doc_id",
+        "version", // version column (UInt64)
+        vec![],
+    )
 }
 
 async fn demo_batch_writer_insert() {
@@ -124,10 +123,7 @@ async fn demo_batch_writer_insert() {
         )
         .unwrap();
 
-    println!(
-        "  Queued {} document-version rows",
-        batch.pending_count()
-    );
+    println!("  Queued {} document-version rows", batch.pending_count());
     println!("  (skipping flush -- no server in this demo)");
 }
 

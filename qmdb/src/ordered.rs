@@ -23,9 +23,7 @@ use crate::codec::{
     encode_chunk_key, encode_current_meta_key, encode_presence_key, encode_update_key,
     ensure_encoded_value_size, mmr_size_for_watermark, UpdateRow, NO_PARTIAL_CHUNK,
 };
-use crate::core::{
-    HistoricalOpsClientCore, PreparedCurrentBoundaryUpload, PreparedUpload,
-};
+use crate::core::{HistoricalOpsClientCore, PreparedCurrentBoundaryUpload, PreparedUpload};
 use crate::error::QmdbError;
 use crate::proof::{
     CurrentOperationRangeProofResult, KeyValueProofResult, MultiProofResult, OperationRangeProof,
@@ -48,8 +46,8 @@ pub struct OrderedClient<
     _marker: PhantomData<(H, K)>,
 }
 
-impl<H: Hasher, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync, const N: usize>
-    std::fmt::Debug for OrderedClient<H, K, V, N>
+impl<H: Hasher, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync, const N: usize> std::fmt::Debug
+    for OrderedClient<H, K, V, N>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OrderedClient").finish_non_exhaustive()
@@ -523,11 +521,9 @@ where
             });
         };
         let location = decode_update_location(&row_key)?;
-        let decoded = <UpdateRow<K, V> as CodecRead>::read_cfg(
-            &mut row_value.as_ref(),
-            &self.update_row_cfg,
-        )
-        .map_err(|e| QmdbError::CorruptData(format!("update row decode: {e}")))?;
+        let decoded =
+            <UpdateRow<K, V> as CodecRead>::read_cfg(&mut row_value.as_ref(), &self.update_row_cfg)
+                .map_err(|e| QmdbError::CorruptData(format!("update row decode: {e}")))?;
         if <K as AsRef<[u8]>>::as_ref(&decoded.key) != key.as_ref() {
             return Err(QmdbError::ProofKeyNotFound {
                 watermark,

@@ -6,8 +6,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use connectrpc::{Chain, ConnectError, ConnectRpcService, Context, Limits};
-use exoware_sdk_rs::keys::Key;
-use exoware_sdk_rs as exoware_proto;
 use exoware_proto::compact::{
     PruneResponse, Service as CompactApi, ServiceServer as CompactServiceServer,
 };
@@ -26,6 +24,8 @@ use exoware_proto::{
     with_query_detail, with_retry_info_detail, RangeTraversalDirection,
     QUERY_DETAIL_RESPONSE_HEADER,
 };
+use exoware_sdk_rs as exoware_proto;
+use exoware_sdk_rs::keys::Key;
 use futures::{stream, Stream};
 use http::header::HeaderValue;
 use http::HeaderName;
@@ -460,9 +460,8 @@ impl CompactApi for CompactConnect {
         >,
     ) -> Result<(PruneResponse, Context), ConnectError> {
         validate::validate_prune_request(&request)?;
-        let document =
-            exoware_proto::prune_policy_document_from_prune_request_view(&request)
-                .map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
+        let document = exoware_proto::prune_policy_document_from_prune_request_view(&request)
+            .map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
         crate::prune::execute_prune(&self.state.engine, &document)
             .map_err(|e| ConnectError::internal(e.to_string()))?;
         Ok((PruneResponse::default(), ctx))

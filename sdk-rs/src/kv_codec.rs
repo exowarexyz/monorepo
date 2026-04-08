@@ -1,7 +1,9 @@
 use std::cmp::Ordering;
 
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{
+    EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
+};
 
 use crate::keys::{read_bit_be, read_bits_to_bytes, write_bit_be, Key};
 
@@ -74,8 +76,8 @@ impl Read for Utf8 {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let range: RangeCfg<usize> = (..).into();
         let bytes = Vec::<u8>::read_cfg(buf, &(range, ()))?;
-        let s = String::from_utf8(bytes)
-            .map_err(|_| CodecError::Invalid("Utf8", "invalid utf8"))?;
+        let s =
+            String::from_utf8(bytes).map_err(|_| CodecError::Invalid("Utf8", "invalid utf8"))?;
         Ok(Utf8(s))
     }
 }
@@ -339,13 +341,34 @@ pub enum StoredValue {
 impl Write for StoredValue {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            StoredValue::Int64(v) => { 0u8.write(buf); v.write(buf); }
-            StoredValue::UInt64(v) => { 1u8.write(buf); v.write(buf); }
-            StoredValue::Float64(v) => { 2u8.write(buf); v.write(buf); }
-            StoredValue::Boolean(v) => { 3u8.write(buf); v.write(buf); }
-            StoredValue::Utf8(v) => { 4u8.write(buf); v.as_bytes().write(buf); }
-            StoredValue::Bytes(v) => { 5u8.write(buf); v.as_slice().write(buf); }
-            StoredValue::List(items) => { 6u8.write(buf); items.as_slice().write(buf); }
+            StoredValue::Int64(v) => {
+                0u8.write(buf);
+                v.write(buf);
+            }
+            StoredValue::UInt64(v) => {
+                1u8.write(buf);
+                v.write(buf);
+            }
+            StoredValue::Float64(v) => {
+                2u8.write(buf);
+                v.write(buf);
+            }
+            StoredValue::Boolean(v) => {
+                3u8.write(buf);
+                v.write(buf);
+            }
+            StoredValue::Utf8(v) => {
+                4u8.write(buf);
+                v.as_bytes().write(buf);
+            }
+            StoredValue::Bytes(v) => {
+                5u8.write(buf);
+                v.as_slice().write(buf);
+            }
+            StoredValue::List(items) => {
+                6u8.write(buf);
+                items.as_slice().write(buf);
+            }
         }
     }
 }
@@ -560,9 +583,7 @@ pub fn eval_expr(
                 (_, KvReducedValue::Int64(0)) | (_, KvReducedValue::UInt64(0)) => {
                     Err("division by zero".to_string())
                 }
-                (_, KvReducedValue::Float64(0.0)) => {
-                    Err("division by zero".to_string())
-                }
+                (_, KvReducedValue::Float64(0.0)) => Err("division by zero".to_string()),
                 (KvReducedValue::Int64(lhs), KvReducedValue::Int64(rhs)) => {
                     Ok(KvReducedValue::Float64(lhs as f64 / rhs as f64))
                 }
@@ -807,26 +828,14 @@ pub fn extract_stored_field(
 
     let value = match (kind, stored) {
         (KvFieldKind::Int64, StoredValue::Int64(v)) => KvReducedValue::Int64(*v),
-        (KvFieldKind::UInt64, StoredValue::UInt64(v)) => {
-            KvReducedValue::UInt64(*v)
-        }
-        (KvFieldKind::Float64, StoredValue::Float64(v)) => {
-            KvReducedValue::Float64(*v)
-        }
-        (KvFieldKind::Float64, StoredValue::Int64(v)) => {
-            KvReducedValue::Float64(*v as f64)
-        }
+        (KvFieldKind::UInt64, StoredValue::UInt64(v)) => KvReducedValue::UInt64(*v),
+        (KvFieldKind::Float64, StoredValue::Float64(v)) => KvReducedValue::Float64(*v),
+        (KvFieldKind::Float64, StoredValue::Int64(v)) => KvReducedValue::Float64(*v as f64),
         (KvFieldKind::Boolean, StoredValue::Boolean(v)) => KvReducedValue::Boolean(*v),
-        (KvFieldKind::Utf8, StoredValue::Utf8(v)) => {
-            KvReducedValue::Utf8(v.as_str().to_string())
-        }
-        (KvFieldKind::Date32, StoredValue::Int64(v)) => {
-            KvReducedValue::Date32(*v as i32)
-        }
+        (KvFieldKind::Utf8, StoredValue::Utf8(v)) => KvReducedValue::Utf8(v.as_str().to_string()),
+        (KvFieldKind::Date32, StoredValue::Int64(v)) => KvReducedValue::Date32(*v as i32),
         (KvFieldKind::Date64, StoredValue::Int64(v)) => KvReducedValue::Date64(*v),
-        (KvFieldKind::Timestamp, StoredValue::Int64(v)) => {
-            KvReducedValue::Timestamp(*v)
-        }
+        (KvFieldKind::Timestamp, StoredValue::Int64(v)) => KvReducedValue::Timestamp(*v),
         (KvFieldKind::Decimal128, StoredValue::Bytes(bytes)) => {
             let raw: [u8; 16] = bytes
                 .as_slice()
@@ -1052,11 +1061,7 @@ fn cmp_i256_le_bytes(a: &[u8; 32], b: &[u8; 32]) -> Ordering {
     }
 }
 
-fn in_i256_le_bounds(
-    value: &[u8; 32],
-    min: Option<&[u8; 32]>,
-    max: Option<&[u8; 32]>,
-) -> bool {
+fn in_i256_le_bounds(value: &[u8; 32], min: Option<&[u8; 32]>, max: Option<&[u8; 32]>) -> bool {
     min.is_none_or(|lower| cmp_i256_le_bytes(value, lower) != Ordering::Less)
         && max.is_none_or(|upper| cmp_i256_le_bytes(value, upper) != Ordering::Greater)
 }

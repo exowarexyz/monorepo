@@ -6,8 +6,8 @@ use datafusion::logical_expr::{Expr, Operator};
 use exoware_sdk_rs::keys::Key;
 use exoware_sdk_rs::kv_codec::{interleave_ordered_key_fields, StoredValue};
 
-use crate::types::*;
 use crate::codec::*;
+use crate::types::*;
 
 #[derive(Debug, Clone)]
 pub(crate) enum PredicateConstraint {
@@ -738,7 +738,11 @@ impl QueryPredicate {
         Ok(best)
     }
 
-    pub(crate) fn index_covers_required_non_pk(&self, model: &TableModel, spec: &ResolvedIndexSpec) -> bool {
+    pub(crate) fn index_covers_required_non_pk(
+        &self,
+        model: &TableModel,
+        spec: &ResolvedIndexSpec,
+    ) -> bool {
         self.constraints
             .keys()
             .copied()
@@ -834,7 +838,11 @@ impl QueryPredicate {
         Ok(ranges)
     }
 
-    pub(crate) fn leading_constrained_prefix(&self, model: &TableModel, spec: &ResolvedIndexSpec) -> usize {
+    pub(crate) fn leading_constrained_prefix(
+        &self,
+        model: &TableModel,
+        spec: &ResolvedIndexSpec,
+    ) -> usize {
         let mut count = 0usize;
         for col_idx in &spec.key_columns {
             let Some(constraint) = self.constraints.get(col_idx) else {
@@ -878,7 +886,11 @@ impl QueryPredicate {
         count
     }
 
-    pub(crate) fn lexicographic_candidate_score(&self, model: &TableModel, spec: &ResolvedIndexSpec) -> usize {
+    pub(crate) fn lexicographic_candidate_score(
+        &self,
+        model: &TableModel,
+        spec: &ResolvedIndexSpec,
+    ) -> usize {
         let mut count = 0usize;
         for col_idx in &spec.key_columns {
             let Some(constraint) = self.constraints.get(col_idx) else {
@@ -941,7 +953,10 @@ impl QueryPredicate {
         }
     }
 
-    pub(crate) fn constraint_supported_for_zorder(kind: ColumnKind, constraint: &PredicateConstraint) -> bool {
+    pub(crate) fn constraint_supported_for_zorder(
+        kind: ColumnKind,
+        constraint: &PredicateConstraint,
+    ) -> bool {
         matches!(
             (kind, constraint),
             (ColumnKind::Utf8, PredicateConstraint::StringEq(_))
@@ -2015,16 +2030,12 @@ pub(crate) fn matches_archived_non_pk_constraint(
         Some(_) if matches!(constraint, PredicateConstraint::IsNull) => false,
         Some(_) if matches!(constraint, PredicateConstraint::IsNotNull) => true,
         Some(stored) => match (col.kind, stored, constraint) {
-            (
-                ColumnKind::Utf8,
-                StoredValue::Utf8(v),
-                PredicateConstraint::StringEq(expected),
-            ) => v.as_str() == expected,
-            (
-                ColumnKind::Utf8,
-                StoredValue::Utf8(v),
-                PredicateConstraint::StringIn(values),
-            ) => values.iter().any(|candidate| candidate == v.as_str()),
+            (ColumnKind::Utf8, StoredValue::Utf8(v), PredicateConstraint::StringEq(expected)) => {
+                v.as_str() == expected
+            }
+            (ColumnKind::Utf8, StoredValue::Utf8(v), PredicateConstraint::StringIn(values)) => {
+                values.iter().any(|candidate| candidate == v.as_str())
+            }
             (
                 ColumnKind::Boolean,
                 StoredValue::Boolean(v),
@@ -2096,16 +2107,12 @@ pub(crate) fn matches_archived_non_pk_constraint(
                 StoredValue::UInt64(v),
                 PredicateConstraint::UInt64Range { min, max },
             ) => in_u64_bounds(*v, *min, *max),
-            (
-                ColumnKind::UInt64,
-                StoredValue::UInt64(v),
-                PredicateConstraint::UInt64In(values),
-            ) => values.contains(v),
-            (
-                ColumnKind::Int64,
-                StoredValue::Int64(v),
-                PredicateConstraint::IntIn(values),
-            ) => values.contains(v),
+            (ColumnKind::UInt64, StoredValue::UInt64(v), PredicateConstraint::UInt64In(values)) => {
+                values.contains(v)
+            }
+            (ColumnKind::Int64, StoredValue::Int64(v), PredicateConstraint::IntIn(values)) => {
+                values.contains(v)
+            }
             (
                 ColumnKind::FixedSizeBinary(_),
                 StoredValue::Bytes(v),
@@ -2151,7 +2158,11 @@ pub(crate) fn in_u64_bounds(value: u64, min: Option<u64>, max: Option<u64>) -> b
     true
 }
 
-pub(crate) fn in_f64_bounds(value: f64, lower: &Option<(f64, bool)>, upper: &Option<(f64, bool)>) -> bool {
+pub(crate) fn in_f64_bounds(
+    value: f64,
+    lower: &Option<(f64, bool)>,
+    upper: &Option<(f64, bool)>,
+) -> bool {
     if value.is_nan() {
         return false;
     }
@@ -2429,7 +2440,10 @@ pub(crate) fn apply_i256_constraint(
     }
 }
 
-pub(crate) fn extract_or_in_column(expr: &Expr, model: &TableModel) -> Option<(String, Vec<ScalarValue>)> {
+pub(crate) fn extract_or_in_column(
+    expr: &Expr,
+    model: &TableModel,
+) -> Option<(String, Vec<ScalarValue>)> {
     let mut col_name: Option<String> = None;
     let mut values: Vec<ScalarValue> = Vec::new();
     if !collect_or_equalities(expr, &mut col_name, &mut values) {
@@ -2661,4 +2675,3 @@ pub(crate) fn scalar_to_i256(value: &ScalarValue) -> Option<i256> {
         _ => None,
     }
 }
-

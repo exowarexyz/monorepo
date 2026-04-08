@@ -168,8 +168,7 @@ pub(crate) fn build_grafted_mmr<H: Hasher, const N: usize>(
     let changeset = {
         let mut batch = grafted_mmr.new_batch();
         for (chunk_index, chunk) in complete_chunks.iter().enumerate() {
-            let ops_position =
-                chunk_idx_to_ops_pos(chunk_index as u64, grafting_height_for::<N>());
+            let ops_position = chunk_idx_to_ops_pos(chunk_index as u64, grafting_height_for::<N>());
             let ops_digest = ops_mmr.get_node(ops_position).ok_or_else(|| {
                 QmdbError::CorruptData(format!(
                     "missing ops subtree root at position {ops_position} for chunk {chunk_index}"
@@ -231,8 +230,7 @@ pub(crate) fn combine_current_roots<H: Hasher>(
 
 pub(crate) fn chunk_idx_to_ops_pos(chunk_idx: u64, grafting_height: u32) -> Position {
     let first_leaf_loc = Location::new(chunk_idx << grafting_height);
-    let first_leaf_pos =
-        Position::try_from(first_leaf_loc).expect("chunk_idx_to_ops_pos overflow");
+    let first_leaf_pos = Position::try_from(first_leaf_loc).expect("chunk_idx_to_ops_pos overflow");
     Position::new(*first_leaf_pos + (1u64 << (grafting_height + 1)) - 2)
 }
 

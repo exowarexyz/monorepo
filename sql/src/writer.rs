@@ -4,10 +4,11 @@ use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use commonware_codec::Encode;
 use datafusion::arrow::array::{
     ArrayRef, BooleanArray, Date32Array, Date64Array, Decimal128Array, Decimal256Array,
-    FixedSizeBinaryArray, Float64Array, Int64Array, LargeStringArray, ListArray,
-    StringArray, StringViewArray, TimestampMicrosecondArray, UInt64Array,
+    FixedSizeBinaryArray, Float64Array, Int64Array, LargeStringArray, ListArray, StringArray,
+    StringViewArray, TimestampMicrosecondArray, UInt64Array,
 };
 use datafusion::arrow::datatypes::{i256, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -15,17 +16,16 @@ use datafusion::common::{DataFusionError, Result as DataFusionResult};
 use datafusion::datasource::sink::DataSink;
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, SendableRecordBatchStream};
-use commonware_codec::Encode;
 use exoware_sdk_rs::keys::Key;
-use exoware_sdk_rs::kv_codec::{StoredRow, StoredValue};
 #[cfg(test)]
 use exoware_sdk_rs::kv_codec::decode_stored_row;
+use exoware_sdk_rs::kv_codec::{StoredRow, StoredValue};
 use exoware_sdk_rs::StoreClient;
 use futures::TryStreamExt;
 
-use crate::types::*;
-use crate::codec::*;
 use crate::builder::archived_non_pk_value_is_valid;
+use crate::codec::*;
+use crate::types::*;
 
 #[derive(Debug)]
 pub struct TableWriter {
@@ -402,7 +402,11 @@ pub(crate) fn owned_stored_value_from_archived(
 }
 
 #[cfg(test)]
-pub(crate) fn decode_base_row(pk_values: Vec<CellValue>, value: &[u8], model: &TableModel) -> Option<KvRow> {
+pub(crate) fn decode_base_row(
+    pk_values: Vec<CellValue>,
+    value: &[u8],
+    model: &TableModel,
+) -> Option<KvRow> {
     if pk_values.len() != model.primary_key_indices.len() {
         return None;
     }
@@ -429,20 +433,12 @@ pub(crate) fn decode_base_row(pk_values: Vec<CellValue>, value: &[u8], model: &T
         values[idx] = match (col.kind, stored) {
             (ColumnKind::Int64, StoredValue::Int64(v)) => CellValue::Int64(*v),
             (ColumnKind::UInt64, StoredValue::UInt64(v)) => CellValue::UInt64(*v),
-            (ColumnKind::Float64, StoredValue::Float64(v)) => {
-                CellValue::Float64(*v)
-            }
-            (ColumnKind::Float64, StoredValue::Int64(v)) => {
-                CellValue::Float64(*v as f64)
-            }
+            (ColumnKind::Float64, StoredValue::Float64(v)) => CellValue::Float64(*v),
+            (ColumnKind::Float64, StoredValue::Int64(v)) => CellValue::Float64(*v as f64),
             (ColumnKind::Boolean, StoredValue::Boolean(v)) => CellValue::Boolean(*v),
-            (ColumnKind::Date32, StoredValue::Int64(v)) => {
-                CellValue::Date32(*v as i32)
-            }
+            (ColumnKind::Date32, StoredValue::Int64(v)) => CellValue::Date32(*v as i32),
             (ColumnKind::Date64, StoredValue::Int64(v)) => CellValue::Date64(*v),
-            (ColumnKind::Timestamp, StoredValue::Int64(v)) => {
-                CellValue::Timestamp(*v)
-            }
+            (ColumnKind::Timestamp, StoredValue::Int64(v)) => CellValue::Timestamp(*v),
             (ColumnKind::Decimal128, StoredValue::Bytes(bytes)) => {
                 let arr: [u8; 16] = bytes.as_slice().try_into().ok()?;
                 CellValue::Decimal128(i128::from_le_bytes(arr))
@@ -451,9 +447,7 @@ pub(crate) fn decode_base_row(pk_values: Vec<CellValue>, value: &[u8], model: &T
                 let arr: [u8; 32] = bytes.as_slice().try_into().ok()?;
                 CellValue::Decimal256(i256::from_le_bytes(arr))
             }
-            (ColumnKind::Utf8, StoredValue::Utf8(v)) => {
-                CellValue::Utf8(v.as_str().to_string())
-            }
+            (ColumnKind::Utf8, StoredValue::Utf8(v)) => CellValue::Utf8(v.as_str().to_string()),
             (ColumnKind::FixedSizeBinary(_), StoredValue::Bytes(v)) => {
                 CellValue::FixedBinary(v.as_slice().to_vec())
             }
@@ -476,27 +470,28 @@ pub(crate) fn decode_list_element_archived(
 ) -> Option<CellValue> {
     Some(match (elem, stored) {
         (ListElementKind::Int64, StoredValue::Int64(v)) => CellValue::Int64(*v),
-        (ListElementKind::Float64, StoredValue::Float64(v)) => {
-            CellValue::Float64(*v)
-        }
-        (ListElementKind::Float64, StoredValue::Int64(v)) => {
-            CellValue::Float64(*v as f64)
-        }
+        (ListElementKind::Float64, StoredValue::Float64(v)) => CellValue::Float64(*v),
+        (ListElementKind::Float64, StoredValue::Int64(v)) => CellValue::Float64(*v as f64),
         (ListElementKind::Boolean, StoredValue::Boolean(v)) => CellValue::Boolean(*v),
-        (ListElementKind::Utf8, StoredValue::Utf8(v)) => {
-            CellValue::Utf8(v.as_str().to_string())
-        }
+        (ListElementKind::Utf8, StoredValue::Utf8(v)) => CellValue::Utf8(v.as_str().to_string()),
         _ => return None,
     })
 }
 
-pub(crate) fn required_column<'a>(batch: &'a RecordBatch, name: &str) -> DataFusionResult<&'a ArrayRef> {
+pub(crate) fn required_column<'a>(
+    batch: &'a RecordBatch,
+    name: &str,
+) -> DataFusionResult<&'a ArrayRef> {
     batch.column_by_name(name).ok_or_else(|| {
         DataFusionError::Execution(format!("insert batch is missing required column '{name}'"))
     })
 }
 
-pub(crate) fn i64_value_at(array: &ArrayRef, row_idx: usize, column_name: &str) -> DataFusionResult<i64> {
+pub(crate) fn i64_value_at(
+    array: &ArrayRef,
+    row_idx: usize,
+    column_name: &str,
+) -> DataFusionResult<i64> {
     if array.is_null(row_idx) {
         return Err(DataFusionError::Execution(format!(
             "column '{column_name}' cannot be NULL for kv table insert"
@@ -536,7 +531,11 @@ pub(crate) fn string_value_at(
     )))
 }
 
-pub(crate) fn f64_value_at(array: &ArrayRef, row_idx: usize, column_name: &str) -> DataFusionResult<f64> {
+pub(crate) fn f64_value_at(
+    array: &ArrayRef,
+    row_idx: usize,
+    column_name: &str,
+) -> DataFusionResult<f64> {
     if array.is_null(row_idx) {
         return Err(DataFusionError::Execution(format!(
             "column '{column_name}' cannot be NULL for kv table insert"
@@ -554,7 +553,11 @@ pub(crate) fn f64_value_at(array: &ArrayRef, row_idx: usize, column_name: &str) 
     Ok(values.value(row_idx))
 }
 
-pub(crate) fn bool_value_at(array: &ArrayRef, row_idx: usize, column_name: &str) -> DataFusionResult<bool> {
+pub(crate) fn bool_value_at(
+    array: &ArrayRef,
+    row_idx: usize,
+    column_name: &str,
+) -> DataFusionResult<bool> {
     if array.is_null(row_idx) {
         return Err(DataFusionError::Execution(format!(
             "column '{column_name}' cannot be NULL for kv table insert"
@@ -572,7 +575,11 @@ pub(crate) fn bool_value_at(array: &ArrayRef, row_idx: usize, column_name: &str)
     Ok(values.value(row_idx))
 }
 
-pub(crate) fn date32_value_at(array: &ArrayRef, row_idx: usize, column_name: &str) -> DataFusionResult<i32> {
+pub(crate) fn date32_value_at(
+    array: &ArrayRef,
+    row_idx: usize,
+    column_name: &str,
+) -> DataFusionResult<i32> {
     if array.is_null(row_idx) {
         return Err(DataFusionError::Execution(format!(
             "column '{column_name}' cannot be NULL for kv table insert"
@@ -590,7 +597,11 @@ pub(crate) fn date32_value_at(array: &ArrayRef, row_idx: usize, column_name: &st
     Ok(values.value(row_idx))
 }
 
-pub(crate) fn date64_value_at(array: &ArrayRef, row_idx: usize, column_name: &str) -> DataFusionResult<i64> {
+pub(crate) fn date64_value_at(
+    array: &ArrayRef,
+    row_idx: usize,
+    column_name: &str,
+) -> DataFusionResult<i64> {
     if array.is_null(row_idx) {
         return Err(DataFusionError::Execution(format!(
             "column '{column_name}' cannot be NULL for kv table insert"
@@ -652,7 +663,11 @@ pub(crate) fn decimal128_value_at(
     Ok(values.value(row_idx))
 }
 
-pub(crate) fn uint64_value_at(array: &ArrayRef, row_idx: usize, column_name: &str) -> DataFusionResult<u64> {
+pub(crate) fn uint64_value_at(
+    array: &ArrayRef,
+    row_idx: usize,
+    column_name: &str,
+) -> DataFusionResult<u64> {
     if array.is_null(row_idx) {
         return Err(DataFusionError::Execution(format!(
             "column '{column_name}' cannot be NULL for kv table insert"

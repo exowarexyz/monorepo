@@ -22,23 +22,23 @@ use datafusion::physical_plan::{
     stream::RecordBatchStreamAdapter, DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
     SendableRecordBatchStream,
 };
-use exoware_sdk_rs::kv_codec::{
-    canonicalize_reduced_group_values, encode_reduced_group_key, KvExpr, KvFieldKind, KvFieldRef,
-    KvPredicate, KvPredicateCheck, KvPredicateConstraint, KvReducedValue,
-};
-use exoware_sdk_rs as exoware_proto;
 use exoware_proto::to_domain_reduce_response;
 use exoware_proto::{
     RangeReduceGroup, RangeReduceOp, RangeReduceRequest, RangeReduceResponse, RangeReduceResult,
     RangeReducerSpec,
 };
+use exoware_sdk_rs as exoware_proto;
+use exoware_sdk_rs::kv_codec::{
+    canonicalize_reduced_group_values, encode_reduced_group_key, KvExpr, KvFieldKind, KvFieldRef,
+    KvPredicate, KvPredicateCheck, KvPredicateConstraint, KvReducedValue,
+};
 use exoware_sdk_rs::{SerializableReadSession, StoreClient};
 use futures::SinkExt;
 
-use crate::types::*;
-use crate::predicate::*;
-use crate::filter::*;
 use crate::diagnostics::*;
+use crate::filter::*;
+use crate::predicate::*;
+use crate::types::*;
 
 #[derive(Debug)]
 pub(crate) struct KvAggregatePushdownRule;
@@ -159,7 +159,10 @@ impl KvAggregatePushdownRule {
         Self
     }
 
-    pub(crate) fn try_rewrite_plan(&self, plan: LogicalPlan) -> DataFusionResult<Transformed<LogicalPlan>> {
+    pub(crate) fn try_rewrite_plan(
+        &self,
+        plan: LogicalPlan,
+    ) -> DataFusionResult<Transformed<LogicalPlan>> {
         let LogicalPlan::Aggregate(aggregate) = plan else {
             return Ok(Transformed::no(plan));
         };
@@ -590,7 +593,10 @@ pub(crate) fn reduced_value_to_scalar(
     })
 }
 
-pub(crate) fn cast_scalar_value(value: ScalarValue, data_type: &DataType) -> DataFusionResult<ScalarValue> {
+pub(crate) fn cast_scalar_value(
+    value: ScalarValue,
+    data_type: &DataType,
+) -> DataFusionResult<ScalarValue> {
     if value.data_type() == *data_type {
         return Ok(value);
     }
@@ -988,7 +994,10 @@ pub(crate) fn results_for_output<'a>(
     }
 }
 
-pub(crate) fn rebase_output_plan(output: AggregateOutputPlan, offset: usize) -> AggregateOutputPlan {
+pub(crate) fn rebase_output_plan(
+    output: AggregateOutputPlan,
+    offset: usize,
+) -> AggregateOutputPlan {
     match output {
         AggregateOutputPlan::Direct {
             reducer_idx,
@@ -1390,7 +1399,10 @@ pub(crate) fn strip_alias_expr(expr: &Expr) -> &Expr {
     expr
 }
 
-pub(crate) fn aggregate_expr_filter(expr: &Expr, model: &TableModel) -> DataFusionResult<Option<Expr>> {
+pub(crate) fn aggregate_expr_filter(
+    expr: &Expr,
+    model: &TableModel,
+) -> DataFusionResult<Option<Expr>> {
     Ok(normalize_aggregate_expr(expr, model)?.filter)
 }
 
@@ -1618,7 +1630,10 @@ pub(crate) fn compile_pushdown_scalar_function(
     }
 }
 
-pub(crate) fn infer_pushdown_mul_kind(left: KvFieldKind, right: KvFieldKind) -> DataFusionResult<KvFieldKind> {
+pub(crate) fn infer_pushdown_mul_kind(
+    left: KvFieldKind,
+    right: KvFieldKind,
+) -> DataFusionResult<KvFieldKind> {
     match (left, right) {
         (KvFieldKind::Int64, KvFieldKind::Int64) => Ok(KvFieldKind::Int64),
         (KvFieldKind::UInt64, KvFieldKind::UInt64) => Ok(KvFieldKind::UInt64),
@@ -1652,7 +1667,10 @@ pub(crate) fn infer_pushdown_add_sub_kind(
     }
 }
 
-pub(crate) fn infer_pushdown_div_kind(left: KvFieldKind, right: KvFieldKind) -> DataFusionResult<KvFieldKind> {
+pub(crate) fn infer_pushdown_div_kind(
+    left: KvFieldKind,
+    right: KvFieldKind,
+) -> DataFusionResult<KvFieldKind> {
     match (left, right) {
         (KvFieldKind::Int64, KvFieldKind::Int64)
         | (KvFieldKind::UInt64, KvFieldKind::UInt64)
@@ -1681,7 +1699,9 @@ pub(crate) fn ensure_pushdown_divisor_supported(expr: &PushdownValueExpr) -> Dat
     }
 }
 
-pub(crate) fn scalar_to_reduced_literal(value: &ScalarValue) -> Option<(KvReducedValue, KvFieldKind)> {
+pub(crate) fn scalar_to_reduced_literal(
+    value: &ScalarValue,
+) -> Option<(KvReducedValue, KvFieldKind)> {
     scalar_to_i64(value)
         .map(|v| (KvReducedValue::Int64(v), KvFieldKind::Int64))
         .or_else(|| scalar_to_u64(value).map(|v| (KvReducedValue::UInt64(v), KvFieldKind::UInt64)))
@@ -1944,7 +1964,11 @@ pub(crate) fn build_case_branch_filter(case_expr: Option<&Expr>, when_expr: &Exp
     }
 }
 
-pub(crate) fn combine_optional_filters(left: Option<Expr>, right: Option<Expr>, op: Operator) -> Option<Expr> {
+pub(crate) fn combine_optional_filters(
+    left: Option<Expr>,
+    right: Option<Expr>,
+    op: Operator,
+) -> Option<Expr> {
     match (left, right) {
         (Some(left), Some(right)) => Some(Expr::BinaryExpr(datafusion::logical_expr::BinaryExpr {
             left: Box::new(left),
@@ -2137,4 +2161,3 @@ pub(crate) fn kv_field_kind(kind: ColumnKind) -> Option<KvFieldKind> {
         ColumnKind::List(_) => None,
     }
 }
-

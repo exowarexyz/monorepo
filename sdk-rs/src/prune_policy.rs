@@ -1,6 +1,8 @@
 use anyhow::{ensure, Context};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{
+    Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
+};
 use regex::bytes::Regex;
 use std::collections::HashSet;
 
@@ -374,9 +376,8 @@ fn capture_groups_are_unique(groups: &[Utf8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_policy_document, encode_policy_document, GroupBy, MatchKey, OrderBy,
-        OrderEncoding, PrunePolicy, PrunePolicyDocument, RetainPolicy,
-        PRUNE_POLICY_CONTROL_KEY,
+        decode_policy_document, encode_policy_document, GroupBy, MatchKey, OrderBy, OrderEncoding,
+        PrunePolicy, PrunePolicyDocument, RetainPolicy, PRUNE_POLICY_CONTROL_KEY,
     };
     use crate::kv_codec::Utf8;
 

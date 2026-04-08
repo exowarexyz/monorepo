@@ -148,7 +148,10 @@ async fn keyless_round_trip() {
         )
         .await
         .expect("proof");
-    assert!(proof.verify::<commonware_cryptography::Sha256>(), "proof must verify");
+    assert!(
+        proof.verify::<commonware_cryptography::Sha256>(),
+        "proof must verify"
+    );
     assert_eq!(proof.root, local.root);
     assert_eq!(proof.operations, local.operations);
 }

@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use datafusion::arrow::array::{
-    ArrayRef, BooleanBuilder, Date32Builder, Date64Builder, Decimal128Builder,
-    Decimal256Builder, FixedSizeBinaryBuilder, Float64Builder, Int64Builder, ListBuilder,
-    StringBuilder, TimestampMicrosecondBuilder, UInt64Builder,
+    ArrayRef, BooleanBuilder, Date32Builder, Date64Builder, Decimal128Builder, Decimal256Builder,
+    FixedSizeBinaryBuilder, Float64Builder, Int64Builder, ListBuilder, StringBuilder,
+    TimestampMicrosecondBuilder, UInt64Builder,
 };
 use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::{i256, DataType, SchemaRef};
@@ -11,8 +11,8 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DataFusionError, Result as DataFusionResult};
 use exoware_sdk_rs::kv_codec::{StoredRow, StoredValue};
 
-use crate::types::*;
 use crate::filter::*;
+use crate::types::*;
 
 pub(crate) enum ColumnBuilder {
     Int64(Int64Builder),
@@ -184,7 +184,10 @@ pub(crate) fn build_projected_batch(
     Ok(RecordBatch::try_new(projected_schema.clone(), columns)?)
 }
 
-pub(crate) fn projected_column_indices(model: &TableModel, projection: &Option<Vec<usize>>) -> Vec<usize> {
+pub(crate) fn projected_column_indices(
+    model: &TableModel,
+    projection: &Option<Vec<usize>>,
+) -> Vec<usize> {
     match projection {
         Some(proj) => proj.clone(),
         None => (0..model.columns.len()).collect(),
@@ -261,14 +264,9 @@ pub(crate) fn archived_non_pk_value_is_valid(
         (ColumnKind::List(ListElementKind::Int64), StoredValue::List(items)) => items
             .iter()
             .all(|item| matches!(item, StoredValue::Int64(_))),
-        (ColumnKind::List(ListElementKind::Float64), StoredValue::List(items)) => {
-            items.iter().all(|item| {
-                matches!(
-                    item,
-                    StoredValue::Float64(_) | StoredValue::Int64(_)
-                )
-            })
-        }
+        (ColumnKind::List(ListElementKind::Float64), StoredValue::List(items)) => items
+            .iter()
+            .all(|item| matches!(item, StoredValue::Float64(_) | StoredValue::Int64(_))),
         (ColumnKind::List(ListElementKind::Boolean), StoredValue::List(items)) => items
             .iter()
             .all(|item| matches!(item, StoredValue::Boolean(_))),
@@ -288,9 +286,7 @@ pub(crate) fn append_archived_non_pk_value(
         return builder.append(&CellValue::Null);
     };
     match (builder, col.kind, stored) {
-        (ColumnBuilder::Int64(b), ColumnKind::Int64, StoredValue::Int64(v)) => {
-            b.append_value(*v)
-        }
+        (ColumnBuilder::Int64(b), ColumnKind::Int64, StoredValue::Int64(v)) => b.append_value(*v),
         (ColumnBuilder::UInt64(b), ColumnKind::UInt64, StoredValue::UInt64(v)) => {
             b.append_value(*v)
         }
@@ -306,27 +302,17 @@ pub(crate) fn append_archived_non_pk_value(
         (ColumnBuilder::Date32(b), ColumnKind::Date32, StoredValue::Int64(v)) => {
             b.append_value(*v as i32)
         }
-        (ColumnBuilder::Date64(b), ColumnKind::Date64, StoredValue::Int64(v)) => {
-            b.append_value(*v)
-        }
+        (ColumnBuilder::Date64(b), ColumnKind::Date64, StoredValue::Int64(v)) => b.append_value(*v),
         (ColumnBuilder::Timestamp(b), ColumnKind::Timestamp, StoredValue::Int64(v)) => {
             b.append_value(*v)
         }
-        (
-            ColumnBuilder::Decimal128(b),
-            ColumnKind::Decimal128,
-            StoredValue::Bytes(bytes),
-        ) => {
+        (ColumnBuilder::Decimal128(b), ColumnKind::Decimal128, StoredValue::Bytes(bytes)) => {
             let arr: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
                 DataFusionError::Execution("invalid Decimal128 byte width".to_string())
             })?;
             b.append_value(i128::from_le_bytes(arr))
         }
-        (
-            ColumnBuilder::Decimal256(b),
-            ColumnKind::Decimal256,
-            StoredValue::Bytes(bytes),
-        ) => {
+        (ColumnBuilder::Decimal256(b), ColumnKind::Decimal256, StoredValue::Bytes(bytes)) => {
             let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
                 DataFusionError::Execution("invalid Decimal256 byte width".to_string())
             })?;
@@ -335,11 +321,7 @@ pub(crate) fn append_archived_non_pk_value(
         (ColumnBuilder::Utf8 { builder, .. }, ColumnKind::Utf8, StoredValue::Utf8(v)) => {
             builder.append_value(v.as_str())
         }
-        (
-            ColumnBuilder::FixedBinary(b),
-            ColumnKind::FixedSizeBinary(_),
-            StoredValue::Bytes(v),
-        ) => b
+        (ColumnBuilder::FixedBinary(b), ColumnKind::FixedSizeBinary(_), StoredValue::Bytes(v)) => b
             .append_value(v.as_slice())
             .map_err(|e| DataFusionError::Execution(format!("FixedBinary append error: {e}")))?,
         (

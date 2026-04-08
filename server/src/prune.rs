@@ -34,11 +34,7 @@ impl std::fmt::Display for PruneError {
 
 impl std::error::Error for PruneError {}
 
-fn extract_order_value(
-    payload: &[u8],
-    regex: &Regex,
-    policy: &PrunePolicy,
-) -> Option<Vec<u8>> {
+fn extract_order_value(payload: &[u8], regex: &Regex, policy: &PrunePolicy) -> Option<Vec<u8>> {
     let order_by = policy.order_by.as_ref()?;
     let captures = regex.captures(payload)?;
     let matched = captures.name(&order_by.capture_group)?;
@@ -62,11 +58,7 @@ fn extract_order_value(
     }
 }
 
-fn extract_group_key(
-    payload: &[u8],
-    regex: &Regex,
-    policy: &PrunePolicy,
-) -> Option<Vec<u8>> {
+fn extract_group_key(payload: &[u8], regex: &Regex, policy: &PrunePolicy) -> Option<Vec<u8>> {
     if policy.group_by.capture_groups.is_empty() {
         return Some(Vec::new());
     }
@@ -89,35 +81,20 @@ struct KeyEntry {
 fn compare_order_values(a: &[u8], b: &[u8], policy: &PrunePolicy) -> Ordering {
     match policy.order_by.as_ref().map(|o| &o.encoding) {
         Some(OrderEncoding::U64Be) => {
-            let a_val = a
-                .try_into()
-                .map(u64::from_be_bytes)
-                .unwrap_or(0);
-            let b_val = b
-                .try_into()
-                .map(u64::from_be_bytes)
-                .unwrap_or(0);
+            let a_val = a.try_into().map(u64::from_be_bytes).unwrap_or(0);
+            let b_val = b.try_into().map(u64::from_be_bytes).unwrap_or(0);
             a_val.cmp(&b_val)
         }
         Some(OrderEncoding::I64Be) => {
-            let a_val = a
-                .try_into()
-                .map(i64::from_be_bytes)
-                .unwrap_or(0);
-            let b_val = b
-                .try_into()
-                .map(i64::from_be_bytes)
-                .unwrap_or(0);
+            let a_val = a.try_into().map(i64::from_be_bytes).unwrap_or(0);
+            let b_val = b.try_into().map(i64::from_be_bytes).unwrap_or(0);
             a_val.cmp(&b_val)
         }
         Some(OrderEncoding::BytesAsc) | None => a.cmp(b),
     }
 }
 
-fn keys_to_delete(
-    mut entries: Vec<KeyEntry>,
-    policy: &PrunePolicy,
-) -> Vec<Bytes> {
+fn keys_to_delete(mut entries: Vec<KeyEntry>, policy: &PrunePolicy) -> Vec<Bytes> {
     entries.sort_by(|a, b| compare_order_values(&a.order_value, &b.order_value, policy));
 
     match &policy.retain {
@@ -134,7 +111,9 @@ fn keys_to_delete(
             let threshold = threshold.to_be_bytes();
             entries
                 .iter()
-                .filter(|e| compare_order_values(&e.order_value, &threshold, policy) != Ordering::Greater)
+                .filter(|e| {
+                    compare_order_values(&e.order_value, &threshold, policy) != Ordering::Greater
+                })
                 .map(|e| e.key.clone())
                 .collect()
         }
@@ -142,7 +121,9 @@ fn keys_to_delete(
             let threshold = threshold.to_be_bytes();
             entries
                 .iter()
-                .filter(|e| compare_order_values(&e.order_value, &threshold, policy) == Ordering::Less)
+                .filter(|e| {
+                    compare_order_values(&e.order_value, &threshold, policy) == Ordering::Less
+                })
                 .map(|e| e.key.clone())
                 .collect()
         }

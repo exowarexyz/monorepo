@@ -2,19 +2,15 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use exoware_sdk_rs::keys::{Key, KeyCodec};
-use exoware_sdk_rs::kv_codec::{
-    eval_predicate, KvPredicate, KvPredicateCheck,
-    StoredRow,
-};
+use exoware_sdk_rs::kv_codec::{eval_predicate, KvPredicate, KvPredicateCheck, StoredRow};
 
-use crate::types::*;
+use crate::aggregate::{
+    compile_kv_predicate_constraint, index_row_field_ref, pk_field_ref_for_secondary_index,
+};
+use crate::builder::{projected_column_indices, ProjectionSource};
 use crate::codec::*;
 use crate::predicate::*;
-use crate::builder::{ProjectionSource, projected_column_indices};
-use crate::aggregate::{
-    compile_kv_predicate_constraint, index_row_field_ref,
-    pk_field_ref_for_secondary_index,
-};
+use crate::types::*;
 
 #[derive(Debug, Clone)]
 pub(crate) enum PredicateAccess {
@@ -171,7 +167,11 @@ impl ScanAccessPlan {
         }
     }
 
-    pub(crate) fn matches_archived_row(&self, pk_values: &[CellValue], archived: &StoredRow) -> bool {
+    pub(crate) fn matches_archived_row(
+        &self,
+        pk_values: &[CellValue],
+        archived: &StoredRow,
+    ) -> bool {
         for check in &self.predicate_checks {
             match check {
                 PredicateAccess::Pk { pk_pos, constraint } => {
@@ -414,7 +414,10 @@ impl ScanAccessPlan {
     }
 }
 
-pub(crate) fn matches_encoded_constraint(field: &[u8], constraint: &EncodedIndexConstraint) -> bool {
+pub(crate) fn matches_encoded_constraint(
+    field: &[u8],
+    constraint: &EncodedIndexConstraint,
+) -> bool {
     match constraint {
         EncodedIndexConstraint::Eq(expected) => field == expected.as_slice(),
         EncodedIndexConstraint::In(values) => {

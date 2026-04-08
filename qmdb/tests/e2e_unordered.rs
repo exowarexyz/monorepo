@@ -5,19 +5,19 @@ mod common;
 
 use std::num::NonZeroU64;
 
+use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
 use commonware_storage::mmr::Location;
+use commonware_storage::qmdb::any::unordered::variable::Operation as UnorderedQmdbOperation;
 use commonware_storage::qmdb::{
     any::{unordered::variable::Db as LocalUnorderedDb, VariableConfig},
     store::LogStore as _,
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use commonware_cryptography::Sha256;
-use commonware_storage::qmdb::any::unordered::variable::Operation as UnorderedQmdbOperation;
-use store_qmdb::MAX_OPERATION_SIZE;
 use store_qmdb::UnorderedClient;
+use store_qmdb::MAX_OPERATION_SIZE;
 
 use common::retry;
 
@@ -34,8 +34,14 @@ fn op_cfg() -> <UnorderedBatchOperation as commonware_codec::Read>::Cfg {
     )
 }
 
-fn update_row_cfg() -> (<Vec<u8> as commonware_codec::Read>::Cfg, <Vec<u8> as commonware_codec::Read>::Cfg) {
-    (((0..=MAX_OPERATION_SIZE).into(), ()), ((0..=MAX_OPERATION_SIZE).into(), ()))
+fn update_row_cfg() -> (
+    <Vec<u8> as commonware_codec::Read>::Cfg,
+    <Vec<u8> as commonware_codec::Read>::Cfg,
+) {
+    (
+        ((0..=MAX_OPERATION_SIZE).into(), ()),
+        ((0..=MAX_OPERATION_SIZE).into(), ()),
+    )
 }
 
 struct LocalReference {

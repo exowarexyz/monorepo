@@ -11,8 +11,6 @@ use connectrpc::{Chain, ConnectRpcService, Context};
 use criterion::{criterion_group, criterion_main, Criterion};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::prelude::SessionContext;
-use exoware_sdk_rs::keys::Key;
-use exoware_sdk_rs as exoware_proto;
 use exoware_proto::connect_compression_registry;
 use exoware_proto::store::ingest::v1::{
     PutResponse as ProtoPutResponse, Service as IngestService, ServiceServer as IngestServiceServer,
@@ -23,10 +21,12 @@ use exoware_proto::store::query::v1::{
     ReduceResponse as ProtoReduceResponse, Service as QueryService,
     ServiceServer as QueryServiceServer,
 };
+use exoware_sdk_rs as exoware_proto;
+use exoware_sdk_rs::keys::Key;
 use exoware_sdk_rs::StoreClient;
+use exoware_sql::{CellValue, IndexSpec, KvSchema, TableColumnConfig};
 use futures::stream;
 use std::pin::Pin;
-use exoware_sql::{CellValue, IndexSpec, KvSchema, TableColumnConfig};
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
 

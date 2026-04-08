@@ -6,7 +6,10 @@ use datafusion::common::ScalarValue;
 use datafusion::prelude::SessionContext;
 use exoware_sql::{default_orders_index_specs, CellValue, IndexSpec, KvSchema, TableColumnConfig};
 
-fn collect_i64_rows(batches: &[datafusion::arrow::record_batch::RecordBatch], col: usize) -> Vec<i64> {
+fn collect_i64_rows(
+    batches: &[datafusion::arrow::record_batch::RecordBatch],
+    col: usize,
+) -> Vec<i64> {
     let mut out = Vec::new();
     for batch in batches {
         let values = batch
@@ -163,7 +166,10 @@ async fn orders_example_queries_work_end_to_end() {
         .collect()
         .await
         .expect("collect filtered");
-    assert_eq!(collect_i64_pairs(&filtered, 0, 1), vec![(1002, 2), (1005, 5)]);
+    assert_eq!(
+        collect_i64_pairs(&filtered, 0, 1),
+        vec![(1002, 2), (1005, 5)]
+    );
     assert_eq!(collect_i64_rows(&filtered, 2), vec![1799, 4599]);
     assert_eq!(
         collect_string_i64_rows(&filtered, 3, 1),
@@ -185,7 +191,9 @@ async fn join_example_queries_work_end_to_end() {
                 TableColumnConfig::new("region", DataType::Utf8, false),
             ],
             vec!["customer_id".to_string()],
-            vec![IndexSpec::lexicographic("region_idx", vec!["region".to_string()]).expect("index")],
+            vec![
+                IndexSpec::lexicographic("region_idx", vec!["region".to_string()]).expect("index"),
+            ],
         )
         .expect("customers schema")
         .table(
@@ -197,8 +205,10 @@ async fn join_example_queries_work_end_to_end() {
                 TableColumnConfig::new("status", DataType::Utf8, false),
             ],
             vec!["order_id".to_string()],
-            vec![IndexSpec::lexicographic("customer_idx", vec!["customer_id".to_string()])
-                .expect("index")],
+            vec![
+                IndexSpec::lexicographic("customer_idx", vec!["customer_id".to_string()])
+                    .expect("index"),
+            ],
         )
         .expect("orders schema")
         .register_all(&ctx)
@@ -253,7 +263,10 @@ async fn join_example_queries_work_end_to_end() {
             ("Carol".to_string(), 104),
         ]
     );
-    assert_eq!(collect_i64_rows(&joined, 2), vec![3499, 1799, 2299, 4599, 1299]);
+    assert_eq!(
+        collect_i64_rows(&joined, 2),
+        vec![3499, 1799, 2299, 4599, 1299]
+    );
 
     let left_join = ctx
         .sql(
@@ -267,7 +280,10 @@ async fn join_example_queries_work_end_to_end() {
         .collect()
         .await
         .expect("collect left join");
-    assert_eq!(collect_two_strings(&left_join, 0, 1), vec![("Dave".to_string(), "us-east".to_string())]);
+    assert_eq!(
+        collect_two_strings(&left_join, 0, 1),
+        vec![("Dave".to_string(), "us-east".to_string())]
+    );
 }
 
 #[tokio::test]
@@ -418,7 +434,10 @@ async fn fixed_binary_example_filters_work_end_to_end() {
                 TableColumnConfig::new("block_num", DataType::UInt64, false),
             ],
             vec!["tx_hash".to_string()],
-            vec![IndexSpec::lexicographic("block_idx", vec!["block_num".to_string()]).expect("index")],
+            vec![
+                IndexSpec::lexicographic("block_idx", vec!["block_num".to_string()])
+                    .expect("index"),
+            ],
         )
         .expect("transfers schema");
 
@@ -446,7 +465,10 @@ async fn fixed_binary_example_filters_work_end_to_end() {
                 TableColumnConfig::new("block_num", DataType::UInt64, false),
             ],
             vec!["tx_hash".to_string()],
-            vec![IndexSpec::lexicographic("block_idx", vec!["block_num".to_string()]).expect("index")],
+            vec![
+                IndexSpec::lexicographic("block_idx", vec!["block_num".to_string()])
+                    .expect("index"),
+            ],
         )
         .expect("transfers writer schema")
         .batch_writer();

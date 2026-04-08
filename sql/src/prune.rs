@@ -88,8 +88,8 @@ mod tests {
     use crate::codec::encode_primary_key;
     use crate::types::{KvTableConfig, TableColumnConfig, TableModel};
     use crate::CellValue;
-    use exoware_sdk_rs::kv_codec::Utf8;
     use datafusion::arrow::datatypes::DataType;
+    use exoware_sdk_rs::kv_codec::Utf8;
     use exoware_sdk_rs::prune_policy::{
         compile_payload_regex, validate_policy, OrderEncoding, RetainPolicy,
     };
@@ -103,10 +103,7 @@ mod tests {
             policy.match_key.payload_regex,
             r"(?s-u)^(?P<entity>.{32})(?P<version>.{8})$"
         );
-        assert_eq!(
-            policy.group_by.capture_groups,
-            vec![Utf8::from("entity")]
-        );
+        assert_eq!(policy.group_by.capture_groups, vec![Utf8::from("entity")]);
         assert_eq!(
             &*policy.order_by.as_ref().expect("order_by").capture_group,
             "version"
@@ -140,10 +137,7 @@ mod tests {
             policy.match_key.payload_regex,
             format!(r"(?s-u)^(?P<entity>{ORDERED_UTF8_REGEX})(?P<version>.{{8}})$")
         );
-        assert_eq!(
-            policy.group_by.capture_groups,
-            vec![Utf8::from("entity")]
-        );
+        assert_eq!(policy.group_by.capture_groups, vec![Utf8::from("entity")]);
         assert_eq!(
             &*policy.order_by.as_ref().expect("order_by").capture_group,
             "version"

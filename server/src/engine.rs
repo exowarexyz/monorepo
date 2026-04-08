@@ -26,7 +26,9 @@ pub trait StoreEngine: Send + Sync + 'static {
 
     /// Batch-get: returns `(key, Option<value>)` for each input key, preserving order.
     fn get_many(&self, keys: &[&[u8]]) -> Result<Vec<(Vec<u8>, Option<Vec<u8>>)>, String> {
-        keys.iter().map(|k| Ok((k.to_vec(), self.get(k)?))).collect()
+        keys.iter()
+            .map(|k| Ok((k.to_vec(), self.get(k)?)))
+            .collect()
     }
 
     /// Delete a batch of keys atomically. Returns the new global sequence number.

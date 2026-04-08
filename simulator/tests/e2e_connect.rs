@@ -6,11 +6,11 @@ use exoware_sdk_rs::compact::{
     PolicyRetain, PruneRequest, RetainGreaterThan, RetainKeepLatest,
     ServiceClient as CompactServiceClient,
 };
-use exoware_sdk_rs::prune_policy;
 use exoware_sdk_rs::keys::{Key, KeyCodec};
 use exoware_sdk_rs::kv_codec::{
     KvExpr, KvFieldKind, KvFieldRef, KvReducedValue, StoredRow, StoredValue,
 };
+use exoware_sdk_rs::prune_policy;
 use exoware_sdk_rs::{
     connect_compression_registry, PreferZstdHttpClient, RangeMode, RangeReduceOp,
     RangeReduceRequest, RangeReducerSpec, RetryConfig, StoreClient,
@@ -78,10 +78,7 @@ async fn get_many_returns_found_and_missing() {
     let ka = key(b"a");
     let kb = key(b"b");
     let kc = key(b"c");
-    client
-        .put(&[(&ka, b"1"), (&kc, b"3")])
-        .await
-        .expect("put");
+    client.put(&[(&ka, b"1"), (&kc, b"3")]).await.expect("put");
 
     let stream = client
         .get_many(&[&ka, &kb, &kc], 100)
@@ -420,8 +417,8 @@ async fn prune_keep_latest_retains_newest() {
                 match_key: Some(PolicyMatchKey {
                     reserved_bits: 4,
                     prefix: 2,
-                    payload_regex:
-                        "(?s-u)^(?P<logical>.{3})\\x00\\x00(?P<version>.{8})$".to_string(),
+                    payload_regex: "(?s-u)^(?P<logical>.{3})\\x00\\x00(?P<version>.{8})$"
+                        .to_string(),
                     ..Default::default()
                 })
                 .into(),
@@ -574,7 +571,10 @@ async fn store_client_prune_drop_all() {
     let codec = KeyCodec::new(4, 5);
     let ka = codec.encode(b"pa").expect("encode");
     let kb = codec.encode(b"pb").expect("encode");
-    client.put(&[(&ka, b"v1"), (&kb, b"v2")]).await.expect("put");
+    client
+        .put(&[(&ka, b"v1"), (&kb, b"v2")])
+        .await
+        .expect("put");
     assert!(client.get(&ka).await.expect("get").is_some());
 
     client

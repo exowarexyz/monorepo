@@ -90,8 +90,7 @@ impl ClientTransport for PreferZstdHttpClient {
             if let Ok(mut g) = sticky_cookie.lock() {
                 for val in parts.headers.get_all(SET_COOKIE) {
                     if let Ok(s) = val.to_str() {
-                        if let Some(pair) = parse_sticky_cookie_pair(s, EXOWARE_AFFINITY_COOKIE)
-                        {
+                        if let Some(pair) = parse_sticky_cookie_pair(s, EXOWARE_AFFINITY_COOKIE) {
                             *g = Some(pair);
                             break;
                         }

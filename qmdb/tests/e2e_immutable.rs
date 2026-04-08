@@ -26,7 +26,8 @@ type LocalDb = Immutable<
     TwoCap,
 >;
 
-type TestImmutableClient = ImmutableClient<commonware_cryptography::Sha256, FixedBytes<32>, Vec<u8>>;
+type TestImmutableClient =
+    ImmutableClient<commonware_cryptography::Sha256, FixedBytes<32>, Vec<u8>>;
 
 fn fresh_immutable(c: StoreClient) -> TestImmutableClient {
     TestImmutableClient::from_client(c, ((0..=10000).into(), ()), ((), ((0..=10000).into(), ())))
@@ -151,7 +152,10 @@ async fn immutable_round_trip() {
         )
         .await
         .expect("proof");
-    assert!(proof.verify::<commonware_cryptography::Sha256>(), "proof must verify");
+    assert!(
+        proof.verify::<commonware_cryptography::Sha256>(),
+        "proof must verify"
+    );
     assert_eq!(proof.root, local.root);
     assert_eq!(proof.operations, local.operations);
 }

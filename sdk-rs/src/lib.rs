@@ -21,8 +21,6 @@ extern crate self as exoware_proto;
 use bytes::Bytes;
 use connectrpc::client::{ClientConfig, ServerStream as ConnectServerStream};
 use connectrpc::{ConnectError, ErrorCode};
-use keys::is_valid_key_size;
-use kv_codec::KvReducedValue;
 use exoware_proto::compact::ServiceClient as CompactServiceClient;
 use exoware_proto::ingest::ServiceClient as IngestServiceClient;
 use exoware_proto::query as proto_query;
@@ -44,6 +42,8 @@ use exoware_proto::{
     QUERY_DETAIL_RESPONSE_HEADER as PROTO_QUERY_DETAIL_RESPONSE_HEADER,
 };
 use http::HeaderMap;
+use keys::is_valid_key_size;
+use kv_codec::KvReducedValue;
 use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -264,10 +264,8 @@ impl RangeStream {
 }
 
 pub struct GetManyStream {
-    stream: ConnectServerStream<
-        hyper::body::Incoming,
-        exoware_proto::query::GetManyFrameView<'static>,
-    >,
+    stream:
+        ConnectServerStream<hyper::body::Incoming, exoware_proto::query::GetManyFrameView<'static>>,
     pending_frame: Option<exoware_proto::query::GetManyFrame>,
     entries_seen: usize,
     final_detail: Option<proto_query::Detail>,
@@ -549,15 +547,22 @@ impl StoreClientBuilder {
         let health_url = self.health_url.ok_or(ClientBuildError::MissingHealthUrl)?;
         let ingest_url = self.ingest_url.ok_or(ClientBuildError::MissingIngestUrl)?;
         let query_url = self.query_url.ok_or(ClientBuildError::MissingQueryUrl)?;
-        let compact_url = self.compact_url.ok_or(ClientBuildError::MissingCompactUrl)?;
-        let ingest_uri: http::Uri = ingest_url.parse().map_err(|e| ClientBuildError::InvalidUrl {
-            url: ingest_url.clone(),
-            source: e,
-        })?;
-        let query_uri: http::Uri = query_url.parse().map_err(|e| ClientBuildError::InvalidUrl {
-            url: query_url.clone(),
-            source: e,
-        })?;
+        let compact_url = self
+            .compact_url
+            .ok_or(ClientBuildError::MissingCompactUrl)?;
+        let ingest_uri: http::Uri =
+            ingest_url
+                .parse()
+                .map_err(|e| ClientBuildError::InvalidUrl {
+                    url: ingest_url.clone(),
+                    source: e,
+                })?;
+        let query_uri: http::Uri = query_url
+            .parse()
+            .map_err(|e| ClientBuildError::InvalidUrl {
+                url: query_url.clone(),
+                source: e,
+            })?;
         let compact_uri: http::Uri =
             compact_url
                 .parse()
@@ -707,7 +712,9 @@ impl StoreClient {
             if !is_valid_key_size(key.len()) {
                 return Err(ClientError::WireFormat(format!(
                     "key length {} is outside valid store key range ({}..={})",
-                    key.len(), keys::MIN_KEY_LEN, MAX_KEY_LEN
+                    key.len(),
+                    keys::MIN_KEY_LEN,
+                    MAX_KEY_LEN
                 )));
             }
             proto_kvs.push(exoware_proto::ingest::KvPair {
@@ -717,10 +724,8 @@ impl StoreClient {
             });
         }
 
-        let config = store_connect_client_config(
-            self.ingest_uri.clone(),
-            self.connect_request_compression,
-        );
+        let config =
+            store_connect_client_config(self.ingest_uri.clone(), self.connect_request_compression);
         let client = IngestServiceClient::new(self.connect_http.clone(), config);
         let response = client
             .put(ProtoPutRequest {
@@ -789,15 +794,15 @@ impl StoreClient {
             if !is_valid_key_size(key.len()) {
                 return Err(ClientError::WireFormat(format!(
                     "key length {} is outside valid store key range ({}..={})",
-                    key.len(), keys::MIN_KEY_LEN, MAX_KEY_LEN
+                    key.len(),
+                    keys::MIN_KEY_LEN,
+                    MAX_KEY_LEN
                 )));
             }
         }
 
-        let config = store_connect_client_config(
-            self.query_uri.clone(),
-            self.connect_request_compression,
-        );
+        let config =
+            store_connect_client_config(self.query_uri.clone(), self.connect_request_compression);
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
         let proto_keys: Vec<Vec<u8>> = keys.iter().map(|k| k.to_vec()).collect();
         let effective_min = self.effective_min_sequence_number(min_sequence_number);
@@ -814,10 +819,8 @@ impl StoreClient {
                 .await
             {
                 Ok(stream) => {
-                    let mut gms = GetManyStream::from_connect_stream(
-                        stream,
-                        self.sequence_number.clone(),
-                    );
+                    let mut gms =
+                        GetManyStream::from_connect_stream(stream, self.sequence_number.clone());
                     if let Err(err) = gms.prefetch_first_frame().await {
                         if attempt < max_attempts && is_retryable_error(&err) {
                             let delay = retry_delay_for_error(&err, attempt, self.retry_config);
@@ -1047,10 +1050,8 @@ impl StoreClient {
         &self,
         policies: &[crate::prune_policy::PrunePolicy],
     ) -> Result<(), ClientError> {
-        let config = store_connect_client_config(
-            self.compact_uri.clone(),
-            self.connect_request_compression,
-        );
+        let config =
+            store_connect_client_config(self.compact_uri.clone(), self.connect_request_compression);
         let client = CompactServiceClient::new(self.connect_http.clone(), config);
         client
             .prune(ProtoPruneRequest {
@@ -1099,27 +1100,25 @@ impl StoreClient {
         if !is_valid_key_size(key.len()) {
             return Err(ClientError::WireFormat(format!(
                 "key length {} is outside valid store key range ({}..={})",
-                key.len(), keys::MIN_KEY_LEN, MAX_KEY_LEN
+                key.len(),
+                keys::MIN_KEY_LEN,
+                MAX_KEY_LEN
             )));
         }
 
-        let config = store_connect_client_config(
-            self.query_uri.clone(),
-            self.connect_request_compression,
-        );
+        let config =
+            store_connect_client_config(self.query_uri.clone(), self.connect_request_compression);
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
         let response = self
-            .send_with_retry(
-                || async {
-                    client
-                        .get(ProtoGetRequest {
-                            key: key.to_vec(),
-                            min_sequence_number,
-                            ..Default::default()
-                        })
-                        .await
-                },
-            )
+            .send_with_retry(|| async {
+                client
+                    .get(ProtoGetRequest {
+                        key: key.to_vec(),
+                        min_sequence_number,
+                        ..Default::default()
+                    })
+                    .await
+            })
             .await?;
         let detail = query_detail_from_unary_metadata(response.headers(), response.trailers());
         let owned = response.into_owned();
@@ -1175,10 +1174,8 @@ impl StoreClient {
             ));
         }
 
-        let config = store_connect_client_config(
-            self.query_uri.clone(),
-            self.connect_request_compression,
-        );
+        let config =
+            store_connect_client_config(self.query_uri.clone(), self.connect_request_compression);
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
         let max_attempts = self.retry_config.max_attempts.max(1);
         let mut attempt = 1usize;
@@ -1253,26 +1250,22 @@ impl StoreClient {
         ),
         ClientError,
     > {
-        let config = store_connect_client_config(
-            self.query_uri.clone(),
-            self.connect_request_compression,
-        );
+        let config =
+            store_connect_client_config(self.query_uri.clone(), self.connect_request_compression);
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
         let proto_params = proto_to_proto_reduce_params(request.clone());
         let response = self
-            .send_with_retry(
-                || async {
-                    client
-                        .reduce(ProtoWireReduceRequest {
-                            start: start.to_vec(),
-                            end: end.to_vec(),
-                            params: Some(proto_params.clone()).into(),
-                            min_sequence_number,
-                            ..Default::default()
-                        })
-                        .await
-                },
-            )
+            .send_with_retry(|| async {
+                client
+                    .reduce(ProtoWireReduceRequest {
+                        start: start.to_vec(),
+                        end: end.to_vec(),
+                        params: Some(proto_params.clone()).into(),
+                        min_sequence_number,
+                        ..Default::default()
+                    })
+                    .await
+            })
             .await?;
         let detail = query_detail_from_unary_metadata(response.headers(), response.trailers());
         let owned = response.into_owned();
@@ -1282,10 +1275,7 @@ impl StoreClient {
         Ok((owned, detail))
     }
 
-    async fn send_with_retry<F, Fut, T>(
-        &self,
-        mut make_request: F,
-    ) -> Result<T, ClientError>
+    async fn send_with_retry<F, Fut, T>(&self, mut make_request: F) -> Result<T, ClientError>
     where
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = Result<T, ConnectError>>,

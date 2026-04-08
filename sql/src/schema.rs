@@ -14,12 +14,12 @@ use datafusion::prelude::SessionContext;
 use exoware_sdk_rs::kv_codec::decode_stored_row;
 use exoware_sdk_rs::StoreClient;
 
-use crate::types::*;
+use crate::aggregate::KvAggregatePushdownRule;
 use crate::codec::*;
 use crate::predicate::*;
 use crate::scan::*;
+use crate::types::*;
 use crate::writer::*;
-use crate::aggregate::KvAggregatePushdownRule;
 
 pub(crate) fn register_kv_table(
     ctx: &SessionContext,
@@ -402,7 +402,6 @@ pub(crate) fn resolved_index_layout_matches(
         && previous.value_column_mask == current.value_column_mask
         && previous.key_columns_width == current.key_columns_width
 }
-
 
 #[async_trait]
 impl TableProvider for KvTable {
