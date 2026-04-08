@@ -22,7 +22,10 @@ tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 
 [dev-dependencies]
+commonware-codec = { workspace = true }
+connectrpc = { workspace = true }
 exoware-sdk-rs = { workspace = true }
+http = { workspace = true }
 tempfile = { workspace = true }
 
 [[bin]]

@@ -13,6 +13,8 @@ use exoware_proto::{
     RangeTraversalModeError,
 };
 
+pub const MAX_VALUE_LEN: usize = 10 * 1024 * 1024;
+
 fn field_error(
     domain: &str,
     field: impl Into<String>,
@@ -60,6 +62,24 @@ fn validate_key_field(domain: &str, field: &str, key: &[u8]) -> Result<(), Conne
     })
 }
 
+fn validate_value_field(domain: &str, field: &str, value: &[u8]) -> Result<(), ConnectError> {
+    if value.len() > MAX_VALUE_LEN {
+        return Err(field_error(
+            domain,
+            field,
+            format!(
+                "value length {} exceeds maximum {}",
+                value.len(),
+                MAX_VALUE_LEN
+            ),
+            "INVALID_VALUE_LENGTH",
+            format!("{field} value length is outside store limits"),
+            [("max_value_len".to_string(), MAX_VALUE_LEN.to_string())],
+        ));
+    }
+    Ok(())
+}
+
 // -- ingest --
 
 pub fn validate_put_request(
@@ -79,6 +99,7 @@ pub fn validate_put_request(
     // buf.validate: KvPair.key bytes.max_len = 254
     for (index, kv) in request.kvs.iter().enumerate() {
         validate_key_field("store.ingest", &format!("kvs[{index}].key"), kv.key)?;
+        validate_value_field("store.ingest", &format!("kvs[{index}].value"), kv.value)?;
     }
     Ok(())
 }
@@ -240,6 +261,19 @@ mod tests {
         req.encode_to_vec()
     }
 
+    fn put_request_with_oversized_value() -> Vec<u8> {
+        use buffa::Message;
+        let req = exoware_proto::ingest::PutRequest {
+            kvs: vec![exoware_proto::ingest::KvPair {
+                key: vec![0u8; 10],
+                value: vec![1u8; MAX_VALUE_LEN + 1],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        req.encode_to_vec()
+    }
+
     fn valid_put_request() -> Vec<u8> {
         use buffa::Message;
         let req = exoware_proto::ingest::PutRequest {
@@ -265,6 +299,15 @@ mod tests {
     #[test]
     fn put_rejects_oversized_key() {
         let bytes = put_request_with_oversized_key();
+        let view = exoware_proto::store::ingest::v1::PutRequestView::decode_view(&bytes)
+            .expect("parse");
+        let err = validate_put_request(&view).unwrap_err();
+        assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn put_rejects_oversized_value() {
+        let bytes = put_request_with_oversized_value();
         let view = exoware_proto::store::ingest::v1::PutRequestView::decode_view(&bytes)
             .expect("parse");
         let err = validate_put_request(&view).unwrap_err();

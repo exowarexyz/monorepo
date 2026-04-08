@@ -4,22 +4,33 @@ package store.ingest.v1;
 
 import "buf/validate/validate.proto";
 
+// Ingest service for writing key-value pairs into the store.
 service Service {
+  // Atomically write a batch of key-value pairs. On success the entire batch
+  // is persisted and the response carries the store sequence number that
+  // covers this write. Clients can pass that sequence number to query RPCs
+  // (via `min_sequence_number`) for read-after-write consistency.
   rpc Put(PutRequest) returns (PutResponse);
 }
 
 // A key-value pair for ingestion.
 //
-// Keys must be between 0 and 254 bytes (inclusive). Values have no size limit.
+// Keys must be between 0 and 254 bytes (inclusive).
 message KvPair {
   bytes key = 1 [(buf.validate.field).bytes.max_len = 254];
   bytes value = 2;
 }
 
+// Batch write request. All pairs are applied atomically.
 message PutRequest {
+  // Key-value pairs to write. At least one pair is required.
   repeated KvPair kvs = 1 [(buf.validate.field).repeated.min_items = 1];
 }
 
+// Response from a successful Put.
 message PutResponse {
+  // Monotonically increasing store sequence number assigned to this write
+  // batch. Pass to query RPCs as `min_sequence_number` to ensure subsequent
+  // reads reflect this write.
   uint64 sequence_number = 1;
 }

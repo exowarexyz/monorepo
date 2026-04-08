@@ -12,6 +12,13 @@ import {
     KvFieldRefSchema,
     KvFieldRef_ValueFieldSchema,
     KvFieldKind,
+    PolicySchema,
+    PolicyMatchKeySchema,
+    PolicyGroupBySchema,
+    PolicyOrderBySchema,
+    PolicyRetainSchema,
+    RetainKeepLatestSchema,
+    PolicyOrderEncoding,
 } from '../src/index';
 
 const MAX_KEY_LEN = 254;
@@ -268,6 +275,77 @@ describe('Exoware TS SDK', () => {
                 expect(c.retryConfig.initialBackoffMs).toBe(100);
                 expect(c.retryConfig.maxBackoffMs).toBe(2000);
             });
+        });
+
+        it('should prune keys per KeepLatest policy', async () => {
+            const store = client.store();
+            const encoder = new TextEncoder();
+
+            function makePruneKey(group: string, version: bigint): Uint8Array {
+                const groupBytes = encoder.encode(group);
+                const prefix = encoder.encode('prune-test-');
+                const separator = new Uint8Array([0x00, 0x00]);
+                const versionBytes = new Uint8Array(8);
+                new DataView(versionBytes.buffer).setBigUint64(0, version, false);
+                const key = new Uint8Array(prefix.length + groupBytes.length + separator.length + versionBytes.length);
+                key.set(prefix, 0);
+                key.set(groupBytes, prefix.length);
+                key.set(separator, prefix.length + groupBytes.length);
+                key.set(versionBytes, prefix.length + groupBytes.length + separator.length);
+                return key;
+            }
+
+            const alphaV1 = makePruneKey('alpha', 1n);
+            const alphaV2 = makePruneKey('alpha', 2n);
+            const alphaV3 = makePruneKey('alpha', 3n);
+            const betaV1 = makePruneKey('beta', 1n);
+            const betaV2 = makePruneKey('beta', 2n);
+
+            await store.setMany([
+                { key: alphaV1, value: Buffer.from('a1') },
+                { key: alphaV2, value: Buffer.from('a2') },
+                { key: alphaV3, value: Buffer.from('a3') },
+                { key: betaV1, value: Buffer.from('b1') },
+                { key: betaV2, value: Buffer.from('b2') },
+            ]);
+
+            for (const k of [alphaV1, alphaV2, alphaV3, betaV1, betaV2]) {
+                expect(await store.get(k)).not.toBeNull();
+            }
+
+            const policy = create(PolicySchema, {
+                matchKey: create(PolicyMatchKeySchema, {
+                    reservedBits: 0,
+                    prefix: 0,
+                    payloadRegex: '(?s-u)^prune-test-(?P<group>[a-z]+)\\x00\\x00(?P<version>.{8})$',
+                }),
+                groupBy: create(PolicyGroupBySchema, {
+                    captureGroups: ['group'],
+                }),
+                orderBy: create(PolicyOrderBySchema, {
+                    captureGroup: 'version',
+                    encoding: PolicyOrderEncoding.U64_BE,
+                }),
+                retain: create(PolicyRetainSchema, {
+                    kind: {
+                        case: 'keepLatest',
+                        value: create(RetainKeepLatestSchema, { count: 1n }),
+                    },
+                }),
+            });
+
+            await store.prune([policy]);
+
+            expect(await store.get(alphaV1)).toBeNull();
+            expect(await store.get(alphaV2)).toBeNull();
+            const a3 = await store.get(alphaV3);
+            expect(a3).not.toBeNull();
+            expect(Buffer.from(a3!.value)).toEqual(Buffer.from('a3'));
+
+            expect(await store.get(betaV1)).toBeNull();
+            const b2 = await store.get(betaV2);
+            expect(b2).not.toBeNull();
+            expect(Buffer.from(b2!.value)).toEqual(Buffer.from('b2'));
         });
 
         describe('limits', () => {

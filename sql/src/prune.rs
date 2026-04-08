@@ -3,7 +3,8 @@ use exoware_sdk_rs::prune_policy::{
     GroupBy, MatchKey, OrderBy, OrderEncoding, PrunePolicy, RetainPolicy,
 };
 
-use crate::{primary_key_codec, PRIMARY_RESERVED_BITS};
+use crate::codec::primary_key_codec;
+use crate::types::PRIMARY_RESERVED_BITS;
 
 const VERSION_WIDTH_BYTES: usize = 8;
 const ORDERED_UTF8_REGEX: &str = r"(?:\x01[\x00-\x02]|[^\x00\x01\xFF])*\x00";
@@ -84,7 +85,9 @@ pub fn keep_latest_versions_utf8(table_prefix: u8, count: usize) -> Result<Prune
 #[cfg(test)]
 mod tests {
     use super::{keep_latest_versions, keep_latest_versions_utf8, ORDERED_UTF8_REGEX};
-    use crate::{encode_primary_key, CellValue, KvTableConfig, TableColumnConfig, TableModel};
+    use crate::codec::encode_primary_key;
+    use crate::types::{KvTableConfig, TableColumnConfig, TableModel};
+    use crate::CellValue;
     use exoware_sdk_rs::kv_codec::Utf8;
     use datafusion::arrow::datatypes::DataType;
     use exoware_sdk_rs::prune_policy::{

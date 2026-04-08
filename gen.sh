@@ -5,6 +5,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 
+rm -rf "$ROOT/sdk-rs/src/gen/"*.rs
+rm -rf "$ROOT/sdk-ts/src/gen/ts/"
+
 echo "==> Rust (sdk-rs)"
 PROTO_GEN=1 cargo build -p exoware-sdk-rs 2>&1
 
