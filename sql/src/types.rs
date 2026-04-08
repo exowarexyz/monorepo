@@ -12,9 +12,7 @@ pub(crate) const KEY_KIND_BITS: u8 = 1;
 pub(crate) const PRIMARY_RESERVED_BITS: u8 = TABLE_PREFIX_BITS + KEY_KIND_BITS;
 pub(crate) const INDEX_SLOT_BITS: u8 = 4;
 pub(crate) const INDEX_FAMILY_BITS: u8 = TABLE_PREFIX_BITS + KEY_KIND_BITS + INDEX_SLOT_BITS;
-#[allow(dead_code)]
 pub(crate) const PRIMARY_KEY_BIT_OFFSET: usize = PRIMARY_RESERVED_BITS as usize;
-#[allow(dead_code)]
 pub(crate) const INDEX_KEY_BIT_OFFSET: usize = INDEX_FAMILY_BITS as usize;
 pub(crate) const MAX_TABLES: usize = 1usize << TABLE_PREFIX_BITS;
 pub(crate) const MAX_INDEX_SPECS: usize = (1usize << INDEX_SLOT_BITS) - 1;

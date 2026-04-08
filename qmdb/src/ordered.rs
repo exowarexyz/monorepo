@@ -592,8 +592,6 @@ where
         session: &SerializableReadSession,
         location: Location,
     ) -> Result<H::Digest, QmdbError> {
-        self.require_current_boundary_state(session, location)
-            .await?;
         let Some(bytes) = session.get(&encode_current_meta_key(location)).await? else {
             return Err(QmdbError::CurrentBoundaryStateMissing { location });
         };

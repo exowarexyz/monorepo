@@ -10,6 +10,7 @@ pub trait StoreEngine: Send + Sync + 'static {
     /// Persist key-value pairs atomically and return the new global sequence number for this write.
     fn put_batch(&self, kvs: &[(Bytes, Bytes)]) -> Result<u64, String>;
 
+    /// Fetch the value for a single key. Returns `None` when the key does not exist.
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, String>;
 
     /// Keys in `[start, end]` (inclusive) when `end` is non-empty; empty `end` means unbounded
@@ -23,6 +24,7 @@ pub trait StoreEngine: Send + Sync + 'static {
         forward: bool,
     ) -> Result<Vec<(Bytes, Bytes)>, String>;
 
+    /// Batch-get: returns `(key, Option<value>)` for each input key, preserving order.
     fn get_many(&self, keys: &[&[u8]]) -> Result<Vec<(Vec<u8>, Option<Vec<u8>>)>, String> {
         keys.iter().map(|k| Ok((k.to_vec(), self.get(k)?))).collect()
     }

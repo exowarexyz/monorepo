@@ -55,6 +55,8 @@ fn read_stats_read_bytes<K: AsRef<[u8]>, V: AsRef<[u8]>>(
 #[derive(Clone)]
 pub struct AppState {
     pub engine: Arc<dyn StoreEngine>,
+    /// Gates ingest (writes) only. Query and compact remain available during drains so that
+    /// in-flight reads can complete while the worker sheds write traffic.
     pub ready: Arc<AtomicBool>,
 }
 
@@ -374,7 +376,7 @@ impl QueryApi for QueryConnect {
             exoware_proto::store::query::v1::ReduceRequestView<'static>,
         >,
     ) -> Result<(ReduceResponse, Context), ConnectError> {
-        validate::validate_reduce_request(&request)?;
+        validate::validate_reduce_request(&request)?; // proto-level; reduce_over_rows re-validates per-reducer constraints
         let token = self.ensure_min_sequence_number(request.min_sequence_number)?;
         let wire = request.bytes();
         let start_key: Key = wire.slice_ref(request.start);

@@ -413,7 +413,7 @@ If you see a warning-sign plan, consider:
 PK-eligible types: `Int64`, `UInt64`, `Utf8`, `FixedSizeBinary`.
 Composite PKs may combine any PK-eligible types. For the current
 implementation, `Utf8` key columns still use a fixed 16-byte inline slot
-inside the SQL wrapper even though the underlying the Exoware store storage key model
+inside the SQL wrapper even though the underlying Exoware store storage key model
 is now variable-length across the broader system.
 
 ## Filter pushdown

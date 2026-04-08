@@ -39,7 +39,7 @@ serde_with = { version = "3.14.0" }
 tempfile = "3.10.1"
 portpicker = "0.1.1"
 http = "1.3.1"
-tower-http = "0.5.2"
+tower-http = { version = "0.5.2", features = ["cors"] }
 bytes = "1"
 connectrpc = { version = "0.3.1", features = ["client", "axum"] }
 hyper = { version = "1", features = ["full"] }

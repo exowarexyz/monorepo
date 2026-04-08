@@ -89,29 +89,25 @@ struct KeyEntry {
 fn compare_order_values(a: &[u8], b: &[u8], policy: &PrunePolicy) -> Ordering {
     match policy.order_by.as_ref().map(|o| &o.encoding) {
         Some(OrderEncoding::U64Be) => {
-            let a_val = if a.len() == 8 {
-                u64::from_be_bytes(a.try_into().unwrap())
-            } else {
-                0
-            };
-            let b_val = if b.len() == 8 {
-                u64::from_be_bytes(b.try_into().unwrap())
-            } else {
-                0
-            };
+            let a_val = a
+                .try_into()
+                .map(u64::from_be_bytes)
+                .unwrap_or(0);
+            let b_val = b
+                .try_into()
+                .map(u64::from_be_bytes)
+                .unwrap_or(0);
             a_val.cmp(&b_val)
         }
         Some(OrderEncoding::I64Be) => {
-            let a_val = if a.len() == 8 {
-                i64::from_be_bytes(a.try_into().unwrap())
-            } else {
-                0
-            };
-            let b_val = if b.len() == 8 {
-                i64::from_be_bytes(b.try_into().unwrap())
-            } else {
-                0
-            };
+            let a_val = a
+                .try_into()
+                .map(i64::from_be_bytes)
+                .unwrap_or(0);
+            let b_val = b
+                .try_into()
+                .map(i64::from_be_bytes)
+                .unwrap_or(0);
             a_val.cmp(&b_val)
         }
         Some(OrderEncoding::BytesAsc) | None => a.cmp(b),

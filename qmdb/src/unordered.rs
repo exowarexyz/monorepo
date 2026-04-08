@@ -82,6 +82,10 @@ where
         &self.client
     }
 
+    pub fn sequence_number(&self) -> u64 {
+        self.client.sequence_number()
+    }
+
     pub async fn writer_location_watermark(&self) -> Result<Option<Location>, QmdbError> {
         self.core().writer_location_watermark().await
     }

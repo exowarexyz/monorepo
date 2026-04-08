@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{routing::get, Router};
+use tower_http::cors::CorsLayer;
 use tracing::info;
 
 use exoware_server::{connect_stack, AppState};
@@ -30,7 +31,8 @@ pub async fn run(
 
     let app = Router::new()
         .route("/health", get(health))
-        .fallback_service(connect);
+        .fallback_service(connect)
+        .layer(CorsLayer::very_permissive());
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!(%addr, "store simulator listening");
@@ -48,7 +50,8 @@ pub async fn spawn_for_test(
     let connect = connect_stack(state);
     let app = Router::new()
         .route("/health", get(health))
-        .fallback_service(connect);
+        .fallback_service(connect)
+        .layer(CorsLayer::very_permissive());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
     let url = format!("http://127.0.0.1:{port}");

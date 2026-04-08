@@ -812,8 +812,7 @@ pub(crate) fn decode_secondary_index_key_with_masks(
     let pk_refs = all_pk_values.iter().collect::<Vec<_>>();
     decoded.primary_key = match encode_primary_key(table_prefix, &pk_refs, model) {
         Ok(key) => key,
-        Err(err) => {
-            eprintln!("debug decode_secondary_index_key pk rebuild error: {err}");
+        Err(_) => {
             return None;
         }
     };
