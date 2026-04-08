@@ -11,7 +11,6 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   UDEPS_VERSION: 0.1.50
-  NIGHTLY_TOOLCHAIN: nightly-2025-11-15
 
 jobs:
   Proto:
@@ -43,13 +42,13 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
     - name: Install nightly Rust toolchain
-      run: rustup toolchain install ${{ env.NIGHTLY_TOOLCHAIN }} && rustup component add --toolchain ${{ env.NIGHTLY_TOOLCHAIN }} rustfmt
+      run: rustup toolchain install nightly && rustup component add --toolchain nightly rustfmt
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Lint
       run: cargo clippy --all-targets -- -D warnings
     - name: Fmt
-      run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} fmt --all -- --check
+      run: cargo +nightly fmt --all -- --check
     - name: Check docs
       run: cargo doc --no-deps --document-private-items
       env:
@@ -94,10 +93,10 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
     - name: Install nightly Rust toolchain
-      run: rustup toolchain install ${{ env.NIGHTLY_TOOLCHAIN }}
+      run: rustup toolchain install nightly
     - name: Get Rust version
       id: rust-version
-      run: echo "rust_version=$(rustc +${{ env.NIGHTLY_TOOLCHAIN }} --version)" >> "$GITHUB_OUTPUT"
+      run: echo "rust_version=$(rustc +nightly --version)" >> "$GITHUB_OUTPUT"
     - name: Run setup
       uses: ./.github/actions/setup
     - name: Cache cargo-udeps
@@ -108,9 +107,9 @@ jobs:
         key: ${{ runner.os }}-${{ env.UDEPS_VERSION }}-cargo-udeps-${{ steps.rust-version.outputs.rust_version }}
     - name: Install cargo-udeps
       if: steps.cargo-udeps-cache.outputs.cache-hit != 'true'
-      run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} install cargo-udeps --version ${{ env.UDEPS_VERSION }}
+      run: cargo +nightly install cargo-udeps --version ${{ env.UDEPS_VERSION }}
     - name: Check for unused dependencies
-      run: cargo +${{ env.NIGHTLY_TOOLCHAIN }} udeps --all-targets
+      run: cargo +nightly udeps --all-targets
 
   Scripts:
     runs-on: ubuntu-latest
