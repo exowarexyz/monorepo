@@ -90,21 +90,21 @@ jobs:
   Dependencies:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: ${{ env.NIGHTLY_VERSION }}
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-    - name: Run setup
-      uses: ./.github/actions/setup
     - name: Install nightly Rust toolchain
       run: rustup toolchain install ${{ env.NIGHTLY_VERSION }} && rustup default ${{ env.NIGHTLY_VERSION }}
     - name: Verify toolchain
       run: cargo --version && rustc --version
     - name: Install cargo-udeps
-      run: cargo install cargo-udeps --version ${{ env.UDEPS_VERSION }} --locked
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-udeps@${{ env.UDEPS_VERSION }}
     - name: Check for unused dependencies
-      run: cargo +${{ env.NIGHTLY_VERSION }} udeps --all-targets
-      env:
-        RUSTUP_TOOLCHAIN: ${{ env.NIGHTLY_VERSION }}
+      run: cargo udeps --all-targets
 
   Scripts:
     runs-on: ubuntu-latest
