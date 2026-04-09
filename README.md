@@ -10,7 +10,7 @@ _Primitives are designed for production use. If you find an exploit, please refe
 
 * [sdk-rs](./sdk-rs/README.md): Interact with the Exoware API in Rust.
 * [sdk-ts](./sdk-ts/README.md): Interact with the Exoware API in TypeScript.
-* [server](./server/Cargo.toml): Serve the Exoware API.
+* [server](./server/README.md): Serve the Exoware API.
 * [qmdb](./qmdb/README.md): QMDB instance backed by the Exoware API.
 * [sql](./sql/README.md): SQL engine backed by the Exoware API.
 
@@ -26,7 +26,7 @@ _The interface for all components is specified in [Protobuf](./proto/)._
 
 _Examples may include insecure code (i.e. deriving keypairs from an integer arguments) to make them easier to run. Examples are not intended to be used directly in production._
 
-* [sandbox](./examples/sandbox): Explore the Exoware API.
+* [sandbox](./examples/sandbox/README.md): Explore the Exoware API.
 * [simulator](./examples/simulator/README.md): Simulate the Exoware API.
 
 ## Licensing

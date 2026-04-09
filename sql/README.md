@@ -2,9 +2,13 @@
 
 SQL engine backed by the Exoware API.
 
-`exoware-sql` is library-first: register `KvSchema` tables against a [`StoreClient`](https://docs.rs/exoware-sdk-rs), then run SQL.
+## Status
+
+`exoware-sql` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
 
 ## Library usage
+
+`exoware-sql` is library-first: register `KvSchema` tables against a [`StoreClient`](https://docs.rs/exoware-sdk-rs), then run SQL.
 
 All table registration goes through `KvSchema`, which auto-assigns compact
 codec prefixes so multiple tables can coexist on a single KV store while still
@@ -408,7 +412,7 @@ If you see a warning-sign plan, consider:
 | `Decimal128(p, s)` | -- | yes | yes | 16 bytes |
 | `Decimal256(p, s)` | -- | yes | yes | 32 bytes |
 | `FixedSizeBinary(n)` | yes | yes | yes | n bytes |
-| `List<T>` | -- | -- | yes | -- |
+| `List<T>` / `LargeList<T>` | -- | -- | yes | -- |
 
 PK-eligible types: `Int64`, `UInt64`, `Utf8`, `FixedSizeBinary`.
 Composite PKs may combine any PK-eligible types. For the current
@@ -425,7 +429,7 @@ The table below shows what filter patterns are pushed down per column type:
 |---|---|---|---|---|
 | `Int64` | yes | yes | yes | yes |
 | `UInt64` | yes | yes | yes | yes |
-| `Float64` | -- | yes | -- | yes |
+| `Float64` | yes | yes | -- | yes |
 | `Boolean` | yes | -- | -- | yes |
 | `Utf8` | yes | -- | yes | yes |
 | `Date32` | yes | yes | -- | yes |
@@ -712,5 +716,5 @@ older rows still require backfill.
   - best index picked by longest constrained key prefix
   - index scan is used only when required columns are covered by index key + cover columns
   - otherwise planner falls back to primary-key scan (no index lookup fanout fallback)
-- value serialization uses rkyv (zero-copy binary); `decode_base_row` uses
-  `rkyv::access` for zero-copy reads
+- value serialization uses `commonware_codec`; `decode_base_row` uses
+  `exoware_sdk_rs::kv_codec::decode_stored_row`

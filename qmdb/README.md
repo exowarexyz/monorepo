@@ -2,7 +2,26 @@
 
 QMDB instance backed by the Exoware API.
 
-It stores:
+## Status
+
+`exoware-qmdb` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
+
+## Supported backends
+
+The crate supports multiple Commonware authenticated backends:
+
+- **Ordered QMDB** (`OrderedClient`): `qmdb::any` and `qmdb::current::ordered`
+- **Unordered QMDB** (`UnorderedClient`): `qmdb::any::unordered::variable`
+- **Immutable** (`ImmutableClient`): `qmdb::immutable`
+- **Keyless** (`KeylessClient`): `qmdb::keyless`
+
+All backends share the same upload -> publish watermark -> historical root /
+range-proof flow. `OrderedClient` additionally supports current-state ordered
+proofs at uploaded batch boundaries.
+
+## Ordered QMDB
+
+The ordered client stores:
 - exact ordered QMDB operations by global `Location`
 - per-key historical update rows for `key <= watermark` lookup
 - historical ops-MMR nodes by global `Position`
@@ -10,7 +29,7 @@ It stores:
   - bitmap chunks
   - grafted MMR nodes
 
-## Why this crate exists
+### Why the ordered client exists
 
 The application-facing query API wants store-style historical reads:
 - "what was the latest value for key K at `location <= X`?"
@@ -19,28 +38,22 @@ But the proof system wants Commonware QMDB types:
 - historical proofs over the ordered operation log
 - current-state ordered proofs that include activity bitmap state
 
-`exoware-qmdb` keeps those two views aligned over one uploaded ordered operation
-log.
+The ordered client keeps those two views aligned over one uploaded ordered
+operation log.
 
-The crate also supports historical authenticated proofs for:
-
-- `commonware_storage::qmdb::immutable`
-- `commonware_storage::qmdb::keyless`
-
-Those backends expose the same upload -> publish watermark -> historical root /
-range-proof flow, without the current-state ordered proof helpers that are
-specific to mutable ordered QMDB.
-For immutable reads, `exoware-qmdb` also persists a keyed historical update family so
-`ImmutableClient::get_at` can use the same reverse indexed lookup pattern as the
-ordered QMDB path instead of replaying the whole operation prefix.
+For immutable reads, `ImmutableClient` also persists a keyed historical update
+family so `ImmutableClient::get_at` can use the same reverse indexed lookup
+pattern as the ordered QMDB path instead of replaying the whole operation prefix.
 
 ## Operation model
 
-This crate now requires exact Commonware ordered-variable operations:
+### OrderedClient
+
+`OrderedClient` requires exact Commonware ordered-variable operations:
 
 - `qmdb::any::ordered::variable::Operation<Vec<u8>, Vec<u8>>`
 
-That is why plain key-value batch uploads are rejected for this crate shape:
+That is why plain key-value batch uploads are rejected for the ordered path:
 the client cannot safely invent the predecessor-repair operations or `next_key`
 links required by `qmdb::current::ordered`.
 
@@ -52,6 +65,21 @@ Use:
 or, if the caller already has both pieces ready at once:
 
 - `upload_operations_with_current_boundary(...)`
+
+### UnorderedClient
+
+`UnorderedClient` operates on unordered-variable operations:
+
+- `qmdb::any::unordered::variable::Operation<K, V>`
+
+It provides the same upload/publish/proof flow as the ordered client but
+without current-state ordered proofs (no bitmap chunks or grafted nodes):
+
+- `upload_operations(latest_location, operations)`
+- `publish_writer_location_watermark(location)`
+- `root_at(watermark)`
+- `operation_range_proof(watermark, start_location, max_locations)`
+- `query_many_at(keys, watermark)`
 
 ## Stored key families
 
