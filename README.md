@@ -20,7 +20,7 @@ _Components are designed for production use. If you find an exploit, please refe
 
 * **store**: Persist immutable artifacts.
 
-_The interface for all components is specified in [Protobuf](./proto/)._
+_The interface for all components is specified in [Protobuf](https://buf.build/exowarexyz/monorepo)._
 
 ## Examples
 
