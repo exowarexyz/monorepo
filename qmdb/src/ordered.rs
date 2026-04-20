@@ -155,7 +155,7 @@ where
             .iter()
             .map(|(key, value)| (key, value.as_slice()))
             .collect::<Vec<_>>();
-        self.client.put(&refs).await?;
+        self.client.ingest().put(&refs).await?;
         self.sync_after_ingest().await?;
         let visible = self.writer_location_watermark().await?;
         if visible < Some(location) {
@@ -176,6 +176,7 @@ where
         }
         if self
             .client
+            .query()
             .get(&encode_presence_key(latest_location))
             .await?
             .is_some()
@@ -189,7 +190,7 @@ where
             .iter()
             .map(|(key, value)| (key, value.as_slice()))
             .collect::<Vec<_>>();
-        self.client.put(&refs).await?;
+        self.client.ingest().put(&refs).await?;
         self.sync_after_ingest().await?;
 
         let writer_location_watermark = self.writer_location_watermark().await?;
@@ -213,6 +214,7 @@ where
         }
         if self
             .client
+            .query()
             .get(&encode_presence_key(latest_location))
             .await?
             .is_some()
@@ -229,7 +231,7 @@ where
             .chain(prepared_current.rows.iter())
             .map(|(key, value)| (key, value.as_slice()))
             .collect::<Vec<_>>();
-        self.client.put(&refs).await?;
+        self.client.ingest().put(&refs).await?;
         self.sync_after_ingest().await?;
 
         let writer_location_watermark = self.writer_location_watermark().await?;
@@ -253,7 +255,7 @@ where
             .iter()
             .map(|(key, value)| (key, value.as_slice()))
             .collect::<Vec<_>>();
-        self.client.put(&refs).await?;
+        self.client.ingest().put(&refs).await?;
         self.sync_after_ingest().await?;
         Ok(())
     }

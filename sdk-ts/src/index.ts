@@ -87,14 +87,14 @@ export type { MatchKey } from './gen/ts/store/v1/common_pb.js';
 export {
     SubscribeRequestSchema,
     SubscribeResponseSchema,
-    GetBatchRequestSchema,
-    GetBatchResponseSchema,
+    GetRequestSchema,
+    GetResponseSchema,
     StreamEntrySchema,
 } from './gen/ts/store/v1/stream_pb.js';
 export type {
     SubscribeRequest,
     SubscribeResponse,
-    GetBatchRequest,
-    GetBatchResponse,
+    GetRequest,
+    GetResponse,
     StreamEntry,
 } from './gen/ts/store/v1/stream_pb.js';

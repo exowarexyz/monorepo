@@ -334,7 +334,7 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for SubscribeRequestView<'a> {
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
-pub struct GetBatchRequest {
+pub struct GetRequest {
     /// Field 1: `sequence_number`
     #[serde(
         rename = "sequenceNumber",
@@ -350,27 +350,27 @@ pub struct GetBatchRequest {
     #[serde(skip)]
     pub __buffa_cached_size: ::buffa::__private::CachedSize,
 }
-impl ::core::fmt::Debug for GetBatchRequest {
+impl ::core::fmt::Debug for GetRequest {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("GetBatchRequest")
+        f.debug_struct("GetRequest")
             .field("sequence_number", &self.sequence_number)
             .finish()
     }
 }
-impl GetBatchRequest {
+impl GetRequest {
     /// Protobuf type URL for this message, for use with `Any::pack` and
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.GetBatchRequest";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.GetRequest";
 }
-unsafe impl ::buffa::DefaultInstance for GetBatchRequest {
+unsafe impl ::buffa::DefaultInstance for GetRequest {
     fn default_instance() -> &'static Self {
-        static VALUE: ::buffa::__private::OnceBox<GetBatchRequest> = ::buffa::__private::OnceBox::new();
+        static VALUE: ::buffa::__private::OnceBox<GetRequest> = ::buffa::__private::OnceBox::new();
         VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
     }
 }
-impl ::buffa::Message for GetBatchRequest {
+impl ::buffa::Message for GetRequest {
     /// Returns the total encoded size in bytes.
     ///
     /// The result is a `u32`; the protobuf specification requires all
@@ -436,8 +436,8 @@ impl ::buffa::Message for GetBatchRequest {
         self.__buffa_cached_size.set(0);
     }
 }
-impl ::buffa::ExtensionSet for GetBatchRequest {
-    const PROTO_FQN: &'static str = "store.stream.v1.GetBatchRequest";
+impl ::buffa::ExtensionSet for GetRequest {
+    const PROTO_FQN: &'static str = "store.stream.v1.GetRequest";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -445,7 +445,7 @@ impl ::buffa::ExtensionSet for GetBatchRequest {
         &mut self.__buffa_unknown_fields
     }
 }
-impl ::buffa::json_helpers::ProtoElemJson for GetBatchRequest {
+impl ::buffa::json_helpers::ProtoElemJson for GetRequest {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
         s: S,
@@ -459,20 +459,20 @@ impl ::buffa::json_helpers::ProtoElemJson for GetBatchRequest {
     }
 }
 #[doc(hidden)]
-pub const __GET_BATCH_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.stream.v1.GetBatchRequest",
-    to_json: ::buffa::type_registry::any_to_json::<GetBatchRequest>,
-    from_json: ::buffa::type_registry::any_from_json::<GetBatchRequest>,
+pub const __GET_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/store.stream.v1.GetRequest",
+    to_json: ::buffa::type_registry::any_to_json::<GetRequest>,
+    from_json: ::buffa::type_registry::any_from_json::<GetRequest>,
     is_wkt: false,
 };
 /// Point-lookup for one historical batch. Always returns the complete batch.
 #[derive(Clone, Debug, Default)]
-pub struct GetBatchRequestView<'a> {
+pub struct GetRequestView<'a> {
     /// Field 1: `sequence_number`
     pub sequence_number: u64,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
-impl<'a> GetBatchRequestView<'a> {
+impl<'a> GetRequestView<'a> {
     /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
     ///
     /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
@@ -530,8 +530,8 @@ impl<'a> GetBatchRequestView<'a> {
         ::core::result::Result::Ok(())
     }
 }
-impl<'a> ::buffa::MessageView<'a> for GetBatchRequestView<'a> {
-    type Owned = GetBatchRequest;
+impl<'a> ::buffa::MessageView<'a> for GetRequestView<'a> {
+    type Owned = GetRequest;
     fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
         Self::_decode_depth(buf, ::buffa::RECURSION_LIMIT)
     }
@@ -543,10 +543,10 @@ impl<'a> ::buffa::MessageView<'a> for GetBatchRequestView<'a> {
     }
     /// Convert this view to the owned message type.
     #[allow(clippy::redundant_closure, clippy::useless_conversion)]
-    fn to_owned_message(&self) -> GetBatchRequest {
+    fn to_owned_message(&self) -> GetRequest {
         #[allow(unused_imports)]
         use ::buffa::alloc::string::ToString as _;
-        GetBatchRequest {
+        GetRequest {
             sequence_number: self.sequence_number,
             __buffa_unknown_fields: self
                 .__buffa_unknown_fields
@@ -557,14 +557,14 @@ impl<'a> ::buffa::MessageView<'a> for GetBatchRequestView<'a> {
         }
     }
 }
-unsafe impl ::buffa::DefaultViewInstance for GetBatchRequestView<'static> {
+unsafe impl ::buffa::DefaultViewInstance for GetRequestView<'static> {
     fn default_view_instance() -> &'static Self {
-        static VALUE: ::buffa::__private::OnceBox<GetBatchRequestView<'static>> = ::buffa::__private::OnceBox::new();
+        static VALUE: ::buffa::__private::OnceBox<GetRequestView<'static>> = ::buffa::__private::OnceBox::new();
         VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
     }
 }
-unsafe impl<'a> ::buffa::HasDefaultViewInstance for GetBatchRequestView<'a> {
-    type Static = GetBatchRequestView<'static>;
+unsafe impl<'a> ::buffa::HasDefaultViewInstance for GetRequestView<'a> {
+    type Static = GetRequestView<'static>;
 }
 /// One (key, value) pair from a `Put` batch. Callers reapply any filter
 /// locally if they need to know which subscriber pattern matched an entry.
@@ -1142,12 +1142,12 @@ unsafe impl ::buffa::DefaultViewInstance for SubscribeResponseView<'static> {
 unsafe impl<'a> ::buffa::HasDefaultViewInstance for SubscribeResponseView<'a> {
     type Static = SubscribeResponseView<'static>;
 }
-/// Response for `GetBatch`: the full contents of the batch at the requested
+/// Response for `Get`: the full contents of the batch at the requested
 /// sequence number, with no server-side filter applied.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
-pub struct GetBatchResponse {
+pub struct GetResponse {
     /// Field 1: `sequence_number`
     #[serde(
         rename = "sequenceNumber",
@@ -1170,28 +1170,28 @@ pub struct GetBatchResponse {
     #[serde(skip)]
     pub __buffa_cached_size: ::buffa::__private::CachedSize,
 }
-impl ::core::fmt::Debug for GetBatchResponse {
+impl ::core::fmt::Debug for GetResponse {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("GetBatchResponse")
+        f.debug_struct("GetResponse")
             .field("sequence_number", &self.sequence_number)
             .field("entries", &self.entries)
             .finish()
     }
 }
-impl GetBatchResponse {
+impl GetResponse {
     /// Protobuf type URL for this message, for use with `Any::pack` and
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.GetBatchResponse";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.GetResponse";
 }
-unsafe impl ::buffa::DefaultInstance for GetBatchResponse {
+unsafe impl ::buffa::DefaultInstance for GetResponse {
     fn default_instance() -> &'static Self {
-        static VALUE: ::buffa::__private::OnceBox<GetBatchResponse> = ::buffa::__private::OnceBox::new();
+        static VALUE: ::buffa::__private::OnceBox<GetResponse> = ::buffa::__private::OnceBox::new();
         VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
     }
 }
-impl ::buffa::Message for GetBatchResponse {
+impl ::buffa::Message for GetResponse {
     /// Returns the total encoded size in bytes.
     ///
     /// The result is a `u32`; the protobuf specification requires all
@@ -1285,8 +1285,8 @@ impl ::buffa::Message for GetBatchResponse {
         self.__buffa_cached_size.set(0);
     }
 }
-impl ::buffa::ExtensionSet for GetBatchResponse {
-    const PROTO_FQN: &'static str = "store.stream.v1.GetBatchResponse";
+impl ::buffa::ExtensionSet for GetResponse {
+    const PROTO_FQN: &'static str = "store.stream.v1.GetResponse";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -1294,7 +1294,7 @@ impl ::buffa::ExtensionSet for GetBatchResponse {
         &mut self.__buffa_unknown_fields
     }
 }
-impl ::buffa::json_helpers::ProtoElemJson for GetBatchResponse {
+impl ::buffa::json_helpers::ProtoElemJson for GetResponse {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
         s: S,
@@ -1308,23 +1308,23 @@ impl ::buffa::json_helpers::ProtoElemJson for GetBatchResponse {
     }
 }
 #[doc(hidden)]
-pub const __GET_BATCH_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.stream.v1.GetBatchResponse",
-    to_json: ::buffa::type_registry::any_to_json::<GetBatchResponse>,
-    from_json: ::buffa::type_registry::any_from_json::<GetBatchResponse>,
+pub const __GET_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/store.stream.v1.GetResponse",
+    to_json: ::buffa::type_registry::any_to_json::<GetResponse>,
+    from_json: ::buffa::type_registry::any_from_json::<GetResponse>,
     is_wkt: false,
 };
-/// Response for `GetBatch`: the full contents of the batch at the requested
+/// Response for `Get`: the full contents of the batch at the requested
 /// sequence number, with no server-side filter applied.
 #[derive(Clone, Debug, Default)]
-pub struct GetBatchResponseView<'a> {
+pub struct GetResponseView<'a> {
     /// Field 1: `sequence_number`
     pub sequence_number: u64,
     /// Field 2: `entries`
     pub entries: ::buffa::RepeatedView<'a, StreamEntryView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
-impl<'a> GetBatchResponseView<'a> {
+impl<'a> GetResponseView<'a> {
     /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
     ///
     /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
@@ -1396,8 +1396,8 @@ impl<'a> GetBatchResponseView<'a> {
         ::core::result::Result::Ok(())
     }
 }
-impl<'a> ::buffa::MessageView<'a> for GetBatchResponseView<'a> {
-    type Owned = GetBatchResponse;
+impl<'a> ::buffa::MessageView<'a> for GetResponseView<'a> {
+    type Owned = GetResponse;
     fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
         Self::_decode_depth(buf, ::buffa::RECURSION_LIMIT)
     }
@@ -1409,10 +1409,10 @@ impl<'a> ::buffa::MessageView<'a> for GetBatchResponseView<'a> {
     }
     /// Convert this view to the owned message type.
     #[allow(clippy::redundant_closure, clippy::useless_conversion)]
-    fn to_owned_message(&self) -> GetBatchResponse {
+    fn to_owned_message(&self) -> GetResponse {
         #[allow(unused_imports)]
         use ::buffa::alloc::string::ToString as _;
-        GetBatchResponse {
+        GetResponse {
             sequence_number: self.sequence_number,
             entries: self.entries.iter().map(|v| v.to_owned_message()).collect(),
             __buffa_unknown_fields: self
@@ -1424,14 +1424,14 @@ impl<'a> ::buffa::MessageView<'a> for GetBatchResponseView<'a> {
         }
     }
 }
-unsafe impl ::buffa::DefaultViewInstance for GetBatchResponseView<'static> {
+unsafe impl ::buffa::DefaultViewInstance for GetResponseView<'static> {
     fn default_view_instance() -> &'static Self {
-        static VALUE: ::buffa::__private::OnceBox<GetBatchResponseView<'static>> = ::buffa::__private::OnceBox::new();
+        static VALUE: ::buffa::__private::OnceBox<GetResponseView<'static>> = ::buffa::__private::OnceBox::new();
         VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
     }
 }
-unsafe impl<'a> ::buffa::HasDefaultViewInstance for GetBatchResponseView<'a> {
-    type Static = GetBatchResponseView<'static>;
+unsafe impl<'a> ::buffa::HasDefaultViewInstance for GetResponseView<'a> {
+    type Static = GetResponseView<'static>;
 }
 
 /// Full service name for this service.
@@ -1440,8 +1440,8 @@ pub const SERVICE_SERVICE_NAME: &str = "store.stream.v1.Service";
 /// `Subscribe` delivers a `SubscribeResponse` per atomic `Put` batch whose
 /// entries match any of the subscriber's `match_keys`. Optional
 /// `since_sequence_number` replays retained batches before transitioning live.
-/// `GetBatch` returns the complete batch at a given sequence number (no filter
-/// applied server-side). `SubscribeResponse` and `GetBatchResponse` carry the
+/// `Get` returns the complete batch at a given sequence number (no filter
+/// applied server-side). `SubscribeResponse` and `GetResponse` carry the
 /// same shape so callers can share decoders.
 ///
 /// # Implementing handlers
@@ -1476,16 +1476,13 @@ pub trait Service: Send + Sync + 'static {
             ::connectrpc::ConnectError,
         >,
     > + Send;
-    /// Handle the GetBatch RPC.
-    fn get_batch(
+    /// Handle the Get RPC.
+    fn get(
         &self,
         ctx: ::connectrpc::Context,
-        request: ::buffa::view::OwnedView<GetBatchRequestView<'static>>,
+        request: ::buffa::view::OwnedView<GetRequestView<'static>>,
     ) -> impl ::std::future::Future<
-        Output = Result<
-            (GetBatchResponse, ::connectrpc::Context),
-            ::connectrpc::ConnectError,
-        >,
+        Output = Result<(GetResponse, ::connectrpc::Context), ::connectrpc::ConnectError>,
     > + Send;
 }
 /// Extension trait for registering a service implementation with a Router.
@@ -1529,12 +1526,12 @@ impl<S: Service> ServiceExt for S {
             )
             .route_view(
                 SERVICE_SERVICE_NAME,
-                "GetBatch",
+                "Get",
                 {
                     let svc = ::std::sync::Arc::clone(&self);
                     ::connectrpc::view_handler_fn(move |ctx, req| {
                         let svc = ::std::sync::Arc::clone(&svc);
-                        async move { svc.get_batch(ctx, req).await }
+                        async move { svc.get(ctx, req).await }
                     })
                 },
             )
@@ -1588,7 +1585,7 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
                     ::connectrpc::dispatcher::codegen::MethodDescriptor::server_streaming(),
                 )
             }
-            "GetBatch" => {
+            "Get" => {
                 Some(::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false))
             }
             _ => None,
@@ -1606,13 +1603,13 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
         };
         let _ = (&ctx, &request, &format);
         match method {
-            "GetBatch" => {
+            "Get" => {
                 let svc = ::std::sync::Arc::clone(&self.inner);
                 Box::pin(async move {
                     let req = ::connectrpc::dispatcher::codegen::decode_request_view::<
-                        GetBatchRequestView,
+                        GetRequestView,
                     >(request, format)?;
-                    let (res, ctx) = svc.get_batch(ctx, req).await?;
+                    let (res, ctx) = svc.get(ctx, req).await?;
                     let bytes = ::connectrpc::dispatcher::codegen::encode_response(
                         &res,
                         format,
@@ -1795,30 +1792,27 @@ where
             )
             .await
     }
-    /// Call the GetBatch RPC. Sends a request to /store.stream.v1.Service/GetBatch.
-    pub async fn get_batch(
+    /// Call the Get RPC. Sends a request to /store.stream.v1.Service/Get.
+    pub async fn get(
         &self,
-        request: GetBatchRequest,
+        request: GetRequest,
     ) -> Result<
         ::connectrpc::client::UnaryResponse<
-            ::buffa::view::OwnedView<GetBatchResponseView<'static>>,
+            ::buffa::view::OwnedView<GetResponseView<'static>>,
         >,
         ::connectrpc::ConnectError,
     > {
-        self.get_batch_with_options(
-                request,
-                ::connectrpc::client::CallOptions::default(),
-            )
+        self.get_with_options(request, ::connectrpc::client::CallOptions::default())
             .await
     }
-    /// Call the GetBatch RPC with explicit per-call options. Options override [`connectrpc::client::ClientConfig`] defaults.
-    pub async fn get_batch_with_options(
+    /// Call the Get RPC with explicit per-call options. Options override [`connectrpc::client::ClientConfig`] defaults.
+    pub async fn get_with_options(
         &self,
-        request: GetBatchRequest,
+        request: GetRequest,
         options: ::connectrpc::client::CallOptions,
     ) -> Result<
         ::connectrpc::client::UnaryResponse<
-            ::buffa::view::OwnedView<GetBatchResponseView<'static>>,
+            ::buffa::view::OwnedView<GetResponseView<'static>>,
         >,
         ::connectrpc::ConnectError,
     > {
@@ -1826,7 +1820,7 @@ where
                 &self.transport,
                 &self.config,
                 SERVICE_SERVICE_NAME,
-                "GetBatch",
+                "Get",
                 request,
                 options,
             )

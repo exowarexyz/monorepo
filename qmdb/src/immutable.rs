@@ -99,6 +99,7 @@ where
         let namespace = AuthenticatedBackendNamespace::Immutable;
         if self
             .client
+            .query()
             .get(&encode_auth_presence_key(namespace, latest_location))
             .await?
             .is_some()
@@ -111,7 +112,7 @@ where
             .iter()
             .map(|(key, value)| (key, value.as_slice()))
             .collect::<Vec<_>>();
-        self.client.put(&refs).await?;
+        self.client.ingest().put(&refs).await?;
         self.sync_after_ingest().await?;
         Ok(UploadReceipt {
             latest_location,
@@ -164,7 +165,7 @@ where
             .iter()
             .map(|(key, value)| (key, value.as_slice()))
             .collect::<Vec<_>>();
-        self.client.put(&refs).await?;
+        self.client.ingest().put(&refs).await?;
         self.sync_after_ingest().await?;
         let visible = self.writer_location_watermark().await?;
         if visible < Some(location) {

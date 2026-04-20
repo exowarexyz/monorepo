@@ -142,6 +142,7 @@ where
         }
         if self
             .client
+            .query()
             .get(&encode_presence_key(latest_location))
             .await?
             .is_some()
@@ -155,7 +156,7 @@ where
             .iter()
             .map(|(key, value)| (key, value.as_slice()))
             .collect::<Vec<_>>();
-        self.client.put(&refs).await?;
+        self.client.ingest().put(&refs).await?;
         self.core().sync_after_ingest().await?;
 
         let writer_location_watermark = self.writer_location_watermark().await?;

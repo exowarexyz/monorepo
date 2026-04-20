@@ -11,12 +11,12 @@ import "store/v1/common.proto";
 // entries match any of the subscriber's `match_keys`. Optional
 // `since_sequence_number` replays retained batches before transitioning live.
 //
-// `GetBatch` returns the complete batch at a given sequence number (no filter
-// applied server-side). `SubscribeResponse` and `GetBatchResponse` carry the
+// `Get` returns the complete batch at a given sequence number (no filter
+// applied server-side). `SubscribeResponse` and `GetResponse` carry the
 // same shape so callers can share decoders.
 service Service {
   rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
-  rpc GetBatch(GetBatchRequest) returns (GetBatchResponse);
+  rpc Get(GetRequest) returns (GetResponse);
 }
 
 // Live (and optionally replayed) subscription request.
@@ -40,7 +40,7 @@ message SubscribeRequest {
 }
 
 // Point-lookup for one historical batch. Always returns the complete batch.
-message GetBatchRequest {
+message GetRequest {
   uint64 sequence_number = 1;
 }
 
@@ -60,9 +60,9 @@ message SubscribeResponse {
   repeated StreamEntry entries = 2;
 }
 
-// Response for `GetBatch`: the full contents of the batch at the requested
+// Response for `Get`: the full contents of the batch at the requested
 // sequence number, with no server-side filter applied.
-message GetBatchResponse {
+message GetResponse {
   uint64 sequence_number = 1;
   repeated StreamEntry entries = 2;
 }

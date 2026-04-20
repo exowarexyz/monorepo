@@ -96,7 +96,8 @@ pub(crate) async fn open_subscription(
     since: Option<u64>,
 ) -> Result<StreamSubscription, QmdbError> {
     client
-        .subscribe_stream(filter, since)
+        .stream()
+        .subscribe(filter, since)
         .await
         .map_err(|e| QmdbError::Stream(e.to_string()))
 }

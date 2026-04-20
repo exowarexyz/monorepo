@@ -54,7 +54,8 @@ async fn next_with_timeout(
 async fn live_subscribe_delivers_matching_entries() {
     let (_h, client) = spawn_client().await;
     let mut sub = client
-        .subscribe_stream(filter(1), None)
+        .stream()
+        .subscribe(filter(1), None)
         .await
         .expect("subscribe");
 
@@ -62,7 +63,7 @@ async fn live_subscribe_delivers_matching_entries() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let k = key(1, b"hello");
-    let seq = client.put(&[(&k, b"world")]).await.expect("put");
+    let seq = client.ingest().put(&[(&k, b"world")]).await.expect("put");
 
     let frame = next_with_timeout(&mut sub, 1_000)
         .await
@@ -77,12 +78,14 @@ async fn live_subscribe_delivers_matching_entries() {
 async fn non_matching_put_yields_no_frame() {
     let (_h, client) = spawn_client().await;
     let mut sub = client
-        .subscribe_stream(filter(1), None)
+        .stream()
+        .subscribe(filter(1), None)
         .await
         .expect("subscribe");
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     client
+        .ingest()
         .put(&[(&key(2, b"miss"), b"v")])
         .await
         .expect("put");
@@ -110,12 +113,13 @@ async fn multiple_match_keys_delivered_once_per_put() {
             },
         ],
     };
-    let mut sub = client.subscribe_stream(f, None).await.expect("subscribe");
+    let mut sub = client.stream().subscribe(f, None).await.expect("subscribe");
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let ka = key(1, b"a");
     let kb = key(2, b"b");
     client
+        .ingest()
         .put(&[(&ka, b"1"), (&kb, b"2")])
         .await
         .expect("put");
@@ -134,16 +138,19 @@ async fn multiple_match_keys_delivered_once_per_put() {
 async fn two_puts_yield_two_distinct_frames() {
     let (_h, client) = spawn_client().await;
     let mut sub = client
-        .subscribe_stream(filter(1), None)
+        .stream()
+        .subscribe(filter(1), None)
         .await
         .expect("subscribe");
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let seq1 = client
+        .ingest()
         .put(&[(&key(1, b"a"), b"1")])
         .await
         .expect("put1");
     let seq2 = client
+        .ingest()
         .put(&[(&key(1, b"b"), b"2")])
         .await
         .expect("put2");
@@ -167,6 +174,7 @@ async fn replay_since_delivers_retained_batches_then_live() {
     let mut seen_seqs = Vec::new();
     for i in 0..5u8 {
         let seq = client
+            .ingest()
             .put(&[(&key(1, &[b'a' + i]), &[b'v', i])])
             .await
             .expect("put");
@@ -176,7 +184,8 @@ async fn replay_since_delivers_retained_batches_then_live() {
     // Subscribe from seq 3 → should replay 3, 4, 5 then continue live.
     let start = seen_seqs[2];
     let mut sub = client
-        .subscribe_stream(filter(1), Some(start))
+        .stream()
+        .subscribe(filter(1), Some(start))
         .await
         .expect("subscribe");
 
@@ -192,6 +201,7 @@ async fn replay_since_delivers_retained_batches_then_live() {
 
     // Now live: a new PUT should arrive with its actual seq.
     let live_seq = client
+        .ingest()
         .put(&[(&key(1, b"live"), b"hot")])
         .await
         .expect("put live");
@@ -206,12 +216,14 @@ async fn replay_since_delivers_retained_batches_then_live() {
 async fn replay_past_end_delivers_only_live() {
     let (_h, client) = spawn_client().await;
     let current = client
+        .ingest()
         .put(&[(&key(1, b"seed"), b"v")])
         .await
         .expect("put");
 
     let mut sub = client
-        .subscribe_stream(filter(1), Some(current + 10))
+        .stream()
+        .subscribe(filter(1), Some(current + 10))
         .await
         .expect("subscribe");
 
@@ -221,6 +233,7 @@ async fn replay_past_end_delivers_only_live() {
 
     // Next live PUT lands with its actual seq (no synthetic gaps).
     let live_seq = client
+        .ingest()
         .put(&[(&key(1, b"next"), b"n")])
         .await
         .expect("put next");
@@ -235,12 +248,14 @@ async fn replay_miss_after_prune_returns_batch_evicted() {
     let (_h, client) = spawn_client().await;
     for i in 0..20u8 {
         client
+            .ingest()
             .put(&[(&key(1, &[i]), &[b'v', i])])
             .await
             .expect("put");
     }
     // Prune via compact batch-log policy: keep last 10.
     client
+        .compact()
         .prune(&[keep_latest_batches(10)])
         .await
         .expect("prune keep_latest batches");
@@ -249,7 +264,7 @@ async fn replay_miss_after_prune_returns_batch_evicted() {
     // surface either on the subscribe call itself or on the first next()
     // depending on whether the transport has flushed headers before the
     // server-side error returns.
-    let err_msg = match client.subscribe_stream(filter(1), Some(1)).await {
+    let err_msg = match client.stream().subscribe(filter(1), Some(1)).await {
         Err(err) => format!("{err:?}"),
         Ok(mut sub) => format!("{:?}", sub.next().await.expect_err("stream should error")),
     };
@@ -270,11 +285,12 @@ async fn get_batch_returns_whole_batch_unfiltered() {
     let ka = key(1, b"a");
     let kb = key(2, b"b");
     let seq = client
+        .ingest()
         .put(&[(&ka, b"1"), (&kb, b"2")])
         .await
         .expect("put");
 
-    let got = client.get_batch(seq).await.expect("get_batch").expect("some");
+    let got = client.stream().get(seq).await.expect("get_batch").expect("some");
     assert_eq!(got.len(), 2);
     // Order must match write order.
     assert_eq!(got[0].0.as_ref(), ka.as_ref());
@@ -286,10 +302,11 @@ async fn get_batch_returns_whole_batch_unfiltered() {
 #[tokio::test]
 async fn get_batch_missing_seq_returns_none() {
     let (_h, client) = spawn_client().await;
-    client.put(&[(&key(1, b"a"), b"1")]).await.expect("put");
+    client.ingest().put(&[(&key(1, b"a"), b"1")]).await.expect("put");
     let current = client.sequence_number();
     let got = client
-        .get_batch(current + 100)
+        .stream()
+        .get(current + 100)
         .await
         .expect("get_batch should not error");
     assert!(got.is_none());
@@ -298,10 +315,10 @@ async fn get_batch_missing_seq_returns_none() {
 #[tokio::test]
 async fn get_batch_after_drop_all_returns_none() {
     let (_h, client) = spawn_client().await;
-    let seq = client.put(&[(&key(1, b"a"), b"1")]).await.expect("put");
-    client.prune(&[drop_all_batches()]).await.expect("prune");
+    let seq = client.ingest().put(&[(&key(1, b"a"), b"1")]).await.expect("put");
+    client.compact().prune(&[drop_all_batches()]).await.expect("prune");
 
-    let got = client.get_batch(seq).await.expect("get_batch");
+    let got = client.stream().get(seq).await.expect("get_batch");
     assert!(got.is_none(), "pruned batch should return None");
 }
 
@@ -311,21 +328,24 @@ async fn get_batch_after_keep_latest_evicts_old_but_keeps_new() {
     let mut seqs = Vec::new();
     for i in 0..20u8 {
         let s = client
+            .ingest()
             .put(&[(&key(1, &[i]), &[b'v', i])])
             .await
             .expect("put");
         seqs.push(s);
     }
     client
+        .compact()
         .prune(&[keep_latest_batches(10)])
         .await
         .expect("prune keep_latest batches");
 
     // Earliest seq should be evicted.
-    assert!(client.get_batch(seqs[0]).await.expect("get").is_none());
+    assert!(client.stream().get(seqs[0]).await.expect("get").is_none());
     // Latest seq should survive.
     let last = client
-        .get_batch(*seqs.last().unwrap())
+        .stream()
+        .get(*seqs.last().unwrap())
         .await
         .expect("get last")
         .expect("some");
@@ -340,7 +360,8 @@ async fn slow_subscriber_drops_without_blocking_ingest() {
     let (_h, client) = spawn_client().await;
     // Open subscription but never drain it. Internal cap = 256 frames.
     let _sub = client
-        .subscribe_stream(filter(1), None)
+        .stream()
+        .subscribe(filter(1), None)
         .await
         .expect("subscribe");
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -351,7 +372,7 @@ async fn slow_subscriber_drops_without_blocking_ingest() {
     let started = std::time::Instant::now();
     for i in 0..512u16 {
         let k = key(1, &i.to_be_bytes());
-        client.put(&[(&k, b"x")]).await.expect("put");
+        client.ingest().put(&[(&k, b"x")]).await.expect("put");
     }
     let elapsed = started.elapsed();
     assert!(
@@ -359,6 +380,6 @@ async fn slow_subscriber_drops_without_blocking_ingest() {
         "ingest should not stall on slow subscriber (took {elapsed:?})"
     );
     // Small verification that the store actually still serves reads.
-    let last = Bytes::copy_from_slice(client.get(&key(1, &511u16.to_be_bytes())).await.expect("get").expect("some").as_ref());
+    let last = Bytes::copy_from_slice(client.query().get(&key(1, &511u16.to_be_bytes())).await.expect("get").expect("some").as_ref());
     assert_eq!(last.as_ref(), b"x");
 }

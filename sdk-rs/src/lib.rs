@@ -801,13 +801,33 @@ impl StoreClient {
         }
     }
 
+    /// Typed access to the `store.ingest.v1` service.
+    pub fn ingest(&self) -> Ingest<'_> {
+        Ingest { c: self }
+    }
+
+    /// Typed access to the `store.query.v1` service.
+    pub fn query(&self) -> Query<'_> {
+        Query { c: self }
+    }
+
+    /// Typed access to the `store.compact.v1` service.
+    pub fn compact(&self) -> Compact<'_> {
+        Compact { c: self }
+    }
+
+    /// Typed access to the `store.stream.v1` service.
+    pub fn stream(&self) -> Stream<'_> {
+        Stream { c: self }
+    }
+
     /// Submit a KV batch via Connect `Put`.
     ///
     /// On success returns the **store sequence number** from the response (same value
     /// the client also records via [`Self::observe_sequence_number`]). Use it for immediate
     /// `get_with_min_sequence_number` / range calls without polling [`Self::sequence_number`].
     /// If the request succeeds, the server accepts the full batch (count is `kvs.len()`).
-    pub async fn put(&self, kvs: &[(&Key, &[u8])]) -> Result<u64, ClientError> {
+    pub(crate) async fn put(&self, kvs: &[(&Key, &[u8])]) -> Result<u64, ClientError> {
         let mut proto_kvs = Vec::with_capacity(kvs.len());
         for (key, value) in kvs {
             if !is_valid_key_size(key.len()) {
@@ -841,11 +861,11 @@ impl StoreClient {
         Ok(token)
     }
 
-    pub async fn get(&self, key: &Key) -> Result<Option<Bytes>, ClientError> {
+    pub(crate) async fn get(&self, key: &Key) -> Result<Option<Bytes>, ClientError> {
         self.get_internal(key, None).await
     }
 
-    pub async fn get_with_min_sequence_number(
+    pub(crate) async fn get_with_min_sequence_number(
         &self,
         key: &Key,
         min_sequence_number: u64,
@@ -867,7 +887,7 @@ impl StoreClient {
         Ok(response.value.map(Bytes::from))
     }
 
-    pub async fn get_many(
+    pub(crate) async fn get_many(
         &self,
         keys: &[&Key],
         batch_size: u32,
@@ -875,7 +895,7 @@ impl StoreClient {
         self.get_many_internal(keys, batch_size, None).await
     }
 
-    pub async fn get_many_with_min_sequence_number(
+    pub(crate) async fn get_many_with_min_sequence_number(
         &self,
         keys: &[&Key],
         batch_size: u32,
@@ -948,7 +968,7 @@ impl StoreClient {
 
     /// Key range is inclusive: `start <= key <= end` when `end` is non-empty; empty `end` is
     /// unbounded above (matches `store.query.v1.RangeRequest`).
-    pub async fn range(
+    pub(crate) async fn range(
         &self,
         start: &Key,
         end: &Key,
@@ -959,7 +979,7 @@ impl StoreClient {
     }
 
     /// See [`StoreClient::range`] for `end` semantics.
-    pub async fn range_with_mode(
+    pub(crate) async fn range_with_mode(
         &self,
         start: &Key,
         end: &Key,
@@ -969,7 +989,7 @@ impl StoreClient {
         self.range_internal(start, end, limit, mode, None).await
     }
 
-    pub async fn range_with_min_sequence_number(
+    pub(crate) async fn range_with_min_sequence_number(
         &self,
         start: &Key,
         end: &Key,
@@ -986,7 +1006,7 @@ impl StoreClient {
         .await
     }
 
-    pub async fn range_with_mode_and_min_sequence_number(
+    pub(crate) async fn range_with_mode_and_min_sequence_number(
         &self,
         start: &Key,
         end: &Key,
@@ -998,7 +1018,7 @@ impl StoreClient {
             .await
     }
 
-    pub async fn range_stream(
+    pub(crate) async fn range_stream(
         &self,
         start: &Key,
         end: &Key,
@@ -1009,7 +1029,7 @@ impl StoreClient {
             .await
     }
 
-    pub async fn range_stream_with_mode(
+    pub(crate) async fn range_stream_with_mode(
         &self,
         start: &Key,
         end: &Key,
@@ -1021,7 +1041,7 @@ impl StoreClient {
             .await
     }
 
-    pub async fn range_stream_with_min_sequence_number(
+    pub(crate) async fn range_stream_with_min_sequence_number(
         &self,
         start: &Key,
         end: &Key,
@@ -1040,7 +1060,7 @@ impl StoreClient {
         .await
     }
 
-    pub async fn range_stream_with_mode_and_min_sequence_number(
+    pub(crate) async fn range_stream_with_mode_and_min_sequence_number(
         &self,
         start: &Key,
         end: &Key,
@@ -1060,7 +1080,7 @@ impl StoreClient {
         .await
     }
 
-    pub async fn range_reduce(
+    pub(crate) async fn range_reduce(
         &self,
         start: &Key,
         end: &Key,
@@ -1082,7 +1102,7 @@ impl StoreClient {
             .collect())
     }
 
-    pub async fn range_reduce_with_min_sequence_number(
+    pub(crate) async fn range_reduce_with_min_sequence_number(
         &self,
         start: &Key,
         end: &Key,
@@ -1105,7 +1125,7 @@ impl StoreClient {
             .collect())
     }
 
-    pub async fn range_reduce_response(
+    pub(crate) async fn range_reduce_response(
         &self,
         start: &Key,
         end: &Key,
@@ -1117,7 +1137,7 @@ impl StoreClient {
         Ok(body)
     }
 
-    pub async fn range_reduce_response_with_min_sequence_number(
+    pub(crate) async fn range_reduce_response_with_min_sequence_number(
         &self,
         start: &Key,
         end: &Key,
@@ -1130,24 +1150,7 @@ impl StoreClient {
         Ok(body)
     }
 
-    #[cfg(test)]
-    pub async fn range_reduce_response_for_tests(
-        &self,
-        start: &Key,
-        end: &Key,
-        request: &DomainRangeReduceRequest,
-    ) -> Result<
-        (
-            exoware_proto::query::ReduceResponse,
-            Option<proto_query::Detail>,
-        ),
-        ClientError,
-    > {
-        self.range_reduce_response_internal(start, end, request, None)
-            .await
-    }
-
-    pub async fn prune(
+    pub(crate) async fn prune(
         &self,
         policies: &[crate::prune_policy::PrunePolicy],
     ) -> Result<(), ClientError> {
@@ -1172,7 +1175,7 @@ impl StoreClient {
     /// into live. If `N` references a batch that has been evicted from the
     /// batch log, this call returns an error whose `ErrorInfo.reason` is
     /// `BATCH_EVICTED`.
-    pub async fn subscribe_stream(
+    pub(crate) async fn subscribe_stream(
         &self,
         filter: crate::stream_filter::StreamFilter,
         since_sequence_number: Option<u64>,
@@ -1212,7 +1215,7 @@ impl StoreClient {
     /// `store.stream.v1.Service.GetBatch`. Returns `Ok(None)` when the server
     /// reports `BATCH_EVICTED` or `BATCH_NOT_FOUND`; other RPC failures are
     /// surfaced as `Err`.
-    pub async fn get_batch(
+    pub(crate) async fn get_batch(
         &self,
         sequence_number: u64,
     ) -> Result<Option<Vec<(Key, Bytes)>>, ClientError> {
@@ -1223,7 +1226,7 @@ impl StoreClient {
             config,
         );
         match client
-            .get_batch(exoware_proto::store::stream::v1::GetBatchRequest {
+            .get(exoware_proto::store::stream::v1::GetRequest {
                 sequence_number,
                 ..Default::default()
             })
@@ -1488,6 +1491,264 @@ impl StoreClient {
                 }
             }
         }
+    }
+}
+
+// --- Service-grouped accessors ---------------------------------------------
+//
+// These thin handles re-export the four RPC services under spec-aligned
+// method names: `client.ingest().put(...)`, `client.query().get(...)`,
+// `client.compact().prune(...)`, `client.stream().{subscribe, get}(...)`.
+// Each holds a `&StoreClient` so no allocation / reference counting happens
+// on the accessor call itself.
+
+#[derive(Clone, Copy, Debug)]
+pub struct Ingest<'a> {
+    c: &'a StoreClient,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Query<'a> {
+    c: &'a StoreClient,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Compact<'a> {
+    c: &'a StoreClient,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Stream<'a> {
+    c: &'a StoreClient,
+}
+
+impl<'a> Ingest<'a> {
+    /// `store.ingest.v1.Service.Put`.
+    pub async fn put(&self, kvs: &[(&Key, &[u8])]) -> Result<u64, ClientError> {
+        self.c.put(kvs).await
+    }
+}
+
+impl<'a> Query<'a> {
+    /// `store.query.v1.Service.Get`.
+    pub async fn get(&self, key: &Key) -> Result<Option<Bytes>, ClientError> {
+        self.c.get(key).await
+    }
+
+    pub async fn get_with_min_sequence_number(
+        &self,
+        key: &Key,
+        min_sequence_number: u64,
+    ) -> Result<Option<Bytes>, ClientError> {
+        self.c
+            .get_with_min_sequence_number(key, min_sequence_number)
+            .await
+    }
+
+    /// `store.query.v1.Service.GetMany`.
+    pub async fn get_many(
+        &self,
+        keys: &[&Key],
+        batch_size: u32,
+    ) -> Result<GetManyStream, ClientError> {
+        self.c.get_many(keys, batch_size).await
+    }
+
+    pub async fn get_many_with_min_sequence_number(
+        &self,
+        keys: &[&Key],
+        batch_size: u32,
+        min_sequence_number: u64,
+    ) -> Result<GetManyStream, ClientError> {
+        self.c
+            .get_many_with_min_sequence_number(keys, batch_size, min_sequence_number)
+            .await
+    }
+
+    /// Collected `store.query.v1.Service.Range`.
+    pub async fn range(
+        &self,
+        start: &Key,
+        end: &Key,
+        limit: usize,
+    ) -> Result<Vec<(Key, Bytes)>, ClientError> {
+        self.c.range(start, end, limit).await
+    }
+
+    pub async fn range_with_mode(
+        &self,
+        start: &Key,
+        end: &Key,
+        limit: usize,
+        mode: RangeMode,
+    ) -> Result<Vec<(Key, Bytes)>, ClientError> {
+        self.c.range_with_mode(start, end, limit, mode).await
+    }
+
+    pub async fn range_with_min_sequence_number(
+        &self,
+        start: &Key,
+        end: &Key,
+        limit: usize,
+        min_sequence_number: u64,
+    ) -> Result<Vec<(Key, Bytes)>, ClientError> {
+        self.c
+            .range_with_min_sequence_number(start, end, limit, min_sequence_number)
+            .await
+    }
+
+    pub async fn range_with_mode_and_min_sequence_number(
+        &self,
+        start: &Key,
+        end: &Key,
+        limit: usize,
+        mode: RangeMode,
+        min_sequence_number: u64,
+    ) -> Result<Vec<(Key, Bytes)>, ClientError> {
+        self.c
+            .range_with_mode_and_min_sequence_number(start, end, limit, mode, min_sequence_number)
+            .await
+    }
+
+    /// Streaming `store.query.v1.Service.Range`.
+    pub async fn range_stream(
+        &self,
+        start: &Key,
+        end: &Key,
+        limit: usize,
+        batch_size: usize,
+    ) -> Result<RangeStream, ClientError> {
+        self.c.range_stream(start, end, limit, batch_size).await
+    }
+
+    pub async fn range_stream_with_mode(
+        &self,
+        start: &Key,
+        end: &Key,
+        limit: usize,
+        batch_size: usize,
+        mode: RangeMode,
+    ) -> Result<RangeStream, ClientError> {
+        self.c
+            .range_stream_with_mode(start, end, limit, batch_size, mode)
+            .await
+    }
+
+    pub async fn range_stream_with_min_sequence_number(
+        &self,
+        start: &Key,
+        end: &Key,
+        limit: usize,
+        batch_size: usize,
+        min_sequence_number: u64,
+    ) -> Result<RangeStream, ClientError> {
+        self.c
+            .range_stream_with_min_sequence_number(
+                start,
+                end,
+                limit,
+                batch_size,
+                min_sequence_number,
+            )
+            .await
+    }
+
+    pub async fn range_stream_with_mode_and_min_sequence_number(
+        &self,
+        start: &Key,
+        end: &Key,
+        limit: usize,
+        batch_size: usize,
+        mode: RangeMode,
+        min_sequence_number: u64,
+    ) -> Result<RangeStream, ClientError> {
+        self.c
+            .range_stream_with_mode_and_min_sequence_number(
+                start,
+                end,
+                limit,
+                batch_size,
+                mode,
+                min_sequence_number,
+            )
+            .await
+    }
+
+    /// `store.query.v1.Service.Reduce`.
+    pub async fn range_reduce(
+        &self,
+        start: &Key,
+        end: &Key,
+        request: &DomainRangeReduceRequest,
+    ) -> Result<Vec<Option<KvReducedValue>>, ClientError> {
+        self.c.range_reduce(start, end, request).await
+    }
+
+    pub async fn range_reduce_with_min_sequence_number(
+        &self,
+        start: &Key,
+        end: &Key,
+        request: &DomainRangeReduceRequest,
+        min_sequence_number: u64,
+    ) -> Result<Vec<Option<KvReducedValue>>, ClientError> {
+        self.c
+            .range_reduce_with_min_sequence_number(start, end, request, min_sequence_number)
+            .await
+    }
+
+    pub async fn range_reduce_response(
+        &self,
+        start: &Key,
+        end: &Key,
+        request: &DomainRangeReduceRequest,
+    ) -> Result<exoware_proto::query::ReduceResponse, ClientError> {
+        self.c.range_reduce_response(start, end, request).await
+    }
+
+    pub async fn range_reduce_response_with_min_sequence_number(
+        &self,
+        start: &Key,
+        end: &Key,
+        request: &DomainRangeReduceRequest,
+        min_sequence_number: u64,
+    ) -> Result<exoware_proto::query::ReduceResponse, ClientError> {
+        self.c
+            .range_reduce_response_with_min_sequence_number(
+                start,
+                end,
+                request,
+                min_sequence_number,
+            )
+            .await
+    }
+}
+
+impl<'a> Compact<'a> {
+    /// `store.compact.v1.Service.Prune`.
+    pub async fn prune(
+        &self,
+        policies: &[crate::prune_policy::PrunePolicy],
+    ) -> Result<(), ClientError> {
+        self.c.prune(policies).await
+    }
+}
+
+impl<'a> Stream<'a> {
+    /// `store.stream.v1.Service.Subscribe`.
+    pub async fn subscribe(
+        &self,
+        filter: crate::stream_filter::StreamFilter,
+        since_sequence_number: Option<u64>,
+    ) -> Result<StreamSubscription, ClientError> {
+        self.c.subscribe_stream(filter, since_sequence_number).await
+    }
+
+    /// `store.stream.v1.Service.Get`.
+    pub async fn get(
+        &self,
+        sequence_number: u64,
+    ) -> Result<Option<Vec<(Key, Bytes)>>, ClientError> {
+        self.c.get_batch(sequence_number).await
     }
 }
 

@@ -811,6 +811,7 @@ pub(crate) async fn flush_ingest_batch(
         .map(|(key, value)| (key, value.as_slice()))
         .collect();
     let token = client
+        .ingest()
         .put(&refs)
         .await
         .map_err(|e| DataFusionError::External(Box::new(e)))?;

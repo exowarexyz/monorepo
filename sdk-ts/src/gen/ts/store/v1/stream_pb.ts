@@ -13,7 +13,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file store/v1/stream.proto.
  */
 export const file_store_v1_stream: GenFile = /*@__PURE__*/
-  fileDesc("ChVzdG9yZS92MS9zdHJlYW0ucHJvdG8SD3N0b3JlLnN0cmVhbS52MSKLAQoQU3Vic2NyaWJlUmVxdWVzdBI5CgptYXRjaF9rZXlzGAEgAygLMhkuc3RvcmUuY29tbW9uLnYxLk1hdGNoS2V5Qgq6SAeSAQQIARAQEiIKFXNpbmNlX3NlcXVlbmNlX251bWJlchgCIAEoBEgAiAEBQhgKFl9zaW5jZV9zZXF1ZW5jZV9udW1iZXIiKgoPR2V0QmF0Y2hSZXF1ZXN0EhcKD3NlcXVlbmNlX251bWJlchgBIAEoBCIpCgtTdHJlYW1FbnRyeRILCgNrZXkYASABKAwSDQoFdmFsdWUYAiABKAwiWwoRU3Vic2NyaWJlUmVzcG9uc2USFwoPc2VxdWVuY2VfbnVtYmVyGAEgASgEEi0KB2VudHJpZXMYAiADKAsyHC5zdG9yZS5zdHJlYW0udjEuU3RyZWFtRW50cnkiWgoQR2V0QmF0Y2hSZXNwb25zZRIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQSLQoHZW50cmllcxgCIAMoCzIcLnN0b3JlLnN0cmVhbS52MS5TdHJlYW1FbnRyeTKwAQoHU2VydmljZRJUCglTdWJzY3JpYmUSIS5zdG9yZS5zdHJlYW0udjEuU3Vic2NyaWJlUmVxdWVzdBoiLnN0b3JlLnN0cmVhbS52MS5TdWJzY3JpYmVSZXNwb25zZTABEk8KCEdldEJhdGNoEiAuc3RvcmUuc3RyZWFtLnYxLkdldEJhdGNoUmVxdWVzdBohLnN0b3JlLnN0cmVhbS52MS5HZXRCYXRjaFJlc3BvbnNlYgZwcm90bzM", [file_buf_validate_validate, file_store_v1_common]);
+  fileDesc("ChVzdG9yZS92MS9zdHJlYW0ucHJvdG8SD3N0b3JlLnN0cmVhbS52MSKLAQoQU3Vic2NyaWJlUmVxdWVzdBI5CgptYXRjaF9rZXlzGAEgAygLMhkuc3RvcmUuY29tbW9uLnYxLk1hdGNoS2V5Qgq6SAeSAQQIARAQEiIKFXNpbmNlX3NlcXVlbmNlX251bWJlchgCIAEoBEgAiAEBQhgKFl9zaW5jZV9zZXF1ZW5jZV9udW1iZXIiJQoKR2V0UmVxdWVzdBIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQiKQoLU3RyZWFtRW50cnkSCwoDa2V5GAEgASgMEg0KBXZhbHVlGAIgASgMIlsKEVN1YnNjcmliZVJlc3BvbnNlEhcKD3NlcXVlbmNlX251bWJlchgBIAEoBBItCgdlbnRyaWVzGAIgAygLMhwuc3RvcmUuc3RyZWFtLnYxLlN0cmVhbUVudHJ5IlUKC0dldFJlc3BvbnNlEhcKD3NlcXVlbmNlX251bWJlchgBIAEoBBItCgdlbnRyaWVzGAIgAygLMhwuc3RvcmUuc3RyZWFtLnYxLlN0cmVhbUVudHJ5MqEBCgdTZXJ2aWNlElQKCVN1YnNjcmliZRIhLnN0b3JlLnN0cmVhbS52MS5TdWJzY3JpYmVSZXF1ZXN0GiIuc3RvcmUuc3RyZWFtLnYxLlN1YnNjcmliZVJlc3BvbnNlMAESQAoDR2V0Ehsuc3RvcmUuc3RyZWFtLnYxLkdldFJlcXVlc3QaHC5zdG9yZS5zdHJlYW0udjEuR2V0UmVzcG9uc2ViBnByb3RvMw", [file_buf_validate_validate, file_store_v1_common]);
 
 /**
  * Live (and optionally replayed) subscription request.
@@ -56,9 +56,9 @@ export const SubscribeRequestSchema: GenMessage<SubscribeRequest> = /*@__PURE__*
 /**
  * Point-lookup for one historical batch. Always returns the complete batch.
  *
- * @generated from message store.stream.v1.GetBatchRequest
+ * @generated from message store.stream.v1.GetRequest
  */
-export type GetBatchRequest = Message<"store.stream.v1.GetBatchRequest"> & {
+export type GetRequest = Message<"store.stream.v1.GetRequest"> & {
   /**
    * @generated from field: uint64 sequence_number = 1;
    */
@@ -66,10 +66,10 @@ export type GetBatchRequest = Message<"store.stream.v1.GetBatchRequest"> & {
 };
 
 /**
- * Describes the message store.stream.v1.GetBatchRequest.
- * Use `create(GetBatchRequestSchema)` to create a new message.
+ * Describes the message store.stream.v1.GetRequest.
+ * Use `create(GetRequestSchema)` to create a new message.
  */
-export const GetBatchRequestSchema: GenMessage<GetBatchRequest> = /*@__PURE__*/
+export const GetRequestSchema: GenMessage<GetRequest> = /*@__PURE__*/
   messageDesc(file_store_v1_stream, 1);
 
 /**
@@ -125,12 +125,12 @@ export const SubscribeResponseSchema: GenMessage<SubscribeResponse> = /*@__PURE_
   messageDesc(file_store_v1_stream, 3);
 
 /**
- * Response for `GetBatch`: the full contents of the batch at the requested
+ * Response for `Get`: the full contents of the batch at the requested
  * sequence number, with no server-side filter applied.
  *
- * @generated from message store.stream.v1.GetBatchResponse
+ * @generated from message store.stream.v1.GetResponse
  */
-export type GetBatchResponse = Message<"store.stream.v1.GetBatchResponse"> & {
+export type GetResponse = Message<"store.stream.v1.GetResponse"> & {
   /**
    * @generated from field: uint64 sequence_number = 1;
    */
@@ -143,10 +143,10 @@ export type GetBatchResponse = Message<"store.stream.v1.GetBatchResponse"> & {
 };
 
 /**
- * Describes the message store.stream.v1.GetBatchResponse.
- * Use `create(GetBatchResponseSchema)` to create a new message.
+ * Describes the message store.stream.v1.GetResponse.
+ * Use `create(GetResponseSchema)` to create a new message.
  */
-export const GetBatchResponseSchema: GenMessage<GetBatchResponse> = /*@__PURE__*/
+export const GetResponseSchema: GenMessage<GetResponse> = /*@__PURE__*/
   messageDesc(file_store_v1_stream, 4);
 
 /**
@@ -156,8 +156,8 @@ export const GetBatchResponseSchema: GenMessage<GetBatchResponse> = /*@__PURE__*
  * entries match any of the subscriber's `match_keys`. Optional
  * `since_sequence_number` replays retained batches before transitioning live.
  *
- * `GetBatch` returns the complete batch at a given sequence number (no filter
- * applied server-side). `SubscribeResponse` and `GetBatchResponse` carry the
+ * `Get` returns the complete batch at a given sequence number (no filter
+ * applied server-side). `SubscribeResponse` and `GetResponse` carry the
  * same shape so callers can share decoders.
  *
  * @generated from service store.stream.v1.Service
@@ -172,12 +172,12 @@ export const Service: GenService<{
     output: typeof SubscribeResponseSchema;
   },
   /**
-   * @generated from rpc store.stream.v1.Service.GetBatch
+   * @generated from rpc store.stream.v1.Service.Get
    */
-  getBatch: {
+  get: {
     methodKind: "unary";
-    input: typeof GetBatchRequestSchema;
-    output: typeof GetBatchResponseSchema;
+    input: typeof GetRequestSchema;
+    output: typeof GetResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_store_v1_stream, 0);

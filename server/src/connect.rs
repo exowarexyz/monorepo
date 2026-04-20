@@ -19,7 +19,7 @@ use exoware_proto::query::{
     Service as QueryApi, ServiceServer as QueryServiceServer,
 };
 use exoware_proto::store::stream::v1::{
-    GetBatchRequestView, GetBatchResponse, Service as StreamApi,
+    GetRequestView, GetResponse as StreamGetResponse, Service as StreamApi,
     ServiceServer as StreamServiceServer, StreamEntry, SubscribeRequestView, SubscribeResponse,
 };
 use exoware_proto::stream_filter::StreamFilter;
@@ -706,11 +706,11 @@ impl StreamApi for StreamConnect {
         Ok((Box::pin(combined), ctx))
     }
 
-    async fn get_batch(
+    async fn get(
         &self,
         ctx: Context,
-        request: buffa::view::OwnedView<GetBatchRequestView<'static>>,
-    ) -> Result<(GetBatchResponse, Context), ConnectError> {
+        request: buffa::view::OwnedView<GetRequestView<'static>>,
+    ) -> Result<(StreamGetResponse, Context), ConnectError> {
         let seq = request.sequence_number;
         match self
             .state
@@ -728,7 +728,7 @@ impl StreamApi for StreamConnect {
                     })
                     .collect();
                 Ok((
-                    GetBatchResponse {
+                    StreamGetResponse {
                         sequence_number: seq,
                         entries,
                         ..Default::default()
