@@ -6,9 +6,7 @@
 
 use anyhow::{ensure, Context};
 use bytes::{Buf, BufMut};
-use commonware_codec::{
-    EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
-};
+use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use regex::bytes::Regex;
 
 use crate::kv_codec::Utf8;

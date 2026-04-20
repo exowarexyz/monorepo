@@ -270,13 +270,10 @@ where
         let sub = drv::open_subscription(&self.client, filter, since).await?;
 
         let build_proof: drv::BuildProof<UnorderedOperationRangeProof<H::Digest, K, V>> =
-            Arc::new(
-                move |watermark: Location, start: Location, count: u32| {
-                    let me = self.clone();
-                    async move { me.operation_range_proof(watermark, start, count).await }
-                        .boxed()
-                },
-            );
+            Arc::new(move |watermark: Location, start: Location, count: u32| {
+                let me = self.clone();
+                async move { me.operation_range_proof(watermark, start, count).await }.boxed()
+            });
 
         Ok(BatchProofStream::new(sub, classify, build_proof))
     }

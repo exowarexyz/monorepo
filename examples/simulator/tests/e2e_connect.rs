@@ -81,7 +81,11 @@ async fn get_many_returns_found_and_missing() {
     let ka = key(b"a");
     let kb = key(b"b");
     let kc = key(b"c");
-    client.ingest().put(&[(&ka, b"1"), (&kc, b"3")]).await.expect("put");
+    client
+        .ingest()
+        .put(&[(&ka, b"1"), (&kc, b"3")])
+        .await
+        .expect("put");
 
     let stream = client
         .query()

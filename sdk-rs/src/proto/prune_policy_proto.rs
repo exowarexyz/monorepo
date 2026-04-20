@@ -6,11 +6,11 @@ use crate::prune_policy::{
     GroupBy, KeysScope, OrderBy, OrderEncoding, PolicyScope, PrunePolicy, PrunePolicyDocument,
     RetainPolicy, PRUNE_POLICY_DOCUMENT_VERSION,
 };
+use crate::store::common::v1::{MatchKey as ProtoMatchKey, MatchKeyView};
 use crate::store::compact::v1::{
     policy, policy_retain, KeysScope as ProtoKeysScope, KeysScopeView, PolicyOrderByView,
-    PolicyOrderEncoding, PolicyView, PruneRequestView, SequenceScopeView,
+    PolicyOrderEncoding, PolicyView, PruneRequestView,
 };
-use crate::store::common::v1::{MatchKey as ProtoMatchKey, MatchKeyView};
 
 fn u8_from_u32(field: &str, v: u32) -> Result<u8, String> {
     u8::try_from(v).map_err(|_| format!("{field} must fit in u8 (got {v})"))
@@ -222,10 +222,4 @@ pub fn prune_policy_document_from_prune_request_view<'a>(
     };
     crate::prune_policy::validate_policy_document(&out).map_err(|e| e.to_string())?;
     Ok(out)
-}
-
-// Silence unused warnings for SequenceScopeView (only used via pattern match above).
-#[allow(dead_code)]
-fn _unused(v: &SequenceScopeView<'_>) {
-    let _ = v;
 }

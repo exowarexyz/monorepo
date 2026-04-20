@@ -532,7 +532,7 @@ impl StreamConnect {
     /// byte-identical to what the live path would have delivered.
     ///
     /// `first_batch` is the batch at `since` that the caller already fetched
-    /// to validate retention; it's reused here instead of being refetched.
+    /// to validate retention; we reuse it instead of refetching.
     fn build_replay_frames(
         &self,
         since: u64,
@@ -541,40 +541,44 @@ impl StreamConnect {
         first_batch: Vec<(Bytes, Bytes)>,
     ) -> Result<Vec<Result<SubscribeResponse, ConnectError>>, ConnectError> {
         let mut out = Vec::new();
-        let mut first_batch = Some(first_batch);
-        for seq in since..=bound {
-            let kvs = if seq == since {
-                first_batch.take()
-            } else {
-                self.state
-                    .engine
-                    .get_batch(seq)
-                    .map_err(ConnectError::internal)?
-            };
-            match kvs {
-                Some(kvs) => {
-                    let entries = crate::stream::apply_filter(matchers, &kvs);
-                    if !entries.is_empty() {
-                        out.push(Ok(SubscribeResponse {
-                            sequence_number: seq,
-                            entries,
-                            ..Default::default()
-                        }));
-                    }
-                }
-                None => {
-                    // Gap inside (since, bound] — emit an empty frame so
-                    // consumers see the sequence number rather than a silent
-                    // skip.
-                    out.push(Ok(SubscribeResponse {
-                        sequence_number: seq,
-                        entries: Vec::new(),
-                        ..Default::default()
-                    }));
-                }
-            }
+        push_replay_frame(&mut out, since, Some(first_batch), matchers);
+        for seq in (since + 1)..=bound {
+            let kvs = self
+                .state
+                .engine
+                .get_batch(seq)
+                .map_err(ConnectError::internal)?;
+            push_replay_frame(&mut out, seq, kvs, matchers);
         }
         Ok(out)
+    }
+}
+
+/// Push one replay frame for `seq`. Some + match => frame with entries.
+/// Some + no match => drop (live path omits these too). None => gap inside
+/// (since, bound] — emit an empty frame so consumers see the seq advance.
+fn push_replay_frame(
+    out: &mut Vec<Result<SubscribeResponse, ConnectError>>,
+    seq: u64,
+    kvs: Option<Vec<(Bytes, Bytes)>>,
+    matchers: &[crate::stream::CompiledMatcher],
+) {
+    match kvs {
+        Some(kvs) => {
+            let entries = crate::stream::apply_filter(matchers, &kvs);
+            if !entries.is_empty() {
+                out.push(Ok(SubscribeResponse {
+                    sequence_number: seq,
+                    entries,
+                    ..Default::default()
+                }));
+            }
+        }
+        None => out.push(Ok(SubscribeResponse {
+            sequence_number: seq,
+            entries: Vec::new(),
+            ..Default::default()
+        })),
     }
 }
 
@@ -634,10 +638,7 @@ impl StreamApi for StreamConnect {
         // it without a second point-lookup.
         let replay_frames: Vec<Result<SubscribeResponse, ConnectError>> = match since {
             Some(s) if s <= boundary && s > 0 => {
-                let first_batch = state
-                    .engine
-                    .get_batch(s)
-                    .map_err(ConnectError::internal)?;
+                let first_batch = state.engine.get_batch(s).map_err(ConnectError::internal)?;
                 let Some(first_batch) = first_batch else {
                     state.stream.unsubscribe(sub_id);
                     let oldest = state

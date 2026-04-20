@@ -314,7 +314,11 @@ pub fn validate_policy(policy: &PrunePolicy) -> anyhow::Result<()> {
 fn validate_user_keys_scope(scope: &KeysScope) -> anyhow::Result<()> {
     KeyCodec::new(scope.match_key.reserved_bits, scope.match_key.prefix);
     let regex = compile_payload_regex(&scope.match_key.payload_regex)?;
-    validate_capture_groups(&regex, &scope.group_by.capture_groups, "group_by capture_groups")?;
+    validate_capture_groups(
+        &regex,
+        &scope.group_by.capture_groups,
+        "group_by capture_groups",
+    )?;
     ensure!(
         capture_groups_are_unique(&scope.group_by.capture_groups),
         "group_by capture_groups must not contain duplicates"
@@ -443,8 +447,8 @@ fn capture_groups_are_unique(groups: &[Utf8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_policy_document, encode_policy_document, GroupBy, MatchKey, OrderBy, OrderEncoding,
-        PolicyScope, PrunePolicy, PrunePolicyDocument, RetainPolicy, KeysScope,
+        decode_policy_document, encode_policy_document, GroupBy, KeysScope, MatchKey, OrderBy,
+        OrderEncoding, PolicyScope, PrunePolicy, PrunePolicyDocument, RetainPolicy,
         PRUNE_POLICY_CONTROL_KEY,
     };
     use crate::kv_codec::Utf8;

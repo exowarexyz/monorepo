@@ -97,7 +97,12 @@ async fn upload_and_publish(client: &TestKeylessClient, batch: &LocalBatch) {
     retry(
         || {
             let loc = batch.latest_location;
-            async move { client.publish_writer_location_watermark(loc).await.map(|_| ()) }
+            async move {
+                client
+                    .publish_writer_location_watermark(loc)
+                    .await
+                    .map(|_| ())
+            }
         },
         "publish_watermark",
     )

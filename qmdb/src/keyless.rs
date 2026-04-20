@@ -269,19 +269,16 @@ where
         use crate::stream::driver::{self as drv, BatchProofStream};
         use futures::FutureExt;
 
-        let (classify, filter) = drv::authenticated_classify_and_filter(
-            AuthenticatedBackendNamespace::Keyless,
-        );
+        let (classify, filter) =
+            drv::authenticated_classify_and_filter(AuthenticatedBackendNamespace::Keyless);
         let sub = drv::open_subscription(&self.client, filter, since).await?;
 
         let build_proof: drv::BuildProof<
             AuthenticatedOperationRangeProof<H::Digest, KeylessOperation<V>>,
-        > = Arc::new(
-            move |watermark: Location, start: Location, count: u32| {
-                let me = self.clone();
-                async move { me.operation_range_proof(watermark, start, count).await }.boxed()
-            },
-        );
+        > = Arc::new(move |watermark: Location, start: Location, count: u32| {
+            let me = self.clone();
+            async move { me.operation_range_proof(watermark, start, count).await }.boxed()
+        });
 
         Ok(BatchProofStream::new(sub, classify, build_proof))
     }

@@ -1,7 +1,7 @@
 use exoware_sdk_rs::kv_codec::Utf8;
 use exoware_sdk_rs::match_key::MatchKey;
 use exoware_sdk_rs::prune_policy::{
-    GroupBy, OrderBy, OrderEncoding, PolicyScope, PrunePolicy, RetainPolicy, KeysScope,
+    GroupBy, KeysScope, OrderBy, OrderEncoding, PolicyScope, PrunePolicy, RetainPolicy,
 };
 
 use crate::codec::{RESERVED_BITS, UPDATE_FAMILY};

@@ -429,12 +429,11 @@ where
         let (classify, filter) = drv::unauthenticated_classify_and_filter();
         let sub = drv::open_subscription(&self.client, filter, since).await?;
 
-        let build_proof: drv::BuildProof<OperationRangeProof<H::Digest, K, V>> = Arc::new(
-            move |watermark: Location, start: Location, count: u32| {
+        let build_proof: drv::BuildProof<OperationRangeProof<H::Digest, K, V>> =
+            Arc::new(move |watermark: Location, start: Location, count: u32| {
                 let me = self.clone();
                 async move { me.operation_range_proof(watermark, start, count).await }.boxed()
-            },
-        );
+            });
 
         Ok(BatchProofStream::new(sub, classify, build_proof))
     }
@@ -813,8 +812,6 @@ where
 }
 
 /// Async stream of `OperationRangeProof`s, one per uploaded batch. See
-/// `OrderedClient::stream_batches`. `N` is not in the proof shape but matches
-/// `OrderedClient`'s const-generic for consistent downstream spelling.
-pub type OrderedBatchStream<H, K, V> = crate::stream::driver::BatchProofStream<
-    OperationRangeProof<<H as Hasher>::Digest, K, V>,
->;
+/// `OrderedClient::stream_batches`.
+pub type OrderedBatchStream<H, K, V> =
+    crate::stream::driver::BatchProofStream<OperationRangeProof<<H as Hasher>::Digest, K, V>>;

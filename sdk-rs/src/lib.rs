@@ -1433,14 +1433,12 @@ pub struct Stream<'a> {
 }
 
 impl<'a> Ingest<'a> {
-    /// `store.ingest.v1.Service.Put`.
     pub async fn put(&self, kvs: &[(&Key, &[u8])]) -> Result<u64, ClientError> {
         self.c.put(kvs).await
     }
 }
 
 impl<'a> Query<'a> {
-    /// `store.query.v1.Service.Get`.
     pub async fn get(&self, key: &Key) -> Result<Option<Bytes>, ClientError> {
         self.c.get(key).await
     }
@@ -1455,7 +1453,6 @@ impl<'a> Query<'a> {
             .await
     }
 
-    /// `store.query.v1.Service.GetMany`.
     pub async fn get_many(
         &self,
         keys: &[&Key],
@@ -1475,7 +1472,7 @@ impl<'a> Query<'a> {
             .await
     }
 
-    /// Collected `store.query.v1.Service.Range`.
+    /// Collect a `Range` into a `Vec`. Use `range_stream` for large scans.
     pub async fn range(
         &self,
         start: &Key,
@@ -1520,7 +1517,6 @@ impl<'a> Query<'a> {
             .await
     }
 
-    /// Streaming `store.query.v1.Service.Range`.
     pub async fn range_stream(
         &self,
         start: &Key,
@@ -1584,7 +1580,6 @@ impl<'a> Query<'a> {
             .await
     }
 
-    /// `store.query.v1.Service.Reduce`.
     pub async fn range_reduce(
         &self,
         start: &Key,
@@ -1634,7 +1629,6 @@ impl<'a> Query<'a> {
 }
 
 impl<'a> Compact<'a> {
-    /// `store.compact.v1.Service.Prune`.
     pub async fn prune(
         &self,
         policies: &[crate::prune_policy::PrunePolicy],
@@ -1671,8 +1665,10 @@ impl<'a> Stream<'a> {
             since_sequence_number,
             ..Default::default()
         };
-        let config =
-            store_connect_client_config(self.c.stream_uri.clone(), self.c.connect_request_compression);
+        let config = store_connect_client_config(
+            self.c.stream_uri.clone(),
+            self.c.connect_request_compression,
+        );
         let client = exoware_proto::store::stream::v1::ServiceClient::new(
             self.c.connect_http.clone(),
             config,
@@ -1690,8 +1686,10 @@ impl<'a> Stream<'a> {
         &self,
         sequence_number: u64,
     ) -> Result<Option<Vec<(Key, Bytes)>>, ClientError> {
-        let config =
-            store_connect_client_config(self.c.stream_uri.clone(), self.c.connect_request_compression);
+        let config = store_connect_client_config(
+            self.c.stream_uri.clone(),
+            self.c.connect_request_compression,
+        );
         let client = exoware_proto::store::stream::v1::ServiceClient::new(
             self.c.connect_http.clone(),
             config,

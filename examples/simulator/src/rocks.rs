@@ -39,9 +39,14 @@ impl RocksStore {
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
 
-        let cf_default = ColumnFamilyDescriptor::new(rocksdb::DEFAULT_COLUMN_FAMILY_NAME, Options::default());
+        let cf_default =
+            ColumnFamilyDescriptor::new(rocksdb::DEFAULT_COLUMN_FAMILY_NAME, Options::default());
         let cf_batch_log = ColumnFamilyDescriptor::new(BATCH_LOG_CF, Options::default());
-        let db = Arc::new(DB::open_cf_descriptors(&opts, path, vec![cf_default, cf_batch_log])?);
+        let db = Arc::new(DB::open_cf_descriptors(
+            &opts,
+            path,
+            vec![cf_default, cf_batch_log],
+        )?);
         let seq = match db.get(SEQ_META_KEY)? {
             Some(bytes) if bytes.len() == 8 => u64::from_le_bytes(bytes.try_into().unwrap()),
             _ => 0,
@@ -171,7 +176,11 @@ impl StoreEngine for RocksStore {
         // an empty batch so sequence numbers remain contiguous and GetBatch
         // can distinguish "this sequence happened but contained no tracked
         // entries" from "evicted / never existed".
-        batch.put_cf(self.batch_log_cf(), next.to_be_bytes(), encode_batch_entries(&[]));
+        batch.put_cf(
+            self.batch_log_cf(),
+            next.to_be_bytes(),
+            encode_batch_entries(&[]),
+        );
         self.db.write(batch).map_err(|e| e.to_string())?;
         if let Some(obs) = &self.observer {
             obs.store(next, Ordering::SeqCst);
@@ -190,9 +199,7 @@ impl StoreEngine for RocksStore {
             .get_cf(cf, sequence_number.to_be_bytes())
             .map_err(|e| e.to_string())?
         {
-            Some(raw) => Ok(Some(
-                decode_batch_entries(&raw).map_err(|e| e.to_string())?,
-            )),
+            Some(raw) => Ok(Some(decode_batch_entries(&raw).map_err(|e| e.to_string())?)),
             None => Ok(None),
         }
     }
@@ -305,7 +312,10 @@ mod tests {
         let kvs = vec![
             (Bytes::from_static(b"a"), Bytes::from_static(b"1")),
             (Bytes::from_static(b""), Bytes::from_static(b"empty key ok")),
-            (Bytes::from_static(b"binary\x00\xff"), Bytes::from_static(&[0u8, 1, 2, 3])),
+            (
+                Bytes::from_static(b"binary\x00\xff"),
+                Bytes::from_static(&[0u8, 1, 2, 3]),
+            ),
         ];
         let encoded = encode_batch_entries(&kvs);
         let decoded = decode_batch_entries(&encoded).unwrap();

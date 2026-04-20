@@ -64,7 +64,8 @@ pub(crate) fn apply_filter(
     matchers: &[CompiledMatcher],
     kvs: &[(Bytes, Bytes)],
 ) -> Vec<StreamEntry> {
-    let mut out = Vec::new();
+    // Upper bound is `kvs.len()` (first-match-wins caps 1 entry per kv).
+    let mut out = Vec::with_capacity(kvs.len());
     'outer: for (k, v) in kvs {
         for matcher in matchers {
             if !matcher.codec.matches(k) {
@@ -157,8 +158,8 @@ impl StreamHub {
         });
     }
 
-    /// Current subscriber count. Tests/diagnostics only.
-    pub fn subscriber_count(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn subscriber_count(&self) -> usize {
         self.subs.len()
     }
 }

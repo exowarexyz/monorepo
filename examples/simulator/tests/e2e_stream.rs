@@ -1,12 +1,12 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use store_qmdb::prune::{drop_all_batches, keep_latest_batches};
 use exoware_sdk_rs::keys::{Key, KeyCodec};
 use exoware_sdk_rs::kv_codec::Utf8;
 use exoware_sdk_rs::match_key::MatchKey;
 use exoware_sdk_rs::stream_filter::StreamFilter;
 use exoware_sdk_rs::{RetryConfig, StoreClient};
+use store_qmdb::prune::{drop_all_batches, keep_latest_batches};
 use tempfile::tempdir;
 
 async fn spawn_client() -> (tokio::task::JoinHandle<()>, StoreClient) {
@@ -155,12 +155,8 @@ async fn two_puts_yield_two_distinct_frames() {
         .await
         .expect("put2");
 
-    let f1 = next_with_timeout(&mut sub, 1_000)
-        .await
-        .expect("frame 1");
-    let f2 = next_with_timeout(&mut sub, 1_000)
-        .await
-        .expect("frame 2");
+    let f1 = next_with_timeout(&mut sub, 1_000).await.expect("frame 1");
+    let f2 = next_with_timeout(&mut sub, 1_000).await.expect("frame 2");
     assert_eq!(f1.sequence_number, seq1);
     assert_eq!(f2.sequence_number, seq2);
     assert!(f2.sequence_number > f1.sequence_number);
@@ -290,7 +286,12 @@ async fn get_batch_returns_whole_batch_unfiltered() {
         .await
         .expect("put");
 
-    let got = client.stream().get(seq).await.expect("get_batch").expect("some");
+    let got = client
+        .stream()
+        .get(seq)
+        .await
+        .expect("get_batch")
+        .expect("some");
     assert_eq!(got.len(), 2);
     // Order must match write order.
     assert_eq!(got[0].0.as_ref(), ka.as_ref());
@@ -302,7 +303,11 @@ async fn get_batch_returns_whole_batch_unfiltered() {
 #[tokio::test]
 async fn get_batch_missing_seq_returns_none() {
     let (_h, client) = spawn_client().await;
-    client.ingest().put(&[(&key(1, b"a"), b"1")]).await.expect("put");
+    client
+        .ingest()
+        .put(&[(&key(1, b"a"), b"1")])
+        .await
+        .expect("put");
     let current = client.sequence_number();
     let got = client
         .stream()
@@ -315,8 +320,16 @@ async fn get_batch_missing_seq_returns_none() {
 #[tokio::test]
 async fn get_batch_after_drop_all_returns_none() {
     let (_h, client) = spawn_client().await;
-    let seq = client.ingest().put(&[(&key(1, b"a"), b"1")]).await.expect("put");
-    client.compact().prune(&[drop_all_batches()]).await.expect("prune");
+    let seq = client
+        .ingest()
+        .put(&[(&key(1, b"a"), b"1")])
+        .await
+        .expect("put");
+    client
+        .compact()
+        .prune(&[drop_all_batches()])
+        .await
+        .expect("prune");
 
     let got = client.stream().get(seq).await.expect("get_batch");
     assert!(got.is_none(), "pruned batch should return None");
@@ -380,6 +393,14 @@ async fn slow_subscriber_drops_without_blocking_ingest() {
         "ingest should not stall on slow subscriber (took {elapsed:?})"
     );
     // Small verification that the store actually still serves reads.
-    let last = Bytes::copy_from_slice(client.query().get(&key(1, &511u16.to_be_bytes())).await.expect("get").expect("some").as_ref());
+    let last = Bytes::copy_from_slice(
+        client
+            .query()
+            .get(&key(1, &511u16.to_be_bytes()))
+            .await
+            .expect("get")
+            .expect("some")
+            .as_ref(),
+    );
     assert_eq!(last.as_ref(), b"x");
 }

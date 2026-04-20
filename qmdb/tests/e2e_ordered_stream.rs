@@ -19,7 +19,9 @@ use commonware_storage::qmdb::{
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use futures::StreamExt;
-use store_qmdb::{build_current_boundary_state, CurrentBoundaryState, OrderedClient, MAX_OPERATION_SIZE};
+use store_qmdb::{
+    build_current_boundary_state, CurrentBoundaryState, OrderedClient, MAX_OPERATION_SIZE,
+};
 
 use common::retry;
 
@@ -134,7 +136,12 @@ async fn upload_and_publish(client: &TestOrderedClient, batch: &LocalBatch) {
     retry(
         || {
             let loc = batch.latest_location;
-            async move { client.publish_writer_location_watermark(loc).await.map(|_| ()) }
+            async move {
+                client
+                    .publish_writer_location_watermark(loc)
+                    .await
+                    .map(|_| ())
+            }
         },
         "publish_watermark",
     )

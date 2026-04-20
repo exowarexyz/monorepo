@@ -8,7 +8,7 @@
 use anyhow::ensure;
 
 use crate::keys::KeyCodec;
-use crate::match_key::{compile_payload_regex, MatchKey};
+use crate::match_key::MatchKey;
 
 pub const MAX_MATCH_KEYS_PER_FILTER: usize = 16;
 
@@ -17,6 +17,8 @@ pub struct StreamFilter {
     pub match_keys: Vec<MatchKey>,
 }
 
+/// Shape-only validation: bounds, family validity, non-empty regex string.
+/// Does NOT compile the regex — the server compiles once per subscribe.
 pub fn validate_filter(filter: &StreamFilter) -> anyhow::Result<()> {
     ensure!(
         !filter.match_keys.is_empty(),
@@ -35,7 +37,10 @@ pub fn validate_filter(filter: &StreamFilter) -> anyhow::Result<()> {
                 mk.prefix
             )
         })?;
-        compile_payload_regex(&mk.payload_regex)?;
+        ensure!(
+            !mk.payload_regex.trim().is_empty(),
+            "match_key payload_regex must not be empty"
+        );
     }
     Ok(())
 }
