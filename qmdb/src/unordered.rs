@@ -278,31 +278,11 @@ where
                 },
             );
 
-        Ok(UnorderedBatchStream {
-            inner: BatchProofStream::new(sub, classify, build_proof),
-        })
+        Ok(BatchProofStream::new(sub, classify, build_proof))
     }
 }
 
 /// Async stream of `UnorderedOperationRangeProof`s, one per uploaded batch.
-pub struct UnorderedBatchStream<H: Hasher, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> {
-    inner: crate::stream::driver::BatchProofStream<UnorderedOperationRangeProof<H::Digest, K, V>>,
-}
-
-impl<H, K, V> futures::Stream for UnorderedBatchStream<H, K, V>
-where
-    H: Hasher,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
-    UnorderedQmdbOperation<K, V>: Encode,
-    UnorderedOperationRangeProof<H::Digest, K, V>: Send + 'static,
-{
-    type Item = Result<UnorderedOperationRangeProof<H::Digest, K, V>, QmdbError>;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        std::pin::Pin::new(&mut self.inner).poll_next(cx)
-    }
-}
+pub type UnorderedBatchStream<H, K, V> = crate::stream::driver::BatchProofStream<
+    UnorderedOperationRangeProof<<H as Hasher>::Digest, K, V>,
+>;

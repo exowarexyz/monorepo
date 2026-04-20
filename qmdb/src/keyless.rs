@@ -283,33 +283,11 @@ where
             },
         );
 
-        Ok(KeylessBatchStream {
-            inner: BatchProofStream::new(sub, classify, build_proof),
-        })
+        Ok(BatchProofStream::new(sub, classify, build_proof))
     }
 }
 
 /// Async stream of authenticated keyless range proofs, one per batch.
-pub struct KeylessBatchStream<H: Hasher, V: Codec + Clone + Send + Sync> {
-    inner: crate::stream::driver::BatchProofStream<
-        AuthenticatedOperationRangeProof<H::Digest, KeylessOperation<V>>,
-    >,
-}
-
-impl<H, V> futures::Stream for KeylessBatchStream<H, V>
-where
-    H: Hasher,
-    V: Codec + Clone + Send + Sync,
-    KeylessOperation<V>: Encode,
-    AuthenticatedOperationRangeProof<H::Digest, KeylessOperation<V>>: Send + 'static,
-{
-    type Item =
-        Result<AuthenticatedOperationRangeProof<H::Digest, KeylessOperation<V>>, QmdbError>;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        std::pin::Pin::new(&mut self.inner).poll_next(cx)
-    }
-}
+pub type KeylessBatchStream<H, V> = crate::stream::driver::BatchProofStream<
+    AuthenticatedOperationRangeProof<<H as Hasher>::Digest, KeylessOperation<V>>,
+>;

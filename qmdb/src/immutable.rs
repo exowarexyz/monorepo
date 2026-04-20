@@ -313,34 +313,11 @@ where
             },
         );
 
-        Ok(ImmutableBatchStream {
-            inner: BatchProofStream::new(sub, classify, build_proof),
-        })
+        Ok(BatchProofStream::new(sub, classify, build_proof))
     }
 }
 
 /// Async stream of authenticated immutable range proofs, one per batch.
-pub struct ImmutableBatchStream<H: Hasher, K: Array + Codec, V: Codec + Clone + Send + Sync> {
-    inner: crate::stream::driver::BatchProofStream<
-        AuthenticatedOperationRangeProof<H::Digest, ImmutableOperation<K, V>>,
-    >,
-}
-
-impl<H, K, V> futures::Stream for ImmutableBatchStream<H, K, V>
-where
-    H: Hasher,
-    K: Array + Codec + Clone + AsRef<[u8]>,
-    V: Codec + Clone + Send + Sync,
-    ImmutableOperation<K, V>: Encode,
-    AuthenticatedOperationRangeProof<H::Digest, ImmutableOperation<K, V>>: Send + 'static,
-{
-    type Item =
-        Result<AuthenticatedOperationRangeProof<H::Digest, ImmutableOperation<K, V>>, QmdbError>;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        std::pin::Pin::new(&mut self.inner).poll_next(cx)
-    }
-}
+pub type ImmutableBatchStream<H, K, V> = crate::stream::driver::BatchProofStream<
+    AuthenticatedOperationRangeProof<<H as Hasher>::Digest, ImmutableOperation<K, V>>,
+>;

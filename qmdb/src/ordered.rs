@@ -412,7 +412,7 @@ where
     pub async fn stream_batches(
         self: std::sync::Arc<Self>,
         since: Option<u64>,
-    ) -> Result<OrderedBatchStream<H, K, V, N>, QmdbError>
+    ) -> Result<OrderedBatchStream<H, K, V>, QmdbError>
     where
         Self: 'static,
         H: Send + Sync + 'static,
@@ -436,9 +436,7 @@ where
             },
         );
 
-        Ok(OrderedBatchStream {
-            inner: BatchProofStream::new(sub, classify, build_proof),
-        })
+        Ok(BatchProofStream::new(sub, classify, build_proof))
     }
 
     pub async fn operation_range_proof_for_variant(
@@ -814,27 +812,9 @@ where
     }
 }
 
-/// Async stream of `OperationRangeProof`s, one per uploaded batch observed
-/// via the store's stream service. See `OrderedClient::stream_batches`.
-pub struct OrderedBatchStream<H: Hasher, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync, const N: usize>
-{
-    inner: crate::stream::driver::BatchProofStream<OperationRangeProof<H::Digest, K, V>>,
-}
-
-impl<H, K, V, const N: usize> futures::Stream for OrderedBatchStream<H, K, V, N>
-where
-    H: Hasher,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
-    QmdbOperation<K, V>: Encode,
-    OperationRangeProof<H::Digest, K, V>: Send + 'static,
-{
-    type Item = Result<OperationRangeProof<H::Digest, K, V>, QmdbError>;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        std::pin::Pin::new(&mut self.inner).poll_next(cx)
-    }
-}
+/// Async stream of `OperationRangeProof`s, one per uploaded batch. See
+/// `OrderedClient::stream_batches`. `N` is not in the proof shape but matches
+/// `OrderedClient`'s const-generic for consistent downstream spelling.
+pub type OrderedBatchStream<H, K, V> = crate::stream::driver::BatchProofStream<
+    OperationRangeProof<<H as Hasher>::Digest, K, V>,
+>;

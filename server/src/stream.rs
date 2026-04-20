@@ -1,11 +1,8 @@
 //! Live subscriber registry + post-commit fan-out for `store.stream.v1`.
 //!
-//! `StreamHub` holds the active subscribers. `StreamHub::publish` is called
-//! synchronously after `StoreEngine::put_batch` returns `Ok`. Each subscriber
-//! carries a precompiled regex-bytes match list; we run it against each `(key,
-//! value)` of the batch and `try_send` a `SubscribeResponse` over a bounded mpsc. A
-//! slow subscriber whose channel fills is dropped on the next non-empty frame
-//! — we don't block ingest to wait for it.
+//! `StreamHub::publish` is called synchronously after `StoreEngine::put_batch`
+//! returns `Ok`. Slow subscribers (full mpsc) are dropped on the next non-empty
+//! fan-out so a wedged client can't hold up ingest.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -21,92 +18,52 @@ use tokio::sync::mpsc;
 
 /// Bounded queue depth per subscriber. 256 frames is enough to absorb bursts
 /// without letting one subscriber hold megabytes of in-flight payload; beyond
-/// that, the subscriber is dropped (reconnect via since-cursor to catch up).
+/// that the subscriber is dropped (reconnect via since-cursor to catch up).
 const SUBSCRIBER_CHANNEL_CAPACITY: usize = 256;
 
+/// `ErrorInfo.domain` used for all stream-service errors.
+pub const STREAM_ERROR_DOMAIN: &str = "store.stream";
+/// `ErrorInfo.reason` when a `since_sequence_number` or `Get(seq)` references a
+/// batch that has been pruned from the batch log.
+pub const REASON_BATCH_EVICTED: &str = "BATCH_EVICTED";
+/// `ErrorInfo.reason` when a `Get(seq)` references a sequence number greater
+/// than any that has ever been issued.
+pub const REASON_BATCH_NOT_FOUND: &str = "BATCH_NOT_FOUND";
+/// Metadata key on `BATCH_EVICTED` errors carrying the lowest retained seq.
+pub const METADATA_OLDEST_RETAINED: &str = "oldest_retained";
+
 #[derive(Clone)]
-struct CompiledMatcher {
+pub(crate) struct CompiledMatcher {
     codec: KeyCodec,
     regex: Regex,
 }
 
-struct Subscriber {
-    matchers: Vec<CompiledMatcher>,
-    tx: mpsc::Sender<Result<SubscribeResponse, ConnectError>>,
-}
-
-#[derive(Default)]
-pub struct StreamHub {
-    subs: DashMap<u64, Subscriber>,
-    next_id: AtomicU64,
-}
-
-impl StreamHub {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Register a subscriber. Returns the subscriber id (for later
-    /// `unsubscribe`) and the receive half of the channel feeding its stream.
-    /// The filter is validated and compiled here so invalid input fails
-    /// before we touch ingest.
-    pub fn subscribe(
-        &self,
-        filter: StreamFilter,
-    ) -> Result<(u64, mpsc::Receiver<Result<SubscribeResponse, ConnectError>>), ConnectError> {
-        validate_filter(&filter).map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
-        let mut matchers = Vec::with_capacity(filter.match_keys.len());
-        for mk in &filter.match_keys {
+/// Validate and compile a `StreamFilter` into ready-to-use `(KeyCodec, Regex)`
+/// pairs. Shared between the hub (live fan-out) and `StreamConnect` (replay)
+/// so both paths match identically and regexes are compiled once per subscribe.
+pub(crate) fn compile_matchers(
+    filter: &StreamFilter,
+) -> Result<Vec<CompiledMatcher>, ConnectError> {
+    validate_filter(filter).map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
+    filter
+        .match_keys
+        .iter()
+        .map(|mk| {
             let regex = compile_payload_regex(&mk.payload_regex)
                 .map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
-            let codec = KeyCodec::new(mk.reserved_bits, mk.prefix);
-            matchers.push(CompiledMatcher { codec, regex });
-        }
-        let (tx, rx) = mpsc::channel(SUBSCRIBER_CHANNEL_CAPACITY);
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.subs.insert(id, Subscriber { matchers, tx });
-        Ok((id, rx))
-    }
-
-    /// Remove a subscriber by id (idempotent; no-op if already gone).
-    pub fn unsubscribe(&self, id: u64) {
-        self.subs.remove(&id);
-    }
-
-    /// Fan out a committed batch. Called synchronously after
-    /// `StoreEngine::put_batch` returns `Ok(seq)`. Subscribers whose mpsc is
-    /// full or closed are dropped on the same pass so a chronically slow
-    /// client can't wedge ingest.
-    pub fn publish(&self, seq: u64, kvs: &[(Bytes, Bytes)]) {
-        // Short-circuit the common no-subscribers case.
-        if self.subs.is_empty() {
-            return;
-        }
-        self.subs.retain(|_, sub| {
-            let entries = apply_filter(&sub.matchers, kvs);
-            if entries.is_empty() {
-                // Keep idle subscribers. Drop only on actual send failure, so
-                // that a filter which never matches doesn't evict the client.
-                return !sub.tx.is_closed();
-            }
-            let frame = SubscribeResponse {
-                sequence_number: seq,
-                entries,
-                ..Default::default()
-            };
-            sub.tx.try_send(Ok(frame)).is_ok()
-        });
-    }
-
-    /// Current subscriber count. Tests/diagnostics only.
-    pub fn subscriber_count(&self) -> usize {
-        self.subs.len()
-    }
+            Ok(CompiledMatcher {
+                codec: KeyCodec::new(mk.reserved_bits, mk.prefix),
+                regex,
+            })
+        })
+        .collect()
 }
 
-/// Apply a subscriber's matchers to a batch. First-match-wins per `(k, v)`.
-/// Returns owned `StreamEntry` vec — the key/value are refcount-cloned.
-fn apply_filter(matchers: &[CompiledMatcher], kvs: &[(Bytes, Bytes)]) -> Vec<StreamEntry> {
+/// Apply a compiled filter to a batch. First-match-wins per `(key, value)`.
+pub(crate) fn apply_filter(
+    matchers: &[CompiledMatcher],
+    kvs: &[(Bytes, Bytes)],
+) -> Vec<StreamEntry> {
     let mut out = Vec::new();
     'outer: for (k, v) in kvs {
         for matcher in matchers {
@@ -128,6 +85,82 @@ fn apply_filter(matchers: &[CompiledMatcher], kvs: &[(Bytes, Bytes)]) -> Vec<Str
         }
     }
     out
+}
+
+struct Subscriber {
+    matchers: Vec<CompiledMatcher>,
+    tx: mpsc::Sender<Result<SubscribeResponse, ConnectError>>,
+}
+
+#[derive(Default)]
+pub struct StreamHub {
+    subs: DashMap<u64, Subscriber>,
+    next_id: AtomicU64,
+}
+
+impl StreamHub {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a subscriber. Returns `(id, pre-compiled matchers, rx)` — the
+    /// matchers are handed back so the replay path can reuse them instead of
+    /// compiling every regex a second time.
+    pub(crate) fn subscribe(
+        &self,
+        filter: StreamFilter,
+    ) -> Result<
+        (
+            u64,
+            Vec<CompiledMatcher>,
+            mpsc::Receiver<Result<SubscribeResponse, ConnectError>>,
+        ),
+        ConnectError,
+    > {
+        let matchers = compile_matchers(&filter)?;
+        let (tx, rx) = mpsc::channel(SUBSCRIBER_CHANNEL_CAPACITY);
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.subs.insert(
+            id,
+            Subscriber {
+                matchers: matchers.clone(),
+                tx,
+            },
+        );
+        Ok((id, matchers, rx))
+    }
+
+    /// Remove a subscriber by id (idempotent; no-op if already gone).
+    pub fn unsubscribe(&self, id: u64) {
+        self.subs.remove(&id);
+    }
+
+    /// Fan out a committed batch. A subscriber whose mpsc is full or closed is
+    /// dropped on the same pass.
+    pub fn publish(&self, seq: u64, kvs: &[(Bytes, Bytes)]) {
+        if self.subs.is_empty() {
+            return;
+        }
+        self.subs.retain(|_, sub| {
+            let entries = apply_filter(&sub.matchers, kvs);
+            if entries.is_empty() {
+                // Retain idle subscribers. Drop only on actual send failure, so
+                // a filter that never matches doesn't evict the client.
+                return !sub.tx.is_closed();
+            }
+            let frame = SubscribeResponse {
+                sequence_number: seq,
+                entries,
+                ..Default::default()
+            };
+            sub.tx.try_send(Ok(frame)).is_ok()
+        });
+    }
+
+    /// Current subscriber count. Tests/diagnostics only.
+    pub fn subscriber_count(&self) -> usize {
+        self.subs.len()
+    }
 }
 
 #[cfg(test)]
@@ -155,7 +188,7 @@ mod tests {
     #[test]
     fn publish_delivers_only_matching_entries() {
         let hub = StreamHub::new();
-        let (_id, mut rx) = hub.subscribe(filter(1, "(?s).*")).unwrap();
+        let (_id, _m, mut rx) = hub.subscribe(filter(1, "(?s).*")).unwrap();
         let kvs = vec![
             (key(1, b"hit"), Bytes::from_static(b"v1")),
             (key(2, b"miss"), Bytes::from_static(b"v2")),
@@ -170,19 +203,18 @@ mod tests {
     #[test]
     fn non_matching_publish_yields_no_frame_but_retains_subscriber() {
         let hub = StreamHub::new();
-        let (_id, mut rx) = hub.subscribe(filter(1, "(?s).*")).unwrap();
+        let (_id, _m, mut rx) = hub.subscribe(filter(1, "(?s).*")).unwrap();
         hub.publish(1, &[(key(2, b"nope"), Bytes::from_static(b"x"))]);
-        assert!(rx.try_recv().is_err()); // no frame
-        assert_eq!(hub.subscriber_count(), 1); // still subscribed
+        assert!(rx.try_recv().is_err());
+        assert_eq!(hub.subscriber_count(), 1);
     }
 
     #[test]
     fn subscriber_drops_on_closed_channel() {
         let hub = StreamHub::new();
-        let (_id, rx) = hub.subscribe(filter(1, "(?s).*")).unwrap();
+        let (_id, _m, rx) = hub.subscribe(filter(1, "(?s).*")).unwrap();
         drop(rx);
-        // First publish won't match our prefix → we still retain, but
-        // `is_closed()` will be true so we drop.
+        // Non-matching publish retains idle subs; `is_closed()` makes us drop.
         hub.publish(1, &[(key(2, b"x"), Bytes::new())]);
         assert_eq!(hub.subscriber_count(), 0);
     }

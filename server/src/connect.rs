@@ -500,13 +500,16 @@ impl StreamConnect {
     fn batch_evicted_error(&self, oldest_retained: Option<u64>) -> ConnectError {
         let mut metadata = HashMap::new();
         if let Some(v) = oldest_retained {
-            metadata.insert("oldest_retained".to_string(), v.to_string());
+            metadata.insert(
+                crate::stream::METADATA_OLDEST_RETAINED.to_string(),
+                v.to_string(),
+            );
         }
         with_error_info_detail(
             ConnectError::out_of_range("batch has been evicted from the log"),
             ErrorInfo {
-                reason: "BATCH_EVICTED".to_string(),
-                domain: "store.stream".to_string(),
+                reason: crate::stream::REASON_BATCH_EVICTED.to_string(),
+                domain: crate::stream::STREAM_ERROR_DOMAIN.to_string(),
                 metadata,
                 ..Default::default()
             },
@@ -517,34 +520,40 @@ impl StreamConnect {
         with_error_info_detail(
             ConnectError::not_found("batch not found"),
             ErrorInfo {
-                reason: "BATCH_NOT_FOUND".to_string(),
-                domain: "store.stream".to_string(),
+                reason: crate::stream::REASON_BATCH_NOT_FOUND.to_string(),
+                domain: crate::stream::STREAM_ERROR_DOMAIN.to_string(),
                 ..Default::default()
             },
         )
     }
 
-    /// Build the replay portion of a `Subscribe` stream (seq in `since..=bound`).
-    /// Applies the subscriber's own filter client-side-style on the server by
-    /// running the compiled regexes against each `get_batch` row; returns a
-    /// Vec of `SubscribeResponse`s ready to be prepended to the live channel.
+    /// Replay `since..=bound` as `SubscribeResponse`s, applying the
+    /// subscriber's pre-compiled filter server-side so replayed frames are
+    /// byte-identical to what the live path would have delivered.
+    ///
+    /// `first_batch` is the batch at `since` that the caller already fetched
+    /// to validate retention; it's reused here instead of being refetched.
     fn build_replay_frames(
         &self,
         since: u64,
         bound: u64,
-        filter: &StreamFilter,
+        matchers: &[crate::stream::CompiledMatcher],
+        first_batch: Vec<(Bytes, Bytes)>,
     ) -> Result<Vec<Result<SubscribeResponse, ConnectError>>, ConnectError> {
         let mut out = Vec::new();
-        let compiled_matchers = compile_matchers(filter)?;
+        let mut first_batch = Some(first_batch);
         for seq in since..=bound {
-            match self
-                .state
-                .engine
-                .get_batch(seq)
-                .map_err(ConnectError::internal)?
-            {
+            let kvs = if seq == since {
+                first_batch.take()
+            } else {
+                self.state
+                    .engine
+                    .get_batch(seq)
+                    .map_err(ConnectError::internal)?
+            };
+            match kvs {
                 Some(kvs) => {
-                    let entries = filter_entries(&compiled_matchers, &kvs);
+                    let entries = crate::stream::apply_filter(matchers, &kvs);
                     if !entries.is_empty() {
                         out.push(Ok(SubscribeResponse {
                             sequence_number: seq,
@@ -554,10 +563,9 @@ impl StreamConnect {
                     }
                 }
                 None => {
-                    // A gap inside [since, bound] is unexpected (those seq
-                    // numbers were produced by THIS engine during replay).
-                    // Emit EMPTY batches with no entries so we don't lie about
-                    // sequence numbers, but keep strict monotonicity.
+                    // Gap inside (since, bound] — emit an empty frame so
+                    // consumers see the sequence number rather than a silent
+                    // skip.
                     out.push(Ok(SubscribeResponse {
                         sequence_number: seq,
                         entries: Vec::new(),
@@ -568,49 +576,6 @@ impl StreamConnect {
         }
         Ok(out)
     }
-}
-
-/// Small helper: compile a `StreamFilter` into `(KeyCodec, Regex)` pairs.
-/// Used by `StreamConnect` replay so the same filter matching logic applies
-/// to replayed frames as to live frames (which are handled inside `StreamHub`).
-fn compile_matchers(
-    filter: &StreamFilter,
-) -> Result<Vec<(exoware_sdk_rs::keys::KeyCodec, regex::bytes::Regex)>, ConnectError> {
-    let mut out = Vec::with_capacity(filter.match_keys.len());
-    for mk in &filter.match_keys {
-        let regex = exoware_sdk_rs::match_key::compile_payload_regex(&mk.payload_regex)
-            .map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
-        let codec = exoware_sdk_rs::keys::KeyCodec::new(mk.reserved_bits, mk.prefix);
-        out.push((codec, regex));
-    }
-    Ok(out)
-}
-
-fn filter_entries(
-    matchers: &[(exoware_sdk_rs::keys::KeyCodec, regex::bytes::Regex)],
-    kvs: &[(Bytes, Bytes)],
-) -> Vec<StreamEntry> {
-    let mut out = Vec::new();
-    'outer: for (k, v) in kvs {
-        for (codec, regex) in matchers {
-            if !codec.matches(k) {
-                continue;
-            }
-            let payload_len = codec.payload_capacity_bytes_for_key_len(k.len());
-            let Ok(payload) = codec.read_payload(k, 0, payload_len) else {
-                continue;
-            };
-            if regex.is_match(&payload) {
-                out.push(StreamEntry {
-                    key: k.to_vec(),
-                    value: v.to_vec(),
-                    ..Default::default()
-                });
-                continue 'outer;
-            }
-        }
-    }
-    out
 }
 
 fn domain_filter_from_subscribe_view(
@@ -656,35 +621,32 @@ impl StreamApi for StreamConnect {
 
         // Phase 1: register the subscriber FIRST so any live Put that lands
         // between now and the replay_bound snapshot is captured in the mpsc.
-        let (sub_id, live_rx) = self.state.stream.subscribe(filter.clone())?;
+        let (sub_id, matchers, live_rx) = self.state.stream.subscribe(filter)?;
 
         // Phase 2: snapshot the replay boundary atomically with respect to
         // future publishes (registration happened before this read).
         let replay_bound = self.state.engine.current_sequence();
-
-        let filter_clone = filter.clone();
         let state = self.state.clone();
         let boundary = replay_bound;
 
-        // Phase 3: optional replay.
+        // Phase 3: optional replay. The `get_batch(s)` below both validates
+        // retention and returns the batch so `build_replay_frames` can reuse
+        // it without a second point-lookup.
         let replay_frames: Vec<Result<SubscribeResponse, ConnectError>> = match since {
             Some(s) if s <= boundary && s > 0 => {
-                // Check the lower bound is still retained.
-                if state
+                let first_batch = state
                     .engine
                     .get_batch(s)
-                    .map_err(ConnectError::internal)?
-                    .is_none()
-                {
-                    // Evicted → unsubscribe and surface the error.
+                    .map_err(ConnectError::internal)?;
+                let Some(first_batch) = first_batch else {
                     state.stream.unsubscribe(sub_id);
                     let oldest = state
                         .engine
                         .oldest_retained_batch()
                         .map_err(ConnectError::internal)?;
                     return Err(self.batch_evicted_error(oldest));
-                }
-                self.build_replay_frames(s, boundary, &filter_clone)?
+                };
+                self.build_replay_frames(s, boundary, &matchers, first_batch)?
             }
             _ => Vec::new(),
         };

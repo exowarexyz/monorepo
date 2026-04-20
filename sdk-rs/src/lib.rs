@@ -1167,90 +1167,6 @@ impl StoreClient {
         Ok(())
     }
 
-    /// Subscribe to `store.stream.v1.Service.Subscribe`.
-    ///
-    /// When `since_sequence_number` is `None` the subscription starts from the
-    /// next live `Put`. When `Some(N)`, the server first replays every retained
-    /// batch with sequence_number >= N in ascending order and then transitions
-    /// into live. If `N` references a batch that has been evicted from the
-    /// batch log, this call returns an error whose `ErrorInfo.reason` is
-    /// `BATCH_EVICTED`.
-    pub(crate) async fn subscribe_stream(
-        &self,
-        filter: crate::stream_filter::StreamFilter,
-        since_sequence_number: Option<u64>,
-    ) -> Result<StreamSubscription, ClientError> {
-        crate::stream_filter::validate_filter(&filter)
-            .map_err(|e| ClientError::WireFormat(e.to_string()))?;
-
-        let match_keys = filter
-            .match_keys
-            .into_iter()
-            .map(|mk| exoware_proto::store::common::v1::MatchKey {
-                reserved_bits: u32::from(mk.reserved_bits),
-                prefix: u32::from(mk.prefix),
-                payload_regex: mk.payload_regex.0,
-                ..Default::default()
-            })
-            .collect();
-        let request = exoware_proto::store::stream::v1::SubscribeRequest {
-            match_keys,
-            since_sequence_number,
-            ..Default::default()
-        };
-        let config =
-            store_connect_client_config(self.stream_uri.clone(), self.connect_request_compression);
-        let client = exoware_proto::store::stream::v1::ServiceClient::new(
-            self.connect_http.clone(),
-            config,
-        );
-        let stream = client
-            .subscribe(request)
-            .await
-            .map_err(client_error_from_connect)?;
-        Ok(StreamSubscription { stream })
-    }
-
-    /// Fetch a historical batch by sequence number via
-    /// `store.stream.v1.Service.GetBatch`. Returns `Ok(None)` when the server
-    /// reports `BATCH_EVICTED` or `BATCH_NOT_FOUND`; other RPC failures are
-    /// surfaced as `Err`.
-    pub(crate) async fn get_batch(
-        &self,
-        sequence_number: u64,
-    ) -> Result<Option<Vec<(Key, Bytes)>>, ClientError> {
-        let config =
-            store_connect_client_config(self.stream_uri.clone(), self.connect_request_compression);
-        let client = exoware_proto::store::stream::v1::ServiceClient::new(
-            self.connect_http.clone(),
-            config,
-        );
-        match client
-            .get(exoware_proto::store::stream::v1::GetRequest {
-                sequence_number,
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(resp) => {
-                let owned = resp.into_owned();
-                let entries = owned
-                    .entries
-                    .into_iter()
-                    .map(|e| (Bytes::from(e.key), Bytes::from(e.value)))
-                    .collect();
-                Ok(Some(entries))
-            }
-            Err(err) => {
-                if is_batch_missing_error(&err) {
-                    Ok(None)
-                } else {
-                    Err(client_error_from_connect(err))
-                }
-            }
-        }
-    }
-
     pub async fn health(&self) -> Result<bool, ClientError> {
         let resp = self
             .http
@@ -1495,12 +1411,6 @@ impl StoreClient {
 }
 
 // --- Service-grouped accessors ---------------------------------------------
-//
-// These thin handles re-export the four RPC services under spec-aligned
-// method names: `client.ingest().put(...)`, `client.query().get(...)`,
-// `client.compact().prune(...)`, `client.stream().{subscribe, get}(...)`.
-// Each holds a `&StoreClient` so no allocation / reference counting happens
-// on the accessor call itself.
 
 #[derive(Clone, Copy, Debug)]
 pub struct Ingest<'a> {
@@ -1734,21 +1644,82 @@ impl<'a> Compact<'a> {
 }
 
 impl<'a> Stream<'a> {
-    /// `store.stream.v1.Service.Subscribe`.
+    /// `store.stream.v1.Service.Subscribe` — see `StreamSubscription::next`
+    /// for consuming delivered frames. `since_sequence_number = None` starts
+    /// live from the next Put; `Some(N)` replays retained batches before
+    /// transitioning to live. An evicted `since` returns a
+    /// `ConnectError::out_of_range` carrying `ErrorInfo.reason = "BATCH_EVICTED"`.
     pub async fn subscribe(
         &self,
         filter: crate::stream_filter::StreamFilter,
         since_sequence_number: Option<u64>,
     ) -> Result<StreamSubscription, ClientError> {
-        self.c.subscribe_stream(filter, since_sequence_number).await
+        crate::stream_filter::validate_filter(&filter)
+            .map_err(|e| ClientError::WireFormat(e.to_string()))?;
+        let match_keys = filter
+            .match_keys
+            .into_iter()
+            .map(|mk| exoware_proto::store::common::v1::MatchKey {
+                reserved_bits: u32::from(mk.reserved_bits),
+                prefix: u32::from(mk.prefix),
+                payload_regex: mk.payload_regex.0,
+                ..Default::default()
+            })
+            .collect();
+        let request = exoware_proto::store::stream::v1::SubscribeRequest {
+            match_keys,
+            since_sequence_number,
+            ..Default::default()
+        };
+        let config =
+            store_connect_client_config(self.c.stream_uri.clone(), self.c.connect_request_compression);
+        let client = exoware_proto::store::stream::v1::ServiceClient::new(
+            self.c.connect_http.clone(),
+            config,
+        );
+        let stream = client
+            .subscribe(request)
+            .await
+            .map_err(client_error_from_connect)?;
+        Ok(StreamSubscription { stream })
     }
 
-    /// `store.stream.v1.Service.Get`.
+    /// `store.stream.v1.Service.Get` — `Ok(None)` collapses the server's
+    /// `BATCH_EVICTED` / `BATCH_NOT_FOUND` error details.
     pub async fn get(
         &self,
         sequence_number: u64,
     ) -> Result<Option<Vec<(Key, Bytes)>>, ClientError> {
-        self.c.get_batch(sequence_number).await
+        let config =
+            store_connect_client_config(self.c.stream_uri.clone(), self.c.connect_request_compression);
+        let client = exoware_proto::store::stream::v1::ServiceClient::new(
+            self.c.connect_http.clone(),
+            config,
+        );
+        match client
+            .get(exoware_proto::store::stream::v1::GetRequest {
+                sequence_number,
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(resp) => {
+                let owned = resp.into_owned();
+                let entries = owned
+                    .entries
+                    .into_iter()
+                    .map(|e| (Bytes::from(e.key), Bytes::from(e.value)))
+                    .collect();
+                Ok(Some(entries))
+            }
+            Err(err) => {
+                if is_batch_missing_error(&err) {
+                    Ok(None)
+                } else {
+                    Err(client_error_from_connect(err))
+                }
+            }
+        }
     }
 }
 

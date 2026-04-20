@@ -1,16 +1,8 @@
 //! Shared batch accumulator + Stream adapter for all four QMDB variants.
 //!
-//! The accumulator consumes `StreamSubscriptionFrame`s from the store's stream
-//! service and drives a state machine:
-//! 1. OP row -> stash the location in the current in-progress batch.
-//! 2. PRESENCE -> close the in-progress batch at `latest_location`, move to
-//!    `pending`.
-//! 3. WATERMARK -> for every pending batch whose `latest_location <= watermark`,
-//!    call `build_proof(...)` and emit the proof on the output stream.
-//!
-//! The variant-specific pieces (family classification, `build_proof`) are
-//! passed in; everything else is shared. Drivers do NOT verify proofs — the
-//! caller is expected to call `verify::<H>()` on the emitted item.
+//! Variants plug in via `(Classify, BuildProof)` pairs; the three-state
+//! pipeline (OP → PRESENCE → WATERMARK → drain) is otherwise identical. The
+//! driver does NOT verify emitted proofs — callers must run `verify::<H>()`.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -206,15 +198,15 @@ struct Accumulator {
 struct InProgressBatch {
     start: Location,
     next_expected: Location,
-    // Intentionally storing raw encoded op bytes is not necessary — the variant's
-    // `operation_range_proof` re-reads ops from the store. We only need the batch
-    // boundary (start/latest locations) to make the call.
-    _count: u32,
 }
 
 struct ClosedBatch {
     start: Location,
     latest: Location,
+    /// Snapshot of the watermark in force at drain time; used by `poll_next`
+    /// to feed `operation_range_proof`. Carrying it here avoids a stale-state
+    /// race if the upstream advances the watermark between drain and poll.
+    watermark: Location,
 }
 
 impl Accumulator {
@@ -229,16 +221,13 @@ impl Accumulator {
     fn ingest_entry(&mut self, family: Family, location: Location) {
         match family {
             Family::Op => {
-                // Find or open an in-progress batch whose next_expected == location.
                 let key = self
                     .in_progress
                     .iter()
                     .find_map(|(start, b)| (b.next_expected == location).then_some(*start));
                 match key {
                     Some(start) => {
-                        let b = self.in_progress.get_mut(&start).unwrap();
-                        b.next_expected += 1;
-                        b._count += 1;
+                        self.in_progress.get_mut(&start).unwrap().next_expected += 1;
                     }
                     None => {
                         self.in_progress.insert(
@@ -246,15 +235,14 @@ impl Accumulator {
                             InProgressBatch {
                                 start: location,
                                 next_expected: location + 1,
-                                _count: 1,
                             },
                         );
                     }
                 }
             }
             Family::Presence => {
-                // `location` is the batch's `latest_location` (inclusive max).
-                // Close the in-progress batch whose next_expected == latest+1.
+                // `location` is the batch's `latest_location` (inclusive max);
+                // close the in-progress batch whose next_expected == latest+1.
                 let key = self
                     .in_progress
                     .iter()
@@ -266,14 +254,14 @@ impl Accumulator {
                         ClosedBatch {
                             start: in_prog.start,
                             latest: location,
+                            watermark: Location::new(0),
                         },
                     );
                 }
             }
             Family::Watermark => {
-                match self.watermark {
-                    Some(w) if w >= location => {}
-                    _ => self.watermark = Some(location),
+                if self.watermark.is_none_or(|w| w < location) {
+                    self.watermark = Some(location);
                 }
             }
         }
@@ -289,7 +277,8 @@ impl Accumulator {
             if latest > w {
                 break;
             }
-            let (_, batch) = self.pending.pop_first().unwrap();
+            let (_, mut batch) = self.pending.pop_first().unwrap();
+            batch.watermark = w;
             ready.push(batch);
         }
         ready
@@ -354,10 +343,9 @@ impl<Out: Send + 'static> Stream for BatchProofStream<Out> {
 
             // 2. If there's a ready batch and no proof in flight, kick one off.
             if let Some(batch) = this.ready.pop_front() {
-                let watermark = this.acc.watermark.expect("ready implies watermark set");
                 let count = u32::try_from(*(batch.latest - batch.start) + 1)
                     .expect("batch length fits u32");
-                let fut = (this.build_proof)(watermark, batch.start, count);
+                let fut = (this.build_proof)(batch.watermark, batch.start, count);
                 this.building.set(Some(fut));
                 continue;
             }
