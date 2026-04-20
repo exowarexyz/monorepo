@@ -7,16 +7,16 @@ import "store/v1/common.proto";
 
 // Push-based subscription + point-lookup over the store's batch log.
 //
-// `Subscribe` delivers a `StreamFrame` per atomic `Put` batch whose entries
-// match any of the subscriber's `match_keys`. Optional `since_sequence_number`
-// replays retained batches before transitioning to live.
+// `Subscribe` delivers a `SubscribeResponse` per atomic `Put` batch whose
+// entries match any of the subscriber's `match_keys`. Optional
+// `since_sequence_number` replays retained batches before transitioning live.
 //
-// `GetBatch` returns the complete batch that was assigned a given sequence
-// number. The response uses the same `StreamFrame` shape as live/replay so
-// callers can share decoders; no filter is applied server-side.
+// `GetBatch` returns the complete batch at a given sequence number (no filter
+// applied server-side). `SubscribeResponse` and `GetBatchResponse` carry the
+// same shape so callers can share decoders.
 service Service {
-  rpc Subscribe(SubscribeRequest) returns (stream StreamFrame);
-  rpc GetBatch(GetBatchRequest) returns (StreamFrame);
+  rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
+  rpc GetBatch(GetBatchRequest) returns (GetBatchResponse);
 }
 
 // Live (and optionally replayed) subscription request.
@@ -51,16 +51,18 @@ message StreamEntry {
   bytes value = 2;
 }
 
-// All rows delivered for a single sequence number.
-//
-// - For `Subscribe`, `entries` contains only rows whose key matched the
-//   subscriber's filter. Entries that match nothing yield NO frame at all.
-// - For `GetBatch`, `entries` contains every row written in that batch.
-//
-// Live and replayed frames are indistinguishable by content; only the
-// observed `sequence_number` (strictly monotonically increasing either way)
-// differs.
-message StreamFrame {
+// One item delivered on a `Subscribe` stream: all rows from a single atomic
+// `Put` batch that matched the subscriber's filter. Live and replayed frames
+// are indistinguishable by content; only the observed `sequence_number`
+// (strictly monotonically increasing either way) differs.
+message SubscribeResponse {
+  uint64 sequence_number = 1;
+  repeated StreamEntry entries = 2;
+}
+
+// Response for `GetBatch`: the full contents of the batch at the requested
+// sequence number, with no server-side filter applied.
+message GetBatchResponse {
   uint64 sequence_number = 1;
   repeated StreamEntry entries = 2;
 }

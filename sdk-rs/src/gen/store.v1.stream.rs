@@ -847,19 +847,14 @@ unsafe impl ::buffa::DefaultViewInstance for StreamEntryView<'static> {
 unsafe impl<'a> ::buffa::HasDefaultViewInstance for StreamEntryView<'a> {
     type Static = StreamEntryView<'static>;
 }
-/// All rows delivered for a single sequence number.
-///
-/// - For `Subscribe`, `entries` contains only rows whose key matched the
-///   subscriber's filter. Entries that match nothing yield NO frame at all.
-/// - For `GetBatch`, `entries` contains every row written in that batch.
-///
-/// Live and replayed frames are indistinguishable by content; only the
-/// observed `sequence_number` (strictly monotonically increasing either way)
-/// differs.
+/// One item delivered on a `Subscribe` stream: all rows from a single atomic
+/// `Put` batch that matched the subscriber's filter. Live and replayed frames
+/// are indistinguishable by content; only the observed `sequence_number`
+/// (strictly monotonically increasing either way) differs.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
-pub struct StreamFrame {
+pub struct SubscribeResponse {
     /// Field 1: `sequence_number`
     #[serde(
         rename = "sequenceNumber",
@@ -882,28 +877,28 @@ pub struct StreamFrame {
     #[serde(skip)]
     pub __buffa_cached_size: ::buffa::__private::CachedSize,
 }
-impl ::core::fmt::Debug for StreamFrame {
+impl ::core::fmt::Debug for SubscribeResponse {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("StreamFrame")
+        f.debug_struct("SubscribeResponse")
             .field("sequence_number", &self.sequence_number)
             .field("entries", &self.entries)
             .finish()
     }
 }
-impl StreamFrame {
+impl SubscribeResponse {
     /// Protobuf type URL for this message, for use with `Any::pack` and
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.StreamFrame";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.SubscribeResponse";
 }
-unsafe impl ::buffa::DefaultInstance for StreamFrame {
+unsafe impl ::buffa::DefaultInstance for SubscribeResponse {
     fn default_instance() -> &'static Self {
-        static VALUE: ::buffa::__private::OnceBox<StreamFrame> = ::buffa::__private::OnceBox::new();
+        static VALUE: ::buffa::__private::OnceBox<SubscribeResponse> = ::buffa::__private::OnceBox::new();
         VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
     }
 }
-impl ::buffa::Message for StreamFrame {
+impl ::buffa::Message for SubscribeResponse {
     /// Returns the total encoded size in bytes.
     ///
     /// The result is a `u32`; the protobuf specification requires all
@@ -997,8 +992,8 @@ impl ::buffa::Message for StreamFrame {
         self.__buffa_cached_size.set(0);
     }
 }
-impl ::buffa::ExtensionSet for StreamFrame {
-    const PROTO_FQN: &'static str = "store.stream.v1.StreamFrame";
+impl ::buffa::ExtensionSet for SubscribeResponse {
+    const PROTO_FQN: &'static str = "store.stream.v1.SubscribeResponse";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -1006,7 +1001,7 @@ impl ::buffa::ExtensionSet for StreamFrame {
         &mut self.__buffa_unknown_fields
     }
 }
-impl ::buffa::json_helpers::ProtoElemJson for StreamFrame {
+impl ::buffa::json_helpers::ProtoElemJson for SubscribeResponse {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
         s: S,
@@ -1020,30 +1015,25 @@ impl ::buffa::json_helpers::ProtoElemJson for StreamFrame {
     }
 }
 #[doc(hidden)]
-pub const __STREAM_FRAME_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.stream.v1.StreamFrame",
-    to_json: ::buffa::type_registry::any_to_json::<StreamFrame>,
-    from_json: ::buffa::type_registry::any_from_json::<StreamFrame>,
+pub const __SUBSCRIBE_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/store.stream.v1.SubscribeResponse",
+    to_json: ::buffa::type_registry::any_to_json::<SubscribeResponse>,
+    from_json: ::buffa::type_registry::any_from_json::<SubscribeResponse>,
     is_wkt: false,
 };
-/// All rows delivered for a single sequence number.
-///
-/// - For `Subscribe`, `entries` contains only rows whose key matched the
-///   subscriber's filter. Entries that match nothing yield NO frame at all.
-/// - For `GetBatch`, `entries` contains every row written in that batch.
-///
-/// Live and replayed frames are indistinguishable by content; only the
-/// observed `sequence_number` (strictly monotonically increasing either way)
-/// differs.
+/// One item delivered on a `Subscribe` stream: all rows from a single atomic
+/// `Put` batch that matched the subscriber's filter. Live and replayed frames
+/// are indistinguishable by content; only the observed `sequence_number`
+/// (strictly monotonically increasing either way) differs.
 #[derive(Clone, Debug, Default)]
-pub struct StreamFrameView<'a> {
+pub struct SubscribeResponseView<'a> {
     /// Field 1: `sequence_number`
     pub sequence_number: u64,
     /// Field 2: `entries`
     pub entries: ::buffa::RepeatedView<'a, StreamEntryView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
-impl<'a> StreamFrameView<'a> {
+impl<'a> SubscribeResponseView<'a> {
     /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
     ///
     /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
@@ -1115,8 +1105,8 @@ impl<'a> StreamFrameView<'a> {
         ::core::result::Result::Ok(())
     }
 }
-impl<'a> ::buffa::MessageView<'a> for StreamFrameView<'a> {
-    type Owned = StreamFrame;
+impl<'a> ::buffa::MessageView<'a> for SubscribeResponseView<'a> {
+    type Owned = SubscribeResponse;
     fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
         Self::_decode_depth(buf, ::buffa::RECURSION_LIMIT)
     }
@@ -1128,10 +1118,10 @@ impl<'a> ::buffa::MessageView<'a> for StreamFrameView<'a> {
     }
     /// Convert this view to the owned message type.
     #[allow(clippy::redundant_closure, clippy::useless_conversion)]
-    fn to_owned_message(&self) -> StreamFrame {
+    fn to_owned_message(&self) -> SubscribeResponse {
         #[allow(unused_imports)]
         use ::buffa::alloc::string::ToString as _;
-        StreamFrame {
+        SubscribeResponse {
             sequence_number: self.sequence_number,
             entries: self.entries.iter().map(|v| v.to_owned_message()).collect(),
             __buffa_unknown_fields: self
@@ -1143,25 +1133,316 @@ impl<'a> ::buffa::MessageView<'a> for StreamFrameView<'a> {
         }
     }
 }
-unsafe impl ::buffa::DefaultViewInstance for StreamFrameView<'static> {
+unsafe impl ::buffa::DefaultViewInstance for SubscribeResponseView<'static> {
     fn default_view_instance() -> &'static Self {
-        static VALUE: ::buffa::__private::OnceBox<StreamFrameView<'static>> = ::buffa::__private::OnceBox::new();
+        static VALUE: ::buffa::__private::OnceBox<SubscribeResponseView<'static>> = ::buffa::__private::OnceBox::new();
         VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
     }
 }
-unsafe impl<'a> ::buffa::HasDefaultViewInstance for StreamFrameView<'a> {
-    type Static = StreamFrameView<'static>;
+unsafe impl<'a> ::buffa::HasDefaultViewInstance for SubscribeResponseView<'a> {
+    type Static = SubscribeResponseView<'static>;
+}
+/// Response for `GetBatch`: the full contents of the batch at the requested
+/// sequence number, with no server-side filter applied.
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct GetBatchResponse {
+    /// Field 1: `sequence_number`
+    #[serde(
+        rename = "sequenceNumber",
+        alias = "sequence_number",
+        with = "::buffa::json_helpers::uint64",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
+    )]
+    pub sequence_number: u64,
+    /// Field 2: `entries`
+    #[serde(
+        rename = "entries",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
+        deserialize_with = "::buffa::json_helpers::null_as_default"
+    )]
+    pub entries: ::buffa::alloc::vec::Vec<StreamEntry>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub __buffa_cached_size: ::buffa::__private::CachedSize,
+}
+impl ::core::fmt::Debug for GetBatchResponse {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("GetBatchResponse")
+            .field("sequence_number", &self.sequence_number)
+            .field("entries", &self.entries)
+            .finish()
+    }
+}
+impl GetBatchResponse {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.GetBatchResponse";
+}
+unsafe impl ::buffa::DefaultInstance for GetBatchResponse {
+    fn default_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<GetBatchResponse> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+impl ::buffa::Message for GetBatchResponse {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// The result is a `u32`; the protobuf specification requires all
+    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
+    /// compliant message will never overflow this type.
+    fn compute_size(&self) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        if self.sequence_number != 0u64 {
+            size
+                += 1u32
+                    + ::buffa::types::uint64_encoded_len(self.sequence_number) as u32;
+        }
+        for v in &self.entries {
+            let inner_size = v.compute_size();
+            size
+                += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
+                    + inner_size;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        self.__buffa_cached_size.set(size);
+        size
+    }
+    fn write_to(&self, buf: &mut impl ::buffa::bytes::BufMut) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if self.sequence_number != 0u64 {
+            ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Varint)
+                .encode(buf);
+            ::buffa::types::encode_uint64(self.sequence_number, buf);
+        }
+        for v in &self.entries {
+            ::buffa::encoding::Tag::new(
+                    2u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::encoding::encode_varint(v.cached_size() as u64, buf);
+            v.write_to(buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 1u32,
+                        expected: 0u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                self.sequence_number = ::buffa::types::decode_uint64(buf)?;
+            }
+            2u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 2u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                let mut elem = ::core::default::Default::default();
+                ::buffa::Message::merge_length_delimited(&mut elem, buf, depth)?;
+                self.entries.push(elem);
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn cached_size(&self) -> u32 {
+        self.__buffa_cached_size.get()
+    }
+    fn clear(&mut self) {
+        self.sequence_number = 0u64;
+        self.entries.clear();
+        self.__buffa_unknown_fields.clear();
+        self.__buffa_cached_size.set(0);
+    }
+}
+impl ::buffa::ExtensionSet for GetBatchResponse {
+    const PROTO_FQN: &'static str = "store.stream.v1.GetBatchResponse";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for GetBatchResponse {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __GET_BATCH_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/store.stream.v1.GetBatchResponse",
+    to_json: ::buffa::type_registry::any_to_json::<GetBatchResponse>,
+    from_json: ::buffa::type_registry::any_from_json::<GetBatchResponse>,
+    is_wkt: false,
+};
+/// Response for `GetBatch`: the full contents of the batch at the requested
+/// sequence number, with no server-side filter applied.
+#[derive(Clone, Debug, Default)]
+pub struct GetBatchResponseView<'a> {
+    /// Field 1: `sequence_number`
+    pub sequence_number: u64,
+    /// Field 2: `entries`
+    pub entries: ::buffa::RepeatedView<'a, StreamEntryView<'a>>,
+    pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+}
+impl<'a> GetBatchResponseView<'a> {
+    /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
+    ///
+    /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
+    /// and by generated sub-message decode arms with `depth - 1`.
+    ///
+    /// **Not part of the public API.** Named with a leading underscore to
+    /// signal that it is for generated-code use only.
+    #[doc(hidden)]
+    pub fn _decode_depth(
+        buf: &'a [u8],
+        depth: u32,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        let mut view = Self::default();
+        view._merge_into_view(buf, depth)?;
+        ::core::result::Result::Ok(view)
+    }
+    /// Merge fields from `buf` into this view (proto merge semantics).
+    ///
+    /// Repeated fields append; singular fields last-wins; singular
+    /// MESSAGE fields merge recursively. Used by sub-message decode
+    /// arms when the same field appears multiple times on the wire.
+    ///
+    /// **Not part of the public API.**
+    #[doc(hidden)]
+    pub fn _merge_into_view(
+        &mut self,
+        buf: &'a [u8],
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        let _ = depth;
+        #[allow(unused_variables)]
+        let view = self;
+        let mut cur: &'a [u8] = buf;
+        while !cur.is_empty() {
+            let before_tag = cur;
+            let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
+            match tag.field_number() {
+                1u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 1u32,
+                            expected: 0u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    view.sequence_number = ::buffa::types::decode_uint64(&mut cur)?;
+                }
+                2u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 2u32,
+                            expected: 2u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    if depth == 0 {
+                        return Err(::buffa::DecodeError::RecursionLimitExceeded);
+                    }
+                    let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                    view.entries.push(StreamEntryView::_decode_depth(sub, depth - 1)?);
+                }
+                _ => {
+                    ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
+                    let span_len = before_tag.len() - cur.len();
+                    view.__buffa_unknown_fields.push_raw(&before_tag[..span_len]);
+                }
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+}
+impl<'a> ::buffa::MessageView<'a> for GetBatchResponseView<'a> {
+    type Owned = GetBatchResponse;
+    fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        Self::_decode_depth(buf, ::buffa::RECURSION_LIMIT)
+    }
+    fn decode_view_with_limit(
+        buf: &'a [u8],
+        depth: u32,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        Self::_decode_depth(buf, depth)
+    }
+    /// Convert this view to the owned message type.
+    #[allow(clippy::redundant_closure, clippy::useless_conversion)]
+    fn to_owned_message(&self) -> GetBatchResponse {
+        #[allow(unused_imports)]
+        use ::buffa::alloc::string::ToString as _;
+        GetBatchResponse {
+            sequence_number: self.sequence_number,
+            entries: self.entries.iter().map(|v| v.to_owned_message()).collect(),
+            __buffa_unknown_fields: self
+                .__buffa_unknown_fields
+                .to_owned()
+                .unwrap_or_default()
+                .into(),
+            ..::core::default::Default::default()
+        }
+    }
+}
+unsafe impl ::buffa::DefaultViewInstance for GetBatchResponseView<'static> {
+    fn default_view_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<GetBatchResponseView<'static>> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+unsafe impl<'a> ::buffa::HasDefaultViewInstance for GetBatchResponseView<'a> {
+    type Static = GetBatchResponseView<'static>;
 }
 
 /// Full service name for this service.
 pub const SERVICE_SERVICE_NAME: &str = "store.stream.v1.Service";
 /// Push-based subscription + point-lookup over the store's batch log.
-/// `Subscribe` delivers a `StreamFrame` per atomic `Put` batch whose entries
-/// match any of the subscriber's `match_keys`. Optional `since_sequence_number`
-/// replays retained batches before transitioning to live.
-/// `GetBatch` returns the complete batch that was assigned a given sequence
-/// number. The response uses the same `StreamFrame` shape as live/replay so
-/// callers can share decoders; no filter is applied server-side.
+/// `Subscribe` delivers a `SubscribeResponse` per atomic `Put` batch whose
+/// entries match any of the subscriber's `match_keys`. Optional
+/// `since_sequence_number` replays retained batches before transitioning live.
+/// `GetBatch` returns the complete batch at a given sequence number (no filter
+/// applied server-side). `SubscribeResponse` and `GetBatchResponse` carry the
+/// same shape so callers can share decoders.
 ///
 /// # Implementing handlers
 ///
@@ -1186,7 +1467,7 @@ pub trait Service: Send + Sync + 'static {
                 ::std::pin::Pin<
                     Box<
                         dyn ::futures::Stream<
-                            Item = Result<StreamFrame, ::connectrpc::ConnectError>,
+                            Item = Result<SubscribeResponse, ::connectrpc::ConnectError>,
                         > + Send,
                     >,
                 >,
@@ -1201,7 +1482,10 @@ pub trait Service: Send + Sync + 'static {
         ctx: ::connectrpc::Context,
         request: ::buffa::view::OwnedView<GetBatchRequestView<'static>>,
     ) -> impl ::std::future::Future<
-        Output = Result<(StreamFrame, ::connectrpc::Context), ::connectrpc::ConnectError>,
+        Output = Result<
+            (GetBatchResponse, ::connectrpc::Context),
+            ::connectrpc::ConnectError,
+        >,
     > + Send;
 }
 /// Extension trait for registering a service implementation with a Router.
@@ -1477,7 +1761,10 @@ where
         &self,
         request: SubscribeRequest,
     ) -> Result<
-        ::connectrpc::client::ServerStream<T::ResponseBody, StreamFrameView<'static>>,
+        ::connectrpc::client::ServerStream<
+            T::ResponseBody,
+            SubscribeResponseView<'static>,
+        >,
         ::connectrpc::ConnectError,
     > {
         self.subscribe_with_options(
@@ -1492,7 +1779,10 @@ where
         request: SubscribeRequest,
         options: ::connectrpc::client::CallOptions,
     ) -> Result<
-        ::connectrpc::client::ServerStream<T::ResponseBody, StreamFrameView<'static>>,
+        ::connectrpc::client::ServerStream<
+            T::ResponseBody,
+            SubscribeResponseView<'static>,
+        >,
         ::connectrpc::ConnectError,
     > {
         ::connectrpc::client::call_server_stream(
@@ -1511,7 +1801,7 @@ where
         request: GetBatchRequest,
     ) -> Result<
         ::connectrpc::client::UnaryResponse<
-            ::buffa::view::OwnedView<StreamFrameView<'static>>,
+            ::buffa::view::OwnedView<GetBatchResponseView<'static>>,
         >,
         ::connectrpc::ConnectError,
     > {
@@ -1528,7 +1818,7 @@ where
         options: ::connectrpc::client::CallOptions,
     ) -> Result<
         ::connectrpc::client::UnaryResponse<
-            ::buffa::view::OwnedView<StreamFrameView<'static>>,
+            ::buffa::view::OwnedView<GetBatchResponseView<'static>>,
         >,
         ::connectrpc::ConnectError,
     > {

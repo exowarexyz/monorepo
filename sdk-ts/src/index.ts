@@ -55,7 +55,8 @@ export type {
 } from './gen/ts/store/v1/query_pb.js';
 export {
     PolicySchema,
-    PolicyMatchKeySchema,
+    KeysScopeSchema,
+    SequenceScopeSchema,
     PolicyGroupBySchema,
     PolicyOrderBySchema,
     PolicyRetainSchema,
@@ -69,7 +70,8 @@ export {
 } from './gen/ts/store/v1/compact_pb.js';
 export type {
     Policy,
-    PolicyMatchKey,
+    KeysScope,
+    SequenceScope,
     PolicyGroupBy,
     PolicyOrderBy,
     PolicyRetain,
@@ -80,3 +82,19 @@ export type {
     PruneRequest,
     PruneResponse,
 } from './gen/ts/store/v1/compact_pb.js';
+export { MatchKeySchema } from './gen/ts/store/v1/common_pb.js';
+export type { MatchKey } from './gen/ts/store/v1/common_pb.js';
+export {
+    SubscribeRequestSchema,
+    SubscribeResponseSchema,
+    GetBatchRequestSchema,
+    GetBatchResponseSchema,
+    StreamEntrySchema,
+} from './gen/ts/store/v1/stream_pb.js';
+export type {
+    SubscribeRequest,
+    SubscribeResponse,
+    GetBatchRequest,
+    GetBatchResponse,
+    StreamEntry,
+} from './gen/ts/store/v1/stream_pb.js';

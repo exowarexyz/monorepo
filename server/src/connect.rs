@@ -19,8 +19,8 @@ use exoware_proto::query::{
     Service as QueryApi, ServiceServer as QueryServiceServer,
 };
 use exoware_proto::store::stream::v1::{
-    GetBatchRequestView, Service as StreamApi, ServiceServer as StreamServiceServer, StreamEntry,
-    StreamFrame, SubscribeRequestView,
+    GetBatchRequestView, GetBatchResponse, Service as StreamApi,
+    ServiceServer as StreamServiceServer, StreamEntry, SubscribeRequestView, SubscribeResponse,
 };
 use exoware_proto::stream_filter::StreamFilter;
 use exoware_proto::{
@@ -527,13 +527,13 @@ impl StreamConnect {
     /// Build the replay portion of a `Subscribe` stream (seq in `since..=bound`).
     /// Applies the subscriber's own filter client-side-style on the server by
     /// running the compiled regexes against each `get_batch` row; returns a
-    /// Vec of `StreamFrame`s ready to be prepended to the live channel.
+    /// Vec of `SubscribeResponse`s ready to be prepended to the live channel.
     fn build_replay_frames(
         &self,
         since: u64,
         bound: u64,
         filter: &StreamFilter,
-    ) -> Result<Vec<Result<StreamFrame, ConnectError>>, ConnectError> {
+    ) -> Result<Vec<Result<SubscribeResponse, ConnectError>>, ConnectError> {
         let mut out = Vec::new();
         let compiled_matchers = compile_matchers(filter)?;
         for seq in since..=bound {
@@ -546,7 +546,7 @@ impl StreamConnect {
                 Some(kvs) => {
                     let entries = filter_entries(&compiled_matchers, &kvs);
                     if !entries.is_empty() {
-                        out.push(Ok(StreamFrame {
+                        out.push(Ok(SubscribeResponse {
                             sequence_number: seq,
                             entries,
                             ..Default::default()
@@ -558,7 +558,7 @@ impl StreamConnect {
                     // numbers were produced by THIS engine during replay).
                     // Emit EMPTY batches with no entries so we don't lie about
                     // sequence numbers, but keep strict monotonicity.
-                    out.push(Ok(StreamFrame {
+                    out.push(Ok(SubscribeResponse {
                         sequence_number: seq,
                         entries: Vec::new(),
                         ..Default::default()
@@ -646,7 +646,7 @@ impl StreamApi for StreamConnect {
         request: buffa::view::OwnedView<SubscribeRequestView<'static>>,
     ) -> Result<
         (
-            Pin<Box<dyn Stream<Item = Result<StreamFrame, ConnectError>> + Send>>,
+            Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>>,
             Context,
         ),
         ConnectError,
@@ -667,7 +667,7 @@ impl StreamApi for StreamConnect {
         let boundary = replay_bound;
 
         // Phase 3: optional replay.
-        let replay_frames: Vec<Result<StreamFrame, ConnectError>> = match since {
+        let replay_frames: Vec<Result<SubscribeResponse, ConnectError>> = match since {
             Some(s) if s <= boundary && s > 0 => {
                 // Check the lower bound is still retained.
                 if state
@@ -710,7 +710,7 @@ impl StreamApi for StreamConnect {
         &self,
         ctx: Context,
         request: buffa::view::OwnedView<GetBatchRequestView<'static>>,
-    ) -> Result<(StreamFrame, Context), ConnectError> {
+    ) -> Result<(GetBatchResponse, Context), ConnectError> {
         let seq = request.sequence_number;
         match self
             .state
@@ -728,7 +728,7 @@ impl StreamApi for StreamConnect {
                     })
                     .collect();
                 Ok((
-                    StreamFrame {
+                    GetBatchResponse {
                         sequence_number: seq,
                         entries,
                         ..Default::default()

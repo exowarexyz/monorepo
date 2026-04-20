@@ -3,7 +3,7 @@
 //! `StreamHub` holds the active subscribers. `StreamHub::publish` is called
 //! synchronously after `StoreEngine::put_batch` returns `Ok`. Each subscriber
 //! carries a precompiled regex-bytes match list; we run it against each `(key,
-//! value)` of the batch and `try_send` a `StreamFrame` over a bounded mpsc. A
+//! value)` of the batch and `try_send` a `SubscribeResponse` over a bounded mpsc. A
 //! slow subscriber whose channel fills is dropped on the next non-empty frame
 //! — we don't block ingest to wait for it.
 
@@ -14,7 +14,7 @@ use connectrpc::ConnectError;
 use dashmap::DashMap;
 use exoware_sdk_rs::keys::KeyCodec;
 use exoware_sdk_rs::match_key::compile_payload_regex;
-use exoware_sdk_rs::store::stream::v1::{StreamEntry, StreamFrame};
+use exoware_sdk_rs::store::stream::v1::{StreamEntry, SubscribeResponse};
 use exoware_sdk_rs::stream_filter::{validate_filter, StreamFilter};
 use regex::bytes::Regex;
 use tokio::sync::mpsc;
@@ -32,7 +32,7 @@ struct CompiledMatcher {
 
 struct Subscriber {
     matchers: Vec<CompiledMatcher>,
-    tx: mpsc::Sender<Result<StreamFrame, ConnectError>>,
+    tx: mpsc::Sender<Result<SubscribeResponse, ConnectError>>,
 }
 
 #[derive(Default)]
@@ -53,7 +53,7 @@ impl StreamHub {
     pub fn subscribe(
         &self,
         filter: StreamFilter,
-    ) -> Result<(u64, mpsc::Receiver<Result<StreamFrame, ConnectError>>), ConnectError> {
+    ) -> Result<(u64, mpsc::Receiver<Result<SubscribeResponse, ConnectError>>), ConnectError> {
         validate_filter(&filter).map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
         let mut matchers = Vec::with_capacity(filter.match_keys.len());
         for mk in &filter.match_keys {
@@ -89,7 +89,7 @@ impl StreamHub {
                 // that a filter which never matches doesn't evict the client.
                 return !sub.tx.is_closed();
             }
-            let frame = StreamFrame {
+            let frame = SubscribeResponse {
                 sequence_number: seq,
                 entries,
                 ..Default::default()

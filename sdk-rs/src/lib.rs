@@ -408,7 +408,7 @@ pub struct StreamSubscriptionFrame {
 pub struct StreamSubscription {
     stream: ConnectServerStream<
         hyper::body::Incoming,
-        exoware_proto::store::stream::v1::StreamFrameView<'static>,
+        exoware_proto::store::stream::v1::SubscribeResponseView<'static>,
     >,
 }
 
