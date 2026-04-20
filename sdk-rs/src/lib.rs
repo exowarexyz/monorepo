@@ -12,8 +12,10 @@
 
 pub mod keys;
 pub mod kv_codec;
+pub mod match_key;
 pub mod proto;
 pub mod prune_policy;
+pub mod stream_filter;
 pub use keys::{Key, KeyCodec, KeyCodecError, KeyMut, KeyValidationError, Value, MAX_KEY_LEN};
 pub use proto::*;
 extern crate self as exoware_proto;
@@ -385,6 +387,84 @@ impl RangeMode {
     }
 }
 
+/// One delivered (key, value) row from a stream subscription. The client
+/// reapplies its own filter if it needs to know which match_key matched —
+/// the wire frame doesn't carry the index.
+#[derive(Clone, Debug)]
+pub struct StreamSubscriptionEntry {
+    pub key: Key,
+    pub value: Bytes,
+}
+
+/// One atomic Put batch delivered to a subscriber.
+#[derive(Clone, Debug)]
+pub struct StreamSubscriptionFrame {
+    pub sequence_number: u64,
+    pub entries: Vec<StreamSubscriptionEntry>,
+}
+
+/// Async stream of `StreamSubscriptionFrame`. Backed by the generated
+/// connectrpc server stream.
+pub struct StreamSubscription {
+    stream: ConnectServerStream<
+        hyper::body::Incoming,
+        exoware_proto::store::stream::v1::StreamFrameView<'static>,
+    >,
+}
+
+impl std::fmt::Debug for StreamSubscription {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamSubscription").finish_non_exhaustive()
+    }
+}
+
+impl StreamSubscription {
+    /// Pull the next frame. `Ok(None)` = server closed the stream cleanly.
+    pub async fn next(&mut self) -> Result<Option<StreamSubscriptionFrame>, ClientError> {
+        match self
+            .stream
+            .message()
+            .await
+            .map_err(client_error_from_connect)?
+        {
+            Some(view) => {
+                let owned = view.to_owned_message();
+                let frame = StreamSubscriptionFrame {
+                    sequence_number: owned.sequence_number,
+                    entries: owned
+                        .entries
+                        .into_iter()
+                        .map(|e| StreamSubscriptionEntry {
+                            key: Bytes::from(e.key),
+                            value: Bytes::from(e.value),
+                        })
+                        .collect(),
+                };
+                Ok(Some(frame))
+            }
+            None => {
+                if let Some(err) = self.stream.error() {
+                    Err(client_error_from_connect(err.clone()))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+}
+
+/// Inspect a Connect error for `store.stream.BATCH_EVICTED` / `BATCH_NOT_FOUND`
+/// `ErrorInfo` details. Used by `get_batch` to collapse both into `Ok(None)`.
+fn is_batch_missing_error(err: &ConnectError) -> bool {
+    match proto_decode_connect_error(err) {
+        Ok(decoded) => decoded.error_info.is_some_and(|info| {
+            info.domain == "store.stream"
+                && matches!(info.reason.as_str(), "BATCH_EVICTED" | "BATCH_NOT_FOUND")
+        }),
+        Err(_) => false,
+    }
+}
+
 /// Retry policy for idempotent read operations.
 #[derive(Clone, Copy, Debug)]
 pub struct RetryConfig {
@@ -491,18 +571,20 @@ pub struct StoreClientBuilder {
     ingest_url: Option<String>,
     query_url: Option<String>,
     compact_url: Option<String>,
+    stream_url: Option<String>,
     retry_config: RetryConfig,
     connect_request_compression: ConnectRequestCompression,
 }
 
 impl StoreClientBuilder {
-    /// Sets the same base URL for all services (health, ingest, query, compact).
+    /// Sets the same base URL for all services (health, ingest, query, compact, stream).
     pub fn url(mut self, url: &str) -> Self {
         let u = trim_connect_base(url);
         self.health_url = Some(u.clone());
         self.ingest_url = Some(u.clone());
         self.query_url = Some(u.clone());
-        self.compact_url = Some(u);
+        self.compact_url = Some(u.clone());
+        self.stream_url = Some(u);
         self
     }
 
@@ -530,6 +612,13 @@ impl StoreClientBuilder {
         self
     }
 
+    /// Base URL for the stream service (`store.stream.v1.Service`). Defaults
+    /// to the ingest base when not set explicitly.
+    pub fn stream_url(mut self, url: &str) -> Self {
+        self.stream_url = Some(trim_connect_base(url));
+        self
+    }
+
     /// Retry policy for idempotent read operations (get / range / reduce).
     pub fn retry_config(mut self, retry: RetryConfig) -> Self {
         self.retry_config = retry.sanitized();
@@ -550,6 +639,9 @@ impl StoreClientBuilder {
         let compact_url = self
             .compact_url
             .ok_or(ClientBuildError::MissingCompactUrl)?;
+        // Stream defaults to ingest when not explicitly configured; they
+        // share the same origin in the reference simulator.
+        let stream_url = self.stream_url.unwrap_or_else(|| ingest_url.clone());
         let ingest_uri: http::Uri =
             ingest_url
                 .parse()
@@ -570,11 +662,19 @@ impl StoreClientBuilder {
                     url: compact_url.clone(),
                     source: e,
                 })?;
+        let stream_uri: http::Uri =
+            stream_url
+                .parse()
+                .map_err(|e| ClientBuildError::InvalidUrl {
+                    url: stream_url.clone(),
+                    source: e,
+                })?;
         Ok(StoreClient {
             health_url,
             ingest_uri,
             query_uri,
             compact_uri,
+            stream_uri,
             http: new_http_client(),
             connect_http: ProtoPreferZstdHttpClient::plaintext(),
             sequence_number: Arc::new(AtomicU64::new(0)),
@@ -592,6 +692,7 @@ pub struct StoreClient {
     ingest_uri: http::Uri,
     query_uri: http::Uri,
     compact_uri: http::Uri,
+    stream_uri: http::Uri,
     http: reqwest::Client,
     connect_http: ProtoPreferZstdHttpClient,
     sequence_number: Arc<AtomicU64>,
@@ -1061,6 +1162,90 @@ impl StoreClient {
             .await
             .map_err(client_error_from_connect)?;
         Ok(())
+    }
+
+    /// Subscribe to `store.stream.v1.Service.Subscribe`.
+    ///
+    /// When `since_sequence_number` is `None` the subscription starts from the
+    /// next live `Put`. When `Some(N)`, the server first replays every retained
+    /// batch with sequence_number >= N in ascending order and then transitions
+    /// into live. If `N` references a batch that has been evicted from the
+    /// batch log, this call returns an error whose `ErrorInfo.reason` is
+    /// `BATCH_EVICTED`.
+    pub async fn subscribe_stream(
+        &self,
+        filter: crate::stream_filter::StreamFilter,
+        since_sequence_number: Option<u64>,
+    ) -> Result<StreamSubscription, ClientError> {
+        crate::stream_filter::validate_filter(&filter)
+            .map_err(|e| ClientError::WireFormat(e.to_string()))?;
+
+        let match_keys = filter
+            .match_keys
+            .into_iter()
+            .map(|mk| exoware_proto::store::common::v1::MatchKey {
+                reserved_bits: u32::from(mk.reserved_bits),
+                prefix: u32::from(mk.prefix),
+                payload_regex: mk.payload_regex.0,
+                ..Default::default()
+            })
+            .collect();
+        let request = exoware_proto::store::stream::v1::SubscribeRequest {
+            match_keys,
+            since_sequence_number,
+            ..Default::default()
+        };
+        let config =
+            store_connect_client_config(self.stream_uri.clone(), self.connect_request_compression);
+        let client = exoware_proto::store::stream::v1::ServiceClient::new(
+            self.connect_http.clone(),
+            config,
+        );
+        let stream = client
+            .subscribe(request)
+            .await
+            .map_err(client_error_from_connect)?;
+        Ok(StreamSubscription { stream })
+    }
+
+    /// Fetch a historical batch by sequence number via
+    /// `store.stream.v1.Service.GetBatch`. Returns `Ok(None)` when the server
+    /// reports `BATCH_EVICTED` or `BATCH_NOT_FOUND`; other RPC failures are
+    /// surfaced as `Err`.
+    pub async fn get_batch(
+        &self,
+        sequence_number: u64,
+    ) -> Result<Option<Vec<(Key, Bytes)>>, ClientError> {
+        let config =
+            store_connect_client_config(self.stream_uri.clone(), self.connect_request_compression);
+        let client = exoware_proto::store::stream::v1::ServiceClient::new(
+            self.connect_http.clone(),
+            config,
+        );
+        match client
+            .get_batch(exoware_proto::store::stream::v1::GetBatchRequest {
+                sequence_number,
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(resp) => {
+                let owned = resp.into_owned();
+                let entries = owned
+                    .entries
+                    .into_iter()
+                    .map(|e| (Bytes::from(e.key), Bytes::from(e.value)))
+                    .collect();
+                Ok(Some(entries))
+            }
+            Err(err) => {
+                if is_batch_missing_error(&err) {
+                    Ok(None)
+                } else {
+                    Err(client_error_from_connect(err))
+                }
+            }
+        }
     }
 
     pub async fn health(&self) -> Result<bool, ClientError> {

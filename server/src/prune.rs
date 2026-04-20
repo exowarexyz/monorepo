@@ -1,8 +1,11 @@
 //! Prune execution: apply prune policies against the store.
 //!
-//! For each policy, scan keys matching the policy's prefix family, filter by payload regex,
-//! group by capture groups, order within groups, and delete keys that do not survive the
-//! retain policy.
+//! Each policy's `scope` discriminates the keyspace:
+//! - `UserKeys` — scan key family keys matching `match_key`, partition by
+//!   `group_by` capture groups, order within each group, and delete entries
+//!   that don't survive `retain`.
+//! - `BatchLog` — translate `retain` into a cutoff sequence number and call
+//!   `StoreEngine::prune_batch_log`. No key scan; no grouping.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -10,8 +13,9 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use exoware_sdk_rs::keys::KeyCodec;
+use exoware_sdk_rs::match_key::compile_payload_regex;
 use exoware_sdk_rs::prune_policy::{
-    compile_payload_regex, OrderEncoding, PrunePolicy, PrunePolicyDocument, RetainPolicy,
+    KeysScope, OrderEncoding, PolicyScope, PrunePolicyDocument, RetainPolicy,
 };
 use regex::bytes::Regex;
 
@@ -34,21 +38,14 @@ impl std::fmt::Display for PruneError {
 
 impl std::error::Error for PruneError {}
 
-fn extract_order_value(payload: &[u8], regex: &Regex, policy: &PrunePolicy) -> Option<Vec<u8>> {
-    let order_by = policy.order_by.as_ref()?;
+fn extract_order_value(payload: &[u8], regex: &Regex, scope: &KeysScope) -> Option<Vec<u8>> {
+    let order_by = scope.order_by.as_ref()?;
     let captures = regex.captures(payload)?;
     let matched = captures.name(&order_by.capture_group)?;
     let raw = matched.as_bytes();
     match order_by.encoding {
         OrderEncoding::BytesAsc => Some(raw.to_vec()),
-        OrderEncoding::U64Be => {
-            if raw.len() == 8 {
-                Some(raw.to_vec())
-            } else {
-                None
-            }
-        }
-        OrderEncoding::I64Be => {
+        OrderEncoding::U64Be | OrderEncoding::I64Be => {
             if raw.len() == 8 {
                 Some(raw.to_vec())
             } else {
@@ -58,13 +55,13 @@ fn extract_order_value(payload: &[u8], regex: &Regex, policy: &PrunePolicy) -> O
     }
 }
 
-fn extract_group_key(payload: &[u8], regex: &Regex, policy: &PrunePolicy) -> Option<Vec<u8>> {
-    if policy.group_by.capture_groups.is_empty() {
+fn extract_group_key(payload: &[u8], regex: &Regex, scope: &KeysScope) -> Option<Vec<u8>> {
+    if scope.group_by.capture_groups.is_empty() {
         return Some(Vec::new());
     }
     let captures = regex.captures(payload)?;
     let mut group_key = Vec::new();
-    for group_name in &policy.group_by.capture_groups {
+    for group_name in &scope.group_by.capture_groups {
         let matched = captures.name(group_name)?;
         let bytes = matched.as_bytes();
         group_key.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
@@ -78,8 +75,8 @@ struct KeyEntry {
     order_value: Vec<u8>,
 }
 
-fn compare_order_values(a: &[u8], b: &[u8], policy: &PrunePolicy) -> Ordering {
-    match policy.order_by.as_ref().map(|o| &o.encoding) {
+fn compare_order_values(a: &[u8], b: &[u8], scope: &KeysScope) -> Ordering {
+    match scope.order_by.as_ref().map(|o| &o.encoding) {
         Some(OrderEncoding::U64Be) => {
             let a_val = a.try_into().map(u64::from_be_bytes).unwrap_or(0);
             let b_val = b.try_into().map(u64::from_be_bytes).unwrap_or(0);
@@ -94,10 +91,14 @@ fn compare_order_values(a: &[u8], b: &[u8], policy: &PrunePolicy) -> Ordering {
     }
 }
 
-fn keys_to_delete(mut entries: Vec<KeyEntry>, policy: &PrunePolicy) -> Vec<Bytes> {
-    entries.sort_by(|a, b| compare_order_values(&a.order_value, &b.order_value, policy));
+fn keys_to_delete(
+    mut entries: Vec<KeyEntry>,
+    scope: &KeysScope,
+    retain: &RetainPolicy,
+) -> Vec<Bytes> {
+    entries.sort_by(|a, b| compare_order_values(&a.order_value, &b.order_value, scope));
 
-    match &policy.retain {
+    match retain {
         RetainPolicy::KeepLatest { count } => {
             if entries.len() <= *count {
                 return Vec::new();
@@ -112,7 +113,7 @@ fn keys_to_delete(mut entries: Vec<KeyEntry>, policy: &PrunePolicy) -> Vec<Bytes
             entries
                 .iter()
                 .filter(|e| {
-                    compare_order_values(&e.order_value, &threshold, policy) != Ordering::Greater
+                    compare_order_values(&e.order_value, &threshold, scope) != Ordering::Greater
                 })
                 .map(|e| e.key.clone())
                 .collect()
@@ -122,7 +123,7 @@ fn keys_to_delete(mut entries: Vec<KeyEntry>, policy: &PrunePolicy) -> Vec<Bytes
             entries
                 .iter()
                 .filter(|e| {
-                    compare_order_values(&e.order_value, &threshold, policy) == Ordering::Less
+                    compare_order_values(&e.order_value, &threshold, scope) == Ordering::Less
                 })
                 .map(|e| e.key.clone())
                 .collect()
@@ -136,17 +137,25 @@ pub fn execute_prune(
     document: &PrunePolicyDocument,
 ) -> Result<(), PruneError> {
     for policy in &document.policies {
-        execute_single_policy(engine, policy)?;
+        match &policy.scope {
+            PolicyScope::Keys(scope) => {
+                execute_user_keys_policy(engine, scope, &policy.retain)?;
+            }
+            PolicyScope::Sequence => {
+                execute_batch_log_policy(engine, &policy.retain)?;
+            }
+        }
     }
     Ok(())
 }
 
-fn execute_single_policy(
+fn execute_user_keys_policy(
     engine: &Arc<dyn StoreEngine>,
-    policy: &PrunePolicy,
+    scope: &KeysScope,
+    retain: &RetainPolicy,
 ) -> Result<(), PruneError> {
-    let codec = KeyCodec::new(policy.match_key.reserved_bits, policy.match_key.prefix);
-    let regex = compile_payload_regex(&policy.match_key.payload_regex)
+    let codec = KeyCodec::new(scope.match_key.reserved_bits, scope.match_key.prefix);
+    let regex: Regex = compile_payload_regex(&scope.match_key.payload_regex)
         .map_err(|e| PruneError::Policy(e.to_string()))?;
 
     let (start, end) = codec.prefix_bounds();
@@ -169,12 +178,12 @@ fn execute_single_policy(
             continue;
         }
 
-        let group_key = match extract_group_key(&payload, &regex, policy) {
+        let group_key = match extract_group_key(&payload, &regex, scope) {
             Some(gk) => gk,
             None => continue,
         };
 
-        let order_value = extract_order_value(&payload, &regex, policy).unwrap_or_default();
+        let order_value = extract_order_value(&payload, &regex, scope).unwrap_or_default();
 
         groups.entry(group_key).or_default().push(KeyEntry {
             key: key.clone(),
@@ -184,7 +193,7 @@ fn execute_single_policy(
 
     let mut all_deletes = Vec::new();
     for (_group_key, entries) in groups {
-        all_deletes.extend(keys_to_delete(entries, policy));
+        all_deletes.extend(keys_to_delete(entries, scope, retain));
     }
 
     if !all_deletes.is_empty() {
@@ -195,14 +204,37 @@ fn execute_single_policy(
     Ok(())
 }
 
+fn execute_batch_log_policy(
+    engine: &Arc<dyn StoreEngine>,
+    retain: &RetainPolicy,
+) -> Result<(), PruneError> {
+    let current = engine.current_sequence();
+    let cutoff_exclusive = match retain {
+        RetainPolicy::KeepLatest { count } => {
+            // Keep the last N batches: cutoff = current + 1 - N (saturating).
+            let count = *count as u64;
+            current.saturating_add(1).saturating_sub(count)
+        }
+        RetainPolicy::GreaterThan { threshold } => threshold.saturating_add(1),
+        RetainPolicy::GreaterThanOrEqual { threshold } => *threshold,
+        RetainPolicy::DropAll => current.saturating_add(1),
+    };
+
+    engine
+        .prune_batch_log(cutoff_exclusive)
+        .map_err(PruneError::Engine)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use exoware_sdk_rs::kv_codec::Utf8;
-    use exoware_sdk_rs::prune_policy::{GroupBy, MatchKey, OrderBy};
+    use exoware_sdk_rs::match_key::MatchKey;
+    use exoware_sdk_rs::prune_policy::{GroupBy, OrderBy};
 
-    fn make_policy(retain: RetainPolicy) -> PrunePolicy {
-        PrunePolicy {
+    fn make_scope() -> KeysScope {
+        KeysScope {
             match_key: MatchKey {
                 reserved_bits: 4,
                 prefix: 1,
@@ -217,7 +249,6 @@ mod tests {
                 capture_group: Utf8::from("version"),
                 encoding: OrderEncoding::U64Be,
             }),
-            retain,
         }
     }
 
@@ -230,42 +261,47 @@ mod tests {
 
     #[test]
     fn keep_latest_retains_newest() {
-        let policy = make_policy(RetainPolicy::KeepLatest { count: 2 });
+        let scope = make_scope();
+        let retain = RetainPolicy::KeepLatest { count: 2 };
         let entries = vec![make_entry(1), make_entry(2), make_entry(3)];
-        let deletes = keys_to_delete(entries, &policy);
+        let deletes = keys_to_delete(entries, &scope, &retain);
         assert_eq!(deletes.len(), 1);
         assert_eq!(deletes[0].as_ref(), &[1u8]);
     }
 
     #[test]
     fn keep_latest_no_delete_when_under_count() {
-        let policy = make_policy(RetainPolicy::KeepLatest { count: 5 });
+        let scope = make_scope();
+        let retain = RetainPolicy::KeepLatest { count: 5 };
         let entries = vec![make_entry(1), make_entry(2)];
-        let deletes = keys_to_delete(entries, &policy);
+        let deletes = keys_to_delete(entries, &scope, &retain);
         assert!(deletes.is_empty());
     }
 
     #[test]
     fn drop_all_deletes_everything() {
-        let policy = make_policy(RetainPolicy::DropAll);
+        let scope = make_scope();
+        let retain = RetainPolicy::DropAll;
         let entries = vec![make_entry(1), make_entry(2)];
-        let deletes = keys_to_delete(entries, &policy);
+        let deletes = keys_to_delete(entries, &scope, &retain);
         assert_eq!(deletes.len(), 2);
     }
 
     #[test]
     fn greater_than_threshold() {
-        let policy = make_policy(RetainPolicy::GreaterThan { threshold: 5 });
+        let scope = make_scope();
+        let retain = RetainPolicy::GreaterThan { threshold: 5 };
         let entries = vec![make_entry(3), make_entry(5), make_entry(7)];
-        let deletes = keys_to_delete(entries, &policy);
+        let deletes = keys_to_delete(entries, &scope, &retain);
         assert_eq!(deletes.len(), 2);
     }
 
     #[test]
     fn greater_than_or_equal_threshold() {
-        let policy = make_policy(RetainPolicy::GreaterThanOrEqual { threshold: 5 });
+        let scope = make_scope();
+        let retain = RetainPolicy::GreaterThanOrEqual { threshold: 5 };
         let entries = vec![make_entry(3), make_entry(5), make_entry(7)];
-        let deletes = keys_to_delete(entries, &policy);
+        let deletes = keys_to_delete(entries, &scope, &retain);
         assert_eq!(deletes.len(), 1);
     }
 }

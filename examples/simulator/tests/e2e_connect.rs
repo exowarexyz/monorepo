@@ -1,15 +1,17 @@
 use bytes::Bytes;
 use commonware_codec::Encode;
 use connectrpc::client::ClientConfig;
+use exoware_sdk_rs::common::MatchKey as ProtoMatchKey;
 use exoware_sdk_rs::compact::{
-    policy_retain, Policy, PolicyGroupBy, PolicyMatchKey, PolicyOrderBy, PolicyOrderEncoding,
-    PolicyRetain, PruneRequest, RetainGreaterThan, RetainKeepLatest,
+    policy, policy_retain, KeysScope as ProtoKeysScope, Policy, PolicyGroupBy, PolicyOrderBy,
+    PolicyOrderEncoding, PolicyRetain, PruneRequest, RetainGreaterThan, RetainKeepLatest,
     ServiceClient as CompactServiceClient,
 };
 use exoware_sdk_rs::keys::{Key, KeyCodec};
 use exoware_sdk_rs::kv_codec::{
     KvExpr, KvFieldKind, KvFieldRef, KvReducedValue, StoredRow, StoredValue,
 };
+use exoware_sdk_rs::match_key::MatchKey as DomainMatchKey;
 use exoware_sdk_rs::prune_policy;
 use exoware_sdk_rs::{
     connect_compression_registry, PreferZstdHttpClient, RangeMode, RangeReduceOp,
@@ -258,19 +260,22 @@ async fn prune_drop_all_removes_keys() {
     compact_client
         .prune(PruneRequest {
             policies: vec![Policy {
-                match_key: Some(PolicyMatchKey {
-                    reserved_bits: 4,
-                    prefix: 1,
-                    payload_regex: "(?s-u)^.*$".to_string(),
+                scope: Some(policy::Scope::Keys(Box::new(ProtoKeysScope {
+                    match_key: Some(ProtoMatchKey {
+                        reserved_bits: 4,
+                        prefix: 1,
+                        payload_regex: "(?s-u)^.*$".to_string(),
+                        ..Default::default()
+                    })
+                    .into(),
+                    group_by: Some(PolicyGroupBy {
+                        capture_groups: vec![],
+                        ..Default::default()
+                    })
+                    .into(),
+                    order_by: Default::default(),
                     ..Default::default()
-                })
-                .into(),
-                group_by: Some(PolicyGroupBy {
-                    capture_groups: vec![],
-                    ..Default::default()
-                })
-                .into(),
-                order_by: Default::default(),
+                }))),
                 retain: Some(PolicyRetain {
                     kind: Some(policy_retain::Kind::DropAll(Box::default())),
                     ..Default::default()
@@ -414,25 +419,28 @@ async fn prune_keep_latest_retains_newest() {
     compact_client
         .prune(PruneRequest {
             policies: vec![Policy {
-                match_key: Some(PolicyMatchKey {
-                    reserved_bits: 4,
-                    prefix: 2,
-                    payload_regex: "(?s-u)^(?P<logical>.{3})\\x00\\x00(?P<version>.{8})$"
-                        .to_string(),
+                scope: Some(policy::Scope::Keys(Box::new(ProtoKeysScope {
+                    match_key: Some(ProtoMatchKey {
+                        reserved_bits: 4,
+                        prefix: 2,
+                        payload_regex: "(?s-u)^(?P<logical>.{3})\\x00\\x00(?P<version>.{8})$"
+                            .to_string(),
+                        ..Default::default()
+                    })
+                    .into(),
+                    group_by: Some(PolicyGroupBy {
+                        capture_groups: vec!["logical".to_string()],
+                        ..Default::default()
+                    })
+                    .into(),
+                    order_by: Some(PolicyOrderBy {
+                        capture_group: "version".to_string(),
+                        encoding: PolicyOrderEncoding::POLICY_ORDER_ENCODING_U64_BE.into(),
+                        ..Default::default()
+                    })
+                    .into(),
                     ..Default::default()
-                })
-                .into(),
-                group_by: Some(PolicyGroupBy {
-                    capture_groups: vec!["logical".to_string()],
-                    ..Default::default()
-                })
-                .into(),
-                order_by: Some(PolicyOrderBy {
-                    capture_group: "version".to_string(),
-                    encoding: PolicyOrderEncoding::POLICY_ORDER_ENCODING_U64_BE.into(),
-                    ..Default::default()
-                })
-                .into(),
+                }))),
                 retain: Some(PolicyRetain {
                     kind: Some(policy_retain::Kind::KeepLatest(Box::new(
                         RetainKeepLatest {
@@ -579,13 +587,15 @@ async fn store_client_prune_drop_all() {
 
     client
         .prune(&[prune_policy::PrunePolicy {
-            match_key: prune_policy::MatchKey {
-                reserved_bits: 4,
-                prefix: 5,
-                payload_regex: ".*".into(),
-            },
-            group_by: prune_policy::GroupBy::default(),
-            order_by: None,
+            scope: prune_policy::PolicyScope::Keys(prune_policy::KeysScope {
+                match_key: DomainMatchKey {
+                    reserved_bits: 4,
+                    prefix: 5,
+                    payload_regex: ".*".into(),
+                },
+                group_by: prune_policy::GroupBy::default(),
+                order_by: None,
+            }),
             retain: prune_policy::RetainPolicy::DropAll,
         }])
         .await
@@ -625,24 +635,27 @@ async fn prune_greater_than_retains_above_threshold() {
     compact_client
         .prune(PruneRequest {
             policies: vec![Policy {
-                match_key: Some(PolicyMatchKey {
-                    reserved_bits: 4,
-                    prefix: 3,
-                    payload_regex: "(?s-u)^(?P<logical>.{2})(?P<version>.{8})$".to_string(),
+                scope: Some(policy::Scope::Keys(Box::new(ProtoKeysScope {
+                    match_key: Some(ProtoMatchKey {
+                        reserved_bits: 4,
+                        prefix: 3,
+                        payload_regex: "(?s-u)^(?P<logical>.{2})(?P<version>.{8})$".to_string(),
+                        ..Default::default()
+                    })
+                    .into(),
+                    group_by: Some(PolicyGroupBy {
+                        capture_groups: vec!["logical".to_string()],
+                        ..Default::default()
+                    })
+                    .into(),
+                    order_by: Some(PolicyOrderBy {
+                        capture_group: "version".to_string(),
+                        encoding: PolicyOrderEncoding::POLICY_ORDER_ENCODING_U64_BE.into(),
+                        ..Default::default()
+                    })
+                    .into(),
                     ..Default::default()
-                })
-                .into(),
-                group_by: Some(PolicyGroupBy {
-                    capture_groups: vec!["logical".to_string()],
-                    ..Default::default()
-                })
-                .into(),
-                order_by: Some(PolicyOrderBy {
-                    capture_group: "version".to_string(),
-                    encoding: PolicyOrderEncoding::POLICY_ORDER_ENCODING_U64_BE.into(),
-                    ..Default::default()
-                })
-                .into(),
+                }))),
                 retain: Some(PolicyRetain {
                     kind: Some(policy_retain::Kind::GreaterThan(Box::new(
                         RetainGreaterThan {

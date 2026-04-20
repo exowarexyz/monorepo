@@ -277,4 +277,105 @@ where
             .await?,
         })
     }
+
+    /// Open a stream of `AuthenticatedOperationRangeProof<ImmutableOperation>`
+    /// per uploaded batch. See `OrderedClient::stream_batches` for semantics.
+    ///
+    /// The filter is restricted to the Immutable namespace tag so Immutable
+    /// and Keyless clients can share a store without cross-talk.
+    pub async fn stream_batches(
+        self: Arc<Self>,
+        since: Option<u64>,
+    ) -> Result<ImmutableBatchStream<H, K, V>, QmdbError>
+    where
+        Self: 'static,
+        H: Send + Sync + 'static,
+        K: Send + Sync + 'static,
+        V: Send + Sync + 'static,
+        K::Cfg: Send + Sync,
+        V::Cfg: Send + Sync,
+    {
+        use crate::auth::{
+            auth_payload_regex_for_namespace, decode_auth_operation_location,
+            decode_auth_presence_location, decode_auth_watermark_location,
+            AUTH_FAMILY_RESERVED_BITS, AUTH_OP_FAMILY_PREFIX, AUTH_PRESENCE_FAMILY_PREFIX,
+            AUTH_WATERMARK_FAMILY_PREFIX,
+        };
+        use crate::stream::driver::{self as drv, BatchProofStream, Classify, Family};
+        use exoware_sdk_rs::keys::{Key, KeyCodec};
+        use futures::FutureExt;
+
+        let namespace = AuthenticatedBackendNamespace::Immutable;
+        let op_codec = KeyCodec::new(AUTH_FAMILY_RESERVED_BITS, AUTH_OP_FAMILY_PREFIX);
+        let presence_codec = KeyCodec::new(AUTH_FAMILY_RESERVED_BITS, AUTH_PRESENCE_FAMILY_PREFIX);
+        let watermark_codec = KeyCodec::new(AUTH_FAMILY_RESERVED_BITS, AUTH_WATERMARK_FAMILY_PREFIX);
+
+        let classify: Classify = Arc::new(move |key: &Key, _value: &[u8]| {
+            if op_codec.matches(key) {
+                return decode_auth_operation_location(namespace, key)
+                    .ok()
+                    .map(|l| (Family::Op, l));
+            }
+            if presence_codec.matches(key) {
+                return decode_auth_presence_location(namespace, key)
+                    .ok()
+                    .map(|l| (Family::Presence, l));
+            }
+            if watermark_codec.matches(key) {
+                return decode_auth_watermark_location(namespace, key)
+                    .ok()
+                    .map(|l| (Family::Watermark, l));
+            }
+            None
+        });
+
+        let payload_regex = auth_payload_regex_for_namespace(namespace);
+        let filter = drv::build_filter(
+            AUTH_FAMILY_RESERVED_BITS,
+            AUTH_OP_FAMILY_PREFIX,
+            AUTH_PRESENCE_FAMILY_PREFIX,
+            AUTH_WATERMARK_FAMILY_PREFIX,
+            &payload_regex,
+        );
+        let sub = drv::open_subscription(&self.client, filter, since).await?;
+
+        let build_proof: drv::BuildProof<
+            AuthenticatedOperationRangeProof<H::Digest, ImmutableOperation<K, V>>,
+        > = Arc::new(
+            move |watermark: Location, start: Location, count: u32| {
+                let me = self.clone();
+                async move { me.operation_range_proof(watermark, start, count).await }.boxed()
+            },
+        );
+
+        Ok(ImmutableBatchStream {
+            inner: BatchProofStream::new(sub, classify, build_proof),
+        })
+    }
+}
+
+/// Async stream of authenticated immutable range proofs, one per batch.
+pub struct ImmutableBatchStream<H: Hasher, K: Array + Codec, V: Codec + Clone + Send + Sync> {
+    inner: crate::stream::driver::BatchProofStream<
+        AuthenticatedOperationRangeProof<H::Digest, ImmutableOperation<K, V>>,
+    >,
+}
+
+impl<H, K, V> futures::Stream for ImmutableBatchStream<H, K, V>
+where
+    H: Hasher,
+    K: Array + Codec + Clone + AsRef<[u8]>,
+    V: Codec + Clone + Send + Sync,
+    ImmutableOperation<K, V>: Encode,
+    AuthenticatedOperationRangeProof<H::Digest, ImmutableOperation<K, V>>: Send + 'static,
+{
+    type Item =
+        Result<AuthenticatedOperationRangeProof<H::Digest, ImmutableOperation<K, V>>, QmdbError>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        std::pin::Pin::new(&mut self.inner).poll_next(cx)
+    }
 }

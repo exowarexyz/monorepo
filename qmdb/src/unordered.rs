@@ -245,4 +245,95 @@ where
             operations,
         })
     }
+
+    /// Open a stream of `UnorderedOperationRangeProof` per uploaded batch.
+    ///
+    /// See `OrderedClient::stream_batches` — the semantics, cursor behavior,
+    /// and error handling are identical; only the proof type differs.
+    pub async fn stream_batches(
+        self: Arc<Self>,
+        since: Option<u64>,
+    ) -> Result<UnorderedBatchStream<H, K, V>, QmdbError>
+    where
+        Self: 'static,
+        H: Send + Sync + 'static,
+        K: Send + Sync + 'static,
+        V: Send + Sync + 'static,
+        K::Cfg: Send + Sync,
+        V::Cfg: Send + Sync,
+    {
+        use crate::codec::{decode_operation_location_key, decode_presence_location};
+        use crate::codec::{OP_FAMILY, PRESENCE_FAMILY, RESERVED_BITS, WATERMARK_FAMILY};
+        use crate::stream::driver::{self as drv, BatchProofStream, Classify, Family};
+        use exoware_sdk_rs::keys::{Key, KeyCodec};
+        use futures::FutureExt;
+
+        let op_codec = KeyCodec::new(RESERVED_BITS, OP_FAMILY);
+        let presence_codec = KeyCodec::new(RESERVED_BITS, PRESENCE_FAMILY);
+        let watermark_codec = KeyCodec::new(RESERVED_BITS, WATERMARK_FAMILY);
+
+        let classify: Classify = Arc::new(move |key: &Key, _value: &[u8]| {
+            if op_codec.matches(key) {
+                return decode_operation_location_key(key)
+                    .ok()
+                    .map(|l| (Family::Op, l));
+            }
+            if presence_codec.matches(key) {
+                return decode_presence_location(key)
+                    .ok()
+                    .map(|l| (Family::Presence, l));
+            }
+            if watermark_codec.matches(key) {
+                return crate::codec::decode_watermark_location(key)
+                    .ok()
+                    .map(|l| (Family::Watermark, l));
+            }
+            None
+        });
+
+        let filter = drv::build_filter(
+            RESERVED_BITS,
+            OP_FAMILY,
+            PRESENCE_FAMILY,
+            WATERMARK_FAMILY,
+            "(?s-u)^.{8}$",
+        );
+        let sub = drv::open_subscription(&self.client, filter, since).await?;
+
+        let build_proof: drv::BuildProof<UnorderedOperationRangeProof<H::Digest, K, V>> =
+            Arc::new(
+                move |watermark: Location, start: Location, count: u32| {
+                    let me = self.clone();
+                    async move { me.operation_range_proof(watermark, start, count).await }
+                        .boxed()
+                },
+            );
+
+        Ok(UnorderedBatchStream {
+            inner: BatchProofStream::new(sub, classify, build_proof),
+        })
+    }
+}
+
+/// Async stream of `UnorderedOperationRangeProof`s, one per uploaded batch.
+pub struct UnorderedBatchStream<H: Hasher, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> {
+    inner: crate::stream::driver::BatchProofStream<UnorderedOperationRangeProof<H::Digest, K, V>>,
+}
+
+impl<H, K, V> futures::Stream for UnorderedBatchStream<H, K, V>
+where
+    H: Hasher,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+    UnorderedQmdbOperation<K, V>: Encode,
+    UnorderedOperationRangeProof<H::Digest, K, V>: Send + 'static,
+{
+    type Item = Result<UnorderedOperationRangeProof<H::Digest, K, V>, QmdbError>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        std::pin::Pin::new(&mut self.inner).poll_next(cx)
+    }
 }

@@ -1,13 +1,16 @@
 //! Convert protobuf prune-policy views into `prune_policy` domain types.
 
 use crate::kv_codec::Utf8;
+use crate::match_key::MatchKey;
 use crate::prune_policy::{
-    GroupBy, MatchKey, OrderBy, OrderEncoding, PrunePolicy, PrunePolicyDocument, RetainPolicy,
-    PRUNE_POLICY_DOCUMENT_VERSION,
+    GroupBy, KeysScope, OrderBy, OrderEncoding, PolicyScope, PrunePolicy, PrunePolicyDocument,
+    RetainPolicy, PRUNE_POLICY_DOCUMENT_VERSION,
 };
 use crate::store::compact::v1::{
-    policy_retain, PolicyOrderByView, PolicyOrderEncoding, PolicyView, PruneRequestView,
+    policy, policy_retain, KeysScope as ProtoKeysScope, KeysScopeView, PolicyOrderByView,
+    PolicyOrderEncoding, PolicyView, PruneRequestView, SequenceScopeView,
 };
+use crate::store::common::v1::{MatchKey as ProtoMatchKey, MatchKeyView};
 
 fn u8_from_u32(field: &str, v: u32) -> Result<u8, String> {
     u8::try_from(v).map_err(|_| format!("{field} must fit in u8 (got {v})"))
@@ -49,38 +52,57 @@ fn retain_from_view(kind: &policy_retain::KindView<'_>) -> Result<RetainPolicy, 
     }
 }
 
-fn prune_policy_from_view(p: &PolicyView<'_>) -> Result<PrunePolicy, String> {
-    if !p.match_key.is_set() {
-        return Err("prune policy match_key is required".to_string());
-    }
-    let mk = &*p.match_key;
-    let match_key = MatchKey {
+fn match_key_from_view(mk: &MatchKeyView<'_>) -> Result<MatchKey, String> {
+    Ok(MatchKey {
         reserved_bits: u8_from_u32("match_key.reserved_bits", mk.reserved_bits)?,
         prefix: u16_from_u32("match_key.prefix", mk.prefix)?,
         payload_regex: Utf8::from(mk.payload_regex),
-    };
+    })
+}
 
-    let group_by = if p.group_by.is_set() {
+fn keys_scope_from_view(s: &KeysScopeView<'_>) -> Result<KeysScope, String> {
+    let Some(mk_view) = s.match_key.as_option() else {
+        return Err("keys scope match_key is required".to_string());
+    };
+    let match_key = match_key_from_view(mk_view)?;
+
+    let group_by = if s.group_by.is_set() {
         GroupBy {
-            capture_groups: p
+            capture_groups: s
                 .group_by
                 .capture_groups
                 .iter()
-                .map(|s| Utf8::from(&**s))
+                .map(|g| Utf8::from(&**g))
                 .collect(),
         }
     } else {
         GroupBy::default()
     };
 
-    let order_by = if p.order_by.is_set() {
-        let o: &PolicyOrderByView<'_> = &p.order_by;
+    let order_by = if s.order_by.is_set() {
+        let o: &PolicyOrderByView<'_> = &s.order_by;
         Some(OrderBy {
             capture_group: Utf8::from(o.capture_group),
             encoding: order_encoding_from_proto(&o.encoding)?,
         })
     } else {
         None
+    };
+
+    Ok(KeysScope {
+        match_key,
+        group_by,
+        order_by,
+    })
+}
+
+fn prune_policy_from_view(p: &PolicyView<'_>) -> Result<PrunePolicy, String> {
+    let Some(scope_view) = p.scope.as_ref() else {
+        return Err("prune policy scope is required".to_string());
+    };
+    let scope = match scope_view {
+        policy::ScopeView::Keys(uk) => PolicyScope::Keys(keys_scope_from_view(uk)?),
+        policy::ScopeView::Sequence(_) => PolicyScope::Sequence,
     };
 
     if !p.retain.is_set() {
@@ -92,32 +114,28 @@ fn prune_policy_from_view(p: &PolicyView<'_>) -> Result<PrunePolicy, String> {
     };
     let retain = retain_from_view(kind)?;
 
-    Ok(PrunePolicy {
-        match_key,
-        group_by,
-        order_by,
-        retain,
-    })
+    Ok(PrunePolicy { scope, retain })
 }
 
 pub fn prune_policies_to_proto(policies: &[PrunePolicy]) -> Vec<crate::store::compact::v1::Policy> {
     policies.iter().map(prune_policy_to_proto).collect()
 }
 
-fn prune_policy_to_proto(p: &PrunePolicy) -> crate::store::compact::v1::Policy {
-    use crate::store::compact::v1::{
-        policy_retain, Policy, PolicyGroupBy, PolicyMatchKey, PolicyOrderBy, PolicyRetain,
-        RetainGreaterThan, RetainGreaterThanOrEqual, RetainKeepLatest,
-    };
-
-    let match_key = PolicyMatchKey {
-        reserved_bits: u32::from(p.match_key.reserved_bits),
-        prefix: u32::from(p.match_key.prefix),
-        payload_regex: p.match_key.payload_regex.0.clone(),
+fn match_key_to_proto(mk: &MatchKey) -> ProtoMatchKey {
+    ProtoMatchKey {
+        reserved_bits: u32::from(mk.reserved_bits),
+        prefix: u32::from(mk.prefix),
+        payload_regex: mk.payload_regex.0.clone(),
         ..Default::default()
-    };
+    }
+}
+
+fn keys_scope_to_proto(s: &KeysScope) -> ProtoKeysScope {
+    use crate::store::compact::v1::{PolicyGroupBy, PolicyOrderBy};
+
+    let match_key = match_key_to_proto(&s.match_key);
     let group_by = PolicyGroupBy {
-        capture_groups: p
+        capture_groups: s
             .group_by
             .capture_groups
             .iter()
@@ -125,11 +143,25 @@ fn prune_policy_to_proto(p: &PrunePolicy) -> crate::store::compact::v1::Policy {
             .collect(),
         ..Default::default()
     };
-    let order_by = p.order_by.as_ref().map(|o| PolicyOrderBy {
+    let order_by = s.order_by.as_ref().map(|o| PolicyOrderBy {
         capture_group: o.capture_group.0.clone(),
         encoding: order_encoding_to_proto(&o.encoding).into(),
         ..Default::default()
     });
+    ProtoKeysScope {
+        match_key: Some(match_key).into(),
+        group_by: Some(group_by).into(),
+        order_by: order_by.into(),
+        ..Default::default()
+    }
+}
+
+fn prune_policy_to_proto(p: &PrunePolicy) -> crate::store::compact::v1::Policy {
+    use crate::store::compact::v1::{
+        policy_retain, Policy, PolicyRetain, RetainGreaterThan, RetainGreaterThanOrEqual,
+        RetainKeepLatest,
+    };
+
     let retain_kind = match &p.retain {
         RetainPolicy::KeepLatest { count } => {
             policy_retain::Kind::KeepLatest(Box::new(RetainKeepLatest {
@@ -151,15 +183,19 @@ fn prune_policy_to_proto(p: &PrunePolicy) -> crate::store::compact::v1::Policy {
         }
         RetainPolicy::DropAll => policy_retain::Kind::DropAll(Box::default()),
     };
+
+    let scope = match &p.scope {
+        PolicyScope::Keys(s) => policy::Scope::Keys(Box::new(keys_scope_to_proto(s))),
+        PolicyScope::Sequence => policy::Scope::Sequence(Box::default()),
+    };
+
     Policy {
-        match_key: Some(match_key).into(),
-        group_by: Some(group_by).into(),
-        order_by: order_by.into(),
         retain: Some(PolicyRetain {
             kind: Some(retain_kind),
             ..Default::default()
         })
         .into(),
+        scope: Some(scope),
         ..Default::default()
     }
 }
@@ -186,4 +222,10 @@ pub fn prune_policy_document_from_prune_request_view<'a>(
     };
     crate::prune_policy::validate_policy_document(&out).map_err(|e| e.to_string())?;
     Ok(out)
+}
+
+// Silence unused warnings for SequenceScopeView (only used via pattern match above).
+#[allow(dead_code)]
+fn _unused(v: &SequenceScopeView<'_>) {
+    let _ = v;
 }

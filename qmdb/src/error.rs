@@ -52,4 +52,9 @@ pub enum QmdbError {
     CorruptData(String),
     #[error("commonware MMR error: {0}")]
     CommonwareMmr(String),
+    /// A live `stream_batches` transport error. Typically means the subscriber
+    /// was dropped by the server (slow consumer) or the connection closed;
+    /// callers should resubscribe via `since = last_seq + 1` to replay the gap.
+    #[error("qmdb stream transport error: {0}")]
+    Stream(String),
 }

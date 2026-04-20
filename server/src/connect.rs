@@ -5,6 +5,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use bytes::Bytes;
 use connectrpc::{Chain, ConnectError, ConnectRpcService, Context, Limits};
 use exoware_proto::compact::{
     PruneResponse, Service as CompactApi, ServiceServer as CompactServiceServer,
@@ -17,6 +18,11 @@ use exoware_proto::query::{
     Detail, GetManyEntry, GetManyFrame, GetResponse, RangeEntry, RangeFrame, ReduceResponse,
     Service as QueryApi, ServiceServer as QueryServiceServer,
 };
+use exoware_proto::store::stream::v1::{
+    GetBatchRequestView, Service as StreamApi, ServiceServer as StreamServiceServer, StreamEntry,
+    StreamFrame, SubscribeRequestView,
+};
+use exoware_proto::stream_filter::StreamFilter;
 use exoware_proto::{
     connect_compression_registry, encode_query_detail_header_value,
     parse_range_traversal_direction, to_domain_reduce_request_from_view,
@@ -26,11 +32,14 @@ use exoware_proto::{
 };
 use exoware_sdk_rs as exoware_proto;
 use exoware_sdk_rs::keys::Key;
-use futures::{stream, Stream};
+use exoware_sdk_rs::match_key::MatchKey;
+use futures::{stream as stream_util, Stream, StreamExt};
 use http::header::HeaderValue;
 use http::HeaderName;
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::reduce::reduce_over_rows;
+use crate::stream::StreamHub;
 use crate::validate;
 use crate::StoreEngine;
 
@@ -58,6 +67,10 @@ pub struct AppState {
     /// Gates ingest (writes) only. Query and compact remain available during drains so that
     /// in-flight reads can complete while the worker sheds write traffic.
     pub ready: Arc<AtomicBool>,
+    /// Shared fan-out hub for `store.stream.v1.Subscribe`. `IngestConnect::put`
+    /// calls `publish` on successful commit so subscribers receive exactly
+    /// the rows that landed in the engine.
+    pub stream: Arc<StreamHub>,
 }
 
 impl AppState {
@@ -65,6 +78,7 @@ impl AppState {
         Self {
             engine,
             ready: Arc::new(AtomicBool::new(true)),
+            stream: Arc::new(StreamHub::new()),
         }
     }
 }
@@ -112,6 +126,11 @@ impl IngestApi for IngestConnect {
             .engine
             .put_batch(&batch)
             .map_err(ConnectError::internal)?;
+
+        // Fan out the just-committed batch to stream subscribers. `publish`
+        // short-circuits when there are no subscribers and uses `try_send`
+        // internally so this never blocks ingest.
+        self.state.stream.publish(seq, &batch);
 
         Ok((
             ProtoPutResponse {
@@ -294,7 +313,7 @@ impl QueryApi for QueryConnect {
             }));
         }
 
-        Ok((Box::pin(stream::iter(frames)), ctx))
+        Ok((Box::pin(stream_util::iter(frames)), ctx))
     }
 
     async fn range(
@@ -365,7 +384,7 @@ impl QueryApi for QueryConnect {
             }));
         }
 
-        Ok((Box::pin(stream::iter(frames)), ctx))
+        Ok((Box::pin(stream_util::iter(frames)), ctx))
     }
 
     async fn reduce(
@@ -468,6 +487,273 @@ impl CompactApi for CompactConnect {
     }
 }
 
+#[derive(Clone)]
+pub struct StreamConnect {
+    state: AppState,
+}
+
+impl StreamConnect {
+    pub fn new(state: AppState) -> Self {
+        Self { state }
+    }
+
+    fn batch_evicted_error(&self, oldest_retained: Option<u64>) -> ConnectError {
+        let mut metadata = HashMap::new();
+        if let Some(v) = oldest_retained {
+            metadata.insert("oldest_retained".to_string(), v.to_string());
+        }
+        with_error_info_detail(
+            ConnectError::out_of_range("batch has been evicted from the log"),
+            ErrorInfo {
+                reason: "BATCH_EVICTED".to_string(),
+                domain: "store.stream".to_string(),
+                metadata,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn batch_not_found_error(&self) -> ConnectError {
+        with_error_info_detail(
+            ConnectError::not_found("batch not found"),
+            ErrorInfo {
+                reason: "BATCH_NOT_FOUND".to_string(),
+                domain: "store.stream".to_string(),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Build the replay portion of a `Subscribe` stream (seq in `since..=bound`).
+    /// Applies the subscriber's own filter client-side-style on the server by
+    /// running the compiled regexes against each `get_batch` row; returns a
+    /// Vec of `StreamFrame`s ready to be prepended to the live channel.
+    fn build_replay_frames(
+        &self,
+        since: u64,
+        bound: u64,
+        filter: &StreamFilter,
+    ) -> Result<Vec<Result<StreamFrame, ConnectError>>, ConnectError> {
+        let mut out = Vec::new();
+        let compiled_matchers = compile_matchers(filter)?;
+        for seq in since..=bound {
+            match self
+                .state
+                .engine
+                .get_batch(seq)
+                .map_err(ConnectError::internal)?
+            {
+                Some(kvs) => {
+                    let entries = filter_entries(&compiled_matchers, &kvs);
+                    if !entries.is_empty() {
+                        out.push(Ok(StreamFrame {
+                            sequence_number: seq,
+                            entries,
+                            ..Default::default()
+                        }));
+                    }
+                }
+                None => {
+                    // A gap inside [since, bound] is unexpected (those seq
+                    // numbers were produced by THIS engine during replay).
+                    // Emit EMPTY batches with no entries so we don't lie about
+                    // sequence numbers, but keep strict monotonicity.
+                    out.push(Ok(StreamFrame {
+                        sequence_number: seq,
+                        entries: Vec::new(),
+                        ..Default::default()
+                    }));
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Small helper: compile a `StreamFilter` into `(KeyCodec, Regex)` pairs.
+/// Used by `StreamConnect` replay so the same filter matching logic applies
+/// to replayed frames as to live frames (which are handled inside `StreamHub`).
+fn compile_matchers(
+    filter: &StreamFilter,
+) -> Result<Vec<(exoware_sdk_rs::keys::KeyCodec, regex::bytes::Regex)>, ConnectError> {
+    let mut out = Vec::with_capacity(filter.match_keys.len());
+    for mk in &filter.match_keys {
+        let regex = exoware_sdk_rs::match_key::compile_payload_regex(&mk.payload_regex)
+            .map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
+        let codec = exoware_sdk_rs::keys::KeyCodec::new(mk.reserved_bits, mk.prefix);
+        out.push((codec, regex));
+    }
+    Ok(out)
+}
+
+fn filter_entries(
+    matchers: &[(exoware_sdk_rs::keys::KeyCodec, regex::bytes::Regex)],
+    kvs: &[(Bytes, Bytes)],
+) -> Vec<StreamEntry> {
+    let mut out = Vec::new();
+    'outer: for (k, v) in kvs {
+        for (codec, regex) in matchers {
+            if !codec.matches(k) {
+                continue;
+            }
+            let payload_len = codec.payload_capacity_bytes_for_key_len(k.len());
+            let Ok(payload) = codec.read_payload(k, 0, payload_len) else {
+                continue;
+            };
+            if regex.is_match(&payload) {
+                out.push(StreamEntry {
+                    key: k.to_vec(),
+                    value: v.to_vec(),
+                    ..Default::default()
+                });
+                continue 'outer;
+            }
+        }
+    }
+    out
+}
+
+fn domain_filter_from_subscribe_view(
+    req: &SubscribeRequestView<'_>,
+) -> Result<StreamFilter, ConnectError> {
+    let mut match_keys = Vec::with_capacity(req.match_keys.len());
+    for mk in req.match_keys.iter() {
+        let reserved_bits = u8::try_from(mk.reserved_bits).map_err(|_| {
+            ConnectError::invalid_argument(format!(
+                "match_key.reserved_bits {} does not fit in u8",
+                mk.reserved_bits
+            ))
+        })?;
+        let prefix = u16::try_from(mk.prefix).map_err(|_| {
+            ConnectError::invalid_argument(format!(
+                "match_key.prefix {} does not fit in u16",
+                mk.prefix
+            ))
+        })?;
+        match_keys.push(MatchKey {
+            reserved_bits,
+            prefix,
+            payload_regex: exoware_sdk_rs::kv_codec::Utf8::from(mk.payload_regex),
+        });
+    }
+    Ok(StreamFilter { match_keys })
+}
+
+impl StreamApi for StreamConnect {
+    async fn subscribe(
+        &self,
+        ctx: Context,
+        request: buffa::view::OwnedView<SubscribeRequestView<'static>>,
+    ) -> Result<
+        (
+            Pin<Box<dyn Stream<Item = Result<StreamFrame, ConnectError>> + Send>>,
+            Context,
+        ),
+        ConnectError,
+    > {
+        let filter = domain_filter_from_subscribe_view(&request)?;
+        let since = request.since_sequence_number;
+
+        // Phase 1: register the subscriber FIRST so any live Put that lands
+        // between now and the replay_bound snapshot is captured in the mpsc.
+        let (sub_id, live_rx) = self.state.stream.subscribe(filter.clone())?;
+
+        // Phase 2: snapshot the replay boundary atomically with respect to
+        // future publishes (registration happened before this read).
+        let replay_bound = self.state.engine.current_sequence();
+
+        let filter_clone = filter.clone();
+        let state = self.state.clone();
+        let boundary = replay_bound;
+
+        // Phase 3: optional replay.
+        let replay_frames: Vec<Result<StreamFrame, ConnectError>> = match since {
+            Some(s) if s <= boundary && s > 0 => {
+                // Check the lower bound is still retained.
+                if state
+                    .engine
+                    .get_batch(s)
+                    .map_err(ConnectError::internal)?
+                    .is_none()
+                {
+                    // Evicted → unsubscribe and surface the error.
+                    state.stream.unsubscribe(sub_id);
+                    let oldest = state
+                        .engine
+                        .oldest_retained_batch()
+                        .map_err(ConnectError::internal)?;
+                    return Err(self.batch_evicted_error(oldest));
+                }
+                self.build_replay_frames(s, boundary, &filter_clone)?
+            }
+            _ => Vec::new(),
+        };
+
+        // Phase 4: chain replay into live, filtering out any live frames
+        // whose sequence number is <= replay_bound (those were already
+        // delivered by replay — avoids double-emit for batches that landed
+        // between registration and the boundary snapshot).
+        let live_stream = ReceiverStream::new(live_rx).filter(move |frame| {
+            let keep = match frame {
+                Ok(f) => f.sequence_number > boundary,
+                Err(_) => true,
+            };
+            async move { keep }
+        });
+        let replay_stream = stream_util::iter(replay_frames);
+        let combined = replay_stream.chain(live_stream);
+
+        Ok((Box::pin(combined), ctx))
+    }
+
+    async fn get_batch(
+        &self,
+        ctx: Context,
+        request: buffa::view::OwnedView<GetBatchRequestView<'static>>,
+    ) -> Result<(StreamFrame, Context), ConnectError> {
+        let seq = request.sequence_number;
+        match self
+            .state
+            .engine
+            .get_batch(seq)
+            .map_err(ConnectError::internal)?
+        {
+            Some(kvs) => {
+                let entries = kvs
+                    .into_iter()
+                    .map(|(k, v)| StreamEntry {
+                        key: k.to_vec(),
+                        value: v.to_vec(),
+                        ..Default::default()
+                    })
+                    .collect();
+                Ok((
+                    StreamFrame {
+                        sequence_number: seq,
+                        entries,
+                        ..Default::default()
+                    },
+                    ctx,
+                ))
+            }
+            None => {
+                let current = self.state.engine.current_sequence();
+                // Distinguish "never existed" (seq > current) vs "evicted".
+                if seq > current {
+                    Err(self.batch_not_found_error())
+                } else {
+                    let oldest = self
+                        .state
+                        .engine
+                        .oldest_retained_batch()
+                        .map_err(ConnectError::internal)?;
+                    Err(self.batch_evicted_error(oldest))
+                }
+            }
+        }
+    }
+}
+
 fn connect_limits() -> Limits {
     Limits::default()
         .max_request_body_size(MAX_CONNECTRPC_BODY_BYTES)
@@ -479,14 +765,20 @@ pub fn connect_stack(
 ) -> ConnectRpcService<
     Chain<
         IngestServiceServer<IngestConnect>,
-        Chain<QueryServiceServer<QueryConnect>, CompactServiceServer<CompactConnect>>,
+        Chain<
+            QueryServiceServer<QueryConnect>,
+            Chain<CompactServiceServer<CompactConnect>, StreamServiceServer<StreamConnect>>,
+        >,
     >,
 > {
     ConnectRpcService::new(Chain(
         IngestServiceServer::new(IngestConnect::new(state.clone())),
         Chain(
             QueryServiceServer::new(QueryConnect::new(state.clone())),
-            CompactServiceServer::new(CompactConnect::new(state)),
+            Chain(
+                CompactServiceServer::new(CompactConnect::new(state.clone())),
+                StreamServiceServer::new(StreamConnect::new(state)),
+            ),
         ),
     ))
     .with_limits(connect_limits())

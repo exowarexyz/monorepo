@@ -37,6 +37,7 @@ pub(crate) mod storage;
 mod immutable;
 mod keyless;
 mod ordered;
+mod stream;
 mod unordered;
 
 pub use error::QmdbError;

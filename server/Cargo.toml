@@ -13,9 +13,12 @@ bytes = { workspace = true }
 buffa = { workspace = true }
 buffa-types = { workspace = true }
 connectrpc = { workspace = true }
+dashmap = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
 regex = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+tokio-stream = { workspace = true }
 exoware-sdk-rs = { workspace = true }
 
 [dev-dependencies]

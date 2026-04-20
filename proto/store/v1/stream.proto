@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+package store.stream.v1;
+
+import "buf/validate/validate.proto";
+import "store/v1/common.proto";
+
+// Push-based subscription + point-lookup over the store's batch log.
+//
+// `Subscribe` delivers a `StreamFrame` per atomic `Put` batch whose entries
+// match any of the subscriber's `match_keys`. Optional `since_sequence_number`
+// replays retained batches before transitioning to live.
+//
+// `GetBatch` returns the complete batch that was assigned a given sequence
+// number. The response uses the same `StreamFrame` shape as live/replay so
+// callers can share decoders; no filter is applied server-side.
+service Service {
+  rpc Subscribe(SubscribeRequest) returns (stream StreamFrame);
+  rpc GetBatch(GetBatchRequest) returns (StreamFrame);
+}
+
+// Live (and optionally replayed) subscription request.
+message SubscribeRequest {
+  // OR semantics across `match_keys`: a row is delivered if any match_key
+  // matches. Bounded to keep server-side regex compilation cost predictable.
+  repeated store.common.v1.MatchKey match_keys = 1
+    [(buf.validate.field).repeated.min_items = 1,
+     (buf.validate.field).repeated.max_items = 16];
+  // Optional replay cursor.
+  //
+  // Unset / 0 -> subscription starts from the next live batch; no replay.
+  //
+  // Set to N -> the server first replays every retained batch with
+  // `sequence_number >= N` in ascending order, then transitions seamlessly
+  // into the live stream. If `N` references a sequence number that has been
+  // evicted from the batch log, the server returns OUT_OF_RANGE with an
+  // `ErrorInfo { reason: "BATCH_EVICTED", metadata: { "oldest_retained": ... } }`
+  // detail so callers can decide how to proceed.
+  optional uint64 since_sequence_number = 2;
+}
+
+// Point-lookup for one historical batch. Always returns the complete batch.
+message GetBatchRequest {
+  uint64 sequence_number = 1;
+}
+
+// One (key, value) pair from a `Put` batch. Callers reapply any filter
+// locally if they need to know which subscriber pattern matched an entry.
+message StreamEntry {
+  bytes key = 1;
+  bytes value = 2;
+}
+
+// All rows delivered for a single sequence number.
+//
+// - For `Subscribe`, `entries` contains only rows whose key matched the
+//   subscriber's filter. Entries that match nothing yield NO frame at all.
+// - For `GetBatch`, `entries` contains every row written in that batch.
+//
+// Live and replayed frames are indistinguishable by content; only the
+// observed `sequence_number` (strictly monotonically increasing either way)
+// differs.
+message StreamFrame {
+  uint64 sequence_number = 1;
+  repeated StreamEntry entries = 2;
+}

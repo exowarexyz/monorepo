@@ -396,6 +396,83 @@ where
         }
     }
 
+    /// Open a stream of `OperationRangeProof` per uploaded batch.
+    ///
+    /// The returned stream yields one proof per batch whose presence marker
+    /// AND watermark have both landed in the store. `since = None` starts live
+    /// from the next batch; `Some(N)` replays retained batches with
+    /// sequence_number >= N before transitioning to live. Caller must verify
+    /// each emitted proof with `verify::<H>()` before trusting its contents.
+    ///
+    /// On transport errors (slow-client eviction, connection closed) the
+    /// stream yields `Err(QmdbError::Stream(..))`; resubscribe with
+    /// `since = last_seen_batch_seq + 1` to replay the gap via the batch log.
+    pub async fn stream_batches(
+        self: std::sync::Arc<Self>,
+        since: Option<u64>,
+    ) -> Result<OrderedBatchStream<H, K, V, N>, QmdbError>
+    where
+        Self: 'static,
+        H: Send + Sync + 'static,
+        K: Send + Sync + 'static,
+        V: Send + Sync + 'static,
+        K::Cfg: Send + Sync,
+        V::Cfg: Send + Sync,
+    {
+        use crate::codec::{decode_operation_location_key, decode_presence_location};
+        use crate::codec::{OP_FAMILY, PRESENCE_FAMILY, RESERVED_BITS, WATERMARK_FAMILY};
+        use crate::stream::driver::{
+            self as drv, BatchProofStream, Classify, Family,
+        };
+        use commonware_storage::mmr::Location;
+        use exoware_sdk_rs::keys::{Key, KeyCodec};
+        use futures::FutureExt;
+        use std::sync::Arc;
+
+        let op_codec = KeyCodec::new(RESERVED_BITS, OP_FAMILY);
+        let presence_codec = KeyCodec::new(RESERVED_BITS, PRESENCE_FAMILY);
+        let watermark_codec = KeyCodec::new(RESERVED_BITS, WATERMARK_FAMILY);
+
+        let classify: Classify = Arc::new(move |key: &Key, _value: &[u8]| {
+            if op_codec.matches(key) {
+                return decode_operation_location_key(key)
+                    .ok()
+                    .map(|l| (Family::Op, l));
+            }
+            if presence_codec.matches(key) {
+                return decode_presence_location(key)
+                    .ok()
+                    .map(|l| (Family::Presence, l));
+            }
+            if watermark_codec.matches(key) {
+                return crate::codec::decode_watermark_location(key)
+                    .ok()
+                    .map(|l| (Family::Watermark, l));
+            }
+            None
+        });
+
+        let filter = drv::build_filter(
+            RESERVED_BITS,
+            OP_FAMILY,
+            PRESENCE_FAMILY,
+            WATERMARK_FAMILY,
+            "(?s-u)^.{8}$",
+        );
+        let sub = drv::open_subscription(&self.client, filter, since).await?;
+
+        let build_proof: drv::BuildProof<OperationRangeProof<H::Digest, K, V>> = Arc::new(
+            move |watermark: Location, start: Location, count: u32| {
+                let me = self.clone();
+                async move { me.operation_range_proof(watermark, start, count).await }.boxed()
+            },
+        );
+
+        Ok(OrderedBatchStream {
+            inner: BatchProofStream::new(sub, classify, build_proof),
+        })
+    }
+
     pub async fn operation_range_proof_for_variant(
         &self,
         watermark: Location,
@@ -766,5 +843,30 @@ where
         self.core()
             .load_latest_update_row(session, watermark, key)
             .await
+    }
+}
+
+/// Async stream of `OperationRangeProof`s, one per uploaded batch observed
+/// via the store's stream service. See `OrderedClient::stream_batches`.
+pub struct OrderedBatchStream<H: Hasher, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync, const N: usize>
+{
+    inner: crate::stream::driver::BatchProofStream<OperationRangeProof<H::Digest, K, V>>,
+}
+
+impl<H, K, V, const N: usize> futures::Stream for OrderedBatchStream<H, K, V, N>
+where
+    H: Hasher,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+    QmdbOperation<K, V>: Encode,
+    OperationRangeProof<H::Digest, K, V>: Send + 'static,
+{
+    type Item = Result<OperationRangeProof<H::Digest, K, V>, QmdbError>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        std::pin::Pin::new(&mut self.inner).poll_next(cx)
     }
 }

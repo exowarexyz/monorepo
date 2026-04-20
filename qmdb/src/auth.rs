@@ -631,3 +631,34 @@ pub(crate) fn decode_auth_watermark_location(
         })?;
     Ok(Location::new(u64::from_be_bytes(bytes)))
 }
+
+pub(crate) fn decode_auth_presence_location(
+    namespace: AuthenticatedBackendNamespace,
+    key: &Key,
+) -> Result<Location, QmdbError> {
+    let codec = AUTH_PRESENCE_CODEC;
+    ensure_auth_namespace(codec, namespace, key, "authenticated presence")?;
+    let bytes = codec
+        .read_payload_exact::<8>(key, AUTH_NAMESPACE_LEN)
+        .map_err(|e| {
+            QmdbError::CorruptData(format!(
+                "cannot decode authenticated presence location: {e}"
+            ))
+        })?;
+    Ok(Location::new(u64::from_be_bytes(bytes)))
+}
+
+/// Family constants exposed to the stream driver.
+pub(crate) const AUTH_OP_FAMILY_PREFIX: u16 = AUTH_OP_FAMILY;
+pub(crate) const AUTH_PRESENCE_FAMILY_PREFIX: u16 = AUTH_INDEX_FAMILY;
+pub(crate) const AUTH_WATERMARK_FAMILY_PREFIX: u16 = AUTH_WATERMARK_FAMILY;
+pub(crate) const AUTH_FAMILY_RESERVED_BITS: u8 = RESERVED_BITS;
+
+/// Byte regex matching a 1-byte namespace tag + 8-byte location payload.
+/// Used by the stream filter to restrict fan-out to one authenticated namespace
+/// (Immutable vs Keyless) even though both share the same reserved family prefix.
+pub(crate) fn auth_payload_regex_for_namespace(
+    namespace: AuthenticatedBackendNamespace,
+) -> String {
+    format!("(?s-u)^\\x{:02x}.{{8}}$", namespace.tag())
+}
