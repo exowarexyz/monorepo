@@ -102,6 +102,100 @@ pub(crate) async fn open_subscription(
         .map_err(|e| QmdbError::Stream(e.to_string()))
 }
 
+/// Classifier + filter pair for the shared (Op, Presence, Watermark) family
+/// layout used by `ordered`/`unordered` (which share OP_FAMILY=0x4 /
+/// PRESENCE_FAMILY=0x2 / WATERMARK_FAMILY=0x3) and `immutable`/`keyless`
+/// (which share AUTH_OP/AUTH_INDEX/AUTH_WATERMARK, distinguished only by a
+/// 1-byte namespace tag). Prevents drift across the four variant call sites.
+pub(crate) fn unauthenticated_classify_and_filter() -> (Classify, StreamFilter) {
+    use crate::codec::{
+        decode_operation_location_key, decode_presence_location, decode_watermark_location,
+        OP_FAMILY, PRESENCE_FAMILY, RESERVED_BITS, WATERMARK_FAMILY,
+    };
+    use exoware_sdk_rs::keys::{Key as StoreKey, KeyCodec};
+
+    let op_codec = KeyCodec::new(RESERVED_BITS, OP_FAMILY);
+    let presence_codec = KeyCodec::new(RESERVED_BITS, PRESENCE_FAMILY);
+    let watermark_codec = KeyCodec::new(RESERVED_BITS, WATERMARK_FAMILY);
+
+    let classify: Classify = Arc::new(move |key: &StoreKey, _value: &[u8]| {
+        if op_codec.matches(key) {
+            return decode_operation_location_key(key)
+                .ok()
+                .map(|l| (Family::Op, l));
+        }
+        if presence_codec.matches(key) {
+            return decode_presence_location(key)
+                .ok()
+                .map(|l| (Family::Presence, l));
+        }
+        if watermark_codec.matches(key) {
+            return decode_watermark_location(key)
+                .ok()
+                .map(|l| (Family::Watermark, l));
+        }
+        None
+    });
+
+    let filter = build_filter(
+        RESERVED_BITS,
+        OP_FAMILY,
+        PRESENCE_FAMILY,
+        WATERMARK_FAMILY,
+        "(?s-u)^.{8}$",
+    );
+    (classify, filter)
+}
+
+/// Classifier + filter for the authenticated families (immutable / keyless).
+/// The 1-byte namespace tag in the payload distinguishes the two within the
+/// same family prefixes, so `auth_classify_and_filter(namespace)` must be
+/// called separately per variant.
+pub(crate) fn authenticated_classify_and_filter(
+    namespace: crate::auth::AuthenticatedBackendNamespace,
+) -> (Classify, StreamFilter) {
+    use crate::auth::{
+        auth_payload_regex_for_namespace, decode_auth_operation_location,
+        decode_auth_presence_location, decode_auth_watermark_location,
+        AUTH_FAMILY_RESERVED_BITS, AUTH_OP_FAMILY_PREFIX, AUTH_PRESENCE_FAMILY_PREFIX,
+        AUTH_WATERMARK_FAMILY_PREFIX,
+    };
+    use exoware_sdk_rs::keys::{Key as StoreKey, KeyCodec};
+
+    let op_codec = KeyCodec::new(AUTH_FAMILY_RESERVED_BITS, AUTH_OP_FAMILY_PREFIX);
+    let presence_codec = KeyCodec::new(AUTH_FAMILY_RESERVED_BITS, AUTH_PRESENCE_FAMILY_PREFIX);
+    let watermark_codec = KeyCodec::new(AUTH_FAMILY_RESERVED_BITS, AUTH_WATERMARK_FAMILY_PREFIX);
+
+    let classify: Classify = Arc::new(move |key: &StoreKey, _value: &[u8]| {
+        if op_codec.matches(key) {
+            return decode_auth_operation_location(namespace, key)
+                .ok()
+                .map(|l| (Family::Op, l));
+        }
+        if presence_codec.matches(key) {
+            return decode_auth_presence_location(namespace, key)
+                .ok()
+                .map(|l| (Family::Presence, l));
+        }
+        if watermark_codec.matches(key) {
+            return decode_auth_watermark_location(namespace, key)
+                .ok()
+                .map(|l| (Family::Watermark, l));
+        }
+        None
+    });
+
+    let payload_regex = auth_payload_regex_for_namespace(namespace);
+    let filter = build_filter(
+        AUTH_FAMILY_RESERVED_BITS,
+        AUTH_OP_FAMILY_PREFIX,
+        AUTH_PRESENCE_FAMILY_PREFIX,
+        AUTH_WATERMARK_FAMILY_PREFIX,
+        &payload_regex,
+    );
+    (classify, filter)
+}
+
 /// State machine for one stream.
 struct Accumulator {
     in_progress: BTreeMap<Location /* start */, InProgressBatch>,

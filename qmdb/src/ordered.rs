@@ -421,46 +421,12 @@ where
         K::Cfg: Send + Sync,
         V::Cfg: Send + Sync,
     {
-        use crate::codec::{decode_operation_location_key, decode_presence_location};
-        use crate::codec::{OP_FAMILY, PRESENCE_FAMILY, RESERVED_BITS, WATERMARK_FAMILY};
-        use crate::stream::driver::{
-            self as drv, BatchProofStream, Classify, Family,
-        };
+        use crate::stream::driver::{self as drv, BatchProofStream};
         use commonware_storage::mmr::Location;
-        use exoware_sdk_rs::keys::{Key, KeyCodec};
         use futures::FutureExt;
         use std::sync::Arc;
 
-        let op_codec = KeyCodec::new(RESERVED_BITS, OP_FAMILY);
-        let presence_codec = KeyCodec::new(RESERVED_BITS, PRESENCE_FAMILY);
-        let watermark_codec = KeyCodec::new(RESERVED_BITS, WATERMARK_FAMILY);
-
-        let classify: Classify = Arc::new(move |key: &Key, _value: &[u8]| {
-            if op_codec.matches(key) {
-                return decode_operation_location_key(key)
-                    .ok()
-                    .map(|l| (Family::Op, l));
-            }
-            if presence_codec.matches(key) {
-                return decode_presence_location(key)
-                    .ok()
-                    .map(|l| (Family::Presence, l));
-            }
-            if watermark_codec.matches(key) {
-                return crate::codec::decode_watermark_location(key)
-                    .ok()
-                    .map(|l| (Family::Watermark, l));
-            }
-            None
-        });
-
-        let filter = drv::build_filter(
-            RESERVED_BITS,
-            OP_FAMILY,
-            PRESENCE_FAMILY,
-            WATERMARK_FAMILY,
-            "(?s-u)^.{8}$",
-        );
+        let (classify, filter) = drv::unauthenticated_classify_and_filter();
         let sub = drv::open_subscription(&self.client, filter, since).await?;
 
         let build_proof: drv::BuildProof<OperationRangeProof<H::Digest, K, V>> = Arc::new(

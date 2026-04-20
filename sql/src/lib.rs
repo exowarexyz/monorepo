@@ -536,7 +536,7 @@ mod tests {
                     for ((state, reducer), value) in states
                         .iter_mut()
                         .zip(domain_request.reducers.iter())
-                        .zip(reducer_values.into_iter())
+                        .zip(reducer_values)
                     {
                         match reducer.op {
                             RangeReduceOp::CountAll => state
@@ -571,7 +571,7 @@ mod tests {
                         .states
                         .iter_mut()
                         .zip(domain_request.reducers.iter())
-                        .zip(reducer_values.into_iter())
+                        .zip(reducer_values)
                     {
                         match reducer.op {
                             RangeReduceOp::CountAll => state

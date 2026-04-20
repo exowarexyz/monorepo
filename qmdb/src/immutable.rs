@@ -296,47 +296,11 @@ where
         K::Cfg: Send + Sync,
         V::Cfg: Send + Sync,
     {
-        use crate::auth::{
-            auth_payload_regex_for_namespace, decode_auth_operation_location,
-            decode_auth_presence_location, decode_auth_watermark_location,
-            AUTH_FAMILY_RESERVED_BITS, AUTH_OP_FAMILY_PREFIX, AUTH_PRESENCE_FAMILY_PREFIX,
-            AUTH_WATERMARK_FAMILY_PREFIX,
-        };
-        use crate::stream::driver::{self as drv, BatchProofStream, Classify, Family};
-        use exoware_sdk_rs::keys::{Key, KeyCodec};
+        use crate::stream::driver::{self as drv, BatchProofStream};
         use futures::FutureExt;
 
-        let namespace = AuthenticatedBackendNamespace::Immutable;
-        let op_codec = KeyCodec::new(AUTH_FAMILY_RESERVED_BITS, AUTH_OP_FAMILY_PREFIX);
-        let presence_codec = KeyCodec::new(AUTH_FAMILY_RESERVED_BITS, AUTH_PRESENCE_FAMILY_PREFIX);
-        let watermark_codec = KeyCodec::new(AUTH_FAMILY_RESERVED_BITS, AUTH_WATERMARK_FAMILY_PREFIX);
-
-        let classify: Classify = Arc::new(move |key: &Key, _value: &[u8]| {
-            if op_codec.matches(key) {
-                return decode_auth_operation_location(namespace, key)
-                    .ok()
-                    .map(|l| (Family::Op, l));
-            }
-            if presence_codec.matches(key) {
-                return decode_auth_presence_location(namespace, key)
-                    .ok()
-                    .map(|l| (Family::Presence, l));
-            }
-            if watermark_codec.matches(key) {
-                return decode_auth_watermark_location(namespace, key)
-                    .ok()
-                    .map(|l| (Family::Watermark, l));
-            }
-            None
-        });
-
-        let payload_regex = auth_payload_regex_for_namespace(namespace);
-        let filter = drv::build_filter(
-            AUTH_FAMILY_RESERVED_BITS,
-            AUTH_OP_FAMILY_PREFIX,
-            AUTH_PRESENCE_FAMILY_PREFIX,
-            AUTH_WATERMARK_FAMILY_PREFIX,
-            &payload_regex,
+        let (classify, filter) = drv::authenticated_classify_and_filter(
+            AuthenticatedBackendNamespace::Immutable,
         );
         let sub = drv::open_subscription(&self.client, filter, since).await?;
 
