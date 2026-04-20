@@ -154,7 +154,6 @@ async fn stream_batches_emits_verifiable_unordered_range_proof() {
         .expect("stream not closed")
         .expect("proof Ok");
 
-    assert!(proof.verify::<Sha256>());
     assert_eq!(proof.operations, local.operations);
     assert_eq!(proof.start_location, Location::new(0));
     assert_eq!(proof.watermark, local.latest_location);

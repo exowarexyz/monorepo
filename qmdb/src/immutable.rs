@@ -20,7 +20,7 @@ use crate::auth::{
 use crate::codec::{mmr_size_for_watermark, UpdateRow};
 use crate::core::{retry_transient_post_ingest_query, wait_until_query_visible_sequence};
 use crate::error::QmdbError;
-use crate::proof::AuthenticatedOperationRangeProof;
+use crate::proof::{AuthenticatedOperationRangeProof, VerifiedOperationRange};
 use crate::storage::AuthKvMmrStorage;
 use crate::{UploadReceipt, VersionedValue};
 
@@ -229,13 +229,14 @@ where
         }
     }
 
+    /// Fetch and verify a contiguous range of operations. The MMR proof is
+    /// built, verified against the store's root, and discarded.
     pub async fn operation_range_proof(
         &self,
         watermark: Location,
         start_location: Location,
         max_locations: u32,
-    ) -> Result<AuthenticatedOperationRangeProof<H::Digest, ImmutableOperation<K, V>>, QmdbError>
-    {
+    ) -> Result<VerifiedOperationRange<H::Digest, ImmutableOperation<K, V>>, QmdbError> {
         if max_locations == 0 {
             return Err(QmdbError::InvalidRangeLength);
         }
@@ -263,24 +264,36 @@ where
         let proof = verification::range_proof(&storage, start_location..end)
             .await
             .map_err(|e| QmdbError::CommonwareMmr(e.to_string()))?;
-        Ok(AuthenticatedOperationRangeProof {
-            watermark,
-            root: compute_auth_root::<H>(&session, namespace, watermark).await?,
-            start_location,
-            proof,
-            operations: load_auth_operation_range::<ImmutableOperation<K, V>>(
-                &session,
-                namespace,
+        let raw: AuthenticatedOperationRangeProof<H::Digest, ImmutableOperation<K, V>> =
+            AuthenticatedOperationRangeProof {
+                watermark,
+                root: compute_auth_root::<H>(&session, namespace, watermark).await?,
                 start_location,
-                end,
-                &self.value_cfg,
-            )
-            .await?,
+                proof,
+                operations: load_auth_operation_range::<ImmutableOperation<K, V>>(
+                    &session,
+                    namespace,
+                    start_location,
+                    end,
+                    &self.value_cfg,
+                )
+                .await?,
+            };
+        if !raw.verify::<H>() {
+            return Err(QmdbError::CorruptData(
+                "immutable range proof failed verification".to_string(),
+            ));
+        }
+        Ok(VerifiedOperationRange {
+            watermark: raw.watermark,
+            root: raw.root,
+            start_location: raw.start_location,
+            operations: raw.operations,
         })
     }
 
-    /// Open a stream of `AuthenticatedOperationRangeProof<ImmutableOperation>`
-    /// per uploaded batch. See `OrderedClient::stream_batches` for semantics.
+    /// Open a stream of verified immutable operation ranges per uploaded batch.
+    /// See `OrderedClient::stream_batches` for semantics.
     ///
     /// The filter is restricted to the Immutable namespace tag so Immutable
     /// and Keyless clients can share a store without cross-talk.
@@ -304,7 +317,7 @@ where
         let sub = drv::open_subscription(&self.client, filter, since).await?;
 
         let build_proof: drv::BuildProof<
-            AuthenticatedOperationRangeProof<H::Digest, ImmutableOperation<K, V>>,
+            VerifiedOperationRange<H::Digest, ImmutableOperation<K, V>>,
         > = Arc::new(move |watermark: Location, start: Location, count: u32| {
             let me = self.clone();
             async move { me.operation_range_proof(watermark, start, count).await }.boxed()
@@ -314,7 +327,7 @@ where
     }
 }
 
-/// Async stream of authenticated immutable range proofs, one per batch.
+/// Async stream of verified immutable operation ranges, one per batch.
 pub type ImmutableBatchStream<H, K, V> = crate::stream::driver::BatchProofStream<
-    AuthenticatedOperationRangeProof<<H as Hasher>::Digest, ImmutableOperation<K, V>>,
+    VerifiedOperationRange<<H as Hasher>::Digest, ImmutableOperation<K, V>>,
 >;

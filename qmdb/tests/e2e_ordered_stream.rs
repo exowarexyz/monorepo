@@ -1,5 +1,5 @@
 //! Ordered QMDB streaming e2e: upload a batch, publish watermark, observe
-//! a verifiable `OperationRangeProof` emitted from `stream_batches`.
+//! a `VerifiedOperationRange` emitted from `stream_batches`.
 
 mod common;
 
@@ -176,7 +176,6 @@ async fn stream_batches_emits_verifiable_range_proof_after_publish() {
         .expect("stream not closed")
         .expect("proof Ok");
 
-    assert!(proof.verify::<Sha256>(), "emitted proof must verify");
     assert_eq!(proof.operations, local.operations);
     assert_eq!(proof.start_location, Location::new(0));
     assert_eq!(proof.watermark, local.latest_location);
@@ -212,7 +211,6 @@ async fn stream_batches_replays_since_cursor() {
         .expect("stream not closed")
         .expect("proof Ok");
 
-    assert!(proof.verify::<Sha256>());
     assert_eq!(proof.operations, local.operations);
     // Ensure that the replay cursor landed within the retained log (sanity).
     assert!(seq_after > 0);

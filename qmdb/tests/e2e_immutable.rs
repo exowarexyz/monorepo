@@ -151,11 +151,6 @@ async fn immutable_round_trip() {
             local.operations.len() as u32,
         )
         .await
-        .expect("proof");
-    assert!(
-        proof.verify::<commonware_cryptography::Sha256>(),
-        "proof must verify"
-    );
-    assert_eq!(proof.root, local.root);
+        .expect("proof");    assert_eq!(proof.root, local.root);
     assert_eq!(proof.operations, local.operations);
 }

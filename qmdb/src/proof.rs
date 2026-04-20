@@ -16,9 +16,106 @@ use commonware_storage::{
 
 use crate::QmdbVariant;
 
+/// A set of (location, operation) pairs whose MMR multi-proof has already been
+/// verified against the store's root. The proof blob is consumed during
+/// verification and not exposed.
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
-pub struct MultiProofResult<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> {
+pub struct VerifiedMultiOperations<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> {
+    pub watermark: Location,
+    pub root: D,
+    pub operations: Vec<(Location, QmdbOperation<K, V>)>,
+}
+
+/// A single key's Update operation whose current-state proof has already been
+/// verified against the store's current-root at `watermark`. The proof blob is
+/// consumed during verification and not exposed — the `Update` inside
+/// `operation` carries the verified `next_key`.
+#[derive(Clone, Debug, PartialEq)]
+#[must_use]
+pub struct VerifiedKeyValue<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> {
+    pub watermark: Location,
+    pub root: D,
+    pub location: Location,
+    pub operation: QmdbOperation<K, V>,
+}
+
+/// A contiguous range of operations plus bitmap chunks whose current-state
+/// range proof has already been verified against the store's current-root.
+/// The proof blob is consumed during verification and not exposed.
+#[derive(Clone, Debug, PartialEq)]
+#[must_use]
+pub struct VerifiedCurrentRange<
+    D: Digest,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+    const N: usize,
+> {
+    pub watermark: Location,
+    pub root: D,
+    pub start_location: Location,
+    pub operations: Vec<QmdbOperation<K, V>>,
+    pub chunks: Vec<[u8; N]>,
+}
+
+/// Variant-tagged verified range proof: either the historical `Any` shape
+/// (no chunks) or the current-state shape (with bitmap chunks).
+#[derive(Clone, Debug, PartialEq)]
+#[must_use]
+pub enum VerifiedVariantRange<
+    D: Digest,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+    const N: usize,
+> {
+    Any(VerifiedOperationRange<D, QmdbOperation<K, V>>),
+    Current(VerifiedCurrentRange<D, K, V, N>),
+}
+
+impl<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync, const N: usize>
+    VerifiedVariantRange<D, K, V, N>
+{
+    pub fn watermark(&self) -> Location {
+        match self {
+            Self::Any(proof) => proof.watermark,
+            Self::Current(proof) => proof.watermark,
+        }
+    }
+
+    pub fn variant(&self) -> QmdbVariant {
+        match self {
+            Self::Any(_) => QmdbVariant::Any,
+            Self::Current(_) => QmdbVariant::Current,
+        }
+    }
+}
+
+/// A contiguous range of operations whose MMR proof has already been verified
+/// against the store's root. The proof blob is consumed during verification
+/// and not exposed — callers work with `operations` directly.
+///
+/// Ordered, unordered, immutable, and keyless variants all produce this shape
+/// (with different `Op` types). Use `QmdbClient::operation_range_proof` to
+/// obtain one.
+#[derive(Clone, Debug, PartialEq)]
+#[must_use]
+pub struct VerifiedOperationRange<D: Digest, Op> {
+    pub watermark: Location,
+    pub root: D,
+    pub start_location: Location,
+    pub operations: Vec<Op>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VariantRoot<D: Digest> {
+    pub watermark: Location,
+    pub variant: QmdbVariant,
+    pub root: D,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[must_use]
+pub(crate) struct MultiProofResult<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> {
     pub watermark: Location,
     pub root: D,
     pub proof: mmr::Proof<D>,
@@ -37,7 +134,11 @@ where
 
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
-pub struct OperationRangeProof<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> {
+pub(crate) struct OperationRangeProof<
+    D: Digest,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+> {
     pub watermark: Location,
     pub root: D,
     pub start_location: Location,
@@ -63,7 +164,7 @@ where
 
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
-pub struct UnorderedOperationRangeProof<
+pub(crate) struct UnorderedOperationRangeProof<
     D: Digest,
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
@@ -94,7 +195,7 @@ where
 
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
-pub struct CurrentOperationRangeProofResult<
+pub(crate) struct CurrentOperationRangeProofResult<
     D: Digest,
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
@@ -125,55 +226,9 @@ where
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VariantRoot<D: Digest> {
-    pub watermark: Location,
-    pub variant: QmdbVariant,
-    pub root: D,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
-pub enum VariantOperationRangeProof<
-    D: Digest,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
-    const N: usize,
-> {
-    Any(OperationRangeProof<D, K, V>),
-    Current(CurrentOperationRangeProofResult<D, K, V, N>),
-}
-
-impl<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync, const N: usize>
-    VariantOperationRangeProof<D, K, V, N>
-where
-    QmdbOperation<K, V>: Encode,
-{
-    pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
-        match self {
-            Self::Any(proof) => proof.verify::<H>(),
-            Self::Current(proof) => proof.verify::<H>(),
-        }
-    }
-
-    pub fn watermark(&self) -> Location {
-        match self {
-            Self::Any(proof) => proof.watermark,
-            Self::Current(proof) => proof.watermark,
-        }
-    }
-
-    pub fn variant(&self) -> QmdbVariant {
-        match self {
-            Self::Any(_) => QmdbVariant::Any,
-            Self::Current(_) => QmdbVariant::Current,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-#[must_use]
-pub struct KeyValueProofResult<
+pub(crate) struct KeyValueProofResult<
     D: Digest,
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
@@ -206,7 +261,7 @@ where
 
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
-pub struct AuthenticatedOperationRangeProof<D: Digest, Op> {
+pub(crate) struct AuthenticatedOperationRangeProof<D: Digest, Op> {
     pub watermark: Location,
     pub root: D,
     pub start_location: Location,

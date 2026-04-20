@@ -45,9 +45,8 @@ pub use immutable::ImmutableClient;
 pub use keyless::KeylessClient;
 pub use ordered::OrderedClient;
 pub use proof::{
-    AuthenticatedOperationRangeProof, CurrentOperationRangeProofResult, KeyValueProofResult,
-    MultiProofResult, OperationRangeProof, UnorderedOperationRangeProof,
-    VariantOperationRangeProof, VariantRoot,
+    VariantRoot, VerifiedCurrentRange, VerifiedKeyValue, VerifiedMultiOperations,
+    VerifiedOperationRange, VerifiedVariantRange,
 };
 pub use unordered::UnorderedClient;
 

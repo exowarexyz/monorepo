@@ -141,7 +141,6 @@ async fn stream_batches_emits_verifiable_immutable_range_proof() {
         .expect("stream not closed")
         .expect("proof Ok");
 
-    assert!(proof.verify::<commonware_cryptography::Sha256>());
     assert_eq!(proof.root, local.root);
     assert_eq!(proof.operations, local.operations);
     assert_eq!(proof.watermark, local.latest_location);

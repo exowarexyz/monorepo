@@ -186,7 +186,6 @@ async fn ordered_round_trip() {
         )
         .await
         .expect("proof");
-    assert!(proof.verify::<Sha256>(), "proof must verify");
     assert_eq!(proof.operations, local.operations);
 }
 
@@ -269,7 +268,6 @@ async fn current_operation_range_proof() {
         )
         .await
         .expect("current_operation_range_proof");
-    assert!(proof.verify::<Sha256>(), "current range proof must verify");
     assert_eq!(proof.operations, local.operations);
 }
 
@@ -309,7 +307,6 @@ async fn key_value_proof() {
         .key_value_proof_at(local.latest_location, b"alpha".as_slice())
         .await
         .expect("key_value_proof_at");
-    assert!(result.verify::<Sha256>(), "key-value proof must verify");
     match &result.operation {
         QmdbOperation::Update(u) => {
             assert_eq!(u.key, b"alpha".to_vec());
@@ -358,6 +355,5 @@ async fn multi_proof() {
         )
         .await
         .expect("multi_proof_at");
-    assert!(result.verify::<Sha256>(), "multi proof must verify");
     assert_eq!(result.operations.len(), 2);
 }

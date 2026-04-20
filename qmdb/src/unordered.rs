@@ -9,7 +9,7 @@ use exoware_sdk_rs::StoreClient;
 use crate::codec::{encode_presence_key, mmr_size_for_watermark};
 use crate::core::{HistoricalOpsClientCore, PreparedUpload};
 use crate::error::QmdbError;
-use crate::proof::UnorderedOperationRangeProof;
+use crate::proof::{UnorderedOperationRangeProof, VerifiedOperationRange};
 use crate::storage::KvMmrStorage;
 use crate::{UploadReceipt, VersionedValue};
 
@@ -185,12 +185,14 @@ where
         self.core().compute_ops_root::<H>(&session, watermark).await
     }
 
+    /// Fetch and verify a contiguous range of operations. The MMR proof is
+    /// built, verified against the store's root, and discarded.
     pub async fn operation_range_proof(
         &self,
         watermark: Location,
         start_location: Location,
         max_locations: u32,
-    ) -> Result<UnorderedOperationRangeProof<H::Digest, K, V>, QmdbError> {
+    ) -> Result<VerifiedOperationRange<H::Digest, UnorderedQmdbOperation<K, V>>, QmdbError> {
         if max_locations == 0 {
             return Err(QmdbError::InvalidRangeLength);
         }
@@ -238,19 +240,30 @@ where
             operations.push(op);
         }
 
-        Ok(UnorderedOperationRangeProof {
+        let raw = UnorderedOperationRangeProof {
             watermark,
             root,
             start_location,
             proof,
             operations,
+        };
+        if !raw.verify::<H>() {
+            return Err(QmdbError::CorruptData(
+                "unordered range proof failed verification".to_string(),
+            ));
+        }
+        Ok(VerifiedOperationRange {
+            watermark: raw.watermark,
+            root: raw.root,
+            start_location: raw.start_location,
+            operations: raw.operations,
         })
     }
 
-    /// Open a stream of `UnorderedOperationRangeProof` per uploaded batch.
+    /// Open a stream of verified unordered operation ranges per uploaded batch.
     ///
     /// See `OrderedClient::stream_batches` — the semantics, cursor behavior,
-    /// and error handling are identical; only the proof type differs.
+    /// and error handling are identical; only the operation type differs.
     pub async fn stream_batches(
         self: Arc<Self>,
         since: Option<u64>,
@@ -269,17 +282,18 @@ where
         let (classify, filter) = drv::unauthenticated_classify_and_filter();
         let sub = drv::open_subscription(&self.client, filter, since).await?;
 
-        let build_proof: drv::BuildProof<UnorderedOperationRangeProof<H::Digest, K, V>> =
-            Arc::new(move |watermark: Location, start: Location, count: u32| {
-                let me = self.clone();
-                async move { me.operation_range_proof(watermark, start, count).await }.boxed()
-            });
+        let build_proof: drv::BuildProof<
+            VerifiedOperationRange<H::Digest, UnorderedQmdbOperation<K, V>>,
+        > = Arc::new(move |watermark: Location, start: Location, count: u32| {
+            let me = self.clone();
+            async move { me.operation_range_proof(watermark, start, count).await }.boxed()
+        });
 
         Ok(BatchProofStream::new(sub, classify, build_proof))
     }
 }
 
-/// Async stream of `UnorderedOperationRangeProof`s, one per uploaded batch.
+/// Async stream of verified operation ranges, one per uploaded batch.
 pub type UnorderedBatchStream<H, K, V> = crate::stream::driver::BatchProofStream<
-    UnorderedOperationRangeProof<<H as Hasher>::Digest, K, V>,
+    VerifiedOperationRange<<H as Hasher>::Digest, UnorderedQmdbOperation<K, V>>,
 >;

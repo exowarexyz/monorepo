@@ -37,8 +37,8 @@ pub(crate) enum Family {
 pub(crate) type Classify =
     Arc<dyn Fn(&Key, &[u8]) -> Option<(Family, Location)> + Send + Sync + 'static>;
 
-/// Async factory that builds a variant's proof (OperationRangeProof,
-/// UnorderedOperationRangeProof, or AuthenticatedOperationRangeProof<_>).
+/// Async factory that builds a variant's verified range (typically
+/// `VerifiedOperationRange` for one of the four QMDB variants).
 pub(crate) type BuildProof<Out> = Arc<
     dyn Fn(
             Location, /* watermark */

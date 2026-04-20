@@ -174,6 +174,5 @@ async fn unordered_round_trip() {
         )
         .await
         .expect("proof");
-    assert!(proof.verify::<Sha256>(), "proof must verify");
     assert_eq!(proof.operations, local.operations);
 }

@@ -27,7 +27,8 @@ use crate::core::{HistoricalOpsClientCore, PreparedCurrentBoundaryUpload, Prepar
 use crate::error::QmdbError;
 use crate::proof::{
     CurrentOperationRangeProofResult, KeyValueProofResult, MultiProofResult, OperationRangeProof,
-    VariantOperationRangeProof, VariantRoot,
+    VariantRoot, VerifiedCurrentRange, VerifiedKeyValue, VerifiedMultiOperations,
+    VerifiedOperationRange, VerifiedVariantRange,
 };
 use crate::storage::{KvCurrentStorage, KvMmrStorage};
 use crate::{CurrentBoundaryState, QmdbVariant, UploadReceipt, VersionedValue};
@@ -307,11 +308,14 @@ where
         self.core().query_many_at(keys, max_location).await
     }
 
+    /// Fetch and verify a multi-proof over a set of keys. The MMR proof is
+    /// built, verified against the store's root, and discarded — callers
+    /// receive only the verified (location, operation) pairs.
     pub async fn multi_proof_at<Q: AsRef<[u8]>>(
         &self,
         watermark: Location,
         keys: &[Q],
-    ) -> Result<MultiProofResult<H::Digest, K, V>, QmdbError> {
+    ) -> Result<VerifiedMultiOperations<H::Digest, K, V>, QmdbError> {
         if keys.is_empty() {
             return Err(QmdbError::EmptyProofRequest);
         }
@@ -368,20 +372,33 @@ where
         let proof = verification::multi_proof(&storage, &locations)
             .await
             .map_err(|e| QmdbError::CommonwareMmr(e.to_string()))?;
-        Ok(MultiProofResult {
+        let raw = MultiProofResult {
             watermark,
             root,
             proof,
             operations,
+        };
+        if !raw.verify::<H>() {
+            return Err(QmdbError::CorruptData(
+                "multi proof failed verification".to_string(),
+            ));
+        }
+        Ok(VerifiedMultiOperations {
+            watermark: raw.watermark,
+            root: raw.root,
+            operations: raw.operations,
         })
     }
 
+    /// Fetch and verify a contiguous range of operations. The MMR proof is
+    /// built, verified against the store's root, and discarded — callers
+    /// receive only the verified data.
     pub async fn operation_range_proof(
         &self,
         watermark: Location,
         start_location: Location,
         max_locations: u32,
-    ) -> Result<OperationRangeProof<H::Digest, K, V>, QmdbError> {
+    ) -> Result<VerifiedOperationRange<H::Digest, QmdbOperation<K, V>>, QmdbError> {
         match self
             .operation_range_proof_for_variant(
                 watermark,
@@ -391,20 +408,21 @@ where
             )
             .await?
         {
-            VariantOperationRangeProof::Any(proof) => Ok(proof),
-            VariantOperationRangeProof::Current(_) => Err(QmdbError::CorruptData(
+            VerifiedVariantRange::Any(verified) => Ok(verified),
+            VerifiedVariantRange::Current(_) => Err(QmdbError::CorruptData(
                 "unexpected current proof returned for any variant request".to_string(),
             )),
         }
     }
 
-    /// Open a stream of `OperationRangeProof` per uploaded batch.
+    /// Open a stream of verified operation ranges per uploaded batch.
     ///
-    /// The returned stream yields one proof per batch whose presence marker
-    /// AND watermark have both landed in the store. `since = None` starts live
-    /// from the next batch; `Some(N)` replays retained batches with
-    /// sequence_number >= N before transitioning to live. Caller must verify
-    /// each emitted proof with `verify::<H>()` before trusting its contents.
+    /// The returned stream yields one `VerifiedOperationRange` per batch whose
+    /// presence marker AND watermark have both landed in the store. The MMR
+    /// proof is verified internally against the store's root before the item
+    /// is emitted — callers receive only the verified operations. `since =
+    /// None` starts live from the next batch; `Some(N)` replays retained
+    /// batches with sequence_number >= N before transitioning to live.
     ///
     /// On transport errors (slow-client eviction, connection closed) the
     /// stream yields `Err(QmdbError::Stream(..))`; resubscribe with
@@ -429,22 +447,26 @@ where
         let (classify, filter) = drv::unauthenticated_classify_and_filter();
         let sub = drv::open_subscription(&self.client, filter, since).await?;
 
-        let build_proof: drv::BuildProof<OperationRangeProof<H::Digest, K, V>> =
-            Arc::new(move |watermark: Location, start: Location, count: u32| {
-                let me = self.clone();
-                async move { me.operation_range_proof(watermark, start, count).await }.boxed()
-            });
+        let build_proof: drv::BuildProof<
+            VerifiedOperationRange<H::Digest, QmdbOperation<K, V>>,
+        > = Arc::new(move |watermark: Location, start: Location, count: u32| {
+            let me = self.clone();
+            async move { me.operation_range_proof(watermark, start, count).await }.boxed()
+        });
 
         Ok(BatchProofStream::new(sub, classify, build_proof))
     }
 
+    /// Fetch and verify a contiguous range of operations for the given variant.
+    /// The proof is verified against the store's root and discarded — callers
+    /// receive only the verified data wrapped in [`VerifiedVariantRange`].
     pub async fn operation_range_proof_for_variant(
         &self,
         watermark: Location,
         variant: QmdbVariant,
         start_location: Location,
         max_locations: u32,
-    ) -> Result<VariantOperationRangeProof<H::Digest, K, V, N>, QmdbError> {
+    ) -> Result<VerifiedVariantRange<H::Digest, K, V, N>, QmdbError> {
         if max_locations == 0 {
             return Err(QmdbError::InvalidRangeLength);
         }
@@ -479,13 +501,23 @@ where
                 let operations = self
                     .load_operation_range(&session, start_location, end)
                     .await?;
-
-                Ok(VariantOperationRangeProof::Any(OperationRangeProof {
+                let raw = OperationRangeProof {
                     watermark,
                     root,
                     start_location,
                     proof,
                     operations,
+                };
+                if !raw.verify::<H>() {
+                    return Err(QmdbError::CorruptData(
+                        "range proof failed verification".to_string(),
+                    ));
+                }
+                Ok(VerifiedVariantRange::Any(VerifiedOperationRange {
+                    watermark: raw.watermark,
+                    root: raw.root,
+                    start_location: raw.start_location,
+                    operations: raw.operations,
                 }))
             }
             QmdbVariant::Current => {
@@ -502,27 +534,39 @@ where
                 let chunks = self
                     .load_bitmap_chunks(&session, watermark, start_location, end)
                     .await?;
-
-                Ok(VariantOperationRangeProof::Current(
-                    CurrentOperationRangeProofResult {
-                        watermark,
-                        root,
-                        start_location,
-                        proof,
-                        operations,
-                        chunks,
-                    },
-                ))
+                let raw = CurrentOperationRangeProofResult {
+                    watermark,
+                    root,
+                    start_location,
+                    proof,
+                    operations,
+                    chunks,
+                };
+                if !raw.verify::<H>() {
+                    return Err(QmdbError::CorruptData(
+                        "current range proof failed verification".to_string(),
+                    ));
+                }
+                Ok(VerifiedVariantRange::Current(VerifiedCurrentRange {
+                    watermark: raw.watermark,
+                    root: raw.root,
+                    start_location: raw.start_location,
+                    operations: raw.operations,
+                    chunks: raw.chunks,
+                }))
             }
         }
     }
 
+    /// Fetch and verify a contiguous range of operations in the current-state
+    /// variant (bitmap chunks included). The proof is verified internally and
+    /// discarded.
     pub async fn current_operation_range_proof(
         &self,
         watermark: Location,
         start_location: Location,
         max_locations: u32,
-    ) -> Result<CurrentOperationRangeProofResult<H::Digest, K, V, N>, QmdbError> {
+    ) -> Result<VerifiedCurrentRange<H::Digest, K, V, N>, QmdbError> {
         match self
             .operation_range_proof_for_variant(
                 watermark,
@@ -532,18 +576,21 @@ where
             )
             .await?
         {
-            VariantOperationRangeProof::Current(proof) => Ok(proof),
-            VariantOperationRangeProof::Any(_) => Err(QmdbError::CorruptData(
+            VerifiedVariantRange::Current(verified) => Ok(verified),
+            VerifiedVariantRange::Any(_) => Err(QmdbError::CorruptData(
                 "unexpected any proof returned for current variant request".to_string(),
             )),
         }
     }
 
+    /// Fetch and verify a single key's current-state proof. Proof verified
+    /// internally and discarded. The returned `operation` is the matching
+    /// `Update` — its `next_key` is the verified successor-key.
     pub async fn key_value_proof_at<Q: AsRef<[u8]>>(
         &self,
         watermark: Location,
         key: Q,
-    ) -> Result<KeyValueProofResult<H::Digest, K, V, N>, QmdbError> {
+    ) -> Result<VerifiedKeyValue<H::Digest, K, V>, QmdbError> {
         let session = self.client.create_session();
         self.core()
             .require_published_watermark(&session, watermark)
@@ -594,7 +641,7 @@ where
             .await?;
         let root = self.load_current_boundary_root(&session, watermark).await?;
 
-        Ok(KeyValueProofResult {
+        let raw = KeyValueProofResult {
             watermark,
             root,
             proof: CurrentKeyValueProof {
@@ -606,6 +653,17 @@ where
                 next_key: update.next_key.clone(),
             },
             operation,
+        };
+        if !raw.verify::<H>() {
+            return Err(QmdbError::CorruptData(
+                "key-value proof failed verification".to_string(),
+            ));
+        }
+        Ok(VerifiedKeyValue {
+            watermark: raw.watermark,
+            root: raw.root,
+            location,
+            operation: raw.operation,
         })
     }
 
@@ -811,7 +869,8 @@ where
     }
 }
 
-/// Async stream of `OperationRangeProof`s, one per uploaded batch. See
-/// `OrderedClient::stream_batches`.
-pub type OrderedBatchStream<H, K, V> =
-    crate::stream::driver::BatchProofStream<OperationRangeProof<<H as Hasher>::Digest, K, V>>;
+/// Async stream of verified operation ranges, one per uploaded batch.
+/// See `OrderedClient::stream_batches`.
+pub type OrderedBatchStream<H, K, V> = crate::stream::driver::BatchProofStream<
+    VerifiedOperationRange<<H as Hasher>::Digest, QmdbOperation<K, V>>,
+>;
