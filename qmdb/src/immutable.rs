@@ -290,11 +290,12 @@ where
         })
     }
 
-    /// Open a stream of verified immutable operation ranges per uploaded batch.
-    /// See `OrderedClient::stream_batches` for semantics.
-    ///
-    /// The filter is restricted to the Immutable namespace tag so Immutable
-    /// and Keyless clients can share a store without cross-talk.
+    /// Open a stream of verified immutable operation ranges, one per uploaded
+    /// batch. See [`OrderedClient::stream_batches`](crate::OrderedClient::stream_batches)
+    /// for the full contract. The operation type is
+    /// `ImmutableOperation<K, V>`, and the subscription filter is restricted
+    /// to the Immutable namespace tag so Immutable and Keyless clients can
+    /// share a store without cross-talk.
     pub async fn stream_batches(
         self: Arc<Self>,
         since: Option<u64>,

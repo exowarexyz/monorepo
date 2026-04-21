@@ -56,16 +56,6 @@ pub fn keep_latest_batches(count: usize) -> PrunePolicy {
     }
 }
 
-/// Prune all batches older than `min_sequence_number` (keeps sequence numbers >= threshold).
-pub fn keep_batches_gte(min_sequence_number: u64) -> PrunePolicy {
-    PrunePolicy {
-        scope: PolicyScope::Sequence,
-        retain: RetainPolicy::GreaterThanOrEqual {
-            threshold: min_sequence_number,
-        },
-    }
-}
-
 /// Drop every retained batch. Disables replay + GetBatch entirely.
 pub fn drop_all_batches() -> PrunePolicy {
     PrunePolicy {
@@ -76,10 +66,7 @@ pub fn drop_all_batches() -> PrunePolicy {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        drop_all_batches, keep_batches_gte, keep_latest_batches, keep_latest_updates,
-        keep_positions_gte,
-    };
+    use super::{drop_all_batches, keep_latest_batches, keep_latest_updates, keep_positions_gte};
     use crate::codec::{RESERVED_BITS, UPDATE_FAMILY};
     use exoware_sdk_rs::kv_codec::Utf8;
     use exoware_sdk_rs::prune_policy::{OrderEncoding, PolicyScope, RetainPolicy};
@@ -124,16 +111,6 @@ mod tests {
         let policy = keep_latest_batches(10);
         assert!(matches!(policy.scope, PolicyScope::Sequence));
         assert_eq!(policy.retain, RetainPolicy::KeepLatest { count: 10 });
-    }
-
-    #[test]
-    fn keep_batches_gte_uses_batch_log_scope() {
-        let policy = keep_batches_gte(123);
-        assert!(matches!(policy.scope, PolicyScope::Sequence));
-        assert_eq!(
-            policy.retain,
-            RetainPolicy::GreaterThanOrEqual { threshold: 123 }
-        );
     }
 
     #[test]

@@ -433,6 +433,69 @@ not allowed:
   current_root_at(150)   // not a batch boundary
 ```
 
+## Streaming
+
+Every client exposes `stream_batches(since)` which returns an async `Stream`
+of verified operation ranges, one item per uploaded batch. The proof is built
+and verified internally; consumers work directly with the decoded operations.
+
+```rust,ignore
+use std::sync::Arc;
+use futures::StreamExt;
+
+let client = Arc::new(OrderedClient::<Sha256, K, V, N>::new(url, op_cfg, row_cfg));
+let mut stream = client.stream_batches(None).await?;
+while let Some(item) = stream.next().await {
+    let verified = item?;
+    // verified.watermark:       the smallest watermark that authorized this batch
+    // verified.start_location:  first location in the batch
+    // verified.operations:      already verified against verified.root
+}
+```
+
+### What triggers an emission
+
+A batch is emitted only when **both** conditions hold:
+
+1. its presence marker has been uploaded (the batch is closed), and
+2. a watermark has been published with `watermark_location >= batch.latest`.
+
+Each batch is stamped with the **smallest** authorizing watermark, so
+`item.watermark` reflects the authority under which the batch was published,
+not a later unrelated watermark.
+
+### The `since` cursor
+
+`since: Option<u64>` is the store's **stream sequence number** assigned to
+each PUT, not a QMDB `Location` or batch index.
+
+- `None`: start live from the next PUT; no historical replay.
+- `Some(N)`: replay every retained PUT with `sequence_number >= N` in
+  ascending order, then transition seamlessly to live.
+- If `N` has been evicted by batch-log pruning, the first poll returns
+  `Err(QmdbError::Stream(..))` with a `BATCH_EVICTED` detail so the caller
+  can decide whether to accept a gap.
+
+### Error recovery
+
+On any transport error (slow-client eviction, connection closed, server
+restart) the stream yields `Err(QmdbError::Stream(..))` and terminates.
+To resume with no gaps, track the last-delivered store sequence number and
+resubscribe with `since = last_seen + 1` — the batch log replays the gap,
+then live resumes.
+
+### Multiple subscribers
+
+Each call to `stream_batches` opens an independent server-side
+subscription. Two clients against the same store get two independent
+streams; there is no shared fan-out on the client side.
+
+### Cross-backend isolation
+
+Immutable and Keyless subscriptions filter on the authenticated namespace
+tag, so a Keyless writer and an Immutable writer can share one store
+without either stream seeing the other's rows.
+
 ## Tests
 
 The crate tests use real local Commonware databases as reference

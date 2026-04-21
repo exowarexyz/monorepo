@@ -5,7 +5,7 @@
 //! Verification happens inside each variant's `BuildProof`, so items emitted
 //! from the stream are already verified against the store's root.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -217,7 +217,11 @@ pub(crate) fn authenticated_classify_and_filter(
 struct Accumulator {
     in_progress: BTreeMap<Location /* start */, InProgressBatch>,
     pending: BTreeMap<Location /* latest */, ClosedBatch>,
-    watermark: Option<Location>,
+    // Every watermark publication seen so far. Each closed batch drains under
+    // the smallest `wm >= batch.latest` — stamping with the single latest
+    // would cause a batch with `latest=5` to claim `watermark=10` when both
+    // arrive in one frame, even though it was authorized at 5.
+    watermarks: BTreeSet<Location>,
 }
 
 struct InProgressBatch {
@@ -239,7 +243,7 @@ impl Accumulator {
         Self {
             in_progress: BTreeMap::new(),
             pending: BTreeMap::new(),
-            watermark: None,
+            watermarks: BTreeSet::new(),
         }
     }
 
@@ -285,26 +289,35 @@ impl Accumulator {
                 }
             }
             Family::Watermark => {
-                if self.watermark.is_none_or(|w| w < location) {
-                    self.watermark = Some(location);
-                }
+                self.watermarks.insert(location);
             }
         }
     }
 
-    /// Drain every pending batch whose latest <= watermark, in ascending order.
+    /// Drain every pending batch whose latest is covered by some seen
+    /// watermark. Each batch is stamped with the smallest `wm >= batch.latest`
+    /// so the emitted `proof.watermark` matches the authority that published
+    /// the batch (not a later unrelated watermark).
     fn drain_ready(&mut self) -> Vec<ClosedBatch> {
-        let Some(w) = self.watermark else {
-            return Vec::new();
-        };
         let mut ready = Vec::new();
         while let Some((&latest, _)) = self.pending.iter().next() {
-            if latest > w {
+            let Some(&wm) = self.watermarks.range(latest..).next() else {
                 break;
-            }
+            };
             let (_, mut batch) = self.pending.pop_first().unwrap();
-            batch.watermark = w;
+            batch.watermark = wm;
             ready.push(batch);
+        }
+        // GC watermarks that can no longer authorize any remaining batch.
+        // Keep the largest seen as a floor so the set never empties on an
+        // idle stream (bounds memory on long-lived subscriptions).
+        if let Some(&floor) = self
+            .pending
+            .keys()
+            .next()
+            .or_else(|| self.watermarks.iter().next_back())
+        {
+            self.watermarks = self.watermarks.split_off(&floor);
         }
         ready
     }
@@ -401,5 +414,71 @@ impl<Out: Send + 'static> Stream for BatchProofStream<Out> {
                 this.ready.push_back(r);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Accumulator, Family};
+    use commonware_storage::mmr::Location;
+
+    fn loc(n: u64) -> Location {
+        Location::new(n)
+    }
+
+    // Two batches pending when both watermarks arrive in the same drain pass
+    // must each be stamped with the watermark that actually authorized them,
+    // not the single latest. Regression test for per-batch watermark mixing.
+    #[test]
+    fn drain_stamps_each_batch_with_its_own_watermark() {
+        let mut acc = Accumulator::new();
+        // Batch A: ops at 0..=5, presence at 5.
+        for i in 0..=5 {
+            acc.ingest_entry(Family::Op, loc(i));
+        }
+        acc.ingest_entry(Family::Presence, loc(5));
+        // Batch B: ops at 6..=10, presence at 10.
+        for i in 6..=10 {
+            acc.ingest_entry(Family::Op, loc(i));
+        }
+        acc.ingest_entry(Family::Presence, loc(10));
+        // Both watermarks land before any drain.
+        acc.ingest_entry(Family::Watermark, loc(5));
+        acc.ingest_entry(Family::Watermark, loc(10));
+
+        let ready = acc.drain_ready();
+        assert_eq!(ready.len(), 2);
+        assert_eq!(ready[0].latest, loc(5));
+        assert_eq!(ready[0].watermark, loc(5), "batch A must drain at wm=5");
+        assert_eq!(ready[1].latest, loc(10));
+        assert_eq!(ready[1].watermark, loc(10), "batch B must drain at wm=10");
+    }
+
+    // A batch stays pending until a watermark large enough to cover its
+    // latest location arrives; later batches drain immediately once their
+    // watermark lands.
+    #[test]
+    fn drain_waits_for_authorizing_watermark() {
+        let mut acc = Accumulator::new();
+        for i in 0..=5 {
+            acc.ingest_entry(Family::Op, loc(i));
+        }
+        acc.ingest_entry(Family::Presence, loc(5));
+        assert!(acc.drain_ready().is_empty());
+
+        acc.ingest_entry(Family::Watermark, loc(4));
+        assert!(
+            acc.drain_ready().is_empty(),
+            "wm=4 does not authorize batch with latest=5"
+        );
+
+        acc.ingest_entry(Family::Watermark, loc(7));
+        let ready = acc.drain_ready();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(
+            ready[0].watermark,
+            loc(7),
+            "smallest wm >= latest is 7 (4 was GC'd)"
+        );
     }
 }

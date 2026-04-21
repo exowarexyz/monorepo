@@ -266,8 +266,10 @@ where
         })
     }
 
-    /// Open a stream of verified keyless operation ranges per uploaded batch.
-    /// See `OrderedClient::stream_batches` for semantics.
+    /// Open a stream of verified keyless operation ranges, one per uploaded
+    /// batch. See [`OrderedClient::stream_batches`](crate::OrderedClient::stream_batches)
+    /// for the full contract. The operation type is `KeylessOperation<V>`,
+    /// and the subscription filter is restricted to the Keyless namespace tag.
     pub async fn stream_batches(
         self: Arc<Self>,
         since: Option<u64>,

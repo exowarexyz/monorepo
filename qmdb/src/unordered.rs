@@ -259,10 +259,11 @@ where
         })
     }
 
-    /// Open a stream of verified unordered operation ranges per uploaded batch.
-    ///
-    /// See `OrderedClient::stream_batches` — the semantics, cursor behavior,
-    /// and error handling are identical; only the operation type differs.
+    /// Open a stream of verified unordered operation ranges, one per uploaded
+    /// batch. See [`OrderedClient::stream_batches`](crate::OrderedClient::stream_batches)
+    /// for the full contract — `since` cursor, per-batch watermark stamping,
+    /// auto-verification, and error recovery are identical. The only
+    /// difference is the operation type (`UnorderedQmdbOperation<K, V>`).
     pub async fn stream_batches(
         self: Arc<Self>,
         since: Option<u64>,

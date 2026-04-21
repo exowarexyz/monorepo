@@ -411,18 +411,60 @@ where
         }
     }
 
-    /// Open a stream of verified operation ranges per uploaded batch.
+    /// Open a stream of verified operation ranges, one per uploaded batch.
     ///
-    /// The returned stream yields one `VerifiedOperationRange` per batch whose
-    /// presence marker AND watermark have both landed in the store. The MMR
-    /// proof is verified internally against the store's root before the item
-    /// is emitted — callers receive only the verified operations. `since =
-    /// None` starts live from the next batch; `Some(N)` replays retained
-    /// batches with sequence_number >= N before transitioning to live.
+    /// # What you get
+    ///
+    /// Each `Stream` item is a `VerifiedOperationRange<H::Digest, QmdbOperation<K, V>>`:
+    /// the MMR range proof has already been verified against the store's root
+    /// before the item is emitted, and the proof blob has been dropped.
+    /// Consumers work directly with `item.operations`.
+    ///
+    /// A batch becomes emittable only once **both** its presence row and a
+    /// watermark that covers its `latest_location` have landed. Each batch is
+    /// stamped with the smallest such watermark, so `item.watermark` is the
+    /// authority that published the batch — not a later, unrelated watermark.
+    ///
+    /// # `since` cursor
+    ///
+    /// `since` is the **store's stream sequence number** (the `sequence_number`
+    /// assigned to each store PUT), *not* a QMDB `Location` or batch index.
+    /// - `None`: start live from the next PUT; no replay.
+    /// - `Some(N)`: replay every retained store PUT with `sequence_number >= N`
+    ///   in ascending order, then continue live with no duplicates and no gaps.
+    /// - If `N` has been evicted by a batch-log prune, the first poll returns
+    ///   `Err(QmdbError::Stream(..))` carrying a `BATCH_EVICTED` detail.
+    ///
+    /// # Error recovery
     ///
     /// On transport errors (slow-client eviction, connection closed) the
-    /// stream yields `Err(QmdbError::Stream(..))`; resubscribe with
-    /// `since = last_seen_batch_seq + 1` to replay the gap via the batch log.
+    /// stream yields `Err(QmdbError::Stream(..))`. To resume, resubscribe with
+    /// `since = last_seen_batch_seq + 1`; the batch log replays the gap, then
+    /// live resumes.
+    ///
+    /// # Multiple subscribers
+    ///
+    /// Each call to `stream_batches` opens an independent store subscription;
+    /// running two clients against the same store with the same filter gets
+    /// two independent streams, not a shared one.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use futures::StreamExt;
+    /// # async fn demo(client: Arc<store_qmdb::OrderedClient<
+    /// #     commonware_cryptography::Sha256, Vec<u8>, Vec<u8>, 32,
+    /// # >>) -> Result<(), store_qmdb::QmdbError> {
+    /// let mut stream = client.stream_batches(None).await?;
+    /// while let Some(item) = stream.next().await {
+    ///     let verified = item?;
+    ///     for op in &verified.operations {
+    ///         // handle already-verified op at `verified.watermark`
+    ///     }
+    /// }
+    /// # Ok(()) }
+    /// ```
     pub async fn stream_batches(
         self: std::sync::Arc<Self>,
         since: Option<u64>,
