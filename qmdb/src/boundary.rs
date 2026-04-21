@@ -56,7 +56,7 @@ fn grafted_to_ops_pos(grafted_pos: Position, grafting_height: u32) -> Position {
 /// chunk for that exact `location`, taken from the same local DB state as
 /// `root`.
 ///
-/// The returned [`CurrentBoundaryState`](crate::CurrentBoundaryState) can be
+/// The returned [`CurrentBoundaryState`] can be
 /// passed directly to [`crate::OrderedWriter::upload_and_publish`].
 ///
 /// TODO: replace this proof-driven recovery path with a thin adapter over
