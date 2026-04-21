@@ -17,9 +17,11 @@ use commonware_storage::qmdb::{
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use store_qmdb::MAX_OPERATION_SIZE;
 use exoware_sdk_rs::StoreClient;
-use store_qmdb::{build_current_boundary_state, CurrentBoundaryState, OrderedClient, OrderedWriter};
+use store_qmdb::MAX_OPERATION_SIZE;
+use store_qmdb::{
+    build_current_boundary_state, CurrentBoundaryState, OrderedClient, OrderedWriter,
+};
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;

@@ -279,7 +279,6 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
         });
         futures::future::join_all(futs).await.into_iter().collect()
     }
-
 }
 
 #[derive(Clone, Debug)]

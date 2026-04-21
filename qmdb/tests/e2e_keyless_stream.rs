@@ -17,7 +17,6 @@ use exoware_sdk_rs::StoreClient;
 use futures::StreamExt;
 use store_qmdb::{KeylessClient, KeylessWriter};
 
-
 type Digest = commonware_cryptography::sha256::Digest;
 type LocalDb = Keyless<deterministic::Context, Vec<u8>, commonware_cryptography::Sha256>;
 type TestKeylessClient = KeylessClient<commonware_cryptography::Sha256, Vec<u8>>;

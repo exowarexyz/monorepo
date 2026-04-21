@@ -139,37 +139,41 @@ where
         &self,
         ops: &[ImmutableOperation<K, V>],
     ) -> Result<UploadReceipt, QmdbError> {
-        let begin = self.core.begin(ops.len() as u64).await?;
-        let built = build_immutable_upload::<H, K, V>(
-            begin.peaks,
-            begin.ops_size,
-            begin.latest_location,
-            ops,
-            begin.watermark_at,
-        )?;
-        self.core
-            .advance(crate::writer::core::BatchAdvance {
-                new_peaks: built.new_peaks,
-                new_ops_size: built.new_ops_size,
-                latest_location: built.latest_location,
-                watermark_at: begin.watermark_at,
-                dispatch_id: begin.dispatch_id,
+        let prepared = self
+            .core
+            .prepare(ops.len() as u64, |ctx| {
+                let built = build_immutable_upload::<H, K, V>(
+                    ctx.peaks,
+                    ctx.ops_size,
+                    ctx.latest_location,
+                    ops,
+                    ctx.watermark_at,
+                )?;
+                Ok(crate::writer::core::BuildResult {
+                    new_peaks: built.new_peaks,
+                    new_ops_size: built.new_ops_size,
+                    output: built.rows,
+                })
             })
-            .await;
+            .await?;
 
-        let refs: Vec<(&Key, &[u8])> = built.rows.iter().map(|(k, v)| (k, v.as_slice())).collect();
+        let refs: Vec<(&Key, &[u8])> = prepared
+            .output
+            .iter()
+            .map(|(k, v)| (k, v.as_slice()))
+            .collect();
         match self.client.ingest().put(&refs).await {
             Ok(_) => {
-                self.core.ack_success(begin.dispatch_id).await;
+                self.core.ack_success(prepared.dispatch_id).await;
                 Ok(UploadReceipt {
-                    latest_location: built.latest_location,
-                    writer_location_watermark: begin.watermark_at,
+                    latest_location: prepared.latest_location,
+                    writer_location_watermark: prepared.watermark_at,
                 })
             }
             Err(err) => {
                 let msg = format!(
                     "immutable upload ending at {} failed: {err}",
-                    built.latest_location
+                    prepared.latest_location
                 );
                 self.core.ack_failure(msg).await;
                 Err(QmdbError::Client(err))

@@ -50,9 +50,8 @@ async fn mirror_keyless_from_local() {
         b"gamma".to_vec(),
     ]])
     .await;
-    let writer: KeylessWriter<Sha256, Vec<u8>> = KeylessWriter::new(client.clone())
-        .await
-        .expect("writer");
+    let writer: KeylessWriter<Sha256, Vec<u8>> =
+        KeylessWriter::new(client.clone()).await.expect("writer");
     writer.upload_and_publish(&ops1).await.expect("upload 1");
     let reader: KeylessClient<Sha256, Vec<u8>> =
         KeylessClient::from_client(client.clone(), ((0..=MAX_OPERATION_SIZE).into(), ()));
@@ -70,9 +69,8 @@ async fn mirror_keyless_from_local() {
         vec![b"delta".to_vec(), b"epsilon".to_vec()],
     ])
     .await;
-    let writer2: KeylessWriter<Sha256, Vec<u8>> = KeylessWriter::new(client.clone())
-        .await
-        .expect("writer 2");
+    let writer2: KeylessWriter<Sha256, Vec<u8>> =
+        KeylessWriter::new(client.clone()).await.expect("writer 2");
     let recovered = writer2
         .latest_published_watermark()
         .await
@@ -148,9 +146,7 @@ async fn mirror_unordered_from_local() {
     ]])
     .await;
     let writer: UnorderedWriter<Sha256, Vec<u8>, Vec<u8>> =
-        UnorderedWriter::new(client.clone())
-            .await
-            .expect("writer");
+        UnorderedWriter::new(client.clone()).await.expect("writer");
     writer.upload_and_publish(&ops1).await.expect("upload 1");
     let reader: UnorderedClient<Sha256, Vec<u8>, Vec<u8>> = UnorderedClient::from_client(
         client.clone(),
@@ -180,10 +176,9 @@ async fn mirror_unordered_from_local() {
         ],
     ])
     .await;
-    let writer2: UnorderedWriter<Sha256, Vec<u8>, Vec<u8>> =
-        UnorderedWriter::new(client.clone())
-            .await
-            .expect("writer 2");
+    let writer2: UnorderedWriter<Sha256, Vec<u8>, Vec<u8>> = UnorderedWriter::new(client.clone())
+        .await
+        .expect("writer 2");
     assert_eq!(
         writer2.latest_published_watermark().await,
         Some(latest1),
@@ -200,9 +195,7 @@ async fn mirror_unordered_from_local() {
 
 type UnorderedBatch = Vec<(Vec<u8>, Option<Vec<u8>>)>;
 
-async fn run_unordered_local(
-    batches: Vec<UnorderedBatch>,
-) -> (Vec<UnorderedOp>, Location, Digest) {
+async fn run_unordered_local(batches: Vec<UnorderedBatch>) -> (Vec<UnorderedOp>, Location, Digest) {
     tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
             let cfg = UnorderedVariableConfig {
@@ -286,10 +279,9 @@ async fn mirror_immutable_from_local() {
         vec![(FixedBytes::new([0x33; 32]), b"three".to_vec())],
     ])
     .await;
-    let writer2: ImmutableWriter<Sha256, ImmK, Vec<u8>> =
-        ImmutableWriter::new(client.clone())
-            .await
-            .expect("writer 2");
+    let writer2: ImmutableWriter<Sha256, ImmK, Vec<u8>> = ImmutableWriter::new(client.clone())
+        .await
+        .expect("writer 2");
     assert_eq!(
         writer2.latest_published_watermark().await,
         Some(latest1),
@@ -405,9 +397,7 @@ async fn mirror_ordered_from_local() {
         build_current_boundary_state::<Sha256, _, _, N>(Some(ops1.as_slice()), &ops_total).await;
 
     let writer2: OrderedWriter<Sha256, Vec<u8>, Vec<u8>, N> =
-        OrderedWriter::new(client.clone())
-            .await
-            .expect("writer 2");
+        OrderedWriter::new(client.clone()).await.expect("writer 2");
     assert_eq!(
         writer2.latest_published_watermark().await,
         Some(latest1),

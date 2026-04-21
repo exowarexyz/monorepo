@@ -87,9 +87,7 @@ async fn build_local_reference(
 /// corresponding to `batches` lengths. (Commonware's keyless DB inserts a
 /// Commit op at each batch boundary; for this test we pass the full flat
 /// sequence to the writer, which mirrors what the local DB produced.)
-fn flat_to_writer_ops(
-    ops: &[KeylessOperation<Vec<u8>>],
-) -> Vec<KeylessOperation<Vec<u8>>> {
+fn flat_to_writer_ops(ops: &[KeylessOperation<Vec<u8>>]) -> Vec<KeylessOperation<Vec<u8>>> {
     ops.to_vec()
 }
 
@@ -396,4 +394,3 @@ async fn bootstrap_resumes_from_existing_store_state() {
     .await;
     assert_eq!(got_final, local_root_final);
 }
-

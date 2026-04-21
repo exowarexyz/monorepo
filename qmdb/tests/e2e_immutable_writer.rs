@@ -105,7 +105,10 @@ async fn sequential_upload_matches_local_root() {
         .await
         .expect("upload");
     assert_eq!(receipt.latest_location, local.latest_location);
-    assert_eq!(receipt.writer_location_watermark, Some(local.latest_location));
+    assert_eq!(
+        receipt.writer_location_watermark,
+        Some(local.latest_location)
+    );
 
     let got_root = retry(
         || {

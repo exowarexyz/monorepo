@@ -72,28 +72,33 @@ pub(crate) struct WriterCore<D: Digest> {
     ack_notify: Notify,
 }
 
-/// Everything a variant writer needs to build the next batch.
-pub(crate) struct BatchBegin<D: Digest> {
+/// Snapshot of cache state handed to the variant-specific build closure
+/// inside [`WriterCore::prepare`]. Ownership of `peaks` transfers so the
+/// closure can feed them directly to `extend_mmr_from_peaks` without cloning.
+pub(crate) struct BuildContext<D: Digest> {
     pub peaks: Vec<(Position, u32, D)>,
     pub ops_size: Position,
     pub latest_location: Location,
     /// Location to emit the watermark row at for this batch's PUT, or `None`
     /// if no safe location is available.
     pub watermark_at: Option<Location>,
-    /// Dispatch id to pass back to `ack_success` / `ack_failure` so we can
-    /// mark the specific batch as acked (ACK order is not guaranteed by the
-    /// transport when PUTs run on separate HTTP/2 streams).
-    pub dispatch_id: u64,
 }
 
-/// Delta a variant writer hands back to [`WriterCore::advance`] after
-/// building the batch's rows.
-pub(crate) struct BatchAdvance<D: Digest> {
+/// What the build closure returns: updated MMR state plus variant-specific
+/// output (the row list the writer will PUT).
+pub(crate) struct BuildResult<D: Digest, R> {
     pub new_peaks: Vec<(Position, u32, D)>,
     pub new_ops_size: Position,
-    pub latest_location: Location,
-    pub watermark_at: Option<Location>,
+    pub output: R,
+}
+
+/// What [`WriterCore::prepare`] returns: the variant's build output plus the
+/// dispatch metadata the writer needs to dispatch + ACK the PUT.
+pub(crate) struct PreparedDispatch<R> {
+    pub output: R,
     pub dispatch_id: u64,
+    pub watermark_at: Option<Location>,
+    pub latest_location: Location,
 }
 
 impl<D: Digest> WriterCore<D> {
@@ -115,12 +120,23 @@ impl<D: Digest> WriterCore<D> {
         self.ack_notify.notify_waiters();
     }
 
-    /// Prepare the next batch. Returns peaks, size, computed `latest_location`,
-    /// and the safe watermark location (if any). Caller must subsequently
-    /// call [`advance`] with the new cache state.
-    pub(crate) async fn begin(&self, ops_len: u64) -> Result<BatchBegin<D>, QmdbError> {
-        let state = self.state.lock().await;
-        let cache = match &*state {
+    /// Atomically reserve a batch slot, run the variant-specific `build`
+    /// closure under the state mutex, and commit the resulting MMR delta to
+    /// the cache — all in one locked step. This is what prevents the
+    /// `dispatch_id` race: because the cache (peaks, size, next_location,
+    /// pending) is updated inside the same lock that `build` runs under, no
+    /// concurrent `prepare` call can observe stale pre-batch state.
+    ///
+    /// Build phase is therefore serialized across pipelined uploads, but the
+    /// PUT dispatch itself happens AFTER `prepare` returns (i.e. outside the
+    /// lock), so network round-trips still pipeline freely.
+    pub(crate) async fn prepare<R>(
+        &self,
+        ops_len: u64,
+        build: impl FnOnce(BuildContext<D>) -> Result<BuildResult<D, R>, QmdbError>,
+    ) -> Result<PreparedDispatch<R>, QmdbError> {
+        let mut state = self.state.lock().await;
+        let cache = match &mut *state {
             State::Ready(c) => c,
             State::Uninit => return Err(QmdbError::WriterNotBootstrapped),
             State::Poisoned(msg) => return Err(QmdbError::WriterPoisoned(msg.clone())),
@@ -143,37 +159,35 @@ impl<D: Digest> WriterCore<D> {
             cache.latest_contiguous_acked
         };
         let watermark_at = candidate.filter(|c| cache.latest_published.is_none_or(|p| *c > p));
-        let dispatch_id = self.dispatched.load(Ordering::SeqCst);
-        Ok(BatchBegin {
+
+        let ctx = BuildContext {
             peaks: cache.peaks.clone(),
             ops_size: cache.ops_size,
             latest_location,
             watermark_at,
-            dispatch_id,
-        })
-    }
+        };
+        let result = build(ctx)?;
 
-    /// Commit the batch delta: update peaks/ops_size/next_location, push
-    /// this batch onto `pending`, advance `latest_published` if we're
-    /// emitting a watermark row, and bump `dispatched`. Call once per
-    /// `begin` before awaiting the PUT.
-    pub(crate) async fn advance(&self, update: BatchAdvance<D>) {
-        let mut state = self.state.lock().await;
-        if let State::Ready(c) = &mut *state {
-            c.peaks = update.new_peaks;
-            c.ops_size = update.new_ops_size;
-            c.next_location = update.latest_location + 1;
-            c.latest_dispatched = Some(update.latest_location);
-            if let Some(wm) = update.watermark_at {
-                c.latest_published = Some(wm);
-            }
-            c.pending.push_back(PendingBatch {
-                id: update.dispatch_id,
-                latest: update.latest_location,
-                acked: false,
-            });
+        let dispatch_id = self.dispatched.fetch_add(1, Ordering::SeqCst);
+        cache.peaks = result.new_peaks;
+        cache.ops_size = result.new_ops_size;
+        cache.next_location = latest_location + 1;
+        cache.latest_dispatched = Some(latest_location);
+        if let Some(wm) = watermark_at {
+            cache.latest_published = Some(wm);
         }
-        self.dispatched.fetch_add(1, Ordering::SeqCst);
+        cache.pending.push_back(PendingBatch {
+            id: dispatch_id,
+            latest: latest_location,
+            acked: false,
+        });
+
+        Ok(PreparedDispatch {
+            output: result.output,
+            dispatch_id,
+            watermark_at,
+            latest_location,
+        })
     }
 
     /// Record a PUT success for the batch with this `dispatch_id`. Marks it

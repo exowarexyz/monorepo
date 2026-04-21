@@ -17,10 +17,9 @@ use commonware_storage::qmdb::{
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use futures::StreamExt;
 use exoware_sdk_rs::StoreClient;
+use futures::StreamExt;
 use store_qmdb::{UnorderedClient, UnorderedWriter, MAX_OPERATION_SIZE};
-
 
 type Digest = commonware_cryptography::sha256::Digest;
 type BatchProof = commonware_storage::mmr::Proof<Digest>;

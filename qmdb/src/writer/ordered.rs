@@ -32,7 +32,9 @@ use crate::codec::{
     decode_watermark_location, encode_node_key, encode_watermark_key, mmr_size_for_watermark,
     WATERMARK_CODEC,
 };
-use crate::core::{extend_mmr_from_peaks, load_ops_peaks, PreparedCurrentBoundaryUpload, PreparedUpload};
+use crate::core::{
+    extend_mmr_from_peaks, load_ops_peaks, PreparedCurrentBoundaryUpload, PreparedUpload,
+};
 use crate::error::QmdbError;
 use crate::writer::core::{Cache, WriterCore};
 use crate::{CurrentBoundaryState, UploadReceipt};
@@ -72,8 +74,7 @@ where
     }
     let prepared_ops = PreparedUpload::build(latest_location, ops)?;
     let prepared_current = PreparedCurrentBoundaryUpload::build(latest_location, current_boundary)?;
-    let ext =
-        extend_mmr_from_peaks::<H, _>(peaks, prev_ops_size, prepared_ops.op_bytes())?;
+    let ext = extend_mmr_from_peaks::<H, _>(peaks, prev_ops_size, prepared_ops.op_bytes())?;
     let operation_count = prepared_ops.operation_count;
     let keyed_operation_count = prepared_ops.keyed_operation_count;
 
@@ -178,38 +179,42 @@ where
         ops: &[QmdbOperation<K, V>],
         current_boundary: &CurrentBoundaryState<H::Digest, N>,
     ) -> Result<UploadReceipt, QmdbError> {
-        let begin = self.core.begin(ops.len() as u64).await?;
-        let built = build_ordered_upload::<H, K, V, N>(
-            begin.peaks,
-            begin.ops_size,
-            begin.latest_location,
-            ops,
-            current_boundary,
-            begin.watermark_at,
-        )?;
-        self.core
-            .advance(crate::writer::core::BatchAdvance {
-                new_peaks: built.new_peaks,
-                new_ops_size: built.new_ops_size,
-                latest_location: built.latest_location,
-                watermark_at: begin.watermark_at,
-                dispatch_id: begin.dispatch_id,
+        let prepared = self
+            .core
+            .prepare(ops.len() as u64, |ctx| {
+                let built = build_ordered_upload::<H, K, V, N>(
+                    ctx.peaks,
+                    ctx.ops_size,
+                    ctx.latest_location,
+                    ops,
+                    current_boundary,
+                    ctx.watermark_at,
+                )?;
+                Ok(crate::writer::core::BuildResult {
+                    new_peaks: built.new_peaks,
+                    new_ops_size: built.new_ops_size,
+                    output: built.rows,
+                })
             })
-            .await;
+            .await?;
 
-        let refs: Vec<(&Key, &[u8])> = built.rows.iter().map(|(k, v)| (k, v.as_slice())).collect();
+        let refs: Vec<(&Key, &[u8])> = prepared
+            .output
+            .iter()
+            .map(|(k, v)| (k, v.as_slice()))
+            .collect();
         match self.client.ingest().put(&refs).await {
             Ok(_) => {
-                self.core.ack_success(begin.dispatch_id).await;
+                self.core.ack_success(prepared.dispatch_id).await;
                 Ok(UploadReceipt {
-                    latest_location: built.latest_location,
-                    writer_location_watermark: begin.watermark_at,
+                    latest_location: prepared.latest_location,
+                    writer_location_watermark: prepared.watermark_at,
                 })
             }
             Err(err) => {
                 let msg = format!(
                     "ordered upload ending at {} failed: {err}",
-                    built.latest_location
+                    prepared.latest_location
                 );
                 self.core.ack_failure(msg).await;
                 Err(QmdbError::Client(err))
