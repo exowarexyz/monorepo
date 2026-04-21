@@ -19,13 +19,13 @@ use crate::codec::{
 use crate::error::QmdbError;
 use crate::CurrentBoundaryState;
 
-pub(crate) fn chunk_idx_to_ops_pos(chunk_idx: u64, grafting_height: u32) -> Position {
+fn chunk_idx_to_ops_pos(chunk_idx: u64, grafting_height: u32) -> Position {
     let first_leaf_loc = Location::new(chunk_idx << grafting_height);
     let first_leaf_pos = Position::try_from(first_leaf_loc).expect("chunk_idx_to_ops_pos overflow");
     Position::new(*first_leaf_pos + (1u64 << (grafting_height + 1)) - 2)
 }
 
-pub(crate) fn grafted_to_ops_pos(grafted_pos: Position, grafting_height: u32) -> Position {
+fn grafted_to_ops_pos(grafted_pos: Position, grafting_height: u32) -> Position {
     let grafted_height = position_height(grafted_pos);
     let leftmost_grafted_leaf_pos = grafted_pos + 2 - (1u64 << (grafted_height + 1));
     let chunk_idx = *Location::try_from(leftmost_grafted_leaf_pos)
@@ -37,7 +37,9 @@ pub(crate) fn grafted_to_ops_pos(grafted_pos: Position, grafting_height: u32) ->
     Position::new(*ops_leaf_pos + (1u64 << (ops_height + 1)) - 2)
 }
 
-pub async fn build_current_boundary_state<H, K, V, const N: usize, F, Fut>(
+/// Recover the ordered current-boundary delta for one batch from local proof
+/// material emitted by a Commonware `current::ordered::Db`.
+pub async fn recover_boundary_state<H, K, V, const N: usize, F, Fut>(
     previous_operations: Option<&[QmdbOperation<K, V>]>,
     operations: &[QmdbOperation<K, V>],
     root: H::Digest,
@@ -49,7 +51,7 @@ where
     V: Codec + Clone + Send + Sync,
     QmdbOperation<K, V>: Encode,
     F: FnMut(Location) -> Fut,
-    Fut: Future<Output = Result<(mmr::Proof<H::Digest>, QmdbOperation<K, V>, [u8; N]), QmdbError>>,
+    Fut: Future<Output = Result<(mmr::Proof<H::Digest>, [u8; N]), QmdbError>>,
 {
     if operations.is_empty() {
         return Err(QmdbError::EmptyBatch);
@@ -64,29 +66,6 @@ where
         )));
     }
 
-    build_current_boundary_state_from_proofs::<H, K, V, N, _, _>(
-        previous_operations,
-        operations,
-        root,
-        &mut prove_at,
-    )
-    .await
-}
-
-async fn build_current_boundary_state_from_proofs<H, K, V, const N: usize, F, Fut>(
-    previous_operations: Option<&[QmdbOperation<K, V>]>,
-    operations: &[QmdbOperation<K, V>],
-    root: H::Digest,
-    prove_at: &mut F,
-) -> Result<CurrentBoundaryState<H::Digest, N>, QmdbError>
-where
-    H: Hasher,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
-    QmdbOperation<K, V>: Encode,
-    F: FnMut(Location) -> Fut,
-    Fut: Future<Output = Result<(mmr::Proof<H::Digest>, QmdbOperation<K, V>, [u8; N]), QmdbError>>,
-{
     let changed_chunks = changed_chunk_representatives::<K, V, N>(previous_operations, operations);
     let complete_chunks = operations.len() / bitmap_chunk_bits::<N>() as usize;
     let mmr_size = Position::try_from(Location::new(operations.len() as u64))
@@ -97,13 +76,18 @@ where
     let mut grafted_nodes = BTreeMap::<Position, H::Digest>::new();
 
     for (chunk_index, location) in changed_chunks {
-        let (proof, operation, chunk) = prove_at(location).await?;
+        let (proof, chunk) = prove_at(location).await?;
         chunks.entry(chunk_index).or_insert(chunk);
 
         if chunk_index as usize >= complete_chunks {
             continue;
         }
 
+        let operation = operations.get(*location as usize).ok_or_else(|| {
+            QmdbError::CorruptData(format!(
+                "missing operation at location {location} in current boundary input"
+            ))
+        })?;
         let elements = [operation.encode().to_vec()];
         let chunk_refs = vec![chunk.as_ref()];
         let mut verifier = ProofVerifier::<H>::new(grafting_height, chunk_index, chunk_refs);

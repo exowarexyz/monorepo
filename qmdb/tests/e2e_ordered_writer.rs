@@ -20,8 +20,7 @@ use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_sdk_rs::StoreClient;
 use store_qmdb::{
-    build_current_boundary_state, CurrentBoundaryState, OrderedClient, OrderedWriter,
-    MAX_OPERATION_SIZE,
+    recover_boundary_state, CurrentBoundaryState, OrderedClient, OrderedWriter, MAX_OPERATION_SIZE,
 };
 
 use common::retry;
@@ -39,7 +38,7 @@ async fn boundary_from_local_db(
     previous_operations: Option<&[BatchOperation]>,
     operations: &[BatchOperation],
 ) -> CurrentBoundaryState<Digest, N> {
-    build_current_boundary_state::<Sha256, _, _, N, _, _>(
+    recover_boundary_state::<Sha256, _, _, N, _, _>(
         previous_operations,
         operations,
         db.root(),
@@ -53,7 +52,7 @@ async fn boundary_from_local_db(
                         "local current range proof at {location}: {error}"
                     ))
                 })?;
-            let operation = proof_ops.pop().ok_or_else(|| {
+            proof_ops.pop().ok_or_else(|| {
                 store_qmdb::QmdbError::CorruptData(format!(
                     "local current range proof at {location} returned no operations"
                 ))
@@ -63,11 +62,11 @@ async fn boundary_from_local_db(
                     "local current range proof at {location} returned no chunks"
                 ))
             })?;
-            Ok((proof.proof, operation, chunk))
+            Ok((proof.proof, chunk))
         },
     )
     .await
-    .expect("build_current_boundary_state")
+    .expect("recover_boundary_state")
 }
 
 fn op_cfg() -> <BatchOperation as commonware_codec::Read>::Cfg {

@@ -29,9 +29,9 @@ use commonware_storage::qmdb::{
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use store_qmdb::{
-    build_current_boundary_state, CurrentBoundaryState, ImmutableClient, ImmutableWriter,
-    KeylessClient, KeylessWriter, OrderedClient, OrderedWriter, UnorderedClient, UnorderedWriter,
-    WriterState, MAX_OPERATION_SIZE,
+    recover_boundary_state, CurrentBoundaryState, ImmutableClient, ImmutableWriter, KeylessClient,
+    KeylessWriter, OrderedClient, OrderedWriter, UnorderedClient, UnorderedWriter, WriterState,
+    MAX_OPERATION_SIZE,
 };
 
 type Digest = commonware_cryptography::sha256::Digest;
@@ -348,7 +348,7 @@ async fn ordered_boundary_from_local_db(
     previous_operations: Option<&[OrderedOp]>,
     operations: &[OrderedOp],
 ) -> CurrentBoundaryState<Digest, N> {
-    build_current_boundary_state::<Sha256, _, _, N, _, _>(
+    recover_boundary_state::<Sha256, _, _, N, _, _>(
         previous_operations,
         operations,
         db.root(),
@@ -362,7 +362,7 @@ async fn ordered_boundary_from_local_db(
                         "local current range proof at {location}: {error}"
                     ))
                 })?;
-            let operation = proof_ops.pop().ok_or_else(|| {
+            proof_ops.pop().ok_or_else(|| {
                 store_qmdb::QmdbError::CorruptData(format!(
                     "local current range proof at {location} returned no operations"
                 ))
@@ -372,11 +372,11 @@ async fn ordered_boundary_from_local_db(
                     "local current range proof at {location} returned no chunks"
                 ))
             })?;
-            Ok((proof.proof, operation, chunk))
+            Ok((proof.proof, chunk))
         },
     )
     .await
-    .expect("build_current_boundary_state")
+    .expect("recover_boundary_state")
 }
 
 #[tokio::test]

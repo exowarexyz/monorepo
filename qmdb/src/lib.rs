@@ -25,7 +25,6 @@
 //! proofs below a later published low watermark.
 
 mod auth;
-#[cfg(any(test, feature = "test-utils"))]
 mod boundary;
 pub(crate) mod codec;
 mod core;
@@ -56,8 +55,7 @@ pub use writer::{
     ImmutableWriter, KeylessWriter, OrderedWriter, UnorderedWriter,
 };
 
-#[cfg(any(test, feature = "test-utils"))]
-pub use boundary::build_current_boundary_state;
+pub use boundary::recover_boundary_state;
 
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
