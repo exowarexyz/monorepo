@@ -1779,7 +1779,6 @@ impl SerializableReadSession {
         .await
     }
 
-    /// Same key-range semantics as [`StoreClient::range`].
     pub async fn range(
         &self,
         start: &Key,
@@ -1790,7 +1789,6 @@ impl SerializableReadSession {
             .await
     }
 
-    /// Same key-range semantics as [`StoreClient::range`].
     pub async fn range_with_mode(
         &self,
         start: &Key,
@@ -1817,7 +1815,6 @@ impl SerializableReadSession {
         .await
     }
 
-    /// Same key-range semantics as [`StoreClient::range`].
     pub async fn range_stream(
         &self,
         start: &Key,
@@ -1829,7 +1826,6 @@ impl SerializableReadSession {
             .await
     }
 
-    /// Same key-range semantics as [`StoreClient::range`].
     pub async fn range_stream_with_mode(
         &self,
         start: &Key,
