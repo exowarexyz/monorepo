@@ -10,6 +10,21 @@
 //! Callers typically drive a local commonware QMDB alongside the writer,
 //! reading the new current-boundary state from the local Db after each batch
 //! and passing it in via [`OrderedWriter::upload_and_publish`].
+//!
+//! Typical flow:
+//!
+//! 1. apply one batch to a local `current::ordered::Db`
+//! 2. recover the boundary delta with [`crate::recover_boundary_state`]
+//! 3. upload the historical ordered ops plus that boundary delta with
+//!    [`OrderedWriter::upload_and_publish`]
+//!
+//! The writer itself does not inspect the local DB; it only consumes the
+//! caller-supplied [`crate::CurrentBoundaryState`].
+//!
+//! Multiple [`OrderedWriter::upload_and_publish`] calls may be in flight on
+//! the same writer at once. The writer assigns locations and safe watermark
+//! candidates in dispatch order, then allows the PUTs themselves to run
+//! concurrently; later ACKs do not publish past an earlier hole.
 
 use std::marker::PhantomData;
 
@@ -130,8 +145,16 @@ where
     }
 
     /// Upload `ops` plus the caller-supplied current boundary state in one
-    /// atomic PUT. `current_boundary` must correspond to the state AFTER
-    /// applying `ops`.
+    /// atomic PUT.
+    ///
+    /// `current_boundary` must correspond to the state after applying `ops`
+    /// to the caller's local ordered Commonware DB. In the common case callers
+    /// produce it with [`crate::recover_boundary_state`] immediately after the
+    /// local `apply_batch`.
+    ///
+    /// This method is concurrency-safe for a single writer instance: multiple
+    /// calls may be awaited simultaneously and the writer will preserve the
+    /// correct contiguous watermark semantics internally.
     pub async fn upload_and_publish(
         &self,
         ops: &[QmdbOperation<K, V>],

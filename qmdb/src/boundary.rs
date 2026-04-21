@@ -40,6 +40,25 @@ fn grafted_to_ops_pos(grafted_pos: Position, grafting_height: u32) -> Position {
 /// Recover the ordered current-boundary delta for one batch from local proof
 /// material emitted by a Commonware `current::ordered::Db`.
 ///
+/// This is the bridge between a caller-owned local Commonware current DB and
+/// [`crate::OrderedWriter`]. Callers apply a batch locally, then use this
+/// function to recover the exact versioned current-state rows that must be
+/// uploaded for that batch boundary:
+///
+/// - `root`: the local current DB root after applying `operations`
+/// - `chunks`: only the bitmap chunks whose contents changed at this boundary
+/// - `grafted_nodes`: only the complete-chunk grafted nodes whose digests
+///   changed at this boundary
+///
+/// `previous_operations` and `operations` are the cumulative ordered-op logs
+/// before and after the batch respectively, not just the delta batch itself.
+/// `prove_at(location)` must return a current range proof plus the bitmap
+/// chunk for that exact `location`, taken from the same local DB state as
+/// `root`.
+///
+/// The returned [`CurrentBoundaryState`](crate::CurrentBoundaryState) can be
+/// passed directly to [`crate::OrderedWriter::upload_and_publish`].
+///
 /// TODO: replace this proof-driven recovery path with a thin adapter over
 /// `commonware_storage::qmdb::current::batch::MerkleizedBatch` once upstream
 /// exposes the bitmap-chunk and grafted-subtree deltas needed to publish one

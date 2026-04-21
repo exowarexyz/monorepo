@@ -7,6 +7,12 @@
 //! frontier state, pipelines PUTs, gates in-band watermark emission on pipeline
 //! emptiness, and exposes a `flush()` to publish a catch-up watermark after bursts.
 //!
+//! Multiple `upload_and_publish` calls may be issued concurrently against the
+//! same writer instance. The writer serializes frontier assignment under its
+//! internal mutex, then releases that lock before awaiting the network PUT, so
+//! independent batches can be in flight at the same time while watermark
+//! publication still follows the contiguous-committed prefix.
+//!
 //! Callers own durability. On any PUT error the writer poisons; the caller must
 //! construct a fresh writer from a caller-owned committed frontier. Since PUT rows are
 //! content-addressed and MMR math is deterministic, retries are idempotent.

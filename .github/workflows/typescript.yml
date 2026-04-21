@@ -1,0 +1,56 @@
+name: TypeScript
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run setup
+        uses: ./.github/actions/setup
+      - name: Install sdk-ts dependencies
+        run: cd sdk-ts && npm ci
+      - name: Lint sdk-ts
+        run: cd sdk-ts && npm run lint
+      - name: Install examples/sandbox dependencies
+        run: cd examples/sandbox && npm install
+      - name: Lint examples/sandbox
+        run: cd examples/sandbox && npm run lint
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run setup
+        uses: ./.github/actions/setup
+      - name: Install sdk-ts dependencies
+        run: cd sdk-ts && npm ci
+      - name: Test sdk-ts
+        run: cd sdk-ts && npm test
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run setup
+        uses: ./.github/actions/setup
+      - name: Install sdk-ts dependencies
+        run: cd sdk-ts && npm ci
+      - name: Build sdk-ts
+        run: cd sdk-ts && npm run build

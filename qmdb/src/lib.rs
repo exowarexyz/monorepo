@@ -168,11 +168,23 @@ impl<D: Digest> WriterState<D> {
     }
 }
 
-/// Current-state rows for one uploaded batch boundary.
+/// Current-state rows for one uploaded ordered batch boundary.
+///
+/// Ordered QMDB uploads carry more than the historical op log: each published
+/// batch boundary also stores the current-state root plus the subset of bitmap
+/// chunks and grafted-MMR nodes that changed at that boundary. This struct is
+/// that versioned delta payload.
+///
+/// Callers typically obtain it from [`recover_boundary_state`], using a local
+/// Commonware `current::ordered::Db`, and then pass it to
+/// [`OrderedWriter::upload_and_publish`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurrentBoundaryState<D: Digest, const N: usize> {
+    /// Canonical current-state root at this batch boundary.
     pub root: D,
+    /// Changed bitmap chunks keyed by chunk index.
     pub chunks: Vec<(u64, [u8; N])>,
+    /// Changed grafted-MMR digests keyed by ops-space MMR position.
     pub grafted_nodes: Vec<(commonware_storage::mmr::Position, D)>,
 }
 

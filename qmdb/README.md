@@ -439,6 +439,9 @@ Each backend exposes a `*Writer` helper for sole-writer ingest. Writers hold
 cached MMR peaks + a pending-batch queue in memory; `upload_and_publish`
 dispatches a single atomic PUT per batch with zero store reads in the hot
 loop. Construction always starts from caller-supplied frontier state.
+Multiple `upload_and_publish` calls may be issued concurrently against the
+same writer; the writer handles location assignment, in-flight pipelining, and
+contiguous watermark publication internally.
 
 ```rust,ignore
 use std::sync::Arc;
@@ -463,6 +466,29 @@ for batch in batches {
 while let Some(r) = in_flight.next().await { r?; }
 writer.flush().await?;  // publish the tail watermark
 ```
+
+### Ordered local-DB flow
+
+`OrderedWriter` needs one extra caller input per batch:
+`CurrentBoundaryState`. That payload is the versioned current-state delta for
+the batch boundary:
+
+- the current root after the batch
+- only the bitmap chunks that changed at that boundary
+- only the grafted-node digests that changed at that boundary
+
+The intended flow is:
+
+1. apply the batch to a local Commonware `current::ordered::Db`
+2. read the cumulative ordered operations after the batch
+3. call `recover_boundary_state(previous_operations, operations, db.root(), prove_at)`
+   against that same local DB state
+4. pass both `operations` and the recovered boundary state into
+   `OrderedWriter::upload_and_publish`
+
+`recover_boundary_state(...)` does not talk to the remote store. It is just
+the adapter that turns local Commonware proofs into the `CurrentBoundaryState`
+rows the store-backed ordered mirror needs.
 
 ### Watermark rule (per-batch)
 
