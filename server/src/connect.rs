@@ -793,10 +793,7 @@ impl StreamApi for StreamConnect {
             }
             _ => None,
         };
-        let next_live_sequence = match replay.as_ref() {
-            Some(replay) => replay.bound.saturating_add(1),
-            None => since.unwrap_or_else(|| replay_bound.saturating_add(1)),
-        };
+        let next_live_sequence = replay_bound.saturating_add(1);
 
         Ok((
             Box::pin(SubscriptionStream::new(
@@ -1093,6 +1090,37 @@ mod tests {
         assert_eq!(frame.sequence_number, 1);
         assert_eq!(frame.entries.len(), 1);
         assert_eq!(frame.entries[0].value.as_slice(), b"v1");
+    }
+
+    #[tokio::test]
+    async fn subscribe_past_end_reads_only_future_live_batches() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(5);
+        for seq in 1..=5 {
+            engine.set_batch(seq, Some(vec![matching_kv(b"seed", b"v")]));
+        }
+        let state = AppState::new(engine.clone());
+        let connect = StreamConnect::new(state.clone());
+        let mut stream = subscribe_stream(&connect, Some(15))
+            .await
+            .expect("subscribe");
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), stream.next())
+                .await
+                .is_err(),
+            "past-end cursor should not replay synthetic or historical frames",
+        );
+
+        engine.publish_live(state.stream.clone(), 6, vec![matching_kv(b"live", b"n")]);
+        let frame = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("stream should yield")
+            .expect("frame should exist")
+            .expect("frame should be ok");
+        assert_eq!(frame.sequence_number, 6);
+        assert_eq!(frame.entries.len(), 1);
+        assert_eq!(frame.entries[0].value.as_slice(), b"n");
     }
 
     #[tokio::test]
