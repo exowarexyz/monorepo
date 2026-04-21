@@ -214,6 +214,24 @@ pub(crate) fn authenticated_classify_and_filter(
 }
 
 /// State machine for one stream.
+///
+/// Invariants the accumulator relies on, all enforced upstream:
+///
+/// 1. One subscribe frame corresponds to exactly one writer PUT (see
+///    `server/src/stream.rs::publish`). A PUT is atomic: its ops + presence +
+///    optional watermark all land in one frame, never split.
+/// 2. Within a frame, ops of a single batch arrive in ascending-location
+///    order. The writer emits them that way and the server preserves kv order.
+/// 3. Frames are delivered in the engine's seq order, which equals dispatch
+///    order (the writer's `prepare()` serializes `latest_location`
+///    assignment), so batch `latest` values are monotonic non-decreasing in
+///    the stream.
+///
+/// Given (1)+(2), a batch's in-progress entry never fragments: op N+1 always
+/// matches `next_expected == N+1` on the same entry. Given (3), GC via
+/// `floor = smallest pending latest` can never discard a watermark still
+/// needed by an unseen batch (that batch would have arrived before any batch
+/// with larger `latest`, not after).
 struct Accumulator {
     in_progress: BTreeMap<Location /* start */, InProgressBatch>,
     pending: BTreeMap<Location /* latest */, ClosedBatch>,
@@ -479,6 +497,74 @@ mod tests {
             ready[0].watermark,
             loc(7),
             "smallest wm >= latest is 7 (4 was GC'd)"
+        );
+    }
+
+    // Cross-batch op interleaving inside a single ingest pass: disjoint
+    // location ranges mean each batch advances its own in-progress entry
+    // unambiguously. (Not a case our transport actually produces — frames are
+    // per-PUT — but the entry-level accumulator handles it correctly and this
+    // test pins that behavior against the bugbot "fragmentation" claim.)
+    #[test]
+    fn interleaved_cross_batch_ops_do_not_fragment() {
+        let mut acc = Accumulator::new();
+        // A: ops 0..=4, presence 4. B: ops 5..=9, presence 9.
+        // Interleave in a way that stresses find_map matching.
+        acc.ingest_entry(Family::Op, loc(0));
+        acc.ingest_entry(Family::Op, loc(5));
+        acc.ingest_entry(Family::Op, loc(1));
+        acc.ingest_entry(Family::Op, loc(6));
+        acc.ingest_entry(Family::Op, loc(2));
+        acc.ingest_entry(Family::Op, loc(3));
+        acc.ingest_entry(Family::Op, loc(4));
+        acc.ingest_entry(Family::Presence, loc(4));
+        acc.ingest_entry(Family::Op, loc(7));
+        acc.ingest_entry(Family::Op, loc(8));
+        acc.ingest_entry(Family::Op, loc(9));
+        acc.ingest_entry(Family::Presence, loc(9));
+        acc.ingest_entry(Family::Watermark, loc(4));
+        acc.ingest_entry(Family::Watermark, loc(9));
+
+        let ready = acc.drain_ready();
+        assert_eq!(ready.len(), 2);
+        assert_eq!((ready[0].start, ready[0].latest), (loc(0), loc(4)));
+        assert_eq!(ready[0].watermark, loc(4));
+        assert_eq!((ready[1].start, ready[1].latest), (loc(5), loc(9)));
+        assert_eq!(ready[1].watermark, loc(9));
+    }
+
+    // GC must not discard a watermark that still authorizes a pending batch.
+    // Per invariant 3 (monotonic batch `latest` on the wire) a late batch
+    // with latest=3 after an earlier drain of latest=7 doesn't actually occur
+    // in production — but the GC rule must still be safe if it did: the
+    // smallest-pending-latest floor never drops a covering wm.
+    #[test]
+    fn gc_preserves_watermarks_needed_by_pending_batches() {
+        let mut acc = Accumulator::new();
+        // Idle drain with wm=7 seen but no pending: the fallback floor
+        // (largest wm) retains wm=7 rather than emptying the set.
+        acc.ingest_entry(Family::Watermark, loc(7));
+        let ready = acc.drain_ready();
+        assert!(ready.is_empty());
+        assert!(
+            acc.watermarks.contains(&loc(7)),
+            "idle GC must retain the largest wm as a floor"
+        );
+
+        // Now a batch with latest=3 arrives (hypothetically late) plus its
+        // own wm=3. Both wm=3 and wm=7 are in the set; drain picks the
+        // smallest wm >= latest = 3, which is the authoritative one.
+        for i in 0..=3 {
+            acc.ingest_entry(Family::Op, loc(i));
+        }
+        acc.ingest_entry(Family::Presence, loc(3));
+        acc.ingest_entry(Family::Watermark, loc(3));
+        let ready = acc.drain_ready();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(
+            ready[0].watermark,
+            loc(3),
+            "drain picks own wm=3, not later wm=7"
         );
     }
 }
