@@ -39,8 +39,6 @@ pub(crate) const AUTH_PRESENCE_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, AU
 pub(crate) const AUTH_IMMUTABLE_UPDATE_CODEC: KeyCodec =
     KeyCodec::new(RESERVED_BITS, AUTH_IMMUTABLE_UPDATE_FAMILY);
 
-pub(crate) type AuthRows = Vec<(Key, Vec<u8>)>;
-
 pub(crate) fn auth_namespace_bounds(
     codec: KeyCodec,
     namespace: AuthenticatedBackendNamespace,
@@ -281,13 +279,15 @@ pub(crate) async fn require_published_auth_watermark(
     Ok(())
 }
 
+/// Consumes `encoded_operations` into the returned `PreparedUpload`'s
+/// `op_rows` — no clones.
 pub(crate) fn build_auth_upload_rows(
     namespace: AuthenticatedBackendNamespace,
     latest_location: Location,
-    encoded_operations: &[Vec<u8>],
-) -> Result<(u32, AuthRows), QmdbError> {
-    let mut rows = Vec::<(Key, Vec<u8>)>::with_capacity(encoded_operations.len() + 1);
-    let count_u64 = encoded_operations.len() as u64;
+    encoded_operations: Vec<Vec<u8>>,
+) -> Result<crate::core::PreparedUpload, QmdbError> {
+    let count = encoded_operations.len();
+    let count_u64 = count as u64;
     let Some(start_location) = latest_location
         .checked_add(1)
         .and_then(|next| next.checked_sub(count_u64))
@@ -295,40 +295,45 @@ pub(crate) fn build_auth_upload_rows(
         return Err(QmdbError::InvalidLocationRange {
             start_location: Location::new(0),
             latest_location,
-            count: encoded_operations.len(),
+            count,
         });
     };
-    for (index, encoded) in encoded_operations.iter().enumerate() {
+    let mut op_rows = Vec::<(Key, Vec<u8>)>::with_capacity(count);
+    for (index, encoded) in encoded_operations.into_iter().enumerate() {
         ensure_encoded_value_size(encoded.len())?;
-        rows.push((
+        op_rows.push((
             encode_auth_operation_key(namespace, start_location + index as u64),
-            encoded.clone(),
+            encoded,
         ));
     }
-    rows.push((
-        encode_auth_presence_key(namespace, latest_location),
-        Vec::new(),
-    ));
-    let operation_count = u32::try_from(encoded_operations.len()).map_err(|_| {
+    let operation_count = u32::try_from(count).map_err(|_| {
         QmdbError::CorruptData("authenticated operation count overflow".to_string())
     })?;
-    Ok((operation_count, rows))
+    Ok(crate::core::PreparedUpload {
+        operation_count,
+        keyed_operation_count: 0,
+        op_rows,
+        aux_rows: vec![(
+            encode_auth_presence_key(namespace, latest_location),
+            Vec::new(),
+        )],
+    })
 }
 
-/// Returns `(keyed_operation_count, encoded_ops, rows)`. `encoded_ops`
-/// is the ops sequence in canonical bytes form, reused by writers to feed
-/// the MMR extension without re-encoding.
+/// Encodes `operations` exactly once — the encoded bytes move into the
+/// returned `PreparedUpload`'s `op_rows`.
 pub(crate) fn build_auth_immutable_upload_rows<K, V>(
     latest_location: Location,
     operations: &[commonware_storage::qmdb::immutable::Operation<K, V>],
-) -> Result<(u32, Vec<Vec<u8>>, AuthRows), QmdbError>
+) -> Result<crate::core::PreparedUpload, QmdbError>
 where
     K: Array + AsRef<[u8]>,
     V: commonware_codec::Codec + Clone + Send + Sync,
 {
     use commonware_storage::qmdb::immutable::Operation as ImmutableOperation;
 
-    let count_u64 = operations.len() as u64;
+    let count = operations.len();
+    let count_u64 = count as u64;
     let Some(start_location) = latest_location
         .checked_add(1)
         .and_then(|next| next.checked_sub(count_u64))
@@ -336,18 +341,17 @@ where
         return Err(QmdbError::InvalidLocationRange {
             start_location: Location::new(0),
             latest_location,
-            count: operations.len(),
+            count,
         });
     };
-    let mut rows = Vec::<(Key, Vec<u8>)>::with_capacity(operations.len() * 2 + 1);
-    let mut encoded_ops = Vec::<Vec<u8>>::with_capacity(operations.len());
+    let mut op_rows = Vec::<(Key, Vec<u8>)>::with_capacity(count);
+    let mut aux_rows = Vec::<(Key, Vec<u8>)>::with_capacity(count + 1);
     let mut keyed_operation_count = 0u32;
     for (index, operation) in operations.iter().enumerate() {
         let location = start_location + index as u64;
         let encoded = operation.encode().to_vec();
         ensure_encoded_value_size(encoded.len())?;
-        encoded_ops.push(encoded.clone());
-        rows.push((
+        op_rows.push((
             encode_auth_operation_key(AuthenticatedBackendNamespace::Immutable, location),
             encoded,
         ));
@@ -357,17 +361,25 @@ where
                 key: key.clone(),
                 value: Some(value.clone()),
             };
-            rows.push((
+            aux_rows.push((
                 encode_auth_immutable_update_key(key.as_ref(), location)?,
                 update_row.encode().to_vec(),
             ));
         }
     }
-    rows.push((
+    aux_rows.push((
         encode_auth_presence_key(AuthenticatedBackendNamespace::Immutable, latest_location),
         Vec::new(),
     ));
-    Ok((keyed_operation_count, encoded_ops, rows))
+    let operation_count = u32::try_from(count).map_err(|_| {
+        QmdbError::CorruptData("authenticated operation count overflow".to_string())
+    })?;
+    Ok(crate::core::PreparedUpload {
+        operation_count,
+        keyed_operation_count,
+        op_rows,
+        aux_rows,
+    })
 }
 
 /// Read the authenticated ops-MMR peaks at `size` from the session. Used by

@@ -13,7 +13,7 @@ use crate::auth::{
     build_auth_upload_rows, encode_auth_node_key, encode_auth_watermark_key, load_auth_peaks,
     read_latest_auth_watermark, AuthenticatedBackendNamespace,
 };
-use crate::codec::{ensure_encoded_value_size, mmr_size_for_watermark};
+use crate::codec::mmr_size_for_watermark;
 use crate::core::extend_mmr_from_peaks;
 use crate::error::QmdbError;
 use crate::writer::core::{Cache, WriterCore};
@@ -53,16 +53,11 @@ where
     if ops.is_empty() {
         return Err(QmdbError::EmptyBatch);
     }
-    let encoded: Vec<Vec<u8>> = ops
-        .iter()
-        .map(|op| {
-            let bytes = op.encode().to_vec();
-            ensure_encoded_value_size(bytes.len())?;
-            Ok(bytes)
-        })
-        .collect::<Result<_, QmdbError>>()?;
-    let (operation_count, mut rows) = build_auth_upload_rows(NAMESPACE, latest_location, &encoded)?;
-    let ext = extend_mmr_from_peaks::<H, _>(peaks, prev_ops_size, &encoded)?;
+    let encoded: Vec<Vec<u8>> = ops.iter().map(|op| op.encode().to_vec()).collect();
+    let prepared = build_auth_upload_rows(NAMESPACE, latest_location, encoded)?;
+    let ext = extend_mmr_from_peaks::<H, _>(peaks, prev_ops_size, prepared.op_bytes())?;
+    let operation_count = prepared.operation_count;
+    let mut rows = prepared.into_all_rows();
     for (pos, digest) in &ext.new_nodes {
         rows.push((
             encode_auth_node_key(NAMESPACE, *pos),

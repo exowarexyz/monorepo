@@ -51,9 +51,10 @@ where
     if ops.is_empty() {
         return Err(QmdbError::EmptyBatch);
     }
-    let (keyed_operation_count, encoded, mut rows) =
-        build_auth_immutable_upload_rows(latest_location, ops)?;
-    let ext = extend_mmr_from_peaks::<H, _>(peaks, prev_ops_size, &encoded)?;
+    let prepared = build_auth_immutable_upload_rows(latest_location, ops)?;
+    let ext = extend_mmr_from_peaks::<H, _>(peaks, prev_ops_size, prepared.op_bytes())?;
+    let keyed_operation_count = prepared.keyed_operation_count;
+    let mut rows = prepared.into_all_rows();
     for (pos, digest) in &ext.new_nodes {
         rows.push((
             encode_auth_node_key(NAMESPACE, *pos),
