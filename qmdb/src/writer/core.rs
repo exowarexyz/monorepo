@@ -30,7 +30,7 @@ use tokio::sync::{Mutex, Notify};
 use crate::error::QmdbError;
 
 /// MMR/pipeline state held in memory by a single-writer helper.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct Cache<D: Digest> {
     pub peaks: Vec<(Position, u32, D)>,
     pub ops_size: Position,
@@ -133,19 +133,16 @@ impl<D: Digest> WriterCore<D> {
             .checked_add(ops_len - 1)
             .ok_or_else(|| QmdbError::CorruptData("next_location overflow".to_string()))?;
 
-        // Safe watermark candidate:
+        // Safe watermark:
         // - Pipeline empty: our own latest_location (we're the only in-flight PUT).
         // - Pipeline non-empty: latest_contiguous_acked (last fully-acked prefix location).
+        // - Don't re-publish what's already out.
         let candidate = if cache.pending.is_empty() {
             Some(latest_location)
         } else {
             cache.latest_contiguous_acked
         };
-        let watermark_at = match (candidate, cache.latest_published) {
-            (Some(c), Some(p)) if c > p => Some(c),
-            (Some(c), None) => Some(c),
-            _ => None,
-        };
+        let watermark_at = candidate.filter(|c| cache.latest_published.is_none_or(|p| *c > p));
         let dispatch_id = self.dispatched.load(Ordering::SeqCst);
         Ok(BatchBegin {
             peaks: cache.peaks.clone(),
@@ -186,10 +183,10 @@ impl<D: Digest> WriterCore<D> {
         {
             let mut state = self.state.lock().await;
             if let State::Ready(c) = &mut *state {
-                for p in c.pending.iter_mut() {
-                    if p.id == dispatch_id {
-                        p.acked = true;
-                        break;
+                match c.pending.iter_mut().find(|p| p.id == dispatch_id) {
+                    Some(p) => p.acked = true,
+                    None => {
+                        debug_assert!(false, "ack_success for unknown dispatch_id {dispatch_id}")
                     }
                 }
                 while c.pending.front().is_some_and(|p| p.acked) {
@@ -216,14 +213,21 @@ impl<D: Digest> WriterCore<D> {
     }
 
     /// Wait until every dispatched batch has ACKd (successfully or not).
+    ///
+    /// Register the `Notified` future BEFORE the counter load: `Notify` does
+    /// not buffer wakes, so a naive `if !done { notified.await }` races
+    /// against ACKs firing between the load and the await.
     pub(crate) async fn await_drain(&self) {
         loop {
+            let notified = self.ack_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             let d = self.dispatched.load(Ordering::SeqCst);
             let a = self.acked.load(Ordering::SeqCst);
             if a >= d {
                 return;
             }
-            self.ack_notify.notified().await;
+            notified.await;
         }
     }
 
@@ -257,5 +261,47 @@ impl<D: Digest> WriterCore<D> {
             State::Ready(c) => c.latest_published,
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::sha256::Digest as Sha256Digest;
+
+    fn fresh_core() -> WriterCore<Sha256Digest> {
+        let core = WriterCore::<Sha256Digest>::new();
+        // install() requires an async context; this test-only helper builds
+        // an initial Ready state without going through the async path.
+        *core.state.try_lock().unwrap() = State::Ready(Cache {
+            peaks: Vec::new(),
+            ops_size: Position::new(0),
+            next_location: Location::new(0),
+            latest_published: None,
+            latest_dispatched: None,
+            pending: VecDeque::new(),
+            latest_contiguous_acked: None,
+        });
+        core
+    }
+
+    // `await_drain` must complete once `acked >= dispatched`, even when the
+    // ACK bump and its wake fire after the counter is first read but before
+    // the waiter has been registered. The implementation uses
+    // `tokio::pin!(notified); notified.as_mut().enable()` BEFORE the load so
+    // the intervening wake is captured. This test drives exactly that
+    // interleaving: bump counters + notify BEFORE polling, so the first
+    // poll inside `await_drain` must still return Ready.
+    #[tokio::test]
+    async fn await_drain_completes_even_with_pre_poll_ack() {
+        let core = fresh_core();
+        core.dispatched.fetch_add(1, Ordering::SeqCst);
+        // ACK lands before any poll of the drain future.
+        core.acked.fetch_add(1, Ordering::SeqCst);
+        core.ack_notify.notify_waiters();
+
+        tokio::time::timeout(std::time::Duration::from_millis(100), core.await_drain())
+            .await
+            .expect("await_drain must complete when acked >= dispatched");
     }
 }

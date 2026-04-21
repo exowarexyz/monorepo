@@ -72,10 +72,12 @@ where
     }
     let prepared_ops = PreparedUpload::build(latest_location, ops)?;
     let prepared_current = PreparedCurrentBoundaryUpload::build(latest_location, current_boundary)?;
-    let encoded: Vec<Vec<u8>> = ops.iter().map(|op| op.encode().to_vec()).collect();
-    let ext = extend_mmr_from_peaks::<H>(peaks, prev_ops_size, &encoded)?;
+    let ext =
+        extend_mmr_from_peaks::<H, _>(peaks, prev_ops_size, prepared_ops.op_bytes())?;
+    let operation_count = prepared_ops.operation_count;
+    let keyed_operation_count = prepared_ops.keyed_operation_count;
 
-    let mut rows = prepared_ops.rows;
+    let mut rows = prepared_ops.into_all_rows();
     rows.extend(prepared_current.rows);
     for (pos, digest) in &ext.new_nodes {
         rows.push((encode_node_key(*pos), digest.as_ref().to_vec()));
@@ -90,8 +92,8 @@ where
         new_ops_size: ext.size,
         new_ops_root: ext.root,
         latest_location,
-        operation_count: prepared_ops.operation_count,
-        keyed_operation_count: prepared_ops.keyed_operation_count,
+        operation_count,
+        keyed_operation_count,
         includes_watermark: watermark_at.is_some(),
     })
 }

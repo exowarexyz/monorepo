@@ -286,7 +286,26 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
 pub(crate) struct PreparedUpload {
     pub(crate) operation_count: u32,
     pub(crate) keyed_operation_count: u32,
-    pub(crate) rows: Vec<(Key, Vec<u8>)>,
+    /// Op rows in location order. Values are canonical encoded bytes; writers
+    /// feed references from here to `extend_mmr_from_peaks` without cloning.
+    pub(crate) op_rows: Vec<(Key, Vec<u8>)>,
+    /// Update-index rows (for keyed ops) plus the presence row. Order is
+    /// opaque to the store — rows are indexed by key, not position.
+    pub(crate) aux_rows: Vec<(Key, Vec<u8>)>,
+}
+
+impl PreparedUpload {
+    /// Byte-slice view over the op rows for feeding to `extend_mmr_from_peaks`.
+    pub(crate) fn op_bytes(&self) -> impl Iterator<Item = &[u8]> {
+        self.op_rows.iter().map(|(_, v)| v.as_slice())
+    }
+
+    /// Consume the two row vectors into a single `Vec` for dispatch.
+    pub(crate) fn into_all_rows(self) -> Vec<(Key, Vec<u8>)> {
+        let mut rows = self.op_rows;
+        rows.extend(self.aux_rows);
+        rows
+    }
 }
 
 impl PreparedUpload {
@@ -329,7 +348,8 @@ impl PreparedUpload {
         operations: &[Op],
         extract_keyed: impl Fn(&Op) -> Option<(&K, Option<&V>)>,
     ) -> Result<Self, QmdbError> {
-        let mut rows = Vec::<(Key, Vec<u8>)>::with_capacity(operations.len() * 2 + 1);
+        let mut op_rows = Vec::<(Key, Vec<u8>)>::with_capacity(operations.len());
+        let mut aux_rows = Vec::<(Key, Vec<u8>)>::with_capacity(operations.len() + 1);
         let mut keyed_operation_count = 0u32;
         let count_u64 = operations.len() as u64;
         let Some(start_location) = latest_location
@@ -347,7 +367,7 @@ impl PreparedUpload {
             let location = start_location + index as u64;
             let encoded = op.encode().to_vec();
             ensure_encoded_value_size(encoded.len())?;
-            rows.push((encode_operation_key(location), encoded));
+            op_rows.push((encode_operation_key(location), encoded));
 
             if let Some((key, value)) = extract_keyed(op) {
                 keyed_operation_count += 1;
@@ -355,7 +375,7 @@ impl PreparedUpload {
                     key: key.clone(),
                     value: value.cloned(),
                 };
-                rows.push((
+                aux_rows.push((
                     encode_update_key(key.as_ref(), location)?,
                     update_row.encode().to_vec(),
                 ));
@@ -365,12 +385,13 @@ impl PreparedUpload {
         let operation_count = u32::try_from(operations.len()).map_err(|_| {
             QmdbError::CorruptData("operation count does not fit in u32".to_string())
         })?;
-        rows.push((encode_presence_key(latest_location), Vec::new()));
+        aux_rows.push((encode_presence_key(latest_location), Vec::new()));
 
         Ok(Self {
             operation_count,
             keyed_operation_count,
-            rows,
+            op_rows,
+            aux_rows,
         })
     }
 }
@@ -420,15 +441,16 @@ pub(crate) struct MmrExtension<D: Digest> {
     pub(crate) new_nodes: Vec<(Position, D)>,
 }
 
-pub(crate) fn extend_mmr_from_peaks<H: Hasher>(
+pub(crate) fn extend_mmr_from_peaks<H: Hasher, Op: AsRef<[u8]>>(
     mut peaks: Vec<(Position, u32, H::Digest)>,
     previous_size: Position,
-    encoded_operations: &[Vec<u8>],
+    encoded_operations: impl IntoIterator<Item = Op>,
 ) -> Result<MmrExtension<H::Digest>, QmdbError> {
     let mut current_size = previous_size;
     let mut new_nodes = Vec::<(Position, H::Digest)>::new();
     let mut hasher = StandardHasher::<H>::new();
     for encoded in encoded_operations {
+        let encoded = encoded.as_ref();
         ensure_encoded_value_size(encoded.len())?;
         let leaf_pos = current_size;
         let leaf_digest = mmr::hasher::Hasher::leaf_digest(&mut hasher, leaf_pos, encoded);

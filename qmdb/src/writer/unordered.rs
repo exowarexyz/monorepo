@@ -54,10 +54,11 @@ where
         return Err(QmdbError::EmptyBatch);
     }
     let prepared = PreparedUpload::build_unordered(latest_location, ops)?;
-    let encoded: Vec<Vec<u8>> = ops.iter().map(|op| op.encode().to_vec()).collect();
-    let ext = extend_mmr_from_peaks::<H>(peaks, prev_ops_size, &encoded)?;
+    let ext = extend_mmr_from_peaks::<H, _>(peaks, prev_ops_size, prepared.op_bytes())?;
+    let operation_count = prepared.operation_count;
+    let keyed_operation_count = prepared.keyed_operation_count;
 
-    let mut rows = prepared.rows;
+    let mut rows = prepared.into_all_rows();
     for (pos, digest) in &ext.new_nodes {
         rows.push((encode_node_key(*pos), digest.as_ref().to_vec()));
     }
@@ -70,8 +71,8 @@ where
         new_ops_size: ext.size,
         new_root: ext.root,
         latest_location,
-        operation_count: prepared.operation_count,
-        keyed_operation_count: prepared.keyed_operation_count,
+        operation_count,
+        keyed_operation_count,
         includes_watermark: watermark_at.is_some(),
     })
 }

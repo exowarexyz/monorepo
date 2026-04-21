@@ -51,9 +51,9 @@ where
     if ops.is_empty() {
         return Err(QmdbError::EmptyBatch);
     }
-    let (keyed_operation_count, mut rows) = build_auth_immutable_upload_rows(latest_location, ops)?;
-    let encoded: Vec<Vec<u8>> = ops.iter().map(|op| op.encode().to_vec()).collect();
-    let ext = extend_mmr_from_peaks::<H>(peaks, prev_ops_size, &encoded)?;
+    let (keyed_operation_count, encoded, mut rows) =
+        build_auth_immutable_upload_rows(latest_location, ops)?;
+    let ext = extend_mmr_from_peaks::<H, _>(peaks, prev_ops_size, &encoded)?;
     for (pos, digest) in &ext.new_nodes {
         rows.push((
             encode_auth_node_key(NAMESPACE, *pos),

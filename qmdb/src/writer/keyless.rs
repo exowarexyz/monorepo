@@ -62,7 +62,7 @@ where
         })
         .collect::<Result<_, QmdbError>>()?;
     let (operation_count, mut rows) = build_auth_upload_rows(NAMESPACE, latest_location, &encoded)?;
-    let ext = extend_mmr_from_peaks::<H>(peaks, prev_ops_size, &encoded)?;
+    let ext = extend_mmr_from_peaks::<H, _>(peaks, prev_ops_size, &encoded)?;
     for (pos, digest) in &ext.new_nodes {
         rows.push((
             encode_auth_node_key(NAMESPACE, *pos),

@@ -286,14 +286,10 @@ async fn bounded_pipeline_advances_watermark_via_contiguous_acks() {
         slices.push(local_ops[start..end].to_vec());
     }
 
-    type UploadFut = std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<store_qmdb::UploadReceipt, store_qmdb::QmdbError>,
-                > + Send,
-        >,
-    >;
-    let mut in_flight: FuturesUnordered<UploadFut> = FuturesUnordered::new();
+    use futures::future::BoxFuture;
+    let mut in_flight: FuturesUnordered<
+        BoxFuture<'static, Result<store_qmdb::UploadReceipt, store_qmdb::QmdbError>>,
+    > = FuturesUnordered::new();
     let mut results = Vec::with_capacity(BATCHES);
     for batch in slices {
         if in_flight.len() >= MAX_INFLIGHT {

@@ -315,10 +315,13 @@ pub(crate) fn build_auth_upload_rows(
     Ok((operation_count, rows))
 }
 
+/// Returns `(keyed_operation_count, encoded_ops, rows)`. `encoded_ops`
+/// is the ops sequence in canonical bytes form, reused by writers to feed
+/// the MMR extension without re-encoding.
 pub(crate) fn build_auth_immutable_upload_rows<K, V>(
     latest_location: Location,
     operations: &[commonware_storage::qmdb::immutable::Operation<K, V>],
-) -> Result<(u32, AuthRows), QmdbError>
+) -> Result<(u32, Vec<Vec<u8>>, AuthRows), QmdbError>
 where
     K: Array + AsRef<[u8]>,
     V: commonware_codec::Codec + Clone + Send + Sync,
@@ -337,11 +340,13 @@ where
         });
     };
     let mut rows = Vec::<(Key, Vec<u8>)>::with_capacity(operations.len() * 2 + 1);
+    let mut encoded_ops = Vec::<Vec<u8>>::with_capacity(operations.len());
     let mut keyed_operation_count = 0u32;
     for (index, operation) in operations.iter().enumerate() {
         let location = start_location + index as u64;
         let encoded = operation.encode().to_vec();
         ensure_encoded_value_size(encoded.len())?;
+        encoded_ops.push(encoded.clone());
         rows.push((
             encode_auth_operation_key(AuthenticatedBackendNamespace::Immutable, location),
             encoded,
@@ -362,7 +367,7 @@ where
         encode_auth_presence_key(AuthenticatedBackendNamespace::Immutable, latest_location),
         Vec::new(),
     ));
-    Ok((keyed_operation_count, rows))
+    Ok((keyed_operation_count, encoded_ops, rows))
 }
 
 /// Read the authenticated ops-MMR peaks at `size` from the session. Used by
