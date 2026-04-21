@@ -4,7 +4,6 @@ use commonware_storage::{
     mmr::{self, Location, StandardHasher},
     qmdb::{
         any::ordered::{variable::Operation as QmdbOperation, Update as QmdbUpdate},
-        any::unordered::variable::Operation as UnorderedQmdbOperation,
         current::{
             ordered::db::KeyValueProof as CurrentKeyValueProof,
             proof::RangeProof as CurrentRangeProof,
@@ -16,9 +15,22 @@ use commonware_storage::{
 
 use crate::QmdbVariant;
 
-/// A set of (location, operation) pairs whose MMR multi-proof has already been
-/// verified against the store's root. The proof blob is consumed during
-/// verification and not exposed.
+// `Verified*` types below all share one invariant: the MMR proof has already
+// been checked against the store's root and the proof blob has been dropped.
+// Callers work with the plain payload fields.
+
+/// Contiguous range of operations verified against the store's root. Shared
+/// across ordered, unordered, immutable, and keyless variants.
+#[derive(Clone, Debug, PartialEq)]
+#[must_use]
+pub struct VerifiedOperationRange<D: Digest, Op> {
+    pub watermark: Location,
+    pub root: D,
+    pub start_location: Location,
+    pub operations: Vec<Op>,
+}
+
+/// Set of (location, operation) pairs verified as a multi-proof.
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
 pub struct VerifiedMultiOperations<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> {
@@ -27,10 +39,8 @@ pub struct VerifiedMultiOperations<D: Digest, K: QmdbKey + Codec, V: Codec + Clo
     pub operations: Vec<(Location, QmdbOperation<K, V>)>,
 }
 
-/// A single key's Update operation whose current-state proof has already been
-/// verified against the store's current-root at `watermark`. The proof blob is
-/// consumed during verification and not exposed — the `Update` inside
-/// `operation` carries the verified `next_key`.
+/// A single key's `Update` operation verified against the current-state root.
+/// `operation.next_key` is the value that verification was checked against.
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
 pub struct VerifiedKeyValue<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> {
@@ -40,9 +50,8 @@ pub struct VerifiedKeyValue<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Se
     pub operation: QmdbOperation<K, V>,
 }
 
-/// A contiguous range of operations plus bitmap chunks whose current-state
-/// range proof has already been verified against the store's current-root.
-/// The proof blob is consumed during verification and not exposed.
+/// Contiguous range of operations plus bitmap chunks verified against the
+/// current-state root.
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
 pub struct VerifiedCurrentRange<
@@ -58,8 +67,8 @@ pub struct VerifiedCurrentRange<
     pub chunks: Vec<[u8; N]>,
 }
 
-/// Variant-tagged verified range proof: either the historical `Any` shape
-/// (no chunks) or the current-state shape (with bitmap chunks).
+/// Variant-tagged verified range: either the historical (`Any`) shape without
+/// chunks, or the current-state shape with bitmap chunks.
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
 pub enum VerifiedVariantRange<
@@ -90,22 +99,6 @@ impl<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync, const N: usi
     }
 }
 
-/// A contiguous range of operations whose MMR proof has already been verified
-/// against the store's root. The proof blob is consumed during verification
-/// and not exposed — callers work with `operations` directly.
-///
-/// Ordered, unordered, immutable, and keyless variants all produce this shape
-/// (with different `Op` types). Use `QmdbClient::operation_range_proof` to
-/// obtain one.
-#[derive(Clone, Debug, PartialEq)]
-#[must_use]
-pub struct VerifiedOperationRange<D: Digest, Op> {
-    pub watermark: Location,
-    pub root: D,
-    pub start_location: Location,
-    pub operations: Vec<Op>,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VariantRoot<D: Digest> {
     pub watermark: Location,
@@ -129,67 +122,6 @@ where
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
         let mut hasher = StandardHasher::<H>::new();
         verify_multi_proof(&mut hasher, &self.proof, &self.operations, &self.root)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-#[must_use]
-pub(crate) struct OperationRangeProof<
-    D: Digest,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
-> {
-    pub watermark: Location,
-    pub root: D,
-    pub start_location: Location,
-    pub proof: mmr::Proof<D>,
-    pub operations: Vec<QmdbOperation<K, V>>,
-}
-
-impl<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> OperationRangeProof<D, K, V>
-where
-    QmdbOperation<K, V>: Encode,
-{
-    pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
-        let mut hasher = StandardHasher::<H>::new();
-        verify_proof(
-            &mut hasher,
-            &self.proof,
-            self.start_location,
-            &self.operations,
-            &self.root,
-        )
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-#[must_use]
-pub(crate) struct UnorderedOperationRangeProof<
-    D: Digest,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
-> {
-    pub watermark: Location,
-    pub root: D,
-    pub start_location: Location,
-    pub proof: mmr::Proof<D>,
-    pub operations: Vec<UnorderedQmdbOperation<K, V>>,
-}
-
-impl<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync>
-    UnorderedOperationRangeProof<D, K, V>
-where
-    UnorderedQmdbOperation<K, V>: Encode,
-{
-    pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
-        let mut hasher = StandardHasher::<H>::new();
-        verify_proof(
-            &mut hasher,
-            &self.proof,
-            self.start_location,
-            &self.operations,
-            &self.root,
-        )
     }
 }
 
@@ -261,7 +193,7 @@ where
 
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
-pub(crate) struct AuthenticatedOperationRangeProof<D: Digest, Op> {
+pub(crate) struct RangeProof<D: Digest, Op> {
     pub watermark: Location,
     pub root: D,
     pub start_location: Location,
@@ -269,7 +201,7 @@ pub(crate) struct AuthenticatedOperationRangeProof<D: Digest, Op> {
     pub operations: Vec<Op>,
 }
 
-impl<D: Digest, Op: Encode> AuthenticatedOperationRangeProof<D, Op> {
+impl<D: Digest, Op: Encode> RangeProof<D, Op> {
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
         let mut hasher = StandardHasher::<H>::new();
         verify_proof(

@@ -19,7 +19,7 @@ use crate::auth::{
 use crate::codec::{ensure_encoded_value_size, mmr_size_for_watermark};
 use crate::core::{retry_transient_post_ingest_query, wait_until_query_visible_sequence};
 use crate::error::QmdbError;
-use crate::proof::{AuthenticatedOperationRangeProof, VerifiedOperationRange};
+use crate::proof::{RangeProof, VerifiedOperationRange};
 use crate::storage::AuthKvMmrStorage;
 use crate::UploadReceipt;
 
@@ -205,8 +205,7 @@ where
         Ok(operation.into_value())
     }
 
-    /// Fetch and verify a contiguous range of operations. The MMR proof is
-    /// built, verified against the store's root, and discarded.
+    /// Verified contiguous range of operations.
     pub async fn operation_range_proof(
         &self,
         watermark: Location,
@@ -240,21 +239,20 @@ where
         let proof = verification::range_proof(&storage, start_location..end)
             .await
             .map_err(|e| QmdbError::CommonwareMmr(e.to_string()))?;
-        let raw: AuthenticatedOperationRangeProof<H::Digest, KeylessOperation<V>> =
-            AuthenticatedOperationRangeProof {
-                watermark,
-                root: compute_auth_root::<H>(&session, namespace, watermark).await?,
+        let raw: RangeProof<H::Digest, KeylessOperation<V>> = RangeProof {
+            watermark,
+            root: compute_auth_root::<H>(&session, namespace, watermark).await?,
+            start_location,
+            proof,
+            operations: load_auth_operation_range::<KeylessOperation<V>>(
+                &session,
+                namespace,
                 start_location,
-                proof,
-                operations: load_auth_operation_range::<KeylessOperation<V>>(
-                    &session,
-                    namespace,
-                    start_location,
-                    end,
-                    &self.value_cfg,
-                )
-                .await?,
-            };
+                end,
+                &self.value_cfg,
+            )
+            .await?,
+        };
         if !raw.verify::<H>() {
             return Err(QmdbError::CorruptData(
                 "keyless range proof failed verification".to_string(),
@@ -287,12 +285,11 @@ where
             drv::authenticated_classify_and_filter(AuthenticatedBackendNamespace::Keyless);
         let sub = drv::open_subscription(&self.client, filter, since).await?;
 
-        let build_proof: drv::BuildProof<
-            VerifiedOperationRange<H::Digest, KeylessOperation<V>>,
-        > = Arc::new(move |watermark: Location, start: Location, count: u32| {
-            let me = self.clone();
-            async move { me.operation_range_proof(watermark, start, count).await }.boxed()
-        });
+        let build_proof: drv::BuildProof<VerifiedOperationRange<H::Digest, KeylessOperation<V>>> =
+            Arc::new(move |watermark: Location, start: Location, count: u32| {
+                let me = self.clone();
+                async move { me.operation_range_proof(watermark, start, count).await }.boxed()
+            });
 
         Ok(BatchProofStream::new(sub, classify, build_proof))
     }

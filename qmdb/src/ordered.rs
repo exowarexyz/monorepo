@@ -26,7 +26,7 @@ use crate::codec::{
 use crate::core::{HistoricalOpsClientCore, PreparedCurrentBoundaryUpload, PreparedUpload};
 use crate::error::QmdbError;
 use crate::proof::{
-    CurrentOperationRangeProofResult, KeyValueProofResult, MultiProofResult, OperationRangeProof,
+    CurrentOperationRangeProofResult, KeyValueProofResult, MultiProofResult, RangeProof,
     VariantRoot, VerifiedCurrentRange, VerifiedKeyValue, VerifiedMultiOperations,
     VerifiedOperationRange, VerifiedVariantRange,
 };
@@ -308,9 +308,7 @@ where
         self.core().query_many_at(keys, max_location).await
     }
 
-    /// Fetch and verify a multi-proof over a set of keys. The MMR proof is
-    /// built, verified against the store's root, and discarded — callers
-    /// receive only the verified (location, operation) pairs.
+    /// Verified multi-proof over a set of keys.
     pub async fn multi_proof_at<Q: AsRef<[u8]>>(
         &self,
         watermark: Location,
@@ -390,9 +388,7 @@ where
         })
     }
 
-    /// Fetch and verify a contiguous range of operations. The MMR proof is
-    /// built, verified against the store's root, and discarded — callers
-    /// receive only the verified data.
+    /// Verified contiguous range of operations.
     pub async fn operation_range_proof(
         &self,
         watermark: Location,
@@ -447,19 +443,16 @@ where
         let (classify, filter) = drv::unauthenticated_classify_and_filter();
         let sub = drv::open_subscription(&self.client, filter, since).await?;
 
-        let build_proof: drv::BuildProof<
-            VerifiedOperationRange<H::Digest, QmdbOperation<K, V>>,
-        > = Arc::new(move |watermark: Location, start: Location, count: u32| {
-            let me = self.clone();
-            async move { me.operation_range_proof(watermark, start, count).await }.boxed()
-        });
+        let build_proof: drv::BuildProof<VerifiedOperationRange<H::Digest, QmdbOperation<K, V>>> =
+            Arc::new(move |watermark: Location, start: Location, count: u32| {
+                let me = self.clone();
+                async move { me.operation_range_proof(watermark, start, count).await }.boxed()
+            });
 
         Ok(BatchProofStream::new(sub, classify, build_proof))
     }
 
-    /// Fetch and verify a contiguous range of operations for the given variant.
-    /// The proof is verified against the store's root and discarded — callers
-    /// receive only the verified data wrapped in [`VerifiedVariantRange`].
+    /// Verified contiguous range of operations for the given variant.
     pub async fn operation_range_proof_for_variant(
         &self,
         watermark: Location,
@@ -501,7 +494,7 @@ where
                 let operations = self
                     .load_operation_range(&session, start_location, end)
                     .await?;
-                let raw = OperationRangeProof {
+                let raw = RangeProof {
                     watermark,
                     root,
                     start_location,
@@ -558,9 +551,7 @@ where
         }
     }
 
-    /// Fetch and verify a contiguous range of operations in the current-state
-    /// variant (bitmap chunks included). The proof is verified internally and
-    /// discarded.
+    /// Verified contiguous range from the current-state variant (with bitmap chunks).
     pub async fn current_operation_range_proof(
         &self,
         watermark: Location,
@@ -583,9 +574,9 @@ where
         }
     }
 
-    /// Fetch and verify a single key's current-state proof. Proof verified
-    /// internally and discarded. The returned `operation` is the matching
-    /// `Update` — its `next_key` is the verified successor-key.
+    /// Verified current-state proof for a single key. The returned
+    /// `operation` is the matching `Update`; its `next_key` is the value
+    /// the proof was verified against.
     pub async fn key_value_proof_at<Q: AsRef<[u8]>>(
         &self,
         watermark: Location,

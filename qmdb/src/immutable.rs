@@ -20,7 +20,7 @@ use crate::auth::{
 use crate::codec::{mmr_size_for_watermark, UpdateRow};
 use crate::core::{retry_transient_post_ingest_query, wait_until_query_visible_sequence};
 use crate::error::QmdbError;
-use crate::proof::{AuthenticatedOperationRangeProof, VerifiedOperationRange};
+use crate::proof::{RangeProof, VerifiedOperationRange};
 use crate::storage::AuthKvMmrStorage;
 use crate::{UploadReceipt, VersionedValue};
 
@@ -229,8 +229,7 @@ where
         }
     }
 
-    /// Fetch and verify a contiguous range of operations. The MMR proof is
-    /// built, verified against the store's root, and discarded.
+    /// Verified contiguous range of operations.
     pub async fn operation_range_proof(
         &self,
         watermark: Location,
@@ -264,21 +263,20 @@ where
         let proof = verification::range_proof(&storage, start_location..end)
             .await
             .map_err(|e| QmdbError::CommonwareMmr(e.to_string()))?;
-        let raw: AuthenticatedOperationRangeProof<H::Digest, ImmutableOperation<K, V>> =
-            AuthenticatedOperationRangeProof {
-                watermark,
-                root: compute_auth_root::<H>(&session, namespace, watermark).await?,
+        let raw: RangeProof<H::Digest, ImmutableOperation<K, V>> = RangeProof {
+            watermark,
+            root: compute_auth_root::<H>(&session, namespace, watermark).await?,
+            start_location,
+            proof,
+            operations: load_auth_operation_range::<ImmutableOperation<K, V>>(
+                &session,
+                namespace,
                 start_location,
-                proof,
-                operations: load_auth_operation_range::<ImmutableOperation<K, V>>(
-                    &session,
-                    namespace,
-                    start_location,
-                    end,
-                    &self.value_cfg,
-                )
-                .await?,
-            };
+                end,
+                &self.value_cfg,
+            )
+            .await?,
+        };
         if !raw.verify::<H>() {
             return Err(QmdbError::CorruptData(
                 "immutable range proof failed verification".to_string(),

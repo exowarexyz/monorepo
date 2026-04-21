@@ -1,8 +1,9 @@
 //! Shared batch accumulator + Stream adapter for all four QMDB variants.
 //!
 //! Variants plug in via `(Classify, BuildProof)` pairs; the three-state
-//! pipeline (OP → PRESENCE → WATERMARK → drain) is otherwise identical. The
-//! driver does NOT verify emitted proofs — callers must run `verify::<H>()`.
+//! pipeline (OP → PRESENCE → WATERMARK → drain) is otherwise identical.
+//! Verification happens inside each variant's `BuildProof`, so items emitted
+//! from the stream are already verified against the store's root.
 
 use std::collections::BTreeMap;
 use std::future::Future;

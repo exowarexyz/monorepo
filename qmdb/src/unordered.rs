@@ -9,7 +9,7 @@ use exoware_sdk_rs::StoreClient;
 use crate::codec::{encode_presence_key, mmr_size_for_watermark};
 use crate::core::{HistoricalOpsClientCore, PreparedUpload};
 use crate::error::QmdbError;
-use crate::proof::{UnorderedOperationRangeProof, VerifiedOperationRange};
+use crate::proof::{RangeProof, VerifiedOperationRange};
 use crate::storage::KvMmrStorage;
 use crate::{UploadReceipt, VersionedValue};
 
@@ -185,8 +185,7 @@ where
         self.core().compute_ops_root::<H>(&session, watermark).await
     }
 
-    /// Fetch and verify a contiguous range of operations. The MMR proof is
-    /// built, verified against the store's root, and discarded.
+    /// Verified contiguous range of operations.
     pub async fn operation_range_proof(
         &self,
         watermark: Location,
@@ -240,7 +239,7 @@ where
             operations.push(op);
         }
 
-        let raw = UnorderedOperationRangeProof {
+        let raw = RangeProof {
             watermark,
             root,
             start_location,
