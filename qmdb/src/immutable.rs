@@ -1,10 +1,10 @@
 use std::marker::PhantomData;
-use std::sync::{atomic::AtomicU64, Arc};
+use std::sync::Arc;
 
 use commonware_codec::{Codec, Decode, Encode, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
-    mmr::{verification, Location, Position},
+    mmr::{verification, Location},
     qmdb::immutable::Operation as ImmutableOperation,
 };
 use commonware_utils::Array;
@@ -12,24 +12,22 @@ use exoware_sdk_rs::StoreClient;
 
 use crate::auth::AuthenticatedBackendNamespace;
 use crate::auth::{
-    append_auth_nodes_incrementally, build_auth_immutable_upload_rows, compute_auth_root,
-    decode_auth_immutable_update_location, encode_auth_presence_key, encode_auth_watermark_key,
-    load_auth_operation_at, load_auth_operation_range, load_latest_auth_immutable_update_row,
-    read_latest_auth_watermark, require_auth_uploaded_boundary, require_published_auth_watermark,
+    compute_auth_root, decode_auth_immutable_update_location, load_auth_operation_at,
+    load_auth_operation_range, load_latest_auth_immutable_update_row, read_latest_auth_watermark,
+    require_published_auth_watermark,
 };
 use crate::codec::{mmr_size_for_watermark, UpdateRow};
-use crate::core::{retry_transient_post_ingest_query, wait_until_query_visible_sequence};
+use crate::core::retry_transient_post_ingest_query;
 use crate::error::QmdbError;
 use crate::proof::{RangeProof, VerifiedOperationRange};
 use crate::storage::AuthKvMmrStorage;
-use crate::{UploadReceipt, VersionedValue};
+use crate::VersionedValue;
 
 #[derive(Clone, Debug)]
 pub struct ImmutableClient<H: Hasher, K: AsRef<[u8]> + Codec, V: Codec + Send + Sync> {
     client: StoreClient,
     value_cfg: V::Cfg,
     update_row_cfg: (K::Cfg, V::Cfg),
-    query_visible_sequence: Option<Arc<AtomicU64>>,
     _marker: PhantomData<(H, K)>,
 }
 
@@ -55,27 +53,12 @@ where
             client,
             value_cfg,
             update_row_cfg,
-            query_visible_sequence: None,
             _marker: PhantomData,
         }
     }
 
-    pub fn with_query_visible_sequence(mut self, seq: Arc<AtomicU64>) -> Self {
-        self.query_visible_sequence = Some(seq);
-        self
-    }
-
-    pub fn inner(&self) -> &StoreClient {
-        &self.client
-    }
-
     pub fn sequence_number(&self) -> u64 {
         self.client.sequence_number()
-    }
-
-    async fn sync_after_ingest(&self) -> Result<(), QmdbError> {
-        let token = self.client.sequence_number();
-        wait_until_query_visible_sequence(self.query_visible_sequence.as_ref(), token).await
     }
 
     pub async fn writer_location_watermark(&self) -> Result<Option<Location>, QmdbError> {
@@ -86,94 +69,6 @@ where
             }
         })
         .await
-    }
-
-    pub async fn upload_operations(
-        &self,
-        latest_location: Location,
-        operations: &[ImmutableOperation<K, V>],
-    ) -> Result<UploadReceipt, QmdbError> {
-        if operations.is_empty() {
-            return Err(QmdbError::EmptyBatch);
-        }
-        let namespace = AuthenticatedBackendNamespace::Immutable;
-        if self
-            .client
-            .query()
-            .get(&encode_auth_presence_key(namespace, latest_location))
-            .await?
-            .is_some()
-        {
-            return Err(QmdbError::DuplicateBatchWatermark { latest_location });
-        }
-        let (keyed_operation_count, rows) =
-            build_auth_immutable_upload_rows(latest_location, operations)?;
-        let refs = rows
-            .iter()
-            .map(|(key, value)| (key, value.as_slice()))
-            .collect::<Vec<_>>();
-        self.client.ingest().put(&refs).await?;
-        self.sync_after_ingest().await?;
-        Ok(UploadReceipt {
-            latest_location,
-            operation_count: Location::new(operations.len() as u64),
-            keyed_operation_count,
-            writer_location_watermark: self.writer_location_watermark().await?,
-            sequence_number: self.client.sequence_number(),
-        })
-    }
-
-    pub async fn publish_writer_location_watermark(
-        &self,
-        location: Location,
-    ) -> Result<Location, QmdbError> {
-        let namespace = AuthenticatedBackendNamespace::Immutable;
-        let session = self.client.create_session();
-        let latest = read_latest_auth_watermark(&session, namespace).await?;
-        if let Some(watermark) = latest {
-            if watermark >= location {
-                return Ok(watermark);
-            }
-        }
-        require_auth_uploaded_boundary(&session, namespace, location).await?;
-        let previous_ops_size = match latest {
-            Some(previous) => mmr_size_for_watermark(previous)?,
-            None => Position::new(0),
-        };
-        let delta_start = latest.map_or(Location::new(0), |watermark| watermark + 1);
-        let end_exclusive = location
-            .checked_add(1)
-            .ok_or_else(|| QmdbError::CorruptData("watermark overflow".to_string()))?;
-        let encoded = crate::auth::load_auth_operation_bytes_range(
-            &session,
-            namespace,
-            delta_start,
-            end_exclusive,
-        )
-        .await?;
-        let mut rows = Vec::new();
-        append_auth_nodes_incrementally::<H>(
-            &session,
-            namespace,
-            previous_ops_size,
-            &encoded,
-            &mut rows,
-        )
-        .await?;
-        rows.push((encode_auth_watermark_key(namespace, location), Vec::new()));
-        let refs = rows
-            .iter()
-            .map(|(key, value)| (key, value.as_slice()))
-            .collect::<Vec<_>>();
-        self.client.ingest().put(&refs).await?;
-        self.sync_after_ingest().await?;
-        let visible = self.writer_location_watermark().await?;
-        if visible < Some(location) {
-            return Err(QmdbError::CorruptData(format!(
-                "immutable watermark publish did not become query-visible: requested={location}, visible={visible:?}"
-            )));
-        }
-        Ok(location)
     }
 
     pub async fn root_at(&self, watermark: Location) -> Result<H::Digest, QmdbError> {

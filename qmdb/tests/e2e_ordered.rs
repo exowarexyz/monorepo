@@ -18,16 +18,26 @@ use commonware_storage::qmdb::{
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use store_qmdb::MAX_OPERATION_SIZE;
-use store_qmdb::{build_current_boundary_state, CurrentBoundaryState, OrderedClient};
-
-use common::retry;
+use exoware_sdk_rs::StoreClient;
+use store_qmdb::{build_current_boundary_state, CurrentBoundaryState, OrderedClient, OrderedWriter};
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
 type BatchProof = commonware_storage::mmr::Proof<Digest>;
 type BatchOperation = QmdbOperation<Vec<u8>, Vec<u8>>;
 type TestOrderedClient = OrderedClient<Sha256, Vec<u8>, Vec<u8>, N>;
+type TestOrderedWriter = OrderedWriter<Sha256, Vec<u8>, Vec<u8>, N>;
 type LocalDb = LocalQmdbDb<cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>;
+
+async fn mirror_local(client: &StoreClient, local: &LocalReference) {
+    let writer: TestOrderedWriter = TestOrderedWriter::new(client.clone())
+        .await
+        .expect("writer");
+    writer
+        .upload_and_publish(&local.operations, &local.current_boundary)
+        .await
+        .expect("upload_and_publish");
+}
 
 fn op_cfg() -> <BatchOperation as commonware_codec::Read>::Cfg {
     (
@@ -126,37 +136,7 @@ async fn ordered_round_trip() {
     let (_dir, _server, client) = common::local_store_client().await;
     let local = build_local_db().await;
 
-    retry(
-        || {
-            let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
-            let ops = local.operations.clone();
-            let loc = local.latest_location;
-            async move { c.upload_operations(loc, &ops).await.map(|_| ()) }
-        },
-        "upload_operations",
-    )
-    .await;
-
-    retry(
-        || {
-            let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
-            let boundary = local.current_boundary.clone();
-            let loc = local.latest_location;
-            async move { c.upload_current_boundary_state(loc, &boundary).await }
-        },
-        "upload_current_boundary_state",
-    )
-    .await;
-
-    retry(
-        || {
-            let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
-            let loc = local.latest_location;
-            async move { c.publish_writer_location_watermark(loc).await.map(|_| ()) }
-        },
-        "publish_watermark",
-    )
-    .await;
+    mirror_local(&client, &local).await;
 
     let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
     let watermark = c.writer_location_watermark().await.expect("watermark");
@@ -194,31 +174,7 @@ async fn current_root_at() {
     let (_dir, _server, client) = common::local_store_client().await;
     let local = build_local_db().await;
 
-    retry(
-        || {
-            let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
-            let ops = local.operations.clone();
-            let boundary = local.current_boundary.clone();
-            let loc = local.latest_location;
-            async move {
-                c.upload_operations_with_current_boundary(loc, &ops, &boundary)
-                    .await
-                    .map(|_| ())
-            }
-        },
-        "upload_operations_with_current_boundary",
-    )
-    .await;
-
-    retry(
-        || {
-            let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
-            let loc = local.latest_location;
-            async move { c.publish_writer_location_watermark(loc).await.map(|_| ()) }
-        },
-        "publish_watermark",
-    )
-    .await;
+    mirror_local(&client, &local).await;
 
     let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
     let root = c
@@ -233,31 +189,7 @@ async fn current_operation_range_proof() {
     let (_dir, _server, client) = common::local_store_client().await;
     let local = build_local_db().await;
 
-    retry(
-        || {
-            let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
-            let ops = local.operations.clone();
-            let boundary = local.current_boundary.clone();
-            let loc = local.latest_location;
-            async move {
-                c.upload_operations_with_current_boundary(loc, &ops, &boundary)
-                    .await
-                    .map(|_| ())
-            }
-        },
-        "upload_operations_with_current_boundary",
-    )
-    .await;
-
-    retry(
-        || {
-            let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
-            let loc = local.latest_location;
-            async move { c.publish_writer_location_watermark(loc).await.map(|_| ()) }
-        },
-        "publish_watermark",
-    )
-    .await;
+    mirror_local(&client, &local).await;
 
     let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
     let proof = c
@@ -276,31 +208,7 @@ async fn key_value_proof() {
     let (_dir, _server, client) = common::local_store_client().await;
     let local = build_local_db().await;
 
-    retry(
-        || {
-            let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
-            let ops = local.operations.clone();
-            let boundary = local.current_boundary.clone();
-            let loc = local.latest_location;
-            async move {
-                c.upload_operations_with_current_boundary(loc, &ops, &boundary)
-                    .await
-                    .map(|_| ())
-            }
-        },
-        "upload_operations_with_current_boundary",
-    )
-    .await;
-
-    retry(
-        || {
-            let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
-            let loc = local.latest_location;
-            async move { c.publish_writer_location_watermark(loc).await.map(|_| ()) }
-        },
-        "publish_watermark",
-    )
-    .await;
+    mirror_local(&client, &local).await;
 
     let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
     let result = c
@@ -321,31 +229,7 @@ async fn multi_proof() {
     let (_dir, _server, client) = common::local_store_client().await;
     let local = build_local_db().await;
 
-    retry(
-        || {
-            let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
-            let ops = local.operations.clone();
-            let boundary = local.current_boundary.clone();
-            let loc = local.latest_location;
-            async move {
-                c.upload_operations_with_current_boundary(loc, &ops, &boundary)
-                    .await
-                    .map(|_| ())
-            }
-        },
-        "upload_operations_with_current_boundary",
-    )
-    .await;
-
-    retry(
-        || {
-            let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
-            let loc = local.latest_location;
-            async move { c.publish_writer_location_watermark(loc).await.map(|_| ()) }
-        },
-        "publish_watermark",
-    )
-    .await;
+    mirror_local(&client, &local).await;
 
     let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
     let result = c

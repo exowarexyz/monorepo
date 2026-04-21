@@ -302,6 +302,13 @@ impl<H: Hasher> mmr::hasher::Hasher for GraftedHasher<H> {
     }
 }
 
+// TODO: replace this with an incremental extractor that reads the delta
+// directly off `commonware_storage::qmdb::current::batch::MerkleizedBatch`
+// (bitmap chunk overlay + grafted-MMR subtree) after each local
+// `apply_batch`. That requires the upstream commonware patch to expose
+// `MerkleizedBatch.bitmap` / `.grafted` publicly (today they are
+// `pub(crate)`). This rebuild-from-scratch path is O(n_total_ops) per batch
+// and is only acceptable for tests and small histories.
 pub async fn build_current_boundary_state<H, K, V, const N: usize>(
     previous_operations: Option<&[QmdbOperation<K, V>]>,
     operations: &[QmdbOperation<K, V>],

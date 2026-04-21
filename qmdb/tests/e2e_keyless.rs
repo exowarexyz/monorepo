@@ -13,7 +13,7 @@ use commonware_storage::qmdb::{
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_sdk_rs::StoreClient;
-use store_qmdb::KeylessClient;
+use store_qmdb::{KeylessClient, KeylessWriter};
 
 use common::retry;
 
@@ -21,9 +21,14 @@ type Digest = commonware_cryptography::sha256::Digest;
 type LocalDb = Keyless<deterministic::Context, Vec<u8>, commonware_cryptography::Sha256>;
 
 type TestKeylessClient = KeylessClient<commonware_cryptography::Sha256, Vec<u8>>;
+type TestKeylessWriter = KeylessWriter<commonware_cryptography::Sha256, Vec<u8>>;
 
 fn fresh_keyless(c: StoreClient) -> TestKeylessClient {
     TestKeylessClient::from_client(c, ((0..=10000).into(), ()))
+}
+
+async fn fresh_writer(c: StoreClient) -> TestKeylessWriter {
+    TestKeylessWriter::new(c).await.expect("writer")
 }
 
 struct LocalReference {
@@ -100,26 +105,11 @@ async fn keyless_round_trip() {
     let (_dir, _server, client) = common::local_store_client().await;
     let local = build_local_db().await;
 
-    retry(
-        || {
-            let c = fresh_keyless(client.clone());
-            let ops = local.operations.clone();
-            let loc = local.latest_location;
-            async move { c.upload_operations(loc, &ops).await.map(|_| ()) }
-        },
-        "upload_operations",
-    )
-    .await;
-
-    retry(
-        || {
-            let c = fresh_keyless(client.clone());
-            let loc = local.latest_location;
-            async move { c.publish_writer_location_watermark(loc).await.map(|_| ()) }
-        },
-        "publish_watermark",
-    )
-    .await;
+    let writer = fresh_writer(client.clone()).await;
+    writer
+        .upload_and_publish(&local.operations)
+        .await
+        .expect("upload_and_publish");
 
     let root = retry(
         || {

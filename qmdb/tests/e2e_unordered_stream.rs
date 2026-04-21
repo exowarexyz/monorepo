@@ -18,9 +18,9 @@ use commonware_storage::qmdb::{
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use futures::StreamExt;
-use store_qmdb::{UnorderedClient, MAX_OPERATION_SIZE};
+use exoware_sdk_rs::StoreClient;
+use store_qmdb::{UnorderedClient, UnorderedWriter, MAX_OPERATION_SIZE};
 
-use common::retry;
 
 type Digest = commonware_cryptography::sha256::Digest;
 type BatchProof = commonware_storage::mmr::Proof<Digest>;
@@ -103,30 +103,13 @@ async fn build_local_batch() -> LocalBatch {
     .expect("join")
 }
 
-async fn upload_and_publish(client: &TestUnorderedClient, batch: &LocalBatch) {
-    retry(
-        || {
-            let ops = batch.operations.clone();
-            let loc = batch.latest_location;
-            async move {
-                client.upload_operations(loc, &ops).await?;
-                Ok(())
-            }
-        },
-        "upload_operations",
-    )
-    .await;
-    retry(
-        || {
-            let loc = batch.latest_location;
-            async move {
-                client.publish_writer_location_watermark(loc).await?;
-                Ok(())
-            }
-        },
-        "publish_watermark",
-    )
-    .await;
+async fn upload_and_publish(client: &StoreClient, batch: &LocalBatch) {
+    let writer: UnorderedWriter<Sha256, Vec<u8>, Vec<u8>> =
+        UnorderedWriter::new(client.clone()).await.expect("writer");
+    writer
+        .upload_and_publish(&batch.operations)
+        .await
+        .expect("upload_and_publish");
 }
 
 #[tokio::test]
@@ -146,7 +129,7 @@ async fn stream_batches_emits_verifiable_unordered_range_proof() {
         .expect("stream_batches");
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    upload_and_publish(&uc, &local).await;
+    upload_and_publish(&client, &local).await;
 
     let proof = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await

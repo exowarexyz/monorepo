@@ -19,11 +19,11 @@ use commonware_storage::qmdb::{
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use futures::StreamExt;
+use exoware_sdk_rs::StoreClient;
 use store_qmdb::{
-    build_current_boundary_state, CurrentBoundaryState, OrderedClient, MAX_OPERATION_SIZE,
+    build_current_boundary_state, CurrentBoundaryState, OrderedClient, OrderedWriter,
+    MAX_OPERATION_SIZE,
 };
-
-use common::retry;
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
@@ -113,39 +113,14 @@ async fn build_local_batch() -> LocalBatch {
     .expect("join")
 }
 
-/// Upload + publish `batch` through `client`.
-async fn upload_and_publish(client: &TestOrderedClient, batch: &LocalBatch) {
-    retry(
-        || {
-            let ops = batch.operations.clone();
-            let loc = batch.latest_location;
-            async move { client.upload_operations(loc, &ops).await.map(|_| ()) }
-        },
-        "upload_operations",
-    )
-    .await;
-    retry(
-        || {
-            let boundary = batch.current_boundary.clone();
-            let loc = batch.latest_location;
-            async move { client.upload_current_boundary_state(loc, &boundary).await }
-        },
-        "upload_current_boundary_state",
-    )
-    .await;
-    retry(
-        || {
-            let loc = batch.latest_location;
-            async move {
-                client
-                    .publish_writer_location_watermark(loc)
-                    .await
-                    .map(|_| ())
-            }
-        },
-        "publish_watermark",
-    )
-    .await;
+/// Upload + publish `batch` via an OrderedWriter.
+async fn upload_and_publish(client: &StoreClient, batch: &LocalBatch) {
+    let writer: OrderedWriter<Sha256, Vec<u8>, Vec<u8>, N> =
+        OrderedWriter::new(client.clone()).await.expect("writer");
+    writer
+        .upload_and_publish(&batch.operations, &batch.current_boundary)
+        .await
+        .expect("upload_and_publish");
 }
 
 #[tokio::test]
@@ -168,7 +143,7 @@ async fn stream_batches_emits_verifiable_range_proof_after_publish() {
     // captures our frames.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    upload_and_publish(&oc, &local).await;
+    upload_and_publish(&client, &local).await;
 
     let proof = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await
@@ -193,7 +168,7 @@ async fn stream_batches_replays_since_cursor() {
     ));
 
     // First upload + publish the batch (no subscriber active).
-    upload_and_publish(&oc, &local).await;
+    upload_and_publish(&client, &local).await;
     let seq_after = client.sequence_number();
 
     // Subscribe with since=1; the driver should replay the retained batch

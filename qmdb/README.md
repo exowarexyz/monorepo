@@ -433,6 +433,83 @@ not allowed:
   current_root_at(150)   // not a batch boundary
 ```
 
+## Writers
+
+Each backend exposes a `*Writer` helper for sole-writer ingest. Writers hold
+cached MMR peaks + a pending-batch queue in memory; `upload_and_publish`
+dispatches a single atomic PUT per batch with zero store reads in the hot
+loop. Construction auto-bootstraps from the store's latest watermark.
+
+```rust,ignore
+use std::sync::Arc;
+use store_qmdb::KeylessWriter;
+
+let writer: Arc<KeylessWriter<Sha256, Vec<u8>>> =
+    Arc::new(KeylessWriter::new(client.clone()).await?);
+
+// Sequential usage — awaits each upload.
+writer.upload_and_publish(&batch_ops).await?;
+
+// Pipelined usage — dispatch concurrent PUTs up to a bounded depth.
+use futures::stream::{FuturesUnordered, StreamExt};
+let mut in_flight = FuturesUnordered::new();
+for batch in batches {
+    if in_flight.len() >= MAX_INFLIGHT {
+        in_flight.next().await.unwrap()?;
+    }
+    let w = writer.clone();
+    in_flight.push(Box::pin(async move { w.upload_and_publish(&batch).await }));
+}
+while let Some(r) = in_flight.next().await { r?; }
+writer.flush().await?;  // publish the tail watermark
+```
+
+### Watermark rule (per-batch)
+
+Every batch's PUT carries a watermark row at the **latest safe location**:
+
+| Pipeline state at dispatch | Watermark row emitted at |
+|---|---|
+| empty (no in-flight PUTs) | this batch's own `latest_location` |
+| non-empty, some prefix ACKd | the contiguous-acked prefix's `latest_location` |
+| non-empty, nothing ACKd yet | *omitted* |
+
+The "contiguous-acked prefix" is the longest prefix of dispatched batches for
+which every batch has returned `Ok`. Popping advances in ACK order (handled
+internally per-batch via a `dispatch_id` — out-of-order ACKs across HTTP/2
+streams are handled correctly).
+
+Under steady-state bounded-concurrency pipelining the published watermark
+lags the dispatch frontier by at most the pipeline depth — never unbounded.
+
+### Flush
+
+`flush()` awaits all in-flight PUTs and, if the last dispatched batch's
+`latest_location` is ahead of the published watermark, issues one standalone
+watermark-row PUT to catch up. Needed only:
+
+- at end-of-stream to publish the tail after the last dispatch, or
+- if you want to block until all pending writes are both ACKd and
+  watermarked (e.g. before a graceful shutdown).
+
+Not needed between batches in steady state — the per-batch rule keeps the
+watermark advancing on its own.
+
+### Failure recovery
+
+Any PUT failure poisons the writer. `upload_and_publish` returns the error
+and future calls return `WriterPoisoned` until `bootstrap()` is called. The
+caller re-reads the store's committed watermark via
+`writer.latest_published_watermark()` (or the reader client) and re-submits
+any batches past that location from its own durable source. Re-submission is
+safe: PUT rows are content-addressed by key and MMR math is deterministic.
+
+### Sole-writer contract
+
+Writers assume they are the only publisher for a namespace at a time.
+Concurrent writers would race on MMR peak extension and corrupt each other's
+state. The store's ingest layer does not enforce this — it's on the caller.
+
 ## Streaming
 
 Every client exposes `stream_batches(since)` which returns an async `Stream`

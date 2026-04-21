@@ -39,6 +39,7 @@ mod keyless;
 mod ordered;
 mod stream;
 mod unordered;
+mod writer;
 
 pub use error::QmdbError;
 pub use immutable::ImmutableClient;
@@ -49,6 +50,11 @@ pub use proof::{
     VerifiedOperationRange, VerifiedVariantRange,
 };
 pub use unordered::UnorderedClient;
+pub use writer::{
+    build_immutable_upload, build_keyless_upload, build_ordered_upload, build_unordered_upload,
+    BuiltImmutableUpload, BuiltKeylessUpload, BuiltOrderedUpload, BuiltUnorderedUpload,
+    ImmutableWriter, KeylessWriter, OrderedWriter, UnorderedWriter,
+};
 
 #[cfg(any(test, feature = "test-utils"))]
 pub use boundary::build_current_boundary_state;
@@ -79,11 +85,11 @@ pub struct VersionedValue<K, V> {
 /// Metadata returned after uploading one batch of QMDB operations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UploadReceipt {
+    /// Inclusive maximum Location of ops in this batch.
     pub latest_location: Location,
-    pub operation_count: Location,
-    pub keyed_operation_count: u32,
+    /// The watermark this batch published, if any. `None` when pipelining
+    /// deferred the watermark to a later `flush()` or batch.
     pub writer_location_watermark: Option<Location>,
-    pub sequence_number: u64,
 }
 
 /// Current-state rows for one uploaded batch boundary.

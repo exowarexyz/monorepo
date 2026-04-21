@@ -15,9 +15,8 @@ use commonware_storage::qmdb::{
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_sdk_rs::StoreClient;
 use futures::StreamExt;
-use store_qmdb::KeylessClient;
+use store_qmdb::{KeylessClient, KeylessWriter};
 
-use common::retry;
 
 type Digest = commonware_cryptography::sha256::Digest;
 type LocalDb = Keyless<deterministic::Context, Vec<u8>, commonware_cryptography::Sha256>;
@@ -84,29 +83,13 @@ async fn build_local_batch() -> LocalBatch {
     .expect("join")
 }
 
-async fn upload_and_publish(client: &TestKeylessClient, batch: &LocalBatch) {
-    retry(
-        || {
-            let ops = batch.operations.clone();
-            let loc = batch.latest_location;
-            async move { client.upload_operations(loc, &ops).await.map(|_| ()) }
-        },
-        "upload_operations",
-    )
-    .await;
-    retry(
-        || {
-            let loc = batch.latest_location;
-            async move {
-                client
-                    .publish_writer_location_watermark(loc)
-                    .await
-                    .map(|_| ())
-            }
-        },
-        "publish_watermark",
-    )
-    .await;
+async fn upload_and_publish(client: &StoreClient, batch: &LocalBatch) {
+    let writer: KeylessWriter<commonware_cryptography::Sha256, Vec<u8>> =
+        KeylessWriter::new(client.clone()).await.expect("writer");
+    writer
+        .upload_and_publish(&batch.operations)
+        .await
+        .expect("upload_and_publish");
 }
 
 #[tokio::test]
@@ -122,7 +105,7 @@ async fn stream_batches_emits_verifiable_keyless_range_proof() {
         .expect("stream_batches");
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    upload_and_publish(&kc, &local).await;
+    upload_and_publish(&client, &local).await;
 
     let proof = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await

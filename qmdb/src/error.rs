@@ -17,8 +17,6 @@ pub enum QmdbError {
     EmptyProofRequest,
     #[error("range proof max_locations must be > 0")]
     InvalidRangeLength,
-    #[error("batch with latest location {latest_location} already exists")]
-    DuplicateBatchWatermark { latest_location: Location },
     #[error("duplicate key in proof request: {key:?}")]
     DuplicateRequestedKey { key: Vec<u8> },
     #[error("requested location {requested} is above published writer watermark {available}")]
@@ -38,8 +36,6 @@ pub enum QmdbError {
     RangeStartOutOfBounds { start: Location, count: Location },
     #[error("encoded value exceeds store value limit ({len} > {max})")]
     EncodedValueTooLarge { len: usize, max: usize },
-    #[error("raw key length {len} exceeds supported limit {max}")]
-    RawKeyTooLarge { len: usize, max: usize },
     #[error(
         "sortable key encoding for raw key length {raw_len} expands to {encoded_len} bytes, exceeding max {max}"
     )]
@@ -54,4 +50,8 @@ pub enum QmdbError {
     CommonwareMmr(String),
     #[error("qmdb stream transport error: {0}")]
     Stream(String),
+    #[error("writer has not been bootstrapped; call bootstrap() first")]
+    WriterNotBootstrapped,
+    #[error("writer is poisoned after an earlier upload failure: {0}")]
+    WriterPoisoned(String),
 }

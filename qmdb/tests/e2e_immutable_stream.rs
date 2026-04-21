@@ -15,9 +15,7 @@ use commonware_storage::translator::TwoCap;
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use exoware_sdk_rs::StoreClient;
 use futures::StreamExt;
-use store_qmdb::ImmutableClient;
-
-use common::retry;
+use store_qmdb::{ImmutableClient, ImmutableWriter};
 
 type Digest = commonware_cryptography::sha256::Digest;
 type LocalDb = Immutable<
@@ -95,29 +93,13 @@ async fn build_local_batch() -> LocalBatch {
     .expect("join")
 }
 
-async fn upload_and_publish(client: &TestImmutableClient, batch: &LocalBatch) {
-    retry(
-        || {
-            let ops = batch.operations.clone();
-            let loc = batch.latest_location;
-            async move { client.upload_operations(loc, &ops).await.map(|_| ()) }
-        },
-        "upload_operations",
-    )
-    .await;
-    retry(
-        || {
-            let loc = batch.latest_location;
-            async move {
-                client
-                    .publish_writer_location_watermark(loc)
-                    .await
-                    .map(|_| ())
-            }
-        },
-        "publish_watermark",
-    )
-    .await;
+async fn upload_and_publish(client: &StoreClient, batch: &LocalBatch) {
+    let writer: ImmutableWriter<commonware_cryptography::Sha256, FixedBytes<32>, Vec<u8>> =
+        ImmutableWriter::new(client.clone()).await.expect("writer");
+    writer
+        .upload_and_publish(&batch.operations)
+        .await
+        .expect("upload_and_publish");
 }
 
 #[tokio::test]
@@ -133,7 +115,7 @@ async fn stream_batches_emits_verifiable_immutable_range_proof() {
         .expect("stream_batches");
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    upload_and_publish(&ic, &local).await;
+    upload_and_publish(&client, &local).await;
 
     let proof = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await

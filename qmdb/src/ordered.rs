@@ -1,11 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::marker::PhantomData;
-use std::sync::{atomic::AtomicU64, Arc};
 
 use commonware_codec::{Codec, Decode, Encode, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
-    mmr::{verification, Location, Position},
+    mmr::{verification, Location},
     qmdb::{
         any::ordered::variable::Operation as QmdbOperation,
         current::{
@@ -20,10 +19,10 @@ use exoware_sdk_rs::{RangeMode, SerializableReadSession, StoreClient};
 
 use crate::codec::{
     bitmap_chunk_bits, chunk_index_for_location, decode_digest, decode_update_location,
-    encode_chunk_key, encode_current_meta_key, encode_presence_key, encode_update_key,
-    ensure_encoded_value_size, mmr_size_for_watermark, UpdateRow, NO_PARTIAL_CHUNK,
+    encode_chunk_key, encode_current_meta_key, encode_update_key, mmr_size_for_watermark,
+    UpdateRow, NO_PARTIAL_CHUNK,
 };
-use crate::core::{HistoricalOpsClientCore, PreparedCurrentBoundaryUpload, PreparedUpload};
+use crate::core::HistoricalOpsClientCore;
 use crate::error::QmdbError;
 use crate::proof::{
     CurrentOperationRangeProofResult, KeyValueProofResult, MultiProofResult, RangeProof,
@@ -31,7 +30,7 @@ use crate::proof::{
     VerifiedOperationRange, VerifiedVariantRange,
 };
 use crate::storage::{KvCurrentStorage, KvMmrStorage};
-use crate::{CurrentBoundaryState, QmdbVariant, UploadReceipt, VersionedValue};
+use crate::{QmdbVariant, VersionedValue};
 
 #[derive(Clone)]
 pub struct OrderedClient<
@@ -43,7 +42,6 @@ pub struct OrderedClient<
     client: StoreClient,
     op_cfg: <QmdbOperation<K, V> as commonware_codec::Read>::Cfg,
     update_row_cfg: (K::Cfg, V::Cfg),
-    query_visible_sequence: Option<Arc<AtomicU64>>,
     _marker: PhantomData<(H, K)>,
 }
 
@@ -66,7 +64,6 @@ where
     fn core(&self) -> HistoricalOpsClientCore<'_, H::Digest, K, V> {
         HistoricalOpsClientCore {
             client: &self.client,
-            query_visible_sequence: self.query_visible_sequence.as_ref(),
             update_row_cfg: self.update_row_cfg.clone(),
             _marker: PhantomData,
         }
@@ -89,22 +86,8 @@ where
             client,
             op_cfg,
             update_row_cfg,
-            query_visible_sequence: None,
             _marker: PhantomData,
         }
-    }
-
-    pub fn with_query_visible_sequence(mut self, seq: Arc<AtomicU64>) -> Self {
-        self.query_visible_sequence = Some(seq);
-        self
-    }
-
-    pub(crate) async fn sync_after_ingest(&self) -> Result<(), QmdbError> {
-        self.core().sync_after_ingest().await
-    }
-
-    pub fn inner(&self) -> &StoreClient {
-        &self.client
     }
 
     pub fn sequence_number(&self) -> u64 {
@@ -113,152 +96,6 @@ where
 
     pub async fn writer_location_watermark(&self) -> Result<Option<Location>, QmdbError> {
         self.core().writer_location_watermark().await
-    }
-
-    pub async fn publish_writer_location_watermark(
-        &self,
-        location: Location,
-    ) -> Result<Location, QmdbError> {
-        let session = self.client.create_session();
-        let latest_watermark = self.core().read_latest_watermark(&session).await?;
-        if let Some(watermark) = latest_watermark {
-            if watermark >= location {
-                return Ok(watermark);
-            }
-        }
-        self.core()
-            .require_batch_boundary(&session, location)
-            .await?;
-        self.require_current_boundary_state(&session, location)
-            .await?;
-        let previous_watermark = latest_watermark;
-        let previous_ops_size = match previous_watermark {
-            Some(previous) => mmr_size_for_watermark(previous)?,
-            None => Position::new(0),
-        };
-        let delta_start_location = previous_watermark.map_or(Location::new(0), |w| w + 1);
-        let end_location_exclusive = location
-            .checked_add(1)
-            .ok_or_else(|| QmdbError::CorruptData("watermark overflow".to_string()))?;
-        let delta_operations = self
-            .load_operation_range(&session, delta_start_location, end_location_exclusive)
-            .await?;
-        let mut rows = Vec::<(Key, Vec<u8>)>::new();
-        self.append_ops_nodes_incrementally(
-            &session,
-            previous_ops_size,
-            &delta_operations,
-            &mut rows,
-        )
-        .await?;
-        rows.push((crate::codec::encode_watermark_key(location), Vec::new()));
-        let refs = rows
-            .iter()
-            .map(|(key, value)| (key, value.as_slice()))
-            .collect::<Vec<_>>();
-        self.client.ingest().put(&refs).await?;
-        self.sync_after_ingest().await?;
-        let visible = self.writer_location_watermark().await?;
-        if visible < Some(location) {
-            return Err(QmdbError::CorruptData(format!(
-                "ordered watermark publish did not become query-visible: requested={location}, visible={visible:?}"
-            )));
-        }
-        Ok(location)
-    }
-
-    pub async fn upload_operations(
-        &self,
-        latest_location: Location,
-        operations: &[QmdbOperation<K, V>],
-    ) -> Result<UploadReceipt, QmdbError> {
-        if operations.is_empty() {
-            return Err(QmdbError::EmptyBatch);
-        }
-        if self
-            .client
-            .query()
-            .get(&encode_presence_key(latest_location))
-            .await?
-            .is_some()
-        {
-            return Err(QmdbError::DuplicateBatchWatermark { latest_location });
-        }
-
-        let prepared = PreparedUpload::build(latest_location, operations)?;
-        let refs = prepared
-            .rows
-            .iter()
-            .map(|(key, value)| (key, value.as_slice()))
-            .collect::<Vec<_>>();
-        self.client.ingest().put(&refs).await?;
-        self.sync_after_ingest().await?;
-
-        let writer_location_watermark = self.writer_location_watermark().await?;
-        Ok(UploadReceipt {
-            latest_location,
-            operation_count: Location::from(prepared.operation_count as u64),
-            keyed_operation_count: prepared.keyed_operation_count,
-            writer_location_watermark,
-            sequence_number: self.client.sequence_number(),
-        })
-    }
-
-    pub async fn upload_operations_with_current_boundary(
-        &self,
-        latest_location: Location,
-        operations: &[QmdbOperation<K, V>],
-        current_boundary: &CurrentBoundaryState<H::Digest, N>,
-    ) -> Result<UploadReceipt, QmdbError> {
-        if operations.is_empty() {
-            return Err(QmdbError::EmptyBatch);
-        }
-        if self
-            .client
-            .query()
-            .get(&encode_presence_key(latest_location))
-            .await?
-            .is_some()
-        {
-            return Err(QmdbError::DuplicateBatchWatermark { latest_location });
-        }
-
-        let prepared_ops = PreparedUpload::build(latest_location, operations)?;
-        let prepared_current =
-            PreparedCurrentBoundaryUpload::build(latest_location, current_boundary)?;
-        let refs = prepared_ops
-            .rows
-            .iter()
-            .chain(prepared_current.rows.iter())
-            .map(|(key, value)| (key, value.as_slice()))
-            .collect::<Vec<_>>();
-        self.client.ingest().put(&refs).await?;
-        self.sync_after_ingest().await?;
-
-        let writer_location_watermark = self.writer_location_watermark().await?;
-        Ok(UploadReceipt {
-            latest_location,
-            operation_count: Location::from(prepared_ops.operation_count as u64),
-            keyed_operation_count: prepared_ops.keyed_operation_count,
-            writer_location_watermark,
-            sequence_number: self.client.sequence_number(),
-        })
-    }
-
-    pub async fn upload_current_boundary_state(
-        &self,
-        latest_location: Location,
-        current_boundary: &CurrentBoundaryState<H::Digest, N>,
-    ) -> Result<(), QmdbError> {
-        let prepared = PreparedCurrentBoundaryUpload::build(latest_location, current_boundary)?;
-        let refs = prepared
-            .rows
-            .iter()
-            .map(|(key, value)| (key, value.as_slice()))
-            .collect::<Vec<_>>();
-        self.client.ingest().put(&refs).await?;
-        self.sync_after_ingest().await?;
-        Ok(())
     }
 
     pub async fn root_at(&self, watermark: Location) -> Result<H::Digest, QmdbError> {
@@ -700,22 +537,6 @@ where
         })
     }
 
-    async fn require_current_boundary_state(
-        &self,
-        session: &SerializableReadSession,
-        location: Location,
-    ) -> Result<(), QmdbError> {
-        if session
-            .get(&encode_current_meta_key(location))
-            .await?
-            .is_some()
-        {
-            Ok(())
-        } else {
-            Err(QmdbError::CurrentBoundaryStateMissing { location })
-        }
-    }
-
     async fn load_current_boundary_root(
         &self,
         session: &SerializableReadSession,
@@ -728,26 +549,6 @@ where
             bytes.as_ref(),
             format!("current boundary root at {location}"),
         )
-    }
-
-    async fn append_ops_nodes_incrementally<Op: Encode>(
-        &self,
-        session: &SerializableReadSession,
-        previous_ops_size: Position,
-        delta_operations: &[Op],
-        rows: &mut Vec<(Key, Vec<u8>)>,
-    ) -> Result<(Position, BTreeMap<Position, H::Digest>, H::Digest), QmdbError> {
-        let encoded = delta_operations
-            .iter()
-            .map(|operation| {
-                let bytes = operation.encode().to_vec();
-                ensure_encoded_value_size(bytes.len())?;
-                Ok(bytes)
-            })
-            .collect::<Result<Vec<_>, QmdbError>>()?;
-        self.core()
-            .append_encoded_ops_nodes_incrementally::<H>(session, previous_ops_size, &encoded, rows)
-            .await
     }
 
     pub(crate) async fn compute_ops_root(
