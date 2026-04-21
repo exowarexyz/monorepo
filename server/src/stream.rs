@@ -1,25 +1,22 @@
-//! Live subscriber registry + post-commit fan-out for `store.stream.v1`.
+//! Live stream coordination for `store.stream.v1`.
 //!
 //! `StreamHub::publish` is called synchronously after `StoreEngine::put_batch`
-//! returns `Ok`. Slow subscribers (full mpsc) are dropped on the next non-empty
-//! fan-out so a wedged client can't hold up ingest.
+//! returns `Ok`. The hub only tracks the highest published batch sequence and
+//! wakes subscribers; each subscriber then pulls batches from the engine at its
+//! own pace, so live delivery is naturally paced by client reads instead of an
+//! internal per-subscriber backlog.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use connectrpc::ConnectError;
-use dashmap::DashMap;
 use exoware_sdk_rs::keys::KeyCodec;
 use exoware_sdk_rs::match_key::compile_payload_regex;
-use exoware_sdk_rs::store::stream::v1::{StreamEntry, SubscribeResponse};
+use exoware_sdk_rs::store::stream::v1::StreamEntry;
 use exoware_sdk_rs::stream_filter::{validate_filter, StreamFilter};
 use regex::bytes::Regex;
-use tokio::sync::mpsc;
-
-/// Bounded queue depth per subscriber. 256 frames is enough to absorb bursts
-/// without letting one subscriber hold megabytes of in-flight payload; beyond
-/// that the subscriber is dropped (reconnect via since-cursor to catch up).
-const SUBSCRIBER_CHANNEL_CAPACITY: usize = 256;
+use tokio::sync::Notify;
 
 /// `ErrorInfo.domain` used for all stream-service errors.
 pub const STREAM_ERROR_DOMAIN: &str = "store.stream";
@@ -39,8 +36,8 @@ pub(crate) struct CompiledMatcher {
 }
 
 /// Validate and compile a `StreamFilter` into ready-to-use `(KeyCodec, Regex)`
-/// pairs. Shared between the hub (live fan-out) and `StreamConnect` (replay)
-/// so both paths match identically and regexes are compiled once per subscribe.
+/// pairs. Shared between replay and live delivery so both paths match
+/// identically and regexes are compiled once per subscribe.
 pub(crate) fn compile_matchers(
     filter: &StreamFilter,
 ) -> Result<Vec<CompiledMatcher>, ConnectError> {
@@ -64,7 +61,6 @@ pub(crate) fn apply_filter(
     matchers: &[CompiledMatcher],
     kvs: &[(Bytes, Bytes)],
 ) -> Vec<StreamEntry> {
-    // Upper bound is `kvs.len()` (first-match-wins caps 1 entry per kv).
     let mut out = Vec::with_capacity(kvs.len());
     'outer: for (k, v) in kvs {
         for matcher in matchers {
@@ -88,79 +84,39 @@ pub(crate) fn apply_filter(
     out
 }
 
-struct Subscriber {
-    matchers: Vec<CompiledMatcher>,
-    tx: mpsc::Sender<Result<SubscribeResponse, ConnectError>>,
-}
-
-#[derive(Default)]
 pub struct StreamHub {
-    subs: DashMap<u64, Subscriber>,
-    next_id: AtomicU64,
+    published_sequence: AtomicU64,
+    notify: Arc<Notify>,
 }
 
 impl StreamHub {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(initial_sequence: u64) -> Self {
+        Self {
+            published_sequence: AtomicU64::new(initial_sequence),
+            notify: Arc::new(Notify::new()),
+        }
     }
 
-    /// Register a subscriber. Returns `(id, pre-compiled matchers, rx)` — the
-    /// matchers are handed back so the replay path can reuse them instead of
-    /// compiling every regex a second time.
+    /// Compile the filter and atomically snapshot the highest published batch
+    /// sequence that should be considered "already visible" to this
+    /// subscription. Later publishes wake the returned notifier.
     pub(crate) fn subscribe(
         &self,
         filter: StreamFilter,
-    ) -> Result<
-        (
-            u64,
-            Vec<CompiledMatcher>,
-            mpsc::Receiver<Result<SubscribeResponse, ConnectError>>,
-        ),
-        ConnectError,
-    > {
+    ) -> Result<(Vec<CompiledMatcher>, u64, Arc<Notify>), ConnectError> {
         let matchers = compile_matchers(&filter)?;
-        let (tx, rx) = mpsc::channel(SUBSCRIBER_CHANNEL_CAPACITY);
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.subs.insert(
-            id,
-            Subscriber {
-                matchers: matchers.clone(),
-                tx,
-            },
-        );
-        Ok((id, matchers, rx))
+        let floor = self.published_sequence.load(Ordering::Acquire);
+        Ok((matchers, floor, self.notify.clone()))
     }
 
-    /// Remove a subscriber by id (idempotent; no-op if already gone).
-    pub fn unsubscribe(&self, id: u64) {
-        self.subs.remove(&id);
+    /// Announce a newly committed batch sequence to subscribers.
+    pub fn publish(&self, seq: u64) {
+        self.published_sequence.fetch_max(seq, Ordering::SeqCst);
+        self.notify.notify_waiters();
     }
 
-    /// Fan out a committed batch. A subscriber whose mpsc is full or closed is
-    /// dropped on the same pass.
-    pub fn publish(&self, seq: u64, kvs: &[(Bytes, Bytes)]) {
-        if self.subs.is_empty() {
-            return;
-        }
-        self.subs.retain(|_, sub| {
-            let entries = apply_filter(&sub.matchers, kvs);
-            if entries.is_empty() {
-                // Retain idle subscribers. Drop only on actual send failure, so
-                // a filter that never matches doesn't evict the client.
-                return !sub.tx.is_closed();
-            }
-            let frame = SubscribeResponse {
-                sequence_number: seq,
-                entries,
-                ..Default::default()
-            };
-            sub.tx.try_send(Ok(frame)).is_ok()
-        });
-    }
-
-    #[cfg(test)]
-    pub(crate) fn subscriber_count(&self) -> usize {
-        self.subs.len()
+    pub(crate) fn current_sequence(&self) -> u64 {
+        self.published_sequence.load(Ordering::Acquire)
     }
 }
 
@@ -187,42 +143,37 @@ mod tests {
     }
 
     #[test]
-    fn publish_delivers_only_matching_entries() {
-        let hub = StreamHub::new();
-        let (_id, _m, mut rx) = hub.subscribe(filter(1, "(?s).*")).unwrap();
+    fn publish_sequence_is_monotonic() {
+        let hub = StreamHub::new(7);
+        assert_eq!(hub.current_sequence(), 7);
+        hub.publish(3);
+        assert_eq!(hub.current_sequence(), 7);
+        hub.publish(9);
+        assert_eq!(hub.current_sequence(), 9);
+    }
+
+    #[test]
+    fn subscribe_snapshots_current_sequence() {
+        let hub = StreamHub::new(11);
+        let (_matchers, floor, _notify) = hub.subscribe(filter(1, "(?s).*")).unwrap();
+        assert_eq!(floor, 11);
+    }
+
+    #[test]
+    fn apply_filter_still_selects_matching_entries() {
+        let matchers = compile_matchers(&filter(1, "(?s).*")).unwrap();
         let kvs = vec![
             (key(1, b"hit"), Bytes::from_static(b"v1")),
             (key(2, b"miss"), Bytes::from_static(b"v2")),
         ];
-        hub.publish(42, &kvs);
-        let frame = rx.try_recv().unwrap().unwrap();
-        assert_eq!(frame.sequence_number, 42);
-        assert_eq!(frame.entries.len(), 1);
-        assert_eq!(frame.entries[0].value.as_slice(), b"v1");
-    }
-
-    #[test]
-    fn non_matching_publish_yields_no_frame_but_retains_subscriber() {
-        let hub = StreamHub::new();
-        let (_id, _m, mut rx) = hub.subscribe(filter(1, "(?s).*")).unwrap();
-        hub.publish(1, &[(key(2, b"nope"), Bytes::from_static(b"x"))]);
-        assert!(rx.try_recv().is_err());
-        assert_eq!(hub.subscriber_count(), 1);
-    }
-
-    #[test]
-    fn subscriber_drops_on_closed_channel() {
-        let hub = StreamHub::new();
-        let (_id, _m, rx) = hub.subscribe(filter(1, "(?s).*")).unwrap();
-        drop(rx);
-        // Non-matching publish retains idle subs; `is_closed()` makes us drop.
-        hub.publish(1, &[(key(2, b"x"), Bytes::new())]);
-        assert_eq!(hub.subscriber_count(), 0);
+        let entries = apply_filter(&matchers, &kvs);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].value.as_slice(), b"v1");
     }
 
     #[test]
     fn subscribe_rejects_invalid_filter() {
-        let hub = StreamHub::new();
+        let hub = StreamHub::new(0);
         let bad = StreamFilter { match_keys: vec![] };
         assert!(hub.subscribe(bad).is_err());
     }

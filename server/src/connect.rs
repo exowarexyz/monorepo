@@ -1,6 +1,7 @@
 //! Ingest, query, and compact services; storage is provided by [`crate::StoreEngine`].
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -37,7 +38,8 @@ use exoware_sdk_rs::match_key::MatchKey;
 use futures::{stream as stream_util, Stream};
 use http::header::HeaderValue;
 use http::HeaderName;
-use tokio::sync::mpsc;
+use tokio::sync::futures::OwnedNotified;
+use tokio::sync::Notify;
 
 use crate::reduce::reduce_over_rows;
 use crate::stream::StreamHub;
@@ -76,10 +78,11 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(engine: Arc<dyn StoreEngine>) -> Self {
+        let current_sequence = engine.current_sequence();
         Self {
             engine,
             ready: Arc::new(AtomicBool::new(true)),
-            stream: Arc::new(StreamHub::new()),
+            stream: Arc::new(StreamHub::new(current_sequence)),
         }
     }
 }
@@ -129,9 +132,9 @@ impl IngestApi for IngestConnect {
             .map_err(ConnectError::internal)?;
 
         // Fan out the just-committed batch to stream subscribers. `publish`
-        // short-circuits when there are no subscribers and uses `try_send`
-        // internally so this never blocks ingest.
-        self.state.stream.publish(seq, &batch);
+        // only announces the new sequence number; subscribers pull the batch
+        // from the engine at their own pace.
+        self.state.stream.publish(seq);
 
         Ok((
             ProtoPutResponse {
@@ -552,15 +555,25 @@ struct ReplayState {
     first_batch: Option<Vec<(Bytes, Bytes)>>,
 }
 
+enum ReplayProgress {
+    Frame(SubscribeResponse),
+    Advanced,
+    Done,
+}
+
+enum LiveProgress {
+    Frame(SubscribeResponse),
+    Advanced,
+    NeedWait,
+}
+
 struct SubscriptionStream {
     state: AppState,
-    sub_id: u64,
     matchers: Vec<crate::stream::CompiledMatcher>,
-    live_rx: mpsc::Receiver<Result<SubscribeResponse, ConnectError>>,
-    live_buffer: VecDeque<Result<SubscribeResponse, ConnectError>>,
     replay: Option<ReplayState>,
-    dedupe_live_through: Option<u64>,
-    live_closed: bool,
+    next_live_sequence: u64,
+    live_notify: Arc<Notify>,
+    live_wait: Option<Pin<Box<OwnedNotified>>>,
     terminal_error: Option<ConnectError>,
     terminated: bool,
 }
@@ -568,58 +581,26 @@ struct SubscriptionStream {
 impl SubscriptionStream {
     fn new(
         state: AppState,
-        sub_id: u64,
         matchers: Vec<crate::stream::CompiledMatcher>,
-        live_rx: mpsc::Receiver<Result<SubscribeResponse, ConnectError>>,
         replay: Option<ReplayState>,
-        dedupe_live_through: Option<u64>,
+        next_live_sequence: u64,
+        live_notify: Arc<Notify>,
     ) -> Self {
         Self {
             state,
-            sub_id,
             matchers,
-            live_rx,
-            live_buffer: VecDeque::new(),
             replay,
-            dedupe_live_through,
-            live_closed: false,
+            next_live_sequence,
+            live_notify,
+            live_wait: None,
             terminal_error: None,
             terminated: false,
         }
     }
 
-    fn drain_ready_live(&mut self) {
-        loop {
-            match self.live_rx.try_recv() {
-                Ok(frame) => self.live_buffer.push_back(frame),
-                Err(mpsc::error::TryRecvError::Empty) => break,
-                Err(mpsc::error::TryRecvError::Disconnected) => {
-                    self.live_closed = true;
-                    break;
-                }
-            }
-        }
-    }
-
-    fn drop_replayed_setup_frames(&mut self) {
-        let Some(boundary) = self.dedupe_live_through else {
-            return;
-        };
-        if self.replay.is_some() {
-            return;
-        }
-        while matches!(
-            self.live_buffer.front(),
-            Some(Ok(frame)) if frame.sequence_number <= boundary
-        ) {
-            self.live_buffer.pop_front();
-        }
-        self.dedupe_live_through = None;
-    }
-
-    fn next_replay_frame(&mut self) -> Result<Option<SubscribeResponse>, ConnectError> {
+    fn next_replay_frame(&mut self) -> Result<ReplayProgress, ConnectError> {
         let Some(replay) = &mut self.replay else {
-            return Ok(None);
+            return Ok(ReplayProgress::Done);
         };
         let seq = replay.next_sequence;
         let kvs = if let Some(first_batch) = replay.first_batch.take() {
@@ -642,13 +623,40 @@ impl SubscriptionStream {
                 .map_err(ConnectError::internal)?;
             return Err(StreamConnect::batch_evicted_connect_error(oldest));
         };
-        Ok(filtered_subscribe_response(seq, &kvs, &self.matchers))
+        Ok(
+            match filtered_subscribe_response(seq, &kvs, &self.matchers) {
+                Some(frame) => ReplayProgress::Frame(frame),
+                None => ReplayProgress::Advanced,
+            },
+        )
     }
-}
 
-impl Drop for SubscriptionStream {
-    fn drop(&mut self) {
-        self.state.stream.unsubscribe(self.sub_id);
+    fn next_live_frame(&mut self) -> Result<LiveProgress, ConnectError> {
+        let current = self.state.stream.current_sequence();
+        if self.next_live_sequence > current {
+            return Ok(LiveProgress::NeedWait);
+        }
+        let seq = self.next_live_sequence;
+        self.next_live_sequence += 1;
+        let kvs = self
+            .state
+            .engine
+            .get_batch(seq)
+            .map_err(ConnectError::internal)?;
+        let Some(kvs) = kvs else {
+            let oldest = self
+                .state
+                .engine
+                .oldest_retained_batch()
+                .map_err(ConnectError::internal)?;
+            return Err(StreamConnect::batch_evicted_connect_error(oldest));
+        };
+        Ok(
+            match filtered_subscribe_response(seq, &kvs, &self.matchers) {
+                Some(frame) => LiveProgress::Frame(frame),
+                None => LiveProgress::Advanced,
+            },
+        )
     }
 }
 
@@ -657,7 +665,6 @@ impl Stream for SubscriptionStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
         loop {
-            self.drain_ready_live();
             if let Some(err) = self.terminal_error.take() {
                 self.terminated = true;
                 return Poll::Ready(Some(Err(err)));
@@ -668,16 +675,9 @@ impl Stream for SubscriptionStream {
 
             if self.replay.is_some() {
                 match self.next_replay_frame() {
-                    Ok(Some(frame)) => return Poll::Ready(Some(Ok(frame))),
-                    Ok(None) => {
-                        if self.replay.is_some() {
-                            // Advance replay one batch per poll while still
-                            // draining any ready live traffic into memory.
-                            cx.waker().wake_by_ref();
-                            return Poll::Pending;
-                        }
-                        continue;
-                    }
+                    Ok(ReplayProgress::Frame(frame)) => return Poll::Ready(Some(Ok(frame))),
+                    Ok(ReplayProgress::Advanced) => continue,
+                    Ok(ReplayProgress::Done) => {}
                     Err(err) => {
                         self.terminal_error = Some(err);
                         continue;
@@ -685,23 +685,35 @@ impl Stream for SubscriptionStream {
                 }
             }
 
-            self.drop_replayed_setup_frames();
-            if let Some(frame) = self.live_buffer.pop_front() {
-                return Poll::Ready(Some(frame));
-            }
-            if self.live_closed {
-                self.terminated = true;
-                return Poll::Ready(None);
-            }
-
-            match Pin::new(&mut self.live_rx).poll_recv(cx) {
-                Poll::Ready(Some(frame)) => {
-                    self.live_buffer.push_back(frame);
+            match self.next_live_frame() {
+                Ok(LiveProgress::Frame(frame)) => return Poll::Ready(Some(Ok(frame))),
+                Ok(LiveProgress::Advanced) => continue,
+                Ok(LiveProgress::NeedWait) => {
+                    if self.live_wait.is_none() {
+                        self.live_wait = Some(Box::pin(self.live_notify.clone().notified_owned()));
+                    }
+                    if self.next_live_sequence <= self.state.stream.current_sequence() {
+                        self.live_wait = None;
+                        continue;
+                    }
+                    match self
+                        .live_wait
+                        .as_mut()
+                        .expect("wait future")
+                        .as_mut()
+                        .poll(cx)
+                    {
+                        Poll::Ready(()) => {
+                            self.live_wait = None;
+                            continue;
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    }
                 }
-                Poll::Ready(None) => {
-                    self.live_closed = true;
+                Err(err) => {
+                    self.terminal_error = Some(err);
+                    continue;
                 }
-                Poll::Pending => return Poll::Pending,
             }
         }
     }
@@ -748,15 +760,13 @@ impl StreamApi for StreamConnect {
         let filter = domain_filter_from_subscribe_view(&request)?;
         let since = request.since_sequence_number;
 
-        // Phase 1: register the subscriber FIRST so any live Put that lands
-        // between now and the replay_bound snapshot is captured in the mpsc.
-        let (sub_id, matchers, live_rx) = self.state.stream.subscribe(filter)?;
+        // Snapshot the current published frontier and subscribe for future
+        // wakeups. The stream then walks the batch log by sequence cursor, so
+        // live delivery is paced by client reads instead of server-side
+        // buffering.
+        let (matchers, replay_bound, live_notify) = self.state.stream.subscribe(filter)?;
 
-        // Phase 2: snapshot the replay boundary atomically with respect to
-        // future publishes (registration happened before this read).
-        let replay_bound = self.state.engine.current_sequence();
-
-        // Phase 3: optional replay. Validate the starting batch eagerly so an
+        // Optional replay. Validate the starting batch eagerly so an
         // already-evicted cursor fails the RPC immediately; later replay holes
         // are surfaced on the stream itself so callers reconnect from a safe
         // point instead of silently continuing.
@@ -768,7 +778,6 @@ impl StreamApi for StreamConnect {
                     .get_batch(s)
                     .map_err(ConnectError::internal)?;
                 let Some(first_batch) = first_batch else {
-                    self.state.stream.unsubscribe(sub_id);
                     let oldest = self
                         .state
                         .engine
@@ -784,16 +793,18 @@ impl StreamApi for StreamConnect {
             }
             _ => None,
         };
-        let dedupe_live_through = replay.as_ref().map(|replay| replay.bound);
+        let next_live_sequence = match replay.as_ref() {
+            Some(replay) => replay.bound.saturating_add(1),
+            None => since.unwrap_or_else(|| replay_bound.saturating_add(1)),
+        };
 
         Ok((
             Box::pin(SubscriptionStream::new(
                 self.state.clone(),
-                sub_id,
                 matchers,
-                live_rx,
                 replay,
-                dedupe_live_through,
+                next_live_sequence,
+                live_notify,
             )),
             ctx,
         ))
@@ -896,13 +907,6 @@ mod tests {
     const TEST_PREFIX: u16 = 1;
 
     #[derive(Clone)]
-    struct PublishBatch {
-        hub: Arc<StreamHub>,
-        sequence_number: u64,
-        kvs: Vec<(Bytes, Bytes)>,
-    }
-
-    #[derive(Clone)]
     struct PublishDuringReplay {
         hub: Arc<StreamHub>,
         sequence_offset: u64,
@@ -914,7 +918,6 @@ mod tests {
         current_sequence: u64,
         batches: BTreeMap<u64, Option<Vec<(Bytes, Bytes)>>>,
         oldest_retained: Option<u64>,
-        publish_on_current_sequence: Option<PublishBatch>,
         publish_on_get_batch: Option<PublishDuringReplay>,
     }
 
@@ -940,17 +943,17 @@ mod tests {
             self.state.lock().expect("lock").oldest_retained = oldest_retained;
         }
 
-        fn publish_once_on_current_sequence(
+        fn publish_live(
             &self,
             hub: Arc<StreamHub>,
             sequence_number: u64,
             kvs: Vec<(Bytes, Bytes)>,
         ) {
-            self.state.lock().expect("lock").publish_on_current_sequence = Some(PublishBatch {
-                hub,
-                sequence_number,
-                kvs,
-            });
+            let mut state = self.state.lock().expect("lock");
+            state.current_sequence = state.current_sequence.max(sequence_number);
+            state.batches.insert(sequence_number, Some(kvs.clone()));
+            drop(state);
+            hub.publish(sequence_number);
         }
 
         fn publish_on_every_get_batch(
@@ -997,35 +1000,30 @@ mod tests {
         }
 
         fn current_sequence(&self) -> u64 {
-            let publish = {
-                let mut state = self.state.lock().expect("lock");
-                if let Some(publish) = state.publish_on_current_sequence.take() {
-                    state.current_sequence = publish.sequence_number;
-                    Some(publish)
-                } else {
-                    None
-                }
-            };
-            if let Some(publish) = publish {
-                publish.hub.publish(publish.sequence_number, &publish.kvs);
-                publish.sequence_number
-            } else {
-                self.state.lock().expect("lock").current_sequence
-            }
+            self.state.lock().expect("lock").current_sequence
         }
 
         fn get_batch(&self, sequence_number: u64) -> Result<Option<Vec<(Bytes, Bytes)>>, String> {
             let (publish, batch) = {
-                let state = self.state.lock().map_err(|e| e.to_string())?;
+                let mut state = self.state.lock().map_err(|e| e.to_string())?;
+                let publish = state.publish_on_get_batch.clone();
+                if let Some(publish) = publish.as_ref() {
+                    let live_sequence = publish.sequence_offset + sequence_number;
+                    state.current_sequence = state.current_sequence.max(live_sequence);
+                    state
+                        .batches
+                        .entry(live_sequence)
+                        .or_insert_with(|| Some(publish.kvs.clone()));
+                }
                 (
-                    state.publish_on_get_batch.clone(),
+                    publish,
                     state.batches.get(&sequence_number).cloned().unwrap_or(None),
                 )
             };
             if let Some(publish) = publish {
                 publish
                     .hub
-                    .publish(publish.sequence_offset + sequence_number, &publish.kvs);
+                    .publish(publish.sequence_offset + sequence_number);
             }
             Ok(batch)
         }
@@ -1081,17 +1079,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscribe_without_replay_keeps_setup_window_live_batch() {
+    async fn subscribe_without_replay_reads_the_next_live_batch() {
         let engine = Arc::new(FakeEngine::default());
         let state = AppState::new(engine.clone());
-        engine.publish_once_on_current_sequence(
-            state.stream.clone(),
-            1,
-            vec![matching_kv(b"hit", b"v1")],
-        );
-
-        let connect = StreamConnect::new(state);
+        let connect = StreamConnect::new(state.clone());
         let mut stream = subscribe_stream(&connect, None).await.expect("subscribe");
+        engine.publish_live(state.stream.clone(), 1, vec![matching_kv(b"hit", b"v1")]);
         let frame = tokio::time::timeout(Duration::from_secs(1), stream.next())
             .await
             .expect("stream should yield")
@@ -1143,8 +1136,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replay_drains_live_frames_without_dropping_the_subscriber() {
-        const REPLAY_BATCHES: u64 = 300;
+    async fn replay_with_live_burst_under_capacity_still_delivers_in_order() {
+        const REPLAY_BATCHES: u64 = 100;
 
         let engine = Arc::new(FakeEngine::default());
         engine.set_current_sequence(REPLAY_BATCHES);
@@ -1174,6 +1167,41 @@ mod tests {
             sequence_numbers.push(frame.sequence_number);
         }
 
+        let expected: Vec<u64> = (1..=(REPLAY_BATCHES * 2)).collect();
+        assert_eq!(sequence_numbers, expected);
+    }
+
+    #[tokio::test]
+    async fn replay_large_live_burst_is_paced_by_client_reads() {
+        const REPLAY_BATCHES: u64 = 300;
+
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(REPLAY_BATCHES);
+        engine.set_oldest_retained(Some(1));
+        for seq in 1..=REPLAY_BATCHES {
+            engine.set_batch(seq, Some(vec![matching_kv(b"replay", b"v")]));
+        }
+
+        let state = AppState::new(engine.clone());
+        engine.publish_on_every_get_batch(
+            state.stream.clone(),
+            REPLAY_BATCHES,
+            vec![matching_kv(b"live", b"tail")],
+        );
+
+        let connect = StreamConnect::new(state);
+        let mut stream = subscribe_stream(&connect, Some(1))
+            .await
+            .expect("subscribe");
+        let mut sequence_numbers = Vec::with_capacity((REPLAY_BATCHES * 2) as usize);
+        while sequence_numbers.len() < (REPLAY_BATCHES * 2) as usize {
+            let frame = tokio::time::timeout(Duration::from_secs(2), stream.next())
+                .await
+                .expect("stream should keep yielding")
+                .expect("frame should exist")
+                .expect("frame should be ok");
+            sequence_numbers.push(frame.sequence_number);
+        }
         let expected: Vec<u64> = (1..=(REPLAY_BATCHES * 2)).collect();
         assert_eq!(sequence_numbers, expected);
     }
