@@ -1,9 +1,10 @@
 //! Ingest, query, and compact services; storage is provided by [`crate::StoreEngine`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::task::{Context as TaskContext, Poll};
 
 use bytes::Bytes;
 use connectrpc::{Chain, ConnectError, ConnectRpcService, Context, Limits};
@@ -33,10 +34,10 @@ use exoware_proto::{
 use exoware_sdk_rs as exoware_proto;
 use exoware_sdk_rs::keys::Key;
 use exoware_sdk_rs::match_key::MatchKey;
-use futures::{stream as stream_util, Stream, StreamExt};
+use futures::{stream as stream_util, Stream};
 use http::header::HeaderValue;
 use http::HeaderName;
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::sync::mpsc;
 
 use crate::reduce::reduce_over_rows;
 use crate::stream::StreamHub;
@@ -497,7 +498,7 @@ impl StreamConnect {
         Self { state }
     }
 
-    fn batch_evicted_error(&self, oldest_retained: Option<u64>) -> ConnectError {
+    fn batch_evicted_connect_error(oldest_retained: Option<u64>) -> ConnectError {
         let mut metadata = HashMap::new();
         if let Some(v) = oldest_retained {
             metadata.insert(
@@ -516,6 +517,10 @@ impl StreamConnect {
         )
     }
 
+    fn batch_evicted_error(&self, oldest_retained: Option<u64>) -> ConnectError {
+        Self::batch_evicted_connect_error(oldest_retained)
+    }
+
     fn batch_not_found_error(&self) -> ConnectError {
         with_error_info_detail(
             ConnectError::not_found("batch not found"),
@@ -526,59 +531,179 @@ impl StreamConnect {
             },
         )
     }
+}
 
-    /// Replay `since..=bound` as `SubscribeResponse`s, applying the
-    /// subscriber's pre-compiled filter server-side so replayed frames are
-    /// byte-identical to what the live path would have delivered.
-    ///
-    /// `first_batch` is the batch at `since` that the caller already fetched
-    /// to validate retention; we reuse it instead of refetching.
-    fn build_replay_frames(
-        &self,
-        since: u64,
-        bound: u64,
-        matchers: &[crate::stream::CompiledMatcher],
-        first_batch: Vec<(Bytes, Bytes)>,
-    ) -> Result<Vec<Result<SubscribeResponse, ConnectError>>, ConnectError> {
-        let mut out = Vec::new();
-        push_replay_frame(&mut out, since, Some(first_batch), matchers);
-        for seq in (since + 1)..=bound {
-            let kvs = self
-                .state
+fn filtered_subscribe_response(
+    seq: u64,
+    kvs: &[(Bytes, Bytes)],
+    matchers: &[crate::stream::CompiledMatcher],
+) -> Option<SubscribeResponse> {
+    let entries = crate::stream::apply_filter(matchers, kvs);
+    (!entries.is_empty()).then_some(SubscribeResponse {
+        sequence_number: seq,
+        entries,
+        ..Default::default()
+    })
+}
+
+struct ReplayState {
+    next_sequence: u64,
+    bound: u64,
+    first_batch: Option<Vec<(Bytes, Bytes)>>,
+}
+
+struct SubscriptionStream {
+    state: AppState,
+    sub_id: u64,
+    matchers: Vec<crate::stream::CompiledMatcher>,
+    live_rx: mpsc::Receiver<Result<SubscribeResponse, ConnectError>>,
+    live_buffer: VecDeque<Result<SubscribeResponse, ConnectError>>,
+    replay: Option<ReplayState>,
+    dedupe_live_through: Option<u64>,
+    live_closed: bool,
+    terminal_error: Option<ConnectError>,
+    terminated: bool,
+}
+
+impl SubscriptionStream {
+    fn new(
+        state: AppState,
+        sub_id: u64,
+        matchers: Vec<crate::stream::CompiledMatcher>,
+        live_rx: mpsc::Receiver<Result<SubscribeResponse, ConnectError>>,
+        replay: Option<ReplayState>,
+        dedupe_live_through: Option<u64>,
+    ) -> Self {
+        Self {
+            state,
+            sub_id,
+            matchers,
+            live_rx,
+            live_buffer: VecDeque::new(),
+            replay,
+            dedupe_live_through,
+            live_closed: false,
+            terminal_error: None,
+            terminated: false,
+        }
+    }
+
+    fn drain_ready_live(&mut self) {
+        loop {
+            match self.live_rx.try_recv() {
+                Ok(frame) => self.live_buffer.push_back(frame),
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    self.live_closed = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn drop_replayed_setup_frames(&mut self) {
+        let Some(boundary) = self.dedupe_live_through else {
+            return;
+        };
+        if self.replay.is_some() {
+            return;
+        }
+        while matches!(
+            self.live_buffer.front(),
+            Some(Ok(frame)) if frame.sequence_number <= boundary
+        ) {
+            self.live_buffer.pop_front();
+        }
+        self.dedupe_live_through = None;
+    }
+
+    fn next_replay_frame(&mut self) -> Result<Option<SubscribeResponse>, ConnectError> {
+        let Some(replay) = &mut self.replay else {
+            return Ok(None);
+        };
+        let seq = replay.next_sequence;
+        let kvs = if let Some(first_batch) = replay.first_batch.take() {
+            Some(first_batch)
+        } else {
+            self.state
                 .engine
                 .get_batch(seq)
-                .map_err(ConnectError::internal)?;
-            push_replay_frame(&mut out, seq, kvs, matchers);
+                .map_err(ConnectError::internal)?
+        };
+        replay.next_sequence += 1;
+        if replay.next_sequence > replay.bound {
+            self.replay = None;
         }
-        Ok(out)
+        let Some(kvs) = kvs else {
+            let oldest = self
+                .state
+                .engine
+                .oldest_retained_batch()
+                .map_err(ConnectError::internal)?;
+            return Err(StreamConnect::batch_evicted_connect_error(oldest));
+        };
+        Ok(filtered_subscribe_response(seq, &kvs, &self.matchers))
     }
 }
 
-/// Push one replay frame for `seq`. Some + match => frame with entries.
-/// Some + no match => drop (live path omits these too). None => gap inside
-/// (since, bound] — emit an empty frame so consumers see the seq advance.
-fn push_replay_frame(
-    out: &mut Vec<Result<SubscribeResponse, ConnectError>>,
-    seq: u64,
-    kvs: Option<Vec<(Bytes, Bytes)>>,
-    matchers: &[crate::stream::CompiledMatcher],
-) {
-    match kvs {
-        Some(kvs) => {
-            let entries = crate::stream::apply_filter(matchers, &kvs);
-            if !entries.is_empty() {
-                out.push(Ok(SubscribeResponse {
-                    sequence_number: seq,
-                    entries,
-                    ..Default::default()
-                }));
+impl Drop for SubscriptionStream {
+    fn drop(&mut self) {
+        self.state.stream.unsubscribe(self.sub_id);
+    }
+}
+
+impl Stream for SubscriptionStream {
+    type Item = Result<SubscribeResponse, ConnectError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            self.drain_ready_live();
+            if let Some(err) = self.terminal_error.take() {
+                self.terminated = true;
+                return Poll::Ready(Some(Err(err)));
+            }
+            if self.terminated {
+                return Poll::Ready(None);
+            }
+
+            if self.replay.is_some() {
+                match self.next_replay_frame() {
+                    Ok(Some(frame)) => return Poll::Ready(Some(Ok(frame))),
+                    Ok(None) => {
+                        if self.replay.is_some() {
+                            // Advance replay one batch per poll while still
+                            // draining any ready live traffic into memory.
+                            cx.waker().wake_by_ref();
+                            return Poll::Pending;
+                        }
+                        continue;
+                    }
+                    Err(err) => {
+                        self.terminal_error = Some(err);
+                        continue;
+                    }
+                }
+            }
+
+            self.drop_replayed_setup_frames();
+            if let Some(frame) = self.live_buffer.pop_front() {
+                return Poll::Ready(Some(frame));
+            }
+            if self.live_closed {
+                self.terminated = true;
+                return Poll::Ready(None);
+            }
+
+            match Pin::new(&mut self.live_rx).poll_recv(cx) {
+                Poll::Ready(Some(frame)) => {
+                    self.live_buffer.push_back(frame);
+                }
+                Poll::Ready(None) => {
+                    self.live_closed = true;
+                }
+                Poll::Pending => return Poll::Pending,
             }
         }
-        None => out.push(Ok(SubscribeResponse {
-            sequence_number: seq,
-            entries: Vec::new(),
-            ..Default::default()
-        })),
     }
 }
 
@@ -630,43 +755,48 @@ impl StreamApi for StreamConnect {
         // Phase 2: snapshot the replay boundary atomically with respect to
         // future publishes (registration happened before this read).
         let replay_bound = self.state.engine.current_sequence();
-        let state = self.state.clone();
-        let boundary = replay_bound;
 
-        // Phase 3: optional replay. The `get_batch(s)` below both validates
-        // retention and returns the batch so `build_replay_frames` can reuse
-        // it without a second point-lookup.
-        let replay_frames: Vec<Result<SubscribeResponse, ConnectError>> = match since {
-            Some(s) if s <= boundary && s > 0 => {
-                let first_batch = state.engine.get_batch(s).map_err(ConnectError::internal)?;
+        // Phase 3: optional replay. Validate the starting batch eagerly so an
+        // already-evicted cursor fails the RPC immediately; later replay holes
+        // are surfaced on the stream itself so callers reconnect from a safe
+        // point instead of silently continuing.
+        let replay = match since {
+            Some(s) if s <= replay_bound && s > 0 => {
+                let first_batch = self
+                    .state
+                    .engine
+                    .get_batch(s)
+                    .map_err(ConnectError::internal)?;
                 let Some(first_batch) = first_batch else {
-                    state.stream.unsubscribe(sub_id);
-                    let oldest = state
+                    self.state.stream.unsubscribe(sub_id);
+                    let oldest = self
+                        .state
                         .engine
                         .oldest_retained_batch()
                         .map_err(ConnectError::internal)?;
                     return Err(self.batch_evicted_error(oldest));
                 };
-                self.build_replay_frames(s, boundary, &matchers, first_batch)?
+                Some(ReplayState {
+                    next_sequence: s,
+                    bound: replay_bound,
+                    first_batch: Some(first_batch),
+                })
             }
-            _ => Vec::new(),
+            _ => None,
         };
+        let dedupe_live_through = replay.as_ref().map(|replay| replay.bound);
 
-        // Phase 4: chain replay into live, filtering out any live frames
-        // whose sequence number is <= replay_bound (those were already
-        // delivered by replay — avoids double-emit for batches that landed
-        // between registration and the boundary snapshot).
-        let live_stream = ReceiverStream::new(live_rx).filter(move |frame| {
-            let keep = match frame {
-                Ok(f) => f.sequence_number > boundary,
-                Err(_) => true,
-            };
-            async move { keep }
-        });
-        let replay_stream = stream_util::iter(replay_frames);
-        let combined = replay_stream.chain(live_stream);
-
-        Ok((Box::pin(combined), ctx))
+        Ok((
+            Box::pin(SubscriptionStream::new(
+                self.state.clone(),
+                sub_id,
+                matchers,
+                live_rx,
+                replay,
+                dedupe_live_through,
+            )),
+            ctx,
+        ))
     }
 
     async fn get(
@@ -746,4 +876,305 @@ pub fn connect_stack(
     ))
     .with_limits(connect_limits())
     .with_compression(connect_compression_registry())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use buffa::Message;
+    use exoware_proto::store::common::v1::MatchKey as ProtoMatchKey;
+    use exoware_proto::store::stream::v1::SubscribeRequest;
+    use exoware_sdk_rs::decode_connect_error;
+    use exoware_sdk_rs::keys::KeyCodec;
+    use futures::StreamExt;
+
+    const TEST_RESERVED_BITS: u8 = 4;
+    const TEST_PREFIX: u16 = 1;
+
+    #[derive(Clone)]
+    struct PublishBatch {
+        hub: Arc<StreamHub>,
+        sequence_number: u64,
+        kvs: Vec<(Bytes, Bytes)>,
+    }
+
+    #[derive(Clone)]
+    struct PublishDuringReplay {
+        hub: Arc<StreamHub>,
+        sequence_offset: u64,
+        kvs: Vec<(Bytes, Bytes)>,
+    }
+
+    #[derive(Default)]
+    struct FakeEngineState {
+        current_sequence: u64,
+        batches: BTreeMap<u64, Option<Vec<(Bytes, Bytes)>>>,
+        oldest_retained: Option<u64>,
+        publish_on_current_sequence: Option<PublishBatch>,
+        publish_on_get_batch: Option<PublishDuringReplay>,
+    }
+
+    #[derive(Default)]
+    struct FakeEngine {
+        state: Mutex<FakeEngineState>,
+    }
+
+    impl FakeEngine {
+        fn set_current_sequence(&self, sequence_number: u64) {
+            self.state.lock().expect("lock").current_sequence = sequence_number;
+        }
+
+        fn set_batch(&self, sequence_number: u64, kvs: Option<Vec<(Bytes, Bytes)>>) {
+            self.state
+                .lock()
+                .expect("lock")
+                .batches
+                .insert(sequence_number, kvs);
+        }
+
+        fn set_oldest_retained(&self, oldest_retained: Option<u64>) {
+            self.state.lock().expect("lock").oldest_retained = oldest_retained;
+        }
+
+        fn publish_once_on_current_sequence(
+            &self,
+            hub: Arc<StreamHub>,
+            sequence_number: u64,
+            kvs: Vec<(Bytes, Bytes)>,
+        ) {
+            self.state.lock().expect("lock").publish_on_current_sequence = Some(PublishBatch {
+                hub,
+                sequence_number,
+                kvs,
+            });
+        }
+
+        fn publish_on_every_get_batch(
+            &self,
+            hub: Arc<StreamHub>,
+            sequence_offset: u64,
+            kvs: Vec<(Bytes, Bytes)>,
+        ) {
+            self.state.lock().expect("lock").publish_on_get_batch = Some(PublishDuringReplay {
+                hub,
+                sequence_offset,
+                kvs,
+            });
+        }
+    }
+
+    impl StoreEngine for FakeEngine {
+        fn put_batch(&self, kvs: &[(Bytes, Bytes)]) -> Result<u64, String> {
+            let mut state = self.state.lock().map_err(|e| e.to_string())?;
+            state.current_sequence += 1;
+            let seq = state.current_sequence;
+            state.batches.insert(seq, Some(kvs.to_vec()));
+            Ok(seq)
+        }
+
+        fn get(&self, _key: &[u8]) -> Result<Option<Vec<u8>>, String> {
+            Ok(None)
+        }
+
+        fn range_scan(
+            &self,
+            _start: &[u8],
+            _end: &[u8],
+            _limit: usize,
+            _forward: bool,
+        ) -> Result<Vec<(Bytes, Bytes)>, String> {
+            Ok(Vec::new())
+        }
+
+        fn delete_batch(&self, _keys: &[&[u8]]) -> Result<u64, String> {
+            let mut state = self.state.lock().map_err(|e| e.to_string())?;
+            state.current_sequence += 1;
+            Ok(state.current_sequence)
+        }
+
+        fn current_sequence(&self) -> u64 {
+            let publish = {
+                let mut state = self.state.lock().expect("lock");
+                if let Some(publish) = state.publish_on_current_sequence.take() {
+                    state.current_sequence = publish.sequence_number;
+                    Some(publish)
+                } else {
+                    None
+                }
+            };
+            if let Some(publish) = publish {
+                publish.hub.publish(publish.sequence_number, &publish.kvs);
+                publish.sequence_number
+            } else {
+                self.state.lock().expect("lock").current_sequence
+            }
+        }
+
+        fn get_batch(&self, sequence_number: u64) -> Result<Option<Vec<(Bytes, Bytes)>>, String> {
+            let (publish, batch) = {
+                let state = self.state.lock().map_err(|e| e.to_string())?;
+                (
+                    state.publish_on_get_batch.clone(),
+                    state.batches.get(&sequence_number).cloned().unwrap_or(None),
+                )
+            };
+            if let Some(publish) = publish {
+                publish
+                    .hub
+                    .publish(publish.sequence_offset + sequence_number, &publish.kvs);
+            }
+            Ok(batch)
+        }
+
+        fn oldest_retained_batch(&self) -> Result<Option<u64>, String> {
+            Ok(self
+                .state
+                .lock()
+                .map_err(|e| e.to_string())?
+                .oldest_retained)
+        }
+
+        fn prune_batch_log(&self, _cutoff_exclusive: u64) -> Result<u64, String> {
+            Ok(0)
+        }
+    }
+
+    fn matching_kv(payload: &[u8], value: &[u8]) -> (Bytes, Bytes) {
+        let codec = KeyCodec::new(TEST_RESERVED_BITS, TEST_PREFIX);
+        let key = codec.encode(payload).expect("encode key");
+        (
+            Bytes::copy_from_slice(key.as_ref()),
+            Bytes::copy_from_slice(value),
+        )
+    }
+
+    fn subscribe_request_bytes(since_sequence_number: Option<u64>) -> Vec<u8> {
+        SubscribeRequest {
+            match_keys: vec![ProtoMatchKey {
+                reserved_bits: u32::from(TEST_RESERVED_BITS),
+                prefix: u32::from(TEST_PREFIX),
+                payload_regex: "(?s).*".to_string(),
+                ..Default::default()
+            }],
+            since_sequence_number,
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
+    async fn subscribe_stream(
+        connect: &StreamConnect,
+        since_sequence_number: Option<u64>,
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>>,
+        ConnectError,
+    > {
+        let bytes = subscribe_request_bytes(since_sequence_number);
+        let request = buffa::view::OwnedView::<SubscribeRequestView<'static>>::decode(bytes.into())
+            .expect("decode subscribe request");
+        let (stream, _ctx) = StreamApi::subscribe(connect, Context::default(), request).await?;
+        Ok(stream)
+    }
+
+    #[tokio::test]
+    async fn subscribe_without_replay_keeps_setup_window_live_batch() {
+        let engine = Arc::new(FakeEngine::default());
+        let state = AppState::new(engine.clone());
+        engine.publish_once_on_current_sequence(
+            state.stream.clone(),
+            1,
+            vec![matching_kv(b"hit", b"v1")],
+        );
+
+        let connect = StreamConnect::new(state);
+        let mut stream = subscribe_stream(&connect, None).await.expect("subscribe");
+        let frame = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("stream should yield")
+            .expect("frame should exist")
+            .expect("frame should be ok");
+        assert_eq!(frame.sequence_number, 1);
+        assert_eq!(frame.entries.len(), 1);
+        assert_eq!(frame.entries[0].value.as_slice(), b"v1");
+    }
+
+    #[tokio::test]
+    async fn replay_hole_returns_batch_evicted_error_instead_of_empty_frame() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(3);
+        engine.set_oldest_retained(Some(2));
+        engine.set_batch(2, Some(vec![matching_kv(b"replay", b"v2")]));
+
+        let state = AppState::new(engine);
+        let connect = StreamConnect::new(state);
+        let mut stream = subscribe_stream(&connect, Some(2))
+            .await
+            .expect("subscribe");
+
+        let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("stream should yield")
+            .expect("first replay frame should exist")
+            .expect("first replay frame should be ok");
+        assert_eq!(first.sequence_number, 2);
+        assert_eq!(first.entries.len(), 1);
+
+        let err = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("stream should yield error")
+            .expect("error item should exist")
+            .expect_err("replay hole must be surfaced as an error");
+        let decoded = decode_connect_error(&err).expect("decode connect error");
+        assert_eq!(
+            decoded.error_info.expect("error info").reason,
+            crate::stream::REASON_BATCH_EVICTED,
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), stream.next())
+                .await
+                .expect("stream should terminate")
+                .is_none(),
+            "stream must terminate after surfacing the replay hole",
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_drains_live_frames_without_dropping_the_subscriber() {
+        const REPLAY_BATCHES: u64 = 300;
+
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(REPLAY_BATCHES);
+        engine.set_oldest_retained(Some(1));
+        for seq in 1..=REPLAY_BATCHES {
+            engine.set_batch(seq, Some(vec![matching_kv(b"replay", b"v")]));
+        }
+
+        let state = AppState::new(engine.clone());
+        engine.publish_on_every_get_batch(
+            state.stream.clone(),
+            REPLAY_BATCHES,
+            vec![matching_kv(b"live", b"tail")],
+        );
+
+        let connect = StreamConnect::new(state);
+        let mut stream = subscribe_stream(&connect, Some(1))
+            .await
+            .expect("subscribe");
+        let mut sequence_numbers = Vec::with_capacity((REPLAY_BATCHES * 2) as usize);
+        while sequence_numbers.len() < (REPLAY_BATCHES * 2) as usize {
+            let frame = tokio::time::timeout(Duration::from_secs(2), stream.next())
+                .await
+                .expect("stream should keep yielding")
+                .expect("frame should exist")
+                .expect("frame should be ok");
+            sequence_numbers.push(frame.sequence_number);
+        }
+
+        let expected: Vec<u64> = (1..=(REPLAY_BATCHES * 2)).collect();
+        assert_eq!(sequence_numbers, expected);
+    }
 }

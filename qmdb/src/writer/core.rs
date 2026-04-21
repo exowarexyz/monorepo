@@ -411,12 +411,18 @@ mod tests {
     async fn out_of_order_acks_only_advance_the_contiguous_prefix() {
         let core = fresh_core();
 
-        let first = core.prepare(1, passthrough_build).await.expect("prepare first");
+        let first = core
+            .prepare(1, passthrough_build)
+            .await
+            .expect("prepare first");
         let second = core
             .prepare(1, passthrough_build)
             .await
             .expect("prepare second");
-        let third = core.prepare(1, passthrough_build).await.expect("prepare third");
+        let third = core
+            .prepare(1, passthrough_build)
+            .await
+            .expect("prepare third");
         assert_eq!(first.watermark_at, Some(loc(0)));
         assert_eq!(second.watermark_at, None);
         assert_eq!(third.watermark_at, None);
@@ -462,7 +468,10 @@ mod tests {
 
         // With batch 3 still in flight, the next dispatch should publish the
         // contiguous prefix watermark, not its own latest location.
-        let fifth = core.prepare(1, passthrough_build).await.expect("prepare fifth");
+        let fifth = core
+            .prepare(1, passthrough_build)
+            .await
+            .expect("prepare fifth");
         assert_eq!(fifth.watermark_at, Some(loc(2)));
     }
 
@@ -474,7 +483,10 @@ mod tests {
             next_location: loc(8),
         }));
 
-        let first = core.prepare(1, passthrough_build).await.expect("prepare first");
+        let first = core
+            .prepare(1, passthrough_build)
+            .await
+            .expect("prepare first");
         let second = core
             .prepare(1, passthrough_build)
             .await
