@@ -95,7 +95,7 @@ async fn build_local_batch() -> LocalBatch {
 
 async fn upload_and_publish(client: &StoreClient, batch: &LocalBatch) {
     let writer: ImmutableWriter<commonware_cryptography::Sha256, FixedBytes<32>, Vec<u8>> =
-        ImmutableWriter::new(client.clone()).await.expect("writer");
+        ImmutableWriter::empty(client.clone());
     writer
         .upload_and_publish(&batch.operations)
         .await

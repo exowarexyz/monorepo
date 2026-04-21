@@ -28,6 +28,7 @@ use commonware_storage::mmr::{Location, Position};
 use tokio::sync::{Mutex, Notify};
 
 use crate::error::QmdbError;
+use crate::WriterState;
 
 /// MMR/pipeline state held in memory by a single-writer helper.
 #[derive(Debug)]
@@ -36,8 +37,8 @@ pub(crate) struct Cache<D: Digest> {
     pub ops_size: Position,
     pub next_location: Location,
     /// Highest watermark location already included in some prepared or
-    /// committed PUT in this epoch. This suppresses duplicate watermark rows
-    /// while batches are still in flight.
+    /// committed PUT by this writer instance. This suppresses duplicate
+    /// watermark rows while batches are still in flight.
     pub latest_published: Option<Location>,
     /// Highest watermark location definitely committed by an ACKed PUT (or a
     /// successful `flush()` watermark PUT). Recovery helpers must report this
@@ -64,17 +65,17 @@ pub(crate) struct PendingBatch {
 
 #[derive(Debug)]
 pub(crate) enum State<D: Digest> {
+    /// Transient sentinel used while moving a poisoned cache out of the enum.
     Uninit,
     Ready(Cache<D>),
-    Poisoned { msg: String, cache: Cache<D> },
+    Poisoned {
+        msg: String,
+        cache: Cache<D>,
+    },
 }
 
 pub(crate) struct WriterCore<D: Digest> {
     state: Mutex<State<D>>,
-    /// Monotonic bootstrap epoch. Each `install()` bumps it, and ACK/failure
-    /// callbacks from an older epoch are ignored so stale in-flight uploads
-    /// cannot mutate the newly bootstrapped state.
-    epoch: AtomicU64,
     /// Monotonic counter of `advance` calls — also the next dispatch_id.
     dispatched: AtomicU64,
     /// Monotonic counter of `ack_success` + `ack_failure` calls. Used only
@@ -108,31 +109,19 @@ pub(crate) struct BuildResult<D: Digest, R> {
 /// dispatch metadata the writer needs to dispatch + ACK the PUT.
 pub(crate) struct PreparedDispatch<R> {
     pub output: R,
-    pub epoch: u64,
     pub dispatch_id: u64,
     pub watermark_at: Option<Location>,
     pub latest_location: Location,
 }
 
 impl<D: Digest> WriterCore<D> {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn from_cache(cache: Cache<D>) -> Self {
         Self {
-            state: Mutex::new(State::Uninit),
-            epoch: AtomicU64::new(0),
+            state: Mutex::new(State::Ready(cache)),
             dispatched: AtomicU64::new(0),
             acked: AtomicU64::new(0),
             ack_notify: Notify::new(),
         }
-    }
-
-    /// Install a freshly-bootstrapped cache and reset pipeline counters.
-    pub(crate) async fn install(&self, cache: Cache<D>) {
-        let mut state = self.state.lock().await;
-        self.epoch.fetch_add(1, Ordering::SeqCst);
-        *state = State::Ready(cache);
-        self.dispatched.store(0, Ordering::SeqCst);
-        self.acked.store(0, Ordering::SeqCst);
-        self.ack_notify.notify_waiters();
     }
 
     /// Atomically reserve a batch slot, run the variant-specific `build`
@@ -153,7 +142,7 @@ impl<D: Digest> WriterCore<D> {
         let mut state = self.state.lock().await;
         let cache = match &mut *state {
             State::Ready(c) => c,
-            State::Uninit => return Err(QmdbError::WriterNotBootstrapped),
+            State::Uninit => unreachable!("writer core is always constructed with state"),
             State::Poisoned { msg, .. } => return Err(QmdbError::WriterPoisoned(msg.clone())),
         };
         if ops_len == 0 {
@@ -183,7 +172,6 @@ impl<D: Digest> WriterCore<D> {
         };
         let result = build(ctx)?;
 
-        let epoch = self.epoch.load(Ordering::SeqCst);
         let dispatch_id = self.dispatched.fetch_add(1, Ordering::SeqCst);
         cache.peaks = result.new_peaks;
         cache.ops_size = result.new_ops_size;
@@ -201,7 +189,6 @@ impl<D: Digest> WriterCore<D> {
 
         Ok(PreparedDispatch {
             output: result.output,
-            epoch,
             dispatch_id,
             watermark_at,
             latest_location,
@@ -211,17 +198,14 @@ impl<D: Digest> WriterCore<D> {
     /// Record a PUT success for the batch with this `dispatch_id`. Marks it
     /// ACKd in `pending`, then advances `latest_contiguous_acked` by popping
     /// any contiguous-acked prefix off the front.
-    pub(crate) async fn ack_success(&self, epoch: u64, dispatch_id: u64) {
+    pub(crate) async fn ack_success(&self, dispatch_id: u64) {
         let mut matched = false;
         {
             let mut state = self.state.lock().await;
-            if self.epoch.load(Ordering::SeqCst) != epoch {
-                return;
-            }
             let cache = match &mut *state {
                 State::Ready(c) => c,
                 State::Poisoned { cache, .. } => cache,
-                State::Uninit => return,
+                State::Uninit => unreachable!("writer core is never externally uninitialized"),
             };
             match cache.pending.iter_mut().find(|p| p.id == dispatch_id) {
                 Some(p) => {
@@ -251,16 +235,13 @@ impl<D: Digest> WriterCore<D> {
         self.ack_notify.notify_waiters();
     }
 
-    /// Record a PUT failure. Poisons the writer — the caller must call
-    /// `bootstrap()` before resuming. (Rolling back cleanly with other
-    /// batches in flight is ambiguous; re-bootstrapping from the store is
-    /// always correct.)
-    pub(crate) async fn ack_failure(&self, epoch: u64, msg: String) {
+    /// Record a PUT failure. Poisons the writer — the caller must construct a
+    /// fresh writer from caller-owned committed frontier state before
+    /// resuming. (Rolling back cleanly with other batches in flight is
+    /// ambiguous; resuming from explicit caller state is always correct.)
+    pub(crate) async fn ack_failure(&self, msg: String) {
         {
             let mut state = self.state.lock().await;
-            if self.epoch.load(Ordering::SeqCst) != epoch {
-                return;
-            }
             let replacement = match std::mem::replace(&mut *state, State::Uninit) {
                 State::Ready(cache) => State::Poisoned { msg, cache },
                 State::Poisoned {
@@ -308,7 +289,7 @@ impl<D: Digest> WriterCore<D> {
                 (_, Some(d)) => Some(d),
                 _ => None,
             }),
-            State::Uninit => Err(QmdbError::WriterNotBootstrapped),
+            State::Uninit => unreachable!("writer core is always constructed with state"),
             State::Poisoned { msg, .. } => Err(QmdbError::WriterPoisoned(msg.clone())),
         }
     }
@@ -332,16 +313,29 @@ impl<D: Digest> WriterCore<D> {
     }
 }
 
+impl<D: Digest> Cache<D> {
+    pub(crate) fn from_writer_state(state: WriterState<D>) -> Self {
+        let latest_committed = state.latest_committed_location();
+        Self {
+            peaks: state.peaks,
+            ops_size: state.ops_size,
+            next_location: state.next_location,
+            latest_published: latest_committed,
+            latest_committed_published: latest_committed,
+            latest_dispatched: None,
+            pending: VecDeque::new(),
+            latest_contiguous_acked: latest_committed,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use commonware_cryptography::sha256::Digest as Sha256Digest;
 
     fn fresh_core() -> WriterCore<Sha256Digest> {
-        let core = WriterCore::<Sha256Digest>::new();
-        // install() requires an async context; this test-only helper builds
-        // an initial Ready state without going through the async path.
-        *core.state.try_lock().unwrap() = State::Ready(Cache {
+        WriterCore::from_cache(Cache {
             peaks: Vec::new(),
             ops_size: Position::new(0),
             next_location: Location::new(0),
@@ -350,8 +344,7 @@ mod tests {
             latest_dispatched: None,
             pending: VecDeque::new(),
             latest_contiguous_acked: None,
-        });
-        core
+        })
     }
 
     // `await_drain` must complete once `acked >= dispatched`, even when the
@@ -405,42 +398,112 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_epoch_completions_are_ignored_after_install() {
+    async fn restored_writer_state_reports_committed_watermark_immediately() {
+        let core = WriterCore::from_cache(Cache::from_writer_state(WriterState::<Sha256Digest> {
+            peaks: Vec::new(),
+            ops_size: Position::new(8),
+            next_location: loc(8),
+        }));
+        assert_eq!(core.latest_published().await, Some(loc(7)));
+    }
+
+    #[tokio::test]
+    async fn out_of_order_acks_only_advance_the_contiguous_prefix() {
         let core = fresh_core();
-        let old = core
+
+        let first = core.prepare(1, passthrough_build).await.expect("prepare first");
+        let second = core
             .prepare(1, passthrough_build)
             .await
-            .expect("old prepare");
+            .expect("prepare second");
+        let third = core.prepare(1, passthrough_build).await.expect("prepare third");
+        assert_eq!(first.watermark_at, Some(loc(0)));
+        assert_eq!(second.watermark_at, None);
+        assert_eq!(third.watermark_at, None);
 
-        core.install(ready_cache(loc(10), Some(loc(9)))).await;
-        let current = core
+        // Later batches ACK first, but the prefix still has a hole at batch 0.
+        core.ack_success(third.dispatch_id).await;
+        core.ack_success(second.dispatch_id).await;
+        assert_eq!(
+            core.latest_published().await,
+            None,
+            "committed watermark must not advance past an unacked prefix hole",
+        );
+        {
+            let state = core.state.lock().await;
+            let cache = match &*state {
+                State::Ready(cache) => cache,
+                other => panic!("unexpected writer state: {other:?}"),
+            };
+            assert_eq!(cache.latest_contiguous_acked, None);
+            assert_eq!(cache.latest_committed_published, None);
+        }
+
+        // A new batch dispatched while the hole remains must still omit the
+        // watermark row.
+        let fourth = core
             .prepare(1, passthrough_build)
             .await
-            .expect("current prepare");
-        assert_ne!(old.epoch, current.epoch, "bootstrap must advance epoch");
+            .expect("prepare fourth");
+        assert_eq!(fourth.watermark_at, None);
 
-        core.ack_failure(old.epoch, "old epoch failure".to_string())
-            .await;
-        assert!(matches!(&*core.state.lock().await, State::Ready(_)));
+        // Once the missing first batch ACKs, the contiguous frontier jumps to
+        // the highest already-acked predecessor (batch 2 / location 2).
+        core.ack_success(first.dispatch_id).await;
+        {
+            let state = core.state.lock().await;
+            let cache = match &*state {
+                State::Ready(cache) => cache,
+                other => panic!("unexpected writer state: {other:?}"),
+            };
+            assert_eq!(cache.latest_contiguous_acked, Some(loc(2)));
+            assert_eq!(cache.latest_committed_published, Some(loc(0)));
+        }
 
-        core.ack_success(old.epoch, old.dispatch_id).await;
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), core.await_drain())
-                .await
-                .is_err(),
-            "stale completions must not satisfy the new epoch's drain counters",
+        // With batch 3 still in flight, the next dispatch should publish the
+        // contiguous prefix watermark, not its own latest location.
+        let fifth = core.prepare(1, passthrough_build).await.expect("prepare fifth");
+        assert_eq!(fifth.watermark_at, Some(loc(2)));
+    }
+
+    #[tokio::test]
+    async fn seeded_state_flush_path_only_needs_one_tail_publication() {
+        let core = WriterCore::from_cache(Cache::from_writer_state(WriterState::<Sha256Digest> {
+            peaks: Vec::new(),
+            ops_size: Position::new(8),
+            next_location: loc(8),
+        }));
+
+        let first = core.prepare(1, passthrough_build).await.expect("prepare first");
+        let second = core
+            .prepare(1, passthrough_build)
+            .await
+            .expect("prepare second");
+        assert_eq!(first.watermark_at, Some(loc(8)));
+        assert_eq!(second.watermark_at, None);
+
+        core.ack_success(first.dispatch_id).await;
+        core.ack_success(second.dispatch_id).await;
+        core.await_drain().await;
+
+        assert_eq!(
+            core.pending_watermark().await.expect("pending watermark"),
+            Some(loc(9)),
+            "flush should publish exactly the trailing batch boundary",
         );
 
-        core.ack_success(current.epoch, current.dispatch_id).await;
-        tokio::time::timeout(std::time::Duration::from_millis(100), core.await_drain())
-            .await
-            .expect("current epoch ack should drain");
+        core.mark_watermark_published(loc(9)).await;
+        assert_eq!(core.latest_published().await, Some(loc(9)));
+        assert_eq!(
+            core.pending_watermark().await.expect("pending watermark"),
+            None,
+            "after publishing the tail once, a second flush should be a no-op",
+        );
     }
 
     #[tokio::test]
     async fn poisoned_writer_reports_last_committed_not_speculative_watermark() {
-        let core = WriterCore::<Sha256Digest>::new();
-        core.install(ready_cache(loc(8), Some(loc(7)))).await;
+        let core = WriterCore::from_cache(ready_cache(loc(8), Some(loc(7))));
 
         let prepared = core.prepare(1, passthrough_build).await.expect("prepare");
         assert_eq!(
@@ -454,7 +517,7 @@ mod tests {
             "recovery helper must stay on the committed watermark while the PUT is in flight",
         );
 
-        core.ack_failure(prepared.epoch, "boom".to_string()).await;
+        core.ack_failure("boom".to_string()).await;
         assert_eq!(
             core.latest_published().await,
             Some(loc(7)),

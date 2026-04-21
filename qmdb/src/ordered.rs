@@ -25,9 +25,9 @@ use crate::codec::{
 use crate::core::HistoricalOpsClientCore;
 use crate::error::QmdbError;
 use crate::proof::{
-    CurrentOperationRangeProofResult, KeyValueProofResult, MultiProofResult, RangeProof,
-    VariantRoot, VerifiedCurrentRange, VerifiedKeyValue, VerifiedMultiOperations,
-    VerifiedOperationRange, VerifiedVariantRange,
+    CurrentOperationRangeProofResult, KeyValueProofResult, MultiProofResult,
+    OperationRangeCheckpoint, VariantRoot, VerifiedCurrentRange, VerifiedKeyValue,
+    VerifiedMultiOperations, VerifiedOperationRange, VerifiedVariantRange,
 };
 use crate::storage::{KvCurrentStorage, KvMmrStorage};
 use crate::{QmdbVariant, VersionedValue};
@@ -248,6 +248,58 @@ where
         }
     }
 
+    pub async fn operation_range_checkpoint(
+        &self,
+        watermark: Location,
+        start_location: Location,
+        max_locations: u32,
+    ) -> Result<OperationRangeCheckpoint<H::Digest>, QmdbError> {
+        if max_locations == 0 {
+            return Err(QmdbError::InvalidRangeLength);
+        }
+
+        let session = self.client.create_session();
+        self.core()
+            .require_published_watermark(&session, watermark)
+            .await?;
+        let count = watermark
+            .checked_add(1)
+            .ok_or_else(|| QmdbError::CorruptData("watermark overflow".to_string()))?;
+        if start_location >= count {
+            return Err(QmdbError::RangeStartOutOfBounds {
+                start: start_location,
+                count,
+            });
+        }
+        let end = start_location
+            .saturating_add(max_locations as u64)
+            .min(count);
+        let storage = KvMmrStorage::<H::Digest> {
+            session: &session,
+            mmr_size: mmr_size_for_watermark(watermark)?,
+            _marker: PhantomData,
+        };
+        let proof = verification::range_proof(&storage, start_location..end)
+            .await
+            .map_err(|e| QmdbError::CommonwareMmr(e.to_string()))?;
+        let checkpoint = OperationRangeCheckpoint {
+            watermark,
+            root: self.compute_ops_root(&session, watermark).await?,
+            start_location,
+            proof: proof.into(),
+            encoded_operations: self
+                .core()
+                .load_operation_bytes_range(&session, start_location, end)
+                .await?,
+        };
+        if !checkpoint.verify::<H>() {
+            return Err(QmdbError::CorruptData(
+                "range checkpoint proof failed verification".to_string(),
+            ));
+        }
+        Ok(checkpoint)
+    }
+
     /// Open a stream of verified operation ranges, one per uploaded batch.
     ///
     /// # What you get
@@ -361,35 +413,29 @@ where
             .min(count);
         match variant {
             QmdbVariant::Any => {
-                let storage = KvMmrStorage::<H::Digest> {
-                    session: &session,
-                    mmr_size: mmr_size_for_watermark(watermark)?,
-                    _marker: PhantomData,
-                };
-                let proof = verification::range_proof(&storage, start_location..end)
-                    .await
-                    .map_err(|e| QmdbError::CommonwareMmr(e.to_string()))?;
-                let root = self.compute_ops_root(&session, watermark).await?;
-                let operations = self
-                    .load_operation_range(&session, start_location, end)
+                let checkpoint = self
+                    .operation_range_checkpoint(watermark, start_location, max_locations)
                     .await?;
-                let raw = RangeProof {
-                    watermark,
-                    root,
-                    start_location,
-                    proof,
-                    operations,
-                };
-                if !raw.verify::<H>() {
-                    return Err(QmdbError::CorruptData(
-                        "range proof failed verification".to_string(),
-                    ));
-                }
+                let operations = checkpoint
+                    .encoded_operations
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, bytes)| {
+                        let location = checkpoint.start_location + offset as u64;
+                        QmdbOperation::<K, V>::decode_cfg(bytes.as_slice(), &self.op_cfg).map_err(
+                            |e| {
+                                QmdbError::CorruptData(format!(
+                                    "failed to decode qmdb operation at location {location}: {e}"
+                                ))
+                            },
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 Ok(VerifiedVariantRange::Any(VerifiedOperationRange {
-                    watermark: raw.watermark,
-                    root: raw.root,
-                    start_location: raw.start_location,
-                    operations: raw.operations,
+                    watermark: checkpoint.watermark,
+                    root: checkpoint.root,
+                    start_location: checkpoint.start_location,
+                    operations,
                 }))
             }
             QmdbVariant::Current => {

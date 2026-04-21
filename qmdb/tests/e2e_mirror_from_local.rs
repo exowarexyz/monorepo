@@ -8,9 +8,8 @@
 //!      ordered).
 //!   3. Feed to `*Writer::upload_and_publish`.
 //!   4. Verify the remote root matches the local root.
-//!   5. Simulate a restart: create a fresh writer, which auto-bootstraps from
-//!      the store's last watermark. Apply more local batches, resume the
-//!      writer from `watermark + 1`, verify again.
+//!   5. Simulate a restart: create a fresh writer from explicit local frontier
+//!      state, apply more local batches, and verify again.
 
 mod common;
 
@@ -19,7 +18,7 @@ use std::num::NonZeroU64;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics as _, Runner as _};
-use commonware_storage::mmr::Location;
+use commonware_storage::mmr::{Location, Proof as BatchProof};
 use commonware_storage::qmdb::{
     any::{unordered::variable::Db as LocalUnorderedDb, VariableConfig as UnorderedVariableConfig},
     current::{ordered::variable::Db as LocalOrderedDb, VariableConfig as OrderedVariableConfig},
@@ -32,7 +31,7 @@ use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use store_qmdb::{
     build_current_boundary_state, CurrentBoundaryState, ImmutableClient, ImmutableWriter,
     KeylessClient, KeylessWriter, OrderedClient, OrderedWriter, UnorderedClient, UnorderedWriter,
-    MAX_OPERATION_SIZE,
+    WriterState, MAX_OPERATION_SIZE,
 };
 
 type Digest = commonware_cryptography::sha256::Digest;
@@ -44,14 +43,13 @@ async fn mirror_keyless_from_local() {
     let (_dir, _server, client) = common::local_store_client().await;
 
     // Session 1: apply one batch locally, mirror.
-    let (ops1, latest1, root1) = run_keyless_local(vec![vec![
+    let (ops1, proof1, latest1, root1) = run_keyless_local(vec![vec![
         b"alpha".to_vec(),
         b"beta".to_vec(),
         b"gamma".to_vec(),
     ]])
     .await;
-    let writer: KeylessWriter<Sha256, Vec<u8>> =
-        KeylessWriter::new(client.clone()).await.expect("writer");
+    let writer: KeylessWriter<Sha256, Vec<u8>> = KeylessWriter::empty(client.clone());
     writer.upload_and_publish(&ops1).await.expect("upload 1");
     let reader: KeylessClient<Sha256, Vec<u8>> =
         KeylessClient::from_client(client.clone(), ((0..=MAX_OPERATION_SIZE).into(), ()));
@@ -61,21 +59,15 @@ async fn mirror_keyless_from_local() {
         "remote root must match local (after batch 1)"
     );
 
-    // Session 2: fresh writer bootstraps from the store's state, picks up
-    // where we left off. Apply another batch locally; caller slices the
-    // delta off using the recovered watermark.
-    let (ops_total, latest2, root2) = run_keyless_local(vec![
+    // Session 2: fresh writer resumes from explicit local proof material.
+    let (ops_total, _proof_total, latest2, root2) = run_keyless_local(vec![
         vec![b"alpha".to_vec(), b"beta".to_vec(), b"gamma".to_vec()],
         vec![b"delta".to_vec(), b"epsilon".to_vec()],
     ])
     .await;
-    let writer2: KeylessWriter<Sha256, Vec<u8>> =
-        KeylessWriter::new(client.clone()).await.expect("writer 2");
-    let recovered = writer2
-        .latest_published_watermark()
-        .await
-        .expect("bootstrap found watermark");
-    assert_eq!(recovered, latest1);
+    let state = WriterState::from_proof::<Sha256, _>(latest1, Location::new(0), &proof1, &ops1)
+        .expect("writer state");
+    let writer2: KeylessWriter<Sha256, Vec<u8>> = KeylessWriter::new(client.clone(), state);
     let delta = &ops_total[ops1.len()..];
     writer2.upload_and_publish(delta).await.expect("upload 2");
     assert_eq!(
@@ -87,7 +79,12 @@ async fn mirror_keyless_from_local() {
 
 async fn run_keyless_local(
     batches: Vec<Vec<Vec<u8>>>,
-) -> (Vec<KeylessOperation<Vec<u8>>>, Location, Digest) {
+) -> (
+    Vec<KeylessOperation<Vec<u8>>>,
+    BatchProof<Digest>,
+    Location,
+    Digest,
+) {
     tokio::task::spawn_blocking(move || {
         deterministic::Runner::default().start(|context| async move {
             let cfg = KeylessConfig {
@@ -119,13 +116,13 @@ async fn run_keyless_local(
             }
             let latest = db.bounds().await.end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
-            let (_proof, ops) = db
+            let (proof, ops) = db
                 .historical_proof(latest + 1, Location::new(0), n)
                 .await
                 .expect("historical_proof");
             let root = db.root();
             db.destroy().await.expect("destroy");
-            (ops, latest, root)
+            (ops, proof, latest, root)
         })
     })
     .await
@@ -140,13 +137,12 @@ type UnorderedOp = commonware_storage::qmdb::any::unordered::variable::Operation
 async fn mirror_unordered_from_local() {
     let (_dir, _server, client) = common::local_store_client().await;
 
-    let (ops1, latest1, root1) = run_unordered_local(vec![vec![
+    let (ops1, proof1, latest1, root1) = run_unordered_local(vec![vec![
         (b"alpha".to_vec(), Some(b"one".to_vec())),
         (b"beta".to_vec(), Some(b"two".to_vec())),
     ]])
     .await;
-    let writer: UnorderedWriter<Sha256, Vec<u8>, Vec<u8>> =
-        UnorderedWriter::new(client.clone()).await.expect("writer");
+    let writer: UnorderedWriter<Sha256, Vec<u8>, Vec<u8>> = UnorderedWriter::empty(client.clone());
     writer.upload_and_publish(&ops1).await.expect("upload 1");
     let reader: UnorderedClient<Sha256, Vec<u8>, Vec<u8>> = UnorderedClient::from_client(
         client.clone(),
@@ -165,7 +161,7 @@ async fn mirror_unordered_from_local() {
         "remote root must match local (after batch 1)"
     );
 
-    let (ops_total, latest2, root2) = run_unordered_local(vec![
+    let (ops_total, _proof_total, latest2, root2) = run_unordered_local(vec![
         vec![
             (b"alpha".to_vec(), Some(b"one".to_vec())),
             (b"beta".to_vec(), Some(b"two".to_vec())),
@@ -176,14 +172,10 @@ async fn mirror_unordered_from_local() {
         ],
     ])
     .await;
-    let writer2: UnorderedWriter<Sha256, Vec<u8>, Vec<u8>> = UnorderedWriter::new(client.clone())
-        .await
-        .expect("writer 2");
-    assert_eq!(
-        writer2.latest_published_watermark().await,
-        Some(latest1),
-        "bootstrap must recover last watermark"
-    );
+    let state = WriterState::from_proof::<Sha256, _>(latest1, Location::new(0), &proof1, &ops1)
+        .expect("writer state");
+    let writer2: UnorderedWriter<Sha256, Vec<u8>, Vec<u8>> =
+        UnorderedWriter::new(client.clone(), state);
     let delta = &ops_total[ops1.len()..];
     writer2.upload_and_publish(delta).await.expect("upload 2");
     assert_eq!(
@@ -195,7 +187,9 @@ async fn mirror_unordered_from_local() {
 
 type UnorderedBatch = Vec<(Vec<u8>, Option<Vec<u8>>)>;
 
-async fn run_unordered_local(batches: Vec<UnorderedBatch>) -> (Vec<UnorderedOp>, Location, Digest) {
+async fn run_unordered_local(
+    batches: Vec<UnorderedBatch>,
+) -> (Vec<UnorderedOp>, BatchProof<Digest>, Location, Digest) {
     tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
             let cfg = UnorderedVariableConfig {
@@ -231,13 +225,13 @@ async fn run_unordered_local(batches: Vec<UnorderedBatch>) -> (Vec<UnorderedOp>,
             }
             let latest = db.bounds().await.end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
-            let (_proof, ops) = db
+            let (proof, ops) = db
                 .historical_proof(latest + 1, Location::new(0), n)
                 .await
                 .expect("historical_proof");
             let root = db.root();
             db.destroy().await.expect("destroy");
-            (ops, latest, root)
+            (ops, proof, latest, root)
         })
     })
     .await
@@ -252,13 +246,12 @@ type ImmK = FixedBytes<32>;
 async fn mirror_immutable_from_local() {
     let (_dir, _server, client) = common::local_store_client().await;
 
-    let (ops1, latest1, root1) = run_immutable_local(vec![vec![
+    let (ops1, proof1, latest1, root1) = run_immutable_local(vec![vec![
         (FixedBytes::new([0x11; 32]), b"one".to_vec()),
         (FixedBytes::new([0x22; 32]), b"two".to_vec()),
     ]])
     .await;
-    let writer: ImmutableWriter<Sha256, ImmK, Vec<u8>> =
-        ImmutableWriter::new(client.clone()).await.expect("writer");
+    let writer: ImmutableWriter<Sha256, ImmK, Vec<u8>> = ImmutableWriter::empty(client.clone());
     writer.upload_and_publish(&ops1).await.expect("upload 1");
     let reader: ImmutableClient<Sha256, ImmK, Vec<u8>> = ImmutableClient::from_client(
         client.clone(),
@@ -271,7 +264,7 @@ async fn mirror_immutable_from_local() {
         "remote root must match local (after batch 1)"
     );
 
-    let (ops_total, latest2, root2) = run_immutable_local(vec![
+    let (ops_total, _proof_total, latest2, root2) = run_immutable_local(vec![
         vec![
             (FixedBytes::new([0x11; 32]), b"one".to_vec()),
             (FixedBytes::new([0x22; 32]), b"two".to_vec()),
@@ -279,14 +272,10 @@ async fn mirror_immutable_from_local() {
         vec![(FixedBytes::new([0x33; 32]), b"three".to_vec())],
     ])
     .await;
-    let writer2: ImmutableWriter<Sha256, ImmK, Vec<u8>> = ImmutableWriter::new(client.clone())
-        .await
-        .expect("writer 2");
-    assert_eq!(
-        writer2.latest_published_watermark().await,
-        Some(latest1),
-        "bootstrap must recover last watermark"
-    );
+    let state = WriterState::from_proof::<Sha256, _>(latest1, Location::new(0), &proof1, &ops1)
+        .expect("writer state");
+    let writer2: ImmutableWriter<Sha256, ImmK, Vec<u8>> =
+        ImmutableWriter::new(client.clone(), state);
     let delta = &ops_total[ops1.len()..];
     writer2.upload_and_publish(delta).await.expect("upload 2");
     assert_eq!(
@@ -298,7 +287,12 @@ async fn mirror_immutable_from_local() {
 
 async fn run_immutable_local(
     batches: Vec<Vec<(ImmK, Vec<u8>)>>,
-) -> (Vec<ImmutableOperation<ImmK, Vec<u8>>>, Location, Digest) {
+) -> (
+    Vec<ImmutableOperation<ImmK, Vec<u8>>>,
+    BatchProof<Digest>,
+    Location,
+    Digest,
+) {
     tokio::task::spawn_blocking(move || {
         deterministic::Runner::default().start(|context| async move {
             let cfg = ImmutableConfig {
@@ -331,13 +325,13 @@ async fn run_immutable_local(
             }
             let latest = db.bounds().await.end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
-            let (_proof, ops) = db
+            let (proof, ops) = db
                 .historical_proof(latest + 1, Location::new(0), n)
                 .await
                 .expect("historical_proof");
             let root = db.root();
             db.destroy().await.expect("destroy");
-            (ops, latest, root)
+            (ops, proof, latest, root)
         })
     })
     .await
@@ -353,13 +347,12 @@ type OrderedOp = commonware_storage::qmdb::any::ordered::variable::Operation<Vec
 async fn mirror_ordered_from_local() {
     let (_dir, _server, client) = common::local_store_client().await;
 
-    let (ops1, latest1, root1, boundary1) = run_ordered_local(vec![vec![
+    let (ops1, proof1, latest1, root1, boundary1) = run_ordered_local(vec![vec![
         (b"alpha".to_vec(), Some(b"one".to_vec())),
         (b"beta".to_vec(), Some(b"two".to_vec())),
     ]])
     .await;
-    let writer: OrderedWriter<Sha256, Vec<u8>, Vec<u8>, N> =
-        OrderedWriter::new(client.clone()).await.expect("writer");
+    let writer: OrderedWriter<Sha256, Vec<u8>, Vec<u8>, N> = OrderedWriter::empty(client.clone());
     writer
         .upload_and_publish(&ops1, &boundary1)
         .await
@@ -385,7 +378,7 @@ async fn mirror_ordered_from_local() {
     // Second session: compute the per-batch boundary delta for the new batch
     // (passing the previous cumulative ops in so `build_current_boundary_state`
     // only emits rows that actually changed — matching what the writer needs).
-    let (ops_total, latest2, root2, _boundary2_full) = run_ordered_local(vec![
+    let (ops_total, _proof_total, latest2, root2, _boundary2_full) = run_ordered_local(vec![
         vec![
             (b"alpha".to_vec(), Some(b"one".to_vec())),
             (b"beta".to_vec(), Some(b"two".to_vec())),
@@ -396,13 +389,10 @@ async fn mirror_ordered_from_local() {
     let boundary_delta =
         build_current_boundary_state::<Sha256, _, _, N>(Some(ops1.as_slice()), &ops_total).await;
 
+    let state = WriterState::from_proof::<Sha256, _>(latest1, Location::new(0), &proof1, &ops1)
+        .expect("writer state");
     let writer2: OrderedWriter<Sha256, Vec<u8>, Vec<u8>, N> =
-        OrderedWriter::new(client.clone()).await.expect("writer 2");
-    assert_eq!(
-        writer2.latest_published_watermark().await,
-        Some(latest1),
-        "bootstrap must recover last watermark"
-    );
+        OrderedWriter::new(client.clone(), state);
     let delta_ops = &ops_total[ops1.len()..];
     writer2
         .upload_and_publish(delta_ops, &boundary_delta)
@@ -421,12 +411,13 @@ async fn run_ordered_local(
     batches: Vec<OrderedBatch>,
 ) -> (
     Vec<OrderedOp>,
+    BatchProof<Digest>,
     Location,
     Digest,
     CurrentBoundaryState<Digest, N>,
 ) {
     let batches_clone = batches.clone();
-    let (ops, latest, root) = tokio::task::spawn_blocking(move || {
+    let (ops, proof, latest, root) = tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
             let cfg = OrderedVariableConfig {
                 mmr_journal_partition: "mirror-ordered-mmr-journal".into(),
@@ -462,18 +453,18 @@ async fn run_ordered_local(
             }
             let latest = db.bounds().await.end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
-            let (_proof, ops) = db
+            let (proof, ops) = db
                 .ops_historical_proof(latest + 1, Location::new(0), n)
                 .await
                 .expect("ops_historical_proof");
             let root = db.root();
             db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
-            (ops, latest, root)
+            (ops, proof, latest, root)
         })
     })
     .await
     .expect("join");
     let boundary = build_current_boundary_state::<Sha256, _, _, N>(None, &ops).await;
-    (ops, latest, root, boundary)
+    (ops, proof, latest, root, boundary)
 }

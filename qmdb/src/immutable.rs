@@ -13,13 +13,13 @@ use exoware_sdk_rs::StoreClient;
 use crate::auth::AuthenticatedBackendNamespace;
 use crate::auth::{
     compute_auth_root, decode_auth_immutable_update_location, load_auth_operation_at,
-    load_auth_operation_range, load_latest_auth_immutable_update_row, read_latest_auth_watermark,
-    require_published_auth_watermark,
+    load_auth_operation_bytes_range, load_latest_auth_immutable_update_row,
+    read_latest_auth_watermark, require_published_auth_watermark,
 };
 use crate::codec::{mmr_size_for_watermark, UpdateRow};
 use crate::core::retry_transient_post_ingest_query;
 use crate::error::QmdbError;
-use crate::proof::{RangeProof, VerifiedOperationRange};
+use crate::proof::{OperationRangeCheckpoint, VerifiedOperationRange};
 use crate::storage::AuthKvMmrStorage;
 use crate::VersionedValue;
 
@@ -124,13 +124,12 @@ where
         }
     }
 
-    /// Verified contiguous range of operations.
-    pub async fn operation_range_proof(
+    pub async fn operation_range_checkpoint(
         &self,
         watermark: Location,
         start_location: Location,
         max_locations: u32,
-    ) -> Result<VerifiedOperationRange<H::Digest, ImmutableOperation<K, V>>, QmdbError> {
+    ) -> Result<OperationRangeCheckpoint<H::Digest>, QmdbError> {
         if max_locations == 0 {
             return Err(QmdbError::InvalidRangeLength);
         }
@@ -158,30 +157,57 @@ where
         let proof = verification::range_proof(&storage, start_location..end)
             .await
             .map_err(|e| QmdbError::CommonwareMmr(e.to_string()))?;
-        let raw: RangeProof<H::Digest, ImmutableOperation<K, V>> = RangeProof {
+        let checkpoint = OperationRangeCheckpoint {
             watermark,
             root: compute_auth_root::<H>(&session, namespace, watermark).await?,
             start_location,
-            proof,
-            operations: load_auth_operation_range::<ImmutableOperation<K, V>>(
+            proof: proof.into(),
+            encoded_operations: load_auth_operation_bytes_range(
                 &session,
                 namespace,
                 start_location,
                 end,
-                &self.value_cfg,
             )
             .await?,
         };
-        if !raw.verify::<H>() {
+        if !checkpoint.verify::<H>() {
             return Err(QmdbError::CorruptData(
-                "immutable range proof failed verification".to_string(),
+                "immutable checkpoint proof failed verification".to_string(),
             ));
         }
+        Ok(checkpoint)
+    }
+
+    /// Verified contiguous range of operations.
+    pub async fn operation_range_proof(
+        &self,
+        watermark: Location,
+        start_location: Location,
+        max_locations: u32,
+    ) -> Result<VerifiedOperationRange<H::Digest, ImmutableOperation<K, V>>, QmdbError> {
+        let checkpoint = self
+            .operation_range_checkpoint(watermark, start_location, max_locations)
+            .await?;
+        let operations = checkpoint
+            .encoded_operations
+            .iter()
+            .enumerate()
+            .map(|(offset, bytes)| {
+                let location = checkpoint.start_location + offset as u64;
+                ImmutableOperation::<K, V>::decode_cfg(bytes.as_slice(), &self.value_cfg).map_err(
+                    |e| {
+                        QmdbError::CorruptData(format!(
+                            "failed to decode authenticated operation at location {location}: {e}"
+                        ))
+                    },
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(VerifiedOperationRange {
-            watermark: raw.watermark,
-            root: raw.root,
-            start_location: raw.start_location,
-            operations: raw.operations,
+            watermark: checkpoint.watermark,
+            root: checkpoint.root,
+            start_location: checkpoint.start_location,
+            operations,
         })
     }
 

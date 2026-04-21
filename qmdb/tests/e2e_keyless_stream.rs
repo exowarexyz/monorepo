@@ -84,7 +84,7 @@ async fn build_local_batch() -> LocalBatch {
 
 async fn upload_and_publish(client: &StoreClient, batch: &LocalBatch) {
     let writer: KeylessWriter<commonware_cryptography::Sha256, Vec<u8>> =
-        KeylessWriter::new(client.clone()).await.expect("writer");
+        KeylessWriter::empty(client.clone());
     writer
         .upload_and_publish(&batch.operations)
         .await

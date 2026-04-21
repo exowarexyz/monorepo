@@ -32,9 +32,7 @@ type TestOrderedWriter = OrderedWriter<Sha256, Vec<u8>, Vec<u8>, N>;
 type LocalDb = LocalQmdbDb<cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>;
 
 async fn mirror_local(client: &StoreClient, local: &LocalReference) {
-    let writer: TestOrderedWriter = TestOrderedWriter::new(client.clone())
-        .await
-        .expect("writer");
+    let writer: TestOrderedWriter = TestOrderedWriter::empty(client.clone());
     writer
         .upload_and_publish(&local.operations, &local.current_boundary)
         .await

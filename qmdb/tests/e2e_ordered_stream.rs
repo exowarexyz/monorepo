@@ -115,8 +115,7 @@ async fn build_local_batch() -> LocalBatch {
 
 /// Upload + publish `batch` via an OrderedWriter.
 async fn upload_and_publish(client: &StoreClient, batch: &LocalBatch) {
-    let writer: OrderedWriter<Sha256, Vec<u8>, Vec<u8>, N> =
-        OrderedWriter::new(client.clone()).await.expect("writer");
+    let writer: OrderedWriter<Sha256, Vec<u8>, Vec<u8>, N> = OrderedWriter::empty(client.clone());
     writer
         .upload_and_publish(&batch.operations, &batch.current_boundary)
         .await

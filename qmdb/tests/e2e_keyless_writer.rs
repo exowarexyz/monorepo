@@ -8,7 +8,7 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use commonware_runtime::{deterministic, Runner as _};
-use commonware_storage::mmr::Location;
+use commonware_storage::mmr::{Location, Proof as BatchProof};
 use commonware_storage::qmdb::{
     keyless::{Config as KeylessConfig, Keyless, Operation as KeylessOperation},
     store::LogStore as _,
@@ -28,15 +28,20 @@ fn fresh_reader(c: StoreClient) -> TestKeylessClient {
     TestKeylessClient::from_client(c, ((0..=10000).into(), ()))
 }
 
-async fn fresh_writer(c: StoreClient) -> TestKeylessWriter {
-    TestKeylessWriter::new(c).await.expect("writer")
+fn fresh_writer(c: StoreClient) -> TestKeylessWriter {
+    TestKeylessWriter::empty(c)
 }
 
 /// Reference Commonware keyless DB fed the same ops the writer will upload.
 /// Returns the root + ops the writer should produce the same root for.
 async fn build_local_reference(
     batches: Vec<Vec<Vec<u8>>>,
-) -> (Digest, Vec<KeylessOperation<Vec<u8>>>, Location) {
+) -> (
+    Digest,
+    BatchProof<Digest>,
+    Vec<KeylessOperation<Vec<u8>>>,
+    Location,
+) {
     tokio::task::spawn_blocking(move || {
         deterministic::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
@@ -70,13 +75,13 @@ async fn build_local_reference(
 
             let latest = db.bounds().await.end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
-            let (_proof, ops) = db
+            let (proof, ops) = db
                 .historical_proof(latest + 1, Location::new(0), n)
                 .await
                 .expect("proof");
             let root = db.root();
             db.destroy().await.expect("destroy");
-            (root, ops, latest)
+            (root, proof, ops, latest)
         })
     })
     .await
@@ -102,14 +107,14 @@ async fn sequential_upload_matches_local_root() {
         vec![b"gamma".to_vec()],
         vec![b"delta".to_vec(), b"epsilon".to_vec(), b"zeta".to_vec()],
     ];
-    let (local_root, local_ops, latest) = build_local_reference(batches).await;
+    let (local_root, _proof, local_ops, latest) = build_local_reference(batches).await;
     let writer_ops = flat_to_writer_ops(&local_ops);
 
     // Group writer_ops into chunks matching the local batch boundaries. The
     // simplest way: feed the whole flat op sequence in one writer call.
     // This proves the writer produces the same root as the local DB when
     // given the same ops.
-    let writer = fresh_writer(client.clone()).await;
+    let writer = fresh_writer(client.clone());
     let receipt = writer
         .upload_and_publish(&writer_ops)
         .await
@@ -143,14 +148,14 @@ async fn sequential_upload_matches_local_root() {
 #[tokio::test]
 async fn multiple_sequential_batches_each_publish_watermarks_in_band() {
     let (_dir, _server, client) = common::local_store_client().await;
-    let (local_root, local_ops, latest) = build_local_reference(vec![
+    let (local_root, _proof, local_ops, latest) = build_local_reference(vec![
         vec![b"a".to_vec(), b"b".to_vec()],
         vec![b"c".to_vec()],
         vec![b"d".to_vec(), b"e".to_vec()],
     ])
     .await;
 
-    let writer = fresh_writer(client.clone()).await;
+    let writer = fresh_writer(client.clone());
 
     // Feed the full op sequence, but in three calls matching the batch sizes.
     // 2 + 1 + 2 = 5 ops.
@@ -191,7 +196,7 @@ async fn pipelined_batches_require_flush_to_catch_up_watermark() {
     // Local DB adds a Commit op per batch, so 3 batches of 2 Appends produce
     // 9 total ops (indices 0..=8). Split the writer's view into the same
     // batch boundaries.
-    let (local_root, local_ops, latest) = build_local_reference(vec![
+    let (local_root, _proof, local_ops, latest) = build_local_reference(vec![
         vec![b"p".to_vec(), b"q".to_vec()],
         vec![b"r".to_vec(), b"s".to_vec()],
         vec![b"t".to_vec(), b"u".to_vec()],
@@ -206,7 +211,7 @@ async fn pipelined_batches_require_flush_to_catch_up_watermark() {
     let o2 = local_ops[chunk..2 * chunk].to_vec();
     let o3 = local_ops[2 * chunk..].to_vec();
 
-    let writer = Arc::new(fresh_writer(client.clone()).await);
+    let writer = Arc::new(fresh_writer(client.clone()));
 
     // Fire three uploads concurrently. Because the writer's state mutex
     // serializes the build phase but not the PUT, later batches will observe
@@ -268,9 +273,9 @@ async fn bounded_pipeline_advances_watermark_via_contiguous_acks() {
     let batch_values: Vec<Vec<Vec<u8>>> = (0..BATCHES)
         .map(|i| vec![format!("v{i}").into_bytes()])
         .collect();
-    let (local_root, local_ops, latest) = build_local_reference(batch_values).await;
+    let (local_root, _proof, local_ops, latest) = build_local_reference(batch_values).await;
 
-    let writer = Arc::new(fresh_writer(client.clone()).await);
+    let writer = Arc::new(fresh_writer(client.clone()));
 
     let chunk = local_ops.len() / BATCHES;
     let mut slices = Vec::with_capacity(BATCHES);
@@ -331,24 +336,24 @@ async fn bounded_pipeline_advances_watermark_via_contiguous_acks() {
     );
 }
 
-// Recovery: bootstrap from an already-populated store (simulating a fresh
-// writer process after a previous one wrote some batches). The writer should
-// read the store's watermark + peaks and be able to continue writing from
-// there.
+// Recovery: resume from caller-supplied local proof material over an already-
+// populated store (simulating a fresh writer process after a previous one
+// wrote some batches).
 #[tokio::test]
-async fn bootstrap_resumes_from_existing_store_state() {
+async fn local_proof_resumes_from_existing_store_state() {
     let (_dir, _server, client) = common::local_store_client().await;
-    let (local_root_after_two, local_ops_two, latest_two) =
+    let (local_root_after_two, proof_two, local_ops_two, latest_two) =
         build_local_reference(vec![vec![b"g".to_vec(), b"h".to_vec()]]).await;
-    let (local_root_final, local_ops_final, latest_final) = build_local_reference(vec![
-        vec![b"g".to_vec(), b"h".to_vec()],
-        vec![b"i".to_vec(), b"j".to_vec(), b"k".to_vec()],
-    ])
-    .await;
+    let (local_root_final, _proof_final, local_ops_final, latest_final) =
+        build_local_reference(vec![
+            vec![b"g".to_vec(), b"h".to_vec()],
+            vec![b"i".to_vec(), b"j".to_vec(), b"k".to_vec()],
+        ])
+        .await;
 
     // First "session": upload two ops and flush.
     {
-        let writer = fresh_writer(client.clone()).await;
+        let writer = fresh_writer(client.clone());
         let receipt = writer
             .upload_and_publish(&local_ops_two)
             .await
@@ -369,16 +374,17 @@ async fn bootstrap_resumes_from_existing_store_state() {
         assert_eq!(got, local_root_after_two);
     }
 
-    // Second "session": a fresh writer bootstraps and picks up where we
-    // left off, then writes the next batch.
+    // Second "session": reconstruct the frontier from known local proof
+    // material and continue writing from there.
     {
-        let writer = fresh_writer(client.clone()).await;
-        assert_eq!(
-            writer.latest_published_watermark().await,
-            Some(latest_two),
-            "bootstrap must recover the last published watermark"
-        );
-
+        let state = store_qmdb::WriterState::from_proof::<commonware_cryptography::Sha256, _>(
+            latest_two,
+            Location::new(0),
+            &proof_two,
+            &local_ops_two,
+        )
+        .expect("writer state from local proof");
+        let writer = TestKeylessWriter::new(client.clone(), state);
         let remainder = &local_ops_final[local_ops_two.len()..];
         let receipt = writer
             .upload_and_publish(remainder)

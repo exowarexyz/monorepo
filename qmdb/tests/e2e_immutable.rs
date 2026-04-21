@@ -36,8 +36,8 @@ fn fresh_immutable(c: StoreClient) -> TestImmutableClient {
 type TestImmutableWriter =
     ImmutableWriter<commonware_cryptography::Sha256, FixedBytes<32>, Vec<u8>>;
 
-async fn fresh_writer(c: StoreClient) -> TestImmutableWriter {
-    TestImmutableWriter::new(c).await.expect("writer")
+fn fresh_writer(c: StoreClient) -> TestImmutableWriter {
+    TestImmutableWriter::empty(c)
 }
 
 struct LocalReference {
@@ -110,7 +110,7 @@ async fn immutable_round_trip() {
     let (_dir, _server, client) = common::local_store_client().await;
     let local = build_local_db().await;
 
-    let writer = fresh_writer(client.clone()).await;
+    let writer = fresh_writer(client.clone());
     writer
         .upload_and_publish(&local.operations)
         .await

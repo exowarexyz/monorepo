@@ -9,7 +9,7 @@ use exoware_sdk_rs::StoreClient;
 use crate::codec::mmr_size_for_watermark;
 use crate::core::HistoricalOpsClientCore;
 use crate::error::QmdbError;
-use crate::proof::{RangeProof, VerifiedOperationRange};
+use crate::proof::{OperationRangeCheckpoint, VerifiedOperationRange};
 use crate::storage::KvMmrStorage;
 use crate::VersionedValue;
 
@@ -94,13 +94,12 @@ where
         self.core().compute_ops_root::<H>(&session, watermark).await
     }
 
-    /// Verified contiguous range of operations.
-    pub async fn operation_range_proof(
+    pub async fn operation_range_checkpoint(
         &self,
         watermark: Location,
         start_location: Location,
         max_locations: u32,
-    ) -> Result<VerifiedOperationRange<H::Digest, UnorderedQmdbOperation<K, V>>, QmdbError> {
+    ) -> Result<OperationRangeCheckpoint<H::Digest>, QmdbError> {
         if max_locations == 0 {
             return Err(QmdbError::InvalidRangeLength);
         }
@@ -128,17 +127,40 @@ where
         let proof = verification::range_proof(&storage, start_location..end)
             .await
             .map_err(|e| QmdbError::CommonwareMmr(e.to_string()))?;
-        let root = self
-            .core()
-            .compute_ops_root::<H>(&session, watermark)
+        let checkpoint = OperationRangeCheckpoint {
+            watermark,
+            root: self
+                .core()
+                .compute_ops_root::<H>(&session, watermark)
+                .await?,
+            start_location,
+            proof: proof.into(),
+            encoded_operations: self
+                .core()
+                .load_operation_bytes_range(&session, start_location, end)
+                .await?,
+        };
+        if !checkpoint.verify::<H>() {
+            return Err(QmdbError::CorruptData(
+                "unordered checkpoint proof failed verification".to_string(),
+            ));
+        }
+        Ok(checkpoint)
+    }
+
+    /// Verified contiguous range of operations.
+    pub async fn operation_range_proof(
+        &self,
+        watermark: Location,
+        start_location: Location,
+        max_locations: u32,
+    ) -> Result<VerifiedOperationRange<H::Digest, UnorderedQmdbOperation<K, V>>, QmdbError> {
+        let checkpoint = self
+            .operation_range_checkpoint(watermark, start_location, max_locations)
             .await?;
-        let rows = self
-            .core()
-            .load_operation_bytes_range(&session, start_location, end)
-            .await?;
-        let mut operations = Vec::with_capacity(rows.len());
-        for (offset, value) in rows.iter().enumerate() {
-            let location = start_location + offset as u64;
+        let mut operations = Vec::with_capacity(checkpoint.encoded_operations.len());
+        for (offset, value) in checkpoint.encoded_operations.iter().enumerate() {
+            let location = checkpoint.start_location + offset as u64;
             let op = UnorderedQmdbOperation::<K, V>::decode_cfg(value.as_slice(), &self.op_cfg)
                 .map_err(|e| {
                     QmdbError::CorruptData(format!(
@@ -147,24 +169,11 @@ where
                 })?;
             operations.push(op);
         }
-
-        let raw = RangeProof {
-            watermark,
-            root,
-            start_location,
-            proof,
-            operations,
-        };
-        if !raw.verify::<H>() {
-            return Err(QmdbError::CorruptData(
-                "unordered range proof failed verification".to_string(),
-            ));
-        }
         Ok(VerifiedOperationRange {
-            watermark: raw.watermark,
-            root: raw.root,
-            start_location: raw.start_location,
-            operations: raw.operations,
+            watermark: checkpoint.watermark,
+            root: checkpoint.root,
+            start_location: checkpoint.start_location,
+            operations,
         })
     }
 

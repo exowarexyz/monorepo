@@ -46,8 +46,8 @@ pub use immutable::ImmutableClient;
 pub use keyless::KeylessClient;
 pub use ordered::OrderedClient;
 pub use proof::{
-    VariantRoot, VerifiedCurrentRange, VerifiedKeyValue, VerifiedMultiOperations,
-    VerifiedOperationRange, VerifiedVariantRange,
+    OperationRangeCheckpoint, RawMmrProof, VariantRoot, VerifiedCurrentRange, VerifiedKeyValue,
+    VerifiedMultiOperations, VerifiedOperationRange, VerifiedVariantRange,
 };
 pub use unordered::UnorderedClient;
 pub use writer::{
@@ -59,8 +59,9 @@ pub use writer::{
 #[cfg(any(test, feature = "test-utils"))]
 pub use boundary::build_current_boundary_state;
 
-use commonware_cryptography::Digest;
-use commonware_storage::mmr::Location;
+use commonware_codec::Encode;
+use commonware_cryptography::{Digest, Hasher};
+use commonware_storage::mmr::{iterator::PeakIterator, Location, Position, Proof, StandardHasher};
 
 /// Maximum encoded operation size for QMDB key and value payloads (u16 length on the wire).
 pub const MAX_OPERATION_SIZE: usize = u16::MAX as usize;
@@ -90,6 +91,83 @@ pub struct UploadReceipt {
     /// The watermark this batch published, if any. `None` when pipelining
     /// deferred the watermark to a later `flush()` or batch.
     pub writer_location_watermark: Option<Location>,
+}
+
+/// Caller-owned frontier for resuming a single-writer helper without reading
+/// the store.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WriterState<D: Digest> {
+    pub peaks: Vec<(Position, u32, D)>,
+    pub ops_size: Position,
+    pub next_location: Location,
+}
+
+impl<D: Digest> WriterState<D> {
+    pub fn empty() -> Self {
+        Self {
+            peaks: Vec::new(),
+            ops_size: Position::new(0),
+            next_location: Location::new(0),
+        }
+    }
+
+    pub fn latest_committed_location(&self) -> Option<Location> {
+        self.next_location.checked_sub(1)
+    }
+
+    pub fn from_checkpoint<H: Hasher<Digest = D>>(
+        checkpoint: &OperationRangeCheckpoint<D>,
+    ) -> Result<Self, QmdbError> {
+        Ok(Self {
+            peaks: checkpoint.reconstruct_peaks::<H>()?,
+            ops_size: Position::try_from(checkpoint.proof.leaves).map_err(|e| {
+                QmdbError::CorruptData(format!("invalid checkpoint leaf count: {e}"))
+            })?,
+            next_location: checkpoint
+                .watermark
+                .checked_add(1)
+                .ok_or_else(|| QmdbError::CorruptData("checkpoint watermark overflow".into()))?,
+        })
+    }
+
+    pub fn from_proof<H, Op>(
+        watermark: Location,
+        start_location: Location,
+        proof: &Proof<D>,
+        operations: &[Op],
+    ) -> Result<Self, QmdbError>
+    where
+        H: Hasher<Digest = D>,
+        Op: Encode,
+    {
+        let encoded_operations: Vec<Vec<u8>> =
+            operations.iter().map(|op| op.encode().to_vec()).collect();
+        let mut hasher = StandardHasher::<H>::new();
+        let peak_digests = proof
+            .reconstruct_peak_digests(&mut hasher, &encoded_operations, start_location, None)
+            .map_err(|e| QmdbError::CorruptData(format!("reconstruct proof peaks failed: {e}")))?;
+        let ops_size = Position::try_from(proof.leaves)
+            .map_err(|e| QmdbError::CorruptData(format!("invalid proof leaf count: {e}")))?;
+        let peak_entries: Vec<(Position, u32)> = PeakIterator::new(ops_size).collect();
+        if peak_entries.len() != peak_digests.len() {
+            return Err(QmdbError::CorruptData(format!(
+                "proof peak count mismatch: expected {}, got {}",
+                peak_entries.len(),
+                peak_digests.len()
+            )));
+        }
+        Ok(Self {
+            peaks: peak_entries
+                .into_iter()
+                .zip(peak_digests)
+                .map(|((pos, height), digest)| (pos, height, digest))
+                .collect(),
+            ops_size,
+            next_location: watermark
+                .checked_add(1)
+                .ok_or_else(|| QmdbError::CorruptData("proof watermark overflow".into()))?,
+        })
+    }
 }
 
 /// Current-state rows for one uploaded batch boundary.

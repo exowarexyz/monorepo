@@ -382,47 +382,6 @@ where
     })
 }
 
-/// Read the authenticated ops-MMR peaks at `size` from the session. Used by
-/// writer bootstrap.
-pub(crate) async fn load_auth_peaks<H: Hasher>(
-    session: &SerializableReadSession,
-    namespace: AuthenticatedBackendNamespace,
-    size: Position,
-) -> Result<Vec<(Position, u32, H::Digest)>, QmdbError> {
-    let peak_entries: Vec<(Position, u32)> = PeakIterator::new(size).collect();
-    if peak_entries.is_empty() {
-        return Ok(Vec::new());
-    }
-    let peak_keys: Vec<Key> = peak_entries
-        .iter()
-        .map(|(pos, _)| encode_auth_node_key(namespace, *pos))
-        .collect();
-    let peak_key_refs: Vec<&Key> = peak_keys.iter().collect();
-    let fetched: std::collections::HashMap<Key, _> = session
-        .get_many(&peak_key_refs, peak_key_refs.len() as u32)
-        .await?
-        .collect()
-        .await?;
-    let mut peaks = Vec::with_capacity(peak_entries.len());
-    for (peak_pos, height) in &peak_entries {
-        let key = encode_auth_node_key(namespace, *peak_pos);
-        let Some(bytes) = fetched.get(&key) else {
-            return Err(QmdbError::CorruptData(format!(
-                "missing authenticated peak node at position {peak_pos}"
-            )));
-        };
-        peaks.push((
-            *peak_pos,
-            *height,
-            decode_digest(
-                bytes.as_ref(),
-                format!("authenticated peak node at position {peak_pos}"),
-            )?,
-        ));
-    }
-    Ok(peaks)
-}
-
 pub(crate) async fn compute_auth_root<H: Hasher>(
     session: &SerializableReadSession,
     namespace: AuthenticatedBackendNamespace,
@@ -525,31 +484,6 @@ pub(crate) async fn load_auth_operation_bytes_range(
         operations.push(value.to_vec());
     }
     Ok(operations)
-}
-
-pub(crate) async fn load_auth_operation_range<Op>(
-    session: &SerializableReadSession,
-    namespace: AuthenticatedBackendNamespace,
-    start_location: Location,
-    end_location_exclusive: Location,
-    cfg: &Op::Cfg,
-) -> Result<Vec<Op>, QmdbError>
-where
-    Op: Decode,
-{
-    load_auth_operation_bytes_range(session, namespace, start_location, end_location_exclusive)
-        .await?
-        .into_iter()
-        .enumerate()
-        .map(|(offset, bytes)| {
-            let location = start_location + offset as u64;
-            Op::decode_cfg(bytes.as_slice(), cfg).map_err(|e| {
-                QmdbError::CorruptData(format!(
-                    "failed to decode authenticated operation at location {location}: {e}"
-                ))
-            })
-        })
-        .collect()
 }
 
 fn decode_auth_location_field(

@@ -50,8 +50,6 @@ pub enum QmdbError {
     CommonwareMmr(String),
     #[error("qmdb stream transport error: {0}")]
     Stream(String),
-    #[error("writer has not been bootstrapped; call bootstrap() first")]
-    WriterNotBootstrapped,
     #[error("writer is poisoned after an earlier upload failure: {0}")]
     WriterPoisoned(String),
 }

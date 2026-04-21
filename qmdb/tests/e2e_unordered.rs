@@ -116,8 +116,7 @@ async fn unordered_round_trip() {
     let (_dir, _server, client) = common::local_store_client().await;
     let local = build_local_db().await;
 
-    let writer: UnorderedWriter<Sha256, Vec<u8>, Vec<u8>> =
-        UnorderedWriter::new(client.clone()).await.expect("writer");
+    let writer: UnorderedWriter<Sha256, Vec<u8>, Vec<u8>> = UnorderedWriter::empty(client.clone());
     writer
         .upload_and_publish(&local.operations)
         .await

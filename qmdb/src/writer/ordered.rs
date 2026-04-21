@@ -28,16 +28,11 @@ use commonware_storage::qmdb::{
 use exoware_sdk_rs::keys::Key;
 use exoware_sdk_rs::StoreClient;
 
-use crate::codec::{
-    decode_watermark_location, encode_node_key, encode_watermark_key, mmr_size_for_watermark,
-    WATERMARK_CODEC,
-};
-use crate::core::{
-    extend_mmr_from_peaks, load_ops_peaks, PreparedCurrentBoundaryUpload, PreparedUpload,
-};
+use crate::codec::{encode_node_key, encode_watermark_key};
+use crate::core::{extend_mmr_from_peaks, PreparedCurrentBoundaryUpload, PreparedUpload};
 use crate::error::QmdbError;
 use crate::writer::core::{Cache, WriterCore};
-use crate::{CurrentBoundaryState, UploadReceipt};
+use crate::{CurrentBoundaryState, UploadReceipt, WriterState};
 
 #[derive(Clone, Debug)]
 pub struct BuiltOrderedUpload<D> {
@@ -123,49 +118,17 @@ where
     V::Cfg: Clone,
     QmdbOperation<K, V>: Encode + Decode,
 {
-    /// Construct a writer and bootstrap its in-memory state from the store
-    /// in one step.
-    pub async fn new(client: StoreClient) -> Result<Self, QmdbError> {
-        let writer = Self {
+    /// Construct a writer from caller-supplied frontier state. No store I/O.
+    pub fn new(client: StoreClient, state: WriterState<H::Digest>) -> Self {
+        Self {
             client,
-            core: WriterCore::new(),
+            core: WriterCore::from_cache(Cache::from_writer_state(state)),
             _marker: PhantomData,
-        };
-        writer.bootstrap().await?;
-        Ok(writer)
+        }
     }
 
-    /// Re-read the store's latest watermark + peaks into local state.
-    /// Call after a poisoned error to reset the writer before resuming.
-    pub async fn bootstrap(&self) -> Result<(), QmdbError> {
-        let session = self.client.create_session();
-        let (start, end) = WATERMARK_CODEC.prefix_bounds();
-        let rows = session
-            .range_with_mode(&start, &end, 1, exoware_sdk_rs::RangeMode::Reverse)
-            .await?;
-        let latest = match rows.into_iter().next() {
-            Some((key, _)) => Some(decode_watermark_location(&key)?),
-            None => None,
-        };
-        let ops_size = match latest {
-            Some(w) => mmr_size_for_watermark(w)?,
-            None => Position::new(0),
-        };
-        let peaks = load_ops_peaks::<H>(&session, ops_size).await?;
-        let next_location = latest.map_or(Location::new(0), |w| w + 1);
-        self.core
-            .install(Cache {
-                peaks,
-                ops_size,
-                next_location,
-                latest_published: latest,
-                latest_committed_published: latest,
-                latest_dispatched: latest,
-                pending: std::collections::VecDeque::new(),
-                latest_contiguous_acked: latest,
-            })
-            .await;
-        Ok(())
+    pub fn empty(client: StoreClient) -> Self {
+        Self::new(client, WriterState::empty())
     }
 
     pub async fn latest_published_watermark(&self) -> Option<Location> {
@@ -206,9 +169,7 @@ where
             .collect();
         match self.client.ingest().put(&refs).await {
             Ok(_) => {
-                self.core
-                    .ack_success(prepared.epoch, prepared.dispatch_id)
-                    .await;
+                self.core.ack_success(prepared.dispatch_id).await;
                 Ok(UploadReceipt {
                     latest_location: prepared.latest_location,
                     writer_location_watermark: prepared.watermark_at,
@@ -219,7 +180,7 @@ where
                     "ordered upload ending at {} failed: {err}",
                     prepared.latest_location
                 );
-                self.core.ack_failure(prepared.epoch, msg).await;
+                self.core.ack_failure(msg).await;
                 Err(QmdbError::Client(err))
             }
         }

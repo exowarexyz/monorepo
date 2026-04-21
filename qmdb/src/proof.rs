@@ -1,7 +1,7 @@
 use commonware_codec::{Codec, Encode};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::{
-    mmr::{self, Location, StandardHasher},
+    mmr::{self, iterator::PeakIterator, Location, Position, StandardHasher},
     qmdb::{
         any::ordered::{variable::Operation as QmdbOperation, Update as QmdbUpdate},
         current::{
@@ -9,11 +9,107 @@ use commonware_storage::{
             proof::RangeProof as CurrentRangeProof,
         },
         operation::Key as QmdbKey,
-        verify::{verify_multi_proof, verify_proof},
+        verify::verify_multi_proof,
     },
 };
 
+use crate::QmdbError;
 use crate::QmdbVariant;
+
+/// Stable mirror of Commonware's MMR proof payload.
+///
+/// This lets callers retain or transport historical proof material without
+/// depending on the upstream `mmr::Proof` shape directly.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[must_use]
+pub struct RawMmrProof<D: Digest> {
+    pub leaves: Location,
+    pub digests: Vec<D>,
+}
+
+impl<D: Digest> From<mmr::Proof<D>> for RawMmrProof<D> {
+    fn from(value: mmr::Proof<D>) -> Self {
+        Self {
+            leaves: value.leaves,
+            digests: value.digests,
+        }
+    }
+}
+
+impl<D: Digest> From<RawMmrProof<D>> for mmr::Proof<D> {
+    fn from(value: RawMmrProof<D>) -> Self {
+        Self {
+            leaves: value.leaves,
+            digests: value.digests,
+        }
+    }
+}
+
+impl<D: Digest + Clone> From<&RawMmrProof<D>> for mmr::Proof<D> {
+    fn from(value: &RawMmrProof<D>) -> Self {
+        Self {
+            leaves: value.leaves,
+            digests: value.digests.clone(),
+        }
+    }
+}
+
+/// Historical operation range plus the raw MMR proof material used to verify
+/// it. This is suitable for checkpointing and writer-frontier recovery.
+#[derive(Clone, Debug, PartialEq)]
+#[must_use]
+pub struct OperationRangeCheckpoint<D: Digest> {
+    pub watermark: Location,
+    pub root: D,
+    pub start_location: Location,
+    pub proof: RawMmrProof<D>,
+    pub encoded_operations: Vec<Vec<u8>>,
+}
+
+impl<D: Digest> OperationRangeCheckpoint<D> {
+    pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
+        let mut hasher = StandardHasher::<H>::new();
+        let proof = mmr::Proof::from(&self.proof);
+        proof.verify_range_inclusion(
+            &mut hasher,
+            &self.encoded_operations,
+            self.start_location,
+            &self.root,
+        )
+    }
+
+    pub fn reconstruct_peaks<H: Hasher<Digest = D>>(
+        &self,
+    ) -> Result<Vec<(Position, u32, D)>, QmdbError> {
+        let mut hasher = StandardHasher::<H>::new();
+        let proof = mmr::Proof::from(&self.proof);
+        let peak_digests = proof
+            .reconstruct_peak_digests(
+                &mut hasher,
+                &self.encoded_operations,
+                self.start_location,
+                None,
+            )
+            .map_err(|e| {
+                QmdbError::CorruptData(format!("reconstruct checkpoint peaks failed: {e}"))
+            })?;
+        let size = Position::try_from(self.proof.leaves)
+            .map_err(|e| QmdbError::CorruptData(format!("invalid checkpoint leaf count: {e}")))?;
+        let peak_entries: Vec<(Position, u32)> = PeakIterator::new(size).collect();
+        if peak_entries.len() != peak_digests.len() {
+            return Err(QmdbError::CorruptData(format!(
+                "checkpoint peak count mismatch: expected {}, got {}",
+                peak_entries.len(),
+                peak_digests.len()
+            )));
+        }
+        Ok(peak_entries
+            .into_iter()
+            .zip(peak_digests)
+            .map(|((pos, height), digest)| (pos, height, digest))
+            .collect())
+    }
+}
 
 // `Verified*` types below all share one invariant: the MMR proof has already
 // been checked against the store's root and the proof blob has been dropped.
@@ -188,28 +284,5 @@ where
         });
         let mut hasher = H::default();
         self.proof.proof.verify(&mut hasher, operation, &self.root)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-#[must_use]
-pub(crate) struct RangeProof<D: Digest, Op> {
-    pub watermark: Location,
-    pub root: D,
-    pub start_location: Location,
-    pub proof: mmr::Proof<D>,
-    pub operations: Vec<Op>,
-}
-
-impl<D: Digest, Op: Encode> RangeProof<D, Op> {
-    pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
-        let mut hasher = StandardHasher::<H>::new();
-        verify_proof(
-            &mut hasher,
-            &self.proof,
-            self.start_location,
-            &self.operations,
-            &self.root,
-        )
     }
 }

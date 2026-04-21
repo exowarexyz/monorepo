@@ -30,8 +30,8 @@ fn fresh_reader(c: StoreClient) -> TestReader {
     TestReader::from_client(c, ((0..=10000).into(), ()), ((), ((0..=10000).into(), ())))
 }
 
-async fn fresh_writer(c: StoreClient) -> TestWriter {
-    TestWriter::new(c).await.expect("writer")
+fn fresh_writer(c: StoreClient) -> TestWriter {
+    TestWriter::empty(c)
 }
 
 struct LocalReference {
@@ -99,7 +99,7 @@ async fn sequential_upload_matches_local_root() {
     ]])
     .await;
 
-    let writer = fresh_writer(client.clone()).await;
+    let writer = fresh_writer(client.clone());
     let receipt = writer
         .upload_and_publish(&local.operations)
         .await
@@ -138,7 +138,7 @@ async fn pipelined_batches_require_flush_to_catch_up_watermark() {
     let o2 = local.operations[chunk..2 * chunk].to_vec();
     let o3 = local.operations[2 * chunk..].to_vec();
 
-    let writer = Arc::new(fresh_writer(client.clone()).await);
+    let writer = Arc::new(fresh_writer(client.clone()));
 
     let w1 = writer.clone();
     let w2 = writer.clone();

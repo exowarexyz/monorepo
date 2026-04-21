@@ -6,7 +6,7 @@ mod common;
 use std::num::NonZeroU64;
 
 use commonware_runtime::{deterministic, Runner as _};
-use commonware_storage::mmr::Location;
+use commonware_storage::mmr::{Location, StandardHasher};
 use commonware_storage::qmdb::{
     keyless::{Config as KeylessConfig, Keyless, Operation as KeylessOperation},
     store::LogStore as _,
@@ -27,8 +27,8 @@ fn fresh_keyless(c: StoreClient) -> TestKeylessClient {
     TestKeylessClient::from_client(c, ((0..=10000).into(), ()))
 }
 
-async fn fresh_writer(c: StoreClient) -> TestKeylessWriter {
-    TestKeylessWriter::new(c).await.expect("writer")
+fn fresh_writer(c: StoreClient) -> TestKeylessWriter {
+    TestKeylessWriter::empty(c)
 }
 
 struct LocalReference {
@@ -105,7 +105,7 @@ async fn keyless_round_trip() {
     let (_dir, _server, client) = common::local_store_client().await;
     let local = build_local_db().await;
 
-    let writer = fresh_writer(client.clone()).await;
+    let writer = fresh_writer(client.clone());
     writer
         .upload_and_publish(&local.operations)
         .await
@@ -140,4 +140,23 @@ async fn keyless_round_trip() {
         .expect("proof");
     assert_eq!(proof.root, local.root);
     assert_eq!(proof.operations, local.operations);
+
+    let checkpoint = c
+        .operation_range_checkpoint(
+            local.latest_location,
+            Location::new(0),
+            local.operations.len() as u32,
+        )
+        .await
+        .expect("checkpoint");
+    let peaks = checkpoint
+        .reconstruct_peaks::<commonware_cryptography::Sha256>()
+        .expect("reconstruct_peaks");
+    let mut hasher = StandardHasher::<commonware_cryptography::Sha256>::new();
+    let reconstructed_root = commonware_storage::mmr::hasher::Hasher::root(
+        &mut hasher,
+        checkpoint.proof.leaves,
+        peaks.iter().map(|(_, _, digest)| digest),
+    );
+    assert_eq!(reconstructed_root, checkpoint.root);
 }

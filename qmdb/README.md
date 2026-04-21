@@ -438,14 +438,14 @@ not allowed:
 Each backend exposes a `*Writer` helper for sole-writer ingest. Writers hold
 cached MMR peaks + a pending-batch queue in memory; `upload_and_publish`
 dispatches a single atomic PUT per batch with zero store reads in the hot
-loop. Construction auto-bootstraps from the store's latest watermark.
+loop. Construction always starts from caller-supplied frontier state.
 
 ```rust,ignore
 use std::sync::Arc;
-use store_qmdb::KeylessWriter;
+use store_qmdb::{KeylessWriter, WriterState};
 
 let writer: Arc<KeylessWriter<Sha256, Vec<u8>>> =
-    Arc::new(KeylessWriter::new(client.clone()).await?);
+    Arc::new(KeylessWriter::new(client.clone(), WriterState::empty()));
 
 // Sequential usage — awaits each upload.
 writer.upload_and_publish(&batch_ops).await?;
@@ -498,11 +498,11 @@ watermark advancing on its own.
 ### Failure recovery
 
 Any PUT failure poisons the writer. `upload_and_publish` returns the error
-and future calls return `WriterPoisoned` until `bootstrap()` is called. The
-caller re-reads the store's committed watermark via
-`writer.latest_published_watermark()` (or the reader client) and re-submits
-any batches past that location from its own durable source. Re-submission is
-safe: PUT rows are content-addressed by key and MMR math is deterministic.
+and future calls return `WriterPoisoned`. The caller constructs a fresh writer
+from caller-owned committed frontier state (for example, reconstructed from a
+local Commonware proof) and re-submits any still-pending batches from its own
+durable source. Re-submission is safe: PUT rows are content-addressed by key
+and MMR math is deterministic.
 
 ### Sole-writer contract
 

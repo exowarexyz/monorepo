@@ -10,14 +10,13 @@ use exoware_sdk_rs::keys::Key;
 use exoware_sdk_rs::StoreClient;
 
 use crate::auth::{
-    build_auth_upload_rows, encode_auth_node_key, encode_auth_watermark_key, load_auth_peaks,
-    read_latest_auth_watermark, AuthenticatedBackendNamespace,
+    build_auth_upload_rows, encode_auth_node_key, encode_auth_watermark_key,
+    AuthenticatedBackendNamespace,
 };
-use crate::codec::mmr_size_for_watermark;
 use crate::core::extend_mmr_from_peaks;
 use crate::error::QmdbError;
 use crate::writer::core::{Cache, WriterCore};
-use crate::UploadReceipt;
+use crate::{UploadReceipt, WriterState};
 
 const NAMESPACE: AuthenticatedBackendNamespace = AuthenticatedBackendNamespace::Keyless;
 
@@ -104,9 +103,9 @@ where
 ///
 /// ## Failure handling
 ///
-/// Any PUT error poisons the writer. The caller must call
-/// [`bootstrap`](Self::bootstrap) (re-reading the store's current watermark +
-/// peaks) before any further uploads can proceed. PUT rows are
+/// Any PUT error poisons the writer. The caller must construct a fresh writer
+/// from a caller-owned committed frontier before any further uploads can
+/// proceed. PUT rows are
 /// content-addressed and MMR math is deterministic, so re-submitting the
 /// batches the caller still considers pending is always safe.
 ///
@@ -128,43 +127,17 @@ where
     V: Codec + Clone + Send + Sync,
     KeylessOperation<V>: Encode,
 {
-    /// Construct a writer and bootstrap its in-memory state from the store
-    /// in one step. Reads the latest watermark + MMR peaks once; subsequent
-    /// calls are hot-path.
-    pub async fn new(client: StoreClient) -> Result<Self, QmdbError> {
-        let writer = Self {
+    /// Construct a writer from caller-supplied frontier state. No store I/O.
+    pub fn new(client: StoreClient, state: WriterState<H::Digest>) -> Self {
+        Self {
             client,
-            core: WriterCore::new(),
+            core: WriterCore::from_cache(Cache::from_writer_state(state)),
             _marker: PhantomData,
-        };
-        writer.bootstrap().await?;
-        Ok(writer)
+        }
     }
 
-    /// Re-read the store's latest watermark + peaks into local state.
-    /// Call after a poisoned error to reset the writer before resuming.
-    pub async fn bootstrap(&self) -> Result<(), QmdbError> {
-        let session = self.client.create_session();
-        let latest = read_latest_auth_watermark(&session, NAMESPACE).await?;
-        let ops_size = match latest {
-            Some(w) => mmr_size_for_watermark(w)?,
-            None => Position::new(0),
-        };
-        let peaks = load_auth_peaks::<H>(&session, NAMESPACE, ops_size).await?;
-        let next_location = latest.map_or(Location::new(0), |w| w + 1);
-        self.core
-            .install(Cache {
-                peaks,
-                ops_size,
-                next_location,
-                latest_published: latest,
-                latest_committed_published: latest,
-                latest_dispatched: latest,
-                pending: std::collections::VecDeque::new(),
-                latest_contiguous_acked: latest,
-            })
-            .await;
-        Ok(())
+    pub fn empty(client: StoreClient) -> Self {
+        Self::new(client, WriterState::empty())
     }
 
     pub async fn latest_published_watermark(&self) -> Option<Location> {
@@ -200,9 +173,7 @@ where
             .collect();
         match self.client.ingest().put(&refs).await {
             Ok(_) => {
-                self.core
-                    .ack_success(prepared.epoch, prepared.dispatch_id)
-                    .await;
+                self.core.ack_success(prepared.dispatch_id).await;
                 Ok(UploadReceipt {
                     latest_location: prepared.latest_location,
                     writer_location_watermark: prepared.watermark_at,
@@ -213,7 +184,7 @@ where
                     "keyless upload ending at {} failed: {err}",
                     prepared.latest_location
                 );
-                self.core.ack_failure(prepared.epoch, msg).await;
+                self.core.ack_failure(msg).await;
                 Err(QmdbError::Client(err))
             }
         }
