@@ -343,14 +343,53 @@ async fn run_immutable_local(
 const N: usize = 32;
 type OrderedOp = commonware_storage::qmdb::any::ordered::variable::Operation<Vec<u8>, Vec<u8>>;
 
+async fn ordered_boundary_from_local_db(
+    db: &LocalOrderedDb<cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>,
+    previous_operations: Option<&[OrderedOp]>,
+    operations: &[OrderedOp],
+) -> CurrentBoundaryState<Digest, N> {
+    build_current_boundary_state::<Sha256, _, _, N, _, _>(
+        previous_operations,
+        operations,
+        db.root(),
+        |location| async move {
+            let mut hasher = Sha256::default();
+            let (proof, mut proof_ops, mut chunks) = db
+                .range_proof(&mut hasher, location, NZU64!(1))
+                .await
+                .map_err(|error| {
+                    store_qmdb::QmdbError::CorruptData(format!(
+                        "local current range proof at {location}: {error}"
+                    ))
+                })?;
+            let operation = proof_ops.pop().ok_or_else(|| {
+                store_qmdb::QmdbError::CorruptData(format!(
+                    "local current range proof at {location} returned no operations"
+                ))
+            })?;
+            let chunk = chunks.pop().ok_or_else(|| {
+                store_qmdb::QmdbError::CorruptData(format!(
+                    "local current range proof at {location} returned no chunks"
+                ))
+            })?;
+            Ok((proof.proof, operation, chunk))
+        },
+    )
+    .await
+    .expect("build_current_boundary_state")
+}
+
 #[tokio::test]
 async fn mirror_ordered_from_local() {
     let (_dir, _server, client) = common::local_store_client().await;
 
-    let (ops1, proof1, latest1, root1, boundary1) = run_ordered_local(vec![vec![
-        (b"alpha".to_vec(), Some(b"one".to_vec())),
-        (b"beta".to_vec(), Some(b"two".to_vec())),
-    ]])
+    let (ops1, proof1, latest1, root1, boundary1) = run_ordered_local(
+        vec![vec![
+            (b"alpha".to_vec(), Some(b"one".to_vec())),
+            (b"beta".to_vec(), Some(b"two".to_vec())),
+        ]],
+        None,
+    )
     .await;
     let writer: OrderedWriter<Sha256, Vec<u8>, Vec<u8>, N> = OrderedWriter::empty(client.clone());
     writer
@@ -375,19 +414,18 @@ async fn mirror_ordered_from_local() {
         "remote root must match local (after batch 1)"
     );
 
-    // Second session: compute the per-batch boundary delta for the new batch
-    // (passing the previous cumulative ops in so `build_current_boundary_state`
-    // only emits rows that actually changed — matching what the writer needs).
-    let (ops_total, _proof_total, latest2, root2, _boundary2_full) = run_ordered_local(vec![
+    // Second session: compute the per-batch boundary delta for the new batch.
+    let (ops_total, _proof_total, latest2, root2, boundary_delta) = run_ordered_local(
         vec![
-            (b"alpha".to_vec(), Some(b"one".to_vec())),
-            (b"beta".to_vec(), Some(b"two".to_vec())),
+            vec![
+                (b"alpha".to_vec(), Some(b"one".to_vec())),
+                (b"beta".to_vec(), Some(b"two".to_vec())),
+            ],
+            vec![(b"alpha".to_vec(), Some(b"one-updated".to_vec()))],
         ],
-        vec![(b"alpha".to_vec(), Some(b"one-updated".to_vec()))],
-    ])
+        Some(ops1.clone()),
+    )
     .await;
-    let boundary_delta =
-        build_current_boundary_state::<Sha256, _, _, N>(Some(ops1.as_slice()), &ops_total).await;
 
     let state = WriterState::from_proof::<Sha256, _>(latest1, Location::new(0), &proof1, &ops1)
         .expect("writer state");
@@ -409,6 +447,7 @@ type OrderedBatch = Vec<(Vec<u8>, Option<Vec<u8>>)>;
 
 async fn run_ordered_local(
     batches: Vec<OrderedBatch>,
+    previous_operations: Option<Vec<OrderedOp>>,
 ) -> (
     Vec<OrderedOp>,
     BatchProof<Digest>,
@@ -417,7 +456,7 @@ async fn run_ordered_local(
     CurrentBoundaryState<Digest, N>,
 ) {
     let batches_clone = batches.clone();
-    let (ops, proof, latest, root) = tokio::task::spawn_blocking(move || {
+    let (ops, proof, latest, root, boundary) = tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
             let cfg = OrderedVariableConfig {
                 mmr_journal_partition: "mirror-ordered-mmr-journal".into(),
@@ -457,14 +496,15 @@ async fn run_ordered_local(
                 .ops_historical_proof(latest + 1, Location::new(0), n)
                 .await
                 .expect("ops_historical_proof");
+            let boundary =
+                ordered_boundary_from_local_db(&db, previous_operations.as_deref(), &ops).await;
             let root = db.root();
             db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
-            (ops, proof, latest, root)
+            (ops, proof, latest, root, boundary)
         })
     })
     .await
     .expect("join");
-    let boundary = build_current_boundary_state::<Sha256, _, _, N>(None, &ops).await;
     (ops, proof, latest, root, boundary)
 }

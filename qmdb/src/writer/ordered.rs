@@ -4,18 +4,12 @@
 //! ordered batches carry current-state rows (bitmap chunks, grafted-MMR
 //! nodes, and the current-state root) keyed by the batch boundary Location.
 //! Those are deterministic from the full op history but require running a
-//! local commonware `current::ordered::Db` (or the test-only rebuild helper)
-//! to compute; the writer takes them as an input rather than trying to
-//! compute them internally.
+//! local commonware `current::ordered::Db` to compute; the writer takes them
+//! as an input rather than trying to compute them internally.
 //!
 //! Callers typically drive a local commonware QMDB alongside the writer,
 //! reading the new current-boundary state from the local Db after each batch
 //! and passing it in via [`OrderedWriter::upload_and_publish`].
-//!
-//! TODO: once upstream commonware exposes the `MerkleizedBatch.bitmap` and
-//! `.grafted` fields publicly, wire this module to extract those deltas
-//! directly from a local `current::ordered::Db` so callers can mirror
-//! without the O(n_total_ops) `build_current_boundary_state` rebuild path.
 
 use std::marker::PhantomData;
 

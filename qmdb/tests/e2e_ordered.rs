@@ -31,6 +31,42 @@ type TestOrderedClient = OrderedClient<Sha256, Vec<u8>, Vec<u8>, N>;
 type TestOrderedWriter = OrderedWriter<Sha256, Vec<u8>, Vec<u8>, N>;
 type LocalDb = LocalQmdbDb<cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>;
 
+async fn boundary_from_local_db(
+    db: &LocalDb,
+    previous_operations: Option<&[BatchOperation]>,
+    operations: &[BatchOperation],
+) -> CurrentBoundaryState<Digest, N> {
+    build_current_boundary_state::<Sha256, _, _, N, _, _>(
+        previous_operations,
+        operations,
+        db.root(),
+        |location| async move {
+            let mut hasher = Sha256::default();
+            let (proof, mut proof_ops, mut chunks) = db
+                .range_proof(&mut hasher, location, NZU64!(1))
+                .await
+                .map_err(|error| {
+                    store_qmdb::QmdbError::CorruptData(format!(
+                        "local current range proof at {location}: {error}"
+                    ))
+                })?;
+            let operation = proof_ops.pop().ok_or_else(|| {
+                store_qmdb::QmdbError::CorruptData(format!(
+                    "local current range proof at {location} returned no operations"
+                ))
+            })?;
+            let chunk = chunks.pop().ok_or_else(|| {
+                store_qmdb::QmdbError::CorruptData(format!(
+                    "local current range proof at {location} returned no chunks"
+                ))
+            })?;
+            Ok((proof.proof, operation, chunk))
+        },
+    )
+    .await
+    .expect("build_current_boundary_state")
+}
+
 async fn mirror_local(client: &StoreClient, local: &LocalReference) {
     let writer: TestOrderedWriter = TestOrderedWriter::empty(client.clone());
     writer
@@ -104,7 +140,7 @@ async fn build_local_db() -> LocalReference {
                 .await
                 .expect("proof");
 
-            let boundary = build_current_boundary_state::<Sha256, _, _, N>(None, &ops).await;
+            let boundary = boundary_from_local_db(&db, None, &ops).await;
 
             let mut values = std::collections::BTreeMap::new();
             values.insert(

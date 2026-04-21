@@ -34,6 +34,42 @@ type TestReader = OrderedClient<Sha256, Vec<u8>, Vec<u8>, N>;
 type TestWriter = OrderedWriter<Sha256, Vec<u8>, Vec<u8>, N>;
 type LocalDb = LocalQmdbDb<cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>;
 
+async fn boundary_from_local_db(
+    db: &LocalDb,
+    previous_operations: Option<&[BatchOperation]>,
+    operations: &[BatchOperation],
+) -> CurrentBoundaryState<Digest, N> {
+    build_current_boundary_state::<Sha256, _, _, N, _, _>(
+        previous_operations,
+        operations,
+        db.root(),
+        |location| async move {
+            let mut hasher = Sha256::default();
+            let (proof, mut proof_ops, mut chunks) = db
+                .range_proof(&mut hasher, location, NZU64!(1))
+                .await
+                .map_err(|error| {
+                    store_qmdb::QmdbError::CorruptData(format!(
+                        "local current range proof at {location}: {error}"
+                    ))
+                })?;
+            let operation = proof_ops.pop().ok_or_else(|| {
+                store_qmdb::QmdbError::CorruptData(format!(
+                    "local current range proof at {location} returned no operations"
+                ))
+            })?;
+            let chunk = chunks.pop().ok_or_else(|| {
+                store_qmdb::QmdbError::CorruptData(format!(
+                    "local current range proof at {location} returned no chunks"
+                ))
+            })?;
+            Ok((proof.proof, operation, chunk))
+        },
+    )
+    .await
+    .expect("build_current_boundary_state")
+}
+
 fn op_cfg() -> <BatchOperation as commonware_codec::Read>::Cfg {
     (
         ((0..=MAX_OPERATION_SIZE).into(), ()),
@@ -68,7 +104,10 @@ struct LocalReference {
 
 type WriteBatch = Vec<(Vec<u8>, Option<Vec<u8>>)>;
 
-async fn build_local_reference(batches: Vec<WriteBatch>) -> LocalReference {
+async fn build_local_reference(
+    batches: Vec<WriteBatch>,
+    previous_operations: Option<Vec<BatchOperation>>,
+) -> LocalReference {
     tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
@@ -109,7 +148,7 @@ async fn build_local_reference(batches: Vec<WriteBatch>) -> LocalReference {
                 .ops_historical_proof(latest + 1, Location::new(0), n)
                 .await
                 .expect("proof");
-            let boundary = build_current_boundary_state::<Sha256, _, _, N>(None, &ops).await;
+            let boundary = boundary_from_local_db(&db, previous_operations.as_deref(), &ops).await;
             db.sync().await.expect("sync");
             let root = db.root();
             db.destroy().await.expect("destroy");
@@ -128,10 +167,13 @@ async fn build_local_reference(batches: Vec<WriteBatch>) -> LocalReference {
 #[tokio::test]
 async fn sequential_upload_matches_local_root() {
     let (_dir, _server, client) = common::local_store_client().await;
-    let local = build_local_reference(vec![vec![
-        (b"alpha".to_vec(), Some(b"one".to_vec())),
-        (b"beta".to_vec(), Some(b"two".to_vec())),
-    ]])
+    let local = build_local_reference(
+        vec![vec![
+            (b"alpha".to_vec(), Some(b"one".to_vec())),
+            (b"beta".to_vec(), Some(b"two".to_vec())),
+        ]],
+        None,
+    )
     .await;
 
     let writer = fresh_writer(client.clone());
@@ -165,33 +207,22 @@ async fn pipelined_batches_require_flush_to_catch_up_watermark() {
     let (_dir, _server, client) = common::local_store_client().await;
 
     // Build three cumulative reference snapshots so we can pull a
-    // current-boundary state at each batch boundary. Per-batch delta
-    // computation via `build_current_boundary_state(prev_ops, cur_ops)`.
+    // current-boundary delta at each batch boundary from the local current DB.
     let b1 = vec![(b"p".to_vec(), Some(b"1".to_vec()))];
     let b2 = vec![(b"q".to_vec(), Some(b"2".to_vec()))];
     let b3 = vec![(b"r".to_vec(), Some(b"3".to_vec()))];
-    let after1 = build_local_reference(vec![b1.clone()]).await;
-    let after2 = build_local_reference(vec![b1.clone(), b2.clone()]).await;
-    let after3 = build_local_reference(vec![b1, b2, b3]).await;
+    let after1 = build_local_reference(vec![b1.clone()], None).await;
+    let after2 = build_local_reference(
+        vec![b1.clone(), b2.clone()],
+        Some(after1.operations.clone()),
+    )
+    .await;
+    let after3 = build_local_reference(vec![b1, b2, b3], Some(after2.operations.clone())).await;
 
     // Per-batch ops: slice the cumulative op list at boundaries.
     let ops1 = after1.operations.clone();
     let ops2 = after2.operations[after1.operations.len()..].to_vec();
     let ops3 = after3.operations[after2.operations.len()..].to_vec();
-
-    // Per-batch boundary states (delta against the PREVIOUS cumulative ops so
-    // we only include rows that actually changed).
-    let boundary1 = build_current_boundary_state::<Sha256, _, _, N>(None, &after1.operations).await;
-    let boundary2 = build_current_boundary_state::<Sha256, _, _, N>(
-        Some(after1.operations.as_slice()),
-        after2.operations.as_slice(),
-    )
-    .await;
-    let boundary3 = build_current_boundary_state::<Sha256, _, _, N>(
-        Some(after2.operations.as_slice()),
-        after3.operations.as_slice(),
-    )
-    .await;
 
     let writer = Arc::new(fresh_writer(client.clone()));
 
@@ -199,9 +230,9 @@ async fn pipelined_batches_require_flush_to_catch_up_watermark() {
     let w2 = writer.clone();
     let w3 = writer.clone();
     let (r1, r2, r3) = tokio::join!(
-        async move { w1.upload_and_publish(&ops1, &boundary1).await },
-        async move { w2.upload_and_publish(&ops2, &boundary2).await },
-        async move { w3.upload_and_publish(&ops3, &boundary3).await }
+        async move { w1.upload_and_publish(&ops1, &after1.current_boundary).await },
+        async move { w2.upload_and_publish(&ops2, &after2.current_boundary).await },
+        async move { w3.upload_and_publish(&ops3, &after3.current_boundary).await }
     );
     let _ = r1.expect("b1");
     let _ = r2.expect("b2");
