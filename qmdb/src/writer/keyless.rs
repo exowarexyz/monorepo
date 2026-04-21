@@ -158,6 +158,7 @@ where
                 ops_size,
                 next_location,
                 latest_published: latest,
+                latest_committed_published: latest,
                 latest_dispatched: latest,
                 pending: std::collections::VecDeque::new(),
                 latest_contiguous_acked: latest,
@@ -199,7 +200,9 @@ where
             .collect();
         match self.client.ingest().put(&refs).await {
             Ok(_) => {
-                self.core.ack_success(prepared.dispatch_id).await;
+                self.core
+                    .ack_success(prepared.epoch, prepared.dispatch_id)
+                    .await;
                 Ok(UploadReceipt {
                     latest_location: prepared.latest_location,
                     writer_location_watermark: prepared.watermark_at,
@@ -210,7 +213,7 @@ where
                     "keyless upload ending at {} failed: {err}",
                     prepared.latest_location
                 );
-                self.core.ack_failure(msg).await;
+                self.core.ack_failure(prepared.epoch, msg).await;
                 Err(QmdbError::Client(err))
             }
         }
