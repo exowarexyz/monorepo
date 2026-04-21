@@ -5,7 +5,7 @@
 import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv1";
 import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv1";
 import { file_buf_validate_validate } from "../../buf/validate/validate_pb";
-import type { MatchKey } from "./common_pb";
+import type { KvEntry, MatchKey } from "./common_pb";
 import { file_store_v1_common } from "./common_pb";
 import type { Message } from "@bufbuild/protobuf";
 
@@ -13,7 +13,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file store/v1/stream.proto.
  */
 export const file_store_v1_stream: GenFile = /*@__PURE__*/
-  fileDesc("ChVzdG9yZS92MS9zdHJlYW0ucHJvdG8SD3N0b3JlLnN0cmVhbS52MSKLAQoQU3Vic2NyaWJlUmVxdWVzdBI5CgptYXRjaF9rZXlzGAEgAygLMhkuc3RvcmUuY29tbW9uLnYxLk1hdGNoS2V5Qgq6SAeSAQQIARAQEiIKFXNpbmNlX3NlcXVlbmNlX251bWJlchgCIAEoBEgAiAEBQhgKFl9zaW5jZV9zZXF1ZW5jZV9udW1iZXIiJQoKR2V0UmVxdWVzdBIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQiKQoLU3RyZWFtRW50cnkSCwoDa2V5GAEgASgMEg0KBXZhbHVlGAIgASgMIlsKEVN1YnNjcmliZVJlc3BvbnNlEhcKD3NlcXVlbmNlX251bWJlchgBIAEoBBItCgdlbnRyaWVzGAIgAygLMhwuc3RvcmUuc3RyZWFtLnYxLlN0cmVhbUVudHJ5IlUKC0dldFJlc3BvbnNlEhcKD3NlcXVlbmNlX251bWJlchgBIAEoBBItCgdlbnRyaWVzGAIgAygLMhwuc3RvcmUuc3RyZWFtLnYxLlN0cmVhbUVudHJ5MqEBCgdTZXJ2aWNlElQKCVN1YnNjcmliZRIhLnN0b3JlLnN0cmVhbS52MS5TdWJzY3JpYmVSZXF1ZXN0GiIuc3RvcmUuc3RyZWFtLnYxLlN1YnNjcmliZVJlc3BvbnNlMAESQAoDR2V0Ehsuc3RvcmUuc3RyZWFtLnYxLkdldFJlcXVlc3QaHC5zdG9yZS5zdHJlYW0udjEuR2V0UmVzcG9uc2ViBnByb3RvMw", [file_buf_validate_validate, file_store_v1_common]);
+  fileDesc("ChVzdG9yZS92MS9zdHJlYW0ucHJvdG8SD3N0b3JlLnN0cmVhbS52MSKLAQoQU3Vic2NyaWJlUmVxdWVzdBI5CgptYXRjaF9rZXlzGAEgAygLMhkuc3RvcmUuY29tbW9uLnYxLk1hdGNoS2V5Qgq6SAeSAQQIARAQEiIKFXNpbmNlX3NlcXVlbmNlX251bWJlchgCIAEoBEgAiAEBQhgKFl9zaW5jZV9zZXF1ZW5jZV9udW1iZXIiJQoKR2V0UmVxdWVzdBIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQiVwoRU3Vic2NyaWJlUmVzcG9uc2USFwoPc2VxdWVuY2VfbnVtYmVyGAEgASgEEikKB2VudHJpZXMYAiADKAsyGC5zdG9yZS5jb21tb24udjEuS3ZFbnRyeSJRCgtHZXRSZXNwb25zZRIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQSKQoHZW50cmllcxgCIAMoCzIYLnN0b3JlLmNvbW1vbi52MS5LdkVudHJ5MqEBCgdTZXJ2aWNlElQKCVN1YnNjcmliZRIhLnN0b3JlLnN0cmVhbS52MS5TdWJzY3JpYmVSZXF1ZXN0GiIuc3RvcmUuc3RyZWFtLnYxLlN1YnNjcmliZVJlc3BvbnNlMAESQAoDR2V0Ehsuc3RvcmUuc3RyZWFtLnYxLkdldFJlcXVlc3QaHC5zdG9yZS5zdHJlYW0udjEuR2V0UmVzcG9uc2ViBnByb3RvMw", [file_buf_validate_validate, file_store_v1_common]);
 
 /**
  * Live (and optionally replayed) subscription request.
@@ -73,31 +73,6 @@ export const GetRequestSchema: GenMessage<GetRequest> = /*@__PURE__*/
   messageDesc(file_store_v1_stream, 1);
 
 /**
- * One (key, value) pair from a `Put` batch. Callers reapply any filter
- * locally if they need to know which subscriber pattern matched an entry.
- *
- * @generated from message store.stream.v1.StreamEntry
- */
-export type StreamEntry = Message<"store.stream.v1.StreamEntry"> & {
-  /**
-   * @generated from field: bytes key = 1;
-   */
-  key: Uint8Array;
-
-  /**
-   * @generated from field: bytes value = 2;
-   */
-  value: Uint8Array;
-};
-
-/**
- * Describes the message store.stream.v1.StreamEntry.
- * Use `create(StreamEntrySchema)` to create a new message.
- */
-export const StreamEntrySchema: GenMessage<StreamEntry> = /*@__PURE__*/
-  messageDesc(file_store_v1_stream, 2);
-
-/**
  * One item delivered on a `Subscribe` stream: all rows from a single atomic
  * `Put` batch that matched the subscriber's filter. Live and replayed frames
  * are indistinguishable by content; only the observed `sequence_number`
@@ -112,9 +87,9 @@ export type SubscribeResponse = Message<"store.stream.v1.SubscribeResponse"> & {
   sequenceNumber: bigint;
 
   /**
-   * @generated from field: repeated store.stream.v1.StreamEntry entries = 2;
+   * @generated from field: repeated store.common.v1.KvEntry entries = 2;
    */
-  entries: StreamEntry[];
+  entries: KvEntry[];
 };
 
 /**
@@ -122,7 +97,7 @@ export type SubscribeResponse = Message<"store.stream.v1.SubscribeResponse"> & {
  * Use `create(SubscribeResponseSchema)` to create a new message.
  */
 export const SubscribeResponseSchema: GenMessage<SubscribeResponse> = /*@__PURE__*/
-  messageDesc(file_store_v1_stream, 3);
+  messageDesc(file_store_v1_stream, 2);
 
 /**
  * Response for `Get`: the full contents of the batch at the requested
@@ -137,9 +112,9 @@ export type GetResponse = Message<"store.stream.v1.GetResponse"> & {
   sequenceNumber: bigint;
 
   /**
-   * @generated from field: repeated store.stream.v1.StreamEntry entries = 2;
+   * @generated from field: repeated store.common.v1.KvEntry entries = 2;
    */
-  entries: StreamEntry[];
+  entries: KvEntry[];
 };
 
 /**
@@ -147,7 +122,7 @@ export type GetResponse = Message<"store.stream.v1.GetResponse"> & {
  * Use `create(GetResponseSchema)` to create a new message.
  */
 export const GetResponseSchema: GenMessage<GetResponse> = /*@__PURE__*/
-  messageDesc(file_store_v1_stream, 4);
+  messageDesc(file_store_v1_stream, 3);
 
 /**
  * Push-based subscription + point-lookup over the store's batch log.

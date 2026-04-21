@@ -3,14 +3,9 @@ syntax = "proto3";
 package store.query.v1;
 
 import "buf/validate/validate.proto";
+import "store/v1/common.proto";
 
 // --- Query wire types ---
-
-// A single key-value row returned by Range scans.
-message RangeEntry {
-  bytes key = 1;
-  bytes value = 2;
-}
 
 // Visible store sequence number plus read counters for query RPCs. On success, carried in unary
 // response metadata (`Get` / `Reduce`) or streaming trailers (`Range` / `GetMany`); also attached as a `google.rpc` error
@@ -400,7 +395,7 @@ message RangeRequest {
 // Each stream message is a batch of rows; the stream ends at HTTP END_STREAM.
 // `Detail` (sequence + read_stats) is carried only in trailers (`x-store-query-detail-bin`).
 message RangeFrame {
-  repeated RangeEntry results = 1;
+  repeated store.common.v1.KvEntry results = 1;
 }
 
 // Same key-range semantics as `RangeRequest`: inclusive `[start, end]` over raw bytes when `end` is

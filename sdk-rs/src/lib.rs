@@ -838,7 +838,7 @@ impl StoreClient {
                     MAX_KEY_LEN
                 )));
             }
-            proto_kvs.push(exoware_proto::ingest::KvPair {
+            proto_kvs.push(exoware_proto::common::KvEntry {
                 key: (*key).to_vec(),
                 value: value.to_vec(),
                 ..Default::default()

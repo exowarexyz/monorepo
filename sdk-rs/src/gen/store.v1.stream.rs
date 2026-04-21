@@ -566,287 +566,6 @@ unsafe impl ::buffa::DefaultViewInstance for GetRequestView<'static> {
 unsafe impl<'a> ::buffa::HasDefaultViewInstance for GetRequestView<'a> {
     type Static = GetRequestView<'static>;
 }
-/// One (key, value) pair from a `Put` batch. Callers reapply any filter
-/// locally if they need to know which subscriber pattern matched an entry.
-#[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
-pub struct StreamEntry {
-    /// Field 1: `key`
-    #[serde(
-        rename = "key",
-        with = "::buffa::json_helpers::bytes",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
-    )]
-    pub key: ::buffa::alloc::vec::Vec<u8>,
-    /// Field 2: `value`
-    #[serde(
-        rename = "value",
-        with = "::buffa::json_helpers::bytes",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
-    )]
-    pub value: ::buffa::alloc::vec::Vec<u8>,
-    #[serde(skip)]
-    #[doc(hidden)]
-    pub __buffa_unknown_fields: ::buffa::UnknownFields,
-    #[doc(hidden)]
-    #[serde(skip)]
-    pub __buffa_cached_size: ::buffa::__private::CachedSize,
-}
-impl ::core::fmt::Debug for StreamEntry {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("StreamEntry")
-            .field("key", &self.key)
-            .field("value", &self.value)
-            .finish()
-    }
-}
-impl StreamEntry {
-    /// Protobuf type URL for this message, for use with `Any::pack` and
-    /// `Any::unpack_if`.
-    ///
-    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.StreamEntry";
-}
-unsafe impl ::buffa::DefaultInstance for StreamEntry {
-    fn default_instance() -> &'static Self {
-        static VALUE: ::buffa::__private::OnceBox<StreamEntry> = ::buffa::__private::OnceBox::new();
-        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
-    }
-}
-impl ::buffa::Message for StreamEntry {
-    /// Returns the total encoded size in bytes.
-    ///
-    /// The result is a `u32`; the protobuf specification requires all
-    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
-    /// compliant message will never overflow this type.
-    fn compute_size(&self) -> u32 {
-        #[allow(unused_imports)]
-        use ::buffa::Enumeration as _;
-        let mut size = 0u32;
-        if !self.key.is_empty() {
-            size += 1u32 + ::buffa::types::bytes_encoded_len(&self.key) as u32;
-        }
-        if !self.value.is_empty() {
-            size += 1u32 + ::buffa::types::bytes_encoded_len(&self.value) as u32;
-        }
-        size += self.__buffa_unknown_fields.encoded_len() as u32;
-        self.__buffa_cached_size.set(size);
-        size
-    }
-    fn write_to(&self, buf: &mut impl ::buffa::bytes::BufMut) {
-        #[allow(unused_imports)]
-        use ::buffa::Enumeration as _;
-        if !self.key.is_empty() {
-            ::buffa::encoding::Tag::new(
-                    1u32,
-                    ::buffa::encoding::WireType::LengthDelimited,
-                )
-                .encode(buf);
-            ::buffa::types::encode_bytes(&self.key, buf);
-        }
-        if !self.value.is_empty() {
-            ::buffa::encoding::Tag::new(
-                    2u32,
-                    ::buffa::encoding::WireType::LengthDelimited,
-                )
-                .encode(buf);
-            ::buffa::types::encode_bytes(&self.value, buf);
-        }
-        self.__buffa_unknown_fields.write_to(buf);
-    }
-    fn merge_field(
-        &mut self,
-        tag: ::buffa::encoding::Tag,
-        buf: &mut impl ::buffa::bytes::Buf,
-        depth: u32,
-    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
-        #[allow(unused_imports)]
-        use ::buffa::bytes::Buf as _;
-        #[allow(unused_imports)]
-        use ::buffa::Enumeration as _;
-        match tag.field_number() {
-            1u32 => {
-                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
-                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                        field_number: 1u32,
-                        expected: 2u8,
-                        actual: tag.wire_type() as u8,
-                    });
-                }
-                ::buffa::types::merge_bytes(&mut self.key, buf)?;
-            }
-            2u32 => {
-                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
-                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                        field_number: 2u32,
-                        expected: 2u8,
-                        actual: tag.wire_type() as u8,
-                    });
-                }
-                ::buffa::types::merge_bytes(&mut self.value, buf)?;
-            }
-            _ => {
-                self.__buffa_unknown_fields
-                    .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
-            }
-        }
-        ::core::result::Result::Ok(())
-    }
-    fn cached_size(&self) -> u32 {
-        self.__buffa_cached_size.get()
-    }
-    fn clear(&mut self) {
-        self.key.clear();
-        self.value.clear();
-        self.__buffa_unknown_fields.clear();
-        self.__buffa_cached_size.set(0);
-    }
-}
-impl ::buffa::ExtensionSet for StreamEntry {
-    const PROTO_FQN: &'static str = "store.stream.v1.StreamEntry";
-    fn unknown_fields(&self) -> &::buffa::UnknownFields {
-        &self.__buffa_unknown_fields
-    }
-    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
-        &mut self.__buffa_unknown_fields
-    }
-}
-impl ::buffa::json_helpers::ProtoElemJson for StreamEntry {
-    fn serialize_proto_json<S: ::serde::Serializer>(
-        v: &Self,
-        s: S,
-    ) -> ::core::result::Result<S::Ok, S::Error> {
-        ::serde::Serialize::serialize(v, s)
-    }
-    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
-        d: D,
-    ) -> ::core::result::Result<Self, D::Error> {
-        <Self as ::serde::Deserialize>::deserialize(d)
-    }
-}
-#[doc(hidden)]
-pub const __STREAM_ENTRY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.stream.v1.StreamEntry",
-    to_json: ::buffa::type_registry::any_to_json::<StreamEntry>,
-    from_json: ::buffa::type_registry::any_from_json::<StreamEntry>,
-    is_wkt: false,
-};
-/// One (key, value) pair from a `Put` batch. Callers reapply any filter
-/// locally if they need to know which subscriber pattern matched an entry.
-#[derive(Clone, Debug, Default)]
-pub struct StreamEntryView<'a> {
-    /// Field 1: `key`
-    pub key: &'a [u8],
-    /// Field 2: `value`
-    pub value: &'a [u8],
-    pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
-}
-impl<'a> StreamEntryView<'a> {
-    /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
-    ///
-    /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
-    /// and by generated sub-message decode arms with `depth - 1`.
-    ///
-    /// **Not part of the public API.** Named with a leading underscore to
-    /// signal that it is for generated-code use only.
-    #[doc(hidden)]
-    pub fn _decode_depth(
-        buf: &'a [u8],
-        depth: u32,
-    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
-        let mut view = Self::default();
-        view._merge_into_view(buf, depth)?;
-        ::core::result::Result::Ok(view)
-    }
-    /// Merge fields from `buf` into this view (proto merge semantics).
-    ///
-    /// Repeated fields append; singular fields last-wins; singular
-    /// MESSAGE fields merge recursively. Used by sub-message decode
-    /// arms when the same field appears multiple times on the wire.
-    ///
-    /// **Not part of the public API.**
-    #[doc(hidden)]
-    pub fn _merge_into_view(
-        &mut self,
-        buf: &'a [u8],
-        depth: u32,
-    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
-        let _ = depth;
-        #[allow(unused_variables)]
-        let view = self;
-        let mut cur: &'a [u8] = buf;
-        while !cur.is_empty() {
-            let before_tag = cur;
-            let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
-            match tag.field_number() {
-                1u32 => {
-                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
-                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                            field_number: 1u32,
-                            expected: 2u8,
-                            actual: tag.wire_type() as u8,
-                        });
-                    }
-                    view.key = ::buffa::types::borrow_bytes(&mut cur)?;
-                }
-                2u32 => {
-                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
-                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                            field_number: 2u32,
-                            expected: 2u8,
-                            actual: tag.wire_type() as u8,
-                        });
-                    }
-                    view.value = ::buffa::types::borrow_bytes(&mut cur)?;
-                }
-                _ => {
-                    ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
-                    let span_len = before_tag.len() - cur.len();
-                    view.__buffa_unknown_fields.push_raw(&before_tag[..span_len]);
-                }
-            }
-        }
-        ::core::result::Result::Ok(())
-    }
-}
-impl<'a> ::buffa::MessageView<'a> for StreamEntryView<'a> {
-    type Owned = StreamEntry;
-    fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
-        Self::_decode_depth(buf, ::buffa::RECURSION_LIMIT)
-    }
-    fn decode_view_with_limit(
-        buf: &'a [u8],
-        depth: u32,
-    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
-        Self::_decode_depth(buf, depth)
-    }
-    /// Convert this view to the owned message type.
-    #[allow(clippy::redundant_closure, clippy::useless_conversion)]
-    fn to_owned_message(&self) -> StreamEntry {
-        #[allow(unused_imports)]
-        use ::buffa::alloc::string::ToString as _;
-        StreamEntry {
-            key: (self.key).to_vec(),
-            value: (self.value).to_vec(),
-            __buffa_unknown_fields: self
-                .__buffa_unknown_fields
-                .to_owned()
-                .unwrap_or_default()
-                .into(),
-            ..::core::default::Default::default()
-        }
-    }
-}
-unsafe impl ::buffa::DefaultViewInstance for StreamEntryView<'static> {
-    fn default_view_instance() -> &'static Self {
-        static VALUE: ::buffa::__private::OnceBox<StreamEntryView<'static>> = ::buffa::__private::OnceBox::new();
-        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
-    }
-}
-unsafe impl<'a> ::buffa::HasDefaultViewInstance for StreamEntryView<'a> {
-    type Static = StreamEntryView<'static>;
-}
 /// One item delivered on a `Subscribe` stream: all rows from a single atomic
 /// `Put` batch that matched the subscriber's filter. Live and replayed frames
 /// are indistinguishable by content; only the observed `sequence_number`
@@ -869,7 +588,7 @@ pub struct SubscribeResponse {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
-    pub entries: ::buffa::alloc::vec::Vec<StreamEntry>,
+    pub entries: ::buffa::alloc::vec::Vec<super::super::common::v1::KvEntry>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -1030,7 +749,7 @@ pub struct SubscribeResponseView<'a> {
     /// Field 1: `sequence_number`
     pub sequence_number: u64,
     /// Field 2: `entries`
-    pub entries: ::buffa::RepeatedView<'a, StreamEntryView<'a>>,
+    pub entries: ::buffa::RepeatedView<'a, super::super::common::v1::KvEntryView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> SubscribeResponseView<'a> {
@@ -1093,7 +812,13 @@ impl<'a> SubscribeResponseView<'a> {
                         return Err(::buffa::DecodeError::RecursionLimitExceeded);
                     }
                     let sub = ::buffa::types::borrow_bytes(&mut cur)?;
-                    view.entries.push(StreamEntryView::_decode_depth(sub, depth - 1)?);
+                    view.entries
+                        .push(
+                            super::super::common::v1::KvEntryView::_decode_depth(
+                                sub,
+                                depth - 1,
+                            )?,
+                        );
                 }
                 _ => {
                     ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
@@ -1162,7 +887,7 @@ pub struct GetResponse {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
-    pub entries: ::buffa::alloc::vec::Vec<StreamEntry>,
+    pub entries: ::buffa::alloc::vec::Vec<super::super::common::v1::KvEntry>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -1321,7 +1046,7 @@ pub struct GetResponseView<'a> {
     /// Field 1: `sequence_number`
     pub sequence_number: u64,
     /// Field 2: `entries`
-    pub entries: ::buffa::RepeatedView<'a, StreamEntryView<'a>>,
+    pub entries: ::buffa::RepeatedView<'a, super::super::common::v1::KvEntryView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> GetResponseView<'a> {
@@ -1384,7 +1109,13 @@ impl<'a> GetResponseView<'a> {
                         return Err(::buffa::DecodeError::RecursionLimitExceeded);
                     }
                     let sub = ::buffa::types::borrow_bytes(&mut cur)?;
-                    view.entries.push(StreamEntryView::_decode_depth(sub, depth - 1)?);
+                    view.entries
+                        .push(
+                            super::super::common::v1::KvEntryView::_decode_depth(
+                                sub,
+                                depth - 1,
+                            )?,
+                        );
                 }
                 _ => {
                     ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;

@@ -4,13 +4,42 @@
 
 import type { GenFile, GenMessage } from "@bufbuild/protobuf/codegenv1";
 import { fileDesc, messageDesc } from "@bufbuild/protobuf/codegenv1";
+import { file_buf_validate_validate } from "../../buf/validate/validate_pb";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
  * Describes the file store/v1/common.proto.
  */
 export const file_store_v1_common: GenFile = /*@__PURE__*/
-  fileDesc("ChVzdG9yZS92MS9jb21tb24ucHJvdG8SD3N0b3JlLmNvbW1vbi52MSJICghNYXRjaEtleRIVCg1yZXNlcnZlZF9iaXRzGAEgASgNEg4KBnByZWZpeBgCIAEoDRIVCg1wYXlsb2FkX3JlZ2V4GAMgASgJYgZwcm90bzM");
+  fileDesc("ChVzdG9yZS92MS9jb21tb24ucHJvdG8SD3N0b3JlLmNvbW1vbi52MSIvCgdLdkVudHJ5EhUKA2tleRgBIAEoDEIIukgFegMY/gESDQoFdmFsdWUYAiABKAwiSAoITWF0Y2hLZXkSFQoNcmVzZXJ2ZWRfYml0cxgBIAEoDRIOCgZwcmVmaXgYAiABKA0SFQoNcGF5bG9hZF9yZWdleBgDIAEoCWIGcHJvdG8z", [file_buf_validate_validate]);
+
+/**
+ * A raw key-value pair shared by store APIs that move complete rows without
+ * additional per-entry metadata.
+ *
+ * Keys must be between 0 and 254 bytes (inclusive) anywhere this message is
+ * used for ingestion.
+ *
+ * @generated from message store.common.v1.KvEntry
+ */
+export type KvEntry = Message<"store.common.v1.KvEntry"> & {
+  /**
+   * @generated from field: bytes key = 1;
+   */
+  key: Uint8Array;
+
+  /**
+   * @generated from field: bytes value = 2;
+   */
+  value: Uint8Array;
+};
+
+/**
+ * Describes the message store.common.v1.KvEntry.
+ * Use `create(KvEntrySchema)` to create a new message.
+ */
+export const KvEntrySchema: GenMessage<KvEntry> = /*@__PURE__*/
+  messageDesc(file_store_v1_common, 0);
 
 /**
  * Identifies a subset of keys by their `KeyCodec` family (reserved_bits +
@@ -54,5 +83,5 @@ export type MatchKey = Message<"store.common.v1.MatchKey"> & {
  * Use `create(MatchKeySchema)` to create a new message.
  */
 export const MatchKeySchema: GenMessage<MatchKey> = /*@__PURE__*/
-  messageDesc(file_store_v1_common, 0);
+  messageDesc(file_store_v1_common, 1);
 

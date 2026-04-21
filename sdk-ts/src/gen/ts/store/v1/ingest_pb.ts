@@ -5,39 +5,15 @@
 import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv1";
 import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv1";
 import { file_buf_validate_validate } from "../../buf/validate/validate_pb";
+import type { KvEntry } from "./common_pb";
+import { file_store_v1_common } from "./common_pb";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
  * Describes the file store/v1/ingest.proto.
  */
 export const file_store_v1_ingest: GenFile = /*@__PURE__*/
-  fileDesc("ChVzdG9yZS92MS9pbmdlc3QucHJvdG8SD3N0b3JlLmluZ2VzdC52MSIuCgZLdlBhaXISFQoDa2V5GAEgASgMQgi6SAV6Axj+ARINCgV2YWx1ZRgCIAEoDCI8CgpQdXRSZXF1ZXN0Ei4KA2t2cxgBIAMoCzIXLnN0b3JlLmluZ2VzdC52MS5LdlBhaXJCCLpIBZIBAggBIiYKC1B1dFJlc3BvbnNlEhcKD3NlcXVlbmNlX251bWJlchgBIAEoBDJLCgdTZXJ2aWNlEkAKA1B1dBIbLnN0b3JlLmluZ2VzdC52MS5QdXRSZXF1ZXN0Ghwuc3RvcmUuaW5nZXN0LnYxLlB1dFJlc3BvbnNlYgZwcm90bzM", [file_buf_validate_validate]);
-
-/**
- * A key-value pair for ingestion.
- *
- * Keys must be between 0 and 254 bytes (inclusive).
- *
- * @generated from message store.ingest.v1.KvPair
- */
-export type KvPair = Message<"store.ingest.v1.KvPair"> & {
-  /**
-   * @generated from field: bytes key = 1;
-   */
-  key: Uint8Array;
-
-  /**
-   * @generated from field: bytes value = 2;
-   */
-  value: Uint8Array;
-};
-
-/**
- * Describes the message store.ingest.v1.KvPair.
- * Use `create(KvPairSchema)` to create a new message.
- */
-export const KvPairSchema: GenMessage<KvPair> = /*@__PURE__*/
-  messageDesc(file_store_v1_ingest, 0);
+  fileDesc("ChVzdG9yZS92MS9pbmdlc3QucHJvdG8SD3N0b3JlLmluZ2VzdC52MSI9CgpQdXRSZXF1ZXN0Ei8KA2t2cxgBIAMoCzIYLnN0b3JlLmNvbW1vbi52MS5LdkVudHJ5Qgi6SAWSAQIIASImCgtQdXRSZXNwb25zZRIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQySwoHU2VydmljZRJACgNQdXQSGy5zdG9yZS5pbmdlc3QudjEuUHV0UmVxdWVzdBocLnN0b3JlLmluZ2VzdC52MS5QdXRSZXNwb25zZWIGcHJvdG8z", [file_buf_validate_validate, file_store_v1_common]);
 
 /**
  * Batch write request. All pairs are applied atomically.
@@ -48,9 +24,9 @@ export type PutRequest = Message<"store.ingest.v1.PutRequest"> & {
   /**
    * Key-value pairs to write. At least one pair is required.
    *
-   * @generated from field: repeated store.ingest.v1.KvPair kvs = 1;
+   * @generated from field: repeated store.common.v1.KvEntry kvs = 1;
    */
-  kvs: KvPair[];
+  kvs: KvEntry[];
 };
 
 /**
@@ -58,7 +34,7 @@ export type PutRequest = Message<"store.ingest.v1.PutRequest"> & {
  * Use `create(PutRequestSchema)` to create a new message.
  */
 export const PutRequestSchema: GenMessage<PutRequest> = /*@__PURE__*/
-  messageDesc(file_store_v1_ingest, 1);
+  messageDesc(file_store_v1_ingest, 0);
 
 /**
  * Response from a successful Put.
@@ -81,7 +57,7 @@ export type PutResponse = Message<"store.ingest.v1.PutResponse"> & {
  * Use `create(PutResponseSchema)` to create a new message.
  */
 export const PutResponseSchema: GenMessage<PutResponse> = /*@__PURE__*/
-  messageDesc(file_store_v1_ingest, 2);
+  messageDesc(file_store_v1_ingest, 1);
 
 /**
  * Ingest service for writing key-value pairs into the store.

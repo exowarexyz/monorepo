@@ -9,6 +9,7 @@ use std::task::{Context as TaskContext, Poll};
 
 use bytes::Bytes;
 use connectrpc::{Chain, ConnectError, ConnectRpcService, Context, Limits};
+use exoware_proto::common::KvEntry;
 use exoware_proto::compact::{
     PruneResponse, Service as CompactApi, ServiceServer as CompactServiceServer,
 };
@@ -17,12 +18,12 @@ use exoware_proto::ingest::{
     PutResponse as ProtoPutResponse, Service as IngestApi, ServiceServer as IngestServiceServer,
 };
 use exoware_proto::query::{
-    Detail, GetManyEntry, GetManyFrame, GetResponse, RangeEntry, RangeFrame, ReduceResponse,
-    Service as QueryApi, ServiceServer as QueryServiceServer,
+    Detail, GetManyEntry, GetManyFrame, GetResponse, RangeFrame, ReduceResponse, Service as QueryApi,
+    ServiceServer as QueryServiceServer,
 };
 use exoware_proto::store::stream::v1::{
     GetRequestView, GetResponse as StreamGetResponse, Service as StreamApi,
-    ServiceServer as StreamServiceServer, StreamEntry, SubscribeRequestView, SubscribeResponse,
+    ServiceServer as StreamServiceServer, SubscribeRequestView, SubscribeResponse,
 };
 use exoware_proto::stream_filter::StreamFilter;
 use exoware_proto::{
@@ -364,7 +365,7 @@ impl QueryApi for QueryConnect {
                 frames.push(Ok(RangeFrame {
                     results: chunk
                         .drain(..)
-                        .map(|(k, v)| RangeEntry {
+                        .map(|(k, v)| KvEntry {
                             key: k.into(),
                             value: v.into(),
                             ..Default::default()
@@ -378,7 +379,7 @@ impl QueryApi for QueryConnect {
             frames.push(Ok(RangeFrame {
                 results: chunk
                     .into_iter()
-                    .map(|(k, v)| RangeEntry {
+                    .map(|(k, v)| KvEntry {
                         key: k.into(),
                         value: v.into(),
                         ..Default::default()
@@ -822,7 +823,7 @@ impl StreamApi for StreamConnect {
             Some(kvs) => {
                 let entries = kvs
                     .into_iter()
-                    .map(|(k, v)| StreamEntry {
+                    .map(|(k, v)| KvEntry {
                         key: k.to_vec(),
                         value: v.to_vec(),
                         ..Default::default()

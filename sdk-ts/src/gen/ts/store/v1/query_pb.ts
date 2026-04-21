@@ -5,37 +5,15 @@
 import type { GenEnum, GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv1";
 import { enumDesc, fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv1";
 import { file_buf_validate_validate } from "../../buf/validate/validate_pb";
+import type { KvEntry } from "./common_pb";
+import { file_store_v1_common } from "./common_pb";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
  * Describes the file store/v1/query.proto.
  */
 export const file_store_v1_query: GenFile = /*@__PURE__*/
-  fileDesc("ChRzdG9yZS92MS9xdWVyeS5wcm90bxIOc3RvcmUucXVlcnkudjEiKAoKUmFuZ2VFbnRyeRILCgNrZXkYASABKAwSDQoFdmFsdWUYAiABKAwijgEKBkRldGFpbBIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQSOQoKcmVhZF9zdGF0cxgCIAMoCzIlLnN0b3JlLnF1ZXJ5LnYxLkRldGFpbC5SZWFkU3RhdHNFbnRyeRowCg5SZWFkU3RhdHNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAQ6AjgBIsUECgpLdkZpZWxkUmVmEjIKA2tleRgBIAEoCzIjLnN0b3JlLnF1ZXJ5LnYxLkt2RmllbGRSZWYuS2V5RmllbGRIABJACgt6X29yZGVyX2tleRgCIAEoCzIpLnN0b3JlLnF1ZXJ5LnYxLkt2RmllbGRSZWYuWk9yZGVyS2V5RmllbGRIABI2CgV2YWx1ZRgDIAEoCzIlLnN0b3JlLnF1ZXJ5LnYxLkt2RmllbGRSZWYuVmFsdWVGaWVsZEgAGmgKCEtleUZpZWxkEhIKCmJpdF9vZmZzZXQYASABKA0SKQoEa2luZBgCIAEoDjIbLnN0b3JlLnF1ZXJ5LnYxLkt2RmllbGRLaW5kEh0KFWZpeGVkX3NpemVfYmluYXJ5X2xlbhgDIAEoDRqcAQoOWk9yZGVyS2V5RmllbGQSEgoKYml0X29mZnNldBgBIAEoDRIWCg5maWVsZF9wb3NpdGlvbhgCIAEoDRIUCgxmaWVsZF93aWR0aHMYAyADKA0SKQoEa2luZBgEIAEoDjIbLnN0b3JlLnF1ZXJ5LnYxLkt2RmllbGRLaW5kEh0KFWZpeGVkX3NpemVfYmluYXJ5X2xlbhgFIAEoDRp3CgpWYWx1ZUZpZWxkEg0KBWluZGV4GAEgASgNEikKBGtpbmQYAiABKA4yGy5zdG9yZS5xdWVyeS52MS5LdkZpZWxkS2luZBIQCghudWxsYWJsZRgDIAEoCBIdChVmaXhlZF9zaXplX2JpbmFyeV9sZW4YBCABKA1CBwoFZmllbGQitgIKDkt2UmVkdWNlZFZhbHVlEhUKC2ludDY0X3ZhbHVlGAEgASgDSAASFgoMdWludDY0X3ZhbHVlGAIgASgESAASFwoNZmxvYXQ2NF92YWx1ZRgDIAEoAUgAEhcKDWJvb2xlYW5fdmFsdWUYBCABKAhIABIUCgp1dGY4X3ZhbHVlGAUgASgJSAASFgoMZGF0ZTMyX3ZhbHVlGAYgASgFSAASFgoMZGF0ZTY0X3ZhbHVlGAcgASgDSAASGQoPdGltZXN0YW1wX3ZhbHVlGAggASgDSAASGgoQZGVjaW1hbDEyOF92YWx1ZRgJIAEoDEgAEiEKF2ZpeGVkX3NpemVfYmluYXJ5X3ZhbHVlGAogASgMSAASGgoQZGVjaW1hbDI1Nl92YWx1ZRgLIAEoDEgAQgcKBXZhbHVlIu4DCgZLdkV4cHISKwoFZmllbGQYASABKAsyGi5zdG9yZS5xdWVyeS52MS5LdkZpZWxkUmVmSAASMQoHbGl0ZXJhbBgCIAEoCzIeLnN0b3JlLnF1ZXJ5LnYxLkt2UmVkdWNlZFZhbHVlSAASMAoDYWRkGAMgASgLMiEuc3RvcmUucXVlcnkudjEuS3ZFeHByLkJpbmFyeUV4cHJIABIwCgNzdWIYBCABKAsyIS5zdG9yZS5xdWVyeS52MS5LdkV4cHIuQmluYXJ5RXhwckgAEjAKA211bBgFIAEoCzIhLnN0b3JlLnF1ZXJ5LnYxLkt2RXhwci5CaW5hcnlFeHBySAASMAoDZGl2GAYgASgLMiEuc3RvcmUucXVlcnkudjEuS3ZFeHByLkJpbmFyeUV4cHJIABInCgVsb3dlchgHIAEoCzIWLnN0b3JlLnF1ZXJ5LnYxLkt2RXhwckgAEjAKDmRhdGVfdHJ1bmNfZGF5GAggASgLMhYuc3RvcmUucXVlcnkudjEuS3ZFeHBySAAaWQoKQmluYXJ5RXhwchIkCgRsZWZ0GAEgASgLMhYuc3RvcmUucXVlcnkudjEuS3ZFeHByEiUKBXJpZ2h0GAIgASgLMhYuc3RvcmUucXVlcnkudjEuS3ZFeHByQgYKBGV4cHIilgsKFUt2UHJlZGljYXRlQ29uc3RyYWludBITCglzdHJpbmdfZXEYASABKAlIABIRCgdib29sX2VxGAIgASgISAASHgoUZml4ZWRfc2l6ZV9iaW5hcnlfZXEYAyABKAxIABJDCglpbnRfcmFuZ2UYBCABKAsyLi5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuSW50UmFuZ2VIABJJCgx1aW50NjRfcmFuZ2UYBSABKAsyMS5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuVUludDY0UmFuZ2VIABJHCgtmbG9hdF9yYW5nZRgGIAEoCzIwLnN0b3JlLnF1ZXJ5LnYxLkt2UHJlZGljYXRlQ29uc3RyYWludC5GbG9hdFJhbmdlSAASUQoQZGVjaW1hbDEyOF9yYW5nZRgHIAEoCzI1LnN0b3JlLnF1ZXJ5LnYxLkt2UHJlZGljYXRlQ29uc3RyYWludC5EZWNpbWFsMTI4UmFuZ2VIABIRCgdpc19udWxsGAggASgISAASFQoLaXNfbm90X251bGwYCSABKAhIABJDCglzdHJpbmdfaW4YCiABKAsyLi5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuU3RyaW5nSW5IABI9CgZpbnRfaW4YCyABKAsyKy5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuSW50SW5IABJDCgl1aW50NjRfaW4YDCABKAsyLi5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuVUludDY0SW5IABJXChRmaXhlZF9zaXplX2JpbmFyeV9pbhgNIAEoCzI3LnN0b3JlLnF1ZXJ5LnYxLkt2UHJlZGljYXRlQ29uc3RyYWludC5GaXhlZFNpemVCaW5hcnlJbkgAElEKEGRlY2ltYWwyNTZfcmFuZ2UYDiABKAsyNS5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuRGVjaW1hbDI1NlJhbmdlSAAaPgoISW50UmFuZ2USEAoDbWluGAEgASgDSACIAQESEAoDbWF4GAIgASgDSAGIAQFCBgoEX21pbkIGCgRfbWF4GkEKC1VJbnQ2NFJhbmdlEhAKA21pbhgBIAEoBEgAiAEBEhAKA21heBgCIAEoBEgBiAEBQgYKBF9taW5CBgoEX21heBouCgpGbG9hdEJvdW5kEg0KBXZhbHVlGAEgASgBEhEKCWluY2x1c2l2ZRgCIAEoCBqkAQoKRmxvYXRSYW5nZRJCCgNtaW4YASABKAsyMC5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuRmxvYXRCb3VuZEgAiAEBEkIKA21heBgCIAEoCzIwLnN0b3JlLnF1ZXJ5LnYxLkt2UHJlZGljYXRlQ29uc3RyYWludC5GbG9hdEJvdW5kSAGIAQFCBgoEX21pbkIGCgRfbWF4GkUKD0RlY2ltYWwxMjhSYW5nZRIQCgNtaW4YASABKAxIAIgBARIQCgNtYXgYAiABKAxIAYgBAUIGCgRfbWluQgYKBF9tYXgaRQoPRGVjaW1hbDI1NlJhbmdlEhAKA21pbhgBIAEoDEgAiAEBEhAKA21heBgCIAEoDEgBiAEBQgYKBF9taW5CBgoEX21heBoaCghTdHJpbmdJbhIOCgZ2YWx1ZXMYASADKAkaFwoFSW50SW4SDgoGdmFsdWVzGAEgAygDGhoKCFVJbnQ2NEluEg4KBnZhbHVlcxgBIAMoBBojChFGaXhlZFNpemVCaW5hcnlJbhIOCgZ2YWx1ZXMYASADKAxCDAoKY29uc3RyYWludCJ4ChBLdlByZWRpY2F0ZUNoZWNrEikKBWZpZWxkGAEgASgLMhouc3RvcmUucXVlcnkudjEuS3ZGaWVsZFJlZhI5Cgpjb25zdHJhaW50GAIgASgLMiUuc3RvcmUucXVlcnkudjEuS3ZQcmVkaWNhdGVDb25zdHJhaW50IlYKC0t2UHJlZGljYXRlEjAKBmNoZWNrcxgBIAMoCzIgLnN0b3JlLnF1ZXJ5LnYxLkt2UHJlZGljYXRlQ2hlY2sSFQoNY29udHJhZGljdGlvbhgCIAEoCCJxChBSYW5nZVJlZHVjZXJTcGVjEikKAm9wGAEgASgOMh0uc3RvcmUucXVlcnkudjEuUmFuZ2VSZWR1Y2VPcBIpCgRleHByGAIgASgLMhYuc3RvcmUucXVlcnkudjEuS3ZFeHBySACIAQFCBwoFX2V4cHIiqQEKDFJlZHVjZVBhcmFtcxIyCghyZWR1Y2VycxgBIAMoCzIgLnN0b3JlLnF1ZXJ5LnYxLlJhbmdlUmVkdWNlclNwZWMSKAoIZ3JvdXBfYnkYAiADKAsyFi5zdG9yZS5xdWVyeS52MS5LdkV4cHISMAoGZmlsdGVyGAMgASgLMhsuc3RvcmUucXVlcnkudjEuS3ZQcmVkaWNhdGVIAIgBAUIJCgdfZmlsdGVyIlEKEVJhbmdlUmVkdWNlUmVzdWx0EjIKBXZhbHVlGAEgASgLMh4uc3RvcmUucXVlcnkudjEuS3ZSZWR1Y2VkVmFsdWVIAIgBAUIICgZfdmFsdWUimgEKEFJhbmdlUmVkdWNlR3JvdXASNAoMZ3JvdXBfdmFsdWVzGAEgAygLMh4uc3RvcmUucXVlcnkudjEuS3ZSZWR1Y2VkVmFsdWUSHAoUZ3JvdXBfdmFsdWVzX3ByZXNlbnQYAiADKAgSMgoHcmVzdWx0cxgDIAMoCzIhLnN0b3JlLnF1ZXJ5LnYxLlJhbmdlUmVkdWNlUmVzdWx0Il0KCkdldFJlcXVlc3QSFQoDa2V5GAEgASgMQgi6SAV6Axj+ARIgChNtaW5fc2VxdWVuY2VfbnVtYmVyGAIgASgESACIAQFCFgoUX21pbl9zZXF1ZW5jZV9udW1iZXIiMQoLR2V0UmVzcG9uc2USEgoFdmFsdWUYAiABKAxIAIgBAUIICgZfdmFsdWVKBAgBEAIihgEKDkdldE1hbnlSZXF1ZXN0Eh0KBGtleXMYASADKAxCD7pIDJIBCQgBIgV6Axj+ARIgChNtaW5fc2VxdWVuY2VfbnVtYmVyGAIgASgESACIAQESGwoKYmF0Y2hfc2l6ZRgDIAEoDUIHukgEKgIgAEIWChRfbWluX3NlcXVlbmNlX251bWJlciI5CgxHZXRNYW55RW50cnkSCwoDa2V5GAEgASgMEhIKBXZhbHVlGAIgASgMSACIAQFCCAoGX3ZhbHVlIj0KDEdldE1hbnlGcmFtZRItCgdyZXN1bHRzGAEgAygLMhwuc3RvcmUucXVlcnkudjEuR2V0TWFueUVudHJ5IuoBCgxSYW5nZVJlcXVlc3QSFwoFc3RhcnQYASABKAxCCLpIBXoDGP4BEhUKA2VuZBgCIAEoDEIIukgFegMY/gESEgoFbGltaXQYAyABKA1IAIgBARIbCgpiYXRjaF9zaXplGAQgASgNQge6SAQqAiAAEjUKBG1vZGUYBSABKA4yHS5zdG9yZS5xdWVyeS52MS5UcmF2ZXJzYWxNb2RlQgi6SAWCAQIQARIgChNtaW5fc2VxdWVuY2VfbnVtYmVyGAYgASgESAGIAQFCCAoGX2xpbWl0QhYKFF9taW5fc2VxdWVuY2VfbnVtYmVyIjkKClJhbmdlRnJhbWUSKwoHcmVzdWx0cxgBIAMoCzIaLnN0b3JlLnF1ZXJ5LnYxLlJhbmdlRW50cnkirwEKDVJlZHVjZVJlcXVlc3QSFwoFc3RhcnQYASABKAxCCLpIBXoDGP4BEhUKA2VuZBgCIAEoDEIIukgFegMY/gESNAoGcGFyYW1zGAMgASgLMhwuc3RvcmUucXVlcnkudjEuUmVkdWNlUGFyYW1zQga6SAPIAQESIAoTbWluX3NlcXVlbmNlX251bWJlchgEIAEoBEgAiAEBQhYKFF9taW5fc2VxdWVuY2VfbnVtYmVyInYKDlJlZHVjZVJlc3BvbnNlEjIKB3Jlc3VsdHMYASADKAsyIS5zdG9yZS5xdWVyeS52MS5SYW5nZVJlZHVjZVJlc3VsdBIwCgZncm91cHMYAiADKAsyIC5zdG9yZS5xdWVyeS52MS5SYW5nZVJlZHVjZUdyb3VwKkcKDVRyYXZlcnNhbE1vZGUSGgoWVFJBVkVSU0FMX01PREVfRk9SV0FSRBAAEhoKFlRSQVZFUlNBTF9NT0RFX1JFVkVSU0UQASrAAgoLS3ZGaWVsZEtpbmQSFwoTS1ZfRklFTERfS0lORF9JTlQ2NBAAEhgKFEtWX0ZJRUxEX0tJTkRfVUlOVDY0EAESGQoVS1ZfRklFTERfS0lORF9GTE9BVDY0EAISGQoVS1ZfRklFTERfS0lORF9CT09MRUFOEAMSFgoSS1ZfRklFTERfS0lORF9VVEY4EAQSGAoUS1ZfRklFTERfS0lORF9EQVRFMzIQBRIYChRLVl9GSUVMRF9LSU5EX0RBVEU2NBAGEhsKF0tWX0ZJRUxEX0tJTkRfVElNRVNUQU1QEAcSHAoYS1ZfRklFTERfS0lORF9ERUNJTUFMMTI4EAgSIwofS1ZfRklFTERfS0lORF9GSVhFRF9TSVpFX0JJTkFSWRAJEhwKGEtWX0ZJRUxEX0tJTkRfREVDSU1BTDI1NhAKKqwBCg1SYW5nZVJlZHVjZU9wEh0KGVJBTkdFX1JFRFVDRV9PUF9DT1VOVF9BTEwQABIfChtSQU5HRV9SRURVQ0VfT1BfQ09VTlRfRklFTEQQARIdChlSQU5HRV9SRURVQ0VfT1BfU1VNX0ZJRUxEEAISHQoZUkFOR0VfUkVEVUNFX09QX01JTl9GSUVMRBADEh0KGVJBTkdFX1JFRFVDRV9PUF9NQVhfRklFTEQQBDK2AgoHU2VydmljZRJDCgNHZXQSGi5zdG9yZS5xdWVyeS52MS5HZXRSZXF1ZXN0Ghsuc3RvcmUucXVlcnkudjEuR2V0UmVzcG9uc2UiA5ACARJOCgdHZXRNYW55Eh4uc3RvcmUucXVlcnkudjEuR2V0TWFueVJlcXVlc3QaHC5zdG9yZS5xdWVyeS52MS5HZXRNYW55RnJhbWUiA5ACATABEkgKBVJhbmdlEhwuc3RvcmUucXVlcnkudjEuUmFuZ2VSZXF1ZXN0Ghouc3RvcmUucXVlcnkudjEuUmFuZ2VGcmFtZSIDkAIBMAESTAoGUmVkdWNlEh0uc3RvcmUucXVlcnkudjEuUmVkdWNlUmVxdWVzdBoeLnN0b3JlLnF1ZXJ5LnYxLlJlZHVjZVJlc3BvbnNlIgOQAgFiBnByb3RvMw", [file_buf_validate_validate]);
-
-/**
- * A single key-value row returned by Range scans.
- *
- * @generated from message store.query.v1.RangeEntry
- */
-export type RangeEntry = Message<"store.query.v1.RangeEntry"> & {
-  /**
-   * @generated from field: bytes key = 1;
-   */
-  key: Uint8Array;
-
-  /**
-   * @generated from field: bytes value = 2;
-   */
-  value: Uint8Array;
-};
-
-/**
- * Describes the message store.query.v1.RangeEntry.
- * Use `create(RangeEntrySchema)` to create a new message.
- */
-export const RangeEntrySchema: GenMessage<RangeEntry> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 0);
+  fileDesc("ChRzdG9yZS92MS9xdWVyeS5wcm90bxIOc3RvcmUucXVlcnkudjEijgEKBkRldGFpbBIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQSOQoKcmVhZF9zdGF0cxgCIAMoCzIlLnN0b3JlLnF1ZXJ5LnYxLkRldGFpbC5SZWFkU3RhdHNFbnRyeRowCg5SZWFkU3RhdHNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAQ6AjgBIsUECgpLdkZpZWxkUmVmEjIKA2tleRgBIAEoCzIjLnN0b3JlLnF1ZXJ5LnYxLkt2RmllbGRSZWYuS2V5RmllbGRIABJACgt6X29yZGVyX2tleRgCIAEoCzIpLnN0b3JlLnF1ZXJ5LnYxLkt2RmllbGRSZWYuWk9yZGVyS2V5RmllbGRIABI2CgV2YWx1ZRgDIAEoCzIlLnN0b3JlLnF1ZXJ5LnYxLkt2RmllbGRSZWYuVmFsdWVGaWVsZEgAGmgKCEtleUZpZWxkEhIKCmJpdF9vZmZzZXQYASABKA0SKQoEa2luZBgCIAEoDjIbLnN0b3JlLnF1ZXJ5LnYxLkt2RmllbGRLaW5kEh0KFWZpeGVkX3NpemVfYmluYXJ5X2xlbhgDIAEoDRqcAQoOWk9yZGVyS2V5RmllbGQSEgoKYml0X29mZnNldBgBIAEoDRIWCg5maWVsZF9wb3NpdGlvbhgCIAEoDRIUCgxmaWVsZF93aWR0aHMYAyADKA0SKQoEa2luZBgEIAEoDjIbLnN0b3JlLnF1ZXJ5LnYxLkt2RmllbGRLaW5kEh0KFWZpeGVkX3NpemVfYmluYXJ5X2xlbhgFIAEoDRp3CgpWYWx1ZUZpZWxkEg0KBWluZGV4GAEgASgNEikKBGtpbmQYAiABKA4yGy5zdG9yZS5xdWVyeS52MS5LdkZpZWxkS2luZBIQCghudWxsYWJsZRgDIAEoCBIdChVmaXhlZF9zaXplX2JpbmFyeV9sZW4YBCABKA1CBwoFZmllbGQitgIKDkt2UmVkdWNlZFZhbHVlEhUKC2ludDY0X3ZhbHVlGAEgASgDSAASFgoMdWludDY0X3ZhbHVlGAIgASgESAASFwoNZmxvYXQ2NF92YWx1ZRgDIAEoAUgAEhcKDWJvb2xlYW5fdmFsdWUYBCABKAhIABIUCgp1dGY4X3ZhbHVlGAUgASgJSAASFgoMZGF0ZTMyX3ZhbHVlGAYgASgFSAASFgoMZGF0ZTY0X3ZhbHVlGAcgASgDSAASGQoPdGltZXN0YW1wX3ZhbHVlGAggASgDSAASGgoQZGVjaW1hbDEyOF92YWx1ZRgJIAEoDEgAEiEKF2ZpeGVkX3NpemVfYmluYXJ5X3ZhbHVlGAogASgMSAASGgoQZGVjaW1hbDI1Nl92YWx1ZRgLIAEoDEgAQgcKBXZhbHVlIu4DCgZLdkV4cHISKwoFZmllbGQYASABKAsyGi5zdG9yZS5xdWVyeS52MS5LdkZpZWxkUmVmSAASMQoHbGl0ZXJhbBgCIAEoCzIeLnN0b3JlLnF1ZXJ5LnYxLkt2UmVkdWNlZFZhbHVlSAASMAoDYWRkGAMgASgLMiEuc3RvcmUucXVlcnkudjEuS3ZFeHByLkJpbmFyeUV4cHJIABIwCgNzdWIYBCABKAsyIS5zdG9yZS5xdWVyeS52MS5LdkV4cHIuQmluYXJ5RXhwckgAEjAKA211bBgFIAEoCzIhLnN0b3JlLnF1ZXJ5LnYxLkt2RXhwci5CaW5hcnlFeHBySAASMAoDZGl2GAYgASgLMiEuc3RvcmUucXVlcnkudjEuS3ZFeHByLkJpbmFyeUV4cHJIABInCgVsb3dlchgHIAEoCzIWLnN0b3JlLnF1ZXJ5LnYxLkt2RXhwckgAEjAKDmRhdGVfdHJ1bmNfZGF5GAggASgLMhYuc3RvcmUucXVlcnkudjEuS3ZFeHBySAAaWQoKQmluYXJ5RXhwchIkCgRsZWZ0GAEgASgLMhYuc3RvcmUucXVlcnkudjEuS3ZFeHByEiUKBXJpZ2h0GAIgASgLMhYuc3RvcmUucXVlcnkudjEuS3ZFeHByQgYKBGV4cHIilgsKFUt2UHJlZGljYXRlQ29uc3RyYWludBITCglzdHJpbmdfZXEYASABKAlIABIRCgdib29sX2VxGAIgASgISAASHgoUZml4ZWRfc2l6ZV9iaW5hcnlfZXEYAyABKAxIABJDCglpbnRfcmFuZ2UYBCABKAsyLi5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuSW50UmFuZ2VIABJJCgx1aW50NjRfcmFuZ2UYBSABKAsyMS5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuVUludDY0UmFuZ2VIABJHCgtmbG9hdF9yYW5nZRgGIAEoCzIwLnN0b3JlLnF1ZXJ5LnYxLkt2UHJlZGljYXRlQ29uc3RyYWludC5GbG9hdFJhbmdlSAASUQoQZGVjaW1hbDEyOF9yYW5nZRgHIAEoCzI1LnN0b3JlLnF1ZXJ5LnYxLkt2UHJlZGljYXRlQ29uc3RyYWludC5EZWNpbWFsMTI4UmFuZ2VIABIRCgdpc19udWxsGAggASgISAASFQoLaXNfbm90X251bGwYCSABKAhIABJDCglzdHJpbmdfaW4YCiABKAsyLi5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuU3RyaW5nSW5IABI9CgZpbnRfaW4YCyABKAsyKy5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuSW50SW5IABJDCgl1aW50NjRfaW4YDCABKAsyLi5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuVUludDY0SW5IABJXChRmaXhlZF9zaXplX2JpbmFyeV9pbhgNIAEoCzI3LnN0b3JlLnF1ZXJ5LnYxLkt2UHJlZGljYXRlQ29uc3RyYWludC5GaXhlZFNpemVCaW5hcnlJbkgAElEKEGRlY2ltYWwyNTZfcmFuZ2UYDiABKAsyNS5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuRGVjaW1hbDI1NlJhbmdlSAAaPgoISW50UmFuZ2USEAoDbWluGAEgASgDSACIAQESEAoDbWF4GAIgASgDSAGIAQFCBgoEX21pbkIGCgRfbWF4GkEKC1VJbnQ2NFJhbmdlEhAKA21pbhgBIAEoBEgAiAEBEhAKA21heBgCIAEoBEgBiAEBQgYKBF9taW5CBgoEX21heBouCgpGbG9hdEJvdW5kEg0KBXZhbHVlGAEgASgBEhEKCWluY2x1c2l2ZRgCIAEoCBqkAQoKRmxvYXRSYW5nZRJCCgNtaW4YASABKAsyMC5zdG9yZS5xdWVyeS52MS5LdlByZWRpY2F0ZUNvbnN0cmFpbnQuRmxvYXRCb3VuZEgAiAEBEkIKA21heBgCIAEoCzIwLnN0b3JlLnF1ZXJ5LnYxLkt2UHJlZGljYXRlQ29uc3RyYWludC5GbG9hdEJvdW5kSAGIAQFCBgoEX21pbkIGCgRfbWF4GkUKD0RlY2ltYWwxMjhSYW5nZRIQCgNtaW4YASABKAxIAIgBARIQCgNtYXgYAiABKAxIAYgBAUIGCgRfbWluQgYKBF9tYXgaRQoPRGVjaW1hbDI1NlJhbmdlEhAKA21pbhgBIAEoDEgAiAEBEhAKA21heBgCIAEoDEgBiAEBQgYKBF9taW5CBgoEX21heBoaCghTdHJpbmdJbhIOCgZ2YWx1ZXMYASADKAkaFwoFSW50SW4SDgoGdmFsdWVzGAEgAygDGhoKCFVJbnQ2NEluEg4KBnZhbHVlcxgBIAMoBBojChFGaXhlZFNpemVCaW5hcnlJbhIOCgZ2YWx1ZXMYASADKAxCDAoKY29uc3RyYWludCJ4ChBLdlByZWRpY2F0ZUNoZWNrEikKBWZpZWxkGAEgASgLMhouc3RvcmUucXVlcnkudjEuS3ZGaWVsZFJlZhI5Cgpjb25zdHJhaW50GAIgASgLMiUuc3RvcmUucXVlcnkudjEuS3ZQcmVkaWNhdGVDb25zdHJhaW50IlYKC0t2UHJlZGljYXRlEjAKBmNoZWNrcxgBIAMoCzIgLnN0b3JlLnF1ZXJ5LnYxLkt2UHJlZGljYXRlQ2hlY2sSFQoNY29udHJhZGljdGlvbhgCIAEoCCJxChBSYW5nZVJlZHVjZXJTcGVjEikKAm9wGAEgASgOMh0uc3RvcmUucXVlcnkudjEuUmFuZ2VSZWR1Y2VPcBIpCgRleHByGAIgASgLMhYuc3RvcmUucXVlcnkudjEuS3ZFeHBySACIAQFCBwoFX2V4cHIiqQEKDFJlZHVjZVBhcmFtcxIyCghyZWR1Y2VycxgBIAMoCzIgLnN0b3JlLnF1ZXJ5LnYxLlJhbmdlUmVkdWNlclNwZWMSKAoIZ3JvdXBfYnkYAiADKAsyFi5zdG9yZS5xdWVyeS52MS5LdkV4cHISMAoGZmlsdGVyGAMgASgLMhsuc3RvcmUucXVlcnkudjEuS3ZQcmVkaWNhdGVIAIgBAUIJCgdfZmlsdGVyIlEKEVJhbmdlUmVkdWNlUmVzdWx0EjIKBXZhbHVlGAEgASgLMh4uc3RvcmUucXVlcnkudjEuS3ZSZWR1Y2VkVmFsdWVIAIgBAUIICgZfdmFsdWUimgEKEFJhbmdlUmVkdWNlR3JvdXASNAoMZ3JvdXBfdmFsdWVzGAEgAygLMh4uc3RvcmUucXVlcnkudjEuS3ZSZWR1Y2VkVmFsdWUSHAoUZ3JvdXBfdmFsdWVzX3ByZXNlbnQYAiADKAgSMgoHcmVzdWx0cxgDIAMoCzIhLnN0b3JlLnF1ZXJ5LnYxLlJhbmdlUmVkdWNlUmVzdWx0Il0KCkdldFJlcXVlc3QSFQoDa2V5GAEgASgMQgi6SAV6Axj+ARIgChNtaW5fc2VxdWVuY2VfbnVtYmVyGAIgASgESACIAQFCFgoUX21pbl9zZXF1ZW5jZV9udW1iZXIiMQoLR2V0UmVzcG9uc2USEgoFdmFsdWUYAiABKAxIAIgBAUIICgZfdmFsdWVKBAgBEAIihgEKDkdldE1hbnlSZXF1ZXN0Eh0KBGtleXMYASADKAxCD7pIDJIBCQgBIgV6Axj+ARIgChNtaW5fc2VxdWVuY2VfbnVtYmVyGAIgASgESACIAQESGwoKYmF0Y2hfc2l6ZRgDIAEoDUIHukgEKgIgAEIWChRfbWluX3NlcXVlbmNlX251bWJlciI5CgxHZXRNYW55RW50cnkSCwoDa2V5GAEgASgMEhIKBXZhbHVlGAIgASgMSACIAQFCCAoGX3ZhbHVlIj0KDEdldE1hbnlGcmFtZRItCgdyZXN1bHRzGAEgAygLMhwuc3RvcmUucXVlcnkudjEuR2V0TWFueUVudHJ5IuoBCgxSYW5nZVJlcXVlc3QSFwoFc3RhcnQYASABKAxCCLpIBXoDGP4BEhUKA2VuZBgCIAEoDEIIukgFegMY/gESEgoFbGltaXQYAyABKA1IAIgBARIbCgpiYXRjaF9zaXplGAQgASgNQge6SAQqAiAAEjUKBG1vZGUYBSABKA4yHS5zdG9yZS5xdWVyeS52MS5UcmF2ZXJzYWxNb2RlQgi6SAWCAQIQARIgChNtaW5fc2VxdWVuY2VfbnVtYmVyGAYgASgESAGIAQFCCAoGX2xpbWl0QhYKFF9taW5fc2VxdWVuY2VfbnVtYmVyIjcKClJhbmdlRnJhbWUSKQoHcmVzdWx0cxgBIAMoCzIYLnN0b3JlLmNvbW1vbi52MS5LdkVudHJ5Iq8BCg1SZWR1Y2VSZXF1ZXN0EhcKBXN0YXJ0GAEgASgMQgi6SAV6Axj+ARIVCgNlbmQYAiABKAxCCLpIBXoDGP4BEjQKBnBhcmFtcxgDIAEoCzIcLnN0b3JlLnF1ZXJ5LnYxLlJlZHVjZVBhcmFtc0IGukgDyAEBEiAKE21pbl9zZXF1ZW5jZV9udW1iZXIYBCABKARIAIgBAUIWChRfbWluX3NlcXVlbmNlX251bWJlciJ2Cg5SZWR1Y2VSZXNwb25zZRIyCgdyZXN1bHRzGAEgAygLMiEuc3RvcmUucXVlcnkudjEuUmFuZ2VSZWR1Y2VSZXN1bHQSMAoGZ3JvdXBzGAIgAygLMiAuc3RvcmUucXVlcnkudjEuUmFuZ2VSZWR1Y2VHcm91cCpHCg1UcmF2ZXJzYWxNb2RlEhoKFlRSQVZFUlNBTF9NT0RFX0ZPUldBUkQQABIaChZUUkFWRVJTQUxfTU9ERV9SRVZFUlNFEAEqwAIKC0t2RmllbGRLaW5kEhcKE0tWX0ZJRUxEX0tJTkRfSU5UNjQQABIYChRLVl9GSUVMRF9LSU5EX1VJTlQ2NBABEhkKFUtWX0ZJRUxEX0tJTkRfRkxPQVQ2NBACEhkKFUtWX0ZJRUxEX0tJTkRfQk9PTEVBThADEhYKEktWX0ZJRUxEX0tJTkRfVVRGOBAEEhgKFEtWX0ZJRUxEX0tJTkRfREFURTMyEAUSGAoUS1ZfRklFTERfS0lORF9EQVRFNjQQBhIbChdLVl9GSUVMRF9LSU5EX1RJTUVTVEFNUBAHEhwKGEtWX0ZJRUxEX0tJTkRfREVDSU1BTDEyOBAIEiMKH0tWX0ZJRUxEX0tJTkRfRklYRURfU0laRV9CSU5BUlkQCRIcChhLVl9GSUVMRF9LSU5EX0RFQ0lNQUwyNTYQCiqsAQoNUmFuZ2VSZWR1Y2VPcBIdChlSQU5HRV9SRURVQ0VfT1BfQ09VTlRfQUxMEAASHwobUkFOR0VfUkVEVUNFX09QX0NPVU5UX0ZJRUxEEAESHQoZUkFOR0VfUkVEVUNFX09QX1NVTV9GSUVMRBACEh0KGVJBTkdFX1JFRFVDRV9PUF9NSU5fRklFTEQQAxIdChlSQU5HRV9SRURVQ0VfT1BfTUFYX0ZJRUxEEAQytgIKB1NlcnZpY2USQwoDR2V0Ehouc3RvcmUucXVlcnkudjEuR2V0UmVxdWVzdBobLnN0b3JlLnF1ZXJ5LnYxLkdldFJlc3BvbnNlIgOQAgESTgoHR2V0TWFueRIeLnN0b3JlLnF1ZXJ5LnYxLkdldE1hbnlSZXF1ZXN0Ghwuc3RvcmUucXVlcnkudjEuR2V0TWFueUZyYW1lIgOQAgEwARJICgVSYW5nZRIcLnN0b3JlLnF1ZXJ5LnYxLlJhbmdlUmVxdWVzdBoaLnN0b3JlLnF1ZXJ5LnYxLlJhbmdlRnJhbWUiA5ACATABEkwKBlJlZHVjZRIdLnN0b3JlLnF1ZXJ5LnYxLlJlZHVjZVJlcXVlc3QaHi5zdG9yZS5xdWVyeS52MS5SZWR1Y2VSZXNwb25zZSIDkAIBYgZwcm90bzM", [file_buf_validate_validate, file_store_v1_common]);
 
 /**
  * Visible store sequence number plus read counters for query RPCs. On success, carried in unary
@@ -64,7 +42,7 @@ export type Detail = Message<"store.query.v1.Detail"> & {
  * Use `create(DetailSchema)` to create a new message.
  */
 export const DetailSchema: GenMessage<Detail> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 1);
+  messageDesc(file_store_v1_query, 0);
 
 /**
  * Reference to a typed field inside a stored key or value. Used by KvExpr
@@ -102,7 +80,7 @@ export type KvFieldRef = Message<"store.query.v1.KvFieldRef"> & {
  * Use `create(KvFieldRefSchema)` to create a new message.
  */
 export const KvFieldRefSchema: GenMessage<KvFieldRef> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 2);
+  messageDesc(file_store_v1_query, 1);
 
 /**
  * A field extracted from the key bytes at a fixed bit offset.
@@ -137,7 +115,7 @@ export type KvFieldRef_KeyField = Message<"store.query.v1.KvFieldRef.KeyField"> 
  * Use `create(KvFieldRef_KeyFieldSchema)` to create a new message.
  */
 export const KvFieldRef_KeyFieldSchema: GenMessage<KvFieldRef_KeyField> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 2, 0);
+  messageDesc(file_store_v1_query, 1, 0);
 
 /**
  * A field extracted from a Z-order (Morton) interleaved key. The field
@@ -187,7 +165,7 @@ export type KvFieldRef_ZOrderKeyField = Message<"store.query.v1.KvFieldRef.ZOrde
  * Use `create(KvFieldRef_ZOrderKeyFieldSchema)` to create a new message.
  */
 export const KvFieldRef_ZOrderKeyFieldSchema: GenMessage<KvFieldRef_ZOrderKeyField> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 2, 1);
+  messageDesc(file_store_v1_query, 1, 1);
 
 /**
  * A field extracted from the stored value (the encoded `StoredRow`).
@@ -230,7 +208,7 @@ export type KvFieldRef_ValueField = Message<"store.query.v1.KvFieldRef.ValueFiel
  * Use `create(KvFieldRef_ValueFieldSchema)` to create a new message.
  */
 export const KvFieldRef_ValueFieldSchema: GenMessage<KvFieldRef_ValueField> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 2, 2);
+  messageDesc(file_store_v1_query, 1, 2);
 
 /**
  * A single scalar value produced by reduction or used as a literal in
@@ -317,7 +295,7 @@ export type KvReducedValue = Message<"store.query.v1.KvReducedValue"> & {
  * Use `create(KvReducedValueSchema)` to create a new message.
  */
 export const KvReducedValueSchema: GenMessage<KvReducedValue> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 3);
+  messageDesc(file_store_v1_query, 2);
 
 /**
  * An expression tree evaluated per row during reduction. Leaf nodes are field
@@ -402,7 +380,7 @@ export type KvExpr = Message<"store.query.v1.KvExpr"> & {
  * Use `create(KvExprSchema)` to create a new message.
  */
 export const KvExprSchema: GenMessage<KvExpr> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 4);
+  messageDesc(file_store_v1_query, 3);
 
 /**
  * Binary arithmetic operation on two sub-expressions.
@@ -426,7 +404,7 @@ export type KvExpr_BinaryExpr = Message<"store.query.v1.KvExpr.BinaryExpr"> & {
  * Use `create(KvExpr_BinaryExprSchema)` to create a new message.
  */
 export const KvExpr_BinaryExprSchema: GenMessage<KvExpr_BinaryExpr> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 4, 0);
+  messageDesc(file_store_v1_query, 3, 0);
 
 /**
  * A constraint applied to a single field value during predicate evaluation.
@@ -558,7 +536,7 @@ export type KvPredicateConstraint = Message<"store.query.v1.KvPredicateConstrain
  * Use `create(KvPredicateConstraintSchema)` to create a new message.
  */
 export const KvPredicateConstraintSchema: GenMessage<KvPredicateConstraint> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 5);
+  messageDesc(file_store_v1_query, 4);
 
 /**
  * Inclusive integer range. Omit `min` or `max` for a one-sided bound.
@@ -582,7 +560,7 @@ export type KvPredicateConstraint_IntRange = Message<"store.query.v1.KvPredicate
  * Use `create(KvPredicateConstraint_IntRangeSchema)` to create a new message.
  */
 export const KvPredicateConstraint_IntRangeSchema: GenMessage<KvPredicateConstraint_IntRange> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 5, 0);
+  messageDesc(file_store_v1_query, 4, 0);
 
 /**
  * Inclusive uint64 range. Omit `min` or `max` for a one-sided bound.
@@ -606,7 +584,7 @@ export type KvPredicateConstraint_UInt64Range = Message<"store.query.v1.KvPredic
  * Use `create(KvPredicateConstraint_UInt64RangeSchema)` to create a new message.
  */
 export const KvPredicateConstraint_UInt64RangeSchema: GenMessage<KvPredicateConstraint_UInt64Range> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 5, 1);
+  messageDesc(file_store_v1_query, 4, 1);
 
 /**
  * A single bound for a float range, with an inclusivity flag.
@@ -632,7 +610,7 @@ export type KvPredicateConstraint_FloatBound = Message<"store.query.v1.KvPredica
  * Use `create(KvPredicateConstraint_FloatBoundSchema)` to create a new message.
  */
 export const KvPredicateConstraint_FloatBoundSchema: GenMessage<KvPredicateConstraint_FloatBound> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 5, 2);
+  messageDesc(file_store_v1_query, 4, 2);
 
 /**
  * Float range with independently inclusive/exclusive bounds.
@@ -656,7 +634,7 @@ export type KvPredicateConstraint_FloatRange = Message<"store.query.v1.KvPredica
  * Use `create(KvPredicateConstraint_FloatRangeSchema)` to create a new message.
  */
 export const KvPredicateConstraint_FloatRangeSchema: GenMessage<KvPredicateConstraint_FloatRange> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 5, 3);
+  messageDesc(file_store_v1_query, 4, 3);
 
 /**
  * Inclusive Decimal128 range (16-byte little-endian).
@@ -680,7 +658,7 @@ export type KvPredicateConstraint_Decimal128Range = Message<"store.query.v1.KvPr
  * Use `create(KvPredicateConstraint_Decimal128RangeSchema)` to create a new message.
  */
 export const KvPredicateConstraint_Decimal128RangeSchema: GenMessage<KvPredicateConstraint_Decimal128Range> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 5, 4);
+  messageDesc(file_store_v1_query, 4, 4);
 
 /**
  * Inclusive Decimal256 range (32-byte little-endian).
@@ -704,7 +682,7 @@ export type KvPredicateConstraint_Decimal256Range = Message<"store.query.v1.KvPr
  * Use `create(KvPredicateConstraint_Decimal256RangeSchema)` to create a new message.
  */
 export const KvPredicateConstraint_Decimal256RangeSchema: GenMessage<KvPredicateConstraint_Decimal256Range> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 5, 5);
+  messageDesc(file_store_v1_query, 4, 5);
 
 /**
  * Set membership test for UTF-8 strings.
@@ -723,7 +701,7 @@ export type KvPredicateConstraint_StringIn = Message<"store.query.v1.KvPredicate
  * Use `create(KvPredicateConstraint_StringInSchema)` to create a new message.
  */
 export const KvPredicateConstraint_StringInSchema: GenMessage<KvPredicateConstraint_StringIn> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 5, 6);
+  messageDesc(file_store_v1_query, 4, 6);
 
 /**
  * Set membership test for int64 values.
@@ -742,7 +720,7 @@ export type KvPredicateConstraint_IntIn = Message<"store.query.v1.KvPredicateCon
  * Use `create(KvPredicateConstraint_IntInSchema)` to create a new message.
  */
 export const KvPredicateConstraint_IntInSchema: GenMessage<KvPredicateConstraint_IntIn> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 5, 7);
+  messageDesc(file_store_v1_query, 4, 7);
 
 /**
  * Set membership test for uint64 values.
@@ -761,7 +739,7 @@ export type KvPredicateConstraint_UInt64In = Message<"store.query.v1.KvPredicate
  * Use `create(KvPredicateConstraint_UInt64InSchema)` to create a new message.
  */
 export const KvPredicateConstraint_UInt64InSchema: GenMessage<KvPredicateConstraint_UInt64In> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 5, 8);
+  messageDesc(file_store_v1_query, 4, 8);
 
 /**
  * Set membership test for fixed-size binary values.
@@ -780,7 +758,7 @@ export type KvPredicateConstraint_FixedSizeBinaryIn = Message<"store.query.v1.Kv
  * Use `create(KvPredicateConstraint_FixedSizeBinaryInSchema)` to create a new message.
  */
 export const KvPredicateConstraint_FixedSizeBinaryInSchema: GenMessage<KvPredicateConstraint_FixedSizeBinaryIn> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 5, 9);
+  messageDesc(file_store_v1_query, 4, 9);
 
 /**
  * A single predicate check: extract the field, then test it against the
@@ -809,7 +787,7 @@ export type KvPredicateCheck = Message<"store.query.v1.KvPredicateCheck"> & {
  * Use `create(KvPredicateCheckSchema)` to create a new message.
  */
 export const KvPredicateCheckSchema: GenMessage<KvPredicateCheck> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 6);
+  messageDesc(file_store_v1_query, 5);
 
 /**
  * Conjunction (AND) of predicate checks used to filter rows before reduction.
@@ -838,7 +816,7 @@ export type KvPredicate = Message<"store.query.v1.KvPredicate"> & {
  * Use `create(KvPredicateSchema)` to create a new message.
  */
 export const KvPredicateSchema: GenMessage<KvPredicate> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 7);
+  messageDesc(file_store_v1_query, 6);
 
 /**
  * A single aggregation to compute over the scanned range.
@@ -867,7 +845,7 @@ export type RangeReducerSpec = Message<"store.query.v1.RangeReducerSpec"> & {
  * Use `create(RangeReducerSpecSchema)` to create a new message.
  */
 export const RangeReducerSpecSchema: GenMessage<RangeReducerSpec> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 8);
+  messageDesc(file_store_v1_query, 7);
 
 /**
  * Parameters for a Reduce RPC: what to aggregate, how to group, and an
@@ -906,7 +884,7 @@ export type ReduceParams = Message<"store.query.v1.ReduceParams"> & {
  * Use `create(ReduceParamsSchema)` to create a new message.
  */
 export const ReduceParamsSchema: GenMessage<ReduceParams> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 9);
+  messageDesc(file_store_v1_query, 8);
 
 /**
  * The result of a single reducer. Absent when no rows contributed (e.g. SUM
@@ -926,7 +904,7 @@ export type RangeReduceResult = Message<"store.query.v1.RangeReduceResult"> & {
  * Use `create(RangeReduceResultSchema)` to create a new message.
  */
 export const RangeReduceResultSchema: GenMessage<RangeReduceResult> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 10);
+  messageDesc(file_store_v1_query, 9);
 
 /**
  * Aggregation results for one distinct combination of group-by values.
@@ -964,7 +942,7 @@ export type RangeReduceGroup = Message<"store.query.v1.RangeReduceGroup"> & {
  * Use `create(RangeReduceGroupSchema)` to create a new message.
  */
 export const RangeReduceGroupSchema: GenMessage<RangeReduceGroup> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 11);
+  messageDesc(file_store_v1_query, 10);
 
 /**
  * Point lookup request for a single key.
@@ -992,7 +970,7 @@ export type GetRequest = Message<"store.query.v1.GetRequest"> & {
  * Use `create(GetRequestSchema)` to create a new message.
  */
 export const GetRequestSchema: GenMessage<GetRequest> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 12);
+  messageDesc(file_store_v1_query, 11);
 
 /**
  * Point lookup response.
@@ -1013,7 +991,7 @@ export type GetResponse = Message<"store.query.v1.GetResponse"> & {
  * Use `create(GetResponseSchema)` to create a new message.
  */
 export const GetResponseSchema: GenMessage<GetResponse> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 13);
+  messageDesc(file_store_v1_query, 12);
 
 /**
  * GetMany performs batch point lookups. Results stream back as frames, each
@@ -1044,7 +1022,7 @@ export type GetManyRequest = Message<"store.query.v1.GetManyRequest"> & {
  * Use `create(GetManyRequestSchema)` to create a new message.
  */
 export const GetManyRequestSchema: GenMessage<GetManyRequest> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 14);
+  messageDesc(file_store_v1_query, 13);
 
 /**
  * A single entry in a GetMany response frame.
@@ -1072,7 +1050,7 @@ export type GetManyEntry = Message<"store.query.v1.GetManyEntry"> & {
  * Use `create(GetManyEntrySchema)` to create a new message.
  */
 export const GetManyEntrySchema: GenMessage<GetManyEntry> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 15);
+  messageDesc(file_store_v1_query, 14);
 
 /**
  * A batch of GetMany lookup results.
@@ -1091,7 +1069,7 @@ export type GetManyFrame = Message<"store.query.v1.GetManyFrame"> & {
  * Use `create(GetManyFrameSchema)` to create a new message.
  */
 export const GetManyFrameSchema: GenMessage<GetManyFrame> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 16);
+  messageDesc(file_store_v1_query, 15);
 
 /**
  * Range reads keys in lexicographic order over raw `bytes` keys.
@@ -1142,7 +1120,7 @@ export type RangeRequest = Message<"store.query.v1.RangeRequest"> & {
  * Use `create(RangeRequestSchema)` to create a new message.
  */
 export const RangeRequestSchema: GenMessage<RangeRequest> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 17);
+  messageDesc(file_store_v1_query, 16);
 
 /**
  * Each stream message is a batch of rows; the stream ends at HTTP END_STREAM.
@@ -1152,9 +1130,9 @@ export const RangeRequestSchema: GenMessage<RangeRequest> = /*@__PURE__*/
  */
 export type RangeFrame = Message<"store.query.v1.RangeFrame"> & {
   /**
-   * @generated from field: repeated store.query.v1.RangeEntry results = 1;
+   * @generated from field: repeated store.common.v1.KvEntry results = 1;
    */
-  results: RangeEntry[];
+  results: KvEntry[];
 };
 
 /**
@@ -1162,7 +1140,7 @@ export type RangeFrame = Message<"store.query.v1.RangeFrame"> & {
  * Use `create(RangeFrameSchema)` to create a new message.
  */
 export const RangeFrameSchema: GenMessage<RangeFrame> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 18);
+  messageDesc(file_store_v1_query, 17);
 
 /**
  * Same key-range semantics as `RangeRequest`: inclusive `[start, end]` over raw bytes when `end` is
@@ -1199,7 +1177,7 @@ export type ReduceRequest = Message<"store.query.v1.ReduceRequest"> & {
  * Use `create(ReduceRequestSchema)` to create a new message.
  */
 export const ReduceRequestSchema: GenMessage<ReduceRequest> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 19);
+  messageDesc(file_store_v1_query, 18);
 
 /**
  * Response from a Reduce RPC. Exactly one of `results` or `groups` is
@@ -1229,7 +1207,7 @@ export type ReduceResponse = Message<"store.query.v1.ReduceResponse"> & {
  * Use `create(ReduceResponseSchema)` to create a new message.
  */
 export const ReduceResponseSchema: GenMessage<ReduceResponse> = /*@__PURE__*/
-  messageDesc(file_store_v1_query, 20);
+  messageDesc(file_store_v1_query, 19);
 
 /**
  * Default when `RangeRequest.mode` is unset (proto3 implicit enum).

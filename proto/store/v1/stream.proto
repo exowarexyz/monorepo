@@ -44,25 +44,18 @@ message GetRequest {
   uint64 sequence_number = 1;
 }
 
-// One (key, value) pair from a `Put` batch. Callers reapply any filter
-// locally if they need to know which subscriber pattern matched an entry.
-message StreamEntry {
-  bytes key = 1;
-  bytes value = 2;
-}
-
 // One item delivered on a `Subscribe` stream: all rows from a single atomic
 // `Put` batch that matched the subscriber's filter. Live and replayed frames
 // are indistinguishable by content; only the observed `sequence_number`
 // (strictly monotonically increasing either way) differs.
 message SubscribeResponse {
   uint64 sequence_number = 1;
-  repeated StreamEntry entries = 2;
+  repeated store.common.v1.KvEntry entries = 2;
 }
 
 // Response for `Get`: the full contents of the batch at the requested
 // sequence number, with no server-side filter applied.
 message GetResponse {
   uint64 sequence_number = 1;
-  repeated StreamEntry entries = 2;
+  repeated store.common.v1.KvEntry entries = 2;
 }

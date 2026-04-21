@@ -61,7 +61,7 @@ mod tests {
         PutResponse as ProtoPutResponse, Service as IngestService,
         ServiceServer as IngestServiceServer,
     };
-    use exoware_sdk_rs::store::query::v1::RangeEntry as ProtoRangeEntry;
+    use exoware_sdk_rs::store::common::v1::KvEntry as ProtoKvEntry;
     use exoware_sdk_rs::store::query::v1::{
         GetManyEntry as ProtoGetManyEntry, GetManyFrame as ProtoGetManyFrame,
         GetResponse as ProtoGetResponse, RangeFrame as ProtoRangeFrame,
@@ -269,7 +269,7 @@ mod tests {
         ProtoRangeFrame {
             results: results
                 .into_iter()
-                .map(|(key, value)| ProtoRangeEntry {
+                .map(|(key, value)| ProtoKvEntry {
                     key: key.to_vec(),
                     value,
                     ..Default::default()
@@ -408,9 +408,9 @@ mod tests {
                 RangeMode::Forward => Box::new(range_iter),
                 RangeMode::Reverse => Box::new(range_iter.rev()),
             };
-            let mut results: Vec<ProtoRangeEntry> = Vec::new();
+            let mut results: Vec<ProtoKvEntry> = Vec::new();
             for (key, value) in iter.take(limit) {
-                results.push(ProtoRangeEntry {
+                results.push(ProtoKvEntry {
                     key: key.to_vec(),
                     value: value.to_vec(),
                     ..Default::default()

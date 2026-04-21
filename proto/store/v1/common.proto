@@ -2,6 +2,18 @@ syntax = "proto3";
 
 package store.common.v1;
 
+import "buf/validate/validate.proto";
+
+// A raw key-value pair shared by store APIs that move complete rows without
+// additional per-entry metadata.
+//
+// Keys must be between 0 and 254 bytes (inclusive) anywhere this message is
+// used for ingestion.
+message KvEntry {
+  bytes key = 1 [(buf.validate.field).bytes.max_len = 254];
+  bytes value = 2;
+}
+
 // Identifies a subset of keys by their `KeyCodec` family (reserved_bits +
 // prefix) and a byte regex over the payload portion of each key (bytes after
 // the reserved/prefix header). Shared across `store.compact.v1` prune

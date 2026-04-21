@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use connectrpc::ConnectError;
+use exoware_sdk_rs::common::KvEntry;
 use exoware_sdk_rs::keys::KeyCodec;
 use exoware_sdk_rs::match_key::compile_payload_regex;
-use exoware_sdk_rs::store::stream::v1::StreamEntry;
 use exoware_sdk_rs::stream_filter::{validate_filter, StreamFilter};
 use regex::bytes::Regex;
 use tokio::sync::Notify;
@@ -60,7 +60,7 @@ pub(crate) fn compile_matchers(
 pub(crate) fn apply_filter(
     matchers: &[CompiledMatcher],
     kvs: &[(Bytes, Bytes)],
-) -> Vec<StreamEntry> {
+) -> Vec<KvEntry> {
     let mut out = Vec::with_capacity(kvs.len());
     'outer: for (k, v) in kvs {
         for matcher in matchers {
@@ -72,7 +72,7 @@ pub(crate) fn apply_filter(
                 continue;
             };
             if matcher.regex.is_match(&payload) {
-                out.push(StreamEntry {
+                out.push(KvEntry {
                     key: k.to_vec(),
                     value: v.to_vec(),
                     ..Default::default()
