@@ -38,8 +38,8 @@ pub struct BuiltKeylessUpload<D> {
 ///
 /// `watermark_at`, if `Some(loc)`, emits a watermark row at that location.
 /// The caller is responsible for ensuring `loc` is safe to publish (i.e. the
-/// entire prefix up to `loc` has committed); [`crate::writer::core::WriterCore::begin`]
-/// computes this safely for in-writer use.
+/// entire prefix up to `loc` has committed); `WriterCore::prepare` computes
+/// this safely for in-writer use.
 pub fn build_keyless_upload<H: Hasher, V: Codec + Clone + Send + Sync>(
     peaks: Vec<(Position, u32, H::Digest)>,
     prev_ops_size: Position,

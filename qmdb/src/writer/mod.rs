@@ -1,7 +1,7 @@
 //! Single-writer helpers that push QMDB state into the store without reading
 //! the store in the hot loop.
 //!
-//! Each variant exposes a pure [`build_*_upload`] function that deterministically
+//! Each variant exposes a pure `build_*_upload` function that deterministically
 //! turns (MMR peaks, ops) into the full set of store rows, plus a stateful
 //! `*Writer` wrapper around [`core::WriterCore`] that bootstraps once, pipelines
 //! PUTs, gates in-band watermark emission on pipeline emptiness, and exposes a
