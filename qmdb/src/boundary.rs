@@ -39,6 +39,11 @@ fn grafted_to_ops_pos(grafted_pos: Position, grafting_height: u32) -> Position {
 
 /// Recover the ordered current-boundary delta for one batch from local proof
 /// material emitted by a Commonware `current::ordered::Db`.
+///
+/// TODO: replace this proof-driven recovery path with a thin adapter over
+/// `commonware_storage::qmdb::current::batch::MerkleizedBatch` once upstream
+/// exposes the bitmap-chunk and grafted-subtree deltas needed to publish one
+/// batch boundary directly.
 pub async fn recover_boundary_state<H, K, V, const N: usize, F, Fut>(
     previous_operations: Option<&[QmdbOperation<K, V>]>,
     operations: &[QmdbOperation<K, V>],
@@ -226,6 +231,10 @@ fn ops_pos_to_chunk_idx(ops_pos: Position, grafting_height: u32) -> u64 {
     *location >> grafting_height
 }
 
+// TODO: replace this local mirror with
+// `commonware_storage::qmdb::current::grafting::Verifier` once upstream makes
+// that verifier public (it is still `pub(super)` in commonware-storage
+// v2026.3.0).
 struct ProofVerifier<'a, H: Hasher> {
     inner: StandardHasher<H>,
     grafting_height: u32,
