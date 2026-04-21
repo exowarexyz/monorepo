@@ -18,8 +18,8 @@ use exoware_proto::ingest::{
     PutResponse as ProtoPutResponse, Service as IngestApi, ServiceServer as IngestServiceServer,
 };
 use exoware_proto::query::{
-    Detail, GetManyEntry, GetManyFrame, GetResponse, RangeFrame, ReduceResponse, Service as QueryApi,
-    ServiceServer as QueryServiceServer,
+    Detail, GetManyEntry, GetManyFrame, GetResponse, RangeFrame, ReduceResponse,
+    Service as QueryApi, ServiceServer as QueryServiceServer,
 };
 use exoware_proto::store::stream::v1::{
     GetRequestView, GetResponse as StreamGetResponse, Service as StreamApi,

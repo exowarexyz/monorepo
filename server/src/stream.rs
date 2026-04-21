@@ -57,10 +57,7 @@ pub(crate) fn compile_matchers(
 }
 
 /// Apply a compiled filter to a batch. First-match-wins per `(key, value)`.
-pub(crate) fn apply_filter(
-    matchers: &[CompiledMatcher],
-    kvs: &[(Bytes, Bytes)],
-) -> Vec<KvEntry> {
+pub(crate) fn apply_filter(matchers: &[CompiledMatcher], kvs: &[(Bytes, Bytes)]) -> Vec<KvEntry> {
     let mut out = Vec::with_capacity(kvs.len());
     'outer: for (k, v) in kvs {
         for matcher in matchers {

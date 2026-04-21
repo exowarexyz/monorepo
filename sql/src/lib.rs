@@ -57,11 +57,11 @@ mod tests {
     use connectrpc::{Chain, ConnectError, ConnectRpcService, Context};
     use exoware_sdk_rs::connect_compression_registry;
     use exoware_sdk_rs::kv_codec::{eval_expr, expr_needs_value};
+    use exoware_sdk_rs::store::common::v1::KvEntry as ProtoKvEntry;
     use exoware_sdk_rs::store::ingest::v1::{
         PutResponse as ProtoPutResponse, Service as IngestService,
         ServiceServer as IngestServiceServer,
     };
-    use exoware_sdk_rs::store::common::v1::KvEntry as ProtoKvEntry;
     use exoware_sdk_rs::store::query::v1::{
         GetManyEntry as ProtoGetManyEntry, GetManyFrame as ProtoGetManyFrame,
         GetResponse as ProtoGetResponse, RangeFrame as ProtoRangeFrame,
