@@ -82,19 +82,17 @@ export type {
     PruneRequest,
     PruneResponse,
 } from './gen/ts/store/v1/compact_pb.js';
-export { MatchKeySchema } from './gen/ts/store/v1/common_pb.js';
-export type { MatchKey } from './gen/ts/store/v1/common_pb.js';
+export { KvEntrySchema, MatchKeySchema } from './gen/ts/store/v1/common_pb.js';
+export type { KvEntry, MatchKey } from './gen/ts/store/v1/common_pb.js';
 export {
     SubscribeRequestSchema,
     SubscribeResponseSchema,
     GetRequestSchema,
     GetResponseSchema,
-    StreamEntrySchema,
 } from './gen/ts/store/v1/stream_pb.js';
 export type {
     SubscribeRequest,
     SubscribeResponse,
     GetRequest,
     GetResponse,
-    StreamEntry,
 } from './gen/ts/store/v1/stream_pb.js';
