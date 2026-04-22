@@ -140,39 +140,6 @@ where
         })
     }
 
-    pub async fn resolve_watermark_for_root(
-        &self,
-        root: &H::Digest,
-        variant: QmdbVariant,
-    ) -> Result<Location, QmdbError> {
-        let session = self.client.create_session();
-        let Some(latest) = self.core().read_latest_watermark(&session).await? else {
-            return Err(QmdbError::ProofRootNotFound {
-                variant,
-                root: root.encode().to_vec(),
-            });
-        };
-
-        for raw in (0..=*latest).rev() {
-            let watermark = Location::new(raw);
-            match self
-                .root_for_variant_in_session(&session, watermark, variant)
-                .await
-            {
-                Ok(found) if found.root == *root => return Ok(watermark),
-                Ok(_) => {}
-                Err(QmdbError::CurrentProofRequiresBatchBoundary { .. })
-                    if variant == QmdbVariant::Current => {}
-                Err(err) => return Err(err),
-            }
-        }
-
-        Err(QmdbError::ProofRootNotFound {
-            variant,
-            root: root.encode().to_vec(),
-        })
-    }
-
     pub async fn query_many_at<Q: AsRef<[u8]>>(
         &self,
         keys: &[Q],

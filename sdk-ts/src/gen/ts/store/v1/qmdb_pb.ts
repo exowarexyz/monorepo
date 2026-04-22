@@ -13,7 +13,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file store/v1/qmdb.proto.
  */
 export const file_store_v1_qmdb: GenFile = /*@__PURE__*/
-  fileDesc("ChNzdG9yZS92MS9xbWRiLnByb3RvEg1zdG9yZS5xbWRiLnYxIo8BChBTdWJzY3JpYmVSZXF1ZXN0Ej0KCm1hdGNoX2tleXMYASADKAsyHi5zdG9yZS5jb21tb24udjEuQnl0ZXNNYXRjaEtleUIJukgGkgEDEIAIEiIKFXNpbmNlX3NlcXVlbmNlX251bWJlchgCIAEoBEgAiAEBQhgKFl9zaW5jZV9zZXF1ZW5jZV9udW1iZXIiJwoKR2V0UmVxdWVzdBILCgNrZXkYASABKAwSDAoEcm9vdBgCIAEoDCI5Cg5HZXRNYW55UmVxdWVzdBIZCgRrZXlzGAEgAygMQgu6SAiSAQUIARCACBIMCgRyb290GAIgASgMIisKCE1tclByb29mEg4KBmxlYXZlcxgBIAEoBBIPCgdkaWdlc3RzGAIgAygMIkIKE011bHRpUHJvb2ZPcGVyYXRpb24SEAoIbG9jYXRpb24YASABKAQSGQoRZW5jb2RlZF9vcGVyYXRpb24YAiABKAwiigEKFEhpc3RvcmljYWxNdWx0aVByb29mEgwKBHJvb3QYAiABKAwSJgoFcHJvb2YYAyABKAsyFy5zdG9yZS5xbWRiLnYxLk1tclByb29mEjYKCm9wZXJhdGlvbnMYBCADKAsyIi5zdG9yZS5xbWRiLnYxLk11bHRpUHJvb2ZPcGVyYXRpb25KBAgBEAIiiQEKEUN1cnJlbnRSYW5nZVByb29mEiYKBXByb29mGAEgASgLMhcuc3RvcmUucW1kYi52MS5NbXJQcm9vZhIhChRwYXJ0aWFsX2NodW5rX2RpZ2VzdBgCIAEoDEgAiAEBEhAKCG9wc19yb290GAMgASgMQhcKFV9wYXJ0aWFsX2NodW5rX2RpZ2VzdCKdAQoUQ3VycmVudEtleVZhbHVlUHJvb2YSDAoEcm9vdBgCIAEoDBIQCghsb2NhdGlvbhgDIAEoBBINCgVjaHVuaxgEIAEoDBI1CgtyYW5nZV9wcm9vZhgFIAEoCzIgLnN0b3JlLnFtZGIudjEuQ3VycmVudFJhbmdlUHJvb2YSGQoRZW5jb2RlZF9vcGVyYXRpb24YBiABKAxKBAgBEAIiZwoRU3Vic2NyaWJlUmVzcG9uc2USHgoWcmVzdW1lX3NlcXVlbmNlX251bWJlchgBIAEoBBIyCgVwcm9vZhgCIAEoCzIjLnN0b3JlLnFtZGIudjEuSGlzdG9yaWNhbE11bHRpUHJvb2YiQQoLR2V0UmVzcG9uc2USMgoFcHJvb2YYASABKAsyIy5zdG9yZS5xbWRiLnYxLkN1cnJlbnRLZXlWYWx1ZVByb29mIkUKD0dldE1hbnlSZXNwb25zZRIyCgVwcm9vZhgBIAEoCzIjLnN0b3JlLnFtZGIudjEuSGlzdG9yaWNhbE11bHRpUHJvb2YymAEKDk9yZGVyZWRTZXJ2aWNlEjwKA0dldBIZLnN0b3JlLnFtZGIudjEuR2V0UmVxdWVzdBoaLnN0b3JlLnFtZGIudjEuR2V0UmVzcG9uc2USSAoHR2V0TWFueRIdLnN0b3JlLnFtZGIudjEuR2V0TWFueVJlcXVlc3QaHi5zdG9yZS5xbWRiLnYxLkdldE1hbnlSZXNwb25zZTJgCgxSYW5nZVNlcnZpY2USUAoJU3Vic2NyaWJlEh8uc3RvcmUucW1kYi52MS5TdWJzY3JpYmVSZXF1ZXN0GiAuc3RvcmUucW1kYi52MS5TdWJzY3JpYmVSZXNwb25zZTABYgZwcm90bzM", [file_buf_validate_validate, file_store_v1_common]);
+  fileDesc("ChNzdG9yZS92MS9xbWRiLnByb3RvEg1zdG9yZS5xbWRiLnYxIo8BChBTdWJzY3JpYmVSZXF1ZXN0Ej0KCm1hdGNoX2tleXMYASADKAsyHi5zdG9yZS5jb21tb24udjEuQnl0ZXNNYXRjaEtleUIJukgGkgEDEIAIEiIKFXNpbmNlX3NlcXVlbmNlX251bWJlchgCIAEoBEgAiAEBQhgKFl9zaW5jZV9zZXF1ZW5jZV9udW1iZXIiJgoKR2V0UmVxdWVzdBILCgNrZXkYASABKAwSCwoDdGlwGAIgASgEIjgKDkdldE1hbnlSZXF1ZXN0EhkKBGtleXMYASADKAxCC7pICJIBBQgBEIAIEgsKA3RpcBgCIAEoBCIrCghNbXJQcm9vZhIOCgZsZWF2ZXMYASABKAQSDwoHZGlnZXN0cxgCIAMoDCJCChNNdWx0aVByb29mT3BlcmF0aW9uEhAKCGxvY2F0aW9uGAEgASgEEhkKEWVuY29kZWRfb3BlcmF0aW9uGAIgASgMIooBChRIaXN0b3JpY2FsTXVsdGlQcm9vZhIMCgRyb290GAIgASgMEiYKBXByb29mGAMgASgLMhcuc3RvcmUucW1kYi52MS5NbXJQcm9vZhI2CgpvcGVyYXRpb25zGAQgAygLMiIuc3RvcmUucW1kYi52MS5NdWx0aVByb29mT3BlcmF0aW9uSgQIARACIokBChFDdXJyZW50UmFuZ2VQcm9vZhImCgVwcm9vZhgBIAEoCzIXLnN0b3JlLnFtZGIudjEuTW1yUHJvb2YSIQoUcGFydGlhbF9jaHVua19kaWdlc3QYAiABKAxIAIgBARIQCghvcHNfcm9vdBgDIAEoDEIXChVfcGFydGlhbF9jaHVua19kaWdlc3QinQEKFEN1cnJlbnRLZXlWYWx1ZVByb29mEgwKBHJvb3QYAiABKAwSEAoIbG9jYXRpb24YAyABKAQSDQoFY2h1bmsYBCABKAwSNQoLcmFuZ2VfcHJvb2YYBSABKAsyIC5zdG9yZS5xbWRiLnYxLkN1cnJlbnRSYW5nZVByb29mEhkKEWVuY29kZWRfb3BlcmF0aW9uGAYgASgMSgQIARACImcKEVN1YnNjcmliZVJlc3BvbnNlEh4KFnJlc3VtZV9zZXF1ZW5jZV9udW1iZXIYASABKAQSMgoFcHJvb2YYAiABKAsyIy5zdG9yZS5xbWRiLnYxLkhpc3RvcmljYWxNdWx0aVByb29mIkEKC0dldFJlc3BvbnNlEjIKBXByb29mGAEgASgLMiMuc3RvcmUucW1kYi52MS5DdXJyZW50S2V5VmFsdWVQcm9vZiJFCg9HZXRNYW55UmVzcG9uc2USMgoFcHJvb2YYASABKAsyIy5zdG9yZS5xbWRiLnYxLkhpc3RvcmljYWxNdWx0aVByb29mMpgBCg5PcmRlcmVkU2VydmljZRI8CgNHZXQSGS5zdG9yZS5xbWRiLnYxLkdldFJlcXVlc3QaGi5zdG9yZS5xbWRiLnYxLkdldFJlc3BvbnNlEkgKB0dldE1hbnkSHS5zdG9yZS5xbWRiLnYxLkdldE1hbnlSZXF1ZXN0Gh4uc3RvcmUucW1kYi52MS5HZXRNYW55UmVzcG9uc2UyYAoMUmFuZ2VTZXJ2aWNlElAKCVN1YnNjcmliZRIfLnN0b3JlLnFtZGIudjEuU3Vic2NyaWJlUmVxdWVzdBogLnN0b3JlLnFtZGIudjEuU3Vic2NyaWJlUmVzcG9uc2UwAWIGcHJvdG8z", [file_buf_validate_validate, file_store_v1_common]);
 
 /**
  * Subscribe to one or more logical QMDB key matchers.
@@ -61,12 +61,14 @@ export type GetRequest = Message<"store.qmdb.v1.GetRequest"> & {
   key: Uint8Array;
 
   /**
-   * Requested ordered-QMDB current root. The server resolves the batch
-   * watermark whose current root matches `root`.
+   * Published ordered-QMDB batch-boundary to prove against. The server
+   * builds the proof at this tip and returns the resulting current root;
+   * the client is expected to compare that root to the one it already
+   * trusts for this tip.
    *
-   * @generated from field: bytes root = 2;
+   * @generated from field: uint64 tip = 2;
    */
-  root: Uint8Array;
+  tip: bigint;
 };
 
 /**
@@ -90,12 +92,14 @@ export type GetManyRequest = Message<"store.qmdb.v1.GetManyRequest"> & {
   keys: Uint8Array[];
 
   /**
-   * Requested ordered-QMDB historical ops root. The server resolves
-   * the watermark whose historical root matches `root`.
+   * Published ordered-QMDB historical watermark to prove against. The
+   * server builds the multi-proof at this tip and returns the resulting
+   * historical ops root; the client is expected to compare that root to
+   * the one it already trusts for this tip.
    *
-   * @generated from field: bytes root = 2;
+   * @generated from field: uint64 tip = 2;
    */
-  root: Uint8Array;
+  tip: bigint;
 };
 
 /**

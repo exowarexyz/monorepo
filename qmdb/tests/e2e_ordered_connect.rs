@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{routing::get, Router};
-use commonware_codec::Encode;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
@@ -320,13 +319,14 @@ async fn ordered_connect_get_returns_current_key_value_proof() {
     let proof = client
         .get(ProtoGetRequest {
             key: b"alpha".to_vec(),
-            root: local.current_boundary.root.encode().to_vec(),
+            tip: local.latest_location.as_u64(),
             ..Default::default()
         })
         .await
         .expect("get");
 
     let expected = latest_operation_for_key(&local.operations, b"alpha");
+    assert_eq!(proof.root, local.current_boundary.root);
     assert_eq!(proof.location, expected.0);
     assert_eq!(proof.operation, expected.1);
 }
@@ -351,7 +351,7 @@ async fn ordered_connect_get_many_returns_historical_multi_proof() {
     let proof = client
         .get_many(ProtoGetManyRequest {
             keys: vec![b"alpha".to_vec(), b"beta".to_vec()],
-            root: historical_root.encode().to_vec(),
+            tip: local.latest_location.as_u64(),
             ..Default::default()
         })
         .await
@@ -361,6 +361,7 @@ async fn ordered_connect_get_many_returns_historical_multi_proof() {
     let beta = latest_operation_for_key(&local.operations, b"beta");
     let mut expected = vec![alpha, beta];
     expected.sort_by_key(|(location, _)| *location);
+    assert_eq!(proof.root, historical_root);
     assert_eq!(proof.operations, expected);
 }
 
@@ -381,7 +382,7 @@ async fn ordered_connect_client_rejects_invalid_get_proof() {
     let raw_get_response = rpc
         .get(ProtoGetRequest {
             key: b"alpha".to_vec(),
-            root: local.current_boundary.root.encode().to_vec(),
+            tip: local.latest_location.as_u64(),
             ..Default::default()
         })
         .await
@@ -391,12 +392,7 @@ async fn ordered_connect_client_rejects_invalid_get_proof() {
     let raw_get_many_response = rpc
         .get_many(ProtoGetManyRequest {
             keys: vec![b"alpha".to_vec(), b"beta".to_vec()],
-            root: ordered_client
-                .root_at(local.latest_location)
-                .await
-                .expect("historical root")
-                .encode()
-                .to_vec(),
+            tip: local.latest_location.as_u64(),
             ..Default::default()
         })
         .await
@@ -414,7 +410,7 @@ async fn ordered_connect_client_rejects_invalid_get_proof() {
     let err = client
         .get(ProtoGetRequest {
             key: b"alpha".to_vec(),
-            root: local.current_boundary.root.encode().to_vec(),
+            tip: local.latest_location.as_u64(),
             ..Default::default()
         })
         .await
@@ -435,17 +431,13 @@ async fn ordered_connect_client_rejects_invalid_get_many_proof() {
         op_cfg(),
         update_row_cfg(),
     ));
-    let historical_root = ordered_client
-        .root_at(local.latest_location)
-        .await
-        .expect("historical root");
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client.clone()).await;
     let rpc = rpc_client(&qmdb_url);
 
     let raw_get_response = rpc
         .get(ProtoGetRequest {
             key: b"alpha".to_vec(),
-            root: local.current_boundary.root.encode().to_vec(),
+            tip: local.latest_location.as_u64(),
             ..Default::default()
         })
         .await
@@ -455,7 +447,7 @@ async fn ordered_connect_client_rejects_invalid_get_many_proof() {
     let raw_get_many_response = rpc
         .get_many(ProtoGetManyRequest {
             keys: vec![b"alpha".to_vec(), b"beta".to_vec()],
-            root: historical_root.encode().to_vec(),
+            tip: local.latest_location.as_u64(),
             ..Default::default()
         })
         .await
@@ -473,7 +465,7 @@ async fn ordered_connect_client_rejects_invalid_get_many_proof() {
     let err = client
         .get_many(ProtoGetManyRequest {
             keys: vec![b"alpha".to_vec(), b"beta".to_vec()],
-            root: historical_root.encode().to_vec(),
+            tip: local.latest_location.as_u64(),
             ..Default::default()
         })
         .await

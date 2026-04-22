@@ -332,16 +332,18 @@ pub struct GetRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
     pub key: ::buffa::alloc::vec::Vec<u8>,
-    /// Requested ordered-QMDB current root. The server resolves the batch
-    /// watermark whose current root matches `root`.
+    /// Published ordered-QMDB batch-boundary to prove against. The server
+    /// builds the proof at this tip and returns the resulting current root;
+    /// the client is expected to compare that root to the one it already
+    /// trusts for this tip.
     ///
-    /// Field 2: `root`
+    /// Field 2: `tip`
     #[serde(
-        rename = "root",
-        with = "::buffa::json_helpers::bytes",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
+        rename = "tip",
+        with = "::buffa::json_helpers::uint64",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
     )]
-    pub root: ::buffa::alloc::vec::Vec<u8>,
+    pub tip: u64,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -353,7 +355,7 @@ impl ::core::fmt::Debug for GetRequest {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         f.debug_struct("GetRequest")
             .field("key", &self.key)
-            .field("root", &self.root)
+            .field("tip", &self.tip)
             .finish()
     }
 }
@@ -383,8 +385,8 @@ impl ::buffa::Message for GetRequest {
         if !self.key.is_empty() {
             size += 1u32 + ::buffa::types::bytes_encoded_len(&self.key) as u32;
         }
-        if !self.root.is_empty() {
-            size += 1u32 + ::buffa::types::bytes_encoded_len(&self.root) as u32;
+        if self.tip != 0u64 {
+            size += 1u32 + ::buffa::types::uint64_encoded_len(self.tip) as u32;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
         self.__buffa_cached_size.set(size);
@@ -401,13 +403,10 @@ impl ::buffa::Message for GetRequest {
                 .encode(buf);
             ::buffa::types::encode_bytes(&self.key, buf);
         }
-        if !self.root.is_empty() {
-            ::buffa::encoding::Tag::new(
-                    2u32,
-                    ::buffa::encoding::WireType::LengthDelimited,
-                )
+        if self.tip != 0u64 {
+            ::buffa::encoding::Tag::new(2u32, ::buffa::encoding::WireType::Varint)
                 .encode(buf);
-            ::buffa::types::encode_bytes(&self.root, buf);
+            ::buffa::types::encode_uint64(self.tip, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -433,14 +432,14 @@ impl ::buffa::Message for GetRequest {
                 ::buffa::types::merge_bytes(&mut self.key, buf)?;
             }
             2u32 => {
-                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                if tag.wire_type() != ::buffa::encoding::WireType::Varint {
                     return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
                         field_number: 2u32,
-                        expected: 2u8,
+                        expected: 0u8,
                         actual: tag.wire_type() as u8,
                     });
                 }
-                ::buffa::types::merge_bytes(&mut self.root, buf)?;
+                self.tip = ::buffa::types::decode_uint64(buf)?;
             }
             _ => {
                 self.__buffa_unknown_fields
@@ -454,7 +453,7 @@ impl ::buffa::Message for GetRequest {
     }
     fn clear(&mut self) {
         self.key.clear();
-        self.root.clear();
+        self.tip = 0u64;
         self.__buffa_unknown_fields.clear();
         self.__buffa_cached_size.set(0);
     }
@@ -495,11 +494,13 @@ pub struct GetRequestView<'a> {
     ///
     /// Field 1: `key`
     pub key: &'a [u8],
-    /// Requested ordered-QMDB current root. The server resolves the batch
-    /// watermark whose current root matches `root`.
+    /// Published ordered-QMDB batch-boundary to prove against. The server
+    /// builds the proof at this tip and returns the resulting current root;
+    /// the client is expected to compare that root to the one it already
+    /// trusts for this tip.
     ///
-    /// Field 2: `root`
-    pub root: &'a [u8],
+    /// Field 2: `tip`
+    pub tip: u64,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> GetRequestView<'a> {
@@ -551,14 +552,14 @@ impl<'a> GetRequestView<'a> {
                     view.key = ::buffa::types::borrow_bytes(&mut cur)?;
                 }
                 2u32 => {
-                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    if tag.wire_type() != ::buffa::encoding::WireType::Varint {
                         return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
                             field_number: 2u32,
-                            expected: 2u8,
+                            expected: 0u8,
                             actual: tag.wire_type() as u8,
                         });
                     }
-                    view.root = ::buffa::types::borrow_bytes(&mut cur)?;
+                    view.tip = ::buffa::types::decode_uint64(&mut cur)?;
                 }
                 _ => {
                     ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
@@ -588,7 +589,7 @@ impl<'a> ::buffa::MessageView<'a> for GetRequestView<'a> {
         use ::buffa::alloc::string::ToString as _;
         GetRequest {
             key: (self.key).to_vec(),
-            root: (self.root).to_vec(),
+            tip: self.tip,
             __buffa_unknown_fields: self
                 .__buffa_unknown_fields
                 .to_owned()
@@ -621,16 +622,18 @@ pub struct GetManyRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec"
     )]
     pub keys: ::buffa::alloc::vec::Vec<::buffa::alloc::vec::Vec<u8>>,
-    /// Requested ordered-QMDB historical ops root. The server resolves
-    /// the watermark whose historical root matches `root`.
+    /// Published ordered-QMDB historical watermark to prove against. The
+    /// server builds the multi-proof at this tip and returns the resulting
+    /// historical ops root; the client is expected to compare that root to
+    /// the one it already trusts for this tip.
     ///
-    /// Field 2: `root`
+    /// Field 2: `tip`
     #[serde(
-        rename = "root",
-        with = "::buffa::json_helpers::bytes",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
+        rename = "tip",
+        with = "::buffa::json_helpers::uint64",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
     )]
-    pub root: ::buffa::alloc::vec::Vec<u8>,
+    pub tip: u64,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -642,7 +645,7 @@ impl ::core::fmt::Debug for GetManyRequest {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         f.debug_struct("GetManyRequest")
             .field("keys", &self.keys)
-            .field("root", &self.root)
+            .field("tip", &self.tip)
             .finish()
     }
 }
@@ -669,8 +672,8 @@ impl ::buffa::Message for GetManyRequest {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
-        if !self.root.is_empty() {
-            size += 1u32 + ::buffa::types::bytes_encoded_len(&self.root) as u32;
+        if self.tip != 0u64 {
+            size += 1u32 + ::buffa::types::uint64_encoded_len(self.tip) as u32;
         }
         for v in &self.keys {
             size += 1u32 + ::buffa::types::bytes_encoded_len(v) as u32;
@@ -682,13 +685,10 @@ impl ::buffa::Message for GetManyRequest {
     fn write_to(&self, buf: &mut impl ::buffa::bytes::BufMut) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if !self.root.is_empty() {
-            ::buffa::encoding::Tag::new(
-                    2u32,
-                    ::buffa::encoding::WireType::LengthDelimited,
-                )
+        if self.tip != 0u64 {
+            ::buffa::encoding::Tag::new(2u32, ::buffa::encoding::WireType::Varint)
                 .encode(buf);
-            ::buffa::types::encode_bytes(&self.root, buf);
+            ::buffa::types::encode_uint64(self.tip, buf);
         }
         for v in &self.keys {
             ::buffa::encoding::Tag::new(
@@ -712,14 +712,14 @@ impl ::buffa::Message for GetManyRequest {
         use ::buffa::Enumeration as _;
         match tag.field_number() {
             2u32 => {
-                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                if tag.wire_type() != ::buffa::encoding::WireType::Varint {
                     return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
                         field_number: 2u32,
-                        expected: 2u8,
+                        expected: 0u8,
                         actual: tag.wire_type() as u8,
                     });
                 }
-                ::buffa::types::merge_bytes(&mut self.root, buf)?;
+                self.tip = ::buffa::types::decode_uint64(buf)?;
             }
             1u32 => {
                 if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
@@ -742,7 +742,7 @@ impl ::buffa::Message for GetManyRequest {
         self.__buffa_cached_size.get()
     }
     fn clear(&mut self) {
-        self.root.clear();
+        self.tip = 0u64;
         self.keys.clear();
         self.__buffa_unknown_fields.clear();
         self.__buffa_cached_size.set(0);
@@ -784,11 +784,13 @@ pub struct GetManyRequestView<'a> {
     ///
     /// Field 1: `keys`
     pub keys: ::buffa::RepeatedView<'a, &'a [u8]>,
-    /// Requested ordered-QMDB historical ops root. The server resolves
-    /// the watermark whose historical root matches `root`.
+    /// Published ordered-QMDB historical watermark to prove against. The
+    /// server builds the multi-proof at this tip and returns the resulting
+    /// historical ops root; the client is expected to compare that root to
+    /// the one it already trusts for this tip.
     ///
-    /// Field 2: `root`
-    pub root: &'a [u8],
+    /// Field 2: `tip`
+    pub tip: u64,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> GetManyRequestView<'a> {
@@ -830,14 +832,14 @@ impl<'a> GetManyRequestView<'a> {
             let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
             match tag.field_number() {
                 2u32 => {
-                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    if tag.wire_type() != ::buffa::encoding::WireType::Varint {
                         return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
                             field_number: 2u32,
-                            expected: 2u8,
+                            expected: 0u8,
                             actual: tag.wire_type() as u8,
                         });
                     }
-                    view.root = ::buffa::types::borrow_bytes(&mut cur)?;
+                    view.tip = ::buffa::types::decode_uint64(&mut cur)?;
                 }
                 1u32 => {
                     if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
@@ -877,7 +879,7 @@ impl<'a> ::buffa::MessageView<'a> for GetManyRequestView<'a> {
         use ::buffa::alloc::string::ToString as _;
         GetManyRequest {
             keys: self.keys.iter().map(|b| (b).to_vec()).collect(),
-            root: (self.root).to_vec(),
+            tip: self.tip,
             __buffa_unknown_fields: self
                 .__buffa_unknown_fields
                 .to_owned()

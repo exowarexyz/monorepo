@@ -48,9 +48,11 @@ message GetRequest {
   // Raw logical QMDB key (`K::as_ref()` bytes), not a store row key.
   bytes key = 1;
 
-  // Requested ordered-QMDB current root. The server resolves the batch
-  // watermark whose current root matches `root`.
-  bytes root = 2;
+  // Published ordered-QMDB batch-boundary to prove against. The server
+  // builds the proof at this tip and returns the resulting current root;
+  // the client is expected to compare that root to the one it already
+  // trusts for this tip.
+  uint64 tip = 2;
 }
 
 // Historical key proof request for one or more logical keys.
@@ -60,9 +62,11 @@ message GetManyRequest {
     [(buf.validate.field).repeated.min_items = 1,
      (buf.validate.field).repeated.max_items = 1024];
 
-  // Requested ordered-QMDB historical ops root. The server resolves
-  // the watermark whose historical root matches `root`.
-  bytes root = 2;
+  // Published ordered-QMDB historical watermark to prove against. The
+  // server builds the multi-proof at this tip and returns the resulting
+  // historical ops root; the client is expected to compare that root to
+  // the one it already trusts for this tip.
+  uint64 tip = 2;
 }
 
 // Stable mirror of an MMR proof payload.
