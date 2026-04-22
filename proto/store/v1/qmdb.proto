@@ -96,7 +96,7 @@ message MultiProofOperation {
 
 // Historical ordered-QMDB multi-proof over one set of logical keys.
 message HistoricalMultiProof {
-  uint64 watermark = 1;
+  reserved 1;
   bytes root = 2;
   MmrProof proof = 3;
   repeated MultiProofOperation operations = 4;
@@ -104,7 +104,7 @@ message HistoricalMultiProof {
 
 // Historical contiguous range proof over one published batch.
 message HistoricalRangeProof {
-  uint64 watermark = 1;
+  reserved 1;
   bytes root = 2;
   uint64 start_location = 3;
   MmrProof proof = 4;
@@ -120,7 +120,7 @@ message CurrentRangeProof {
 
 // Current ordered proof for one active key.
 message CurrentKeyValueProof {
-  uint64 watermark = 1;
+  reserved 1;
   bytes root = 2;
   uint64 location = 3;
   bytes chunk = 4;

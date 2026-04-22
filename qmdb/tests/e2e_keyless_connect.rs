@@ -248,7 +248,6 @@ async fn keyless_connect_subscribe_emits_verifiable_range_proof() {
 
     assert!(frame.resume_sequence_number > 0);
     assert_eq!(frame.proof.start_location, Location::new(0));
-    assert_eq!(frame.proof.watermark, local.latest_location);
     assert_eq!(frame.proof.root, local.root);
     assert_eq!(frame.proof.operations, local.operations);
 }

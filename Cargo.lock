@@ -876,6 +876,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b193af5b67834b676abd72466a96c1024e6a6ad978a1f484bd90b85c94041351"
 dependencies = [
  "clap_builder",
+ "clap_derive",
 ]
 
 [[package]]
@@ -888,6 +889,18 @@ dependencies = [
  "anstyle",
  "clap_lex",
  "strsim",
+]
+
+[[package]]
+name = "clap_derive"
+version = "4.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1110bd8a634a1ab8cb04345d8d878267d57c3cf1b38d91b71af6686408bbca6a"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -2293,6 +2306,7 @@ dependencies = [
  "axum",
  "buffa",
  "bytes",
+ "clap",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-runtime",
@@ -2313,6 +2327,25 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tower-http 0.5.2",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "exoware-qmdb-wasm"
+version = "2026.4.0"
+dependencies = [
+ "buffa",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-storage",
+ "connectrpc",
+ "futures",
+ "http-body",
+ "js-sys",
+ "serde",
+ "wasm-bindgen",
 ]
 
 [[package]]

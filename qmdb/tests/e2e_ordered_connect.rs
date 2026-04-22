@@ -405,7 +405,6 @@ async fn ordered_connect_subscribe_emits_multi_proof_for_matching_keys() {
 
     let expected = latest_operation_for_key(&local.operations, b"alpha");
     assert!(frame.resume_sequence_number > 0);
-    assert_eq!(frame.proof.watermark, local.latest_location);
     assert_eq!(frame.proof.operations.len(), 1);
     assert_eq!(frame.proof.operations[0], expected);
 }
@@ -514,7 +513,6 @@ async fn ordered_connect_get_returns_current_key_value_proof() {
         .expect("get");
 
     let expected = latest_operation_for_key(&local.operations, b"alpha");
-    assert_eq!(proof.watermark, local.latest_location);
     assert_eq!(proof.location, expected.0);
     assert_eq!(proof.operation, expected.1);
 }
@@ -549,7 +547,6 @@ async fn ordered_connect_get_many_returns_historical_multi_proof() {
     let beta = latest_operation_for_key(&local.operations, b"beta");
     let mut expected = vec![alpha, beta];
     expected.sort_by_key(|(location, _)| *location);
-    assert_eq!(proof.watermark, local.latest_location);
     assert_eq!(proof.operations, expected);
 }
 

@@ -122,7 +122,6 @@ where
     QmdbOperation<K, V>: Encode,
 {
     ProtoHistoricalMultiProof {
-        watermark: *proof.watermark,
         root: proof.root.encode().to_vec(),
         proof: Some(raw_mmr_proof_to_proto(&proof.proof)).into(),
         operations: proof
@@ -142,7 +141,6 @@ fn operation_range_checkpoint_to_proto<D: commonware_cryptography::Digest>(
     checkpoint: &OperationRangeCheckpoint<D>,
 ) -> ProtoHistoricalRangeProof {
     ProtoHistoricalRangeProof {
-        watermark: *checkpoint.watermark,
         root: checkpoint.root.encode().to_vec(),
         start_location: *checkpoint.start_location,
         proof: Some(raw_mmr_proof_to_proto(&checkpoint.proof)).into(),
@@ -181,7 +179,6 @@ where
     QmdbOperation<K, V>: Encode,
 {
     ProtoCurrentKeyValueProof {
-        watermark: *proof.watermark,
         root: proof.root.encode().to_vec(),
         location: *proof.location,
         chunk: proof.chunk.to_vec(),

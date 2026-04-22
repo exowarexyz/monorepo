@@ -1700,13 +1700,6 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for MultiProofOperationView<'a> 
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct HistoricalMultiProof {
-    /// Field 1: `watermark`
-    #[serde(
-        rename = "watermark",
-        with = "::buffa::json_helpers::uint64",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
-    )]
-    pub watermark: u64,
     /// Field 2: `root`
     #[serde(
         rename = "root",
@@ -1737,7 +1730,6 @@ pub struct HistoricalMultiProof {
 impl ::core::fmt::Debug for HistoricalMultiProof {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         f.debug_struct("HistoricalMultiProof")
-            .field("watermark", &self.watermark)
             .field("root", &self.root)
             .field("proof", &self.proof)
             .field("operations", &self.operations)
@@ -1767,9 +1759,6 @@ impl ::buffa::Message for HistoricalMultiProof {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
-        if self.watermark != 0u64 {
-            size += 1u32 + ::buffa::types::uint64_encoded_len(self.watermark) as u32;
-        }
         if !self.root.is_empty() {
             size += 1u32 + ::buffa::types::bytes_encoded_len(&self.root) as u32;
         }
@@ -1792,11 +1781,6 @@ impl ::buffa::Message for HistoricalMultiProof {
     fn write_to(&self, buf: &mut impl ::buffa::bytes::BufMut) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.watermark != 0u64 {
-            ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Varint)
-                .encode(buf);
-            ::buffa::types::encode_uint64(self.watermark, buf);
-        }
         if !self.root.is_empty() {
             ::buffa::encoding::Tag::new(
                     2u32,
@@ -1836,16 +1820,6 @@ impl ::buffa::Message for HistoricalMultiProof {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         match tag.field_number() {
-            1u32 => {
-                if tag.wire_type() != ::buffa::encoding::WireType::Varint {
-                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                        field_number: 1u32,
-                        expected: 0u8,
-                        actual: tag.wire_type() as u8,
-                    });
-                }
-                self.watermark = ::buffa::types::decode_uint64(buf)?;
-            }
             2u32 => {
                 if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                     return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
@@ -1893,7 +1867,6 @@ impl ::buffa::Message for HistoricalMultiProof {
         self.__buffa_cached_size.get()
     }
     fn clear(&mut self) {
-        self.watermark = 0u64;
         self.root.clear();
         self.proof = ::buffa::MessageField::none();
         self.operations.clear();
@@ -1933,8 +1906,6 @@ pub const __HISTORICAL_MULTI_PROOF_JSON_ANY: ::buffa::type_registry::JsonAnyEntr
 /// Historical ordered-QMDB multi-proof over one set of logical keys.
 #[derive(Clone, Debug, Default)]
 pub struct HistoricalMultiProofView<'a> {
-    /// Field 1: `watermark`
-    pub watermark: u64,
     /// Field 2: `root`
     pub root: &'a [u8],
     /// Field 3: `proof`
@@ -1981,16 +1952,6 @@ impl<'a> HistoricalMultiProofView<'a> {
             let before_tag = cur;
             let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
             match tag.field_number() {
-                1u32 => {
-                    if tag.wire_type() != ::buffa::encoding::WireType::Varint {
-                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                            field_number: 1u32,
-                            expected: 0u8,
-                            actual: tag.wire_type() as u8,
-                        });
-                    }
-                    view.watermark = ::buffa::types::decode_uint64(&mut cur)?;
-                }
                 2u32 => {
                     if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                         return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
@@ -2064,7 +2025,6 @@ impl<'a> ::buffa::MessageView<'a> for HistoricalMultiProofView<'a> {
         #[allow(unused_imports)]
         use ::buffa::alloc::string::ToString as _;
         HistoricalMultiProof {
-            watermark: self.watermark,
             root: (self.root).to_vec(),
             proof: match self.proof.as_option() {
                 Some(v) => ::buffa::MessageField::<MmrProof>::some(v.to_owned_message()),
@@ -2094,13 +2054,6 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for HistoricalMultiProofView<'a>
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct HistoricalRangeProof {
-    /// Field 1: `watermark`
-    #[serde(
-        rename = "watermark",
-        with = "::buffa::json_helpers::uint64",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
-    )]
-    pub watermark: u64,
     /// Field 2: `root`
     #[serde(
         rename = "root",
@@ -2140,7 +2093,6 @@ pub struct HistoricalRangeProof {
 impl ::core::fmt::Debug for HistoricalRangeProof {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         f.debug_struct("HistoricalRangeProof")
-            .field("watermark", &self.watermark)
             .field("root", &self.root)
             .field("start_location", &self.start_location)
             .field("proof", &self.proof)
@@ -2171,9 +2123,6 @@ impl ::buffa::Message for HistoricalRangeProof {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
-        if self.watermark != 0u64 {
-            size += 1u32 + ::buffa::types::uint64_encoded_len(self.watermark) as u32;
-        }
         if !self.root.is_empty() {
             size += 1u32 + ::buffa::types::bytes_encoded_len(&self.root) as u32;
         }
@@ -2197,11 +2146,6 @@ impl ::buffa::Message for HistoricalRangeProof {
     fn write_to(&self, buf: &mut impl ::buffa::bytes::BufMut) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.watermark != 0u64 {
-            ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Varint)
-                .encode(buf);
-            ::buffa::types::encode_uint64(self.watermark, buf);
-        }
         if !self.root.is_empty() {
             ::buffa::encoding::Tag::new(
                     2u32,
@@ -2245,16 +2189,6 @@ impl ::buffa::Message for HistoricalRangeProof {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         match tag.field_number() {
-            1u32 => {
-                if tag.wire_type() != ::buffa::encoding::WireType::Varint {
-                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                        field_number: 1u32,
-                        expected: 0u8,
-                        actual: tag.wire_type() as u8,
-                    });
-                }
-                self.watermark = ::buffa::types::decode_uint64(buf)?;
-            }
             2u32 => {
                 if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                     return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
@@ -2310,7 +2244,6 @@ impl ::buffa::Message for HistoricalRangeProof {
         self.__buffa_cached_size.get()
     }
     fn clear(&mut self) {
-        self.watermark = 0u64;
         self.root.clear();
         self.start_location = 0u64;
         self.proof = ::buffa::MessageField::none();
@@ -2351,8 +2284,6 @@ pub const __HISTORICAL_RANGE_PROOF_JSON_ANY: ::buffa::type_registry::JsonAnyEntr
 /// Historical contiguous range proof over one published batch.
 #[derive(Clone, Debug, Default)]
 pub struct HistoricalRangeProofView<'a> {
-    /// Field 1: `watermark`
-    pub watermark: u64,
     /// Field 2: `root`
     pub root: &'a [u8],
     /// Field 3: `start_location`
@@ -2401,16 +2332,6 @@ impl<'a> HistoricalRangeProofView<'a> {
             let before_tag = cur;
             let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
             match tag.field_number() {
-                1u32 => {
-                    if tag.wire_type() != ::buffa::encoding::WireType::Varint {
-                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                            field_number: 1u32,
-                            expected: 0u8,
-                            actual: tag.wire_type() as u8,
-                        });
-                    }
-                    view.watermark = ::buffa::types::decode_uint64(&mut cur)?;
-                }
                 2u32 => {
                     if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                         return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
@@ -2490,7 +2411,6 @@ impl<'a> ::buffa::MessageView<'a> for HistoricalRangeProofView<'a> {
         #[allow(unused_imports)]
         use ::buffa::alloc::string::ToString as _;
         HistoricalRangeProof {
-            watermark: self.watermark,
             root: (self.root).to_vec(),
             start_location: self.start_location,
             proof: match self.proof.as_option() {
@@ -2877,13 +2797,6 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for CurrentRangeProofView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct CurrentKeyValueProof {
-    /// Field 1: `watermark`
-    #[serde(
-        rename = "watermark",
-        with = "::buffa::json_helpers::uint64",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
-    )]
-    pub watermark: u64,
     /// Field 2: `root`
     #[serde(
         rename = "root",
@@ -2930,7 +2843,6 @@ pub struct CurrentKeyValueProof {
 impl ::core::fmt::Debug for CurrentKeyValueProof {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         f.debug_struct("CurrentKeyValueProof")
-            .field("watermark", &self.watermark)
             .field("root", &self.root)
             .field("location", &self.location)
             .field("chunk", &self.chunk)
@@ -2962,9 +2874,6 @@ impl ::buffa::Message for CurrentKeyValueProof {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
-        if self.watermark != 0u64 {
-            size += 1u32 + ::buffa::types::uint64_encoded_len(self.watermark) as u32;
-        }
         if !self.root.is_empty() {
             size += 1u32 + ::buffa::types::bytes_encoded_len(&self.root) as u32;
         }
@@ -2992,11 +2901,6 @@ impl ::buffa::Message for CurrentKeyValueProof {
     fn write_to(&self, buf: &mut impl ::buffa::bytes::BufMut) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.watermark != 0u64 {
-            ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Varint)
-                .encode(buf);
-            ::buffa::types::encode_uint64(self.watermark, buf);
-        }
         if !self.root.is_empty() {
             ::buffa::encoding::Tag::new(
                     2u32,
@@ -3048,16 +2952,6 @@ impl ::buffa::Message for CurrentKeyValueProof {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         match tag.field_number() {
-            1u32 => {
-                if tag.wire_type() != ::buffa::encoding::WireType::Varint {
-                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                        field_number: 1u32,
-                        expected: 0u8,
-                        actual: tag.wire_type() as u8,
-                    });
-                }
-                self.watermark = ::buffa::types::decode_uint64(buf)?;
-            }
             2u32 => {
                 if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                     return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
@@ -3123,7 +3017,6 @@ impl ::buffa::Message for CurrentKeyValueProof {
         self.__buffa_cached_size.get()
     }
     fn clear(&mut self) {
-        self.watermark = 0u64;
         self.root.clear();
         self.location = 0u64;
         self.chunk.clear();
@@ -3165,8 +3058,6 @@ pub const __CURRENT_KEY_VALUE_PROOF_JSON_ANY: ::buffa::type_registry::JsonAnyEnt
 /// Current ordered proof for one active key.
 #[derive(Clone, Debug, Default)]
 pub struct CurrentKeyValueProofView<'a> {
-    /// Field 1: `watermark`
-    pub watermark: u64,
     /// Field 2: `root`
     pub root: &'a [u8],
     /// Field 3: `location`
@@ -3217,16 +3108,6 @@ impl<'a> CurrentKeyValueProofView<'a> {
             let before_tag = cur;
             let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
             match tag.field_number() {
-                1u32 => {
-                    if tag.wire_type() != ::buffa::encoding::WireType::Varint {
-                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                            field_number: 1u32,
-                            expected: 0u8,
-                            actual: tag.wire_type() as u8,
-                        });
-                    }
-                    view.watermark = ::buffa::types::decode_uint64(&mut cur)?;
-                }
                 2u32 => {
                     if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                         return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
@@ -3315,7 +3196,6 @@ impl<'a> ::buffa::MessageView<'a> for CurrentKeyValueProofView<'a> {
         #[allow(unused_imports)]
         use ::buffa::alloc::string::ToString as _;
         CurrentKeyValueProof {
-            watermark: self.watermark,
             root: (self.root).to_vec(),
             location: self.location,
             chunk: (self.chunk).to_vec(),

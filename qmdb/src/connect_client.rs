@@ -6,15 +6,19 @@ use bytes::Bytes;
 use commonware_codec::{Decode, DecodeExt, Read};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::{
-    mmr::Location,
+    mmr::{self, Location, StandardHasher},
     qmdb::{
         any::{
             ordered::variable::Operation as QmdbOperation,
             unordered::variable::Operation as UnorderedQmdbOperation,
         },
+        current::proof::{
+            OperationProof as CurrentOperationProof, RangeProof as CurrentRangeProof,
+        },
         immutable::Operation as ImmutableOperation,
         keyless::Operation as KeylessOperation,
         operation::Key as QmdbKey,
+        verify::verify_multi_proof,
     },
 };
 use connectrpc::client::{ClientConfig, ClientTransport, ServerStream};
@@ -30,8 +34,7 @@ use exoware_sdk_rs::ClientError;
 use http_body::Body;
 
 use crate::proof::{
-    OperationRangeCheckpoint, RawCurrentRangeProof, RawKeyValueProof, RawMmrProof, RawMultiProof,
-    VerifiedKeyValue, VerifiedMultiOperations, VerifiedOperationRange,
+    RawMmrProof, VerifiedKeyValue, VerifiedMultiOperations, VerifiedOperationRange,
 };
 use crate::QmdbError;
 
@@ -136,18 +139,7 @@ where
             .proof
             .as_option()
             .ok_or_else(|| QmdbError::CorruptData("qmdb get response missing proof".to_string()))?;
-        let raw = raw_key_value_from_proto::<H, K, V, N>(proof, self.op_cfg.as_ref())?;
-        if !raw.verify::<H>() {
-            return Err(QmdbError::CorruptData(
-                "key-value proof failed verification".to_string(),
-            ));
-        }
-        Ok(VerifiedKeyValue {
-            watermark: raw.watermark,
-            root: raw.root,
-            location: raw.location,
-            operation: raw.operation,
-        })
+        verify_key_value_from_proto::<H, K, V, N>(proof, self.op_cfg.as_ref())
     }
 
     pub async fn get_many(
@@ -164,16 +156,11 @@ where
         let proof = response.proof.as_option().ok_or_else(|| {
             QmdbError::CorruptData("qmdb get_many response missing proof".to_string())
         })?;
-        let raw = raw_multi_from_proto::<H, K, V>(proof, self.op_cfg.as_ref())?;
-        if !raw.verify::<H>() {
-            return Err(QmdbError::CorruptData(
-                "many-key proof failed verification".to_string(),
-            ));
-        }
-        Ok(VerifiedMultiOperations {
-            watermark: raw.watermark,
-            root: raw.root,
-            operations: raw.operations,
+        verify_multi_from_proto::<H, K, V>(proof, self.op_cfg.as_ref()).map_err(|err| match err {
+            QmdbError::CorruptData(message) if message == "multi proof failed verification" => {
+                QmdbError::CorruptData("many-key proof failed verification".to_string())
+            }
+            other => other,
         })
     }
 }
@@ -210,19 +197,9 @@ where
         let proof = frame.proof.as_option().ok_or_else(|| {
             QmdbError::CorruptData("qmdb subscribe response missing proof".to_string())
         })?;
-        let raw = raw_multi_from_proto::<H, K, V>(proof, self.op_cfg.as_ref())?;
-        if !raw.verify::<H>() {
-            return Err(QmdbError::CorruptData(
-                "multi proof failed verification".to_string(),
-            ));
-        }
         Ok(Some(OrderedSubscribeProof {
             resume_sequence_number: frame.resume_sequence_number,
-            proof: VerifiedMultiOperations {
-                watermark: raw.watermark,
-                root: raw.root,
-                operations: raw.operations,
-            },
+            proof: verify_multi_from_proto::<H, K, V>(proof, self.op_cfg.as_ref())?,
         }))
     }
 }
@@ -257,12 +234,7 @@ where
         let proof = frame.proof.as_option().ok_or_else(|| {
             QmdbError::CorruptData("qmdb range subscribe response missing proof".to_string())
         })?;
-        let checkpoint = checkpoint_from_proto::<H>(proof)?;
-        if !checkpoint.verify::<H>() {
-            return Err(QmdbError::CorruptData(
-                "range checkpoint proof failed verification".to_string(),
-            ));
-        }
+        let checkpoint = verify_checkpoint_from_proto::<H>(proof)?;
         let operations = checkpoint
             .encoded_operations
             .iter()
@@ -279,7 +251,6 @@ where
         Ok(Some(RangeSubscribeProof {
             resume_sequence_number: frame.resume_sequence_number,
             proof: VerifiedOperationRange {
-                watermark: checkpoint.watermark,
                 root: checkpoint.root,
                 start_location: checkpoint.start_location,
                 operations,
@@ -599,9 +570,15 @@ fn raw_mmr_from_proto<D: Digest + Decode>(
     })
 }
 
-fn checkpoint_from_proto<H>(
+struct VerifiedCheckpoint<D: Digest> {
+    root: D,
+    start_location: Location,
+    encoded_operations: Vec<Vec<u8>>,
+}
+
+fn verify_checkpoint_from_proto<H>(
     proto: &HistoricalRangeProof,
-) -> Result<OperationRangeCheckpoint<H::Digest>, QmdbError>
+) -> Result<VerifiedCheckpoint<H::Digest>, QmdbError>
 where
     H: Hasher,
     H::Digest: DecodeExt<()>,
@@ -609,19 +586,31 @@ where
     let proof = proto.proof.as_option().ok_or_else(|| {
         QmdbError::CorruptData("historical range proof missing mmr proof".to_string())
     })?;
-    Ok(OperationRangeCheckpoint {
-        watermark: Location::new(proto.watermark),
-        root: decode_digest(&proto.root, "historical range proof root")?,
-        start_location: Location::new(proto.start_location),
-        proof: raw_mmr_from_proto(proof)?,
+    let root = decode_digest(&proto.root, "historical range proof root")?;
+    let start_location = Location::new(proto.start_location);
+    let mmr_proof = raw_mmr_from_proto(proof)?;
+    let mut hasher = StandardHasher::<H>::new();
+    if !mmr::Proof::from(&mmr_proof).verify_range_inclusion(
+        &mut hasher,
+        &proto.encoded_operations,
+        start_location,
+        &root,
+    ) {
+        return Err(QmdbError::CorruptData(
+            "range checkpoint proof failed verification".to_string(),
+        ));
+    }
+    Ok(VerifiedCheckpoint {
+        root,
+        start_location,
         encoded_operations: proto.encoded_operations.clone(),
     })
 }
 
-fn raw_multi_from_proto<H, K, V>(
+fn verify_multi_from_proto<H, K, V>(
     proto: &HistoricalMultiProof,
     op_cfg: &<QmdbOperation<K, V> as Read>::Cfg,
-) -> Result<RawMultiProof<H::Digest, K, V>, QmdbError>
+) -> Result<VerifiedMultiOperations<H::Digest, K, V>, QmdbError>
 where
     H: Hasher,
     H::Digest: DecodeExt<()>,
@@ -632,6 +621,7 @@ where
     let proof = proto.proof.as_option().ok_or_else(|| {
         QmdbError::CorruptData("historical multi proof missing mmr proof".to_string())
     })?;
+    let root = decode_digest(&proto.root, "historical multi proof root")?;
     let operations = proto
         .operations
         .iter()
@@ -648,18 +638,25 @@ where
             ))
         })
         .collect::<Result<Vec<_>, QmdbError>>()?;
-    Ok(RawMultiProof {
-        watermark: Location::new(proto.watermark),
-        root: decode_digest(&proto.root, "historical multi proof root")?,
-        proof: raw_mmr_from_proto(proof)?,
-        operations,
-    })
+    let mmr_proof = raw_mmr_from_proto(proof)?;
+    let mut hasher = StandardHasher::<H>::new();
+    if !verify_multi_proof(
+        &mut hasher,
+        &mmr::Proof::from(&mmr_proof),
+        &operations,
+        &root,
+    ) {
+        return Err(QmdbError::CorruptData(
+            "multi proof failed verification".to_string(),
+        ));
+    }
+    Ok(VerifiedMultiOperations { root, operations })
 }
 
-fn raw_key_value_from_proto<H, K, V, const N: usize>(
+fn verify_key_value_from_proto<H, K, V, const N: usize>(
     proto: &CurrentKeyValueProof,
     op_cfg: &<QmdbOperation<K, V> as Read>::Cfg,
-) -> Result<RawKeyValueProof<H::Digest, K, V, N>, QmdbError>
+) -> Result<VerifiedKeyValue<H::Digest, K, V>, QmdbError>
 where
     H: Hasher,
     H::Digest: DecodeExt<()>,
@@ -673,18 +670,31 @@ where
     let mmr_proof = range_proof.proof.as_option().ok_or_else(|| {
         QmdbError::CorruptData("current range proof missing mmr proof".to_string())
     })?;
-    Ok(RawKeyValueProof {
-        watermark: Location::new(proto.watermark),
-        root: decode_digest(&proto.root, "current key-value proof root")?,
-        location: Location::new(proto.location),
-        chunk: proto.chunk.as_slice().try_into().map_err(|_| {
-            QmdbError::CorruptData(format!(
-                "invalid chunk length {}, expected {N}",
-                proto.chunk.len()
-            ))
-        })?,
-        range_proof: RawCurrentRangeProof {
-            proof: raw_mmr_from_proto(mmr_proof)?,
+    let root = decode_digest(&proto.root, "current key-value proof root")?;
+    let location = Location::new(proto.location);
+    let chunk: [u8; N] = proto.chunk.as_slice().try_into().map_err(|_| {
+        QmdbError::CorruptData(format!(
+            "invalid chunk length {}, expected {N}",
+            proto.chunk.len()
+        ))
+    })?;
+    let operation = QmdbOperation::<K, V>::decode_cfg(proto.encoded_operation.as_slice(), op_cfg)
+        .map_err(|err| {
+        QmdbError::CorruptData(format!(
+            "failed to decode current key-value operation at {}: {err}",
+            proto.location
+        ))
+    })?;
+    let QmdbOperation::Update(_) = &operation else {
+        return Err(QmdbError::CorruptData(
+            "current key-value proof operation must be an update".to_string(),
+        ));
+    };
+    let proof = CurrentOperationProof {
+        loc: location,
+        chunk,
+        range_proof: CurrentRangeProof {
+            proof: mmr::Proof::from(&raw_mmr_from_proto(mmr_proof)?),
             partial_chunk_digest: range_proof
                 .partial_chunk_digest
                 .as_ref()
@@ -692,12 +702,16 @@ where
                 .transpose()?,
             ops_root: decode_digest(&range_proof.ops_root, "current range ops root")?,
         },
-        operation: QmdbOperation::<K, V>::decode_cfg(proto.encoded_operation.as_slice(), op_cfg)
-            .map_err(|err| {
-                QmdbError::CorruptData(format!(
-                    "failed to decode current key-value operation at {}: {err}",
-                    proto.location
-                ))
-            })?,
+    };
+    let mut hasher = H::default();
+    if !proof.verify(&mut hasher, operation.clone(), &root) {
+        return Err(QmdbError::CorruptData(
+            "key-value proof failed verification".to_string(),
+        ));
+    }
+    Ok(VerifiedKeyValue {
+        root,
+        location,
+        operation,
     })
 }

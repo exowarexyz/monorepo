@@ -303,7 +303,6 @@ where
     ) -> Result<VerifiedMultiOperations<H::Digest, K, V>, QmdbError> {
         let raw = self.multi_proof_raw_at(watermark, keys).await?;
         Ok(VerifiedMultiOperations {
-            watermark: raw.watermark,
             root: raw.root,
             operations: raw.operations,
         })
@@ -468,7 +467,6 @@ where
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(VerifiedVariantRange::Any(VerifiedOperationRange {
-                    watermark: checkpoint.watermark,
                     root: checkpoint.root,
                     start_location: checkpoint.start_location,
                     operations,
@@ -502,7 +500,6 @@ where
                     ));
                 }
                 Ok(VerifiedVariantRange::Current(VerifiedCurrentRange {
-                    watermark: raw.watermark,
                     root: raw.root,
                     start_location: raw.start_location,
                     operations: raw.operations,
@@ -627,7 +624,6 @@ where
     ) -> Result<VerifiedKeyValue<H::Digest, K, V>, QmdbError> {
         let raw = self.key_value_proof_raw_at(watermark, key).await?;
         Ok(VerifiedKeyValue {
-            watermark: raw.watermark,
             root: raw.root,
             location: raw.location,
             operation: raw.operation,

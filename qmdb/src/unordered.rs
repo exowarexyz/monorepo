@@ -204,7 +204,6 @@ where
             operations.push(op);
         }
         Ok(VerifiedOperationRange {
-            watermark: checkpoint.watermark,
             root: checkpoint.root,
             start_location: checkpoint.start_location,
             operations,

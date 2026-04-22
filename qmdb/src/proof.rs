@@ -216,7 +216,6 @@ where
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
 pub struct VerifiedOperationRange<D: Digest, Op> {
-    pub watermark: Location,
     pub root: D,
     pub start_location: Location,
     pub operations: Vec<Op>,
@@ -226,7 +225,6 @@ pub struct VerifiedOperationRange<D: Digest, Op> {
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
 pub struct VerifiedMultiOperations<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> {
-    pub watermark: Location,
     pub root: D,
     pub operations: Vec<(Location, QmdbOperation<K, V>)>,
 }
@@ -236,7 +234,6 @@ pub struct VerifiedMultiOperations<D: Digest, K: QmdbKey + Codec, V: Codec + Clo
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
 pub struct VerifiedKeyValue<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> {
-    pub watermark: Location,
     pub root: D,
     pub location: Location,
     pub operation: QmdbOperation<K, V>,
@@ -252,7 +249,6 @@ pub struct VerifiedCurrentRange<
     V: Codec + Clone + Send + Sync,
     const N: usize,
 > {
-    pub watermark: Location,
     pub root: D,
     pub start_location: Location,
     pub operations: Vec<QmdbOperation<K, V>>,
@@ -276,13 +272,6 @@ pub enum VerifiedVariantRange<
 impl<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync, const N: usize>
     VerifiedVariantRange<D, K, V, N>
 {
-    pub fn watermark(&self) -> Location {
-        match self {
-            Self::Any(proof) => proof.watermark,
-            Self::Current(proof) => proof.watermark,
-        }
-    }
-
     pub fn variant(&self) -> QmdbVariant {
         match self {
             Self::Any(_) => QmdbVariant::Any,

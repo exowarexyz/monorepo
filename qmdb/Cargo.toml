@@ -13,19 +13,26 @@ name = "store_qmdb"
 test-utils = []
 
 [dependencies]
+axum = { workspace = true }
 bytes = { workspace = true }
 buffa = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
 commonware-codec = "2026.3.0"
+commonware-runtime = "2026.3.0"
 futures = { workspace = true }
 commonware-cryptography = "2026.3.0"
 commonware-storage = "2026.3.0"
 commonware-utils = "2026.3.0"
 connectrpc = { workspace = true }
 exoware-sdk-rs = { workspace = true }
+hex = { workspace = true }
 http-body = "1"
 regex = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tower-http = { workspace = true, features = ["cors"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 exoware-qmdb = { path = ".", features = ["test-utils"] }
