@@ -355,6 +355,64 @@ describe('Exoware TS SDK', () => {
             expect(Buffer.from(b2!.value)).toEqual(Buffer.from('b2'));
         });
 
+        it('should get a raw batch from the stream service', async () => {
+            const store = client.store();
+            const stream = client.stream();
+            const encoder = new TextEncoder();
+            const key = encoder.encode('stream-get-test');
+            const value = Buffer.from('stream-get-value');
+
+            const sequenceNumber = await store.set(key, value);
+            const batch = await stream.get(sequenceNumber);
+
+            expect(batch.sequenceNumber).toBe(sequenceNumber);
+            expect(batch.entries).toHaveLength(1);
+            expect(batch.entries[0].key).toEqual(key);
+            expect(Buffer.from(batch.entries[0].value)).toEqual(value);
+        });
+
+        it('should subscribe to matching live batches', async () => {
+            const store = client.store();
+            const stream = client.stream();
+            const encoder = new TextEncoder();
+            const key = encoder.encode('stream-subscribe-test');
+            const value = Buffer.from('stream-subscribe-value');
+
+            const iterator = stream.subscribe([
+                create(MatchKeySchema, {
+                    reservedBits: 0,
+                    prefix: 0,
+                    payloadRegex: '(?s-u)^stream-subscribe-test$',
+                }),
+            ]);
+
+            let timeout: ReturnType<typeof setTimeout> | undefined;
+            const nextBatch = Promise.race([
+                iterator.next(),
+                new Promise<IteratorResult<never>>((_, reject) => {
+                    timeout = setTimeout(() => reject(new Error('timed out waiting for stream batch')), 5000);
+                }),
+            ]).finally(() => {
+                if (timeout !== undefined) {
+                    clearTimeout(timeout);
+                }
+            });
+
+            // Give the server a moment to register the live subscription before
+            // the write that should trigger it.
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            const sequenceNumber = await store.set(key, value);
+            const result = await nextBatch;
+
+            expect(result.done).toBe(false);
+            expect(result.value.sequenceNumber).toBe(sequenceNumber);
+            expect(result.value.entries).toHaveLength(1);
+            expect(result.value.entries[0].key).toEqual(key);
+            expect(Buffer.from(result.value.entries[0].value)).toEqual(value);
+
+            await iterator.return?.();
+        });
+
         describe('limits', () => {
             it('should handle key at size limit', async () => {
                 const store = client.store();

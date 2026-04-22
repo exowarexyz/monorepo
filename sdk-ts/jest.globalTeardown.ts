@@ -21,7 +21,7 @@ const teardown = async () => {
     }
 
     if (fs.existsSync(tempDir)) {
-        fs.rmSync(tempDir, { recursive: true, force: true });
+        fs.rmSync(path.join(tempDir, 'storage'), { recursive: true, force: true });
     }
 };
 

@@ -1,5 +1,6 @@
 export { Client, type ClientOptions, type RetryConfig } from './client.js';
 export { StoreClient, TraversalMode, type GetResult, type GetManyResultItem, type QueryResult, type QueryResultItem, type ReduceParams, type ReduceResponse } from './store.js';
+export { StoreStreamClient, type StreamBatch, type StreamBatchEntry } from './stream.js';
 export { ExowareError, HttpError } from './error.js';
 export {
     RangeReduceOp,

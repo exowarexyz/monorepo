@@ -5,31 +5,23 @@
 //! Verification happens inside each variant's `BuildProof`, so items emitted
 //! from the stream are already verified against the store's root.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use commonware_storage::mmr::Location;
+use exoware_qmdb_core::stream::{Accumulator, ClosedBatch, Family};
+use exoware_sdk_rs::ClientError;
 use exoware_sdk_rs::keys::Key;
 use exoware_sdk_rs::match_key::MatchKey;
 use exoware_sdk_rs::stream_filter::StreamFilter;
-use exoware_sdk_rs::{StoreClient, StreamSubscription, StreamSubscriptionEntry};
 use futures::future::BoxFuture;
 use futures::Stream;
 
 use crate::error::QmdbError;
-
-/// Family an incoming key belongs to. `None` → the row is unrelated / we
-/// should ignore it (for example, if the subscriber's filter were ever
-/// widened to include other families).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Family {
-    Op,
-    Presence,
-    Watermark,
-}
+use crate::{ReadSubscription, SubscriptionEntry, SubscriptionFrame};
 
 /// Closure that classifies a `(key, value)` pair into a known family and
 /// decodes the sequence-number-agnostic `Location` from it. Implemented per
@@ -86,19 +78,6 @@ pub(crate) fn build_filter(
             },
         ],
     }
-}
-
-/// Open a subscription with no replay (live from the next batch).
-pub(crate) async fn open_subscription(
-    client: &StoreClient,
-    filter: StreamFilter,
-    since: Option<u64>,
-) -> Result<StreamSubscription, QmdbError> {
-    client
-        .stream()
-        .subscribe(filter, since)
-        .await
-        .map_err(|e| QmdbError::Stream(e.to_string()))
 }
 
 /// Per-family decoder callback used by `classify_and_filter`. Returns `None`
@@ -219,153 +198,11 @@ pub(crate) fn authenticated_classify_and_filter(
     )
 }
 
-/// State machine for one stream.
-///
-/// Invariants the accumulator relies on, all enforced upstream:
-///
-/// 1. One subscribe frame corresponds to exactly one writer PUT (see
-///    `server/src/stream.rs::publish`). A PUT is atomic: its ops + presence +
-///    optional watermark all land in one frame, never split.
-/// 2. Within a frame, ops of a single batch arrive in ascending-location
-///    order. The writer emits them that way and the server preserves kv order.
-/// 3. Frames are delivered in the engine's seq order, which equals dispatch
-///    order (the writer's `prepare()` serializes `latest_location`
-///    assignment), so batch `latest` values are monotonic non-decreasing in
-///    the stream.
-///
-/// Given (1)+(2), a batch's in-progress entry never fragments: op N+1 always
-/// matches `next_expected == N+1` on the same entry. Given (3), GC via
-/// `floor = smallest pending latest` can never discard a watermark still
-/// needed by an unseen batch (that batch would have arrived before any batch
-/// with larger `latest`, not after).
-struct Accumulator {
-    in_progress: BTreeMap<Location /* start */, InProgressBatch>,
-    pending: BTreeMap<Location /* latest */, ClosedBatch>,
-    // Every watermark publication seen so far. Each closed batch drains under
-    // the smallest `wm >= batch.latest` — stamping with the single latest
-    // would cause a batch with `latest=5` to claim `watermark=10` when both
-    // arrive in one frame, even though it was authorized at 5. The stored
-    // sequence number is the store batch seq that made that watermark visible
-    // to reads; proof builders must seed sessions from it.
-    watermarks: BTreeMap<Location, u64>,
-}
-
-struct InProgressBatch {
-    start: Location,
-    next_expected: Location,
-}
-
-struct ClosedBatch {
-    start: Location,
-    latest: Location,
-    sequence_number: u64,
-    /// Snapshot of the watermark in force at drain time; used by `poll_next`
-    /// to feed `operation_range_proof`. Carrying it here avoids a stale-state
-    /// race if the upstream advances the watermark between drain and poll.
-    watermark: Location,
-    /// Store sequence number that makes this batch readable end-to-end. This
-    /// is `max(batch sequence, authorizing watermark sequence)`.
-    read_floor_sequence: u64,
-}
-
-impl Accumulator {
-    fn new() -> Self {
-        Self {
-            in_progress: BTreeMap::new(),
-            pending: BTreeMap::new(),
-            watermarks: BTreeMap::new(),
-        }
-    }
-
-    fn ingest_entry(&mut self, family: Family, location: Location, sequence_number: u64) {
-        match family {
-            Family::Op => {
-                let key = self
-                    .in_progress
-                    .iter()
-                    .find_map(|(start, b)| (b.next_expected == location).then_some(*start));
-                match key {
-                    Some(start) => {
-                        self.in_progress.get_mut(&start).unwrap().next_expected += 1;
-                    }
-                    None => {
-                        self.in_progress.insert(
-                            location,
-                            InProgressBatch {
-                                start: location,
-                                next_expected: location + 1,
-                            },
-                        );
-                    }
-                }
-            }
-            Family::Presence => {
-                // `location` is the batch's `latest_location` (inclusive max);
-                // close the in-progress batch whose next_expected == latest+1.
-                let key = self
-                    .in_progress
-                    .iter()
-                    .find_map(|(start, b)| (b.next_expected == location + 1).then_some(*start));
-                if let Some(start) = key {
-                    let in_prog = self.in_progress.remove(&start).unwrap();
-                    self.pending.insert(
-                        location,
-                        ClosedBatch {
-                            start: in_prog.start,
-                            latest: location,
-                            sequence_number,
-                            watermark: Location::new(0),
-                            read_floor_sequence: 0,
-                        },
-                    );
-                }
-            }
-            Family::Watermark => {
-                self.watermarks.entry(location).or_insert(sequence_number);
-            }
-        }
-    }
-
-    /// Drain every pending batch whose latest is covered by some seen
-    /// watermark. Each batch is stamped with the smallest `wm >= batch.latest`
-    /// so the emitted `proof.watermark` matches the authority that published
-    /// the batch (not a later unrelated watermark).
-    ///
-    /// The batch also carries the store sequence that must seed the follow-up
-    /// proof/query session: the later of the batch frame that delivered the
-    /// ops/presence rows and the frame that delivered the authorizing
-    /// watermark row.
-    fn drain_ready(&mut self) -> Vec<ClosedBatch> {
-        let mut ready = Vec::new();
-        while let Some((&latest, _)) = self.pending.iter().next() {
-            let Some((&wm, &wm_sequence)) = self.watermarks.range(latest..).next() else {
-                break;
-            };
-            let (_, mut batch) = self.pending.pop_first().unwrap();
-            batch.watermark = wm;
-            batch.read_floor_sequence = batch.sequence_number.max(wm_sequence);
-            ready.push(batch);
-        }
-        // GC watermarks that can no longer authorize any remaining batch.
-        // Keep the largest seen as a floor so the set never empties on an
-        // idle stream (bounds memory on long-lived subscriptions).
-        if let Some(&floor) = self
-            .pending
-            .keys()
-            .next()
-            .or_else(|| self.watermarks.keys().next_back())
-        {
-            self.watermarks = self.watermarks.split_off(&floor);
-        }
-        ready
-    }
-}
-
 pin_project_lite::pin_project! {
     // Generic stream of per-batch proofs. `Out` is whatever the variant's
     // `operation_range_proof` returns.
     pub struct BatchProofStream<Out> {
-        sub: StreamSubscription,
+        sub: Option<Box<dyn ReadSubscription>>,
         classify: Classify,
         build_proof: BuildProof<Out>,
         acc: Accumulator,
@@ -375,22 +212,39 @@ pin_project_lite::pin_project! {
         // Currently-building proof future, if any.
         #[pin]
         building: Option<BoxFuture<'static, Result<Out, QmdbError>>>,
+        // In-flight upstream subscription read. This must persist across polls,
+        // especially for JS/WASM subscriptions whose `next()` resolves later.
+        #[pin]
+        pulling: Option<PullNext>,
     }
+}
+
+type PullNext =
+    BoxFuture<'static, (Box<dyn ReadSubscription>, Result<Option<SubscriptionFrame>, ClientError>)>;
+
+fn pull_next(
+    mut sub: Box<dyn ReadSubscription>,
+) -> PullNext {
+    Box::pin(async move {
+        let next = sub.next().await;
+        (sub, next)
+    })
 }
 
 impl<Out> BatchProofStream<Out> {
     pub(crate) fn new(
-        sub: StreamSubscription,
+        sub: Box<dyn ReadSubscription>,
         classify: Classify,
         build_proof: BuildProof<Out>,
     ) -> Self {
         Self {
-            sub,
+            sub: Some(sub),
             classify,
             build_proof,
             acc: Accumulator::new(),
             ready: VecDeque::new(),
             building: None,
+            pulling: None,
         }
     }
 }
@@ -432,21 +286,39 @@ impl<Out: Send + 'static> Stream for BatchProofStream<Out> {
             }
 
             // 3. Pull the next frame from the upstream subscription.
-            let next_fut = this.sub.next();
-            tokio::pin!(next_fut);
-            let frame = match next_fut.as_mut().poll(cx) {
-                Poll::Ready(Ok(Some(frame))) => frame,
-                Poll::Ready(Ok(None)) => return Poll::Ready(None),
-                Poll::Ready(Err(e)) => {
-                    return Poll::Ready(Some(Err(QmdbError::Stream(e.to_string()))));
-                }
+            if this.pulling.as_mut().as_pin_mut().is_none() {
+                let sub = this
+                    .sub
+                    .take()
+                    .expect("subscription is only absent while a pull is in flight");
+                this.pulling.set(Some(pull_next(sub)));
+            }
+
+            let (sub, next) = match this
+                .pulling
+                .as_mut()
+                .as_pin_mut()
+                .expect("pulling must be set before poll")
+                .poll(cx)
+            {
+                Poll::Ready(result) => result,
                 Poll::Pending => return Poll::Pending,
+            };
+            *this.sub = Some(sub);
+            this.pulling.set(None);
+
+            let frame = match next {
+                Ok(Some(frame)) => frame,
+                Ok(None) => return Poll::Ready(None),
+                Err(err) => {
+                    return Poll::Ready(Some(Err(QmdbError::Stream(err.to_string()))));
+                }
             };
 
             // 4. Classify every entry in the frame and feed the accumulator.
             for entry in &frame.entries {
-                let StreamSubscriptionEntry { key, value } = entry;
-                if let Some((family, location)) = (this.classify)(key, value.as_ref()) {
+                let SubscriptionEntry { key, value } = entry;
+                if let Some((family, location)) = (this.classify)(&key, value.as_ref()) {
                     this.acc
                         .ingest_entry(family, location, frame.sequence_number);
                 }
@@ -578,7 +450,7 @@ mod tests {
         let ready = acc.drain_ready();
         assert!(ready.is_empty());
         assert!(
-            acc.watermarks.contains_key(&loc(7)),
+            acc.has_watermark(loc(7)),
             "idle GC must retain the largest wm as a floor"
         );
 

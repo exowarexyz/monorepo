@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
 use commonware_storage::mmr::{self, storage::Storage as MmrStorage, Location, Position};
-use exoware_sdk_rs::{RangeMode, SerializableReadSession};
+use exoware_sdk_rs::RangeMode;
 
 use crate::auth::encode_auth_node_key;
 use crate::auth::AuthenticatedBackendNamespace;
@@ -11,9 +11,10 @@ use crate::codec::{
     encode_grafted_node_key, encode_node_key, grafting_height_for, ops_to_grafted_pos,
     position_height,
 };
+use crate::ReadSession;
 
 pub(crate) struct KvMmrStorage<'a, D: Digest> {
-    pub(crate) session: &'a SerializableReadSession,
+    pub(crate) session: &'a dyn ReadSession,
     pub(crate) mmr_size: Position,
     pub(crate) _marker: PhantomData<D>,
 }
@@ -45,7 +46,7 @@ impl<D: Digest> MmrStorage<D> for KvMmrStorage<'_, D> {
 }
 
 pub(crate) struct KvCurrentStorage<'a, D: Digest, const N: usize> {
-    pub(crate) session: &'a SerializableReadSession,
+    pub(crate) session: &'a dyn ReadSession,
     pub(crate) watermark: Location,
     pub(crate) mmr_size: Position,
     pub(crate) _marker: PhantomData<D>,
@@ -100,7 +101,7 @@ impl<D: Digest, const N: usize> MmrStorage<D> for KvCurrentStorage<'_, D, N> {
 }
 
 pub(crate) struct AuthKvMmrStorage<'a, D: Digest> {
-    pub(crate) session: &'a SerializableReadSession,
+    pub(crate) session: &'a dyn ReadSession,
     pub(crate) namespace: AuthenticatedBackendNamespace,
     pub(crate) mmr_size: Position,
     pub(crate) _marker: PhantomData<D>,

@@ -36,11 +36,18 @@ pub(crate) mod storage;
 mod immutable;
 mod keyless;
 mod ordered;
+mod read_store;
 mod stream;
 mod unordered;
 mod writer;
 
 pub use error::QmdbError;
+pub use exoware_qmdb_core::read_store::{
+    ReadSession, ReadStore, ReadSubscription, SubscriptionEntry, SubscriptionFrame,
+};
+pub use exoware_qmdb_core::{
+    CurrentBoundaryState, QmdbVariant, VersionedValue, MAX_OPERATION_SIZE,
+};
 pub use immutable::ImmutableClient;
 pub use keyless::KeylessClient;
 pub use ordered::OrderedClient;
@@ -48,6 +55,7 @@ pub use proof::{
     OperationRangeCheckpoint, RawMmrProof, VariantRoot, VerifiedCurrentRange, VerifiedKeyValue,
     VerifiedMultiOperations, VerifiedOperationRange, VerifiedVariantRange,
 };
+pub use read_store::SdkReadStore;
 pub use unordered::UnorderedClient;
 pub use writer::{
     build_immutable_upload, build_keyless_upload, build_ordered_upload, build_unordered_upload,
@@ -60,26 +68,6 @@ pub use boundary::recover_boundary_state;
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::mmr::{iterator::PeakIterator, Location, Position, Proof, StandardHasher};
-
-/// Maximum encoded operation size for QMDB key and value payloads (u16 length on the wire).
-pub const MAX_OPERATION_SIZE: usize = u16::MAX as usize;
-
-/// QMDB proof/root variant supported by `exoware-qmdb`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum QmdbVariant {
-    /// Historical `qmdb::any` root / proof over the uploaded ordered operation log.
-    Any,
-    /// Current-state `qmdb::current::ordered` root / proof at an uploaded batch boundary.
-    Current,
-}
-
-/// Historical value resolved for one logical key.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VersionedValue<K, V> {
-    pub key: K,
-    pub location: Location,
-    pub value: Option<V>,
-}
 
 /// Metadata returned after uploading one batch of QMDB operations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -168,24 +156,14 @@ impl<D: Digest> WriterState<D> {
     }
 }
 
-/// Current-state rows for one uploaded ordered batch boundary.
-///
-/// Ordered QMDB uploads carry more than the historical op log: each published
-/// batch boundary also stores the current-state root plus the subset of bitmap
-/// chunks and grafted-MMR nodes that changed at that boundary. This struct is
-/// that versioned delta payload.
-///
-/// Callers typically obtain it from [`recover_boundary_state`], using a local
-/// Commonware `current::ordered::Db`, and then pass it to
-/// [`OrderedWriter::upload_and_publish`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CurrentBoundaryState<D: Digest, const N: usize> {
-    /// Canonical current-state root at this batch boundary.
-    pub root: D,
-    /// Changed bitmap chunks keyed by chunk index.
-    pub chunks: Vec<(u64, [u8; N])>,
-    /// Changed grafted-MMR digests keyed by ops-space MMR position.
-    pub grafted_nodes: Vec<(commonware_storage::mmr::Position, D)>,
+#[cfg(feature = "test-utils")]
+pub mod test_utils {
+    use commonware_storage::mmr::Position;
+    use exoware_sdk_rs::Key;
+
+    pub fn encode_immutable_auth_node_key(position: Position) -> Key {
+        crate::auth::encode_auth_node_key(crate::auth::AuthenticatedBackendNamespace::Immutable, position)
+    }
 }
 
 // Keep test module inline since it tests the full integrated stack.

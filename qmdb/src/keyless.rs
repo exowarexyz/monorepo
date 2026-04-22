@@ -7,7 +7,7 @@ use commonware_storage::{
     mmr::{verification, Location},
     qmdb::keyless::Operation as KeylessOperation,
 };
-use exoware_sdk_rs::{SerializableReadSession, StoreClient};
+use exoware_sdk_rs::StoreClient;
 
 use crate::auth::AuthenticatedBackendNamespace;
 use crate::auth::{
@@ -19,12 +19,19 @@ use crate::core::retry_transient_post_ingest_query;
 use crate::error::QmdbError;
 use crate::proof::{OperationRangeCheckpoint, VerifiedOperationRange};
 use crate::storage::AuthKvMmrStorage;
+use crate::{ReadSession, ReadStore, SdkReadStore};
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct KeylessClient<H: Hasher, V: Codec + Send + Sync> {
-    client: StoreClient,
+    store: Arc<dyn ReadStore>,
     value_cfg: V::Cfg,
     _marker: PhantomData<H>,
+}
+
+impl<H: Hasher, V: Codec + Send + Sync> std::fmt::Debug for KeylessClient<H, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeylessClient").finish_non_exhaustive()
+    }
 }
 
 impl<H, V> KeylessClient<H, V>
@@ -39,8 +46,12 @@ where
     }
 
     pub fn from_client(client: StoreClient, value_cfg: V::Cfg) -> Self {
+        Self::from_read_store(Arc::new(SdkReadStore::new(client)), value_cfg)
+    }
+
+    pub fn from_read_store(store: Arc<dyn ReadStore>, value_cfg: V::Cfg) -> Self {
         Self {
-            client,
+            store,
             value_cfg,
             _marker: PhantomData,
         }
@@ -48,9 +59,10 @@ where
 
     pub async fn writer_location_watermark(&self) -> Result<Option<Location>, QmdbError> {
         retry_transient_post_ingest_query(|| {
-            let session = self.client.create_session();
+            let session = self.store.create_session();
             async move {
-                read_latest_auth_watermark(&session, AuthenticatedBackendNamespace::Keyless).await
+                read_latest_auth_watermark(session.as_ref(), AuthenticatedBackendNamespace::Keyless)
+                    .await
             }
         })
         .await
@@ -58,9 +70,9 @@ where
 
     pub async fn root_at(&self, watermark: Location) -> Result<H::Digest, QmdbError> {
         let namespace = AuthenticatedBackendNamespace::Keyless;
-        let session = self.client.create_session();
-        require_published_auth_watermark(&session, namespace, watermark).await?;
-        compute_auth_root::<H>(&session, namespace, watermark).await
+        let session = self.store.create_session();
+        require_published_auth_watermark(session.as_ref(), namespace, watermark).await?;
+        compute_auth_root::<H>(session.as_ref(), namespace, watermark).await
     }
 
     pub async fn get_at(
@@ -69,8 +81,8 @@ where
         watermark: Location,
     ) -> Result<Option<V>, QmdbError> {
         let namespace = AuthenticatedBackendNamespace::Keyless;
-        let session = self.client.create_session();
-        require_published_auth_watermark(&session, namespace, watermark).await?;
+        let session = self.store.create_session();
+        require_published_auth_watermark(session.as_ref(), namespace, watermark).await?;
         let count = watermark
             .checked_add(1)
             .ok_or_else(|| QmdbError::CorruptData("watermark overflow".to_string()))?;
@@ -81,7 +93,7 @@ where
             });
         }
         let operation = load_auth_operation_at::<KeylessOperation<V>>(
-            &session,
+            session.as_ref(),
             namespace,
             location,
             &self.value_cfg,
@@ -96,9 +108,9 @@ where
         start_location: Location,
         max_locations: u32,
     ) -> Result<OperationRangeCheckpoint<H::Digest>, QmdbError> {
-        let session = self.client.create_session();
+        let session = self.store.create_session();
         self.operation_range_checkpoint_in_session(
-            &session,
+            session.as_ref(),
             watermark,
             start_location,
             max_locations,
@@ -108,7 +120,7 @@ where
 
     async fn operation_range_checkpoint_in_session(
         &self,
-        session: &SerializableReadSession,
+        session: &dyn ReadSession,
         watermark: Location,
         start_location: Location,
         max_locations: u32,
@@ -167,12 +179,10 @@ where
         start_location: Location,
         max_locations: u32,
     ) -> Result<VerifiedOperationRange<H::Digest, KeylessOperation<V>>, QmdbError> {
-        let session = self
-            .client
-            .create_session_with_sequence(read_floor_sequence);
+        let session = self.store.create_session_with_sequence(read_floor_sequence);
         let checkpoint = self
             .operation_range_checkpoint_in_session(
-                &session,
+                session.as_ref(),
                 watermark,
                 start_location,
                 max_locations,
@@ -255,7 +265,7 @@ where
 
         let (classify, filter) =
             drv::authenticated_classify_and_filter(AuthenticatedBackendNamespace::Keyless);
-        let sub = drv::open_subscription(&self.client, filter, since).await?;
+        let sub = self.store.subscribe(filter, since).await?;
 
         let build_proof: drv::BuildProof<VerifiedOperationRange<H::Digest, KeylessOperation<V>>> =
             Arc::new(

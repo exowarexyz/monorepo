@@ -46,6 +46,24 @@ jobs:
       - name: Run tests
         run: cargo test --verbose
 
+  wasm:
+    name: Wasm
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run setup
+        uses: ./.github/actions/setup
+      - name: Install wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.13.1
+      - name: Build qmdb/web wasm package
+        run: wasm-pack build qmdb/web --target bundler --out-dir pkg
+
   dependencies:
     name: Dependencies
     runs-on: ubuntu-latest

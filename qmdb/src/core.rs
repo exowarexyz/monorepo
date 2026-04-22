@@ -9,7 +9,7 @@ use commonware_storage::qmdb::{
     any::unordered::variable::Operation as UnorderedQmdbOperation, operation::Key as QmdbKey,
 };
 use exoware_sdk_rs::keys::Key;
-use exoware_sdk_rs::{ClientError, RangeMode, SerializableReadSession, StoreClient};
+use exoware_sdk_rs::{ClientError, RangeMode};
 
 use crate::codec::{
     decode_digest, decode_operation_location_key, decode_update_location,
@@ -20,6 +20,7 @@ use crate::codec::{
 };
 use crate::error::QmdbError;
 use crate::VersionedValue;
+use crate::{ReadSession, ReadStore};
 
 const POST_INGEST_QUERY_RETRY_MAX_ATTEMPTS: usize = 6;
 const POST_INGEST_QUERY_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
@@ -50,6 +51,18 @@ pub(crate) fn post_ingest_query_retry_backoff(attempt: usize) -> Duration {
     Duration::from_millis(capped_ms.min(u64::MAX as u128) as u64)
 }
 
+async fn sleep_retry_backoff(duration: Duration) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        gloo_timers::future::sleep(duration).await;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        tokio::time::sleep(duration).await;
+    }
+}
+
 pub(crate) async fn retry_transient_post_ingest_query<F, Fut, T>(mut op: F) -> Result<T, QmdbError>
 where
     F: FnMut() -> Fut,
@@ -63,7 +76,7 @@ where
                 if attempt < POST_INGEST_QUERY_RETRY_MAX_ATTEMPTS
                     && is_transient_post_ingest_query_error(&err) =>
             {
-                tokio::time::sleep(post_ingest_query_retry_backoff(attempt)).await;
+                sleep_retry_backoff(post_ingest_query_retry_backoff(attempt)).await;
                 attempt += 1;
             }
             Err(err) => return Err(err),
@@ -71,9 +84,9 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct HistoricalOpsClientCore<'a, D: Digest, K: Codec, V: Codec> {
-    pub(crate) client: &'a StoreClient,
+    pub(crate) store: &'a dyn ReadStore,
     pub(crate) update_row_cfg: (K::Cfg, V::Cfg),
     pub(crate) _marker: PhantomData<(D, K, V)>,
 }
@@ -81,15 +94,15 @@ pub(crate) struct HistoricalOpsClientCore<'a, D: Digest, K: Codec, V: Codec> {
 impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
     pub(crate) async fn writer_location_watermark(&self) -> Result<Option<Location>, QmdbError> {
         retry_transient_post_ingest_query(|| {
-            let session = self.client.create_session();
-            async move { self.read_latest_watermark(&session).await }
+            let session = self.store.create_session();
+            async move { self.read_latest_watermark(session.as_ref()).await }
         })
         .await
     }
 
     pub(crate) async fn read_latest_watermark(
         &self,
-        session: &SerializableReadSession,
+        session: &dyn ReadSession,
     ) -> Result<Option<Location>, QmdbError> {
         let (start, end) = WATERMARK_CODEC.prefix_bounds();
         let rows = session
@@ -103,7 +116,7 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
 
     pub(crate) async fn require_published_watermark(
         &self,
-        session: &SerializableReadSession,
+        session: &dyn ReadSession,
         watermark: Location,
     ) -> Result<(), QmdbError> {
         let available = self
@@ -127,7 +140,7 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
 
     pub(crate) async fn require_batch_boundary(
         &self,
-        session: &SerializableReadSession,
+        session: &dyn ReadSession,
         location: Location,
     ) -> Result<(), QmdbError> {
         if session.get(&encode_presence_key(location)).await?.is_some() {
@@ -139,7 +152,7 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
 
     pub(crate) async fn load_latest_update_row(
         &self,
-        session: &SerializableReadSession,
+        session: &dyn ReadSession,
         watermark: Location,
         key: &[u8],
     ) -> Result<Option<(Key, Vec<u8>)>, QmdbError> {
@@ -156,7 +169,7 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
 
     pub(crate) async fn compute_ops_root<H: Hasher<Digest = D>>(
         &self,
-        session: &SerializableReadSession,
+        session: &dyn ReadSession,
         watermark: Location,
     ) -> Result<D, QmdbError> {
         let size = mmr_size_for_watermark(watermark)?;
@@ -174,8 +187,6 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
             let peak_key_refs: Vec<&Key> = peak_keys.iter().collect();
             session
                 .get_many(&peak_key_refs, peak_key_refs.len() as u32)
-                .await?
-                .collect()
                 .await?
         };
         let mut peaks = Vec::with_capacity(peak_positions.len());
@@ -196,7 +207,7 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
 
     pub(crate) async fn load_operation_bytes_at(
         &self,
-        session: &SerializableReadSession,
+        session: &dyn ReadSession,
         location: Location,
     ) -> Result<Vec<u8>, QmdbError> {
         let Some(bytes) = session.get(&encode_operation_key(location)).await? else {
@@ -209,7 +220,7 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
 
     pub(crate) async fn load_operation_bytes_range(
         &self,
-        session: &SerializableReadSession,
+        session: &dyn ReadSession,
         start_location: Location,
         end_location_exclusive: Location,
     ) -> Result<Vec<Vec<u8>>, QmdbError> {
@@ -251,15 +262,16 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
         keys: &[Q],
         max_location: Location,
     ) -> Result<Vec<Option<VersionedValue<K, V>>>, QmdbError> {
-        let session = self.client.create_session();
-        self.require_published_watermark(&session, max_location)
+        let session = self.store.create_session();
+        self.require_published_watermark(session.as_ref(), max_location)
             .await?;
+        let session = session.as_ref();
 
         let futs = keys.iter().map(|key| {
             let key_bytes = key.as_ref();
             async {
                 let Some((row_key, row_value)) = self
-                    .load_latest_update_row(&session, max_location, key_bytes)
+                    .load_latest_update_row(session, max_location, key_bytes)
                     .await?
                 else {
                     return Ok(None);

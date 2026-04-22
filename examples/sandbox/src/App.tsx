@@ -2,11 +2,22 @@ import { useState, useEffect } from 'react';
 import {
   Client,
   type StoreClient,
+  type StoreStreamClient,
   type GetResult,
   type QueryResult,
-  type QueryResultItem
+  type QueryResultItem,
+  type StreamBatch,
 } from 'exoware-sdk-ts';
 import { Buffer } from 'buffer';
+import {
+  ImmutableQmdbClient,
+  KeylessQmdbClient,
+  OrderedQmdbClient,
+  UnorderedQmdbClient,
+  qmdbMatchKeysForVariant,
+  type QmdbStreamVariant,
+  type VerifiedQmdbBatch,
+} from '@exoware/qmdb-web';
 import './App.css';
 
 // Polyfill Buffer for browser environment
@@ -28,9 +39,18 @@ interface Notification {
   message: string;
 }
 
+type VerifiedQmdbOperation = VerifiedQmdbBatch['operations'][number];
+type VerifiedStreamClient = {
+  streamBatches(since?: bigint): AsyncGenerator<VerifiedQmdbBatch, void, void>;
+  free(): void;
+};
+
+const MAX_STREAM_BATCHES = 12;
+
 function App() {
   const [, setClient] = useState<Client | null>(null);
   const [storeClient, setStoreClient] = useState<StoreClient | null>(null);
+  const [streamClient, setStreamClient] = useState<StoreStreamClient | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [notifications, setNotifications] = useState<Notification[]>([]);
 
@@ -45,6 +65,26 @@ function App() {
   const [queryLimit, setQueryLimit] = useState('10');
   const [queryResult, setQueryResult] = useState<QueryResult | null>(null);
 
+  // Stream state
+  const [streamVariant, setStreamVariant] = useState<QmdbStreamVariant>('ordered');
+  const [streamSinceSequence, setStreamSinceSequence] = useState('');
+  const [immutableKeySizeBytes, setImmutableKeySizeBytes] = useState('32');
+  const [activeStream, setActiveStream] = useState<{
+    variant: QmdbStreamVariant;
+    sinceSequenceNumber?: bigint;
+    immutableKeySizeBytes?: number;
+  } | null>(null);
+  const [streamBatches, setStreamBatches] = useState<StreamBatch[]>([]);
+  const [verifiedBatches, setVerifiedBatches] = useState<VerifiedQmdbBatch[]>([]);
+  const [streamError, setStreamError] = useState<string | null>(null);
+  const [verifiedError, setVerifiedError] = useState<string | null>(null);
+  const [lastStreamSequence, setLastStreamSequence] = useState<bigint | null>(null);
+  const [lastVerifiedWatermark, setLastVerifiedWatermark] = useState<bigint | null>(null);
+  const [isStreamConnecting, setIsStreamConnecting] = useState(false);
+  const [isStreamLive, setIsStreamLive] = useState(false);
+  const [isVerifiedStreamConnecting, setIsVerifiedStreamConnecting] = useState(false);
+  const [isVerifiedStreamLive, setIsVerifiedStreamLive] = useState(false);
+
   // Loading states
   const [isSettingValue, setIsSettingValue] = useState(false);
   const [isGettingValue, setIsGettingValue] = useState(false);
@@ -56,6 +96,7 @@ function App() {
     const c = new Client(SIMULATOR_URL, TOKEN);
     setClient(c);
     setStoreClient(c.store());
+    setStreamClient(c.stream());
 
     // Initial connection test
     testConnection(c).then(connected => {
@@ -102,6 +143,190 @@ function App() {
       setIsConnected(false);
       return false;
     }
+  };
+
+  const createVerifiedStreamClient = (): VerifiedStreamClient | null => {
+    if (!storeClient || !streamClient || activeStream === null) {
+      return null;
+    }
+
+    switch (activeStream.variant) {
+      case 'ordered':
+        return new OrderedQmdbClient(storeClient, streamClient) as VerifiedStreamClient;
+      case 'unordered':
+        return new UnorderedQmdbClient(storeClient, streamClient) as VerifiedStreamClient;
+      case 'immutable':
+        return new ImmutableQmdbClient(
+          storeClient,
+          streamClient,
+          activeStream.immutableKeySizeBytes ?? 32,
+        ) as VerifiedStreamClient;
+      case 'keyless':
+        return new KeylessQmdbClient(storeClient, streamClient) as VerifiedStreamClient;
+    }
+  };
+
+  useEffect(() => {
+    if (!streamClient || activeStream === null) {
+      return;
+    }
+
+    let cancelled = false;
+    const iterator = streamClient.subscribe(
+      qmdbMatchKeysForVariant(activeStream.variant),
+      activeStream.sinceSequenceNumber,
+    );
+
+    setIsStreamConnecting(true);
+    setIsStreamLive(false);
+    setStreamError(null);
+
+    void (async () => {
+      try {
+        for await (const batch of iterator) {
+          if (cancelled) {
+            break;
+          }
+          setIsStreamConnecting(false);
+          setIsStreamLive(true);
+          setLastStreamSequence(batch.sequenceNumber);
+          setStreamBatches((prev) => [batch, ...prev].slice(0, MAX_STREAM_BATCHES));
+        }
+
+        if (!cancelled) {
+          setIsStreamConnecting(false);
+          setIsStreamLive(false);
+        }
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        setIsStreamConnecting(false);
+        setIsStreamLive(false);
+        setStreamError(message);
+        showNotification('error', 'Stream Error', message);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      setIsStreamConnecting(false);
+      setIsStreamLive(false);
+      void iterator.return?.();
+    };
+  }, [activeStream, streamClient]);
+
+  useEffect(() => {
+    if (!storeClient || !streamClient || activeStream === null) {
+      return;
+    }
+
+    let cancelled = false;
+    const reader = createVerifiedStreamClient();
+    let iterator: AsyncGenerator<VerifiedQmdbBatch, void, void> | null = null;
+    let readerReleased = false;
+
+    if (reader === null) {
+      return;
+    }
+
+    const releaseReader = () => {
+      if (!readerReleased) {
+        readerReleased = true;
+        reader.free();
+      }
+    };
+
+    setIsVerifiedStreamConnecting(true);
+    setIsVerifiedStreamLive(false);
+    setVerifiedError(null);
+
+    void (async () => {
+      try {
+        iterator = reader.streamBatches(activeStream.sinceSequenceNumber);
+        for await (const batch of iterator) {
+          if (cancelled) {
+            break;
+          }
+          setIsVerifiedStreamConnecting(false);
+          setIsVerifiedStreamLive(true);
+          setLastVerifiedWatermark(batch.watermark);
+          setVerifiedBatches((prev) => [batch, ...prev].slice(0, MAX_STREAM_BATCHES));
+        }
+
+        if (!cancelled) {
+          setIsVerifiedStreamConnecting(false);
+          setIsVerifiedStreamLive(false);
+        }
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        setIsVerifiedStreamConnecting(false);
+        setIsVerifiedStreamLive(false);
+        setVerifiedError(message);
+        showNotification('error', 'Verified Stream Error', message);
+      } finally {
+        releaseReader();
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      setIsVerifiedStreamConnecting(false);
+      setIsVerifiedStreamLive(false);
+      void iterator?.return?.();
+      releaseReader();
+    };
+  }, [activeStream, storeClient, streamClient]);
+
+  const handleStartStream = () => {
+    if (!streamClient) {
+      showNotification('error', 'Error', 'Stream client is not ready');
+      return;
+    }
+
+    try {
+      const trimmed = streamSinceSequence.trim();
+      const sinceSequenceNumber = trimmed.length > 0 ? BigInt(trimmed) : undefined;
+      const immutableKeySize =
+        streamVariant === 'immutable'
+          ? Number.parseInt(immutableKeySizeBytes.trim(), 10)
+          : undefined;
+      if (
+        streamVariant === 'immutable' &&
+        (!Number.isInteger(immutableKeySize) || immutableKeySize === undefined || immutableKeySize <= 0)
+      ) {
+        throw new Error('Immutable key size must be a positive integer');
+      }
+      setStreamBatches([]);
+      setVerifiedBatches([]);
+      setStreamError(null);
+      setVerifiedError(null);
+      setLastStreamSequence(null);
+      setLastVerifiedWatermark(null);
+      setActiveStream({
+        variant: streamVariant,
+        ...(sinceSequenceNumber !== undefined ? { sinceSequenceNumber } : {}),
+        ...(immutableKeySize !== undefined
+          ? { immutableKeySizeBytes: immutableKeySize }
+          : {}),
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Invalid stream sequence number';
+      showNotification('error', 'Invalid Cursor', message);
+    }
+  };
+
+  const handleStopStream = () => {
+    setActiveStream(null);
+    setIsStreamConnecting(false);
+    setIsStreamLive(false);
+    setIsVerifiedStreamConnecting(false);
+    setIsVerifiedStreamLive(false);
   };
 
   const handleSet = async () => {
@@ -197,6 +422,39 @@ function App() {
       return `[${key.byteLength} bytes]`;
     }
   };
+
+  const formatHex = (value: Uint8Array) =>
+    Array.from(value, (byte) => byte.toString(16).padStart(2, '0')).join('');
+
+  const renderVerifiedOperation = (operation: VerifiedQmdbOperation) => {
+    switch (operation.kind) {
+      case 'delete':
+        return `delete ${formatKeyPreview(operation.key)}`;
+      case 'update':
+        if ('nextKey' in operation) {
+          return `update ${formatKeyPreview(operation.key)} -> ${renderValue(operation.value)} (next ${formatKeyPreview(operation.nextKey)})`;
+        }
+        return `update ${formatKeyPreview(operation.key)} -> ${renderValue(operation.value)}`;
+      case 'set':
+        return `set ${formatKeyPreview(operation.key)} -> ${renderValue(operation.value)}`;
+      case 'append':
+        return `append ${renderValue(operation.value)}`;
+      case 'commit':
+        return operation.metadata
+          ? `commit metadata=${renderValue(operation.metadata)}`
+          : 'commit';
+      case 'commitFloor':
+        return operation.metadata
+          ? `commitFloor inactivity=${operation.inactivityFloor.toString()} metadata=${renderValue(operation.metadata)}`
+          : `commitFloor inactivity=${operation.inactivityFloor.toString()}`;
+    }
+  };
+
+  const activeVariant = activeStream?.variant ?? streamVariant;
+  const nextResumeSequence =
+    lastStreamSequence === null ? null : (lastStreamSequence + 1n).toString();
+  const activeImmutableKeySize =
+    activeStream?.immutableKeySizeBytes?.toString() ?? immutableKeySizeBytes;
 
   return (
     <div className="App">
@@ -348,6 +606,166 @@ function App() {
               ) : (
                 <p>No results found</p>
               )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="card fade-in">
+        <h2>QMDB Stream</h2>
+
+        <div className="form-section">
+          <h3>Live Subscription</h3>
+          <div className="form-row">
+            <div className="form-group">
+              <label htmlFor="stream-variant">Variant</label>
+              <select
+                id="stream-variant"
+                value={streamVariant}
+                onChange={(e) => setStreamVariant(e.target.value as QmdbStreamVariant)}
+                disabled={activeStream !== null}
+              >
+                <option value="ordered">Ordered</option>
+                <option value="unordered">Unordered</option>
+                <option value="immutable">Immutable</option>
+                <option value="keyless">Keyless</option>
+              </select>
+            </div>
+            <div className="form-group">
+              <label htmlFor="stream-since-sequence">Since Sequence (optional)</label>
+              <input
+                id="stream-since-sequence"
+                type="text"
+                placeholder="Replay from store sequence"
+                value={streamSinceSequence}
+                onChange={(e) => setStreamSinceSequence(e.target.value)}
+                disabled={activeStream !== null}
+              />
+            </div>
+            {streamVariant === 'immutable' && (
+              <div className="form-group">
+                <label htmlFor="immutable-key-size">Immutable Key Size (bytes)</label>
+                <input
+                  id="immutable-key-size"
+                  type="number"
+                  min="1"
+                  placeholder="32"
+                  value={immutableKeySizeBytes}
+                  onChange={(e) => setImmutableKeySizeBytes(e.target.value)}
+                  disabled={activeStream !== null}
+                />
+              </div>
+            )}
+          </div>
+          <div className="form-row">
+            <button
+              className={`btn-primary ${isStreamConnecting ? 'loading' : ''}`}
+              onClick={handleStartStream}
+              disabled={activeStream !== null || streamClient === null}
+            >
+              {isStreamConnecting ? 'Connecting...' : 'Start Stream'}
+            </button>
+            <button
+              className="btn-secondary"
+              onClick={handleStopStream}
+              disabled={activeStream === null}
+            >
+              Stop Stream
+            </button>
+          </div>
+          <div className="result fade-in">
+            <h4>Stream Status</h4>
+            <p><strong>Variant:</strong> {activeVariant}</p>
+            <p>
+              <strong>Raw Stream:</strong>{' '}
+              {isStreamConnecting ? 'connecting' : isStreamLive ? 'live' : activeStream ? 'idle' : 'stopped'}
+            </p>
+            <p>
+              <strong>Verified Stream:</strong>{' '}
+              {isVerifiedStreamConnecting
+                ? 'connecting'
+                : isVerifiedStreamLive
+                  ? 'live'
+                  : activeStream
+                    ? 'idle'
+                    : 'stopped'}
+            </p>
+            <p><strong>Filter Families:</strong> {qmdbMatchKeysForVariant(activeVariant).map((matchKey) => matchKey.prefix).join(', ')}</p>
+            {activeVariant === 'immutable' && (
+              <p><strong>Immutable Key Size:</strong> {activeImmutableKeySize}</p>
+            )}
+            {lastStreamSequence !== null && (
+              <p><strong>Last Raw Sequence:</strong> {lastStreamSequence.toString()}</p>
+            )}
+            {nextResumeSequence !== null && (
+              <p><strong>Next Resume Cursor:</strong> {nextResumeSequence}</p>
+            )}
+            {lastVerifiedWatermark !== null && (
+              <p><strong>Last Verified Watermark:</strong> {lastVerifiedWatermark.toString()}</p>
+            )}
+            {streamError && (
+              <p><strong>Raw Stream Error:</strong> {streamError}</p>
+            )}
+            {verifiedError && (
+              <p><strong>Verification Error:</strong> {verifiedError}</p>
+            )}
+          </div>
+        </div>
+
+        <div className="form-section">
+          <h3>Raw Stream Frames</h3>
+          {streamBatches.length > 0 ? (
+            streamBatches.map((batch) => (
+              <div key={batch.sequenceNumber.toString()} className="result fade-in">
+                <h4>Batch {batch.sequenceNumber.toString()}</h4>
+                <p><strong>Entries:</strong> {batch.entries.length}</p>
+                <ul>
+                  {batch.entries.map((entry, index) => (
+                    <li key={`${batch.sequenceNumber.toString()}-${index}`}>
+                      <strong>key</strong> {formatHex(entry.key)} | <strong>value</strong> {renderValue(entry.value)}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))
+          ) : (
+            <div className="result fade-in">
+              <p>No stream frames received yet.</p>
+            </div>
+          )}
+        </div>
+
+        <div className="form-section">
+          <h3>Verified QMDB Batches (WASM)</h3>
+          {verifiedBatches.length > 0 ? (
+            verifiedBatches.map((batch, batchIndex) => (
+              <div
+                key={`verified-${batch.watermark.toString()}-${batch.startLocation.toString()}-${batchIndex}`}
+                className="result fade-in"
+              >
+                <h4>Watermark {batch.watermark.toString()}</h4>
+                <p><strong>Start Location:</strong> {batch.startLocation.toString()}</p>
+                <p><strong>Operations:</strong> {batch.operations.length}</p>
+                <p><strong>Root:</strong> {formatHex(batch.root)}</p>
+                {batch.resumeSequenceNumber !== undefined && (
+                  <p><strong>Resume Sequence:</strong> {batch.resumeSequenceNumber.toString()}</p>
+                )}
+                {batch.operations.length > 0 ? (
+                  <ul>
+                    {batch.operations.map((operation, index) => (
+                      <li key={`verified-${batch.watermark.toString()}-${index}`}>
+                        {renderVerifiedOperation(operation)}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p>No operations verified for this batch.</p>
+                )}
+              </div>
+            ))
+          ) : (
+            <div className="result fade-in">
+              <p>No verified QMDB batches received yet.</p>
             </div>
           )}
         </div>

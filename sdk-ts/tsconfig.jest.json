@@ -1,0 +1,18 @@
+{
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+        "baseUrl": ".",
+        "rootDir": "..",
+        "module": "ES2022",
+        "moduleResolution": "bundler",
+        "types": ["jest", "node"],
+        "paths": {
+            "exoware-sdk-ts": ["./src/index.ts"]
+        }
+    },
+    "include": [
+        "src/**/*",
+        "__tests__/**/*",
+        "../qmdb/web/src/**/*"
+    ]
+}

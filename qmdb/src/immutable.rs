@@ -8,7 +8,7 @@ use commonware_storage::{
     qmdb::immutable::Operation as ImmutableOperation,
 };
 use commonware_utils::Array;
-use exoware_sdk_rs::{SerializableReadSession, StoreClient};
+use exoware_sdk_rs::StoreClient;
 
 use crate::auth::AuthenticatedBackendNamespace;
 use crate::auth::{
@@ -21,14 +21,22 @@ use crate::core::retry_transient_post_ingest_query;
 use crate::error::QmdbError;
 use crate::proof::{OperationRangeCheckpoint, VerifiedOperationRange};
 use crate::storage::AuthKvMmrStorage;
-use crate::VersionedValue;
+use crate::{ReadSession, ReadStore, SdkReadStore, VersionedValue};
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ImmutableClient<H: Hasher, K: AsRef<[u8]> + Codec, V: Codec + Send + Sync> {
-    client: StoreClient,
+    store: Arc<dyn ReadStore>,
     value_cfg: V::Cfg,
     update_row_cfg: (K::Cfg, V::Cfg),
     _marker: PhantomData<(H, K)>,
+}
+
+impl<H: Hasher, K: AsRef<[u8]> + Codec, V: Codec + Send + Sync> std::fmt::Debug
+    for ImmutableClient<H, K, V>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImmutableClient").finish_non_exhaustive()
+    }
 }
 
 impl<H, K, V> ImmutableClient<H, K, V>
@@ -49,8 +57,20 @@ where
         value_cfg: V::Cfg,
         update_row_cfg: (K::Cfg, V::Cfg),
     ) -> Self {
+        Self::from_read_store(
+            Arc::new(SdkReadStore::new(client)),
+            value_cfg,
+            update_row_cfg,
+        )
+    }
+
+    pub fn from_read_store(
+        store: Arc<dyn ReadStore>,
+        value_cfg: V::Cfg,
+        update_row_cfg: (K::Cfg, V::Cfg),
+    ) -> Self {
         Self {
-            client,
+            store,
             value_cfg,
             update_row_cfg,
             _marker: PhantomData,
@@ -59,9 +79,13 @@ where
 
     pub async fn writer_location_watermark(&self) -> Result<Option<Location>, QmdbError> {
         retry_transient_post_ingest_query(|| {
-            let session = self.client.create_session();
+            let session = self.store.create_session();
             async move {
-                read_latest_auth_watermark(&session, AuthenticatedBackendNamespace::Immutable).await
+                read_latest_auth_watermark(
+                    session.as_ref(),
+                    AuthenticatedBackendNamespace::Immutable,
+                )
+                .await
             }
         })
         .await
@@ -69,9 +93,9 @@ where
 
     pub async fn root_at(&self, watermark: Location) -> Result<H::Digest, QmdbError> {
         let namespace = AuthenticatedBackendNamespace::Immutable;
-        let session = self.client.create_session();
-        require_published_auth_watermark(&session, namespace, watermark).await?;
-        compute_auth_root::<H>(&session, namespace, watermark).await
+        let session = self.store.create_session();
+        require_published_auth_watermark(session.as_ref(), namespace, watermark).await?;
+        compute_auth_root::<H>(session.as_ref(), namespace, watermark).await
     }
 
     pub async fn get_at(
@@ -80,10 +104,11 @@ where
         watermark: Location,
     ) -> Result<Option<VersionedValue<K, V>>, QmdbError> {
         let namespace = AuthenticatedBackendNamespace::Immutable;
-        let session = self.client.create_session();
-        require_published_auth_watermark(&session, namespace, watermark).await?;
+        let session = self.store.create_session();
+        require_published_auth_watermark(session.as_ref(), namespace, watermark).await?;
         let Some((row_key, row_value)) =
-            load_latest_auth_immutable_update_row(&session, watermark, key.as_ref()).await?
+            load_latest_auth_immutable_update_row(session.as_ref(), watermark, key.as_ref())
+                .await?
         else {
             return Ok(None);
         };
@@ -97,7 +122,7 @@ where
             )));
         }
         let operation = load_auth_operation_at::<ImmutableOperation<K, V>>(
-            &session,
+            session.as_ref(),
             namespace,
             location,
             &self.value_cfg,
@@ -126,9 +151,9 @@ where
         start_location: Location,
         max_locations: u32,
     ) -> Result<OperationRangeCheckpoint<H::Digest>, QmdbError> {
-        let session = self.client.create_session();
+        let session = self.store.create_session();
         self.operation_range_checkpoint_in_session(
-            &session,
+            session.as_ref(),
             watermark,
             start_location,
             max_locations,
@@ -138,7 +163,7 @@ where
 
     async fn operation_range_checkpoint_in_session(
         &self,
-        session: &SerializableReadSession,
+        session: &dyn ReadSession,
         watermark: Location,
         start_location: Location,
         max_locations: u32,
@@ -197,12 +222,10 @@ where
         start_location: Location,
         max_locations: u32,
     ) -> Result<VerifiedOperationRange<H::Digest, ImmutableOperation<K, V>>, QmdbError> {
-        let session = self
-            .client
-            .create_session_with_sequence(read_floor_sequence);
+        let session = self.store.create_session_with_sequence(read_floor_sequence);
         let checkpoint = self
             .operation_range_checkpoint_in_session(
-                &session,
+                session.as_ref(),
                 watermark,
                 start_location,
                 max_locations,
@@ -293,7 +316,7 @@ where
 
         let (classify, filter) =
             drv::authenticated_classify_and_filter(AuthenticatedBackendNamespace::Immutable);
-        let sub = drv::open_subscription(&self.client, filter, since).await?;
+        let sub = self.store.subscribe(filter, since).await?;
 
         let build_proof: drv::BuildProof<
             VerifiedOperationRange<H::Digest, ImmutableOperation<K, V>>,

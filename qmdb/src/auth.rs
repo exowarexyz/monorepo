@@ -3,7 +3,7 @@ use commonware_cryptography::Hasher;
 use commonware_storage::mmr::{self, iterator::PeakIterator, Location, Position, StandardHasher};
 use commonware_utils::Array;
 use exoware_sdk_rs::keys::{Key, KeyCodec};
-use exoware_sdk_rs::{RangeMode, SerializableReadSession};
+use exoware_sdk_rs::RangeMode;
 
 use crate::codec::{
     decode_digest, encode_ordered_update_payload, ensure_encoded_value_size,
@@ -11,6 +11,7 @@ use crate::codec::{
     RESERVED_BITS, UPDATE_VERSION_LEN,
 };
 use crate::error::QmdbError;
+use crate::ReadSession;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AuthenticatedBackendNamespace {
@@ -227,7 +228,7 @@ pub(crate) fn decode_auth_immutable_update_location(key: &Key) -> Result<Locatio
 }
 
 pub(crate) async fn load_latest_auth_immutable_update_row(
-    session: &SerializableReadSession,
+    session: &dyn ReadSession,
     watermark: Location,
     key: &[u8],
 ) -> Result<Option<(Key, Vec<u8>)>, QmdbError> {
@@ -243,7 +244,7 @@ pub(crate) async fn load_latest_auth_immutable_update_row(
 }
 
 pub(crate) async fn read_latest_auth_watermark(
-    session: &SerializableReadSession,
+    session: &dyn ReadSession,
     namespace: AuthenticatedBackendNamespace,
 ) -> Result<Option<Location>, QmdbError> {
     let (start, end) = auth_namespace_bounds(AUTH_WATERMARK_CODEC, namespace);
@@ -257,7 +258,7 @@ pub(crate) async fn read_latest_auth_watermark(
 }
 
 pub(crate) async fn require_published_auth_watermark(
-    session: &SerializableReadSession,
+    session: &dyn ReadSession,
     namespace: AuthenticatedBackendNamespace,
     watermark: Location,
 ) -> Result<(), QmdbError> {
@@ -383,7 +384,7 @@ where
 }
 
 pub(crate) async fn compute_auth_root<H: Hasher>(
-    session: &SerializableReadSession,
+    session: &dyn ReadSession,
     namespace: AuthenticatedBackendNamespace,
     watermark: Location,
 ) -> Result<H::Digest, QmdbError> {
@@ -402,8 +403,6 @@ pub(crate) async fn compute_auth_root<H: Hasher>(
         let peak_key_refs: Vec<&Key> = peak_keys.iter().collect();
         session
             .get_many(&peak_key_refs, peak_key_refs.len() as u32)
-            .await?
-            .collect()
             .await?
     };
     let mut peaks = Vec::with_capacity(peak_positions.len());
@@ -424,7 +423,7 @@ pub(crate) async fn compute_auth_root<H: Hasher>(
 }
 
 pub(crate) async fn load_auth_operation_at<Op>(
-    session: &SerializableReadSession,
+    session: &dyn ReadSession,
     namespace: AuthenticatedBackendNamespace,
     location: Location,
     cfg: &Op::Cfg,
@@ -448,7 +447,7 @@ where
 }
 
 pub(crate) async fn load_auth_operation_bytes_range(
-    session: &SerializableReadSession,
+    session: &dyn ReadSession,
     namespace: AuthenticatedBackendNamespace,
     start_location: Location,
     end_location_exclusive: Location,

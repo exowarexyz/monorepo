@@ -12,6 +12,15 @@
     "skipLibCheck": true,
     /* Bundler mode */
     "moduleResolution": "bundler",
+    "baseUrl": ".",
+    "paths": {
+      "@exoware/qmdb-web": [
+        "../../qmdb/web/src/index.ts"
+      ],
+      "exoware-sdk-ts": [
+        "./node_modules/exoware-sdk-ts/dist/index.d.ts"
+      ]
+    },
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "moduleDetection": "force",

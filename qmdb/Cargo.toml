@@ -13,6 +13,7 @@ name = "store_qmdb"
 test-utils = []
 
 [dependencies]
+async-trait = { workspace = true }
 bytes = { workspace = true }
 commonware-codec = "2026.3.0"
 futures = { workspace = true }
@@ -20,6 +21,7 @@ commonware-cryptography = "2026.3.0"
 commonware-storage = "2026.3.0"
 commonware-utils = "2026.3.0"
 connectrpc = { workspace = true }
+exoware-qmdb-core = { workspace = true }
 exoware-sdk-rs = { workspace = true }
 pin-project-lite = "0.2"
 thiserror = { workspace = true }

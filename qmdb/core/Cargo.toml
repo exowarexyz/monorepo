@@ -1,0 +1,16 @@
+[package]
+name = "exoware-qmdb-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared read-side and proof logic for Exoware QMDB."
+readme = "../README.md"
+
+[dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+commonware-codec = "2026.3.0"
+commonware-cryptography = "2026.3.0"
+commonware-storage = "2026.3.0"
+exoware-sdk-rs = { workspace = true }
+thiserror = { workspace = true }

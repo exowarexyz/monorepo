@@ -1,0 +1,39 @@
+[package]
+name = "exoware-qmdb-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WASM/browser read facade for Exoware QMDB."
+readme = "../README.md"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+doctest = false
+
+[dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+commonware-codec = { workspace = true }
+commonware-cryptography = "2026.3.0"
+commonware-storage = "2026.3.0"
+commonware-utils = "2026.3.0"
+futures = { workspace = true }
+gloo-timers = { version = "0.3", features = ["futures"] }
+js-sys = "0.3"
+pin-project-lite = "0.2"
+send_wrapper = "0.4"
+serde = { workspace = true, features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+
+[dev-dependencies]
+exoware-sdk-rs-real = { package = "exoware-sdk-rs", path = "../../sdk-rs" }
+store-qmdb-native = { package = "exoware-qmdb", path = ".." }
+exoware-simulator = { path = "../../examples/simulator" }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+wasm-bindgen-test = "0.3"

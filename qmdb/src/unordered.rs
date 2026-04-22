@@ -4,14 +4,14 @@ use std::sync::Arc;
 use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::Hasher;
 use commonware_storage::mmr::{verification, Location};
-use exoware_sdk_rs::{SerializableReadSession, StoreClient};
+use exoware_sdk_rs::StoreClient;
 
 use crate::codec::mmr_size_for_watermark;
 use crate::core::HistoricalOpsClientCore;
 use crate::error::QmdbError;
 use crate::proof::{OperationRangeCheckpoint, VerifiedOperationRange};
 use crate::storage::KvMmrStorage;
-use crate::VersionedValue;
+use crate::{ReadSession, ReadStore, SdkReadStore, VersionedValue};
 
 use commonware_storage::qmdb::{
     any::unordered::variable::Operation as UnorderedQmdbOperation, operation::Key as QmdbKey,
@@ -19,7 +19,7 @@ use commonware_storage::qmdb::{
 
 #[derive(Clone)]
 pub struct UnorderedClient<H: Hasher, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> {
-    client: StoreClient,
+    store: Arc<dyn ReadStore>,
     op_cfg: <UnorderedQmdbOperation<K, V> as commonware_codec::Read>::Cfg,
     update_row_cfg: (K::Cfg, V::Cfg),
     _marker: PhantomData<(H, K)>,
@@ -43,7 +43,7 @@ where
 {
     fn core(&self) -> HistoricalOpsClientCore<'_, H::Digest, K, V> {
         HistoricalOpsClientCore {
-            client: &self.client,
+            store: self.store.as_ref(),
             update_row_cfg: self.update_row_cfg.clone(),
             _marker: PhantomData,
         }
@@ -62,8 +62,16 @@ where
         op_cfg: <UnorderedQmdbOperation<K, V> as commonware_codec::Read>::Cfg,
         update_row_cfg: (K::Cfg, V::Cfg),
     ) -> Self {
+        Self::from_read_store(Arc::new(SdkReadStore::new(client)), op_cfg, update_row_cfg)
+    }
+
+    pub fn from_read_store(
+        store: Arc<dyn ReadStore>,
+        op_cfg: <UnorderedQmdbOperation<K, V> as commonware_codec::Read>::Cfg,
+        update_row_cfg: (K::Cfg, V::Cfg),
+    ) -> Self {
         Self {
-            client,
+            store,
             op_cfg,
             update_row_cfg,
             _marker: PhantomData,
@@ -83,11 +91,13 @@ where
     }
 
     pub async fn root_at(&self, watermark: Location) -> Result<H::Digest, QmdbError> {
-        let session = self.client.create_session();
+        let session = self.store.create_session();
         self.core()
-            .require_published_watermark(&session, watermark)
+            .require_published_watermark(session.as_ref(), watermark)
             .await?;
-        self.core().compute_ops_root::<H>(&session, watermark).await
+        self.core()
+            .compute_ops_root::<H>(session.as_ref(), watermark)
+            .await
     }
 
     pub async fn operation_range_checkpoint(
@@ -96,9 +106,9 @@ where
         start_location: Location,
         max_locations: u32,
     ) -> Result<OperationRangeCheckpoint<H::Digest>, QmdbError> {
-        let session = self.client.create_session();
+        let session = self.store.create_session();
         self.operation_range_checkpoint_in_session(
-            &session,
+            session.as_ref(),
             watermark,
             start_location,
             max_locations,
@@ -108,7 +118,7 @@ where
 
     async fn operation_range_checkpoint_in_session(
         &self,
-        session: &SerializableReadSession,
+        session: &dyn ReadSession,
         watermark: Location,
         start_location: Location,
         max_locations: u32,
@@ -167,12 +177,10 @@ where
         start_location: Location,
         max_locations: u32,
     ) -> Result<VerifiedOperationRange<H::Digest, UnorderedQmdbOperation<K, V>>, QmdbError> {
-        let session = self
-            .client
-            .create_session_with_sequence(read_floor_sequence);
+        let session = self.store.create_session_with_sequence(read_floor_sequence);
         let checkpoint = self
             .operation_range_checkpoint_in_session(
-                &session,
+                session.as_ref(),
                 watermark,
                 start_location,
                 max_locations,
@@ -253,7 +261,7 @@ where
         use futures::FutureExt;
 
         let (classify, filter) = drv::unauthenticated_classify_and_filter();
-        let sub = drv::open_subscription(&self.client, filter, since).await?;
+        let sub = self.store.subscribe(filter, since).await?;
 
         let build_proof: drv::BuildProof<
             VerifiedOperationRange<H::Digest, UnorderedQmdbOperation<K, V>>,
