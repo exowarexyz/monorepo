@@ -18,7 +18,7 @@ use crate::auth::{
 use crate::codec::{mmr_size_for_watermark, UpdateRow};
 use crate::core::retry_transient_post_ingest_query;
 use crate::error::QmdbError;
-use crate::proof::{OperationRangeCheckpoint, VerifiedOperationRange};
+use crate::proof::{OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange};
 use crate::storage::AuthKvMmrStorage;
 use crate::VersionedValue;
 
@@ -58,6 +58,19 @@ where
 
     pub(crate) fn store_client(&self) -> &StoreClient {
         &self.client
+    }
+
+    pub(crate) fn extract_operation_key(
+        &self,
+        location: Location,
+        bytes: &[u8],
+    ) -> Result<Option<Vec<u8>>, QmdbError> {
+        let op = ImmutableOperation::<K, V>::decode_cfg(bytes, &self.value_cfg).map_err(|e| {
+            QmdbError::CorruptData(format!(
+                "failed to decode immutable operation at location {location}: {e}"
+            ))
+        })?;
+        Ok(op.key().map(|k| <K as AsRef<[u8]>>::as_ref(k).to_vec()))
     }
 
     pub async fn writer_location_watermark(&self) -> Result<Option<Location>, QmdbError> {
@@ -139,23 +152,43 @@ where
         .await
     }
 
-    pub(crate) async fn operation_range_checkpoint_with_read_floor(
+    pub(crate) async fn batch_multi_proof_with_read_floor(
         &self,
         read_floor_sequence: u64,
         watermark: Location,
-        start_location: Location,
-        max_locations: u32,
-    ) -> Result<OperationRangeCheckpoint<H::Digest>, QmdbError> {
+        operations: Vec<(Location, Vec<u8>)>,
+    ) -> Result<RawBatchMultiProof<H::Digest>, QmdbError> {
+        if operations.is_empty() {
+            return Err(QmdbError::EmptyProofRequest);
+        }
+        let namespace = AuthenticatedBackendNamespace::Immutable;
         let session = self
             .client
             .create_session_with_sequence(read_floor_sequence);
-        self.operation_range_checkpoint_in_session(
-            &session,
+        require_published_auth_watermark(&session, namespace, watermark).await?;
+        let storage = AuthKvMmrStorage {
+            session: &session,
+            namespace,
+            mmr_size: mmr_size_for_watermark(watermark)?,
+            _marker: PhantomData::<H::Digest>,
+        };
+        let locations: Vec<Location> = operations.iter().map(|(loc, _)| *loc).collect();
+        let proof = verification::multi_proof(&storage, &locations)
+            .await
+            .map_err(|e| QmdbError::CommonwareMmr(e.to_string()))?;
+        let root = compute_auth_root::<H>(&session, namespace, watermark).await?;
+        let raw = RawBatchMultiProof {
             watermark,
-            start_location,
-            max_locations,
-        )
-        .await
+            root,
+            proof: proof.into(),
+            operations,
+        };
+        if !raw.verify::<H>() {
+            return Err(QmdbError::CorruptData(
+                "immutable batch multi proof failed verification".to_string(),
+            ));
+        }
+        Ok(raw)
     }
 
     async fn operation_range_checkpoint_in_session(

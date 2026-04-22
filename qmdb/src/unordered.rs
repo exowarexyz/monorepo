@@ -8,12 +8,13 @@ use exoware_sdk_rs::{SerializableReadSession, StoreClient};
 use crate::codec::mmr_size_for_watermark;
 use crate::core::HistoricalOpsClientCore;
 use crate::error::QmdbError;
-use crate::proof::{OperationRangeCheckpoint, VerifiedOperationRange};
+use crate::proof::{OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange};
 use crate::storage::KvMmrStorage;
 use crate::VersionedValue;
 
 use commonware_storage::qmdb::{
-    any::unordered::variable::Operation as UnorderedQmdbOperation, operation::Key as QmdbKey,
+    any::unordered::variable::Operation as UnorderedQmdbOperation,
+    operation::{Key as QmdbKey, Operation as _},
 };
 
 #[derive(Clone)]
@@ -73,6 +74,19 @@ where
         &self.client
     }
 
+    pub(crate) fn extract_operation_key(
+        &self,
+        location: Location,
+        bytes: &[u8],
+    ) -> Result<Option<Vec<u8>>, QmdbError> {
+        let op = UnorderedQmdbOperation::<K, V>::decode_cfg(bytes, &self.op_cfg).map_err(|e| {
+            QmdbError::CorruptData(format!(
+                "failed to decode unordered operation at location {location}: {e}"
+            ))
+        })?;
+        Ok(op.key().map(|k| <K as AsRef<[u8]>>::as_ref(k).to_vec()))
+    }
+
     pub async fn writer_location_watermark(&self) -> Result<Option<Location>, QmdbError> {
         self.core().writer_location_watermark().await
     }
@@ -109,23 +123,46 @@ where
         .await
     }
 
-    pub(crate) async fn operation_range_checkpoint_with_read_floor(
+    pub(crate) async fn batch_multi_proof_with_read_floor(
         &self,
         read_floor_sequence: u64,
         watermark: Location,
-        start_location: Location,
-        max_locations: u32,
-    ) -> Result<OperationRangeCheckpoint<H::Digest>, QmdbError> {
+        operations: Vec<(Location, Vec<u8>)>,
+    ) -> Result<RawBatchMultiProof<H::Digest>, QmdbError> {
+        if operations.is_empty() {
+            return Err(QmdbError::EmptyProofRequest);
+        }
         let session = self
             .client
             .create_session_with_sequence(read_floor_sequence);
-        self.operation_range_checkpoint_in_session(
-            &session,
+        self.core()
+            .require_published_watermark(&session, watermark)
+            .await?;
+        let storage = KvMmrStorage::<H::Digest> {
+            session: &session,
+            mmr_size: mmr_size_for_watermark(watermark)?,
+            _marker: PhantomData,
+        };
+        let locations: Vec<Location> = operations.iter().map(|(loc, _)| *loc).collect();
+        let proof = verification::multi_proof(&storage, &locations)
+            .await
+            .map_err(|e| QmdbError::CommonwareMmr(e.to_string()))?;
+        let root = self
+            .core()
+            .compute_ops_root::<H>(&session, watermark)
+            .await?;
+        let raw = RawBatchMultiProof {
             watermark,
-            start_location,
-            max_locations,
-        )
-        .await
+            root,
+            proof: proof.into(),
+            operations,
+        };
+        if !raw.verify::<H>() {
+            return Err(QmdbError::CorruptData(
+                "unordered batch multi proof failed verification".to_string(),
+            ));
+        }
+        Ok(raw)
     }
 
     async fn operation_range_checkpoint_in_session(

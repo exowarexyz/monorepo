@@ -18,35 +18,20 @@ use commonware_storage::{
         immutable::Operation as ImmutableOperation,
         keyless::Operation as KeylessOperation,
         operation::Key as QmdbKey,
-        verify::verify_multi_proof,
     },
 };
 use connectrpc::client::{ClientConfig, ClientTransport, ServerStream};
 use connectrpc::ConnectError;
 use exoware_sdk_rs::proto::PreferZstdHttpClient;
 use exoware_sdk_rs::store::qmdb::v1::{
-    CurrentKeyValueProof, GetManyRequest, GetRequest, HistoricalMultiProof, HistoricalRangeProof,
-    ImmutableRangeServiceClient, KeylessRangeServiceClient, OrderedRangeServiceClient,
-    OrderedServiceClient, RangeSubscribeRequest, RangeSubscribeResponseView, SubscribeRequest,
-    SubscribeResponseView, UnorderedRangeServiceClient,
+    CurrentKeyValueProof, GetManyRequest, GetRequest, HistoricalMultiProof, OrderedServiceClient,
+    RangeServiceClient, SubscribeRequest, SubscribeResponseView,
 };
 use exoware_sdk_rs::ClientError;
 use http_body::Body;
 
-use crate::proof::{
-    RawMmrProof, VerifiedKeyValue, VerifiedMultiOperations, VerifiedOperationRange,
-};
+use crate::proof::{RawMmrProof, VerifiedKeyValue, VerifiedMultiOperations};
 use crate::QmdbError;
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct OrderedSubscribeProof<
-    D: Digest,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-> {
-    pub resume_sequence_number: u64,
-    pub proof: VerifiedMultiOperations<D, K, V>,
-}
 
 #[derive(Clone)]
 pub struct OrderedConnectClient<
@@ -108,22 +93,6 @@ where
         }
     }
 
-    pub async fn subscribe(
-        &self,
-        request: SubscribeRequest,
-    ) -> Result<OrderedConnectSubscription<T::ResponseBody, H, K, V, N>, QmdbError> {
-        let stream = self
-            .rpc
-            .subscribe(request)
-            .await
-            .map_err(connect_error_to_qmdb)?;
-        Ok(OrderedConnectSubscription {
-            stream,
-            op_cfg: Arc::clone(&self.op_cfg),
-            _marker: PhantomData,
-        })
-    }
-
     pub async fn get(
         &self,
         request: GetRequest,
@@ -156,62 +125,29 @@ where
         let proof = response.proof.as_option().ok_or_else(|| {
             QmdbError::CorruptData("qmdb get_many response missing proof".to_string())
         })?;
-        verify_multi_from_proto::<H, K, V>(proof, self.op_cfg.as_ref()).map_err(|err| match err {
-            QmdbError::CorruptData(message) if message == "multi proof failed verification" => {
-                QmdbError::CorruptData("many-key proof failed verification".to_string())
-            }
-            other => other,
-        })
-    }
-}
-
-pub struct OrderedConnectSubscription<
-    B,
-    H: Hasher,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    const N: usize,
-> {
-    stream: ServerStream<B, SubscribeResponseView<'static>>,
-    op_cfg: Arc<<QmdbOperation<K, V> as Read>::Cfg>,
-    _marker: PhantomData<(H, K, V)>,
-}
-
-impl<B, H, K, V, const N: usize> OrderedConnectSubscription<B, H, K, V, N>
-where
-    B: Body<Data = Bytes> + Unpin,
-    B::Error: Display,
-    H: Hasher,
-    H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    QmdbOperation<K, V>: Decode + Read,
-{
-    pub async fn message(
-        &mut self,
-    ) -> Result<Option<OrderedSubscribeProof<H::Digest, K, V>>, QmdbError> {
-        let Some(frame) = self.stream.message().await.map_err(connect_error_to_qmdb)? else {
-            return Ok(None);
-        };
-        let frame = frame.to_owned_message();
-        let proof = frame.proof.as_option().ok_or_else(|| {
-            QmdbError::CorruptData("qmdb subscribe response missing proof".to_string())
-        })?;
-        Ok(Some(OrderedSubscribeProof {
-            resume_sequence_number: frame.resume_sequence_number,
-            proof: verify_multi_from_proto::<H, K, V>(proof, self.op_cfg.as_ref())?,
-        }))
+        let (root, operations) =
+            verify_multi_from_proto::<H, _, _>(proof, self.op_cfg.as_ref(), |bytes, cfg| {
+                QmdbOperation::<K, V>::decode_cfg(bytes, cfg)
+            })
+            .map_err(|err| match err {
+                QmdbError::CorruptData(message) if message == "multi proof failed verification" => {
+                    QmdbError::CorruptData("many-key proof failed verification".to_string())
+                }
+                other => other,
+            })?;
+        Ok(VerifiedMultiOperations { root, operations })
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RangeSubscribeProof<D: Digest, Op> {
     pub resume_sequence_number: u64,
-    pub proof: VerifiedOperationRange<D, Op>,
+    pub root: D,
+    pub operations: Vec<(Location, Op)>,
 }
 
 pub struct RangeConnectSubscription<B, H: Hasher, Op: Decode + Read> {
-    stream: ServerStream<B, RangeSubscribeResponseView<'static>>,
+    stream: ServerStream<B, SubscribeResponseView<'static>>,
     op_cfg: Arc<Op::Cfg>,
     _marker: PhantomData<(H, Op)>,
 }
@@ -224,37 +160,22 @@ where
     H::Digest: DecodeExt<()>,
     Op: Decode + Read,
 {
-    pub async fn message(
-        &mut self,
-    ) -> Result<Option<RangeSubscribeProof<H::Digest, Op>>, QmdbError> {
+    pub async fn message(&mut self) -> Result<Option<RangeSubscribeProof<H::Digest, Op>>, QmdbError> {
         let Some(frame) = self.stream.message().await.map_err(connect_error_to_qmdb)? else {
             return Ok(None);
         };
         let frame = frame.to_owned_message();
         let proof = frame.proof.as_option().ok_or_else(|| {
-            QmdbError::CorruptData("qmdb range subscribe response missing proof".to_string())
+            QmdbError::CorruptData("qmdb subscribe response missing proof".to_string())
         })?;
-        let checkpoint = verify_checkpoint_from_proto::<H>(proof)?;
-        let operations = checkpoint
-            .encoded_operations
-            .iter()
-            .enumerate()
-            .map(|(offset, bytes)| {
-                let location = checkpoint.start_location + offset as u64;
-                Op::decode_cfg(bytes.as_slice(), self.op_cfg.as_ref()).map_err(|err| {
-                    QmdbError::CorruptData(format!(
-                        "failed to decode streamed operation at location {location}: {err}"
-                    ))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let (root, operations) =
+            verify_multi_from_proto::<H, _, _>(proof, self.op_cfg.as_ref(), |bytes, cfg| {
+                Op::decode_cfg(bytes, cfg)
+            })?;
         Ok(Some(RangeSubscribeProof {
             resume_sequence_number: frame.resume_sequence_number,
-            proof: VerifiedOperationRange {
-                root: checkpoint.root,
-                start_location: checkpoint.start_location,
-                operations,
-            },
+            root,
+            operations,
         }))
     }
 }
@@ -267,7 +188,7 @@ pub struct OrderedRangeConnectClient<
     V: commonware_codec::Codec + Clone + Send + Sync,
     const N: usize,
 > {
-    rpc: OrderedRangeServiceClient<T>,
+    rpc: RangeServiceClient<T>,
     op_cfg: Arc<<QmdbOperation<K, V> as Read>::Cfg>,
     _marker: PhantomData<(H, K, V)>,
 }
@@ -305,11 +226,11 @@ where
         config: ClientConfig,
         op_cfg: <QmdbOperation<K, V> as Read>::Cfg,
     ) -> Self {
-        Self::from_service_client(OrderedRangeServiceClient::new(transport, config), op_cfg)
+        Self::from_service_client(RangeServiceClient::new(transport, config), op_cfg)
     }
 
     pub fn from_service_client(
-        rpc: OrderedRangeServiceClient<T>,
+        rpc: RangeServiceClient<T>,
         op_cfg: <QmdbOperation<K, V> as Read>::Cfg,
     ) -> Self {
         Self {
@@ -321,7 +242,7 @@ where
 
     pub async fn subscribe(
         &self,
-        request: RangeSubscribeRequest,
+        request: SubscribeRequest,
     ) -> Result<RangeConnectSubscription<T::ResponseBody, H, QmdbOperation<K, V>>, QmdbError> {
         let stream = self
             .rpc
@@ -343,7 +264,7 @@ pub struct UnorderedRangeConnectClient<
     K: QmdbKey + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
 > {
-    rpc: UnorderedRangeServiceClient<T>,
+    rpc: RangeServiceClient<T>,
     op_cfg: Arc<<UnorderedQmdbOperation<K, V> as Read>::Cfg>,
     _marker: PhantomData<(H, K, V)>,
 }
@@ -381,11 +302,11 @@ where
         config: ClientConfig,
         op_cfg: <UnorderedQmdbOperation<K, V> as Read>::Cfg,
     ) -> Self {
-        Self::from_service_client(UnorderedRangeServiceClient::new(transport, config), op_cfg)
+        Self::from_service_client(RangeServiceClient::new(transport, config), op_cfg)
     }
 
     pub fn from_service_client(
-        rpc: UnorderedRangeServiceClient<T>,
+        rpc: RangeServiceClient<T>,
         op_cfg: <UnorderedQmdbOperation<K, V> as Read>::Cfg,
     ) -> Self {
         Self {
@@ -397,7 +318,7 @@ where
 
     pub async fn subscribe(
         &self,
-        request: RangeSubscribeRequest,
+        request: SubscribeRequest,
     ) -> Result<RangeConnectSubscription<T::ResponseBody, H, UnorderedQmdbOperation<K, V>>, QmdbError>
     {
         let stream = self
@@ -420,7 +341,7 @@ pub struct ImmutableRangeConnectClient<
     K: commonware_utils::Array + AsRef<[u8]> + commonware_codec::Codec,
     V: commonware_codec::Codec + Send + Sync,
 > {
-    rpc: ImmutableRangeServiceClient<T>,
+    rpc: RangeServiceClient<T>,
     op_cfg: Arc<V::Cfg>,
     _marker: PhantomData<(H, K, V)>,
 }
@@ -454,13 +375,10 @@ where
     ImmutableOperation<K, V>: Decode<Cfg = V::Cfg> + Read<Cfg = V::Cfg>,
 {
     pub fn new(transport: T, config: ClientConfig, value_cfg: V::Cfg) -> Self {
-        Self::from_service_client(
-            ImmutableRangeServiceClient::new(transport, config),
-            value_cfg,
-        )
+        Self::from_service_client(RangeServiceClient::new(transport, config), value_cfg)
     }
 
-    pub fn from_service_client(rpc: ImmutableRangeServiceClient<T>, value_cfg: V::Cfg) -> Self {
+    pub fn from_service_client(rpc: RangeServiceClient<T>, value_cfg: V::Cfg) -> Self {
         Self {
             rpc,
             op_cfg: Arc::new(value_cfg),
@@ -470,7 +388,7 @@ where
 
     pub async fn subscribe(
         &self,
-        request: RangeSubscribeRequest,
+        request: SubscribeRequest,
     ) -> Result<RangeConnectSubscription<T::ResponseBody, H, ImmutableOperation<K, V>>, QmdbError>
     {
         let stream = self
@@ -488,7 +406,7 @@ where
 
 #[derive(Clone)]
 pub struct KeylessRangeConnectClient<T, H: Hasher, V: commonware_codec::Codec + Send + Sync> {
-    rpc: KeylessRangeServiceClient<T>,
+    rpc: RangeServiceClient<T>,
     op_cfg: Arc<V::Cfg>,
     _marker: PhantomData<(H, V)>,
 }
@@ -520,10 +438,10 @@ where
     KeylessOperation<V>: Decode<Cfg = V::Cfg> + Read<Cfg = V::Cfg>,
 {
     pub fn new(transport: T, config: ClientConfig, value_cfg: V::Cfg) -> Self {
-        Self::from_service_client(KeylessRangeServiceClient::new(transport, config), value_cfg)
+        Self::from_service_client(RangeServiceClient::new(transport, config), value_cfg)
     }
 
-    pub fn from_service_client(rpc: KeylessRangeServiceClient<T>, value_cfg: V::Cfg) -> Self {
+    pub fn from_service_client(rpc: RangeServiceClient<T>, value_cfg: V::Cfg) -> Self {
         Self {
             rpc,
             op_cfg: Arc::new(value_cfg),
@@ -533,7 +451,7 @@ where
 
     pub async fn subscribe(
         &self,
-        request: RangeSubscribeRequest,
+        request: SubscribeRequest,
     ) -> Result<RangeConnectSubscription<T::ResponseBody, H, KeylessOperation<V>>, QmdbError> {
         let stream = self
             .rpc
@@ -570,87 +488,48 @@ fn raw_mmr_from_proto<D: Digest + Decode>(
     })
 }
 
-struct VerifiedCheckpoint<D: Digest> {
-    root: D,
-    start_location: Location,
-    encoded_operations: Vec<Vec<u8>>,
-}
-
-fn verify_checkpoint_from_proto<H>(
-    proto: &HistoricalRangeProof,
-) -> Result<VerifiedCheckpoint<H::Digest>, QmdbError>
-where
-    H: Hasher,
-    H::Digest: DecodeExt<()>,
-{
-    let proof = proto.proof.as_option().ok_or_else(|| {
-        QmdbError::CorruptData("historical range proof missing mmr proof".to_string())
-    })?;
-    let root = decode_digest(&proto.root, "historical range proof root")?;
-    let start_location = Location::new(proto.start_location);
-    let mmr_proof = raw_mmr_from_proto(proof)?;
-    let mut hasher = StandardHasher::<H>::new();
-    if !mmr::Proof::from(&mmr_proof).verify_range_inclusion(
-        &mut hasher,
-        &proto.encoded_operations,
-        start_location,
-        &root,
-    ) {
-        return Err(QmdbError::CorruptData(
-            "range checkpoint proof failed verification".to_string(),
-        ));
-    }
-    Ok(VerifiedCheckpoint {
-        root,
-        start_location,
-        encoded_operations: proto.encoded_operations.clone(),
-    })
-}
-
-fn verify_multi_from_proto<H, K, V>(
+fn verify_multi_from_proto<H, Op, F>(
     proto: &HistoricalMultiProof,
-    op_cfg: &<QmdbOperation<K, V> as Read>::Cfg,
-) -> Result<VerifiedMultiOperations<H::Digest, K, V>, QmdbError>
+    op_cfg: &Op::Cfg,
+    decode: F,
+) -> Result<(H::Digest, Vec<(Location, Op)>), QmdbError>
 where
     H: Hasher,
     H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    QmdbOperation<K, V>: Decode + Read,
+    Op: Read,
+    F: Fn(&[u8], &Op::Cfg) -> Result<Op, commonware_codec::Error>,
 {
     let proof = proto.proof.as_option().ok_or_else(|| {
         QmdbError::CorruptData("historical multi proof missing mmr proof".to_string())
     })?;
     let root = decode_digest(&proto.root, "historical multi proof root")?;
-    let operations = proto
+    let encoded: Vec<(&[u8], Location)> = proto
         .operations
         .iter()
-        .map(|operation| {
-            Ok((
-                Location::new(operation.location),
-                QmdbOperation::<K, V>::decode_cfg(operation.encoded_operation.as_slice(), op_cfg)
-                    .map_err(|err| {
-                    QmdbError::CorruptData(format!(
-                        "failed to decode multi-proof operation at {}: {err}",
-                        operation.location
-                    ))
-                })?,
-            ))
-        })
-        .collect::<Result<Vec<_>, QmdbError>>()?;
+        .map(|op| (op.encoded_operation.as_slice(), Location::new(op.location)))
+        .collect();
     let mmr_proof = raw_mmr_from_proto(proof)?;
     let mut hasher = StandardHasher::<H>::new();
-    if !verify_multi_proof(
-        &mut hasher,
-        &mmr::Proof::from(&mmr_proof),
-        &operations,
-        &root,
-    ) {
+    if !mmr::Proof::from(&mmr_proof).verify_multi_inclusion(&mut hasher, &encoded, &root) {
         return Err(QmdbError::CorruptData(
             "multi proof failed verification".to_string(),
         ));
     }
-    Ok(VerifiedMultiOperations { root, operations })
+    let operations = proto
+        .operations
+        .iter()
+        .map(|operation| {
+            let decoded =
+                decode(operation.encoded_operation.as_slice(), op_cfg).map_err(|err| {
+                    QmdbError::CorruptData(format!(
+                        "failed to decode multi-proof operation at {}: {err}",
+                        operation.location
+                    ))
+                })?;
+            Ok((Location::new(operation.location), decoded))
+        })
+        .collect::<Result<Vec<_>, QmdbError>>()?;
+    Ok((root, operations))
 }
 
 fn verify_key_value_from_proto<H, K, V, const N: usize>(

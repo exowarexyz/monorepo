@@ -5,59 +5,42 @@ package store.qmdb.v1;
 import "buf/validate/validate.proto";
 import "store/v1/common.proto";
 
-// Ordered-QMDB proof service.
+// Current/historical key-proof service.
 //
-// `Subscribe` listens to the full ordered-QMDB batch stream server-side and
-// emits a historical multi-proof whenever any subscribed logical key is
-// touched by an authorized batch.
-//
-// `Get` returns a current ordered key proof for one logical key.
+// `Get` returns a current ordered key proof for one logical key; `GetMany`
+// returns a historical multi-proof over one or more logical keys. Both are
+// ordered-backend only.
 service OrderedService {
-  rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
   rpc Get(GetRequest) returns (GetResponse);
   rpc GetMany(GetManyRequest) returns (GetManyResponse);
 }
 
-// Range-checkpoint streaming over the ordered historical op log.
-service OrderedRangeService {
-  rpc Subscribe(RangeSubscribeRequest) returns (stream RangeSubscribeResponse);
+// Subscription service over a QMDB backend's historical op log.
+//
+// Clients dial the endpoint bound to the backend variant they want to read
+// (ordered, unordered, immutable, or keyless). The wire protocol is identical
+// across all four.
+//
+// With `match_keys` set, only batches touching a matched logical key produce
+// a proof (ordered/unordered/immutable). With `match_keys` empty, every
+// batch produces a proof covering all of its operations; keyless backends
+// require `match_keys` to be empty.
+service RangeService {
+  rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
 }
 
-// Range-checkpoint streaming over unordered historical ops.
-service UnorderedRangeService {
-  rpc Subscribe(RangeSubscribeRequest) returns (stream RangeSubscribeResponse);
-}
-
-// Range-checkpoint streaming over immutable historical ops.
-service ImmutableRangeService {
-  rpc Subscribe(RangeSubscribeRequest) returns (stream RangeSubscribeResponse);
-}
-
-// Range-checkpoint streaming over keyless historical ops.
-service KeylessRangeService {
-  rpc Subscribe(RangeSubscribeRequest) returns (stream RangeSubscribeResponse);
-}
-
-// Subscribe to one or more logical ordered-QMDB key matchers.
+// Subscribe to one or more logical QMDB key matchers.
 message SubscribeRequest {
   // OR semantics across `match_keys`: a proof is emitted when any touched
-  // logical key matches any filter.
+  // logical key matches any filter. Leave empty to emit a proof for every
+  // batch (required for keyless backends).
   repeated store.common.v1.BytesMatchKey match_keys = 1
-    [(buf.validate.field).repeated.min_items = 1,
-     (buf.validate.field).repeated.max_items = 1024];
+    [(buf.validate.field).repeated.max_items = 1024];
 
   // Resume cursor over the underlying store batch log. Use
   // `SubscribeResponse.resume_sequence_number + 1` to resume after a
   // disconnect.
   optional uint64 since_sequence_number = 2;
-}
-
-// Subscribe to published batch checkpoints for a QMDB backend.
-message RangeSubscribeRequest {
-  // Resume cursor over the underlying store batch log. Use
-  // `RangeSubscribeResponse.resume_sequence_number + 1` to resume after a
-  // disconnect.
-  optional uint64 since_sequence_number = 1;
 }
 
 // Current key proof request.
@@ -94,21 +77,12 @@ message MultiProofOperation {
   bytes encoded_operation = 2;
 }
 
-// Historical ordered-QMDB multi-proof over one set of logical keys.
+// Historical QMDB multi-proof over a set of operation locations.
 message HistoricalMultiProof {
   reserved 1;
   bytes root = 2;
   MmrProof proof = 3;
   repeated MultiProofOperation operations = 4;
-}
-
-// Historical contiguous range proof over one published batch.
-message HistoricalRangeProof {
-  reserved 1;
-  bytes root = 2;
-  uint64 start_location = 3;
-  MmrProof proof = 4;
-  repeated bytes encoded_operations = 5;
 }
 
 // Stable mirror of a current ordered range proof payload.
@@ -133,13 +107,6 @@ message SubscribeResponse {
   // Underlying store stream sequence that made this proof readable end-to-end.
   uint64 resume_sequence_number = 1;
   HistoricalMultiProof proof = 2;
-}
-
-// One emitted range checkpoint for a subscribed batch.
-message RangeSubscribeResponse {
-  // Underlying store stream sequence that made this proof readable end-to-end.
-  uint64 resume_sequence_number = 1;
-  HistoricalRangeProof proof = 2;
 }
 
 // Unary current key proof response.

@@ -13,17 +13,18 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file store/v1/qmdb.proto.
  */
 export const file_store_v1_qmdb: GenFile = /*@__PURE__*/
-  fileDesc("ChNzdG9yZS92MS9xbWRiLnByb3RvEg1zdG9yZS5xbWRiLnYxIpEBChBTdWJzY3JpYmVSZXF1ZXN0Ej8KCm1hdGNoX2tleXMYASADKAsyHi5zdG9yZS5jb21tb24udjEuQnl0ZXNNYXRjaEtleUILukgIkgEFCAEQgAgSIgoVc2luY2Vfc2VxdWVuY2VfbnVtYmVyGAIgASgESACIAQFCGAoWX3NpbmNlX3NlcXVlbmNlX251bWJlciJVChVSYW5nZVN1YnNjcmliZVJlcXVlc3QSIgoVc2luY2Vfc2VxdWVuY2VfbnVtYmVyGAEgASgESACIAQFCGAoWX3NpbmNlX3NlcXVlbmNlX251bWJlciInCgpHZXRSZXF1ZXN0EgsKA2tleRgBIAEoDBIMCgRyb290GAIgASgMIjkKDkdldE1hbnlSZXF1ZXN0EhkKBGtleXMYASADKAxCC7pICJIBBQgBEIAIEgwKBHJvb3QYAiABKAwiKwoITW1yUHJvb2YSDgoGbGVhdmVzGAEgASgEEg8KB2RpZ2VzdHMYAiADKAwiQgoTTXVsdGlQcm9vZk9wZXJhdGlvbhIQCghsb2NhdGlvbhgBIAEoBBIZChFlbmNvZGVkX29wZXJhdGlvbhgCIAEoDCKKAQoUSGlzdG9yaWNhbE11bHRpUHJvb2YSDAoEcm9vdBgCIAEoDBImCgVwcm9vZhgDIAEoCzIXLnN0b3JlLnFtZGIudjEuTW1yUHJvb2YSNgoKb3BlcmF0aW9ucxgEIAMoCzIiLnN0b3JlLnFtZGIudjEuTXVsdGlQcm9vZk9wZXJhdGlvbkoECAEQAiKGAQoUSGlzdG9yaWNhbFJhbmdlUHJvb2YSDAoEcm9vdBgCIAEoDBIWCg5zdGFydF9sb2NhdGlvbhgDIAEoBBImCgVwcm9vZhgEIAEoCzIXLnN0b3JlLnFtZGIudjEuTW1yUHJvb2YSGgoSZW5jb2RlZF9vcGVyYXRpb25zGAUgAygMSgQIARACIokBChFDdXJyZW50UmFuZ2VQcm9vZhImCgVwcm9vZhgBIAEoCzIXLnN0b3JlLnFtZGIudjEuTW1yUHJvb2YSIQoUcGFydGlhbF9jaHVua19kaWdlc3QYAiABKAxIAIgBARIQCghvcHNfcm9vdBgDIAEoDEIXChVfcGFydGlhbF9jaHVua19kaWdlc3QinQEKFEN1cnJlbnRLZXlWYWx1ZVByb29mEgwKBHJvb3QYAiABKAwSEAoIbG9jYXRpb24YAyABKAQSDQoFY2h1bmsYBCABKAwSNQoLcmFuZ2VfcHJvb2YYBSABKAsyIC5zdG9yZS5xbWRiLnYxLkN1cnJlbnRSYW5nZVByb29mEhkKEWVuY29kZWRfb3BlcmF0aW9uGAYgASgMSgQIARACImcKEVN1YnNjcmliZVJlc3BvbnNlEh4KFnJlc3VtZV9zZXF1ZW5jZV9udW1iZXIYASABKAQSMgoFcHJvb2YYAiABKAsyIy5zdG9yZS5xbWRiLnYxLkhpc3RvcmljYWxNdWx0aVByb29mImwKFlJhbmdlU3Vic2NyaWJlUmVzcG9uc2USHgoWcmVzdW1lX3NlcXVlbmNlX251bWJlchgBIAEoBBIyCgVwcm9vZhgCIAEoCzIjLnN0b3JlLnFtZGIudjEuSGlzdG9yaWNhbFJhbmdlUHJvb2YiQQoLR2V0UmVzcG9uc2USMgoFcHJvb2YYASABKAsyIy5zdG9yZS5xbWRiLnYxLkN1cnJlbnRLZXlWYWx1ZVByb29mIkUKD0dldE1hbnlSZXNwb25zZRIyCgVwcm9vZhgBIAEoCzIjLnN0b3JlLnFtZGIudjEuSGlzdG9yaWNhbE11bHRpUHJvb2Yy6gEKDk9yZGVyZWRTZXJ2aWNlElAKCVN1YnNjcmliZRIfLnN0b3JlLnFtZGIudjEuU3Vic2NyaWJlUmVxdWVzdBogLnN0b3JlLnFtZGIudjEuU3Vic2NyaWJlUmVzcG9uc2UwARI8CgNHZXQSGS5zdG9yZS5xbWRiLnYxLkdldFJlcXVlc3QaGi5zdG9yZS5xbWRiLnYxLkdldFJlc3BvbnNlEkgKB0dldE1hbnkSHS5zdG9yZS5xbWRiLnYxLkdldE1hbnlSZXF1ZXN0Gh4uc3RvcmUucW1kYi52MS5HZXRNYW55UmVzcG9uc2UycQoTT3JkZXJlZFJhbmdlU2VydmljZRJaCglTdWJzY3JpYmUSJC5zdG9yZS5xbWRiLnYxLlJhbmdlU3Vic2NyaWJlUmVxdWVzdBolLnN0b3JlLnFtZGIudjEuUmFuZ2VTdWJzY3JpYmVSZXNwb25zZTABMnMKFVVub3JkZXJlZFJhbmdlU2VydmljZRJaCglTdWJzY3JpYmUSJC5zdG9yZS5xbWRiLnYxLlJhbmdlU3Vic2NyaWJlUmVxdWVzdBolLnN0b3JlLnFtZGIudjEuUmFuZ2VTdWJzY3JpYmVSZXNwb25zZTABMnMKFUltbXV0YWJsZVJhbmdlU2VydmljZRJaCglTdWJzY3JpYmUSJC5zdG9yZS5xbWRiLnYxLlJhbmdlU3Vic2NyaWJlUmVxdWVzdBolLnN0b3JlLnFtZGIudjEuUmFuZ2VTdWJzY3JpYmVSZXNwb25zZTABMnEKE0tleWxlc3NSYW5nZVNlcnZpY2USWgoJU3Vic2NyaWJlEiQuc3RvcmUucW1kYi52MS5SYW5nZVN1YnNjcmliZVJlcXVlc3QaJS5zdG9yZS5xbWRiLnYxLlJhbmdlU3Vic2NyaWJlUmVzcG9uc2UwAWIGcHJvdG8z", [file_buf_validate_validate, file_store_v1_common]);
+  fileDesc("ChNzdG9yZS92MS9xbWRiLnByb3RvEg1zdG9yZS5xbWRiLnYxIo8BChBTdWJzY3JpYmVSZXF1ZXN0Ej0KCm1hdGNoX2tleXMYASADKAsyHi5zdG9yZS5jb21tb24udjEuQnl0ZXNNYXRjaEtleUIJukgGkgEDEIAIEiIKFXNpbmNlX3NlcXVlbmNlX251bWJlchgCIAEoBEgAiAEBQhgKFl9zaW5jZV9zZXF1ZW5jZV9udW1iZXIiJwoKR2V0UmVxdWVzdBILCgNrZXkYASABKAwSDAoEcm9vdBgCIAEoDCI5Cg5HZXRNYW55UmVxdWVzdBIZCgRrZXlzGAEgAygMQgu6SAiSAQUIARCACBIMCgRyb290GAIgASgMIisKCE1tclByb29mEg4KBmxlYXZlcxgBIAEoBBIPCgdkaWdlc3RzGAIgAygMIkIKE011bHRpUHJvb2ZPcGVyYXRpb24SEAoIbG9jYXRpb24YASABKAQSGQoRZW5jb2RlZF9vcGVyYXRpb24YAiABKAwiigEKFEhpc3RvcmljYWxNdWx0aVByb29mEgwKBHJvb3QYAiABKAwSJgoFcHJvb2YYAyABKAsyFy5zdG9yZS5xbWRiLnYxLk1tclByb29mEjYKCm9wZXJhdGlvbnMYBCADKAsyIi5zdG9yZS5xbWRiLnYxLk11bHRpUHJvb2ZPcGVyYXRpb25KBAgBEAIiiQEKEUN1cnJlbnRSYW5nZVByb29mEiYKBXByb29mGAEgASgLMhcuc3RvcmUucW1kYi52MS5NbXJQcm9vZhIhChRwYXJ0aWFsX2NodW5rX2RpZ2VzdBgCIAEoDEgAiAEBEhAKCG9wc19yb290GAMgASgMQhcKFV9wYXJ0aWFsX2NodW5rX2RpZ2VzdCKdAQoUQ3VycmVudEtleVZhbHVlUHJvb2YSDAoEcm9vdBgCIAEoDBIQCghsb2NhdGlvbhgDIAEoBBINCgVjaHVuaxgEIAEoDBI1CgtyYW5nZV9wcm9vZhgFIAEoCzIgLnN0b3JlLnFtZGIudjEuQ3VycmVudFJhbmdlUHJvb2YSGQoRZW5jb2RlZF9vcGVyYXRpb24YBiABKAxKBAgBEAIiZwoRU3Vic2NyaWJlUmVzcG9uc2USHgoWcmVzdW1lX3NlcXVlbmNlX251bWJlchgBIAEoBBIyCgVwcm9vZhgCIAEoCzIjLnN0b3JlLnFtZGIudjEuSGlzdG9yaWNhbE11bHRpUHJvb2YiQQoLR2V0UmVzcG9uc2USMgoFcHJvb2YYASABKAsyIy5zdG9yZS5xbWRiLnYxLkN1cnJlbnRLZXlWYWx1ZVByb29mIkUKD0dldE1hbnlSZXNwb25zZRIyCgVwcm9vZhgBIAEoCzIjLnN0b3JlLnFtZGIudjEuSGlzdG9yaWNhbE11bHRpUHJvb2YymAEKDk9yZGVyZWRTZXJ2aWNlEjwKA0dldBIZLnN0b3JlLnFtZGIudjEuR2V0UmVxdWVzdBoaLnN0b3JlLnFtZGIudjEuR2V0UmVzcG9uc2USSAoHR2V0TWFueRIdLnN0b3JlLnFtZGIudjEuR2V0TWFueVJlcXVlc3QaHi5zdG9yZS5xbWRiLnYxLkdldE1hbnlSZXNwb25zZTJgCgxSYW5nZVNlcnZpY2USUAoJU3Vic2NyaWJlEh8uc3RvcmUucW1kYi52MS5TdWJzY3JpYmVSZXF1ZXN0GiAuc3RvcmUucW1kYi52MS5TdWJzY3JpYmVSZXNwb25zZTABYgZwcm90bzM", [file_buf_validate_validate, file_store_v1_common]);
 
 /**
- * Subscribe to one or more logical ordered-QMDB key matchers.
+ * Subscribe to one or more logical QMDB key matchers.
  *
  * @generated from message store.qmdb.v1.SubscribeRequest
  */
 export type SubscribeRequest = Message<"store.qmdb.v1.SubscribeRequest"> & {
   /**
    * OR semantics across `match_keys`: a proof is emitted when any touched
-   * logical key matches any filter.
+   * logical key matches any filter. Leave empty to emit a proof for every
+   * batch (required for keyless backends).
    *
    * @generated from field: repeated store.common.v1.BytesMatchKey match_keys = 1;
    */
@@ -45,29 +46,6 @@ export type SubscribeRequest = Message<"store.qmdb.v1.SubscribeRequest"> & {
  */
 export const SubscribeRequestSchema: GenMessage<SubscribeRequest> = /*@__PURE__*/
   messageDesc(file_store_v1_qmdb, 0);
-
-/**
- * Subscribe to published batch checkpoints for a QMDB backend.
- *
- * @generated from message store.qmdb.v1.RangeSubscribeRequest
- */
-export type RangeSubscribeRequest = Message<"store.qmdb.v1.RangeSubscribeRequest"> & {
-  /**
-   * Resume cursor over the underlying store batch log. Use
-   * `RangeSubscribeResponse.resume_sequence_number + 1` to resume after a
-   * disconnect.
-   *
-   * @generated from field: optional uint64 since_sequence_number = 1;
-   */
-  sinceSequenceNumber?: bigint;
-};
-
-/**
- * Describes the message store.qmdb.v1.RangeSubscribeRequest.
- * Use `create(RangeSubscribeRequestSchema)` to create a new message.
- */
-export const RangeSubscribeRequestSchema: GenMessage<RangeSubscribeRequest> = /*@__PURE__*/
-  messageDesc(file_store_v1_qmdb, 1);
 
 /**
  * Current key proof request.
@@ -96,7 +74,7 @@ export type GetRequest = Message<"store.qmdb.v1.GetRequest"> & {
  * Use `create(GetRequestSchema)` to create a new message.
  */
 export const GetRequestSchema: GenMessage<GetRequest> = /*@__PURE__*/
-  messageDesc(file_store_v1_qmdb, 2);
+  messageDesc(file_store_v1_qmdb, 1);
 
 /**
  * Historical key proof request for one or more logical keys.
@@ -125,7 +103,7 @@ export type GetManyRequest = Message<"store.qmdb.v1.GetManyRequest"> & {
  * Use `create(GetManyRequestSchema)` to create a new message.
  */
 export const GetManyRequestSchema: GenMessage<GetManyRequest> = /*@__PURE__*/
-  messageDesc(file_store_v1_qmdb, 3);
+  messageDesc(file_store_v1_qmdb, 2);
 
 /**
  * Stable mirror of an MMR proof payload.
@@ -149,7 +127,7 @@ export type MmrProof = Message<"store.qmdb.v1.MmrProof"> & {
  * Use `create(MmrProofSchema)` to create a new message.
  */
 export const MmrProofSchema: GenMessage<MmrProof> = /*@__PURE__*/
-  messageDesc(file_store_v1_qmdb, 4);
+  messageDesc(file_store_v1_qmdb, 3);
 
 /**
  * One historical operation proven by a multi-proof.
@@ -173,10 +151,10 @@ export type MultiProofOperation = Message<"store.qmdb.v1.MultiProofOperation"> &
  * Use `create(MultiProofOperationSchema)` to create a new message.
  */
 export const MultiProofOperationSchema: GenMessage<MultiProofOperation> = /*@__PURE__*/
-  messageDesc(file_store_v1_qmdb, 5);
+  messageDesc(file_store_v1_qmdb, 4);
 
 /**
- * Historical ordered-QMDB multi-proof over one set of logical keys.
+ * Historical QMDB multi-proof over a set of operation locations.
  *
  * @generated from message store.qmdb.v1.HistoricalMultiProof
  */
@@ -202,41 +180,7 @@ export type HistoricalMultiProof = Message<"store.qmdb.v1.HistoricalMultiProof">
  * Use `create(HistoricalMultiProofSchema)` to create a new message.
  */
 export const HistoricalMultiProofSchema: GenMessage<HistoricalMultiProof> = /*@__PURE__*/
-  messageDesc(file_store_v1_qmdb, 6);
-
-/**
- * Historical contiguous range proof over one published batch.
- *
- * @generated from message store.qmdb.v1.HistoricalRangeProof
- */
-export type HistoricalRangeProof = Message<"store.qmdb.v1.HistoricalRangeProof"> & {
-  /**
-   * @generated from field: bytes root = 2;
-   */
-  root: Uint8Array;
-
-  /**
-   * @generated from field: uint64 start_location = 3;
-   */
-  startLocation: bigint;
-
-  /**
-   * @generated from field: store.qmdb.v1.MmrProof proof = 4;
-   */
-  proof?: MmrProof;
-
-  /**
-   * @generated from field: repeated bytes encoded_operations = 5;
-   */
-  encodedOperations: Uint8Array[];
-};
-
-/**
- * Describes the message store.qmdb.v1.HistoricalRangeProof.
- * Use `create(HistoricalRangeProofSchema)` to create a new message.
- */
-export const HistoricalRangeProofSchema: GenMessage<HistoricalRangeProof> = /*@__PURE__*/
-  messageDesc(file_store_v1_qmdb, 7);
+  messageDesc(file_store_v1_qmdb, 5);
 
 /**
  * Stable mirror of a current ordered range proof payload.
@@ -265,7 +209,7 @@ export type CurrentRangeProof = Message<"store.qmdb.v1.CurrentRangeProof"> & {
  * Use `create(CurrentRangeProofSchema)` to create a new message.
  */
 export const CurrentRangeProofSchema: GenMessage<CurrentRangeProof> = /*@__PURE__*/
-  messageDesc(file_store_v1_qmdb, 8);
+  messageDesc(file_store_v1_qmdb, 6);
 
 /**
  * Current ordered proof for one active key.
@@ -304,7 +248,7 @@ export type CurrentKeyValueProof = Message<"store.qmdb.v1.CurrentKeyValueProof">
  * Use `create(CurrentKeyValueProofSchema)` to create a new message.
  */
 export const CurrentKeyValueProofSchema: GenMessage<CurrentKeyValueProof> = /*@__PURE__*/
-  messageDesc(file_store_v1_qmdb, 9);
+  messageDesc(file_store_v1_qmdb, 7);
 
 /**
  * One emitted proof for a subscribed batch.
@@ -330,33 +274,7 @@ export type SubscribeResponse = Message<"store.qmdb.v1.SubscribeResponse"> & {
  * Use `create(SubscribeResponseSchema)` to create a new message.
  */
 export const SubscribeResponseSchema: GenMessage<SubscribeResponse> = /*@__PURE__*/
-  messageDesc(file_store_v1_qmdb, 10);
-
-/**
- * One emitted range checkpoint for a subscribed batch.
- *
- * @generated from message store.qmdb.v1.RangeSubscribeResponse
- */
-export type RangeSubscribeResponse = Message<"store.qmdb.v1.RangeSubscribeResponse"> & {
-  /**
-   * Underlying store stream sequence that made this proof readable end-to-end.
-   *
-   * @generated from field: uint64 resume_sequence_number = 1;
-   */
-  resumeSequenceNumber: bigint;
-
-  /**
-   * @generated from field: store.qmdb.v1.HistoricalRangeProof proof = 2;
-   */
-  proof?: HistoricalRangeProof;
-};
-
-/**
- * Describes the message store.qmdb.v1.RangeSubscribeResponse.
- * Use `create(RangeSubscribeResponseSchema)` to create a new message.
- */
-export const RangeSubscribeResponseSchema: GenMessage<RangeSubscribeResponse> = /*@__PURE__*/
-  messageDesc(file_store_v1_qmdb, 11);
+  messageDesc(file_store_v1_qmdb, 8);
 
 /**
  * Unary current key proof response.
@@ -375,7 +293,7 @@ export type GetResponse = Message<"store.qmdb.v1.GetResponse"> & {
  * Use `create(GetResponseSchema)` to create a new message.
  */
 export const GetResponseSchema: GenMessage<GetResponse> = /*@__PURE__*/
-  messageDesc(file_store_v1_qmdb, 12);
+  messageDesc(file_store_v1_qmdb, 9);
 
 /**
  * Unary historical many-key proof response.
@@ -394,28 +312,18 @@ export type GetManyResponse = Message<"store.qmdb.v1.GetManyResponse"> & {
  * Use `create(GetManyResponseSchema)` to create a new message.
  */
 export const GetManyResponseSchema: GenMessage<GetManyResponse> = /*@__PURE__*/
-  messageDesc(file_store_v1_qmdb, 13);
+  messageDesc(file_store_v1_qmdb, 10);
 
 /**
- * Ordered-QMDB proof service.
+ * Current/historical key-proof service.
  *
- * `Subscribe` listens to the full ordered-QMDB batch stream server-side and
- * emits a historical multi-proof whenever any subscribed logical key is
- * touched by an authorized batch.
- *
- * `Get` returns a current ordered key proof for one logical key.
+ * `Get` returns a current ordered key proof for one logical key; `GetMany`
+ * returns a historical multi-proof over one or more logical keys. Both are
+ * ordered-backend only.
  *
  * @generated from service store.qmdb.v1.OrderedService
  */
 export const OrderedService: GenService<{
-  /**
-   * @generated from rpc store.qmdb.v1.OrderedService.Subscribe
-   */
-  subscribe: {
-    methodKind: "server_streaming";
-    input: typeof SubscribeRequestSchema;
-    output: typeof SubscribeResponseSchema;
-  },
   /**
    * @generated from rpc store.qmdb.v1.OrderedService.Get
    */
@@ -436,70 +344,28 @@ export const OrderedService: GenService<{
   serviceDesc(file_store_v1_qmdb, 0);
 
 /**
- * Range-checkpoint streaming over the ordered historical op log.
+ * Subscription service over a QMDB backend's historical op log.
  *
- * @generated from service store.qmdb.v1.OrderedRangeService
+ * Clients dial the endpoint bound to the backend variant they want to read
+ * (ordered, unordered, immutable, or keyless). The wire protocol is identical
+ * across all four.
+ *
+ * With `match_keys` set, only batches touching a matched logical key produce
+ * a proof (ordered/unordered/immutable). With `match_keys` empty, every
+ * batch produces a proof covering all of its operations; keyless backends
+ * require `match_keys` to be empty.
+ *
+ * @generated from service store.qmdb.v1.RangeService
  */
-export const OrderedRangeService: GenService<{
+export const RangeService: GenService<{
   /**
-   * @generated from rpc store.qmdb.v1.OrderedRangeService.Subscribe
+   * @generated from rpc store.qmdb.v1.RangeService.Subscribe
    */
   subscribe: {
     methodKind: "server_streaming";
-    input: typeof RangeSubscribeRequestSchema;
-    output: typeof RangeSubscribeResponseSchema;
+    input: typeof SubscribeRequestSchema;
+    output: typeof SubscribeResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_store_v1_qmdb, 1);
-
-/**
- * Range-checkpoint streaming over unordered historical ops.
- *
- * @generated from service store.qmdb.v1.UnorderedRangeService
- */
-export const UnorderedRangeService: GenService<{
-  /**
-   * @generated from rpc store.qmdb.v1.UnorderedRangeService.Subscribe
-   */
-  subscribe: {
-    methodKind: "server_streaming";
-    input: typeof RangeSubscribeRequestSchema;
-    output: typeof RangeSubscribeResponseSchema;
-  },
-}> = /*@__PURE__*/
-  serviceDesc(file_store_v1_qmdb, 2);
-
-/**
- * Range-checkpoint streaming over immutable historical ops.
- *
- * @generated from service store.qmdb.v1.ImmutableRangeService
- */
-export const ImmutableRangeService: GenService<{
-  /**
-   * @generated from rpc store.qmdb.v1.ImmutableRangeService.Subscribe
-   */
-  subscribe: {
-    methodKind: "server_streaming";
-    input: typeof RangeSubscribeRequestSchema;
-    output: typeof RangeSubscribeResponseSchema;
-  },
-}> = /*@__PURE__*/
-  serviceDesc(file_store_v1_qmdb, 3);
-
-/**
- * Range-checkpoint streaming over keyless historical ops.
- *
- * @generated from service store.qmdb.v1.KeylessRangeService
- */
-export const KeylessRangeService: GenService<{
-  /**
-   * @generated from rpc store.qmdb.v1.KeylessRangeService.Subscribe
-   */
-  subscribe: {
-    methodKind: "server_streaming";
-    input: typeof RangeSubscribeRequestSchema;
-    output: typeof RangeSubscribeResponseSchema;
-  },
-}> = /*@__PURE__*/
-  serviceDesc(file_store_v1_qmdb, 4);
 

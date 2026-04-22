@@ -118,10 +118,8 @@ export {
     HistoricalMultiProofSchema,
     MmrProofSchema,
     MultiProofOperationSchema,
-    OrderedRangeService,
     OrderedService,
-    RangeSubscribeRequestSchema as QmdbRangeSubscribeRequestSchema,
-    RangeSubscribeResponseSchema as QmdbRangeSubscribeResponseSchema,
+    RangeService,
     SubscribeRequestSchema as QmdbSubscribeRequestSchema,
     SubscribeResponseSchema as QmdbSubscribeResponseSchema,
 } from './gen/ts/store/v1/qmdb_pb.js';
@@ -135,8 +133,6 @@ export type {
     HistoricalMultiProof,
     MmrProof,
     MultiProofOperation,
-    RangeSubscribeRequest as QmdbRangeSubscribeRequest,
-    RangeSubscribeResponse as QmdbRangeSubscribeResponse,
     SubscribeRequest as QmdbSubscribeRequest,
     SubscribeResponse as QmdbSubscribeResponse,
 } from './gen/ts/store/v1/qmdb_pb.js';

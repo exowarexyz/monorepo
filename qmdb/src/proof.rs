@@ -171,6 +171,31 @@ where
     }
 }
 
+/// Backend-agnostic historical multi-proof keyed to an authorized batch. The
+/// operations are stored as encoded bytes so this type is shared across
+/// ordered, unordered, immutable, and keyless backends.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[must_use]
+pub struct RawBatchMultiProof<D: Digest> {
+    pub watermark: Location,
+    pub root: D,
+    pub proof: RawMmrProof<D>,
+    pub operations: Vec<(Location, Vec<u8>)>,
+}
+
+impl<D: Digest> RawBatchMultiProof<D> {
+    pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
+        let mut hasher = StandardHasher::<H>::new();
+        let proof = mmr::Proof::from(&self.proof);
+        let elements: Vec<(&[u8], Location)> = self
+            .operations
+            .iter()
+            .map(|(loc, bytes)| (bytes.as_slice(), *loc))
+            .collect();
+        proof.verify_multi_inclusion(&mut hasher, &elements, &self.root)
+    }
+}
+
 /// Stable mirror of the current ordered key-value proof payload.
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]

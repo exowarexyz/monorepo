@@ -15,7 +15,6 @@ use commonware_storage::{
         },
         immutable::Operation as ImmutableOperation,
         keyless::Operation as KeylessOperation,
-        operation::Operation as _,
     },
 };
 use connectrpc::{ConnectError, ConnectRpcService, Context, ErrorCode, Limits};
@@ -23,20 +22,16 @@ use exoware_sdk_rs::store::common::v1::bytes_match_key::KindView as ProtoBytesMa
 use exoware_sdk_rs::store::qmdb::v1::{
     CurrentKeyValueProof as ProtoCurrentKeyValueProof, CurrentRangeProof as ProtoCurrentRangeProof,
     GetManyRequestView, GetManyResponse, GetRequestView, GetResponse,
-    HistoricalMultiProof as ProtoHistoricalMultiProof,
-    HistoricalRangeProof as ProtoHistoricalRangeProof, ImmutableRangeService,
-    ImmutableRangeServiceServer, KeylessRangeService, KeylessRangeServiceServer,
-    MmrProof as ProtoMmrProof, MultiProofOperation as ProtoMultiProofOperation,
-    OrderedRangeService, OrderedRangeServiceServer, OrderedService, OrderedServiceServer,
-    RangeSubscribeRequestView, RangeSubscribeResponse, SubscribeRequestView, SubscribeResponse,
-    UnorderedRangeService, UnorderedRangeServiceServer,
+    HistoricalMultiProof as ProtoHistoricalMultiProof, MmrProof as ProtoMmrProof,
+    MultiProofOperation as ProtoMultiProofOperation, OrderedService, OrderedServiceServer,
+    RangeService, RangeServiceServer, SubscribeRequestView, SubscribeResponse,
 };
 use futures::future::BoxFuture;
 use futures::{FutureExt, Stream};
 use regex::bytes::Regex;
 
 use crate::proof::{
-    OperationRangeCheckpoint, RawCurrentRangeProof, RawKeyValueProof, RawMmrProof, RawMultiProof,
+    RawBatchMultiProof, RawCurrentRangeProof, RawKeyValueProof, RawMmrProof, RawMultiProof,
 };
 use crate::subscription::{self as sub, Classify, Family};
 use crate::{
@@ -138,14 +133,21 @@ where
     }
 }
 
-fn operation_range_checkpoint_to_proto<D: commonware_cryptography::Digest>(
-    checkpoint: &OperationRangeCheckpoint<D>,
-) -> ProtoHistoricalRangeProof {
-    ProtoHistoricalRangeProof {
-        root: checkpoint.root.encode().to_vec(),
-        start_location: *checkpoint.start_location,
-        proof: Some(raw_mmr_proof_to_proto(&checkpoint.proof)).into(),
-        encoded_operations: checkpoint.encoded_operations.clone(),
+fn raw_batch_multi_proof_to_proto<D: commonware_cryptography::Digest>(
+    proof: &RawBatchMultiProof<D>,
+) -> ProtoHistoricalMultiProof {
+    ProtoHistoricalMultiProof {
+        root: proof.root.encode().to_vec(),
+        proof: Some(raw_mmr_proof_to_proto(&proof.proof)).into(),
+        operations: proof
+            .operations
+            .iter()
+            .map(|(location, encoded_operation)| ProtoMultiProofOperation {
+                location: location.as_u64(),
+                encoded_operation: encoded_operation.clone(),
+                ..Default::default()
+            })
+            .collect(),
         ..Default::default()
     }
 }
@@ -287,34 +289,16 @@ where
 }
 
 #[derive(Clone, Debug)]
-struct PendingRangeBatch {
-    sequence_number: u64,
-    start_location: Location,
-    operation_count: u32,
-}
-
-#[derive(Clone, Debug)]
-struct ReadyRangeBatch {
-    watermark: Location,
-    read_floor_sequence: u64,
-    start_location: Location,
-    operation_count: u32,
-}
-
-type BuildRangeResponse<Resp> =
-    Arc<dyn Fn(ReadyRangeBatch) -> BoxFuture<'static, Result<Resp, ConnectError>> + Send + Sync>;
-
-#[derive(Clone, Debug)]
 struct PendingBatch {
     sequence_number: u64,
-    matched_keys: Vec<Vec<u8>>,
+    matched: Vec<(Location, Vec<u8>)>,
 }
 
 #[derive(Clone, Debug)]
 struct ReadyBatch {
     watermark: Location,
     read_floor_sequence: u64,
-    matched_keys: Vec<Vec<u8>>,
+    matched: Vec<(Location, Vec<u8>)>,
 }
 
 #[derive(Clone, Debug)]
@@ -336,15 +320,64 @@ impl SubscriptionMatcher {
     }
 }
 
-struct OrderedSubscribeStream<
-    H: Hasher,
-    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    const N: usize,
-> {
-    client: Arc<OrderedClient<H, K, V, N>>,
-    matcher: SubscriptionMatcher,
+fn parse_match_keys(
+    request: &buffa::view::OwnedView<SubscribeRequestView<'static>>,
+) -> Result<Option<SubscriptionMatcher>, ConnectError> {
+    let mut exact_keys = BTreeSet::<Vec<u8>>::new();
+    let mut prefixes = Vec::new();
+    let mut regexes = Vec::new();
+    for match_key in request.match_keys.iter() {
+        match match_key.kind {
+            Some(ProtoBytesMatchKeyKindView::Exact(exact)) => {
+                exact_keys.insert(exact.to_vec());
+            }
+            Some(ProtoBytesMatchKeyKindView::Prefix(prefix)) => {
+                prefixes.push(prefix.to_vec());
+            }
+            Some(ProtoBytesMatchKeyKindView::Regex(pattern)) => {
+                regexes.push(Regex::new(pattern).map_err(|err| {
+                    ConnectError::invalid_argument(format!(
+                        "invalid regex subscription filter `{pattern}`: {err}"
+                    ))
+                })?);
+            }
+            None => {
+                return Err(ConnectError::invalid_argument(
+                    "each match_key must set exactly one of exact, prefix, or regex",
+                ));
+            }
+        }
+    }
+    let matcher = SubscriptionMatcher {
+        exact_keys,
+        prefixes,
+        regexes,
+    };
+    if matcher.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(matcher))
+    }
+}
+
+/// Closure invoked per operation in each streamed batch. Returns
+/// `Some(key_bytes)` when the op has a logical key (used for filtering).
+type ExtractKey =
+    Arc<dyn Fn(Location, &[u8]) -> Result<Option<Vec<u8>>, QmdbError> + Send + Sync + 'static>;
+
+/// Closure invoked once per ready batch to produce the multi-proof future.
+type BuildBatchProof<D> = Arc<
+    dyn Fn(u64, Location, Vec<(Location, Vec<u8>)>) -> BoxFuture<'static, Result<RawBatchMultiProof<D>, QmdbError>>
+        + Send
+        + Sync
+        + 'static,
+>;
+
+struct BatchSubscribeStream<D: commonware_cryptography::Digest> {
+    matcher: Option<SubscriptionMatcher>,
     classify: Classify,
+    extract_key: ExtractKey,
+    build_proof: BuildBatchProof<D>,
     sub: exoware_sdk_rs::StreamSubscription,
     pending: BTreeMap<Location, PendingBatch>,
     watermarks: BTreeMap<Location, u64>,
@@ -352,23 +385,19 @@ struct OrderedSubscribeStream<
     building: Option<BoxFuture<'static, Result<SubscribeResponse, ConnectError>>>,
 }
 
-impl<H, K, V, const N: usize> OrderedSubscribeStream<H, K, V, N>
-where
-    H: Hasher + Send + Sync + 'static,
-    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
-    V: commonware_codec::Codec + Clone + Send + Sync + 'static,
-    QmdbOperation<K, V>: Encode + commonware_codec::Decode,
-{
+impl<D: commonware_cryptography::Digest> BatchSubscribeStream<D> {
     fn new(
-        client: Arc<OrderedClient<H, K, V, N>>,
-        matcher: SubscriptionMatcher,
+        matcher: Option<SubscriptionMatcher>,
         classify: Classify,
+        extract_key: ExtractKey,
+        build_proof: BuildBatchProof<D>,
         sub: exoware_sdk_rs::StreamSubscription,
     ) -> Self {
         Self {
-            client,
             matcher,
             classify,
+            extract_key,
+            build_proof,
             sub,
             pending: BTreeMap::new(),
             watermarks: BTreeMap::new(),
@@ -382,8 +411,8 @@ where
         frame: &exoware_sdk_rs::StreamSubscriptionFrame,
     ) -> Result<(), BoxConnectError> {
         let mut saw_operation = false;
-        let mut latest = None;
-        let mut matched_keys = BTreeSet::<Vec<u8>>::new();
+        let mut latest: Option<Location> = None;
+        let mut matched: Vec<(Location, Vec<u8>)> = Vec::new();
 
         for entry in &frame.entries {
             let Some((family, location)) = (self.classify)(&entry.key, entry.value.as_ref()) else {
@@ -392,14 +421,16 @@ where
             match family {
                 Family::Op => {
                     saw_operation = true;
-                    let operation = self
-                        .client
-                        .decode_operation_bytes(location, entry.value.as_ref())
-                        .map_err(qmdb_error_to_connect)?;
-                    if let Some(key) = operation.key() {
-                        if self.matcher.matches(key.as_ref()) {
-                            matched_keys.insert(key.as_ref().to_vec());
+                    let include = match &self.matcher {
+                        None => true,
+                        Some(matcher) => {
+                            let key = (self.extract_key)(location, entry.value.as_ref())
+                                .map_err(qmdb_error_to_connect)?;
+                            key.map(|k| matcher.matches(&k)).unwrap_or(false)
                         }
+                    };
+                    if include {
+                        matched.push((location, entry.value.to_vec()));
                     }
                 }
                 Family::Presence => latest = Some(location),
@@ -411,21 +442,18 @@ where
             }
         }
 
-        if saw_operation {
+        if saw_operation && !matched.is_empty() {
             let latest = latest.ok_or_else(|| {
-                Box::new(ConnectError::internal(
-                    "ordered qmdb batch missing presence row",
-                ))
+                Box::new(ConnectError::internal("qmdb batch missing presence row"))
             })?;
-            if !matched_keys.is_empty() {
-                self.pending.insert(
-                    latest,
-                    PendingBatch {
-                        sequence_number: frame.sequence_number,
-                        matched_keys: matched_keys.into_iter().collect(),
-                    },
-                );
-            }
+            matched.sort_by_key(|(loc, _)| *loc);
+            self.pending.insert(
+                latest,
+                PendingBatch {
+                    sequence_number: frame.sequence_number,
+                    matched,
+                },
+            );
         }
 
         self.drain_ready();
@@ -442,7 +470,7 @@ where
             self.ready.push_back(ReadyBatch {
                 watermark,
                 read_floor_sequence: batch.sequence_number.max(watermark_sequence),
-                matched_keys: batch.matched_keys,
+                matched: batch.matched,
             });
         }
 
@@ -457,13 +485,7 @@ where
     }
 }
 
-impl<H, K, V, const N: usize> Stream for OrderedSubscribeStream<H, K, V, N>
-where
-    H: Hasher + Send + Sync + 'static,
-    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
-    V: commonware_codec::Codec + Clone + Send + Sync + 'static,
-    QmdbOperation<K, V>: Encode + commonware_codec::Decode,
-{
+impl<D: commonware_cryptography::Digest> Stream for BatchSubscribeStream<D> {
     type Item = Result<SubscribeResponse, ConnectError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
@@ -481,204 +503,19 @@ where
             }
 
             if let Some(batch) = this.ready.pop_front() {
-                let client = this.client.clone();
-                let keys = batch.matched_keys;
+                let build = this.build_proof.clone();
                 let fut = async move {
-                    let proof = client
-                        .multi_proof_raw_with_read_floor(
-                            batch.read_floor_sequence,
-                            batch.watermark,
-                            &keys,
-                        )
+                    let proof = (build)(batch.read_floor_sequence, batch.watermark, batch.matched)
                         .await
                         .map_err(qmdb_error_to_connect)?;
                     Ok(SubscribeResponse {
                         resume_sequence_number: batch.read_floor_sequence,
-                        proof: Some(raw_multi_proof_to_proto(&proof)).into(),
+                        proof: Some(raw_batch_multi_proof_to_proto(&proof)).into(),
                         ..Default::default()
                     })
                 }
                 .boxed();
                 this.building = Some(fut);
-                continue;
-            }
-
-            let frame = {
-                let next_fut = this.sub.next();
-                tokio::pin!(next_fut);
-                match next_fut.as_mut().poll(cx) {
-                    Poll::Ready(Ok(Some(frame))) => frame,
-                    Poll::Ready(Ok(None)) => return Poll::Ready(None),
-                    Poll::Ready(Err(err)) => {
-                        let connect = if let Some(rpc) = err.rpc_error() {
-                            ConnectError::new(rpc.code, rpc.message.clone().unwrap_or_default())
-                        } else {
-                            ConnectError::new(ErrorCode::Internal, err.to_string())
-                        };
-                        return Poll::Ready(Some(Err(connect)));
-                    }
-                    Poll::Pending => return Poll::Pending,
-                }
-            };
-
-            if let Err(err) = this.ingest_frame(&frame) {
-                return Poll::Ready(Some(Err(*err)));
-            }
-        }
-    }
-}
-
-struct RangeSubscribeStream<Resp> {
-    classify: Classify,
-    sub: exoware_sdk_rs::StreamSubscription,
-    pending: BTreeMap<Location, PendingRangeBatch>,
-    watermarks: BTreeMap<Location, u64>,
-    ready: VecDeque<ReadyRangeBatch>,
-    building: Option<BoxFuture<'static, Result<Resp, ConnectError>>>,
-    build_response: BuildRangeResponse<Resp>,
-}
-
-impl<Resp> RangeSubscribeStream<Resp>
-where
-    Resp: Send + 'static,
-{
-    fn new(
-        classify: Classify,
-        sub: exoware_sdk_rs::StreamSubscription,
-        build_response: BuildRangeResponse<Resp>,
-    ) -> Self {
-        Self {
-            classify,
-            sub,
-            pending: BTreeMap::new(),
-            watermarks: BTreeMap::new(),
-            ready: VecDeque::new(),
-            building: None,
-            build_response,
-        }
-    }
-
-    fn ingest_frame(
-        &mut self,
-        frame: &exoware_sdk_rs::StreamSubscriptionFrame,
-    ) -> Result<(), BoxConnectError> {
-        let mut operation_count = 0u32;
-        let mut min_operation: Option<Location> = None;
-        let mut max_operation: Option<Location> = None;
-        let mut latest = None;
-
-        for entry in &frame.entries {
-            let Some((family, location)) = (self.classify)(&entry.key, entry.value.as_ref()) else {
-                continue;
-            };
-            match family {
-                Family::Op => {
-                    operation_count = operation_count.checked_add(1).ok_or_else(|| {
-                        Box::new(ConnectError::internal(
-                            "operation count overflow in streamed qmdb batch",
-                        ))
-                    })?;
-                    min_operation = Some(min_operation.map_or(location, |min| min.min(location)));
-                    max_operation = Some(max_operation.map_or(location, |max| max.max(location)));
-                }
-                Family::Presence => latest = Some(location),
-                Family::Watermark => {
-                    self.watermarks
-                        .entry(location)
-                        .or_insert(frame.sequence_number);
-                }
-            }
-        }
-
-        if operation_count > 0 {
-            let latest = latest.ok_or_else(|| {
-                Box::new(ConnectError::internal("qmdb batch missing presence row"))
-            })?;
-            let start_location = latest
-                .checked_add(1)
-                .and_then(|next| next.checked_sub(operation_count as u64))
-                .ok_or_else(|| {
-                    Box::new(ConnectError::internal(
-                        "invalid streamed batch location range",
-                    ))
-                })?;
-            let min_operation = min_operation.ok_or_else(|| {
-                Box::new(ConnectError::internal(
-                    "streamed batch missing operation rows",
-                ))
-            })?;
-            let max_operation = max_operation.ok_or_else(|| {
-                Box::new(ConnectError::internal(
-                    "streamed batch missing operation rows",
-                ))
-            })?;
-            if min_operation != start_location || max_operation != latest {
-                return Err(Box::new(ConnectError::internal(format!(
-                    "streamed qmdb batch locations are not contiguous: expected [{start_location}, {latest}], saw [{min_operation}, {max_operation}]"
-                ))));
-            }
-            self.pending.insert(
-                latest,
-                PendingRangeBatch {
-                    sequence_number: frame.sequence_number,
-                    start_location,
-                    operation_count,
-                },
-            );
-        }
-
-        self.drain_ready();
-        Ok(())
-    }
-
-    fn drain_ready(&mut self) {
-        while let Some((&latest, _)) = self.pending.iter().next() {
-            let Some((&watermark, &watermark_sequence)) = self.watermarks.range(latest..).next()
-            else {
-                break;
-            };
-            let (_, batch) = self.pending.pop_first().expect("pending is not empty");
-            self.ready.push_back(ReadyRangeBatch {
-                watermark,
-                read_floor_sequence: batch.sequence_number.max(watermark_sequence),
-                start_location: batch.start_location,
-                operation_count: batch.operation_count,
-            });
-        }
-
-        if let Some(&floor) = self
-            .pending
-            .keys()
-            .next()
-            .or_else(|| self.watermarks.keys().next_back())
-        {
-            self.watermarks = self.watermarks.split_off(&floor);
-        }
-    }
-}
-
-impl<Resp> Stream for RangeSubscribeStream<Resp>
-where
-    Resp: Send + 'static,
-{
-    type Item = Result<Resp, ConnectError>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-
-        loop {
-            if let Some(fut) = this.building.as_mut() {
-                match fut.as_mut().poll(cx) {
-                    Poll::Ready(result) => {
-                        this.building = None;
-                        return Poll::Ready(Some(result));
-                    }
-                    Poll::Pending => return Poll::Pending,
-                }
-            }
-
-            if let Some(batch) = this.ready.pop_front() {
-                this.building = Some((this.build_response)(batch));
                 continue;
             }
 
@@ -714,6 +551,9 @@ fn decode_since(since: Option<u64>) -> Option<u64> {
     }
 }
 
+type SubscribeStream =
+    Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>>;
+
 impl<H, K, V, const N: usize> OrderedService for OrderedConnect<H, K, V, N>
 where
     H: Hasher + Send + Sync + 'static,
@@ -721,70 +561,6 @@ where
     V: commonware_codec::Codec + Clone + Send + Sync + 'static,
     QmdbOperation<K, V>: Encode + commonware_codec::Decode,
 {
-    fn subscribe(
-        &self,
-        ctx: Context,
-        request: buffa::view::OwnedView<SubscribeRequestView<'static>>,
-    ) -> impl Future<
-        Output = Result<
-            (
-                Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>>,
-                Context,
-            ),
-            ConnectError,
-        >,
-    > + Send {
-        let client = self.client.clone();
-        async move {
-            let mut exact_keys = BTreeSet::<Vec<u8>>::new();
-            let mut prefixes = Vec::new();
-            let mut regexes = Vec::new();
-            for match_key in request.match_keys.iter() {
-                match match_key.kind {
-                    Some(ProtoBytesMatchKeyKindView::Exact(exact)) => {
-                        exact_keys.insert(exact.to_vec());
-                    }
-                    Some(ProtoBytesMatchKeyKindView::Prefix(prefix)) => {
-                        prefixes.push(prefix.to_vec());
-                    }
-                    Some(ProtoBytesMatchKeyKindView::Regex(pattern)) => {
-                        regexes.push(Regex::new(pattern).map_err(|err| {
-                            ConnectError::invalid_argument(format!(
-                                "invalid regex subscription filter `{pattern}`: {err}"
-                            ))
-                        })?);
-                    }
-                    None => {
-                        return Err(ConnectError::invalid_argument(
-                            "each match_key must set exactly one of exact, prefix, or regex",
-                        ));
-                    }
-                }
-            }
-            let matcher = SubscriptionMatcher {
-                exact_keys,
-                prefixes,
-                regexes,
-            };
-            if matcher.is_empty() {
-                return Err(ConnectError::invalid_argument(
-                    "subscribe must include at least one match_key",
-                ));
-            }
-
-            let since = decode_since(request.since_sequence_number);
-            let (classify, filter) = sub::ordered_classify_and_filter();
-            let sub = sub::open_store_subscription(client.store_client(), filter, since)
-                .await
-                .map_err(qmdb_error_to_connect)?;
-            let stream = OrderedSubscribeStream::new(client, matcher, classify, sub);
-            let stream: Pin<
-                Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>,
-            > = Box::pin(stream);
-            Ok((stream, ctx))
-        }
-    }
-
     fn get(
         &self,
         ctx: Context,
@@ -844,7 +620,7 @@ where
     }
 }
 
-impl<H, K, V, const N: usize> OrderedRangeService for OrderedRangeConnect<H, K, V, N>
+impl<H, K, V, const N: usize> RangeService for OrderedRangeConnect<H, K, V, N>
 where
     H: Hasher + Send + Sync + 'static,
     K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
@@ -854,56 +630,45 @@ where
     fn subscribe(
         &self,
         ctx: Context,
-        request: buffa::view::OwnedView<RangeSubscribeRequestView<'static>>,
-    ) -> impl Future<
-        Output = Result<
-            (
-                Pin<Box<dyn Stream<Item = Result<RangeSubscribeResponse, ConnectError>> + Send>>,
-                Context,
-            ),
-            ConnectError,
-        >,
-    > + Send {
+        request: buffa::view::OwnedView<SubscribeRequestView<'static>>,
+    ) -> impl Future<Output = Result<(SubscribeStream, Context), ConnectError>> + Send {
         let client = self.client.clone();
         async move {
+            let matcher = parse_match_keys(&request)?;
             let since = decode_since(request.since_sequence_number);
             let (classify, filter) = sub::ordered_classify_and_filter();
             let sub = sub::open_store_subscription(client.store_client(), filter, since)
                 .await
                 .map_err(qmdb_error_to_connect)?;
-            let build_response: BuildRangeResponse<RangeSubscribeResponse> = Arc::new({
+            let extract_key: ExtractKey = {
                 let client = client.clone();
-                move |batch| {
+                Arc::new(move |location, bytes| client.extract_operation_key(location, bytes))
+            };
+            let build_proof: BuildBatchProof<H::Digest> = {
+                let client = client.clone();
+                Arc::new(move |seq, watermark, matched| {
                     let client = client.clone();
                     async move {
-                        let checkpoint = client
-                            .operation_range_checkpoint_with_read_floor(
-                                batch.read_floor_sequence,
-                                batch.watermark,
-                                batch.start_location,
-                                batch.operation_count,
-                            )
+                        client
+                            .batch_multi_proof_with_read_floor(seq, watermark, matched)
                             .await
-                            .map_err(qmdb_error_to_connect)?;
-                        Ok(RangeSubscribeResponse {
-                            resume_sequence_number: batch.read_floor_sequence,
-                            proof: Some(operation_range_checkpoint_to_proto(&checkpoint)).into(),
-                            ..Default::default()
-                        })
                     }
                     .boxed()
-                }
-            });
-            let stream = RangeSubscribeStream::new(classify, sub, build_response);
-            let stream: Pin<
-                Box<dyn Stream<Item = Result<RangeSubscribeResponse, ConnectError>> + Send>,
-            > = Box::pin(stream);
+                })
+            };
+            let stream: SubscribeStream = Box::pin(BatchSubscribeStream::new(
+                matcher,
+                classify,
+                extract_key,
+                build_proof,
+                sub,
+            ));
             Ok((stream, ctx))
         }
     }
 }
 
-impl<H, K, V> UnorderedRangeService for UnorderedRangeConnect<H, K, V>
+impl<H, K, V> RangeService for UnorderedRangeConnect<H, K, V>
 where
     H: Hasher + Send + Sync + 'static,
     K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
@@ -913,56 +678,45 @@ where
     fn subscribe(
         &self,
         ctx: Context,
-        request: buffa::view::OwnedView<RangeSubscribeRequestView<'static>>,
-    ) -> impl Future<
-        Output = Result<
-            (
-                Pin<Box<dyn Stream<Item = Result<RangeSubscribeResponse, ConnectError>> + Send>>,
-                Context,
-            ),
-            ConnectError,
-        >,
-    > + Send {
+        request: buffa::view::OwnedView<SubscribeRequestView<'static>>,
+    ) -> impl Future<Output = Result<(SubscribeStream, Context), ConnectError>> + Send {
         let client = self.client.clone();
         async move {
+            let matcher = parse_match_keys(&request)?;
             let since = decode_since(request.since_sequence_number);
             let (classify, filter) = sub::unordered_classify_and_filter();
             let sub = sub::open_store_subscription(client.store_client(), filter, since)
                 .await
                 .map_err(qmdb_error_to_connect)?;
-            let build_response: BuildRangeResponse<RangeSubscribeResponse> = Arc::new({
+            let extract_key: ExtractKey = {
                 let client = client.clone();
-                move |batch| {
+                Arc::new(move |location, bytes| client.extract_operation_key(location, bytes))
+            };
+            let build_proof: BuildBatchProof<H::Digest> = {
+                let client = client.clone();
+                Arc::new(move |seq, watermark, matched| {
                     let client = client.clone();
                     async move {
-                        let checkpoint = client
-                            .operation_range_checkpoint_with_read_floor(
-                                batch.read_floor_sequence,
-                                batch.watermark,
-                                batch.start_location,
-                                batch.operation_count,
-                            )
+                        client
+                            .batch_multi_proof_with_read_floor(seq, watermark, matched)
                             .await
-                            .map_err(qmdb_error_to_connect)?;
-                        Ok(RangeSubscribeResponse {
-                            resume_sequence_number: batch.read_floor_sequence,
-                            proof: Some(operation_range_checkpoint_to_proto(&checkpoint)).into(),
-                            ..Default::default()
-                        })
                     }
                     .boxed()
-                }
-            });
-            let stream = RangeSubscribeStream::new(classify, sub, build_response);
-            let stream: Pin<
-                Box<dyn Stream<Item = Result<RangeSubscribeResponse, ConnectError>> + Send>,
-            > = Box::pin(stream);
+                })
+            };
+            let stream: SubscribeStream = Box::pin(BatchSubscribeStream::new(
+                matcher,
+                classify,
+                extract_key,
+                build_proof,
+                sub,
+            ));
             Ok((stream, ctx))
         }
     }
 }
 
-impl<H, K, V> ImmutableRangeService for ImmutableRangeConnect<H, K, V>
+impl<H, K, V> RangeService for ImmutableRangeConnect<H, K, V>
 where
     H: Hasher + Send + Sync + 'static,
     K: commonware_utils::Array
@@ -978,56 +732,45 @@ where
     fn subscribe(
         &self,
         ctx: Context,
-        request: buffa::view::OwnedView<RangeSubscribeRequestView<'static>>,
-    ) -> impl Future<
-        Output = Result<
-            (
-                Pin<Box<dyn Stream<Item = Result<RangeSubscribeResponse, ConnectError>> + Send>>,
-                Context,
-            ),
-            ConnectError,
-        >,
-    > + Send {
+        request: buffa::view::OwnedView<SubscribeRequestView<'static>>,
+    ) -> impl Future<Output = Result<(SubscribeStream, Context), ConnectError>> + Send {
         let client = self.client.clone();
         async move {
+            let matcher = parse_match_keys(&request)?;
             let since = decode_since(request.since_sequence_number);
             let (classify, filter) = sub::immutable_classify_and_filter();
             let sub = sub::open_store_subscription(client.store_client(), filter, since)
                 .await
                 .map_err(qmdb_error_to_connect)?;
-            let build_response: BuildRangeResponse<RangeSubscribeResponse> = Arc::new({
+            let extract_key: ExtractKey = {
                 let client = client.clone();
-                move |batch| {
+                Arc::new(move |location, bytes| client.extract_operation_key(location, bytes))
+            };
+            let build_proof: BuildBatchProof<H::Digest> = {
+                let client = client.clone();
+                Arc::new(move |seq, watermark, matched| {
                     let client = client.clone();
                     async move {
-                        let checkpoint = client
-                            .operation_range_checkpoint_with_read_floor(
-                                batch.read_floor_sequence,
-                                batch.watermark,
-                                batch.start_location,
-                                batch.operation_count,
-                            )
+                        client
+                            .batch_multi_proof_with_read_floor(seq, watermark, matched)
                             .await
-                            .map_err(qmdb_error_to_connect)?;
-                        Ok(RangeSubscribeResponse {
-                            resume_sequence_number: batch.read_floor_sequence,
-                            proof: Some(operation_range_checkpoint_to_proto(&checkpoint)).into(),
-                            ..Default::default()
-                        })
                     }
                     .boxed()
-                }
-            });
-            let stream = RangeSubscribeStream::new(classify, sub, build_response);
-            let stream: Pin<
-                Box<dyn Stream<Item = Result<RangeSubscribeResponse, ConnectError>> + Send>,
-            > = Box::pin(stream);
+                })
+            };
+            let stream: SubscribeStream = Box::pin(BatchSubscribeStream::new(
+                matcher,
+                classify,
+                extract_key,
+                build_proof,
+                sub,
+            ));
             Ok((stream, ctx))
         }
     }
 }
 
-impl<H, V> KeylessRangeService for KeylessRangeConnect<H, V>
+impl<H, V> RangeService for KeylessRangeConnect<H, V>
 where
     H: Hasher + Send + Sync + 'static,
     V: commonware_codec::Codec + Clone + Send + Sync + 'static,
@@ -1036,50 +779,41 @@ where
     fn subscribe(
         &self,
         ctx: Context,
-        request: buffa::view::OwnedView<RangeSubscribeRequestView<'static>>,
-    ) -> impl Future<
-        Output = Result<
-            (
-                Pin<Box<dyn Stream<Item = Result<RangeSubscribeResponse, ConnectError>> + Send>>,
-                Context,
-            ),
-            ConnectError,
-        >,
-    > + Send {
+        request: buffa::view::OwnedView<SubscribeRequestView<'static>>,
+    ) -> impl Future<Output = Result<(SubscribeStream, Context), ConnectError>> + Send {
         let client = self.client.clone();
         async move {
+            if !request.match_keys.is_empty() {
+                return Err(ConnectError::invalid_argument(
+                    "keyless RangeService.Subscribe does not accept match_keys",
+                ));
+            }
             let since = decode_since(request.since_sequence_number);
             let (classify, filter) = sub::keyless_classify_and_filter();
             let sub = sub::open_store_subscription(client.store_client(), filter, since)
                 .await
                 .map_err(qmdb_error_to_connect)?;
-            let build_response: BuildRangeResponse<RangeSubscribeResponse> = Arc::new({
+            let extract_key: ExtractKey =
+                Arc::new(|_location, _bytes| Ok::<Option<Vec<u8>>, QmdbError>(None));
+            let build_proof: BuildBatchProof<H::Digest> = {
                 let client = client.clone();
-                move |batch| {
+                Arc::new(move |seq, watermark, matched| {
                     let client = client.clone();
                     async move {
-                        let checkpoint = client
-                            .operation_range_checkpoint_with_read_floor(
-                                batch.read_floor_sequence,
-                                batch.watermark,
-                                batch.start_location,
-                                batch.operation_count,
-                            )
+                        client
+                            .batch_multi_proof_with_read_floor(seq, watermark, matched)
                             .await
-                            .map_err(qmdb_error_to_connect)?;
-                        Ok(RangeSubscribeResponse {
-                            resume_sequence_number: batch.read_floor_sequence,
-                            proof: Some(operation_range_checkpoint_to_proto(&checkpoint)).into(),
-                            ..Default::default()
-                        })
                     }
                     .boxed()
-                }
-            });
-            let stream = RangeSubscribeStream::new(classify, sub, build_response);
-            let stream: Pin<
-                Box<dyn Stream<Item = Result<RangeSubscribeResponse, ConnectError>> + Send>,
-            > = Box::pin(stream);
+                })
+            };
+            let stream: SubscribeStream = Box::pin(BatchSubscribeStream::new(
+                None,
+                classify,
+                extract_key,
+                build_proof,
+                sub,
+            ));
             Ok((stream, ctx))
         }
     }
@@ -1108,15 +842,13 @@ pub fn ordered_range_connect_stack<
     const N: usize,
 >(
     client: Arc<OrderedClient<H, K, V, N>>,
-) -> ConnectRpcService<OrderedRangeServiceServer<OrderedRangeConnect<H, K, V, N>>>
+) -> ConnectRpcService<RangeServiceServer<OrderedRangeConnect<H, K, V, N>>>
 where
     QmdbOperation<K, V>: Encode + commonware_codec::Decode,
 {
-    ConnectRpcService::new(OrderedRangeServiceServer::new(OrderedRangeConnect::new(
-        client,
-    )))
-    .with_limits(connect_limits())
-    .with_compression(exoware_sdk_rs::connect_compression_registry())
+    ConnectRpcService::new(RangeServiceServer::new(OrderedRangeConnect::new(client)))
+        .with_limits(connect_limits())
+        .with_compression(exoware_sdk_rs::connect_compression_registry())
 }
 
 pub fn unordered_range_connect_stack<
@@ -1125,15 +857,13 @@ pub fn unordered_range_connect_stack<
     V: commonware_codec::Codec + Clone + Send + Sync + 'static,
 >(
     client: Arc<UnorderedClient<H, K, V>>,
-) -> ConnectRpcService<UnorderedRangeServiceServer<UnorderedRangeConnect<H, K, V>>>
+) -> ConnectRpcService<RangeServiceServer<UnorderedRangeConnect<H, K, V>>>
 where
     UnorderedQmdbOperation<K, V>: Encode + commonware_codec::Decode,
 {
-    ConnectRpcService::new(UnorderedRangeServiceServer::new(
-        UnorderedRangeConnect::new(client),
-    ))
-    .with_limits(connect_limits())
-    .with_compression(exoware_sdk_rs::connect_compression_registry())
+    ConnectRpcService::new(RangeServiceServer::new(UnorderedRangeConnect::new(client)))
+        .with_limits(connect_limits())
+        .with_compression(exoware_sdk_rs::connect_compression_registry())
 }
 
 pub fn immutable_range_connect_stack<
@@ -1142,15 +872,13 @@ pub fn immutable_range_connect_stack<
     V: commonware_codec::Codec + Clone + Send + Sync + 'static,
 >(
     client: Arc<ImmutableClient<H, K, V>>,
-) -> ConnectRpcService<ImmutableRangeServiceServer<ImmutableRangeConnect<H, K, V>>>
+) -> ConnectRpcService<RangeServiceServer<ImmutableRangeConnect<H, K, V>>>
 where
     ImmutableOperation<K, V>: Encode + commonware_codec::Decode<Cfg = V::Cfg> + Clone,
 {
-    ConnectRpcService::new(ImmutableRangeServiceServer::new(
-        ImmutableRangeConnect::new(client),
-    ))
-    .with_limits(connect_limits())
-    .with_compression(exoware_sdk_rs::connect_compression_registry())
+    ConnectRpcService::new(RangeServiceServer::new(ImmutableRangeConnect::new(client)))
+        .with_limits(connect_limits())
+        .with_compression(exoware_sdk_rs::connect_compression_registry())
 }
 
 pub fn keyless_range_connect_stack<
@@ -1158,13 +886,12 @@ pub fn keyless_range_connect_stack<
     V: commonware_codec::Codec + Clone + Send + Sync + 'static,
 >(
     client: Arc<KeylessClient<H, V>>,
-) -> ConnectRpcService<KeylessRangeServiceServer<KeylessRangeConnect<H, V>>>
+) -> ConnectRpcService<RangeServiceServer<KeylessRangeConnect<H, V>>>
 where
     KeylessOperation<V>: Encode + commonware_codec::Decode<Cfg = V::Cfg> + Clone,
 {
-    ConnectRpcService::new(KeylessRangeServiceServer::new(KeylessRangeConnect::new(
-        client,
-    )))
-    .with_limits(connect_limits())
-    .with_compression(exoware_sdk_rs::connect_compression_registry())
+    ConnectRpcService::new(RangeServiceServer::new(KeylessRangeConnect::new(client)))
+        .with_limits(connect_limits())
+        .with_compression(exoware_sdk_rs::connect_compression_registry())
 }
+

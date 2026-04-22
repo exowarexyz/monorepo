@@ -20,9 +20,8 @@ use connectrpc::client::ClientConfig;
 use connectrpc::{ConnectError, ConnectRpcService, Context};
 use exoware_sdk_rs::proto::PreferZstdHttpClient;
 use exoware_sdk_rs::store::qmdb::v1::{
-    KeylessRangeService, KeylessRangeServiceClient, KeylessRangeServiceServer,
-    RangeSubscribeRequest as ProtoRangeSubscribeRequest,
-    RangeSubscribeResponse as ProtoRangeSubscribeResponse,
+    RangeService, RangeServiceClient, RangeServiceServer,
+    SubscribeRequest as ProtoSubscribeRequest, SubscribeResponse as ProtoSubscribeResponse,
 };
 use exoware_sdk_rs::StoreClient;
 use store_qmdb::{
@@ -75,8 +74,8 @@ async fn spawn_qmdb_server(
     (handle, url)
 }
 
-fn rpc_client(base: &str) -> KeylessRangeServiceClient<PreferZstdHttpClient> {
-    KeylessRangeServiceClient::new(
+fn rpc_client(base: &str) -> RangeServiceClient<PreferZstdHttpClient> {
+    RangeServiceClient::new(
         PreferZstdHttpClient::plaintext(),
         ClientConfig::new(base.parse().expect("qmdb uri")),
     )
@@ -151,25 +150,24 @@ async fn upload_and_publish(client: &StoreClient, batch: &LocalBatch) {
 }
 
 #[derive(Clone)]
-struct StaticKeylessRangeService {
-    subscribe_response: ProtoRangeSubscribeResponse,
+struct StaticRangeService {
+    subscribe_response: ProtoSubscribeResponse,
 }
 
-impl KeylessRangeService for StaticKeylessRangeService {
+impl RangeService for StaticRangeService {
     fn subscribe(
         &self,
         ctx: Context,
         _request: buffa::view::OwnedView<
-            exoware_sdk_rs::store::qmdb::v1::RangeSubscribeRequestView<'static>,
+            exoware_sdk_rs::store::qmdb::v1::SubscribeRequestView<'static>,
         >,
     ) -> impl std::future::Future<
         Output = Result<
             (
                 Pin<
                     Box<
-                        dyn futures::Stream<
-                                Item = Result<ProtoRangeSubscribeResponse, ConnectError>,
-                            > + Send,
+                        dyn futures::Stream<Item = Result<ProtoSubscribeResponse, ConnectError>>
+                            + Send,
                     >,
                 >,
                 Context,
@@ -180,10 +178,7 @@ impl KeylessRangeService for StaticKeylessRangeService {
         let response = self.subscribe_response.clone();
         async move {
             let stream: Pin<
-                Box<
-                    dyn futures::Stream<Item = Result<ProtoRangeSubscribeResponse, ConnectError>>
-                        + Send,
-                >,
+                Box<dyn futures::Stream<Item = Result<ProtoSubscribeResponse, ConnectError>> + Send>,
             > = Box::pin(futures::stream::iter([Ok(response)]));
             Ok((stream, ctx))
         }
@@ -191,12 +186,12 @@ impl KeylessRangeService for StaticKeylessRangeService {
 }
 
 async fn spawn_static_server(
-    service: StaticKeylessRangeService,
+    service: StaticRangeService,
 ) -> (tokio::task::JoinHandle<()>, String) {
     let app = Router::new()
         .route("/health", get(health))
         .fallback_service(
-            ConnectRpcService::new(KeylessRangeServiceServer::new(service))
+            ConnectRpcService::new(RangeServiceServer::new(service))
                 .with_compression(exoware_sdk_rs::connect_compression_registry()),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -211,15 +206,15 @@ async fn spawn_static_server(
     (handle, url)
 }
 
-fn tamper_range_response(mut response: ProtoRangeSubscribeResponse) -> ProtoRangeSubscribeResponse {
-    let mut proof = response.proof.as_option().cloned().expect("range proof");
+fn tamper_subscribe_response(mut response: ProtoSubscribeResponse) -> ProtoSubscribeResponse {
+    let mut proof = response.proof.as_option().cloned().expect("multi proof");
     proof.root[0] ^= 0x01;
     response.proof = Some(proof).into();
     response
 }
 
 #[tokio::test]
-async fn keyless_connect_subscribe_emits_verifiable_range_proof() {
+async fn keyless_connect_subscribe_emits_verifiable_multi_proof() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
     let keyless_client = Arc::new(TestKeylessClient::from_client(
@@ -230,7 +225,7 @@ async fn keyless_connect_subscribe_emits_verifiable_range_proof() {
     let client = validated_client(&qmdb_url);
 
     let mut stream = client
-        .subscribe(ProtoRangeSubscribeRequest::default())
+        .subscribe(ProtoSubscribeRequest::default())
         .await
         .expect("subscribe");
 
@@ -245,9 +240,14 @@ async fn keyless_connect_subscribe_emits_verifiable_range_proof() {
             .expect("stream frame");
 
     assert!(frame.resume_sequence_number > 0);
-    assert_eq!(frame.proof.start_location, Location::new(0));
-    assert_eq!(frame.proof.root, local.root);
-    assert_eq!(frame.proof.operations, local.operations);
+    assert_eq!(frame.root, local.root);
+    let expected: Vec<(Location, BatchOperation)> = local
+        .operations
+        .iter()
+        .enumerate()
+        .map(|(i, op)| (Location::new(i as u64), op.clone()))
+        .collect();
+    assert_eq!(frame.operations, expected);
 }
 
 #[tokio::test]
@@ -263,7 +263,7 @@ async fn keyless_connect_client_rejects_invalid_streamed_proof() {
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
     let rpc = rpc_client(&qmdb_url);
     let mut raw_stream = rpc
-        .subscribe(ProtoRangeSubscribeRequest {
+        .subscribe(ProtoSubscribeRequest {
             since_sequence_number: Some(1),
             ..Default::default()
         })
@@ -276,13 +276,13 @@ async fn keyless_connect_client_rejects_invalid_streamed_proof() {
         .expect("stream frame")
         .to_owned_message();
 
-    let (_static_server, static_url) = spawn_static_server(StaticKeylessRangeService {
-        subscribe_response: tamper_range_response(raw_response),
+    let (_static_server, static_url) = spawn_static_server(StaticRangeService {
+        subscribe_response: tamper_subscribe_response(raw_response),
     })
     .await;
     let client = validated_client(&static_url);
     let mut stream = client
-        .subscribe(ProtoRangeSubscribeRequest::default())
+        .subscribe(ProtoSubscribeRequest::default())
         .await
         .expect("subscribe");
 
@@ -291,6 +291,6 @@ async fn keyless_connect_client_rejects_invalid_streamed_proof() {
         .await
         .expect_err("tampered streamed proof should fail");
     assert!(
-        matches!(err, QmdbError::CorruptData(message) if message.contains("range checkpoint proof failed verification"))
+        matches!(err, QmdbError::CorruptData(message) if message.contains("multi proof failed verification"))
     );
 }

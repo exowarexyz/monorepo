@@ -7,7 +7,8 @@ use commonware_storage::{
     mmr::{verification, Location},
     qmdb::{
         any::ordered::variable::Operation as QmdbOperation,
-        current::proof::RangeProof as CurrentRangeProof, operation::Key as QmdbKey,
+        current::proof::RangeProof as CurrentRangeProof,
+        operation::{Key as QmdbKey, Operation as _},
     },
 };
 use exoware_sdk_rs::keys::Key;
@@ -21,9 +22,9 @@ use crate::codec::{
 use crate::core::HistoricalOpsClientCore;
 use crate::error::QmdbError;
 use crate::proof::{
-    CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawCurrentRangeProof,
-    RawKeyValueProof, RawMultiProof, VariantRoot, VerifiedCurrentRange, VerifiedKeyValue,
-    VerifiedMultiOperations, VerifiedOperationRange, VerifiedVariantRange,
+    CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
+    RawCurrentRangeProof, RawKeyValueProof, RawMultiProof, VariantRoot, VerifiedCurrentRange,
+    VerifiedKeyValue, VerifiedMultiOperations, VerifiedOperationRange, VerifiedVariantRange,
 };
 use crate::storage::{KvCurrentStorage, KvMmrStorage};
 use crate::{QmdbVariant, VersionedValue};
@@ -196,6 +197,15 @@ where
         })
     }
 
+    pub(crate) fn extract_operation_key(
+        &self,
+        location: Location,
+        bytes: &[u8],
+    ) -> Result<Option<Vec<u8>>, QmdbError> {
+        let op = self.decode_operation_bytes(location, bytes)?;
+        Ok(op.key().map(|k| <K as AsRef<[u8]>>::as_ref(k).to_vec()))
+    }
+
     async fn multi_proof_raw_in_session<Q: AsRef<[u8]>>(
         &self,
         session: &SerializableReadSession,
@@ -271,17 +281,43 @@ where
         Ok(raw)
     }
 
-    pub(crate) async fn multi_proof_raw_with_read_floor<Q: AsRef<[u8]>>(
+    pub(crate) async fn batch_multi_proof_with_read_floor(
         &self,
         read_floor_sequence: u64,
         watermark: Location,
-        keys: &[Q],
-    ) -> Result<RawMultiProof<H::Digest, K, V>, QmdbError> {
+        operations: Vec<(Location, Vec<u8>)>,
+    ) -> Result<RawBatchMultiProof<H::Digest>, QmdbError> {
+        if operations.is_empty() {
+            return Err(QmdbError::EmptyProofRequest);
+        }
         let session = self
             .client
             .create_session_with_sequence(read_floor_sequence);
-        self.multi_proof_raw_in_session(&session, watermark, keys)
+        self.core()
+            .require_published_watermark(&session, watermark)
+            .await?;
+        let storage = KvMmrStorage::<H::Digest> {
+            session: &session,
+            mmr_size: mmr_size_for_watermark(watermark)?,
+            _marker: PhantomData,
+        };
+        let locations: Vec<Location> = operations.iter().map(|(loc, _)| *loc).collect();
+        let proof = verification::multi_proof(&storage, &locations)
             .await
+            .map_err(|e| QmdbError::CommonwareMmr(e.to_string()))?;
+        let root = self.compute_ops_root(&session, watermark).await?;
+        let raw = RawBatchMultiProof {
+            watermark,
+            root,
+            proof: proof.into(),
+            operations,
+        };
+        if !raw.verify::<H>() {
+            return Err(QmdbError::CorruptData(
+                "batch multi proof failed verification".to_string(),
+            ));
+        }
+        Ok(raw)
     }
 
     /// Verified raw multi-proof over a set of keys.
@@ -338,25 +374,6 @@ where
         max_locations: u32,
     ) -> Result<OperationRangeCheckpoint<H::Digest>, QmdbError> {
         let session = self.client.create_session();
-        self.operation_range_checkpoint_in_session(
-            &session,
-            watermark,
-            start_location,
-            max_locations,
-        )
-        .await
-    }
-
-    pub(crate) async fn operation_range_checkpoint_with_read_floor(
-        &self,
-        read_floor_sequence: u64,
-        watermark: Location,
-        start_location: Location,
-        max_locations: u32,
-    ) -> Result<OperationRangeCheckpoint<H::Digest>, QmdbError> {
-        let session = self
-            .client
-            .create_session_with_sequence(read_floor_sequence);
         self.operation_range_checkpoint_in_session(
             &session,
             watermark,

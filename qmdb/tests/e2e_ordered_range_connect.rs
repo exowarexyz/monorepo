@@ -15,6 +15,7 @@ use commonware_runtime::Runner as _;
 use commonware_storage::mmr::Location;
 use commonware_storage::qmdb::any::ordered::variable::Operation as QmdbOperation;
 use commonware_storage::qmdb::{
+    any::ordered::Update,
     current::{ordered::variable::Db as LocalQmdbDb, VariableConfig},
     store::LogStore as _,
 };
@@ -23,10 +24,12 @@ use commonware_utils::{NZUsize, NZU16, NZU64};
 use connectrpc::client::ClientConfig;
 use connectrpc::{ConnectError, ConnectRpcService, Context};
 use exoware_sdk_rs::proto::PreferZstdHttpClient;
+use exoware_sdk_rs::store::common::v1::{
+    bytes_match_key as proto_bytes_match_key, BytesMatchKey as ProtoBytesMatchKey,
+};
 use exoware_sdk_rs::store::qmdb::v1::{
-    OrderedRangeService, OrderedRangeServiceClient, OrderedRangeServiceServer,
-    RangeSubscribeRequest as ProtoRangeSubscribeRequest,
-    RangeSubscribeResponse as ProtoRangeSubscribeResponse,
+    RangeService, RangeServiceClient, RangeServiceServer,
+    SubscribeRequest as ProtoSubscribeRequest, SubscribeResponse as ProtoSubscribeResponse,
 };
 use exoware_sdk_rs::StoreClient;
 use store_qmdb::{
@@ -81,8 +84,8 @@ async fn spawn_qmdb_server(
     (handle, url)
 }
 
-fn rpc_client(base: &str) -> OrderedRangeServiceClient<PreferZstdHttpClient> {
-    OrderedRangeServiceClient::new(
+fn rpc_client(base: &str) -> RangeServiceClient<PreferZstdHttpClient> {
+    RangeServiceClient::new(
         PreferZstdHttpClient::plaintext(),
         ClientConfig::new(base.parse().expect("qmdb uri")),
     )
@@ -216,25 +219,24 @@ async fn upload_and_publish(client: &StoreClient, batch: &LocalBatch) {
 }
 
 #[derive(Clone)]
-struct StaticOrderedRangeService {
-    subscribe_response: ProtoRangeSubscribeResponse,
+struct StaticRangeService {
+    subscribe_response: ProtoSubscribeResponse,
 }
 
-impl OrderedRangeService for StaticOrderedRangeService {
+impl RangeService for StaticRangeService {
     fn subscribe(
         &self,
         ctx: Context,
         _request: buffa::view::OwnedView<
-            exoware_sdk_rs::store::qmdb::v1::RangeSubscribeRequestView<'static>,
+            exoware_sdk_rs::store::qmdb::v1::SubscribeRequestView<'static>,
         >,
     ) -> impl std::future::Future<
         Output = Result<
             (
                 Pin<
                     Box<
-                        dyn futures::Stream<
-                                Item = Result<ProtoRangeSubscribeResponse, ConnectError>,
-                            > + Send,
+                        dyn futures::Stream<Item = Result<ProtoSubscribeResponse, ConnectError>>
+                            + Send,
                     >,
                 >,
                 Context,
@@ -245,10 +247,7 @@ impl OrderedRangeService for StaticOrderedRangeService {
         let response = self.subscribe_response.clone();
         async move {
             let stream: Pin<
-                Box<
-                    dyn futures::Stream<Item = Result<ProtoRangeSubscribeResponse, ConnectError>>
-                        + Send,
-                >,
+                Box<dyn futures::Stream<Item = Result<ProtoSubscribeResponse, ConnectError>> + Send>,
             > = Box::pin(futures::stream::iter([Ok(response)]));
             Ok((stream, ctx))
         }
@@ -256,12 +255,12 @@ impl OrderedRangeService for StaticOrderedRangeService {
 }
 
 async fn spawn_static_server(
-    service: StaticOrderedRangeService,
+    service: StaticRangeService,
 ) -> (tokio::task::JoinHandle<()>, String) {
     let app = Router::new()
         .route("/health", get(health))
         .fallback_service(
-            ConnectRpcService::new(OrderedRangeServiceServer::new(service))
+            ConnectRpcService::new(RangeServiceServer::new(service))
                 .with_compression(exoware_sdk_rs::connect_compression_registry()),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -276,11 +275,51 @@ async fn spawn_static_server(
     (handle, url)
 }
 
-fn tamper_range_response(mut response: ProtoRangeSubscribeResponse) -> ProtoRangeSubscribeResponse {
-    let mut proof = response.proof.as_option().cloned().expect("range proof");
+fn tamper_subscribe_response(mut response: ProtoSubscribeResponse) -> ProtoSubscribeResponse {
+    let mut proof = response.proof.as_option().cloned().expect("multi proof");
     proof.root[0] ^= 0x01;
     response.proof = Some(proof).into();
     response
+}
+
+fn match_exact(key: &[u8]) -> ProtoBytesMatchKey {
+    ProtoBytesMatchKey {
+        kind: Some(proto_bytes_match_key::Kind::Exact(key.to_vec())),
+        ..Default::default()
+    }
+}
+
+fn match_prefix(prefix: &[u8]) -> ProtoBytesMatchKey {
+    ProtoBytesMatchKey {
+        kind: Some(proto_bytes_match_key::Kind::Prefix(prefix.to_vec())),
+        ..Default::default()
+    }
+}
+
+fn match_regex(regex: &str) -> ProtoBytesMatchKey {
+    ProtoBytesMatchKey {
+        kind: Some(proto_bytes_match_key::Kind::Regex(regex.to_string())),
+        ..Default::default()
+    }
+}
+
+fn all_operations_for_key(
+    operations: &[BatchOperation],
+    key: &[u8],
+) -> Vec<(Location, BatchOperation)> {
+    operations
+        .iter()
+        .enumerate()
+        .filter_map(|(index, operation)| match operation {
+            BatchOperation::Delete(found) if found.as_slice() == key => {
+                Some((Location::new(index as u64), operation.clone()))
+            }
+            BatchOperation::Update(Update { key: found, .. }) if found.as_slice() == key => {
+                Some((Location::new(index as u64), operation.clone()))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 #[tokio::test]
@@ -296,7 +335,7 @@ async fn ordered_range_connect_subscribe_emits_verifiable_range_proof() {
     let client = validated_client(&qmdb_url);
 
     let mut stream = client
-        .subscribe(ProtoRangeSubscribeRequest::default())
+        .subscribe(ProtoSubscribeRequest::default())
         .await
         .expect("subscribe");
 
@@ -311,8 +350,13 @@ async fn ordered_range_connect_subscribe_emits_verifiable_range_proof() {
             .expect("stream frame");
 
     assert!(frame.resume_sequence_number > 0);
-    assert_eq!(frame.proof.start_location, Location::new(0));
-    assert_eq!(frame.proof.operations, local.operations);
+    let expected: Vec<(Location, BatchOperation)> = local
+        .operations
+        .iter()
+        .enumerate()
+        .map(|(i, op)| (Location::new(i as u64), op.clone()))
+        .collect();
+    assert_eq!(frame.operations, expected);
 }
 
 #[tokio::test]
@@ -329,7 +373,7 @@ async fn ordered_range_connect_client_rejects_invalid_streamed_proof() {
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client).await;
     let rpc = rpc_client(&qmdb_url);
     let mut raw_stream = rpc
-        .subscribe(ProtoRangeSubscribeRequest {
+        .subscribe(ProtoSubscribeRequest {
             since_sequence_number: Some(1),
             ..Default::default()
         })
@@ -342,13 +386,13 @@ async fn ordered_range_connect_client_rejects_invalid_streamed_proof() {
         .expect("stream frame")
         .to_owned_message();
 
-    let (_static_server, static_url) = spawn_static_server(StaticOrderedRangeService {
-        subscribe_response: tamper_range_response(raw_response),
+    let (_static_server, static_url) = spawn_static_server(StaticRangeService {
+        subscribe_response: tamper_subscribe_response(raw_response),
     })
     .await;
     let client = validated_client(&static_url);
     let mut stream = client
-        .subscribe(ProtoRangeSubscribeRequest::default())
+        .subscribe(ProtoSubscribeRequest::default())
         .await
         .expect("subscribe");
 
@@ -357,6 +401,126 @@ async fn ordered_range_connect_client_rejects_invalid_streamed_proof() {
         .await
         .expect_err("tampered streamed proof should fail");
     assert!(
-        matches!(err, QmdbError::CorruptData(message) if message.contains("range checkpoint proof failed verification"))
+        matches!(err, QmdbError::CorruptData(message) if message.contains("multi proof failed verification"))
     );
+}
+
+#[tokio::test]
+async fn ordered_range_connect_subscribe_emits_multi_proof_for_matching_keys() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_local_batch().await;
+    let ordered_client = Arc::new(TestOrderedClient::from_client(
+        store_client.clone(),
+        op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client.clone()).await;
+    let client = validated_client(&qmdb_url);
+
+    let mut stream = client
+        .subscribe(ProtoSubscribeRequest {
+            match_keys: vec![match_exact(b"alpha")],
+            ..Default::default()
+        })
+        .await
+        .expect("subscribe");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    upload_and_publish(&store_client, &local).await;
+
+    let frame: RangeSubscribeProof<Digest, BatchOperation> =
+        tokio::time::timeout(Duration::from_secs(5), stream.message())
+            .await
+            .expect("timeout")
+            .expect("stream result")
+            .expect("stream frame");
+
+    let expected = all_operations_for_key(&local.operations, b"alpha");
+    assert!(!expected.is_empty());
+    assert!(frame.resume_sequence_number > 0);
+    assert_eq!(frame.operations, expected);
+}
+
+#[tokio::test]
+async fn ordered_range_connect_subscribe_replays_since_cursor() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_local_batch().await;
+    let ordered_client = Arc::new(TestOrderedClient::from_client(
+        store_client.clone(),
+        op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client.clone()).await;
+    let client = validated_client(&qmdb_url);
+
+    upload_and_publish(&store_client, &local).await;
+
+    let mut stream = client
+        .subscribe(ProtoSubscribeRequest {
+            match_keys: vec![match_exact(b"alpha")],
+            since_sequence_number: Some(1),
+            ..Default::default()
+        })
+        .await
+        .expect("subscribe");
+
+    let frame = tokio::time::timeout(Duration::from_secs(5), stream.message())
+        .await
+        .expect("timeout")
+        .expect("stream result")
+        .expect("stream frame");
+
+    let expected = all_operations_for_key(&local.operations, b"alpha");
+    assert!(!expected.is_empty());
+    assert_eq!(frame.operations, expected);
+}
+
+#[tokio::test]
+async fn ordered_range_connect_subscribe_matches_prefix_and_regex_filters() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_local_batch().await;
+    let ordered_client = Arc::new(TestOrderedClient::from_client(
+        store_client.clone(),
+        op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client.clone()).await;
+    let client = validated_client(&qmdb_url);
+
+    let mut prefix_stream = client
+        .subscribe(ProtoSubscribeRequest {
+            match_keys: vec![match_prefix(b"alp")],
+            ..Default::default()
+        })
+        .await
+        .expect("prefix subscribe");
+    let mut regex_stream = client
+        .subscribe(ProtoSubscribeRequest {
+            match_keys: vec![match_regex("^be.*$")],
+            ..Default::default()
+        })
+        .await
+        .expect("regex subscribe");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    upload_and_publish(&store_client, &local).await;
+
+    let prefix_frame = tokio::time::timeout(Duration::from_secs(5), prefix_stream.message())
+        .await
+        .expect("prefix timeout")
+        .expect("prefix stream result")
+        .expect("prefix stream frame");
+    let regex_frame = tokio::time::timeout(Duration::from_secs(5), regex_stream.message())
+        .await
+        .expect("regex timeout")
+        .expect("regex stream result")
+        .expect("regex stream frame");
+
+    let alpha = all_operations_for_key(&local.operations, b"alpha");
+    let beta = all_operations_for_key(&local.operations, b"beta");
+    assert!(!alpha.is_empty());
+    assert!(!beta.is_empty());
+
+    assert_eq!(prefix_frame.operations, alpha);
+    assert_eq!(regex_frame.operations, beta);
 }

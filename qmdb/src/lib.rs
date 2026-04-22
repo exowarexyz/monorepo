@@ -66,8 +66,8 @@ pub use connect::{
 };
 pub use connect_client::{
     ImmutableRangeConnectClient, KeylessRangeConnectClient, OrderedConnectClient,
-    OrderedConnectSubscription, OrderedRangeConnectClient, OrderedSubscribeProof,
-    RangeConnectSubscription, RangeSubscribeProof, UnorderedRangeConnectClient,
+    OrderedRangeConnectClient, RangeConnectSubscription, RangeSubscribeProof,
+    UnorderedRangeConnectClient,
 };
 
 use commonware_codec::Encode;
