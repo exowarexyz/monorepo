@@ -1,14 +1,14 @@
-import { create, fromBinary } from '@bufbuild/protobuf';
+import { create, fromBinary, type MessageInitShape } from '@bufbuild/protobuf';
 import { Code, ConnectError } from '@connectrpc/connect';
 import type { CallOptions } from '@connectrpc/connect';
 import type { Client } from './client.js';
 import { HttpError } from './error.js';
 import { PruneRequestSchema } from './gen/ts/store/v1/compact_pb.js';
 import type { Policy } from './gen/ts/store/v1/compact_pb.js';
-import { KvEntrySchema } from './gen/ts/store/v1/common_pb.js';
+import { KvEntrySchema, MatchKeySchema } from './gen/ts/store/v1/common_pb.js';
 import { PutRequestSchema } from './gen/ts/store/v1/ingest_pb.js';
 import {
-    GetRequestSchema,
+    GetRequestSchema as QueryGetRequestSchema,
     GetManyRequestSchema,
     RangeRequestSchema,
     ReduceRequestSchema,
@@ -20,6 +20,11 @@ import type {
     ReduceResponse,
     Detail,
 } from './gen/ts/store/v1/query_pb.js';
+import { ErrorInfoSchema } from './gen/ts/google/rpc/error_details_pb.js';
+import {
+    GetRequestSchema as StreamGetRequestSchema,
+    SubscribeRequestSchema,
+} from './gen/ts/store/v1/stream_pb.js';
 
 const QUERY_DETAIL_HEADER = 'x-store-query-detail-bin';
 
@@ -43,6 +48,16 @@ export interface QueryResultItem {
 
 export interface QueryResult {
     results: QueryResultItem[];
+}
+
+export interface StoreBatchEntry {
+    key: Uint8Array;
+    value: Uint8Array;
+}
+
+export interface StoreBatch {
+    sequenceNumber: bigint;
+    entries: StoreBatchEntry[];
 }
 
 function toUint8Array(value: Uint8Array | Buffer): Uint8Array {
@@ -109,6 +124,29 @@ function parseDetailFromHeaders(headers: Headers): Detail | undefined {
     } catch {
         return undefined;
     }
+}
+
+function isMissingBatchError(err: ConnectError): boolean {
+    return err.findDetails(ErrorInfoSchema).some(
+        (detail) =>
+            detail.domain === 'store.stream' &&
+            (detail.reason === 'BATCH_EVICTED' || detail.reason === 'BATCH_NOT_FOUND'),
+    );
+}
+
+function toStoreBatch(
+    response: {
+        sequenceNumber: bigint;
+        entries: { key: Uint8Array; value: Uint8Array }[];
+    },
+): StoreBatch {
+    return {
+        sequenceNumber: response.sequenceNumber,
+        entries: response.entries.map((entry) => ({
+            key: entry.key,
+            value: entry.value,
+        })),
+    };
 }
 
 export class StoreClient {
@@ -179,7 +217,7 @@ export class StoreClient {
         minSequenceNumber?: bigint,
     ): Promise<GetResult | null> {
         const effective = this.effectiveMinSequenceNumber(minSequenceNumber);
-        const req = create(GetRequestSchema, {
+        const req = create(QueryGetRequestSchema, {
             key,
             ...(effective !== undefined ? { minSequenceNumber: effective } : {}),
         });
@@ -299,6 +337,43 @@ export class StoreClient {
                 onTrailer: (t) => this.observeDetailFromHeaders(t),
             };
             return await this.client.query.reduce(req, callOpts);
+        } catch (e) {
+            mapConnectToHttpError(e);
+        }
+    }
+
+    async getBatch(sequenceNumber: bigint, options?: CallOptions): Promise<StoreBatch | null> {
+        const req = create(StreamGetRequestSchema, { sequenceNumber });
+        try {
+            const res = await this.client.stream.get(req, options);
+            this.observeSequenceNumber(res.sequenceNumber);
+            return toStoreBatch(res);
+        } catch (e) {
+            if (
+                e instanceof ConnectError &&
+                (isMissingBatchError(e) || e.code === Code.NotFound || e.code === Code.OutOfRange)
+            ) {
+                return null;
+            }
+            mapConnectToHttpError(e);
+        }
+    }
+
+    async *subscribe(
+        matchKeys: MessageInitShape<typeof MatchKeySchema>[],
+        sinceSequenceNumber?: bigint,
+        options?: CallOptions,
+    ): AsyncIterable<StoreBatch> {
+        const req = create(SubscribeRequestSchema, {
+            matchKeys,
+            ...(sinceSequenceNumber !== undefined ? { sinceSequenceNumber } : {}),
+        });
+        try {
+            const stream = this.client.stream.subscribe(req, options);
+            for await (const frame of stream) {
+                this.observeSequenceNumber(frame.sequenceNumber);
+                yield toStoreBatch(frame);
+            }
         } catch (e) {
             mapConnectToHttpError(e);
         }

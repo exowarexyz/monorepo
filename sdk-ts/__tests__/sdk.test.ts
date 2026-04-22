@@ -37,6 +37,14 @@ function encodeStoredRowInt64(value: bigint): Uint8Array {
     return new Uint8Array(buf);
 }
 
+function makeStreamMatchKey(prefix: string) {
+    return create(MatchKeySchema, {
+        reservedBits: 0,
+        prefix: 0,
+        payloadRegex: `(?s-u)^${prefix}.*$`,
+    });
+}
+
 describe('Exoware TS SDK', () => {
     let client: Client;
 
@@ -103,6 +111,66 @@ describe('Exoware TS SDK', () => {
                 expect(result).not.toBeNull();
                 expect(Buffer.from(result!.value)).toEqual(kv.value);
             }
+        });
+
+        it('should get a batch by sequence number', async () => {
+            const store = client.store();
+            const encoder = new TextEncoder();
+            const prefix = 'stream-getbatch-';
+            const kvs = [
+                { key: encoder.encode(`${prefix}a`), value: Buffer.from('ba') },
+                { key: encoder.encode(`${prefix}b`), value: Buffer.from('bb') },
+            ];
+
+            const sequenceNumber = await store.setMany(kvs);
+            const batch = await store.getBatch(sequenceNumber);
+
+            expect(batch).not.toBeNull();
+            expect(batch!.sequenceNumber).toBe(sequenceNumber);
+            expect(batch!.entries.map((entry) => Buffer.from(entry.key))).toEqual(
+                kvs.map((kv) => Buffer.from(kv.key)),
+            );
+            expect(batch!.entries.map((entry) => Buffer.from(entry.value))).toEqual(
+                kvs.map((kv) => Buffer.from(kv.value)),
+            );
+            expect(store.sequenceNumber).toBe(sequenceNumber);
+        });
+
+        it('should return null for a missing batch sequence number', async () => {
+            const store = client.store();
+            await store.set(new TextEncoder().encode('stream-missing-sentinel'), Buffer.from('x'));
+
+            const batch = await store.getBatch(10_000_000n);
+
+            expect(batch).toBeNull();
+        });
+
+        it('should subscribe to replayed matching batches', async () => {
+            const store = client.store();
+            const encoder = new TextEncoder();
+            const prefix = 'stream-subscribe-replay-';
+            const kvs = [
+                { key: encoder.encode(`${prefix}1`), value: Buffer.from('sa') },
+                { key: encoder.encode(`${prefix}2`), value: Buffer.from('sb') },
+            ];
+
+            const sequenceNumber = await store.setMany(kvs);
+            const batches = [];
+
+            for await (const batch of store.subscribe([makeStreamMatchKey(prefix)], sequenceNumber)) {
+                batches.push(batch);
+                break;
+            }
+
+            expect(batches).toHaveLength(1);
+            expect(batches[0].sequenceNumber).toBe(sequenceNumber);
+            expect(batches[0].entries.map((entry) => Buffer.from(entry.key))).toEqual(
+                kvs.map((kv) => Buffer.from(kv.key)),
+            );
+            expect(batches[0].entries.map((entry) => Buffer.from(entry.value))).toEqual(
+                kvs.map((kv) => Buffer.from(kv.value)),
+            );
+            expect(store.sequenceNumber).toBe(sequenceNumber);
         });
 
         it('should getMany', async () => {
