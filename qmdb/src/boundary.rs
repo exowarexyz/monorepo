@@ -51,7 +51,15 @@ fn grafted_to_ops_pos(grafted_pos: Position, grafting_height: u32) -> Position {
 ///   changed at this boundary
 ///
 /// `previous_operations` and `operations` are the cumulative ordered-op logs
-/// before and after the batch respectively, not just the delta batch itself.
+/// before and after one finalized local batch respectively, not just the delta
+/// batch itself. In the intended flow `operations` therefore includes the
+/// new batch's appended `CommitFloor`, and `previous_operations` is the exact
+/// cumulative prefix immediately before that batch was applied.
+///
+/// This function is not meant for arbitrary diffs between unrelated op slices;
+/// it assumes the caller is recovering the boundary rows for exactly one newly
+/// applied local batch.
+///
 /// `prove_at(location)` must return a current range proof plus the bitmap
 /// chunk for that exact `location`, taken from the same local DB state as
 /// `root`.
@@ -89,6 +97,7 @@ where
             previous_len
         )));
     }
+    validate_recovery_input(previous_operations, operations)?;
 
     let changed_chunks = changed_chunk_representatives::<K, V, N>(previous_operations, operations);
     let complete_chunks = operations.len() / bitmap_chunk_bits::<N>() as usize;
@@ -143,6 +152,54 @@ where
     })
 }
 
+fn validate_recovery_input<K, V>(
+    previous_operations: Option<&[QmdbOperation<K, V>]>,
+    operations: &[QmdbOperation<K, V>],
+) -> Result<(), QmdbError>
+where
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+    QmdbOperation<K, V>: Encode,
+{
+    if !matches!(operations.last(), Some(QmdbOperation::CommitFloor(_, _))) {
+        return Err(QmdbError::CorruptData(
+            "recover_boundary_state requires operations to end with CommitFloor".into(),
+        ));
+    }
+
+    let Some(previous) = previous_operations else {
+        return Ok(());
+    };
+
+    for (index, (expected, actual)) in previous.iter().zip(operations.iter()).enumerate() {
+        if expected.encode() != actual.encode() {
+            return Err(QmdbError::CorruptData(format!(
+                "recover_boundary_state requires previous_operations to be an exact prefix of operations; mismatch at location {index}"
+            )));
+        }
+    }
+
+    let delta = &operations[previous.len()..];
+    let commit_count = delta
+        .iter()
+        .filter(|operation| matches!(operation, QmdbOperation::CommitFloor(_, _)))
+        .count();
+    if commit_count != 1 {
+        return Err(QmdbError::CorruptData(format!(
+            "recover_boundary_state requires exactly one CommitFloor in the appended batch delta, found {commit_count}"
+        )));
+    }
+
+    if !matches!(delta.last(), Some(QmdbOperation::CommitFloor(_, _))) {
+        return Err(QmdbError::CorruptData(
+            "recover_boundary_state requires the appended batch delta to end with CommitFloor"
+                .into(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn changed_chunk_representatives<K, V, const N: usize>(
     previous_operations: Option<&[QmdbOperation<K, V>]>,
     operations: &[QmdbOperation<K, V>],
@@ -173,7 +230,9 @@ where
             QmdbOperation::CommitFloor(_, _) => None,
         })
         .collect::<BTreeSet<_>>();
-    let mut needs_previous_commit = previous_len > 0;
+    let mut needs_previous_commit = operations[previous_len..]
+        .iter()
+        .any(|operation| matches!(operation, QmdbOperation::CommitFloor(_, _)));
 
     for index in (0..previous.len()).rev() {
         let location = Location::new(index as u64);
@@ -269,6 +328,125 @@ impl<'a, H: Hasher> ProofVerifier<'a, H> {
             chunks,
             start_chunk_index,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::changed_chunk_representatives;
+    use commonware_storage::mmr::Location;
+    use commonware_storage::qmdb::any::ordered::{
+        variable::Operation as TestOperation, Update as OrderedUpdate,
+    };
+    use std::collections::BTreeMap;
+
+    fn update(key: &[u8], value: &[u8]) -> TestOperation<Vec<u8>, Vec<u8>> {
+        TestOperation::Update(OrderedUpdate {
+            key: key.to_vec(),
+            value: value.to_vec(),
+            next_key: Vec::new(),
+        })
+    }
+
+    fn commit(floor: u64) -> TestOperation<Vec<u8>, Vec<u8>> {
+        TestOperation::CommitFloor(None, Location::new(floor))
+    }
+
+    fn previous_ops() -> Vec<TestOperation<Vec<u8>, Vec<u8>>> {
+        let mut ops = vec![commit(0)];
+        for index in 1..8 {
+            ops.push(update(
+                format!("fill-{index}").as_bytes(),
+                format!("value-{index}").as_bytes(),
+            ));
+        }
+        ops.push(update(b"target", b"old"));
+        for index in 9..16 {
+            ops.push(update(
+                format!("fill-{index}").as_bytes(),
+                format!("value-{index}").as_bytes(),
+            ));
+        }
+        ops
+    }
+
+    #[test]
+    fn unchanged_old_commit_floor_chunk_is_not_reported_without_new_commit_floor() {
+        let previous = previous_ops();
+        let mut operations = previous.clone();
+        operations.push(update(b"target", b"new"));
+
+        let changed =
+            changed_chunk_representatives::<Vec<u8>, Vec<u8>, 1>(Some(&previous), &operations);
+
+        assert_eq!(
+            changed,
+            BTreeMap::from([(1u64, Location::new(8)), (2u64, Location::new(16)),])
+        );
+    }
+
+    #[test]
+    fn new_commit_floor_requires_previous_commit_floor_chunk() {
+        let previous = previous_ops();
+        let mut operations = previous.clone();
+        operations.push(update(b"target", b"new"));
+        operations.push(commit(16));
+
+        let changed =
+            changed_chunk_representatives::<Vec<u8>, Vec<u8>, 1>(Some(&previous), &operations);
+
+        assert_eq!(
+            changed,
+            BTreeMap::from([
+                (0u64, Location::new(0)),
+                (1u64, Location::new(8)),
+                (2u64, Location::new(16)),
+            ])
+        );
+    }
+
+    #[test]
+    fn rejects_inputs_that_do_not_end_with_commit_floor() {
+        let previous = previous_ops();
+        let mut operations = previous.clone();
+        operations.push(update(b"target", b"new"));
+
+        let err =
+            super::validate_recovery_input(Some(&previous), &operations).expect_err("must reject");
+        assert!(
+            err.to_string().contains("end with CommitFloor"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_delta_with_multiple_commit_floors() {
+        let previous = previous_ops();
+        let mut operations = previous.clone();
+        operations.push(commit(16));
+        operations.push(commit(17));
+
+        let err =
+            super::validate_recovery_input(Some(&previous), &operations).expect_err("must reject");
+        assert!(
+            err.to_string().contains("exactly one CommitFloor"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_non_prefix_previous_operations() {
+        let previous = previous_ops();
+        let mut operations = previous.clone();
+        operations[3] = update(b"mutated", b"value");
+        operations.push(commit(16));
+
+        let err =
+            super::validate_recovery_input(Some(&previous), &operations).expect_err("must reject");
+        assert!(
+            err.to_string().contains("exact prefix"),
+            "unexpected error: {err}"
+        );
     }
 }
 
