@@ -357,153 +357,6 @@ where
         Ok(checkpoint)
     }
 
-    async fn operation_range_proof_with_read_floor(
-        &self,
-        read_floor_sequence: u64,
-        watermark: Location,
-        start_location: Location,
-        max_locations: u32,
-    ) -> Result<VerifiedOperationRange<H::Digest, QmdbOperation<K, V>>, QmdbError> {
-        let session = self
-            .client
-            .create_session_with_sequence(read_floor_sequence);
-        let checkpoint = self
-            .operation_range_checkpoint_in_session(
-                &session,
-                watermark,
-                start_location,
-                max_locations,
-            )
-            .await?;
-        let operations = checkpoint
-            .encoded_operations
-            .iter()
-            .enumerate()
-            .map(|(offset, bytes)| {
-                let location = checkpoint.start_location + offset as u64;
-                QmdbOperation::<K, V>::decode_cfg(bytes.as_slice(), &self.op_cfg).map_err(|e| {
-                    QmdbError::CorruptData(format!(
-                        "failed to decode qmdb operation at location {location}: {e}"
-                    ))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(VerifiedOperationRange {
-            resume_sequence_number: Some(read_floor_sequence),
-            watermark: checkpoint.watermark,
-            root: checkpoint.root,
-            start_location: checkpoint.start_location,
-            operations,
-        })
-    }
-
-    /// Open a stream of verified operation ranges, one per uploaded batch.
-    ///
-    /// # What you get
-    ///
-    /// Each `Stream` item is a `VerifiedOperationRange<H::Digest, QmdbOperation<K, V>>`:
-    /// the MMR range proof has already been verified against the store's root
-    /// before the item is emitted, and the proof blob has been dropped.
-    /// Consumers work directly with `item.operations`.
-    ///
-    /// The emitted item also carries `item.resume_sequence_number`, the
-    /// latest store stream sequence consumed to make that batch readable. Use
-    /// `since = item.resume_sequence_number.unwrap() + 1` to resume after a
-    /// disconnect without replaying already-emitted batches.
-    ///
-    /// A batch becomes emittable only once **both** its presence row and a
-    /// watermark that covers its `latest_location` have landed. Each batch is
-    /// stamped with the smallest such watermark, so `item.watermark` is the
-    /// authority that published the batch — not a later, unrelated watermark.
-    ///
-    /// # `since` cursor
-    ///
-    /// `since` is the **store's stream sequence number** (the `sequence_number`
-    /// assigned to each store PUT), *not* a QMDB `Location` or batch index.
-    /// - `None`: start live from the next PUT; no replay.
-    /// - `Some(N)`: replay every retained store PUT with `sequence_number >= N`
-    ///   in ascending order, then continue live with no duplicates and no gaps.
-    /// - If `N` has been evicted by a batch-log prune, the first poll returns
-    ///   `Err(QmdbError::Stream(..))` carrying a `BATCH_EVICTED` detail.
-    ///
-    /// # Error recovery
-    ///
-    /// On transport errors (slow-client eviction, connection closed) the
-    /// stream yields `Err(QmdbError::Stream(..))`. To resume, resubscribe with
-    /// `since = last_item.resume_sequence_number.unwrap() + 1`; the batch log
-    /// replays the gap, then live resumes.
-    ///
-    /// Proof reads are performed in a serializable session pinned to the
-    /// later of the observed batch sequence and the authorizing watermark
-    /// sequence, so stream delivery cannot race ahead of query visibility.
-    ///
-    /// # Multiple subscribers
-    ///
-    /// Each call to `stream_batches` opens an independent store subscription;
-    /// running two clients against the same store with the same filter gets
-    /// two independent streams, not a shared one.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use std::sync::Arc;
-    /// # use futures::StreamExt;
-    /// # async fn demo(client: Arc<store_qmdb::OrderedClient<
-    /// #     commonware_cryptography::Sha256, Vec<u8>, Vec<u8>, 32,
-    /// # >>) -> Result<(), store_qmdb::QmdbError> {
-    /// let mut stream = client.stream_batches(None).await?;
-    /// while let Some(item) = stream.next().await {
-    ///     let verified = item?;
-    ///     // Persist `verified.resume_sequence_number` if you need a reconnect cursor.
-    ///     for op in &verified.operations {
-    ///         // handle already-verified op at `verified.watermark`
-    ///     }
-    /// }
-    /// # Ok(()) }
-    /// ```
-    pub async fn stream_batches(
-        self: std::sync::Arc<Self>,
-        since: Option<u64>,
-    ) -> Result<OrderedBatchStream<H, K, V>, QmdbError>
-    where
-        Self: 'static,
-        H: Send + Sync + 'static,
-        K: Send + Sync + 'static,
-        V: Send + Sync + 'static,
-        K::Cfg: Send + Sync,
-        V::Cfg: Send + Sync,
-    {
-        use crate::stream::driver::{self as drv, BatchProofStream};
-        use commonware_storage::mmr::Location;
-        use futures::FutureExt;
-        use std::sync::Arc;
-
-        let (classify, filter) = drv::unauthenticated_classify_and_filter();
-        let sub = drv::open_subscription(&self.client, filter, since).await?;
-
-        let build_proof: drv::BuildProof<VerifiedOperationRange<H::Digest, QmdbOperation<K, V>>> =
-            Arc::new(
-                move |read_floor_sequence: u64,
-                      watermark: Location,
-                      start: Location,
-                      count: u32| {
-                    let me = self.clone();
-                    async move {
-                        me.operation_range_proof_with_read_floor(
-                            read_floor_sequence,
-                            watermark,
-                            start,
-                            count,
-                        )
-                        .await
-                    }
-                    .boxed()
-                },
-            );
-
-        Ok(BatchProofStream::new(sub, classify, build_proof))
-    }
-
     /// Verified contiguous range of operations for the given variant.
     pub async fn operation_range_proof_for_variant(
         &self,
@@ -553,7 +406,6 @@ where
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(VerifiedVariantRange::Any(VerifiedOperationRange {
-                    resume_sequence_number: None,
                     watermark: checkpoint.watermark,
                     root: checkpoint.root,
                     start_location: checkpoint.start_location,
@@ -885,9 +737,3 @@ where
             .await
     }
 }
-
-/// Async stream of verified operation ranges, one per uploaded batch.
-/// See `OrderedClient::stream_batches`.
-pub type OrderedBatchStream<H, K, V> = crate::stream::driver::BatchProofStream<
-    VerifiedOperationRange<<H as Hasher>::Digest, QmdbOperation<K, V>>,
->;

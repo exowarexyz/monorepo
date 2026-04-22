@@ -22,11 +22,9 @@ commonware-storage = "2026.3.0"
 commonware-utils = "2026.3.0"
 connectrpc = { workspace = true }
 exoware-sdk-rs = { workspace = true }
-pin-project-lite = "0.2"
 regex = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tokio-stream = { workspace = true }
 
 [dev-dependencies]
 exoware-qmdb = { path = ".", features = ["test-utils"] }

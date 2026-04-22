@@ -216,13 +216,6 @@ where
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
 pub struct VerifiedOperationRange<D: Digest, Op> {
-    /// Latest store stream sequence that must be considered observed for this
-    /// range to be readable end-to-end.
-    ///
-    /// `stream_batches()` sets this to `Some(seq)` so callers can resume with
-    /// `since = seq + 1` after a disconnect. Direct proof queries set it to
-    /// `None` because they are not derived from a store stream cursor.
-    pub resume_sequence_number: Option<u64>,
     pub watermark: Location,
     pub root: D,
     pub start_location: Location,

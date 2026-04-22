@@ -2305,7 +2305,6 @@ dependencies = [
  "exoware-simulator",
  "futures",
  "hex",
- "pin-project-lite",
  "rand 0.8.5",
  "regex",
  "reqwest",
@@ -2313,7 +2312,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tokio-stream",
 ]
 
 [[package]]

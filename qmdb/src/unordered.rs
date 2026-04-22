@@ -1,5 +1,4 @@
 use std::marker::PhantomData;
-use std::sync::Arc;
 
 use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::Hasher;
@@ -160,44 +159,6 @@ where
         Ok(checkpoint)
     }
 
-    async fn operation_range_proof_with_read_floor(
-        &self,
-        read_floor_sequence: u64,
-        watermark: Location,
-        start_location: Location,
-        max_locations: u32,
-    ) -> Result<VerifiedOperationRange<H::Digest, UnorderedQmdbOperation<K, V>>, QmdbError> {
-        let session = self
-            .client
-            .create_session_with_sequence(read_floor_sequence);
-        let checkpoint = self
-            .operation_range_checkpoint_in_session(
-                &session,
-                watermark,
-                start_location,
-                max_locations,
-            )
-            .await?;
-        let mut operations = Vec::with_capacity(checkpoint.encoded_operations.len());
-        for (offset, value) in checkpoint.encoded_operations.iter().enumerate() {
-            let location = checkpoint.start_location + offset as u64;
-            let op = UnorderedQmdbOperation::<K, V>::decode_cfg(value.as_slice(), &self.op_cfg)
-                .map_err(|e| {
-                    QmdbError::CorruptData(format!(
-                        "failed to decode unordered operation at location {location}: {e}"
-                    ))
-                })?;
-            operations.push(op);
-        }
-        Ok(VerifiedOperationRange {
-            resume_sequence_number: Some(read_floor_sequence),
-            watermark: checkpoint.watermark,
-            root: checkpoint.root,
-            start_location: checkpoint.start_location,
-            operations,
-        })
-    }
-
     /// Verified contiguous range of operations.
     pub async fn operation_range_proof(
         &self,
@@ -220,64 +181,10 @@ where
             operations.push(op);
         }
         Ok(VerifiedOperationRange {
-            resume_sequence_number: None,
             watermark: checkpoint.watermark,
             root: checkpoint.root,
             start_location: checkpoint.start_location,
             operations,
         })
     }
-
-    /// Open a stream of verified unordered operation ranges, one per uploaded
-    /// batch. See [`OrderedClient::stream_batches`](crate::OrderedClient::stream_batches)
-    /// for the full contract — `since` cursor, per-batch watermark stamping,
-    /// auto-verification, and error recovery are identical. The only
-    /// difference is the operation type (`UnorderedQmdbOperation<K, V>`).
-    ///
-    /// Proof reads are performed in a serializable session pinned to the
-    /// later of the observed batch sequence and the authorizing watermark
-    /// sequence, so stream delivery cannot race ahead of query visibility.
-    pub async fn stream_batches(
-        self: Arc<Self>,
-        since: Option<u64>,
-    ) -> Result<UnorderedBatchStream<H, K, V>, QmdbError>
-    where
-        Self: 'static,
-        H: Send + Sync + 'static,
-        K: Send + Sync + 'static,
-        V: Send + Sync + 'static,
-        K::Cfg: Send + Sync,
-        V::Cfg: Send + Sync,
-    {
-        use crate::stream::driver::{self as drv, BatchProofStream};
-        use futures::FutureExt;
-
-        let (classify, filter) = drv::unauthenticated_classify_and_filter();
-        let sub = drv::open_subscription(&self.client, filter, since).await?;
-
-        let build_proof: drv::BuildProof<
-            VerifiedOperationRange<H::Digest, UnorderedQmdbOperation<K, V>>,
-        > = Arc::new(
-            move |read_floor_sequence: u64, watermark: Location, start: Location, count: u32| {
-                let me = self.clone();
-                async move {
-                    me.operation_range_proof_with_read_floor(
-                        read_floor_sequence,
-                        watermark,
-                        start,
-                        count,
-                    )
-                    .await
-                }
-                .boxed()
-            },
-        );
-
-        Ok(BatchProofStream::new(sub, classify, build_proof))
-    }
 }
-
-/// Async stream of verified operation ranges, one per uploaded batch.
-pub type UnorderedBatchStream<H, K, V> = crate::stream::driver::BatchProofStream<
-    VerifiedOperationRange<<H as Hasher>::Digest, UnorderedQmdbOperation<K, V>>,
->;

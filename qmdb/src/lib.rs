@@ -37,7 +37,7 @@ pub(crate) mod storage;
 mod immutable;
 mod keyless;
 mod ordered;
-mod stream;
+mod subscription;
 mod unordered;
 mod writer;
 

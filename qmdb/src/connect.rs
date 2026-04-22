@@ -23,7 +23,7 @@ use futures::{FutureExt, Stream};
 use regex::bytes::Regex;
 
 use crate::proof::{RawCurrentRangeProof, RawKeyValueProof, RawMmrProof, RawMultiProof};
-use crate::stream::driver::{self as drv, Classify, Family};
+use crate::subscription::{self as sub, Classify, Family};
 use crate::{OrderedClient, QmdbError};
 
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
@@ -447,8 +447,8 @@ where
                 Some(0) | None => None,
                 Some(value) => Some(value),
             };
-            let (classify, filter) = drv::unauthenticated_classify_and_filter();
-            let sub = drv::open_subscription(client.store_client(), filter, since)
+            let (classify, filter) = sub::ordered_classify_and_filter();
+            let sub = sub::open_store_subscription(client.store_client(), filter, since)
                 .await
                 .map_err(qmdb_error_to_connect)?;
             let stream = OrderedSubscribeStream::new(client, matcher, classify, sub);
