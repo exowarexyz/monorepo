@@ -2291,6 +2291,7 @@ name = "exoware-qmdb"
 version = "2026.4.0"
 dependencies = [
  "axum",
+ "buffa",
  "bytes",
  "commonware-codec",
  "commonware-cryptography",
@@ -2306,6 +2307,7 @@ dependencies = [
  "hex",
  "pin-project-lite",
  "rand 0.8.5",
+ "regex",
  "reqwest",
  "serde",
  "tempfile",

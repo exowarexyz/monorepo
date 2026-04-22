@@ -3,10 +3,10 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::{
     mmr::{self, iterator::PeakIterator, Location, Position, StandardHasher},
     qmdb::{
-        any::ordered::{variable::Operation as QmdbOperation, Update as QmdbUpdate},
+        any::ordered::variable::Operation as QmdbOperation,
         current::{
             ordered::db::KeyValueProof as CurrentKeyValueProof,
-            proof::RangeProof as CurrentRangeProof,
+            proof::{OperationProof as CurrentOperationProof, RangeProof as CurrentRangeProof},
         },
         operation::Key as QmdbKey,
         verify::verify_multi_proof,
@@ -108,6 +108,102 @@ impl<D: Digest> OperationRangeCheckpoint<D> {
             .zip(peak_digests)
             .map(|((pos, height), digest)| (pos, height, digest))
             .collect())
+    }
+}
+
+/// Stable mirror of the current ordered range-proof payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[must_use]
+pub struct RawCurrentRangeProof<D: Digest> {
+    pub proof: RawMmrProof<D>,
+    pub partial_chunk_digest: Option<D>,
+    pub ops_root: D,
+}
+
+impl<D: Digest> From<CurrentRangeProof<D>> for RawCurrentRangeProof<D> {
+    fn from(value: CurrentRangeProof<D>) -> Self {
+        Self {
+            proof: value.proof.into(),
+            partial_chunk_digest: value.partial_chunk_digest,
+            ops_root: value.ops_root,
+        }
+    }
+}
+
+impl<D: Digest> From<RawCurrentRangeProof<D>> for CurrentRangeProof<D> {
+    fn from(value: RawCurrentRangeProof<D>) -> Self {
+        Self {
+            proof: value.proof.into(),
+            partial_chunk_digest: value.partial_chunk_digest,
+            ops_root: value.ops_root,
+        }
+    }
+}
+
+impl<D: Digest + Clone> From<&RawCurrentRangeProof<D>> for CurrentRangeProof<D> {
+    fn from(value: &RawCurrentRangeProof<D>) -> Self {
+        Self {
+            proof: (&value.proof).into(),
+            partial_chunk_digest: value.partial_chunk_digest.clone(),
+            ops_root: value.ops_root.clone(),
+        }
+    }
+}
+
+/// Historical multi-proof plus the exact operations it authenticates.
+#[derive(Clone, Debug, PartialEq)]
+#[must_use]
+pub struct RawMultiProof<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> {
+    pub watermark: Location,
+    pub root: D,
+    pub proof: RawMmrProof<D>,
+    pub operations: Vec<(Location, QmdbOperation<K, V>)>,
+}
+
+impl<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> RawMultiProof<D, K, V>
+where
+    QmdbOperation<K, V>: Encode,
+{
+    pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
+        let mut hasher = StandardHasher::<H>::new();
+        let proof = mmr::Proof::from(&self.proof);
+        verify_multi_proof(&mut hasher, &proof, &self.operations, &self.root)
+    }
+}
+
+/// Stable mirror of the current ordered key-value proof payload.
+#[derive(Clone, Debug, PartialEq)]
+#[must_use]
+pub struct RawKeyValueProof<
+    D: Digest,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+    const N: usize,
+> {
+    pub watermark: Location,
+    pub root: D,
+    pub location: Location,
+    pub chunk: [u8; N],
+    pub range_proof: RawCurrentRangeProof<D>,
+    pub operation: QmdbOperation<K, V>,
+}
+
+impl<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync, const N: usize>
+    RawKeyValueProof<D, K, V, N>
+where
+    QmdbOperation<K, V>: Encode + Clone,
+{
+    pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
+        let QmdbOperation::Update(_) = &self.operation else {
+            return false;
+        };
+        let proof = CurrentOperationProof {
+            loc: self.location,
+            chunk: self.chunk,
+            range_proof: (&self.range_proof).into(),
+        };
+        let mut hasher = H::default();
+        proof.verify(&mut hasher, self.operation.clone(), &self.root)
     }
 }
 
@@ -218,13 +314,16 @@ pub(crate) struct MultiProofResult<D: Digest, K: QmdbKey + Codec, V: Codec + Clo
     pub operations: Vec<(Location, QmdbOperation<K, V>)>,
 }
 
-impl<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> MultiProofResult<D, K, V>
-where
-    QmdbOperation<K, V>: Encode,
+impl<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> From<MultiProofResult<D, K, V>>
+    for RawMultiProof<D, K, V>
 {
-    pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
-        let mut hasher = StandardHasher::<H>::new();
-        verify_multi_proof(&mut hasher, &self.proof, &self.operations, &self.root)
+    fn from(value: MultiProofResult<D, K, V>) -> Self {
+        Self {
+            watermark: value.watermark,
+            root: value.root,
+            proof: value.proof.into(),
+            operations: value.operations,
+        }
     }
 }
 
@@ -276,20 +375,16 @@ pub(crate) struct KeyValueProofResult<
 }
 
 impl<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync, const N: usize>
-    KeyValueProofResult<D, K, V, N>
-where
-    QmdbOperation<K, V>: Encode,
+    From<KeyValueProofResult<D, K, V, N>> for RawKeyValueProof<D, K, V, N>
 {
-    pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
-        let QmdbOperation::Update(update) = &self.operation else {
-            return false;
-        };
-        let operation = QmdbOperation::Update(QmdbUpdate {
-            key: update.key.clone(),
-            value: update.value.clone(),
-            next_key: self.proof.next_key.clone(),
-        });
-        let mut hasher = H::default();
-        self.proof.proof.verify(&mut hasher, operation, &self.root)
+    fn from(value: KeyValueProofResult<D, K, V, N>) -> Self {
+        Self {
+            watermark: value.watermark,
+            root: value.root,
+            location: value.proof.proof.loc,
+            chunk: value.proof.proof.chunk,
+            range_proof: value.proof.proof.range_proof.into(),
+            operation: value.operation,
+        }
     }
 }

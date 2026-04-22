@@ -27,6 +27,7 @@
 mod auth;
 mod boundary;
 pub(crate) mod codec;
+mod connect;
 mod core;
 pub mod error;
 pub mod proof;
@@ -45,8 +46,9 @@ pub use immutable::ImmutableClient;
 pub use keyless::KeylessClient;
 pub use ordered::OrderedClient;
 pub use proof::{
-    OperationRangeCheckpoint, RawMmrProof, VariantRoot, VerifiedCurrentRange, VerifiedKeyValue,
-    VerifiedMultiOperations, VerifiedOperationRange, VerifiedVariantRange,
+    OperationRangeCheckpoint, RawCurrentRangeProof, RawKeyValueProof, RawMmrProof, RawMultiProof,
+    VariantRoot, VerifiedCurrentRange, VerifiedKeyValue, VerifiedMultiOperations,
+    VerifiedOperationRange, VerifiedVariantRange,
 };
 pub use unordered::UnorderedClient;
 pub use writer::{
@@ -56,6 +58,7 @@ pub use writer::{
 };
 
 pub use boundary::recover_boundary_state;
+pub use connect::{ordered_connect_stack, OrderedConnect};
 
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};

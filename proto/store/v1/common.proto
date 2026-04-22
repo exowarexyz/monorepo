@@ -32,3 +32,15 @@ message MatchKey {
   // Regex applied to the payload portion of each key. Must be non-empty.
   string payload_regex = 3;
 }
+
+// Matches an uninterpreted byte key by exact value, prefix, or full-key regex.
+//
+// Intended for APIs that operate on decoded logical keys rather than store-row
+// `KeyCodec` families.
+message BytesMatchKey {
+  oneof kind {
+    bytes exact = 1;
+    bytes prefix = 2;
+    string regex = 3;
+  }
+}

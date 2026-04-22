@@ -2,6 +2,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=PROTO_GEN");
+    println!("cargo:rerun-if-changed=../proto");
+
     if std::env::var("PROTO_GEN").is_err() {
         return;
     }
@@ -23,6 +26,7 @@ fn main() {
             "store/v1/common.proto",
             "store/v1/compact.proto",
             "store/v1/ingest.proto",
+            "store/v1/qmdb.proto",
             "store/v1/query.proto",
             "store/v1/stream.proto",
         ])

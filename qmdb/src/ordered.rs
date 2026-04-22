@@ -7,11 +7,7 @@ use commonware_storage::{
     mmr::{verification, Location},
     qmdb::{
         any::ordered::variable::Operation as QmdbOperation,
-        current::{
-            ordered::db::KeyValueProof as CurrentKeyValueProof,
-            proof::{OperationProof as CurrentOperationProof, RangeProof as CurrentRangeProof},
-        },
-        operation::Key as QmdbKey,
+        current::proof::RangeProof as CurrentRangeProof, operation::Key as QmdbKey,
     },
 };
 use exoware_sdk_rs::keys::Key;
@@ -25,8 +21,8 @@ use crate::codec::{
 use crate::core::HistoricalOpsClientCore;
 use crate::error::QmdbError;
 use crate::proof::{
-    CurrentOperationRangeProofResult, KeyValueProofResult, MultiProofResult,
-    OperationRangeCheckpoint, VariantRoot, VerifiedCurrentRange, VerifiedKeyValue,
+    CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawCurrentRangeProof,
+    RawKeyValueProof, RawMultiProof, VariantRoot, VerifiedCurrentRange, VerifiedKeyValue,
     VerifiedMultiOperations, VerifiedOperationRange, VerifiedVariantRange,
 };
 use crate::storage::{KvCurrentStorage, KvMmrStorage};
@@ -141,26 +137,41 @@ where
         self.core().query_many_at(keys, max_location).await
     }
 
-    /// Verified multi-proof over a set of keys.
-    pub async fn multi_proof_at<Q: AsRef<[u8]>>(
+    pub(crate) fn store_client(&self) -> &StoreClient {
+        &self.client
+    }
+
+    pub(crate) fn decode_operation_bytes(
         &self,
+        location: Location,
+        bytes: &[u8],
+    ) -> Result<QmdbOperation<K, V>, QmdbError> {
+        QmdbOperation::<K, V>::decode_cfg(bytes, &self.op_cfg).map_err(|e| {
+            QmdbError::CorruptData(format!(
+                "failed to decode qmdb operation at location {location}: {e}"
+            ))
+        })
+    }
+
+    async fn multi_proof_raw_in_session<Q: AsRef<[u8]>>(
+        &self,
+        session: &SerializableReadSession,
         watermark: Location,
         keys: &[Q],
-    ) -> Result<VerifiedMultiOperations<H::Digest, K, V>, QmdbError> {
+    ) -> Result<RawMultiProof<H::Digest, K, V>, QmdbError> {
         if keys.is_empty() {
             return Err(QmdbError::EmptyProofRequest);
         }
 
-        let session = self.client.create_session();
         self.core()
-            .require_published_watermark(&session, watermark)
+            .require_published_watermark(session, watermark)
             .await?;
         let storage = KvMmrStorage::<H::Digest> {
-            session: &session,
+            session,
             mmr_size: mmr_size_for_watermark(watermark)?,
             _marker: PhantomData,
         };
-        let root = self.compute_ops_root(&session, watermark).await?;
+        let root = self.compute_ops_root(session, watermark).await?;
 
         let mut seen = BTreeSet::<Vec<u8>>::new();
         let mut locations = Vec::<Location>::with_capacity(keys.len());
@@ -193,7 +204,7 @@ where
                     key: key.as_ref().to_vec(),
                 });
             }
-            let operation = self.load_operation_at(&session, global_loc).await?;
+            let operation = self.load_operation_at(session, global_loc).await?;
             locations.push(global_loc);
             operations.push((global_loc, operation));
         }
@@ -203,10 +214,10 @@ where
         let proof = verification::multi_proof(&storage, &locations)
             .await
             .map_err(|e| QmdbError::CommonwareMmr(e.to_string()))?;
-        let raw = MultiProofResult {
+        let raw = RawMultiProof {
             watermark,
             root,
-            proof,
+            proof: proof.into(),
             operations,
         };
         if !raw.verify::<H>() {
@@ -214,6 +225,40 @@ where
                 "multi proof failed verification".to_string(),
             ));
         }
+        Ok(raw)
+    }
+
+    pub(crate) async fn multi_proof_raw_with_read_floor<Q: AsRef<[u8]>>(
+        &self,
+        read_floor_sequence: u64,
+        watermark: Location,
+        keys: &[Q],
+    ) -> Result<RawMultiProof<H::Digest, K, V>, QmdbError> {
+        let session = self
+            .client
+            .create_session_with_sequence(read_floor_sequence);
+        self.multi_proof_raw_in_session(&session, watermark, keys)
+            .await
+    }
+
+    /// Verified raw multi-proof over a set of keys.
+    pub async fn multi_proof_raw_at<Q: AsRef<[u8]>>(
+        &self,
+        watermark: Location,
+        keys: &[Q],
+    ) -> Result<RawMultiProof<H::Digest, K, V>, QmdbError> {
+        let session = self.client.create_session();
+        self.multi_proof_raw_in_session(&session, watermark, keys)
+            .await
+    }
+
+    /// Verified multi-proof over a set of keys.
+    pub async fn multi_proof_at<Q: AsRef<[u8]>>(
+        &self,
+        watermark: Location,
+        keys: &[Q],
+    ) -> Result<VerifiedMultiOperations<H::Digest, K, V>, QmdbError> {
+        let raw = self.multi_proof_raw_at(watermark, keys).await?;
         Ok(VerifiedMultiOperations {
             watermark: raw.watermark,
             root: raw.root,
@@ -576,25 +621,22 @@ where
         }
     }
 
-    /// Verified current-state proof for a single key. The returned
-    /// `operation` is the matching `Update`; its `next_key` is the value
-    /// the proof was verified against.
-    pub async fn key_value_proof_at<Q: AsRef<[u8]>>(
+    async fn key_value_proof_raw_in_session<Q: AsRef<[u8]>>(
         &self,
+        session: &SerializableReadSession,
         watermark: Location,
         key: Q,
-    ) -> Result<VerifiedKeyValue<H::Digest, K, V>, QmdbError> {
-        let session = self.client.create_session();
+    ) -> Result<RawKeyValueProof<H::Digest, K, V, N>, QmdbError> {
         self.core()
-            .require_published_watermark(&session, watermark)
+            .require_published_watermark(session, watermark)
             .await?;
         self.core()
-            .require_batch_boundary(&session, watermark)
+            .require_batch_boundary(session, watermark)
             .await?;
 
         let key_bytes = key.as_ref().to_vec();
         let Some((row_key, row_value)) = self
-            .load_latest_update_row(&session, watermark, key.as_ref())
+            .load_latest_update_row(session, watermark, key.as_ref())
             .await?
         else {
             return Err(QmdbError::ProofKeyNotFound {
@@ -619,32 +661,27 @@ where
             });
         }
 
-        let operation = self.load_operation_at(&session, location).await?;
-        let QmdbOperation::Update(update) = &operation else {
+        let operation = self.load_operation_at(session, location).await?;
+        let QmdbOperation::Update(_) = &operation else {
             return Err(QmdbError::KeyNotActive {
                 watermark,
                 key: key.as_ref().to_vec(),
             });
         };
         let range_proof = self
-            .build_current_range_proof(&session, watermark, location, location + 1)
+            .build_current_range_proof(session, watermark, location, location + 1)
             .await?;
         let chunk = self
-            .load_bitmap_chunk(&session, watermark, chunk_index_for_location::<N>(location))
+            .load_bitmap_chunk(session, watermark, chunk_index_for_location::<N>(location))
             .await?;
-        let root = self.load_current_boundary_root(&session, watermark).await?;
+        let root = self.load_current_boundary_root(session, watermark).await?;
 
-        let raw = KeyValueProofResult {
+        let raw = RawKeyValueProof {
             watermark,
             root,
-            proof: CurrentKeyValueProof {
-                proof: CurrentOperationProof {
-                    loc: location,
-                    chunk,
-                    range_proof,
-                },
-                next_key: update.next_key.clone(),
-            },
+            location,
+            chunk,
+            range_proof: RawCurrentRangeProof::from(range_proof),
             operation,
         };
         if !raw.verify::<H>() {
@@ -652,10 +689,33 @@ where
                 "key-value proof failed verification".to_string(),
             ));
         }
+        Ok(raw)
+    }
+
+    /// Verified raw current-state proof for a single key.
+    pub async fn key_value_proof_raw_at<Q: AsRef<[u8]>>(
+        &self,
+        watermark: Location,
+        key: Q,
+    ) -> Result<RawKeyValueProof<H::Digest, K, V, N>, QmdbError> {
+        let session = self.client.create_session();
+        self.key_value_proof_raw_in_session(&session, watermark, key)
+            .await
+    }
+
+    /// Verified current-state proof for a single key. The returned
+    /// `operation` is the matching `Update`; its `next_key` is the value
+    /// the proof was verified against.
+    pub async fn key_value_proof_at<Q: AsRef<[u8]>>(
+        &self,
+        watermark: Location,
+        key: Q,
+    ) -> Result<VerifiedKeyValue<H::Digest, K, V>, QmdbError> {
+        let raw = self.key_value_proof_raw_at(watermark, key).await?;
         Ok(VerifiedKeyValue {
             watermark: raw.watermark,
             root: raw.root,
-            location,
+            location: raw.location,
             operation: raw.operation,
         })
     }

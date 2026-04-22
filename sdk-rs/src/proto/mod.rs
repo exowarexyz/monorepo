@@ -43,6 +43,16 @@ pub mod store {
         }
     }
 
+    pub mod qmdb {
+        pub mod v1 {
+            #![allow(non_camel_case_types)]
+            #![allow(unused_imports)]
+            #![allow(clippy::derivable_impls)]
+            #![allow(clippy::match_single_binding)]
+            include!("../gen/store.v1.qmdb.rs");
+        }
+    }
+
     pub mod stream {
         pub mod v1 {
             #![allow(non_camel_case_types)]
@@ -94,6 +104,14 @@ pub mod query {
     #![allow(clippy::derivable_impls)]
     #![allow(clippy::match_single_binding)]
     pub use crate::store::query::v1::*;
+}
+
+pub mod qmdb {
+    #![allow(non_camel_case_types)]
+    #![allow(unused_imports)]
+    #![allow(clippy::derivable_impls)]
+    #![allow(clippy::match_single_binding)]
+    pub use crate::store::qmdb::v1::*;
 }
 
 pub mod stream {

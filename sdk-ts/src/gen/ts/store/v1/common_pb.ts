@@ -11,7 +11,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file store/v1/common.proto.
  */
 export const file_store_v1_common: GenFile = /*@__PURE__*/
-  fileDesc("ChVzdG9yZS92MS9jb21tb24ucHJvdG8SD3N0b3JlLmNvbW1vbi52MSIvCgdLdkVudHJ5EhUKA2tleRgBIAEoDEIIukgFegMY/gESDQoFdmFsdWUYAiABKAwiSAoITWF0Y2hLZXkSFQoNcmVzZXJ2ZWRfYml0cxgBIAEoDRIOCgZwcmVmaXgYAiABKA0SFQoNcGF5bG9hZF9yZWdleBgDIAEoCWIGcHJvdG8z", [file_buf_validate_validate]);
+  fileDesc("ChVzdG9yZS92MS9jb21tb24ucHJvdG8SD3N0b3JlLmNvbW1vbi52MSIvCgdLdkVudHJ5EhUKA2tleRgBIAEoDEIIukgFegMY/gESDQoFdmFsdWUYAiABKAwiSAoITWF0Y2hLZXkSFQoNcmVzZXJ2ZWRfYml0cxgBIAEoDRIOCgZwcmVmaXgYAiABKA0SFQoNcGF5bG9hZF9yZWdleBgDIAEoCSJLCg1CeXRlc01hdGNoS2V5Eg8KBWV4YWN0GAEgASgMSAASEAoGcHJlZml4GAIgASgMSAASDwoFcmVnZXgYAyABKAlIAEIGCgRraW5kYgZwcm90bzM", [file_buf_validate_validate]);
 
 /**
  * A raw key-value pair shared by store APIs that move complete rows without
@@ -84,4 +84,44 @@ export type MatchKey = Message<"store.common.v1.MatchKey"> & {
  */
 export const MatchKeySchema: GenMessage<MatchKey> = /*@__PURE__*/
   messageDesc(file_store_v1_common, 1);
+
+/**
+ * Matches an uninterpreted byte key by exact value, prefix, or full-key regex.
+ *
+ * Intended for APIs that operate on decoded logical keys rather than store-row
+ * `KeyCodec` families.
+ *
+ * @generated from message store.common.v1.BytesMatchKey
+ */
+export type BytesMatchKey = Message<"store.common.v1.BytesMatchKey"> & {
+  /**
+   * @generated from oneof store.common.v1.BytesMatchKey.kind
+   */
+  kind: {
+    /**
+     * @generated from field: bytes exact = 1;
+     */
+    value: Uint8Array;
+    case: "exact";
+  } | {
+    /**
+     * @generated from field: bytes prefix = 2;
+     */
+    value: Uint8Array;
+    case: "prefix";
+  } | {
+    /**
+     * @generated from field: string regex = 3;
+     */
+    value: string;
+    case: "regex";
+  } | { case: undefined; value?: undefined };
+};
+
+/**
+ * Describes the message store.common.v1.BytesMatchKey.
+ * Use `create(BytesMatchKeySchema)` to create a new message.
+ */
+export const BytesMatchKeySchema: GenMessage<BytesMatchKey> = /*@__PURE__*/
+  messageDesc(file_store_v1_common, 2);
 
