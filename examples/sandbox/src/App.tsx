@@ -35,7 +35,6 @@ function App() {
   const [storeClient, setStoreClient] = useState<StoreClient | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [notifications, setNotifications] = useState<Notification[]>([]);
-  const [observedSequenceNumber, setObservedSequenceNumber] = useState('0');
 
   // Store state
   const [storeKey, setStoreKey] = useState('');
@@ -72,7 +71,6 @@ function App() {
     const client = new Client(SIMULATOR_URL, TOKEN);
     const store = client.store();
     setStoreClient(store);
-    setObservedSequenceNumber(store.sequenceNumber.toString());
 
     testConnection(client).then((connected) => {
       if (!connected) {
@@ -97,10 +95,6 @@ function App() {
       streamAbortRef.current?.abort();
     };
   }, []);
-
-  const syncObservedSequenceNumber = (store: StoreClient) => {
-    setObservedSequenceNumber(store.sequenceNumber.toString());
-  };
 
   const showNotification = (type: 'success' | 'error', title: string, message: string) => {
     const id = Math.random().toString(36).slice(2, 11);
@@ -141,7 +135,6 @@ function App() {
       setIsSettingValue(true);
       try {
         const sequenceNumber = await storeClient.set(enc.encode(storeKey), Buffer.from(storeValue));
-        syncObservedSequenceNumber(storeClient);
         showNotification('success', 'Success', `Key "${storeKey}" set at sequence ${sequenceNumber}`);
         setStoreKey('');
         setStoreValue('');
@@ -165,7 +158,6 @@ function App() {
         const result = await storeClient.get(enc.encode(storeGetKey));
         setStoreGetValue(result);
         setKeyNotFound(result === null);
-        syncObservedSequenceNumber(storeClient);
         showNotification('success', 'Success', `Retrieved value for key "${storeGetKey}"`);
       } catch (e) {
         showNotification('error', 'Error', `Failed to get value: ${e}`);
@@ -190,7 +182,6 @@ function App() {
           queryLimit ? parseInt(queryLimit, 10) : undefined
         );
         setQueryResult(result);
-        syncObservedSequenceNumber(storeClient);
         showNotification('success', 'Success', `Query returned ${result.results.length} results`);
       } catch (e) {
         showNotification('error', 'Error', `Query failed: ${e}`);
@@ -213,7 +204,6 @@ function App() {
       const result = await storeClient.getBatch(sequenceNumber);
       setBatchResult(result);
       setBatchNotFound(result === null);
-      syncObservedSequenceNumber(storeClient);
       if (result) {
         showNotification('success', 'Batch Loaded', `Loaded batch ${sequenceNumber}`);
       } else {
@@ -266,7 +256,6 @@ function App() {
             signal: controller.signal
           })) {
             setStreamEvents((prev) => [batch, ...prev].slice(0, MAX_STREAM_EVENTS));
-            setObservedSequenceNumber(batch.sequenceNumber.toString());
             setIsConnected(true);
           }
         } catch (e) {
@@ -373,7 +362,6 @@ function App() {
       <div className="header">
         <div className="header-copy">
           <h1>Exoware API Sandbox</h1>
-          <p className="header-meta">Observed sequence: {observedSequenceNumber}</p>
         </div>
         <div className={`status-indicator ${isConnected ? 'status-connected' : 'status-disconnected'}`}>
           <span>●</span>

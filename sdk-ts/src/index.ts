@@ -1,5 +1,6 @@
 export { Client, type ClientOptions, type RetryConfig } from './client.js';
 export {
+    SerializableReadSession,
     StoreClient,
     TraversalMode,
     type GetResult,
