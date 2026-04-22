@@ -28,6 +28,12 @@
   border-bottom: 1px solid #f0f0f0;
 }
 
+.header-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
 .header h1 {
   font-size: 1.75rem;
   font-weight: 600;
@@ -35,16 +41,6 @@
   margin: 0;
   letter-spacing: -0.02em;
   line-height: 1.1;
-}
-
-.header p {
-  font-size: 1.25rem;
-  color: #666;
-  margin: 0 0 1.5rem 0;
-  font-weight: 400;
-  max-width: 600px;
-  margin-left: auto;
-  margin-right: auto;
 }
 
 /* Cards */
@@ -105,12 +101,22 @@
   min-width: 200px;
 }
 
+.form-group-wide {
+  flex: 2;
+}
+
 .form-group label {
   display: block;
   font-size: 0.875rem;
   font-weight: 500;
   color: #374151;
   margin-bottom: 0.5rem;
+}
+
+.section-note {
+  margin: 0 0 1rem 0;
+  color: #4b5563;
+  font-size: 0.875rem;
 }
 
 input[type="text"],
@@ -192,6 +198,12 @@ button {
   border-color: #b91c1c;
 }
 
+.button-row {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
 /* Results */
 .result {
   background: #f8fafc;
@@ -243,6 +255,35 @@ button {
   color: #000;
   font-weight: 600;
   margin-right: 0.5rem;
+}
+
+.result-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.result-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.75rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #fff;
+  word-break: break-word;
+}
+
+.stream-events {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.stream-event .result {
+  margin-top: 0;
 }
 
 .message-timestamp {
@@ -354,6 +395,10 @@ button {
   }
 
   .form-row {
+    flex-direction: column;
+  }
+
+  .button-row {
     flex-direction: column;
   }
 

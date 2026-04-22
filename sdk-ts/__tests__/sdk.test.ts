@@ -37,6 +37,14 @@ function encodeStoredRowInt64(value: bigint): Uint8Array {
     return new Uint8Array(buf);
 }
 
+function makeStreamMatchKey(prefix: string) {
+    return create(MatchKeySchema, {
+        reservedBits: 0,
+        prefix: 0,
+        payloadRegex: `(?s-u)^${prefix}.*$`,
+    });
+}
+
 describe('Exoware TS SDK', () => {
     let client: Client;
 
@@ -103,6 +111,64 @@ describe('Exoware TS SDK', () => {
                 expect(result).not.toBeNull();
                 expect(Buffer.from(result!.value)).toEqual(kv.value);
             }
+        });
+
+        it('should get a batch by sequence number', async () => {
+            const store = client.store();
+            const encoder = new TextEncoder();
+            const prefix = 'stream-getbatch-';
+            const kvs = [
+                { key: encoder.encode(`${prefix}a`), value: Buffer.from('ba') },
+                { key: encoder.encode(`${prefix}b`), value: Buffer.from('bb') },
+            ];
+
+            const sequenceNumber = await store.setMany(kvs);
+            const batch = await store.getBatch(sequenceNumber);
+
+            expect(batch).not.toBeNull();
+            expect(batch!.sequenceNumber).toBe(sequenceNumber);
+            expect(batch!.entries.map((entry) => Buffer.from(entry.key))).toEqual(
+                kvs.map((kv) => Buffer.from(kv.key)),
+            );
+            expect(batch!.entries.map((entry) => Buffer.from(entry.value))).toEqual(
+                kvs.map((kv) => Buffer.from(kv.value)),
+            );
+        });
+
+        it('should return null for a missing batch sequence number', async () => {
+            const store = client.store();
+            await store.set(new TextEncoder().encode('stream-missing-sentinel'), Buffer.from('x'));
+
+            const batch = await store.getBatch(10_000_000n);
+
+            expect(batch).toBeNull();
+        });
+
+        it('should subscribe to replayed matching batches', async () => {
+            const store = client.store();
+            const encoder = new TextEncoder();
+            const prefix = 'stream-subscribe-replay-';
+            const kvs = [
+                { key: encoder.encode(`${prefix}1`), value: Buffer.from('sa') },
+                { key: encoder.encode(`${prefix}2`), value: Buffer.from('sb') },
+            ];
+
+            const sequenceNumber = await store.setMany(kvs);
+            const batches = [];
+
+            for await (const batch of store.subscribe([makeStreamMatchKey(prefix)], sequenceNumber)) {
+                batches.push(batch);
+                break;
+            }
+
+            expect(batches).toHaveLength(1);
+            expect(batches[0].sequenceNumber).toBe(sequenceNumber);
+            expect(batches[0].entries.map((entry) => Buffer.from(entry.key))).toEqual(
+                kvs.map((kv) => Buffer.from(kv.key)),
+            );
+            expect(batches[0].entries.map((entry) => Buffer.from(entry.value))).toEqual(
+                kvs.map((kv) => Buffer.from(kv.value)),
+            );
         });
 
         it('should getMany', async () => {
@@ -247,17 +313,42 @@ describe('Exoware TS SDK', () => {
             expect(sumValue!.value.value).toBe(60n);
         });
 
-        it('should track sequence numbers from put', async () => {
+        it('should seed a serializable session from the first successful read', async () => {
             const store = client.store();
             const encoder = new TextEncoder();
+            const firstKey = encoder.encode('serializable-session-1');
+            const secondKey = encoder.encode('serializable-session-2');
 
-            const sn1 = await store.set(encoder.encode('sn-test-1'), Buffer.from('v1'));
-            expect(sn1).toBeGreaterThan(0n);
-            expect(store.sequenceNumber).toBe(sn1);
+            const sn1 = await store.set(firstKey, Buffer.from('v1'));
+            const session = store.createSession();
+            expect(session.fixedSequence()).toBeUndefined();
 
-            const sn2 = await store.set(encoder.encode('sn-test-2'), Buffer.from('v2'));
+            const first = await session.get(firstKey);
+            expect(first).not.toBeNull();
+            expect(Buffer.from(first!.value)).toEqual(Buffer.from('v1'));
+            expect(session.fixedSequence()).toBe(sn1);
+
+            const sn2 = await store.set(secondKey, Buffer.from('v2'));
             expect(sn2).toBeGreaterThan(sn1);
-            expect(store.sequenceNumber).toBe(sn2);
+
+            const second = await session.get(secondKey);
+            expect(second).not.toBeNull();
+            expect(Buffer.from(second!.value)).toEqual(Buffer.from('v2'));
+            expect(session.fixedSequence()).toBe(sn1);
+        });
+
+        it('should honor an explicit serializable session floor', async () => {
+            const store = client.store();
+            const session = store.createSessionWithSequence(10_000_000n);
+
+            expect(session.fixedSequence()).toBe(10_000_000n);
+            await expect(
+                session.get(new TextEncoder().encode('serializable-floor-test')),
+            ).rejects.toMatchObject({
+                name: 'HttpError',
+                status: 409,
+            });
+            expect(session.fixedSequence()).toBe(10_000_000n);
         });
 
         describe('retry config', () => {
