@@ -318,7 +318,7 @@ impl<Out: Send + 'static> Stream for BatchProofStream<Out> {
             // 4. Classify every entry in the frame and feed the accumulator.
             for entry in &frame.entries {
                 let SubscriptionEntry { key, value } = entry;
-                if let Some((family, location)) = (this.classify)(&key, value.as_ref()) {
+                if let Some((family, location)) = (this.classify)(key, value.as_ref()) {
                     this.acc
                         .ingest_entry(family, location, frame.sequence_number);
                 }

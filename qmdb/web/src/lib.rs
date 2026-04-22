@@ -143,18 +143,23 @@ pub mod proof;
 pub mod core_stream;
 
 #[path = "../../src/auth.rs"]
+#[allow(dead_code)]
 mod auth;
 #[path = "../../src/core.rs"]
+#[allow(dead_code)]
 mod core;
 #[path = "../../src/keyless.rs"]
+#[allow(dead_code)]
 mod keyless;
 #[path = "../../src/ordered.rs"]
+#[allow(dead_code)]
 mod ordered;
 #[path = "../../src/storage.rs"]
 mod storage;
 #[path = "../../src/stream/driver.rs"]
 pub mod stream_driver;
 #[path = "../../src/unordered.rs"]
+#[allow(dead_code)]
 mod unordered;
 
 pub mod stream {

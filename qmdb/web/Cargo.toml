@@ -19,7 +19,6 @@ commonware-cryptography = "2026.3.0"
 commonware-storage = "2026.3.0"
 commonware-utils = "2026.3.0"
 futures = { workspace = true }
-gloo-timers = { version = "0.3", features = ["futures"] }
 js-sys = "0.3"
 pin-project-lite = "0.2"
 send_wrapper = "0.4"
@@ -36,4 +35,3 @@ store-qmdb-native = { package = "exoware-qmdb", path = ".." }
 exoware-simulator = { path = "../../examples/simulator" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
-wasm-bindgen-test = "0.3"
