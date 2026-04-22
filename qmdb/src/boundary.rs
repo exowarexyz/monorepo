@@ -331,6 +331,72 @@ impl<'a, H: Hasher> ProofVerifier<'a, H> {
     }
 }
 
+impl<H: Hasher> mmr::hasher::Hasher for ProofVerifier<'_, H> {
+    type Digest = H::Digest;
+    type Inner = H;
+
+    fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> Self::Digest {
+        self.inner.leaf_digest(pos, element)
+    }
+
+    fn node_digest(
+        &mut self,
+        pos: Position,
+        left: &Self::Digest,
+        right: &Self::Digest,
+    ) -> Self::Digest {
+        match position_height(pos).cmp(&self.grafting_height) {
+            std::cmp::Ordering::Less | std::cmp::Ordering::Greater => {
+                self.inner.node_digest(pos, left, right)
+            }
+            std::cmp::Ordering::Equal => {
+                let ops_subtree_root = self.inner.node_digest(pos, left, right);
+                let chunk_idx = ops_pos_to_chunk_idx(pos, self.grafting_height);
+                let Some(local_idx) = chunk_idx
+                    .checked_sub(self.start_chunk_index)
+                    .filter(|index| *index < self.chunks.len() as u64)
+                    .map(|index| index as usize)
+                else {
+                    return ops_subtree_root;
+                };
+                let chunk = self.chunks[local_idx];
+                if chunk.iter().all(|&byte| byte == 0) {
+                    ops_subtree_root
+                } else {
+                    self.inner.inner().update(chunk);
+                    self.inner.inner().update(&ops_subtree_root);
+                    self.inner.inner().finalize()
+                }
+            }
+        }
+    }
+
+    fn root<'a>(
+        &mut self,
+        leaves: Location,
+        peak_digests: impl Iterator<Item = &'a Self::Digest>,
+    ) -> Self::Digest {
+        self.inner.root(leaves, peak_digests)
+    }
+
+    fn digest(&mut self, data: &[u8]) -> Self::Digest {
+        self.inner.digest(data)
+    }
+
+    fn inner(&mut self) -> &mut Self::Inner {
+        self.inner.inner()
+    }
+
+    fn fork(&self) -> impl mmr::hasher::Hasher<Digest = Self::Digest> {
+        Self {
+            inner: StandardHasher::<H>::new(),
+            grafting_height: self.grafting_height,
+            chunks: self.chunks.clone(),
+            start_chunk_index: self.start_chunk_index,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::changed_chunk_representatives;
@@ -447,71 +513,5 @@ mod tests {
             err.to_string().contains("exact prefix"),
             "unexpected error: {err}"
         );
-    }
-}
-
-impl<H: Hasher> mmr::hasher::Hasher for ProofVerifier<'_, H> {
-    type Digest = H::Digest;
-    type Inner = H;
-
-    fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> Self::Digest {
-        self.inner.leaf_digest(pos, element)
-    }
-
-    fn node_digest(
-        &mut self,
-        pos: Position,
-        left: &Self::Digest,
-        right: &Self::Digest,
-    ) -> Self::Digest {
-        match position_height(pos).cmp(&self.grafting_height) {
-            std::cmp::Ordering::Less | std::cmp::Ordering::Greater => {
-                self.inner.node_digest(pos, left, right)
-            }
-            std::cmp::Ordering::Equal => {
-                let ops_subtree_root = self.inner.node_digest(pos, left, right);
-                let chunk_idx = ops_pos_to_chunk_idx(pos, self.grafting_height);
-                let Some(local_idx) = chunk_idx
-                    .checked_sub(self.start_chunk_index)
-                    .filter(|index| *index < self.chunks.len() as u64)
-                    .map(|index| index as usize)
-                else {
-                    return ops_subtree_root;
-                };
-                let chunk = self.chunks[local_idx];
-                if chunk.iter().all(|&byte| byte == 0) {
-                    ops_subtree_root
-                } else {
-                    self.inner.inner().update(chunk);
-                    self.inner.inner().update(&ops_subtree_root);
-                    self.inner.inner().finalize()
-                }
-            }
-        }
-    }
-
-    fn root<'a>(
-        &mut self,
-        leaves: Location,
-        peak_digests: impl Iterator<Item = &'a Self::Digest>,
-    ) -> Self::Digest {
-        self.inner.root(leaves, peak_digests)
-    }
-
-    fn digest(&mut self, data: &[u8]) -> Self::Digest {
-        self.inner.digest(data)
-    }
-
-    fn inner(&mut self) -> &mut Self::Inner {
-        self.inner.inner()
-    }
-
-    fn fork(&self) -> impl mmr::hasher::Hasher<Digest = Self::Digest> {
-        Self {
-            inner: StandardHasher::<H>::new(),
-            grafting_height: self.grafting_height,
-            chunks: self.chunks.clone(),
-            start_chunk_index: self.start_chunk_index,
-        }
     }
 }
