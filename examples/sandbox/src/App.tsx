@@ -268,8 +268,8 @@ function App() {
         } finally {
           if (streamAbortRef.current === controller) {
             streamAbortRef.current = null;
+            setIsSubscribing(false);
           }
-          setIsSubscribing(false);
         }
       })();
 
