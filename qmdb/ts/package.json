@@ -23,7 +23,7 @@
     "README.md"
   ],
   "scripts": {
-    "build:wasm": "CC=/opt/homebrew/opt/llvm/bin/clang AR=/opt/homebrew/opt/llvm/bin/llvm-ar CARGO_TARGET_DIR=/tmp/exoware-codex-target-qmdb-wasm wasm-pack build ../wasm --target web --mode no-install --no-opt --out-dir ../ts/src/generated/wasm --out-name exoware_qmdb_wasm",
+    "build:wasm": "wasm-pack build ../wasm --target web --mode no-install --no-opt --out-dir ../ts/src/generated/wasm --out-name exoware_qmdb_wasm",
     "build": "npm run build:wasm && tsc && rm -rf dist/generated && mkdir -p dist/generated && cp -R src/generated/wasm dist/generated/wasm",
     "lint": "tsc --noEmit",
     "prepublishOnly": "npm run build"
