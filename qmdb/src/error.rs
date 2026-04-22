@@ -1,6 +1,8 @@
 use commonware_storage::mmr::Location;
 use exoware_sdk_rs::ClientError;
 
+use crate::QmdbVariant;
+
 #[derive(Debug, thiserror::Error)]
 pub enum QmdbError {
     #[error(transparent)]
@@ -32,6 +34,8 @@ pub enum QmdbError {
     CurrentProofRequiresBatchBoundary { location: Location },
     #[error("current boundary state has not been uploaded for batch location {location}")]
     CurrentBoundaryStateMissing { location: Location },
+    #[error("requested {variant:?} root was not found: {root:?}")]
+    ProofRootNotFound { variant: QmdbVariant, root: Vec<u8> },
     #[error("range proof start {start} is out of bounds for watermark with {count} leaves")]
     RangeStartOutOfBounds { start: Location, count: Location },
     #[error("encoded value exceeds store value limit ({len} > {max})")]

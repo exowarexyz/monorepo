@@ -110,22 +110,65 @@ where
         variant: QmdbVariant,
     ) -> Result<VariantRoot<H::Digest>, QmdbError> {
         let session = self.client.create_session();
+        self.root_for_variant_in_session(&session, watermark, variant)
+            .await
+    }
+
+    async fn root_for_variant_in_session(
+        &self,
+        session: &SerializableReadSession,
+        watermark: Location,
+        variant: QmdbVariant,
+    ) -> Result<VariantRoot<H::Digest>, QmdbError> {
         self.core()
-            .require_published_watermark(&session, watermark)
+            .require_published_watermark(session, watermark)
             .await?;
         let root = match variant {
-            QmdbVariant::Any => self.compute_ops_root(&session, watermark).await?,
+            QmdbVariant::Any => self.compute_ops_root(session, watermark).await?,
             QmdbVariant::Current => {
                 self.core()
-                    .require_batch_boundary(&session, watermark)
+                    .require_batch_boundary(session, watermark)
                     .await?;
-                self.load_current_boundary_root(&session, watermark).await?
+                self.load_current_boundary_root(session, watermark).await?
             }
         };
         Ok(VariantRoot {
             watermark,
             variant,
             root,
+        })
+    }
+
+    pub async fn resolve_watermark_for_root(
+        &self,
+        root: &H::Digest,
+        variant: QmdbVariant,
+    ) -> Result<Location, QmdbError> {
+        let session = self.client.create_session();
+        let Some(latest) = self.core().read_latest_watermark(&session).await? else {
+            return Err(QmdbError::ProofRootNotFound {
+                variant,
+                root: root.encode().to_vec(),
+            });
+        };
+
+        for raw in (0..=*latest).rev() {
+            let watermark = Location::new(raw);
+            match self
+                .root_for_variant_in_session(&session, watermark, variant)
+                .await
+            {
+                Ok(found) if found.root == *root => return Ok(watermark),
+                Ok(_) => {}
+                Err(QmdbError::CurrentProofRequiresBatchBoundary { .. })
+                    if variant == QmdbVariant::Current => {}
+                Err(err) => return Err(err),
+            }
+        }
+
+        Err(QmdbError::ProofRootNotFound {
+            variant,
+            root: root.encode().to_vec(),
         })
     }
 

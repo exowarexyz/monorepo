@@ -21,7 +21,7 @@ use connectrpc::client::{ClientConfig, ClientTransport, ServerStream};
 use connectrpc::ConnectError;
 use exoware_sdk_rs::proto::PreferZstdHttpClient;
 use exoware_sdk_rs::store::qmdb::v1::{
-    CurrentKeyValueProof, GetRequest, HistoricalMultiProof, HistoricalRangeProof,
+    CurrentKeyValueProof, GetManyRequest, GetRequest, HistoricalMultiProof, HistoricalRangeProof,
     ImmutableRangeServiceClient, KeylessRangeServiceClient, OrderedRangeServiceClient,
     OrderedServiceClient, RangeSubscribeRequest, RangeSubscribeResponseView, SubscribeRequest,
     SubscribeResponseView, UnorderedRangeServiceClient,
@@ -147,6 +147,33 @@ where
             root: raw.root,
             location: raw.location,
             operation: raw.operation,
+        })
+    }
+
+    pub async fn get_many(
+        &self,
+        request: GetManyRequest,
+    ) -> Result<VerifiedMultiOperations<H::Digest, K, V>, QmdbError> {
+        let response = self
+            .rpc
+            .get_many(request)
+            .await
+            .map_err(connect_error_to_qmdb)?
+            .into_view()
+            .to_owned_message();
+        let proof = response.proof.as_option().ok_or_else(|| {
+            QmdbError::CorruptData("qmdb get_many response missing proof".to_string())
+        })?;
+        let raw = raw_multi_from_proto::<H, K, V>(proof, self.op_cfg.as_ref())?;
+        if !raw.verify::<H>() {
+            return Err(QmdbError::CorruptData(
+                "many-key proof failed verification".to_string(),
+            ));
+        }
+        Ok(VerifiedMultiOperations {
+            watermark: raw.watermark,
+            root: raw.root,
+            operations: raw.operations,
         })
     }
 }

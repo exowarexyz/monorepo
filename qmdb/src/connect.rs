@@ -22,7 +22,8 @@ use connectrpc::{ConnectError, ConnectRpcService, Context, ErrorCode, Limits};
 use exoware_sdk_rs::store::common::v1::bytes_match_key::KindView as ProtoBytesMatchKeyKindView;
 use exoware_sdk_rs::store::qmdb::v1::{
     CurrentKeyValueProof as ProtoCurrentKeyValueProof, CurrentRangeProof as ProtoCurrentRangeProof,
-    GetRequestView, GetResponse, HistoricalMultiProof as ProtoHistoricalMultiProof,
+    GetManyRequestView, GetManyResponse, GetRequestView, GetResponse,
+    HistoricalMultiProof as ProtoHistoricalMultiProof,
     HistoricalRangeProof as ProtoHistoricalRangeProof, ImmutableRangeService,
     ImmutableRangeServiceServer, KeylessRangeService, KeylessRangeServiceServer,
     MmrProof as ProtoMmrProof, MultiProofOperation as ProtoMultiProofOperation,
@@ -38,7 +39,9 @@ use crate::proof::{
     OperationRangeCheckpoint, RawCurrentRangeProof, RawKeyValueProof, RawMmrProof, RawMultiProof,
 };
 use crate::subscription::{self as sub, Classify, Family};
-use crate::{ImmutableClient, KeylessClient, OrderedClient, QmdbError, UnorderedClient};
+use crate::{
+    ImmutableClient, KeylessClient, OrderedClient, QmdbError, QmdbVariant, UnorderedClient,
+};
 
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
 
@@ -66,9 +69,9 @@ fn qmdb_error_to_connect(err: QmdbError) -> ConnectError {
         | QmdbError::EncodedValueTooLarge { .. }
         | QmdbError::SortableKeyTooLarge { .. } => ConnectError::invalid_argument(err.to_string()),
         QmdbError::WatermarkTooLow { .. } => ConnectError::out_of_range(err.to_string()),
-        QmdbError::ProofKeyNotFound { .. } | QmdbError::KeyNotActive { .. } => {
-            ConnectError::not_found(err.to_string())
-        }
+        QmdbError::ProofKeyNotFound { .. }
+        | QmdbError::KeyNotActive { .. }
+        | QmdbError::ProofRootNotFound { .. } => ConnectError::not_found(err.to_string()),
         QmdbError::CurrentProofRequiresBatchBoundary { .. }
         | QmdbError::CurrentBoundaryStateMissing { .. } => {
             ConnectError::failed_precondition(err.to_string())
@@ -145,6 +148,24 @@ fn operation_range_checkpoint_to_proto<D: commonware_cryptography::Digest>(
         proof: Some(raw_mmr_proof_to_proto(&checkpoint.proof)).into(),
         encoded_operations: checkpoint.encoded_operations.clone(),
         ..Default::default()
+    }
+}
+
+fn request_root_to_digest<H: Hasher>(
+    root: &[u8],
+    variant: QmdbVariant,
+) -> Result<H::Digest, ConnectError> {
+    crate::codec::decode_digest(root, format!("{variant:?} root"))
+        .map_err(|err| ConnectError::invalid_argument(err.to_string()))
+}
+
+fn require_root_bytes(root: &[u8], label: &str) -> Result<(), ConnectError> {
+    if root.is_empty() {
+        Err(ConnectError::invalid_argument(format!(
+            "{label} requires a non-empty root"
+        )))
+    } else {
+        Ok(())
     }
 }
 
@@ -758,16 +779,12 @@ where
         let client = self.client.clone();
         async move {
             let key = request.key.to_vec();
-            let watermark = match request.watermark {
-                Some(watermark) => Location::new(watermark),
-                None => client
-                    .writer_location_watermark()
-                    .await
-                    .map_err(qmdb_error_to_connect)?
-                    .ok_or_else(|| {
-                        ConnectError::failed_precondition("ordered qmdb has no published watermark")
-                    })?,
-            };
+            require_root_bytes(request.root, "qmdb get")?;
+            let root = request_root_to_digest::<H>(request.root, QmdbVariant::Current)?;
+            let watermark = client
+                .resolve_watermark_for_root(&root, QmdbVariant::Current)
+                .await
+                .map_err(qmdb_error_to_connect)?;
             let proof = client
                 .key_value_proof_raw_at::<&[u8]>(watermark, key.as_slice())
                 .await
@@ -775,6 +792,34 @@ where
             Ok((
                 GetResponse {
                     proof: Some(raw_key_value_proof_to_proto(&proof)).into(),
+                    ..Default::default()
+                },
+                ctx,
+            ))
+        }
+    }
+
+    fn get_many(
+        &self,
+        ctx: Context,
+        request: buffa::view::OwnedView<GetManyRequestView<'static>>,
+    ) -> impl Future<Output = Result<(GetManyResponse, Context), ConnectError>> + Send {
+        let client = self.client.clone();
+        async move {
+            require_root_bytes(request.root, "qmdb get_many")?;
+            let root = request_root_to_digest::<H>(request.root, QmdbVariant::Any)?;
+            let watermark = client
+                .resolve_watermark_for_root(&root, QmdbVariant::Any)
+                .await
+                .map_err(qmdb_error_to_connect)?;
+            let keys: Vec<Vec<u8>> = request.keys.iter().map(|key| key.to_vec()).collect();
+            let proof = client
+                .multi_proof_raw_at(watermark, &keys)
+                .await
+                .map_err(qmdb_error_to_connect)?;
+            Ok((
+                GetManyResponse {
+                    proof: Some(raw_multi_proof_to_proto(&proof)).into(),
                     ..Default::default()
                 },
                 ctx,

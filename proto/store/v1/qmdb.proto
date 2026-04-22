@@ -15,6 +15,7 @@ import "store/v1/common.proto";
 service OrderedService {
   rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
   rpc Get(GetRequest) returns (GetResponse);
+  rpc GetMany(GetManyRequest) returns (GetManyResponse);
 }
 
 // Range-checkpoint streaming over the ordered historical op log.
@@ -64,9 +65,21 @@ message GetRequest {
   // Raw logical QMDB key (`K::as_ref()` bytes), not a store row key.
   bytes key = 1;
 
-  // Requested ordered-QMDB watermark. When unset, the server resolves the
-  // latest published watermark.
-  optional uint64 watermark = 2;
+  // Requested ordered-QMDB current root. The server resolves the batch
+  // watermark whose current root matches `root`.
+  bytes root = 2;
+}
+
+// Historical key proof request for one or more logical keys.
+message GetManyRequest {
+  // Raw logical QMDB keys (`K::as_ref()` bytes), not store row keys.
+  repeated bytes keys = 1
+    [(buf.validate.field).repeated.min_items = 1,
+     (buf.validate.field).repeated.max_items = 1024];
+
+  // Requested ordered-QMDB historical ops root. The server resolves
+  // the watermark whose historical root matches `root`.
+  bytes root = 2;
 }
 
 // Stable mirror of an MMR proof payload.
@@ -132,4 +145,9 @@ message RangeSubscribeResponse {
 // Unary current key proof response.
 message GetResponse {
   CurrentKeyValueProof proof = 1;
+}
+
+// Unary historical many-key proof response.
+message GetManyResponse {
+  HistoricalMultiProof proof = 1;
 }

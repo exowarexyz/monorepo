@@ -576,16 +576,16 @@ pub struct GetRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
     pub key: ::buffa::alloc::vec::Vec<u8>,
-    /// Requested ordered-QMDB watermark. When unset, the server resolves the
-    /// latest published watermark.
+    /// Requested ordered-QMDB current root. The server resolves the batch
+    /// watermark whose current root matches `root`.
     ///
-    /// Field 2: `watermark`
+    /// Field 2: `root`
     #[serde(
-        rename = "watermark",
-        with = "::buffa::json_helpers::opt_uint64",
-        skip_serializing_if = "Option::is_none"
+        rename = "root",
+        with = "::buffa::json_helpers::bytes",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
-    pub watermark: Option<u64>,
+    pub root: ::buffa::alloc::vec::Vec<u8>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -597,7 +597,7 @@ impl ::core::fmt::Debug for GetRequest {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         f.debug_struct("GetRequest")
             .field("key", &self.key)
-            .field("watermark", &self.watermark)
+            .field("root", &self.root)
             .finish()
     }
 }
@@ -627,8 +627,8 @@ impl ::buffa::Message for GetRequest {
         if !self.key.is_empty() {
             size += 1u32 + ::buffa::types::bytes_encoded_len(&self.key) as u32;
         }
-        if let Some(v) = self.watermark {
-            size += 1u32 + ::buffa::types::uint64_encoded_len(v) as u32;
+        if !self.root.is_empty() {
+            size += 1u32 + ::buffa::types::bytes_encoded_len(&self.root) as u32;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
         self.__buffa_cached_size.set(size);
@@ -645,10 +645,13 @@ impl ::buffa::Message for GetRequest {
                 .encode(buf);
             ::buffa::types::encode_bytes(&self.key, buf);
         }
-        if let Some(v) = self.watermark {
-            ::buffa::encoding::Tag::new(2u32, ::buffa::encoding::WireType::Varint)
+        if !self.root.is_empty() {
+            ::buffa::encoding::Tag::new(
+                    2u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
                 .encode(buf);
-            ::buffa::types::encode_uint64(v, buf);
+            ::buffa::types::encode_bytes(&self.root, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -674,16 +677,14 @@ impl ::buffa::Message for GetRequest {
                 ::buffa::types::merge_bytes(&mut self.key, buf)?;
             }
             2u32 => {
-                if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                     return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
                         field_number: 2u32,
-                        expected: 0u8,
+                        expected: 2u8,
                         actual: tag.wire_type() as u8,
                     });
                 }
-                self.watermark = ::core::option::Option::Some(
-                    ::buffa::types::decode_uint64(buf)?,
-                );
+                ::buffa::types::merge_bytes(&mut self.root, buf)?;
             }
             _ => {
                 self.__buffa_unknown_fields
@@ -697,7 +698,7 @@ impl ::buffa::Message for GetRequest {
     }
     fn clear(&mut self) {
         self.key.clear();
-        self.watermark = ::core::option::Option::None;
+        self.root.clear();
         self.__buffa_unknown_fields.clear();
         self.__buffa_cached_size.set(0);
     }
@@ -738,11 +739,11 @@ pub struct GetRequestView<'a> {
     ///
     /// Field 1: `key`
     pub key: &'a [u8],
-    /// Requested ordered-QMDB watermark. When unset, the server resolves the
-    /// latest published watermark.
+    /// Requested ordered-QMDB current root. The server resolves the batch
+    /// watermark whose current root matches `root`.
     ///
-    /// Field 2: `watermark`
-    pub watermark: ::core::option::Option<u64>,
+    /// Field 2: `root`
+    pub root: &'a [u8],
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> GetRequestView<'a> {
@@ -794,14 +795,14 @@ impl<'a> GetRequestView<'a> {
                     view.key = ::buffa::types::borrow_bytes(&mut cur)?;
                 }
                 2u32 => {
-                    if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                         return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
                             field_number: 2u32,
-                            expected: 0u8,
+                            expected: 2u8,
                             actual: tag.wire_type() as u8,
                         });
                     }
-                    view.watermark = Some(::buffa::types::decode_uint64(&mut cur)?);
+                    view.root = ::buffa::types::borrow_bytes(&mut cur)?;
                 }
                 _ => {
                     ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
@@ -831,7 +832,7 @@ impl<'a> ::buffa::MessageView<'a> for GetRequestView<'a> {
         use ::buffa::alloc::string::ToString as _;
         GetRequest {
             key: (self.key).to_vec(),
-            watermark: self.watermark,
+            root: (self.root).to_vec(),
             __buffa_unknown_fields: self
                 .__buffa_unknown_fields
                 .to_owned()
@@ -849,6 +850,295 @@ unsafe impl ::buffa::DefaultViewInstance for GetRequestView<'static> {
 }
 unsafe impl<'a> ::buffa::HasDefaultViewInstance for GetRequestView<'a> {
     type Static = GetRequestView<'static>;
+}
+/// Historical key proof request for one or more logical keys.
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct GetManyRequest {
+    /// Raw logical QMDB keys (`K::as_ref()` bytes), not store row keys.
+    ///
+    /// Field 1: `keys`
+    #[serde(
+        rename = "keys",
+        with = "::buffa::json_helpers::proto_seq",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec"
+    )]
+    pub keys: ::buffa::alloc::vec::Vec<::buffa::alloc::vec::Vec<u8>>,
+    /// Requested ordered-QMDB historical ops root. The server resolves
+    /// the watermark whose historical root matches `root`.
+    ///
+    /// Field 2: `root`
+    #[serde(
+        rename = "root",
+        with = "::buffa::json_helpers::bytes",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
+    )]
+    pub root: ::buffa::alloc::vec::Vec<u8>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub __buffa_cached_size: ::buffa::__private::CachedSize,
+}
+impl ::core::fmt::Debug for GetManyRequest {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("GetManyRequest")
+            .field("keys", &self.keys)
+            .field("root", &self.root)
+            .finish()
+    }
+}
+impl GetManyRequest {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/store.qmdb.v1.GetManyRequest";
+}
+unsafe impl ::buffa::DefaultInstance for GetManyRequest {
+    fn default_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<GetManyRequest> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+impl ::buffa::Message for GetManyRequest {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// The result is a `u32`; the protobuf specification requires all
+    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
+    /// compliant message will never overflow this type.
+    fn compute_size(&self) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        if !self.root.is_empty() {
+            size += 1u32 + ::buffa::types::bytes_encoded_len(&self.root) as u32;
+        }
+        for v in &self.keys {
+            size += 1u32 + ::buffa::types::bytes_encoded_len(v) as u32;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        self.__buffa_cached_size.set(size);
+        size
+    }
+    fn write_to(&self, buf: &mut impl ::buffa::bytes::BufMut) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if !self.root.is_empty() {
+            ::buffa::encoding::Tag::new(
+                    2u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::types::encode_bytes(&self.root, buf);
+        }
+        for v in &self.keys {
+            ::buffa::encoding::Tag::new(
+                    1u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::types::encode_bytes(v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            2u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 2u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                ::buffa::types::merge_bytes(&mut self.root, buf)?;
+            }
+            1u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 1u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                self.keys.push(::buffa::types::decode_bytes(buf)?);
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn cached_size(&self) -> u32 {
+        self.__buffa_cached_size.get()
+    }
+    fn clear(&mut self) {
+        self.root.clear();
+        self.keys.clear();
+        self.__buffa_unknown_fields.clear();
+        self.__buffa_cached_size.set(0);
+    }
+}
+impl ::buffa::ExtensionSet for GetManyRequest {
+    const PROTO_FQN: &'static str = "store.qmdb.v1.GetManyRequest";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for GetManyRequest {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __GET_MANY_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/store.qmdb.v1.GetManyRequest",
+    to_json: ::buffa::type_registry::any_to_json::<GetManyRequest>,
+    from_json: ::buffa::type_registry::any_from_json::<GetManyRequest>,
+    is_wkt: false,
+};
+/// Historical key proof request for one or more logical keys.
+#[derive(Clone, Debug, Default)]
+pub struct GetManyRequestView<'a> {
+    /// Raw logical QMDB keys (`K::as_ref()` bytes), not store row keys.
+    ///
+    /// Field 1: `keys`
+    pub keys: ::buffa::RepeatedView<'a, &'a [u8]>,
+    /// Requested ordered-QMDB historical ops root. The server resolves
+    /// the watermark whose historical root matches `root`.
+    ///
+    /// Field 2: `root`
+    pub root: &'a [u8],
+    pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+}
+impl<'a> GetManyRequestView<'a> {
+    /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
+    ///
+    /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
+    /// and by generated sub-message decode arms with `depth - 1`.
+    ///
+    /// **Not part of the public API.** Named with a leading underscore to
+    /// signal that it is for generated-code use only.
+    #[doc(hidden)]
+    pub fn _decode_depth(
+        buf: &'a [u8],
+        depth: u32,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        let mut view = Self::default();
+        view._merge_into_view(buf, depth)?;
+        ::core::result::Result::Ok(view)
+    }
+    /// Merge fields from `buf` into this view (proto merge semantics).
+    ///
+    /// Repeated fields append; singular fields last-wins; singular
+    /// MESSAGE fields merge recursively. Used by sub-message decode
+    /// arms when the same field appears multiple times on the wire.
+    ///
+    /// **Not part of the public API.**
+    #[doc(hidden)]
+    pub fn _merge_into_view(
+        &mut self,
+        buf: &'a [u8],
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        let _ = depth;
+        #[allow(unused_variables)]
+        let view = self;
+        let mut cur: &'a [u8] = buf;
+        while !cur.is_empty() {
+            let before_tag = cur;
+            let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
+            match tag.field_number() {
+                2u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 2u32,
+                            expected: 2u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    view.root = ::buffa::types::borrow_bytes(&mut cur)?;
+                }
+                1u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 1u32,
+                            expected: 2u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    view.keys.push(::buffa::types::borrow_bytes(&mut cur)?);
+                }
+                _ => {
+                    ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
+                    let span_len = before_tag.len() - cur.len();
+                    view.__buffa_unknown_fields.push_raw(&before_tag[..span_len]);
+                }
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+}
+impl<'a> ::buffa::MessageView<'a> for GetManyRequestView<'a> {
+    type Owned = GetManyRequest;
+    fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        Self::_decode_depth(buf, ::buffa::RECURSION_LIMIT)
+    }
+    fn decode_view_with_limit(
+        buf: &'a [u8],
+        depth: u32,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        Self::_decode_depth(buf, depth)
+    }
+    /// Convert this view to the owned message type.
+    #[allow(clippy::redundant_closure, clippy::useless_conversion)]
+    fn to_owned_message(&self) -> GetManyRequest {
+        #[allow(unused_imports)]
+        use ::buffa::alloc::string::ToString as _;
+        GetManyRequest {
+            keys: self.keys.iter().map(|b| (b).to_vec()).collect(),
+            root: (self.root).to_vec(),
+            __buffa_unknown_fields: self
+                .__buffa_unknown_fields
+                .to_owned()
+                .unwrap_or_default()
+                .into(),
+            ..::core::default::Default::default()
+        }
+    }
+}
+unsafe impl ::buffa::DefaultViewInstance for GetManyRequestView<'static> {
+    fn default_view_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<GetManyRequestView<'static>> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+unsafe impl<'a> ::buffa::HasDefaultViewInstance for GetManyRequestView<'a> {
+    type Static = GetManyRequestView<'static>;
 }
 /// Stable mirror of an MMR proof payload.
 #[derive(Clone, PartialEq, Default)]
@@ -3937,6 +4227,265 @@ unsafe impl ::buffa::DefaultViewInstance for GetResponseView<'static> {
 unsafe impl<'a> ::buffa::HasDefaultViewInstance for GetResponseView<'a> {
     type Static = GetResponseView<'static>;
 }
+/// Unary historical many-key proof response.
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct GetManyResponse {
+    /// Field 1: `proof`
+    #[serde(
+        rename = "proof",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
+    )]
+    pub proof: ::buffa::MessageField<HistoricalMultiProof>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub __buffa_cached_size: ::buffa::__private::CachedSize,
+}
+impl ::core::fmt::Debug for GetManyResponse {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("GetManyResponse").field("proof", &self.proof).finish()
+    }
+}
+impl GetManyResponse {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/store.qmdb.v1.GetManyResponse";
+}
+unsafe impl ::buffa::DefaultInstance for GetManyResponse {
+    fn default_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<GetManyResponse> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+impl ::buffa::Message for GetManyResponse {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// The result is a `u32`; the protobuf specification requires all
+    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
+    /// compliant message will never overflow this type.
+    fn compute_size(&self) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        if self.proof.is_set() {
+            let inner_size = self.proof.compute_size();
+            size
+                += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
+                    + inner_size;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        self.__buffa_cached_size.set(size);
+        size
+    }
+    fn write_to(&self, buf: &mut impl ::buffa::bytes::BufMut) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if self.proof.is_set() {
+            ::buffa::encoding::Tag::new(
+                    1u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::encoding::encode_varint(self.proof.cached_size() as u64, buf);
+            self.proof.write_to(buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 1u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                ::buffa::Message::merge_length_delimited(
+                    self.proof.get_or_insert_default(),
+                    buf,
+                    depth,
+                )?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn cached_size(&self) -> u32 {
+        self.__buffa_cached_size.get()
+    }
+    fn clear(&mut self) {
+        self.proof = ::buffa::MessageField::none();
+        self.__buffa_unknown_fields.clear();
+        self.__buffa_cached_size.set(0);
+    }
+}
+impl ::buffa::ExtensionSet for GetManyResponse {
+    const PROTO_FQN: &'static str = "store.qmdb.v1.GetManyResponse";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for GetManyResponse {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __GET_MANY_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/store.qmdb.v1.GetManyResponse",
+    to_json: ::buffa::type_registry::any_to_json::<GetManyResponse>,
+    from_json: ::buffa::type_registry::any_from_json::<GetManyResponse>,
+    is_wkt: false,
+};
+/// Unary historical many-key proof response.
+#[derive(Clone, Debug, Default)]
+pub struct GetManyResponseView<'a> {
+    /// Field 1: `proof`
+    pub proof: ::buffa::MessageFieldView<HistoricalMultiProofView<'a>>,
+    pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+}
+impl<'a> GetManyResponseView<'a> {
+    /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
+    ///
+    /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
+    /// and by generated sub-message decode arms with `depth - 1`.
+    ///
+    /// **Not part of the public API.** Named with a leading underscore to
+    /// signal that it is for generated-code use only.
+    #[doc(hidden)]
+    pub fn _decode_depth(
+        buf: &'a [u8],
+        depth: u32,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        let mut view = Self::default();
+        view._merge_into_view(buf, depth)?;
+        ::core::result::Result::Ok(view)
+    }
+    /// Merge fields from `buf` into this view (proto merge semantics).
+    ///
+    /// Repeated fields append; singular fields last-wins; singular
+    /// MESSAGE fields merge recursively. Used by sub-message decode
+    /// arms when the same field appears multiple times on the wire.
+    ///
+    /// **Not part of the public API.**
+    #[doc(hidden)]
+    pub fn _merge_into_view(
+        &mut self,
+        buf: &'a [u8],
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        let _ = depth;
+        #[allow(unused_variables)]
+        let view = self;
+        let mut cur: &'a [u8] = buf;
+        while !cur.is_empty() {
+            let before_tag = cur;
+            let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
+            match tag.field_number() {
+                1u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 1u32,
+                            expected: 2u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    if depth == 0 {
+                        return Err(::buffa::DecodeError::RecursionLimitExceeded);
+                    }
+                    let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                    match view.proof.as_mut() {
+                        Some(existing) => existing._merge_into_view(sub, depth - 1)?,
+                        None => {
+                            view.proof = ::buffa::MessageFieldView::set(
+                                HistoricalMultiProofView::_decode_depth(sub, depth - 1)?,
+                            );
+                        }
+                    }
+                }
+                _ => {
+                    ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
+                    let span_len = before_tag.len() - cur.len();
+                    view.__buffa_unknown_fields.push_raw(&before_tag[..span_len]);
+                }
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+}
+impl<'a> ::buffa::MessageView<'a> for GetManyResponseView<'a> {
+    type Owned = GetManyResponse;
+    fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        Self::_decode_depth(buf, ::buffa::RECURSION_LIMIT)
+    }
+    fn decode_view_with_limit(
+        buf: &'a [u8],
+        depth: u32,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        Self::_decode_depth(buf, depth)
+    }
+    /// Convert this view to the owned message type.
+    #[allow(clippy::redundant_closure, clippy::useless_conversion)]
+    fn to_owned_message(&self) -> GetManyResponse {
+        #[allow(unused_imports)]
+        use ::buffa::alloc::string::ToString as _;
+        GetManyResponse {
+            proof: match self.proof.as_option() {
+                Some(v) => {
+                    ::buffa::MessageField::<
+                        HistoricalMultiProof,
+                    >::some(v.to_owned_message())
+                }
+                None => ::buffa::MessageField::none(),
+            },
+            __buffa_unknown_fields: self
+                .__buffa_unknown_fields
+                .to_owned()
+                .unwrap_or_default()
+                .into(),
+            ..::core::default::Default::default()
+        }
+    }
+}
+unsafe impl ::buffa::DefaultViewInstance for GetManyResponseView<'static> {
+    fn default_view_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<GetManyResponseView<'static>> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+unsafe impl<'a> ::buffa::HasDefaultViewInstance for GetManyResponseView<'a> {
+    type Static = GetManyResponseView<'static>;
+}
 
 /// Full service name for this service.
 pub const ORDERED_SERVICE_SERVICE_NAME: &str = "store.qmdb.v1.OrderedService";
@@ -3986,6 +4535,17 @@ pub trait OrderedService: Send + Sync + 'static {
     ) -> impl ::std::future::Future<
         Output = Result<(GetResponse, ::connectrpc::Context), ::connectrpc::ConnectError>,
     > + Send;
+    /// Handle the GetMany RPC.
+    fn get_many(
+        &self,
+        ctx: ::connectrpc::Context,
+        request: ::buffa::view::OwnedView<GetManyRequestView<'static>>,
+    ) -> impl ::std::future::Future<
+        Output = Result<
+            (GetManyResponse, ::connectrpc::Context),
+            ::connectrpc::ConnectError,
+        >,
+    > + Send;
 }
 /// Extension trait for registering a service implementation with a Router.
 ///
@@ -4034,6 +4594,17 @@ impl<S: OrderedService> OrderedServiceExt for S {
                     ::connectrpc::view_handler_fn(move |ctx, req| {
                         let svc = ::std::sync::Arc::clone(&svc);
                         async move { svc.get(ctx, req).await }
+                    })
+                },
+            )
+            .route_view(
+                ORDERED_SERVICE_SERVICE_NAME,
+                "GetMany",
+                {
+                    let svc = ::std::sync::Arc::clone(&self);
+                    ::connectrpc::view_handler_fn(move |ctx, req| {
+                        let svc = ::std::sync::Arc::clone(&svc);
+                        async move { svc.get_many(ctx, req).await }
                     })
                 },
             )
@@ -4090,6 +4661,9 @@ impl<T: OrderedService> ::connectrpc::Dispatcher for OrderedServiceServer<T> {
             "Get" => {
                 Some(::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false))
             }
+            "GetMany" => {
+                Some(::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false))
+            }
             _ => None,
         }
     }
@@ -4112,6 +4686,20 @@ impl<T: OrderedService> ::connectrpc::Dispatcher for OrderedServiceServer<T> {
                         GetRequestView,
                     >(request, format)?;
                     let (res, ctx) = svc.get(ctx, req).await?;
+                    let bytes = ::connectrpc::dispatcher::codegen::encode_response(
+                        &res,
+                        format,
+                    )?;
+                    Ok((bytes, ctx))
+                })
+            }
+            "GetMany" => {
+                let svc = ::std::sync::Arc::clone(&self.inner);
+                Box::pin(async move {
+                    let req = ::connectrpc::dispatcher::codegen::decode_request_view::<
+                        GetManyRequestView,
+                    >(request, format)?;
+                    let (res, ctx) = svc.get_many(ctx, req).await?;
                     let bytes = ::connectrpc::dispatcher::codegen::encode_response(
                         &res,
                         format,
@@ -4323,6 +4911,40 @@ where
                 &self.config,
                 ORDERED_SERVICE_SERVICE_NAME,
                 "Get",
+                request,
+                options,
+            )
+            .await
+    }
+    /// Call the GetMany RPC. Sends a request to /store.qmdb.v1.OrderedService/GetMany.
+    pub async fn get_many(
+        &self,
+        request: GetManyRequest,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<GetManyResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        self.get_many_with_options(request, ::connectrpc::client::CallOptions::default())
+            .await
+    }
+    /// Call the GetMany RPC with explicit per-call options. Options override [`connectrpc::client::ClientConfig`] defaults.
+    pub async fn get_many_with_options(
+        &self,
+        request: GetManyRequest,
+        options: ::connectrpc::client::CallOptions,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<GetManyResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        ::connectrpc::client::call_unary(
+                &self.transport,
+                &self.config,
+                ORDERED_SERVICE_SERVICE_NAME,
+                "GetMany",
                 request,
                 options,
             )
