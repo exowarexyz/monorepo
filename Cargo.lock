@@ -2305,6 +2305,7 @@ dependencies = [
  "exoware-simulator",
  "futures",
  "hex",
+ "http-body",
  "rand 0.8.5",
  "regex",
  "reqwest",

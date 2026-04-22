@@ -305,6 +305,25 @@ where
         .await
     }
 
+    pub(crate) async fn operation_range_checkpoint_with_read_floor(
+        &self,
+        read_floor_sequence: u64,
+        watermark: Location,
+        start_location: Location,
+        max_locations: u32,
+    ) -> Result<OperationRangeCheckpoint<H::Digest>, QmdbError> {
+        let session = self
+            .client
+            .create_session_with_sequence(read_floor_sequence);
+        self.operation_range_checkpoint_in_session(
+            &session,
+            watermark,
+            start_location,
+            max_locations,
+        )
+        .await
+    }
+
     async fn operation_range_checkpoint_in_session(
         &self,
         session: &SerializableReadSession,

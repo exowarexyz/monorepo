@@ -28,6 +28,7 @@ mod auth;
 mod boundary;
 pub(crate) mod codec;
 mod connect;
+mod connect_client;
 mod core;
 pub mod error;
 pub mod proof;
@@ -58,7 +59,16 @@ pub use writer::{
 };
 
 pub use boundary::recover_boundary_state;
-pub use connect::{ordered_connect_stack, OrderedConnect};
+pub use connect::{
+    immutable_range_connect_stack, keyless_range_connect_stack, ordered_connect_stack,
+    ordered_range_connect_stack, unordered_range_connect_stack, ImmutableRangeConnect,
+    KeylessRangeConnect, OrderedConnect, OrderedRangeConnect, UnorderedRangeConnect,
+};
+pub use connect_client::{
+    ImmutableRangeConnectClient, KeylessRangeConnectClient, OrderedConnectClient,
+    OrderedConnectSubscription, OrderedRangeConnectClient, OrderedSubscribeProof,
+    RangeConnectSubscription, RangeSubscribeProof, UnorderedRangeConnectClient,
+};
 
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};

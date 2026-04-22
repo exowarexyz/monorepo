@@ -56,6 +56,10 @@ where
         }
     }
 
+    pub(crate) fn store_client(&self) -> &StoreClient {
+        &self.client
+    }
+
     pub async fn writer_location_watermark(&self) -> Result<Option<Location>, QmdbError> {
         retry_transient_post_ingest_query(|| {
             let session = self.client.create_session();
@@ -126,6 +130,25 @@ where
         max_locations: u32,
     ) -> Result<OperationRangeCheckpoint<H::Digest>, QmdbError> {
         let session = self.client.create_session();
+        self.operation_range_checkpoint_in_session(
+            &session,
+            watermark,
+            start_location,
+            max_locations,
+        )
+        .await
+    }
+
+    pub(crate) async fn operation_range_checkpoint_with_read_floor(
+        &self,
+        read_floor_sequence: u64,
+        watermark: Location,
+        start_location: Location,
+        max_locations: u32,
+    ) -> Result<OperationRangeCheckpoint<H::Digest>, QmdbError> {
+        let session = self
+            .client
+            .create_session_with_sequence(read_floor_sequence);
         self.operation_range_checkpoint_in_session(
             &session,
             watermark,

@@ -522,3 +522,15 @@ pub(crate) fn decode_auth_watermark_location(
         "authenticated watermark",
     )
 }
+
+pub(crate) fn decode_auth_presence_location(
+    namespace: AuthenticatedBackendNamespace,
+    key: &Key,
+) -> Result<Location, QmdbError> {
+    decode_auth_location_field(
+        AUTH_PRESENCE_CODEC,
+        namespace,
+        key,
+        "authenticated presence",
+    )
+}

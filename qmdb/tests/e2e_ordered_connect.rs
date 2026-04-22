@@ -4,11 +4,11 @@
 mod common;
 
 use std::num::NonZeroU64;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{routing::get, Router};
-use commonware_codec::{Decode, DecodeExt};
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
@@ -22,20 +22,20 @@ use commonware_storage::qmdb::{
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use connectrpc::client::ClientConfig;
+use connectrpc::{ConnectError, ConnectRpcService, Context};
 use exoware_sdk_rs::proto::PreferZstdHttpClient;
 use exoware_sdk_rs::store::common::v1::{
     bytes_match_key as proto_bytes_match_key, BytesMatchKey as ProtoBytesMatchKey,
 };
 use exoware_sdk_rs::store::qmdb::v1::{
-    CurrentKeyValueProof as ProtoCurrentKeyValueProof, GetRequest as ProtoGetRequest,
-    HistoricalMultiProof as ProtoHistoricalMultiProof, MmrProof as ProtoMmrProof,
-    OrderedServiceClient, SubscribeRequest as ProtoSubscribeRequest,
+    GetRequest as ProtoGetRequest, GetResponse as ProtoGetResponse, OrderedService,
+    OrderedServiceClient, OrderedServiceServer, SubscribeRequest as ProtoSubscribeRequest,
+    SubscribeResponse as ProtoSubscribeResponse,
 };
 use exoware_sdk_rs::StoreClient;
 use store_qmdb::{
     ordered_connect_stack, recover_boundary_state, CurrentBoundaryState, OrderedClient,
-    OrderedWriter, RawCurrentRangeProof, RawKeyValueProof, RawMmrProof, RawMultiProof,
-    MAX_OPERATION_SIZE,
+    OrderedConnectClient, OrderedSubscribeProof, OrderedWriter, QmdbError, MAX_OPERATION_SIZE,
 };
 
 const N: usize = 32;
@@ -90,6 +90,12 @@ fn rpc_client(base: &str) -> OrderedServiceClient<PreferZstdHttpClient> {
         PreferZstdHttpClient::plaintext(),
         ClientConfig::new(base.parse().expect("qmdb uri")),
     )
+}
+
+fn validated_client(
+    base: &str,
+) -> OrderedConnectClient<PreferZstdHttpClient, Sha256, Vec<u8>, Vec<u8>, N> {
+    OrderedConnectClient::plaintext(base, op_cfg())
 }
 
 async fn boundary_from_local_db(
@@ -216,64 +222,6 @@ async fn upload_and_publish(client: &StoreClient, batch: &LocalBatch) {
         .expect("upload_and_publish");
 }
 
-fn decode_digest(bytes: &[u8]) -> Digest {
-    Digest::decode(bytes).expect("digest decode")
-}
-
-fn raw_mmr_from_proto(proto: &ProtoMmrProof) -> RawMmrProof<Digest> {
-    RawMmrProof {
-        leaves: Location::new(proto.leaves),
-        digests: proto
-            .digests
-            .iter()
-            .map(|digest| decode_digest(digest))
-            .collect(),
-    }
-}
-
-fn raw_multi_from_proto(
-    proto: &ProtoHistoricalMultiProof,
-) -> RawMultiProof<Digest, Vec<u8>, Vec<u8>> {
-    RawMultiProof {
-        watermark: Location::new(proto.watermark),
-        root: decode_digest(&proto.root),
-        proof: raw_mmr_from_proto(proto.proof.as_option().expect("historical multi proof")),
-        operations: proto
-            .operations
-            .iter()
-            .map(|operation| {
-                (
-                    Location::new(operation.location),
-                    BatchOperation::decode_cfg(operation.encoded_operation.as_slice(), &op_cfg())
-                        .expect("decode operation"),
-                )
-            })
-            .collect(),
-    }
-}
-
-fn raw_key_value_from_proto(
-    proto: &ProtoCurrentKeyValueProof,
-) -> RawKeyValueProof<Digest, Vec<u8>, Vec<u8>, N> {
-    let range_proof = proto.range_proof.as_option().expect("current range proof");
-    RawKeyValueProof {
-        watermark: Location::new(proto.watermark),
-        root: decode_digest(&proto.root),
-        location: Location::new(proto.location),
-        chunk: proto.chunk.as_slice().try_into().expect("chunk"),
-        range_proof: RawCurrentRangeProof {
-            proof: raw_mmr_from_proto(range_proof.proof.as_option().expect("mmr proof")),
-            partial_chunk_digest: range_proof
-                .partial_chunk_digest
-                .as_ref()
-                .map(|digest| decode_digest(digest)),
-            ops_root: decode_digest(&range_proof.ops_root),
-        },
-        operation: BatchOperation::decode_cfg(proto.encoded_operation.as_slice(), &op_cfg())
-            .expect("decode current operation"),
-    }
-}
-
 fn match_exact(key: &[u8]) -> ProtoBytesMatchKey {
     ProtoBytesMatchKey {
         kind: Some(proto_bytes_match_key::Kind::Exact(key.to_vec())),
@@ -315,6 +263,94 @@ fn latest_operation_for_key(
         .expect("matching operation")
 }
 
+#[derive(Clone)]
+struct StaticOrderedService {
+    subscribe_response: ProtoSubscribeResponse,
+    get_response: ProtoGetResponse,
+}
+
+impl OrderedService for StaticOrderedService {
+    fn subscribe(
+        &self,
+        ctx: Context,
+        _request: buffa::view::OwnedView<
+            exoware_sdk_rs::store::qmdb::v1::SubscribeRequestView<'static>,
+        >,
+    ) -> impl std::future::Future<
+        Output = Result<
+            (
+                Pin<
+                    Box<
+                        dyn futures::Stream<Item = Result<ProtoSubscribeResponse, ConnectError>>
+                            + Send,
+                    >,
+                >,
+                Context,
+            ),
+            ConnectError,
+        >,
+    > + Send {
+        let response = self.subscribe_response.clone();
+        async move {
+            let stream: Pin<
+                Box<
+                    dyn futures::Stream<Item = Result<ProtoSubscribeResponse, ConnectError>> + Send,
+                >,
+            > = Box::pin(futures::stream::iter([Ok(response)]));
+            Ok((stream, ctx))
+        }
+    }
+
+    fn get(
+        &self,
+        ctx: Context,
+        _request: buffa::view::OwnedView<exoware_sdk_rs::store::qmdb::v1::GetRequestView<'static>>,
+    ) -> impl std::future::Future<Output = Result<(ProtoGetResponse, Context), ConnectError>> + Send
+    {
+        let response = self.get_response.clone();
+        async move { Ok((response, ctx)) }
+    }
+}
+
+async fn spawn_static_server(
+    service: StaticOrderedService,
+) -> (tokio::task::JoinHandle<()>, String) {
+    let app = Router::new()
+        .route("/health", get(health))
+        .fallback_service(
+            ConnectRpcService::new(OrderedServiceServer::new(service))
+                .with_compression(exoware_sdk_rs::connect_compression_registry()),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind static qmdb server");
+    let port = listener.local_addr().expect("local addr").port();
+    let url = format!("http://127.0.0.1:{port}");
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    wait_for_health(&url).await;
+    (handle, url)
+}
+
+fn tamper_subscribe_response(mut response: ProtoSubscribeResponse) -> ProtoSubscribeResponse {
+    let mut proof = response
+        .proof
+        .as_option()
+        .cloned()
+        .expect("subscribe proof");
+    proof.root[0] ^= 0x01;
+    response.proof = Some(proof).into();
+    response
+}
+
+fn tamper_get_response(mut response: ProtoGetResponse) -> ProtoGetResponse {
+    let mut proof = response.proof.as_option().cloned().expect("get proof");
+    proof.root[0] ^= 0x01;
+    response.proof = Some(proof).into();
+    response
+}
+
 #[tokio::test]
 async fn ordered_connect_subscribe_emits_multi_proof_for_matching_keys() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
@@ -325,9 +361,9 @@ async fn ordered_connect_subscribe_emits_multi_proof_for_matching_keys() {
         update_row_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client).await;
-    let rpc = rpc_client(&qmdb_url);
+    let client = validated_client(&qmdb_url);
 
-    let mut stream = rpc
+    let mut stream = client
         .subscribe(ProtoSubscribeRequest {
             match_keys: vec![match_exact(b"alpha")],
             ..Default::default()
@@ -338,20 +374,18 @@ async fn ordered_connect_subscribe_emits_multi_proof_for_matching_keys() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     upload_and_publish(&store_client, &local).await;
 
-    let frame = tokio::time::timeout(Duration::from_secs(5), stream.message())
-        .await
-        .expect("timeout")
-        .expect("stream result")
-        .expect("stream frame")
-        .to_owned_message();
+    let frame: OrderedSubscribeProof<Digest, Vec<u8>, Vec<u8>> =
+        tokio::time::timeout(Duration::from_secs(5), stream.message())
+            .await
+            .expect("timeout")
+            .expect("stream result")
+            .expect("stream frame");
 
     let expected = latest_operation_for_key(&local.operations, b"alpha");
     assert!(frame.resume_sequence_number > 0);
-    let proof = raw_multi_from_proto(frame.proof.as_option().expect("proof"));
-    assert!(proof.verify::<Sha256>());
-    assert_eq!(proof.watermark, local.latest_location);
-    assert_eq!(proof.operations.len(), 1);
-    assert_eq!(proof.operations[0], expected);
+    assert_eq!(frame.proof.watermark, local.latest_location);
+    assert_eq!(frame.proof.operations.len(), 1);
+    assert_eq!(frame.proof.operations[0], expected);
 }
 
 #[tokio::test]
@@ -364,11 +398,11 @@ async fn ordered_connect_subscribe_replays_since_cursor() {
         update_row_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client).await;
-    let rpc = rpc_client(&qmdb_url);
+    let client = validated_client(&qmdb_url);
 
     upload_and_publish(&store_client, &local).await;
 
-    let mut stream = rpc
+    let mut stream = client
         .subscribe(ProtoSubscribeRequest {
             match_keys: vec![match_exact(b"alpha")],
             since_sequence_number: Some(1),
@@ -381,13 +415,10 @@ async fn ordered_connect_subscribe_replays_since_cursor() {
         .await
         .expect("timeout")
         .expect("stream result")
-        .expect("stream frame")
-        .to_owned_message();
+        .expect("stream frame");
 
     let expected = latest_operation_for_key(&local.operations, b"alpha");
-    let proof = raw_multi_from_proto(frame.proof.as_option().expect("proof"));
-    assert!(proof.verify::<Sha256>());
-    assert_eq!(proof.operations, vec![expected]);
+    assert_eq!(frame.proof.operations, vec![expected]);
 }
 
 #[tokio::test]
@@ -400,16 +431,16 @@ async fn ordered_connect_subscribe_matches_prefix_and_regex_filters() {
         update_row_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client).await;
-    let rpc = rpc_client(&qmdb_url);
+    let client = validated_client(&qmdb_url);
 
-    let mut prefix_stream = rpc
+    let mut prefix_stream = client
         .subscribe(ProtoSubscribeRequest {
             match_keys: vec![match_prefix(b"alp")],
             ..Default::default()
         })
         .await
         .expect("prefix subscribe");
-    let mut regex_stream = rpc
+    let mut regex_stream = client
         .subscribe(ProtoSubscribeRequest {
             match_keys: vec![match_regex("^be.*$")],
             ..Default::default()
@@ -424,25 +455,18 @@ async fn ordered_connect_subscribe_matches_prefix_and_regex_filters() {
         .await
         .expect("prefix timeout")
         .expect("prefix stream result")
-        .expect("prefix stream frame")
-        .to_owned_message();
+        .expect("prefix stream frame");
     let regex_frame = tokio::time::timeout(Duration::from_secs(5), regex_stream.message())
         .await
         .expect("regex timeout")
         .expect("regex stream result")
-        .expect("regex stream frame")
-        .to_owned_message();
+        .expect("regex stream frame");
 
     let alpha = latest_operation_for_key(&local.operations, b"alpha");
     let beta = latest_operation_for_key(&local.operations, b"beta");
 
-    let prefix_proof = raw_multi_from_proto(prefix_frame.proof.as_option().expect("proof"));
-    assert!(prefix_proof.verify::<Sha256>());
-    assert_eq!(prefix_proof.operations, vec![alpha]);
-
-    let regex_proof = raw_multi_from_proto(regex_frame.proof.as_option().expect("proof"));
-    assert!(regex_proof.verify::<Sha256>());
-    assert_eq!(regex_proof.operations, vec![beta]);
+    assert_eq!(prefix_frame.proof.operations, vec![alpha]);
+    assert_eq!(regex_frame.proof.operations, vec![beta]);
 }
 
 #[tokio::test]
@@ -457,9 +481,51 @@ async fn ordered_connect_get_returns_current_key_value_proof() {
         update_row_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client).await;
+    let client = validated_client(&qmdb_url);
+
+    let proof = client
+        .get(ProtoGetRequest {
+            key: b"alpha".to_vec(),
+            ..Default::default()
+        })
+        .await
+        .expect("get");
+
+    let expected = latest_operation_for_key(&local.operations, b"alpha");
+    assert_eq!(proof.watermark, local.latest_location);
+    assert_eq!(proof.location, expected.0);
+    assert_eq!(proof.operation, expected.1);
+}
+
+#[tokio::test]
+async fn ordered_connect_client_rejects_invalid_subscribe_proof() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_local_batch().await;
+    upload_and_publish(&store_client, &local).await;
+
+    let ordered_client = Arc::new(TestOrderedClient::from_client(
+        store_client.clone(),
+        op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client).await;
     let rpc = rpc_client(&qmdb_url);
 
-    let response = rpc
+    let mut raw_stream = rpc
+        .subscribe(ProtoSubscribeRequest {
+            match_keys: vec![match_exact(b"alpha")],
+            since_sequence_number: Some(1),
+            ..Default::default()
+        })
+        .await
+        .expect("subscribe");
+    let raw_subscribe_response = raw_stream
+        .message()
+        .await
+        .expect("stream result")
+        .expect("stream frame")
+        .to_owned_message();
+    let raw_get_response = rpc
         .get(ProtoGetRequest {
             key: b"alpha".to_vec(),
             ..Default::default()
@@ -469,10 +535,82 @@ async fn ordered_connect_get_returns_current_key_value_proof() {
         .into_view()
         .to_owned_message();
 
-    let expected = latest_operation_for_key(&local.operations, b"alpha");
-    let proof = raw_key_value_from_proto(response.proof.as_option().expect("proof"));
-    assert!(proof.verify::<Sha256>());
-    assert_eq!(proof.watermark, local.latest_location);
-    assert_eq!(proof.location, expected.0);
-    assert_eq!(proof.operation, expected.1);
+    let (_static_server, static_url) = spawn_static_server(StaticOrderedService {
+        subscribe_response: tamper_subscribe_response(raw_subscribe_response),
+        get_response: raw_get_response,
+    })
+    .await;
+    let client = validated_client(&static_url);
+    let mut stream = client
+        .subscribe(ProtoSubscribeRequest {
+            match_keys: vec![match_exact(b"alpha")],
+            ..Default::default()
+        })
+        .await
+        .expect("subscribe");
+
+    let err = stream
+        .message()
+        .await
+        .expect_err("tampered subscribe proof should fail");
+    assert!(
+        matches!(err, QmdbError::CorruptData(message) if message.contains("multi proof failed verification"))
+    );
+}
+
+#[tokio::test]
+async fn ordered_connect_client_rejects_invalid_get_proof() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_local_batch().await;
+    upload_and_publish(&store_client, &local).await;
+
+    let ordered_client = Arc::new(TestOrderedClient::from_client(
+        store_client.clone(),
+        op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client).await;
+    let rpc = rpc_client(&qmdb_url);
+
+    let mut raw_stream = rpc
+        .subscribe(ProtoSubscribeRequest {
+            match_keys: vec![match_exact(b"alpha")],
+            since_sequence_number: Some(1),
+            ..Default::default()
+        })
+        .await
+        .expect("subscribe");
+    let raw_subscribe_response = raw_stream
+        .message()
+        .await
+        .expect("stream result")
+        .expect("stream frame")
+        .to_owned_message();
+    let raw_get_response = rpc
+        .get(ProtoGetRequest {
+            key: b"alpha".to_vec(),
+            ..Default::default()
+        })
+        .await
+        .expect("get")
+        .into_view()
+        .to_owned_message();
+
+    let (_static_server, static_url) = spawn_static_server(StaticOrderedService {
+        subscribe_response: raw_subscribe_response,
+        get_response: tamper_get_response(raw_get_response),
+    })
+    .await;
+    let client = validated_client(&static_url);
+
+    let err = client
+        .get(ProtoGetRequest {
+            key: b"alpha".to_vec(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("tampered get proof should fail");
+    assert!(
+        matches!(err, QmdbError::CorruptData(message) if message.contains("key-value proof failed verification"))
+    );
 }

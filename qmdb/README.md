@@ -540,7 +540,7 @@ state. The store's ingest layer does not enforce this — it's on the caller.
 
 The old client-side `stream_batches(since)` API has been removed.
 
-Live ordered-QMDB proof delivery now goes through the ConnectRPC
+Live ordered-QMDB keyed proofs now go through the ConnectRPC
 `store.qmdb.v1.OrderedService`:
 
 - `Subscribe` listens to the full ordered batch log server-side and emits a
@@ -551,8 +551,19 @@ Live ordered-QMDB proof delivery now goes through the ConnectRPC
 - `SubscribeResponse.resume_sequence_number + 1` is the reconnect cursor for
   lossless replay after a disconnect.
 
+Historical batch-range streaming now goes through ConnectRPC as well:
+
+- `store.qmdb.v1.OrderedRangeService`
+- `store.qmdb.v1.UnorderedRangeService`
+- `store.qmdb.v1.ImmutableRangeService`
+- `store.qmdb.v1.KeylessRangeService`
+
+Each `Subscribe` emits a historical contiguous range checkpoint for one
+published batch, and `RangeSubscribeResponse.resume_sequence_number + 1` is
+the reconnect cursor.
+
 This crate still exposes direct proof/query APIs for historical ranges,
-historical multi-proofs, and current key proofs.
+historical multi-proofs, and current ordered key proofs.
 
 ## Tests
 

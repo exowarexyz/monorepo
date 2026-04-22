@@ -1,0 +1,299 @@
+//! Keyless QMDB ConnectRPC e2e: streamed range checkpoints plus client-side
+//! validation of tampered proofs.
+
+mod common;
+
+use std::num::NonZeroU64;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::{routing::get, Router};
+use commonware_runtime::{deterministic, Runner as _};
+use commonware_storage::mmr::Location;
+use commonware_storage::qmdb::{
+    keyless::{Config as KeylessConfig, Keyless, Operation as KeylessOperation},
+    store::LogStore as _,
+};
+use commonware_utils::{NZUsize, NZU16, NZU64};
+use connectrpc::client::ClientConfig;
+use connectrpc::{ConnectError, ConnectRpcService, Context};
+use exoware_sdk_rs::proto::PreferZstdHttpClient;
+use exoware_sdk_rs::store::qmdb::v1::{
+    KeylessRangeService, KeylessRangeServiceClient, KeylessRangeServiceServer,
+    RangeSubscribeRequest as ProtoRangeSubscribeRequest,
+    RangeSubscribeResponse as ProtoRangeSubscribeResponse,
+};
+use exoware_sdk_rs::StoreClient;
+use store_qmdb::{
+    keyless_range_connect_stack, KeylessClient, KeylessRangeConnectClient, KeylessWriter,
+    QmdbError, RangeSubscribeProof,
+};
+
+type Digest = commonware_cryptography::sha256::Digest;
+type LocalDb = Keyless<deterministic::Context, Vec<u8>, commonware_cryptography::Sha256>;
+type TestKeylessClient = KeylessClient<commonware_cryptography::Sha256, Vec<u8>>;
+type BatchOperation = KeylessOperation<Vec<u8>>;
+
+async fn health() -> &'static str {
+    "ok"
+}
+
+async fn wait_for_health(base: &str) {
+    let url = format!("{base}/health");
+    let client = reqwest::Client::new();
+    for _ in 0..200 {
+        if client
+            .get(&url)
+            .send()
+            .await
+            .ok()
+            .is_some_and(|res| res.status().is_success())
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("qmdb server did not become ready at {url}");
+}
+
+async fn spawn_qmdb_server(
+    client: Arc<TestKeylessClient>,
+) -> (tokio::task::JoinHandle<()>, String) {
+    let app = Router::new()
+        .route("/health", get(health))
+        .fallback_service(keyless_range_connect_stack(client));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind qmdb server");
+    let port = listener.local_addr().expect("local addr").port();
+    let url = format!("http://127.0.0.1:{port}");
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    wait_for_health(&url).await;
+    (handle, url)
+}
+
+fn rpc_client(base: &str) -> KeylessRangeServiceClient<PreferZstdHttpClient> {
+    KeylessRangeServiceClient::new(
+        PreferZstdHttpClient::plaintext(),
+        ClientConfig::new(base.parse().expect("qmdb uri")),
+    )
+}
+
+fn validated_client(
+    base: &str,
+) -> KeylessRangeConnectClient<PreferZstdHttpClient, commonware_cryptography::Sha256, Vec<u8>> {
+    KeylessRangeConnectClient::plaintext(base, ((0..=10000).into(), ()))
+}
+
+struct LocalBatch {
+    latest_location: Location,
+    operations: Vec<BatchOperation>,
+    root: Digest,
+}
+
+async fn build_local_batch() -> LocalBatch {
+    tokio::task::spawn_blocking(|| {
+        deterministic::Runner::default().start(|context| async move {
+            use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
+            let cfg = KeylessConfig {
+                mmr_journal_partition: "keyless-mmr-journal".into(),
+                mmr_metadata_partition: "keyless-mmr-metadata".into(),
+                mmr_items_per_blob: NZU64!(8),
+                mmr_write_buffer: NZUsize!(1024),
+                log_partition: "keyless-log".into(),
+                log_write_buffer: NZUsize!(1024),
+                log_compression: None,
+                log_codec_config: ((0..=10000).into(), ()),
+                log_items_per_section: NZU64!(7),
+                thread_pool: None,
+                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8)),
+            };
+            let mut db: LocalDb = LocalDb::init(context.with_label("db"), cfg)
+                .await
+                .expect("init");
+
+            let finalized = {
+                let mut batch = db.new_batch();
+                batch.append(b"first-value".to_vec());
+                batch.append(b"second-value".to_vec());
+                batch.merkleize(None::<Vec<u8>>).finalize()
+            };
+            db.apply_batch(finalized).await.expect("apply");
+
+            let latest = db.bounds().await.end - 1;
+            let n = NonZeroU64::new(*latest + 1).unwrap();
+            let (_proof, ops) = db
+                .historical_proof(latest + 1, Location::new(0), n)
+                .await
+                .expect("proof");
+            let root = db.root();
+            db.destroy().await.expect("destroy");
+
+            LocalBatch {
+                latest_location: latest,
+                operations: ops,
+                root,
+            }
+        })
+    })
+    .await
+    .expect("join")
+}
+
+async fn upload_and_publish(client: &StoreClient, batch: &LocalBatch) {
+    let writer: KeylessWriter<commonware_cryptography::Sha256, Vec<u8>> =
+        KeylessWriter::empty(client.clone());
+    writer
+        .upload_and_publish(&batch.operations)
+        .await
+        .expect("upload_and_publish");
+}
+
+#[derive(Clone)]
+struct StaticKeylessRangeService {
+    subscribe_response: ProtoRangeSubscribeResponse,
+}
+
+impl KeylessRangeService for StaticKeylessRangeService {
+    fn subscribe(
+        &self,
+        ctx: Context,
+        _request: buffa::view::OwnedView<
+            exoware_sdk_rs::store::qmdb::v1::RangeSubscribeRequestView<'static>,
+        >,
+    ) -> impl std::future::Future<
+        Output = Result<
+            (
+                Pin<
+                    Box<
+                        dyn futures::Stream<
+                                Item = Result<ProtoRangeSubscribeResponse, ConnectError>,
+                            > + Send,
+                    >,
+                >,
+                Context,
+            ),
+            ConnectError,
+        >,
+    > + Send {
+        let response = self.subscribe_response.clone();
+        async move {
+            let stream: Pin<
+                Box<
+                    dyn futures::Stream<Item = Result<ProtoRangeSubscribeResponse, ConnectError>>
+                        + Send,
+                >,
+            > = Box::pin(futures::stream::iter([Ok(response)]));
+            Ok((stream, ctx))
+        }
+    }
+}
+
+async fn spawn_static_server(
+    service: StaticKeylessRangeService,
+) -> (tokio::task::JoinHandle<()>, String) {
+    let app = Router::new()
+        .route("/health", get(health))
+        .fallback_service(
+            ConnectRpcService::new(KeylessRangeServiceServer::new(service))
+                .with_compression(exoware_sdk_rs::connect_compression_registry()),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind static qmdb server");
+    let port = listener.local_addr().expect("local addr").port();
+    let url = format!("http://127.0.0.1:{port}");
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    wait_for_health(&url).await;
+    (handle, url)
+}
+
+fn tamper_range_response(mut response: ProtoRangeSubscribeResponse) -> ProtoRangeSubscribeResponse {
+    let mut proof = response.proof.as_option().cloned().expect("range proof");
+    proof.root[0] ^= 0x01;
+    response.proof = Some(proof).into();
+    response
+}
+
+#[tokio::test]
+async fn keyless_connect_subscribe_emits_verifiable_range_proof() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_local_batch().await;
+    let keyless_client = Arc::new(TestKeylessClient::from_client(
+        store_client.clone(),
+        ((0..=10000).into(), ()),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
+    let client = validated_client(&qmdb_url);
+
+    let mut stream = client
+        .subscribe(ProtoRangeSubscribeRequest::default())
+        .await
+        .expect("subscribe");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    upload_and_publish(&store_client, &local).await;
+
+    let frame: RangeSubscribeProof<Digest, BatchOperation> =
+        tokio::time::timeout(Duration::from_secs(5), stream.message())
+            .await
+            .expect("timeout")
+            .expect("stream result")
+            .expect("stream frame");
+
+    assert!(frame.resume_sequence_number > 0);
+    assert_eq!(frame.proof.start_location, Location::new(0));
+    assert_eq!(frame.proof.watermark, local.latest_location);
+    assert_eq!(frame.proof.root, local.root);
+    assert_eq!(frame.proof.operations, local.operations);
+}
+
+#[tokio::test]
+async fn keyless_connect_client_rejects_invalid_streamed_proof() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_local_batch().await;
+    upload_and_publish(&store_client, &local).await;
+
+    let keyless_client = Arc::new(TestKeylessClient::from_client(
+        store_client.clone(),
+        ((0..=10000).into(), ()),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
+    let rpc = rpc_client(&qmdb_url);
+    let mut raw_stream = rpc
+        .subscribe(ProtoRangeSubscribeRequest {
+            since_sequence_number: Some(1),
+            ..Default::default()
+        })
+        .await
+        .expect("subscribe");
+    let raw_response = raw_stream
+        .message()
+        .await
+        .expect("stream result")
+        .expect("stream frame")
+        .to_owned_message();
+
+    let (_static_server, static_url) = spawn_static_server(StaticKeylessRangeService {
+        subscribe_response: tamper_range_response(raw_response),
+    })
+    .await;
+    let client = validated_client(&static_url);
+    let mut stream = client
+        .subscribe(ProtoRangeSubscribeRequest::default())
+        .await
+        .expect("subscribe");
+
+    let err = stream
+        .message()
+        .await
+        .expect_err("tampered streamed proof should fail");
+    assert!(
+        matches!(err, QmdbError::CorruptData(message) if message.contains("range checkpoint proof failed verification"))
+    );
+}
