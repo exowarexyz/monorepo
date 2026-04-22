@@ -212,8 +212,8 @@ pin_project_lite::pin_project! {
         // Currently-building proof future, if any.
         #[pin]
         building: Option<BoxFuture<'static, Result<Out, QmdbError>>>,
-        // In-flight upstream subscription read. This must persist across polls,
-        // especially for JS/WASM subscriptions whose `next()` resolves later.
+        // In-flight read; must persist across polls since the subscription's
+        // `next()` may not be cancel-safe.
         #[pin]
         pulling: Option<PullNext>,
     }

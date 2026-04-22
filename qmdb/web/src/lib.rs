@@ -89,12 +89,6 @@ mod connectrpc_types {
 
 pub use connectrpc_types::ErrorCode;
 
-#[derive(Debug, Clone)]
-pub struct RpcError {
-    pub code: ErrorCode,
-    pub message: String,
-}
-
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ClientError {
     #[error("HTTP error: {0}")]
@@ -442,11 +436,12 @@ fn frame_from_js(value: &JsValue) -> Result<SubscriptionFrame, ClientError> {
         &get_property(value, "sequenceNumber")?,
         "frame.sequenceNumber",
     )?;
-    let entries_value = get_property(value, "entries")?;
-    let entries = entries_from_js(&entries_value)?
-        .into_iter()
-        .map(|(key, value)| SubscriptionEntry { key, value })
-        .collect();
+    let arr = Array::from(&get_property(value, "entries")?);
+    let mut entries = Vec::with_capacity(arr.length() as usize);
+    for item in arr.iter() {
+        let (key, value) = entry_from_js(&item)?;
+        entries.push(SubscriptionEntry { key, value });
+    }
     Ok(SubscriptionFrame {
         sequence_number,
         entries,

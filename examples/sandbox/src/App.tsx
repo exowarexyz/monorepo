@@ -47,6 +47,8 @@ type VerifiedStreamClient = {
 
 const MAX_STREAM_BATCHES = 12;
 
+type StreamStatus = 'stopped' | 'connecting' | 'live';
+
 function App() {
   const [, setClient] = useState<Client | null>(null);
   const [storeClient, setStoreClient] = useState<StoreClient | null>(null);
@@ -80,10 +82,8 @@ function App() {
   const [verifiedError, setVerifiedError] = useState<string | null>(null);
   const [lastStreamSequence, setLastStreamSequence] = useState<bigint | null>(null);
   const [lastVerifiedWatermark, setLastVerifiedWatermark] = useState<bigint | null>(null);
-  const [isStreamConnecting, setIsStreamConnecting] = useState(false);
-  const [isStreamLive, setIsStreamLive] = useState(false);
-  const [isVerifiedStreamConnecting, setIsVerifiedStreamConnecting] = useState(false);
-  const [isVerifiedStreamLive, setIsVerifiedStreamLive] = useState(false);
+  const [streamStatus, setStreamStatus] = useState<StreamStatus>('stopped');
+  const [verifiedStatus, setVerifiedStatus] = useState<StreamStatus>('stopped');
 
   // Loading states
   const [isSettingValue, setIsSettingValue] = useState(false);
@@ -177,33 +177,33 @@ function App() {
       activeStream.sinceSequenceNumber,
     );
 
-    setIsStreamConnecting(true);
-    setIsStreamLive(false);
+    setStreamStatus('connecting');
     setStreamError(null);
 
     void (async () => {
       try {
+        let seenFirst = false;
         for await (const batch of iterator) {
           if (cancelled) {
             break;
           }
-          setIsStreamConnecting(false);
-          setIsStreamLive(true);
+          if (!seenFirst) {
+            setStreamStatus('live');
+            seenFirst = true;
+          }
           setLastStreamSequence(batch.sequenceNumber);
           setStreamBatches((prev) => [batch, ...prev].slice(0, MAX_STREAM_BATCHES));
         }
 
         if (!cancelled) {
-          setIsStreamConnecting(false);
-          setIsStreamLive(false);
+          setStreamStatus('stopped');
         }
       } catch (error) {
         if (cancelled) {
           return;
         }
         const message = error instanceof Error ? error.message : String(error);
-        setIsStreamConnecting(false);
-        setIsStreamLive(false);
+        setStreamStatus('stopped');
         setStreamError(message);
         showNotification('error', 'Stream Error', message);
       }
@@ -211,8 +211,7 @@ function App() {
 
     return () => {
       cancelled = true;
-      setIsStreamConnecting(false);
-      setIsStreamLive(false);
+      setStreamStatus('stopped');
       void iterator.return?.();
     };
   }, [activeStream, streamClient]);
@@ -238,34 +237,34 @@ function App() {
       }
     };
 
-    setIsVerifiedStreamConnecting(true);
-    setIsVerifiedStreamLive(false);
+    setVerifiedStatus('connecting');
     setVerifiedError(null);
 
     void (async () => {
       try {
         iterator = reader.streamBatches(activeStream.sinceSequenceNumber);
+        let seenFirst = false;
         for await (const batch of iterator) {
           if (cancelled) {
             break;
           }
-          setIsVerifiedStreamConnecting(false);
-          setIsVerifiedStreamLive(true);
+          if (!seenFirst) {
+            setVerifiedStatus('live');
+            seenFirst = true;
+          }
           setLastVerifiedWatermark(batch.watermark);
           setVerifiedBatches((prev) => [batch, ...prev].slice(0, MAX_STREAM_BATCHES));
         }
 
         if (!cancelled) {
-          setIsVerifiedStreamConnecting(false);
-          setIsVerifiedStreamLive(false);
+          setVerifiedStatus('stopped');
         }
       } catch (error) {
         if (cancelled) {
           return;
         }
         const message = error instanceof Error ? error.message : String(error);
-        setIsVerifiedStreamConnecting(false);
-        setIsVerifiedStreamLive(false);
+        setVerifiedStatus('stopped');
         setVerifiedError(message);
         showNotification('error', 'Verified Stream Error', message);
       } finally {
@@ -275,8 +274,7 @@ function App() {
 
     return () => {
       cancelled = true;
-      setIsVerifiedStreamConnecting(false);
-      setIsVerifiedStreamLive(false);
+      setVerifiedStatus('stopped');
       void iterator?.return?.();
       releaseReader();
     };
@@ -323,10 +321,8 @@ function App() {
 
   const handleStopStream = () => {
     setActiveStream(null);
-    setIsStreamConnecting(false);
-    setIsStreamLive(false);
-    setIsVerifiedStreamConnecting(false);
-    setIsVerifiedStreamLive(false);
+    setStreamStatus('stopped');
+    setVerifiedStatus('stopped');
   };
 
   const handleSet = async () => {
@@ -659,11 +655,11 @@ function App() {
           </div>
           <div className="form-row">
             <button
-              className={`btn-primary ${isStreamConnecting ? 'loading' : ''}`}
+              className={`btn-primary ${streamStatus === 'connecting' ? 'loading' : ''}`}
               onClick={handleStartStream}
               disabled={activeStream !== null || streamClient === null}
             >
-              {isStreamConnecting ? 'Connecting...' : 'Start Stream'}
+              {streamStatus === 'connecting' ? 'Connecting...' : 'Start Stream'}
             </button>
             <button
               className="btn-secondary"
@@ -678,17 +674,11 @@ function App() {
             <p><strong>Variant:</strong> {activeVariant}</p>
             <p>
               <strong>Raw Stream:</strong>{' '}
-              {isStreamConnecting ? 'connecting' : isStreamLive ? 'live' : activeStream ? 'idle' : 'stopped'}
+              {streamStatus === 'stopped' && activeStream ? 'idle' : streamStatus}
             </p>
             <p>
               <strong>Verified Stream:</strong>{' '}
-              {isVerifiedStreamConnecting
-                ? 'connecting'
-                : isVerifiedStreamLive
-                  ? 'live'
-                  : activeStream
-                    ? 'idle'
-                    : 'stopped'}
+              {verifiedStatus === 'stopped' && activeStream ? 'idle' : verifiedStatus}
             </p>
             <p><strong>Filter Families:</strong> {qmdbMatchKeysForVariant(activeVariant).map((matchKey) => matchKey.prefix).join(', ')}</p>
             {activeVariant === 'immutable' && (

@@ -2,7 +2,7 @@ use std::num::NonZeroU64;
 
 use commonware_codec::FixedSize;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{deterministic, tokio as cw_tokio, Runner as _};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, tokio as cw_tokio, Metrics as _, Runner as _};
 use commonware_storage::mmr::Location;
 use commonware_storage::qmdb::{
     any::{
@@ -139,8 +139,6 @@ async fn ordered_boundary_from_local_db(
 async fn build_ordered_batch() -> OrderedBatch {
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
-            use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
-
             let cfg = OrderedVariableConfig {
                 mmr_journal_partition: "qmdb-web-ordered-mmr-journal".into(),
                 mmr_items_per_blob: NZU64!(8),
@@ -194,8 +192,6 @@ async fn build_ordered_batch() -> OrderedBatch {
 async fn build_unordered_batch() -> UnorderedBatch {
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
-            use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
-
             let cfg = AnyVariableConfig {
                 mmr_journal_partition: "qmdb-web-unordered-mmr-journal".into(),
                 mmr_items_per_blob: NZU64!(8),
@@ -247,8 +243,6 @@ async fn build_unordered_batch() -> UnorderedBatch {
 async fn build_immutable_batch() -> ImmutableBatch {
     tokio::task::spawn_blocking(|| {
         deterministic::Runner::default().start(|context| async move {
-            use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
-
             let cfg = ImmutableConfig {
                 mmr_journal_partition: "qmdb-web-immutable-mmr-journal".into(),
                 mmr_metadata_partition: "qmdb-web-immutable-mmr-metadata".into(),
@@ -302,8 +296,6 @@ async fn build_immutable_batch() -> ImmutableBatch {
 async fn build_tampered_immutable_batch() -> ImmutableBatch {
     tokio::task::spawn_blocking(|| {
         deterministic::Runner::default().start(|context| async move {
-            use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
-
             let cfg = ImmutableConfig {
                 mmr_journal_partition: "qmdb-web-immutable-tampered-mmr-journal".into(),
                 mmr_metadata_partition: "qmdb-web-immutable-tampered-mmr-metadata".into(),
@@ -357,8 +349,6 @@ async fn build_tampered_immutable_batch() -> ImmutableBatch {
 async fn build_keyless_batch() -> KeylessBatch {
     tokio::task::spawn_blocking(|| {
         deterministic::Runner::default().start(|context| async move {
-            use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
-
             let cfg = KeylessConfig {
                 mmr_journal_partition: "qmdb-web-keyless-mmr-journal".into(),
                 mmr_metadata_partition: "qmdb-web-keyless-mmr-metadata".into(),
