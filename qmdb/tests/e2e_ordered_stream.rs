@@ -188,6 +188,10 @@ async fn stream_batches_emits_verifiable_range_proof_after_publish() {
     assert_eq!(proof.operations, local.operations);
     assert_eq!(proof.start_location, Location::new(0));
     assert_eq!(proof.watermark, local.latest_location);
+    assert!(
+        proof.resume_sequence_number.is_some(),
+        "stream items should expose a reconnect sequence"
+    );
 }
 
 #[tokio::test]
@@ -203,10 +207,8 @@ async fn stream_batches_replays_since_cursor() {
 
     // First upload + publish the batch (no subscriber active).
     upload_and_publish(&client, &local).await;
-    let seq_after = client.sequence_number();
-
     // Subscribe with since=1; the driver should replay the retained batch
-    // (which is contained in sequence numbers 1..=seq_after) and produce a
+    // (which is contained in the retained stream log) and produce a
     // proof.
     let mut stream = oc
         .clone()
@@ -221,6 +223,10 @@ async fn stream_batches_replays_since_cursor() {
         .expect("proof Ok");
 
     assert_eq!(proof.operations, local.operations);
-    // Ensure that the replay cursor landed within the retained log (sanity).
-    assert!(seq_after > 0);
+    assert!(
+        proof
+            .resume_sequence_number
+            .is_some_and(|sequence| sequence > 0),
+        "replayed batches should expose a reconnect sequence"
+    );
 }

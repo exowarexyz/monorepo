@@ -52,10 +52,8 @@ async fn sql_full_pipeline_insert_and_query() {
             )
             .expect("insert row");
     }
-    let min_token = writer.flush().await.expect("flush batch");
-    assert!(min_token > 0);
-
-    read_client.observe_sequence_number(min_token);
+    let min_sequence = writer.flush().await.expect("flush batch");
+    assert!(min_sequence > 0);
     let read_schema = KvSchema::new(read_client)
         .table(
             "slam_orders",

@@ -5,7 +5,7 @@
 //! Verification happens inside each variant's `BuildProof`, so items emitted
 //! from the stream are already verified against the store's root.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -40,8 +40,14 @@ pub(crate) type Classify =
 
 /// Async factory that builds a variant's verified range (typically
 /// `VerifiedOperationRange` for one of the four QMDB variants).
+///
+/// The leading `u64` is the store batch sequence that must be used as the
+/// read floor for any follow-up query/proof session. This is how
+/// `stream_batches()` avoids a visibility race where subscribe delivery can
+/// outrun ordinary query visibility.
 pub(crate) type BuildProof<Out> = Arc<
     dyn Fn(
+            u64,      /* read floor store sequence number */
             Location, /* watermark */
             Location, /* start */
             u32,      /* count */
@@ -238,8 +244,10 @@ struct Accumulator {
     // Every watermark publication seen so far. Each closed batch drains under
     // the smallest `wm >= batch.latest` — stamping with the single latest
     // would cause a batch with `latest=5` to claim `watermark=10` when both
-    // arrive in one frame, even though it was authorized at 5.
-    watermarks: BTreeSet<Location>,
+    // arrive in one frame, even though it was authorized at 5. The stored
+    // sequence number is the store batch seq that made that watermark visible
+    // to reads; proof builders must seed sessions from it.
+    watermarks: BTreeMap<Location, u64>,
 }
 
 struct InProgressBatch {
@@ -250,10 +258,14 @@ struct InProgressBatch {
 struct ClosedBatch {
     start: Location,
     latest: Location,
+    sequence_number: u64,
     /// Snapshot of the watermark in force at drain time; used by `poll_next`
     /// to feed `operation_range_proof`. Carrying it here avoids a stale-state
     /// race if the upstream advances the watermark between drain and poll.
     watermark: Location,
+    /// Store sequence number that makes this batch readable end-to-end. This
+    /// is `max(batch sequence, authorizing watermark sequence)`.
+    read_floor_sequence: u64,
 }
 
 impl Accumulator {
@@ -261,11 +273,11 @@ impl Accumulator {
         Self {
             in_progress: BTreeMap::new(),
             pending: BTreeMap::new(),
-            watermarks: BTreeSet::new(),
+            watermarks: BTreeMap::new(),
         }
     }
 
-    fn ingest_entry(&mut self, family: Family, location: Location) {
+    fn ingest_entry(&mut self, family: Family, location: Location, sequence_number: u64) {
         match family {
             Family::Op => {
                 let key = self
@@ -301,13 +313,15 @@ impl Accumulator {
                         ClosedBatch {
                             start: in_prog.start,
                             latest: location,
+                            sequence_number,
                             watermark: Location::new(0),
+                            read_floor_sequence: 0,
                         },
                     );
                 }
             }
             Family::Watermark => {
-                self.watermarks.insert(location);
+                self.watermarks.entry(location).or_insert(sequence_number);
             }
         }
     }
@@ -316,14 +330,20 @@ impl Accumulator {
     /// watermark. Each batch is stamped with the smallest `wm >= batch.latest`
     /// so the emitted `proof.watermark` matches the authority that published
     /// the batch (not a later unrelated watermark).
+    ///
+    /// The batch also carries the store sequence that must seed the follow-up
+    /// proof/query session: the later of the batch frame that delivered the
+    /// ops/presence rows and the frame that delivered the authorizing
+    /// watermark row.
     fn drain_ready(&mut self) -> Vec<ClosedBatch> {
         let mut ready = Vec::new();
         while let Some((&latest, _)) = self.pending.iter().next() {
-            let Some(&wm) = self.watermarks.range(latest..).next() else {
+            let Some((&wm, &wm_sequence)) = self.watermarks.range(latest..).next() else {
                 break;
             };
             let (_, mut batch) = self.pending.pop_first().unwrap();
             batch.watermark = wm;
+            batch.read_floor_sequence = batch.sequence_number.max(wm_sequence);
             ready.push(batch);
         }
         // GC watermarks that can no longer authorize any remaining batch.
@@ -333,7 +353,7 @@ impl Accumulator {
             .pending
             .keys()
             .next()
-            .or_else(|| self.watermarks.iter().next_back())
+            .or_else(|| self.watermarks.keys().next_back())
         {
             self.watermarks = self.watermarks.split_off(&floor);
         }
@@ -351,7 +371,7 @@ pin_project_lite::pin_project! {
         acc: Accumulator,
         // Queued ready batches awaiting proof construction. Pulled one per
         // poll_next call so we don't starve the transport.
-        ready: std::collections::VecDeque<ClosedBatch>,
+        ready: VecDeque<ClosedBatch>,
         // Currently-building proof future, if any.
         #[pin]
         building: Option<BoxFuture<'static, Result<Out, QmdbError>>>,
@@ -369,7 +389,7 @@ impl<Out> BatchProofStream<Out> {
             classify,
             build_proof,
             acc: Accumulator::new(),
-            ready: std::collections::VecDeque::new(),
+            ready: VecDeque::new(),
             building: None,
         }
     }
@@ -401,7 +421,12 @@ impl<Out: Send + 'static> Stream for BatchProofStream<Out> {
             if let Some(batch) = this.ready.pop_front() {
                 let count = u32::try_from(*(batch.latest - batch.start) + 1)
                     .expect("batch length fits u32");
-                let fut = (this.build_proof)(batch.watermark, batch.start, count);
+                let fut = (this.build_proof)(
+                    batch.read_floor_sequence,
+                    batch.watermark,
+                    batch.start,
+                    count,
+                );
                 this.building.set(Some(fut));
                 continue;
             }
@@ -422,7 +447,8 @@ impl<Out: Send + 'static> Stream for BatchProofStream<Out> {
             for entry in &frame.entries {
                 let StreamSubscriptionEntry { key, value } = entry;
                 if let Some((family, location)) = (this.classify)(key, value.as_ref()) {
-                    this.acc.ingest_entry(family, location);
+                    this.acc
+                        .ingest_entry(family, location, frame.sequence_number);
                 }
             }
 
@@ -452,24 +478,26 @@ mod tests {
         let mut acc = Accumulator::new();
         // Batch A: ops at 0..=5, presence at 5.
         for i in 0..=5 {
-            acc.ingest_entry(Family::Op, loc(i));
+            acc.ingest_entry(Family::Op, loc(i), 11);
         }
-        acc.ingest_entry(Family::Presence, loc(5));
+        acc.ingest_entry(Family::Presence, loc(5), 11);
         // Batch B: ops at 6..=10, presence at 10.
         for i in 6..=10 {
-            acc.ingest_entry(Family::Op, loc(i));
+            acc.ingest_entry(Family::Op, loc(i), 19);
         }
-        acc.ingest_entry(Family::Presence, loc(10));
+        acc.ingest_entry(Family::Presence, loc(10), 19);
         // Both watermarks land before any drain.
-        acc.ingest_entry(Family::Watermark, loc(5));
-        acc.ingest_entry(Family::Watermark, loc(10));
+        acc.ingest_entry(Family::Watermark, loc(5), 13);
+        acc.ingest_entry(Family::Watermark, loc(10), 23);
 
         let ready = acc.drain_ready();
         assert_eq!(ready.len(), 2);
         assert_eq!(ready[0].latest, loc(5));
         assert_eq!(ready[0].watermark, loc(5), "batch A must drain at wm=5");
+        assert_eq!(ready[0].read_floor_sequence, 13);
         assert_eq!(ready[1].latest, loc(10));
         assert_eq!(ready[1].watermark, loc(10), "batch B must drain at wm=10");
+        assert_eq!(ready[1].read_floor_sequence, 23);
     }
 
     // A batch stays pending until a watermark large enough to cover its
@@ -479,18 +507,18 @@ mod tests {
     fn drain_waits_for_authorizing_watermark() {
         let mut acc = Accumulator::new();
         for i in 0..=5 {
-            acc.ingest_entry(Family::Op, loc(i));
+            acc.ingest_entry(Family::Op, loc(i), 5);
         }
-        acc.ingest_entry(Family::Presence, loc(5));
+        acc.ingest_entry(Family::Presence, loc(5), 5);
         assert!(acc.drain_ready().is_empty());
 
-        acc.ingest_entry(Family::Watermark, loc(4));
+        acc.ingest_entry(Family::Watermark, loc(4), 4);
         assert!(
             acc.drain_ready().is_empty(),
             "wm=4 does not authorize batch with latest=5"
         );
 
-        acc.ingest_entry(Family::Watermark, loc(7));
+        acc.ingest_entry(Family::Watermark, loc(7), 9);
         let ready = acc.drain_ready();
         assert_eq!(ready.len(), 1);
         assert_eq!(
@@ -498,6 +526,7 @@ mod tests {
             loc(7),
             "smallest wm >= latest is 7 (4 was GC'd)"
         );
+        assert_eq!(ready[0].read_floor_sequence, 9);
     }
 
     // Cross-batch op interleaving inside a single ingest pass: disjoint
@@ -510,27 +539,29 @@ mod tests {
         let mut acc = Accumulator::new();
         // A: ops 0..=4, presence 4. B: ops 5..=9, presence 9.
         // Interleave in a way that stresses find_map matching.
-        acc.ingest_entry(Family::Op, loc(0));
-        acc.ingest_entry(Family::Op, loc(5));
-        acc.ingest_entry(Family::Op, loc(1));
-        acc.ingest_entry(Family::Op, loc(6));
-        acc.ingest_entry(Family::Op, loc(2));
-        acc.ingest_entry(Family::Op, loc(3));
-        acc.ingest_entry(Family::Op, loc(4));
-        acc.ingest_entry(Family::Presence, loc(4));
-        acc.ingest_entry(Family::Op, loc(7));
-        acc.ingest_entry(Family::Op, loc(8));
-        acc.ingest_entry(Family::Op, loc(9));
-        acc.ingest_entry(Family::Presence, loc(9));
-        acc.ingest_entry(Family::Watermark, loc(4));
-        acc.ingest_entry(Family::Watermark, loc(9));
+        acc.ingest_entry(Family::Op, loc(0), 10);
+        acc.ingest_entry(Family::Op, loc(5), 20);
+        acc.ingest_entry(Family::Op, loc(1), 10);
+        acc.ingest_entry(Family::Op, loc(6), 20);
+        acc.ingest_entry(Family::Op, loc(2), 10);
+        acc.ingest_entry(Family::Op, loc(3), 10);
+        acc.ingest_entry(Family::Op, loc(4), 10);
+        acc.ingest_entry(Family::Presence, loc(4), 10);
+        acc.ingest_entry(Family::Op, loc(7), 20);
+        acc.ingest_entry(Family::Op, loc(8), 20);
+        acc.ingest_entry(Family::Op, loc(9), 20);
+        acc.ingest_entry(Family::Presence, loc(9), 20);
+        acc.ingest_entry(Family::Watermark, loc(4), 12);
+        acc.ingest_entry(Family::Watermark, loc(9), 22);
 
         let ready = acc.drain_ready();
         assert_eq!(ready.len(), 2);
         assert_eq!((ready[0].start, ready[0].latest), (loc(0), loc(4)));
         assert_eq!(ready[0].watermark, loc(4));
+        assert_eq!(ready[0].read_floor_sequence, 12);
         assert_eq!((ready[1].start, ready[1].latest), (loc(5), loc(9)));
         assert_eq!(ready[1].watermark, loc(9));
+        assert_eq!(ready[1].read_floor_sequence, 22);
     }
 
     // GC must not discard a watermark that still authorizes a pending batch.
@@ -543,11 +574,11 @@ mod tests {
         let mut acc = Accumulator::new();
         // Idle drain with wm=7 seen but no pending: the fallback floor
         // (largest wm) retains wm=7 rather than emptying the set.
-        acc.ingest_entry(Family::Watermark, loc(7));
+        acc.ingest_entry(Family::Watermark, loc(7), 7);
         let ready = acc.drain_ready();
         assert!(ready.is_empty());
         assert!(
-            acc.watermarks.contains(&loc(7)),
+            acc.watermarks.contains_key(&loc(7)),
             "idle GC must retain the largest wm as a floor"
         );
 
@@ -555,10 +586,10 @@ mod tests {
         // own wm=3. Both wm=3 and wm=7 are in the set; drain picks the
         // smallest wm >= latest = 3, which is the authoritative one.
         for i in 0..=3 {
-            acc.ingest_entry(Family::Op, loc(i));
+            acc.ingest_entry(Family::Op, loc(i), 3);
         }
-        acc.ingest_entry(Family::Presence, loc(3));
-        acc.ingest_entry(Family::Watermark, loc(3));
+        acc.ingest_entry(Family::Presence, loc(3), 3);
+        acc.ingest_entry(Family::Watermark, loc(3), 3);
         let ready = acc.drain_ready();
         assert_eq!(ready.len(), 1);
         assert_eq!(
@@ -566,5 +597,26 @@ mod tests {
             loc(3),
             "drain picks own wm=3, not later wm=7"
         );
+        assert_eq!(ready[0].read_floor_sequence, 3);
+    }
+
+    #[test]
+    fn drain_uses_later_of_batch_and_watermark_sequences_as_read_floor() {
+        let mut acc = Accumulator::new();
+
+        acc.ingest_entry(Family::Op, loc(0), 40);
+        acc.ingest_entry(Family::Presence, loc(0), 40);
+        acc.ingest_entry(Family::Watermark, loc(0), 35);
+
+        acc.ingest_entry(Family::Op, loc(1), 50);
+        acc.ingest_entry(Family::Presence, loc(1), 50);
+        acc.ingest_entry(Family::Watermark, loc(1), 60);
+
+        let ready = acc.drain_ready();
+        assert_eq!(ready.len(), 2);
+        assert_eq!(ready[0].latest, loc(0));
+        assert_eq!(ready[0].read_floor_sequence, 40);
+        assert_eq!(ready[1].latest, loc(1));
+        assert_eq!(ready[1].read_floor_sequence, 60);
     }
 }

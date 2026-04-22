@@ -7,7 +7,7 @@ use commonware_storage::{
     mmr::{verification, Location},
     qmdb::keyless::Operation as KeylessOperation,
 };
-use exoware_sdk_rs::StoreClient;
+use exoware_sdk_rs::{SerializableReadSession, StoreClient};
 
 use crate::auth::AuthenticatedBackendNamespace;
 use crate::auth::{
@@ -44,10 +44,6 @@ where
             value_cfg,
             _marker: PhantomData,
         }
-    }
-
-    pub fn sequence_number(&self) -> u64 {
-        self.client.sequence_number()
     }
 
     pub async fn writer_location_watermark(&self) -> Result<Option<Location>, QmdbError> {
@@ -100,11 +96,27 @@ where
         start_location: Location,
         max_locations: u32,
     ) -> Result<OperationRangeCheckpoint<H::Digest>, QmdbError> {
+        let session = self.client.create_session();
+        self.operation_range_checkpoint_in_session(
+            &session,
+            watermark,
+            start_location,
+            max_locations,
+        )
+        .await
+    }
+
+    async fn operation_range_checkpoint_in_session(
+        &self,
+        session: &SerializableReadSession,
+        watermark: Location,
+        start_location: Location,
+        max_locations: u32,
+    ) -> Result<OperationRangeCheckpoint<H::Digest>, QmdbError> {
         if max_locations == 0 {
             return Err(QmdbError::InvalidRangeLength);
         }
         let namespace = AuthenticatedBackendNamespace::Keyless;
-        let session = self.client.create_session();
         require_published_auth_watermark(&session, namespace, watermark).await?;
         let count = watermark
             .checked_add(1)
@@ -119,7 +131,7 @@ where
             .saturating_add(max_locations as u64)
             .min(count);
         let storage = AuthKvMmrStorage {
-            session: &session,
+            session,
             namespace,
             mmr_size: mmr_size_for_watermark(watermark)?,
             _marker: PhantomData::<H::Digest>,
@@ -129,11 +141,11 @@ where
             .map_err(|e| QmdbError::CommonwareMmr(e.to_string()))?;
         let checkpoint = OperationRangeCheckpoint {
             watermark,
-            root: compute_auth_root::<H>(&session, namespace, watermark).await?,
+            root: compute_auth_root::<H>(session, namespace, watermark).await?,
             start_location,
             proof: proof.into(),
             encoded_operations: load_auth_operation_bytes_range(
-                &session,
+                session,
                 namespace,
                 start_location,
                 end,
@@ -146,6 +158,46 @@ where
             ));
         }
         Ok(checkpoint)
+    }
+
+    async fn operation_range_proof_with_read_floor(
+        &self,
+        read_floor_sequence: u64,
+        watermark: Location,
+        start_location: Location,
+        max_locations: u32,
+    ) -> Result<VerifiedOperationRange<H::Digest, KeylessOperation<V>>, QmdbError> {
+        let session = self
+            .client
+            .create_session_with_sequence(read_floor_sequence);
+        let checkpoint = self
+            .operation_range_checkpoint_in_session(
+                &session,
+                watermark,
+                start_location,
+                max_locations,
+            )
+            .await?;
+        let operations = checkpoint
+            .encoded_operations
+            .iter()
+            .enumerate()
+            .map(|(offset, bytes)| {
+                let location = checkpoint.start_location + offset as u64;
+                KeylessOperation::<V>::decode_cfg(bytes.as_slice(), &self.value_cfg).map_err(|e| {
+                    QmdbError::CorruptData(format!(
+                        "failed to decode authenticated operation at location {location}: {e}"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(VerifiedOperationRange {
+            resume_sequence_number: Some(read_floor_sequence),
+            watermark: checkpoint.watermark,
+            root: checkpoint.root,
+            start_location: checkpoint.start_location,
+            operations,
+        })
     }
 
     /// Verified contiguous range of operations.
@@ -172,6 +224,7 @@ where
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(VerifiedOperationRange {
+            resume_sequence_number: None,
             watermark: checkpoint.watermark,
             root: checkpoint.root,
             start_location: checkpoint.start_location,
@@ -183,6 +236,10 @@ where
     /// batch. See [`OrderedClient::stream_batches`](crate::OrderedClient::stream_batches)
     /// for the full contract. The operation type is `KeylessOperation<V>`,
     /// and the subscription filter is restricted to the Keyless namespace tag.
+    ///
+    /// Proof reads are performed in a serializable session pinned to the
+    /// later of the observed batch sequence and the authorizing watermark
+    /// sequence, so stream delivery cannot race ahead of query visibility.
     pub async fn stream_batches(
         self: Arc<Self>,
         since: Option<u64>,
@@ -201,10 +258,24 @@ where
         let sub = drv::open_subscription(&self.client, filter, since).await?;
 
         let build_proof: drv::BuildProof<VerifiedOperationRange<H::Digest, KeylessOperation<V>>> =
-            Arc::new(move |watermark: Location, start: Location, count: u32| {
-                let me = self.clone();
-                async move { me.operation_range_proof(watermark, start, count).await }.boxed()
-            });
+            Arc::new(
+                move |read_floor_sequence: u64,
+                      watermark: Location,
+                      start: Location,
+                      count: u32| {
+                    let me = self.clone();
+                    async move {
+                        me.operation_range_proof_with_read_floor(
+                            read_floor_sequence,
+                            watermark,
+                            start,
+                            count,
+                        )
+                        .await
+                    }
+                    .boxed()
+                },
+            );
 
         Ok(BatchProofStream::new(sub, classify, build_proof))
     }

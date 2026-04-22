@@ -308,10 +308,9 @@ async fn get_batch_missing_seq_returns_none() {
         .put(&[(&key(1, b"a"), b"1")])
         .await
         .expect("put");
-    let current = client.sequence_number();
     let got = client
         .stream()
-        .get(current + 100)
+        .get(10_000)
         .await
         .expect("get_batch should not error");
     assert!(got.is_none());

@@ -312,17 +312,20 @@ async fn prune_drop_all_removes_keys() {
     assert!(client.query().get(&kc).await.expect("get c").is_none());
 }
 
-// -- sequence number tracking --
+// -- explicit sequence reads --
 
 #[tokio::test]
-async fn sequence_number_advances() {
+async fn create_session_with_sequence_reads_at_or_above_floor() {
     let (_h, client, _url) = spawn_client().await;
     let k1 = key(b"s1");
     let k2 = key(b"s2");
     let seq1 = client.ingest().put(&[(&k1, b"v1")]).await.expect("put1");
     let seq2 = client.ingest().put(&[(&k2, b"v2")]).await.expect("put2");
     assert!(seq2 > seq1);
-    assert!(client.sequence_number() >= seq2);
+
+    let session = client.create_session_with_sequence(seq2);
+    let got = session.get(&k2).await.expect("session get");
+    assert_eq!(got.as_deref(), Some(b"v2".as_slice()));
 }
 
 // -- health --
