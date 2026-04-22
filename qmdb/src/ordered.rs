@@ -272,7 +272,7 @@ where
         }
 
         self.core()
-            .require_published_watermark(&session, watermark)
+            .require_published_watermark(session, watermark)
             .await?;
         let count = watermark
             .checked_add(1)
@@ -287,7 +287,7 @@ where
             .saturating_add(max_locations as u64)
             .min(count);
         let storage = KvMmrStorage::<H::Digest> {
-            session: &session,
+            session,
             mmr_size: mmr_size_for_watermark(watermark)?,
             _marker: PhantomData,
         };

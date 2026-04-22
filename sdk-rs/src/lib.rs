@@ -735,6 +735,12 @@ impl SessionState {
     }
 }
 
+#[derive(Default)]
+struct RangeStreamReadOptions {
+    min_sequence_number: Option<u64>,
+    observed_sequence: Option<Arc<AtomicU64>>,
+}
+
 impl StoreClient {
     /// Start building a client with per-service base URLs.
     pub fn builder() -> StoreClientBuilder {
@@ -1047,8 +1053,7 @@ impl StoreClient {
             limit,
             batch_size,
             RangeMode::Forward,
-            None,
-            None,
+            RangeStreamReadOptions::default(),
         )
         .await
     }
@@ -1061,7 +1066,7 @@ impl StoreClient {
         batch_size: usize,
         mode: RangeMode,
     ) -> Result<RangeStream, ClientError> {
-        self.range_stream_internal(start, end, limit, batch_size, mode, None, None)
+        self.range_stream_internal(start, end, limit, batch_size, mode, Default::default())
             .await
     }
 
@@ -1079,8 +1084,10 @@ impl StoreClient {
             limit,
             batch_size,
             RangeMode::Forward,
-            Some(min_sequence_number),
-            None,
+            RangeStreamReadOptions {
+                min_sequence_number: Some(min_sequence_number),
+                observed_sequence: None,
+            },
         )
         .await
     }
@@ -1100,8 +1107,10 @@ impl StoreClient {
             limit,
             batch_size,
             mode,
-            Some(min_sequence_number),
-            None,
+            RangeStreamReadOptions {
+                min_sequence_number: Some(min_sequence_number),
+                observed_sequence: None,
+            },
         )
         .await
     }
@@ -1284,8 +1293,10 @@ impl StoreClient {
                 limit,
                 limit.max(1),
                 mode,
-                min_sequence_number,
-                None,
+                RangeStreamReadOptions {
+                    min_sequence_number,
+                    observed_sequence: None,
+                },
             )
             .await?;
         stream.collect().await
@@ -1298,8 +1309,7 @@ impl StoreClient {
         limit: usize,
         batch_size: usize,
         mode: RangeMode,
-        min_sequence_number: Option<u64>,
-        observed_sequence: Option<Arc<AtomicU64>>,
+        options: RangeStreamReadOptions,
     ) -> Result<RangeStream, ClientError> {
         if !is_valid_key_size(start.len()) || !is_valid_key_size(end.len()) {
             return Err(ClientError::WireFormat(
@@ -1315,7 +1325,7 @@ impl StoreClient {
         let config =
             store_connect_client_config(self.query_uri.clone(), self.connect_request_compression);
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
-        let min_sequence_number = self.normalize_min_sequence_number(min_sequence_number);
+        let min_sequence_number = self.normalize_min_sequence_number(options.min_sequence_number);
         let max_attempts = self.retry_config.max_attempts.max(1);
         let mut attempt = 1usize;
         loop {
@@ -1354,7 +1364,8 @@ impl StoreClient {
                 }
             };
 
-            let mut stream = RangeStream::from_connect_stream(response, observed_sequence.clone());
+            let mut stream =
+                RangeStream::from_connect_stream(response, options.observed_sequence.clone());
             if let Err(err) = stream.prefetch_first_frame().await {
                 if attempt < max_attempts && is_retryable_error(&err) {
                     let delay = retry_delay_for_error(&err, attempt, self.retry_config);
@@ -1859,8 +1870,10 @@ impl SerializableReadSession {
                             limit,
                             limit.max(1),
                             mode,
-                            None,
-                            Some(observed_sequence),
+                            RangeStreamReadOptions {
+                                min_sequence_number: None,
+                                observed_sequence: Some(observed_sequence),
+                            },
                         )
                         .await;
                     stream?.collect().await
@@ -1912,8 +1925,10 @@ impl SerializableReadSession {
                             limit,
                             batch_size,
                             mode,
-                            None,
-                            Some(observed_sequence),
+                            RangeStreamReadOptions {
+                                min_sequence_number: None,
+                                observed_sequence: Some(observed_sequence),
+                            },
                         )
                         .await
                 }

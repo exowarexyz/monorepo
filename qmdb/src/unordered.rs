@@ -117,7 +117,7 @@ where
             return Err(QmdbError::InvalidRangeLength);
         }
         self.core()
-            .require_published_watermark(&session, watermark)
+            .require_published_watermark(session, watermark)
             .await?;
         let count = watermark
             .checked_add(1)

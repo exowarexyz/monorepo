@@ -147,7 +147,7 @@ where
             return Err(QmdbError::InvalidRangeLength);
         }
         let namespace = AuthenticatedBackendNamespace::Immutable;
-        require_published_auth_watermark(&session, namespace, watermark).await?;
+        require_published_auth_watermark(session, namespace, watermark).await?;
         let count = watermark
             .checked_add(1)
             .ok_or_else(|| QmdbError::CorruptData("watermark overflow".to_string()))?;
