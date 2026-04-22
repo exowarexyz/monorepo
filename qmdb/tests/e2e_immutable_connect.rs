@@ -101,7 +101,6 @@ fn validated_client(
 }
 
 struct LocalBatch {
-    latest_location: Location,
     operations: Vec<BatchOperation>,
     root: Digest,
 }
@@ -148,7 +147,6 @@ async fn build_local_batch() -> LocalBatch {
             db.destroy().await.expect("destroy");
 
             LocalBatch {
-                latest_location: latest,
                 operations: ops,
                 root,
             }

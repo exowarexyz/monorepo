@@ -148,7 +148,6 @@ fn update_row_cfg() -> (
 }
 
 struct LocalBatch {
-    latest_location: Location,
     operations: Vec<BatchOperation>,
     current_boundary: CurrentBoundaryState<Digest, N>,
 }
@@ -199,7 +198,6 @@ async fn build_local_batch() -> LocalBatch {
             db.destroy().await.expect("destroy");
 
             LocalBatch {
-                latest_location: latest,
                 operations: ops,
                 current_boundary: boundary,
             }

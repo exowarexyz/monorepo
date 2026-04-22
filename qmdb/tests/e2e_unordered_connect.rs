@@ -111,7 +111,6 @@ fn update_row_cfg() -> (
 }
 
 struct LocalBatch {
-    latest_location: Location,
     operations: Vec<BatchOperation>,
 }
 
@@ -158,10 +157,7 @@ async fn build_local_batch() -> LocalBatch {
             db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
 
-            LocalBatch {
-                latest_location: latest,
-                operations: ops,
-            }
+            LocalBatch { operations: ops }
         })
     })
     .await

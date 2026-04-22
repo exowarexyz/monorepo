@@ -44,6 +44,7 @@ use crate::{
 };
 
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
+type BoxConnectError = Box<ConnectError>;
 
 fn connect_limits() -> Limits {
     Limits::default()
@@ -152,16 +153,16 @@ fn operation_range_checkpoint_to_proto<D: commonware_cryptography::Digest>(
 fn request_root_to_digest<H: Hasher>(
     root: &[u8],
     variant: QmdbVariant,
-) -> Result<H::Digest, ConnectError> {
+) -> Result<H::Digest, BoxConnectError> {
     crate::codec::decode_digest(root, format!("{variant:?} root"))
-        .map_err(|err| ConnectError::invalid_argument(err.to_string()))
+        .map_err(|err| Box::new(ConnectError::invalid_argument(err.to_string())))
 }
 
-fn require_root_bytes(root: &[u8], label: &str) -> Result<(), ConnectError> {
+fn require_root_bytes(root: &[u8], label: &str) -> Result<(), BoxConnectError> {
     if root.is_empty() {
-        Err(ConnectError::invalid_argument(format!(
+        Err(Box::new(ConnectError::invalid_argument(format!(
             "{label} requires a non-empty root"
-        )))
+        ))))
     } else {
         Ok(())
     }
@@ -379,7 +380,7 @@ where
     fn ingest_frame(
         &mut self,
         frame: &exoware_sdk_rs::StreamSubscriptionFrame,
-    ) -> Result<(), ConnectError> {
+    ) -> Result<(), BoxConnectError> {
         let mut saw_operation = false;
         let mut latest = None;
         let mut matched_keys = BTreeSet::<Vec<u8>>::new();
@@ -411,8 +412,11 @@ where
         }
 
         if saw_operation {
-            let latest = latest
-                .ok_or_else(|| ConnectError::internal("ordered qmdb batch missing presence row"))?;
+            let latest = latest.ok_or_else(|| {
+                Box::new(ConnectError::internal(
+                    "ordered qmdb batch missing presence row",
+                ))
+            })?;
             if !matched_keys.is_empty() {
                 self.pending.insert(
                     latest,
@@ -518,7 +522,7 @@ where
             };
 
             if let Err(err) = this.ingest_frame(&frame) {
-                return Poll::Ready(Some(Err(err)));
+                return Poll::Ready(Some(Err(*err)));
             }
         }
     }
@@ -557,7 +561,7 @@ where
     fn ingest_frame(
         &mut self,
         frame: &exoware_sdk_rs::StreamSubscriptionFrame,
-    ) -> Result<(), ConnectError> {
+    ) -> Result<(), BoxConnectError> {
         let mut operation_count = 0u32;
         let mut min_operation: Option<Location> = None;
         let mut max_operation: Option<Location> = None;
@@ -570,7 +574,9 @@ where
             match family {
                 Family::Op => {
                     operation_count = operation_count.checked_add(1).ok_or_else(|| {
-                        ConnectError::internal("operation count overflow in streamed qmdb batch")
+                        Box::new(ConnectError::internal(
+                            "operation count overflow in streamed qmdb batch",
+                        ))
                     })?;
                     min_operation = Some(min_operation.map_or(location, |min| min.min(location)));
                     max_operation = Some(max_operation.map_or(location, |max| max.max(location)));
@@ -585,20 +591,31 @@ where
         }
 
         if operation_count > 0 {
-            let latest =
-                latest.ok_or_else(|| ConnectError::internal("qmdb batch missing presence row"))?;
+            let latest = latest.ok_or_else(|| {
+                Box::new(ConnectError::internal("qmdb batch missing presence row"))
+            })?;
             let start_location = latest
                 .checked_add(1)
                 .and_then(|next| next.checked_sub(operation_count as u64))
-                .ok_or_else(|| ConnectError::internal("invalid streamed batch location range"))?;
-            let min_operation = min_operation
-                .ok_or_else(|| ConnectError::internal("streamed batch missing operation rows"))?;
-            let max_operation = max_operation
-                .ok_or_else(|| ConnectError::internal("streamed batch missing operation rows"))?;
+                .ok_or_else(|| {
+                    Box::new(ConnectError::internal(
+                        "invalid streamed batch location range",
+                    ))
+                })?;
+            let min_operation = min_operation.ok_or_else(|| {
+                Box::new(ConnectError::internal(
+                    "streamed batch missing operation rows",
+                ))
+            })?;
+            let max_operation = max_operation.ok_or_else(|| {
+                Box::new(ConnectError::internal(
+                    "streamed batch missing operation rows",
+                ))
+            })?;
             if min_operation != start_location || max_operation != latest {
-                return Err(ConnectError::internal(format!(
+                return Err(Box::new(ConnectError::internal(format!(
                     "streamed qmdb batch locations are not contiguous: expected [{start_location}, {latest}], saw [{min_operation}, {max_operation}]"
-                )));
+                ))));
             }
             self.pending.insert(
                 latest,
@@ -684,7 +701,7 @@ where
             };
 
             if let Err(err) = this.ingest_frame(&frame) {
-                return Poll::Ready(Some(Err(err)));
+                return Poll::Ready(Some(Err(*err)));
             }
         }
     }
@@ -776,8 +793,9 @@ where
         let client = self.client.clone();
         async move {
             let key = request.key.to_vec();
-            require_root_bytes(request.root, "qmdb get")?;
-            let root = request_root_to_digest::<H>(request.root, QmdbVariant::Current)?;
+            require_root_bytes(request.root, "qmdb get").map_err(|err| *err)?;
+            let root = request_root_to_digest::<H>(request.root, QmdbVariant::Current)
+                .map_err(|err| *err)?;
             let watermark = client
                 .resolve_watermark_for_root(&root, QmdbVariant::Current)
                 .await
@@ -803,8 +821,9 @@ where
     ) -> impl Future<Output = Result<(GetManyResponse, Context), ConnectError>> + Send {
         let client = self.client.clone();
         async move {
-            require_root_bytes(request.root, "qmdb get_many")?;
-            let root = request_root_to_digest::<H>(request.root, QmdbVariant::Any)?;
+            require_root_bytes(request.root, "qmdb get_many").map_err(|err| *err)?;
+            let root =
+                request_root_to_digest::<H>(request.root, QmdbVariant::Any).map_err(|err| *err)?;
             let watermark = client
                 .resolve_watermark_for_root(&root, QmdbVariant::Any)
                 .await

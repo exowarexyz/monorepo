@@ -144,8 +144,8 @@ impl<D: Digest + Clone> From<&RawCurrentRangeProof<D>> for CurrentRangeProof<D> 
     fn from(value: &RawCurrentRangeProof<D>) -> Self {
         Self {
             proof: (&value.proof).into(),
-            partial_chunk_digest: value.partial_chunk_digest.clone(),
-            ops_root: value.ops_root.clone(),
+            partial_chunk_digest: value.partial_chunk_digest,
+            ops_root: value.ops_root,
         }
     }
 }
