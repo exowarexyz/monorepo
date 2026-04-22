@@ -1,0 +1,67 @@
+name: Rust
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  UDEPS_VERSION: 0.1.57
+  NIGHTLY_VERSION: nightly-2025-11-15
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run setup
+        uses: ./.github/actions/setup
+      - name: Install nightly Rust toolchain
+        run: rustup toolchain install ${{ env.NIGHTLY_VERSION }} && rustup component add --toolchain ${{ env.NIGHTLY_VERSION }} rustfmt
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Fmt
+        run: cargo +${{ env.NIGHTLY_VERSION }} fmt --all -- --check
+      - name: Check docs
+        run: cargo doc --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run setup
+        uses: ./.github/actions/setup
+      - name: Run tests
+        run: cargo test --verbose
+
+  dependencies:
+    name: Dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install nightly Rust toolchain
+        run: rustup toolchain install ${{ env.NIGHTLY_VERSION }}
+      - name: Verify toolchain
+        run: cargo +${{ env.NIGHTLY_VERSION }} --version && rustc +${{ env.NIGHTLY_VERSION }} --version
+      - name: Run setup
+        uses: ./.github/actions/setup
+      - name: Install cargo-udeps
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-udeps@${{ env.UDEPS_VERSION }}
+      - name: Check for unused dependencies
+        run: cargo +${{ env.NIGHTLY_VERSION }} udeps --all-targets

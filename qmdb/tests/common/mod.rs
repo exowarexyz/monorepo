@@ -15,6 +15,7 @@ pub async fn local_store_client() -> (tempfile::TempDir, tokio::task::JoinHandle
     (dir, jh, client)
 }
 
+#[allow(dead_code)]
 pub async fn retry<F, Fut, T>(f: F, label: &str) -> T
 where
     F: Fn() -> Fut,
@@ -23,9 +24,6 @@ where
     for attempt in 1..=15 {
         match f().await {
             Ok(v) => return v,
-            Err(QmdbError::DuplicateBatchWatermark { .. }) => {
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
             Err(e) if attempt < 15 => {
                 eprintln!("{label}: attempt {attempt}/{e}, retrying...");
                 tokio::time::sleep(Duration::from_secs(2)).await;

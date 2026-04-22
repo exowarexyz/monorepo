@@ -2304,12 +2304,14 @@ dependencies = [
  "exoware-simulator",
  "futures",
  "hex",
+ "pin-project-lite",
  "rand 0.8.5",
  "reqwest",
  "serde",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
 ]
 
 [[package]]
@@ -2352,6 +2354,7 @@ dependencies = [
  "futures",
  "http",
  "regex",
+ "tokio",
 ]
 
 [[package]]
@@ -2363,6 +2366,7 @@ dependencies = [
  "clap",
  "commonware-codec",
  "connectrpc",
+ "exoware-qmdb",
  "exoware-sdk-rs",
  "exoware-server",
  "http",

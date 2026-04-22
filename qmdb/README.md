@@ -433,6 +433,172 @@ not allowed:
   current_root_at(150)   // not a batch boundary
 ```
 
+## Writers
+
+Each backend exposes a `*Writer` helper for sole-writer ingest. Writers hold
+cached MMR peaks + a pending-batch queue in memory; `upload_and_publish`
+dispatches a single atomic PUT per batch with zero store reads in the hot
+loop. Construction always starts from caller-supplied frontier state.
+Multiple `upload_and_publish` calls may be issued concurrently against the
+same writer; the writer handles location assignment, in-flight pipelining, and
+contiguous watermark publication internally.
+
+```rust,ignore
+use std::sync::Arc;
+use store_qmdb::{KeylessWriter, WriterState};
+
+let writer: Arc<KeylessWriter<Sha256, Vec<u8>>> =
+    Arc::new(KeylessWriter::new(client.clone(), WriterState::empty()));
+
+// Sequential usage — awaits each upload.
+writer.upload_and_publish(&batch_ops).await?;
+
+// Pipelined usage — dispatch concurrent PUTs up to a bounded depth.
+use futures::stream::{FuturesUnordered, StreamExt};
+let mut in_flight = FuturesUnordered::new();
+for batch in batches {
+    if in_flight.len() >= MAX_INFLIGHT {
+        in_flight.next().await.unwrap()?;
+    }
+    let w = writer.clone();
+    in_flight.push(Box::pin(async move { w.upload_and_publish(&batch).await }));
+}
+while let Some(r) = in_flight.next().await { r?; }
+writer.flush().await?;  // publish the tail watermark
+```
+
+### Ordered local-DB flow
+
+`OrderedWriter` needs one extra caller input per batch:
+`CurrentBoundaryState`. That payload is the versioned current-state delta for
+the batch boundary:
+
+- the current root after the batch
+- only the bitmap chunks that changed at that boundary
+- only the grafted-node digests that changed at that boundary
+
+The intended flow is:
+
+1. apply the batch to a local Commonware `current::ordered::Db`
+2. read the cumulative ordered operations after the batch
+3. call `recover_boundary_state(previous_operations, operations, db.root(), prove_at)`
+   against that same local DB state
+4. pass both `operations` and the recovered boundary state into
+   `OrderedWriter::upload_and_publish`
+
+`recover_boundary_state(...)` does not talk to the remote store. It is just
+the adapter that turns local Commonware proofs into the `CurrentBoundaryState`
+rows the store-backed ordered mirror needs.
+
+### Watermark rule (per-batch)
+
+Every batch's PUT carries a watermark row at the **latest safe location**:
+
+| Pipeline state at dispatch | Watermark row emitted at |
+|---|---|
+| empty (no in-flight PUTs) | this batch's own `latest_location` |
+| non-empty, some prefix ACKd | the contiguous-acked prefix's `latest_location` |
+| non-empty, nothing ACKd yet | *omitted* |
+
+The "contiguous-acked prefix" is the longest prefix of dispatched batches for
+which every batch has returned `Ok`. Popping advances in ACK order (handled
+internally per-batch via a `dispatch_id` — out-of-order ACKs across HTTP/2
+streams are handled correctly).
+
+Under steady-state bounded-concurrency pipelining the published watermark
+lags the dispatch frontier by at most the pipeline depth — never unbounded.
+
+### Flush
+
+`flush()` awaits all in-flight PUTs and, if the last dispatched batch's
+`latest_location` is ahead of the published watermark, issues one standalone
+watermark-row PUT to catch up. Needed only:
+
+- at end-of-stream to publish the tail after the last dispatch, or
+- if you want to block until all pending writes are both ACKd and
+  watermarked (e.g. before a graceful shutdown).
+
+Not needed between batches in steady state — the per-batch rule keeps the
+watermark advancing on its own.
+
+### Failure recovery
+
+Any PUT failure poisons the writer. `upload_and_publish` returns the error
+and future calls return `WriterPoisoned`. The caller constructs a fresh writer
+from caller-owned committed frontier state (for example, reconstructed from a
+local Commonware proof) and re-submits any still-pending batches from its own
+durable source. Re-submission is safe: PUT rows are content-addressed by key
+and MMR math is deterministic.
+
+### Sole-writer contract
+
+Writers assume they are the only publisher for a namespace at a time.
+Concurrent writers would race on MMR peak extension and corrupt each other's
+state. The store's ingest layer does not enforce this — it's on the caller.
+
+## Streaming
+
+Every client exposes `stream_batches(since)` which returns an async `Stream`
+of verified operation ranges, one item per uploaded batch. The proof is built
+and verified internally; consumers work directly with the decoded operations.
+
+```rust,ignore
+use std::sync::Arc;
+use futures::StreamExt;
+
+let client = Arc::new(OrderedClient::<Sha256, K, V, N>::new(url, op_cfg, row_cfg));
+let mut stream = client.stream_batches(None).await?;
+while let Some(item) = stream.next().await {
+    let verified = item?;
+    // verified.watermark:       the smallest watermark that authorized this batch
+    // verified.start_location:  first location in the batch
+    // verified.operations:      already verified against verified.root
+}
+```
+
+### What triggers an emission
+
+A batch is emitted only when **both** conditions hold:
+
+1. its presence marker has been uploaded (the batch is closed), and
+2. a watermark has been published with `watermark_location >= batch.latest`.
+
+Each batch is stamped with the **smallest** authorizing watermark, so
+`item.watermark` reflects the authority under which the batch was published,
+not a later unrelated watermark.
+
+### The `since` cursor
+
+`since: Option<u64>` is the store's **stream sequence number** assigned to
+each PUT, not a QMDB `Location` or batch index.
+
+- `None`: start live from the next PUT; no historical replay.
+- `Some(N)`: replay every retained PUT with `sequence_number >= N` in
+  ascending order, then transition seamlessly to live.
+- If `N` has been evicted by batch-log pruning, the first poll returns
+  `Err(QmdbError::Stream(..))` with a `BATCH_EVICTED` detail so the caller
+  can decide whether to accept a gap.
+
+### Error recovery
+
+On any transport error (slow-client eviction, connection closed, server
+restart) the stream yields `Err(QmdbError::Stream(..))` and terminates.
+To resume with no gaps, track the last-delivered store sequence number and
+resubscribe with `since = last_seen + 1` — the batch log replays the gap,
+then live resumes.
+
+### Multiple subscribers
+
+Each call to `stream_batches` opens an independent server-side
+subscription. Two clients against the same store get two independent
+streams; there is no shared fan-out on the client side.
+
+### Cross-backend isolation
+
+Immutable and Keyless subscriptions filter on the authenticated namespace
+tag, so a Keyless writer and an Immutable writer can share one store
+without either stream seeing the other's rows.
+
 ## Tests
 
 The crate tests use real local Commonware databases as reference

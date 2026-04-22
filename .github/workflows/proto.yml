@@ -1,0 +1,33 @@
+name: Proto
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install Buf CLI
+        uses: bufbuild/buf-setup-action@v1
+        with:
+          version: 1.67.0
+      - name: Run setup (Rust + Node)
+        uses: ./.github/actions/setup
+      - name: Buf build
+        run: buf build proto
+      - name: Buf lint
+        run: buf lint proto
+      - name: Verify generated code is up to date
+        run: |
+          ./gen.sh
+          git diff --exit-code sdk-rs/src/gen/ sdk-ts/src/gen/ || \
+            (echo "Generated code is stale. Run ./gen.sh and commit." && exit 1)

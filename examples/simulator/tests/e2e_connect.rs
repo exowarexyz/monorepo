@@ -1,15 +1,17 @@
 use bytes::Bytes;
 use commonware_codec::Encode;
 use connectrpc::client::ClientConfig;
+use exoware_sdk_rs::common::MatchKey as ProtoMatchKey;
 use exoware_sdk_rs::compact::{
-    policy_retain, Policy, PolicyGroupBy, PolicyMatchKey, PolicyOrderBy, PolicyOrderEncoding,
-    PolicyRetain, PruneRequest, RetainGreaterThan, RetainKeepLatest,
+    policy, policy_retain, KeysScope as ProtoKeysScope, Policy, PolicyGroupBy, PolicyOrderBy,
+    PolicyOrderEncoding, PolicyRetain, PruneRequest, RetainGreaterThan, RetainKeepLatest,
     ServiceClient as CompactServiceClient,
 };
 use exoware_sdk_rs::keys::{Key, KeyCodec};
 use exoware_sdk_rs::kv_codec::{
     KvExpr, KvFieldKind, KvFieldRef, KvReducedValue, StoredRow, StoredValue,
 };
+use exoware_sdk_rs::match_key::MatchKey as DomainMatchKey;
 use exoware_sdk_rs::prune_policy;
 use exoware_sdk_rs::{
     connect_compression_registry, PreferZstdHttpClient, RangeMode, RangeReduceOp,
@@ -43,17 +45,17 @@ async fn put_and_get_round_trip() {
     let (_h, client, _url) = spawn_client().await;
     let k = key(b"hello");
     let v = b"world";
-    let seq = client.put(&[(&k, v)]).await.expect("put");
+    let seq = client.ingest().put(&[(&k, v)]).await.expect("put");
     assert!(seq > 0);
 
-    let got = client.get(&k).await.expect("get");
+    let got = client.query().get(&k).await.expect("get");
     assert_eq!(got.as_deref(), Some(v.as_slice()));
 }
 
 #[tokio::test]
 async fn get_missing_key_returns_none() {
     let (_h, client, _url) = spawn_client().await;
-    let got = client.get(&key(b"nope")).await.expect("get");
+    let got = client.query().get(&key(b"nope")).await.expect("get");
     assert!(got.is_none());
 }
 
@@ -61,9 +63,10 @@ async fn get_missing_key_returns_none() {
 async fn put_overwrites_value() {
     let (_h, client, _url) = spawn_client().await;
     let k = key(b"k");
-    client.put(&[(&k, b"v1")]).await.expect("put1");
-    let seq2 = client.put(&[(&k, b"v2")]).await.expect("put2");
+    client.ingest().put(&[(&k, b"v1")]).await.expect("put1");
+    let seq2 = client.ingest().put(&[(&k, b"v2")]).await.expect("put2");
     let got = client
+        .query()
         .get_with_min_sequence_number(&k, seq2)
         .await
         .expect("get");
@@ -78,9 +81,14 @@ async fn get_many_returns_found_and_missing() {
     let ka = key(b"a");
     let kb = key(b"b");
     let kc = key(b"c");
-    client.put(&[(&ka, b"1"), (&kc, b"3")]).await.expect("put");
+    client
+        .ingest()
+        .put(&[(&ka, b"1"), (&kc, b"3")])
+        .await
+        .expect("put");
 
     let stream = client
+        .query()
         .get_many(&[&ka, &kb, &kc], 100)
         .await
         .expect("get_many");
@@ -99,11 +107,13 @@ async fn range_forward() {
     let kb = key(b"rb");
     let kc = key(b"rc");
     client
+        .ingest()
         .put(&[(&ka, b"1"), (&kb, b"2"), (&kc, b"3")])
         .await
         .expect("put");
 
     let rows = client
+        .query()
         .range(&key(b"ra"), &key(b"rc"), 100)
         .await
         .expect("range");
@@ -118,11 +128,13 @@ async fn range_reverse() {
     let kb = key(b"sb");
     let kc = key(b"sc");
     client
+        .ingest()
         .put(&[(&ka, b"1"), (&kb, b"2"), (&kc, b"3")])
         .await
         .expect("put");
 
     let rows = client
+        .query()
         .range_with_mode(&key(b"sa"), &key(b"sc"), 100, RangeMode::Reverse)
         .await
         .expect("range_reverse");
@@ -137,11 +149,13 @@ async fn range_with_limit() {
     let kb = key(b"lb");
     let kc = key(b"lc");
     client
+        .ingest()
         .put(&[(&ka, b"1"), (&kb, b"2"), (&kc, b"3")])
         .await
         .expect("put");
 
     let rows = client
+        .query()
         .range(&key(b"la"), &key(b"lc"), 2)
         .await
         .expect("range");
@@ -154,6 +168,7 @@ async fn range_with_limit() {
 async fn range_empty_result() {
     let (_h, client, _url) = spawn_client().await;
     let rows = client
+        .query()
         .range(&key(b"zzz_no"), &key(b"zzz_nz"), 100)
         .await
         .expect("range");
@@ -169,6 +184,7 @@ async fn reduce_count_all() {
     let kb = key(b"cb");
     let kc = key(b"cc");
     client
+        .ingest()
         .put(&[(&ka, b"1"), (&kb, b"2"), (&kc, b"3")])
         .await
         .expect("put");
@@ -182,6 +198,7 @@ async fn reduce_count_all() {
         filter: None,
     };
     let results = client
+        .query()
         .range_reduce(&key(b"ca"), &key(b"cc"), &request)
         .await
         .expect("reduce");
@@ -205,6 +222,7 @@ async fn reduce_sum_int64() {
         .to_vec()
     };
     client
+        .ingest()
         .put(&[
             (&ka, encode_row(10).as_slice()),
             (&kb, encode_row(20).as_slice()),
@@ -226,6 +244,7 @@ async fn reduce_sum_int64() {
         filter: None,
     };
     let results = client
+        .query()
         .range_reduce(&key(b"ua"), &key(b"uc"), &request)
         .await
         .expect("reduce");
@@ -244,12 +263,13 @@ async fn prune_drop_all_removes_keys() {
     let kb = codec.encode(b"bbb").expect("encode key b");
     let kc = codec.encode(b"ccc").expect("encode key c");
     client
+        .ingest()
         .put(&[(&ka, b"va"), (&kb, b"vb"), (&kc, b"vc")])
         .await
         .expect("put");
 
     // Verify keys exist
-    assert!(client.get(&ka).await.expect("get a").is_some());
+    assert!(client.query().get(&ka).await.expect("get a").is_some());
 
     let compact_config = ClientConfig::new(url.parse::<http::Uri>().unwrap())
         .compression(connect_compression_registry());
@@ -258,19 +278,22 @@ async fn prune_drop_all_removes_keys() {
     compact_client
         .prune(PruneRequest {
             policies: vec![Policy {
-                match_key: Some(PolicyMatchKey {
-                    reserved_bits: 4,
-                    prefix: 1,
-                    payload_regex: "(?s-u)^.*$".to_string(),
+                scope: Some(policy::Scope::Keys(Box::new(ProtoKeysScope {
+                    match_key: Some(ProtoMatchKey {
+                        reserved_bits: 4,
+                        prefix: 1,
+                        payload_regex: "(?s-u)^.*$".to_string(),
+                        ..Default::default()
+                    })
+                    .into(),
+                    group_by: Some(PolicyGroupBy {
+                        capture_groups: vec![],
+                        ..Default::default()
+                    })
+                    .into(),
+                    order_by: Default::default(),
                     ..Default::default()
-                })
-                .into(),
-                group_by: Some(PolicyGroupBy {
-                    capture_groups: vec![],
-                    ..Default::default()
-                })
-                .into(),
-                order_by: Default::default(),
+                }))),
                 retain: Some(PolicyRetain {
                     kind: Some(policy_retain::Kind::DropAll(Box::default())),
                     ..Default::default()
@@ -284,22 +307,25 @@ async fn prune_drop_all_removes_keys() {
         .expect("prune");
 
     // All keys in this prefix should be gone
-    assert!(client.get(&ka).await.expect("get a").is_none());
-    assert!(client.get(&kb).await.expect("get b").is_none());
-    assert!(client.get(&kc).await.expect("get c").is_none());
+    assert!(client.query().get(&ka).await.expect("get a").is_none());
+    assert!(client.query().get(&kb).await.expect("get b").is_none());
+    assert!(client.query().get(&kc).await.expect("get c").is_none());
 }
 
-// -- sequence number tracking --
+// -- explicit sequence reads --
 
 #[tokio::test]
-async fn sequence_number_advances() {
+async fn create_session_with_sequence_reads_at_or_above_floor() {
     let (_h, client, _url) = spawn_client().await;
     let k1 = key(b"s1");
     let k2 = key(b"s2");
-    let seq1 = client.put(&[(&k1, b"v1")]).await.expect("put1");
-    let seq2 = client.put(&[(&k2, b"v2")]).await.expect("put2");
+    let seq1 = client.ingest().put(&[(&k1, b"v1")]).await.expect("put1");
+    let seq2 = client.ingest().put(&[(&k2, b"v2")]).await.expect("put2");
     assert!(seq2 > seq1);
-    assert!(client.sequence_number() >= seq2);
+
+    let session = client.create_session_with_sequence(seq2);
+    let got = session.get(&k2).await.expect("session get");
+    assert_eq!(got.as_deref(), Some(b"v2".as_slice()));
 }
 
 // -- health --
@@ -319,20 +345,21 @@ async fn put_batch_multiple_keys() {
     let kb = key(b"bb");
     let kc = key(b"bc");
     client
+        .ingest()
         .put(&[(&ka, b"1"), (&kb, b"2"), (&kc, b"3")])
         .await
         .expect("put batch");
 
     assert_eq!(
-        client.get(&ka).await.expect("get a").as_deref(),
+        client.query().get(&ka).await.expect("get a").as_deref(),
         Some(b"1".as_slice())
     );
     assert_eq!(
-        client.get(&kb).await.expect("get b").as_deref(),
+        client.query().get(&kb).await.expect("get b").as_deref(),
         Some(b"2".as_slice())
     );
     assert_eq!(
-        client.get(&kc).await.expect("get c").as_deref(),
+        client.query().get(&kc).await.expect("get c").as_deref(),
         Some(b"3".as_slice())
     );
 }
@@ -347,11 +374,13 @@ async fn range_stream_collects_all() {
     let kc = key(b"xc");
     let kd = key(b"xd");
     client
+        .ingest()
         .put(&[(&ka, b"1"), (&kb, b"2"), (&kc, b"3"), (&kd, b"4")])
         .await
         .expect("put");
 
     let stream = client
+        .query()
         .range_stream(&key(b"xa"), &key(b"xd"), 100, 2)
         .await
         .expect("range_stream");
@@ -367,8 +396,9 @@ async fn range_stream_collects_all() {
 async fn get_with_min_sequence_number() {
     let (_h, client, _url) = spawn_client().await;
     let k = key(b"msn");
-    let seq = client.put(&[(&k, b"val")]).await.expect("put");
+    let seq = client.ingest().put(&[(&k, b"val")]).await.expect("put");
     let got = client
+        .query()
         .get_with_min_sequence_number(&k, seq)
         .await
         .expect("get with min seq");
@@ -398,6 +428,7 @@ async fn prune_keep_latest_retains_newest() {
     let k_b1 = make_key(b"bbb", 1);
 
     client
+        .ingest()
         .put(&[
             (&k_a1, b"a-v1"),
             (&k_a2, b"a-v2"),
@@ -414,25 +445,28 @@ async fn prune_keep_latest_retains_newest() {
     compact_client
         .prune(PruneRequest {
             policies: vec![Policy {
-                match_key: Some(PolicyMatchKey {
-                    reserved_bits: 4,
-                    prefix: 2,
-                    payload_regex: "(?s-u)^(?P<logical>.{3})\\x00\\x00(?P<version>.{8})$"
-                        .to_string(),
+                scope: Some(policy::Scope::Keys(Box::new(ProtoKeysScope {
+                    match_key: Some(ProtoMatchKey {
+                        reserved_bits: 4,
+                        prefix: 2,
+                        payload_regex: "(?s-u)^(?P<logical>.{3})\\x00\\x00(?P<version>.{8})$"
+                            .to_string(),
+                        ..Default::default()
+                    })
+                    .into(),
+                    group_by: Some(PolicyGroupBy {
+                        capture_groups: vec!["logical".to_string()],
+                        ..Default::default()
+                    })
+                    .into(),
+                    order_by: Some(PolicyOrderBy {
+                        capture_group: "version".to_string(),
+                        encoding: PolicyOrderEncoding::POLICY_ORDER_ENCODING_U64_BE.into(),
+                        ..Default::default()
+                    })
+                    .into(),
                     ..Default::default()
-                })
-                .into(),
-                group_by: Some(PolicyGroupBy {
-                    capture_groups: vec!["logical".to_string()],
-                    ..Default::default()
-                })
-                .into(),
-                order_by: Some(PolicyOrderBy {
-                    capture_group: "version".to_string(),
-                    encoding: PolicyOrderEncoding::POLICY_ORDER_ENCODING_U64_BE.into(),
-                    ..Default::default()
-                })
-                .into(),
+                }))),
                 retain: Some(PolicyRetain {
                     kind: Some(policy_retain::Kind::KeepLatest(Box::new(
                         RetainKeepLatest {
@@ -451,15 +485,15 @@ async fn prune_keep_latest_retains_newest() {
         .expect("prune keep_latest");
 
     // Only the newest version of group "aaa" (version=3) should survive
-    assert!(client.get(&k_a1).await.expect("get a1").is_none());
-    assert!(client.get(&k_a2).await.expect("get a2").is_none());
+    assert!(client.query().get(&k_a1).await.expect("get a1").is_none());
+    assert!(client.query().get(&k_a2).await.expect("get a2").is_none());
     assert_eq!(
-        client.get(&k_a3).await.expect("get a3").as_deref(),
+        client.query().get(&k_a3).await.expect("get a3").as_deref(),
         Some(b"a-v3".as_slice())
     );
     // Group "bbb" has only 1 entry, which is its latest -- should survive
     assert_eq!(
-        client.get(&k_b1).await.expect("get b1").as_deref(),
+        client.query().get(&k_b1).await.expect("get b1").as_deref(),
         Some(b"b-v1".as_slice())
     );
 }
@@ -477,6 +511,7 @@ async fn reduce_count_min_max_field() {
         .to_vec()
     };
     client
+        .ingest()
         .put(&[
             (&key(b"fa"), encode_row(10).as_slice()),
             (&key(b"fb"), encode_row(30).as_slice()),
@@ -509,6 +544,7 @@ async fn reduce_count_min_max_field() {
         filter: None,
     };
     let results = client
+        .query()
         .range_reduce(&key(b"fa"), &key(b"fc"), &request)
         .await
         .expect("reduce");
@@ -536,6 +572,7 @@ async fn reduce_grouped_count() {
     let kb1 = codec.encode(b"b\x01").expect("encode");
 
     client
+        .ingest()
         .put(&[
             (&ka1, encode_row(1).as_slice()),
             (&ka2, encode_row(2).as_slice()),
@@ -556,6 +593,7 @@ async fn reduce_grouped_count() {
         filter: None,
     };
     let response = client
+        .query()
         .range_reduce_response(&ka1, &kb1, &request)
         .await
         .expect("reduce");
@@ -572,27 +610,31 @@ async fn store_client_prune_drop_all() {
     let ka = codec.encode(b"pa").expect("encode");
     let kb = codec.encode(b"pb").expect("encode");
     client
+        .ingest()
         .put(&[(&ka, b"v1"), (&kb, b"v2")])
         .await
         .expect("put");
-    assert!(client.get(&ka).await.expect("get").is_some());
+    assert!(client.query().get(&ka).await.expect("get").is_some());
 
     client
+        .compact()
         .prune(&[prune_policy::PrunePolicy {
-            match_key: prune_policy::MatchKey {
-                reserved_bits: 4,
-                prefix: 5,
-                payload_regex: ".*".into(),
-            },
-            group_by: prune_policy::GroupBy::default(),
-            order_by: None,
+            scope: prune_policy::PolicyScope::Keys(prune_policy::KeysScope {
+                match_key: DomainMatchKey {
+                    reserved_bits: 4,
+                    prefix: 5,
+                    payload_regex: ".*".into(),
+                },
+                group_by: prune_policy::GroupBy::default(),
+                order_by: None,
+            }),
             retain: prune_policy::RetainPolicy::DropAll,
         }])
         .await
         .expect("prune");
 
-    assert!(client.get(&ka).await.expect("get").is_none());
-    assert!(client.get(&kb).await.expect("get").is_none());
+    assert!(client.query().get(&ka).await.expect("get").is_none());
+    assert!(client.query().get(&kb).await.expect("get").is_none());
 }
 
 // -- prune with GreaterThan retain --
@@ -614,6 +656,7 @@ async fn prune_greater_than_retains_above_threshold() {
     let k_a30 = make_key(b"aa", 30);
 
     client
+        .ingest()
         .put(&[(&k_a10, b"v10"), (&k_a20, b"v20"), (&k_a30, b"v30")])
         .await
         .expect("put");
@@ -625,24 +668,27 @@ async fn prune_greater_than_retains_above_threshold() {
     compact_client
         .prune(PruneRequest {
             policies: vec![Policy {
-                match_key: Some(PolicyMatchKey {
-                    reserved_bits: 4,
-                    prefix: 3,
-                    payload_regex: "(?s-u)^(?P<logical>.{2})(?P<version>.{8})$".to_string(),
+                scope: Some(policy::Scope::Keys(Box::new(ProtoKeysScope {
+                    match_key: Some(ProtoMatchKey {
+                        reserved_bits: 4,
+                        prefix: 3,
+                        payload_regex: "(?s-u)^(?P<logical>.{2})(?P<version>.{8})$".to_string(),
+                        ..Default::default()
+                    })
+                    .into(),
+                    group_by: Some(PolicyGroupBy {
+                        capture_groups: vec!["logical".to_string()],
+                        ..Default::default()
+                    })
+                    .into(),
+                    order_by: Some(PolicyOrderBy {
+                        capture_group: "version".to_string(),
+                        encoding: PolicyOrderEncoding::POLICY_ORDER_ENCODING_U64_BE.into(),
+                        ..Default::default()
+                    })
+                    .into(),
                     ..Default::default()
-                })
-                .into(),
-                group_by: Some(PolicyGroupBy {
-                    capture_groups: vec!["logical".to_string()],
-                    ..Default::default()
-                })
-                .into(),
-                order_by: Some(PolicyOrderBy {
-                    capture_group: "version".to_string(),
-                    encoding: PolicyOrderEncoding::POLICY_ORDER_ENCODING_U64_BE.into(),
-                    ..Default::default()
-                })
-                .into(),
+                }))),
                 retain: Some(PolicyRetain {
                     kind: Some(policy_retain::Kind::GreaterThan(Box::new(
                         RetainGreaterThan {
@@ -660,7 +706,7 @@ async fn prune_greater_than_retains_above_threshold() {
         .await
         .expect("prune greater_than");
 
-    assert!(client.get(&k_a10).await.expect("get a10").is_none());
-    assert!(client.get(&k_a20).await.expect("get a20").is_some());
-    assert!(client.get(&k_a30).await.expect("get a30").is_some());
+    assert!(client.query().get(&k_a10).await.expect("get a10").is_none());
+    assert!(client.query().get(&k_a20).await.expect("get a20").is_some());
+    assert!(client.query().get(&k_a30).await.expect("get a30").is_some());
 }

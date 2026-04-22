@@ -3,6 +3,16 @@
 //! Proto sources: `proto/`. Run `./gen.sh` to regenerate all bindings.
 
 pub mod store {
+    pub mod common {
+        pub mod v1 {
+            #![allow(non_camel_case_types)]
+            #![allow(unused_imports)]
+            #![allow(clippy::derivable_impls)]
+            #![allow(clippy::match_single_binding)]
+            include!("../gen/store.v1.common.rs");
+        }
+    }
+
     pub mod compact {
         pub mod v1 {
             #![allow(non_camel_case_types)]
@@ -32,6 +42,16 @@ pub mod store {
             include!("../gen/store.v1.query.rs");
         }
     }
+
+    pub mod stream {
+        pub mod v1 {
+            #![allow(non_camel_case_types)]
+            #![allow(unused_imports)]
+            #![allow(clippy::derivable_impls)]
+            #![allow(clippy::match_single_binding)]
+            include!("../gen/store.v1.stream.rs");
+        }
+    }
 }
 
 pub mod google {
@@ -42,6 +62,14 @@ pub mod google {
         #![allow(clippy::match_single_binding)]
         include!("../gen/google.rpc.error_details.rs");
     }
+}
+
+pub mod common {
+    #![allow(non_camel_case_types)]
+    #![allow(unused_imports)]
+    #![allow(clippy::derivable_impls)]
+    #![allow(clippy::match_single_binding)]
+    pub use crate::store::common::v1::*;
 }
 
 pub mod compact {
@@ -66,6 +94,14 @@ pub mod query {
     #![allow(clippy::derivable_impls)]
     #![allow(clippy::match_single_binding)]
     pub use crate::store::query::v1::*;
+}
+
+pub mod stream {
+    #![allow(non_camel_case_types)]
+    #![allow(unused_imports)]
+    #![allow(clippy::derivable_impls)]
+    #![allow(clippy::match_single_binding)]
+    pub use crate::store::stream::v1::*;
 }
 
 pub mod compression;

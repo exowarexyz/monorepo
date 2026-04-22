@@ -20,9 +20,11 @@ fn main() {
     connectrpc_build::Config::new()
         .files(&[
             "google/rpc/error_details.proto",
+            "store/v1/common.proto",
             "store/v1/compact.proto",
             "store/v1/ingest.proto",
             "store/v1/query.proto",
+            "store/v1/stream.proto",
         ])
         .descriptor_set(&descriptor)
         .emit_register_fn(false)

@@ -6,14 +6,14 @@ mod common;
 use std::num::NonZeroU64;
 
 use commonware_runtime::{deterministic, Runner as _};
-use commonware_storage::mmr::Location;
+use commonware_storage::mmr::{Location, StandardHasher};
 use commonware_storage::qmdb::{
     keyless::{Config as KeylessConfig, Keyless, Operation as KeylessOperation},
     store::LogStore as _,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_sdk_rs::StoreClient;
-use store_qmdb::KeylessClient;
+use store_qmdb::{KeylessClient, KeylessWriter};
 
 use common::retry;
 
@@ -21,9 +21,14 @@ type Digest = commonware_cryptography::sha256::Digest;
 type LocalDb = Keyless<deterministic::Context, Vec<u8>, commonware_cryptography::Sha256>;
 
 type TestKeylessClient = KeylessClient<commonware_cryptography::Sha256, Vec<u8>>;
+type TestKeylessWriter = KeylessWriter<commonware_cryptography::Sha256, Vec<u8>>;
 
 fn fresh_keyless(c: StoreClient) -> TestKeylessClient {
     TestKeylessClient::from_client(c, ((0..=10000).into(), ()))
+}
+
+fn fresh_writer(c: StoreClient) -> TestKeylessWriter {
+    TestKeylessWriter::empty(c)
 }
 
 struct LocalReference {
@@ -100,26 +105,11 @@ async fn keyless_round_trip() {
     let (_dir, _server, client) = common::local_store_client().await;
     let local = build_local_db().await;
 
-    retry(
-        || {
-            let c = fresh_keyless(client.clone());
-            let ops = local.operations.clone();
-            let loc = local.latest_location;
-            async move { c.upload_operations(loc, &ops).await.map(|_| ()) }
-        },
-        "upload_operations",
-    )
-    .await;
-
-    retry(
-        || {
-            let c = fresh_keyless(client.clone());
-            let loc = local.latest_location;
-            async move { c.publish_writer_location_watermark(loc).await.map(|_| ()) }
-        },
-        "publish_watermark",
-    )
-    .await;
+    let writer = fresh_writer(client.clone());
+    writer
+        .upload_and_publish(&local.operations)
+        .await
+        .expect("upload_and_publish");
 
     let root = retry(
         || {
@@ -148,10 +138,25 @@ async fn keyless_round_trip() {
         )
         .await
         .expect("proof");
-    assert!(
-        proof.verify::<commonware_cryptography::Sha256>(),
-        "proof must verify"
-    );
     assert_eq!(proof.root, local.root);
     assert_eq!(proof.operations, local.operations);
+
+    let checkpoint = c
+        .operation_range_checkpoint(
+            local.latest_location,
+            Location::new(0),
+            local.operations.len() as u32,
+        )
+        .await
+        .expect("checkpoint");
+    let peaks = checkpoint
+        .reconstruct_peaks::<commonware_cryptography::Sha256>()
+        .expect("reconstruct_peaks");
+    let mut hasher = StandardHasher::<commonware_cryptography::Sha256>::new();
+    let reconstructed_root = commonware_storage::mmr::hasher::Hasher::root(
+        &mut hasher,
+        checkpoint.proof.leaves,
+        peaks.iter().map(|(_, _, digest)| digest),
+    );
+    assert_eq!(reconstructed_root, checkpoint.root);
 }

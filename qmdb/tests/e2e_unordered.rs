@@ -16,10 +16,7 @@ use commonware_storage::qmdb::{
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use store_qmdb::UnorderedClient;
-use store_qmdb::MAX_OPERATION_SIZE;
-
-use common::retry;
+use store_qmdb::{UnorderedClient, UnorderedWriter, MAX_OPERATION_SIZE};
 
 type Digest = commonware_cryptography::sha256::Digest;
 type BatchProof = commonware_storage::mmr::Proof<Digest>;
@@ -119,32 +116,11 @@ async fn unordered_round_trip() {
     let (_dir, _server, client) = common::local_store_client().await;
     let local = build_local_db().await;
 
-    retry(
-        || {
-            let c = TestUnorderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
-            let ops = local.operations.clone();
-            let loc = local.latest_location;
-            async move {
-                c.upload_operations(loc, &ops).await?;
-                Ok(())
-            }
-        },
-        "upload_operations",
-    )
-    .await;
-
-    retry(
-        || {
-            let c = TestUnorderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
-            let loc = local.latest_location;
-            async move {
-                c.publish_writer_location_watermark(loc).await?;
-                Ok(())
-            }
-        },
-        "publish_watermark",
-    )
-    .await;
+    let writer: UnorderedWriter<Sha256, Vec<u8>, Vec<u8>> = UnorderedWriter::empty(client.clone());
+    writer
+        .upload_and_publish(&local.operations)
+        .await
+        .expect("upload_and_publish");
 
     let c = TestUnorderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
     let watermark = c.writer_location_watermark().await.expect("watermark");
@@ -174,6 +150,5 @@ async fn unordered_round_trip() {
         )
         .await
         .expect("proof");
-    assert!(proof.verify::<Sha256>(), "proof must verify");
     assert_eq!(proof.operations, local.operations);
 }

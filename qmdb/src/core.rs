@@ -1,6 +1,4 @@
-use std::collections::BTreeMap;
 use std::marker::PhantomData;
-use std::sync::{atomic::AtomicU64, Arc};
 use std::time::Duration;
 
 use commonware_codec::{Codec, Encode, Read as CodecRead};
@@ -26,29 +24,6 @@ use crate::VersionedValue;
 const POST_INGEST_QUERY_RETRY_MAX_ATTEMPTS: usize = 6;
 const POST_INGEST_QUERY_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 const POST_INGEST_QUERY_RETRY_MAX_BACKOFF: Duration = Duration::from_millis(1_000);
-
-pub(crate) async fn wait_until_query_visible_sequence(
-    visible_sequence: Option<&Arc<AtomicU64>>,
-    token: u64,
-) -> Result<(), QmdbError> {
-    let Some(seq) = visible_sequence else {
-        return Ok(());
-    };
-    if token == 0 {
-        return Ok(());
-    }
-    use std::sync::atomic::Ordering;
-    for _ in 0..10_000 {
-        if seq.load(Ordering::Relaxed) >= token {
-            return Ok(());
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-    }
-    Err(QmdbError::CorruptData(
-        "timed out waiting for query worker visible_sequence to catch ingest consistency token"
-            .to_string(),
-    ))
-}
 
 pub(crate) fn is_transient_post_ingest_query_error(err: &QmdbError) -> bool {
     match err {
@@ -99,17 +74,11 @@ where
 #[derive(Clone, Debug)]
 pub(crate) struct HistoricalOpsClientCore<'a, D: Digest, K: Codec, V: Codec> {
     pub(crate) client: &'a StoreClient,
-    pub(crate) query_visible_sequence: Option<&'a Arc<AtomicU64>>,
     pub(crate) update_row_cfg: (K::Cfg, V::Cfg),
     pub(crate) _marker: PhantomData<(D, K, V)>,
 }
 
 impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
-    pub(crate) async fn sync_after_ingest(&self) -> Result<(), QmdbError> {
-        let token = self.client.sequence_number();
-        wait_until_query_visible_sequence(self.query_visible_sequence, token).await
-    }
-
     pub(crate) async fn writer_location_watermark(&self) -> Result<Option<Location>, QmdbError> {
         retry_transient_post_ingest_query(|| {
             let session = self.client.create_session();
@@ -183,88 +152,6 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
             .into_iter()
             .next()
             .map(|(key, value)| (key, value.to_vec())))
-    }
-
-    pub(crate) async fn append_encoded_ops_nodes_incrementally<H: Hasher<Digest = D>>(
-        &self,
-        session: &SerializableReadSession,
-        previous_ops_size: Position,
-        encoded_operations: &[Vec<u8>],
-        rows: &mut Vec<(Key, Vec<u8>)>,
-    ) -> Result<(Position, BTreeMap<Position, D>, D), QmdbError> {
-        let peak_entries: Vec<(Position, u32)> = PeakIterator::new(previous_ops_size).collect();
-        let fetched = if peak_entries.is_empty() {
-            std::collections::HashMap::new()
-        } else {
-            let peak_keys: Vec<Key> = peak_entries
-                .iter()
-                .map(|(pos, _)| encode_node_key(*pos))
-                .collect();
-            let peak_key_refs: Vec<&Key> = peak_keys.iter().collect();
-            session
-                .get_many(&peak_key_refs, peak_key_refs.len() as u32)
-                .await?
-                .collect()
-                .await?
-        };
-        let mut peaks = Vec::<(Position, u32, D)>::with_capacity(peak_entries.len());
-        for (peak_pos, height) in &peak_entries {
-            let Some(bytes) = fetched.get(&encode_node_key(*peak_pos)) else {
-                return Err(QmdbError::CorruptData(format!(
-                    "missing prior ops peak node at position {peak_pos}"
-                )));
-            };
-            peaks.push((
-                *peak_pos,
-                *height,
-                decode_digest(bytes.as_ref(), format!("prior ops peak node at {peak_pos}"))?,
-            ));
-        }
-
-        let mut current_size = previous_ops_size;
-        let mut overlay = BTreeMap::<Position, D>::new();
-        let mut hasher = StandardHasher::<H>::new();
-        for encoded in encoded_operations {
-            ensure_encoded_value_size(encoded.len())?;
-            let leaf_pos = current_size;
-            let leaf_digest = mmr::hasher::Hasher::leaf_digest(&mut hasher, leaf_pos, encoded);
-            overlay.insert(leaf_pos, leaf_digest);
-            rows.push((encode_node_key(leaf_pos), leaf_digest.as_ref().to_vec()));
-            current_size = Position::new(*current_size + 1);
-
-            let mut carry_pos = leaf_pos;
-            let mut carry_digest = leaf_digest;
-            let mut carry_height = 0u32;
-            while peaks
-                .last()
-                .is_some_and(|(_, height, _)| *height == carry_height)
-            {
-                let (_, _, left_digest) = peaks.pop().expect("peak exists");
-                let parent_pos = current_size;
-                let parent_digest = mmr::hasher::Hasher::node_digest(
-                    &mut hasher,
-                    parent_pos,
-                    &left_digest,
-                    &carry_digest,
-                );
-                overlay.insert(parent_pos, parent_digest);
-                rows.push((encode_node_key(parent_pos), parent_digest.as_ref().to_vec()));
-                current_size = Position::new(*current_size + 1);
-                carry_pos = parent_pos;
-                carry_digest = parent_digest;
-                carry_height += 1;
-            }
-            peaks.push((carry_pos, carry_height, carry_digest));
-        }
-
-        let leaves = Location::try_from(current_size)
-            .map_err(|e| QmdbError::CorruptData(format!("invalid incremental ops size: {e}")))?;
-        let ops_root = mmr::hasher::Hasher::root(
-            &mut hasher,
-            leaves,
-            peaks.iter().map(|(_, _, digest)| digest),
-        );
-        Ok((current_size, overlay, ops_root))
     }
 
     pub(crate) async fn compute_ops_root<H: Hasher<Digest = D>>(
@@ -392,51 +279,32 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
         });
         futures::future::join_all(futs).await.into_iter().collect()
     }
-
-    pub(crate) async fn publish_writer_location_watermark_with_encoded_ops<
-        H: Hasher<Digest = D>,
-    >(
-        &self,
-        session: &SerializableReadSession,
-        latest_watermark: Option<Location>,
-        location: Location,
-        encoded_delta_ops: &[Vec<u8>],
-        kind: &str,
-    ) -> Result<Location, QmdbError> {
-        let previous_ops_size = match latest_watermark {
-            Some(previous) => mmr_size_for_watermark(previous)?,
-            None => Position::new(0),
-        };
-        let mut rows = Vec::<(Key, Vec<u8>)>::new();
-        self.append_encoded_ops_nodes_incrementally::<H>(
-            session,
-            previous_ops_size,
-            encoded_delta_ops,
-            &mut rows,
-        )
-        .await?;
-        rows.push((encode_watermark_key(location), Vec::new()));
-        let refs = rows
-            .iter()
-            .map(|(key, value)| (key, value.as_slice()))
-            .collect::<Vec<_>>();
-        self.client.put(&refs).await?;
-        self.sync_after_ingest().await?;
-        let visible = self.writer_location_watermark().await?;
-        if visible < Some(location) {
-            return Err(QmdbError::CorruptData(format!(
-                "{kind} watermark publish did not become query-visible: requested={location}, visible={visible:?}"
-            )));
-        }
-        Ok(location)
-    }
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedUpload {
     pub(crate) operation_count: u32,
     pub(crate) keyed_operation_count: u32,
-    pub(crate) rows: Vec<(Key, Vec<u8>)>,
+    /// Op rows in location order. Values are canonical encoded bytes; writers
+    /// feed references from here to `extend_mmr_from_peaks` without cloning.
+    pub(crate) op_rows: Vec<(Key, Vec<u8>)>,
+    /// Update-index rows (for keyed ops) plus the presence row. Order is
+    /// opaque to the store — rows are indexed by key, not position.
+    pub(crate) aux_rows: Vec<(Key, Vec<u8>)>,
+}
+
+impl PreparedUpload {
+    /// Byte-slice view over the op rows for feeding to `extend_mmr_from_peaks`.
+    pub(crate) fn op_bytes(&self) -> impl Iterator<Item = &[u8]> {
+        self.op_rows.iter().map(|(_, v)| v.as_slice())
+    }
+
+    /// Consume the two row vectors into a single `Vec` for dispatch.
+    pub(crate) fn into_all_rows(self) -> Vec<(Key, Vec<u8>)> {
+        let mut rows = self.op_rows;
+        rows.extend(self.aux_rows);
+        rows
+    }
 }
 
 impl PreparedUpload {
@@ -479,7 +347,8 @@ impl PreparedUpload {
         operations: &[Op],
         extract_keyed: impl Fn(&Op) -> Option<(&K, Option<&V>)>,
     ) -> Result<Self, QmdbError> {
-        let mut rows = Vec::<(Key, Vec<u8>)>::with_capacity(operations.len() * 2 + 1);
+        let mut op_rows = Vec::<(Key, Vec<u8>)>::with_capacity(operations.len());
+        let mut aux_rows = Vec::<(Key, Vec<u8>)>::with_capacity(operations.len() + 1);
         let mut keyed_operation_count = 0u32;
         let count_u64 = operations.len() as u64;
         let Some(start_location) = latest_location
@@ -497,7 +366,7 @@ impl PreparedUpload {
             let location = start_location + index as u64;
             let encoded = op.encode().to_vec();
             ensure_encoded_value_size(encoded.len())?;
-            rows.push((encode_operation_key(location), encoded));
+            op_rows.push((encode_operation_key(location), encoded));
 
             if let Some((key, value)) = extract_keyed(op) {
                 keyed_operation_count += 1;
@@ -505,7 +374,7 @@ impl PreparedUpload {
                     key: key.clone(),
                     value: value.cloned(),
                 };
-                rows.push((
+                aux_rows.push((
                     encode_update_key(key.as_ref(), location)?,
                     update_row.encode().to_vec(),
                 ));
@@ -515,12 +384,13 @@ impl PreparedUpload {
         let operation_count = u32::try_from(operations.len()).map_err(|_| {
             QmdbError::CorruptData("operation count does not fit in u32".to_string())
         })?;
-        rows.push((encode_presence_key(latest_location), Vec::new()));
+        aux_rows.push((encode_presence_key(latest_location), Vec::new()));
 
         Ok(Self {
             operation_count,
             keyed_operation_count,
-            rows,
+            op_rows,
+            aux_rows,
         })
     }
 }
@@ -556,4 +426,70 @@ impl PreparedCurrentBoundaryUpload {
         }
         Ok(Self { rows })
     }
+}
+
+/// Pure MMR extension: from existing peaks + size, fold `encoded_operations`
+/// into new leaves and compute the resulting peaks, size, root, and the full
+/// list of newly-created nodes the caller can persist. Shared between the
+/// unauthenticated and authenticated publish paths; also used by writers that
+/// maintain peaks in memory to avoid storage reads in the hot loop.
+pub(crate) struct MmrExtension<D: Digest> {
+    pub(crate) size: Position,
+    pub(crate) peaks: Vec<(Position, u32, D)>,
+    pub(crate) root: D,
+    pub(crate) new_nodes: Vec<(Position, D)>,
+}
+
+pub(crate) fn extend_mmr_from_peaks<H: Hasher, Op: AsRef<[u8]>>(
+    mut peaks: Vec<(Position, u32, H::Digest)>,
+    previous_size: Position,
+    encoded_operations: impl IntoIterator<Item = Op>,
+) -> Result<MmrExtension<H::Digest>, QmdbError> {
+    let mut current_size = previous_size;
+    let mut new_nodes = Vec::<(Position, H::Digest)>::new();
+    let mut hasher = StandardHasher::<H>::new();
+    for encoded in encoded_operations {
+        let encoded = encoded.as_ref();
+        ensure_encoded_value_size(encoded.len())?;
+        let leaf_pos = current_size;
+        let leaf_digest = mmr::hasher::Hasher::leaf_digest(&mut hasher, leaf_pos, encoded);
+        new_nodes.push((leaf_pos, leaf_digest));
+        current_size = Position::new(*current_size + 1);
+
+        let mut carry_pos = leaf_pos;
+        let mut carry_digest = leaf_digest;
+        let mut carry_height = 0u32;
+        while peaks
+            .last()
+            .is_some_and(|(_, height, _)| *height == carry_height)
+        {
+            let (_, _, left_digest) = peaks.pop().expect("peak exists");
+            let parent_pos = current_size;
+            let parent_digest = mmr::hasher::Hasher::node_digest(
+                &mut hasher,
+                parent_pos,
+                &left_digest,
+                &carry_digest,
+            );
+            new_nodes.push((parent_pos, parent_digest));
+            current_size = Position::new(*current_size + 1);
+            carry_pos = parent_pos;
+            carry_digest = parent_digest;
+            carry_height += 1;
+        }
+        peaks.push((carry_pos, carry_height, carry_digest));
+    }
+    let leaves = Location::try_from(current_size)
+        .map_err(|e| QmdbError::CorruptData(format!("invalid incremental ops size: {e}")))?;
+    let root = mmr::hasher::Hasher::root(
+        &mut hasher,
+        leaves,
+        peaks.iter().map(|(_, _, digest)| digest),
+    );
+    Ok(MmrExtension {
+        size: current_size,
+        peaks,
+        root,
+        new_nodes,
+    })
 }

@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package store.common.v1;
+
+import "buf/validate/validate.proto";
+
+// A raw key-value pair shared by store APIs that move complete rows without
+// additional per-entry metadata.
+//
+// Keys must be between 0 and 254 bytes (inclusive) anywhere this message is
+// used for ingestion.
+message KvEntry {
+  bytes key = 1 [(buf.validate.field).bytes.max_len = 254];
+  bytes value = 2;
+}
+
+// Identifies a subset of keys by their `KeyCodec` family (reserved_bits +
+// prefix) and a byte regex over the payload portion of each key (bytes after
+// the reserved/prefix header). Shared across `store.compact.v1` prune
+// policies, `store.stream.v1` subscriptions, and any future filter-by-key
+// surface so that one domain type is used end-to-end.
+//
+// Named capture groups referenced by callers (e.g. `PolicyGroupBy` /
+// `PolicyOrderBy`) must exist in `payload_regex`.
+message MatchKey {
+  // Number of high bits in the key reserved for internal routing. Together
+  // with `prefix`, this selects the `KeyCodec` family to scan.
+  uint32 reserved_bits = 1;
+  // Key family prefix. Combined with `reserved_bits` to derive the scan range
+  // via `KeyCodec::prefix_bounds`.
+  uint32 prefix = 2;
+  // Regex applied to the payload portion of each key. Must be non-empty.
+  string payload_regex = 3;
+}

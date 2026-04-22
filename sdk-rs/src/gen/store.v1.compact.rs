@@ -143,361 +143,16 @@ impl ::buffa::Enumeration for PolicyOrderEncoding {
 }
 /// Prune policy graph and admin RPC (served by the compaction worker).
 ///
-/// Identifies which keys a prune policy applies to. Keys are selected by their
-/// `KeyCodec` family (reserved_bits + prefix) and an optional regex over the
-/// key payload bytes.
-#[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
-pub struct PolicyMatchKey {
-    /// Number of high bits in the key reserved for internal routing. Together with
-    /// `prefix`, this selects the `KeyCodec` family to scan.
-    ///
-    /// Field 1: `reserved_bits`
-    #[serde(
-        rename = "reservedBits",
-        alias = "reserved_bits",
-        with = "::buffa::json_helpers::uint32",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u32"
-    )]
-    pub reserved_bits: u32,
-    /// Key family prefix. Combined with `reserved_bits` to derive the scan range
-    /// via `KeyCodec::prefix_bounds`.
-    ///
-    /// Field 2: `prefix`
-    #[serde(
-        rename = "prefix",
-        with = "::buffa::json_helpers::uint32",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u32"
-    )]
-    pub prefix: u32,
-    /// Regex applied to the payload portion of each key (the bytes after the
-    /// reserved/prefix header). Must be non-empty. Named capture groups referenced
-    /// by `PolicyGroupBy` and `PolicyOrderBy` must exist in this regex.
-    ///
-    /// Field 3: `payload_regex`
-    #[serde(
-        rename = "payloadRegex",
-        alias = "payload_regex",
-        with = "::buffa::json_helpers::proto_string",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_str"
-    )]
-    pub payload_regex: ::buffa::alloc::string::String,
-    #[serde(skip)]
-    #[doc(hidden)]
-    pub __buffa_unknown_fields: ::buffa::UnknownFields,
-    #[doc(hidden)]
-    #[serde(skip)]
-    pub __buffa_cached_size: ::buffa::__private::CachedSize,
-}
-impl ::core::fmt::Debug for PolicyMatchKey {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("PolicyMatchKey")
-            .field("reserved_bits", &self.reserved_bits)
-            .field("prefix", &self.prefix)
-            .field("payload_regex", &self.payload_regex)
-            .finish()
-    }
-}
-impl PolicyMatchKey {
-    /// Protobuf type URL for this message, for use with `Any::pack` and
-    /// `Any::unpack_if`.
-    ///
-    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.PolicyMatchKey";
-}
-unsafe impl ::buffa::DefaultInstance for PolicyMatchKey {
-    fn default_instance() -> &'static Self {
-        static VALUE: ::buffa::__private::OnceBox<PolicyMatchKey> = ::buffa::__private::OnceBox::new();
-        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
-    }
-}
-impl ::buffa::Message for PolicyMatchKey {
-    /// Returns the total encoded size in bytes.
-    ///
-    /// The result is a `u32`; the protobuf specification requires all
-    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
-    /// compliant message will never overflow this type.
-    fn compute_size(&self) -> u32 {
-        #[allow(unused_imports)]
-        use ::buffa::Enumeration as _;
-        let mut size = 0u32;
-        if self.reserved_bits != 0u32 {
-            size += 1u32 + ::buffa::types::uint32_encoded_len(self.reserved_bits) as u32;
-        }
-        if self.prefix != 0u32 {
-            size += 1u32 + ::buffa::types::uint32_encoded_len(self.prefix) as u32;
-        }
-        if !self.payload_regex.is_empty() {
-            size
-                += 1u32 + ::buffa::types::string_encoded_len(&self.payload_regex) as u32;
-        }
-        size += self.__buffa_unknown_fields.encoded_len() as u32;
-        self.__buffa_cached_size.set(size);
-        size
-    }
-    fn write_to(&self, buf: &mut impl ::buffa::bytes::BufMut) {
-        #[allow(unused_imports)]
-        use ::buffa::Enumeration as _;
-        if self.reserved_bits != 0u32 {
-            ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Varint)
-                .encode(buf);
-            ::buffa::types::encode_uint32(self.reserved_bits, buf);
-        }
-        if self.prefix != 0u32 {
-            ::buffa::encoding::Tag::new(2u32, ::buffa::encoding::WireType::Varint)
-                .encode(buf);
-            ::buffa::types::encode_uint32(self.prefix, buf);
-        }
-        if !self.payload_regex.is_empty() {
-            ::buffa::encoding::Tag::new(
-                    3u32,
-                    ::buffa::encoding::WireType::LengthDelimited,
-                )
-                .encode(buf);
-            ::buffa::types::encode_string(&self.payload_regex, buf);
-        }
-        self.__buffa_unknown_fields.write_to(buf);
-    }
-    fn merge_field(
-        &mut self,
-        tag: ::buffa::encoding::Tag,
-        buf: &mut impl ::buffa::bytes::Buf,
-        depth: u32,
-    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
-        #[allow(unused_imports)]
-        use ::buffa::bytes::Buf as _;
-        #[allow(unused_imports)]
-        use ::buffa::Enumeration as _;
-        match tag.field_number() {
-            1u32 => {
-                if tag.wire_type() != ::buffa::encoding::WireType::Varint {
-                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                        field_number: 1u32,
-                        expected: 0u8,
-                        actual: tag.wire_type() as u8,
-                    });
-                }
-                self.reserved_bits = ::buffa::types::decode_uint32(buf)?;
-            }
-            2u32 => {
-                if tag.wire_type() != ::buffa::encoding::WireType::Varint {
-                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                        field_number: 2u32,
-                        expected: 0u8,
-                        actual: tag.wire_type() as u8,
-                    });
-                }
-                self.prefix = ::buffa::types::decode_uint32(buf)?;
-            }
-            3u32 => {
-                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
-                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                        field_number: 3u32,
-                        expected: 2u8,
-                        actual: tag.wire_type() as u8,
-                    });
-                }
-                ::buffa::types::merge_string(&mut self.payload_regex, buf)?;
-            }
-            _ => {
-                self.__buffa_unknown_fields
-                    .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
-            }
-        }
-        ::core::result::Result::Ok(())
-    }
-    fn cached_size(&self) -> u32 {
-        self.__buffa_cached_size.get()
-    }
-    fn clear(&mut self) {
-        self.reserved_bits = 0u32;
-        self.prefix = 0u32;
-        self.payload_regex.clear();
-        self.__buffa_unknown_fields.clear();
-        self.__buffa_cached_size.set(0);
-    }
-}
-impl ::buffa::ExtensionSet for PolicyMatchKey {
-    const PROTO_FQN: &'static str = "store.compact.v1.PolicyMatchKey";
-    fn unknown_fields(&self) -> &::buffa::UnknownFields {
-        &self.__buffa_unknown_fields
-    }
-    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
-        &mut self.__buffa_unknown_fields
-    }
-}
-impl ::buffa::json_helpers::ProtoElemJson for PolicyMatchKey {
-    fn serialize_proto_json<S: ::serde::Serializer>(
-        v: &Self,
-        s: S,
-    ) -> ::core::result::Result<S::Ok, S::Error> {
-        ::serde::Serialize::serialize(v, s)
-    }
-    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
-        d: D,
-    ) -> ::core::result::Result<Self, D::Error> {
-        <Self as ::serde::Deserialize>::deserialize(d)
-    }
-}
-#[doc(hidden)]
-pub const __POLICY_MATCH_KEY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.compact.v1.PolicyMatchKey",
-    to_json: ::buffa::type_registry::any_to_json::<PolicyMatchKey>,
-    from_json: ::buffa::type_registry::any_from_json::<PolicyMatchKey>,
-    is_wkt: false,
-};
-/// Prune policy graph and admin RPC (served by the compaction worker).
-///
-/// Identifies which keys a prune policy applies to. Keys are selected by their
-/// `KeyCodec` family (reserved_bits + prefix) and an optional regex over the
-/// key payload bytes.
-#[derive(Clone, Debug, Default)]
-pub struct PolicyMatchKeyView<'a> {
-    /// Number of high bits in the key reserved for internal routing. Together with
-    /// `prefix`, this selects the `KeyCodec` family to scan.
-    ///
-    /// Field 1: `reserved_bits`
-    pub reserved_bits: u32,
-    /// Key family prefix. Combined with `reserved_bits` to derive the scan range
-    /// via `KeyCodec::prefix_bounds`.
-    ///
-    /// Field 2: `prefix`
-    pub prefix: u32,
-    /// Regex applied to the payload portion of each key (the bytes after the
-    /// reserved/prefix header). Must be non-empty. Named capture groups referenced
-    /// by `PolicyGroupBy` and `PolicyOrderBy` must exist in this regex.
-    ///
-    /// Field 3: `payload_regex`
-    pub payload_regex: &'a str,
-    pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
-}
-impl<'a> PolicyMatchKeyView<'a> {
-    /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
-    ///
-    /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
-    /// and by generated sub-message decode arms with `depth - 1`.
-    ///
-    /// **Not part of the public API.** Named with a leading underscore to
-    /// signal that it is for generated-code use only.
-    #[doc(hidden)]
-    pub fn _decode_depth(
-        buf: &'a [u8],
-        depth: u32,
-    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
-        let mut view = Self::default();
-        view._merge_into_view(buf, depth)?;
-        ::core::result::Result::Ok(view)
-    }
-    /// Merge fields from `buf` into this view (proto merge semantics).
-    ///
-    /// Repeated fields append; singular fields last-wins; singular
-    /// MESSAGE fields merge recursively. Used by sub-message decode
-    /// arms when the same field appears multiple times on the wire.
-    ///
-    /// **Not part of the public API.**
-    #[doc(hidden)]
-    pub fn _merge_into_view(
-        &mut self,
-        buf: &'a [u8],
-        depth: u32,
-    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
-        let _ = depth;
-        #[allow(unused_variables)]
-        let view = self;
-        let mut cur: &'a [u8] = buf;
-        while !cur.is_empty() {
-            let before_tag = cur;
-            let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
-            match tag.field_number() {
-                1u32 => {
-                    if tag.wire_type() != ::buffa::encoding::WireType::Varint {
-                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                            field_number: 1u32,
-                            expected: 0u8,
-                            actual: tag.wire_type() as u8,
-                        });
-                    }
-                    view.reserved_bits = ::buffa::types::decode_uint32(&mut cur)?;
-                }
-                2u32 => {
-                    if tag.wire_type() != ::buffa::encoding::WireType::Varint {
-                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                            field_number: 2u32,
-                            expected: 0u8,
-                            actual: tag.wire_type() as u8,
-                        });
-                    }
-                    view.prefix = ::buffa::types::decode_uint32(&mut cur)?;
-                }
-                3u32 => {
-                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
-                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                            field_number: 3u32,
-                            expected: 2u8,
-                            actual: tag.wire_type() as u8,
-                        });
-                    }
-                    view.payload_regex = ::buffa::types::borrow_str(&mut cur)?;
-                }
-                _ => {
-                    ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
-                    let span_len = before_tag.len() - cur.len();
-                    view.__buffa_unknown_fields.push_raw(&before_tag[..span_len]);
-                }
-            }
-        }
-        ::core::result::Result::Ok(())
-    }
-}
-impl<'a> ::buffa::MessageView<'a> for PolicyMatchKeyView<'a> {
-    type Owned = PolicyMatchKey;
-    fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
-        Self::_decode_depth(buf, ::buffa::RECURSION_LIMIT)
-    }
-    fn decode_view_with_limit(
-        buf: &'a [u8],
-        depth: u32,
-    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
-        Self::_decode_depth(buf, depth)
-    }
-    /// Convert this view to the owned message type.
-    #[allow(clippy::redundant_closure, clippy::useless_conversion)]
-    fn to_owned_message(&self) -> PolicyMatchKey {
-        #[allow(unused_imports)]
-        use ::buffa::alloc::string::ToString as _;
-        PolicyMatchKey {
-            reserved_bits: self.reserved_bits,
-            prefix: self.prefix,
-            payload_regex: self.payload_regex.to_string(),
-            __buffa_unknown_fields: self
-                .__buffa_unknown_fields
-                .to_owned()
-                .unwrap_or_default()
-                .into(),
-            ..::core::default::Default::default()
-        }
-    }
-}
-unsafe impl ::buffa::DefaultViewInstance for PolicyMatchKeyView<'static> {
-    fn default_view_instance() -> &'static Self {
-        static VALUE: ::buffa::__private::OnceBox<PolicyMatchKeyView<'static>> = ::buffa::__private::OnceBox::new();
-        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
-    }
-}
-unsafe impl<'a> ::buffa::HasDefaultViewInstance for PolicyMatchKeyView<'a> {
-    type Static = PolicyMatchKeyView<'static>;
-}
 /// Controls how matched keys are partitioned into independent groups before
 /// the retain policy is applied. Each group is pruned independently.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct PolicyGroupBy {
-    /// Named capture groups from `PolicyMatchKey.payload_regex` whose matched
-    /// bytes are concatenated (length-prefixed) to form each group's identity.
-    /// Must not contain duplicates. When empty, all matched keys belong to a
-    /// single group.
+    /// Named capture groups from `store.common.v1.MatchKey.payload_regex` whose
+    /// matched bytes are concatenated (length-prefixed) to form each group's
+    /// identity. Must not contain duplicates. When empty, all matched keys
+    /// belong to a single group.
     ///
     /// Field 1: `capture_groups`
     #[serde(
@@ -630,14 +285,16 @@ pub const __POLICY_GROUP_BY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::b
     from_json: ::buffa::type_registry::any_from_json::<PolicyGroupBy>,
     is_wkt: false,
 };
+/// Prune policy graph and admin RPC (served by the compaction worker).
+///
 /// Controls how matched keys are partitioned into independent groups before
 /// the retain policy is applied. Each group is pruned independently.
 #[derive(Clone, Debug, Default)]
 pub struct PolicyGroupByView<'a> {
-    /// Named capture groups from `PolicyMatchKey.payload_regex` whose matched
-    /// bytes are concatenated (length-prefixed) to form each group's identity.
-    /// Must not contain duplicates. When empty, all matched keys belong to a
-    /// single group.
+    /// Named capture groups from `store.common.v1.MatchKey.payload_regex` whose
+    /// matched bytes are concatenated (length-prefixed) to form each group's
+    /// identity. Must not contain duplicates. When empty, all matched keys
+    /// belong to a single group.
     ///
     /// Field 1: `capture_groups`
     pub capture_groups: ::buffa::RepeatedView<'a, &'a str>,
@@ -744,8 +401,8 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for PolicyGroupByView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct PolicyOrderBy {
-    /// Name of the capture group in `PolicyMatchKey.payload_regex` that provides
-    /// the ordering value.
+    /// Name of the capture group in `store.common.v1.MatchKey.payload_regex`
+    /// that provides the ordering value.
     ///
     /// Field 1: `capture_group`
     #[serde(
@@ -921,8 +578,8 @@ pub const __POLICY_ORDER_BY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::b
 /// Required for `RetainKeepLatest` and threshold-based retain policies.
 #[derive(Clone, Debug, Default)]
 pub struct PolicyOrderByView<'a> {
-    /// Name of the capture group in `PolicyMatchKey.payload_regex` that provides
-    /// the ordering value.
+    /// Name of the capture group in `store.common.v1.MatchKey.payload_regex`
+    /// that provides the ordering value.
     ///
     /// Field 1: `capture_group`
     pub capture_group: &'a str,
@@ -1040,7 +697,7 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for PolicyOrderByView<'a> {
     type Static = PolicyOrderByView<'static>;
 }
 /// Retain the N entries with the highest order values within each group.
-/// Requires `PolicyOrderBy` to be set on the parent `Policy`.
+/// Requires `PolicyOrderBy` to be set on the parent scope.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
@@ -1173,7 +830,7 @@ pub const __RETAIN_KEEP_LATEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = 
     is_wkt: false,
 };
 /// Retain the N entries with the highest order values within each group.
-/// Requires `PolicyOrderBy` to be set on the parent `Policy`.
+/// Requires `PolicyOrderBy` to be set on the parent scope.
 #[derive(Clone, Debug, Default)]
 pub struct RetainKeepLatestView<'a> {
     /// Number of entries to keep per group. Must be \> 0.
@@ -1277,7 +934,7 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for RetainKeepLatestView<'a> {
     type Static = RetainKeepLatestView<'static>;
 }
 /// Delete entries whose order value is less than or equal to `threshold`.
-/// Requires `PolicyOrderBy` with `POLICY_ORDER_ENCODING_U64_BE`.
+/// For `UserKeysScope` requires `PolicyOrderBy` with u64_be encoding.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
@@ -1410,7 +1067,7 @@ pub const __RETAIN_GREATER_THAN_JSON_ANY: ::buffa::type_registry::JsonAnyEntry =
     is_wkt: false,
 };
 /// Delete entries whose order value is less than or equal to `threshold`.
-/// Requires `PolicyOrderBy` with `POLICY_ORDER_ENCODING_U64_BE`.
+/// For `UserKeysScope` requires `PolicyOrderBy` with u64_be encoding.
 #[derive(Clone, Debug, Default)]
 pub struct RetainGreaterThanView<'a> {
     /// Entries with order value \> this threshold are retained.
@@ -1514,7 +1171,7 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for RetainGreaterThanView<'a> {
     type Static = RetainGreaterThanView<'static>;
 }
 /// Delete entries whose order value is strictly less than `threshold`.
-/// Requires `PolicyOrderBy` with `POLICY_ORDER_ENCODING_U64_BE`.
+/// For `UserKeysScope` requires `PolicyOrderBy` with u64_be encoding.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
@@ -1649,7 +1306,7 @@ pub const __RETAIN_GREATER_THAN_OR_EQUAL_JSON_ANY: ::buffa::type_registry::JsonA
     is_wkt: false,
 };
 /// Delete entries whose order value is strictly less than `threshold`.
-/// Requires `PolicyOrderBy` with `POLICY_ORDER_ENCODING_U64_BE`.
+/// For `UserKeysScope` requires `PolicyOrderBy` with u64_be encoding.
 #[derive(Clone, Debug, Default)]
 pub struct RetainGreaterThanOrEqualView<'a> {
     /// Entries with order value \>= this threshold are retained.
@@ -1754,7 +1411,7 @@ unsafe impl ::buffa::DefaultViewInstance for RetainGreaterThanOrEqualView<'stati
 unsafe impl<'a> ::buffa::HasDefaultViewInstance for RetainGreaterThanOrEqualView<'a> {
     type Static = RetainGreaterThanOrEqualView<'static>;
 }
-/// Delete all matched entries in each group unconditionally.
+/// Delete all matched entries unconditionally.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
@@ -1858,7 +1515,7 @@ pub const __RETAIN_DROP_ALL_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::b
     from_json: ::buffa::type_registry::any_from_json::<RetainDropAll>,
     is_wkt: false,
 };
-/// Delete all matched entries in each group unconditionally.
+/// Delete all matched entries unconditionally.
 #[derive(Clone, Debug, Default)]
 pub struct RetainDropAllView<'a> {
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -2659,24 +2316,20 @@ pub mod policy_retain {
         DropAll(::buffa::alloc::boxed::Box<super::RetainDropAllView<'a>>),
     }
 }
-/// A single prune policy: scan a key family, partition into groups, order
-/// within each group, then apply the retain rule to decide which keys to
-/// delete.
+/// User-key-space scope: scan a KeyCodec family by `match_key`, partition
+/// matched keys into `group_by` groups, order within each group by
+/// `order_by`, then apply `retain` to decide which keys to delete.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
-pub struct Policy {
-    /// Selects the key family and payload filter for this policy.
-    ///
+pub struct KeysScope {
     /// Field 1: `match_key`
     #[serde(
         rename = "matchKey",
         alias = "match_key",
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
     )]
-    pub match_key: ::buffa::MessageField<PolicyMatchKey>,
-    /// How to partition matched keys into independent groups.
-    ///
+    pub match_key: ::buffa::MessageField<super::super::common::v1::MatchKey>,
     /// Field 2: `group_by`
     #[serde(
         rename = "groupBy",
@@ -2684,9 +2337,6 @@ pub struct Policy {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
     )]
     pub group_by: ::buffa::MessageField<PolicyGroupBy>,
-    /// Sort order within each group. Required for `keep_latest` and threshold
-    /// retain policies; optional for `drop_all`.
-    ///
     /// Field 3: `order_by`
     #[serde(
         rename = "orderBy",
@@ -2694,14 +2344,6 @@ pub struct Policy {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
     )]
     pub order_by: ::buffa::MessageField<PolicyOrderBy>,
-    /// Which entries to keep after sorting within each group.
-    ///
-    /// Field 4: `retain`
-    #[serde(
-        rename = "retain",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
-    )]
-    pub retain: ::buffa::MessageField<PolicyRetain>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -2709,30 +2351,29 @@ pub struct Policy {
     #[serde(skip)]
     pub __buffa_cached_size: ::buffa::__private::CachedSize,
 }
-impl ::core::fmt::Debug for Policy {
+impl ::core::fmt::Debug for KeysScope {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("Policy")
+        f.debug_struct("KeysScope")
             .field("match_key", &self.match_key)
             .field("group_by", &self.group_by)
             .field("order_by", &self.order_by)
-            .field("retain", &self.retain)
             .finish()
     }
 }
-impl Policy {
+impl KeysScope {
     /// Protobuf type URL for this message, for use with `Any::pack` and
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.Policy";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.KeysScope";
 }
-unsafe impl ::buffa::DefaultInstance for Policy {
+unsafe impl ::buffa::DefaultInstance for KeysScope {
     fn default_instance() -> &'static Self {
-        static VALUE: ::buffa::__private::OnceBox<Policy> = ::buffa::__private::OnceBox::new();
+        static VALUE: ::buffa::__private::OnceBox<KeysScope> = ::buffa::__private::OnceBox::new();
         VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
     }
 }
-impl ::buffa::Message for Policy {
+impl ::buffa::Message for KeysScope {
     /// Returns the total encoded size in bytes.
     ///
     /// The result is a `u32`; the protobuf specification requires all
@@ -2756,12 +2397,6 @@ impl ::buffa::Message for Policy {
         }
         if self.order_by.is_set() {
             let inner_size = self.order_by.compute_size();
-            size
-                += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
-                    + inner_size;
-        }
-        if self.retain.is_set() {
-            let inner_size = self.retain.compute_size();
             size
                 += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
                     + inner_size;
@@ -2799,15 +2434,6 @@ impl ::buffa::Message for Policy {
                 .encode(buf);
             ::buffa::encoding::encode_varint(self.order_by.cached_size() as u64, buf);
             self.order_by.write_to(buf);
-        }
-        if self.retain.is_set() {
-            ::buffa::encoding::Tag::new(
-                    4u32,
-                    ::buffa::encoding::WireType::LengthDelimited,
-                )
-                .encode(buf);
-            ::buffa::encoding::encode_varint(self.retain.cached_size() as u64, buf);
-            self.retain.write_to(buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -2864,20 +2490,6 @@ impl ::buffa::Message for Policy {
                     depth,
                 )?;
             }
-            4u32 => {
-                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
-                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                        field_number: 4u32,
-                        expected: 2u8,
-                        actual: tag.wire_type() as u8,
-                    });
-                }
-                ::buffa::Message::merge_length_delimited(
-                    self.retain.get_or_insert_default(),
-                    buf,
-                    depth,
-                )?;
-            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
@@ -2892,13 +2504,12 @@ impl ::buffa::Message for Policy {
         self.match_key = ::buffa::MessageField::none();
         self.group_by = ::buffa::MessageField::none();
         self.order_by = ::buffa::MessageField::none();
-        self.retain = ::buffa::MessageField::none();
         self.__buffa_unknown_fields.clear();
         self.__buffa_cached_size.set(0);
     }
 }
-impl ::buffa::ExtensionSet for Policy {
-    const PROTO_FQN: &'static str = "store.compact.v1.Policy";
+impl ::buffa::ExtensionSet for KeysScope {
+    const PROTO_FQN: &'static str = "store.compact.v1.KeysScope";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -2906,7 +2517,7 @@ impl ::buffa::ExtensionSet for Policy {
         &mut self.__buffa_unknown_fields
     }
 }
-impl ::buffa::json_helpers::ProtoElemJson for Policy {
+impl ::buffa::json_helpers::ProtoElemJson for KeysScope {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
         s: S,
@@ -2920,37 +2531,26 @@ impl ::buffa::json_helpers::ProtoElemJson for Policy {
     }
 }
 #[doc(hidden)]
-pub const __POLICY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.compact.v1.Policy",
-    to_json: ::buffa::type_registry::any_to_json::<Policy>,
-    from_json: ::buffa::type_registry::any_from_json::<Policy>,
+pub const __KEYS_SCOPE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/store.compact.v1.KeysScope",
+    to_json: ::buffa::type_registry::any_to_json::<KeysScope>,
+    from_json: ::buffa::type_registry::any_from_json::<KeysScope>,
     is_wkt: false,
 };
-/// A single prune policy: scan a key family, partition into groups, order
-/// within each group, then apply the retain rule to decide which keys to
-/// delete.
+/// User-key-space scope: scan a KeyCodec family by `match_key`, partition
+/// matched keys into `group_by` groups, order within each group by
+/// `order_by`, then apply `retain` to decide which keys to delete.
 #[derive(Clone, Debug, Default)]
-pub struct PolicyView<'a> {
-    /// Selects the key family and payload filter for this policy.
-    ///
+pub struct KeysScopeView<'a> {
     /// Field 1: `match_key`
-    pub match_key: ::buffa::MessageFieldView<PolicyMatchKeyView<'a>>,
-    /// How to partition matched keys into independent groups.
-    ///
+    pub match_key: ::buffa::MessageFieldView<super::super::common::v1::MatchKeyView<'a>>,
     /// Field 2: `group_by`
     pub group_by: ::buffa::MessageFieldView<PolicyGroupByView<'a>>,
-    /// Sort order within each group. Required for `keep_latest` and threshold
-    /// retain policies; optional for `drop_all`.
-    ///
     /// Field 3: `order_by`
     pub order_by: ::buffa::MessageFieldView<PolicyOrderByView<'a>>,
-    /// Which entries to keep after sorting within each group.
-    ///
-    /// Field 4: `retain`
-    pub retain: ::buffa::MessageFieldView<PolicyRetainView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
-impl<'a> PolicyView<'a> {
+impl<'a> KeysScopeView<'a> {
     /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
     ///
     /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
@@ -3004,7 +2604,10 @@ impl<'a> PolicyView<'a> {
                         Some(existing) => existing._merge_into_view(sub, depth - 1)?,
                         None => {
                             view.match_key = ::buffa::MessageFieldView::set(
-                                PolicyMatchKeyView::_decode_depth(sub, depth - 1)?,
+                                super::super::common::v1::MatchKeyView::_decode_depth(
+                                    sub,
+                                    depth - 1,
+                                )?,
                             );
                         }
                     }
@@ -3051,10 +2654,649 @@ impl<'a> PolicyView<'a> {
                         }
                     }
                 }
-                4u32 => {
+                _ => {
+                    ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
+                    let span_len = before_tag.len() - cur.len();
+                    view.__buffa_unknown_fields.push_raw(&before_tag[..span_len]);
+                }
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+}
+impl<'a> ::buffa::MessageView<'a> for KeysScopeView<'a> {
+    type Owned = KeysScope;
+    fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        Self::_decode_depth(buf, ::buffa::RECURSION_LIMIT)
+    }
+    fn decode_view_with_limit(
+        buf: &'a [u8],
+        depth: u32,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        Self::_decode_depth(buf, depth)
+    }
+    /// Convert this view to the owned message type.
+    #[allow(clippy::redundant_closure, clippy::useless_conversion)]
+    fn to_owned_message(&self) -> KeysScope {
+        #[allow(unused_imports)]
+        use ::buffa::alloc::string::ToString as _;
+        KeysScope {
+            match_key: match self.match_key.as_option() {
+                Some(v) => {
+                    ::buffa::MessageField::<
+                        super::super::common::v1::MatchKey,
+                    >::some(v.to_owned_message())
+                }
+                None => ::buffa::MessageField::none(),
+            },
+            group_by: match self.group_by.as_option() {
+                Some(v) => {
+                    ::buffa::MessageField::<PolicyGroupBy>::some(v.to_owned_message())
+                }
+                None => ::buffa::MessageField::none(),
+            },
+            order_by: match self.order_by.as_option() {
+                Some(v) => {
+                    ::buffa::MessageField::<PolicyOrderBy>::some(v.to_owned_message())
+                }
+                None => ::buffa::MessageField::none(),
+            },
+            __buffa_unknown_fields: self
+                .__buffa_unknown_fields
+                .to_owned()
+                .unwrap_or_default()
+                .into(),
+            ..::core::default::Default::default()
+        }
+    }
+}
+unsafe impl ::buffa::DefaultViewInstance for KeysScopeView<'static> {
+    fn default_view_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<KeysScopeView<'static>> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+unsafe impl<'a> ::buffa::HasDefaultViewInstance for KeysScopeView<'a> {
+    type Static = KeysScopeView<'static>;
+}
+/// Sequence-number scope: prune the per-batch sequence log served by the
+/// store's `Stream` service. `match_key` / `group_by` / `order_by` are not
+/// meaningful here — the log has a single implicit ordering by sequence
+/// number. The `retain` rule on the parent `Policy` is interpreted directly
+/// over sequence numbers:
+///
+///   - `keep_latest { count: N }`        -\> keep the last N batches
+///   - `greater_than { threshold: T }`   -\> keep sequence numbers \> T
+///   - `greater_than_or_equal { .. T }`  -\> keep sequence numbers \>= T
+///   - `drop_all`                        -\> clear the batch log entirely
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct SequenceScope {
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub __buffa_cached_size: ::buffa::__private::CachedSize,
+}
+impl ::core::fmt::Debug for SequenceScope {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("SequenceScope").finish()
+    }
+}
+impl SequenceScope {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.SequenceScope";
+}
+unsafe impl ::buffa::DefaultInstance for SequenceScope {
+    fn default_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<SequenceScope> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+impl ::buffa::Message for SequenceScope {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// The result is a `u32`; the protobuf specification requires all
+    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
+    /// compliant message will never overflow this type.
+    fn compute_size(&self) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        self.__buffa_cached_size.set(size);
+        size
+    }
+    fn write_to(&self, buf: &mut impl ::buffa::bytes::BufMut) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn cached_size(&self) -> u32 {
+        self.__buffa_cached_size.get()
+    }
+    fn clear(&mut self) {
+        self.__buffa_unknown_fields.clear();
+        self.__buffa_cached_size.set(0);
+    }
+}
+impl ::buffa::ExtensionSet for SequenceScope {
+    const PROTO_FQN: &'static str = "store.compact.v1.SequenceScope";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for SequenceScope {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __SEQUENCE_SCOPE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/store.compact.v1.SequenceScope",
+    to_json: ::buffa::type_registry::any_to_json::<SequenceScope>,
+    from_json: ::buffa::type_registry::any_from_json::<SequenceScope>,
+    is_wkt: false,
+};
+/// Sequence-number scope: prune the per-batch sequence log served by the
+/// store's `Stream` service. `match_key` / `group_by` / `order_by` are not
+/// meaningful here — the log has a single implicit ordering by sequence
+/// number. The `retain` rule on the parent `Policy` is interpreted directly
+/// over sequence numbers:
+///
+///   - `keep_latest { count: N }`        -\> keep the last N batches
+///   - `greater_than { threshold: T }`   -\> keep sequence numbers \> T
+///   - `greater_than_or_equal { .. T }`  -\> keep sequence numbers \>= T
+///   - `drop_all`                        -\> clear the batch log entirely
+#[derive(Clone, Debug, Default)]
+pub struct SequenceScopeView<'a> {
+    pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+}
+impl<'a> SequenceScopeView<'a> {
+    /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
+    ///
+    /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
+    /// and by generated sub-message decode arms with `depth - 1`.
+    ///
+    /// **Not part of the public API.** Named with a leading underscore to
+    /// signal that it is for generated-code use only.
+    #[doc(hidden)]
+    pub fn _decode_depth(
+        buf: &'a [u8],
+        depth: u32,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        let mut view = Self::default();
+        view._merge_into_view(buf, depth)?;
+        ::core::result::Result::Ok(view)
+    }
+    /// Merge fields from `buf` into this view (proto merge semantics).
+    ///
+    /// Repeated fields append; singular fields last-wins; singular
+    /// MESSAGE fields merge recursively. Used by sub-message decode
+    /// arms when the same field appears multiple times on the wire.
+    ///
+    /// **Not part of the public API.**
+    #[doc(hidden)]
+    pub fn _merge_into_view(
+        &mut self,
+        buf: &'a [u8],
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        let _ = depth;
+        #[allow(unused_variables)]
+        let view = self;
+        let mut cur: &'a [u8] = buf;
+        while !cur.is_empty() {
+            let before_tag = cur;
+            let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
+            match tag.field_number() {
+                _ => {
+                    ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
+                    let span_len = before_tag.len() - cur.len();
+                    view.__buffa_unknown_fields.push_raw(&before_tag[..span_len]);
+                }
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+}
+impl<'a> ::buffa::MessageView<'a> for SequenceScopeView<'a> {
+    type Owned = SequenceScope;
+    fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        Self::_decode_depth(buf, ::buffa::RECURSION_LIMIT)
+    }
+    fn decode_view_with_limit(
+        buf: &'a [u8],
+        depth: u32,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        Self::_decode_depth(buf, depth)
+    }
+    /// Convert this view to the owned message type.
+    #[allow(clippy::redundant_closure, clippy::useless_conversion)]
+    fn to_owned_message(&self) -> SequenceScope {
+        #[allow(unused_imports)]
+        use ::buffa::alloc::string::ToString as _;
+        SequenceScope {
+            __buffa_unknown_fields: self
+                .__buffa_unknown_fields
+                .to_owned()
+                .unwrap_or_default()
+                .into(),
+            ..::core::default::Default::default()
+        }
+    }
+}
+unsafe impl ::buffa::DefaultViewInstance for SequenceScopeView<'static> {
+    fn default_view_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<SequenceScopeView<'static>> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+unsafe impl<'a> ::buffa::HasDefaultViewInstance for SequenceScopeView<'a> {
+    type Static = SequenceScopeView<'static>;
+}
+/// A single prune policy. `scope` discriminates the keyspace the rule applies
+/// to; `retain` is shared between scopes.
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize)]
+#[serde(default)]
+pub struct Policy {
+    /// Field 3: `retain`
+    #[serde(
+        rename = "retain",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
+    )]
+    pub retain: ::buffa::MessageField<PolicyRetain>,
+    #[serde(flatten)]
+    pub scope: Option<policy::Scope>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub __buffa_cached_size: ::buffa::__private::CachedSize,
+}
+impl ::core::fmt::Debug for Policy {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("Policy")
+            .field("retain", &self.retain)
+            .field("scope", &self.scope)
+            .finish()
+    }
+}
+impl Policy {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.Policy";
+}
+unsafe impl ::buffa::DefaultInstance for Policy {
+    fn default_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<Policy> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+impl ::buffa::Message for Policy {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// The result is a `u32`; the protobuf specification requires all
+    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
+    /// compliant message will never overflow this type.
+    fn compute_size(&self) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        if self.retain.is_set() {
+            let inner_size = self.retain.compute_size();
+            size
+                += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
+                    + inner_size;
+        }
+        if let ::core::option::Option::Some(ref v) = self.scope {
+            match v {
+                policy::Scope::Keys(x) => {
+                    let inner = x.compute_size();
+                    size
+                        += 1u32 + ::buffa::encoding::varint_len(inner as u64) as u32
+                            + inner;
+                }
+                policy::Scope::Sequence(x) => {
+                    let inner = x.compute_size();
+                    size
+                        += 1u32 + ::buffa::encoding::varint_len(inner as u64) as u32
+                            + inner;
+                }
+            }
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        self.__buffa_cached_size.set(size);
+        size
+    }
+    fn write_to(&self, buf: &mut impl ::buffa::bytes::BufMut) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if self.retain.is_set() {
+            ::buffa::encoding::Tag::new(
+                    3u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::encoding::encode_varint(self.retain.cached_size() as u64, buf);
+            self.retain.write_to(buf);
+        }
+        if let ::core::option::Option::Some(ref v) = self.scope {
+            match v {
+                policy::Scope::Keys(x) => {
+                    ::buffa::encoding::Tag::new(
+                            1u32,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )
+                        .encode(buf);
+                    ::buffa::encoding::encode_varint(x.cached_size() as u64, buf);
+                    x.write_to(buf);
+                }
+                policy::Scope::Sequence(x) => {
+                    ::buffa::encoding::Tag::new(
+                            2u32,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )
+                        .encode(buf);
+                    ::buffa::encoding::encode_varint(x.cached_size() as u64, buf);
+                    x.write_to(buf);
+                }
+            }
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            3u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 3u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                ::buffa::Message::merge_length_delimited(
+                    self.retain.get_or_insert_default(),
+                    buf,
+                    depth,
+                )?;
+            }
+            1u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 1u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                if let ::core::option::Option::Some(
+                    policy::Scope::Keys(ref mut existing),
+                ) = self.scope
+                {
+                    ::buffa::Message::merge_length_delimited(
+                        &mut **existing,
+                        buf,
+                        depth,
+                    )?;
+                } else {
+                    let mut val = ::core::default::Default::default();
+                    ::buffa::Message::merge_length_delimited(&mut val, buf, depth)?;
+                    self.scope = ::core::option::Option::Some(
+                        policy::Scope::Keys(::buffa::alloc::boxed::Box::new(val)),
+                    );
+                }
+            }
+            2u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 2u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                if let ::core::option::Option::Some(
+                    policy::Scope::Sequence(ref mut existing),
+                ) = self.scope
+                {
+                    ::buffa::Message::merge_length_delimited(
+                        &mut **existing,
+                        buf,
+                        depth,
+                    )?;
+                } else {
+                    let mut val = ::core::default::Default::default();
+                    ::buffa::Message::merge_length_delimited(&mut val, buf, depth)?;
+                    self.scope = ::core::option::Option::Some(
+                        policy::Scope::Sequence(::buffa::alloc::boxed::Box::new(val)),
+                    );
+                }
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn cached_size(&self) -> u32 {
+        self.__buffa_cached_size.get()
+    }
+    fn clear(&mut self) {
+        self.retain = ::buffa::MessageField::none();
+        self.scope = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+        self.__buffa_cached_size.set(0);
+    }
+}
+impl ::buffa::ExtensionSet for Policy {
+    const PROTO_FQN: &'static str = "store.compact.v1.Policy";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl<'de> serde::Deserialize<'de> for Policy {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct _V;
+        impl<'de> serde::de::Visitor<'de> for _V {
+            type Value = Policy;
+            fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.write_str("struct Policy")
+            }
+            #[allow(clippy::field_reassign_with_default)]
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Policy, A::Error> {
+                let mut __f_retain: Option<::buffa::MessageField<PolicyRetain>> = None;
+                let mut __oneof_scope: Option<policy::Scope> = None;
+                while let Some(key) = map.next_key::<::buffa::alloc::string::String>()? {
+                    match key.as_str() {
+                        "retain" => {
+                            __f_retain = Some(
+                                map.next_value::<::buffa::MessageField<PolicyRetain>>()?,
+                            );
+                        }
+                        "keys" => {
+                            let v: Option<KeysScope> = map
+                                .next_value_seed(
+                                    ::buffa::json_helpers::NullableDeserializeSeed(
+                                        ::buffa::json_helpers::DefaultDeserializeSeed::<
+                                            KeysScope,
+                                        >::new(),
+                                    ),
+                                )?;
+                            if let Some(v) = v {
+                                if __oneof_scope.is_some() {
+                                    return Err(
+                                        serde::de::Error::custom(
+                                            "multiple oneof fields set for 'scope'",
+                                        ),
+                                    );
+                                }
+                                __oneof_scope = Some(
+                                    policy::Scope::Keys(::buffa::alloc::boxed::Box::new(v)),
+                                );
+                            }
+                        }
+                        "sequence" => {
+                            let v: Option<SequenceScope> = map
+                                .next_value_seed(
+                                    ::buffa::json_helpers::NullableDeserializeSeed(
+                                        ::buffa::json_helpers::DefaultDeserializeSeed::<
+                                            SequenceScope,
+                                        >::new(),
+                                    ),
+                                )?;
+                            if let Some(v) = v {
+                                if __oneof_scope.is_some() {
+                                    return Err(
+                                        serde::de::Error::custom(
+                                            "multiple oneof fields set for 'scope'",
+                                        ),
+                                    );
+                                }
+                                __oneof_scope = Some(
+                                    policy::Scope::Sequence(::buffa::alloc::boxed::Box::new(v)),
+                                );
+                            }
+                        }
+                        _ => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                let mut __r = <Policy as ::core::default::Default>::default();
+                if let ::core::option::Option::Some(v) = __f_retain {
+                    __r.retain = v;
+                }
+                __r.scope = __oneof_scope;
+                Ok(__r)
+            }
+        }
+        d.deserialize_map(_V)
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for Policy {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __POLICY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/store.compact.v1.Policy",
+    to_json: ::buffa::type_registry::any_to_json::<Policy>,
+    from_json: ::buffa::type_registry::any_from_json::<Policy>,
+    is_wkt: false,
+};
+/// A single prune policy. `scope` discriminates the keyspace the rule applies
+/// to; `retain` is shared between scopes.
+#[derive(Clone, Debug, Default)]
+pub struct PolicyView<'a> {
+    /// Field 3: `retain`
+    pub retain: ::buffa::MessageFieldView<PolicyRetainView<'a>>,
+    pub scope: ::core::option::Option<policy::ScopeView<'a>>,
+    pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+}
+impl<'a> PolicyView<'a> {
+    /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
+    ///
+    /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
+    /// and by generated sub-message decode arms with `depth - 1`.
+    ///
+    /// **Not part of the public API.** Named with a leading underscore to
+    /// signal that it is for generated-code use only.
+    #[doc(hidden)]
+    pub fn _decode_depth(
+        buf: &'a [u8],
+        depth: u32,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        let mut view = Self::default();
+        view._merge_into_view(buf, depth)?;
+        ::core::result::Result::Ok(view)
+    }
+    /// Merge fields from `buf` into this view (proto merge semantics).
+    ///
+    /// Repeated fields append; singular fields last-wins; singular
+    /// MESSAGE fields merge recursively. Used by sub-message decode
+    /// arms when the same field appears multiple times on the wire.
+    ///
+    /// **Not part of the public API.**
+    #[doc(hidden)]
+    pub fn _merge_into_view(
+        &mut self,
+        buf: &'a [u8],
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        let _ = depth;
+        #[allow(unused_variables)]
+        let view = self;
+        let mut cur: &'a [u8] = buf;
+        while !cur.is_empty() {
+            let before_tag = cur;
+            let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
+            match tag.field_number() {
+                3u32 => {
                     if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                         return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                            field_number: 4u32,
+                            field_number: 3u32,
                             expected: 2u8,
                             actual: tag.wire_type() as u8,
                         });
@@ -3070,6 +3312,56 @@ impl<'a> PolicyView<'a> {
                                 PolicyRetainView::_decode_depth(sub, depth - 1)?,
                             );
                         }
+                    }
+                }
+                1u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 1u32,
+                            expected: 2u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    if depth == 0 {
+                        return Err(::buffa::DecodeError::RecursionLimitExceeded);
+                    }
+                    let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                    if let Some(policy::ScopeView::Keys(ref mut existing)) = view.scope {
+                        existing._merge_into_view(sub, depth - 1)?;
+                    } else {
+                        view.scope = Some(
+                            policy::ScopeView::Keys(
+                                ::buffa::alloc::boxed::Box::new(
+                                    KeysScopeView::_decode_depth(sub, depth - 1)?,
+                                ),
+                            ),
+                        );
+                    }
+                }
+                2u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 2u32,
+                            expected: 2u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    if depth == 0 {
+                        return Err(::buffa::DecodeError::RecursionLimitExceeded);
+                    }
+                    let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                    if let Some(policy::ScopeView::Sequence(ref mut existing)) = view
+                        .scope
+                    {
+                        existing._merge_into_view(sub, depth - 1)?;
+                    } else {
+                        view.scope = Some(
+                            policy::ScopeView::Sequence(
+                                ::buffa::alloc::boxed::Box::new(
+                                    SequenceScopeView::_decode_depth(sub, depth - 1)?,
+                                ),
+                            ),
+                        );
                     }
                 }
                 _ => {
@@ -3099,30 +3391,27 @@ impl<'a> ::buffa::MessageView<'a> for PolicyView<'a> {
         #[allow(unused_imports)]
         use ::buffa::alloc::string::ToString as _;
         Policy {
-            match_key: match self.match_key.as_option() {
-                Some(v) => {
-                    ::buffa::MessageField::<PolicyMatchKey>::some(v.to_owned_message())
-                }
-                None => ::buffa::MessageField::none(),
-            },
-            group_by: match self.group_by.as_option() {
-                Some(v) => {
-                    ::buffa::MessageField::<PolicyGroupBy>::some(v.to_owned_message())
-                }
-                None => ::buffa::MessageField::none(),
-            },
-            order_by: match self.order_by.as_option() {
-                Some(v) => {
-                    ::buffa::MessageField::<PolicyOrderBy>::some(v.to_owned_message())
-                }
-                None => ::buffa::MessageField::none(),
-            },
             retain: match self.retain.as_option() {
                 Some(v) => {
                     ::buffa::MessageField::<PolicyRetain>::some(v.to_owned_message())
                 }
                 None => ::buffa::MessageField::none(),
             },
+            scope: self
+                .scope
+                .as_ref()
+                .map(|v| match v {
+                    policy::ScopeView::Keys(v) => {
+                        policy::Scope::Keys(
+                            ::buffa::alloc::boxed::Box::new(v.to_owned_message()),
+                        )
+                    }
+                    policy::ScopeView::Sequence(v) => {
+                        policy::Scope::Sequence(
+                            ::buffa::alloc::boxed::Box::new(v.to_owned_message()),
+                        )
+                    }
+                }),
             __buffa_unknown_fields: self
                 .__buffa_unknown_fields
                 .to_owned()
@@ -3141,13 +3430,66 @@ unsafe impl ::buffa::DefaultViewInstance for PolicyView<'static> {
 unsafe impl<'a> ::buffa::HasDefaultViewInstance for PolicyView<'a> {
     type Static = PolicyView<'static>;
 }
+pub mod policy {
+    #[allow(unused_imports)]
+    use super::*;
+    #[derive(Clone, PartialEq, Debug)]
+    pub enum Scope {
+        Keys(::buffa::alloc::boxed::Box<super::KeysScope>),
+        Sequence(::buffa::alloc::boxed::Box<super::SequenceScope>),
+    }
+    impl ::buffa::Oneof for Scope {}
+    impl From<super::KeysScope> for Scope {
+        fn from(v: super::KeysScope) -> Self {
+            Self::Keys(::buffa::alloc::boxed::Box::new(v))
+        }
+    }
+    impl From<super::KeysScope> for ::core::option::Option<Scope> {
+        fn from(v: super::KeysScope) -> Self {
+            Self::Some(Scope::from(v))
+        }
+    }
+    impl From<super::SequenceScope> for Scope {
+        fn from(v: super::SequenceScope) -> Self {
+            Self::Sequence(::buffa::alloc::boxed::Box::new(v))
+        }
+    }
+    impl From<super::SequenceScope> for ::core::option::Option<Scope> {
+        fn from(v: super::SequenceScope) -> Self {
+            Self::Some(Scope::from(v))
+        }
+    }
+    impl serde::Serialize for Scope {
+        fn serialize<S: serde::Serializer>(
+            &self,
+            s: S,
+        ) -> ::core::result::Result<S::Ok, S::Error> {
+            use serde::ser::SerializeMap;
+            let mut map = s.serialize_map(Some(1))?;
+            match self {
+                Scope::Keys(v) => {
+                    map.serialize_entry("keys", v)?;
+                }
+                Scope::Sequence(v) => {
+                    map.serialize_entry("sequence", v)?;
+                }
+            }
+            map.end()
+        }
+    }
+    #[derive(Clone, Debug)]
+    pub enum ScopeView<'a> {
+        Keys(::buffa::alloc::boxed::Box<super::KeysScopeView<'a>>),
+        Sequence(::buffa::alloc::boxed::Box<super::SequenceScopeView<'a>>),
+    }
+}
 /// Request to execute prune policies.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct PruneRequest {
-    /// One or more prune policies to apply. At least one is required. Policies
-    /// must not share the same (reserved_bits, prefix) pair.
+    /// One or more prune policies to apply. At least one is required. UserKeys
+    /// policies must not share the same (reserved_bits, prefix) pair.
     ///
     /// Field 1: `policies`
     #[serde(
@@ -3286,8 +3628,8 @@ pub const __PRUNE_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buf
 /// Request to execute prune policies.
 #[derive(Clone, Debug, Default)]
 pub struct PruneRequestView<'a> {
-    /// One or more prune policies to apply. At least one is required. Policies
-    /// must not share the same (reserved_bits, prefix) pair.
+    /// One or more prune policies to apply. At least one is required. UserKeys
+    /// policies must not share the same (reserved_bits, prefix) pair.
     ///
     /// Field 1: `policies`
     pub policies: ::buffa::RepeatedView<'a, PolicyView<'a>>,
@@ -3601,8 +3943,7 @@ pub const SERVICE_SERVICE_NAME: &str = "store.compact.v1.Service";
 #[allow(clippy::type_complexity)]
 pub trait Service: Send + Sync + 'static {
     /// Execute one or more prune policies against the store. Each policy is
-    /// applied sequentially: matching keys are scanned, grouped, ordered, and
-    /// entries that do not survive the retain rule are deleted.
+    /// applied sequentially.
     fn prune(
         &self,
         ctx: ::connectrpc::Context,

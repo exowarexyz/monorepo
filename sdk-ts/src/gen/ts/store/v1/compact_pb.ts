@@ -5,54 +5,15 @@
 import type { GenEnum, GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv1";
 import { enumDesc, fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv1";
 import { file_buf_validate_validate } from "../../buf/validate/validate_pb";
+import type { MatchKey } from "./common_pb";
+import { file_store_v1_common } from "./common_pb";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
  * Describes the file store/v1/compact.proto.
  */
 export const file_store_v1_compact: GenFile = /*@__PURE__*/
-  fileDesc("ChZzdG9yZS92MS9jb21wYWN0LnByb3RvEhBzdG9yZS5jb21wYWN0LnYxIk4KDlBvbGljeU1hdGNoS2V5EhUKDXJlc2VydmVkX2JpdHMYASABKA0SDgoGcHJlZml4GAIgASgNEhUKDXBheWxvYWRfcmVnZXgYAyABKAkiJwoNUG9saWN5R3JvdXBCeRIWCg5jYXB0dXJlX2dyb3VwcxgBIAMoCSJfCg1Qb2xpY3lPcmRlckJ5EhUKDWNhcHR1cmVfZ3JvdXAYASABKAkSNwoIZW5jb2RpbmcYAiABKA4yJS5zdG9yZS5jb21wYWN0LnYxLlBvbGljeU9yZGVyRW5jb2RpbmciKgoQUmV0YWluS2VlcExhdGVzdBIWCgVjb3VudBgBIAEoBEIHukgEMgIgACImChFSZXRhaW5HcmVhdGVyVGhhbhIRCgl0aHJlc2hvbGQYASABKAQiLQoYUmV0YWluR3JlYXRlclRoYW5PckVxdWFsEhEKCXRocmVzaG9sZBgBIAEoBCIPCg1SZXRhaW5Ecm9wQWxsIpACCgxQb2xpY3lSZXRhaW4SOQoLa2VlcF9sYXRlc3QYASABKAsyIi5zdG9yZS5jb21wYWN0LnYxLlJldGFpbktlZXBMYXRlc3RIABI7CgxncmVhdGVyX3RoYW4YAiABKAsyIy5zdG9yZS5jb21wYWN0LnYxLlJldGFpbkdyZWF0ZXJUaGFuSAASSwoVZ3JlYXRlcl90aGFuX29yX2VxdWFsGAMgASgLMiouc3RvcmUuY29tcGFjdC52MS5SZXRhaW5HcmVhdGVyVGhhbk9yRXF1YWxIABIzCghkcm9wX2FsbBgEIAEoCzIfLnN0b3JlLmNvbXBhY3QudjEuUmV0YWluRHJvcEFsbEgAQgYKBGtpbmQi5QEKBlBvbGljeRIzCgltYXRjaF9rZXkYASABKAsyIC5zdG9yZS5jb21wYWN0LnYxLlBvbGljeU1hdGNoS2V5EjEKCGdyb3VwX2J5GAIgASgLMh8uc3RvcmUuY29tcGFjdC52MS5Qb2xpY3lHcm91cEJ5EjYKCG9yZGVyX2J5GAMgASgLMh8uc3RvcmUuY29tcGFjdC52MS5Qb2xpY3lPcmRlckJ5SACIAQESLgoGcmV0YWluGAQgASgLMh4uc3RvcmUuY29tcGFjdC52MS5Qb2xpY3lSZXRhaW5CCwoJX29yZGVyX2J5IkQKDFBydW5lUmVxdWVzdBI0Cghwb2xpY2llcxgBIAMoCzIYLnN0b3JlLmNvbXBhY3QudjEuUG9saWN5Qgi6SAWSAQIIASIPCg1QcnVuZVJlc3BvbnNlKn4KE1BvbGljeU9yZGVyRW5jb2RpbmcSIwofUE9MSUNZX09SREVSX0VOQ09ESU5HX0JZVEVTX0FTQxAAEiAKHFBPTElDWV9PUkRFUl9FTkNPRElOR19VNjRfQkUQARIgChxQT0xJQ1lfT1JERVJfRU5DT0RJTkdfSTY0X0JFEAIyUwoHU2VydmljZRJICgVQcnVuZRIeLnN0b3JlLmNvbXBhY3QudjEuUHJ1bmVSZXF1ZXN0Gh8uc3RvcmUuY29tcGFjdC52MS5QcnVuZVJlc3BvbnNlYgZwcm90bzM", [file_buf_validate_validate]);
-
-/**
- * Identifies which keys a prune policy applies to. Keys are selected by their
- * `KeyCodec` family (reserved_bits + prefix) and an optional regex over the
- * key payload bytes.
- *
- * @generated from message store.compact.v1.PolicyMatchKey
- */
-export type PolicyMatchKey = Message<"store.compact.v1.PolicyMatchKey"> & {
-  /**
-   * Number of high bits in the key reserved for internal routing. Together with
-   * `prefix`, this selects the `KeyCodec` family to scan.
-   *
-   * @generated from field: uint32 reserved_bits = 1;
-   */
-  reservedBits: number;
-
-  /**
-   * Key family prefix. Combined with `reserved_bits` to derive the scan range
-   * via `KeyCodec::prefix_bounds`.
-   *
-   * @generated from field: uint32 prefix = 2;
-   */
-  prefix: number;
-
-  /**
-   * Regex applied to the payload portion of each key (the bytes after the
-   * reserved/prefix header). Must be non-empty. Named capture groups referenced
-   * by `PolicyGroupBy` and `PolicyOrderBy` must exist in this regex.
-   *
-   * @generated from field: string payload_regex = 3;
-   */
-  payloadRegex: string;
-};
-
-/**
- * Describes the message store.compact.v1.PolicyMatchKey.
- * Use `create(PolicyMatchKeySchema)` to create a new message.
- */
-export const PolicyMatchKeySchema: GenMessage<PolicyMatchKey> = /*@__PURE__*/
-  messageDesc(file_store_v1_compact, 0);
+  fileDesc("ChZzdG9yZS92MS9jb21wYWN0LnByb3RvEhBzdG9yZS5jb21wYWN0LnYxIicKDVBvbGljeUdyb3VwQnkSFgoOY2FwdHVyZV9ncm91cHMYASADKAkiXwoNUG9saWN5T3JkZXJCeRIVCg1jYXB0dXJlX2dyb3VwGAEgASgJEjcKCGVuY29kaW5nGAIgASgOMiUuc3RvcmUuY29tcGFjdC52MS5Qb2xpY3lPcmRlckVuY29kaW5nIioKEFJldGFpbktlZXBMYXRlc3QSFgoFY291bnQYASABKARCB7pIBDICIAAiJgoRUmV0YWluR3JlYXRlclRoYW4SEQoJdGhyZXNob2xkGAEgASgEIi0KGFJldGFpbkdyZWF0ZXJUaGFuT3JFcXVhbBIRCgl0aHJlc2hvbGQYASABKAQiDwoNUmV0YWluRHJvcEFsbCKQAgoMUG9saWN5UmV0YWluEjkKC2tlZXBfbGF0ZXN0GAEgASgLMiIuc3RvcmUuY29tcGFjdC52MS5SZXRhaW5LZWVwTGF0ZXN0SAASOwoMZ3JlYXRlcl90aGFuGAIgASgLMiMuc3RvcmUuY29tcGFjdC52MS5SZXRhaW5HcmVhdGVyVGhhbkgAEksKFWdyZWF0ZXJfdGhhbl9vcl9lcXVhbBgDIAEoCzIqLnN0b3JlLmNvbXBhY3QudjEuUmV0YWluR3JlYXRlclRoYW5PckVxdWFsSAASMwoIZHJvcF9hbGwYBCABKAsyHy5zdG9yZS5jb21wYWN0LnYxLlJldGFpbkRyb3BBbGxIAEIGCgRraW5kIrEBCglLZXlzU2NvcGUSLAoJbWF0Y2hfa2V5GAEgASgLMhkuc3RvcmUuY29tbW9uLnYxLk1hdGNoS2V5EjEKCGdyb3VwX2J5GAIgASgLMh8uc3RvcmUuY29tcGFjdC52MS5Qb2xpY3lHcm91cEJ5EjYKCG9yZGVyX2J5GAMgASgLMh8uc3RvcmUuY29tcGFjdC52MS5Qb2xpY3lPcmRlckJ5SACIAQFCCwoJX29yZGVyX2J5Ig8KDVNlcXVlbmNlU2NvcGUiowEKBlBvbGljeRIrCgRrZXlzGAEgASgLMhsuc3RvcmUuY29tcGFjdC52MS5LZXlzU2NvcGVIABIzCghzZXF1ZW5jZRgCIAEoCzIfLnN0b3JlLmNvbXBhY3QudjEuU2VxdWVuY2VTY29wZUgAEi4KBnJldGFpbhgDIAEoCzIeLnN0b3JlLmNvbXBhY3QudjEuUG9saWN5UmV0YWluQgcKBXNjb3BlIkQKDFBydW5lUmVxdWVzdBI0Cghwb2xpY2llcxgBIAMoCzIYLnN0b3JlLmNvbXBhY3QudjEuUG9saWN5Qgi6SAWSAQIIASIPCg1QcnVuZVJlc3BvbnNlKn4KE1BvbGljeU9yZGVyRW5jb2RpbmcSIwofUE9MSUNZX09SREVSX0VOQ09ESU5HX0JZVEVTX0FTQxAAEiAKHFBPTElDWV9PUkRFUl9FTkNPRElOR19VNjRfQkUQARIgChxQT0xJQ1lfT1JERVJfRU5DT0RJTkdfSTY0X0JFEAIyUwoHU2VydmljZRJICgVQcnVuZRIeLnN0b3JlLmNvbXBhY3QudjEuUHJ1bmVSZXF1ZXN0Gh8uc3RvcmUuY29tcGFjdC52MS5QcnVuZVJlc3BvbnNlYgZwcm90bzM", [file_buf_validate_validate, file_store_v1_common]);
 
 /**
  * Controls how matched keys are partitioned into independent groups before
@@ -62,10 +23,10 @@ export const PolicyMatchKeySchema: GenMessage<PolicyMatchKey> = /*@__PURE__*/
  */
 export type PolicyGroupBy = Message<"store.compact.v1.PolicyGroupBy"> & {
   /**
-   * Named capture groups from `PolicyMatchKey.payload_regex` whose matched
-   * bytes are concatenated (length-prefixed) to form each group's identity.
-   * Must not contain duplicates. When empty, all matched keys belong to a
-   * single group.
+   * Named capture groups from `store.common.v1.MatchKey.payload_regex` whose
+   * matched bytes are concatenated (length-prefixed) to form each group's
+   * identity. Must not contain duplicates. When empty, all matched keys
+   * belong to a single group.
    *
    * @generated from field: repeated string capture_groups = 1;
    */
@@ -77,7 +38,7 @@ export type PolicyGroupBy = Message<"store.compact.v1.PolicyGroupBy"> & {
  * Use `create(PolicyGroupBySchema)` to create a new message.
  */
 export const PolicyGroupBySchema: GenMessage<PolicyGroupBy> = /*@__PURE__*/
-  messageDesc(file_store_v1_compact, 1);
+  messageDesc(file_store_v1_compact, 0);
 
 /**
  * Defines the sort order within each group. The named capture group is
@@ -88,8 +49,8 @@ export const PolicyGroupBySchema: GenMessage<PolicyGroupBy> = /*@__PURE__*/
  */
 export type PolicyOrderBy = Message<"store.compact.v1.PolicyOrderBy"> & {
   /**
-   * Name of the capture group in `PolicyMatchKey.payload_regex` that provides
-   * the ordering value.
+   * Name of the capture group in `store.common.v1.MatchKey.payload_regex`
+   * that provides the ordering value.
    *
    * @generated from field: string capture_group = 1;
    */
@@ -108,11 +69,11 @@ export type PolicyOrderBy = Message<"store.compact.v1.PolicyOrderBy"> & {
  * Use `create(PolicyOrderBySchema)` to create a new message.
  */
 export const PolicyOrderBySchema: GenMessage<PolicyOrderBy> = /*@__PURE__*/
-  messageDesc(file_store_v1_compact, 2);
+  messageDesc(file_store_v1_compact, 1);
 
 /**
  * Retain the N entries with the highest order values within each group.
- * Requires `PolicyOrderBy` to be set on the parent `Policy`.
+ * Requires `PolicyOrderBy` to be set on the parent scope.
  *
  * @generated from message store.compact.v1.RetainKeepLatest
  */
@@ -130,11 +91,11 @@ export type RetainKeepLatest = Message<"store.compact.v1.RetainKeepLatest"> & {
  * Use `create(RetainKeepLatestSchema)` to create a new message.
  */
 export const RetainKeepLatestSchema: GenMessage<RetainKeepLatest> = /*@__PURE__*/
-  messageDesc(file_store_v1_compact, 3);
+  messageDesc(file_store_v1_compact, 2);
 
 /**
  * Delete entries whose order value is less than or equal to `threshold`.
- * Requires `PolicyOrderBy` with `POLICY_ORDER_ENCODING_U64_BE`.
+ * For `UserKeysScope` requires `PolicyOrderBy` with u64_be encoding.
  *
  * @generated from message store.compact.v1.RetainGreaterThan
  */
@@ -152,11 +113,11 @@ export type RetainGreaterThan = Message<"store.compact.v1.RetainGreaterThan"> & 
  * Use `create(RetainGreaterThanSchema)` to create a new message.
  */
 export const RetainGreaterThanSchema: GenMessage<RetainGreaterThan> = /*@__PURE__*/
-  messageDesc(file_store_v1_compact, 4);
+  messageDesc(file_store_v1_compact, 3);
 
 /**
  * Delete entries whose order value is strictly less than `threshold`.
- * Requires `PolicyOrderBy` with `POLICY_ORDER_ENCODING_U64_BE`.
+ * For `UserKeysScope` requires `PolicyOrderBy` with u64_be encoding.
  *
  * @generated from message store.compact.v1.RetainGreaterThanOrEqual
  */
@@ -174,10 +135,10 @@ export type RetainGreaterThanOrEqual = Message<"store.compact.v1.RetainGreaterTh
  * Use `create(RetainGreaterThanOrEqualSchema)` to create a new message.
  */
 export const RetainGreaterThanOrEqualSchema: GenMessage<RetainGreaterThanOrEqual> = /*@__PURE__*/
-  messageDesc(file_store_v1_compact, 5);
+  messageDesc(file_store_v1_compact, 4);
 
 /**
- * Delete all matched entries in each group unconditionally.
+ * Delete all matched entries unconditionally.
  *
  * @generated from message store.compact.v1.RetainDropAll
  */
@@ -189,7 +150,7 @@ export type RetainDropAll = Message<"store.compact.v1.RetainDropAll"> & {
  * Use `create(RetainDropAllSchema)` to create a new message.
  */
 export const RetainDropAllSchema: GenMessage<RetainDropAll> = /*@__PURE__*/
-  messageDesc(file_store_v1_compact, 6);
+  messageDesc(file_store_v1_compact, 5);
 
 /**
  * Selects which entries survive pruning within each group.
@@ -232,42 +193,89 @@ export type PolicyRetain = Message<"store.compact.v1.PolicyRetain"> & {
  * Use `create(PolicyRetainSchema)` to create a new message.
  */
 export const PolicyRetainSchema: GenMessage<PolicyRetain> = /*@__PURE__*/
-  messageDesc(file_store_v1_compact, 7);
+  messageDesc(file_store_v1_compact, 6);
 
 /**
- * A single prune policy: scan a key family, partition into groups, order
- * within each group, then apply the retain rule to decide which keys to
- * delete.
+ * User-key-space scope: scan a KeyCodec family by `match_key`, partition
+ * matched keys into `group_by` groups, order within each group by
+ * `order_by`, then apply `retain` to decide which keys to delete.
  *
- * @generated from message store.compact.v1.Policy
+ * @generated from message store.compact.v1.KeysScope
  */
-export type Policy = Message<"store.compact.v1.Policy"> & {
+export type KeysScope = Message<"store.compact.v1.KeysScope"> & {
   /**
-   * Selects the key family and payload filter for this policy.
-   *
-   * @generated from field: store.compact.v1.PolicyMatchKey match_key = 1;
+   * @generated from field: store.common.v1.MatchKey match_key = 1;
    */
-  matchKey?: PolicyMatchKey;
+  matchKey?: MatchKey;
 
   /**
-   * How to partition matched keys into independent groups.
-   *
    * @generated from field: store.compact.v1.PolicyGroupBy group_by = 2;
    */
   groupBy?: PolicyGroupBy;
 
   /**
-   * Sort order within each group. Required for `keep_latest` and threshold
-   * retain policies; optional for `drop_all`.
-   *
    * @generated from field: optional store.compact.v1.PolicyOrderBy order_by = 3;
    */
   orderBy?: PolicyOrderBy;
+};
+
+/**
+ * Describes the message store.compact.v1.KeysScope.
+ * Use `create(KeysScopeSchema)` to create a new message.
+ */
+export const KeysScopeSchema: GenMessage<KeysScope> = /*@__PURE__*/
+  messageDesc(file_store_v1_compact, 7);
+
+/**
+ * Sequence-number scope: prune the per-batch sequence log served by the
+ * store's `Stream` service. `match_key` / `group_by` / `order_by` are not
+ * meaningful here — the log has a single implicit ordering by sequence
+ * number. The `retain` rule on the parent `Policy` is interpreted directly
+ * over sequence numbers:
+ *
+ *   - `keep_latest { count: N }`        -> keep the last N batches
+ *   - `greater_than { threshold: T }`   -> keep sequence numbers > T
+ *   - `greater_than_or_equal { .. T }`  -> keep sequence numbers >= T
+ *   - `drop_all`                        -> clear the batch log entirely
+ *
+ * @generated from message store.compact.v1.SequenceScope
+ */
+export type SequenceScope = Message<"store.compact.v1.SequenceScope"> & {
+};
+
+/**
+ * Describes the message store.compact.v1.SequenceScope.
+ * Use `create(SequenceScopeSchema)` to create a new message.
+ */
+export const SequenceScopeSchema: GenMessage<SequenceScope> = /*@__PURE__*/
+  messageDesc(file_store_v1_compact, 8);
+
+/**
+ * A single prune policy. `scope` discriminates the keyspace the rule applies
+ * to; `retain` is shared between scopes.
+ *
+ * @generated from message store.compact.v1.Policy
+ */
+export type Policy = Message<"store.compact.v1.Policy"> & {
+  /**
+   * @generated from oneof store.compact.v1.Policy.scope
+   */
+  scope: {
+    /**
+     * @generated from field: store.compact.v1.KeysScope keys = 1;
+     */
+    value: KeysScope;
+    case: "keys";
+  } | {
+    /**
+     * @generated from field: store.compact.v1.SequenceScope sequence = 2;
+     */
+    value: SequenceScope;
+    case: "sequence";
+  } | { case: undefined; value?: undefined };
 
   /**
-   * Which entries to keep after sorting within each group.
-   *
-   * @generated from field: store.compact.v1.PolicyRetain retain = 4;
+   * @generated from field: store.compact.v1.PolicyRetain retain = 3;
    */
   retain?: PolicyRetain;
 };
@@ -277,7 +285,7 @@ export type Policy = Message<"store.compact.v1.Policy"> & {
  * Use `create(PolicySchema)` to create a new message.
  */
 export const PolicySchema: GenMessage<Policy> = /*@__PURE__*/
-  messageDesc(file_store_v1_compact, 8);
+  messageDesc(file_store_v1_compact, 9);
 
 /**
  * Request to execute prune policies.
@@ -286,8 +294,8 @@ export const PolicySchema: GenMessage<Policy> = /*@__PURE__*/
  */
 export type PruneRequest = Message<"store.compact.v1.PruneRequest"> & {
   /**
-   * One or more prune policies to apply. At least one is required. Policies
-   * must not share the same (reserved_bits, prefix) pair.
+   * One or more prune policies to apply. At least one is required. UserKeys
+   * policies must not share the same (reserved_bits, prefix) pair.
    *
    * @generated from field: repeated store.compact.v1.Policy policies = 1;
    */
@@ -299,7 +307,7 @@ export type PruneRequest = Message<"store.compact.v1.PruneRequest"> & {
  * Use `create(PruneRequestSchema)` to create a new message.
  */
 export const PruneRequestSchema: GenMessage<PruneRequest> = /*@__PURE__*/
-  messageDesc(file_store_v1_compact, 9);
+  messageDesc(file_store_v1_compact, 10);
 
 /**
  * Empty response returned on successful prune execution.
@@ -314,7 +322,7 @@ export type PruneResponse = Message<"store.compact.v1.PruneResponse"> & {
  * Use `create(PruneResponseSchema)` to create a new message.
  */
 export const PruneResponseSchema: GenMessage<PruneResponse> = /*@__PURE__*/
-  messageDesc(file_store_v1_compact, 10);
+  messageDesc(file_store_v1_compact, 11);
 
 /**
  * Interpretation of the order-by capture group bytes when comparing keys
@@ -359,8 +367,7 @@ export const PolicyOrderEncodingSchema: GenEnum<PolicyOrderEncoding> = /*@__PURE
 export const Service: GenService<{
   /**
    * Execute one or more prune policies against the store. Each policy is
-   * applied sequentially: matching keys are scanned, grouped, ordered, and
-   * entries that do not survive the retain rule are deleted.
+   * applied sequentially.
    *
    * @generated from rpc store.compact.v1.Service.Prune
    */

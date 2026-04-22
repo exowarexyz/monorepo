@@ -36,4 +36,24 @@ pub trait StoreEngine: Send + Sync + 'static {
 
     /// Current sequence number visible to readers (used for `min_sequence_number` checks).
     fn current_sequence(&self) -> u64;
+
+    /// Return the (key, value) pairs written by the `put_batch` call that was
+    /// assigned `sequence_number`. `Ok(None)` = the batch has been pruned or
+    /// was never written (the store.stream.v1 service maps `None` to NOT_FOUND
+    /// with a `BATCH_EVICTED` detail).
+    ///
+    /// Engines that don't retain a batch log return `Ok(None)` unconditionally,
+    /// which disables `GetBatch` and since-cursored `Subscribe` for that
+    /// deployment.
+    fn get_batch(&self, sequence_number: u64) -> Result<Option<Vec<(Bytes, Bytes)>>, String>;
+
+    /// Lowest retained batch sequence number, or `None` when the batch log is
+    /// empty. Surfaced in `BATCH_EVICTED` error details so clients know where
+    /// to resume from.
+    fn oldest_retained_batch(&self) -> Result<Option<u64>, String>;
+
+    /// Delete all batch-log entries with `sequence_number < cutoff_exclusive`.
+    /// Returns the number of entries deleted. Invoked only by the compact
+    /// service's batch-log policy scope — never by ingest.
+    fn prune_batch_log(&self, cutoff_exclusive: u64) -> Result<u64, String>;
 }

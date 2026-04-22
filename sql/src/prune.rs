@@ -1,6 +1,7 @@
 use exoware_sdk_rs::kv_codec::Utf8;
+use exoware_sdk_rs::match_key::MatchKey;
 use exoware_sdk_rs::prune_policy::{
-    GroupBy, MatchKey, OrderBy, OrderEncoding, PrunePolicy, RetainPolicy,
+    GroupBy, KeysScope, OrderBy, OrderEncoding, PolicyScope, PrunePolicy, RetainPolicy,
 };
 
 use crate::codec::primary_key_codec;
@@ -31,17 +32,19 @@ fn keep_latest_versions_with_regex(
     }
 
     Ok(PrunePolicy {
-        match_key: MatchKey {
-            reserved_bits: PRIMARY_RESERVED_BITS,
-            prefix: codec.prefix(),
-            payload_regex,
-        },
-        group_by: GroupBy {
-            capture_groups: vec![Utf8::from("entity")],
-        },
-        order_by: Some(OrderBy {
-            capture_group: Utf8::from("version"),
-            encoding: OrderEncoding::U64Be,
+        scope: PolicyScope::Keys(KeysScope {
+            match_key: MatchKey {
+                reserved_bits: PRIMARY_RESERVED_BITS,
+                prefix: codec.prefix(),
+                payload_regex,
+            },
+            group_by: GroupBy {
+                capture_groups: vec![Utf8::from("entity")],
+            },
+            order_by: Some(OrderBy {
+                capture_group: Utf8::from("version"),
+                encoding: OrderEncoding::U64Be,
+            }),
         }),
         retain: RetainPolicy::KeepLatest { count },
     })
@@ -90,26 +93,33 @@ mod tests {
     use crate::CellValue;
     use datafusion::arrow::datatypes::DataType;
     use exoware_sdk_rs::kv_codec::Utf8;
-    use exoware_sdk_rs::prune_policy::{
-        compile_payload_regex, validate_policy, OrderEncoding, RetainPolicy,
-    };
+    use exoware_sdk_rs::match_key::compile_payload_regex;
+    use exoware_sdk_rs::prune_policy::{validate_policy, OrderEncoding, PolicyScope, RetainPolicy};
+
+    fn keys_scope(policy: &super::PrunePolicy) -> &super::KeysScope {
+        match &policy.scope {
+            PolicyScope::Keys(s) => s,
+            PolicyScope::Sequence => panic!("expected Keys scope"),
+        }
+    }
 
     #[test]
     fn keep_latest_versions_builds_expected_policy_for_fixed_width_entity() {
         let policy = keep_latest_versions(3, 32, 1).expect("policy");
-        assert_eq!(policy.match_key.reserved_bits, 5);
-        assert_eq!(policy.match_key.prefix, 6);
+        let scope = keys_scope(&policy);
+        assert_eq!(scope.match_key.reserved_bits, 5);
+        assert_eq!(scope.match_key.prefix, 6);
         assert_eq!(
-            policy.match_key.payload_regex,
+            scope.match_key.payload_regex,
             r"(?s-u)^(?P<entity>.{32})(?P<version>.{8})$"
         );
-        assert_eq!(policy.group_by.capture_groups, vec![Utf8::from("entity")]);
+        assert_eq!(scope.group_by.capture_groups, vec![Utf8::from("entity")]);
         assert_eq!(
-            &*policy.order_by.as_ref().expect("order_by").capture_group,
+            &*scope.order_by.as_ref().expect("order_by").capture_group,
             "version"
         );
         assert_eq!(
-            policy.order_by.as_ref().expect("order_by").encoding,
+            scope.order_by.as_ref().expect("order_by").encoding,
             OrderEncoding::U64Be
         );
         assert_eq!(policy.retain, RetainPolicy::KeepLatest { count: 1 });
@@ -131,19 +141,20 @@ mod tests {
     #[test]
     fn keep_latest_versions_utf8_builds_expected_policy() {
         let policy = keep_latest_versions_utf8(3, 1).expect("policy");
-        assert_eq!(policy.match_key.reserved_bits, 5);
-        assert_eq!(policy.match_key.prefix, 6);
+        let scope = keys_scope(&policy);
+        assert_eq!(scope.match_key.reserved_bits, 5);
+        assert_eq!(scope.match_key.prefix, 6);
         assert_eq!(
-            policy.match_key.payload_regex,
+            scope.match_key.payload_regex,
             format!(r"(?s-u)^(?P<entity>{ORDERED_UTF8_REGEX})(?P<version>.{{8}})$")
         );
-        assert_eq!(policy.group_by.capture_groups, vec![Utf8::from("entity")]);
+        assert_eq!(scope.group_by.capture_groups, vec![Utf8::from("entity")]);
         assert_eq!(
-            &*policy.order_by.as_ref().expect("order_by").capture_group,
+            &*scope.order_by.as_ref().expect("order_by").capture_group,
             "version"
         );
         assert_eq!(
-            policy.order_by.as_ref().expect("order_by").encoding,
+            scope.order_by.as_ref().expect("order_by").encoding,
             OrderEncoding::U64Be
         );
         assert_eq!(policy.retain, RetainPolicy::KeepLatest { count: 1 });
@@ -153,7 +164,8 @@ mod tests {
     #[test]
     fn keep_latest_versions_utf8_matches_variable_length_entity_payloads() {
         let policy = keep_latest_versions_utf8(3, 1).expect("policy");
-        let regex = compile_payload_regex(&policy.match_key.payload_regex).expect("regex");
+        let scope = keys_scope(&policy);
+        let regex = compile_payload_regex(&scope.match_key.payload_regex).expect("regex");
         let config = KvTableConfig::new(
             3,
             vec![

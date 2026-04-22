@@ -3,6 +3,7 @@ syntax = "proto3";
 package store.ingest.v1;
 
 import "buf/validate/validate.proto";
+import "store/v1/common.proto";
 
 // Ingest service for writing key-value pairs into the store.
 service Service {
@@ -13,18 +14,11 @@ service Service {
   rpc Put(PutRequest) returns (PutResponse);
 }
 
-// A key-value pair for ingestion.
-//
-// Keys must be between 0 and 254 bytes (inclusive).
-message KvPair {
-  bytes key = 1 [(buf.validate.field).bytes.max_len = 254];
-  bytes value = 2;
-}
-
 // Batch write request. All pairs are applied atomically.
 message PutRequest {
   // Key-value pairs to write. At least one pair is required.
-  repeated KvPair kvs = 1 [(buf.validate.field).repeated.min_items = 1];
+  repeated store.common.v1.KvEntry kvs = 1
+    [(buf.validate.field).repeated.min_items = 1];
 }
 
 // Response from a successful Put.

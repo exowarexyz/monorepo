@@ -39,8 +39,6 @@ pub(crate) const AUTH_PRESENCE_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, AU
 pub(crate) const AUTH_IMMUTABLE_UPDATE_CODEC: KeyCodec =
     KeyCodec::new(RESERVED_BITS, AUTH_IMMUTABLE_UPDATE_FAMILY);
 
-pub(crate) type AuthRows = Vec<(Key, Vec<u8>)>;
-
 pub(crate) fn auth_namespace_bounds(
     codec: KeyCodec,
     namespace: AuthenticatedBackendNamespace,
@@ -281,31 +279,15 @@ pub(crate) async fn require_published_auth_watermark(
     Ok(())
 }
 
-pub(crate) async fn require_auth_uploaded_boundary(
-    session: &SerializableReadSession,
-    namespace: AuthenticatedBackendNamespace,
-    location: Location,
-) -> Result<(), QmdbError> {
-    if session
-        .get(&encode_auth_presence_key(namespace, location))
-        .await?
-        .is_some()
-    {
-        Ok(())
-    } else {
-        Err(QmdbError::CorruptData(format!(
-            "authenticated backend upload boundary missing at {location}"
-        )))
-    }
-}
-
+/// Consumes `encoded_operations` into the returned `PreparedUpload`'s
+/// `op_rows` — no clones.
 pub(crate) fn build_auth_upload_rows(
     namespace: AuthenticatedBackendNamespace,
     latest_location: Location,
-    encoded_operations: &[Vec<u8>],
-) -> Result<(u32, AuthRows), QmdbError> {
-    let mut rows = Vec::<(Key, Vec<u8>)>::with_capacity(encoded_operations.len() + 1);
-    let count_u64 = encoded_operations.len() as u64;
+    encoded_operations: Vec<Vec<u8>>,
+) -> Result<crate::core::PreparedUpload, QmdbError> {
+    let count = encoded_operations.len();
+    let count_u64 = count as u64;
     let Some(start_location) = latest_location
         .checked_add(1)
         .and_then(|next| next.checked_sub(count_u64))
@@ -313,37 +295,45 @@ pub(crate) fn build_auth_upload_rows(
         return Err(QmdbError::InvalidLocationRange {
             start_location: Location::new(0),
             latest_location,
-            count: encoded_operations.len(),
+            count,
         });
     };
-    for (index, encoded) in encoded_operations.iter().enumerate() {
+    let mut op_rows = Vec::<(Key, Vec<u8>)>::with_capacity(count);
+    for (index, encoded) in encoded_operations.into_iter().enumerate() {
         ensure_encoded_value_size(encoded.len())?;
-        rows.push((
+        op_rows.push((
             encode_auth_operation_key(namespace, start_location + index as u64),
-            encoded.clone(),
+            encoded,
         ));
     }
-    rows.push((
-        encode_auth_presence_key(namespace, latest_location),
-        Vec::new(),
-    ));
-    let operation_count = u32::try_from(encoded_operations.len()).map_err(|_| {
+    let operation_count = u32::try_from(count).map_err(|_| {
         QmdbError::CorruptData("authenticated operation count overflow".to_string())
     })?;
-    Ok((operation_count, rows))
+    Ok(crate::core::PreparedUpload {
+        operation_count,
+        keyed_operation_count: 0,
+        op_rows,
+        aux_rows: vec![(
+            encode_auth_presence_key(namespace, latest_location),
+            Vec::new(),
+        )],
+    })
 }
 
+/// Encodes `operations` exactly once — the encoded bytes move into the
+/// returned `PreparedUpload`'s `op_rows`.
 pub(crate) fn build_auth_immutable_upload_rows<K, V>(
     latest_location: Location,
     operations: &[commonware_storage::qmdb::immutable::Operation<K, V>],
-) -> Result<(u32, AuthRows), QmdbError>
+) -> Result<crate::core::PreparedUpload, QmdbError>
 where
     K: Array + AsRef<[u8]>,
     V: commonware_codec::Codec + Clone + Send + Sync,
 {
     use commonware_storage::qmdb::immutable::Operation as ImmutableOperation;
 
-    let count_u64 = operations.len() as u64;
+    let count = operations.len();
+    let count_u64 = count as u64;
     let Some(start_location) = latest_location
         .checked_add(1)
         .and_then(|next| next.checked_sub(count_u64))
@@ -351,16 +341,17 @@ where
         return Err(QmdbError::InvalidLocationRange {
             start_location: Location::new(0),
             latest_location,
-            count: operations.len(),
+            count,
         });
     };
-    let mut rows = Vec::<(Key, Vec<u8>)>::with_capacity(operations.len() * 2 + 1);
+    let mut op_rows = Vec::<(Key, Vec<u8>)>::with_capacity(count);
+    let mut aux_rows = Vec::<(Key, Vec<u8>)>::with_capacity(count + 1);
     let mut keyed_operation_count = 0u32;
     for (index, operation) in operations.iter().enumerate() {
         let location = start_location + index as u64;
         let encoded = operation.encode().to_vec();
         ensure_encoded_value_size(encoded.len())?;
-        rows.push((
+        op_rows.push((
             encode_auth_operation_key(AuthenticatedBackendNamespace::Immutable, location),
             encoded,
         ));
@@ -370,105 +361,25 @@ where
                 key: key.clone(),
                 value: Some(value.clone()),
             };
-            rows.push((
+            aux_rows.push((
                 encode_auth_immutable_update_key(key.as_ref(), location)?,
                 update_row.encode().to_vec(),
             ));
         }
     }
-    rows.push((
+    aux_rows.push((
         encode_auth_presence_key(AuthenticatedBackendNamespace::Immutable, latest_location),
         Vec::new(),
     ));
-    Ok((keyed_operation_count, rows))
-}
-
-pub(crate) async fn append_auth_nodes_incrementally<H: Hasher>(
-    session: &SerializableReadSession,
-    namespace: AuthenticatedBackendNamespace,
-    previous_ops_size: Position,
-    delta_operations: &[Vec<u8>],
-    rows: &mut Vec<(Key, Vec<u8>)>,
-) -> Result<(Position, H::Digest), QmdbError> {
-    let peak_entries: Vec<(Position, u32)> = PeakIterator::new(previous_ops_size).collect();
-    let fetched = if peak_entries.is_empty() {
-        std::collections::HashMap::new()
-    } else {
-        let peak_keys: Vec<Key> = peak_entries
-            .iter()
-            .map(|(pos, _)| encode_auth_node_key(namespace, *pos))
-            .collect();
-        let peak_key_refs: Vec<&Key> = peak_keys.iter().collect();
-        session
-            .get_many(&peak_key_refs, peak_key_refs.len() as u32)
-            .await?
-            .collect()
-            .await?
-    };
-    let mut peaks = Vec::<(Position, u32, H::Digest)>::with_capacity(peak_entries.len());
-    for (peak_pos, height) in &peak_entries {
-        let key = encode_auth_node_key(namespace, *peak_pos);
-        let Some(bytes) = fetched.get(&key) else {
-            return Err(QmdbError::CorruptData(format!(
-                "missing authenticated peak node at position {peak_pos}"
-            )));
-        };
-        peaks.push((
-            *peak_pos,
-            *height,
-            decode_digest(
-                bytes.as_ref(),
-                format!("authenticated peak node at position {peak_pos}"),
-            )?,
-        ));
-    }
-
-    let mut current_size = previous_ops_size;
-    let mut hasher = StandardHasher::<H>::new();
-    for encoded in delta_operations {
-        let leaf_pos = current_size;
-        let leaf_digest = mmr::hasher::Hasher::leaf_digest(&mut hasher, leaf_pos, encoded);
-        rows.push((
-            encode_auth_node_key(namespace, leaf_pos),
-            leaf_digest.as_ref().to_vec(),
-        ));
-        current_size = Position::new(*current_size + 1);
-
-        let mut carry_pos = leaf_pos;
-        let mut carry_digest = leaf_digest;
-        let mut carry_height = 0u32;
-        while peaks
-            .last()
-            .is_some_and(|(_, height, _)| *height == carry_height)
-        {
-            let (_, _, left_digest) = peaks.pop().expect("peak exists");
-            let parent_pos = current_size;
-            let parent_digest = mmr::hasher::Hasher::node_digest(
-                &mut hasher,
-                parent_pos,
-                &left_digest,
-                &carry_digest,
-            );
-            rows.push((
-                encode_auth_node_key(namespace, parent_pos),
-                parent_digest.as_ref().to_vec(),
-            ));
-            current_size = Position::new(*current_size + 1);
-            carry_pos = parent_pos;
-            carry_digest = parent_digest;
-            carry_height += 1;
-        }
-        peaks.push((carry_pos, carry_height, carry_digest));
-    }
-
-    let leaves = Location::try_from(current_size)
-        .map_err(|e| QmdbError::CorruptData(format!("invalid authenticated ops size: {e}")))?;
-    let root = mmr::hasher::Hasher::root(
-        &mut hasher,
-        leaves,
-        peaks.iter().map(|(_, _, digest)| digest),
-    );
-    Ok((current_size, root))
+    let operation_count = u32::try_from(count).map_err(|_| {
+        QmdbError::CorruptData("authenticated operation count overflow".to_string())
+    })?;
+    Ok(crate::core::PreparedUpload {
+        operation_count,
+        keyed_operation_count,
+        op_rows,
+        aux_rows,
+    })
 }
 
 pub(crate) async fn compute_auth_root<H: Hasher>(
@@ -575,59 +486,64 @@ pub(crate) async fn load_auth_operation_bytes_range(
     Ok(operations)
 }
 
-pub(crate) async fn load_auth_operation_range<Op>(
-    session: &SerializableReadSession,
+fn decode_auth_location_field(
+    codec: KeyCodec,
     namespace: AuthenticatedBackendNamespace,
-    start_location: Location,
-    end_location_exclusive: Location,
-    cfg: &Op::Cfg,
-) -> Result<Vec<Op>, QmdbError>
-where
-    Op: Decode,
-{
-    load_auth_operation_bytes_range(session, namespace, start_location, end_location_exclusive)
-        .await?
-        .into_iter()
-        .enumerate()
-        .map(|(offset, bytes)| {
-            let location = start_location + offset as u64;
-            Op::decode_cfg(bytes.as_slice(), cfg).map_err(|e| {
-                QmdbError::CorruptData(format!(
-                    "failed to decode authenticated operation at location {location}: {e}"
-                ))
-            })
-        })
-        .collect()
+    key: &Key,
+    label: &str,
+) -> Result<Location, QmdbError> {
+    ensure_auth_namespace(codec, namespace, key, label)?;
+    let bytes = codec
+        .read_payload_exact::<8>(key, AUTH_NAMESPACE_LEN)
+        .map_err(|e| QmdbError::CorruptData(format!("cannot decode {label} location: {e}")))?;
+    Ok(Location::new(u64::from_be_bytes(bytes)))
 }
 
 pub(crate) fn decode_auth_operation_location(
     namespace: AuthenticatedBackendNamespace,
     key: &Key,
 ) -> Result<Location, QmdbError> {
-    let codec = AUTH_OPERATION_CODEC;
-    ensure_auth_namespace(codec, namespace, key, "authenticated operation")?;
-    let bytes = codec
-        .read_payload_exact::<8>(key, AUTH_NAMESPACE_LEN)
-        .map_err(|e| {
-            QmdbError::CorruptData(format!(
-                "cannot decode authenticated operation location: {e}"
-            ))
-        })?;
-    Ok(Location::new(u64::from_be_bytes(bytes)))
+    decode_auth_location_field(
+        AUTH_OPERATION_CODEC,
+        namespace,
+        key,
+        "authenticated operation",
+    )
 }
 
 pub(crate) fn decode_auth_watermark_location(
     namespace: AuthenticatedBackendNamespace,
     key: &Key,
 ) -> Result<Location, QmdbError> {
-    let codec = AUTH_WATERMARK_CODEC;
-    ensure_auth_namespace(codec, namespace, key, "authenticated watermark")?;
-    let bytes = codec
-        .read_payload_exact::<8>(key, AUTH_NAMESPACE_LEN)
-        .map_err(|e| {
-            QmdbError::CorruptData(format!(
-                "cannot decode authenticated watermark location: {e}"
-            ))
-        })?;
-    Ok(Location::new(u64::from_be_bytes(bytes)))
+    decode_auth_location_field(
+        AUTH_WATERMARK_CODEC,
+        namespace,
+        key,
+        "authenticated watermark",
+    )
+}
+
+pub(crate) fn decode_auth_presence_location(
+    namespace: AuthenticatedBackendNamespace,
+    key: &Key,
+) -> Result<Location, QmdbError> {
+    decode_auth_location_field(
+        AUTH_PRESENCE_CODEC,
+        namespace,
+        key,
+        "authenticated presence",
+    )
+}
+
+/// Family constants exposed to the stream driver.
+pub(crate) const AUTH_OP_FAMILY_PREFIX: u16 = AUTH_OP_FAMILY;
+pub(crate) const AUTH_PRESENCE_FAMILY_PREFIX: u16 = AUTH_INDEX_FAMILY;
+pub(crate) const AUTH_WATERMARK_FAMILY_PREFIX: u16 = AUTH_WATERMARK_FAMILY;
+pub(crate) const AUTH_FAMILY_RESERVED_BITS: u8 = RESERVED_BITS;
+
+/// Byte regex matching a 1-byte namespace tag + 8-byte location payload.
+/// Used by the stream filter to restrict fan-out to one authenticated namespace
+/// (Immutable vs Keyless) even though both share the same reserved family prefix.
+pub(crate) fn auth_payload_regex_for_namespace(namespace: AuthenticatedBackendNamespace) -> String {
+    format!("(?s-u)^\\x{:02x}.{{8}}$", namespace.tag())
 }

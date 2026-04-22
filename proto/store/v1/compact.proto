@@ -3,32 +3,17 @@ syntax = "proto3";
 package store.compact.v1;
 
 import "buf/validate/validate.proto";
+import "store/v1/common.proto";
 
 // Prune policy graph and admin RPC (served by the compaction worker).
-
-// Identifies which keys a prune policy applies to. Keys are selected by their
-// `KeyCodec` family (reserved_bits + prefix) and an optional regex over the
-// key payload bytes.
-message PolicyMatchKey {
-  // Number of high bits in the key reserved for internal routing. Together with
-  // `prefix`, this selects the `KeyCodec` family to scan.
-  uint32 reserved_bits = 1;
-  // Key family prefix. Combined with `reserved_bits` to derive the scan range
-  // via `KeyCodec::prefix_bounds`.
-  uint32 prefix = 2;
-  // Regex applied to the payload portion of each key (the bytes after the
-  // reserved/prefix header). Must be non-empty. Named capture groups referenced
-  // by `PolicyGroupBy` and `PolicyOrderBy` must exist in this regex.
-  string payload_regex = 3;
-}
 
 // Controls how matched keys are partitioned into independent groups before
 // the retain policy is applied. Each group is pruned independently.
 message PolicyGroupBy {
-  // Named capture groups from `PolicyMatchKey.payload_regex` whose matched
-  // bytes are concatenated (length-prefixed) to form each group's identity.
-  // Must not contain duplicates. When empty, all matched keys belong to a
-  // single group.
+  // Named capture groups from `store.common.v1.MatchKey.payload_regex` whose
+  // matched bytes are concatenated (length-prefixed) to form each group's
+  // identity. Must not contain duplicates. When empty, all matched keys
+  // belong to a single group.
   repeated string capture_groups = 1;
 }
 
@@ -47,35 +32,35 @@ enum PolicyOrderEncoding {
 // extracted from the payload regex and decoded according to `encoding`.
 // Required for `RetainKeepLatest` and threshold-based retain policies.
 message PolicyOrderBy {
-  // Name of the capture group in `PolicyMatchKey.payload_regex` that provides
-  // the ordering value.
+  // Name of the capture group in `store.common.v1.MatchKey.payload_regex`
+  // that provides the ordering value.
   string capture_group = 1;
   // How to decode and compare the captured bytes.
   PolicyOrderEncoding encoding = 2;
 }
 
 // Retain the N entries with the highest order values within each group.
-// Requires `PolicyOrderBy` to be set on the parent `Policy`.
+// Requires `PolicyOrderBy` to be set on the parent scope.
 message RetainKeepLatest {
   // Number of entries to keep per group. Must be > 0.
   uint64 count = 1 [(buf.validate.field).uint64.gt = 0];
 }
 
 // Delete entries whose order value is less than or equal to `threshold`.
-// Requires `PolicyOrderBy` with `POLICY_ORDER_ENCODING_U64_BE`.
+// For `UserKeysScope` requires `PolicyOrderBy` with u64_be encoding.
 message RetainGreaterThan {
   // Entries with order value > this threshold are retained.
   uint64 threshold = 1;
 }
 
 // Delete entries whose order value is strictly less than `threshold`.
-// Requires `PolicyOrderBy` with `POLICY_ORDER_ENCODING_U64_BE`.
+// For `UserKeysScope` requires `PolicyOrderBy` with u64_be encoding.
 message RetainGreaterThanOrEqual {
   // Entries with order value >= this threshold are retained.
   uint64 threshold = 1;
 }
 
-// Delete all matched entries in each group unconditionally.
+// Delete all matched entries unconditionally.
 message RetainDropAll {}
 
 // Selects which entries survive pruning within each group.
@@ -88,33 +73,48 @@ message PolicyRetain {
   }
 }
 
-// A single prune policy: scan a key family, partition into groups, order
-// within each group, then apply the retain rule to decide which keys to
-// delete.
-message Policy {
-  // Selects the key family and payload filter for this policy.
-  PolicyMatchKey match_key = 1;
-  // How to partition matched keys into independent groups.
+// User-key-space scope: scan a KeyCodec family by `match_key`, partition
+// matched keys into `group_by` groups, order within each group by
+// `order_by`, then apply `retain` to decide which keys to delete.
+message KeysScope {
+  store.common.v1.MatchKey match_key = 1;
   PolicyGroupBy group_by = 2;
-  // Sort order within each group. Required for `keep_latest` and threshold
-  // retain policies; optional for `drop_all`.
   optional PolicyOrderBy order_by = 3;
-  // Which entries to keep after sorting within each group.
-  PolicyRetain retain = 4;
+}
+
+// Sequence-number scope: prune the per-batch sequence log served by the
+// store's `Stream` service. `match_key` / `group_by` / `order_by` are not
+// meaningful here — the log has a single implicit ordering by sequence
+// number. The `retain` rule on the parent `Policy` is interpreted directly
+// over sequence numbers:
+//
+//   - `keep_latest { count: N }`        -> keep the last N batches
+//   - `greater_than { threshold: T }`   -> keep sequence numbers > T
+//   - `greater_than_or_equal { .. T }`  -> keep sequence numbers >= T
+//   - `drop_all`                        -> clear the batch log entirely
+message SequenceScope {}
+
+// A single prune policy. `scope` discriminates the keyspace the rule applies
+// to; `retain` is shared between scopes.
+message Policy {
+  oneof scope {
+    KeysScope keys = 1;
+    SequenceScope sequence = 2;
+  }
+  PolicyRetain retain = 3;
 }
 
 // Compaction service, typically served by the compaction worker.
 service Service {
   // Execute one or more prune policies against the store. Each policy is
-  // applied sequentially: matching keys are scanned, grouped, ordered, and
-  // entries that do not survive the retain rule are deleted.
+  // applied sequentially.
   rpc Prune(PruneRequest) returns (PruneResponse);
 }
 
 // Request to execute prune policies.
 message PruneRequest {
-  // One or more prune policies to apply. At least one is required. Policies
-  // must not share the same (reserved_bits, prefix) pair.
+  // One or more prune policies to apply. At least one is required. UserKeys
+  // policies must not share the same (reserved_bits, prefix) pair.
   repeated Policy policies = 1 [(buf.validate.field).repeated.min_items = 1];
 }
 

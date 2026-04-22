@@ -7,9 +7,13 @@ mod connect;
 mod engine;
 mod prune;
 mod reduce;
+mod stream;
 mod validate;
 
-pub use connect::{connect_stack, AppState, CompactConnect, IngestConnect, QueryConnect};
+pub use connect::{
+    connect_stack, AppState, CompactConnect, IngestConnect, QueryConnect, StreamConnect,
+};
 pub use engine::StoreEngine;
 pub use prune::{execute_prune, PruneError};
 pub use reduce::{reduce_over_rows, RangeError};
+pub use stream::StreamHub;

@@ -371,3 +371,16 @@ pub(crate) fn decode_operation_location_key(key: &Key) -> Result<Location, QmdbE
         .map_err(|e| QmdbError::CorruptData(format!("cannot decode operation location: {e}")))?;
     Ok(Location::new(u64::from_be_bytes(bytes)))
 }
+
+pub(crate) fn decode_presence_location(key: &Key) -> Result<Location, QmdbError> {
+    let codec = PRESENCE_CODEC;
+    if !codec.matches(key) {
+        return Err(QmdbError::CorruptData(
+            "presence key prefix mismatch".to_string(),
+        ));
+    }
+    let bytes = codec
+        .read_payload_exact::<8>(key, 0)
+        .map_err(|e| QmdbError::CorruptData(format!("cannot decode presence location: {e}")))?;
+    Ok(Location::new(u64::from_be_bytes(bytes)))
+}

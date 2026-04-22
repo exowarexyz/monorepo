@@ -130,7 +130,7 @@ impl GroupedReductionState {
             .states
             .iter_mut()
             .zip(request.reducers.iter())
-            .zip(reducer_values.into_iter())
+            .zip(reducer_values)
         {
             state.update(reducer.op, value)?;
         }
@@ -225,7 +225,7 @@ fn reduce_row_into_response(
         for ((state, reducer), value) in states
             .iter_mut()
             .zip(request.reducers.iter())
-            .zip(extracted.reducer_values.into_iter())
+            .zip(extracted.reducer_values)
         {
             state.update(reducer.op, value)?;
         }

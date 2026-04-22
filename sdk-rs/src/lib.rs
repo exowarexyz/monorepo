@@ -12,8 +12,10 @@
 
 pub mod keys;
 pub mod kv_codec;
+pub mod match_key;
 pub mod proto;
 pub mod prune_policy;
+pub mod stream_filter;
 pub use keys::{Key, KeyCodec, KeyCodecError, KeyMut, KeyValidationError, Value, MAX_KEY_LEN};
 pub use proto::*;
 extern crate self as exoware_proto;
@@ -46,7 +48,7 @@ use keys::is_valid_key_size;
 use kv_codec::KvReducedValue;
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicU64, Ordering},
     Arc,
 };
 use std::time::Duration;
@@ -151,7 +153,7 @@ pub struct RangeStream {
     final_count: Option<usize>,
     final_detail: Option<proto_query::Detail>,
     finished: bool,
-    sequence_number: Option<Arc<AtomicU64>>,
+    observed_sequence: Option<Arc<AtomicU64>>,
 }
 
 impl RangeStream {
@@ -160,7 +162,7 @@ impl RangeStream {
             hyper::body::Incoming,
             exoware_proto::query::RangeFrameView<'static>,
         >,
-        sequence_number: Arc<AtomicU64>,
+        observed_sequence: Option<Arc<AtomicU64>>,
     ) -> Self {
         Self {
             stream,
@@ -169,7 +171,7 @@ impl RangeStream {
             final_count: None,
             final_detail: None,
             finished: false,
-            sequence_number: Some(sequence_number),
+            observed_sequence,
         }
     }
 
@@ -186,8 +188,10 @@ impl RangeStream {
             .stream
             .trailers()
             .and_then(query_detail_from_header_map);
-        if let (Some(token_store), Some(d)) = (&self.sequence_number, self.final_detail.as_ref()) {
-            token_store.fetch_max(d.sequence_number, Ordering::SeqCst);
+        if let (Some(sequence_store), Some(d)) =
+            (&self.observed_sequence, self.final_detail.as_ref())
+        {
+            sequence_store.fetch_max(d.sequence_number, Ordering::SeqCst);
         }
     }
 
@@ -270,7 +274,7 @@ pub struct GetManyStream {
     entries_seen: usize,
     final_detail: Option<proto_query::Detail>,
     finished: bool,
-    sequence_number: Option<Arc<AtomicU64>>,
+    observed_sequence: Option<Arc<AtomicU64>>,
 }
 
 impl GetManyStream {
@@ -283,7 +287,7 @@ impl GetManyStream {
             hyper::body::Incoming,
             exoware_proto::query::GetManyFrameView<'static>,
         >,
-        sequence_number: Arc<AtomicU64>,
+        observed_sequence: Option<Arc<AtomicU64>>,
     ) -> Self {
         Self {
             stream,
@@ -291,7 +295,7 @@ impl GetManyStream {
             entries_seen: 0,
             final_detail: None,
             finished: false,
-            sequence_number: Some(sequence_number),
+            observed_sequence,
         }
     }
 
@@ -300,8 +304,10 @@ impl GetManyStream {
             .stream
             .trailers()
             .and_then(query_detail_from_header_map);
-        if let (Some(token_store), Some(d)) = (&self.sequence_number, self.final_detail.as_ref()) {
-            token_store.fetch_max(d.sequence_number, Ordering::SeqCst);
+        if let (Some(sequence_store), Some(d)) =
+            (&self.observed_sequence, self.final_detail.as_ref())
+        {
+            sequence_store.fetch_max(d.sequence_number, Ordering::SeqCst);
         }
     }
 
@@ -382,6 +388,84 @@ impl RangeMode {
             Self::Forward => proto_query::TraversalMode::TRAVERSAL_MODE_FORWARD,
             Self::Reverse => proto_query::TraversalMode::TRAVERSAL_MODE_REVERSE,
         }
+    }
+}
+
+/// One delivered (key, value) row from a stream subscription. The client
+/// reapplies its own filter if it needs to know which match_key matched —
+/// the wire frame doesn't carry the index.
+#[derive(Clone, Debug)]
+pub struct StreamSubscriptionEntry {
+    pub key: Key,
+    pub value: Bytes,
+}
+
+/// One atomic Put batch delivered to a subscriber.
+#[derive(Clone, Debug)]
+pub struct StreamSubscriptionFrame {
+    pub sequence_number: u64,
+    pub entries: Vec<StreamSubscriptionEntry>,
+}
+
+/// Async stream of `StreamSubscriptionFrame`. Backed by the generated
+/// connectrpc server stream.
+pub struct StreamSubscription {
+    stream: ConnectServerStream<
+        hyper::body::Incoming,
+        exoware_proto::store::stream::v1::SubscribeResponseView<'static>,
+    >,
+}
+
+impl std::fmt::Debug for StreamSubscription {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamSubscription").finish_non_exhaustive()
+    }
+}
+
+impl StreamSubscription {
+    /// Pull the next frame. `Ok(None)` = server closed the stream cleanly.
+    pub async fn next(&mut self) -> Result<Option<StreamSubscriptionFrame>, ClientError> {
+        match self
+            .stream
+            .message()
+            .await
+            .map_err(client_error_from_connect)?
+        {
+            Some(view) => {
+                let owned = view.to_owned_message();
+                let frame = StreamSubscriptionFrame {
+                    sequence_number: owned.sequence_number,
+                    entries: owned
+                        .entries
+                        .into_iter()
+                        .map(|e| StreamSubscriptionEntry {
+                            key: Bytes::from(e.key),
+                            value: Bytes::from(e.value),
+                        })
+                        .collect(),
+                };
+                Ok(Some(frame))
+            }
+            None => {
+                if let Some(err) = self.stream.error() {
+                    Err(client_error_from_connect(err.clone()))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+}
+
+/// Inspect a Connect error for `store.stream.BATCH_EVICTED` / `BATCH_NOT_FOUND`
+/// `ErrorInfo` details. Used by `get_batch` to collapse both into `Ok(None)`.
+fn is_batch_missing_error(err: &ConnectError) -> bool {
+    match proto_decode_connect_error(err) {
+        Ok(decoded) => decoded.error_info.is_some_and(|info| {
+            info.domain == "store.stream"
+                && matches!(info.reason.as_str(), "BATCH_EVICTED" | "BATCH_NOT_FOUND")
+        }),
+        Err(_) => false,
     }
 }
 
@@ -491,18 +575,20 @@ pub struct StoreClientBuilder {
     ingest_url: Option<String>,
     query_url: Option<String>,
     compact_url: Option<String>,
+    stream_url: Option<String>,
     retry_config: RetryConfig,
     connect_request_compression: ConnectRequestCompression,
 }
 
 impl StoreClientBuilder {
-    /// Sets the same base URL for all services (health, ingest, query, compact).
+    /// Sets the same base URL for all services (health, ingest, query, compact, stream).
     pub fn url(mut self, url: &str) -> Self {
         let u = trim_connect_base(url);
         self.health_url = Some(u.clone());
         self.ingest_url = Some(u.clone());
         self.query_url = Some(u.clone());
-        self.compact_url = Some(u);
+        self.compact_url = Some(u.clone());
+        self.stream_url = Some(u);
         self
     }
 
@@ -530,6 +616,13 @@ impl StoreClientBuilder {
         self
     }
 
+    /// Base URL for the stream service (`store.stream.v1.Service`). Defaults
+    /// to the ingest base when not set explicitly.
+    pub fn stream_url(mut self, url: &str) -> Self {
+        self.stream_url = Some(trim_connect_base(url));
+        self
+    }
+
     /// Retry policy for idempotent read operations (get / range / reduce).
     pub fn retry_config(mut self, retry: RetryConfig) -> Self {
         self.retry_config = retry.sanitized();
@@ -550,6 +643,9 @@ impl StoreClientBuilder {
         let compact_url = self
             .compact_url
             .ok_or(ClientBuildError::MissingCompactUrl)?;
+        // Stream defaults to ingest when not explicitly configured; they
+        // share the same origin in the reference simulator.
+        let stream_url = self.stream_url.unwrap_or_else(|| ingest_url.clone());
         let ingest_uri: http::Uri =
             ingest_url
                 .parse()
@@ -570,14 +666,21 @@ impl StoreClientBuilder {
                     url: compact_url.clone(),
                     source: e,
                 })?;
+        let stream_uri: http::Uri =
+            stream_url
+                .parse()
+                .map_err(|e| ClientBuildError::InvalidUrl {
+                    url: stream_url.clone(),
+                    source: e,
+                })?;
         Ok(StoreClient {
             health_url,
             ingest_uri,
             query_uri,
             compact_uri,
+            stream_uri,
             http: new_http_client(),
             connect_http: ProtoPreferZstdHttpClient::plaintext(),
-            sequence_number: Arc::new(AtomicU64::new(0)),
             retry_config: self.retry_config,
             connect_request_compression: self.connect_request_compression,
         })
@@ -592,19 +695,27 @@ pub struct StoreClient {
     ingest_uri: http::Uri,
     query_uri: http::Uri,
     compact_uri: http::Uri,
+    stream_uri: http::Uri,
     http: reqwest::Client,
     connect_http: ProtoPreferZstdHttpClient,
-    sequence_number: Arc<AtomicU64>,
     retry_config: RetryConfig,
     connect_request_compression: ConnectRequestCompression,
 }
 
 /// A session that enforces monotonic read consistency via a fixed `min_sequence_number` floor.
 ///
-/// The first read either inherits the parent `StoreClient`'s observed sequence number
-/// (if nonzero) or issues an unseeded read and seeds from the response. Every
-/// subsequent read passes that fixed floor so the server guarantees all responses
-/// reflect at least that point in the write log.
+/// `StoreClient` itself does not retain any client-global observed sequence.
+/// Plain query reads are stateless unless the caller passes an explicit
+/// `min_sequence_number`.
+///
+/// A `SerializableReadSession` is the explicit consistency mechanism. The first
+/// successful unary read seeds the session from the server-reported sequence,
+/// and every later read passes that fixed floor so the server guarantees all
+/// responses reflect at least that point in the write log.
+///
+/// Streamed query reads (`get_many`, `range_stream`) only expose their final
+/// sequence in stream trailers, so if one of those is the first successful
+/// read, the session is not pinned until that stream is fully drained.
 #[derive(Clone, Debug)]
 pub struct SerializableReadSession {
     client: StoreClient,
@@ -613,9 +724,21 @@ pub struct SerializableReadSession {
 
 #[derive(Debug)]
 struct SessionState {
-    token: AtomicU64,
-    seeded: AtomicBool,
+    sequence: Arc<AtomicU64>,
     init_gate: tokio::sync::Mutex<()>,
+}
+
+impl SessionState {
+    fn fixed_sequence(&self) -> Option<u64> {
+        let sequence = self.sequence.load(Ordering::Acquire);
+        (sequence > 0).then_some(sequence)
+    }
+}
+
+#[derive(Default)]
+struct RangeStreamReadOptions {
+    min_sequence_number: Option<u64>,
+    observed_sequence: Option<Arc<AtomicU64>>,
 }
 
 impl StoreClient {
@@ -669,17 +792,9 @@ impl StoreClient {
             .expect("all service URLs are set")
     }
 
-    pub fn sequence_number(&self) -> u64 {
-        self.sequence_number.load(Ordering::Relaxed)
-    }
-
     /// Outgoing Connect request body compression (see [`ConnectRequestCompression`]).
     pub fn connect_request_compression(&self) -> ConnectRequestCompression {
         self.connect_request_compression
-    }
-
-    pub fn observe_sequence_number(&self, token: u64) {
-        self.sequence_number.fetch_max(token, Ordering::SeqCst);
     }
 
     pub fn decode_error_details(
@@ -688,25 +803,57 @@ impl StoreClient {
         proto_decode_connect_error(err)
     }
 
+    /// Create an unseeded serializable read session.
+    ///
+    /// The first successful unary read fixes the session's sequence floor from
+    /// the server response. Streamed query reads fix that floor only once their
+    /// trailers arrive.
     pub fn create_session(&self) -> SerializableReadSession {
-        let initial = self.sequence_number();
+        self.create_session_with_sequence(0)
+    }
+
+    /// Create a serializable read session pinned to at least `sequence`.
+    ///
+    /// This is intended for stream-driven read paths that already observed a
+    /// concrete store batch sequence and need follow-up query/proof reads to
+    /// see at least that sequence.
+    pub fn create_session_with_sequence(&self, sequence: u64) -> SerializableReadSession {
         SerializableReadSession {
             client: self.clone(),
             state: Arc::new(SessionState {
-                token: AtomicU64::new(initial),
-                seeded: AtomicBool::new(initial > 0),
+                sequence: Arc::new(AtomicU64::new(sequence)),
                 init_gate: tokio::sync::Mutex::new(()),
             }),
         }
     }
 
+    /// Typed access to the `store.ingest.v1` service.
+    pub fn ingest(&self) -> Ingest<'_> {
+        Ingest { c: self }
+    }
+
+    /// Typed access to the `store.query.v1` service.
+    pub fn query(&self) -> Query<'_> {
+        Query { c: self }
+    }
+
+    /// Typed access to the `store.compact.v1` service.
+    pub fn compact(&self) -> Compact<'_> {
+        Compact { c: self }
+    }
+
+    /// Typed access to the `store.stream.v1` service.
+    pub fn stream(&self) -> Stream<'_> {
+        Stream { c: self }
+    }
+
     /// Submit a KV batch via Connect `Put`.
     ///
-    /// On success returns the **store sequence number** from the response (same value
-    /// the client also records via [`Self::observe_sequence_number`]). Use it for immediate
-    /// `get_with_min_sequence_number` / range calls without polling [`Self::sequence_number`].
+    /// On success returns the **store sequence number** from the response. Use it for immediate
+    /// `get_with_min_sequence_number` / range calls or to seed
+    /// [`Self::create_session_with_sequence`].
     /// If the request succeeds, the server accepts the full batch (count is `kvs.len()`).
-    pub async fn put(&self, kvs: &[(&Key, &[u8])]) -> Result<u64, ClientError> {
+    pub(crate) async fn put(&self, kvs: &[(&Key, &[u8])]) -> Result<u64, ClientError> {
         let mut proto_kvs = Vec::with_capacity(kvs.len());
         for (key, value) in kvs {
             if !is_valid_key_size(key.len()) {
@@ -717,7 +864,7 @@ impl StoreClient {
                     MAX_KEY_LEN
                 )));
             }
-            proto_kvs.push(exoware_proto::ingest::KvPair {
+            proto_kvs.push(exoware_proto::common::KvEntry {
                 key: (*key).to_vec(),
                 value: value.to_vec(),
                 ..Default::default()
@@ -734,17 +881,14 @@ impl StoreClient {
             })
             .await
             .map_err(client_error_from_connect)?;
-        let owned = response.into_owned();
-        let token = owned.sequence_number;
-        self.observe_sequence_number(token);
-        Ok(token)
+        Ok(response.into_owned().sequence_number)
     }
 
-    pub async fn get(&self, key: &Key) -> Result<Option<Bytes>, ClientError> {
+    pub(crate) async fn get(&self, key: &Key) -> Result<Option<Bytes>, ClientError> {
         self.get_internal(key, None).await
     }
 
-    pub async fn get_with_min_sequence_number(
+    pub(crate) async fn get_with_min_sequence_number(
         &self,
         key: &Key,
         min_sequence_number: u64,
@@ -758,29 +902,27 @@ impl StoreClient {
         min_sequence_number: Option<u64>,
     ) -> Result<Option<Bytes>, ClientError> {
         let (response, detail) = self
-            .send_get(key, self.effective_min_sequence_number(min_sequence_number))
+            .send_get(key, self.normalize_min_sequence_number(min_sequence_number))
             .await?;
-        if let Some(d) = detail {
-            self.observe_sequence_number(d.sequence_number);
-        }
+        let _ = detail;
         Ok(response.value.map(Bytes::from))
     }
 
-    pub async fn get_many(
+    pub(crate) async fn get_many(
         &self,
         keys: &[&Key],
         batch_size: u32,
     ) -> Result<GetManyStream, ClientError> {
-        self.get_many_internal(keys, batch_size, None).await
+        self.get_many_internal(keys, batch_size, None, None).await
     }
 
-    pub async fn get_many_with_min_sequence_number(
+    pub(crate) async fn get_many_with_min_sequence_number(
         &self,
         keys: &[&Key],
         batch_size: u32,
         min_sequence_number: u64,
     ) -> Result<GetManyStream, ClientError> {
-        self.get_many_internal(keys, batch_size, Some(min_sequence_number))
+        self.get_many_internal(keys, batch_size, Some(min_sequence_number), None)
             .await
     }
 
@@ -789,6 +931,7 @@ impl StoreClient {
         keys: &[&Key],
         batch_size: u32,
         min_sequence_number: Option<u64>,
+        observed_sequence: Option<Arc<AtomicU64>>,
     ) -> Result<GetManyStream, ClientError> {
         for key in keys {
             if !is_valid_key_size(key.len()) {
@@ -805,7 +948,7 @@ impl StoreClient {
             store_connect_client_config(self.query_uri.clone(), self.connect_request_compression);
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
         let proto_keys: Vec<Vec<u8>> = keys.iter().map(|k| k.to_vec()).collect();
-        let effective_min = self.effective_min_sequence_number(min_sequence_number);
+        let effective_min = self.normalize_min_sequence_number(min_sequence_number);
         let max_attempts = self.retry_config.max_attempts.max(1);
         let mut attempt = 1usize;
         loop {
@@ -820,7 +963,7 @@ impl StoreClient {
             {
                 Ok(stream) => {
                     let mut gms =
-                        GetManyStream::from_connect_stream(stream, self.sequence_number.clone());
+                        GetManyStream::from_connect_stream(stream, observed_sequence.clone());
                     if let Err(err) = gms.prefetch_first_frame().await {
                         if attempt < max_attempts && is_retryable_error(&err) {
                             let delay = retry_delay_for_error(&err, attempt, self.retry_config);
@@ -847,7 +990,7 @@ impl StoreClient {
 
     /// Key range is inclusive: `start <= key <= end` when `end` is non-empty; empty `end` is
     /// unbounded above (matches `store.query.v1.RangeRequest`).
-    pub async fn range(
+    pub(crate) async fn range(
         &self,
         start: &Key,
         end: &Key,
@@ -858,7 +1001,7 @@ impl StoreClient {
     }
 
     /// See [`StoreClient::range`] for `end` semantics.
-    pub async fn range_with_mode(
+    pub(crate) async fn range_with_mode(
         &self,
         start: &Key,
         end: &Key,
@@ -868,7 +1011,7 @@ impl StoreClient {
         self.range_internal(start, end, limit, mode, None).await
     }
 
-    pub async fn range_with_min_sequence_number(
+    pub(crate) async fn range_with_min_sequence_number(
         &self,
         start: &Key,
         end: &Key,
@@ -885,7 +1028,7 @@ impl StoreClient {
         .await
     }
 
-    pub async fn range_with_mode_and_min_sequence_number(
+    pub(crate) async fn range_with_mode_and_min_sequence_number(
         &self,
         start: &Key,
         end: &Key,
@@ -897,18 +1040,25 @@ impl StoreClient {
             .await
     }
 
-    pub async fn range_stream(
+    pub(crate) async fn range_stream(
         &self,
         start: &Key,
         end: &Key,
         limit: usize,
         batch_size: usize,
     ) -> Result<RangeStream, ClientError> {
-        self.range_stream_internal(start, end, limit, batch_size, RangeMode::Forward, None)
-            .await
+        self.range_stream_internal(
+            start,
+            end,
+            limit,
+            batch_size,
+            RangeMode::Forward,
+            RangeStreamReadOptions::default(),
+        )
+        .await
     }
 
-    pub async fn range_stream_with_mode(
+    pub(crate) async fn range_stream_with_mode(
         &self,
         start: &Key,
         end: &Key,
@@ -916,11 +1066,11 @@ impl StoreClient {
         batch_size: usize,
         mode: RangeMode,
     ) -> Result<RangeStream, ClientError> {
-        self.range_stream_internal(start, end, limit, batch_size, mode, None)
+        self.range_stream_internal(start, end, limit, batch_size, mode, Default::default())
             .await
     }
 
-    pub async fn range_stream_with_min_sequence_number(
+    pub(crate) async fn range_stream_with_min_sequence_number(
         &self,
         start: &Key,
         end: &Key,
@@ -934,12 +1084,15 @@ impl StoreClient {
             limit,
             batch_size,
             RangeMode::Forward,
-            Some(min_sequence_number),
+            RangeStreamReadOptions {
+                min_sequence_number: Some(min_sequence_number),
+                observed_sequence: None,
+            },
         )
         .await
     }
 
-    pub async fn range_stream_with_mode_and_min_sequence_number(
+    pub(crate) async fn range_stream_with_mode_and_min_sequence_number(
         &self,
         start: &Key,
         end: &Key,
@@ -954,12 +1107,15 @@ impl StoreClient {
             limit,
             batch_size,
             mode,
-            Some(min_sequence_number),
+            RangeStreamReadOptions {
+                min_sequence_number: Some(min_sequence_number),
+                observed_sequence: None,
+            },
         )
         .await
     }
 
-    pub async fn range_reduce(
+    pub(crate) async fn range_reduce(
         &self,
         start: &Key,
         end: &Key,
@@ -981,7 +1137,7 @@ impl StoreClient {
             .collect())
     }
 
-    pub async fn range_reduce_with_min_sequence_number(
+    pub(crate) async fn range_reduce_with_min_sequence_number(
         &self,
         start: &Key,
         end: &Key,
@@ -1004,7 +1160,7 @@ impl StoreClient {
             .collect())
     }
 
-    pub async fn range_reduce_response(
+    pub(crate) async fn range_reduce_response(
         &self,
         start: &Key,
         end: &Key,
@@ -1016,7 +1172,7 @@ impl StoreClient {
         Ok(body)
     }
 
-    pub async fn range_reduce_response_with_min_sequence_number(
+    pub(crate) async fn range_reduce_response_with_min_sequence_number(
         &self,
         start: &Key,
         end: &Key,
@@ -1029,24 +1185,7 @@ impl StoreClient {
         Ok(body)
     }
 
-    #[cfg(test)]
-    pub async fn range_reduce_response_for_tests(
-        &self,
-        start: &Key,
-        end: &Key,
-        request: &DomainRangeReduceRequest,
-    ) -> Result<
-        (
-            exoware_proto::query::ReduceResponse,
-            Option<proto_query::Detail>,
-        ),
-        ClientError,
-    > {
-        self.range_reduce_response_internal(start, end, request, None)
-            .await
-    }
-
-    pub async fn prune(
+    pub(crate) async fn prune(
         &self,
         policies: &[crate::prune_policy::PrunePolicy],
     ) -> Result<(), ClientError> {
@@ -1081,9 +1220,8 @@ impl StoreClient {
         Ok(resp.status().is_success())
     }
 
-    fn effective_min_sequence_number(&self, override_token: Option<u64>) -> Option<u64> {
-        let token = override_token.unwrap_or_else(|| self.sequence_number());
-        (token > 0).then_some(token)
+    fn normalize_min_sequence_number(&self, requested_sequence: Option<u64>) -> Option<u64> {
+        requested_sequence.filter(|sequence| *sequence > 0)
     }
 
     async fn send_get(
@@ -1149,7 +1287,17 @@ impl StoreClient {
         min_sequence_number: Option<u64>,
     ) -> Result<Vec<(Key, Bytes)>, ClientError> {
         let stream = self
-            .range_stream_internal(start, end, limit, limit.max(1), mode, min_sequence_number)
+            .range_stream_internal(
+                start,
+                end,
+                limit,
+                limit.max(1),
+                mode,
+                RangeStreamReadOptions {
+                    min_sequence_number,
+                    observed_sequence: None,
+                },
+            )
             .await?;
         stream.collect().await
     }
@@ -1161,7 +1309,7 @@ impl StoreClient {
         limit: usize,
         batch_size: usize,
         mode: RangeMode,
-        min_sequence_number: Option<u64>,
+        options: RangeStreamReadOptions,
     ) -> Result<RangeStream, ClientError> {
         if !is_valid_key_size(start.len()) || !is_valid_key_size(end.len()) {
             return Err(ClientError::WireFormat(
@@ -1177,6 +1325,7 @@ impl StoreClient {
         let config =
             store_connect_client_config(self.query_uri.clone(), self.connect_request_compression);
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
+        let min_sequence_number = self.normalize_min_sequence_number(options.min_sequence_number);
         let max_attempts = self.retry_config.max_attempts.max(1);
         let mut attempt = 1usize;
         loop {
@@ -1216,7 +1365,7 @@ impl StoreClient {
             };
 
             let mut stream =
-                RangeStream::from_connect_stream(response, self.sequence_number.clone());
+                RangeStream::from_connect_stream(response, options.observed_sequence.clone());
             if let Err(err) = stream.prefetch_first_frame().await {
                 if attempt < max_attempts && is_retryable_error(&err) {
                     let delay = retry_delay_for_error(&err, attempt, self.retry_config);
@@ -1254,6 +1403,7 @@ impl StoreClient {
             store_connect_client_config(self.query_uri.clone(), self.connect_request_compression);
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
         let proto_params = proto_to_proto_reduce_params(request.clone());
+        let min_sequence_number = self.normalize_min_sequence_number(min_sequence_number);
         let response = self
             .send_with_retry(|| async {
                 client
@@ -1269,9 +1419,6 @@ impl StoreClient {
             .await?;
         let detail = query_detail_from_unary_metadata(response.headers(), response.trailers());
         let owned = response.into_owned();
-        if let Some(d) = detail.as_ref() {
-            self.observe_sequence_number(d.sequence_number);
-        }
         Ok((owned, detail))
     }
 
@@ -1306,26 +1453,345 @@ impl StoreClient {
     }
 }
 
-impl SerializableReadSession {
-    pub fn fixed_token(&self) -> Option<u64> {
-        if !self.state.seeded.load(Ordering::Acquire) {
-            return None;
+// --- Service-grouped accessors ---------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+pub struct Ingest<'a> {
+    c: &'a StoreClient,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Query<'a> {
+    c: &'a StoreClient,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Compact<'a> {
+    c: &'a StoreClient,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Stream<'a> {
+    c: &'a StoreClient,
+}
+
+impl<'a> Ingest<'a> {
+    pub async fn put(&self, kvs: &[(&Key, &[u8])]) -> Result<u64, ClientError> {
+        self.c.put(kvs).await
+    }
+}
+
+impl<'a> Query<'a> {
+    pub async fn get(&self, key: &Key) -> Result<Option<Bytes>, ClientError> {
+        self.c.get(key).await
+    }
+
+    pub async fn get_with_min_sequence_number(
+        &self,
+        key: &Key,
+        min_sequence_number: u64,
+    ) -> Result<Option<Bytes>, ClientError> {
+        self.c
+            .get_with_min_sequence_number(key, min_sequence_number)
+            .await
+    }
+
+    pub async fn get_many(
+        &self,
+        keys: &[&Key],
+        batch_size: u32,
+    ) -> Result<GetManyStream, ClientError> {
+        self.c.get_many(keys, batch_size).await
+    }
+
+    pub async fn get_many_with_min_sequence_number(
+        &self,
+        keys: &[&Key],
+        batch_size: u32,
+        min_sequence_number: u64,
+    ) -> Result<GetManyStream, ClientError> {
+        self.c
+            .get_many_with_min_sequence_number(keys, batch_size, min_sequence_number)
+            .await
+    }
+
+    /// Collect a `Range` into a `Vec`. Use `range_stream` for large scans.
+    pub async fn range(
+        &self,
+        start: &Key,
+        end: &Key,
+        limit: usize,
+    ) -> Result<Vec<(Key, Bytes)>, ClientError> {
+        self.c.range(start, end, limit).await
+    }
+
+    pub async fn range_with_mode(
+        &self,
+        start: &Key,
+        end: &Key,
+        limit: usize,
+        mode: RangeMode,
+    ) -> Result<Vec<(Key, Bytes)>, ClientError> {
+        self.c.range_with_mode(start, end, limit, mode).await
+    }
+
+    pub async fn range_with_min_sequence_number(
+        &self,
+        start: &Key,
+        end: &Key,
+        limit: usize,
+        min_sequence_number: u64,
+    ) -> Result<Vec<(Key, Bytes)>, ClientError> {
+        self.c
+            .range_with_min_sequence_number(start, end, limit, min_sequence_number)
+            .await
+    }
+
+    pub async fn range_with_mode_and_min_sequence_number(
+        &self,
+        start: &Key,
+        end: &Key,
+        limit: usize,
+        mode: RangeMode,
+        min_sequence_number: u64,
+    ) -> Result<Vec<(Key, Bytes)>, ClientError> {
+        self.c
+            .range_with_mode_and_min_sequence_number(start, end, limit, mode, min_sequence_number)
+            .await
+    }
+
+    pub async fn range_stream(
+        &self,
+        start: &Key,
+        end: &Key,
+        limit: usize,
+        batch_size: usize,
+    ) -> Result<RangeStream, ClientError> {
+        self.c.range_stream(start, end, limit, batch_size).await
+    }
+
+    pub async fn range_stream_with_mode(
+        &self,
+        start: &Key,
+        end: &Key,
+        limit: usize,
+        batch_size: usize,
+        mode: RangeMode,
+    ) -> Result<RangeStream, ClientError> {
+        self.c
+            .range_stream_with_mode(start, end, limit, batch_size, mode)
+            .await
+    }
+
+    pub async fn range_stream_with_min_sequence_number(
+        &self,
+        start: &Key,
+        end: &Key,
+        limit: usize,
+        batch_size: usize,
+        min_sequence_number: u64,
+    ) -> Result<RangeStream, ClientError> {
+        self.c
+            .range_stream_with_min_sequence_number(
+                start,
+                end,
+                limit,
+                batch_size,
+                min_sequence_number,
+            )
+            .await
+    }
+
+    pub async fn range_stream_with_mode_and_min_sequence_number(
+        &self,
+        start: &Key,
+        end: &Key,
+        limit: usize,
+        batch_size: usize,
+        mode: RangeMode,
+        min_sequence_number: u64,
+    ) -> Result<RangeStream, ClientError> {
+        self.c
+            .range_stream_with_mode_and_min_sequence_number(
+                start,
+                end,
+                limit,
+                batch_size,
+                mode,
+                min_sequence_number,
+            )
+            .await
+    }
+
+    pub async fn range_reduce(
+        &self,
+        start: &Key,
+        end: &Key,
+        request: &DomainRangeReduceRequest,
+    ) -> Result<Vec<Option<KvReducedValue>>, ClientError> {
+        self.c.range_reduce(start, end, request).await
+    }
+
+    pub async fn range_reduce_with_min_sequence_number(
+        &self,
+        start: &Key,
+        end: &Key,
+        request: &DomainRangeReduceRequest,
+        min_sequence_number: u64,
+    ) -> Result<Vec<Option<KvReducedValue>>, ClientError> {
+        self.c
+            .range_reduce_with_min_sequence_number(start, end, request, min_sequence_number)
+            .await
+    }
+
+    pub async fn range_reduce_response(
+        &self,
+        start: &Key,
+        end: &Key,
+        request: &DomainRangeReduceRequest,
+    ) -> Result<exoware_proto::query::ReduceResponse, ClientError> {
+        self.c.range_reduce_response(start, end, request).await
+    }
+
+    pub async fn range_reduce_response_with_min_sequence_number(
+        &self,
+        start: &Key,
+        end: &Key,
+        request: &DomainRangeReduceRequest,
+        min_sequence_number: u64,
+    ) -> Result<exoware_proto::query::ReduceResponse, ClientError> {
+        self.c
+            .range_reduce_response_with_min_sequence_number(
+                start,
+                end,
+                request,
+                min_sequence_number,
+            )
+            .await
+    }
+}
+
+impl<'a> Compact<'a> {
+    pub async fn prune(
+        &self,
+        policies: &[crate::prune_policy::PrunePolicy],
+    ) -> Result<(), ClientError> {
+        self.c.prune(policies).await
+    }
+}
+
+impl<'a> Stream<'a> {
+    /// `store.stream.v1.Service.Subscribe` — see `StreamSubscription::next`
+    /// for consuming delivered frames. `since_sequence_number = None` starts
+    /// live from the next Put; `Some(N)` replays retained batches before
+    /// transitioning to live. An evicted `since` returns a
+    /// `ConnectError::out_of_range` carrying `ErrorInfo.reason = "BATCH_EVICTED"`.
+    pub async fn subscribe(
+        &self,
+        filter: crate::stream_filter::StreamFilter,
+        since_sequence_number: Option<u64>,
+    ) -> Result<StreamSubscription, ClientError> {
+        crate::stream_filter::validate_filter(&filter)
+            .map_err(|e| ClientError::WireFormat(e.to_string()))?;
+        let match_keys = filter
+            .match_keys
+            .into_iter()
+            .map(|mk| exoware_proto::store::common::v1::MatchKey {
+                reserved_bits: u32::from(mk.reserved_bits),
+                prefix: u32::from(mk.prefix),
+                payload_regex: mk.payload_regex.0,
+                ..Default::default()
+            })
+            .collect();
+        let request = exoware_proto::store::stream::v1::SubscribeRequest {
+            match_keys,
+            since_sequence_number,
+            ..Default::default()
+        };
+        let config = store_connect_client_config(
+            self.c.stream_uri.clone(),
+            self.c.connect_request_compression,
+        );
+        let client = exoware_proto::store::stream::v1::ServiceClient::new(
+            self.c.connect_http.clone(),
+            config,
+        );
+        let stream = client
+            .subscribe(request)
+            .await
+            .map_err(client_error_from_connect)?;
+        Ok(StreamSubscription { stream })
+    }
+
+    /// `store.stream.v1.Service.Get` — `Ok(None)` collapses the server's
+    /// `BATCH_EVICTED` / `BATCH_NOT_FOUND` error details.
+    pub async fn get(
+        &self,
+        sequence_number: u64,
+    ) -> Result<Option<Vec<(Key, Bytes)>>, ClientError> {
+        let config = store_connect_client_config(
+            self.c.stream_uri.clone(),
+            self.c.connect_request_compression,
+        );
+        let client = exoware_proto::store::stream::v1::ServiceClient::new(
+            self.c.connect_http.clone(),
+            config,
+        );
+        match client
+            .get(exoware_proto::store::stream::v1::GetRequest {
+                sequence_number,
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(resp) => {
+                let owned = resp.into_owned();
+                let entries = owned
+                    .entries
+                    .into_iter()
+                    .map(|e| (Bytes::from(e.key), Bytes::from(e.value)))
+                    .collect();
+                Ok(Some(entries))
+            }
+            Err(err) => {
+                if is_batch_missing_error(&err) {
+                    Ok(None)
+                } else {
+                    Err(client_error_from_connect(err))
+                }
+            }
         }
-        let token = self.state.token.load(Ordering::Acquire);
-        (token > 0).then_some(token)
+    }
+}
+
+impl SerializableReadSession {
+    /// Fixed sequence floor for this session, if one has been established yet.
+    ///
+    /// Fresh sessions start with `None` unless created via
+    /// [`StoreClient::create_session_with_sequence`]. A first streamed query
+    /// read (`get_many`, `range_stream`) only sets this once the stream is
+    /// fully drained and trailers are available.
+    pub fn fixed_sequence(&self) -> Option<u64> {
+        self.state.fixed_sequence()
     }
 
     pub async fn get(&self, key: &Key) -> Result<Option<Bytes>, ClientError> {
         let seeded_client = self.client.clone();
         let unseeded_client = self.client.clone();
         self.run_read(
-            move |token| {
+            move |sequence| {
                 let client = seeded_client.clone();
-                async move { client.get_with_min_sequence_number(key, token).await }
+                async move { client.get_with_min_sequence_number(key, sequence).await }
             },
-            move || {
+            move |observed_sequence| {
                 let client = unseeded_client.clone();
-                async move { client.get(key).await }
+                async move {
+                    let (response, detail) = client.send_get(key, None).await?;
+                    if let Some(detail) = detail {
+                        observed_sequence.fetch_max(detail.sequence_number, Ordering::SeqCst);
+                    }
+                    Ok(response.value.map(Bytes::from))
+                }
             },
         )
         .await
@@ -1342,29 +1808,30 @@ impl SerializableReadSession {
         let keys_seeded = keys_owned.clone();
         let keys_unseeded = keys_owned;
         self.run_read(
-            move |token| {
+            move |sequence| {
                 let client = seeded_client.clone();
                 let keys = keys_seeded.clone();
                 async move {
                     let refs: Vec<&Key> = keys.iter().collect();
                     client
-                        .get_many_with_min_sequence_number(&refs, batch_size, token)
+                        .get_many_with_min_sequence_number(&refs, batch_size, sequence)
                         .await
                 }
             },
-            move || {
+            move |observed_sequence| {
                 let client = unseeded_client.clone();
                 let keys = keys_unseeded.clone();
                 async move {
                     let refs: Vec<&Key> = keys.iter().collect();
-                    client.get_many(&refs, batch_size).await
+                    client
+                        .get_many_internal(&refs, batch_size, None, Some(observed_sequence))
+                        .await
                 }
             },
         )
         .await
     }
 
-    /// Same key-range semantics as [`StoreClient::range`].
     pub async fn range(
         &self,
         start: &Key,
@@ -1375,7 +1842,6 @@ impl SerializableReadSession {
             .await
     }
 
-    /// Same key-range semantics as [`StoreClient::range`].
     pub async fn range_with_mode(
         &self,
         start: &Key,
@@ -1386,23 +1852,37 @@ impl SerializableReadSession {
         let seeded_client = self.client.clone();
         let unseeded_client = self.client.clone();
         self.run_read(
-            move |token| {
+            move |sequence| {
                 let client = seeded_client.clone();
                 async move {
                     client
-                        .range_with_mode_and_min_sequence_number(start, end, limit, mode, token)
+                        .range_with_mode_and_min_sequence_number(start, end, limit, mode, sequence)
                         .await
                 }
             },
-            move || {
+            move |observed_sequence| {
                 let client = unseeded_client.clone();
-                async move { client.range_internal(start, end, limit, mode, None).await }
+                async move {
+                    let stream = client
+                        .range_stream_internal(
+                            start,
+                            end,
+                            limit,
+                            limit.max(1),
+                            mode,
+                            RangeStreamReadOptions {
+                                min_sequence_number: None,
+                                observed_sequence: Some(observed_sequence),
+                            },
+                        )
+                        .await;
+                    stream?.collect().await
+                }
             },
         )
         .await
     }
 
-    /// Same key-range semantics as [`StoreClient::range`].
     pub async fn range_stream(
         &self,
         start: &Key,
@@ -1414,7 +1894,6 @@ impl SerializableReadSession {
             .await
     }
 
-    /// Same key-range semantics as [`StoreClient::range`].
     pub async fn range_stream_with_mode(
         &self,
         start: &Key,
@@ -1426,21 +1905,31 @@ impl SerializableReadSession {
         let seeded_client = self.client.clone();
         let unseeded_client = self.client.clone();
         self.run_read(
-            move |token| {
+            move |sequence| {
                 let client = seeded_client.clone();
                 async move {
                     client
                         .range_stream_with_mode_and_min_sequence_number(
-                            start, end, limit, batch_size, mode, token,
+                            start, end, limit, batch_size, mode, sequence,
                         )
                         .await
                 }
             },
-            move || {
+            move |observed_sequence| {
                 let client = unseeded_client.clone();
                 async move {
                     client
-                        .range_stream_internal(start, end, limit, batch_size, mode, None)
+                        .range_stream_internal(
+                            start,
+                            end,
+                            limit,
+                            batch_size,
+                            mode,
+                            RangeStreamReadOptions {
+                                min_sequence_number: None,
+                                observed_sequence: Some(observed_sequence),
+                            },
+                        )
                         .await
                 }
             },
@@ -1459,19 +1948,39 @@ impl SerializableReadSession {
         let request_seeded = request.clone();
         let request_unseeded = request.clone();
         self.run_read(
-            move |token| {
+            move |sequence| {
                 let client = seeded_client.clone();
                 let request = request_seeded.clone();
                 async move {
                     client
-                        .range_reduce_with_min_sequence_number(start, end, &request, token)
+                        .range_reduce_with_min_sequence_number(start, end, &request, sequence)
                         .await
                 }
             },
-            move || {
+            move |observed_sequence| {
                 let client = unseeded_client.clone();
                 let request = request_unseeded.clone();
-                async move { client.range_reduce(start, end, &request).await }
+                async move {
+                    let (response, detail) = client
+                        .range_reduce_response_internal(start, end, &request, None)
+                        .await?;
+                    if let Some(detail) = detail {
+                        observed_sequence.fetch_max(detail.sequence_number, Ordering::SeqCst);
+                    }
+                    let decoded = proto_to_domain_reduce_response(response)
+                        .map_err(ClientError::WireFormat)?;
+                    if !decoded.groups.is_empty() {
+                        return Err(ClientError::WireFormat(
+                            "grouped range reduction response returned for scalar request"
+                                .to_string(),
+                        ));
+                    }
+                    Ok(decoded
+                        .results
+                        .iter()
+                        .map(|result| result.value.clone())
+                        .collect())
+                }
             },
         )
         .await
@@ -1488,32 +1997,32 @@ impl SerializableReadSession {
         let request_seeded = request.clone();
         let request_unseeded = request.clone();
         self.run_read(
-            move |token| {
+            move |sequence| {
                 let client = seeded_client.clone();
                 let request = request_seeded.clone();
                 async move {
                     client
-                        .range_reduce_response_with_min_sequence_number(start, end, &request, token)
+                        .range_reduce_response_with_min_sequence_number(
+                            start, end, &request, sequence,
+                        )
                         .await
                 }
             },
-            move || {
+            move |observed_sequence| {
                 let client = unseeded_client.clone();
                 let request = request_unseeded.clone();
-                async move { client.range_reduce_response(start, end, &request).await }
+                async move {
+                    let (response, detail) = client
+                        .range_reduce_response_internal(start, end, &request, None)
+                        .await?;
+                    if let Some(detail) = detail {
+                        observed_sequence.fetch_max(detail.sequence_number, Ordering::SeqCst);
+                    }
+                    Ok(response)
+                }
             },
         )
         .await
-    }
-
-    fn try_seed_from_client_token(&self) -> Option<u64> {
-        let token = self.client.sequence_number();
-        if token == 0 {
-            return None;
-        }
-        self.state.token.store(token, Ordering::Release);
-        self.state.seeded.store(true, Ordering::Release);
-        Some(token)
     }
 
     async fn run_read<T, SeededCall, SeededFut, UnseededCall, UnseededFut>(
@@ -1524,27 +2033,21 @@ impl SerializableReadSession {
     where
         SeededCall: Fn(u64) -> SeededFut,
         SeededFut: std::future::Future<Output = Result<T, ClientError>>,
-        UnseededCall: Fn() -> UnseededFut,
+        UnseededCall: Fn(Arc<AtomicU64>) -> UnseededFut,
         UnseededFut: std::future::Future<Output = Result<T, ClientError>>,
     {
-        if let Some(token) = self.fixed_token() {
-            return seeded_call(token).await;
+        if let Some(sequence) = self.fixed_sequence() {
+            return seeded_call(sequence).await;
         }
 
         let gate = self.state.init_gate.lock().await;
 
-        if let Some(token) = self
-            .fixed_token()
-            .or_else(|| self.try_seed_from_client_token())
-        {
+        if let Some(sequence) = self.fixed_sequence() {
             drop(gate);
-            return seeded_call(token).await;
+            return seeded_call(sequence).await;
         }
 
-        let result = unseeded_call().await;
-        if result.is_ok() {
-            let _ = self.try_seed_from_client_token();
-        }
+        let result = unseeded_call(self.state.sequence.clone()).await;
         drop(gate);
         result
     }
@@ -1679,13 +2182,10 @@ mod tests {
     }
 
     #[test]
-    fn sequence_number_is_monotonic() {
+    fn create_session_starts_unseeded() {
         let client = StoreClient::new("http://localhost:10000/");
-        assert_eq!(client.sequence_number(), 0);
-        client.observe_sequence_number(7);
-        client.observe_sequence_number(3);
-        client.observe_sequence_number(9);
-        assert_eq!(client.sequence_number(), 9);
+        let session = client.create_session();
+        assert_eq!(session.fixed_sequence(), None);
     }
 
     #[test]
@@ -1745,11 +2245,10 @@ mod tests {
     }
 
     #[test]
-    fn create_session_uses_existing_client_token() {
+    fn create_session_with_sequence_pins_explicit_floor() {
         let client = StoreClient::new("http://localhost:10000/");
-        client.observe_sequence_number(11);
-        let session = client.create_session();
-        assert_eq!(session.fixed_token(), Some(11));
+        let session = client.create_session_with_sequence(27);
+        assert_eq!(session.fixed_sequence(), Some(27));
     }
 
     fn hex_encode(data: &[u8]) -> String {

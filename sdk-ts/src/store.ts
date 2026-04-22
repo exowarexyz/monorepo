@@ -5,7 +5,8 @@ import type { Client } from './client.js';
 import { HttpError } from './error.js';
 import { PruneRequestSchema } from './gen/ts/store/v1/compact_pb.js';
 import type { Policy } from './gen/ts/store/v1/compact_pb.js';
-import { PutRequestSchema, KvPairSchema } from './gen/ts/store/v1/ingest_pb.js';
+import { KvEntrySchema } from './gen/ts/store/v1/common_pb.js';
+import { PutRequestSchema } from './gen/ts/store/v1/ingest_pb.js';
 import {
     GetRequestSchema,
     GetManyRequestSchema,
@@ -140,7 +141,7 @@ export class StoreClient {
     async set(key: Uint8Array, value: Uint8Array | Buffer): Promise<bigint> {
         const req = create(PutRequestSchema, {
             kvs: [
-                create(KvPairSchema, {
+                create(KvEntrySchema, {
                     key,
                     value: toUint8Array(value),
                 }),
@@ -158,7 +159,7 @@ export class StoreClient {
     async setMany(kvs: { key: Uint8Array; value: Uint8Array | Buffer }[]): Promise<bigint> {
         const req = create(PutRequestSchema, {
             kvs: kvs.map((kv) =>
-                create(KvPairSchema, {
+                create(KvEntrySchema, {
                     key: kv.key,
                     value: toUint8Array(kv.value),
                 }),

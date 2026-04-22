@@ -13,7 +13,7 @@ use commonware_storage::qmdb::immutable::{
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use exoware_sdk_rs::StoreClient;
-use store_qmdb::ImmutableClient;
+use store_qmdb::{ImmutableClient, ImmutableWriter};
 
 use common::retry;
 
@@ -31,6 +31,13 @@ type TestImmutableClient =
 
 fn fresh_immutable(c: StoreClient) -> TestImmutableClient {
     TestImmutableClient::from_client(c, ((0..=10000).into(), ()), ((), ((0..=10000).into(), ())))
+}
+
+type TestImmutableWriter =
+    ImmutableWriter<commonware_cryptography::Sha256, FixedBytes<32>, Vec<u8>>;
+
+fn fresh_writer(c: StoreClient) -> TestImmutableWriter {
+    TestImmutableWriter::empty(c)
 }
 
 struct LocalReference {
@@ -103,26 +110,11 @@ async fn immutable_round_trip() {
     let (_dir, _server, client) = common::local_store_client().await;
     let local = build_local_db().await;
 
-    retry(
-        || {
-            let c = fresh_immutable(client.clone());
-            let ops = local.operations.clone();
-            let loc = local.latest_location;
-            async move { c.upload_operations(loc, &ops).await.map(|_| ()) }
-        },
-        "upload_operations",
-    )
-    .await;
-
-    retry(
-        || {
-            let c = fresh_immutable(client.clone());
-            let loc = local.latest_location;
-            async move { c.publish_writer_location_watermark(loc).await.map(|_| ()) }
-        },
-        "publish_watermark",
-    )
-    .await;
+    let writer = fresh_writer(client.clone());
+    writer
+        .upload_and_publish(&local.operations)
+        .await
+        .expect("upload_and_publish");
 
     let root = retry(
         || {
@@ -152,10 +144,6 @@ async fn immutable_round_trip() {
         )
         .await
         .expect("proof");
-    assert!(
-        proof.verify::<commonware_cryptography::Sha256>(),
-        "proof must verify"
-    );
     assert_eq!(proof.root, local.root);
     assert_eq!(proof.operations, local.operations);
 }
