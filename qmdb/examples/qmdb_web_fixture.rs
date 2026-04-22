@@ -16,7 +16,7 @@ use commonware_storage::qmdb::{
     store::LogStore as _,
 };
 use commonware_storage::translator::TwoCap;
-use commonware_utils::{sequence::FixedBytes, NZU16, NZU64, NZUsize};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use exoware_sdk_rs::StoreClient;
 use store_qmdb::{
     recover_boundary_state, test_utils, CurrentBoundaryState, ImmutableClient, ImmutableWriter,
@@ -33,8 +33,7 @@ type KeylessBatchOperation = KeylessOperation<Vec<u8>>;
 type OrderedLocalDb =
     LocalOrderedDb<cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, ORDERED_BOUNDARY_BYTES>;
 type UnorderedLocalDb = LocalUnorderedDb<cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap>;
-type ImmutableLocalDb =
-    Immutable<deterministic::Context, FixedBytes<20>, Vec<u8>, Sha256, TwoCap>;
+type ImmutableLocalDb = Immutable<deterministic::Context, FixedBytes<20>, Vec<u8>, Sha256, TwoCap>;
 type KeylessLocalDb = Keyless<deterministic::Context, Vec<u8>, Sha256>;
 
 struct OrderedBatch {
@@ -212,9 +211,10 @@ async fn build_unordered_batch() -> UnorderedBatch {
                 page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8)),
             };
 
-            let mut db: UnorderedLocalDb = UnorderedLocalDb::init(context.with_label("unordered"), cfg)
-                .await
-                .expect("init");
+            let mut db: UnorderedLocalDb =
+                UnorderedLocalDb::init(context.with_label("unordered"), cfg)
+                    .await
+                    .expect("init");
 
             let finalized = {
                 let mut batch = db.new_batch();
@@ -264,9 +264,10 @@ async fn build_immutable_batch() -> ImmutableBatch {
                 page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8)),
             };
 
-            let mut db: ImmutableLocalDb = ImmutableLocalDb::init(context.with_label("immutable"), cfg)
-                .await
-                .expect("init");
+            let mut db: ImmutableLocalDb =
+                ImmutableLocalDb::init(context.with_label("immutable"), cfg)
+                    .await
+                    .expect("init");
 
             let key_a = FixedBytes::new([0x11; 20]);
             let key_b = FixedBytes::new([0x22; 20]);
@@ -318,12 +319,10 @@ async fn build_tampered_immutable_batch() -> ImmutableBatch {
                 page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8)),
             };
 
-            let mut db: ImmutableLocalDb = ImmutableLocalDb::init(
-                context.with_label("immutable_tampered"),
-                cfg,
-            )
-            .await
-            .expect("init");
+            let mut db: ImmutableLocalDb =
+                ImmutableLocalDb::init(context.with_label("immutable_tampered"), cfg)
+                    .await
+                    .expect("init");
 
             let key_a = FixedBytes::new([0x33; 20]);
             let key_b = FixedBytes::new([0x44; 20]);
@@ -441,35 +440,26 @@ async fn seed_all(base_url: &str) {
         .await
         .expect("upload keyless");
 
-    line(
-        "ordered_watermark",
-        ordered.latest_location.as_u64(),
-    );
+    line("ordered_watermark", ordered.latest_location.as_u64());
     line(
         "ordered_start_location",
         start_location(ordered.latest_location, ordered.operations.len()),
     );
-    line(
-        "unordered_watermark",
-        unordered.latest_location.as_u64(),
-    );
+    line("unordered_watermark", unordered.latest_location.as_u64());
     line(
         "unordered_start_location",
         start_location(unordered.latest_location, unordered.operations.len()),
     );
-    line(
-        "immutable_watermark",
-        immutable.latest_location.as_u64(),
-    );
+    line("immutable_watermark", immutable.latest_location.as_u64());
     line(
         "immutable_start_location",
         start_location(immutable.latest_location, immutable.operations.len()),
     );
-    line("immutable_key_hex", hex::encode(immutable.primary_key.as_ref()));
     line(
-        "keyless_watermark",
-        keyless.latest_location.as_u64(),
+        "immutable_key_hex",
+        hex::encode(immutable.primary_key.as_ref()),
     );
+    line("keyless_watermark", keyless.latest_location.as_u64());
     line(
         "keyless_start_location",
         start_location(keyless.latest_location, keyless.operations.len()),
@@ -519,7 +509,10 @@ async fn seed_immutable(base_url: &str) {
         "immutable_start_location",
         start_location(immutable.latest_location, immutable.operations.len()),
     );
-    line("immutable_key_hex", hex::encode(immutable.primary_key.as_ref()));
+    line(
+        "immutable_key_hex",
+        hex::encode(immutable.primary_key.as_ref()),
+    );
 }
 
 async fn seed_keyless(base_url: &str) {
@@ -574,7 +567,10 @@ async fn tamper_immutable(base_url: &str) {
 
     line("immutable_watermark", watermark.as_u64());
     line("immutable_start_location", batch_start.as_u64());
-    line("immutable_key_hex", hex::encode(immutable.primary_key.as_ref()));
+    line(
+        "immutable_key_hex",
+        hex::encode(immutable.primary_key.as_ref()),
+    );
 }
 
 #[tokio::main]

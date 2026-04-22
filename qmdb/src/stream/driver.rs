@@ -13,10 +13,10 @@ use std::task::{Context, Poll};
 
 use commonware_storage::mmr::Location;
 use exoware_qmdb_core::stream::{Accumulator, ClosedBatch, Family};
-use exoware_sdk_rs::ClientError;
 use exoware_sdk_rs::keys::Key;
 use exoware_sdk_rs::match_key::MatchKey;
 use exoware_sdk_rs::stream_filter::StreamFilter;
+use exoware_sdk_rs::ClientError;
 use futures::future::BoxFuture;
 use futures::Stream;
 
@@ -219,12 +219,15 @@ pin_project_lite::pin_project! {
     }
 }
 
-type PullNext =
-    BoxFuture<'static, (Box<dyn ReadSubscription>, Result<Option<SubscriptionFrame>, ClientError>)>;
+type PullNext = BoxFuture<
+    'static,
+    (
+        Box<dyn ReadSubscription>,
+        Result<Option<SubscriptionFrame>, ClientError>,
+    ),
+>;
 
-fn pull_next(
-    mut sub: Box<dyn ReadSubscription>,
-) -> PullNext {
+fn pull_next(mut sub: Box<dyn ReadSubscription>) -> PullNext {
     Box::pin(async move {
         let next = sub.next().await;
         (sub, next)

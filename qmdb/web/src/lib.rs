@@ -131,16 +131,16 @@ impl StoreClient {
     }
 }
 
-#[path = "../../core/src/error.rs"]
-pub mod error;
-#[path = "../../core/src/read_store.rs"]
-pub mod read_store;
 #[path = "../../core/src/codec.rs"]
 pub mod codec;
-#[path = "../../core/src/proof.rs"]
-pub mod proof;
 #[path = "../../core/src/stream.rs"]
 pub mod core_stream;
+#[path = "../../core/src/error.rs"]
+pub mod error;
+#[path = "../../core/src/proof.rs"]
+pub mod proof;
+#[path = "../../core/src/read_store.rs"]
+pub mod read_store;
 
 #[path = "../../src/auth.rs"]
 #[allow(dead_code)]
@@ -172,7 +172,9 @@ pub use proof::{
     OperationRangeCheckpoint, RawMmrProof, VariantRoot, VerifiedCurrentRange, VerifiedKeyValue,
     VerifiedMultiOperations, VerifiedOperationRange, VerifiedVariantRange,
 };
-pub use read_store::{ReadSession, ReadStore, ReadSubscription, SubscriptionEntry, SubscriptionFrame};
+pub use read_store::{
+    ReadSession, ReadStore, ReadSubscription, SubscriptionEntry, SubscriptionFrame,
+};
 
 pub const MAX_OPERATION_SIZE: usize = u16::MAX as usize;
 
@@ -208,11 +210,15 @@ impl SdkReadStore {
 #[async_trait]
 impl ReadStore for SdkReadStore {
     fn create_session(&self) -> Box<dyn ReadSession> {
-        panic!("StoreClient-backed constructors are unavailable in wasm; use JS read-store adapters")
+        panic!(
+            "StoreClient-backed constructors are unavailable in wasm; use JS read-store adapters"
+        )
     }
 
     fn create_session_with_sequence(&self, _sequence: u64) -> Box<dyn ReadSession> {
-        panic!("StoreClient-backed constructors are unavailable in wasm; use JS read-store adapters")
+        panic!(
+            "StoreClient-backed constructors are unavailable in wasm; use JS read-store adapters"
+        )
     }
 
     async fn subscribe(
@@ -220,7 +226,9 @@ impl ReadStore for SdkReadStore {
         _filter: stream_filter::StreamFilter,
         _since: Option<u64>,
     ) -> Result<Box<dyn ReadSubscription>, ClientError> {
-        panic!("StoreClient-backed constructors are unavailable in wasm; use JS read-store adapters")
+        panic!(
+            "StoreClient-backed constructors are unavailable in wasm; use JS read-store adapters"
+        )
     }
 }
 
@@ -340,18 +348,23 @@ fn js_error_to_string(value: &JsValue) -> String {
     value
         .as_string()
         .or_else(|| {
-            value
-                .dyn_ref::<js_sys::Error>()
-                .map(|err| err.to_string().as_string().unwrap_or_else(|| "Error".to_string()))
+            value.dyn_ref::<js_sys::Error>().map(|err| {
+                err.to_string()
+                    .as_string()
+                    .unwrap_or_else(|| "Error".to_string())
+            })
         })
         .unwrap_or_else(|| format!("{value:?}"))
 }
 
 async fn call_method1(target: &JsValue, name: &str, a0: &JsValue) -> Result<JsValue, ClientError> {
     let method = get_method(target, name)?;
-    let result = method
-        .call1(target, a0)
-        .map_err(|err| js_error(format!("calling {name} failed: {}", js_error_to_string(&err))))?;
+    let result = method.call1(target, a0).map_err(|err| {
+        js_error(format!(
+            "calling {name} failed: {}",
+            js_error_to_string(&err)
+        ))
+    })?;
     await_js(result).await
 }
 
@@ -362,9 +375,12 @@ async fn call_method2(
     a1: &JsValue,
 ) -> Result<JsValue, ClientError> {
     let method = get_method(target, name)?;
-    let result = method
-        .call2(target, a0, a1)
-        .map_err(|err| js_error(format!("calling {name} failed: {}", js_error_to_string(&err))))?;
+    let result = method.call2(target, a0, a1).map_err(|err| {
+        js_error(format!(
+            "calling {name} failed: {}",
+            js_error_to_string(&err)
+        ))
+    })?;
     await_js(result).await
 }
 
@@ -376,9 +392,12 @@ async fn call_method3(
     a2: &JsValue,
 ) -> Result<JsValue, ClientError> {
     let method = get_method(target, name)?;
-    let result = method
-        .call3(target, a0, a1, a2)
-        .map_err(|err| js_error(format!("calling {name} failed: {}", js_error_to_string(&err))))?;
+    let result = method.call3(target, a0, a1, a2).map_err(|err| {
+        js_error(format!(
+            "calling {name} failed: {}",
+            js_error_to_string(&err)
+        ))
+    })?;
     await_js(result).await
 }
 
@@ -392,12 +411,14 @@ async fn call_method5(
     a4: &JsValue,
 ) -> Result<JsValue, ClientError> {
     let method = get_method(target, name)?;
-    let result = Reflect::apply(
-        method.as_ref(),
-        target,
-        &Array::of5(a0, a1, a2, a3, a4),
-    )
-    .map_err(|err| js_error(format!("calling {name} failed: {}", js_error_to_string(&err))))?;
+    let result = Reflect::apply(method.as_ref(), target, &Array::of5(a0, a1, a2, a3, a4)).map_err(
+        |err| {
+            js_error(format!(
+                "calling {name} failed: {}",
+                js_error_to_string(&err)
+            ))
+        },
+    )?;
     await_js(result).await
 }
 
@@ -417,7 +438,10 @@ fn entries_from_js(value: &JsValue) -> Result<Vec<(Bytes, Bytes)>, ClientError> 
 }
 
 fn frame_from_js(value: &JsValue) -> Result<SubscriptionFrame, ClientError> {
-    let sequence_number = value_to_u64(&get_property(value, "sequenceNumber")?, "frame.sequenceNumber")?;
+    let sequence_number = value_to_u64(
+        &get_property(value, "sequenceNumber")?,
+        "frame.sequenceNumber",
+    )?;
     let entries_value = get_property(value, "entries")?;
     let entries = entries_from_js(&entries_value)?
         .into_iter()
@@ -659,7 +683,10 @@ impl ImmutableBytesClient {
         .await
     }
 
-    async fn root_at(&self, watermark: Location) -> Result<commonware_cryptography::sha256::Digest, QmdbError> {
+    async fn root_at(
+        &self,
+        watermark: Location,
+    ) -> Result<commonware_cryptography::sha256::Digest, QmdbError> {
         let namespace = auth::AuthenticatedBackendNamespace::Immutable;
         let session = self.store.create_session();
         auth::require_published_auth_watermark(session.as_ref(), namespace, watermark).await?;
@@ -742,7 +769,10 @@ impl ImmutableBytesClient {
         watermark: Location,
         start_location: Location,
         max_locations: u32,
-    ) -> Result<VerifiedOperationRange<commonware_cryptography::sha256::Digest, ImmutableBytesOperation>, QmdbError> {
+    ) -> Result<
+        VerifiedOperationRange<commonware_cryptography::sha256::Digest, ImmutableBytesOperation>,
+        QmdbError,
+    > {
         let session = self.store.create_session_with_sequence(read_floor_sequence);
         let checkpoint = self
             .operation_range_checkpoint_in_session(
@@ -781,7 +811,10 @@ impl ImmutableBytesClient {
         watermark: Location,
         start_location: Location,
         max_locations: u32,
-    ) -> Result<VerifiedOperationRange<commonware_cryptography::sha256::Digest, ImmutableBytesOperation>, QmdbError> {
+    ) -> Result<
+        VerifiedOperationRange<commonware_cryptography::sha256::Digest, ImmutableBytesOperation>,
+        QmdbError,
+    > {
         let checkpoint = self
             .operation_range_checkpoint(watermark, start_location, max_locations)
             .await?;
@@ -844,10 +877,7 @@ impl ImmutableBytesClient {
             )));
         };
         match operation {
-            ImmutableBytesOperation::Set {
-                key: op_key,
-                value,
-            } if op_key == key => {
+            ImmutableBytesOperation::Set { key: op_key, value } if op_key == key => {
                 if decoded_row.value.as_ref() != Some(&value) {
                     return Err(QmdbError::CorruptData(format!(
                         "immutable update row value mismatch at location {location}"
@@ -871,16 +901,28 @@ impl ImmutableBytesClient {
     async fn stream_batches(
         self: Arc<Self>,
         since: Option<u64>,
-    ) -> Result<stream_driver::BatchProofStream<VerifiedOperationRange<commonware_cryptography::sha256::Digest, ImmutableBytesOperation>>, QmdbError>
+    ) -> Result<
+        stream_driver::BatchProofStream<
+            VerifiedOperationRange<
+                commonware_cryptography::sha256::Digest,
+                ImmutableBytesOperation,
+            >,
+        >,
+        QmdbError,
+    >
     where
         Self: 'static,
     {
-        let (classify, filter) =
-            stream_driver::authenticated_classify_and_filter(auth::AuthenticatedBackendNamespace::Immutable);
+        let (classify, filter) = stream_driver::authenticated_classify_and_filter(
+            auth::AuthenticatedBackendNamespace::Immutable,
+        );
         let sub = self.store.subscribe(filter, since).await?;
 
         let build_proof: stream_driver::BuildProof<
-            VerifiedOperationRange<commonware_cryptography::sha256::Digest, ImmutableBytesOperation>,
+            VerifiedOperationRange<
+                commonware_cryptography::sha256::Digest,
+                ImmutableBytesOperation,
+            >,
         > = Arc::new(
             move |read_floor_sequence: u64, watermark: Location, start: Location, count: u32| {
                 let me = self.clone();
@@ -897,7 +939,11 @@ impl ImmutableBytesClient {
             },
         );
 
-        Ok(stream_driver::BatchProofStream::new(sub, classify, build_proof))
+        Ok(stream_driver::BatchProofStream::new(
+            sub,
+            classify,
+            build_proof,
+        ))
     }
 }
 
@@ -983,17 +1029,34 @@ struct VersionedValueJs {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 enum OrderedOperationJs {
-    Delete { key: Vec<u8> },
-    Update { key: Vec<u8>, value: Vec<u8>, next_key: Vec<u8> },
-    CommitFloor { metadata: Option<Vec<u8>>, inactivity_floor: u64 },
+    Delete {
+        key: Vec<u8>,
+    },
+    Update {
+        key: Vec<u8>,
+        value: Vec<u8>,
+        next_key: Vec<u8>,
+    },
+    CommitFloor {
+        metadata: Option<Vec<u8>>,
+        inactivity_floor: u64,
+    },
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 enum UnorderedOperationJs {
-    Delete { key: Vec<u8> },
-    Update { key: Vec<u8>, value: Vec<u8> },
-    CommitFloor { metadata: Option<Vec<u8>>, inactivity_floor: u64 },
+    Delete {
+        key: Vec<u8>,
+    },
+    Update {
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
+    CommitFloor {
+        metadata: Option<Vec<u8>>,
+        inactivity_floor: u64,
+    },
 }
 
 #[derive(Serialize)]
@@ -1036,10 +1099,12 @@ fn ordered_operation_to_js(value: OrderedOperation<Vec<u8>, Vec<u8>>) -> Ordered
             value: update.value,
             next_key: update.next_key,
         },
-        OrderedOperation::CommitFloor(metadata, inactivity_floor) => OrderedOperationJs::CommitFloor {
-            metadata,
-            inactivity_floor: inactivity_floor.as_u64(),
-        },
+        OrderedOperation::CommitFloor(metadata, inactivity_floor) => {
+            OrderedOperationJs::CommitFloor {
+                metadata,
+                inactivity_floor: inactivity_floor.as_u64(),
+            }
+        }
     }
 }
 
@@ -1050,10 +1115,12 @@ fn unordered_operation_to_js(value: UnorderedOperation<Vec<u8>, Vec<u8>>) -> Uno
             key: update.0,
             value: update.1,
         },
-        UnorderedOperation::CommitFloor(metadata, inactivity_floor) => UnorderedOperationJs::CommitFloor {
-            metadata,
-            inactivity_floor: inactivity_floor.as_u64(),
-        },
+        UnorderedOperation::CommitFloor(metadata, inactivity_floor) => {
+            UnorderedOperationJs::CommitFloor {
+                metadata,
+                inactivity_floor: inactivity_floor.as_u64(),
+            }
+        }
     }
 }
 
@@ -1072,26 +1139,40 @@ fn keyless_operation_to_js(value: KeylessOperation<Vec<u8>>) -> KeylessOperation
 }
 
 fn ordered_range_to_js(
-    value: VerifiedOperationRange<commonware_cryptography::sha256::Digest, OrderedOperation<Vec<u8>, Vec<u8>>>,
+    value: VerifiedOperationRange<
+        commonware_cryptography::sha256::Digest,
+        OrderedOperation<Vec<u8>, Vec<u8>>,
+    >,
 ) -> Result<JsValue, JsValue> {
     to_js(&OperationRangeJs {
         resume_sequence_number: value.resume_sequence_number,
         watermark: value.watermark.as_u64(),
         root: value.root.encode().to_vec(),
         start_location: value.start_location.as_u64(),
-        operations: value.operations.into_iter().map(ordered_operation_to_js).collect(),
+        operations: value
+            .operations
+            .into_iter()
+            .map(ordered_operation_to_js)
+            .collect(),
     })
 }
 
 fn unordered_range_to_js(
-    value: VerifiedOperationRange<commonware_cryptography::sha256::Digest, UnorderedOperation<Vec<u8>, Vec<u8>>>,
+    value: VerifiedOperationRange<
+        commonware_cryptography::sha256::Digest,
+        UnorderedOperation<Vec<u8>, Vec<u8>>,
+    >,
 ) -> Result<JsValue, JsValue> {
     to_js(&OperationRangeJs {
         resume_sequence_number: value.resume_sequence_number,
         watermark: value.watermark.as_u64(),
         root: value.root.encode().to_vec(),
         start_location: value.start_location.as_u64(),
-        operations: value.operations.into_iter().map(unordered_operation_to_js).collect(),
+        operations: value
+            .operations
+            .into_iter()
+            .map(unordered_operation_to_js)
+            .collect(),
     })
 }
 
@@ -1103,19 +1184,30 @@ fn immutable_range_to_js(
         watermark: value.watermark.as_u64(),
         root: value.root.encode().to_vec(),
         start_location: value.start_location.as_u64(),
-        operations: value.operations.into_iter().map(immutable_operation_to_js).collect(),
+        operations: value
+            .operations
+            .into_iter()
+            .map(immutable_operation_to_js)
+            .collect(),
     })
 }
 
 fn keyless_range_to_js(
-    value: VerifiedOperationRange<commonware_cryptography::sha256::Digest, KeylessOperation<Vec<u8>>>,
+    value: VerifiedOperationRange<
+        commonware_cryptography::sha256::Digest,
+        KeylessOperation<Vec<u8>>,
+    >,
 ) -> Result<JsValue, JsValue> {
     to_js(&OperationRangeJs {
         resume_sequence_number: value.resume_sequence_number,
         watermark: value.watermark.as_u64(),
         root: value.root.encode().to_vec(),
         start_location: value.start_location.as_u64(),
-        operations: value.operations.into_iter().map(keyless_operation_to_js).collect(),
+        operations: value
+            .operations
+            .into_iter()
+            .map(keyless_operation_to_js)
+            .collect(),
     })
 }
 
@@ -1186,7 +1278,11 @@ impl OrderedQmdbClient {
     ) -> Result<JsValue, JsValue> {
         ordered_range_to_js(
             self.inner
-                .operation_range_proof(Location::new(watermark), Location::new(start_location), max_locations)
+                .operation_range_proof(
+                    Location::new(watermark),
+                    Location::new(start_location),
+                    max_locations,
+                )
                 .await
                 .map_err(to_js_error)?,
         )
@@ -1242,7 +1338,11 @@ impl UnorderedQmdbClient {
     ) -> Result<JsValue, JsValue> {
         unordered_range_to_js(
             self.inner
-                .operation_range_proof(Location::new(watermark), Location::new(start_location), max_locations)
+                .operation_range_proof(
+                    Location::new(watermark),
+                    Location::new(start_location),
+                    max_locations,
+                )
                 .await
                 .map_err(to_js_error)?,
         )
@@ -1323,7 +1423,11 @@ impl ImmutableQmdbClient {
     ) -> Result<JsValue, JsValue> {
         immutable_range_to_js(
             self.inner
-                .operation_range_proof(Location::new(watermark), Location::new(start_location), max_locations)
+                .operation_range_proof(
+                    Location::new(watermark),
+                    Location::new(start_location),
+                    max_locations,
+                )
                 .await
                 .map_err(to_js_error)?,
         )
@@ -1352,7 +1456,10 @@ impl KeylessQmdbClient {
     pub fn new(adapter: JsValue) -> Self {
         let store = Arc::new(JsReadStore::new(adapter));
         Self {
-            inner: Arc::new(KeylessBytesClient::from_read_store(store, keyless_value_cfg())),
+            inner: Arc::new(KeylessBytesClient::from_read_store(
+                store,
+                keyless_value_cfg(),
+            )),
         }
     }
 
@@ -1375,7 +1482,11 @@ impl KeylessQmdbClient {
     ) -> Result<JsValue, JsValue> {
         keyless_range_to_js(
             self.inner
-                .operation_range_proof(Location::new(watermark), Location::new(start_location), max_locations)
+                .operation_range_proof(
+                    Location::new(watermark),
+                    Location::new(start_location),
+                    max_locations,
+                )
                 .await
                 .map_err(to_js_error)?,
         )
@@ -1427,7 +1538,9 @@ mod tests {
     fn map_client_error(err: real_sdk::ClientError) -> ClientError {
         match err {
             real_sdk::ClientError::Http(err) => ClientError::Http(err.to_string()),
-            real_sdk::ClientError::Rpc(err) => ClientError::Rpc(ErrorCode::Unknown, err.to_string()),
+            real_sdk::ClientError::Rpc(err) => {
+                ClientError::Rpc(ErrorCode::Unknown, err.to_string())
+            }
             real_sdk::ClientError::InvalidKeyLength { expected, got } => {
                 ClientError::InvalidKeyLength { expected, got }
             }
@@ -1442,7 +1555,9 @@ mod tests {
         }
     }
 
-    fn to_real_filter(filter: stream_filter::StreamFilter) -> real_sdk::stream_filter::StreamFilter {
+    fn to_real_filter(
+        filter: stream_filter::StreamFilter,
+    ) -> real_sdk::stream_filter::StreamFilter {
         real_sdk::stream_filter::StreamFilter {
             match_keys: filter
                 .match_keys
@@ -1482,7 +1597,10 @@ mod tests {
             end: &keys::Key,
             limit: usize,
         ) -> Result<Vec<(keys::Key, Bytes)>, ClientError> {
-            self.session.range(start, end, limit).await.map_err(map_client_error)
+            self.session
+                .range(start, end, limit)
+                .await
+                .map_err(map_client_error)
         }
 
         async fn range_with_mode(
@@ -1552,8 +1670,7 @@ mod tests {
         }
     }
 
-    async fn local_store_client(
-    ) -> (
+    async fn local_store_client() -> (
         tempfile::TempDir,
         tokio::task::JoinHandle<()>,
         real_sdk::StoreClient,
@@ -1581,7 +1698,10 @@ mod tests {
             ImmutableOperation::Set(key_a.clone(), b"alpha".to_vec()),
             ImmutableOperation::Set(key_b.clone(), b"beta".to_vec()),
         ];
-        writer.upload_and_publish(&ops).await.expect("upload_and_publish");
+        writer
+            .upload_and_publish(&ops)
+            .await
+            .expect("upload_and_publish");
 
         let watermark = reader
             .writer_location_watermark()
@@ -1642,7 +1762,10 @@ mod tests {
             ImmutableOperation::Set(key_a.clone(), b"alpha".to_vec()),
             ImmutableOperation::Set(key_b.clone(), b"beta".to_vec()),
         ];
-        writer.upload_and_publish(&ops).await.expect("upload_and_publish");
+        writer
+            .upload_and_publish(&ops)
+            .await
+            .expect("upload_and_publish");
 
         let watermark = reader
             .writer_location_watermark()
@@ -1659,7 +1782,8 @@ mod tests {
             .into_iter()
             .next()
             .expect("peak");
-        let key = auth::encode_auth_node_key(auth::AuthenticatedBackendNamespace::Immutable, peak_pos);
+        let key =
+            auth::encode_auth_node_key(auth::AuthenticatedBackendNamespace::Immutable, peak_pos);
         let bad_value = vec![0xAA; commonware_cryptography::sha256::Digest::SIZE];
         client
             .ingest()

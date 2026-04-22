@@ -162,7 +162,10 @@ pub mod test_utils {
     use exoware_sdk_rs::Key;
 
     pub fn encode_immutable_auth_node_key(position: Position) -> Key {
-        crate::auth::encode_auth_node_key(crate::auth::AuthenticatedBackendNamespace::Immutable, position)
+        crate::auth::encode_auth_node_key(
+            crate::auth::AuthenticatedBackendNamespace::Immutable,
+            position,
+        )
     }
 }
 
