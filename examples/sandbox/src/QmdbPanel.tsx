@@ -10,8 +10,23 @@ import {
 } from '@qmdb-ts';
 
 const QMDB_URL = import.meta.env.VITE_QMDB_URL ?? 'http://127.0.0.1:8081';
-const DEFAULT_TIP = import.meta.env.VITE_QMDB_TIP ?? '';
 const MAX_EVENTS = 10;
+
+function parseHexRoot(value: string): Uint8Array {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new Error('Expected Root is required');
+  }
+  const body = trimmed.startsWith('0x') || trimmed.startsWith('0X') ? trimmed.slice(2) : trimmed;
+  if (body.length === 0 || body.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(body)) {
+    throw new Error('Expected Root must be a hex string (optionally 0x-prefixed)');
+  }
+  const out = new Uint8Array(body.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(body.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
 
 interface NotificationFn {
   (type: 'success' | 'error', title: string, message: string): void;
@@ -27,7 +42,6 @@ function decodeUtf8(bytes: Uint8Array): string {
 
 function formatBytes(bytes: Uint8Array): string {
   const text = decodeUtf8(bytes);
-  // eslint-disable-next-line no-control-regex
   if (text && /^[\x20-\x7E]*$/.test(text)) {
     return text;
   }
@@ -86,7 +100,8 @@ export function QmdbPanel({ showNotification }: { showNotification: Notification
   const subscribeAbortRef = useRef<AbortController | null>(null);
 
   const [isConnected, setIsConnected] = useState(false);
-  const [tip, setTip] = useState(DEFAULT_TIP);
+  const [tip, setTip] = useState('');
+  const [expectedRoot, setExpectedRoot] = useState('');
 
   const [getKey, setGetKey] = useState('alpha');
   const [getProof, setGetProof] = useState<VerifiedCurrentKeyValueProof | null>(null);
@@ -131,9 +146,9 @@ export function QmdbPanel({ showNotification }: { showNotification: Notification
     setIsGetting(true);
     setGetProof(null);
     try {
-      const proof = await client.get(getKey, parseTip(tip));
+      const proof = await client.get(getKey, parseTip(tip), parseHexRoot(expectedRoot));
       setGetProof(proof);
-      showNotification('success', 'QMDB Get', `Verified proof for "${getKey}"`);
+      showNotification('success', 'QMDB Get', `Verified proof for "${getKey}" against expected root`);
     } catch (error) {
       showNotification('error', 'QMDB Get Failed', String(error));
     } finally {
@@ -152,9 +167,13 @@ export function QmdbPanel({ showNotification }: { showNotification: Notification
       if (keys.length === 0) {
         throw new Error('At least one key is required');
       }
-      const proof = await client.getMany(keys, parseTip(tip));
+      const proof = await client.getMany(keys, parseTip(tip), parseHexRoot(expectedRoot));
       setManyProof(proof);
-      showNotification('success', 'QMDB GetMany', `Verified ${proof.operations.length} operations`);
+      showNotification(
+        'success',
+        'QMDB GetMany',
+        `Verified ${proof.operations.length} operations against expected root`,
+      );
     } catch (error) {
       showNotification('error', 'QMDB GetMany Failed', String(error));
     } finally {
@@ -225,8 +244,10 @@ export function QmdbPanel({ showNotification }: { showNotification: Notification
       <div className="form-section">
         <h3>Connection</h3>
         <p className="section-note">
-          Proofs are anchored to a published batch tip (location). Run `qmdb run` locally and
-          `qmdb seed-demo` to seed data; the seeded tip is printed on stdout.
+          Proofs are anchored to a (tip, root) pair. Run `qmdb run` locally and
+          `qmdb seed-continuous` to stream fresh tips; each line prints
+          `watermark=N current_root=0x..`. Paste a matching pair below to verify
+          against an externally trusted root.
         </p>
         <p><strong>Server:</strong> {QMDB_URL}</p>
         <p><strong>Status:</strong> {isConnected ? 'Connected' : 'Disconnected'}</p>
@@ -237,9 +258,19 @@ export function QmdbPanel({ showNotification }: { showNotification: Notification
               id="qmdb-tip"
               type="number"
               min="0"
-              placeholder="e.g. 4"
+              placeholder="e.g. 14"
               value={tip}
               onChange={(event) => setTip(event.target.value)}
+            />
+          </div>
+          <div className="form-group form-group-wide">
+            <label htmlFor="qmdb-root">Expected Root (hex)</label>
+            <input
+              id="qmdb-root"
+              type="text"
+              placeholder="0x..."
+              value={expectedRoot}
+              onChange={(event) => setExpectedRoot(event.target.value)}
             />
           </div>
         </div>
@@ -261,7 +292,7 @@ export function QmdbPanel({ showNotification }: { showNotification: Notification
         <button
           className={`btn-primary ${isGetting ? 'loading' : ''}`}
           onClick={handleGet}
-          disabled={isGetting || !getKey.trim() || !tip.trim()}
+          disabled={isGetting || !getKey.trim() || !tip.trim() || !expectedRoot.trim()}
         >
           {isGetting ? 'Verifying...' : 'Get Proof'}
         </button>
@@ -291,7 +322,7 @@ export function QmdbPanel({ showNotification }: { showNotification: Notification
         <button
           className={`btn-primary ${isGettingMany ? 'loading' : ''}`}
           onClick={handleGetMany}
-          disabled={isGettingMany || !manyKeys.trim() || !tip.trim()}
+          disabled={isGettingMany || !manyKeys.trim() || !tip.trim() || !expectedRoot.trim()}
         >
           {isGettingMany ? 'Verifying...' : 'Get Multi-Proof'}
         </button>

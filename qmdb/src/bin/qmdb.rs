@@ -55,6 +55,12 @@ enum Command {
         #[arg(long)]
         store_url: String,
     },
+    SeedContinuous {
+        #[arg(long)]
+        store_url: String,
+        #[arg(long, default_value_t = 2)]
+        interval_secs: u64,
+    },
 }
 
 struct LocalBatch {
@@ -255,6 +261,121 @@ async fn seed_demo(store_url: &str) -> Result<(), Box<dyn std::error::Error + Se
     Ok(())
 }
 
+async fn seed_continuous(
+    store_url: &str,
+    interval_secs: u64,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let store = StoreClient::new(store_url);
+    let reader = OrderedClient::<Sha256, Vec<u8>, Vec<u8>, N>::from_client(
+        store.clone(),
+        op_cfg(),
+        update_row_cfg(),
+    );
+    let writer = OrderedWriter::<Sha256, Vec<u8>, Vec<u8>, N>::empty(store);
+
+    tokio::task::spawn_blocking(move || {
+        cw_tokio::Runner::default().start(|context| async move {
+            use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
+
+            let cfg = VariableConfig {
+                mmr_journal_partition: "mmr-journal".into(),
+                mmr_items_per_blob: NZU64!(8),
+                mmr_write_buffer: NZUsize!(1024),
+                mmr_metadata_partition: "mmr-metadata".into(),
+                log_partition: "log".into(),
+                log_write_buffer: NZUsize!(1024),
+                log_compression: None,
+                log_codec_config: (
+                    ((0..=MAX_OPERATION_SIZE).into(), ()),
+                    ((0..=MAX_OPERATION_SIZE).into(), ()),
+                ),
+                log_items_per_blob: NZU64!(8),
+                grafted_mmr_metadata_partition: "grafted-metadata".into(),
+                translator: TwoCap,
+                thread_pool: None,
+                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8)),
+            };
+            let mut db: LocalDb = LocalDb::init(context.with_label("qmdb-continuous"), cfg)
+                .await
+                .expect("init local ordered db");
+
+            let mut previous_ops: Vec<BatchOperation> = Vec::new();
+            let mut counter: u64 = 0;
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = tokio::signal::ctrl_c() => {
+                        info!("ctrl-c received, shutting down");
+                        break;
+                    }
+                    _ = ticker.tick() => {}
+                }
+
+                let finalized = {
+                    let mut batch = db.new_batch();
+                    for offset in 0..3u64 {
+                        let key = format!("k-{:08x}", counter + offset).into_bytes();
+                        let value = format!("v-{:08x}", counter + offset).into_bytes();
+                        batch.write(key, Some(value));
+                    }
+                    if counter >= 3 {
+                        let rewrite_key = format!("k-{:08x}", counter - 3).into_bytes();
+                        let rewrite_value = format!("v-{:08x}-r", counter).into_bytes();
+                        batch.write(rewrite_key, Some(rewrite_value));
+                    }
+                    if counter >= 6 && counter.is_multiple_of(12) {
+                        let delete_key = format!("k-{:08x}", counter - 6).into_bytes();
+                        batch.write(delete_key, None);
+                    }
+                    counter += 3;
+                    batch.merkleize(None::<Vec<u8>>).await.expect("merkleize")
+                };
+                db.apply_batch(finalized.finalize())
+                    .await
+                    .expect("apply batch");
+
+                let latest = db.bounds().await.end - 1;
+                let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");
+                let (_proof, cumulative_ops) = db
+                    .ops_historical_proof(latest + 1, Location::new(0), count)
+                    .await
+                    .expect("historical proof");
+                let previous_slice = if previous_ops.is_empty() {
+                    None
+                } else {
+                    Some(previous_ops.as_slice())
+                };
+                let boundary = boundary_from_local_db(&db, previous_slice, &cumulative_ops).await;
+                let delta = &cumulative_ops[previous_ops.len()..];
+
+                writer
+                    .upload_and_publish(delta, &boundary)
+                    .await
+                    .expect("upload_and_publish");
+
+                let historical_root = reader.root_at(latest).await.expect("historical root");
+                let current_root = reader.current_root_at(latest).await.expect("current root");
+                println!(
+                    "watermark={} current_root=0x{} historical_root=0x{}",
+                    *latest,
+                    hex::encode(current_root.encode()),
+                    hex::encode(historical_root.encode()),
+                );
+
+                previous_ops = cumulative_ops;
+            }
+
+            db.sync().await.expect("sync local ordered db");
+            db.destroy().await.expect("destroy local ordered db");
+        })
+    })
+    .await?;
+    Ok(())
+}
+
 fn init_tracing() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -275,6 +396,10 @@ async fn main() -> std::process::ExitCode {
             port,
         } => run(&store_url, host, port).await,
         Command::SeedDemo { store_url } => seed_demo(&store_url).await,
+        Command::SeedContinuous {
+            store_url,
+            interval_secs,
+        } => seed_continuous(&store_url, interval_secs).await,
     };
 
     match result {

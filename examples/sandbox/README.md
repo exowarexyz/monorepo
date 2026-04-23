@@ -38,34 +38,48 @@ Explore the Exoware API.
 
 ## Ordered QMDB panel
 
-The QMDB panel talks to a separate ConnectRPC server (not the simulator). It
-expects a published batch tip to anchor proofs against. Follow these steps in
-addition to the simulator already running above:
+The QMDB panel talks to a separate ConnectRPC server (not the simulator) and
+verifies every `Get` / `GetMany` proof against a **user-supplied expected
+root**. Without the root the UI cannot anchor trust — the server could return
+an internally-consistent but fabricated proof. Paste both the tip (location)
+and the matching root (hex) into the UI per query.
 
-1. **Seed the demo batch** (one-shot; prints the tip watermark)
+In addition to the simulator running above:
 
-   ```bash
-   cargo run --package exoware-qmdb --bin qmdb -- \
-     seed-demo --store-url http://127.0.0.1:8080
-   ```
-
-   Note the `watermark=<N>` line printed on stdout — that's the value to
-   paste into the Tip field (and, optionally, set as `VITE_QMDB_TIP`).
-
-2. **Start the QMDB server** on port 8081
+1. **Start the QMDB server** on port 8081
 
    ```bash
    cargo run --package exoware-qmdb --bin qmdb -- \
      run --store-url http://127.0.0.1:8080
    ```
 
-3. **Point the web app at both** — override the QMDB URL and the default tip
-   in `.env.local` (or inline) before `npm run dev`:
+2. **Stream fresh batches** (keeps running; prints a `watermark=N
+   current_root=0x..` line every few seconds)
 
    ```bash
-   VITE_QMDB_URL=http://127.0.0.1:8081 VITE_QMDB_TIP=<watermark> npm run dev
+   cargo run --package exoware-qmdb --bin qmdb -- \
+     seed-continuous --store-url http://127.0.0.1:8080 --interval-secs 2
    ```
 
-The seeded demo writes `alpha`, `beta`, `gamma`. Get / GetMany proofs work
-against the printed tip. Subscribe streams live matches — re-run `seed-demo`
-or write your own batches via `OrderedWriter` to trigger more events.
+   Each line looks like:
+
+   ```
+   watermark=14 current_root=0xb777..1064 historical_root=0x1a3d..cd7b
+   ```
+
+   For a one-shot alternative, use `seed-demo` instead — it writes a single
+   fixed batch (`alpha`, `beta`, `gamma`) and exits.
+
+3. **Point the web app at the QMDB server**:
+
+   ```bash
+   VITE_QMDB_URL=http://127.0.0.1:8081 npm run dev
+   ```
+
+4. **In the UI**, paste any `watermark` + matching `current_root` from the
+   `seed-continuous` stream into the Tip and Expected Root fields, then pick a
+   key (e.g. `k-00000000`) and click **Get Proof**. The client-side verifier
+   rejects the proof if the recomputed root doesn't match.
+
+Subscribe streams live matches and does not require Expected Root — each
+batch's root is anchored by the stream's own `resumeSequenceNumber`.

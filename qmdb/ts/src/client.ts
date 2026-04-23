@@ -77,6 +77,29 @@ function toBytes(value: BytesLike): Uint8Array {
   return typeof value === 'string' ? new TextEncoder().encode(value) : value;
 }
 
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function hex(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function assertRootMatches(actual: Uint8Array, expected: BytesLike, label: string): void {
+  const expectedBytes = toBytes(expected);
+  if (!bytesEqual(actual, expectedBytes)) {
+    throw new Error(
+      `${label} root mismatch: expected 0x${hex(expectedBytes)}, got 0x${hex(actual)}`,
+    );
+  }
+}
+
 export function matchExact(bytes: BytesLike): BytesFilter {
   return create(BytesFilterSchema, {
     kind: {
@@ -117,6 +140,7 @@ export class OrderedQmdbClient {
   async get(
     key: BytesLike,
     tip: bigint,
+    expectedRoot: BytesLike,
     options?: CallOptions,
   ): Promise<VerifiedCurrentKeyValueProof> {
     await ensureWasm();
@@ -130,14 +154,17 @@ export class OrderedQmdbClient {
     if (!response.proof) {
       throw new Error('qmdb get response missing proof');
     }
-    return verify_current_key_value_proof(
+    const verified = verify_current_key_value_proof(
       toBinary(CurrentKeyValueProofSchema, response.proof),
     ) as VerifiedCurrentKeyValueProof;
+    assertRootMatches(verified.root, expectedRoot, 'qmdb get');
+    return verified;
   }
 
   async getMany(
     keys: BytesLike[],
     tip: bigint,
+    expectedRoot: BytesLike,
     options?: CallOptions,
   ): Promise<VerifiedHistoricalMultiProof> {
     await ensureWasm();
@@ -151,9 +178,11 @@ export class OrderedQmdbClient {
     if (!response.proof) {
       throw new Error('qmdb getMany response missing proof');
     }
-    return verify_historical_multi_proof(
+    const verified = verify_historical_multi_proof(
       toBinary(HistoricalMultiProofSchema, response.proof),
     ) as VerifiedHistoricalMultiProof;
+    assertRootMatches(verified.root, expectedRoot, 'qmdb getMany');
+    return verified;
   }
 
   async *subscribe(
