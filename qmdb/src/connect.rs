@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -27,9 +27,9 @@ use exoware_sdk_rs::store::qmdb::v1::{
     MultiProofOperation as ProtoMultiProofOperation, OrderedService, OrderedServiceServer,
     RangeService, RangeServiceServer, SubscribeRequestView, SubscribeResponse,
 };
+use exoware_sdk_rs::stream_filter::{BytesFilter, CompiledBytesFilters};
 use futures::future::BoxFuture;
 use futures::{FutureExt, Stream};
-use regex::bytes::Regex;
 
 use crate::auth::AuthenticatedBackendNamespace;
 use crate::proof::{
@@ -283,64 +283,31 @@ struct ReadyBatch {
     matched: Vec<(Location, Vec<u8>)>,
 }
 
-#[derive(Clone, Debug)]
-struct BytesMatcher {
-    exacts: BTreeSet<Vec<u8>>,
-    prefixes: Vec<Vec<u8>>,
-    regexes: Vec<Regex>,
-}
-
-impl BytesMatcher {
-    fn is_empty(&self) -> bool {
-        self.exacts.is_empty() && self.prefixes.is_empty() && self.regexes.is_empty()
-    }
-
-    fn matches(&self, bytes: &[u8]) -> bool {
-        self.exacts.contains(bytes)
-            || self.prefixes.iter().any(|prefix| bytes.starts_with(prefix))
-            || self.regexes.iter().any(|regex| regex.is_match(bytes))
-    }
-}
-
 fn parse_bytes_filters<'a, 'b, I>(
     filters: I,
     label: &str,
-) -> Result<Option<BytesMatcher>, ConnectError>
+) -> Result<Option<CompiledBytesFilters>, ConnectError>
 where
     I: IntoIterator<Item = &'b exoware_sdk_rs::store::common::v1::BytesFilterView<'a>>,
     'a: 'b,
 {
-    let mut exacts = BTreeSet::<Vec<u8>>::new();
-    let mut prefixes = Vec::new();
-    let mut regexes = Vec::new();
+    let mut domain = Vec::new();
     for filter in filters {
-        match filter.kind {
-            Some(ProtoBytesFilterKindView::Exact(exact)) => {
-                exacts.insert(exact.to_vec());
-            }
-            Some(ProtoBytesFilterKindView::Prefix(prefix)) => {
-                prefixes.push(prefix.to_vec());
-            }
+        domain.push(match filter.kind {
+            Some(ProtoBytesFilterKindView::Exact(exact)) => BytesFilter::Exact(exact.to_vec()),
+            Some(ProtoBytesFilterKindView::Prefix(prefix)) => BytesFilter::Prefix(prefix.to_vec()),
             Some(ProtoBytesFilterKindView::Regex(pattern)) => {
-                regexes.push(Regex::new(pattern).map_err(|err| {
-                    ConnectError::invalid_argument(format!(
-                        "invalid regex {label} filter `{pattern}`: {err}"
-                    ))
-                })?);
+                BytesFilter::Regex(pattern.to_string())
             }
             None => {
                 return Err(ConnectError::invalid_argument(format!(
                     "each {label} filter must set exactly one of exact, prefix, or regex"
                 )));
             }
-        }
+        });
     }
-    let matcher = BytesMatcher {
-        exacts,
-        prefixes,
-        regexes,
-    };
-    Ok((!matcher.is_empty()).then_some(matcher))
+    CompiledBytesFilters::compile(&domain)
+        .map_err(|e| ConnectError::invalid_argument(format!("invalid {label} filter: {e}")))
 }
 
 /// Decodes one streamed operation into its (optional key, optional value)
@@ -364,7 +331,7 @@ type BuildBatchProof<D> = Arc<
         + 'static,
 >;
 
-fn matcher_passes(matcher: &Option<BytesMatcher>, bytes: Option<&[u8]>) -> bool {
+fn matcher_passes(matcher: &Option<CompiledBytesFilters>, bytes: Option<&[u8]>) -> bool {
     match matcher {
         None => true,
         Some(m) => bytes.map(|b| m.matches(b)).unwrap_or(false),
@@ -372,8 +339,8 @@ fn matcher_passes(matcher: &Option<BytesMatcher>, bytes: Option<&[u8]>) -> bool 
 }
 
 struct BatchSubscribeStream<D: commonware_cryptography::Digest> {
-    key_matcher: Option<BytesMatcher>,
-    value_matcher: Option<BytesMatcher>,
+    key_matcher: Option<CompiledBytesFilters>,
+    value_matcher: Option<CompiledBytesFilters>,
     classify: Classify,
     extract_kv: ExtractKv,
     build_proof: BuildBatchProof<D>,
@@ -386,8 +353,8 @@ struct BatchSubscribeStream<D: commonware_cryptography::Digest> {
 
 impl<D: commonware_cryptography::Digest> BatchSubscribeStream<D> {
     fn new(
-        key_matcher: Option<BytesMatcher>,
-        value_matcher: Option<BytesMatcher>,
+        key_matcher: Option<CompiledBytesFilters>,
+        value_matcher: Option<CompiledBytesFilters>,
         classify: Classify,
         extract_kv: ExtractKv,
         build_proof: BuildBatchProof<D>,
@@ -820,6 +787,12 @@ where
     }
 }
 
+fn wrap_stack<D: ::connectrpc::Dispatcher>(dispatcher: D) -> ConnectRpcService<D> {
+    ConnectRpcService::new(dispatcher)
+        .with_limits(connect_limits())
+        .with_compression(exoware_sdk_rs::connect_compression_registry())
+}
+
 pub fn ordered_connect_stack<
     H: Hasher + Send + Sync + 'static,
     K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
@@ -831,9 +804,7 @@ pub fn ordered_connect_stack<
 where
     QmdbOperation<K, V>: Encode + commonware_codec::Decode,
 {
-    ConnectRpcService::new(OrderedServiceServer::new(OrderedConnect::new(client)))
-        .with_limits(connect_limits())
-        .with_compression(exoware_sdk_rs::connect_compression_registry())
+    wrap_stack(OrderedServiceServer::new(OrderedConnect::new(client)))
 }
 
 pub fn ordered_range_connect_stack<
@@ -847,9 +818,7 @@ pub fn ordered_range_connect_stack<
 where
     QmdbOperation<K, V>: Encode + commonware_codec::Decode,
 {
-    ConnectRpcService::new(RangeServiceServer::new(OrderedRangeConnect::new(client)))
-        .with_limits(connect_limits())
-        .with_compression(exoware_sdk_rs::connect_compression_registry())
+    wrap_stack(RangeServiceServer::new(OrderedRangeConnect::new(client)))
 }
 
 pub fn unordered_range_connect_stack<
@@ -862,9 +831,7 @@ pub fn unordered_range_connect_stack<
 where
     UnorderedQmdbOperation<K, V>: Encode + commonware_codec::Decode,
 {
-    ConnectRpcService::new(RangeServiceServer::new(UnorderedRangeConnect::new(client)))
-        .with_limits(connect_limits())
-        .with_compression(exoware_sdk_rs::connect_compression_registry())
+    wrap_stack(RangeServiceServer::new(UnorderedRangeConnect::new(client)))
 }
 
 pub fn immutable_range_connect_stack<
@@ -877,9 +844,7 @@ pub fn immutable_range_connect_stack<
 where
     ImmutableOperation<K, V>: Encode + commonware_codec::Decode<Cfg = V::Cfg> + Clone,
 {
-    ConnectRpcService::new(RangeServiceServer::new(ImmutableRangeConnect::new(client)))
-        .with_limits(connect_limits())
-        .with_compression(exoware_sdk_rs::connect_compression_registry())
+    wrap_stack(RangeServiceServer::new(ImmutableRangeConnect::new(client)))
 }
 
 pub fn keyless_range_connect_stack<
@@ -891,7 +856,5 @@ pub fn keyless_range_connect_stack<
 where
     KeylessOperation<V>: Encode + commonware_codec::Decode<Cfg = V::Cfg> + Clone,
 {
-    ConnectRpcService::new(RangeServiceServer::new(KeylessRangeConnect::new(client)))
-        .with_limits(connect_limits())
-        .with_compression(exoware_sdk_rs::connect_compression_registry())
+    wrap_stack(RangeServiceServer::new(KeylessRangeConnect::new(client)))
 }

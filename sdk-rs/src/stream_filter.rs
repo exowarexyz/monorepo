@@ -8,7 +8,10 @@
 //! `BytesFilter` in the value list (OR within the value list; AND between key
 //! and value filters).
 
+use std::collections::BTreeSet;
+
 use anyhow::ensure;
+use regex::bytes::Regex;
 
 use crate::keys::KeyCodec;
 use crate::match_key::MatchKey;
@@ -29,6 +32,58 @@ pub enum BytesFilter {
 pub struct StreamFilter {
     pub match_keys: Vec<MatchKey>,
     pub value_filters: Vec<BytesFilter>,
+}
+
+/// A compiled bundle of `BytesFilter`s ready to evaluate against a byte
+/// slice. OR semantics: `matches` returns true when any contained filter
+/// matches the input. An empty bundle matches nothing; callers should model
+/// "no filter configured" as `Option::None` and skip the match.
+#[derive(Clone, Debug)]
+pub struct CompiledBytesFilters {
+    exacts: BTreeSet<Vec<u8>>,
+    prefixes: Vec<Vec<u8>>,
+    regexes: Vec<Regex>,
+}
+
+impl CompiledBytesFilters {
+    /// Compile filters from the domain `BytesFilter` representation. Returns
+    /// `Ok(None)` when the input is empty (caller should skip matching).
+    pub fn compile(filters: &[BytesFilter]) -> Result<Option<Self>, String> {
+        if filters.is_empty() {
+            return Ok(None);
+        }
+        let mut exacts = BTreeSet::<Vec<u8>>::new();
+        let mut prefixes = Vec::new();
+        let mut regexes = Vec::new();
+        for filter in filters {
+            match filter {
+                BytesFilter::Exact(bytes) => {
+                    exacts.insert(bytes.clone());
+                }
+                BytesFilter::Prefix(bytes) => prefixes.push(bytes.clone()),
+                BytesFilter::Regex(pattern) => {
+                    if pattern.trim().is_empty() {
+                        return Err("regex filter must not be empty".to_string());
+                    }
+                    regexes.push(
+                        Regex::new(pattern)
+                            .map_err(|e| format!("invalid regex `{pattern}`: {e}"))?,
+                    );
+                }
+            }
+        }
+        Ok(Some(Self {
+            exacts,
+            prefixes,
+            regexes,
+        }))
+    }
+
+    pub fn matches(&self, bytes: &[u8]) -> bool {
+        self.exacts.contains(bytes)
+            || self.prefixes.iter().any(|p| bytes.starts_with(p))
+            || self.regexes.iter().any(|r| r.is_match(bytes))
+    }
 }
 
 /// Shape-only validation: bounds, family validity, non-empty regex string.

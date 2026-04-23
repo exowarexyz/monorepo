@@ -14,7 +14,7 @@ use connectrpc::ConnectError;
 use exoware_sdk_rs::common::KvEntry;
 use exoware_sdk_rs::keys::KeyCodec;
 use exoware_sdk_rs::match_key::compile_payload_regex;
-use exoware_sdk_rs::stream_filter::{validate_filter, BytesFilter, StreamFilter};
+use exoware_sdk_rs::stream_filter::{validate_filter, CompiledBytesFilters, StreamFilter};
 use regex::bytes::Regex;
 use tokio::sync::Notify;
 
@@ -36,26 +36,9 @@ pub(crate) struct CompiledKeyMatcher {
 }
 
 #[derive(Clone)]
-pub(crate) enum CompiledValueMatcher {
-    Exact(Vec<u8>),
-    Prefix(Vec<u8>),
-    Regex(Regex),
-}
-
-impl CompiledValueMatcher {
-    fn matches(&self, value: &[u8]) -> bool {
-        match self {
-            Self::Exact(bytes) => value == bytes.as_slice(),
-            Self::Prefix(bytes) => value.starts_with(bytes),
-            Self::Regex(regex) => regex.is_match(value),
-        }
-    }
-}
-
-#[derive(Clone)]
 pub(crate) struct CompiledMatchers {
     pub keys: Vec<CompiledKeyMatcher>,
-    pub values: Vec<CompiledValueMatcher>,
+    pub values: Option<CompiledBytesFilters>,
 }
 
 /// Validate and compile a `StreamFilter`. Shared between replay and live
@@ -75,32 +58,19 @@ pub(crate) fn compile_matchers(filter: &StreamFilter) -> Result<CompiledMatchers
             })
         })
         .collect::<Result<Vec<_>, ConnectError>>()?;
-    let values = filter
-        .value_filters
-        .iter()
-        .map(|vf| match vf {
-            BytesFilter::Exact(bytes) => Ok(CompiledValueMatcher::Exact(bytes.clone())),
-            BytesFilter::Prefix(bytes) => Ok(CompiledValueMatcher::Prefix(bytes.clone())),
-            BytesFilter::Regex(pattern) => Regex::new(pattern)
-                .map(CompiledValueMatcher::Regex)
-                .map_err(|err| {
-                    ConnectError::invalid_argument(format!(
-                        "invalid value_filter regex `{pattern}`: {err}"
-                    ))
-                }),
-        })
-        .collect::<Result<Vec<_>, ConnectError>>()?;
+    let values = CompiledBytesFilters::compile(&filter.value_filters)
+        .map_err(|e| ConnectError::invalid_argument(format!("invalid value_filter: {e}")))?;
     Ok(CompiledMatchers { keys, values })
-}
-
-fn value_matches(values: &[CompiledValueMatcher], value: &[u8]) -> bool {
-    values.is_empty() || values.iter().any(|m| m.matches(value))
 }
 
 /// Apply a compiled filter to a batch. First-match-wins per `(key, value)`.
 pub(crate) fn apply_filter(matchers: &CompiledMatchers, kvs: &[(Bytes, Bytes)]) -> Vec<KvEntry> {
     let mut out = Vec::with_capacity(kvs.len());
     'outer: for (k, v) in kvs {
+        let value_ok = matchers.values.as_ref().map_or(true, |m| m.matches(v));
+        if !value_ok {
+            continue;
+        }
         for matcher in &matchers.keys {
             if !matcher.codec.matches(k) {
                 continue;
@@ -109,7 +79,7 @@ pub(crate) fn apply_filter(matchers: &CompiledMatchers, kvs: &[(Bytes, Bytes)]) 
             let Ok(payload) = matcher.codec.read_payload(k, 0, payload_len) else {
                 continue;
             };
-            if matcher.regex.is_match(&payload) && value_matches(&matchers.values, v) {
+            if matcher.regex.is_match(&payload) {
                 out.push(KvEntry {
                     key: k.to_vec(),
                     value: v.to_vec(),
@@ -163,6 +133,7 @@ mod tests {
     use super::*;
     use exoware_sdk_rs::kv_codec::Utf8;
     use exoware_sdk_rs::match_key::MatchKey;
+    use exoware_sdk_rs::stream_filter::BytesFilter;
 
     fn filter(prefix: u16, regex: &str) -> StreamFilter {
         StreamFilter {

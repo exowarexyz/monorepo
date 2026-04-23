@@ -2,10 +2,7 @@ use std::marker::PhantomData;
 
 use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::Hasher;
-use commonware_storage::{
-    mmr::{verification, Location},
-    qmdb::keyless::Operation as KeylessOperation,
-};
+use commonware_storage::{mmr::Location, qmdb::keyless::Operation as KeylessOperation};
 use exoware_sdk_rs::{SerializableReadSession, StoreClient};
 
 use crate::auth::AuthenticatedBackendNamespace;
@@ -136,9 +133,6 @@ where
         watermark: Location,
         operations: Vec<(Location, Vec<u8>)>,
     ) -> Result<RawBatchMultiProof<H::Digest>, QmdbError> {
-        if operations.is_empty() {
-            return Err(QmdbError::EmptyProofRequest);
-        }
         let namespace = AuthenticatedBackendNamespace::Keyless;
         let session = self
             .client
@@ -150,23 +144,8 @@ where
             mmr_size: mmr_size_for_watermark(watermark)?,
             _marker: PhantomData::<H::Digest>,
         };
-        let locations: Vec<Location> = operations.iter().map(|(loc, _)| *loc).collect();
-        let proof = verification::multi_proof(&storage, &locations)
-            .await
-            .map_err(|e| QmdbError::CommonwareMmr(e.to_string()))?;
         let root = compute_auth_root::<H>(&session, namespace, watermark).await?;
-        let raw = RawBatchMultiProof {
-            watermark,
-            root,
-            proof: proof.into(),
-            operations,
-        };
-        if !raw.verify::<H>() {
-            return Err(QmdbError::CorruptData(
-                "keyless batch multi proof failed verification".to_string(),
-            ));
-        }
-        Ok(raw)
+        crate::proof::build_batch_multi_proof::<H, _>(&storage, watermark, root, operations).await
     }
 
     async fn operation_range_checkpoint_in_session(
@@ -176,51 +155,27 @@ where
         start_location: Location,
         max_locations: u32,
     ) -> Result<OperationRangeCheckpoint<H::Digest>, QmdbError> {
-        if max_locations == 0 {
-            return Err(QmdbError::InvalidRangeLength);
-        }
         let namespace = AuthenticatedBackendNamespace::Keyless;
         require_published_auth_watermark(session, namespace, watermark).await?;
-        let count = watermark
-            .checked_add(1)
-            .ok_or_else(|| QmdbError::CorruptData("watermark overflow".to_string()))?;
-        if start_location >= count {
-            return Err(QmdbError::RangeStartOutOfBounds {
-                start: start_location,
-                count,
-            });
-        }
-        let end = start_location
-            .saturating_add(max_locations as u64)
-            .min(count);
+        let end = crate::proof::resolve_range_bounds(watermark, start_location, max_locations)?;
         let storage = AuthKvMmrStorage {
             session,
             namespace,
             mmr_size: mmr_size_for_watermark(watermark)?,
             _marker: PhantomData::<H::Digest>,
         };
-        let proof = verification::range_proof(&storage, start_location..end)
-            .await
-            .map_err(|e| QmdbError::CommonwareMmr(e.to_string()))?;
-        let checkpoint = OperationRangeCheckpoint {
+        let root = compute_auth_root::<H>(session, namespace, watermark).await?;
+        let encoded_operations =
+            load_auth_operation_bytes_range(session, namespace, start_location, end).await?;
+        crate::proof::build_operation_range_checkpoint::<H, _>(
+            &storage,
             watermark,
-            root: compute_auth_root::<H>(session, namespace, watermark).await?,
             start_location,
-            proof: proof.into(),
-            encoded_operations: load_auth_operation_bytes_range(
-                session,
-                namespace,
-                start_location,
-                end,
-            )
-            .await?,
-        };
-        if !checkpoint.verify::<H>() {
-            return Err(QmdbError::CorruptData(
-                "keyless checkpoint proof failed verification".to_string(),
-            ));
-        }
-        Ok(checkpoint)
+            end,
+            root,
+            encoded_operations,
+        )
+        .await
     }
 
     /// Verified contiguous range of operations.

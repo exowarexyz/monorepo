@@ -4,11 +4,9 @@
 mod common;
 
 use std::num::NonZeroU64;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::{routing::get, Router};
 use commonware_runtime::{deterministic, Runner as _};
 use commonware_storage::mmr::Location;
 use commonware_storage::qmdb::{
@@ -16,16 +14,11 @@ use commonware_storage::qmdb::{
     store::LogStore as _,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use connectrpc::client::ClientConfig;
-use connectrpc::{ConnectError, ConnectRpcService, Context};
 use exoware_sdk_rs::proto::PreferZstdHttpClient;
 use exoware_sdk_rs::store::common::v1::{
     bytes_filter as proto_bytes_filter, BytesFilter as ProtoBytesFilter,
 };
-use exoware_sdk_rs::store::qmdb::v1::{
-    RangeService, RangeServiceClient, RangeServiceServer,
-    SubscribeRequest as ProtoSubscribeRequest, SubscribeResponse as ProtoSubscribeResponse,
-};
+use exoware_sdk_rs::store::qmdb::v1::SubscribeRequest as ProtoSubscribeRequest;
 use exoware_sdk_rs::StoreClient;
 use store_qmdb::{
     keyless_range_connect_stack, KeylessClient, KeylessRangeConnectClient, KeylessWriter,
@@ -37,51 +30,10 @@ type LocalDb = Keyless<deterministic::Context, Vec<u8>, commonware_cryptography:
 type TestKeylessClient = KeylessClient<commonware_cryptography::Sha256, Vec<u8>>;
 type BatchOperation = KeylessOperation<Vec<u8>>;
 
-async fn health() -> &'static str {
-    "ok"
-}
-
-async fn wait_for_health(base: &str) {
-    let url = format!("{base}/health");
-    let client = reqwest::Client::new();
-    for _ in 0..200 {
-        if client
-            .get(&url)
-            .send()
-            .await
-            .ok()
-            .is_some_and(|res| res.status().is_success())
-        {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    panic!("qmdb server did not become ready at {url}");
-}
-
 async fn spawn_qmdb_server(
     client: Arc<TestKeylessClient>,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    let app = Router::new()
-        .route("/health", get(health))
-        .fallback_service(keyless_range_connect_stack(client));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind qmdb server");
-    let port = listener.local_addr().expect("local addr").port();
-    let url = format!("http://127.0.0.1:{port}");
-    let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    wait_for_health(&url).await;
-    (handle, url)
-}
-
-fn rpc_client(base: &str) -> RangeServiceClient<PreferZstdHttpClient> {
-    RangeServiceClient::new(
-        PreferZstdHttpClient::plaintext(),
-        ClientConfig::new(base.parse().expect("qmdb uri")),
-    )
+    common::spawn_range_service(keyless_range_connect_stack(client)).await
 }
 
 fn validated_client(
@@ -152,70 +104,6 @@ async fn upload_and_publish(client: &StoreClient, batch: &LocalBatch) {
         .expect("upload_and_publish");
 }
 
-#[derive(Clone)]
-struct StaticRangeService {
-    subscribe_response: ProtoSubscribeResponse,
-}
-
-impl RangeService for StaticRangeService {
-    fn subscribe(
-        &self,
-        ctx: Context,
-        _request: buffa::view::OwnedView<
-            exoware_sdk_rs::store::qmdb::v1::SubscribeRequestView<'static>,
-        >,
-    ) -> impl std::future::Future<
-        Output = Result<
-            (
-                Pin<
-                    Box<
-                        dyn futures::Stream<Item = Result<ProtoSubscribeResponse, ConnectError>>
-                            + Send,
-                    >,
-                >,
-                Context,
-            ),
-            ConnectError,
-        >,
-    > + Send {
-        let response = self.subscribe_response.clone();
-        async move {
-            let stream: Pin<
-                Box<
-                    dyn futures::Stream<Item = Result<ProtoSubscribeResponse, ConnectError>> + Send,
-                >,
-            > = Box::pin(futures::stream::iter([Ok(response)]));
-            Ok((stream, ctx))
-        }
-    }
-}
-
-async fn spawn_static_server(service: StaticRangeService) -> (tokio::task::JoinHandle<()>, String) {
-    let app = Router::new()
-        .route("/health", get(health))
-        .fallback_service(
-            ConnectRpcService::new(RangeServiceServer::new(service))
-                .with_compression(exoware_sdk_rs::connect_compression_registry()),
-        );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind static qmdb server");
-    let port = listener.local_addr().expect("local addr").port();
-    let url = format!("http://127.0.0.1:{port}");
-    let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    wait_for_health(&url).await;
-    (handle, url)
-}
-
-fn tamper_subscribe_response(mut response: ProtoSubscribeResponse) -> ProtoSubscribeResponse {
-    let mut proof = response.proof.as_option().cloned().expect("multi proof");
-    proof.root[0] ^= 0x01;
-    response.proof = Some(proof).into();
-    response
-}
-
 #[tokio::test]
 async fn keyless_connect_subscribe_emits_verifiable_multi_proof() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
@@ -264,7 +152,7 @@ async fn keyless_connect_client_rejects_invalid_streamed_proof() {
         ((0..=10000).into(), ()),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
-    let rpc = rpc_client(&qmdb_url);
+    let rpc = common::rpc_client(&qmdb_url);
     let mut raw_stream = rpc
         .subscribe(ProtoSubscribeRequest {
             since_sequence_number: Some(1),
@@ -279,10 +167,11 @@ async fn keyless_connect_client_rejects_invalid_streamed_proof() {
         .expect("stream frame")
         .to_owned_message();
 
-    let (_static_server, static_url) = spawn_static_server(StaticRangeService {
-        subscribe_response: tamper_subscribe_response(raw_response),
-    })
-    .await;
+    let (_static_server, static_url) =
+        common::spawn_static_range_service(common::StaticRangeService {
+            subscribe_response: common::tamper_subscribe_response(raw_response),
+        })
+        .await;
     let client = validated_client(&static_url);
     let mut stream = client
         .subscribe(ProtoSubscribeRequest::default())
@@ -368,7 +257,7 @@ async fn keyless_connect_subscribe_rejects_key_filters() {
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
 
-    let rpc = rpc_client(&qmdb_url);
+    let rpc = common::rpc_client(&qmdb_url);
     let mut stream = rpc
         .subscribe(ProtoSubscribeRequest {
             key_filters: vec![match_exact(b"anything")],

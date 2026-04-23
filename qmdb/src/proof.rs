@@ -1,7 +1,10 @@
 use commonware_codec::{Codec, Encode};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::{
-    mmr::{self, iterator::PeakIterator, Location, Position, StandardHasher},
+    mmr::{
+        self, iterator::PeakIterator, storage::Storage as MmrStorage, verification, Location,
+        Position, StandardHasher,
+    },
     qmdb::{
         any::ordered::variable::Operation as QmdbOperation,
         current::{
@@ -194,6 +197,97 @@ impl<D: Digest> RawBatchMultiProof<D> {
             .collect();
         proof.verify_multi_inclusion(&mut hasher, &elements, &self.root)
     }
+}
+
+/// Validate a `[start, start + max_locations)` window against the published
+/// watermark. Returns the exclusive end bound clamped to the watermark's
+/// available count (watermark + 1).
+pub(crate) fn resolve_range_bounds(
+    watermark: Location,
+    start_location: Location,
+    max_locations: u32,
+) -> Result<Location, crate::QmdbError> {
+    if max_locations == 0 {
+        return Err(crate::QmdbError::InvalidRangeLength);
+    }
+    let count = watermark
+        .checked_add(1)
+        .ok_or_else(|| crate::QmdbError::CorruptData("watermark overflow".to_string()))?;
+    if start_location >= count {
+        return Err(crate::QmdbError::RangeStartOutOfBounds {
+            start: start_location,
+            count,
+        });
+    }
+    Ok(start_location
+        .saturating_add(max_locations as u64)
+        .min(count))
+}
+
+/// Build and self-verify a `RawBatchMultiProof` over the given operations,
+/// sourcing MMR nodes from `storage` and using the caller-supplied `root`.
+pub(crate) async fn build_batch_multi_proof<H, S>(
+    storage: &S,
+    watermark: Location,
+    root: H::Digest,
+    operations: Vec<(Location, Vec<u8>)>,
+) -> Result<RawBatchMultiProof<H::Digest>, crate::QmdbError>
+where
+    H: Hasher,
+    S: MmrStorage<H::Digest>,
+{
+    if operations.is_empty() {
+        return Err(crate::QmdbError::EmptyProofRequest);
+    }
+    let locations: Vec<Location> = operations.iter().map(|(loc, _)| *loc).collect();
+    let proof = verification::multi_proof(storage, &locations)
+        .await
+        .map_err(|e| crate::QmdbError::CommonwareMmr(e.to_string()))?;
+    let raw = RawBatchMultiProof {
+        watermark,
+        root,
+        proof: proof.into(),
+        operations,
+    };
+    if !raw.verify::<H>() {
+        return Err(crate::QmdbError::CorruptData(
+            "batch multi proof failed verification".to_string(),
+        ));
+    }
+    Ok(raw)
+}
+
+/// Build and self-verify an `OperationRangeCheckpoint` over the given
+/// contiguous span, sourcing MMR nodes from `storage` and using the
+/// caller-supplied `root` and pre-loaded `encoded_operations`.
+pub(crate) async fn build_operation_range_checkpoint<H, S>(
+    storage: &S,
+    watermark: Location,
+    start_location: Location,
+    end_location_exclusive: Location,
+    root: H::Digest,
+    encoded_operations: Vec<Vec<u8>>,
+) -> Result<OperationRangeCheckpoint<H::Digest>, crate::QmdbError>
+where
+    H: Hasher,
+    S: MmrStorage<H::Digest>,
+{
+    let proof = verification::range_proof(storage, start_location..end_location_exclusive)
+        .await
+        .map_err(|e| crate::QmdbError::CommonwareMmr(e.to_string()))?;
+    let checkpoint = OperationRangeCheckpoint {
+        watermark,
+        root,
+        start_location,
+        proof: proof.into(),
+        encoded_operations,
+    };
+    if !checkpoint.verify::<H>() {
+        return Err(crate::QmdbError::CorruptData(
+            "range checkpoint proof failed verification".to_string(),
+        ));
+    }
+    Ok(checkpoint)
 }
 
 /// Stable mirror of the current ordered key-value proof payload.
