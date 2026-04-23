@@ -11,7 +11,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file store/v1/common.proto.
  */
 export const file_store_v1_common: GenFile = /*@__PURE__*/
-  fileDesc("ChVzdG9yZS92MS9jb21tb24ucHJvdG8SD3N0b3JlLmNvbW1vbi52MSIvCgdLdkVudHJ5EhUKA2tleRgBIAEoDEIIukgFegMY/gESDQoFdmFsdWUYAiABKAwiSAoITWF0Y2hLZXkSFQoNcmVzZXJ2ZWRfYml0cxgBIAEoDRIOCgZwcmVmaXgYAiABKA0SFQoNcGF5bG9hZF9yZWdleBgDIAEoCWIGcHJvdG8z", [file_buf_validate_validate]);
+  fileDesc("ChVzdG9yZS92MS9jb21tb24ucHJvdG8SD3N0b3JlLmNvbW1vbi52MSIvCgdLdkVudHJ5EhUKA2tleRgBIAEoDEIIukgFegMY/gESDQoFdmFsdWUYAiABKAwiSAoITWF0Y2hLZXkSFQoNcmVzZXJ2ZWRfYml0cxgBIAEoDRIOCgZwcmVmaXgYAiABKA0SFQoNcGF5bG9hZF9yZWdleBgDIAEoCSJJCgtCeXRlc0ZpbHRlchIPCgVleGFjdBgBIAEoDEgAEhAKBnByZWZpeBgCIAEoDEgAEg8KBXJlZ2V4GAMgASgJSABCBgoEa2luZGIGcHJvdG8z", [file_buf_validate_validate]);
 
 /**
  * A raw key-value pair shared by store APIs that move complete rows without
@@ -84,4 +84,43 @@ export type MatchKey = Message<"store.common.v1.MatchKey"> & {
  */
 export const MatchKeySchema: GenMessage<MatchKey> = /*@__PURE__*/
   messageDesc(file_store_v1_common, 1);
+
+/**
+ * Matches an uninterpreted byte string by exact value, prefix, or full-string
+ * regex. Used for filtering both decoded logical keys and operation values in
+ * APIs that operate above the store-row `KeyCodec` layer.
+ *
+ * @generated from message store.common.v1.BytesFilter
+ */
+export type BytesFilter = Message<"store.common.v1.BytesFilter"> & {
+  /**
+   * @generated from oneof store.common.v1.BytesFilter.kind
+   */
+  kind: {
+    /**
+     * @generated from field: bytes exact = 1;
+     */
+    value: Uint8Array;
+    case: "exact";
+  } | {
+    /**
+     * @generated from field: bytes prefix = 2;
+     */
+    value: Uint8Array;
+    case: "prefix";
+  } | {
+    /**
+     * @generated from field: string regex = 3;
+     */
+    value: string;
+    case: "regex";
+  } | { case: undefined; value?: undefined };
+};
+
+/**
+ * Describes the message store.common.v1.BytesFilter.
+ * Use `create(BytesFilterSchema)` to create a new message.
+ */
+export const BytesFilterSchema: GenMessage<BytesFilter> = /*@__PURE__*/
+  messageDesc(file_store_v1_common, 2);
 

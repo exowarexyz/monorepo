@@ -208,20 +208,41 @@ where
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
 {
+    // The inactivity floor of the batch being recovered lives in the trailing
+    // CommitFloor op. Chunks whose entire bit range is below this floor are
+    // fully pruned by `current::Db` after `apply_batch`; we cannot serve a
+    // proof for them and we do not need to -- `load_bitmap_chunk` folds all
+    // below-floor bits to 0 deterministically at read time. Skip those chunks
+    // here so we do not ask the local DB to prove a location it has discarded.
+    let floor = match operations.last() {
+        Some(QmdbOperation::CommitFloor(_, floor)) => *floor,
+        _ => Location::new(0),
+    };
+    let chunk_bits = bitmap_chunk_bits::<N>();
+    let floor_chunk = *floor / chunk_bits;
+    let first_alive_location = floor_chunk.saturating_mul(chunk_bits);
+
     let previous_len = previous_operations.map_or(0usize, |ops| ops.len());
     let mut changed = BTreeMap::<u64, Location>::new();
 
     for raw_location in previous_len..operations.len() {
         let location = Location::new(raw_location as u64);
-        changed
-            .entry(chunk_index_for_location::<N>(location))
-            .or_insert(location);
+        if raw_location as u64 >= first_alive_location {
+            changed
+                .entry(chunk_index_for_location::<N>(location))
+                .or_insert(location);
+        }
     }
 
     let Some(previous) = previous_operations else {
         return changed;
     };
 
+    // The previous batch's CommitFloor bit, floor-raise move clears, and
+    // base-diff clears of still-present-but-below-floor locations are all
+    // handled at read time via `load_bitmap_chunk`'s below-floor masking.
+    // We only track touched-key representatives in chunks the server does
+    // not already know how to fold (chunks straddling or above the floor).
     let mut touched_keys = operations[previous_len..]
         .iter()
         .filter_map(|operation| match operation {
@@ -230,11 +251,15 @@ where
             QmdbOperation::CommitFloor(_, _) => None,
         })
         .collect::<BTreeSet<_>>();
-    let mut needs_previous_commit = operations[previous_len..]
-        .iter()
-        .any(|operation| matches!(operation, QmdbOperation::CommitFloor(_, _)));
 
+    // Walk backwards only as far as the first alive chunk. Anything below
+    // that is fully pruned locally and contributes nothing to the boundary,
+    // so iterating it just wastes work on unmatchable brand-new keys still
+    // sitting in `touched_keys`.
     for index in (0..previous.len()).rev() {
+        if touched_keys.is_empty() || (index as u64) < first_alive_location {
+            break;
+        }
         let location = Location::new(index as u64);
         match &previous[index] {
             QmdbOperation::Update(update) => {
@@ -247,18 +272,7 @@ where
             QmdbOperation::Delete(key) => {
                 touched_keys.remove(key.as_ref());
             }
-            QmdbOperation::CommitFloor(_, _) => {
-                if needs_previous_commit {
-                    changed
-                        .entry(chunk_index_for_location::<N>(location))
-                        .or_insert(location);
-                    needs_previous_commit = false;
-                }
-            }
-        }
-
-        if touched_keys.is_empty() && !needs_previous_commit {
-            break;
+            QmdbOperation::CommitFloor(_, _) => {}
         }
     }
 
@@ -437,7 +451,9 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_old_commit_floor_chunk_is_not_reported_without_new_commit_floor() {
+    fn rewrite_pulls_in_old_update_chunk_when_floor_preserves_it() {
+        // No trailing CommitFloor -> floor defaults to 0 -> no filtering.
+        // The rewrite of "target" pulls in its old-location chunk.
         let previous = previous_ops();
         let mut operations = previous.clone();
         operations.push(update(b"target", b"new"));
@@ -452,7 +468,13 @@ mod tests {
     }
 
     #[test]
-    fn new_commit_floor_requires_previous_commit_floor_chunk() {
+    fn chunks_fully_below_new_floor_are_skipped() {
+        // Trailing CommitFloor(floor=16) means chunks 0 and 1 (covering
+        // locations 0..15) are fully below the floor and handled by read-time
+        // masking; they must not appear in the changed-chunks map. Only chunk
+        // 2 (straddling / above the floor) is tracked, and crucially the
+        // representative for that chunk is an above-floor location so the
+        // local DB can still serve a proof for it.
         let previous = previous_ops();
         let mut operations = previous.clone();
         operations.push(update(b"target", b"new"));
@@ -461,14 +483,28 @@ mod tests {
         let changed =
             changed_chunk_representatives::<Vec<u8>, Vec<u8>, 1>(Some(&previous), &operations);
 
-        assert_eq!(
-            changed,
-            BTreeMap::from([
-                (0u64, Location::new(0)),
-                (1u64, Location::new(8)),
-                (2u64, Location::new(16)),
-            ])
-        );
+        assert_eq!(changed, BTreeMap::from([(2u64, Location::new(16))]));
+    }
+
+    #[test]
+    fn straddling_chunk_keeps_first_new_representative() {
+        // With floor=18, chunks 0 and 1 (locations 0..15) are fully below and
+        // skipped; chunk 2 (locations 16..23) straddles -- locations 16-17 are
+        // below the floor, locations 18-23 are at/above. The local DB still
+        // has chunk 2 intact (it is not fully pruned), so the filter operates
+        // at chunk granularity and keeps chunk 2 with the first new-location
+        // representative.
+        let previous = previous_ops();
+        let mut operations = previous.clone();
+        operations.push(update(b"neighbor1", b"v"));
+        operations.push(update(b"neighbor2", b"v"));
+        operations.push(update(b"neighbor3", b"v"));
+        operations.push(commit(18));
+
+        let changed =
+            changed_chunk_representatives::<Vec<u8>, Vec<u8>, 1>(Some(&previous), &operations);
+
+        assert_eq!(changed, BTreeMap::from([(2u64, Location::new(16))]));
     }
 
     #[test]

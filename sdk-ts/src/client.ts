@@ -61,6 +61,28 @@ export type ClientOptions = {
     retry?: RetryConfig;
 };
 
+function normalizeClientOptions(tokenOrOptions?: string | ClientOptions): ClientOptions {
+    return typeof tokenOrOptions === 'string' ? { token: tokenOrOptions } : tokenOrOptions ?? {};
+}
+
+export function createTransport(baseUrl: string, tokenOrOptions?: string | ClientOptions) {
+    const opts = normalizeClientOptions(tokenOrOptions);
+    const retryConfig = opts.retry ?? DEFAULT_RETRY_CONFIG;
+    const interceptors: Interceptor[] = [];
+    if (opts.token !== undefined) {
+        const token = opts.token;
+        interceptors.push((next) => async (req) => {
+            req.header.set('Authorization', `Bearer ${token}`);
+            return next(req);
+        });
+    }
+    interceptors.push(makeRetryInterceptor(retryConfig));
+    return createConnectTransport({
+        baseUrl: baseUrl.replace(/\/$/, ''),
+        interceptors,
+    });
+}
+
 export class Client {
     public readonly baseUrl: string;
     public readonly compact: ConnectClient<typeof CompactService>;
@@ -70,23 +92,10 @@ export class Client {
     public readonly retryConfig: RetryConfig;
 
     constructor(baseUrl: string, tokenOrOptions?: string | ClientOptions) {
-        const opts: ClientOptions =
-            typeof tokenOrOptions === 'string' ? { token: tokenOrOptions } : tokenOrOptions ?? {};
+        const opts = normalizeClientOptions(tokenOrOptions);
         this.baseUrl = baseUrl.replace(/\/$/, '');
         this.retryConfig = opts.retry ?? DEFAULT_RETRY_CONFIG;
-        const interceptors: Interceptor[] = [];
-        if (opts.token !== undefined) {
-            const token = opts.token;
-            interceptors.push((next) => async (req) => {
-                req.header.set('Authorization', `Bearer ${token}`);
-                return next(req);
-            });
-        }
-        interceptors.push(makeRetryInterceptor(this.retryConfig));
-        const transport = createConnectTransport({
-            baseUrl: this.baseUrl,
-            interceptors,
-        });
+        const transport = createTransport(this.baseUrl, opts);
         this.compact = createClient(CompactService, transport);
         this.ingest = createClient(IngestService, transport);
         this.query = createClient(QueryService, transport);

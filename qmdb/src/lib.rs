@@ -27,6 +27,8 @@
 mod auth;
 mod boundary;
 pub(crate) mod codec;
+mod connect;
+mod connect_client;
 mod core;
 pub mod error;
 pub mod proof;
@@ -36,17 +38,18 @@ pub(crate) mod storage;
 mod immutable;
 mod keyless;
 mod ordered;
-mod stream;
+mod subscription;
 mod unordered;
 mod writer;
 
-pub use error::QmdbError;
+pub use error::{ProofKind, QmdbError};
 pub use immutable::ImmutableClient;
 pub use keyless::KeylessClient;
 pub use ordered::OrderedClient;
 pub use proof::{
-    OperationRangeCheckpoint, RawMmrProof, VariantRoot, VerifiedCurrentRange, VerifiedKeyValue,
-    VerifiedMultiOperations, VerifiedOperationRange, VerifiedVariantRange,
+    OperationRangeCheckpoint, RawCurrentRangeProof, RawKeyValueProof, RawMmrProof, RawMultiProof,
+    VariantRoot, VerifiedCurrentRange, VerifiedKeyValue, VerifiedMultiOperations,
+    VerifiedOperationRange, VerifiedVariantRange,
 };
 pub use unordered::UnorderedClient;
 pub use writer::{
@@ -56,6 +59,16 @@ pub use writer::{
 };
 
 pub use boundary::recover_boundary_state;
+pub use connect::{
+    immutable_range_connect_stack, keyless_range_connect_stack, ordered_connect_stack,
+    unordered_range_connect_stack, ImmutableRangeConnect, KeylessRangeConnect, OrderedConnect,
+    OrderedRangeConnect, UnorderedRangeConnect,
+};
+pub use connect_client::{
+    ImmutableRangeConnectClient, KeylessRangeConnectClient, OrderedConnectClient,
+    OrderedRangeConnectClient, RangeConnectSubscription, RangeSubscribeProof,
+    UnorderedRangeConnectClient,
+};
 
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
@@ -187,5 +200,3 @@ pub struct CurrentBoundaryState<D: Digest, const N: usize> {
     /// Changed grafted-MMR digests keyed by ops-space MMR position.
     pub grafted_nodes: Vec<(commonware_storage::mmr::Position, D)>,
 }
-
-// Keep test module inline since it tests the full integrated stack.

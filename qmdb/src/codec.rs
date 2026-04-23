@@ -359,6 +359,40 @@ pub(crate) fn encode_chunk_key(chunk_index: u64, watermark: Location) -> Key {
     key.freeze()
 }
 
+/// Clear every bitmap bit below `floor` within the chunk at `chunk_index`.
+///
+/// Bits below the inactivity floor are definitionally 0 at any watermark; the
+/// writer does not republish a chunk every time floor advancement flips one
+/// of its bits, so the stored payload may carry stale 1s. Fold those clears
+/// in deterministically at read time. Mirrors the bit layout used by
+/// `commonware_utils::bitmap::BitMap`: byte offset within the chunk is
+/// `(L / 8) % N`, bit mask is `1 << (L % 8)`.
+pub(crate) fn clear_below_floor<const N: usize>(
+    chunk: &mut [u8; N],
+    chunk_index: u64,
+    floor: Location,
+) {
+    let chunk_bits = bitmap_chunk_bits::<N>();
+    let chunk_start = chunk_index.saturating_mul(chunk_bits);
+    let chunk_end_exclusive = chunk_start.saturating_add(chunk_bits);
+    if *floor <= chunk_start {
+        return;
+    }
+    if *floor >= chunk_end_exclusive {
+        *chunk = [0u8; N];
+        return;
+    }
+    let bits_to_clear = (*floor - chunk_start) as usize;
+    let whole_bytes = bits_to_clear / 8;
+    let remainder = bits_to_clear % 8;
+    for byte in &mut chunk[..whole_bytes] {
+        *byte = 0;
+    }
+    if remainder != 0 {
+        chunk[whole_bytes] &= !((1u8 << remainder) - 1);
+    }
+}
+
 pub(crate) fn decode_operation_location_key(key: &Key) -> Result<Location, QmdbError> {
     let codec = OPERATION_CODEC;
     if !codec.matches(key) {
@@ -383,4 +417,55 @@ pub(crate) fn decode_presence_location(key: &Key) -> Result<Location, QmdbError>
         .read_payload_exact::<8>(key, 0)
         .map_err(|e| QmdbError::CorruptData(format!("cannot decode presence location: {e}")))?;
     Ok(Location::new(u64::from_be_bytes(bytes)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clear_below_floor_bitwise<const N: usize>(
+        chunk: &mut [u8; N],
+        chunk_index: u64,
+        floor: Location,
+    ) {
+        let chunk_bits = bitmap_chunk_bits::<N>();
+        let chunk_start = chunk_index.saturating_mul(chunk_bits);
+        let chunk_end_exclusive = chunk_start.saturating_add(chunk_bits);
+        if *floor <= chunk_start {
+            return;
+        }
+        if *floor >= chunk_end_exclusive {
+            *chunk = [0u8; N];
+            return;
+        }
+        for bit in chunk_start..*floor {
+            let byte_offset = ((bit / 8) % N as u64) as usize;
+            let mask: u8 = 1u8 << (bit % 8);
+            chunk[byte_offset] &= !mask;
+        }
+    }
+
+    #[test]
+    fn clear_below_floor_matches_bitwise_reference() {
+        const N: usize = 4;
+        let chunk_bits = bitmap_chunk_bits::<N>();
+        for chunk_index in 0..3u64 {
+            let chunk_start = chunk_index * chunk_bits;
+            for floor_bit in 0..=(chunk_start + chunk_bits + 4) {
+                let original = [0xAB_u8; N];
+                let mut optimized = original;
+                let mut reference = original;
+                clear_below_floor::<N>(&mut optimized, chunk_index, Location::new(floor_bit));
+                clear_below_floor_bitwise::<N>(
+                    &mut reference,
+                    chunk_index,
+                    Location::new(floor_bit),
+                );
+                assert_eq!(
+                    optimized, reference,
+                    "mismatch at chunk_index={chunk_index} floor={floor_bit}"
+                );
+            }
+        }
+    }
 }

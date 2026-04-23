@@ -23,7 +23,7 @@ jobs:
       - name: Lint sdk-ts
         run: cd sdk-ts && npm run lint
       - name: Install examples/sandbox dependencies
-        run: cd examples/sandbox && npm install
+        run: cd examples/sandbox && npm install --ignore-scripts
       - name: Lint examples/sandbox
         run: cd examples/sandbox && npm run lint
 
@@ -54,3 +54,31 @@ jobs:
         run: cd sdk-ts && npm ci
       - name: Build sdk-ts
         run: cd sdk-ts && npm run build
+
+  qmdb-web:
+    name: QMDB Web
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run setup
+        uses: ./.github/actions/setup
+      - name: Install wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Install wasm-pack + wasm-bindgen-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.13.1,wasm-bindgen-cli@0.2.117
+      - name: Install sdk-ts dependencies
+        run: cd sdk-ts && npm ci
+      - name: Build sdk-ts
+        run: cd sdk-ts && npm run build
+      - name: Install qmdb/ts dependencies
+        run: cd qmdb/ts && npm ci
+      - name: Build qmdb/ts
+        run: cd qmdb/ts && npm run build
+      - name: Install examples/sandbox dependencies
+        run: cd examples/sandbox && npm ci --ignore-scripts
+      - name: Build examples/sandbox
+        run: cd examples/sandbox && npm run build

@@ -4,6 +4,7 @@ members = [
     "sdk-rs",
     "examples/simulator",
     "qmdb",
+    "qmdb/wasm",
     "sql",
 ]
 resolver = "2"

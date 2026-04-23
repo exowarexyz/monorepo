@@ -156,7 +156,10 @@ describe('Exoware TS SDK', () => {
             const sequenceNumber = await store.setMany(kvs);
             const batches = [];
 
-            for await (const batch of store.subscribe([makeStreamMatchKey(prefix)], sequenceNumber)) {
+            for await (const batch of store.subscribe({
+                matchKeys: [makeStreamMatchKey(prefix)],
+                sinceSequenceNumber: sequenceNumber,
+            })) {
                 batches.push(batch);
                 break;
             }

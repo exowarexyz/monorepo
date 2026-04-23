@@ -9,6 +9,7 @@ import {
 } from 'exoware-sdk-ts';
 import { Buffer } from 'buffer';
 import './App.css';
+import { QMDB_URL, QmdbPanel } from './QmdbPanel';
 
 const MAX_STREAM_EVENTS = 10;
 
@@ -54,6 +55,7 @@ function App() {
   const [streamReservedBits, setStreamReservedBits] = useState('0');
   const [streamPrefix, setStreamPrefix] = useState('0');
   const [streamPayloadRegex, setStreamPayloadRegex] = useState('(?s-u)^.*$');
+  const [streamValueRegex, setStreamValueRegex] = useState('');
   const [streamSinceSequenceNumber, setStreamSinceSequenceNumber] = useState('');
   const [streamEvents, setStreamEvents] = useState<StoreBatch[]>([]);
 
@@ -249,12 +251,21 @@ function App() {
         prefix,
         payloadRegex: streamPayloadRegex.trim()
       };
+      const valueRegex = streamValueRegex.trim();
+      const valueFilters = valueRegex
+        ? [{ kind: { case: 'regex' as const, value: valueRegex } }]
+        : [];
 
       void (async () => {
         try {
-          for await (const batch of storeClient.subscribe([matchKey], sinceSequenceNumber, {
-            signal: controller.signal
-          })) {
+          for await (const batch of storeClient.subscribe(
+            {
+              matchKeys: [matchKey],
+              valueFilters,
+              sinceSequenceNumber,
+            },
+            { signal: controller.signal },
+          )) {
             setStreamEvents((prev) => [batch, ...prev].slice(0, MAX_STREAM_EVENTS));
             setIsConnected(true);
           }
@@ -578,13 +589,25 @@ function App() {
           </div>
           <div className="form-row">
             <div className="form-group form-group-wide">
-              <label htmlFor="stream-payload-regex">Payload Regex</label>
+              <label htmlFor="stream-payload-regex">Payload Regex (key)</label>
               <input
                 id="stream-payload-regex"
                 type="text"
                 placeholder="(?s-u)^orders/.*$"
                 value={streamPayloadRegex}
                 onChange={(e) => setStreamPayloadRegex(e.target.value)}
+              />
+            </div>
+          </div>
+          <div className="form-row">
+            <div className="form-group form-group-wide">
+              <label htmlFor="stream-value-regex">Value Regex (optional)</label>
+              <input
+                id="stream-value-regex"
+                type="text"
+                placeholder="(?s)^status=ready$"
+                value={streamValueRegex}
+                onChange={(e) => setStreamValueRegex(e.target.value)}
               />
             </div>
           </div>
@@ -628,6 +651,8 @@ function App() {
           )}
         </div>
       </div>
+
+      {QMDB_URL && <QmdbPanel qmdbUrl={QMDB_URL} showNotification={showNotification} />}
     </div>
   );
 }

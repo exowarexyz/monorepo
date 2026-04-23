@@ -1,4 +1,4 @@
-export { Client, type ClientOptions, type RetryConfig } from './client.js';
+export { Client, createTransport, type ClientOptions, type RetryConfig } from './client.js';
 export {
     SerializableReadSession,
     StoreClient,
@@ -94,8 +94,8 @@ export type {
     PruneRequest,
     PruneResponse,
 } from './gen/ts/store/v1/compact_pb.js';
-export { KvEntrySchema, MatchKeySchema } from './gen/ts/store/v1/common_pb.js';
-export type { KvEntry, MatchKey } from './gen/ts/store/v1/common_pb.js';
+export { BytesFilterSchema, KvEntrySchema, MatchKeySchema } from './gen/ts/store/v1/common_pb.js';
+export type { BytesFilter, KvEntry, MatchKey } from './gen/ts/store/v1/common_pb.js';
 export {
     SubscribeRequestSchema,
     SubscribeResponseSchema,
@@ -108,3 +108,31 @@ export type {
     GetRequest,
     GetResponse,
 } from './gen/ts/store/v1/stream_pb.js';
+export {
+    CurrentKeyValueProofSchema,
+    CurrentRangeProofSchema,
+    GetManyRequestSchema as QmdbGetManyRequestSchema,
+    GetManyResponseSchema as QmdbGetManyResponseSchema,
+    GetRequestSchema as QmdbGetRequestSchema,
+    GetResponseSchema as QmdbGetResponseSchema,
+    HistoricalMultiProofSchema,
+    MmrProofSchema,
+    MultiProofOperationSchema,
+    OrderedService,
+    RangeService,
+    SubscribeRequestSchema as QmdbSubscribeRequestSchema,
+    SubscribeResponseSchema as QmdbSubscribeResponseSchema,
+} from './gen/ts/store/v1/qmdb_pb.js';
+export type {
+    CurrentKeyValueProof,
+    CurrentRangeProof,
+    GetManyRequest as QmdbGetManyRequest,
+    GetManyResponse as QmdbGetManyResponse,
+    GetRequest as QmdbGetRequest,
+    GetResponse as QmdbGetResponse,
+    HistoricalMultiProof,
+    MmrProof,
+    MultiProofOperation,
+    SubscribeRequest as QmdbSubscribeRequest,
+    SubscribeResponse as QmdbSubscribeResponse,
+} from './gen/ts/store/v1/qmdb_pb.js';

@@ -10,6 +10,12 @@
     ],
     "module": "ESNext",
     "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "@qmdb-ts": [
+        "../../qmdb/ts/src/index.ts"
+      ]
+    },
     /* Bundler mode */
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,

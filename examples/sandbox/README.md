@@ -34,3 +34,59 @@ Explore the Exoware API.
 ## Features
 
 - **Store:** set and get key-value pairs, and run range queries.
+- **Ordered QMDB** (optional, requires `VITE_QMDB_URL`): current/historical
+  proofs and live subscribe streaming.
+
+## Ordered QMDB panel
+
+The QMDB panel is only rendered when `VITE_QMDB_URL` is set, since it requires
+a separate ConnectRPC server (not the simulator) running alongside the
+simulator. It verifies every `Get` / `GetMany` proof against a **user-supplied
+expected root**. Without the root the UI cannot anchor trust — the server
+could return an internally-consistent but fabricated proof. Paste both the tip
+(location) and the matching root (hex) into the UI per query.
+
+In addition to the simulator running above:
+
+1. **Start the QMDB server** on port 8081
+
+   ```bash
+   cargo run --package exoware-qmdb --bin qmdb -- \
+     run --store-url http://127.0.0.1:8080
+   ```
+
+2. **Stream fresh batches** (keeps running; prints a `tip=N
+   current_root=0x..` line every few seconds). Local ordered-QMDB state
+   persists under `$HOME/.exoware_qmdb_seed` so ctrl-c / restart resumes where
+   the previous run left off; delete the directory to reset, or override the
+   location with `--directory`.
+
+   ```bash
+   cargo run --package exoware-qmdb --bin qmdb -- \
+     seed --store-url http://127.0.0.1:8080 --interval-secs 2
+   ```
+
+   Each line looks like:
+
+   ```
+   tip=14 current_root=0xb777..1064 historical_root=0x1a3d..cd7b
+   ```
+
+3. **Point the web app at the QMDB server**:
+
+   ```bash
+   VITE_QMDB_URL=http://127.0.0.1:8081 npm run dev
+   ```
+
+4. **In the UI**, paste a `tip` + matching root pair from the `seed` stream,
+   then pick a key (e.g. `k-00000000`):
+   - **Get Proof** verifies against `current_root` (paste into Expected Current
+     Root).
+   - **Get Multi-Proof** verifies against `historical_root` (paste into
+     Expected Historical Root).
+
+   The client-side verifier rejects any proof whose recomputed root doesn't
+   match the pasted anchor.
+
+Subscribe streams live matches and does not require an expected root — each
+batch's root is anchored by the stream's own `resumeSequenceNumber`.

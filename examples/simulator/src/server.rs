@@ -35,7 +35,7 @@ pub async fn run(
         .layer(CorsLayer::very_permissive());
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    info!(%addr, "store simulator listening");
+    info!(%addr, directory = %directory.display(), "store simulator listening");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())

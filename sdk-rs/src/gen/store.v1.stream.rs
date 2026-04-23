@@ -17,6 +17,19 @@ pub struct SubscribeRequest {
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
     pub match_keys: ::buffa::alloc::vec::Vec<super::super::common::v1::MatchKey>,
+    /// Optional value-side filter, AND'd with `match_keys`. OR semantics within
+    /// the list: once a row's key passes a `MatchKey`, it is delivered only if
+    /// its raw value bytes satisfy any one of `value_filters` (or the list is
+    /// empty).
+    ///
+    /// Field 2: `value_filters`
+    #[serde(
+        rename = "valueFilters",
+        alias = "value_filters",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
+        deserialize_with = "::buffa::json_helpers::null_as_default"
+    )]
+    pub value_filters: ::buffa::alloc::vec::Vec<super::super::common::v1::BytesFilter>,
     /// Optional replay cursor.
     ///
     /// Unset / 0 -\> subscription starts from the next live batch; no replay.
@@ -28,7 +41,7 @@ pub struct SubscribeRequest {
     /// `ErrorInfo { reason: "BATCH_EVICTED", metadata: { "oldest_retained": ... } }`
     /// detail so callers can decide how to proceed.
     ///
-    /// Field 2: `since_sequence_number`
+    /// Field 3: `since_sequence_number`
     #[serde(
         rename = "sinceSequenceNumber",
         alias = "since_sequence_number",
@@ -47,6 +60,7 @@ impl ::core::fmt::Debug for SubscribeRequest {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         f.debug_struct("SubscribeRequest")
             .field("match_keys", &self.match_keys)
+            .field("value_filters", &self.value_filters)
             .field("since_sequence_number", &self.since_sequence_number)
             .finish()
     }
@@ -83,6 +97,12 @@ impl ::buffa::Message for SubscribeRequest {
                 += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
                     + inner_size;
         }
+        for v in &self.value_filters {
+            let inner_size = v.compute_size();
+            size
+                += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
+                    + inner_size;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
         self.__buffa_cached_size.set(size);
         size
@@ -91,13 +111,22 @@ impl ::buffa::Message for SubscribeRequest {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         if let Some(v) = self.since_sequence_number {
-            ::buffa::encoding::Tag::new(2u32, ::buffa::encoding::WireType::Varint)
+            ::buffa::encoding::Tag::new(3u32, ::buffa::encoding::WireType::Varint)
                 .encode(buf);
             ::buffa::types::encode_uint64(v, buf);
         }
         for v in &self.match_keys {
             ::buffa::encoding::Tag::new(
                     1u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::encoding::encode_varint(v.cached_size() as u64, buf);
+            v.write_to(buf);
+        }
+        for v in &self.value_filters {
+            ::buffa::encoding::Tag::new(
+                    2u32,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )
                 .encode(buf);
@@ -117,10 +146,10 @@ impl ::buffa::Message for SubscribeRequest {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         match tag.field_number() {
-            2u32 => {
+            3u32 => {
                 if tag.wire_type() != ::buffa::encoding::WireType::Varint {
                     return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                        field_number: 2u32,
+                        field_number: 3u32,
                         expected: 0u8,
                         actual: tag.wire_type() as u8,
                     });
@@ -141,6 +170,18 @@ impl ::buffa::Message for SubscribeRequest {
                 ::buffa::Message::merge_length_delimited(&mut elem, buf, depth)?;
                 self.match_keys.push(elem);
             }
+            2u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 2u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                let mut elem = ::core::default::Default::default();
+                ::buffa::Message::merge_length_delimited(&mut elem, buf, depth)?;
+                self.value_filters.push(elem);
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
@@ -154,6 +195,7 @@ impl ::buffa::Message for SubscribeRequest {
     fn clear(&mut self) {
         self.since_sequence_number = ::core::option::Option::None;
         self.match_keys.clear();
+        self.value_filters.clear();
         self.__buffa_unknown_fields.clear();
         self.__buffa_cached_size.set(0);
     }
@@ -198,6 +240,16 @@ pub struct SubscribeRequestView<'a> {
         'a,
         super::super::common::v1::MatchKeyView<'a>,
     >,
+    /// Optional value-side filter, AND'd with `match_keys`. OR semantics within
+    /// the list: once a row's key passes a `MatchKey`, it is delivered only if
+    /// its raw value bytes satisfy any one of `value_filters` (or the list is
+    /// empty).
+    ///
+    /// Field 2: `value_filters`
+    pub value_filters: ::buffa::RepeatedView<
+        'a,
+        super::super::common::v1::BytesFilterView<'a>,
+    >,
     /// Optional replay cursor.
     ///
     /// Unset / 0 -\> subscription starts from the next live batch; no replay.
@@ -209,7 +261,7 @@ pub struct SubscribeRequestView<'a> {
     /// `ErrorInfo { reason: "BATCH_EVICTED", metadata: { "oldest_retained": ... } }`
     /// detail so callers can decide how to proceed.
     ///
-    /// Field 2: `since_sequence_number`
+    /// Field 3: `since_sequence_number`
     pub since_sequence_number: ::core::option::Option<u64>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
@@ -251,10 +303,10 @@ impl<'a> SubscribeRequestView<'a> {
             let before_tag = cur;
             let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
             match tag.field_number() {
-                2u32 => {
+                3u32 => {
                     if tag.wire_type() != ::buffa::encoding::WireType::Varint {
                         return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                            field_number: 2u32,
+                            field_number: 3u32,
                             expected: 0u8,
                             actual: tag.wire_type() as u8,
                         });
@@ -278,6 +330,26 @@ impl<'a> SubscribeRequestView<'a> {
                     view.match_keys
                         .push(
                             super::super::common::v1::MatchKeyView::_decode_depth(
+                                sub,
+                                depth - 1,
+                            )?,
+                        );
+                }
+                2u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 2u32,
+                            expected: 2u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    if depth == 0 {
+                        return Err(::buffa::DecodeError::RecursionLimitExceeded);
+                    }
+                    let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                    view.value_filters
+                        .push(
+                            super::super::common::v1::BytesFilterView::_decode_depth(
                                 sub,
                                 depth - 1,
                             )?,
@@ -311,6 +383,11 @@ impl<'a> ::buffa::MessageView<'a> for SubscribeRequestView<'a> {
         use ::buffa::alloc::string::ToString as _;
         SubscribeRequest {
             match_keys: self.match_keys.iter().map(|v| v.to_owned_message()).collect(),
+            value_filters: self
+                .value_filters
+                .iter()
+                .map(|v| v.to_owned_message())
+                .collect(),
             since_sequence_number: self.since_sequence_number,
             __buffa_unknown_fields: self
                 .__buffa_unknown_fields
