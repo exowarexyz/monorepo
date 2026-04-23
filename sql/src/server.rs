@@ -44,7 +44,9 @@ use exoware_sdk_rs::store::sql::v1::{
 };
 use exoware_sdk_rs::stream_filter::StreamFilter;
 use exoware_sdk_rs::{StoreClient, StreamSubscription};
+use futures::future::BoxFuture;
 use futures::stream::Stream;
+use futures::FutureExt;
 
 use crate::builder::{projected_column_indices, ProjectedBatchBuilder};
 use crate::codec::decode_primary_key_selected;
@@ -167,6 +169,7 @@ impl SqlServer {
         &self.ctx
     }
 
+    #[allow(clippy::result_large_err)]
     fn stream(&self, table: &str) -> Result<&TableStream, ConnectError> {
         self.streams.get(table).ok_or_else(|| {
             ConnectError::not_found(format!("unknown table '{table}'"))
@@ -347,9 +350,7 @@ struct BatchPredicateStream {
     state: TableStream,
     table_name: String,
     where_sql: String,
-    building: Option<
-        Pin<Box<dyn Future<Output = Result<Option<SubscribeResponse>, ConnectError>> + Send>>,
-    >,
+    building: Option<BoxFuture<'static, Result<Option<SubscribeResponse>, ConnectError>>>,
 }
 
 impl BatchPredicateStream {
@@ -419,9 +420,12 @@ impl Stream for BatchPredicateStream {
             let state = this.state.clone();
             let table_name = this.table_name.clone();
             let where_sql = this.where_sql.clone();
-            this.building = Some(Box::pin(async move {
-                evaluate_batch(state, table_name, where_sql, sequence_number, entries).await
-            }));
+            this.building = Some(
+                async move {
+                    evaluate_batch(state, table_name, where_sql, sequence_number, entries).await
+                }
+                .boxed(),
+            );
         }
     }
 }
@@ -505,7 +509,7 @@ fn record_batches_to_proto_rows(batches: &[RecordBatch]) -> DataFusionResult<Vec
 
 fn arrow_value_to_cell(array: &ArrayRef, row: usize) -> DataFusionResult<ProtoCell> {
     let kind = if array.is_null(row) {
-        ProtoCellKind::NullValue(Box::new(ProtoNull::default()))
+        ProtoCellKind::NullValue(Box::<ProtoNull>::default())
     } else {
         arrow_value_to_kind(array, row)?
     };
