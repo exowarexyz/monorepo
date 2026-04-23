@@ -67,7 +67,7 @@ pub(crate) fn compile_matchers(filter: &StreamFilter) -> Result<CompiledMatchers
 pub(crate) fn apply_filter(matchers: &CompiledMatchers, kvs: &[(Bytes, Bytes)]) -> Vec<KvEntry> {
     let mut out = Vec::with_capacity(kvs.len());
     'outer: for (k, v) in kvs {
-        let value_ok = matchers.values.as_ref().map_or(true, |m| m.matches(v));
+        let value_ok = matchers.values.as_ref().is_none_or(|m| m.matches(v));
         if !value_ok {
             continue;
         }

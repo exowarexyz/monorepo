@@ -69,7 +69,7 @@ jobs:
       - name: Install wasm-pack + wasm-bindgen-cli
         uses: taiki-e/install-action@v2
         with:
-          tool: wasm-pack@0.13.1,wasm-bindgen-cli
+          tool: wasm-pack@0.13.1,wasm-bindgen-cli@0.2.117
       - name: Install sdk-ts dependencies
         run: cd sdk-ts && npm ci
       - name: Build sdk-ts

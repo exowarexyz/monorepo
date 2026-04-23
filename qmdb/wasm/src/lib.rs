@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 use crate::proto::store::qmdb::v1::{
     CurrentKeyValueProof, CurrentKeyValueProofView, HistoricalMultiProof, HistoricalMultiProofView,
 };
@@ -17,6 +19,7 @@ use commonware_storage::{
 use js_sys::{Array, BigInt, Object, Reflect, Uint8Array};
 use wasm_bindgen::prelude::*;
 
+#[allow(dead_code)]
 mod proto {
     pub mod store {
         pub mod common {
