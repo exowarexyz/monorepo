@@ -4,7 +4,7 @@
   "version": "2026.4.0",
   "type": "module",
   "scripts": {
-    "postinstall": "npm --prefix ../../sdk-ts install && npm --prefix ../../sdk-ts run build && npm --prefix ../../qmdb/ts install && npm --prefix ../../qmdb/ts run build:wasm",
+    "postinstall": "npm --prefix ../../sdk-ts install && npm --prefix ../../sdk-ts run build && npm --prefix ../../qmdb/ts install && npm --prefix ../../qmdb/ts run build:wasm && npm --prefix ../../sql/ts install && npm --prefix ../../sql/ts run build",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",

@@ -2421,6 +2421,7 @@ dependencies = [
  "axum",
  "buffa",
  "bytes",
+ "clap",
  "commonware-codec",
  "connectrpc",
  "criterion 0.5.1",
@@ -2433,8 +2434,13 @@ dependencies = [
  "regex",
  "reqwest",
  "serde",
+ "serde_json",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
+ "tower-http 0.5.2",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

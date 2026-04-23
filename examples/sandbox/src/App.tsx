@@ -10,6 +10,7 @@ import {
 import { Buffer } from 'buffer';
 import './App.css';
 import { QMDB_URL, QmdbPanel } from './QmdbPanel';
+import { SQL_URL, SqlPanel } from './SqlPanel';
 
 const MAX_STREAM_EVENTS = 10;
 
@@ -653,6 +654,7 @@ function App() {
       </div>
 
       {QMDB_URL && <QmdbPanel qmdbUrl={QMDB_URL} showNotification={showNotification} />}
+      {SQL_URL && <SqlPanel sqlUrl={SQL_URL} showNotification={showNotification} />}
     </div>
   );
 }

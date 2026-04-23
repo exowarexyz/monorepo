@@ -120,7 +120,9 @@
 }
 
 input[type="text"],
-input[type="number"] {
+input[type="number"],
+textarea,
+select {
   width: 100%;
   padding: 0.75rem;
   border: 1px solid #d1d5db;
@@ -129,18 +131,122 @@ input[type="number"] {
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
   background: #fff;
   color: #111827;
+  font-family: inherit;
+}
+
+textarea {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  resize: vertical;
+  min-height: 6rem;
 }
 
 input[type="text"]:focus,
-input[type="number"]:focus {
+input[type="number"]:focus,
+textarea:focus,
+select:focus {
   outline: none;
   border-color: #000;
   box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.1);
 }
 
 input[type="text"]::placeholder,
-input[type="number"]::placeholder {
+input[type="number"]::placeholder,
+textarea::placeholder {
   color: #9ca3af;
+}
+
+/* Schema catalog boxes in the SQL panel */
+.schema-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-top: 0.25rem;
+}
+
+.schema-table {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 0.875rem 1rem;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.8125rem;
+}
+
+.schema-table-name {
+  font-weight: 600;
+  color: #0f172a;
+  margin-bottom: 0.5rem;
+  font-size: 0.875rem;
+  letter-spacing: -0.01em;
+}
+
+.schema-columns {
+  display: grid;
+  grid-template-columns: minmax(6rem, auto) 1fr auto;
+  gap: 0.125rem 0.75rem;
+  margin-bottom: 0.5rem;
+  color: #1e293b;
+}
+
+.schema-column-name {
+  color: #0f172a;
+  font-weight: 500;
+}
+
+.schema-column-name.is-pk::after {
+  content: " 🔑";
+  font-size: 0.75rem;
+}
+
+.schema-column-type {
+  color: #475569;
+}
+
+.schema-column-null {
+  color: #94a3b8;
+  font-size: 0.75rem;
+  align-self: center;
+}
+
+.schema-section-label {
+  font-family: inherit;
+  color: #475569;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 0.5rem 0 0.25rem 0;
+}
+
+.schema-indexes {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.schema-index {
+  color: #0f172a;
+}
+
+.schema-index-name {
+  font-weight: 500;
+}
+
+.schema-index-badge {
+  display: inline-block;
+  padding: 0 0.4rem;
+  margin-left: 0.35rem;
+  border-radius: 4px;
+  background: #f1f5f9;
+  color: #475569;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.schema-index-detail {
+  color: #475569;
 }
 
 /* Buttons */

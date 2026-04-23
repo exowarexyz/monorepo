@@ -14,6 +14,9 @@
     "paths": {
       "@qmdb-ts": [
         "../../qmdb/ts/src/index.ts"
+      ],
+      "@sql-ts": [
+        "../../sql/ts/src/index.ts"
       ]
     },
     /* Bundler mode */
