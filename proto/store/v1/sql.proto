@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package store.sql.v1;
+
+import "buf/validate/validate.proto";
+
+// Streaming SQL predicate service over a server-side `KvSchema`.
+//
+// The server registers a fixed set of SQL tables at startup (schema lives on
+// the server, not the wire). Each RPC names one of those tables.
+service Service {
+  // Re-run a SQL WHERE predicate against every incoming batch that touches
+  // `table`'s primary-key codec family. Emits one `SubscribeResponse` per
+  // matched batch containing just the rows that satisfied the predicate.
+  rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
+
+  // Ad-hoc unary SQL against the server-side session. Useful for inspecting
+  // the current table state alongside the live subscription.
+  rpc Query(QueryRequest) returns (QueryResponse);
+}
+
+// Stream every batch whose rows match `where_sql`.
+message SubscribeRequest {
+  // Table name registered in the server-side `KvSchema`.
+  string table = 1
+    [(buf.validate.field).string.min_len = 1,
+     (buf.validate.field).string.max_len = 255];
+
+  // SQL boolean predicate evaluated against the decoded rows from each
+  // incoming batch (no `WHERE` keyword). Empty means "emit every decoded
+  // row". Bounded to keep server-side compile cost predictable.
+  string where_sql = 2
+    [(buf.validate.field).string.max_len = 4096];
+
+  // Resume cursor over the underlying store batch log. Use
+  // `SubscribeResponse.sequence_number + 1` to resume after a disconnect.
+  optional uint64 since_sequence_number = 3;
+}
+
+// Rows from one atomic ingest batch that matched the subscriber's predicate.
+message SubscribeResponse {
+  // Underlying store batch sequence that produced these rows. Always
+  // monotonically increasing; unique per delivered frame.
+  uint64 sequence_number = 1;
+  // Column names in `rows[].cells` order.
+  repeated string column = 2;
+  // Rows that satisfied `where_sql` from this batch. Empty frames are not
+  // delivered.
+  repeated Row rows = 3;
+}
+
+// Ad-hoc SQL statement.
+message QueryRequest {
+  string sql = 1
+    [(buf.validate.field).string.min_len = 1,
+     (buf.validate.field).string.max_len = 65535];
+}
+
+// Result set from `Query`.
+message QueryResponse {
+  repeated string column = 1;
+  repeated Row rows = 2;
+}
+
+// Typed row. `cells[i]` aligns with `column[i]` in the parent message.
+message Row {
+  repeated Cell cells = 1;
+}
+
+// Typed scalar for one row cell. NULL cells leave `kind` unset.
+message Cell {
+  oneof kind {
+    int64 int64_value = 1;
+    double float64_value = 2;
+    bool boolean_value = 3;
+    string utf8_value = 4;
+    bytes bytes_value = 5;
+  }
+}

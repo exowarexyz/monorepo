@@ -36,6 +36,8 @@ Explore the Exoware API.
 - **Store:** set and get key-value pairs, and run range queries.
 - **Ordered QMDB** (optional, requires `VITE_QMDB_URL`): current/historical
   proofs and live subscribe streaming.
+- **SQL** (optional, requires `VITE_SQL_URL`): run ad-hoc SQL queries and
+  subscribe to a SQL WHERE predicate evaluated per ingested batch.
 
 ## Ordered QMDB panel
 
@@ -90,3 +92,42 @@ In addition to the simulator running above:
 
 Subscribe streams live matches and does not require an expected root — each
 batch's root is anchored by the stream's own `resumeSequenceNumber`.
+
+## SQL panel
+
+The SQL panel is only rendered when `VITE_SQL_URL` is set. It hosts a thin
+Connect client for `store.sql.v1.Service` served by a separate binary that
+owns a `KvSchema` + DataFusion session.
+
+In addition to the simulator running above:
+
+1. **Start the SQL server** on port 8082
+
+   ```bash
+   cargo run --package exoware-sql --bin sql -- \
+     run --store-url http://127.0.0.1:8080
+   ```
+
+2. **Seed rows** (keeps running; every `--interval-secs` it inserts 5 orders
+   into `orders_kv` via `INSERT ... VALUES`). The server decodes each ingest
+   batch and re-runs the subscriber's SQL WHERE predicate against just those
+   rows, emitting one frame per matching batch.
+
+   ```bash
+   cargo run --package exoware-sql --bin sql -- \
+     seed --store-url http://127.0.0.1:8080 --interval-secs 2
+   ```
+
+3. **Point the web app at the SQL server**:
+
+   ```bash
+   VITE_SQL_URL=http://127.0.0.1:8082 npm run dev
+   ```
+
+4. **In the UI**:
+   - **Run Query** executes arbitrary SQL against the server's DataFusion
+     session (e.g. aggregates over `orders_kv`).
+   - **Start Subscribe** streams rows per ingest batch that satisfy the
+     given WHERE predicate. Leave the predicate empty to emit every decoded
+     row. Paste `SubscribeResponse.sequence_number + 1` into Since Sequence
+     to resume.

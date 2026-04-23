@@ -123,6 +123,23 @@ export {
     SubscribeRequestSchema as QmdbSubscribeRequestSchema,
     SubscribeResponseSchema as QmdbSubscribeResponseSchema,
 } from './gen/ts/store/v1/qmdb_pb.js';
+export {
+    CellSchema,
+    QueryRequestSchema as SqlQueryRequestSchema,
+    QueryResponseSchema as SqlQueryResponseSchema,
+    RowSchema as SqlRowSchema,
+    Service as SqlService,
+    SubscribeRequestSchema as SqlSubscribeRequestSchema,
+    SubscribeResponseSchema as SqlSubscribeResponseSchema,
+} from './gen/ts/store/v1/sql_pb.js';
+export type {
+    Cell as SqlCell,
+    QueryRequest as SqlQueryRequest,
+    QueryResponse as SqlQueryResponse,
+    Row as SqlRow,
+    SubscribeRequest as SqlSubscribeRequest,
+    SubscribeResponse as SqlSubscribeResponse,
+} from './gen/ts/store/v1/sql_pb.js';
 export type {
     CurrentKeyValueProof,
     CurrentRangeProof,

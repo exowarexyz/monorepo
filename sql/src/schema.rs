@@ -118,6 +118,14 @@ impl KvSchema {
         self.tables.len()
     }
 
+    pub(crate) fn client(&self) -> &StoreClient {
+        &self.client
+    }
+
+    pub(crate) fn tables(&self) -> &[(String, KvTableConfig)] {
+        &self.tables
+    }
+
     pub fn register_all(self, ctx: &SessionContext) -> DataFusionResult<()> {
         let _ = ctx.remove_optimizer_rule("kv_aggregate_pushdown");
         ctx.add_optimizer_rule(Arc::new(KvAggregatePushdownRule::new()));

@@ -1,4 +1,5 @@
 pub mod prune;
+pub mod server;
 
 mod aggregate;
 mod builder;
@@ -12,6 +13,7 @@ mod types;
 mod writer;
 
 pub use schema::KvSchema;
+pub use server::{sql_connect_stack, SqlConnect, SqlServer};
 pub use types::default_orders_index_specs;
 pub use types::{
     CellValue, IndexBackfillEvent, IndexBackfillOptions, IndexBackfillReport, IndexLayout,
