@@ -63,9 +63,9 @@ enum Command {
         interval_secs: u64,
         /// Persistent directory for the local ordered-QMDB state. Reusing the
         /// same directory across restarts preserves the write log; deleting it
-        /// resets the demo.
+        /// resets the demo. Defaults to `$HOME/.exoware_qmdb_seed_continuous`.
         #[arg(long)]
-        directory: PathBuf,
+        directory: Option<PathBuf>,
     },
 }
 
@@ -267,11 +267,24 @@ async fn seed_demo(store_url: &str) -> Result<(), Box<dyn std::error::Error + Se
     Ok(())
 }
 
+fn default_seed_continuous_directory() -> PathBuf {
+    let home = std::env::var("HOME").expect("$HOME is not configured");
+    PathBuf::from(format!("{home}/.exoware_qmdb_seed_continuous"))
+}
+
 async fn seed_continuous(
     store_url: &str,
     interval_secs: u64,
-    directory: PathBuf,
+    directory: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let directory = directory.unwrap_or_else(default_seed_continuous_directory);
+    info!(
+        directory = %directory.display(),
+        store_url,
+        interval_secs,
+        "starting seed-continuous"
+    );
+
     let store = StoreClient::new(store_url);
     let reader = OrderedClient::<Sha256, Vec<u8>, Vec<u8>, N>::from_client(
         store.clone(),
