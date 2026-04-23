@@ -34,6 +34,7 @@ use regex::bytes::Regex;
 use crate::proof::{
     RawBatchMultiProof, RawCurrentRangeProof, RawKeyValueProof, RawMmrProof, RawMultiProof,
 };
+use crate::auth::AuthenticatedBackendNamespace;
 use crate::subscription::{self as sub, Classify, Family};
 use crate::{ImmutableClient, KeylessClient, OrderedClient, QmdbError, UnorderedClient};
 
@@ -342,12 +343,16 @@ where
     Ok((!matcher.is_empty()).then_some(matcher))
 }
 
-/// Closure invoked per operation in each streamed batch. Returns the decoded
-/// key or value bytes, or `None` when the op has no key/value of that shape.
-type ExtractBytes =
-    Arc<dyn Fn(Location, &[u8]) -> Result<Option<Vec<u8>>, QmdbError> + Send + Sync + 'static>;
+/// Decodes one streamed operation into its (optional key, optional value)
+/// byte view. Combined so we decode the op once even when both filters are
+/// active.
+type ExtractKv = Arc<
+    dyn Fn(Location, &[u8]) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>), QmdbError>
+        + Send
+        + Sync
+        + 'static,
+>;
 
-/// Closure invoked once per ready batch to produce the multi-proof future.
 type BuildBatchProof<D> = Arc<
     dyn Fn(
             u64,
@@ -359,12 +364,18 @@ type BuildBatchProof<D> = Arc<
         + 'static,
 >;
 
+fn matcher_passes(matcher: &Option<BytesMatcher>, bytes: Option<&[u8]>) -> bool {
+    match matcher {
+        None => true,
+        Some(m) => bytes.map(|b| m.matches(b)).unwrap_or(false),
+    }
+}
+
 struct BatchSubscribeStream<D: commonware_cryptography::Digest> {
     key_matcher: Option<BytesMatcher>,
     value_matcher: Option<BytesMatcher>,
     classify: Classify,
-    extract_key: ExtractBytes,
-    extract_value: ExtractBytes,
+    extract_kv: ExtractKv,
     build_proof: BuildBatchProof<D>,
     sub: exoware_sdk_rs::StreamSubscription,
     pending: BTreeMap<Location, PendingBatch>,
@@ -378,8 +389,7 @@ impl<D: commonware_cryptography::Digest> BatchSubscribeStream<D> {
         key_matcher: Option<BytesMatcher>,
         value_matcher: Option<BytesMatcher>,
         classify: Classify,
-        extract_key: ExtractBytes,
-        extract_value: ExtractBytes,
+        extract_kv: ExtractKv,
         build_proof: BuildBatchProof<D>,
         sub: exoware_sdk_rs::StreamSubscription,
     ) -> Self {
@@ -387,8 +397,7 @@ impl<D: commonware_cryptography::Digest> BatchSubscribeStream<D> {
             key_matcher,
             value_matcher,
             classify,
-            extract_key,
-            extract_value,
+            extract_kv,
             build_proof,
             sub,
             pending: BTreeMap::new(),
@@ -405,6 +414,7 @@ impl<D: commonware_cryptography::Digest> BatchSubscribeStream<D> {
         let mut saw_operation = false;
         let mut latest: Option<Location> = None;
         let mut matched: Vec<(Location, Vec<u8>)> = Vec::new();
+        let needs_decode = self.key_matcher.is_some() || self.value_matcher.is_some();
 
         for entry in &frame.entries {
             let Some((family, location)) = (self.classify)(&entry.key, entry.value.as_ref()) else {
@@ -413,22 +423,15 @@ impl<D: commonware_cryptography::Digest> BatchSubscribeStream<D> {
             match family {
                 Family::Op => {
                     saw_operation = true;
-                    let key_ok = match &self.key_matcher {
-                        None => true,
-                        Some(matcher) => (self.extract_key)(location, entry.value.as_ref())
-                            .map_err(qmdb_error_to_connect)?
-                            .map(|k| matcher.matches(&k))
-                            .unwrap_or(false),
+                    let include = if needs_decode {
+                        let (key, value) = (self.extract_kv)(location, entry.value.as_ref())
+                            .map_err(qmdb_error_to_connect)?;
+                        matcher_passes(&self.key_matcher, key.as_deref())
+                            && matcher_passes(&self.value_matcher, value.as_deref())
+                    } else {
+                        true
                     };
-                    let value_ok = key_ok
-                        && match &self.value_matcher {
-                            None => true,
-                            Some(matcher) => (self.extract_value)(location, entry.value.as_ref())
-                                .map_err(qmdb_error_to_connect)?
-                                .map(|v| matcher.matches(&v))
-                                .unwrap_or(false),
-                        };
-                    if key_ok && value_ok {
+                    if include {
                         matched.push((location, entry.value.to_vec()));
                     }
                 }
@@ -623,17 +626,13 @@ where
             let key_matcher = parse_bytes_filters(request.key_filters.iter(), "key")?;
             let value_matcher = parse_bytes_filters(request.value_filters.iter(), "value")?;
             let since = decode_since(request.since_sequence_number);
-            let (classify, filter) = sub::ordered_classify_and_filter();
+            let (classify, filter) = sub::classify_and_filter(None);
             let sub = sub::open_store_subscription(client.store_client(), filter, since)
                 .await
                 .map_err(qmdb_error_to_connect)?;
-            let extract_key: ExtractBytes = {
+            let extract_kv: ExtractKv = {
                 let client = client.clone();
-                Arc::new(move |location, bytes| client.extract_operation_key(location, bytes))
-            };
-            let extract_value: ExtractBytes = {
-                let client = client.clone();
-                Arc::new(move |location, bytes| client.extract_operation_value(location, bytes))
+                Arc::new(move |location, bytes| client.extract_operation_kv(location, bytes))
             };
             let build_proof: BuildBatchProof<H::Digest> = {
                 let client = client.clone();
@@ -651,8 +650,7 @@ where
                 key_matcher,
                 value_matcher,
                 classify,
-                extract_key,
-                extract_value,
+                extract_kv,
                 build_proof,
                 sub,
             ));
@@ -678,17 +676,13 @@ where
             let key_matcher = parse_bytes_filters(request.key_filters.iter(), "key")?;
             let value_matcher = parse_bytes_filters(request.value_filters.iter(), "value")?;
             let since = decode_since(request.since_sequence_number);
-            let (classify, filter) = sub::unordered_classify_and_filter();
+            let (classify, filter) = sub::classify_and_filter(None);
             let sub = sub::open_store_subscription(client.store_client(), filter, since)
                 .await
                 .map_err(qmdb_error_to_connect)?;
-            let extract_key: ExtractBytes = {
+            let extract_kv: ExtractKv = {
                 let client = client.clone();
-                Arc::new(move |location, bytes| client.extract_operation_key(location, bytes))
-            };
-            let extract_value: ExtractBytes = {
-                let client = client.clone();
-                Arc::new(move |location, bytes| client.extract_operation_value(location, bytes))
+                Arc::new(move |location, bytes| client.extract_operation_kv(location, bytes))
             };
             let build_proof: BuildBatchProof<H::Digest> = {
                 let client = client.clone();
@@ -706,8 +700,7 @@ where
                 key_matcher,
                 value_matcher,
                 classify,
-                extract_key,
-                extract_value,
+                extract_kv,
                 build_proof,
                 sub,
             ));
@@ -739,17 +732,14 @@ where
             let key_matcher = parse_bytes_filters(request.key_filters.iter(), "key")?;
             let value_matcher = parse_bytes_filters(request.value_filters.iter(), "value")?;
             let since = decode_since(request.since_sequence_number);
-            let (classify, filter) = sub::immutable_classify_and_filter();
+            let (classify, filter) =
+                sub::classify_and_filter(Some(AuthenticatedBackendNamespace::Immutable));
             let sub = sub::open_store_subscription(client.store_client(), filter, since)
                 .await
                 .map_err(qmdb_error_to_connect)?;
-            let extract_key: ExtractBytes = {
+            let extract_kv: ExtractKv = {
                 let client = client.clone();
-                Arc::new(move |location, bytes| client.extract_operation_key(location, bytes))
-            };
-            let extract_value: ExtractBytes = {
-                let client = client.clone();
-                Arc::new(move |location, bytes| client.extract_operation_value(location, bytes))
+                Arc::new(move |location, bytes| client.extract_operation_kv(location, bytes))
             };
             let build_proof: BuildBatchProof<H::Digest> = {
                 let client = client.clone();
@@ -767,8 +757,7 @@ where
                 key_matcher,
                 value_matcher,
                 classify,
-                extract_key,
-                extract_value,
+                extract_kv,
                 build_proof,
                 sub,
             ));
@@ -797,15 +786,14 @@ where
             }
             let value_matcher = parse_bytes_filters(request.value_filters.iter(), "value")?;
             let since = decode_since(request.since_sequence_number);
-            let (classify, filter) = sub::keyless_classify_and_filter();
+            let (classify, filter) =
+                sub::classify_and_filter(Some(AuthenticatedBackendNamespace::Keyless));
             let sub = sub::open_store_subscription(client.store_client(), filter, since)
                 .await
                 .map_err(qmdb_error_to_connect)?;
-            let extract_key: ExtractBytes =
-                Arc::new(|_location, _bytes| Ok::<Option<Vec<u8>>, QmdbError>(None));
-            let extract_value: ExtractBytes = {
+            let extract_kv: ExtractKv = {
                 let client = client.clone();
-                Arc::new(move |location, bytes| client.extract_operation_value(location, bytes))
+                Arc::new(move |location, bytes| client.extract_operation_kv(location, bytes))
             };
             let build_proof: BuildBatchProof<H::Digest> = {
                 let client = client.clone();
@@ -823,8 +811,7 @@ where
                 None,
                 value_matcher,
                 classify,
-                extract_key,
-                extract_value,
+                extract_kv,
                 build_proof,
                 sub,
             ));

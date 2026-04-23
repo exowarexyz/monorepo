@@ -49,11 +49,11 @@ where
         &self.client
     }
 
-    pub(crate) fn extract_operation_value(
+    pub(crate) fn extract_operation_kv(
         &self,
         location: Location,
         bytes: &[u8],
-    ) -> Result<Option<Vec<u8>>, QmdbError>
+    ) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>), QmdbError>
     where
         V: AsRef<[u8]>,
     {
@@ -62,11 +62,12 @@ where
                 "failed to decode keyless operation at location {location}: {e}"
             ))
         })?;
-        Ok(match op {
+        let value = match &op {
             KeylessOperation::Append(value) => Some(value.as_ref().to_vec()),
             KeylessOperation::Commit(Some(value)) => Some(value.as_ref().to_vec()),
             KeylessOperation::Commit(None) => None,
-        })
+        };
+        Ok((None, value))
     }
 
     pub async fn writer_location_watermark(&self) -> Result<Option<Location>, QmdbError> {

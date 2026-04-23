@@ -74,24 +74,11 @@ where
         &self.client
     }
 
-    pub(crate) fn extract_operation_key(
+    pub(crate) fn extract_operation_kv(
         &self,
         location: Location,
         bytes: &[u8],
-    ) -> Result<Option<Vec<u8>>, QmdbError> {
-        let op = UnorderedQmdbOperation::<K, V>::decode_cfg(bytes, &self.op_cfg).map_err(|e| {
-            QmdbError::CorruptData(format!(
-                "failed to decode unordered operation at location {location}: {e}"
-            ))
-        })?;
-        Ok(op.key().map(|k| <K as AsRef<[u8]>>::as_ref(k).to_vec()))
-    }
-
-    pub(crate) fn extract_operation_value(
-        &self,
-        location: Location,
-        bytes: &[u8],
-    ) -> Result<Option<Vec<u8>>, QmdbError>
+    ) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>), QmdbError>
     where
         V: AsRef<[u8]>,
     {
@@ -100,13 +87,15 @@ where
                 "failed to decode unordered operation at location {location}: {e}"
             ))
         })?;
-        Ok(match op {
+        let key = op.key().map(|k| <K as AsRef<[u8]>>::as_ref(k).to_vec());
+        let value = match &op {
             UnorderedQmdbOperation::Update(update) => Some(update.1.as_ref().to_vec()),
             UnorderedQmdbOperation::CommitFloor(Some(value), _) => Some(value.as_ref().to_vec()),
             UnorderedQmdbOperation::Delete(_) | UnorderedQmdbOperation::CommitFloor(None, _) => {
                 None
             }
-        })
+        };
+        Ok((key, value))
     }
 
     pub async fn writer_location_watermark(&self) -> Result<Option<Location>, QmdbError> {

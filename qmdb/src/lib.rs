@@ -200,5 +200,3 @@ pub struct CurrentBoundaryState<D: Digest, const N: usize> {
     /// Changed grafted-MMR digests keyed by ops-space MMR position.
     pub grafted_nodes: Vec<(commonware_storage::mmr::Position, D)>,
 }
-
-// Keep test module inline since it tests the full integrated stack.

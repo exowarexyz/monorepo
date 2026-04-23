@@ -556,20 +556,9 @@ export class StoreClient {
     }
 
     async *subscribe(
-        filters: SubscribeFilters | MessageInitShape<typeof MatchKeySchema>[],
-        sinceOrOptions?: bigint | CallOptions,
-        maybeOptions?: CallOptions,
+        filters: SubscribeFilters,
+        options?: CallOptions,
     ): AsyncIterable<StoreBatch> {
-        // Back-compat: allow `subscribe(matchKeys, sinceSequenceNumber?, options?)`.
-        const resolved: SubscribeFilters = Array.isArray(filters)
-            ? {
-                  matchKeys: filters,
-                  sinceSequenceNumber:
-                      typeof sinceOrOptions === 'bigint' ? sinceOrOptions : undefined,
-              }
-            : filters;
-        const opts =
-            typeof sinceOrOptions === 'bigint' ? maybeOptions : (sinceOrOptions as CallOptions | undefined);
-        yield* performSubscribe(this.client, resolved, opts);
+        yield* performSubscribe(this.client, filters, options);
     }
 }

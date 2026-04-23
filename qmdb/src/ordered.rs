@@ -164,29 +164,22 @@ where
         })
     }
 
-    pub(crate) fn extract_operation_key(
+    pub(crate) fn extract_operation_kv(
         &self,
         location: Location,
         bytes: &[u8],
-    ) -> Result<Option<Vec<u8>>, QmdbError> {
-        let op = self.decode_operation_bytes(location, bytes)?;
-        Ok(op.key().map(|k| <K as AsRef<[u8]>>::as_ref(k).to_vec()))
-    }
-
-    pub(crate) fn extract_operation_value(
-        &self,
-        location: Location,
-        bytes: &[u8],
-    ) -> Result<Option<Vec<u8>>, QmdbError>
+    ) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>), QmdbError>
     where
         V: AsRef<[u8]>,
     {
         let op = self.decode_operation_bytes(location, bytes)?;
-        Ok(match op {
+        let key = op.key().map(|k| <K as AsRef<[u8]>>::as_ref(k).to_vec());
+        let value = match &op {
             QmdbOperation::Update(update) => Some(update.value.as_ref().to_vec()),
             QmdbOperation::CommitFloor(Some(value), _) => Some(value.as_ref().to_vec()),
             QmdbOperation::Delete(_) | QmdbOperation::CommitFloor(None, _) => None,
-        })
+        };
+        Ok((key, value))
     }
 
     async fn multi_proof_raw_in_session<Q: AsRef<[u8]>>(
