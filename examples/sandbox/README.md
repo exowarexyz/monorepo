@@ -54,11 +54,16 @@ In addition to the simulator running above:
    ```
 
 2. **Stream fresh batches** (keeps running; prints a `watermark=N
-   current_root=0x..` line every few seconds)
+   current_root=0x..` line every few seconds). The `--directory` holds the
+   local ordered-QMDB state so ctrl-c / restart resumes where the previous run
+   left off. Delete the directory to reset.
 
    ```bash
    cargo run --package exoware-qmdb --bin qmdb -- \
-     seed-continuous --store-url http://127.0.0.1:8080 --interval-secs 2
+     seed-continuous \
+     --store-url http://127.0.0.1:8080 \
+     --interval-secs 2 \
+     --directory ~/.exoware_qmdb_continuous
    ```
 
    Each line looks like:

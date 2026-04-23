@@ -1,5 +1,6 @@
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU64;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::{routing::get, Router};
@@ -60,6 +61,11 @@ enum Command {
         store_url: String,
         #[arg(long, default_value_t = 2)]
         interval_secs: u64,
+        /// Persistent directory for the local ordered-QMDB state. Reusing the
+        /// same directory across restarts preserves the write log; deleting it
+        /// resets the demo.
+        #[arg(long)]
+        directory: PathBuf,
     },
 }
 
@@ -264,6 +270,7 @@ async fn seed_demo(store_url: &str) -> Result<(), Box<dyn std::error::Error + Se
 async fn seed_continuous(
     store_url: &str,
     interval_secs: u64,
+    directory: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let store = StoreClient::new(store_url);
     let reader = OrderedClient::<Sha256, Vec<u8>, Vec<u8>, N>::from_client(
@@ -271,10 +278,10 @@ async fn seed_continuous(
         op_cfg(),
         update_row_cfg(),
     );
-    let writer = OrderedWriter::<Sha256, Vec<u8>, Vec<u8>, N>::empty(store);
 
     tokio::task::spawn_blocking(move || {
-        cw_tokio::Runner::default().start(|context| async move {
+        let runner_cfg = cw_tokio::Config::new().with_storage_directory(directory);
+        cw_tokio::Runner::new(runner_cfg).start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
 
             let cfg = VariableConfig {
@@ -299,8 +306,44 @@ async fn seed_continuous(
                 .await
                 .expect("init local ordered db");
 
-            let mut previous_ops: Vec<BatchOperation> = Vec::new();
-            let mut counter: u64 = 0;
+            let bounds = db.bounds().await;
+            let (mut previous_ops, mut counter, writer) = if *bounds.end == 0 {
+                info!("starting from empty local DB");
+                let writer = OrderedWriter::<Sha256, Vec<u8>, Vec<u8>, N>::empty(store);
+                (Vec::<BatchOperation>::new(), 0u64, writer)
+            } else {
+                let latest = bounds.end - 1;
+                let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");
+                let (proof, cumulative) = db
+                    .ops_historical_proof(latest + 1, Location::new(0), count)
+                    .await
+                    .expect(
+                        "resume: failed to load cumulative ops from local DB; \
+                             delete the directory to reset",
+                    );
+                let commit_count = cumulative
+                    .iter()
+                    .filter(|op| matches!(op, BatchOperation::CommitFloor(_, _)))
+                    .count();
+                let batches_so_far = (commit_count as u64).saturating_sub(1);
+                let counter = batches_so_far * 3;
+                let writer_state = store_qmdb::WriterState::from_proof::<Sha256, _>(
+                    latest,
+                    Location::new(0),
+                    &proof,
+                    &cumulative,
+                )
+                .expect("resume: reconstruct writer state");
+                info!(
+                    watermark = *latest,
+                    batches = batches_so_far,
+                    next_key_index = counter,
+                    "resuming from persisted local DB",
+                );
+                let writer = OrderedWriter::<Sha256, Vec<u8>, Vec<u8>, N>::new(store, writer_state);
+                (cumulative, counter, writer)
+            };
+
             let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -369,7 +412,6 @@ async fn seed_continuous(
             }
 
             db.sync().await.expect("sync local ordered db");
-            db.destroy().await.expect("destroy local ordered db");
         })
     })
     .await?;
@@ -399,7 +441,8 @@ async fn main() -> std::process::ExitCode {
         Command::SeedContinuous {
             store_url,
             interval_secs,
-        } => seed_continuous(&store_url, interval_secs).await,
+            directory,
+        } => seed_continuous(&store_url, interval_secs, directory).await,
     };
 
     match result {

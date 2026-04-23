@@ -460,15 +460,46 @@ export function QmdbPanel({ showNotification }: { showNotification: Notification
             <p>No proof events yet</p>
           ) : (
             <div className="result-list">
-              {events.map((event, index) => (
-                <div
-                  key={`${event.resumeSequenceNumber.toString()}-${index}`}
-                  className="result-row-block"
-                >
-                  <p><strong>Resume Sequence:</strong> {event.resumeSequenceNumber.toString()}</p>
-                  <p><strong>Operations:</strong> {event.proof.operations.length}</p>
-                </div>
-              ))}
+              {events.map((event, index) => {
+                const ops = event.proof.operations;
+                const locations = ops.map((op) => op.location);
+                const minLoc = locations.reduce((a, b) => (a < b ? a : b), locations[0] ?? 0n);
+                const maxLoc = locations.reduce((a, b) => (a > b ? a : b), locations[0] ?? 0n);
+                const locationRange =
+                  ops.length === 0
+                    ? '(none)'
+                    : minLoc === maxLoc
+                      ? minLoc.toString()
+                      : `${minLoc.toString()}-${maxLoc.toString()}`;
+                return (
+                  <div
+                    key={`${event.resumeSequenceNumber.toString()}-${index}`}
+                    className="result-row-block"
+                  >
+                    <p>
+                      <strong>Resume Sequence:</strong> {event.resumeSequenceNumber.toString()}
+                      {' · '}
+                      <strong>Matched:</strong> {ops.length}
+                      {' · '}
+                      <strong>Locations:</strong> {locationRange}
+                    </p>
+                    <p><strong>Historical Root:</strong> {formatBytes(event.proof.root)}</p>
+                    {ops.length > 0 && (
+                      <div className="result-list">
+                        {ops.map((op, opIndex) => (
+                          <div
+                            key={`${event.resumeSequenceNumber.toString()}-${opIndex}-${op.location.toString()}`}
+                            className="result-row-block"
+                          >
+                            <p><strong>Location:</strong> {op.location.toString()}</p>
+                            {renderOperation(op.operation)}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
