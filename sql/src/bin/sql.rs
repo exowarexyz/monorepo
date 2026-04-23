@@ -39,8 +39,9 @@ async fn health() -> &'static str {
     "ok"
 }
 
-fn build_server(store_url: &str) -> Result<Arc<SqlServer>, Box<dyn std::error::Error + Send + Sync>>
-{
+fn build_server(
+    store_url: &str,
+) -> Result<Arc<SqlServer>, Box<dyn std::error::Error + Send + Sync>> {
     let client = StoreClient::new(store_url);
     let schema = KvSchema::new(client)
         .orders_table(TABLE_NAME, default_orders_index_specs())
@@ -117,8 +118,7 @@ async fn seed(
 fn init_tracing() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .try_init();
 }

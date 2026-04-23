@@ -38,9 +38,8 @@ use exoware_sdk_rs::match_key::MatchKey;
 use exoware_sdk_rs::store::sql::v1::{
     cell::Kind as ProtoCellKind, Cell as ProtoCell, Column as ProtoColumn, Index as ProtoIndex,
     IndexLayout as ProtoIndexLayout, ListValue as ProtoListValue, Null as ProtoNull,
-    QueryRequestView, QueryResponse, Row as ProtoRow, Service, ServiceServer,
-    SubscribeRequestView, SubscribeResponse, Table as ProtoTable, TablesRequestView,
-    TablesResponse,
+    QueryRequestView, QueryResponse, Row as ProtoRow, Service, ServiceServer, SubscribeRequestView,
+    SubscribeResponse, Table as ProtoTable, TablesRequestView, TablesResponse,
 };
 use exoware_sdk_rs::stream_filter::StreamFilter;
 use exoware_sdk_rs::{StoreClient, StreamSubscription};
@@ -59,8 +58,7 @@ use crate::types::{
 
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
 
-type SubscribeStream =
-    Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>>;
+type SubscribeStream = Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>>;
 
 /// One registered table's streaming-decode state.
 #[derive(Clone)]
@@ -143,10 +141,10 @@ impl SqlServer {
         let mut streams = HashMap::with_capacity(schema.tables().len());
         let mut table_names = Vec::with_capacity(schema.tables().len());
         for (name, config) in schema.tables() {
-            let model = Arc::new(
-                TableModel::from_config(config)
-                    .map_err(|e| DataFusionError::Execution(format!("invalid table config: {e}")))?,
-            );
+            let model =
+                Arc::new(TableModel::from_config(config).map_err(|e| {
+                    DataFusionError::Execution(format!("invalid table config: {e}"))
+                })?);
             let indexes = model
                 .resolve_index_specs(&config.index_specs)
                 .map_err(|e| DataFusionError::Execution(format!("invalid index specs: {e}")))?;
@@ -171,9 +169,9 @@ impl SqlServer {
 
     #[allow(clippy::result_large_err)]
     fn stream(&self, table: &str) -> Result<&TableStream, ConnectError> {
-        self.streams.get(table).ok_or_else(|| {
-            ConnectError::not_found(format!("unknown table '{table}'"))
-        })
+        self.streams
+            .get(table)
+            .ok_or_else(|| ConnectError::not_found(format!("unknown table '{table}'")))
     }
 
     fn describe_tables(&self) -> Vec<ProtoTable> {
@@ -290,7 +288,9 @@ impl Service for SqlConnect {
                 .await
                 .map_err(client_error_to_connect)?;
 
-            let output = Box::pin(BatchPredicateStream::new(sub, stream, table_name, where_sql));
+            let output = Box::pin(BatchPredicateStream::new(
+                sub, stream, table_name, where_sql,
+            ));
             Ok((output as SubscribeStream, ctx))
         }
     }
@@ -327,12 +327,9 @@ impl Service for SqlConnect {
                 .map_err(datafusion_error_to_connect)?;
             let schema = df.schema().clone();
             let batches = df.collect().await.map_err(datafusion_error_to_connect)?;
-            let columns: Vec<String> = schema
-                .fields()
-                .iter()
-                .map(|f| f.name().clone())
-                .collect();
-            let rows = record_batches_to_proto_rows(&batches).map_err(datafusion_error_to_connect)?;
+            let columns: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
+            let rows =
+                record_batches_to_proto_rows(&batches).map_err(datafusion_error_to_connect)?;
             Ok((
                 QueryResponse {
                     column: columns,
@@ -401,9 +398,7 @@ impl Stream for BatchPredicateStream {
                 tokio::pin!(next_fut);
                 match next_fut.as_mut().poll(cx) {
                     std::task::Poll::Ready(Ok(Some(frame))) => frame,
-                    std::task::Poll::Ready(Ok(None)) => {
-                        return std::task::Poll::Ready(None)
-                    }
+                    std::task::Poll::Ready(Ok(None)) => return std::task::Poll::Ready(None),
                     std::task::Poll::Ready(Err(err)) => {
                         return std::task::Poll::Ready(Some(Err(client_error_to_connect(err))));
                     }
@@ -522,34 +517,77 @@ fn arrow_value_to_cell(array: &ArrayRef, row: usize) -> DataFusionResult<ProtoCe
 fn arrow_value_to_kind(array: &ArrayRef, row: usize) -> DataFusionResult<ProtoCellKind> {
     match array.data_type() {
         DataType::Int64 => Ok(ProtoCellKind::Int64Value(
-            array.as_any().downcast_ref::<Int64Array>().unwrap().value(row),
+            array
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(row),
         )),
         DataType::Int32 => Ok(ProtoCellKind::Int64Value(
-            array.as_any().downcast_ref::<Int32Array>().unwrap().value(row) as i64,
+            array
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap()
+                .value(row) as i64,
         )),
         DataType::UInt64 => Ok(ProtoCellKind::Uint64Value(
-            array.as_any().downcast_ref::<UInt64Array>().unwrap().value(row),
+            array
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .value(row),
         )),
         DataType::UInt32 => Ok(ProtoCellKind::Uint64Value(
-            array.as_any().downcast_ref::<UInt32Array>().unwrap().value(row) as u64,
+            array
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .unwrap()
+                .value(row) as u64,
         )),
         DataType::Float64 => Ok(ProtoCellKind::Float64Value(
-            array.as_any().downcast_ref::<Float64Array>().unwrap().value(row),
+            array
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .value(row),
         )),
         DataType::Float32 => Ok(ProtoCellKind::Float64Value(
-            array.as_any().downcast_ref::<Float32Array>().unwrap().value(row) as f64,
+            array
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .unwrap()
+                .value(row) as f64,
         )),
         DataType::Boolean => Ok(ProtoCellKind::BooleanValue(
-            array.as_any().downcast_ref::<BooleanArray>().unwrap().value(row),
+            array
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .unwrap()
+                .value(row),
         )),
         DataType::Utf8 => Ok(ProtoCellKind::Utf8Value(
-            array.as_any().downcast_ref::<StringArray>().unwrap().value(row).to_string(),
+            array
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(row)
+                .to_string(),
         )),
         DataType::LargeUtf8 => Ok(ProtoCellKind::Utf8Value(
-            array.as_any().downcast_ref::<LargeStringArray>().unwrap().value(row).to_string(),
+            array
+                .as_any()
+                .downcast_ref::<LargeStringArray>()
+                .unwrap()
+                .value(row)
+                .to_string(),
         )),
         DataType::Utf8View => Ok(ProtoCellKind::Utf8Value(
-            array.as_any().downcast_ref::<StringViewArray>().unwrap().value(row).to_string(),
+            array
+                .as_any()
+                .downcast_ref::<StringViewArray>()
+                .unwrap()
+                .value(row)
+                .to_string(),
         )),
         DataType::FixedSizeBinary(_) => Ok(ProtoCellKind::FixedSizeBinaryValue(
             array
@@ -560,10 +598,18 @@ fn arrow_value_to_kind(array: &ArrayRef, row: usize) -> DataFusionResult<ProtoCe
                 .to_vec(),
         )),
         DataType::Date32 => Ok(ProtoCellKind::Date32Value(
-            array.as_any().downcast_ref::<Date32Array>().unwrap().value(row),
+            array
+                .as_any()
+                .downcast_ref::<Date32Array>()
+                .unwrap()
+                .value(row),
         )),
         DataType::Date64 => Ok(ProtoCellKind::Date64Value(
-            array.as_any().downcast_ref::<Date64Array>().unwrap().value(row),
+            array
+                .as_any()
+                .downcast_ref::<Date64Array>()
+                .unwrap()
+                .value(row),
         )),
         DataType::Timestamp(unit, _) => {
             let v = match unit {
