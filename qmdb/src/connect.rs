@@ -349,7 +349,11 @@ type ExtractBytes =
 
 /// Closure invoked once per ready batch to produce the multi-proof future.
 type BuildBatchProof<D> = Arc<
-    dyn Fn(u64, Location, Vec<(Location, Vec<u8>)>) -> BoxFuture<'static, Result<RawBatchMultiProof<D>, QmdbError>>
+    dyn Fn(
+            u64,
+            Location,
+            Vec<(Location, Vec<u8>)>,
+        ) -> BoxFuture<'static, Result<RawBatchMultiProof<D>, QmdbError>>
         + Send
         + Sync
         + 'static,
@@ -546,8 +550,7 @@ fn decode_since(since: Option<u64>) -> Option<u64> {
     }
 }
 
-type SubscribeStream =
-    Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>>;
+type SubscribeStream = Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>>;
 
 impl<H, K, V, const N: usize> OrderedService for OrderedConnect<H, K, V, N>
 where
@@ -905,4 +908,3 @@ where
         .with_limits(connect_limits())
         .with_compression(exoware_sdk_rs::connect_compression_registry())
 }
-

@@ -193,16 +193,16 @@ impl RangeService for StaticRangeService {
         let response = self.subscribe_response.clone();
         async move {
             let stream: Pin<
-                Box<dyn futures::Stream<Item = Result<ProtoSubscribeResponse, ConnectError>> + Send>,
+                Box<
+                    dyn futures::Stream<Item = Result<ProtoSubscribeResponse, ConnectError>> + Send,
+                >,
             > = Box::pin(futures::stream::iter([Ok(response)]));
             Ok((stream, ctx))
         }
     }
 }
 
-async fn spawn_static_server(
-    service: StaticRangeService,
-) -> (tokio::task::JoinHandle<()>, String) {
+async fn spawn_static_server(service: StaticRangeService) -> (tokio::task::JoinHandle<()>, String) {
     let app = Router::new()
         .route("/health", get(health))
         .fallback_service(

@@ -26,7 +26,6 @@ use exoware_proto::store::stream::v1::{
     ServiceServer as StreamServiceServer, SubscribeRequestView, SubscribeResponse,
 };
 use exoware_proto::stream_filter::{BytesFilter, StreamFilter};
-use exoware_sdk_rs::store::common::v1::bytes_filter::KindView as ProtoBytesFilterKindView;
 use exoware_proto::{
     connect_compression_registry, encode_query_detail_header_value,
     parse_range_traversal_direction, to_domain_reduce_request_from_view,
@@ -37,6 +36,7 @@ use exoware_proto::{
 use exoware_sdk_rs as exoware_proto;
 use exoware_sdk_rs::keys::Key;
 use exoware_sdk_rs::match_key::MatchKey;
+use exoware_sdk_rs::store::common::v1::bytes_filter::KindView as ProtoBytesFilterKindView;
 use futures::{stream as stream_util, Stream};
 use http::header::HeaderValue;
 use http::HeaderName;
@@ -749,7 +749,9 @@ fn domain_filter_from_subscribe_view(
         value_filters.push(match vf.kind {
             Some(ProtoBytesFilterKindView::Exact(bytes)) => BytesFilter::Exact(bytes.to_vec()),
             Some(ProtoBytesFilterKindView::Prefix(bytes)) => BytesFilter::Prefix(bytes.to_vec()),
-            Some(ProtoBytesFilterKindView::Regex(pattern)) => BytesFilter::Regex(pattern.to_string()),
+            Some(ProtoBytesFilterKindView::Regex(pattern)) => {
+                BytesFilter::Regex(pattern.to_string())
+            }
             None => {
                 return Err(ConnectError::invalid_argument(
                     "each value_filter must set exactly one of exact, prefix, or regex",

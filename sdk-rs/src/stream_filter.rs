@@ -62,10 +62,9 @@ pub fn validate_filter(filter: &StreamFilter) -> anyhow::Result<()> {
     }
     for vf in &filter.value_filters {
         match vf {
-            BytesFilter::Regex(r) => ensure!(
-                !r.trim().is_empty(),
-                "value_filter regex must not be empty"
-            ),
+            BytesFilter::Regex(r) => {
+                ensure!(!r.trim().is_empty(), "value_filter regex must not be empty")
+            }
             BytesFilter::Exact(_) | BytesFilter::Prefix(_) => {}
         }
     }

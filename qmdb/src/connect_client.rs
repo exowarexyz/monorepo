@@ -160,7 +160,9 @@ where
     H::Digest: DecodeExt<()>,
     Op: Decode + Read,
 {
-    pub async fn message(&mut self) -> Result<Option<RangeSubscribeProof<H::Digest, Op>>, QmdbError> {
+    pub async fn message(
+        &mut self,
+    ) -> Result<Option<RangeSubscribeProof<H::Digest, Op>>, QmdbError> {
         let Some(frame) = self.stream.message().await.map_err(connect_error_to_qmdb)? else {
             return Ok(None);
         };
