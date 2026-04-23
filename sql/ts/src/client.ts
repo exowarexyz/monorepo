@@ -2,23 +2,43 @@ import { create } from '@bufbuild/protobuf';
 import { createClient, type CallOptions, type Client as ConnectClient } from '@connectrpc/connect';
 import {
   createTransport,
+  SqlIndexLayout,
   SqlService,
   SqlQueryRequestSchema,
   SqlSubscribeRequestSchema,
+  SqlTablesRequestSchema,
   type ClientOptions as SdkClientOptions,
   type SqlCell,
+  type SqlColumn,
+  type SqlIndex,
   type SqlQueryResponse,
   type SqlRow,
   type SqlSubscribeResponse,
+  type SqlTable,
 } from 'exoware-sdk-ts';
 
 export type SqlClientOptions = SdkClientOptions;
 
 /**
- * Typed view of a single row cell. `null` means the server emitted an empty
- * `kind` oneof (SQL NULL).
+ * Typed view of a single row cell.
+ *
+ * - `null` is SQL NULL (wire `null_value`).
+ * - `bigint` covers Int64, UInt64 (unsigned), Date64, and Timestamp.
+ * - `number` covers Float64 and Date32 (days since epoch).
+ * - `Uint8Array` covers FixedSizeBinary and the big-endian encodings of
+ *   Decimal128 (16 bytes) / Decimal256 (32 bytes).
+ * - `CellValue[]` covers `List<...>` columns; elements use the same type.
+ * - The `undefined` case means the server sent an unknown oneof variant.
  */
-export type CellValue = bigint | number | boolean | string | Uint8Array | null;
+export type CellValue =
+  | bigint
+  | number
+  | boolean
+  | string
+  | Uint8Array
+  | CellValue[]
+  | null
+  | undefined;
 
 export interface DecodedRow {
   /** Column → value. Columns are in the same order as the `columns` array. */
@@ -38,20 +58,58 @@ export interface DecodedSubscribeFrame {
   rows: DecodedRow[];
 }
 
+export interface DecodedColumn {
+  name: string;
+  /** Arrow DataType debug string, e.g. `Int64`, `Utf8`, `Decimal128(38, 10)`. */
+  dataType: string;
+  nullable: boolean;
+}
+
+export type DecodedIndexLayout = 'lexicographic' | 'zorder';
+
+export interface DecodedIndex {
+  name: string;
+  layout: DecodedIndexLayout;
+  /** Names of columns in key order. */
+  keyColumns: string[];
+  /** Names of columns included in the index payload ("covered"). */
+  coverColumns: string[];
+}
+
+export interface DecodedTable {
+  name: string;
+  columns: DecodedColumn[];
+  /** Names of primary-key columns in key-sort order. */
+  primaryKeyColumns: string[];
+  indexes: DecodedIndex[];
+}
+
 function cellToValue(cell: SqlCell): CellValue {
   switch (cell.kind.case) {
+    case 'nullValue':
+      return null;
     case 'int64Value':
+    case 'uint64Value':
+    case 'date64Value':
+    case 'timestampValue':
       return cell.kind.value;
     case 'float64Value':
+    case 'date32Value':
       return cell.kind.value;
     case 'booleanValue':
       return cell.kind.value;
     case 'utf8Value':
       return cell.kind.value;
-    case 'bytesValue':
+    case 'fixedSizeBinaryValue':
+    case 'decimal128Value':
+    case 'decimal256Value':
       return cell.kind.value;
+    case 'listValue':
+      return cell.kind.value.elements.map(cellToValue);
     default:
-      return null;
+      // Unknown oneof variant (forward-compatibility safeguard). Distinct
+      // from SQL NULL (`null`).
+      return undefined;
   }
 }
 
@@ -81,6 +139,40 @@ function decodeSubscribe(response: SqlSubscribeResponse): DecodedSubscribeFrame 
   };
 }
 
+function decodeLayout(layout: SqlIndexLayout): DecodedIndexLayout {
+  return layout === SqlIndexLayout.Z_ORDER ? 'zorder' : 'lexicographic';
+}
+
+function decodeColumn(column: SqlColumn): DecodedColumn {
+  return {
+    name: column.name,
+    dataType: column.dataType,
+    nullable: column.nullable,
+  };
+}
+
+function decodeIndex(index: SqlIndex, columnNames: string[]): DecodedIndex {
+  const lookup = (idx: number) => columnNames[idx] ?? `#${idx}`;
+  return {
+    name: index.name,
+    layout: decodeLayout(index.layout),
+    keyColumns: index.keyColumns.map(lookup),
+    coverColumns: index.coverColumns.map(lookup),
+  };
+}
+
+function decodeTable(table: SqlTable): DecodedTable {
+  const columns = table.columns.map(decodeColumn);
+  const columnNames = columns.map((c) => c.name);
+  const lookup = (idx: number) => columnNames[idx] ?? `#${idx}`;
+  return {
+    name: table.name,
+    columns,
+    primaryKeyColumns: table.primaryKeyColumns.map(lookup),
+    indexes: table.indexes.map((index) => decodeIndex(index, columnNames)),
+  };
+}
+
 /**
  * Thin wrapper around the `store.sql.v1.Service` Connect client.
  *
@@ -103,6 +195,14 @@ export class SqlClient {
       options,
     );
     return decodeQuery(response);
+  }
+
+  async tables(options?: CallOptions): Promise<DecodedTable[]> {
+    const response = await this.rpc.tables(
+      create(SqlTablesRequestSchema, {}),
+      options,
+    );
+    return response.tables.map(decodeTable);
   }
 
   async *subscribe(

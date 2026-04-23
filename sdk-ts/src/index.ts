@@ -125,20 +125,31 @@ export {
 } from './gen/ts/store/v1/qmdb_pb.js';
 export {
     CellSchema,
+    ColumnSchema as SqlColumnSchema,
+    IndexLayout as SqlIndexLayout,
+    IndexSchema as SqlIndexSchema,
     QueryRequestSchema as SqlQueryRequestSchema,
     QueryResponseSchema as SqlQueryResponseSchema,
     RowSchema as SqlRowSchema,
     Service as SqlService,
     SubscribeRequestSchema as SqlSubscribeRequestSchema,
     SubscribeResponseSchema as SqlSubscribeResponseSchema,
+    TableSchema as SqlTableSchema,
+    TablesRequestSchema as SqlTablesRequestSchema,
+    TablesResponseSchema as SqlTablesResponseSchema,
 } from './gen/ts/store/v1/sql_pb.js';
 export type {
     Cell as SqlCell,
+    Column as SqlColumn,
+    Index as SqlIndex,
     QueryRequest as SqlQueryRequest,
     QueryResponse as SqlQueryResponse,
     Row as SqlRow,
     SubscribeRequest as SqlSubscribeRequest,
     SubscribeResponse as SqlSubscribeResponse,
+    Table as SqlTable,
+    TablesRequest as SqlTablesRequest,
+    TablesResponse as SqlTablesResponse,
 } from './gen/ts/store/v1/sql_pb.js';
 export type {
     CurrentKeyValueProof,

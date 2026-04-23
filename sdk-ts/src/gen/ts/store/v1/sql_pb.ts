@@ -2,8 +2,8 @@
 // @generated from file store/v1/sql.proto (package store.sql.v1, syntax proto3)
 /* eslint-disable */
 
-import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv1";
-import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv1";
+import type { GenEnum, GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv1";
+import { enumDesc, fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv1";
 import { file_buf_validate_validate } from "../../buf/validate/validate_pb";
 import type { Message } from "@bufbuild/protobuf";
 
@@ -11,7 +11,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file store/v1/sql.proto.
  */
 export const file_store_v1_sql: GenFile = /*@__PURE__*/
-  fileDesc("ChJzdG9yZS92MS9zcWwucHJvdG8SDHN0b3JlLnNxbC52MSKIAQoQU3Vic2NyaWJlUmVxdWVzdBIZCgV0YWJsZRgBIAEoCUIKukgHcgUQARj/ARIbCgl3aGVyZV9zcWwYAiABKAlCCLpIBXIDGIAgEiIKFXNpbmNlX3NlcXVlbmNlX251bWJlchgDIAEoBEgAiAEBQhgKFl9zaW5jZV9zZXF1ZW5jZV9udW1iZXIiXQoRU3Vic2NyaWJlUmVzcG9uc2USFwoPc2VxdWVuY2VfbnVtYmVyGAEgASgEEg4KBmNvbHVtbhgCIAMoCRIfCgRyb3dzGAMgAygLMhEuc3RvcmUuc3FsLnYxLlJvdyIoCgxRdWVyeVJlcXVlc3QSGAoDc3FsGAEgASgJQgu6SAhyBhABGP//AyJACg1RdWVyeVJlc3BvbnNlEg4KBmNvbHVtbhgBIAMoCRIfCgRyb3dzGAIgAygLMhEuc3RvcmUuc3FsLnYxLlJvdyIoCgNSb3cSIQoFY2VsbHMYASADKAsyEi5zdG9yZS5zcWwudjEuQ2VsbCKEAQoEQ2VsbBIVCgtpbnQ2NF92YWx1ZRgBIAEoA0gAEhcKDWZsb2F0NjRfdmFsdWUYAiABKAFIABIXCg1ib29sZWFuX3ZhbHVlGAMgASgISAASFAoKdXRmOF92YWx1ZRgEIAEoCUgAEhUKC2J5dGVzX3ZhbHVlGAUgASgMSABCBgoEa2luZDKbAQoHU2VydmljZRJOCglTdWJzY3JpYmUSHi5zdG9yZS5zcWwudjEuU3Vic2NyaWJlUmVxdWVzdBofLnN0b3JlLnNxbC52MS5TdWJzY3JpYmVSZXNwb25zZTABEkAKBVF1ZXJ5Ehouc3RvcmUuc3FsLnYxLlF1ZXJ5UmVxdWVzdBobLnN0b3JlLnNxbC52MS5RdWVyeVJlc3BvbnNlYgZwcm90bzM", [file_buf_validate_validate]);
+  fileDesc("ChJzdG9yZS92MS9zcWwucHJvdG8SDHN0b3JlLnNxbC52MSKIAQoQU3Vic2NyaWJlUmVxdWVzdBIZCgV0YWJsZRgBIAEoCUIKukgHcgUQARj/ARIbCgl3aGVyZV9zcWwYAiABKAlCCLpIBXIDGIAgEiIKFXNpbmNlX3NlcXVlbmNlX251bWJlchgDIAEoBEgAiAEBQhgKFl9zaW5jZV9zZXF1ZW5jZV9udW1iZXIiXQoRU3Vic2NyaWJlUmVzcG9uc2USFwoPc2VxdWVuY2VfbnVtYmVyGAEgASgEEg4KBmNvbHVtbhgCIAMoCRIfCgRyb3dzGAMgAygLMhEuc3RvcmUuc3FsLnYxLlJvdyIPCg1UYWJsZXNSZXF1ZXN0IjUKDlRhYmxlc1Jlc3BvbnNlEiMKBnRhYmxlcxgBIAMoCzITLnN0b3JlLnNxbC52MS5UYWJsZSJ/CgVUYWJsZRIMCgRuYW1lGAEgASgJEiUKB2NvbHVtbnMYAiADKAsyFC5zdG9yZS5zcWwudjEuQ29sdW1uEhsKE3ByaW1hcnlfa2V5X2NvbHVtbnMYAyADKA0SJAoHaW5kZXhlcxgEIAMoCzITLnN0b3JlLnNxbC52MS5JbmRleCI7CgZDb2x1bW4SDAoEbmFtZRgBIAEoCRIRCglkYXRhX3R5cGUYAiABKAkSEAoIbnVsbGFibGUYAyABKAgibAoFSW5kZXgSDAoEbmFtZRgBIAEoCRIpCgZsYXlvdXQYAiABKA4yGS5zdG9yZS5zcWwudjEuSW5kZXhMYXlvdXQSEwoLa2V5X2NvbHVtbnMYAyADKA0SFQoNY292ZXJfY29sdW1ucxgEIAMoDSIoCgxRdWVyeVJlcXVlc3QSGAoDc3FsGAEgASgJQgu6SAhyBhABGP//AyJACg1RdWVyeVJlc3BvbnNlEg4KBmNvbHVtbhgBIAMoCRIfCgRyb3dzGAIgAygLMhEuc3RvcmUuc3FsLnYxLlJvdyIoCgNSb3cSIQoFY2VsbHMYASADKAsyEi5zdG9yZS5zcWwudjEuQ2VsbCIGCgROdWxsIjEKCUxpc3RWYWx1ZRIkCghlbGVtZW50cxgBIAMoCzISLnN0b3JlLnNxbC52MS5DZWxsIoQDCgRDZWxsEigKCm51bGxfdmFsdWUYASABKAsyEi5zdG9yZS5zcWwudjEuTnVsbEgAEhUKC2ludDY0X3ZhbHVlGAIgASgDSAASFgoMdWludDY0X3ZhbHVlGAMgASgESAASFwoNZmxvYXQ2NF92YWx1ZRgEIAEoAUgAEhcKDWJvb2xlYW5fdmFsdWUYBSABKAhIABIUCgp1dGY4X3ZhbHVlGAYgASgJSAASIQoXZml4ZWRfc2l6ZV9iaW5hcnlfdmFsdWUYByABKAxIABIWCgxkYXRlMzJfdmFsdWUYCCABKAVIABIWCgxkYXRlNjRfdmFsdWUYCSABKANIABIZCg90aW1lc3RhbXBfdmFsdWUYCiABKANIABIaChBkZWNpbWFsMTI4X3ZhbHVlGAsgASgMSAASGgoQZGVjaW1hbDI1Nl92YWx1ZRgMIAEoDEgAEi0KCmxpc3RfdmFsdWUYDSABKAsyFy5zdG9yZS5zcWwudjEuTGlzdFZhbHVlSABCBgoEa2luZCpHCgtJbmRleExheW91dBIeChpJTkRFWF9MQVlPVVRfTEVYSUNPR1JBUEhJQxAAEhgKFElOREVYX0xBWU9VVF9aX09SREVSEAEy4AEKB1NlcnZpY2USTgoJU3Vic2NyaWJlEh4uc3RvcmUuc3FsLnYxLlN1YnNjcmliZVJlcXVlc3QaHy5zdG9yZS5zcWwudjEuU3Vic2NyaWJlUmVzcG9uc2UwARJACgVRdWVyeRIaLnN0b3JlLnNxbC52MS5RdWVyeVJlcXVlc3QaGy5zdG9yZS5zcWwudjEuUXVlcnlSZXNwb25zZRJDCgZUYWJsZXMSGy5zdG9yZS5zcWwudjEuVGFibGVzUmVxdWVzdBocLnN0b3JlLnNxbC52MS5UYWJsZXNSZXNwb25zZWIGcHJvdG8z", [file_buf_validate_validate]);
 
 /**
  * Stream every batch whose rows match `where_sql`.
@@ -89,6 +89,154 @@ export const SubscribeResponseSchema: GenMessage<SubscribeResponse> = /*@__PURE_
   messageDesc(file_store_v1_sql, 1);
 
 /**
+ * Discovery request; currently has no parameters.
+ *
+ * @generated from message store.sql.v1.TablesRequest
+ */
+export type TablesRequest = Message<"store.sql.v1.TablesRequest"> & {
+};
+
+/**
+ * Describes the message store.sql.v1.TablesRequest.
+ * Use `create(TablesRequestSchema)` to create a new message.
+ */
+export const TablesRequestSchema: GenMessage<TablesRequest> = /*@__PURE__*/
+  messageDesc(file_store_v1_sql, 2);
+
+/**
+ * Describes every table registered in the server-side `KvSchema`.
+ *
+ * @generated from message store.sql.v1.TablesResponse
+ */
+export type TablesResponse = Message<"store.sql.v1.TablesResponse"> & {
+  /**
+   * @generated from field: repeated store.sql.v1.Table tables = 1;
+   */
+  tables: Table[];
+};
+
+/**
+ * Describes the message store.sql.v1.TablesResponse.
+ * Use `create(TablesResponseSchema)` to create a new message.
+ */
+export const TablesResponseSchema: GenMessage<TablesResponse> = /*@__PURE__*/
+  messageDesc(file_store_v1_sql, 3);
+
+/**
+ * Server-registered table.
+ *
+ * @generated from message store.sql.v1.Table
+ */
+export type Table = Message<"store.sql.v1.Table"> & {
+  /**
+   * Name clients pass to `Subscribe.table` / reference in `Query.sql`.
+   *
+   * @generated from field: string name = 1;
+   */
+  name: string;
+
+  /**
+   * Columns in declaration order. `Subscribe` emits rows in this order.
+   *
+   * @generated from field: repeated store.sql.v1.Column columns = 2;
+   */
+  columns: Column[];
+
+  /**
+   * Indices into `columns` that form the primary key, in key-sort order.
+   *
+   * @generated from field: repeated uint32 primary_key_columns = 3;
+   */
+  primaryKeyColumns: number[];
+
+  /**
+   * Secondary indexes declared on this table, in registration order.
+   *
+   * @generated from field: repeated store.sql.v1.Index indexes = 4;
+   */
+  indexes: Index[];
+};
+
+/**
+ * Describes the message store.sql.v1.Table.
+ * Use `create(TableSchema)` to create a new message.
+ */
+export const TableSchema: GenMessage<Table> = /*@__PURE__*/
+  messageDesc(file_store_v1_sql, 4);
+
+/**
+ * One column of a registered `Table`.
+ *
+ * @generated from message store.sql.v1.Column
+ */
+export type Column = Message<"store.sql.v1.Column"> & {
+  /**
+   * @generated from field: string name = 1;
+   */
+  name: string;
+
+  /**
+   * Arrow DataType rendered as its stable debug string (e.g. `Int64`,
+   * `Utf8`, `Timestamp(Microsecond, None)`, `Decimal128(38, 10)`). Clients
+   * that need typed handling should match against these exact strings.
+   *
+   * @generated from field: string data_type = 2;
+   */
+  dataType: string;
+
+  /**
+   * @generated from field: bool nullable = 3;
+   */
+  nullable: boolean;
+};
+
+/**
+ * Describes the message store.sql.v1.Column.
+ * Use `create(ColumnSchema)` to create a new message.
+ */
+export const ColumnSchema: GenMessage<Column> = /*@__PURE__*/
+  messageDesc(file_store_v1_sql, 5);
+
+/**
+ * Secondary index declared on a `Table`.
+ *
+ * @generated from message store.sql.v1.Index
+ */
+export type Index = Message<"store.sql.v1.Index"> & {
+  /**
+   * @generated from field: string name = 1;
+   */
+  name: string;
+
+  /**
+   * @generated from field: store.sql.v1.IndexLayout layout = 2;
+   */
+  layout: IndexLayout;
+
+  /**
+   * Indices into `Table.columns` that make up the index key, in sort order.
+   *
+   * @generated from field: repeated uint32 key_columns = 3;
+   */
+  keyColumns: number[];
+
+  /**
+   * Additional column indices stored in the index payload so point lookups
+   * through this index don't need a base-row fetch ("covered" columns).
+   *
+   * @generated from field: repeated uint32 cover_columns = 4;
+   */
+  coverColumns: number[];
+};
+
+/**
+ * Describes the message store.sql.v1.Index.
+ * Use `create(IndexSchema)` to create a new message.
+ */
+export const IndexSchema: GenMessage<Index> = /*@__PURE__*/
+  messageDesc(file_store_v1_sql, 6);
+
+/**
  * Ad-hoc SQL statement.
  *
  * @generated from message store.sql.v1.QueryRequest
@@ -105,7 +253,7 @@ export type QueryRequest = Message<"store.sql.v1.QueryRequest"> & {
  * Use `create(QueryRequestSchema)` to create a new message.
  */
 export const QueryRequestSchema: GenMessage<QueryRequest> = /*@__PURE__*/
-  messageDesc(file_store_v1_sql, 2);
+  messageDesc(file_store_v1_sql, 7);
 
 /**
  * Result set from `Query`.
@@ -129,7 +277,7 @@ export type QueryResponse = Message<"store.sql.v1.QueryResponse"> & {
  * Use `create(QueryResponseSchema)` to create a new message.
  */
 export const QueryResponseSchema: GenMessage<QueryResponse> = /*@__PURE__*/
-  messageDesc(file_store_v1_sql, 3);
+  messageDesc(file_store_v1_sql, 8);
 
 /**
  * Typed row. `cells[i]` aligns with `column[i]` in the parent message.
@@ -148,10 +296,48 @@ export type Row = Message<"store.sql.v1.Row"> & {
  * Use `create(RowSchema)` to create a new message.
  */
 export const RowSchema: GenMessage<Row> = /*@__PURE__*/
-  messageDesc(file_store_v1_sql, 4);
+  messageDesc(file_store_v1_sql, 9);
 
 /**
- * Typed scalar for one row cell. NULL cells leave `kind` unset.
+ * Explicit NULL marker for SQL NULL cells. Distinct from a `Cell` whose
+ * `kind` oneof is unset — that indicates a malformed wire message, not NULL.
+ *
+ * @generated from message store.sql.v1.Null
+ */
+export type Null = Message<"store.sql.v1.Null"> & {
+};
+
+/**
+ * Describes the message store.sql.v1.Null.
+ * Use `create(NullSchema)` to create a new message.
+ */
+export const NullSchema: GenMessage<Null> = /*@__PURE__*/
+  messageDesc(file_store_v1_sql, 10);
+
+/**
+ * Ordered list of scalar cells. Used for `List<...>` columns. Elements must
+ * all carry the same inner kind (Int64, Float64, Boolean, or Utf8).
+ *
+ * @generated from message store.sql.v1.ListValue
+ */
+export type ListValue = Message<"store.sql.v1.ListValue"> & {
+  /**
+   * @generated from field: repeated store.sql.v1.Cell elements = 1;
+   */
+  elements: Cell[];
+};
+
+/**
+ * Describes the message store.sql.v1.ListValue.
+ * Use `create(ListValueSchema)` to create a new message.
+ */
+export const ListValueSchema: GenMessage<ListValue> = /*@__PURE__*/
+  messageDesc(file_store_v1_sql, 11);
+
+/**
+ * Typed scalar for one row cell. Mirrors every column kind supported by
+ * `KvSchema`. Servers MUST always set `kind`; clients MUST treat a missing
+ * `kind` as a protocol error rather than as NULL.
  *
  * @generated from message store.sql.v1.Cell
  */
@@ -161,34 +347,112 @@ export type Cell = Message<"store.sql.v1.Cell"> & {
    */
   kind: {
     /**
-     * @generated from field: int64 int64_value = 1;
+     * SQL NULL (any column type).
+     *
+     * @generated from field: store.sql.v1.Null null_value = 1;
+     */
+    value: Null;
+    case: "nullValue";
+  } | {
+    /**
+     * Int64 / Int32 column.
+     *
+     * @generated from field: int64 int64_value = 2;
      */
     value: bigint;
     case: "int64Value";
   } | {
     /**
-     * @generated from field: double float64_value = 2;
+     * UInt64 column. Uses the full u64 range, so do not narrow client-side.
+     *
+     * @generated from field: uint64 uint64_value = 3;
+     */
+    value: bigint;
+    case: "uint64Value";
+  } | {
+    /**
+     * Float64 / Float32 column.
+     *
+     * @generated from field: double float64_value = 4;
      */
     value: number;
     case: "float64Value";
   } | {
     /**
-     * @generated from field: bool boolean_value = 3;
+     * Boolean column.
+     *
+     * @generated from field: bool boolean_value = 5;
      */
     value: boolean;
     case: "booleanValue";
   } | {
     /**
-     * @generated from field: string utf8_value = 4;
+     * Utf8 / LargeUtf8 / Utf8View column.
+     *
+     * @generated from field: string utf8_value = 6;
      */
     value: string;
     case: "utf8Value";
   } | {
     /**
-     * @generated from field: bytes bytes_value = 5;
+     * FixedSizeBinary column. Server-side schema fixes the byte length.
+     *
+     * @generated from field: bytes fixed_size_binary_value = 7;
      */
     value: Uint8Array;
-    case: "bytesValue";
+    case: "fixedSizeBinaryValue";
+  } | {
+    /**
+     * Date32 column: days since 1970-01-01 (Arrow Date32 semantics).
+     *
+     * @generated from field: int32 date32_value = 8;
+     */
+    value: number;
+    case: "date32Value";
+  } | {
+    /**
+     * Date64 column: milliseconds since 1970-01-01T00:00:00Z.
+     *
+     * @generated from field: int64 date64_value = 9;
+     */
+    value: bigint;
+    case: "date64Value";
+  } | {
+    /**
+     * Timestamp column. Value is in the column's declared Arrow TimeUnit
+     * (second / millisecond / microsecond / nanosecond). Clients must consult
+     * the table schema to interpret.
+     *
+     * @generated from field: int64 timestamp_value = 10;
+     */
+    value: bigint;
+    case: "timestampValue";
+  } | {
+    /**
+     * Decimal128 column. 16-byte big-endian two's-complement encoding of the
+     * unscaled integer; precision and scale come from the column schema.
+     *
+     * @generated from field: bytes decimal128_value = 11;
+     */
+    value: Uint8Array;
+    case: "decimal128Value";
+  } | {
+    /**
+     * Decimal256 column. 32-byte big-endian two's-complement, otherwise
+     * identical to `decimal128_value`.
+     *
+     * @generated from field: bytes decimal256_value = 12;
+     */
+    value: Uint8Array;
+    case: "decimal256Value";
+  } | {
+    /**
+     * List<Int64|Float64|Boolean|Utf8> column.
+     *
+     * @generated from field: store.sql.v1.ListValue list_value = 13;
+     */
+    value: ListValue;
+    case: "listValue";
   } | { case: undefined; value?: undefined };
 };
 
@@ -197,7 +461,35 @@ export type Cell = Message<"store.sql.v1.Cell"> & {
  * Use `create(CellSchema)` to create a new message.
  */
 export const CellSchema: GenMessage<Cell> = /*@__PURE__*/
-  messageDesc(file_store_v1_sql, 5);
+  messageDesc(file_store_v1_sql, 12);
+
+/**
+ * Key layout of a secondary index.
+ *
+ * @generated from enum store.sql.v1.IndexLayout
+ */
+export enum IndexLayout {
+  /**
+   * Standard lexicographic concatenation of key columns.
+   *
+   * @generated from enum value: INDEX_LAYOUT_LEXICOGRAPHIC = 0;
+   */
+  LEXICOGRAPHIC = 0,
+
+  /**
+   * Z-order (Morton) interleaving of the key columns' bits, for
+   * multi-dimensional range scans.
+   *
+   * @generated from enum value: INDEX_LAYOUT_Z_ORDER = 1;
+   */
+  Z_ORDER = 1,
+}
+
+/**
+ * Describes the enum store.sql.v1.IndexLayout.
+ */
+export const IndexLayoutSchema: GenEnum<IndexLayout> = /*@__PURE__*/
+  enumDesc(file_store_v1_sql, 0);
 
 /**
  * Streaming SQL predicate service over a server-side `KvSchema`.
@@ -230,6 +522,18 @@ export const Service: GenService<{
     methodKind: "unary";
     input: typeof QueryRequestSchema;
     output: typeof QueryResponseSchema;
+  },
+  /**
+   * Describe every registered table. Carries KV-specific metadata
+   * (primary-key order, secondary indexes with their layout + cover columns)
+   * that DataFusion's `information_schema` doesn't surface.
+   *
+   * @generated from rpc store.sql.v1.Service.Tables
+   */
+  tables: {
+    methodKind: "unary";
+    input: typeof TablesRequestSchema;
+    output: typeof TablesResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_store_v1_sql, 0);
