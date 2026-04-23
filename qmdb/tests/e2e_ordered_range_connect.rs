@@ -45,7 +45,7 @@ async fn spawn_qmdb_server(
 
 fn validated_client(
     base: &str,
-) -> OrderedRangeConnectClient<PreferZstdHttpClient, Sha256, Vec<u8>, Vec<u8>, N> {
+) -> OrderedRangeConnectClient<PreferZstdHttpClient, Sha256, Vec<u8>, Vec<u8>> {
     OrderedRangeConnectClient::plaintext(base, op_cfg())
 }
 
@@ -289,9 +289,12 @@ async fn ordered_range_connect_client_rejects_invalid_streamed_proof() {
         .message()
         .await
         .expect_err("tampered streamed proof should fail");
-    assert!(
-        matches!(err, QmdbError::CorruptData(message) if message.contains("multi proof failed verification"))
-    );
+    assert!(matches!(
+        err,
+        QmdbError::ProofVerification {
+            kind: store_qmdb::ProofKind::BatchMulti
+        }
+    ));
 }
 
 #[tokio::test]

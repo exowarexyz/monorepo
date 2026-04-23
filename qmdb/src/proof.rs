@@ -250,9 +250,9 @@ where
         operations,
     };
     if !raw.verify::<H>() {
-        return Err(crate::QmdbError::CorruptData(
-            "batch multi proof failed verification".to_string(),
-        ));
+        return Err(crate::QmdbError::ProofVerification {
+            kind: crate::ProofKind::BatchMulti,
+        });
     }
     Ok(raw)
 }
@@ -283,9 +283,9 @@ where
         encoded_operations,
     };
     if !checkpoint.verify::<H>() {
-        return Err(crate::QmdbError::CorruptData(
-            "range checkpoint proof failed verification".to_string(),
-        ));
+        return Err(crate::QmdbError::ProofVerification {
+            kind: crate::ProofKind::RangeCheckpoint,
+        });
     }
     Ok(checkpoint)
 }

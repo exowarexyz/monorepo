@@ -73,9 +73,10 @@ fn qmdb_error_to_connect(err: QmdbError) -> ConnectError {
             ConnectError::failed_precondition(err.to_string())
         }
         QmdbError::Stream(_) => ConnectError::unavailable(err.to_string()),
-        QmdbError::CorruptData(_) | QmdbError::CommonwareMmr(_) | QmdbError::WriterPoisoned(_) => {
-            ConnectError::internal(err.to_string())
-        }
+        QmdbError::ProofVerification { .. }
+        | QmdbError::CorruptData(_)
+        | QmdbError::CommonwareMmr(_)
+        | QmdbError::WriterPoisoned(_) => ConnectError::internal(err.to_string()),
     }
 }
 

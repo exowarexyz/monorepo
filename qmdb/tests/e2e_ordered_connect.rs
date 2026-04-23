@@ -415,9 +415,12 @@ async fn ordered_connect_client_rejects_invalid_get_proof() {
         })
         .await
         .expect_err("tampered get proof should fail");
-    assert!(
-        matches!(err, QmdbError::CorruptData(message) if message.contains("key-value proof failed verification"))
-    );
+    assert!(matches!(
+        err,
+        QmdbError::ProofVerification {
+            kind: store_qmdb::ProofKind::CurrentKeyValue
+        }
+    ));
 }
 
 #[tokio::test]
@@ -470,7 +473,10 @@ async fn ordered_connect_client_rejects_invalid_get_many_proof() {
         })
         .await
         .expect_err("tampered get_many proof should fail");
-    assert!(
-        matches!(err, QmdbError::CorruptData(message) if message.contains("many-key proof failed verification"))
-    );
+    assert!(matches!(
+        err,
+        QmdbError::ProofVerification {
+            kind: store_qmdb::ProofKind::HistoricalMultiKey
+        }
+    ));
 }

@@ -42,7 +42,7 @@ mod subscription;
 mod unordered;
 mod writer;
 
-pub use error::QmdbError;
+pub use error::{ProofKind, QmdbError};
 pub use immutable::ImmutableClient;
 pub use keyless::KeylessClient;
 pub use ordered::OrderedClient;

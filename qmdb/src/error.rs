@@ -1,6 +1,37 @@
 use commonware_storage::mmr::Location;
 use exoware_sdk_rs::ClientError;
 
+/// Which proof shape failed verification. Carried on
+/// [`QmdbError::ProofVerification`] so callers and tests can discriminate
+/// without string matching on the error message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProofKind {
+    /// Single-key current-state proof (`OrderedService.Get`).
+    CurrentKeyValue,
+    /// Historical multi-proof over a set of logical keys (`OrderedService.GetMany`).
+    HistoricalMultiKey,
+    /// Subscribe-time multi-proof covering matched operations in one batch
+    /// (`RangeService.Subscribe`).
+    BatchMulti,
+    /// Contiguous historical range proof (sync checkpoint).
+    RangeCheckpoint,
+    /// Contiguous current-state range proof.
+    CurrentRange,
+}
+
+impl std::fmt::Display for ProofKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::CurrentKeyValue => "current key-value",
+            Self::HistoricalMultiKey => "historical many-key",
+            Self::BatchMulti => "batch multi",
+            Self::RangeCheckpoint => "range checkpoint",
+            Self::CurrentRange => "current range",
+        };
+        f.write_str(s)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum QmdbError {
     #[error(transparent)]
@@ -44,6 +75,8 @@ pub enum QmdbError {
         encoded_len: usize,
         max: usize,
     },
+    #[error("{kind} proof failed verification")]
+    ProofVerification { kind: ProofKind },
     #[error("corrupt qmdb data: {0}")]
     CorruptData(String),
     #[error("commonware MMR error: {0}")]

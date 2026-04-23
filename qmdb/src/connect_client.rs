@@ -125,16 +125,12 @@ where
         let proof = response.proof.as_option().ok_or_else(|| {
             QmdbError::CorruptData("qmdb get_many response missing proof".to_string())
         })?;
-        let (root, operations) =
-            verify_multi_from_proto::<H, _, _>(proof, self.op_cfg.as_ref(), |bytes, cfg| {
-                QmdbOperation::<K, V>::decode_cfg(bytes, cfg)
-            })
-            .map_err(|err| match err {
-                QmdbError::CorruptData(message) if message == "multi proof failed verification" => {
-                    QmdbError::CorruptData("many-key proof failed verification".to_string())
-                }
-                other => other,
-            })?;
+        let (root, operations) = verify_multi_from_proto::<H, _, _>(
+            proof,
+            self.op_cfg.as_ref(),
+            crate::ProofKind::HistoricalMultiKey,
+            |bytes, cfg| QmdbOperation::<K, V>::decode_cfg(bytes, cfg),
+        )?;
         Ok(VerifiedMultiOperations { root, operations })
     }
 }
@@ -170,10 +166,12 @@ where
         let proof = frame.proof.as_option().ok_or_else(|| {
             QmdbError::CorruptData("qmdb subscribe response missing proof".to_string())
         })?;
-        let (root, operations) =
-            verify_multi_from_proto::<H, _, _>(proof, self.op_cfg.as_ref(), |bytes, cfg| {
-                Op::decode_cfg(bytes, cfg)
-            })?;
+        let (root, operations) = verify_multi_from_proto::<H, _, _>(
+            proof,
+            self.op_cfg.as_ref(),
+            crate::ProofKind::BatchMulti,
+            |bytes, cfg| Op::decode_cfg(bytes, cfg),
+        )?;
         Ok(Some(RangeSubscribeProof {
             resume_sequence_number: frame.resume_sequence_number,
             root,
@@ -182,28 +180,23 @@ where
     }
 }
 
+/// Client for `store.qmdb.v1.RangeService`, parameterized on the backend
+/// operation type. The per-backend wrappers below are type aliases that pin
+/// `Op` to `QmdbOperation<K,V>` / `UnorderedQmdbOperation<K,V>` / etc.
 #[derive(Clone)]
-pub struct OrderedRangeConnectClient<
-    T,
-    H: Hasher,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    const N: usize,
-> {
+pub struct RangeConnectClient<T, H: Hasher, Op: Read> {
     rpc: RangeServiceClient<T>,
-    op_cfg: Arc<<QmdbOperation<K, V> as Read>::Cfg>,
-    _marker: PhantomData<(H, K, V)>,
+    op_cfg: Arc<Op::Cfg>,
+    _marker: PhantomData<(H, Op)>,
 }
 
-impl<H, K, V, const N: usize> OrderedRangeConnectClient<PreferZstdHttpClient, H, K, V, N>
+impl<H, Op> RangeConnectClient<PreferZstdHttpClient, H, Op>
 where
     H: Hasher,
     H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    QmdbOperation<K, V>: Decode + Read,
+    Op: Decode + Read,
 {
-    pub fn plaintext(base: &str, op_cfg: <QmdbOperation<K, V> as Read>::Cfg) -> Self {
+    pub fn plaintext(base: &str, op_cfg: Op::Cfg) -> Self {
         Self::new(
             PreferZstdHttpClient::plaintext(),
             ClientConfig::new(base.parse().expect("qmdb uri")),
@@ -212,29 +205,20 @@ where
     }
 }
 
-impl<T, H, K, V, const N: usize> OrderedRangeConnectClient<T, H, K, V, N>
+impl<T, H, Op> RangeConnectClient<T, H, Op>
 where
     T: ClientTransport,
     T::ResponseBody: Body<Data = Bytes> + Unpin,
     <T::ResponseBody as Body>::Error: Display,
     H: Hasher,
     H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    QmdbOperation<K, V>: Decode + Read,
+    Op: Decode + Read,
 {
-    pub fn new(
-        transport: T,
-        config: ClientConfig,
-        op_cfg: <QmdbOperation<K, V> as Read>::Cfg,
-    ) -> Self {
+    pub fn new(transport: T, config: ClientConfig, op_cfg: Op::Cfg) -> Self {
         Self::from_service_client(RangeServiceClient::new(transport, config), op_cfg)
     }
 
-    pub fn from_service_client(
-        rpc: RangeServiceClient<T>,
-        op_cfg: <QmdbOperation<K, V> as Read>::Cfg,
-    ) -> Self {
+    pub fn from_service_client(rpc: RangeServiceClient<T>, op_cfg: Op::Cfg) -> Self {
         Self {
             rpc,
             op_cfg: Arc::new(op_cfg),
@@ -245,7 +229,7 @@ where
     pub async fn subscribe(
         &self,
         request: SubscribeRequest,
-    ) -> Result<RangeConnectSubscription<T::ResponseBody, H, QmdbOperation<K, V>>, QmdbError> {
+    ) -> Result<RangeConnectSubscription<T::ResponseBody, H, Op>, QmdbError> {
         let stream = self
             .rpc
             .subscribe(request)
@@ -259,214 +243,13 @@ where
     }
 }
 
-#[derive(Clone)]
-pub struct UnorderedRangeConnectClient<
-    T,
-    H: Hasher,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-> {
-    rpc: RangeServiceClient<T>,
-    op_cfg: Arc<<UnorderedQmdbOperation<K, V> as Read>::Cfg>,
-    _marker: PhantomData<(H, K, V)>,
-}
-
-impl<H, K, V> UnorderedRangeConnectClient<PreferZstdHttpClient, H, K, V>
-where
-    H: Hasher,
-    H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    UnorderedQmdbOperation<K, V>: Decode + Read,
-{
-    pub fn plaintext(base: &str, op_cfg: <UnorderedQmdbOperation<K, V> as Read>::Cfg) -> Self {
-        Self::new(
-            PreferZstdHttpClient::plaintext(),
-            ClientConfig::new(base.parse().expect("qmdb uri")),
-            op_cfg,
-        )
-    }
-}
-
-impl<T, H, K, V> UnorderedRangeConnectClient<T, H, K, V>
-where
-    T: ClientTransport,
-    T::ResponseBody: Body<Data = Bytes> + Unpin,
-    <T::ResponseBody as Body>::Error: Display,
-    H: Hasher,
-    H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    UnorderedQmdbOperation<K, V>: Decode + Read,
-{
-    pub fn new(
-        transport: T,
-        config: ClientConfig,
-        op_cfg: <UnorderedQmdbOperation<K, V> as Read>::Cfg,
-    ) -> Self {
-        Self::from_service_client(RangeServiceClient::new(transport, config), op_cfg)
-    }
-
-    pub fn from_service_client(
-        rpc: RangeServiceClient<T>,
-        op_cfg: <UnorderedQmdbOperation<K, V> as Read>::Cfg,
-    ) -> Self {
-        Self {
-            rpc,
-            op_cfg: Arc::new(op_cfg),
-            _marker: PhantomData,
-        }
-    }
-
-    pub async fn subscribe(
-        &self,
-        request: SubscribeRequest,
-    ) -> Result<RangeConnectSubscription<T::ResponseBody, H, UnorderedQmdbOperation<K, V>>, QmdbError>
-    {
-        let stream = self
-            .rpc
-            .subscribe(request)
-            .await
-            .map_err(connect_error_to_qmdb)?;
-        Ok(RangeConnectSubscription {
-            stream,
-            op_cfg: Arc::clone(&self.op_cfg),
-            _marker: PhantomData,
-        })
-    }
-}
-
-#[derive(Clone)]
-pub struct ImmutableRangeConnectClient<
-    T,
-    H: Hasher,
-    K: commonware_utils::Array + AsRef<[u8]> + commonware_codec::Codec,
-    V: commonware_codec::Codec + Send + Sync,
-> {
-    rpc: RangeServiceClient<T>,
-    op_cfg: Arc<V::Cfg>,
-    _marker: PhantomData<(H, K, V)>,
-}
-
-impl<H, K, V> ImmutableRangeConnectClient<PreferZstdHttpClient, H, K, V>
-where
-    H: Hasher,
-    H::Digest: DecodeExt<()>,
-    K: commonware_utils::Array + AsRef<[u8]> + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    ImmutableOperation<K, V>: Decode<Cfg = V::Cfg> + Read<Cfg = V::Cfg>,
-{
-    pub fn plaintext(base: &str, value_cfg: V::Cfg) -> Self {
-        Self::new(
-            PreferZstdHttpClient::plaintext(),
-            ClientConfig::new(base.parse().expect("qmdb uri")),
-            value_cfg,
-        )
-    }
-}
-
-impl<T, H, K, V> ImmutableRangeConnectClient<T, H, K, V>
-where
-    T: ClientTransport,
-    T::ResponseBody: Body<Data = Bytes> + Unpin,
-    <T::ResponseBody as Body>::Error: Display,
-    H: Hasher,
-    H::Digest: DecodeExt<()>,
-    K: commonware_utils::Array + AsRef<[u8]> + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    ImmutableOperation<K, V>: Decode<Cfg = V::Cfg> + Read<Cfg = V::Cfg>,
-{
-    pub fn new(transport: T, config: ClientConfig, value_cfg: V::Cfg) -> Self {
-        Self::from_service_client(RangeServiceClient::new(transport, config), value_cfg)
-    }
-
-    pub fn from_service_client(rpc: RangeServiceClient<T>, value_cfg: V::Cfg) -> Self {
-        Self {
-            rpc,
-            op_cfg: Arc::new(value_cfg),
-            _marker: PhantomData,
-        }
-    }
-
-    pub async fn subscribe(
-        &self,
-        request: SubscribeRequest,
-    ) -> Result<RangeConnectSubscription<T::ResponseBody, H, ImmutableOperation<K, V>>, QmdbError>
-    {
-        let stream = self
-            .rpc
-            .subscribe(request)
-            .await
-            .map_err(connect_error_to_qmdb)?;
-        Ok(RangeConnectSubscription {
-            stream,
-            op_cfg: Arc::clone(&self.op_cfg),
-            _marker: PhantomData,
-        })
-    }
-}
-
-#[derive(Clone)]
-pub struct KeylessRangeConnectClient<T, H: Hasher, V: commonware_codec::Codec + Send + Sync> {
-    rpc: RangeServiceClient<T>,
-    op_cfg: Arc<V::Cfg>,
-    _marker: PhantomData<(H, V)>,
-}
-
-impl<H, V> KeylessRangeConnectClient<PreferZstdHttpClient, H, V>
-where
-    H: Hasher,
-    H::Digest: DecodeExt<()>,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    KeylessOperation<V>: Decode<Cfg = V::Cfg> + Read<Cfg = V::Cfg>,
-{
-    pub fn plaintext(base: &str, value_cfg: V::Cfg) -> Self {
-        Self::new(
-            PreferZstdHttpClient::plaintext(),
-            ClientConfig::new(base.parse().expect("qmdb uri")),
-            value_cfg,
-        )
-    }
-}
-
-impl<T, H, V> KeylessRangeConnectClient<T, H, V>
-where
-    T: ClientTransport,
-    T::ResponseBody: Body<Data = Bytes> + Unpin,
-    <T::ResponseBody as Body>::Error: Display,
-    H: Hasher,
-    H::Digest: DecodeExt<()>,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    KeylessOperation<V>: Decode<Cfg = V::Cfg> + Read<Cfg = V::Cfg>,
-{
-    pub fn new(transport: T, config: ClientConfig, value_cfg: V::Cfg) -> Self {
-        Self::from_service_client(RangeServiceClient::new(transport, config), value_cfg)
-    }
-
-    pub fn from_service_client(rpc: RangeServiceClient<T>, value_cfg: V::Cfg) -> Self {
-        Self {
-            rpc,
-            op_cfg: Arc::new(value_cfg),
-            _marker: PhantomData,
-        }
-    }
-
-    pub async fn subscribe(
-        &self,
-        request: SubscribeRequest,
-    ) -> Result<RangeConnectSubscription<T::ResponseBody, H, KeylessOperation<V>>, QmdbError> {
-        let stream = self
-            .rpc
-            .subscribe(request)
-            .await
-            .map_err(connect_error_to_qmdb)?;
-        Ok(RangeConnectSubscription {
-            stream,
-            op_cfg: Arc::clone(&self.op_cfg),
-            _marker: PhantomData,
-        })
-    }
-}
+pub type OrderedRangeConnectClient<T, H, K, V> =
+    RangeConnectClient<T, H, QmdbOperation<K, V>>;
+pub type UnorderedRangeConnectClient<T, H, K, V> =
+    RangeConnectClient<T, H, UnorderedQmdbOperation<K, V>>;
+pub type ImmutableRangeConnectClient<T, H, K, V> =
+    RangeConnectClient<T, H, ImmutableOperation<K, V>>;
+pub type KeylessRangeConnectClient<T, H, V> = RangeConnectClient<T, H, KeylessOperation<V>>;
 
 fn connect_error_to_qmdb(err: ConnectError) -> QmdbError {
     QmdbError::Client(ClientError::Rpc(Box::new(err)))
@@ -493,6 +276,7 @@ fn raw_mmr_from_proto<D: Digest + Decode>(
 fn verify_multi_from_proto<H, Op, F>(
     proto: &HistoricalMultiProof,
     op_cfg: &Op::Cfg,
+    kind: crate::ProofKind,
     decode: F,
 ) -> Result<(H::Digest, Vec<(Location, Op)>), QmdbError>
 where
@@ -513,9 +297,7 @@ where
     let mmr_proof = raw_mmr_from_proto(proof)?;
     let mut hasher = StandardHasher::<H>::new();
     if !mmr::Proof::from(&mmr_proof).verify_multi_inclusion(&mut hasher, &encoded, &root) {
-        return Err(QmdbError::CorruptData(
-            "multi proof failed verification".to_string(),
-        ));
+        return Err(QmdbError::ProofVerification { kind });
     }
     let operations = proto
         .operations
@@ -586,9 +368,9 @@ where
     };
     let mut hasher = H::default();
     if !proof.verify(&mut hasher, operation.clone(), &root) {
-        return Err(QmdbError::CorruptData(
-            "key-value proof failed verification".to_string(),
-        ));
+        return Err(QmdbError::ProofVerification {
+            kind: crate::ProofKind::CurrentKeyValue,
+        });
     }
     Ok(VerifiedKeyValue {
         root,

@@ -250,9 +250,9 @@ where
             operations,
         };
         if !raw.verify::<H>() {
-            return Err(QmdbError::CorruptData(
-                "multi proof failed verification".to_string(),
-            ));
+            return Err(QmdbError::ProofVerification {
+                kind: crate::ProofKind::HistoricalMultiKey,
+            });
         }
         Ok(raw)
     }
@@ -450,9 +450,9 @@ where
                     chunks,
                 };
                 if !raw.verify::<H>() {
-                    return Err(QmdbError::CorruptData(
-                        "current range proof failed verification".to_string(),
-                    ));
+                    return Err(QmdbError::ProofVerification {
+                        kind: crate::ProofKind::CurrentRange,
+                    });
                 }
                 Ok(VerifiedVariantRange::Current(VerifiedCurrentRange {
                     root: raw.root,
@@ -551,9 +551,9 @@ where
             operation,
         };
         if !raw.verify::<H>() {
-            return Err(QmdbError::CorruptData(
-                "key-value proof failed verification".to_string(),
-            ));
+            return Err(QmdbError::ProofVerification {
+                kind: crate::ProofKind::CurrentKeyValue,
+            });
         }
         Ok(raw)
     }

@@ -202,7 +202,10 @@ async fn unordered_connect_client_rejects_invalid_streamed_proof() {
         .message()
         .await
         .expect_err("tampered streamed proof should fail");
-    assert!(
-        matches!(err, QmdbError::CorruptData(message) if message.contains("multi proof failed verification"))
-    );
+    assert!(matches!(
+        err,
+        QmdbError::ProofVerification {
+            kind: store_qmdb::ProofKind::BatchMulti
+        }
+    ));
 }
