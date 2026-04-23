@@ -419,6 +419,16 @@ struct PendingBatch {
 #[derive(Clone, Debug)]
 struct ReadyBatch {
     watermark: Location,
+    /// Store sequence of this batch's ops frame. Emitted as
+    /// `resume_sequence_number`; unique per batch, so a client reconnecting
+    /// at `resume + 1` skips only this batch. When multiple pending batches
+    /// share a single authorizing watermark, each must carry its own
+    /// per-batch sequence here or the reconnect cursor would jump past
+    /// unread siblings.
+    batch_sequence: u64,
+    /// Minimum store sequence for the read session that builds the proof.
+    /// Must be at least the watermark's publication sequence so the session
+    /// observes the watermark row.
     read_floor_sequence: u64,
     matched: Vec<(Location, Vec<u8>)>,
 }
@@ -565,27 +575,34 @@ impl<D: commonware_cryptography::Digest> BatchSubscribeStream<D> {
     }
 
     fn drain_ready(&mut self) {
-        while let Some((&latest, _)) = self.pending.iter().next() {
-            let Some((&watermark, &watermark_sequence)) = self.watermarks.range(latest..).next()
-            else {
-                break;
-            };
-            let (_, batch) = self.pending.pop_first().expect("pending is not empty");
-            self.ready.push_back(ReadyBatch {
-                watermark,
-                read_floor_sequence: batch.sequence_number.max(watermark_sequence),
-                matched: batch.matched,
-            });
-        }
+        drain_ready(&mut self.pending, &mut self.watermarks, &mut self.ready);
+    }
+}
 
-        if let Some(&floor) = self
-            .pending
-            .keys()
-            .next()
-            .or_else(|| self.watermarks.keys().next_back())
-        {
-            self.watermarks = self.watermarks.split_off(&floor);
-        }
+fn drain_ready(
+    pending: &mut BTreeMap<Location, PendingBatch>,
+    watermarks: &mut BTreeMap<Location, u64>,
+    ready: &mut VecDeque<ReadyBatch>,
+) {
+    while let Some((&latest, _)) = pending.iter().next() {
+        let Some((&watermark, &watermark_sequence)) = watermarks.range(latest..).next() else {
+            break;
+        };
+        let (_, batch) = pending.pop_first().expect("pending is not empty");
+        ready.push_back(ReadyBatch {
+            watermark,
+            batch_sequence: batch.sequence_number,
+            read_floor_sequence: batch.sequence_number.max(watermark_sequence),
+            matched: batch.matched,
+        });
+    }
+
+    if let Some(&floor) = pending
+        .keys()
+        .next()
+        .or_else(|| watermarks.keys().next_back())
+    {
+        *watermarks = watermarks.split_off(&floor);
     }
 }
 
@@ -613,7 +630,7 @@ impl<D: commonware_cryptography::Digest> Stream for BatchSubscribeStream<D> {
                         .await
                         .map_err(qmdb_error_to_connect)?;
                     Ok(SubscribeResponse {
-                        resume_sequence_number: batch.read_floor_sequence,
+                        resume_sequence_number: batch.batch_sequence,
                         proof: Some(raw_batch_multi_proof_to_proto(&proof)).into(),
                         ..Default::default()
                     })
@@ -830,4 +847,53 @@ where
     KeylessOperation<V>: Encode + commonware_codec::Decode<Cfg = V::Cfg> + Clone,
 {
     wrap_stack(RangeServiceServer::new(KeylessRangeConnect::new(client)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pending(sequence_number: u64) -> PendingBatch {
+        PendingBatch {
+            sequence_number,
+            matched: vec![(Location::new(sequence_number), vec![sequence_number as u8])],
+        }
+    }
+
+    #[test]
+    fn shared_watermark_preserves_per_batch_resume_cursor() {
+        // Three batches (ops at locations 10, 11, 12) authorized by a single
+        // watermark at location 12 (published at store seq 15). If they all
+        // emitted the same resume cursor, a client that received only the
+        // first batch and reconnected at resume+1 would skip the other two.
+        let mut pending = BTreeMap::from([
+            (Location::new(10), pending(10)),
+            (Location::new(11), pending(11)),
+            (Location::new(12), pending(12)),
+        ]);
+        let mut watermarks = BTreeMap::from([(Location::new(12), 15u64)]);
+        let mut ready = VecDeque::new();
+
+        drain_ready(&mut pending, &mut watermarks, &mut ready);
+
+        assert_eq!(ready.len(), 3);
+        let cursors: Vec<u64> = ready.iter().map(|b| b.batch_sequence).collect();
+        assert_eq!(cursors, vec![10, 11, 12]);
+        for b in &ready {
+            assert_eq!(b.read_floor_sequence, 15);
+            assert_eq!(b.watermark, Location::new(12));
+        }
+
+        // Simulate a reconnect after only the first batch was delivered:
+        // the client would request since = cursors[0] + 1 = 11. After that
+        // replay the server must still be able to hand the client batches 2
+        // and 3 (their batch_sequence values 11 and 12 are both >= 11).
+        let next_since = cursors[0] + 1;
+        let not_yet_delivered: Vec<u64> = cursors
+            .iter()
+            .copied()
+            .filter(|&seq| seq >= next_since)
+            .collect();
+        assert_eq!(not_yet_delivered, vec![11, 12]);
+    }
 }

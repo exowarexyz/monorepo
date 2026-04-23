@@ -1,6 +1,7 @@
 *.swp
 *.DS_Store
 /target
+/package-lock.json
 *.vscode
 *.claude
 
