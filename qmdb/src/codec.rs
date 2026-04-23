@@ -359,6 +359,36 @@ pub(crate) fn encode_chunk_key(chunk_index: u64, watermark: Location) -> Key {
     key.freeze()
 }
 
+/// Clear every bitmap bit below `floor` within the chunk at `chunk_index`.
+///
+/// Bits below the inactivity floor are definitionally 0 at any watermark; the
+/// writer does not republish a chunk every time floor advancement flips one
+/// of its bits, so the stored payload may carry stale 1s. Fold those clears
+/// in deterministically at read time. Mirrors the bit layout used by
+/// `commonware_utils::bitmap::BitMap`: byte offset within the chunk is
+/// `(L / 8) % N`, bit mask is `1 << (L % 8)`.
+pub(crate) fn clear_below_floor<const N: usize>(
+    chunk: &mut [u8; N],
+    chunk_index: u64,
+    floor: Location,
+) {
+    let chunk_bits = bitmap_chunk_bits::<N>();
+    let chunk_start = chunk_index.saturating_mul(chunk_bits);
+    let chunk_end_exclusive = chunk_start.saturating_add(chunk_bits);
+    if *floor <= chunk_start {
+        return;
+    }
+    if *floor >= chunk_end_exclusive {
+        *chunk = [0u8; N];
+        return;
+    }
+    for bit in chunk_start..*floor {
+        let byte_offset = ((bit / 8) % N as u64) as usize;
+        let mask: u8 = 1u8 << (bit % 8);
+        chunk[byte_offset] &= !mask;
+    }
+}
+
 pub(crate) fn decode_operation_location_key(key: &Key) -> Result<Location, QmdbError> {
     let codec = OPERATION_CODEC;
     if !codec.matches(key) {

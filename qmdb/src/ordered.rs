@@ -15,9 +15,9 @@ use exoware_sdk_rs::keys::Key;
 use exoware_sdk_rs::{RangeMode, SerializableReadSession, StoreClient};
 
 use crate::codec::{
-    bitmap_chunk_bits, chunk_index_for_location, decode_digest, decode_update_location,
-    encode_chunk_key, encode_current_meta_key, encode_update_key, mmr_size_for_watermark,
-    UpdateRow, NO_PARTIAL_CHUNK,
+    bitmap_chunk_bits, chunk_index_for_location, clear_below_floor, decode_digest,
+    decode_update_location, encode_chunk_key, encode_current_meta_key, encode_update_key,
+    mmr_size_for_watermark, UpdateRow, NO_PARTIAL_CHUNK,
 };
 use crate::connect::OperationKv;
 use crate::core::HistoricalOpsClientCore;
@@ -634,10 +634,36 @@ where
         })
     }
 
+    async fn load_inactivity_floor_at(
+        &self,
+        session: &SerializableReadSession,
+        watermark: Location,
+    ) -> Result<Location, QmdbError> {
+        let operation = self.load_operation_at(session, watermark).await?;
+        match operation {
+            QmdbOperation::CommitFloor(_, floor) => Ok(floor),
+            _ => Err(QmdbError::CorruptData(format!(
+                "expected CommitFloor at watermark {watermark}"
+            ))),
+        }
+    }
+
     async fn load_bitmap_chunk(
         &self,
         session: &SerializableReadSession,
         watermark: Location,
+        chunk_index: u64,
+    ) -> Result<[u8; N], QmdbError> {
+        let floor = self.load_inactivity_floor_at(session, watermark).await?;
+        self.load_bitmap_chunk_with_floor(session, watermark, floor, chunk_index)
+            .await
+    }
+
+    async fn load_bitmap_chunk_with_floor(
+        &self,
+        session: &SerializableReadSession,
+        watermark: Location,
+        inactivity_floor: Location,
         chunk_index: u64,
     ) -> Result<[u8; N], QmdbError> {
         let start = encode_chunk_key(chunk_index, Location::new(0));
@@ -645,19 +671,48 @@ where
         let rows = session
             .range_with_mode(&start, &end, 1, RangeMode::Reverse)
             .await?;
-        let Some((_, bytes)) = rows.into_iter().next() else {
-            return Err(QmdbError::CorruptData(format!(
-                "missing bitmap chunk {chunk_index} at watermark {watermark}"
-            )));
+        let mut chunk = match rows.into_iter().next() {
+            Some((_, bytes)) => {
+                if bytes.len() != N {
+                    return Err(QmdbError::CorruptData(format!(
+                        "bitmap chunk {chunk_index} has invalid length {}",
+                        bytes.len()
+                    )));
+                }
+                let mut buf = [0u8; N];
+                buf.copy_from_slice(bytes.as_ref());
+                buf
+            }
+            None => {
+                // The writer elides chunks whose entire bit range is below
+                // the inactivity floor (see `changed_chunk_representatives`
+                // in `boundary.rs`). For such chunks the server never has a
+                // stored copy; the content is definitionally all zeros.
+                let chunk_bits = bitmap_chunk_bits::<N>();
+                let chunk_end_exclusive = chunk_index
+                    .checked_mul(chunk_bits)
+                    .and_then(|start| start.checked_add(chunk_bits))
+                    .ok_or_else(|| {
+                        QmdbError::CorruptData(format!(
+                            "bitmap chunk {chunk_index} range overflow"
+                        ))
+                    })?;
+                if chunk_end_exclusive > *inactivity_floor {
+                    return Err(QmdbError::CorruptData(format!(
+                        "missing bitmap chunk {chunk_index} at watermark {watermark}"
+                    )));
+                }
+                [0u8; N]
+            }
         };
-        if bytes.len() != N {
-            return Err(QmdbError::CorruptData(format!(
-                "bitmap chunk {chunk_index} has invalid length {}",
-                bytes.len()
-            )));
-        }
-        let mut chunk = [0u8; N];
-        chunk.copy_from_slice(bytes.as_ref());
+
+        // All bits below the inactivity floor are 0 by definition. The writer
+        // only republishes a chunk when a new op lands in it or an above-floor
+        // bit clears; bit flips induced by floor-raise moves, base-diff
+        // clears of still-present-but-below-floor locations, and the previous
+        // batch's CommitFloor are not separately republished. Fold them in
+        // deterministically here.
+        clear_below_floor::<N>(&mut chunk, chunk_index, inactivity_floor);
         Ok(chunk)
     }
 
@@ -668,12 +723,13 @@ where
         start_location: Location,
         end_location_exclusive: Location,
     ) -> Result<Vec<[u8; N]>, QmdbError> {
+        let floor = self.load_inactivity_floor_at(session, watermark).await?;
         let start_chunk = chunk_index_for_location::<N>(start_location);
         let end_chunk = chunk_index_for_location::<N>(end_location_exclusive - 1);
         let mut chunks = Vec::with_capacity((end_chunk - start_chunk + 1) as usize);
         for chunk_index in start_chunk..=end_chunk {
             chunks.push(
-                self.load_bitmap_chunk(session, watermark, chunk_index)
+                self.load_bitmap_chunk_with_floor(session, watermark, floor, chunk_index)
                     .await?,
             );
         }
