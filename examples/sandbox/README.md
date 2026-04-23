@@ -76,10 +76,15 @@ In addition to the simulator running above:
    VITE_QMDB_URL=http://127.0.0.1:8081 npm run dev
    ```
 
-4. **In the UI**, paste any `watermark` + matching `current_root` from the
-   `seed-continuous` stream into the Tip and Expected Root fields, then pick a
-   key (e.g. `k-00000000`) and click **Get Proof**. The client-side verifier
-   rejects the proof if the recomputed root doesn't match.
+4. **In the UI**, paste a `watermark` + matching root pair from the
+   `seed-continuous` stream, then pick a key (e.g. `k-00000000`):
+   - **Get Proof** verifies against `current_root` (paste into Expected Current
+     Root).
+   - **Get Multi-Proof** verifies against `historical_root` (paste into
+     Expected Historical Root).
 
-Subscribe streams live matches and does not require Expected Root — each
+   The client-side verifier rejects any proof whose recomputed root doesn't
+   match the pasted anchor.
+
+Subscribe streams live matches and does not require an expected root — each
 batch's root is anchored by the stream's own `resumeSequenceNumber`.

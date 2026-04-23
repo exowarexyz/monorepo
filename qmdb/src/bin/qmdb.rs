@@ -19,7 +19,7 @@ use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_sdk_rs::StoreClient;
 use store_qmdb::{
-    ordered_connect_stack, recover_boundary_state, CurrentBoundaryState, OrderedClient,
+    ordered_full_connect_stack, recover_boundary_state, CurrentBoundaryState, OrderedClient,
     OrderedWriter, MAX_OPERATION_SIZE,
 };
 use tower_http::cors::CorsLayer;
@@ -220,7 +220,7 @@ async fn run(
     ));
     let app = Router::new()
         .route("/health", get(health))
-        .fallback_service(ordered_connect_stack(client))
+        .fallback_service(ordered_full_connect_stack(client))
         .layer(CorsLayer::very_permissive());
 
     let addr = SocketAddr::from((host, port));

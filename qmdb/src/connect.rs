@@ -18,7 +18,7 @@ use commonware_storage::{
     },
 };
 
-use connectrpc::{ConnectError, ConnectRpcService, Context, ErrorCode, Limits};
+use connectrpc::{Chain, ConnectError, ConnectRpcService, Context, ErrorCode, Limits};
 use exoware_sdk_rs::store::common::v1::bytes_filter::KindView as ProtoBytesFilterKindView;
 use exoware_sdk_rs::store::qmdb::v1::{
     CurrentKeyValueProof as ProtoCurrentKeyValueProof, CurrentRangeProof as ProtoCurrentRangeProof,
@@ -780,6 +780,32 @@ where
     QmdbOperation<K, V>: Encode + commonware_codec::Decode,
 {
     wrap_stack(OrderedServiceServer::new(OrderedConnect::new(client)))
+}
+
+pub type OrderedFullConnectStack<H, K, V, const N: usize> = ConnectRpcService<
+    Chain<
+        OrderedServiceServer<OrderedConnect<H, K, V, N>>,
+        RangeServiceServer<OrderedRangeConnect<H, K, V, N>>,
+    >,
+>;
+
+/// Mount both `OrderedService` (Get/GetMany) and `RangeService` (Subscribe) on
+/// one endpoint, so a single HTTP URL serves the full ordered-QMDB surface.
+pub fn ordered_full_connect_stack<
+    H: Hasher + Send + Sync + 'static,
+    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
+    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
+    const N: usize,
+>(
+    client: Arc<OrderedClient<H, K, V, N>>,
+) -> OrderedFullConnectStack<H, K, V, N>
+where
+    QmdbOperation<K, V>: Encode + commonware_codec::Decode,
+{
+    wrap_stack(Chain(
+        OrderedServiceServer::new(OrderedConnect::new(client.clone())),
+        RangeServiceServer::new(OrderedRangeConnect::new(client)),
+    ))
 }
 
 pub fn ordered_range_connect_stack<

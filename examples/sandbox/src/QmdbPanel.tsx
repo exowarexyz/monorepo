@@ -101,20 +101,21 @@ export function QmdbPanel({ showNotification }: { showNotification: Notification
 
   const [isConnected, setIsConnected] = useState(false);
   const [tip, setTip] = useState('');
-  const [expectedRoot, setExpectedRoot] = useState('');
+  const [expectedCurrentRoot, setExpectedCurrentRoot] = useState('');
+  const [expectedHistoricalRoot, setExpectedHistoricalRoot] = useState('');
 
-  const [getKey, setGetKey] = useState('alpha');
+  const [getKey, setGetKey] = useState('k-00000000');
   const [getProof, setGetProof] = useState<VerifiedCurrentKeyValueProof | null>(null);
   const [isGetting, setIsGetting] = useState(false);
 
-  const [manyKeys, setManyKeys] = useState('alpha,beta');
+  const [manyKeys, setManyKeys] = useState('k-00000000,k-00000001');
   const [manyProof, setManyProof] = useState<VerifiedHistoricalMultiProof | null>(null);
   const [isGettingMany, setIsGettingMany] = useState(false);
 
   const [keyMatcherKind, setKeyMatcherKind] = useState<'exact' | 'prefix' | 'regex' | 'none'>(
     'prefix',
   );
-  const [keyMatcherValue, setKeyMatcherValue] = useState('a');
+  const [keyMatcherValue, setKeyMatcherValue] = useState('k-');
   const [valueMatcherKind, setValueMatcherKind] = useState<'exact' | 'prefix' | 'regex' | 'none'>(
     'none',
   );
@@ -146,7 +147,11 @@ export function QmdbPanel({ showNotification }: { showNotification: Notification
     setIsGetting(true);
     setGetProof(null);
     try {
-      const proof = await client.get(getKey, parseTip(tip), parseHexRoot(expectedRoot));
+      const proof = await client.get(
+        getKey,
+        parseTip(tip),
+        parseHexRoot(expectedCurrentRoot),
+      );
       setGetProof(proof);
       showNotification('success', 'QMDB Get', `Verified proof for "${getKey}" against expected root`);
     } catch (error) {
@@ -167,7 +172,11 @@ export function QmdbPanel({ showNotification }: { showNotification: Notification
       if (keys.length === 0) {
         throw new Error('At least one key is required');
       }
-      const proof = await client.getMany(keys, parseTip(tip), parseHexRoot(expectedRoot));
+      const proof = await client.getMany(
+        keys,
+        parseTip(tip),
+        parseHexRoot(expectedHistoricalRoot),
+      );
       setManyProof(proof);
       showNotification(
         'success',
@@ -244,10 +253,11 @@ export function QmdbPanel({ showNotification }: { showNotification: Notification
       <div className="form-section">
         <h3>Connection</h3>
         <p className="section-note">
-          Proofs are anchored to a (tip, root) pair. Run `qmdb run` locally and
-          `qmdb seed-continuous` to stream fresh tips; each line prints
-          `watermark=N current_root=0x..`. Paste a matching pair below to verify
-          against an externally trusted root.
+          Proofs are anchored to roots the writer emits per batch. Run `qmdb run`
+          locally and `qmdb seed-continuous` to stream fresh tips; each line prints
+          `watermark=N current_root=0x.. historical_root=0x..`. Get Proof verifies
+          against the current root; Get Multi-Proof verifies against the
+          historical root.
         </p>
         <p><strong>Server:</strong> {QMDB_URL}</p>
         <p><strong>Status:</strong> {isConnected ? 'Connected' : 'Disconnected'}</p>
@@ -264,13 +274,23 @@ export function QmdbPanel({ showNotification }: { showNotification: Notification
             />
           </div>
           <div className="form-group form-group-wide">
-            <label htmlFor="qmdb-root">Expected Root (hex)</label>
+            <label htmlFor="qmdb-current-root">Expected Current Root (hex)</label>
             <input
-              id="qmdb-root"
+              id="qmdb-current-root"
               type="text"
               placeholder="0x..."
-              value={expectedRoot}
-              onChange={(event) => setExpectedRoot(event.target.value)}
+              value={expectedCurrentRoot}
+              onChange={(event) => setExpectedCurrentRoot(event.target.value)}
+            />
+          </div>
+          <div className="form-group form-group-wide">
+            <label htmlFor="qmdb-historical-root">Expected Historical Root (hex)</label>
+            <input
+              id="qmdb-historical-root"
+              type="text"
+              placeholder="0x..."
+              value={expectedHistoricalRoot}
+              onChange={(event) => setExpectedHistoricalRoot(event.target.value)}
             />
           </div>
         </div>
@@ -292,7 +312,9 @@ export function QmdbPanel({ showNotification }: { showNotification: Notification
         <button
           className={`btn-primary ${isGetting ? 'loading' : ''}`}
           onClick={handleGet}
-          disabled={isGetting || !getKey.trim() || !tip.trim() || !expectedRoot.trim()}
+          disabled={
+            isGetting || !getKey.trim() || !tip.trim() || !expectedCurrentRoot.trim()
+          }
         >
           {isGetting ? 'Verifying...' : 'Get Proof'}
         </button>
@@ -322,7 +344,9 @@ export function QmdbPanel({ showNotification }: { showNotification: Notification
         <button
           className={`btn-primary ${isGettingMany ? 'loading' : ''}`}
           onClick={handleGetMany}
-          disabled={isGettingMany || !manyKeys.trim() || !tip.trim() || !expectedRoot.trim()}
+          disabled={
+            isGettingMany || !manyKeys.trim() || !tip.trim() || !expectedHistoricalRoot.trim()
+          }
         >
           {isGettingMany ? 'Verifying...' : 'Get Multi-Proof'}
         </button>
