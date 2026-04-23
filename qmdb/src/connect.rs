@@ -195,79 +195,214 @@ where
     }
 }
 
-#[derive(Clone)]
-pub struct OrderedRangeConnect<
-    H: Hasher,
-    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    const N: usize,
-> {
-    client: Arc<OrderedClient<H, K, V, N>>,
+/// Implemented by each QMDB backend client (`Arc<OrderedClient<...>>`,
+/// `Arc<UnorderedClient<...>>`, etc.) to expose just the surface the generic
+/// `RangeService` subscribe path needs. Callers instantiate via the
+/// `RangeConnect<B>` type aliases + `*_range_connect_stack` helpers rather
+/// than implementing this trait.
+pub trait RangeBackend: Clone + Send + Sync + 'static {
+    type Digest: commonware_cryptography::Digest;
+    /// Reject `key_filters` at subscribe time (set true for keyless, whose
+    /// ops have no logical key).
+    const REJECTS_KEY_FILTERS: bool = false;
+
+    fn store_client(&self) -> &exoware_sdk_rs::StoreClient;
+    fn classify_and_filter(&self) -> (Classify, exoware_sdk_rs::stream_filter::StreamFilter);
+    fn extract_operation_kv(
+        &self,
+        location: Location,
+        bytes: &[u8],
+    ) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>), QmdbError>;
+    fn batch_multi_proof_with_read_floor(
+        &self,
+        read_floor_sequence: u64,
+        watermark: Location,
+        operations: Vec<(Location, Vec<u8>)>,
+    ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest>, QmdbError>> + Send;
 }
 
-impl<H, K, V, const N: usize> OrderedRangeConnect<H, K, V, N>
-where
-    H: Hasher,
-    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-{
-    pub fn new(client: Arc<OrderedClient<H, K, V, N>>) -> Self {
-        Self { client }
+/// Wrapper that bridges any `RangeBackend` into a concrete `RangeService`
+/// implementation usable with `RangeServiceServer`.
+#[derive(Clone)]
+pub struct RangeConnect<B: RangeBackend> {
+    backend: B,
+}
+
+impl<B: RangeBackend> RangeConnect<B> {
+    pub fn new(backend: B) -> Self {
+        Self { backend }
     }
 }
 
-#[derive(Clone)]
-pub struct UnorderedRangeConnect<
-    H: Hasher,
-    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-> {
-    client: Arc<UnorderedClient<H, K, V>>,
-}
+pub type OrderedRangeConnect<H, K, V, const N: usize> =
+    RangeConnect<Arc<OrderedClient<H, K, V, N>>>;
+pub type UnorderedRangeConnect<H, K, V> = RangeConnect<Arc<UnorderedClient<H, K, V>>>;
+pub type ImmutableRangeConnect<H, K, V> = RangeConnect<Arc<ImmutableClient<H, K, V>>>;
+pub type KeylessRangeConnect<H, V> = RangeConnect<Arc<KeylessClient<H, V>>>;
 
-impl<H, K, V> UnorderedRangeConnect<H, K, V>
+impl<H, K, V, const N: usize> RangeBackend for Arc<OrderedClient<H, K, V, N>>
 where
-    H: Hasher,
-    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    H: Hasher + Send + Sync + 'static,
+    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
+    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
+    QmdbOperation<K, V>: Encode + commonware_codec::Decode,
 {
-    pub fn new(client: Arc<UnorderedClient<H, K, V>>) -> Self {
-        Self { client }
+    type Digest = H::Digest;
+
+    fn store_client(&self) -> &exoware_sdk_rs::StoreClient {
+        OrderedClient::store_client(self)
+    }
+
+    fn classify_and_filter(&self) -> (Classify, exoware_sdk_rs::stream_filter::StreamFilter) {
+        sub::classify_and_filter(None)
+    }
+
+    fn extract_operation_kv(
+        &self,
+        location: Location,
+        bytes: &[u8],
+    ) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>), QmdbError> {
+        OrderedClient::extract_operation_kv(self, location, bytes)
+    }
+
+    fn batch_multi_proof_with_read_floor(
+        &self,
+        read_floor_sequence: u64,
+        watermark: Location,
+        operations: Vec<(Location, Vec<u8>)>,
+    ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest>, QmdbError>> + Send {
+        OrderedClient::batch_multi_proof_with_read_floor(
+            self,
+            read_floor_sequence,
+            watermark,
+            operations,
+        )
     }
 }
 
-#[derive(Clone)]
-pub struct ImmutableRangeConnect<
-    H: Hasher,
-    K: AsRef<[u8]> + commonware_codec::Codec,
-    V: commonware_codec::Codec + Send + Sync,
-> {
-    client: Arc<ImmutableClient<H, K, V>>,
-}
-
-impl<H, K, V> ImmutableRangeConnect<H, K, V>
+impl<H, K, V> RangeBackend for Arc<UnorderedClient<H, K, V>>
 where
-    H: Hasher,
-    K: AsRef<[u8]> + commonware_codec::Codec,
-    V: commonware_codec::Codec + Send + Sync,
+    H: Hasher + Send + Sync + 'static,
+    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
+    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
+    UnorderedQmdbOperation<K, V>: Encode + commonware_codec::Decode,
 {
-    pub fn new(client: Arc<ImmutableClient<H, K, V>>) -> Self {
-        Self { client }
+    type Digest = H::Digest;
+
+    fn store_client(&self) -> &exoware_sdk_rs::StoreClient {
+        UnorderedClient::store_client(self)
+    }
+
+    fn classify_and_filter(&self) -> (Classify, exoware_sdk_rs::stream_filter::StreamFilter) {
+        sub::classify_and_filter(None)
+    }
+
+    fn extract_operation_kv(
+        &self,
+        location: Location,
+        bytes: &[u8],
+    ) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>), QmdbError> {
+        UnorderedClient::extract_operation_kv(self, location, bytes)
+    }
+
+    fn batch_multi_proof_with_read_floor(
+        &self,
+        read_floor_sequence: u64,
+        watermark: Location,
+        operations: Vec<(Location, Vec<u8>)>,
+    ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest>, QmdbError>> + Send {
+        UnorderedClient::batch_multi_proof_with_read_floor(
+            self,
+            read_floor_sequence,
+            watermark,
+            operations,
+        )
     }
 }
 
-#[derive(Clone)]
-pub struct KeylessRangeConnect<H: Hasher, V: commonware_codec::Codec + Send + Sync> {
-    client: Arc<KeylessClient<H, V>>,
+impl<H, K, V> RangeBackend for Arc<ImmutableClient<H, K, V>>
+where
+    H: Hasher + Send + Sync + 'static,
+    K: commonware_utils::Array
+        + commonware_codec::Codec
+        + Clone
+        + AsRef<[u8]>
+        + Send
+        + Sync
+        + 'static,
+    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
+    ImmutableOperation<K, V>: Encode + commonware_codec::Decode<Cfg = V::Cfg> + Clone,
+{
+    type Digest = H::Digest;
+
+    fn store_client(&self) -> &exoware_sdk_rs::StoreClient {
+        ImmutableClient::store_client(self)
+    }
+
+    fn classify_and_filter(&self) -> (Classify, exoware_sdk_rs::stream_filter::StreamFilter) {
+        sub::classify_and_filter(Some(AuthenticatedBackendNamespace::Immutable))
+    }
+
+    fn extract_operation_kv(
+        &self,
+        location: Location,
+        bytes: &[u8],
+    ) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>), QmdbError> {
+        ImmutableClient::extract_operation_kv(self, location, bytes)
+    }
+
+    fn batch_multi_proof_with_read_floor(
+        &self,
+        read_floor_sequence: u64,
+        watermark: Location,
+        operations: Vec<(Location, Vec<u8>)>,
+    ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest>, QmdbError>> + Send {
+        ImmutableClient::batch_multi_proof_with_read_floor(
+            self,
+            read_floor_sequence,
+            watermark,
+            operations,
+        )
+    }
 }
 
-impl<H, V> KeylessRangeConnect<H, V>
+impl<H, V> RangeBackend for Arc<KeylessClient<H, V>>
 where
-    H: Hasher,
-    V: commonware_codec::Codec + Send + Sync,
+    H: Hasher + Send + Sync + 'static,
+    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
+    KeylessOperation<V>: Encode + commonware_codec::Decode<Cfg = V::Cfg> + Clone,
 {
-    pub fn new(client: Arc<KeylessClient<H, V>>) -> Self {
-        Self { client }
+    type Digest = H::Digest;
+    const REJECTS_KEY_FILTERS: bool = true;
+
+    fn store_client(&self) -> &exoware_sdk_rs::StoreClient {
+        KeylessClient::store_client(self)
+    }
+
+    fn classify_and_filter(&self) -> (Classify, exoware_sdk_rs::stream_filter::StreamFilter) {
+        sub::classify_and_filter(Some(AuthenticatedBackendNamespace::Keyless))
+    }
+
+    fn extract_operation_kv(
+        &self,
+        location: Location,
+        bytes: &[u8],
+    ) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>), QmdbError> {
+        KeylessClient::extract_operation_kv(self, location, bytes)
+    }
+
+    fn batch_multi_proof_with_read_floor(
+        &self,
+        read_floor_sequence: u64,
+        watermark: Location,
+        operations: Vec<(Location, Vec<u8>)>,
+    ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest>, QmdbError>> + Send {
+        KeylessClient::batch_multi_proof_with_read_floor(
+            self,
+            read_floor_sequence,
+            watermark,
+            operations,
+        )
     }
 }
 
@@ -577,198 +712,36 @@ where
     }
 }
 
-impl<H, K, V, const N: usize> RangeService for OrderedRangeConnect<H, K, V, N>
-where
-    H: Hasher + Send + Sync + 'static,
-    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    QmdbOperation<K, V>: Encode + commonware_codec::Decode,
-{
+impl<B: RangeBackend> RangeService for RangeConnect<B> {
     fn subscribe(
         &self,
         ctx: Context,
         request: buffa::view::OwnedView<SubscribeRequestView<'static>>,
     ) -> impl Future<Output = Result<(SubscribeStream, Context), ConnectError>> + Send {
-        let client = self.client.clone();
+        let backend = self.backend.clone();
         async move {
-            let key_matcher = parse_bytes_filters(request.key_filters.iter(), "key")?;
-            let value_matcher = parse_bytes_filters(request.value_filters.iter(), "value")?;
-            let since = decode_since(request.since_sequence_number);
-            let (classify, filter) = sub::classify_and_filter(None);
-            let sub = sub::open_store_subscription(client.store_client(), filter, since)
-                .await
-                .map_err(qmdb_error_to_connect)?;
-            let extract_kv: ExtractKv = {
-                let client = client.clone();
-                Arc::new(move |location, bytes| client.extract_operation_kv(location, bytes))
-            };
-            let build_proof: BuildBatchProof<H::Digest> = {
-                let client = client.clone();
-                Arc::new(move |seq, watermark, matched| {
-                    let client = client.clone();
-                    async move {
-                        client
-                            .batch_multi_proof_with_read_floor(seq, watermark, matched)
-                            .await
-                    }
-                    .boxed()
-                })
-            };
-            let stream: SubscribeStream = Box::pin(BatchSubscribeStream::new(
-                key_matcher,
-                value_matcher,
-                classify,
-                extract_kv,
-                build_proof,
-                sub,
-            ));
-            Ok((stream, ctx))
-        }
-    }
-}
-
-impl<H, K, V> RangeService for UnorderedRangeConnect<H, K, V>
-where
-    H: Hasher + Send + Sync + 'static,
-    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    UnorderedQmdbOperation<K, V>: Encode + commonware_codec::Decode,
-{
-    fn subscribe(
-        &self,
-        ctx: Context,
-        request: buffa::view::OwnedView<SubscribeRequestView<'static>>,
-    ) -> impl Future<Output = Result<(SubscribeStream, Context), ConnectError>> + Send {
-        let client = self.client.clone();
-        async move {
-            let key_matcher = parse_bytes_filters(request.key_filters.iter(), "key")?;
-            let value_matcher = parse_bytes_filters(request.value_filters.iter(), "value")?;
-            let since = decode_since(request.since_sequence_number);
-            let (classify, filter) = sub::classify_and_filter(None);
-            let sub = sub::open_store_subscription(client.store_client(), filter, since)
-                .await
-                .map_err(qmdb_error_to_connect)?;
-            let extract_kv: ExtractKv = {
-                let client = client.clone();
-                Arc::new(move |location, bytes| client.extract_operation_kv(location, bytes))
-            };
-            let build_proof: BuildBatchProof<H::Digest> = {
-                let client = client.clone();
-                Arc::new(move |seq, watermark, matched| {
-                    let client = client.clone();
-                    async move {
-                        client
-                            .batch_multi_proof_with_read_floor(seq, watermark, matched)
-                            .await
-                    }
-                    .boxed()
-                })
-            };
-            let stream: SubscribeStream = Box::pin(BatchSubscribeStream::new(
-                key_matcher,
-                value_matcher,
-                classify,
-                extract_kv,
-                build_proof,
-                sub,
-            ));
-            Ok((stream, ctx))
-        }
-    }
-}
-
-impl<H, K, V> RangeService for ImmutableRangeConnect<H, K, V>
-where
-    H: Hasher + Send + Sync + 'static,
-    K: commonware_utils::Array
-        + commonware_codec::Codec
-        + Clone
-        + AsRef<[u8]>
-        + Send
-        + Sync
-        + 'static,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    ImmutableOperation<K, V>: Encode + commonware_codec::Decode<Cfg = V::Cfg> + Clone,
-{
-    fn subscribe(
-        &self,
-        ctx: Context,
-        request: buffa::view::OwnedView<SubscribeRequestView<'static>>,
-    ) -> impl Future<Output = Result<(SubscribeStream, Context), ConnectError>> + Send {
-        let client = self.client.clone();
-        async move {
-            let key_matcher = parse_bytes_filters(request.key_filters.iter(), "key")?;
-            let value_matcher = parse_bytes_filters(request.value_filters.iter(), "value")?;
-            let since = decode_since(request.since_sequence_number);
-            let (classify, filter) =
-                sub::classify_and_filter(Some(AuthenticatedBackendNamespace::Immutable));
-            let sub = sub::open_store_subscription(client.store_client(), filter, since)
-                .await
-                .map_err(qmdb_error_to_connect)?;
-            let extract_kv: ExtractKv = {
-                let client = client.clone();
-                Arc::new(move |location, bytes| client.extract_operation_kv(location, bytes))
-            };
-            let build_proof: BuildBatchProof<H::Digest> = {
-                let client = client.clone();
-                Arc::new(move |seq, watermark, matched| {
-                    let client = client.clone();
-                    async move {
-                        client
-                            .batch_multi_proof_with_read_floor(seq, watermark, matched)
-                            .await
-                    }
-                    .boxed()
-                })
-            };
-            let stream: SubscribeStream = Box::pin(BatchSubscribeStream::new(
-                key_matcher,
-                value_matcher,
-                classify,
-                extract_kv,
-                build_proof,
-                sub,
-            ));
-            Ok((stream, ctx))
-        }
-    }
-}
-
-impl<H, V> RangeService for KeylessRangeConnect<H, V>
-where
-    H: Hasher + Send + Sync + 'static,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    KeylessOperation<V>: Encode + commonware_codec::Decode<Cfg = V::Cfg> + Clone,
-{
-    fn subscribe(
-        &self,
-        ctx: Context,
-        request: buffa::view::OwnedView<SubscribeRequestView<'static>>,
-    ) -> impl Future<Output = Result<(SubscribeStream, Context), ConnectError>> + Send {
-        let client = self.client.clone();
-        async move {
-            if !request.key_filters.is_empty() {
+            if B::REJECTS_KEY_FILTERS && !request.key_filters.is_empty() {
                 return Err(ConnectError::invalid_argument(
-                    "keyless RangeService.Subscribe does not accept key_filters",
+                    "this RangeService endpoint does not accept key_filters",
                 ));
             }
+            let key_matcher = parse_bytes_filters(request.key_filters.iter(), "key")?;
             let value_matcher = parse_bytes_filters(request.value_filters.iter(), "value")?;
             let since = decode_since(request.since_sequence_number);
-            let (classify, filter) =
-                sub::classify_and_filter(Some(AuthenticatedBackendNamespace::Keyless));
-            let sub = sub::open_store_subscription(client.store_client(), filter, since)
+            let (classify, filter) = backend.classify_and_filter();
+            let sub = sub::open_store_subscription(backend.store_client(), filter, since)
                 .await
                 .map_err(qmdb_error_to_connect)?;
             let extract_kv: ExtractKv = {
-                let client = client.clone();
-                Arc::new(move |location, bytes| client.extract_operation_kv(location, bytes))
+                let backend = backend.clone();
+                Arc::new(move |location, bytes| backend.extract_operation_kv(location, bytes))
             };
-            let build_proof: BuildBatchProof<H::Digest> = {
-                let client = client.clone();
+            let build_proof: BuildBatchProof<B::Digest> = {
+                let backend = backend.clone();
                 Arc::new(move |seq, watermark, matched| {
-                    let client = client.clone();
+                    let backend = backend.clone();
                     async move {
-                        client
+                        backend
                             .batch_multi_proof_with_read_floor(seq, watermark, matched)
                             .await
                     }
@@ -776,7 +749,7 @@ where
                 })
             };
             let stream: SubscribeStream = Box::pin(BatchSubscribeStream::new(
-                None,
+                key_matcher,
                 value_matcher,
                 classify,
                 extract_kv,

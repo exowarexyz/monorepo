@@ -243,8 +243,7 @@ where
     }
 }
 
-pub type OrderedRangeConnectClient<T, H, K, V> =
-    RangeConnectClient<T, H, QmdbOperation<K, V>>;
+pub type OrderedRangeConnectClient<T, H, K, V> = RangeConnectClient<T, H, QmdbOperation<K, V>>;
 pub type UnorderedRangeConnectClient<T, H, K, V> =
     RangeConnectClient<T, H, UnorderedQmdbOperation<K, V>>;
 pub type ImmutableRangeConnectClient<T, H, K, V> =

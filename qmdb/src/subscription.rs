@@ -17,14 +17,13 @@ use crate::codec::{
 use crate::QmdbError;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Family {
+pub enum Family {
     Op,
     Presence,
     Watermark,
 }
 
-pub(crate) type Classify =
-    Arc<dyn Fn(&Key, &[u8]) -> Option<(Family, Location)> + Send + Sync + 'static>;
+pub type Classify = Arc<dyn Fn(&Key, &[u8]) -> Option<(Family, Location)> + Send + Sync + 'static>;
 
 pub(crate) async fn open_store_subscription(
     client: &StoreClient,
