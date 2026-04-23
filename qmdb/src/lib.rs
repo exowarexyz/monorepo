@@ -1,4 +1,3 @@
-#![allow(clippy::type_complexity, clippy::result_large_err)]
 //! Store-backed bridge for Commonware authenticated storage proofs.
 //!
 //! The crate currently supports multiple Commonware authenticated backends:

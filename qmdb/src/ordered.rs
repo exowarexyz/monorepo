@@ -19,6 +19,7 @@ use crate::codec::{
     encode_chunk_key, encode_current_meta_key, encode_update_key, mmr_size_for_watermark,
     UpdateRow, NO_PARTIAL_CHUNK,
 };
+use crate::connect::OperationKv;
 use crate::core::HistoricalOpsClientCore;
 use crate::error::QmdbError;
 use crate::proof::{
@@ -168,7 +169,7 @@ where
         &self,
         location: Location,
         bytes: &[u8],
-    ) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>), QmdbError>
+    ) -> Result<OperationKv, QmdbError>
     where
         V: AsRef<[u8]>,
     {

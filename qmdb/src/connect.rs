@@ -41,6 +41,10 @@ use crate::{ImmutableClient, KeylessClient, OrderedClient, QmdbError, UnorderedC
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
 type BoxConnectError = Box<ConnectError>;
 
+/// Decoded (key, value) payload for a QMDB operation. Either element is `None`
+/// when the operation's logical key or value is absent (e.g. keyless ops).
+pub type OperationKv = (Option<Vec<u8>>, Option<Vec<u8>>);
+
 fn connect_limits() -> Limits {
     Limits::default()
         .max_request_body_size(MAX_CONNECTRPC_BODY_BYTES)
@@ -212,7 +216,7 @@ pub trait RangeBackend: Clone + Send + Sync + 'static {
         &self,
         location: Location,
         bytes: &[u8],
-    ) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>), QmdbError>;
+    ) -> Result<OperationKv, QmdbError>;
     fn batch_multi_proof_with_read_floor(
         &self,
         read_floor_sequence: u64,
@@ -261,7 +265,7 @@ where
         &self,
         location: Location,
         bytes: &[u8],
-    ) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>), QmdbError> {
+    ) -> Result<OperationKv, QmdbError> {
         OrderedClient::extract_operation_kv(self, location, bytes)
     }
 
@@ -301,7 +305,7 @@ where
         &self,
         location: Location,
         bytes: &[u8],
-    ) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>), QmdbError> {
+    ) -> Result<OperationKv, QmdbError> {
         UnorderedClient::extract_operation_kv(self, location, bytes)
     }
 
@@ -347,7 +351,7 @@ where
         &self,
         location: Location,
         bytes: &[u8],
-    ) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>), QmdbError> {
+    ) -> Result<OperationKv, QmdbError> {
         ImmutableClient::extract_operation_kv(self, location, bytes)
     }
 
@@ -387,7 +391,7 @@ where
         &self,
         location: Location,
         bytes: &[u8],
-    ) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>), QmdbError> {
+    ) -> Result<OperationKv, QmdbError> {
         KeylessClient::extract_operation_kv(self, location, bytes)
     }
 
@@ -422,7 +426,7 @@ struct ReadyBatch {
 fn parse_bytes_filters<'a, 'b, I>(
     filters: I,
     label: &str,
-) -> Result<Option<CompiledBytesFilters>, ConnectError>
+) -> Result<Option<CompiledBytesFilters>, String>
 where
     I: IntoIterator<Item = &'b exoware_sdk_rs::store::common::v1::BytesFilterView<'a>>,
     'a: 'b,
@@ -436,21 +440,20 @@ where
                 BytesFilter::Regex(pattern.to_string())
             }
             None => {
-                return Err(ConnectError::invalid_argument(format!(
+                return Err(format!(
                     "each {label} filter must set exactly one of exact, prefix, or regex"
-                )));
+                ));
             }
         });
     }
-    CompiledBytesFilters::compile(&domain)
-        .map_err(|e| ConnectError::invalid_argument(format!("invalid {label} filter: {e}")))
+    CompiledBytesFilters::compile(&domain).map_err(|e| format!("invalid {label} filter: {e}"))
 }
 
 /// Decodes one streamed operation into its (optional key, optional value)
 /// byte view. Combined so we decode the op once even when both filters are
 /// active.
 type ExtractKv = Arc<
-    dyn Fn(Location, &[u8]) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>), QmdbError>
+    dyn Fn(Location, &[u8]) -> Result<OperationKv, QmdbError>
         + Send
         + Sync
         + 'static,
@@ -725,8 +728,10 @@ impl<B: RangeBackend> RangeService for RangeConnect<B> {
                     "this RangeService endpoint does not accept key_filters",
                 ));
             }
-            let key_matcher = parse_bytes_filters(request.key_filters.iter(), "key")?;
-            let value_matcher = parse_bytes_filters(request.value_filters.iter(), "value")?;
+            let key_matcher = parse_bytes_filters(request.key_filters.iter(), "key")
+                .map_err(ConnectError::invalid_argument)?;
+            let value_matcher = parse_bytes_filters(request.value_filters.iter(), "value")
+                .map_err(ConnectError::invalid_argument)?;
             let since = decode_since(request.since_sequence_number);
             let (classify, filter) = backend.classify_and_filter();
             let sub = sub::open_store_subscription(backend.store_client(), filter, since)

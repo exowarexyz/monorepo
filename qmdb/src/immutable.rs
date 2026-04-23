@@ -7,6 +7,7 @@ use commonware_utils::Array;
 use exoware_sdk_rs::{SerializableReadSession, StoreClient};
 
 use crate::auth::AuthenticatedBackendNamespace;
+use crate::connect::OperationKv;
 use crate::auth::{
     compute_auth_root, decode_auth_immutable_update_location, load_auth_operation_at,
     load_auth_operation_bytes_range, load_latest_auth_immutable_update_row,
@@ -61,7 +62,7 @@ where
         &self,
         location: Location,
         bytes: &[u8],
-    ) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>), QmdbError>
+    ) -> Result<OperationKv, QmdbError>
     where
         V: AsRef<[u8]>,
     {

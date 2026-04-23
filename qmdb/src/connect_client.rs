@@ -272,12 +272,14 @@ fn raw_mmr_from_proto<D: Digest + Decode>(
     })
 }
 
+type RootAndOps<H, Op> = (<H as Hasher>::Digest, Vec<(Location, Op)>);
+
 fn verify_multi_from_proto<H, Op, F>(
     proto: &HistoricalMultiProof,
     op_cfg: &Op::Cfg,
     kind: crate::ProofKind,
     decode: F,
-) -> Result<(H::Digest, Vec<(Location, Op)>), QmdbError>
+) -> Result<RootAndOps<H, Op>, QmdbError>
 where
     H: Hasher,
     H::Digest: DecodeExt<()>,

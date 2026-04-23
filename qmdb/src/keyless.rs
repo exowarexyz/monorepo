@@ -6,6 +6,7 @@ use commonware_storage::{mmr::Location, qmdb::keyless::Operation as KeylessOpera
 use exoware_sdk_rs::{SerializableReadSession, StoreClient};
 
 use crate::auth::AuthenticatedBackendNamespace;
+use crate::connect::OperationKv;
 use crate::auth::{
     compute_auth_root, load_auth_operation_at, load_auth_operation_bytes_range,
     read_latest_auth_watermark, require_published_auth_watermark,
@@ -50,7 +51,7 @@ where
         &self,
         location: Location,
         bytes: &[u8],
-    ) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>), QmdbError>
+    ) -> Result<OperationKv, QmdbError>
     where
         V: AsRef<[u8]>,
     {

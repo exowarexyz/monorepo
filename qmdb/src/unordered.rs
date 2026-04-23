@@ -6,6 +6,7 @@ use commonware_storage::mmr::Location;
 use exoware_sdk_rs::{SerializableReadSession, StoreClient};
 
 use crate::codec::mmr_size_for_watermark;
+use crate::connect::OperationKv;
 use crate::core::HistoricalOpsClientCore;
 use crate::error::QmdbError;
 use crate::proof::{OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange};
@@ -78,7 +79,7 @@ where
         &self,
         location: Location,
         bytes: &[u8],
-    ) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>), QmdbError>
+    ) -> Result<OperationKv, QmdbError>
     where
         V: AsRef<[u8]>,
     {

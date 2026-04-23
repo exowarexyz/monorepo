@@ -1,5 +1,3 @@
-#![allow(clippy::type_complexity)]
-
 use crate::proto::store::qmdb::v1::{
     CurrentKeyValueProof, CurrentKeyValueProofView, HistoricalMultiProof, HistoricalMultiProofView,
 };
@@ -19,8 +17,7 @@ use commonware_storage::{
 use js_sys::{Array, BigInt, Object, Reflect, Uint8Array};
 use wasm_bindgen::prelude::*;
 
-#[allow(dead_code)]
-mod proto {
+pub mod proto {
     pub mod store {
         pub mod common {
             pub mod v1 {
@@ -51,6 +48,9 @@ mod proto {
 }
 
 const MAX_OPERATION_SIZE: usize = u16::MAX as usize;
+
+type DecodedOperation = OrderedOperation<Vec<u8>, Vec<u8>>;
+type MultiProofOperations = Vec<(Location, DecodedOperation)>;
 
 #[derive(Clone)]
 struct RawMmrProof<D: Digest> {
@@ -97,7 +97,7 @@ impl<D: Digest + Clone> From<&RawMmrProof<D>> for mmr::Proof<D> {
 
 fn verify_multi_from_proto(
     proto: &HistoricalMultiProof,
-) -> Result<(Vec<u8>, Vec<(Location, OrderedOperation<Vec<u8>, Vec<u8>>)>), String> {
+) -> Result<(Vec<u8>, MultiProofOperations), String> {
     let proof = proto
         .proof
         .as_option()
@@ -137,7 +137,7 @@ fn verify_multi_from_proto(
 
 fn verify_key_value_from_proto(
     proto: &CurrentKeyValueProof,
-) -> Result<(Vec<u8>, Location, OrderedOperation<Vec<u8>, Vec<u8>>), String> {
+) -> Result<(Vec<u8>, Location, DecodedOperation), String> {
     let range_proof = proto
         .range_proof
         .as_option()
