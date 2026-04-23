@@ -7,13 +7,13 @@ use commonware_utils::Array;
 use exoware_sdk_rs::{SerializableReadSession, StoreClient};
 
 use crate::auth::AuthenticatedBackendNamespace;
-use crate::connect::OperationKv;
 use crate::auth::{
     compute_auth_root, decode_auth_immutable_update_location, load_auth_operation_at,
     load_auth_operation_bytes_range, load_latest_auth_immutable_update_row,
     read_latest_auth_watermark, require_published_auth_watermark,
 };
 use crate::codec::{mmr_size_for_watermark, UpdateRow};
+use crate::connect::OperationKv;
 use crate::core::retry_transient_post_ingest_query;
 use crate::error::QmdbError;
 use crate::proof::{OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange};

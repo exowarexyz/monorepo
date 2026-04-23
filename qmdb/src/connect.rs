@@ -452,12 +452,8 @@ where
 /// Decodes one streamed operation into its (optional key, optional value)
 /// byte view. Combined so we decode the op once even when both filters are
 /// active.
-type ExtractKv = Arc<
-    dyn Fn(Location, &[u8]) -> Result<OperationKv, QmdbError>
-        + Send
-        + Sync
-        + 'static,
->;
+type ExtractKv =
+    Arc<dyn Fn(Location, &[u8]) -> Result<OperationKv, QmdbError> + Send + Sync + 'static>;
 
 type BuildBatchProof<D> = Arc<
     dyn Fn(

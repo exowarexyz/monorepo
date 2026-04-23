@@ -6,12 +6,12 @@ use commonware_storage::{mmr::Location, qmdb::keyless::Operation as KeylessOpera
 use exoware_sdk_rs::{SerializableReadSession, StoreClient};
 
 use crate::auth::AuthenticatedBackendNamespace;
-use crate::connect::OperationKv;
 use crate::auth::{
     compute_auth_root, load_auth_operation_at, load_auth_operation_bytes_range,
     read_latest_auth_watermark, require_published_auth_watermark,
 };
 use crate::codec::mmr_size_for_watermark;
+use crate::connect::OperationKv;
 use crate::core::retry_transient_post_ingest_query;
 use crate::error::QmdbError;
 use crate::proof::{OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange};
