@@ -78,6 +78,10 @@ jobs:
         run: cd qmdb/ts && npm ci
       - name: Build qmdb/ts
         run: cd qmdb/ts && npm run build
+      - name: Install sql/ts dependencies
+        run: cd sql/ts && npm ci
+      - name: Build sql/ts
+        run: cd sql/ts && npm run build
       - name: Install examples/sandbox dependencies
         run: cd examples/sandbox && npm ci --ignore-scripts
       - name: Build examples/sandbox
