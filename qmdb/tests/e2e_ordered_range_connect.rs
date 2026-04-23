@@ -25,7 +25,7 @@ use connectrpc::client::ClientConfig;
 use connectrpc::{ConnectError, ConnectRpcService, Context};
 use exoware_sdk_rs::proto::PreferZstdHttpClient;
 use exoware_sdk_rs::store::common::v1::{
-    bytes_match_key as proto_bytes_match_key, BytesMatchKey as ProtoBytesMatchKey,
+    bytes_filter as proto_bytes_filter, BytesFilter as ProtoBytesFilter,
 };
 use exoware_sdk_rs::store::qmdb::v1::{
     RangeService, RangeServiceClient, RangeServiceServer,
@@ -282,23 +282,23 @@ fn tamper_subscribe_response(mut response: ProtoSubscribeResponse) -> ProtoSubsc
     response
 }
 
-fn match_exact(key: &[u8]) -> ProtoBytesMatchKey {
-    ProtoBytesMatchKey {
-        kind: Some(proto_bytes_match_key::Kind::Exact(key.to_vec())),
+fn match_exact(key: &[u8]) -> ProtoBytesFilter {
+    ProtoBytesFilter {
+        kind: Some(proto_bytes_filter::Kind::Exact(key.to_vec())),
         ..Default::default()
     }
 }
 
-fn match_prefix(prefix: &[u8]) -> ProtoBytesMatchKey {
-    ProtoBytesMatchKey {
-        kind: Some(proto_bytes_match_key::Kind::Prefix(prefix.to_vec())),
+fn match_prefix(prefix: &[u8]) -> ProtoBytesFilter {
+    ProtoBytesFilter {
+        kind: Some(proto_bytes_filter::Kind::Prefix(prefix.to_vec())),
         ..Default::default()
     }
 }
 
-fn match_regex(regex: &str) -> ProtoBytesMatchKey {
-    ProtoBytesMatchKey {
-        kind: Some(proto_bytes_match_key::Kind::Regex(regex.to_string())),
+fn match_regex(regex: &str) -> ProtoBytesFilter {
+    ProtoBytesFilter {
+        kind: Some(proto_bytes_filter::Kind::Regex(regex.to_string())),
         ..Default::default()
     }
 }
@@ -419,7 +419,7 @@ async fn ordered_range_connect_subscribe_emits_multi_proof_for_matching_keys() {
 
     let mut stream = client
         .subscribe(ProtoSubscribeRequest {
-            match_keys: vec![match_exact(b"alpha")],
+            key_filters: vec![match_exact(b"alpha")],
             ..Default::default()
         })
         .await
@@ -457,7 +457,7 @@ async fn ordered_range_connect_subscribe_replays_since_cursor() {
 
     let mut stream = client
         .subscribe(ProtoSubscribeRequest {
-            match_keys: vec![match_exact(b"alpha")],
+            key_filters: vec![match_exact(b"alpha")],
             since_sequence_number: Some(1),
             ..Default::default()
         })
@@ -489,14 +489,14 @@ async fn ordered_range_connect_subscribe_matches_prefix_and_regex_filters() {
 
     let mut prefix_stream = client
         .subscribe(ProtoSubscribeRequest {
-            match_keys: vec![match_prefix(b"alp")],
+            key_filters: vec![match_prefix(b"alp")],
             ..Default::default()
         })
         .await
         .expect("prefix subscribe");
     let mut regex_stream = client
         .subscribe(ProtoSubscribeRequest {
-            match_keys: vec![match_regex("^be.*$")],
+            key_filters: vec![match_regex("^be.*$")],
             ..Default::default()
         })
         .await
@@ -523,4 +523,78 @@ async fn ordered_range_connect_subscribe_matches_prefix_and_regex_filters() {
 
     assert_eq!(prefix_frame.operations, alpha);
     assert_eq!(regex_frame.operations, beta);
+}
+
+#[tokio::test]
+async fn ordered_range_connect_subscribe_filters_by_value_regex_without_key() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_local_batch().await;
+    let ordered_client = Arc::new(TestOrderedClient::from_client(
+        store_client.clone(),
+        op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client.clone()).await;
+    let client = validated_client(&qmdb_url);
+
+    // Regex matches the literal "one" — the value written for key "alpha" but
+    // not for "beta". The client supplies no key filter.
+    let mut stream = client
+        .subscribe(ProtoSubscribeRequest {
+            value_filters: vec![match_regex("^one$")],
+            ..Default::default()
+        })
+        .await
+        .expect("subscribe");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    upload_and_publish(&store_client, &local).await;
+
+    let frame: RangeSubscribeProof<Digest, BatchOperation> =
+        tokio::time::timeout(Duration::from_secs(5), stream.message())
+            .await
+            .expect("timeout")
+            .expect("stream result")
+            .expect("stream frame");
+
+    let expected = all_operations_for_key(&local.operations, b"alpha");
+    assert!(!expected.is_empty());
+    assert_eq!(frame.operations, expected);
+}
+
+#[tokio::test]
+async fn ordered_range_connect_subscribe_intersects_key_and_value_filters() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_local_batch().await;
+    let ordered_client = Arc::new(TestOrderedClient::from_client(
+        store_client.clone(),
+        op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client.clone()).await;
+    let client = validated_client(&qmdb_url);
+
+    // Key prefix matches alpha + beta; value regex excludes everything except
+    // "two". Intersection should leave only beta's updates.
+    let mut stream = client
+        .subscribe(ProtoSubscribeRequest {
+            key_filters: vec![match_prefix(b"")],
+            value_filters: vec![match_regex("^two$")],
+            ..Default::default()
+        })
+        .await
+        .expect("subscribe");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    upload_and_publish(&store_client, &local).await;
+
+    let frame = tokio::time::timeout(Duration::from_secs(5), stream.message())
+        .await
+        .expect("timeout")
+        .expect("stream result")
+        .expect("stream frame");
+
+    let expected = all_operations_for_key(&local.operations, b"beta");
+    assert!(!expected.is_empty());
+    assert_eq!(frame.operations, expected);
 }

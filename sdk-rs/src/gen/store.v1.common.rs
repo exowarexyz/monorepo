@@ -637,16 +637,15 @@ unsafe impl ::buffa::DefaultViewInstance for MatchKeyView<'static> {
 unsafe impl<'a> ::buffa::HasDefaultViewInstance for MatchKeyView<'a> {
     type Static = MatchKeyView<'static>;
 }
-/// Matches an uninterpreted byte key by exact value, prefix, or full-key regex.
-///
-/// Intended for APIs that operate on decoded logical keys rather than store-row
-/// `KeyCodec` families.
+/// Matches an uninterpreted byte string by exact value, prefix, or full-string
+/// regex. Used for filtering both decoded logical keys and operation values in
+/// APIs that operate above the store-row `KeyCodec` layer.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize)]
 #[serde(default)]
-pub struct BytesMatchKey {
+pub struct BytesFilter {
     #[serde(flatten)]
-    pub kind: Option<bytes_match_key::Kind>,
+    pub kind: Option<bytes_filter::Kind>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -654,25 +653,25 @@ pub struct BytesMatchKey {
     #[serde(skip)]
     pub __buffa_cached_size: ::buffa::__private::CachedSize,
 }
-impl ::core::fmt::Debug for BytesMatchKey {
+impl ::core::fmt::Debug for BytesFilter {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("BytesMatchKey").field("kind", &self.kind).finish()
+        f.debug_struct("BytesFilter").field("kind", &self.kind).finish()
     }
 }
-impl BytesMatchKey {
+impl BytesFilter {
     /// Protobuf type URL for this message, for use with `Any::pack` and
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.common.v1.BytesMatchKey";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/store.common.v1.BytesFilter";
 }
-unsafe impl ::buffa::DefaultInstance for BytesMatchKey {
+unsafe impl ::buffa::DefaultInstance for BytesFilter {
     fn default_instance() -> &'static Self {
-        static VALUE: ::buffa::__private::OnceBox<BytesMatchKey> = ::buffa::__private::OnceBox::new();
+        static VALUE: ::buffa::__private::OnceBox<BytesFilter> = ::buffa::__private::OnceBox::new();
         VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
     }
 }
-impl ::buffa::Message for BytesMatchKey {
+impl ::buffa::Message for BytesFilter {
     /// Returns the total encoded size in bytes.
     ///
     /// The result is a `u32`; the protobuf specification requires all
@@ -684,13 +683,13 @@ impl ::buffa::Message for BytesMatchKey {
         let mut size = 0u32;
         if let ::core::option::Option::Some(ref v) = self.kind {
             match v {
-                bytes_match_key::Kind::Exact(x) => {
+                bytes_filter::Kind::Exact(x) => {
                     size += 1u32 + ::buffa::types::bytes_encoded_len(x) as u32;
                 }
-                bytes_match_key::Kind::Prefix(x) => {
+                bytes_filter::Kind::Prefix(x) => {
                     size += 1u32 + ::buffa::types::bytes_encoded_len(x) as u32;
                 }
-                bytes_match_key::Kind::Regex(x) => {
+                bytes_filter::Kind::Regex(x) => {
                     size += 1u32 + ::buffa::types::string_encoded_len(x) as u32;
                 }
             }
@@ -704,7 +703,7 @@ impl ::buffa::Message for BytesMatchKey {
         use ::buffa::Enumeration as _;
         if let ::core::option::Option::Some(ref v) = self.kind {
             match v {
-                bytes_match_key::Kind::Exact(x) => {
+                bytes_filter::Kind::Exact(x) => {
                     ::buffa::encoding::Tag::new(
                             1u32,
                             ::buffa::encoding::WireType::LengthDelimited,
@@ -712,7 +711,7 @@ impl ::buffa::Message for BytesMatchKey {
                         .encode(buf);
                     ::buffa::types::encode_bytes(x, buf);
                 }
-                bytes_match_key::Kind::Prefix(x) => {
+                bytes_filter::Kind::Prefix(x) => {
                     ::buffa::encoding::Tag::new(
                             2u32,
                             ::buffa::encoding::WireType::LengthDelimited,
@@ -720,7 +719,7 @@ impl ::buffa::Message for BytesMatchKey {
                         .encode(buf);
                     ::buffa::types::encode_bytes(x, buf);
                 }
-                bytes_match_key::Kind::Regex(x) => {
+                bytes_filter::Kind::Regex(x) => {
                     ::buffa::encoding::Tag::new(
                             3u32,
                             ::buffa::encoding::WireType::LengthDelimited,
@@ -752,7 +751,7 @@ impl ::buffa::Message for BytesMatchKey {
                     });
                 }
                 self.kind = ::core::option::Option::Some(
-                    bytes_match_key::Kind::Exact(::buffa::types::decode_bytes(buf)?),
+                    bytes_filter::Kind::Exact(::buffa::types::decode_bytes(buf)?),
                 );
             }
             2u32 => {
@@ -764,7 +763,7 @@ impl ::buffa::Message for BytesMatchKey {
                     });
                 }
                 self.kind = ::core::option::Option::Some(
-                    bytes_match_key::Kind::Prefix(::buffa::types::decode_bytes(buf)?),
+                    bytes_filter::Kind::Prefix(::buffa::types::decode_bytes(buf)?),
                 );
             }
             3u32 => {
@@ -776,7 +775,7 @@ impl ::buffa::Message for BytesMatchKey {
                     });
                 }
                 self.kind = ::core::option::Option::Some(
-                    bytes_match_key::Kind::Regex(::buffa::types::decode_string(buf)?),
+                    bytes_filter::Kind::Regex(::buffa::types::decode_string(buf)?),
                 );
             }
             _ => {
@@ -795,8 +794,8 @@ impl ::buffa::Message for BytesMatchKey {
         self.__buffa_cached_size.set(0);
     }
 }
-impl ::buffa::ExtensionSet for BytesMatchKey {
-    const PROTO_FQN: &'static str = "store.common.v1.BytesMatchKey";
+impl ::buffa::ExtensionSet for BytesFilter {
+    const PROTO_FQN: &'static str = "store.common.v1.BytesFilter";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -804,20 +803,20 @@ impl ::buffa::ExtensionSet for BytesMatchKey {
         &mut self.__buffa_unknown_fields
     }
 }
-impl<'de> serde::Deserialize<'de> for BytesMatchKey {
+impl<'de> serde::Deserialize<'de> for BytesFilter {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         struct _V;
         impl<'de> serde::de::Visitor<'de> for _V {
-            type Value = BytesMatchKey;
+            type Value = BytesFilter;
             fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                f.write_str("struct BytesMatchKey")
+                f.write_str("struct BytesFilter")
             }
             #[allow(clippy::field_reassign_with_default)]
             fn visit_map<A: serde::de::MapAccess<'de>>(
                 self,
                 mut map: A,
-            ) -> Result<BytesMatchKey, A::Error> {
-                let mut __oneof_kind: Option<bytes_match_key::Kind> = None;
+            ) -> Result<BytesFilter, A::Error> {
+                let mut __oneof_kind: Option<bytes_filter::Kind> = None;
                 while let Some(key) = map.next_key::<::buffa::alloc::string::String>()? {
                     match key.as_str() {
                         "exact" => {
@@ -846,7 +845,7 @@ impl<'de> serde::Deserialize<'de> for BytesMatchKey {
                                         ),
                                     );
                                 }
-                                __oneof_kind = Some(bytes_match_key::Kind::Exact(v));
+                                __oneof_kind = Some(bytes_filter::Kind::Exact(v));
                             }
                         }
                         "prefix" => {
@@ -875,7 +874,7 @@ impl<'de> serde::Deserialize<'de> for BytesMatchKey {
                                         ),
                                     );
                                 }
-                                __oneof_kind = Some(bytes_match_key::Kind::Prefix(v));
+                                __oneof_kind = Some(bytes_filter::Kind::Prefix(v));
                             }
                         }
                         "regex" => {
@@ -895,7 +894,7 @@ impl<'de> serde::Deserialize<'de> for BytesMatchKey {
                                         ),
                                     );
                                 }
-                                __oneof_kind = Some(bytes_match_key::Kind::Regex(v));
+                                __oneof_kind = Some(bytes_filter::Kind::Regex(v));
                             }
                         }
                         _ => {
@@ -903,7 +902,7 @@ impl<'de> serde::Deserialize<'de> for BytesMatchKey {
                         }
                     }
                 }
-                let mut __r = <BytesMatchKey as ::core::default::Default>::default();
+                let mut __r = <BytesFilter as ::core::default::Default>::default();
                 __r.kind = __oneof_kind;
                 Ok(__r)
             }
@@ -911,7 +910,7 @@ impl<'de> serde::Deserialize<'de> for BytesMatchKey {
         d.deserialize_map(_V)
     }
 }
-impl ::buffa::json_helpers::ProtoElemJson for BytesMatchKey {
+impl ::buffa::json_helpers::ProtoElemJson for BytesFilter {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
         s: S,
@@ -925,22 +924,21 @@ impl ::buffa::json_helpers::ProtoElemJson for BytesMatchKey {
     }
 }
 #[doc(hidden)]
-pub const __BYTES_MATCH_KEY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.common.v1.BytesMatchKey",
-    to_json: ::buffa::type_registry::any_to_json::<BytesMatchKey>,
-    from_json: ::buffa::type_registry::any_from_json::<BytesMatchKey>,
+pub const __BYTES_FILTER_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/store.common.v1.BytesFilter",
+    to_json: ::buffa::type_registry::any_to_json::<BytesFilter>,
+    from_json: ::buffa::type_registry::any_from_json::<BytesFilter>,
     is_wkt: false,
 };
-/// Matches an uninterpreted byte key by exact value, prefix, or full-key regex.
-///
-/// Intended for APIs that operate on decoded logical keys rather than store-row
-/// `KeyCodec` families.
+/// Matches an uninterpreted byte string by exact value, prefix, or full-string
+/// regex. Used for filtering both decoded logical keys and operation values in
+/// APIs that operate above the store-row `KeyCodec` layer.
 #[derive(Clone, Debug, Default)]
-pub struct BytesMatchKeyView<'a> {
-    pub kind: ::core::option::Option<bytes_match_key::KindView<'a>>,
+pub struct BytesFilterView<'a> {
+    pub kind: ::core::option::Option<bytes_filter::KindView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
-impl<'a> BytesMatchKeyView<'a> {
+impl<'a> BytesFilterView<'a> {
     /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
     ///
     /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
@@ -987,7 +985,7 @@ impl<'a> BytesMatchKeyView<'a> {
                         });
                     }
                     view.kind = Some(
-                        bytes_match_key::KindView::Exact(
+                        bytes_filter::KindView::Exact(
                             ::buffa::types::borrow_bytes(&mut cur)?,
                         ),
                     );
@@ -1001,7 +999,7 @@ impl<'a> BytesMatchKeyView<'a> {
                         });
                     }
                     view.kind = Some(
-                        bytes_match_key::KindView::Prefix(
+                        bytes_filter::KindView::Prefix(
                             ::buffa::types::borrow_bytes(&mut cur)?,
                         ),
                     );
@@ -1015,7 +1013,7 @@ impl<'a> BytesMatchKeyView<'a> {
                         });
                     }
                     view.kind = Some(
-                        bytes_match_key::KindView::Regex(
+                        bytes_filter::KindView::Regex(
                             ::buffa::types::borrow_str(&mut cur)?,
                         ),
                     );
@@ -1030,8 +1028,8 @@ impl<'a> BytesMatchKeyView<'a> {
         ::core::result::Result::Ok(())
     }
 }
-impl<'a> ::buffa::MessageView<'a> for BytesMatchKeyView<'a> {
-    type Owned = BytesMatchKey;
+impl<'a> ::buffa::MessageView<'a> for BytesFilterView<'a> {
+    type Owned = BytesFilter;
     fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
         Self::_decode_depth(buf, ::buffa::RECURSION_LIMIT)
     }
@@ -1043,22 +1041,22 @@ impl<'a> ::buffa::MessageView<'a> for BytesMatchKeyView<'a> {
     }
     /// Convert this view to the owned message type.
     #[allow(clippy::redundant_closure, clippy::useless_conversion)]
-    fn to_owned_message(&self) -> BytesMatchKey {
+    fn to_owned_message(&self) -> BytesFilter {
         #[allow(unused_imports)]
         use ::buffa::alloc::string::ToString as _;
-        BytesMatchKey {
+        BytesFilter {
             kind: self
                 .kind
                 .as_ref()
                 .map(|v| match v {
-                    bytes_match_key::KindView::Exact(v) => {
-                        bytes_match_key::Kind::Exact((v).to_vec())
+                    bytes_filter::KindView::Exact(v) => {
+                        bytes_filter::Kind::Exact((v).to_vec())
                     }
-                    bytes_match_key::KindView::Prefix(v) => {
-                        bytes_match_key::Kind::Prefix((v).to_vec())
+                    bytes_filter::KindView::Prefix(v) => {
+                        bytes_filter::Kind::Prefix((v).to_vec())
                     }
-                    bytes_match_key::KindView::Regex(v) => {
-                        bytes_match_key::Kind::Regex(v.to_string())
+                    bytes_filter::KindView::Regex(v) => {
+                        bytes_filter::Kind::Regex(v.to_string())
                     }
                 }),
             __buffa_unknown_fields: self
@@ -1070,16 +1068,16 @@ impl<'a> ::buffa::MessageView<'a> for BytesMatchKeyView<'a> {
         }
     }
 }
-unsafe impl ::buffa::DefaultViewInstance for BytesMatchKeyView<'static> {
+unsafe impl ::buffa::DefaultViewInstance for BytesFilterView<'static> {
     fn default_view_instance() -> &'static Self {
-        static VALUE: ::buffa::__private::OnceBox<BytesMatchKeyView<'static>> = ::buffa::__private::OnceBox::new();
+        static VALUE: ::buffa::__private::OnceBox<BytesFilterView<'static>> = ::buffa::__private::OnceBox::new();
         VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
     }
 }
-unsafe impl<'a> ::buffa::HasDefaultViewInstance for BytesMatchKeyView<'a> {
-    type Static = BytesMatchKeyView<'static>;
+unsafe impl<'a> ::buffa::HasDefaultViewInstance for BytesFilterView<'a> {
+    type Static = BytesFilterView<'static>;
 }
-pub mod bytes_match_key {
+pub mod bytes_filter {
     #[allow(unused_imports)]
     use super::*;
     #[derive(Clone, PartialEq, Debug)]

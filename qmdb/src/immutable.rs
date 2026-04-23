@@ -73,6 +73,26 @@ where
         Ok(op.key().map(|k| <K as AsRef<[u8]>>::as_ref(k).to_vec()))
     }
 
+    pub(crate) fn extract_operation_value(
+        &self,
+        location: Location,
+        bytes: &[u8],
+    ) -> Result<Option<Vec<u8>>, QmdbError>
+    where
+        V: AsRef<[u8]>,
+    {
+        let op = ImmutableOperation::<K, V>::decode_cfg(bytes, &self.value_cfg).map_err(|e| {
+            QmdbError::CorruptData(format!(
+                "failed to decode immutable operation at location {location}: {e}"
+            ))
+        })?;
+        Ok(match op {
+            ImmutableOperation::Set(_, value) => Some(value.as_ref().to_vec()),
+            ImmutableOperation::Commit(Some(value)) => Some(value.as_ref().to_vec()),
+            ImmutableOperation::Commit(None) => None,
+        })
+    }
+
     pub async fn writer_location_watermark(&self) -> Result<Option<Location>, QmdbError> {
         retry_transient_post_ingest_query(|| {
             let session = self.client.create_session();

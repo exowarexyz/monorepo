@@ -3,7 +3,10 @@
 //! The filter is a list of `MatchKey`s with OR semantics: a row is delivered
 //! if any match_key's (reserved_bits, prefix) selects its family AND its
 //! payload_regex matches the key's payload bytes. The list is capped at 16 to
-//! keep server-side regex compile cost predictable.
+//! keep server-side regex compile cost predictable. When `value_filters` is
+//! non-empty, rows that pass the key filter must also satisfy any one
+//! `BytesFilter` in the value list (OR within the value list; AND between key
+//! and value filters).
 
 use anyhow::ensure;
 
@@ -11,10 +14,21 @@ use crate::keys::KeyCodec;
 use crate::match_key::MatchKey;
 
 pub const MAX_MATCH_KEYS_PER_FILTER: usize = 16;
+pub const MAX_VALUE_FILTERS_PER_FILTER: usize = 16;
+
+/// Matches a row's raw value bytes by exact match, prefix, or regex. Wire
+/// shape mirrors `store.common.v1.BytesFilter`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BytesFilter {
+    Exact(Vec<u8>),
+    Prefix(Vec<u8>),
+    Regex(String),
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamFilter {
     pub match_keys: Vec<MatchKey>,
+    pub value_filters: Vec<BytesFilter>,
 }
 
 /// Shape-only validation: bounds, family validity, non-empty regex string.
@@ -27,6 +41,10 @@ pub fn validate_filter(filter: &StreamFilter) -> anyhow::Result<()> {
     ensure!(
         filter.match_keys.len() <= MAX_MATCH_KEYS_PER_FILTER,
         "stream filter capped at {MAX_MATCH_KEYS_PER_FILTER} match_keys"
+    );
+    ensure!(
+        filter.value_filters.len() <= MAX_VALUE_FILTERS_PER_FILTER,
+        "stream filter capped at {MAX_VALUE_FILTERS_PER_FILTER} value_filters"
     );
     for mk in &filter.match_keys {
         // Panics on invalid (reserved_bits, prefix); translate to Err.
@@ -41,6 +59,15 @@ pub fn validate_filter(filter: &StreamFilter) -> anyhow::Result<()> {
             !mk.payload_regex.trim().is_empty(),
             "match_key payload_regex must not be empty"
         );
+    }
+    for vf in &filter.value_filters {
+        match vf {
+            BytesFilter::Regex(r) => ensure!(
+                !r.trim().is_empty(),
+                "value_filter regex must not be empty"
+            ),
+            BytesFilter::Exact(_) | BytesFilter::Prefix(_) => {}
+        }
     }
     Ok(())
 }
@@ -62,13 +89,17 @@ mod tests {
     fn accepts_one_match_key() {
         let f = StreamFilter {
             match_keys: vec![mk(1)],
+            value_filters: vec![],
         };
         validate_filter(&f).unwrap();
     }
 
     #[test]
     fn rejects_empty() {
-        let f = StreamFilter { match_keys: vec![] };
+        let f = StreamFilter {
+            match_keys: vec![],
+            value_filters: vec![],
+        };
         assert!(validate_filter(&f).is_err());
     }
 
@@ -78,6 +109,7 @@ mod tests {
             match_keys: (0..(MAX_MATCH_KEYS_PER_FILTER as u16 + 1))
                 .map(mk)
                 .collect(),
+            value_filters: vec![],
         };
         assert!(validate_filter(&f).is_err());
     }
@@ -90,6 +122,7 @@ mod tests {
                 prefix: 1,
                 payload_regex: Utf8::from(""),
             }],
+            value_filters: vec![],
         };
         assert!(validate_filter(&f).is_err());
     }

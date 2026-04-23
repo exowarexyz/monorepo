@@ -5,7 +5,11 @@ import type { Client } from './client.js';
 import { HttpError } from './error.js';
 import { PruneRequestSchema } from './gen/ts/store/v1/compact_pb.js';
 import type { Policy } from './gen/ts/store/v1/compact_pb.js';
-import { KvEntrySchema, MatchKeySchema } from './gen/ts/store/v1/common_pb.js';
+import {
+    BytesFilterSchema,
+    KvEntrySchema,
+    MatchKeySchema,
+} from './gen/ts/store/v1/common_pb.js';
 import { ErrorInfoSchema } from './gen/ts/google/rpc/error_details_pb.js';
 import { PutRequestSchema } from './gen/ts/store/v1/ingest_pb.js';
 import {
@@ -310,15 +314,23 @@ async function performGetBatch(
     }
 }
 
+export interface SubscribeFilters {
+    matchKeys: MessageInitShape<typeof MatchKeySchema>[];
+    valueFilters?: MessageInitShape<typeof BytesFilterSchema>[];
+    sinceSequenceNumber?: bigint;
+}
+
 async function* performSubscribe(
     client: Client,
-    matchKeys: MessageInitShape<typeof MatchKeySchema>[],
-    sinceSequenceNumber?: bigint,
+    filters: SubscribeFilters,
     options?: CallOptions,
 ): AsyncIterable<StoreBatch> {
     const req = create(SubscribeRequestSchema, {
-        matchKeys,
-        ...(sinceSequenceNumber !== undefined ? { sinceSequenceNumber } : {}),
+        matchKeys: filters.matchKeys,
+        valueFilters: filters.valueFilters ?? [],
+        ...(filters.sinceSequenceNumber !== undefined
+            ? { sinceSequenceNumber: filters.sinceSequenceNumber }
+            : {}),
     });
     try {
         const stream = client.stream.subscribe(req, options);
@@ -544,10 +556,20 @@ export class StoreClient {
     }
 
     async *subscribe(
-        matchKeys: MessageInitShape<typeof MatchKeySchema>[],
-        sinceSequenceNumber?: bigint,
-        options?: CallOptions,
+        filters: SubscribeFilters | MessageInitShape<typeof MatchKeySchema>[],
+        sinceOrOptions?: bigint | CallOptions,
+        maybeOptions?: CallOptions,
     ): AsyncIterable<StoreBatch> {
-        yield* performSubscribe(this.client, matchKeys, sinceSequenceNumber, options);
+        // Back-compat: allow `subscribe(matchKeys, sinceSequenceNumber?, options?)`.
+        const resolved: SubscribeFilters = Array.isArray(filters)
+            ? {
+                  matchKeys: filters,
+                  sinceSequenceNumber:
+                      typeof sinceOrOptions === 'bigint' ? sinceOrOptions : undefined,
+              }
+            : filters;
+        const opts =
+            typeof sinceOrOptions === 'bigint' ? maybeOptions : (sinceOrOptions as CallOptions | undefined);
+        yield* performSubscribe(this.client, resolved, opts);
     }
 }

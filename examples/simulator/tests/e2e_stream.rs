@@ -35,6 +35,7 @@ fn filter(family: u16) -> StreamFilter {
             prefix: family,
             payload_regex: Utf8::from("(?s).*"),
         }],
+        value_filters: vec![],
     }
 }
 
@@ -112,6 +113,7 @@ async fn multiple_match_keys_delivered_once_per_put() {
                 payload_regex: Utf8::from("(?s).*"),
             },
         ],
+        value_filters: vec![],
     };
     let mut sub = client.stream().subscribe(f, None).await.expect("subscribe");
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -402,4 +404,35 @@ async fn slow_subscriber_drops_without_blocking_ingest() {
             .as_ref(),
     );
     assert_eq!(last.as_ref(), b"x");
+}
+
+#[tokio::test]
+async fn value_filter_restricts_to_matching_values() {
+    use exoware_sdk_rs::stream_filter::BytesFilter;
+    let (_h, client) = spawn_client().await;
+    let f = StreamFilter {
+        match_keys: vec![MatchKey {
+            reserved_bits: 4,
+            prefix: 1,
+            payload_regex: Utf8::from("(?s).*"),
+        }],
+        value_filters: vec![BytesFilter::Regex("^keep.*$".into())],
+    };
+    let mut sub = client.stream().subscribe(f, None).await.expect("subscribe");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let ka = key(1, b"a");
+    let kb = key(1, b"b");
+    client
+        .ingest()
+        .put(&[(&ka, b"keep-alpha"), (&kb, b"drop-beta")])
+        .await
+        .expect("put");
+
+    let frame = next_with_timeout(&mut sub, 1_000)
+        .await
+        .expect("should receive a frame");
+    assert_eq!(frame.entries.len(), 1);
+    assert_eq!(frame.entries[0].key.as_ref(), ka.as_ref());
+    assert_eq!(frame.entries[0].value.as_ref(), b"keep-alpha");
 }

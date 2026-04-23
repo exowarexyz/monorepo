@@ -5,7 +5,7 @@
 import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv1";
 import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv1";
 import { file_buf_validate_validate } from "../../buf/validate/validate_pb";
-import type { BytesMatchKey } from "./common_pb";
+import type { BytesFilter } from "./common_pb";
 import { file_store_v1_common } from "./common_pb";
 import type { Message } from "@bufbuild/protobuf";
 
@@ -13,29 +13,42 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file store/v1/qmdb.proto.
  */
 export const file_store_v1_qmdb: GenFile = /*@__PURE__*/
-  fileDesc("ChNzdG9yZS92MS9xbWRiLnByb3RvEg1zdG9yZS5xbWRiLnYxIo8BChBTdWJzY3JpYmVSZXF1ZXN0Ej0KCm1hdGNoX2tleXMYASADKAsyHi5zdG9yZS5jb21tb24udjEuQnl0ZXNNYXRjaEtleUIJukgGkgEDEIAIEiIKFXNpbmNlX3NlcXVlbmNlX251bWJlchgCIAEoBEgAiAEBQhgKFl9zaW5jZV9zZXF1ZW5jZV9udW1iZXIiJgoKR2V0UmVxdWVzdBILCgNrZXkYASABKAwSCwoDdGlwGAIgASgEIjgKDkdldE1hbnlSZXF1ZXN0EhkKBGtleXMYASADKAxCC7pICJIBBQgBEIAIEgsKA3RpcBgCIAEoBCIrCghNbXJQcm9vZhIOCgZsZWF2ZXMYASABKAQSDwoHZGlnZXN0cxgCIAMoDCJCChNNdWx0aVByb29mT3BlcmF0aW9uEhAKCGxvY2F0aW9uGAEgASgEEhkKEWVuY29kZWRfb3BlcmF0aW9uGAIgASgMIooBChRIaXN0b3JpY2FsTXVsdGlQcm9vZhIMCgRyb290GAIgASgMEiYKBXByb29mGAMgASgLMhcuc3RvcmUucW1kYi52MS5NbXJQcm9vZhI2CgpvcGVyYXRpb25zGAQgAygLMiIuc3RvcmUucW1kYi52MS5NdWx0aVByb29mT3BlcmF0aW9uSgQIARACIokBChFDdXJyZW50UmFuZ2VQcm9vZhImCgVwcm9vZhgBIAEoCzIXLnN0b3JlLnFtZGIudjEuTW1yUHJvb2YSIQoUcGFydGlhbF9jaHVua19kaWdlc3QYAiABKAxIAIgBARIQCghvcHNfcm9vdBgDIAEoDEIXChVfcGFydGlhbF9jaHVua19kaWdlc3QinQEKFEN1cnJlbnRLZXlWYWx1ZVByb29mEgwKBHJvb3QYAiABKAwSEAoIbG9jYXRpb24YAyABKAQSDQoFY2h1bmsYBCABKAwSNQoLcmFuZ2VfcHJvb2YYBSABKAsyIC5zdG9yZS5xbWRiLnYxLkN1cnJlbnRSYW5nZVByb29mEhkKEWVuY29kZWRfb3BlcmF0aW9uGAYgASgMSgQIARACImcKEVN1YnNjcmliZVJlc3BvbnNlEh4KFnJlc3VtZV9zZXF1ZW5jZV9udW1iZXIYASABKAQSMgoFcHJvb2YYAiABKAsyIy5zdG9yZS5xbWRiLnYxLkhpc3RvcmljYWxNdWx0aVByb29mIkEKC0dldFJlc3BvbnNlEjIKBXByb29mGAEgASgLMiMuc3RvcmUucW1kYi52MS5DdXJyZW50S2V5VmFsdWVQcm9vZiJFCg9HZXRNYW55UmVzcG9uc2USMgoFcHJvb2YYASABKAsyIy5zdG9yZS5xbWRiLnYxLkhpc3RvcmljYWxNdWx0aVByb29mMpgBCg5PcmRlcmVkU2VydmljZRI8CgNHZXQSGS5zdG9yZS5xbWRiLnYxLkdldFJlcXVlc3QaGi5zdG9yZS5xbWRiLnYxLkdldFJlc3BvbnNlEkgKB0dldE1hbnkSHS5zdG9yZS5xbWRiLnYxLkdldE1hbnlSZXF1ZXN0Gh4uc3RvcmUucW1kYi52MS5HZXRNYW55UmVzcG9uc2UyYAoMUmFuZ2VTZXJ2aWNlElAKCVN1YnNjcmliZRIfLnN0b3JlLnFtZGIudjEuU3Vic2NyaWJlUmVxdWVzdBogLnN0b3JlLnFtZGIudjEuU3Vic2NyaWJlUmVzcG9uc2UwAWIGcHJvdG8z", [file_buf_validate_validate, file_store_v1_common]);
+  fileDesc("ChNzdG9yZS92MS9xbWRiLnByb3RvEg1zdG9yZS5xbWRiLnYxIs4BChBTdWJzY3JpYmVSZXF1ZXN0EjwKC2tleV9maWx0ZXJzGAEgAygLMhwuc3RvcmUuY29tbW9uLnYxLkJ5dGVzRmlsdGVyQgm6SAaSAQMQgAgSPgoNdmFsdWVfZmlsdGVycxgCIAMoCzIcLnN0b3JlLmNvbW1vbi52MS5CeXRlc0ZpbHRlckIJukgGkgEDEIAIEiIKFXNpbmNlX3NlcXVlbmNlX251bWJlchgDIAEoBEgAiAEBQhgKFl9zaW5jZV9zZXF1ZW5jZV9udW1iZXIiJgoKR2V0UmVxdWVzdBILCgNrZXkYASABKAwSCwoDdGlwGAIgASgEIjgKDkdldE1hbnlSZXF1ZXN0EhkKBGtleXMYASADKAxCC7pICJIBBQgBEIAIEgsKA3RpcBgCIAEoBCIrCghNbXJQcm9vZhIOCgZsZWF2ZXMYASABKAQSDwoHZGlnZXN0cxgCIAMoDCJCChNNdWx0aVByb29mT3BlcmF0aW9uEhAKCGxvY2F0aW9uGAEgASgEEhkKEWVuY29kZWRfb3BlcmF0aW9uGAIgASgMIooBChRIaXN0b3JpY2FsTXVsdGlQcm9vZhIMCgRyb290GAIgASgMEiYKBXByb29mGAMgASgLMhcuc3RvcmUucW1kYi52MS5NbXJQcm9vZhI2CgpvcGVyYXRpb25zGAQgAygLMiIuc3RvcmUucW1kYi52MS5NdWx0aVByb29mT3BlcmF0aW9uSgQIARACIokBChFDdXJyZW50UmFuZ2VQcm9vZhImCgVwcm9vZhgBIAEoCzIXLnN0b3JlLnFtZGIudjEuTW1yUHJvb2YSIQoUcGFydGlhbF9jaHVua19kaWdlc3QYAiABKAxIAIgBARIQCghvcHNfcm9vdBgDIAEoDEIXChVfcGFydGlhbF9jaHVua19kaWdlc3QinQEKFEN1cnJlbnRLZXlWYWx1ZVByb29mEgwKBHJvb3QYAiABKAwSEAoIbG9jYXRpb24YAyABKAQSDQoFY2h1bmsYBCABKAwSNQoLcmFuZ2VfcHJvb2YYBSABKAsyIC5zdG9yZS5xbWRiLnYxLkN1cnJlbnRSYW5nZVByb29mEhkKEWVuY29kZWRfb3BlcmF0aW9uGAYgASgMSgQIARACImcKEVN1YnNjcmliZVJlc3BvbnNlEh4KFnJlc3VtZV9zZXF1ZW5jZV9udW1iZXIYASABKAQSMgoFcHJvb2YYAiABKAsyIy5zdG9yZS5xbWRiLnYxLkhpc3RvcmljYWxNdWx0aVByb29mIkEKC0dldFJlc3BvbnNlEjIKBXByb29mGAEgASgLMiMuc3RvcmUucW1kYi52MS5DdXJyZW50S2V5VmFsdWVQcm9vZiJFCg9HZXRNYW55UmVzcG9uc2USMgoFcHJvb2YYASABKAsyIy5zdG9yZS5xbWRiLnYxLkhpc3RvcmljYWxNdWx0aVByb29mMpgBCg5PcmRlcmVkU2VydmljZRI8CgNHZXQSGS5zdG9yZS5xbWRiLnYxLkdldFJlcXVlc3QaGi5zdG9yZS5xbWRiLnYxLkdldFJlc3BvbnNlEkgKB0dldE1hbnkSHS5zdG9yZS5xbWRiLnYxLkdldE1hbnlSZXF1ZXN0Gh4uc3RvcmUucW1kYi52MS5HZXRNYW55UmVzcG9uc2UyYAoMUmFuZ2VTZXJ2aWNlElAKCVN1YnNjcmliZRIfLnN0b3JlLnFtZGIudjEuU3Vic2NyaWJlUmVxdWVzdBogLnN0b3JlLnFtZGIudjEuU3Vic2NyaWJlUmVzcG9uc2UwAWIGcHJvdG8z", [file_buf_validate_validate, file_store_v1_common]);
 
 /**
- * Subscribe to one or more logical QMDB key matchers.
+ * Subscribe to operations whose logical key and/or value match the given
+ * filters.
+ *
+ * An operation is included when it satisfies every non-empty filter list.
+ * OR semantics within a list (any member may match); AND semantics across
+ * the two lists (if both are specified, key AND value must match). Leaving
+ * both empty emits a proof for every batch (required for keyless backends,
+ * which have no logical key).
  *
  * @generated from message store.qmdb.v1.SubscribeRequest
  */
 export type SubscribeRequest = Message<"store.qmdb.v1.SubscribeRequest"> & {
   /**
-   * OR semantics across `match_keys`: a proof is emitted when any touched
-   * logical key matches any filter. Leave empty to emit a proof for every
-   * batch (required for keyless backends).
+   * Filters applied to each operation's decoded logical key.
    *
-   * @generated from field: repeated store.common.v1.BytesMatchKey match_keys = 1;
+   * @generated from field: repeated store.common.v1.BytesFilter key_filters = 1;
    */
-  matchKeys: BytesMatchKey[];
+  keyFilters: BytesFilter[];
+
+  /**
+   * Filters applied to each operation's decoded value bytes. Operations
+   * without a value (e.g. deletes, commits) never match a value filter.
+   *
+   * @generated from field: repeated store.common.v1.BytesFilter value_filters = 2;
+   */
+  valueFilters: BytesFilter[];
 
   /**
    * Resume cursor over the underlying store batch log. Use
    * `SubscribeResponse.resume_sequence_number + 1` to resume after a
    * disconnect.
    *
-   * @generated from field: optional uint64 since_sequence_number = 2;
+   * @generated from field: optional uint64 since_sequence_number = 3;
    */
   sinceSequenceNumber?: bigint;
 };

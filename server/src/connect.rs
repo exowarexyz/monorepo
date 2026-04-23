@@ -25,7 +25,8 @@ use exoware_proto::store::stream::v1::{
     GetRequestView, GetResponse as StreamGetResponse, Service as StreamApi,
     ServiceServer as StreamServiceServer, SubscribeRequestView, SubscribeResponse,
 };
-use exoware_proto::stream_filter::StreamFilter;
+use exoware_proto::stream_filter::{BytesFilter, StreamFilter};
+use exoware_sdk_rs::store::common::v1::bytes_filter::KindView as ProtoBytesFilterKindView;
 use exoware_proto::{
     connect_compression_registry, encode_query_detail_header_value,
     parse_range_traversal_direction, to_domain_reduce_request_from_view,
@@ -540,7 +541,7 @@ impl StreamConnect {
 fn filtered_subscribe_response(
     seq: u64,
     kvs: &[(Bytes, Bytes)],
-    matchers: &[crate::stream::CompiledMatcher],
+    matchers: &crate::stream::CompiledMatchers,
 ) -> Option<SubscribeResponse> {
     let entries = crate::stream::apply_filter(matchers, kvs);
     (!entries.is_empty()).then_some(SubscribeResponse {
@@ -570,7 +571,7 @@ enum LiveProgress {
 
 struct SubscriptionStream {
     state: AppState,
-    matchers: Vec<crate::stream::CompiledMatcher>,
+    matchers: crate::stream::CompiledMatchers,
     replay: Option<ReplayState>,
     next_live_sequence: u64,
     live_notify: Arc<Notify>,
@@ -582,7 +583,7 @@ struct SubscriptionStream {
 impl SubscriptionStream {
     fn new(
         state: AppState,
-        matchers: Vec<crate::stream::CompiledMatcher>,
+        matchers: crate::stream::CompiledMatchers,
         replay: Option<ReplayState>,
         next_live_sequence: u64,
         live_notify: Arc<Notify>,
@@ -743,7 +744,23 @@ fn domain_filter_from_subscribe_view(
             payload_regex: exoware_sdk_rs::kv_codec::Utf8::from(mk.payload_regex),
         });
     }
-    Ok(StreamFilter { match_keys })
+    let mut value_filters = Vec::with_capacity(req.value_filters.len());
+    for vf in req.value_filters.iter() {
+        value_filters.push(match vf.kind {
+            Some(ProtoBytesFilterKindView::Exact(bytes)) => BytesFilter::Exact(bytes.to_vec()),
+            Some(ProtoBytesFilterKindView::Prefix(bytes)) => BytesFilter::Prefix(bytes.to_vec()),
+            Some(ProtoBytesFilterKindView::Regex(pattern)) => BytesFilter::Regex(pattern.to_string()),
+            None => {
+                return Err(ConnectError::invalid_argument(
+                    "each value_filter must set exactly one of exact, prefix, or regex",
+                ))
+            }
+        });
+    }
+    Ok(StreamFilter {
+        match_keys,
+        value_filters,
+    })
 }
 
 impl StreamApi for StreamConnect {

@@ -53,6 +53,7 @@ fn build_filter(
                 payload_regex: Utf8::from(payload_regex),
             },
         ],
+        value_filters: vec![],
     }
 }
 

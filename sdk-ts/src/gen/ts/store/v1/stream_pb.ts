@@ -5,7 +5,7 @@
 import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv1";
 import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv1";
 import { file_buf_validate_validate } from "../../buf/validate/validate_pb";
-import type { KvEntry, MatchKey } from "./common_pb";
+import type { BytesFilter, KvEntry, MatchKey } from "./common_pb";
 import { file_store_v1_common } from "./common_pb";
 import type { Message } from "@bufbuild/protobuf";
 
@@ -13,7 +13,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file store/v1/stream.proto.
  */
 export const file_store_v1_stream: GenFile = /*@__PURE__*/
-  fileDesc("ChVzdG9yZS92MS9zdHJlYW0ucHJvdG8SD3N0b3JlLnN0cmVhbS52MSKLAQoQU3Vic2NyaWJlUmVxdWVzdBI5CgptYXRjaF9rZXlzGAEgAygLMhkuc3RvcmUuY29tbW9uLnYxLk1hdGNoS2V5Qgq6SAeSAQQIARAQEiIKFXNpbmNlX3NlcXVlbmNlX251bWJlchgCIAEoBEgAiAEBQhgKFl9zaW5jZV9zZXF1ZW5jZV9udW1iZXIiJQoKR2V0UmVxdWVzdBIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQiVwoRU3Vic2NyaWJlUmVzcG9uc2USFwoPc2VxdWVuY2VfbnVtYmVyGAEgASgEEikKB2VudHJpZXMYAiADKAsyGC5zdG9yZS5jb21tb24udjEuS3ZFbnRyeSJRCgtHZXRSZXNwb25zZRIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQSKQoHZW50cmllcxgCIAMoCzIYLnN0b3JlLmNvbW1vbi52MS5LdkVudHJ5MqEBCgdTZXJ2aWNlElQKCVN1YnNjcmliZRIhLnN0b3JlLnN0cmVhbS52MS5TdWJzY3JpYmVSZXF1ZXN0GiIuc3RvcmUuc3RyZWFtLnYxLlN1YnNjcmliZVJlc3BvbnNlMAESQAoDR2V0Ehsuc3RvcmUuc3RyZWFtLnYxLkdldFJlcXVlc3QaHC5zdG9yZS5zdHJlYW0udjEuR2V0UmVzcG9uc2ViBnByb3RvMw", [file_buf_validate_validate, file_store_v1_common]);
+  fileDesc("ChVzdG9yZS92MS9zdHJlYW0ucHJvdG8SD3N0b3JlLnN0cmVhbS52MSLKAQoQU3Vic2NyaWJlUmVxdWVzdBI5CgptYXRjaF9rZXlzGAEgAygLMhkuc3RvcmUuY29tbW9uLnYxLk1hdGNoS2V5Qgq6SAeSAQQIARAQEj0KDXZhbHVlX2ZpbHRlcnMYAiADKAsyHC5zdG9yZS5jb21tb24udjEuQnl0ZXNGaWx0ZXJCCLpIBZIBAhAQEiIKFXNpbmNlX3NlcXVlbmNlX251bWJlchgDIAEoBEgAiAEBQhgKFl9zaW5jZV9zZXF1ZW5jZV9udW1iZXIiJQoKR2V0UmVxdWVzdBIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQiVwoRU3Vic2NyaWJlUmVzcG9uc2USFwoPc2VxdWVuY2VfbnVtYmVyGAEgASgEEikKB2VudHJpZXMYAiADKAsyGC5zdG9yZS5jb21tb24udjEuS3ZFbnRyeSJRCgtHZXRSZXNwb25zZRIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQSKQoHZW50cmllcxgCIAMoCzIYLnN0b3JlLmNvbW1vbi52MS5LdkVudHJ5MqEBCgdTZXJ2aWNlElQKCVN1YnNjcmliZRIhLnN0b3JlLnN0cmVhbS52MS5TdWJzY3JpYmVSZXF1ZXN0GiIuc3RvcmUuc3RyZWFtLnYxLlN1YnNjcmliZVJlc3BvbnNlMAESQAoDR2V0Ehsuc3RvcmUuc3RyZWFtLnYxLkdldFJlcXVlc3QaHC5zdG9yZS5zdHJlYW0udjEuR2V0UmVzcG9uc2ViBnByb3RvMw", [file_buf_validate_validate, file_store_v1_common]);
 
 /**
  * Live (and optionally replayed) subscription request.
@@ -30,6 +30,16 @@ export type SubscribeRequest = Message<"store.stream.v1.SubscribeRequest"> & {
   matchKeys: MatchKey[];
 
   /**
+   * Optional value-side filter, AND'd with `match_keys`. OR semantics within
+   * the list: once a row's key passes a `MatchKey`, it is delivered only if
+   * its raw value bytes satisfy any one of `value_filters` (or the list is
+   * empty).
+   *
+   * @generated from field: repeated store.common.v1.BytesFilter value_filters = 2;
+   */
+  valueFilters: BytesFilter[];
+
+  /**
    * Optional replay cursor.
    *
    * Unset / 0 -> subscription starts from the next live batch; no replay.
@@ -41,7 +51,7 @@ export type SubscribeRequest = Message<"store.stream.v1.SubscribeRequest"> & {
    * `ErrorInfo { reason: "BATCH_EVICTED", metadata: { "oldest_retained": ... } }`
    * detail so callers can decide how to proceed.
    *
-   * @generated from field: optional uint64 since_sequence_number = 2;
+   * @generated from field: optional uint64 since_sequence_number = 3;
    */
   sinceSequenceNumber?: bigint;
 };

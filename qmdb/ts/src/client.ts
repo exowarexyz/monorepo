@@ -5,15 +5,16 @@ import {
   type Client as ConnectClient,
 } from '@connectrpc/connect';
 import {
-  BytesMatchKeySchema,
+  BytesFilterSchema,
   CurrentKeyValueProofSchema,
   HistoricalMultiProofSchema,
   OrderedService,
   QmdbGetManyRequestSchema,
   QmdbGetRequestSchema,
   QmdbSubscribeRequestSchema,
+  RangeService,
   createTransport,
-  type BytesMatchKey,
+  type BytesFilter,
   type ClientOptions as SdkClientOptions,
 } from 'exoware-sdk-ts';
 import initWasm, {
@@ -76,17 +77,17 @@ function toBytes(value: BytesLike): Uint8Array {
   return typeof value === 'string' ? new TextEncoder().encode(value) : value;
 }
 
-export function matchExact(key: BytesLike): BytesMatchKey {
-  return create(BytesMatchKeySchema, {
+export function matchExact(bytes: BytesLike): BytesFilter {
+  return create(BytesFilterSchema, {
     kind: {
       case: 'exact',
-      value: toBytes(key),
+      value: toBytes(bytes),
     },
   });
 }
 
-export function matchPrefix(prefix: BytesLike): BytesMatchKey {
-  return create(BytesMatchKeySchema, {
+export function matchPrefix(prefix: BytesLike): BytesFilter {
+  return create(BytesFilterSchema, {
     kind: {
       case: 'prefix',
       value: toBytes(prefix),
@@ -94,8 +95,8 @@ export function matchPrefix(prefix: BytesLike): BytesMatchKey {
   });
 }
 
-export function matchRegex(regex: string): BytesMatchKey {
-  return create(BytesMatchKeySchema, {
+export function matchRegex(regex: string): BytesFilter {
+  return create(BytesFilterSchema, {
     kind: {
       case: 'regex',
       value: regex,
@@ -105,22 +106,24 @@ export function matchRegex(regex: string): BytesMatchKey {
 
 export class OrderedQmdbClient {
   private readonly rpc: ConnectClient<typeof OrderedService>;
+  private readonly range: ConnectClient<typeof RangeService>;
 
   constructor(baseUrl: string, options: OrderedQmdbClientOptions = {}) {
     const transport = createTransport(baseUrl, options);
     this.rpc = createClient(OrderedService, transport);
+    this.range = createClient(RangeService, transport);
   }
 
   async get(
     key: BytesLike,
-    root: Uint8Array,
+    tip: bigint,
     options?: CallOptions,
   ): Promise<VerifiedCurrentKeyValueProof> {
     await ensureWasm();
     const response = await this.rpc.get(
       create(QmdbGetRequestSchema, {
         key: toBytes(key),
-        root,
+        tip,
       }),
       options,
     );
@@ -134,14 +137,14 @@ export class OrderedQmdbClient {
 
   async getMany(
     keys: BytesLike[],
-    root: Uint8Array,
+    tip: bigint,
     options?: CallOptions,
   ): Promise<VerifiedHistoricalMultiProof> {
     await ensureWasm();
     const response = await this.rpc.getMany(
       create(QmdbGetManyRequestSchema, {
         keys: keys.map((key) => toBytes(key)),
-        root,
+        tip,
       }),
       options,
     );
@@ -154,15 +157,21 @@ export class OrderedQmdbClient {
   }
 
   async *subscribe(
-    matchKeys: MessageInitShape<typeof BytesMatchKeySchema>[],
-    sinceSequenceNumber?: bigint,
+    filters: {
+      keyFilters?: MessageInitShape<typeof BytesFilterSchema>[];
+      valueFilters?: MessageInitShape<typeof BytesFilterSchema>[];
+      sinceSequenceNumber?: bigint;
+    },
     options?: CallOptions,
   ): AsyncIterable<OrderedSubscribeProof> {
     await ensureWasm();
-    const stream = this.rpc.subscribe(
+    const stream = this.range.subscribe(
       create(QmdbSubscribeRequestSchema, {
-        matchKeys,
-        ...(sinceSequenceNumber !== undefined ? { sinceSequenceNumber } : {}),
+        keyFilters: filters.keyFilters ?? [],
+        valueFilters: filters.valueFilters ?? [],
+        ...(filters.sinceSequenceNumber !== undefined
+          ? { sinceSequenceNumber: filters.sinceSequenceNumber }
+          : {}),
       }),
       options,
     );

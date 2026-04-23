@@ -26,6 +26,12 @@ message SubscribeRequest {
   repeated store.common.v1.MatchKey match_keys = 1
     [(buf.validate.field).repeated.min_items = 1,
      (buf.validate.field).repeated.max_items = 16];
+  // Optional value-side filter, AND'd with `match_keys`. OR semantics within
+  // the list: once a row's key passes a `MatchKey`, it is delivered only if
+  // its raw value bytes satisfy any one of `value_filters` (or the list is
+  // empty).
+  repeated store.common.v1.BytesFilter value_filters = 2
+    [(buf.validate.field).repeated.max_items = 16];
   // Optional replay cursor.
   //
   // Unset / 0 -> subscription starts from the next live batch; no replay.
@@ -36,7 +42,7 @@ message SubscribeRequest {
   // evicted from the batch log, the server returns OUT_OF_RANGE with an
   // `ErrorInfo { reason: "BATCH_EVICTED", metadata: { "oldest_retained": ... } }`
   // detail so callers can decide how to proceed.
-  optional uint64 since_sequence_number = 2;
+  optional uint64 since_sequence_number = 3;
 }
 
 // Point-lookup for one historical batch. Always returns the complete batch.

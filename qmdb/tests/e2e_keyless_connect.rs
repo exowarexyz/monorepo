@@ -19,6 +19,9 @@ use commonware_utils::{NZUsize, NZU16, NZU64};
 use connectrpc::client::ClientConfig;
 use connectrpc::{ConnectError, ConnectRpcService, Context};
 use exoware_sdk_rs::proto::PreferZstdHttpClient;
+use exoware_sdk_rs::store::common::v1::{
+    bytes_filter as proto_bytes_filter, BytesFilter as ProtoBytesFilter,
+};
 use exoware_sdk_rs::store::qmdb::v1::{
     RangeService, RangeServiceClient, RangeServiceServer,
     SubscribeRequest as ProtoSubscribeRequest, SubscribeResponse as ProtoSubscribeResponse,
@@ -293,4 +296,101 @@ async fn keyless_connect_client_rejects_invalid_streamed_proof() {
     assert!(
         matches!(err, QmdbError::CorruptData(message) if message.contains("multi proof failed verification"))
     );
+}
+
+fn match_exact(bytes: &[u8]) -> ProtoBytesFilter {
+    ProtoBytesFilter {
+        kind: Some(proto_bytes_filter::Kind::Exact(bytes.to_vec())),
+        ..Default::default()
+    }
+}
+
+fn match_regex(regex: &str) -> ProtoBytesFilter {
+    ProtoBytesFilter {
+        kind: Some(proto_bytes_filter::Kind::Regex(regex.to_string())),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn keyless_connect_subscribe_filters_by_value_regex() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_local_batch().await;
+    let keyless_client = Arc::new(TestKeylessClient::from_client(
+        store_client.clone(),
+        ((0..=10000).into(), ()),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
+    let client = validated_client(&qmdb_url);
+
+    // Only include ops whose value begins with "second".
+    let mut stream = client
+        .subscribe(ProtoSubscribeRequest {
+            value_filters: vec![match_regex("^second.*$")],
+            ..Default::default()
+        })
+        .await
+        .expect("subscribe");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    upload_and_publish(&store_client, &local).await;
+
+    let frame: RangeSubscribeProof<Digest, BatchOperation> =
+        tokio::time::timeout(Duration::from_secs(5), stream.message())
+            .await
+            .expect("timeout")
+            .expect("stream result")
+            .expect("stream frame");
+
+    assert_eq!(frame.root, local.root);
+    let expected: Vec<(Location, BatchOperation)> = local
+        .operations
+        .iter()
+        .enumerate()
+        .filter_map(|(i, op)| match op {
+            KeylessOperation::Append(value) if value.starts_with(b"second") => {
+                Some((Location::new(i as u64), op.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(!expected.is_empty());
+    assert_eq!(frame.operations, expected);
+}
+
+#[tokio::test]
+async fn keyless_connect_subscribe_rejects_key_filters() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_local_batch().await;
+    let keyless_client = Arc::new(TestKeylessClient::from_client(
+        store_client.clone(),
+        ((0..=10000).into(), ()),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
+
+    let rpc = rpc_client(&qmdb_url);
+    let mut stream = rpc
+        .subscribe(ProtoSubscribeRequest {
+            key_filters: vec![match_exact(b"anything")],
+            ..Default::default()
+        })
+        .await
+        .expect("subscribe opens");
+
+    // Even if we upload a batch that would otherwise match, the stream must
+    // not emit a proof — keyless rejects key_filters server-side before it
+    // opens the store subscription.
+    upload_and_publish(&store_client, &local).await;
+
+    match tokio::time::timeout(Duration::from_millis(500), stream.message()).await {
+        Ok(Ok(Some(_))) => {
+            panic!("keyless stream must not emit a proof when key_filters is set")
+        }
+        Ok(Ok(None)) => {}
+        Ok(Err(err)) => {
+            let msg = err.to_string();
+            assert!(msg.contains("key_filters"), "unexpected error: {msg}");
+        }
+        Err(_) => panic!("stream hung instead of rejecting key_filters"),
+    }
 }

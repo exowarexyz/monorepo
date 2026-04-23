@@ -29,18 +29,28 @@ service RangeService {
   rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
 }
 
-// Subscribe to one or more logical QMDB key matchers.
+// Subscribe to operations whose logical key and/or value match the given
+// filters.
+//
+// An operation is included when it satisfies every non-empty filter list.
+// OR semantics within a list (any member may match); AND semantics across
+// the two lists (if both are specified, key AND value must match). Leaving
+// both empty emits a proof for every batch (required for keyless backends,
+// which have no logical key).
 message SubscribeRequest {
-  // OR semantics across `match_keys`: a proof is emitted when any touched
-  // logical key matches any filter. Leave empty to emit a proof for every
-  // batch (required for keyless backends).
-  repeated store.common.v1.BytesMatchKey match_keys = 1
+  // Filters applied to each operation's decoded logical key.
+  repeated store.common.v1.BytesFilter key_filters = 1
+    [(buf.validate.field).repeated.max_items = 1024];
+
+  // Filters applied to each operation's decoded value bytes. Operations
+  // without a value (e.g. deletes, commits) never match a value filter.
+  repeated store.common.v1.BytesFilter value_filters = 2
     [(buf.validate.field).repeated.max_items = 1024];
 
   // Resume cursor over the underlying store batch log. Use
   // `SubscribeResponse.resume_sequence_number + 1` to resume after a
   // disconnect.
-  optional uint64 since_sequence_number = 2;
+  optional uint64 since_sequence_number = 3;
 }
 
 // Current key proof request.
