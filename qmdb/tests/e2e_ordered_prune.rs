@@ -165,7 +165,10 @@ async fn mirror_ordered_prune_past_chunk_zero() {
             // crosses the first chunk boundary.
             let chunk_zero_pruned = {
                 let mut hasher = Sha256::default();
-                match db.range_proof(&mut hasher, Location::new(0), NZU64!(1)).await {
+                match db
+                    .range_proof(&mut hasher, Location::new(0), NZU64!(1))
+                    .await
+                {
                     Err(e) => e.to_string().contains("operation pruned"),
                     Ok(_) => false,
                 }
