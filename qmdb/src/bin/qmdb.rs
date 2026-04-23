@@ -12,7 +12,6 @@ use commonware_runtime::Runner as _;
 use commonware_storage::mmr::Location;
 use commonware_storage::qmdb::any::ordered::variable::Operation as QmdbOperation;
 use commonware_storage::qmdb::{
-    any::ordered::Update,
     current::{ordered::variable::Db as LocalQmdbDb, VariableConfig},
     store::LogStore as _,
 };
@@ -52,27 +51,17 @@ enum Command {
         #[arg(long, default_value_t = 8081)]
         port: u16,
     },
-    SeedDemo {
-        #[arg(long)]
-        store_url: String,
-    },
-    SeedContinuous {
+    Seed {
         #[arg(long)]
         store_url: String,
         #[arg(long, default_value_t = 2)]
         interval_secs: u64,
         /// Persistent directory for the local ordered-QMDB state. Reusing the
         /// same directory across restarts preserves the write log; deleting it
-        /// resets the demo. Defaults to `$HOME/.exoware_qmdb_seed_continuous`.
+        /// resets the demo. Defaults to `$HOME/.exoware_qmdb_seed`.
         #[arg(long)]
         directory: Option<PathBuf>,
     },
-}
-
-struct LocalBatch {
-    latest_location: Location,
-    operations: Vec<BatchOperation>,
-    current_boundary: CurrentBoundaryState<Digest, N>,
 }
 
 async fn health() -> &'static str {
@@ -132,88 +121,6 @@ async fn boundary_from_local_db(
     .expect("recover boundary state")
 }
 
-async fn build_demo_batch() -> LocalBatch {
-    tokio::task::spawn_blocking(|| {
-        cw_tokio::Runner::default().start(|context| async move {
-            use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
-
-            let cfg = VariableConfig {
-                mmr_journal_partition: "mmr-journal".into(),
-                mmr_items_per_blob: NZU64!(8),
-                mmr_write_buffer: NZUsize!(1024),
-                mmr_metadata_partition: "mmr-metadata".into(),
-                log_partition: "log".into(),
-                log_write_buffer: NZUsize!(1024),
-                log_compression: None,
-                log_codec_config: (
-                    ((0..=MAX_OPERATION_SIZE).into(), ()),
-                    ((0..=MAX_OPERATION_SIZE).into(), ()),
-                ),
-                log_items_per_blob: NZU64!(8),
-                grafted_mmr_metadata_partition: "grafted-metadata".into(),
-                translator: TwoCap,
-                thread_pool: None,
-                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8)),
-            };
-            let mut db: LocalDb = LocalDb::init(context.with_label("qmdb-demo"), cfg)
-                .await
-                .expect("init local ordered db");
-
-            let finalized = {
-                let mut batch = db.new_batch();
-                batch.write(b"alpha".to_vec(), Some(b"one".to_vec()));
-                batch.write(b"beta".to_vec(), Some(b"two".to_vec()));
-                batch.write(b"gamma".to_vec(), Some(b"three".to_vec()));
-                batch
-                    .merkleize(None::<Vec<u8>>)
-                    .await
-                    .expect("merkleize demo batch")
-            };
-            db.apply_batch(finalized.finalize())
-                .await
-                .expect("apply demo batch");
-
-            let latest = db.bounds().await.end - 1;
-            let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");
-            let (_proof, ops) = db
-                .ops_historical_proof(latest + 1, Location::new(0), count)
-                .await
-                .expect("historical proof");
-            let boundary = boundary_from_local_db(&db, None, &ops).await;
-
-            db.sync().await.expect("sync local ordered db");
-            db.destroy().await.expect("destroy local ordered db");
-
-            LocalBatch {
-                latest_location: latest,
-                operations: ops,
-                current_boundary: boundary,
-            }
-        })
-    })
-    .await
-    .expect("join demo batch task")
-}
-
-fn operation_summary(operation: &BatchOperation) -> String {
-    match operation {
-        BatchOperation::Update(Update {
-            key,
-            value,
-            next_key,
-        }) => format!(
-            "update key={} value={} next_key={}",
-            String::from_utf8_lossy(key),
-            String::from_utf8_lossy(value),
-            String::from_utf8_lossy(next_key),
-        ),
-        BatchOperation::Delete(key) => {
-            format!("delete key={}", String::from_utf8_lossy(key))
-        }
-        other => format!("{other:?}"),
-    }
-}
-
 async fn run(
     store_url: &str,
     host: IpAddr,
@@ -236,53 +143,22 @@ async fn run(
     Ok(())
 }
 
-async fn seed_demo(store_url: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let store = StoreClient::new(store_url);
-    let writer = OrderedWriter::<Sha256, Vec<u8>, Vec<u8>, N>::empty(store.clone());
-    let demo = build_demo_batch().await;
-
-    writer
-        .upload_and_publish(&demo.operations, &demo.current_boundary)
-        .await?;
-
-    let reader = OrderedClient::<Sha256, Vec<u8>, Vec<u8>, N>::from_client(
-        store,
-        op_cfg(),
-        update_row_cfg(),
-    );
-    let historical_root = reader.root_at(demo.latest_location).await?;
-    let current_root = reader.current_root_at(demo.latest_location).await?;
-
-    println!("seeded ordered QMDB demo batch");
-    println!("watermark={}", *demo.latest_location);
-    println!(
-        "historical_root=0x{}",
-        hex::encode(historical_root.encode())
-    );
-    println!("current_root=0x{}", hex::encode(current_root.encode()));
-    println!("operations:");
-    for operation in &demo.operations {
-        println!("  {}", operation_summary(operation));
-    }
-    Ok(())
-}
-
-fn default_seed_continuous_directory() -> PathBuf {
+fn default_seed_directory() -> PathBuf {
     let home = std::env::var("HOME").expect("$HOME is not configured");
-    PathBuf::from(format!("{home}/.exoware_qmdb_seed_continuous"))
+    PathBuf::from(format!("{home}/.exoware_qmdb_seed"))
 }
 
-async fn seed_continuous(
+async fn seed(
     store_url: &str,
     interval_secs: u64,
     directory: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let directory = directory.unwrap_or_else(default_seed_continuous_directory);
+    let directory = directory.unwrap_or_else(default_seed_directory);
     info!(
         directory = %directory.display(),
         store_url,
         interval_secs,
-        "starting seed-continuous"
+        "starting seed"
     );
 
     let store = StoreClient::new(store_url);
@@ -315,7 +191,7 @@ async fn seed_continuous(
                 thread_pool: None,
                 page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8)),
             };
-            let mut db: LocalDb = LocalDb::init(context.with_label("qmdb-continuous"), cfg)
+            let mut db: LocalDb = LocalDb::init(context.with_label("qmdb-seed"), cfg)
                 .await
                 .expect("init local ordered db");
 
@@ -347,7 +223,7 @@ async fn seed_continuous(
                 )
                 .expect("resume: reconstruct writer state");
                 info!(
-                    watermark = *latest,
+                    tip = *latest,
                     batches = batches_so_far,
                     next_key_index = counter,
                     "resuming from persisted local DB",
@@ -414,7 +290,7 @@ async fn seed_continuous(
                 let historical_root = reader.root_at(latest).await.expect("historical root");
                 let current_root = reader.current_root_at(latest).await.expect("current root");
                 println!(
-                    "watermark={} current_root=0x{} historical_root=0x{}",
+                    "tip={} current_root=0x{} historical_root=0x{}",
                     *latest,
                     hex::encode(current_root.encode()),
                     hex::encode(historical_root.encode()),
@@ -449,12 +325,11 @@ async fn main() -> std::process::ExitCode {
             host,
             port,
         } => run(&store_url, host, port).await,
-        Command::SeedDemo { store_url } => seed_demo(&store_url).await,
-        Command::SeedContinuous {
+        Command::Seed {
             store_url,
             interval_secs,
             directory,
-        } => seed_continuous(&store_url, interval_secs, directory).await,
+        } => seed(&store_url, interval_secs, directory).await,
     };
 
     match result {

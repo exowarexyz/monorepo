@@ -260,8 +260,8 @@ export function QmdbPanel({
         <h3>Connection</h3>
         <p className="section-note">
           Proofs are anchored to roots the writer emits per batch. Run `qmdb run`
-          locally and `qmdb seed-continuous` to stream fresh tips; each line prints
-          `watermark=N current_root=0x.. historical_root=0x..`. Get Proof verifies
+          locally and `qmdb seed` to stream fresh tips; each line prints
+          `tip=N current_root=0x.. historical_root=0x..`. Get Proof verifies
           against the current root; Get Multi-Proof verifies against the
           historical root.
         </p>

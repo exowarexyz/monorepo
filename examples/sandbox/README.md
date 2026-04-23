@@ -55,27 +55,22 @@ In addition to the simulator running above:
      run --store-url http://127.0.0.1:8080
    ```
 
-2. **Stream fresh batches** (keeps running; prints a `watermark=N
-   current_root=0x..` line every few seconds). The `--directory` holds the
-   local ordered-QMDB state so ctrl-c / restart resumes where the previous run
-   left off. Delete the directory to reset.
+2. **Stream fresh batches** (keeps running; prints a `tip=N
+   current_root=0x..` line every few seconds). Local ordered-QMDB state
+   persists under `$HOME/.exoware_qmdb_seed` so ctrl-c / restart resumes where
+   the previous run left off; delete the directory to reset, or override the
+   location with `--directory`.
 
    ```bash
    cargo run --package exoware-qmdb --bin qmdb -- \
-     seed-continuous \
-     --store-url http://127.0.0.1:8080 \
-     --interval-secs 2 \
-     --directory ~/.exoware_qmdb_continuous
+     seed --store-url http://127.0.0.1:8080 --interval-secs 2
    ```
 
    Each line looks like:
 
    ```
-   watermark=14 current_root=0xb777..1064 historical_root=0x1a3d..cd7b
+   tip=14 current_root=0xb777..1064 historical_root=0x1a3d..cd7b
    ```
-
-   For a one-shot alternative, use `seed-demo` instead — it writes a single
-   fixed batch (`alpha`, `beta`, `gamma`) and exits.
 
 3. **Point the web app at the QMDB server**:
 
@@ -83,8 +78,8 @@ In addition to the simulator running above:
    VITE_QMDB_URL=http://127.0.0.1:8081 npm run dev
    ```
 
-4. **In the UI**, paste a `watermark` + matching root pair from the
-   `seed-continuous` stream, then pick a key (e.g. `k-00000000`):
+4. **In the UI**, paste a `tip` + matching root pair from the `seed` stream,
+   then pick a key (e.g. `k-00000000`):
    - **Get Proof** verifies against `current_root` (paste into Expected Current
      Root).
    - **Get Multi-Proof** verifies against `historical_root` (paste into
