@@ -31,10 +31,10 @@ use futures::future::BoxFuture;
 use futures::{FutureExt, Stream};
 use regex::bytes::Regex;
 
+use crate::auth::AuthenticatedBackendNamespace;
 use crate::proof::{
     RawBatchMultiProof, RawCurrentRangeProof, RawKeyValueProof, RawMmrProof, RawMultiProof,
 };
-use crate::auth::AuthenticatedBackendNamespace;
 use crate::subscription::{self as sub, Classify, Family};
 use crate::{ImmutableClient, KeylessClient, OrderedClient, QmdbError, UnorderedClient};
 
