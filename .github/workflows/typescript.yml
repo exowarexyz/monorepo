@@ -23,7 +23,7 @@ jobs:
       - name: Lint sdk-ts
         run: cd sdk-ts && npm run lint
       - name: Install examples/sandbox dependencies
-        run: cd examples/sandbox && npm install
+        run: cd examples/sandbox && npm install --ignore-scripts
       - name: Lint examples/sandbox
         run: cd examples/sandbox && npm run lint
 
@@ -66,10 +66,10 @@ jobs:
         uses: ./.github/actions/setup
       - name: Install wasm32 target
         run: rustup target add wasm32-unknown-unknown
-      - name: Install wasm-pack
+      - name: Install wasm-pack + wasm-bindgen-cli
         uses: taiki-e/install-action@v2
         with:
-          tool: wasm-pack@0.13.1
+          tool: wasm-pack@0.13.1,wasm-bindgen-cli
       - name: Install sdk-ts dependencies
         run: cd sdk-ts && npm ci
       - name: Build sdk-ts
