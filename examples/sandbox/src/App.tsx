@@ -9,7 +9,7 @@ import {
 } from 'exoware-sdk-ts';
 import { Buffer } from 'buffer';
 import './App.css';
-import { QmdbPanel } from './QmdbPanel';
+import { QMDB_URL, QmdbPanel } from './QmdbPanel';
 
 const MAX_STREAM_EVENTS = 10;
 
@@ -652,7 +652,7 @@ function App() {
         </div>
       </div>
 
-      <QmdbPanel showNotification={showNotification} />
+      {QMDB_URL && <QmdbPanel qmdbUrl={QMDB_URL} showNotification={showNotification} />}
     </div>
   );
 }

@@ -700,13 +700,6 @@ where
                 [0u8; N]
             }
         };
-
-        // All bits below the inactivity floor are 0 by definition. The writer
-        // only republishes a chunk when a new op lands in it or an above-floor
-        // bit clears; bit flips induced by floor-raise moves, base-diff
-        // clears of still-present-but-below-floor locations, and the previous
-        // batch's CommitFloor are not separately republished. Fold them in
-        // deterministically here.
         clear_below_floor::<N>(&mut chunk, chunk_index, inactivity_floor);
         Ok(chunk)
     }
@@ -721,14 +714,10 @@ where
         let floor = self.load_inactivity_floor_at(session, watermark).await?;
         let start_chunk = chunk_index_for_location::<N>(start_location);
         let end_chunk = chunk_index_for_location::<N>(end_location_exclusive - 1);
-        let mut chunks = Vec::with_capacity((end_chunk - start_chunk + 1) as usize);
-        for chunk_index in start_chunk..=end_chunk {
-            chunks.push(
-                self.load_bitmap_chunk_with_floor(session, watermark, floor, chunk_index)
-                    .await?,
-            );
-        }
-        Ok(chunks)
+        futures::future::try_join_all((start_chunk..=end_chunk).map(|chunk_index| {
+            self.load_bitmap_chunk_with_floor(session, watermark, floor, chunk_index)
+        }))
+        .await
     }
 
     async fn load_partial_chunk_digest(

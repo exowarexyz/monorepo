@@ -26,7 +26,7 @@ use exoware_sdk_rs::store::common::v1::{
 use exoware_sdk_rs::store::qmdb::v1::SubscribeRequest as ProtoSubscribeRequest;
 use exoware_sdk_rs::StoreClient;
 use store_qmdb::{
-    ordered_range_connect_stack, recover_boundary_state, CurrentBoundaryState, OrderedClient,
+    ordered_connect_stack, recover_boundary_state, CurrentBoundaryState, OrderedClient,
     OrderedRangeConnectClient, OrderedWriter, QmdbError, RangeSubscribeProof, MAX_OPERATION_SIZE,
 };
 
@@ -40,7 +40,7 @@ type LocalDb = LocalQmdbDb<cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, 
 async fn spawn_qmdb_server(
     client: Arc<TestOrderedClient>,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_range_service(ordered_range_connect_stack(client)).await
+    common::spawn_range_service(ordered_connect_stack(client)).await
 }
 
 fn validated_client(

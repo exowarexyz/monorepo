@@ -20,7 +20,7 @@ use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_sdk_rs::StoreClient;
 use store_qmdb::{
-    ordered_full_connect_stack, recover_boundary_state, CurrentBoundaryState, OrderedClient,
+    ordered_connect_stack, recover_boundary_state, CurrentBoundaryState, OrderedClient,
     OrderedWriter, MAX_OPERATION_SIZE,
 };
 use tower_http::cors::CorsLayer;
@@ -226,7 +226,7 @@ async fn run(
     ));
     let app = Router::new()
         .route("/health", get(health))
-        .fallback_service(ordered_full_connect_stack(client))
+        .fallback_service(ordered_connect_stack(client))
         .layer(CorsLayer::very_permissive());
 
     let addr = SocketAddr::from((host, port));
@@ -334,11 +334,10 @@ async fn seed_continuous(
                         "resume: failed to load cumulative ops from local DB; \
                              delete the directory to reset",
                     );
-                let commit_count = cumulative
+                let batches_so_far = cumulative
                     .iter()
                     .filter(|op| matches!(op, BatchOperation::CommitFloor(_, _)))
-                    .count();
-                let batches_so_far = (commit_count as u64).saturating_sub(1);
+                    .count() as u64;
                 let counter = batches_so_far * 3;
                 let writer_state = store_qmdb::WriterState::from_proof::<Sha256, _>(
                     latest,

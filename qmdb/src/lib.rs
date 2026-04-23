@@ -61,9 +61,8 @@ pub use writer::{
 pub use boundary::recover_boundary_state;
 pub use connect::{
     immutable_range_connect_stack, keyless_range_connect_stack, ordered_connect_stack,
-    ordered_full_connect_stack, ordered_range_connect_stack, unordered_range_connect_stack,
-    ImmutableRangeConnect, KeylessRangeConnect, OrderedConnect, OrderedRangeConnect,
-    UnorderedRangeConnect,
+    unordered_range_connect_stack, ImmutableRangeConnect, KeylessRangeConnect, OrderedConnect,
+    OrderedRangeConnect, UnorderedRangeConnect,
 };
 pub use connect_client::{
     ImmutableRangeConnectClient, KeylessRangeConnectClient, OrderedConnectClient,

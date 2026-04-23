@@ -9,7 +9,7 @@ import {
   type VerifiedHistoricalMultiProof,
 } from '@qmdb-ts';
 
-const QMDB_URL = import.meta.env.VITE_QMDB_URL ?? 'http://127.0.0.1:8081';
+export const QMDB_URL = import.meta.env.VITE_QMDB_URL as string | undefined;
 const MAX_EVENTS = 10;
 
 function parseHexRoot(value: string): Uint8Array {
@@ -95,8 +95,14 @@ function renderOperation(
   }
 }
 
-export function QmdbPanel({ showNotification }: { showNotification: NotificationFn }) {
-  const client = useMemo(() => new OrderedQmdbClient(QMDB_URL), []);
+export function QmdbPanel({
+  qmdbUrl,
+  showNotification,
+}: {
+  qmdbUrl: string;
+  showNotification: NotificationFn;
+}) {
+  const client = useMemo(() => new OrderedQmdbClient(qmdbUrl), [qmdbUrl]);
   const subscribeAbortRef = useRef<AbortController | null>(null);
 
   const [isConnected, setIsConnected] = useState(false);
@@ -128,7 +134,7 @@ export function QmdbPanel({ showNotification }: { showNotification: Notification
     const controller = new AbortController();
     void (async () => {
       try {
-        const response = await fetch(`${QMDB_URL.replace(/\/$/, '')}/health`, {
+        const response = await fetch(`${qmdbUrl.replace(/\/$/, '')}/health`, {
           signal: controller.signal,
         });
         setIsConnected(response.ok);
@@ -259,7 +265,7 @@ export function QmdbPanel({ showNotification }: { showNotification: Notification
           against the current root; Get Multi-Proof verifies against the
           historical root.
         </p>
-        <p><strong>Server:</strong> {QMDB_URL}</p>
+        <p><strong>Server:</strong> {qmdbUrl}</p>
         <p><strong>Status:</strong> {isConnected ? 'Connected' : 'Disconnected'}</p>
         <div className="form-row">
           <div className="form-group">
@@ -462,15 +468,19 @@ export function QmdbPanel({ showNotification }: { showNotification: Notification
             <div className="result-list">
               {events.map((event, index) => {
                 const ops = event.proof.operations;
-                const locations = ops.map((op) => op.location);
-                const minLoc = locations.reduce((a, b) => (a < b ? a : b), locations[0] ?? 0n);
-                const maxLoc = locations.reduce((a, b) => (a > b ? a : b), locations[0] ?? 0n);
-                const locationRange =
-                  ops.length === 0
-                    ? '(none)'
-                    : minLoc === maxLoc
+                let locationRange = '(none)';
+                if (ops.length > 0) {
+                  let minLoc = ops[0].location;
+                  let maxLoc = ops[0].location;
+                  for (const op of ops) {
+                    if (op.location < minLoc) minLoc = op.location;
+                    if (op.location > maxLoc) maxLoc = op.location;
+                  }
+                  locationRange =
+                    minLoc === maxLoc
                       ? minLoc.toString()
                       : `${minLoc.toString()}-${maxLoc.toString()}`;
+                }
                 return (
                   <div
                     key={`${event.resumeSequenceNumber.toString()}-${index}`}

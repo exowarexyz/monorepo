@@ -34,15 +34,17 @@ Explore the Exoware API.
 ## Features
 
 - **Store:** set and get key-value pairs, and run range queries.
-- **Ordered QMDB:** current/historical proofs and live subscribe streaming.
+- **Ordered QMDB** (optional, requires `VITE_QMDB_URL`): current/historical
+  proofs and live subscribe streaming.
 
 ## Ordered QMDB panel
 
-The QMDB panel talks to a separate ConnectRPC server (not the simulator) and
-verifies every `Get` / `GetMany` proof against a **user-supplied expected
-root**. Without the root the UI cannot anchor trust — the server could return
-an internally-consistent but fabricated proof. Paste both the tip (location)
-and the matching root (hex) into the UI per query.
+The QMDB panel is only rendered when `VITE_QMDB_URL` is set, since it requires
+a separate ConnectRPC server (not the simulator) running alongside the
+simulator. It verifies every `Get` / `GetMany` proof against a **user-supplied
+expected root**. Without the root the UI cannot anchor trust — the server
+could return an internally-consistent but fabricated proof. Paste both the tip
+(location) and the matching root (hex) into the UI per query.
 
 In addition to the simulator running above:
 
