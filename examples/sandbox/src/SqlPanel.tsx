@@ -115,10 +115,12 @@ export function SqlPanel({
 
     const controller = new AbortController();
     subscribeAbortRef.current = controller;
-    const since = sinceSequenceNumber.trim() ? BigInt(sinceSequenceNumber.trim()) : undefined;
 
     void (async () => {
       try {
+        const since = sinceSequenceNumber.trim()
+          ? BigInt(sinceSequenceNumber.trim())
+          : undefined;
         for await (const frame of client.subscribe(
           {
             table: table.trim(),
