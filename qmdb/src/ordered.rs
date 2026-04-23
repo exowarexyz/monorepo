@@ -687,16 +687,11 @@ where
                 // The writer elides chunks whose entire bit range is below
                 // the inactivity floor (see `changed_chunk_representatives`
                 // in `boundary.rs`). For such chunks the server never has a
-                // stored copy; the content is definitionally all zeros.
-                let chunk_bits = bitmap_chunk_bits::<N>();
+                // stored copy; the content is definitionally all zeros. For
+                // any other missing chunk the upload genuinely dropped a row.
                 let chunk_end_exclusive = chunk_index
-                    .checked_mul(chunk_bits)
-                    .and_then(|start| start.checked_add(chunk_bits))
-                    .ok_or_else(|| {
-                        QmdbError::CorruptData(format!(
-                            "bitmap chunk {chunk_index} range overflow"
-                        ))
-                    })?;
+                    .saturating_add(1)
+                    .saturating_mul(bitmap_chunk_bits::<N>());
                 if chunk_end_exclusive > *inactivity_floor {
                     return Err(QmdbError::CorruptData(format!(
                         "missing bitmap chunk {chunk_index} at watermark {watermark}"

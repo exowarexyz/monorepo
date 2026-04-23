@@ -200,10 +200,6 @@ where
     Ok(())
 }
 
-fn first_above_floor_chunk<const N: usize>(floor: Location) -> u64 {
-    *floor / bitmap_chunk_bits::<N>()
-}
-
 fn changed_chunk_representatives<K, V, const N: usize>(
     previous_operations: Option<&[QmdbOperation<K, V>]>,
     operations: &[QmdbOperation<K, V>],
@@ -222,18 +218,20 @@ where
         Some(QmdbOperation::CommitFloor(_, floor)) => *floor,
         _ => Location::new(0),
     };
-    let floor_chunk = first_above_floor_chunk::<N>(floor);
+    let chunk_bits = bitmap_chunk_bits::<N>();
+    let floor_chunk = *floor / chunk_bits;
+    let first_alive_location = floor_chunk.saturating_mul(chunk_bits);
 
     let previous_len = previous_operations.map_or(0usize, |ops| ops.len());
     let mut changed = BTreeMap::<u64, Location>::new();
 
     for raw_location in previous_len..operations.len() {
         let location = Location::new(raw_location as u64);
-        let chunk = chunk_index_for_location::<N>(location);
-        if chunk < floor_chunk {
-            continue;
+        if raw_location as u64 >= first_alive_location {
+            changed
+                .entry(chunk_index_for_location::<N>(location))
+                .or_insert(location);
         }
-        changed.entry(chunk).or_insert(location);
     }
 
     let Some(previous) = previous_operations else {
@@ -243,9 +241,8 @@ where
     // The previous batch's CommitFloor bit, floor-raise move clears, and
     // base-diff clears of still-present-but-below-floor locations are all
     // handled at read time via `load_bitmap_chunk`'s below-floor masking.
-    // We only track above-floor touched-key representatives here because
-    // only those chunks have genuine content the server does not already
-    // know (active bits at or above the floor).
+    // We only track touched-key representatives in chunks the server does
+    // not already know how to fold (chunks straddling or above the floor).
     let mut touched_keys = operations[previous_len..]
         .iter()
         .filter_map(|operation| match operation {
@@ -255,16 +252,21 @@ where
         })
         .collect::<BTreeSet<_>>();
 
+    // Walk backwards only as far as the first alive chunk. Anything below
+    // that is fully pruned locally and contributes nothing to the boundary,
+    // so iterating it just wastes work on unmatchable brand-new keys still
+    // sitting in `touched_keys`.
     for index in (0..previous.len()).rev() {
-        if touched_keys.is_empty() {
+        if touched_keys.is_empty() || (index as u64) < first_alive_location {
             break;
         }
         let location = Location::new(index as u64);
-        let chunk = chunk_index_for_location::<N>(location);
         match &previous[index] {
             QmdbOperation::Update(update) => {
-                if touched_keys.remove(update.key.as_ref()) && chunk >= floor_chunk {
-                    changed.entry(chunk).or_insert(location);
+                if touched_keys.remove(update.key.as_ref()) {
+                    changed
+                        .entry(chunk_index_for_location::<N>(location))
+                        .or_insert(location);
                 }
             }
             QmdbOperation::Delete(key) => {
