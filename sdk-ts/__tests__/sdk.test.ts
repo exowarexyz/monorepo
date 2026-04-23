@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { create } from '@bufbuild/protobuf';
 import { Client } from '../src/client';
-import { TraversalMode } from '../src/store';
+import { StoreKeyPrefix, StoreWriteBatch, TraversalMode } from '../src/store';
 import {
     ReduceParamsSchema,
     RangeReducerSpecSchema,
@@ -172,6 +172,38 @@ describe('Exoware TS SDK', () => {
             expect(batches[0].entries.map((entry) => Buffer.from(entry.value))).toEqual(
                 kvs.map((kv) => Buffer.from(kv.value)),
             );
+        });
+
+        it('should isolate prefixed stores and commit a cross-prefix batch', async () => {
+            const base = client.store();
+            const a = client.store(new StoreKeyPrefix(4, 1));
+            const b = client.store(new StoreKeyPrefix(4, 2));
+            const encoder = new TextEncoder();
+            const key = encoder.encode('prefixed-store-shared-key');
+
+            const batch = new StoreWriteBatch();
+            batch.push(a, key, Buffer.from('value-a'));
+            batch.push(b, key, Buffer.from('value-b'));
+            const sequenceNumber = await batch.commit(base);
+
+            const resultA = await a.get(key);
+            const resultB = await b.get(key);
+            const resultBase = await base.get(key);
+
+            expect(Buffer.from(resultA!.value)).toEqual(Buffer.from('value-a'));
+            expect(Buffer.from(resultB!.value)).toEqual(Buffer.from('value-b'));
+            expect(resultBase).toBeNull();
+
+            const rangeA = await a.query(key, key);
+            expect(rangeA.results).toHaveLength(1);
+            expect(Buffer.from(rangeA.results[0].key)).toEqual(Buffer.from(key));
+            expect(Buffer.from(rangeA.results[0].value)).toEqual(Buffer.from('value-a'));
+
+            const batchA = await a.getBatch(sequenceNumber);
+            expect(batchA).not.toBeNull();
+            expect(batchA!.entries).toHaveLength(1);
+            expect(Buffer.from(batchA!.entries[0].key)).toEqual(Buffer.from(key));
+            expect(Buffer.from(batchA!.entries[0].value)).toEqual(Buffer.from('value-a'));
         });
 
         it('should getMany', async () => {

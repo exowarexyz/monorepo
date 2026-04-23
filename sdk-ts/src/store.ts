@@ -10,6 +10,7 @@ import {
     KvEntrySchema,
     MatchKeySchema,
 } from './gen/ts/store/v1/common_pb.js';
+import type { MatchKey } from './gen/ts/store/v1/common_pb.js';
 import { ErrorInfoSchema } from './gen/ts/google/rpc/error_details_pb.js';
 import { PutRequestSchema } from './gen/ts/store/v1/ingest_pb.js';
 import {
@@ -20,7 +21,15 @@ import {
     ReduceRequestSchema,
     TraversalMode,
 } from './gen/ts/store/v1/query_pb.js';
-import type { Detail, ReduceParams, ReduceResponse } from './gen/ts/store/v1/query_pb.js';
+import type {
+    Detail,
+    KvExpr,
+    KvFieldRef,
+    KvPredicate,
+    RangeReducerSpec,
+    ReduceParams,
+    ReduceResponse,
+} from './gen/ts/store/v1/query_pb.js';
 import {
     GetRequestSchema as StreamGetRequestSchema,
     SubscribeRequestSchema,
@@ -62,8 +71,230 @@ export interface StoreBatch {
     entries: StoreBatchEntry[];
 }
 
+const MAX_KEY_LEN = 254;
+
+function prefixMask(bits: number): number {
+    if (!Number.isInteger(bits) || bits < 0 || bits > 16) {
+        throw new RangeError(`reservedBits must be an integer in [0, 16], got ${bits}`);
+    }
+    return bits === 0 ? 0 : (1 << bits) - 1;
+}
+
+function validatePrefix(reservedBits: number, prefix: number): void {
+    const mask = prefixMask(reservedBits);
+    if (!Number.isInteger(prefix) || prefix < 0 || prefix > mask) {
+        throw new RangeError(`prefix ${prefix} does not fit in ${reservedBits} reserved bits`);
+    }
+}
+
+function minKeyLenForPayload(reservedBits: number, payloadLen: number): number {
+    return Math.ceil((reservedBits + payloadLen * 8) / 8);
+}
+
+function payloadCapacityForKeyLen(reservedBits: number, keyLen: number): number {
+    return Math.floor((keyLen * 8 - reservedBits) / 8);
+}
+
+function readBitBe(bytes: Uint8Array, bitIdx: number): boolean {
+    const byteIdx = Math.floor(bitIdx / 8);
+    const bitInByte = 7 - (bitIdx % 8);
+    return byteIdx < bytes.length && ((bytes[byteIdx] >> bitInByte) & 1) !== 0;
+}
+
+function writeBitBe(bytes: Uint8Array, bitIdx: number, value: boolean): void {
+    const byteIdx = Math.floor(bitIdx / 8);
+    const bitInByte = 7 - (bitIdx % 8);
+    const mask = 1 << bitInByte;
+    if (value) {
+        bytes[byteIdx] |= mask;
+    } else {
+        bytes[byteIdx] &= ~mask;
+    }
+}
+
+function writePrefixBits(bytes: Uint8Array, reservedBits: number, prefix: number): void {
+    for (let bitIdx = 0; bitIdx < reservedBits; bitIdx++) {
+        const shift = reservedBits - 1 - bitIdx;
+        writeBitBe(bytes, bitIdx, ((prefix >> shift) & 1) !== 0);
+    }
+}
+
+function readPrefixBits(bytes: Uint8Array, reservedBits: number): number {
+    let prefix = 0;
+    for (let bitIdx = 0; bitIdx < reservedBits; bitIdx++) {
+        prefix <<= 1;
+        if (readBitBe(bytes, bitIdx)) {
+            prefix |= 1;
+        }
+    }
+    return prefix;
+}
+
+function writeBitsFromBytes(
+    dst: Uint8Array,
+    dstBitOffset: number,
+    src: Uint8Array,
+    bitLen: number,
+): void {
+    for (let bitIdx = 0; bitIdx < bitLen; bitIdx++) {
+        writeBitBe(dst, dstBitOffset + bitIdx, readBitBe(src, bitIdx));
+    }
+}
+
+function readBitsToBytes(
+    src: Uint8Array,
+    srcBitOffset: number,
+    dst: Uint8Array,
+    bitLen: number,
+): void {
+    dst.fill(0);
+    for (let bitIdx = 0; bitIdx < bitLen; bitIdx++) {
+        writeBitBe(dst, bitIdx, readBitBe(src, srcBitOffset + bitIdx));
+    }
+}
+
+export class StoreKeyPrefix {
+    public readonly reservedBits: number;
+    public readonly prefix: number;
+
+    constructor(reservedBits: number, prefix: number) {
+        validatePrefix(reservedBits, prefix);
+        this.reservedBits = reservedBits;
+        this.prefix = prefix;
+    }
+
+    maxLogicalKeyLen(): number {
+        return Math.floor((MAX_KEY_LEN * 8 - this.reservedBits) / 8);
+    }
+
+    encodeKey(key: Uint8Array): Uint8Array {
+        const maxPayloadLen = this.maxLogicalKeyLen();
+        if (key.length > maxPayloadLen) {
+            throw new RangeError(
+                `logical key length ${key.length} exceeds prefixed capacity ${maxPayloadLen}`,
+            );
+        }
+        const totalLen = minKeyLenForPayload(this.reservedBits, key.length);
+        const out = new Uint8Array(totalLen);
+        writePrefixBits(out, this.reservedBits, this.prefix);
+        writeBitsFromBytes(out, this.reservedBits, key, key.length * 8);
+        return out;
+    }
+
+    decodeKey(key: Uint8Array): Uint8Array {
+        if (!this.matches(key)) {
+            throw new RangeError('key does not belong to this store prefix');
+        }
+        const payloadLen = payloadCapacityForKeyLen(this.reservedBits, key.length);
+        const out = new Uint8Array(payloadLen);
+        readBitsToBytes(key, this.reservedBits, out, payloadLen * 8);
+        return out;
+    }
+
+    matches(key: Uint8Array): boolean {
+        return (
+            key.length >= Math.ceil(this.reservedBits / 8) &&
+            readPrefixBits(key, this.reservedBits) === this.prefix
+        );
+    }
+
+    prefixBounds(): { start: Uint8Array; end: Uint8Array } {
+        const start = new Uint8Array(Math.ceil(this.reservedBits / 8));
+        writePrefixBits(start, this.reservedBits, this.prefix);
+        const end = new Uint8Array(MAX_KEY_LEN);
+        end.fill(0xff);
+        writePrefixBits(end, this.reservedBits, this.prefix);
+        return { start, end };
+    }
+
+    encodeRange(start?: Uint8Array, end?: Uint8Array): { start: Uint8Array; end: Uint8Array } {
+        const physicalStart = this.encodeKey(start ?? new Uint8Array());
+        let physicalEnd: Uint8Array;
+        if (end === undefined || end.length === 0) {
+            physicalEnd = this.prefixBounds().end;
+        } else {
+            const maxLen = this.maxLogicalKeyLen();
+            physicalEnd = this.encodeKey(end.length > maxLen ? end.slice(0, maxLen) : end);
+        }
+        return { start: physicalStart, end: physicalEnd };
+    }
+
+    prefixMatchKey(matchKey: MessageInitShape<typeof MatchKeySchema>): MatchKey {
+        const logicalReservedBits = matchKey.reservedBits ?? 0;
+        const logicalPrefix = matchKey.prefix ?? 0;
+        validatePrefix(logicalReservedBits, logicalPrefix);
+        const reservedBits = this.reservedBits + logicalReservedBits;
+        if (reservedBits > 16) {
+            throw new RangeError(
+                `combined reserved bits exceed 16: ${this.reservedBits} + ${logicalReservedBits}`,
+            );
+        }
+        const prefix = (this.prefix << logicalReservedBits) | logicalPrefix;
+        validatePrefix(reservedBits, prefix);
+        return create(MatchKeySchema, {
+            reservedBits,
+            prefix,
+            payloadRegex: matchKey.payloadRegex ?? '',
+        });
+    }
+}
+
 function toUint8Array(value: Uint8Array | Buffer): Uint8Array {
     return value instanceof Uint8Array ? value : new Uint8Array(value);
+}
+
+function copyBytes(value: Uint8Array | Buffer): Uint8Array {
+    return new Uint8Array(toUint8Array(value));
+}
+
+function encodeStoreKey(prefix: StoreKeyPrefix | undefined, key: Uint8Array): Uint8Array {
+    return prefix ? prefix.encodeKey(key) : key;
+}
+
+function decodeStoreKey(prefix: StoreKeyPrefix | undefined, key: Uint8Array): Uint8Array {
+    return prefix ? prefix.decodeKey(key) : key;
+}
+
+function encodeStoreRange(
+    prefix: StoreKeyPrefix | undefined,
+    start?: Uint8Array,
+    end?: Uint8Array,
+): { start: Uint8Array; end: Uint8Array } {
+    if (prefix) {
+        return prefix.encodeRange(start, end);
+    }
+    return {
+        start: start ?? new Uint8Array(),
+        end: end ?? new Uint8Array(),
+    };
+}
+
+export class StoreWriteBatch {
+    private readonly kvs: StoreBatchEntry[] = [];
+
+    push(client: StoreClient, key: Uint8Array, value: Uint8Array | Buffer): this {
+        this.kvs.push({
+            key: client.encodeStoreKey(key),
+            value: copyBytes(value),
+        });
+        return this;
+    }
+
+    entries(): readonly StoreBatchEntry[] {
+        return this.kvs;
+    }
+
+    get length(): number {
+        return this.kvs.length;
+    }
+
+    clear(): void {
+        this.kvs.length = 0;
+    }
+
+    async commit(client: StoreClient): Promise<bigint> {
+        return client.putPrepared(this);
+    }
 }
 
 function normalizeMinSequenceNumber(value?: bigint): bigint | undefined {
@@ -171,14 +402,162 @@ function toStoreBatch(
         sequenceNumber: bigint;
         entries: { key: Uint8Array; value: Uint8Array }[];
     },
+    prefix?: StoreKeyPrefix,
 ): StoreBatch {
     return {
         sequenceNumber: response.sequenceNumber,
-        entries: response.entries.map((entry) => ({
-            key: entry.key,
-            value: entry.value,
-        })),
+        entries: response.entries.flatMap((entry) => {
+            if (prefix && !prefix.matches(entry.key)) {
+                return [];
+            }
+            return [
+                {
+                    key: decodeStoreKey(prefix, entry.key),
+                    value: entry.value,
+                },
+            ];
+        }),
     };
+}
+
+function prefixPolicies(policies: Policy[], prefix?: StoreKeyPrefix): Policy[] {
+    if (!prefix) return policies;
+    return policies.map((policy) => {
+        if (policy.scope.case !== 'keys') {
+            return policy;
+        }
+        const scope = policy.scope.value;
+        return {
+            ...policy,
+            scope: {
+                case: 'keys',
+                value: {
+                    ...scope,
+                    matchKey: scope.matchKey ? prefix.prefixMatchKey(scope.matchKey) : undefined,
+                },
+            },
+        } as Policy;
+    });
+}
+
+function prefixSubscribeFilters(
+    filters: SubscribeFilters,
+    prefix?: StoreKeyPrefix,
+): SubscribeFilters {
+    if (!prefix) return filters;
+    return {
+        ...filters,
+        matchKeys: filters.matchKeys.map((matchKey) => prefix.prefixMatchKey(matchKey)),
+    };
+}
+
+function shiftBitOffset(bitOffset: number, prefixBits: number): number {
+    const shifted = bitOffset + prefixBits;
+    if (shifted > 0xffff) {
+        throw new RangeError(`key bit offset ${bitOffset} plus prefix bits ${prefixBits} exceeds u16`);
+    }
+    return shifted;
+}
+
+function prefixFieldRef(field: KvFieldRef, prefixBits: number): KvFieldRef {
+    switch (field.field.case) {
+        case 'key':
+            return {
+                ...field,
+                field: {
+                    case: 'key',
+                    value: {
+                        ...field.field.value,
+                        bitOffset: shiftBitOffset(field.field.value.bitOffset, prefixBits),
+                    },
+                },
+            } as KvFieldRef;
+        case 'zOrderKey':
+            return {
+                ...field,
+                field: {
+                    case: 'zOrderKey',
+                    value: {
+                        ...field.field.value,
+                        bitOffset: shiftBitOffset(field.field.value.bitOffset, prefixBits),
+                    },
+                },
+            } as KvFieldRef;
+        case 'value':
+        case undefined:
+            return field;
+    }
+}
+
+function prefixExpr(expr: KvExpr, prefixBits: number): KvExpr {
+    switch (expr.expr.case) {
+        case 'field':
+            return {
+                ...expr,
+                expr: {
+                    case: 'field',
+                    value: prefixFieldRef(expr.expr.value, prefixBits),
+                },
+            } as KvExpr;
+        case 'add':
+        case 'sub':
+        case 'mul':
+        case 'div':
+            return {
+                ...expr,
+                expr: {
+                    case: expr.expr.case,
+                    value: {
+                        ...expr.expr.value,
+                        left: expr.expr.value.left
+                            ? prefixExpr(expr.expr.value.left, prefixBits)
+                            : undefined,
+                        right: expr.expr.value.right
+                            ? prefixExpr(expr.expr.value.right, prefixBits)
+                            : undefined,
+                    },
+                },
+            } as KvExpr;
+        case 'lower':
+        case 'dateTruncDay':
+            return {
+                ...expr,
+                expr: {
+                    case: expr.expr.case,
+                    value: prefixExpr(expr.expr.value, prefixBits),
+                },
+            } as KvExpr;
+        case 'literal':
+        case undefined:
+            return expr;
+    }
+}
+
+function prefixPredicate(predicate: KvPredicate, prefixBits: number): KvPredicate {
+    return {
+        ...predicate,
+        checks: predicate.checks.map((check) => ({
+            ...check,
+            field: check.field ? prefixFieldRef(check.field, prefixBits) : undefined,
+        })),
+    } as KvPredicate;
+}
+
+function prefixReducer(reducer: RangeReducerSpec, prefixBits: number): RangeReducerSpec {
+    return {
+        ...reducer,
+        expr: reducer.expr ? prefixExpr(reducer.expr, prefixBits) : undefined,
+    } as RangeReducerSpec;
+}
+
+function prefixReduceParams(params: ReduceParams, prefix?: StoreKeyPrefix): ReduceParams {
+    if (!prefix) return params;
+    return {
+        ...params,
+        reducers: params.reducers.map((reducer) => prefixReducer(reducer, prefix.reservedBits)),
+        groupBy: params.groupBy.map((expr) => prefixExpr(expr, prefix.reservedBits)),
+        filter: params.filter ? prefixPredicate(params.filter, prefix.reservedBits) : undefined,
+    } as ReduceParams;
 }
 
 async function performGet(
@@ -186,10 +565,11 @@ async function performGet(
     key: Uint8Array,
     minSequenceNumber?: bigint,
     detailObserver?: DetailObserver,
+    prefix?: StoreKeyPrefix,
 ): Promise<GetResult | null> {
     const effective = normalizeMinSequenceNumber(minSequenceNumber);
     const req = create(QueryGetRequestSchema, {
-        key,
+        key: encodeStoreKey(prefix, key),
         ...(effective !== undefined ? { minSequenceNumber: effective } : {}),
     });
     try {
@@ -210,10 +590,11 @@ async function performGetMany(
     onChunk?: (entries: GetManyResultItem[]) => void,
     minSequenceNumber?: bigint,
     detailObserver?: DetailObserver,
+    prefix?: StoreKeyPrefix,
 ): Promise<GetManyResultItem[]> {
     const effective = normalizeMinSequenceNumber(minSequenceNumber);
     const req = create(GetManyRequestSchema, {
-        keys,
+        keys: keys.map((key) => encodeStoreKey(prefix, key)),
         batchSize: batchSize ?? keys.length,
         ...(effective !== undefined ? { minSequenceNumber: effective } : {}),
     });
@@ -224,7 +605,7 @@ async function performGetMany(
             const chunk: GetManyResultItem[] = [];
             for (const entry of frame.results) {
                 chunk.push({
-                    key: entry.key,
+                    key: decodeStoreKey(prefix, entry.key),
                     value: entry.value,
                 });
             }
@@ -248,11 +629,13 @@ async function performQuery(
     mode: TraversalMode = TraversalMode.FORWARD,
     minSequenceNumber?: bigint,
     detailObserver?: DetailObserver,
+    prefix?: StoreKeyPrefix,
 ): Promise<QueryResult> {
     const effective = normalizeMinSequenceNumber(minSequenceNumber);
+    const physicalRange = encodeStoreRange(prefix, start, end);
     const req = create(RangeRequestSchema, {
-        start: start ?? new Uint8Array(),
-        end: end ?? new Uint8Array(),
+        start: physicalRange.start,
+        end: physicalRange.end,
         batchSize,
         mode,
         ...(limit !== undefined ? { limit } : {}),
@@ -263,7 +646,7 @@ async function performQuery(
         const stream = client.query.range(req, mergeCallOptionsWithDetailObserver(detailObserver));
         for await (const frame of stream) {
             for (const row of frame.results) {
-                results.push({ key: row.key, value: row.value });
+                results.push({ key: decodeStoreKey(prefix, row.key), value: row.value });
             }
         }
         return { results };
@@ -279,12 +662,14 @@ async function performReduce(
     params: ReduceParams,
     minSequenceNumber?: bigint,
     detailObserver?: DetailObserver,
+    prefix?: StoreKeyPrefix,
 ): Promise<ReduceResponse> {
     const effective = normalizeMinSequenceNumber(minSequenceNumber);
+    const physicalRange = encodeStoreRange(prefix, start, end);
     const req = create(ReduceRequestSchema, {
-        start,
-        end,
-        params,
+        start: physicalRange.start,
+        end: physicalRange.end,
+        params: prefixReduceParams(params, prefix),
         ...(effective !== undefined ? { minSequenceNumber: effective } : {}),
     });
     try {
@@ -297,12 +682,13 @@ async function performReduce(
 async function performGetBatch(
     client: Client,
     sequenceNumber: bigint,
+    prefix?: StoreKeyPrefix,
     options?: CallOptions,
 ): Promise<StoreBatch | null> {
     const req = create(StreamGetRequestSchema, { sequenceNumber });
     try {
         const res = await client.stream.get(req, options);
-        return toStoreBatch(res);
+        return toStoreBatch(res, prefix);
     } catch (e) {
         if (
             e instanceof ConnectError &&
@@ -323,19 +709,21 @@ export interface SubscribeFilters {
 async function* performSubscribe(
     client: Client,
     filters: SubscribeFilters,
+    prefix?: StoreKeyPrefix,
     options?: CallOptions,
 ): AsyncIterable<StoreBatch> {
+    const prefixed = prefixSubscribeFilters(filters, prefix);
     const req = create(SubscribeRequestSchema, {
-        matchKeys: filters.matchKeys,
-        valueFilters: filters.valueFilters ?? [],
-        ...(filters.sinceSequenceNumber !== undefined
-            ? { sinceSequenceNumber: filters.sinceSequenceNumber }
+        matchKeys: prefixed.matchKeys,
+        valueFilters: prefixed.valueFilters ?? [],
+        ...(prefixed.sinceSequenceNumber !== undefined
+            ? { sinceSequenceNumber: prefixed.sinceSequenceNumber }
             : {}),
     });
     try {
         const stream = client.stream.subscribe(req, options);
         for await (const frame of stream) {
-            yield toStoreBatch(frame);
+            yield toStoreBatch(frame, prefix);
         }
     } catch (e) {
         mapConnectToHttpError(e);
@@ -347,7 +735,11 @@ export class SerializableReadSession {
     private initGate = Promise.resolve();
     private gateLocked = false;
 
-    constructor(private readonly client: Client, initialSequence: bigint = 0n) {
+    constructor(
+        private readonly client: Client,
+        private readonly keyPrefix?: StoreKeyPrefix,
+        initialSequence: bigint = 0n,
+    ) {
         this.sequence = normalizeMinSequenceNumber(initialSequence) ?? 0n;
     }
 
@@ -403,8 +795,9 @@ export class SerializableReadSession {
 
     async get(key: Uint8Array): Promise<GetResult | null> {
         return this.runRead(
-            (sequence) => performGet(this.client, key, sequence),
-            (detailObserver) => performGet(this.client, key, undefined, detailObserver),
+            (sequence) => performGet(this.client, key, sequence, undefined, this.keyPrefix),
+            (detailObserver) =>
+                performGet(this.client, key, undefined, detailObserver, this.keyPrefix),
         );
     }
 
@@ -414,9 +807,26 @@ export class SerializableReadSession {
         onChunk?: (entries: GetManyResultItem[]) => void,
     ): Promise<GetManyResultItem[]> {
         return this.runRead(
-            (sequence) => performGetMany(this.client, keys, batchSize, onChunk, sequence),
+            (sequence) =>
+                performGetMany(
+                    this.client,
+                    keys,
+                    batchSize,
+                    onChunk,
+                    sequence,
+                    undefined,
+                    this.keyPrefix,
+                ),
             (detailObserver) =>
-                performGetMany(this.client, keys, batchSize, onChunk, undefined, detailObserver),
+                performGetMany(
+                    this.client,
+                    keys,
+                    batchSize,
+                    onChunk,
+                    undefined,
+                    detailObserver,
+                    this.keyPrefix,
+                ),
         );
     }
 
@@ -428,7 +838,18 @@ export class SerializableReadSession {
         mode: TraversalMode = TraversalMode.FORWARD,
     ): Promise<QueryResult> {
         return this.runRead(
-            (sequence) => performQuery(this.client, start, end, limit, batchSize, mode, sequence),
+            (sequence) =>
+                performQuery(
+                    this.client,
+                    start,
+                    end,
+                    limit,
+                    batchSize,
+                    mode,
+                    sequence,
+                    undefined,
+                    this.keyPrefix,
+                ),
             (detailObserver) =>
                 performQuery(
                     this.client,
@@ -439,6 +860,7 @@ export class SerializableReadSession {
                     mode,
                     undefined,
                     detailObserver,
+                    this.keyPrefix,
                 ),
         );
     }
@@ -449,29 +871,57 @@ export class SerializableReadSession {
         params: ReduceParams,
     ): Promise<ReduceResponse> {
         return this.runRead(
-            (sequence) => performReduce(this.client, start, end, params, sequence),
+            (sequence) =>
+                performReduce(this.client, start, end, params, sequence, undefined, this.keyPrefix),
             (detailObserver) =>
-                performReduce(this.client, start, end, params, undefined, detailObserver),
+                performReduce(
+                    this.client,
+                    start,
+                    end,
+                    params,
+                    undefined,
+                    detailObserver,
+                    this.keyPrefix,
+                ),
         );
     }
 }
 
 export class StoreClient {
-    constructor(private readonly client: Client) {}
+    constructor(
+        private readonly client: Client,
+        private readonly keyPrefix?: StoreKeyPrefix,
+    ) {}
+
+    withKeyPrefix(prefix: StoreKeyPrefix): StoreClient {
+        return new StoreClient(this.client, prefix);
+    }
+
+    withoutKeyPrefix(): StoreClient {
+        return new StoreClient(this.client);
+    }
+
+    encodeStoreKey(key: Uint8Array): Uint8Array {
+        return encodeStoreKey(this.keyPrefix, key);
+    }
+
+    decodeStoreKey(key: Uint8Array): Uint8Array {
+        return decodeStoreKey(this.keyPrefix, key);
+    }
 
     createSession(): SerializableReadSession {
-        return new SerializableReadSession(this.client);
+        return new SerializableReadSession(this.client, this.keyPrefix);
     }
 
     createSessionWithSequence(sequence: bigint): SerializableReadSession {
-        return new SerializableReadSession(this.client, sequence);
+        return new SerializableReadSession(this.client, this.keyPrefix, sequence);
     }
 
     async set(key: Uint8Array, value: Uint8Array | Buffer): Promise<bigint> {
         const req = create(PutRequestSchema, {
             kvs: [
                 create(KvEntrySchema, {
-                    key,
+                    key: this.encodeStoreKey(key),
                     value: toUint8Array(value),
                 }),
             ],
@@ -488,7 +938,7 @@ export class StoreClient {
         const req = create(PutRequestSchema, {
             kvs: kvs.map((kv) =>
                 create(KvEntrySchema, {
-                    key: kv.key,
+                    key: this.encodeStoreKey(kv.key),
                     value: toUint8Array(kv.value),
                 }),
             ),
@@ -501,8 +951,25 @@ export class StoreClient {
         }
     }
 
+    async putPrepared(batch: StoreWriteBatch): Promise<bigint> {
+        const req = create(PutRequestSchema, {
+            kvs: batch.entries().map((kv) =>
+                create(KvEntrySchema, {
+                    key: kv.key,
+                    value: kv.value,
+                }),
+            ),
+        });
+        try {
+            const res = await this.client.ingest.put(req);
+            return res.sequenceNumber;
+        } catch (e) {
+            mapConnectToHttpError(e);
+        }
+    }
+
     async get(key: Uint8Array, minSequenceNumber?: bigint): Promise<GetResult | null> {
-        return performGet(this.client, key, minSequenceNumber);
+        return performGet(this.client, key, minSequenceNumber, undefined, this.keyPrefix);
     }
 
     async getMany(
@@ -511,7 +978,15 @@ export class StoreClient {
         onChunk?: (entries: GetManyResultItem[]) => void,
         minSequenceNumber?: bigint,
     ): Promise<GetManyResultItem[]> {
-        return performGetMany(this.client, keys, batchSize, onChunk, minSequenceNumber);
+        return performGetMany(
+            this.client,
+            keys,
+            batchSize,
+            onChunk,
+            minSequenceNumber,
+            undefined,
+            this.keyPrefix,
+        );
     }
 
     async query(
@@ -530,11 +1005,13 @@ export class StoreClient {
             batchSize,
             mode,
             minSequenceNumber,
+            undefined,
+            this.keyPrefix,
         );
     }
 
     async prune(policies: Policy[]): Promise<void> {
-        const req = create(PruneRequestSchema, { policies });
+        const req = create(PruneRequestSchema, { policies: prefixPolicies(policies, this.keyPrefix) });
         try {
             await this.client.compact.prune(req);
         } catch (e) {
@@ -548,17 +1025,25 @@ export class StoreClient {
         params: ReduceParams,
         minSequenceNumber?: bigint,
     ): Promise<ReduceResponse> {
-        return performReduce(this.client, start, end, params, minSequenceNumber);
+        return performReduce(
+            this.client,
+            start,
+            end,
+            params,
+            minSequenceNumber,
+            undefined,
+            this.keyPrefix,
+        );
     }
 
     async getBatch(sequenceNumber: bigint, options?: CallOptions): Promise<StoreBatch | null> {
-        return performGetBatch(this.client, sequenceNumber, options);
+        return performGetBatch(this.client, sequenceNumber, this.keyPrefix, options);
     }
 
     async *subscribe(
         filters: SubscribeFilters,
         options?: CallOptions,
     ): AsyncIterable<StoreBatch> {
-        yield* performSubscribe(this.client, filters, options);
+        yield* performSubscribe(this.client, filters, this.keyPrefix, options);
     }
 }

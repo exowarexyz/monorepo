@@ -6,6 +6,7 @@ members = [
     "qmdb",
     "qmdb/wasm",
     "sql",
+    "exoware-integration",
 ]
 resolver = "2"
 

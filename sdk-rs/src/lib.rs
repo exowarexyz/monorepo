@@ -45,7 +45,7 @@ use exoware_proto::{
 };
 use http::HeaderMap;
 use keys::is_valid_key_size;
-use kv_codec::KvReducedValue;
+use kv_codec::{KvExpr, KvFieldRef, KvReducedValue};
 use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -112,6 +112,8 @@ pub enum ClientError {
     Http(#[from] reqwest::Error),
     #[error("RPC error ({0})")]
     Rpc(Box<ConnectError>),
+    #[error("store key prefix error: {0}")]
+    KeyPrefix(#[from] StoreKeyPrefixError),
     #[error("invalid key length: expected {expected}, got {got}")]
     InvalidKeyLength { expected: usize, got: usize },
     #[error("wire format error: {0}")]
@@ -137,6 +139,196 @@ impl ClientError {
     }
 }
 
+/// Errors returned by [`StoreKeyPrefix`] when a logical key cannot be mapped
+/// into the prefixed physical keyspace.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum StoreKeyPrefixError {
+    #[error("reserved_bits {reserved_bits} exceeds 16")]
+    ReservedBitsTooLarge { reserved_bits: u8 },
+    #[error("prefix {prefix} does not fit in {reserved_bits} reserved bits")]
+    PrefixTooLarge { reserved_bits: u8, prefix: u16 },
+    #[error(
+        "combined reserved bits exceed 16: store prefix bits {prefix_bits} + logical bits {logical_bits}"
+    )]
+    CombinedReservedBitsTooLarge { prefix_bits: u8, logical_bits: u8 },
+    #[error("key does not belong to this store prefix")]
+    PrefixMismatch,
+    #[error("key bit offset {offset} plus store prefix bits {prefix_bits} exceeds u16")]
+    BitOffsetOverflow { offset: u16, prefix_bits: u8 },
+    #[error("key codec error: {0}")]
+    Codec(#[from] KeyCodecError),
+}
+
+/// A client-side namespace layered over raw Store keys.
+///
+/// The prefix consumes a small number of high bits in the physical Store key
+/// and stores the caller's logical key in the remaining payload bits. QMDB,
+/// SQL, and other higher-level instances continue to build their own logical
+/// keys as before; a prefixed [`StoreClient`] maps those keys on the wire and
+/// maps returned keys back before callers see them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct StoreKeyPrefix {
+    codec: KeyCodec,
+}
+
+impl StoreKeyPrefix {
+    pub fn new(reserved_bits: u8, prefix: u16) -> Result<Self, StoreKeyPrefixError> {
+        validate_prefix_bits(reserved_bits, prefix)?;
+        Ok(Self {
+            codec: KeyCodec::new(reserved_bits, prefix),
+        })
+    }
+
+    #[inline]
+    pub fn reserved_bits(self) -> u8 {
+        self.codec.reserved_bits()
+    }
+
+    #[inline]
+    pub fn prefix(self) -> u16 {
+        self.codec.prefix()
+    }
+
+    /// Maximum logical key bytes available under this prefix.
+    #[inline]
+    pub fn max_logical_key_len(self) -> usize {
+        self.codec.max_payload_capacity_bytes()
+    }
+
+    /// Encode a logical key into the physical Store keyspace.
+    pub fn encode_key(self, key: &Key) -> Result<Key, StoreKeyPrefixError> {
+        Ok(self.codec.encode(key)?)
+    }
+
+    /// Decode a physical Store key back into the logical keyspace.
+    pub fn decode_key(self, key: &Key) -> Result<Key, StoreKeyPrefixError> {
+        if !self.codec.matches(key) {
+            return Err(StoreKeyPrefixError::PrefixMismatch);
+        }
+        let payload_len = self.codec.payload_capacity_bytes_for_key_len(key.len());
+        Ok(Bytes::from(self.codec.read_payload(key, 0, payload_len)?))
+    }
+
+    /// Encode an inclusive logical range into the physical Store keyspace.
+    ///
+    /// Empty `end` means unbounded in the logical keyspace and is narrowed to
+    /// this prefix's physical upper bound. Long logical upper bounds are
+    /// clamped to the maximum logical key length representable under this
+    /// prefix; this preserves scans over existing `KeyCodec::prefix_bounds`
+    /// ranges, whose upper bound is intentionally `MAX_KEY_LEN` bytes.
+    pub fn encode_range(self, start: &Key, end: &Key) -> Result<(Key, Key), StoreKeyPrefixError> {
+        let start = self.encode_key(start)?;
+        let end = if end.is_empty() {
+            self.codec.prefix_bounds().1
+        } else {
+            let max_len = self.max_logical_key_len();
+            let end = if end.len() > max_len {
+                Bytes::copy_from_slice(&end[..max_len])
+            } else {
+                Bytes::copy_from_slice(end)
+            };
+            self.encode_key(&end)?
+        };
+        Ok((start, end))
+    }
+
+    fn prefix_match_key(
+        self,
+        match_key: &crate::match_key::MatchKey,
+    ) -> Result<crate::match_key::MatchKey, StoreKeyPrefixError> {
+        self.prefix_match_key_with_regex(match_key, match_key.payload_regex.clone())
+    }
+
+    fn prefix_stream_match_key(
+        self,
+        match_key: &crate::match_key::MatchKey,
+    ) -> Result<crate::match_key::MatchKey, StoreKeyPrefixError> {
+        self.prefix_match_key_with_regex(match_key, crate::kv_codec::Utf8::from("(?s-u).*"))
+    }
+
+    fn prefix_match_key_with_regex(
+        self,
+        match_key: &crate::match_key::MatchKey,
+        payload_regex: crate::kv_codec::Utf8,
+    ) -> Result<crate::match_key::MatchKey, StoreKeyPrefixError> {
+        validate_prefix_bits(match_key.reserved_bits, match_key.prefix)?;
+        let reserved_bits = self
+            .reserved_bits()
+            .checked_add(match_key.reserved_bits)
+            .ok_or(StoreKeyPrefixError::CombinedReservedBitsTooLarge {
+                prefix_bits: self.reserved_bits(),
+                logical_bits: match_key.reserved_bits,
+            })?;
+        if reserved_bits > 16 {
+            return Err(StoreKeyPrefixError::CombinedReservedBitsTooLarge {
+                prefix_bits: self.reserved_bits(),
+                logical_bits: match_key.reserved_bits,
+            });
+        }
+
+        let prefix = (u32::from(self.prefix()) << u32::from(match_key.reserved_bits))
+            | u32::from(match_key.prefix);
+        let prefix = u16::try_from(prefix).map_err(|_| StoreKeyPrefixError::PrefixTooLarge {
+            reserved_bits,
+            prefix: u16::MAX,
+        })?;
+        validate_prefix_bits(reserved_bits, prefix)?;
+        Ok(crate::match_key::MatchKey {
+            reserved_bits,
+            prefix,
+            payload_regex,
+        })
+    }
+}
+
+/// A physical Store write batch assembled from one or more logical clients.
+///
+/// Use [`Self::push`] with the specific prefixed client that produced each
+/// logical key, then [`Self::commit`] once to submit all rows in one atomic
+/// Store `Put`.
+#[derive(Clone, Debug, Default)]
+pub struct StoreWriteBatch {
+    entries: Vec<(Key, Bytes)>,
+}
+
+impl StoreWriteBatch {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    pub fn push(
+        &mut self,
+        client: &StoreClient,
+        key: &Key,
+        value: &[u8],
+    ) -> Result<&mut Self, ClientError> {
+        self.entries
+            .push((client.encode_store_key(key)?, Bytes::copy_from_slice(value)));
+        Ok(self)
+    }
+
+    pub async fn commit(&self, client: &StoreClient) -> Result<u64, ClientError> {
+        let refs: Vec<(&Key, &[u8])> = self
+            .entries
+            .iter()
+            .map(|(key, value)| (key, value.as_ref()))
+            .collect();
+        client.put_physical(&refs).await
+    }
+}
+
 /// Traversal mode for range queries.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RangeMode {
@@ -154,6 +346,7 @@ pub struct RangeStream {
     final_detail: Option<proto_query::Detail>,
     finished: bool,
     observed_sequence: Option<Arc<AtomicU64>>,
+    key_prefix: Option<StoreKeyPrefix>,
 }
 
 impl RangeStream {
@@ -163,6 +356,7 @@ impl RangeStream {
             exoware_proto::query::RangeFrameView<'static>,
         >,
         observed_sequence: Option<Arc<AtomicU64>>,
+        key_prefix: Option<StoreKeyPrefix>,
     ) -> Self {
         Self {
             stream,
@@ -172,6 +366,7 @@ impl RangeStream {
             final_detail: None,
             finished: false,
             observed_sequence,
+            key_prefix,
         }
     }
 
@@ -244,18 +439,16 @@ impl RangeStream {
 
         let n = frame.results.len();
         self.rows_seen += n;
-        Ok(Some(
-            frame
-                .results
-                .iter()
-                .map(|entry| {
-                    (
-                        Bytes::copy_from_slice(&entry.key),
-                        Bytes::copy_from_slice(&entry.value),
-                    )
-                })
-                .collect(),
-        ))
+        let mut out = Vec::with_capacity(n);
+        for entry in &frame.results {
+            let key = Bytes::copy_from_slice(&entry.key);
+            let key = match self.key_prefix {
+                Some(prefix) => prefix.decode_key(&key)?,
+                None => key,
+            };
+            out.push((key, Bytes::copy_from_slice(&entry.value)));
+        }
+        Ok(Some(out))
     }
 
     pub async fn collect(mut self) -> Result<Vec<(Key, Bytes)>, ClientError> {
@@ -275,6 +468,7 @@ pub struct GetManyStream {
     final_detail: Option<proto_query::Detail>,
     finished: bool,
     observed_sequence: Option<Arc<AtomicU64>>,
+    key_prefix: Option<StoreKeyPrefix>,
 }
 
 impl GetManyStream {
@@ -288,6 +482,7 @@ impl GetManyStream {
             exoware_proto::query::GetManyFrameView<'static>,
         >,
         observed_sequence: Option<Arc<AtomicU64>>,
+        key_prefix: Option<StoreKeyPrefix>,
     ) -> Self {
         Self {
             stream,
@@ -296,6 +491,7 @@ impl GetManyStream {
             final_detail: None,
             finished: false,
             observed_sequence,
+            key_prefix,
         }
     }
 
@@ -356,17 +552,17 @@ impl GetManyStream {
         };
 
         self.entries_seen += frame.results.len();
-        Ok(Some(
-            frame
-                .results
-                .iter()
-                .map(|entry| {
-                    let key = Bytes::copy_from_slice(&entry.key);
-                    let value = entry.value.as_ref().map(|v| Bytes::copy_from_slice(v));
-                    (key, value)
-                })
-                .collect(),
-        ))
+        let mut out = Vec::with_capacity(frame.results.len());
+        for entry in &frame.results {
+            let key = Bytes::copy_from_slice(&entry.key);
+            let key = match self.key_prefix {
+                Some(prefix) => prefix.decode_key(&key)?,
+                None => key,
+            };
+            let value = entry.value.as_ref().map(|v| Bytes::copy_from_slice(v));
+            out.push((key, value));
+        }
+        Ok(Some(out))
     }
 
     pub async fn collect(mut self) -> Result<HashMap<Key, Bytes>, ClientError> {
@@ -389,6 +585,33 @@ impl RangeMode {
             Self::Reverse => proto_query::TraversalMode::TRAVERSAL_MODE_REVERSE,
         }
     }
+}
+
+#[inline]
+fn key_prefix_mask(bits: u8) -> Result<u16, StoreKeyPrefixError> {
+    if bits > 16 {
+        return Err(StoreKeyPrefixError::ReservedBitsTooLarge {
+            reserved_bits: bits,
+        });
+    }
+    Ok(if bits == 0 {
+        0
+    } else if bits == 16 {
+        u16::MAX
+    } else {
+        (1u16 << bits) - 1
+    })
+}
+
+fn validate_prefix_bits(reserved_bits: u8, prefix: u16) -> Result<(), StoreKeyPrefixError> {
+    let mask = key_prefix_mask(reserved_bits)?;
+    if prefix > mask {
+        return Err(StoreKeyPrefixError::PrefixTooLarge {
+            reserved_bits,
+            prefix,
+        });
+    }
+    Ok(())
 }
 
 /// One delivered (key, value) row from a stream subscription. The client
@@ -414,6 +637,8 @@ pub struct StreamSubscription {
         hyper::body::Incoming,
         exoware_proto::store::stream::v1::SubscribeResponseView<'static>,
     >,
+    key_prefix: Option<StoreKeyPrefix>,
+    logical_filter: Option<ClientStreamFilter>,
 }
 
 impl std::fmt::Debug for StreamSubscription {
@@ -425,35 +650,103 @@ impl std::fmt::Debug for StreamSubscription {
 impl StreamSubscription {
     /// Pull the next frame. `Ok(None)` = server closed the stream cleanly.
     pub async fn next(&mut self) -> Result<Option<StreamSubscriptionFrame>, ClientError> {
-        match self
-            .stream
-            .message()
-            .await
-            .map_err(client_error_from_connect)?
-        {
-            Some(view) => {
-                let owned = view.to_owned_message();
-                let frame = StreamSubscriptionFrame {
-                    sequence_number: owned.sequence_number,
-                    entries: owned
-                        .entries
-                        .into_iter()
-                        .map(|e| StreamSubscriptionEntry {
-                            key: Bytes::from(e.key),
-                            value: Bytes::from(e.value),
-                        })
-                        .collect(),
-                };
-                Ok(Some(frame))
-            }
-            None => {
-                if let Some(err) = self.stream.error() {
-                    Err(client_error_from_connect(err.clone()))
-                } else {
-                    Ok(None)
+        loop {
+            match self
+                .stream
+                .message()
+                .await
+                .map_err(client_error_from_connect)?
+            {
+                Some(view) => {
+                    let owned = view.to_owned_message();
+                    let mut entries = Vec::with_capacity(owned.entries.len());
+                    for entry in owned.entries {
+                        let key = Bytes::from(entry.key);
+                        let key = match self.key_prefix {
+                            Some(prefix) => prefix.decode_key(&key)?,
+                            None => key,
+                        };
+                        let value = Bytes::from(entry.value);
+                        if self
+                            .logical_filter
+                            .as_ref()
+                            .is_none_or(|filter| filter.matches(&key, value.as_ref()))
+                        {
+                            entries.push(StreamSubscriptionEntry { key, value });
+                        }
+                    }
+                    if entries.is_empty() {
+                        continue;
+                    }
+                    let frame = StreamSubscriptionFrame {
+                        sequence_number: owned.sequence_number,
+                        entries,
+                    };
+                    return Ok(Some(frame));
+                }
+                None => {
+                    if let Some(err) = self.stream.error() {
+                        return Err(client_error_from_connect(err.clone()));
+                    } else {
+                        return Ok(None);
+                    }
                 }
             }
         }
+    }
+}
+
+#[derive(Clone)]
+struct ClientKeyMatcher {
+    codec: KeyCodec,
+    regex: regex::bytes::Regex,
+}
+
+#[derive(Clone)]
+struct ClientStreamFilter {
+    keys: Vec<ClientKeyMatcher>,
+    values: Option<crate::stream_filter::CompiledBytesFilters>,
+}
+
+impl ClientStreamFilter {
+    fn compile(filter: &crate::stream_filter::StreamFilter) -> Result<Self, ClientError> {
+        crate::stream_filter::validate_filter(filter)
+            .map_err(|e| ClientError::WireFormat(e.to_string()))?;
+        let keys = filter
+            .match_keys
+            .iter()
+            .map(|mk| {
+                let regex = crate::match_key::compile_payload_regex(&mk.payload_regex)
+                    .map_err(|e| ClientError::WireFormat(e.to_string()))?;
+                Ok(ClientKeyMatcher {
+                    codec: KeyCodec::new(mk.reserved_bits, mk.prefix),
+                    regex,
+                })
+            })
+            .collect::<Result<Vec<_>, ClientError>>()?;
+        let values = crate::stream_filter::CompiledBytesFilters::compile(&filter.value_filters)
+            .map_err(ClientError::WireFormat)?;
+        Ok(Self { keys, values })
+    }
+
+    fn matches(&self, key: &Key, value: &[u8]) -> bool {
+        if !self
+            .values
+            .as_ref()
+            .is_none_or(|filter| filter.matches(value))
+        {
+            return false;
+        }
+        self.keys.iter().any(|matcher| {
+            if !matcher.codec.matches(key) {
+                return false;
+            }
+            let payload_len = matcher.codec.payload_capacity_bytes_for_key_len(key.len());
+            matcher
+                .codec
+                .read_payload(key, 0, payload_len)
+                .is_ok_and(|payload| matcher.regex.is_match(&payload))
+        })
     }
 }
 
@@ -576,6 +869,7 @@ pub struct StoreClientBuilder {
     query_url: Option<String>,
     compact_url: Option<String>,
     stream_url: Option<String>,
+    key_prefix: Option<StoreKeyPrefix>,
     retry_config: RetryConfig,
     connect_request_compression: ConnectRequestCompression,
 }
@@ -620,6 +914,12 @@ impl StoreClientBuilder {
     /// to the ingest base when not set explicitly.
     pub fn stream_url(mut self, url: &str) -> Self {
         self.stream_url = Some(trim_connect_base(url));
+        self
+    }
+
+    /// Client-side key namespace applied to all user-key operations.
+    pub fn key_prefix(mut self, prefix: StoreKeyPrefix) -> Self {
+        self.key_prefix = Some(prefix);
         self
     }
 
@@ -683,6 +983,7 @@ impl StoreClientBuilder {
             connect_http: ProtoPreferZstdHttpClient::plaintext(),
             retry_config: self.retry_config,
             connect_request_compression: self.connect_request_compression,
+            key_prefix: self.key_prefix,
         })
     }
 }
@@ -700,6 +1001,7 @@ pub struct StoreClient {
     connect_http: ProtoPreferZstdHttpClient,
     retry_config: RetryConfig,
     connect_request_compression: ConnectRequestCompression,
+    key_prefix: Option<StoreKeyPrefix>,
 }
 
 /// A session that enforces monotonic read consistency via a fixed `min_sequence_number` floor.
@@ -792,6 +1094,48 @@ impl StoreClient {
             .expect("all service URLs are set")
     }
 
+    /// Return this client's configured Store key prefix, if any.
+    pub fn key_prefix(&self) -> Option<StoreKeyPrefix> {
+        self.key_prefix
+    }
+
+    /// Clone this client with a client-side Store key prefix.
+    pub fn with_key_prefix(&self, prefix: StoreKeyPrefix) -> Self {
+        let mut out = self.clone();
+        out.key_prefix = Some(prefix);
+        out
+    }
+
+    /// Clone this client without client-side key prefixing.
+    pub fn without_key_prefix(&self) -> Self {
+        let mut out = self.clone();
+        out.key_prefix = None;
+        out
+    }
+
+    /// Encode a logical key as it will appear in the physical Store.
+    pub fn encode_store_key(&self, key: &Key) -> Result<Key, ClientError> {
+        match self.key_prefix {
+            Some(prefix) => Ok(prefix.encode_key(key)?),
+            None => Ok(Bytes::copy_from_slice(key)),
+        }
+    }
+
+    /// Decode a physical Store key into this client's logical keyspace.
+    pub fn decode_store_key(&self, key: &Key) -> Result<Key, ClientError> {
+        match self.key_prefix {
+            Some(prefix) => Ok(prefix.decode_key(key)?),
+            None => Ok(Bytes::copy_from_slice(key)),
+        }
+    }
+
+    fn encode_store_range(&self, start: &Key, end: &Key) -> Result<(Key, Key), ClientError> {
+        match self.key_prefix {
+            Some(prefix) => Ok(prefix.encode_range(start, end)?),
+            None => Ok((Bytes::copy_from_slice(start), Bytes::copy_from_slice(end))),
+        }
+    }
+
     /// Outgoing Connect request body compression (see [`ConnectRequestCompression`]).
     pub fn connect_request_compression(&self) -> ConnectRequestCompression {
         self.connect_request_compression
@@ -854,6 +1198,22 @@ impl StoreClient {
     /// [`Self::create_session_with_sequence`].
     /// If the request succeeds, the server accepts the full batch (count is `kvs.len()`).
     pub(crate) async fn put(&self, kvs: &[(&Key, &[u8])]) -> Result<u64, ClientError> {
+        if self.key_prefix.is_none() {
+            return self.put_physical(kvs).await;
+        }
+        let mut keys = Vec::with_capacity(kvs.len());
+        for (key, _) in kvs {
+            keys.push(self.encode_store_key(key)?);
+        }
+        let prefixed: Vec<(&Key, &[u8])> = keys
+            .iter()
+            .zip(kvs.iter())
+            .map(|(key, (_, value))| (key, *value))
+            .collect();
+        self.put_physical(&prefixed).await
+    }
+
+    async fn put_physical(&self, kvs: &[(&Key, &[u8])]) -> Result<u64, ClientError> {
         let mut proto_kvs = Vec::with_capacity(kvs.len());
         for (key, value) in kvs {
             if !is_valid_key_size(key.len()) {
@@ -947,7 +1307,10 @@ impl StoreClient {
         let config =
             store_connect_client_config(self.query_uri.clone(), self.connect_request_compression);
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
-        let proto_keys: Vec<Vec<u8>> = keys.iter().map(|k| k.to_vec()).collect();
+        let proto_keys: Vec<Vec<u8>> = keys
+            .iter()
+            .map(|k| self.encode_store_key(k).map(|key| key.to_vec()))
+            .collect::<Result<Vec<_>, _>>()?;
         let effective_min = self.normalize_min_sequence_number(min_sequence_number);
         let max_attempts = self.retry_config.max_attempts.max(1);
         let mut attempt = 1usize;
@@ -962,8 +1325,11 @@ impl StoreClient {
                 .await
             {
                 Ok(stream) => {
-                    let mut gms =
-                        GetManyStream::from_connect_stream(stream, observed_sequence.clone());
+                    let mut gms = GetManyStream::from_connect_stream(
+                        stream,
+                        observed_sequence.clone(),
+                        self.key_prefix,
+                    );
                     if let Err(err) = gms.prefetch_first_frame().await {
                         if attempt < max_attempts && is_retryable_error(&err) {
                             let delay = retry_delay_for_error(&err, attempt, self.retry_config);
@@ -1192,9 +1558,10 @@ impl StoreClient {
         let config =
             store_connect_client_config(self.compact_uri.clone(), self.connect_request_compression);
         let client = CompactServiceClient::new(self.connect_http.clone(), config);
+        let policies = self.prefix_prune_policies(policies)?;
         client
             .prune(ProtoPruneRequest {
-                policies: exoware_proto::prune_policies_to_proto(policies),
+                policies: exoware_proto::prune_policies_to_proto(&policies),
                 ..Default::default()
             })
             .await
@@ -1243,6 +1610,7 @@ impl StoreClient {
                 MAX_KEY_LEN
             )));
         }
+        let key = self.encode_store_key(key)?;
 
         let config =
             store_connect_client_config(self.query_uri.clone(), self.connect_request_compression);
@@ -1321,6 +1689,7 @@ impl StoreClient {
                 "batch_size must be positive".to_string(),
             ));
         }
+        let (start, end) = self.encode_store_range(start, end)?;
 
         let config =
             store_connect_client_config(self.query_uri.clone(), self.connect_request_compression);
@@ -1364,8 +1733,11 @@ impl StoreClient {
                 }
             };
 
-            let mut stream =
-                RangeStream::from_connect_stream(response, options.observed_sequence.clone());
+            let mut stream = RangeStream::from_connect_stream(
+                response,
+                options.observed_sequence.clone(),
+                self.key_prefix,
+            );
             if let Err(err) = stream.prefetch_first_frame().await {
                 if attempt < max_attempts && is_retryable_error(&err) {
                     let delay = retry_delay_for_error(&err, attempt, self.retry_config);
@@ -1402,7 +1774,9 @@ impl StoreClient {
         let config =
             store_connect_client_config(self.query_uri.clone(), self.connect_request_compression);
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
-        let proto_params = proto_to_proto_reduce_params(request.clone());
+        let (start, end) = self.encode_store_range(start, end)?;
+        let request = self.prefix_reduce_request(request)?;
+        let proto_params = proto_to_proto_reduce_params(request);
         let min_sequence_number = self.normalize_min_sequence_number(min_sequence_number);
         let response = self
             .send_with_retry(|| async {
@@ -1420,6 +1794,64 @@ impl StoreClient {
         let detail = query_detail_from_unary_metadata(response.headers(), response.trailers());
         let owned = response.into_owned();
         Ok((owned, detail))
+    }
+
+    fn prefix_prune_policies(
+        &self,
+        policies: &[crate::prune_policy::PrunePolicy],
+    ) -> Result<Vec<crate::prune_policy::PrunePolicy>, ClientError> {
+        let Some(prefix) = self.key_prefix else {
+            return Ok(policies.to_vec());
+        };
+        policies
+            .iter()
+            .map(|policy| {
+                use crate::prune_policy::{PolicyScope, PrunePolicy};
+                let scope = match &policy.scope {
+                    PolicyScope::Keys(scope) => {
+                        let mut scope = scope.clone();
+                        scope.match_key = prefix.prefix_match_key(&scope.match_key)?;
+                        PolicyScope::Keys(scope)
+                    }
+                    PolicyScope::Sequence => PolicyScope::Sequence,
+                };
+                Ok(PrunePolicy {
+                    scope,
+                    retain: policy.retain.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, StoreKeyPrefixError>>()
+            .map_err(ClientError::from)
+    }
+
+    fn prefix_stream_filter(
+        &self,
+        filter: crate::stream_filter::StreamFilter,
+    ) -> Result<crate::stream_filter::StreamFilter, ClientError> {
+        let Some(prefix) = self.key_prefix else {
+            return Ok(filter);
+        };
+        let match_keys = filter
+            .match_keys
+            .iter()
+            .map(|mk| prefix.prefix_stream_match_key(mk))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(crate::stream_filter::StreamFilter {
+            match_keys,
+            value_filters: filter.value_filters,
+        })
+    }
+
+    fn prefix_reduce_request(
+        &self,
+        request: &DomainRangeReduceRequest,
+    ) -> Result<DomainRangeReduceRequest, ClientError> {
+        let Some(prefix) = self.key_prefix else {
+            return Ok(request.clone());
+        };
+        let mut request = request.clone();
+        shift_reduce_request_key_offsets(prefix.reserved_bits(), &mut request)?;
+        Ok(request)
     }
 
     async fn send_with_retry<F, Fut, T>(&self, mut make_request: F) -> Result<T, ClientError>
@@ -1453,6 +1885,61 @@ impl StoreClient {
     }
 }
 
+fn shift_reduce_request_key_offsets(
+    prefix_bits: u8,
+    request: &mut DomainRangeReduceRequest,
+) -> Result<(), StoreKeyPrefixError> {
+    for reducer in &mut request.reducers {
+        if let Some(expr) = &mut reducer.expr {
+            shift_expr_key_offsets(prefix_bits, expr)?;
+        }
+    }
+    for expr in &mut request.group_by {
+        shift_expr_key_offsets(prefix_bits, expr)?;
+    }
+    if let Some(filter) = &mut request.filter {
+        for check in &mut filter.checks {
+            shift_field_ref_key_offset(prefix_bits, &mut check.field)?;
+        }
+    }
+    Ok(())
+}
+
+fn shift_expr_key_offsets(prefix_bits: u8, expr: &mut KvExpr) -> Result<(), StoreKeyPrefixError> {
+    match expr {
+        KvExpr::Field(field) => shift_field_ref_key_offset(prefix_bits, field),
+        KvExpr::Literal(_) => Ok(()),
+        KvExpr::Add(left, right)
+        | KvExpr::Sub(left, right)
+        | KvExpr::Mul(left, right)
+        | KvExpr::Div(left, right) => {
+            shift_expr_key_offsets(prefix_bits, left)?;
+            shift_expr_key_offsets(prefix_bits, right)
+        }
+        KvExpr::Lower(inner) | KvExpr::DateTruncDay(inner) => {
+            shift_expr_key_offsets(prefix_bits, inner)
+        }
+    }
+}
+
+fn shift_field_ref_key_offset(
+    prefix_bits: u8,
+    field: &mut KvFieldRef,
+) -> Result<(), StoreKeyPrefixError> {
+    match field {
+        KvFieldRef::Key { bit_offset, .. } | KvFieldRef::ZOrderKey { bit_offset, .. } => {
+            *bit_offset = bit_offset.checked_add(u16::from(prefix_bits)).ok_or(
+                StoreKeyPrefixError::BitOffsetOverflow {
+                    offset: *bit_offset,
+                    prefix_bits,
+                },
+            )?;
+            Ok(())
+        }
+        KvFieldRef::Value { .. } => Ok(()),
+    }
+}
+
 // --- Service-grouped accessors ---------------------------------------------
 
 #[derive(Clone, Copy, Debug)]
@@ -1478,6 +1965,12 @@ pub struct Stream<'a> {
 impl<'a> Ingest<'a> {
     pub async fn put(&self, kvs: &[(&Key, &[u8])]) -> Result<u64, ClientError> {
         self.c.put(kvs).await
+    }
+
+    /// Submit a [`StoreWriteBatch`] that has already been encoded into the
+    /// physical Store keyspace.
+    pub async fn put_prepared(&self, batch: &StoreWriteBatch) -> Result<u64, ClientError> {
+        batch.commit(self.c).await
     }
 }
 
@@ -1691,6 +2184,13 @@ impl<'a> Stream<'a> {
         filter: crate::stream_filter::StreamFilter,
         since_sequence_number: Option<u64>,
     ) -> Result<StreamSubscription, ClientError> {
+        let logical_filter = self
+            .c
+            .key_prefix
+            .is_some()
+            .then(|| ClientStreamFilter::compile(&filter))
+            .transpose()?;
+        let filter = self.c.prefix_stream_filter(filter)?;
         crate::stream_filter::validate_filter(&filter)
             .map_err(|e| ClientError::WireFormat(e.to_string()))?;
         let match_keys = filter
@@ -1738,7 +2238,11 @@ impl<'a> Stream<'a> {
             .subscribe(request)
             .await
             .map_err(client_error_from_connect)?;
-        Ok(StreamSubscription { stream })
+        Ok(StreamSubscription {
+            stream,
+            key_prefix: self.c.key_prefix,
+            logical_filter,
+        })
     }
 
     /// `store.stream.v1.Service.Get` — `Ok(None)` collapses the server's
@@ -1764,11 +2268,17 @@ impl<'a> Stream<'a> {
         {
             Ok(resp) => {
                 let owned = resp.into_owned();
-                let entries = owned
-                    .entries
-                    .into_iter()
-                    .map(|e| (Bytes::from(e.key), Bytes::from(e.value)))
-                    .collect();
+                let mut entries = Vec::with_capacity(owned.entries.len());
+                for entry in owned.entries {
+                    let key = Bytes::from(entry.key);
+                    match self.c.key_prefix {
+                        Some(prefix) if !prefix.codec.matches(&key) => {}
+                        Some(prefix) => {
+                            entries.push((prefix.decode_key(&key)?, Bytes::from(entry.value)))
+                        }
+                        None => entries.push((key, Bytes::from(entry.value))),
+                    }
+                }
                 Ok(Some(entries))
             }
             Err(err) => {
@@ -2123,6 +2633,7 @@ fn retry_backoff_delay(attempt: usize, retry_config: RetryConfig) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kv_codec::{KvFieldKind, KvPredicate, KvPredicateCheck, KvPredicateConstraint};
     use exoware_proto::query::TraversalMode as ProtoTraversalMode;
 
     #[test]
@@ -2267,6 +2778,130 @@ mod tests {
         let client = StoreClient::new("http://localhost:10000/");
         let session = client.create_session_with_sequence(27);
         assert_eq!(session.fixed_sequence(), Some(27));
+    }
+
+    #[test]
+    fn store_key_prefix_round_trips_logical_keys() {
+        let prefix = StoreKeyPrefix::new(4, 0xA).unwrap();
+        let logical = Bytes::from_static(b"hello");
+        let physical = prefix.encode_key(&logical).unwrap();
+        assert!(prefix.codec.matches(&physical));
+        assert_eq!(prefix.decode_key(&physical).unwrap(), logical);
+    }
+
+    #[test]
+    fn store_key_prefix_clamps_long_logical_range_upper_bound() {
+        let prefix = StoreKeyPrefix::new(4, 0x2).unwrap();
+        let logical_codec = KeyCodec::new(4, 0x7);
+        let (logical_start, logical_end) = logical_codec.prefix_bounds();
+        assert_eq!(logical_end.len(), MAX_KEY_LEN);
+
+        let (physical_start, physical_end) =
+            prefix.encode_range(&logical_start, &logical_end).unwrap();
+        assert!(prefix.codec.matches(&physical_start));
+        assert!(prefix.codec.matches(&physical_end));
+        assert_eq!(physical_end.len(), MAX_KEY_LEN);
+        assert_eq!(prefix.decode_key(&physical_start).unwrap(), logical_start);
+    }
+
+    #[test]
+    fn store_key_prefix_rewrites_match_key_family() {
+        let prefix = StoreKeyPrefix::new(3, 0b101).unwrap();
+        let logical = crate::match_key::MatchKey {
+            reserved_bits: 4,
+            prefix: 0b0110,
+            payload_regex: crate::kv_codec::Utf8::from("(?s).*"),
+        };
+        let physical = prefix.prefix_match_key(&logical).unwrap();
+        assert_eq!(physical.reserved_bits, 7);
+        assert_eq!(physical.prefix, 0b101_0110);
+        assert_eq!(physical.payload_regex, logical.payload_regex);
+    }
+
+    #[test]
+    fn store_key_prefix_broadens_stream_match_key_payload_regex() {
+        let prefix = StoreKeyPrefix::new(3, 0b101).unwrap();
+        let logical = crate::match_key::MatchKey {
+            reserved_bits: 4,
+            prefix: 0b0110,
+            payload_regex: crate::kv_codec::Utf8::from("(?s).*"),
+        };
+        let physical = prefix.prefix_stream_match_key(&logical).unwrap();
+        assert_eq!(physical.reserved_bits, 7);
+        assert_eq!(physical.prefix, 0b101_0110);
+        assert_eq!(&*physical.payload_regex, "(?s-u).*");
+    }
+
+    #[test]
+    fn prefixed_reduce_request_shifts_key_field_offsets() {
+        let client = StoreClient::builder()
+            .url("http://localhost:10000")
+            .key_prefix(StoreKeyPrefix::new(5, 0b10101).unwrap())
+            .build()
+            .unwrap();
+        let request = DomainRangeReduceRequest {
+            reducers: vec![crate::RangeReducerSpec {
+                op: crate::RangeReduceOp::SumField,
+                expr: Some(KvExpr::Field(KvFieldRef::Key {
+                    bit_offset: 9,
+                    kind: KvFieldKind::UInt64,
+                })),
+            }],
+            group_by: vec![KvExpr::Field(KvFieldRef::ZOrderKey {
+                bit_offset: 12,
+                field_position: 0,
+                field_widths: vec![8],
+                kind: KvFieldKind::UInt64,
+            })],
+            filter: Some(KvPredicate {
+                checks: vec![KvPredicateCheck {
+                    field: KvFieldRef::Value {
+                        index: 0,
+                        kind: KvFieldKind::UInt64,
+                        nullable: false,
+                    },
+                    constraint: KvPredicateConstraint::UInt64Range {
+                        min: Some(1),
+                        max: Some(9),
+                    },
+                }],
+                contradiction: false,
+            }),
+        };
+
+        let shifted = client.prefix_reduce_request(&request).unwrap();
+        let Some(KvExpr::Field(KvFieldRef::Key { bit_offset, .. })) =
+            shifted.reducers[0].expr.as_ref()
+        else {
+            panic!("expected key field reducer");
+        };
+        assert_eq!(*bit_offset, 14);
+        let KvExpr::Field(KvFieldRef::ZOrderKey { bit_offset, .. }) = &shifted.group_by[0] else {
+            panic!("expected z-order group field");
+        };
+        assert_eq!(*bit_offset, 17);
+    }
+
+    #[test]
+    fn store_write_batch_uses_each_clients_prefix() {
+        let base = StoreClient::new("http://localhost:10000");
+        let a = base.with_key_prefix(StoreKeyPrefix::new(4, 1).unwrap());
+        let b = base.with_key_prefix(StoreKeyPrefix::new(4, 2).unwrap());
+        let key_a = Bytes::from_static(b"a");
+        let key_b = Bytes::from_static(b"b");
+
+        let mut batch = StoreWriteBatch::new();
+        batch.push(&a, &key_a, b"va").unwrap();
+        batch.push(&b, &key_b, b"vb").unwrap();
+
+        assert_eq!(
+            batch.entries[0].0,
+            a.key_prefix().unwrap().encode_key(&key_a).unwrap()
+        );
+        assert_eq!(
+            batch.entries[1].0,
+            b.key_prefix().unwrap().encode_key(&key_b).unwrap()
+        );
     }
 
     fn hex_encode(data: &[u8]) -> String {

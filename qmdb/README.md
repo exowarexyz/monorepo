@@ -139,6 +139,12 @@ authenticated prefix. This keeps immutable `get_at(key, watermark)` efficient:
 read the latest keyed row with `location <= watermark`, then load exactly that
 operation location to recover the typed value.
 
+Run multiple QMDB instances, or multiple QMDB variants, on one Store by giving
+each instance a distinct SDK `StoreKeyPrefix` and constructing the QMDB client
+or writer from that prefixed `StoreClient`. This pass leaves the existing QMDB
+family constants intact, so collapsing those constants remains a separate
+logical/on-disk format decision.
+
 ## Historical proof path
 
 Historical helpers operate on the exact uploaded ordered operation log:

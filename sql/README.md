@@ -15,6 +15,10 @@ codec prefixes so multiple tables can coexist on a single KV store while still
 letting the first 12 bits of encoded keys carry real payload. DataFusion
 handles JOINs natively once tables are registered.
 
+To run multiple independent SQL schemas, or SQL alongside QMDB, on one Store,
+give each instance a distinct SDK `StoreKeyPrefix` and pass that prefixed
+`StoreClient` to `KvSchema`.
+
 ```rust
 use exoware_sdk_rs::StoreClient;
 use exoware_sql::{IndexSpec, KvSchema, TableColumnConfig};
