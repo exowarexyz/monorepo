@@ -23,9 +23,14 @@ Explore the Exoware API.
 
    ```bash
    cd examples/sandbox
-   npm install
+   npm install --include=dev
    npm run dev
    ```
+
+   The app and local package build steps use dev dependencies (`vite`,
+   `typescript`, and `wasm-pack`-driven build tooling). `--include=dev` keeps
+   this working even if your shell or npm config omits dev dependencies by
+   default.
 
 3. **Open the web UI**
 
