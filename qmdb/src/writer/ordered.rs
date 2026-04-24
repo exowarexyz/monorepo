@@ -36,7 +36,10 @@ use commonware_storage::qmdb::{
     any::ordered::variable::Operation as QmdbOperation, operation::Key as QmdbKey,
 };
 use exoware_sdk_rs::keys::Key;
-use exoware_sdk_rs::{StoreBatchPublication, StoreBatchUpload, StoreClient, StoreWriteBatch};
+use exoware_sdk_rs::{
+    StoreBatchPublication, StoreBatchUpload, StoreClient, StorePublicationFrontierWriter,
+    StoreWriteBatch,
+};
 use futures::future::BoxFuture;
 
 use crate::codec::{encode_node_key, encode_watermark_key};
@@ -367,5 +370,39 @@ where
         Box::pin(async move {
             OrderedWriter::mark_flush_persisted(self, prepared, sequence_number).await
         })
+    }
+}
+
+impl<H, K, V, const N: usize> StorePublicationFrontierWriter for OrderedWriter<H, K, V, N>
+where
+    H: Hasher + Sync,
+    K: QmdbKey + Codec + Sync,
+    V: Codec + Clone + Send + Sync,
+    V::Cfg: Clone,
+    QmdbOperation<K, V>: Encode + Decode,
+{
+    fn latest_publication_receipt<'a>(&'a self) -> BoxFuture<'a, Option<PublishedCheckpoint>>
+    where
+        Self: Sync + 'a,
+    {
+        Box::pin(async move { OrderedWriter::latest_published_checkpoint(self).await })
+    }
+
+    fn prepare_publication<'a>(
+        &'a self,
+    ) -> BoxFuture<'a, Result<Option<super::PreparedWatermark>, QmdbError>>
+    where
+        Self: Sync + 'a,
+    {
+        Box::pin(async move { OrderedWriter::prepare_flush(self).await })
+    }
+
+    fn flush_publication_with_receipt<'a>(
+        &'a self,
+    ) -> BoxFuture<'a, Result<Option<PublishedCheckpoint>, QmdbError>>
+    where
+        Self: Sync + 'a,
+    {
+        Box::pin(async move { OrderedWriter::flush_with_receipt(self).await })
     }
 }

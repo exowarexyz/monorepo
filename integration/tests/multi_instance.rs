@@ -21,7 +21,7 @@ use exoware_sdk_rs::store::sql::v1::{
 use exoware_sdk_rs::stream_filter::StreamFilter;
 use exoware_sdk_rs::{
     RetryConfig, StoreBatchPublication, StoreBatchUpload, StoreClient, StoreKeyPrefix,
-    StoreWriteBatch, StreamSubscription, StreamSubscriptionFrame,
+    StorePublicationFrontierWriter, StoreWriteBatch, StreamSubscription, StreamSubscriptionFrame,
 };
 use exoware_sql::{sql_connect_stack, CellValue, KvSchema, SqlServer, TableColumnConfig};
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -200,7 +200,9 @@ async fn drive_qmdb_writer(
     while let Some(result) = in_flight.next().await {
         receipts.push(result.expect("qmdb upload"));
     }
-    writer.flush().await.expect("qmdb flush");
+    StorePublicationFrontierWriter::flush_publication(writer.as_ref())
+        .await
+        .expect("qmdb flush");
     (expected, receipts)
 }
 
@@ -560,8 +562,7 @@ async fn prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_receipts(
         .prepare_flush()
         .expect("prepare sql")
         .expect("sql rows");
-    let prepared_qmdb_watermark = qmdb_writer
-        .prepare_flush()
+    let prepared_qmdb_watermark = StorePublicationFrontierWriter::prepare_publication(&qmdb_writer)
         .await
         .expect("prepare qmdb watermark")
         .expect("qmdb tail watermark");
@@ -619,7 +620,7 @@ async fn prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_receipts(
     assert!(receipt_qmdb_2.writer_location_watermark.is_none());
     assert_eq!(checkpoint.location, Location::new(5));
     assert_eq!(
-        qmdb_writer.latest_published_checkpoint().await,
+        StorePublicationFrontierWriter::latest_publication_receipt(&qmdb_writer).await,
         Some(checkpoint)
     );
 

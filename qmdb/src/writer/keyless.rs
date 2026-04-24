@@ -7,7 +7,10 @@ use commonware_cryptography::Hasher;
 use commonware_storage::mmr::{Location, Position};
 use commonware_storage::qmdb::keyless::Operation as KeylessOperation;
 use exoware_sdk_rs::keys::Key;
-use exoware_sdk_rs::{StoreBatchPublication, StoreBatchUpload, StoreClient, StoreWriteBatch};
+use exoware_sdk_rs::{
+    StoreBatchPublication, StoreBatchUpload, StoreClient, StorePublicationFrontierWriter,
+    StoreWriteBatch,
+};
 use futures::future::BoxFuture;
 
 use crate::auth::{
@@ -346,6 +349,38 @@ where
         Box::pin(async move {
             KeylessWriter::mark_flush_persisted(self, prepared, sequence_number).await
         })
+    }
+}
+
+impl<H, V> StorePublicationFrontierWriter for KeylessWriter<H, V>
+where
+    H: Hasher + Sync,
+    V: Codec + Clone + Send + Sync,
+    KeylessOperation<V>: Encode,
+{
+    fn latest_publication_receipt<'a>(&'a self) -> BoxFuture<'a, Option<PublishedCheckpoint>>
+    where
+        Self: Sync + 'a,
+    {
+        Box::pin(async move { KeylessWriter::latest_published_checkpoint(self).await })
+    }
+
+    fn prepare_publication<'a>(
+        &'a self,
+    ) -> BoxFuture<'a, Result<Option<super::PreparedWatermark>, QmdbError>>
+    where
+        Self: Sync + 'a,
+    {
+        Box::pin(async move { KeylessWriter::prepare_flush(self).await })
+    }
+
+    fn flush_publication_with_receipt<'a>(
+        &'a self,
+    ) -> BoxFuture<'a, Result<Option<PublishedCheckpoint>, QmdbError>>
+    where
+        Self: Sync + 'a,
+    {
+        Box::pin(async move { KeylessWriter::flush_with_receipt(self).await })
     }
 }
 

@@ -9,7 +9,10 @@ use commonware_storage::mmr::{Location, Position};
 use commonware_storage::qmdb::immutable::Operation as ImmutableOperation;
 use commonware_utils::Array;
 use exoware_sdk_rs::keys::Key;
-use exoware_sdk_rs::{StoreBatchPublication, StoreBatchUpload, StoreClient, StoreWriteBatch};
+use exoware_sdk_rs::{
+    StoreBatchPublication, StoreBatchUpload, StoreClient, StorePublicationFrontierWriter,
+    StoreWriteBatch,
+};
 use futures::future::BoxFuture;
 
 use crate::auth::{
@@ -319,5 +322,40 @@ where
         Box::pin(async move {
             ImmutableWriter::mark_flush_persisted(self, prepared, sequence_number).await
         })
+    }
+}
+
+impl<H, K, V> StorePublicationFrontierWriter for ImmutableWriter<H, K, V>
+where
+    H: Hasher + Sync,
+    K: Array + Codec + Clone + AsRef<[u8]> + Sync,
+    V: Codec + Clone + Send + Sync,
+    V::Cfg: Clone,
+    K::Cfg: Clone,
+    ImmutableOperation<K, V>: Encode + Decode<Cfg = V::Cfg> + Clone,
+{
+    fn latest_publication_receipt<'a>(&'a self) -> BoxFuture<'a, Option<PublishedCheckpoint>>
+    where
+        Self: Sync + 'a,
+    {
+        Box::pin(async move { ImmutableWriter::latest_published_checkpoint(self).await })
+    }
+
+    fn prepare_publication<'a>(
+        &'a self,
+    ) -> BoxFuture<'a, Result<Option<super::PreparedWatermark>, QmdbError>>
+    where
+        Self: Sync + 'a,
+    {
+        Box::pin(async move { ImmutableWriter::prepare_flush(self).await })
+    }
+
+    fn flush_publication_with_receipt<'a>(
+        &'a self,
+    ) -> BoxFuture<'a, Result<Option<PublishedCheckpoint>, QmdbError>>
+    where
+        Self: Sync + 'a,
+    {
+        Box::pin(async move { ImmutableWriter::flush_with_receipt(self).await })
     }
 }

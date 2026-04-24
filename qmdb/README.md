@@ -452,9 +452,22 @@ stage prepared uploads and prepared watermark publications from one or more
 instances, commit once, then mark each prepared handle persisted with the
 returned Store sequence number.
 
+The generic Store traits cover the prepared-handle lifecycle:
+
+- `StoreBatchUpload`: stage prepared upload rows and report success/failure
+- `StoreBatchPublication`: stage prepared publication rows and report
+  success/failure
+- `StorePublicationFrontierWriter`: prepare and flush a stateful publication frontier
+
+QMDB uses `StorePublicationFrontierWriter` for the part SQL does not have: the
+in-memory frontier, in-flight upload queue, and catch-up watermark flush.
+Upload preparation remains an inherent method because each backend's inputs
+differ; ordered QMDB, for example, also needs caller-supplied current boundary
+state.
+
 ```rust,ignore
 use std::sync::Arc;
-use exoware_sdk_rs::{StoreBatchPublication, StoreBatchUpload};
+use exoware_sdk_rs::{StoreBatchPublication, StoreBatchUpload, StorePublicationFrontierWriter};
 use store_qmdb::{KeylessWriter, WriterState};
 
 let writer: Arc<KeylessWriter<Sha256, Vec<u8>>> =
@@ -479,7 +492,7 @@ for batch in batches {
     }));
 }
 while let Some(r) = in_flight.next().await { r?; }
-writer.flush().await?;  // publish the tail watermark
+StorePublicationFrontierWriter::flush_publication(writer.as_ref()).await?;  // publish tail watermark
 ```
 
 ### Ordered local-DB flow

@@ -477,6 +477,46 @@ pub trait StoreBatchPublication {
     }
 }
 
+/// A stateful writer that owns a durable publication frontier.
+///
+/// This extends [`StoreBatchPublication`] with the pieces needed by writers
+/// that can prepare a catch-up publication after pending uploads drain. The
+/// associated prepared publication, receipt, and error types come from
+/// [`StoreBatchPublication`], so databases can use this for watermarks,
+/// checkpoints, catalog versions, or any similar publication record without
+/// sharing QMDB-specific concepts.
+pub trait StorePublicationFrontierWriter: StoreBatchPublication {
+    fn latest_publication_receipt<'a>(&'a self) -> BoxFuture<'a, Option<Self::PublicationReceipt>>
+    where
+        Self: Sync + 'a,
+        Self::PublicationReceipt: 'a;
+
+    fn prepare_publication<'a>(
+        &'a self,
+    ) -> BoxFuture<'a, Result<Option<Self::PreparedPublication>, Self::Error>>
+    where
+        Self: Sync + 'a,
+        Self::PreparedPublication: 'a,
+        Self::Error: 'a;
+
+    fn flush_publication_with_receipt<'a>(
+        &'a self,
+    ) -> BoxFuture<'a, Result<Option<Self::PublicationReceipt>, Self::Error>>
+    where
+        Self: Sync + 'a,
+        Self::PublicationReceipt: 'a,
+        Self::Error: 'a;
+
+    fn flush_publication<'a>(&'a self) -> BoxFuture<'a, Result<(), Self::Error>>
+    where
+        Self: Sync + 'a,
+        Self::PublicationReceipt: 'a,
+        Self::Error: 'a,
+    {
+        Box::pin(async move { self.flush_publication_with_receipt().await.map(|_| ()) })
+    }
+}
+
 /// Traversal mode for range queries.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RangeMode {
