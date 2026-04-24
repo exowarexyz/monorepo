@@ -3,8 +3,9 @@ name = "exoware-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-homepage.workspace = true
 description = "Serve the Exoware API."
+readme = "README.md"
+homepage.workspace = true
 repository = "https://github.com/exowarexyz/monorepo/tree/main/server"
 documentation = "https://docs.rs/exoware-server"
 

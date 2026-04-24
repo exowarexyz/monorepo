@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "QMDB instance backed by the Exoware API."
 readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/exowarexyz/monorepo/tree/main/qmdb"
+documentation = "https://docs.rs/exoware-qmdb"
 
 [features]
 test-utils = []

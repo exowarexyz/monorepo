@@ -7,7 +7,7 @@
   "homepage": "https://exoware.xyz",
   "repository": {
     "type": "git",
-    "url": "https://github.com/exowarexyz/monorepo.git",
+    "url": "git+https://github.com/exowarexyz/monorepo.git",
     "directory": "sql/ts"
   },
   "publishConfig": {
