@@ -52,10 +52,7 @@ const DEFAULT_NAMESPACE = new TextEncoder().encode('_ALTO');
 let wasmReady: Promise<unknown> | undefined;
 
 function ensureWasm(): Promise<unknown> {
-  if (!wasmReady) {
-    wasmReady = initWasm();
-  }
-  return wasmReady;
+  return wasmReady ?? (wasmReady = initWasm());
 }
 
 function toTextBytes(value: BytesLike): Uint8Array {
