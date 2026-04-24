@@ -1,10 +1,10 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use exoware_qmdb::prune::{drop_all_batches, keep_latest_batches};
 use exoware_sdk::keys::{Key, KeyCodec};
 use exoware_sdk::kv_codec::Utf8;
 use exoware_sdk::match_key::MatchKey;
+use exoware_sdk::prune_policy::{PolicyScope, PrunePolicy, RetainPolicy};
 use exoware_sdk::stream_filter::StreamFilter;
 use exoware_sdk::{RetryConfig, StoreClient};
 use tempfile::tempdir;
@@ -36,6 +36,20 @@ fn filter(family: u16) -> StreamFilter {
             payload_regex: Utf8::from("(?s).*"),
         }],
         value_filters: vec![],
+    }
+}
+
+fn keep_latest_batches(count: usize) -> PrunePolicy {
+    PrunePolicy {
+        scope: PolicyScope::Sequence,
+        retain: RetainPolicy::KeepLatest { count },
+    }
+}
+
+fn drop_all_batches() -> PrunePolicy {
+    PrunePolicy {
+        scope: PolicyScope::Sequence,
+        retain: RetainPolicy::DropAll,
     }
 }
 
