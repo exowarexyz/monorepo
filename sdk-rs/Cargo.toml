@@ -1,5 +1,5 @@
 [package]
-name = "exoware-sdk-rs"
+name = "exoware-sdk"
 version.workspace = true
 edition.workspace = true
 publish = true
@@ -8,7 +8,7 @@ description = "Interact with the Exoware API in Rust."
 readme = "README.md"
 homepage.workspace = true
 repository = "https://github.com/exowarexyz/monorepo/tree/main/sdk-rs"
-documentation = "https://docs.rs/exoware-sdk-rs"
+documentation = "https://docs.rs/exoware-sdk"
 
 [dependencies]
 anyhow = { workspace = true }

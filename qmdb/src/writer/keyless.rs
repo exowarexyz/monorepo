@@ -6,8 +6,8 @@ use commonware_codec::{Codec, Encode};
 use commonware_cryptography::Hasher;
 use commonware_storage::mmr::{Location, Position};
 use commonware_storage::qmdb::keyless::Operation as KeylessOperation;
-use exoware_sdk_rs::keys::Key;
-use exoware_sdk_rs::{
+use exoware_sdk::keys::Key;
+use exoware_sdk::{
     StoreBatchPublication, StoreBatchUpload, StoreClient, StorePublicationFrontierWriter,
     StoreWriteBatch,
 };
@@ -282,7 +282,7 @@ where
         KeylessWriter::stage_upload(self, prepared, batch)
     }
 
-    fn commit_error(&self, error: exoware_sdk_rs::ClientError) -> Self::Error {
+    fn commit_error(&self, error: exoware_sdk::ClientError) -> Self::Error {
         QmdbError::Client(error)
     }
 
@@ -333,7 +333,7 @@ where
         KeylessWriter::stage_flush(self, prepared, batch)
     }
 
-    fn publication_commit_error(&self, error: exoware_sdk_rs::ClientError) -> Self::Error {
+    fn publication_commit_error(&self, error: exoware_sdk::ClientError) -> Self::Error {
         QmdbError::Client(error)
     }
 

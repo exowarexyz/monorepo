@@ -14,8 +14,8 @@ use commonware_storage::qmdb::immutable::{
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
-use exoware_sdk_rs::StoreClient;
-use store_qmdb::{ImmutableClient, ImmutableWriter};
+use exoware_qmdb::{ImmutableClient, ImmutableWriter};
+use exoware_sdk::StoreClient;
 
 use common::retry;
 

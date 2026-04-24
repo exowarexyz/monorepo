@@ -1,5 +1,5 @@
 use commonware_storage::mmr::Location;
-use exoware_sdk_rs::ClientError;
+use exoware_sdk::ClientError;
 
 /// Which proof shape failed verification. Carried on
 /// [`QmdbError::ProofVerification`] so callers and tests can discriminate

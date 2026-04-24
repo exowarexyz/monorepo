@@ -1,6 +1,6 @@
-use exoware_sdk_rs::kv_codec::Utf8;
-use exoware_sdk_rs::match_key::MatchKey;
-use exoware_sdk_rs::prune_policy::{
+use exoware_sdk::kv_codec::Utf8;
+use exoware_sdk::match_key::MatchKey;
+use exoware_sdk::prune_policy::{
     GroupBy, KeysScope, OrderBy, OrderEncoding, PolicyScope, PrunePolicy, RetainPolicy,
 };
 
@@ -68,8 +68,8 @@ pub fn drop_all_batches() -> PrunePolicy {
 mod tests {
     use super::{drop_all_batches, keep_latest_batches, keep_latest_updates, keep_positions_gte};
     use crate::codec::{RESERVED_BITS, UPDATE_FAMILY};
-    use exoware_sdk_rs::kv_codec::Utf8;
-    use exoware_sdk_rs::prune_policy::{OrderEncoding, PolicyScope, RetainPolicy};
+    use exoware_sdk::kv_codec::Utf8;
+    use exoware_sdk::prune_policy::{OrderEncoding, PolicyScope, RetainPolicy};
 
     #[test]
     fn keep_latest_updates_matches_update_key_layout() {

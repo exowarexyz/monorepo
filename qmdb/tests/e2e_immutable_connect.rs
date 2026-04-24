@@ -14,13 +14,13 @@ use commonware_storage::qmdb::immutable::{
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
-use exoware_sdk_rs::proto::PreferZstdHttpClient;
-use exoware_sdk_rs::store::qmdb::v1::SubscribeRequest as ProtoSubscribeRequest;
-use exoware_sdk_rs::StoreClient;
-use store_qmdb::{
+use exoware_qmdb::{
     immutable_range_connect_stack, ImmutableClient, ImmutableRangeConnectClient, ImmutableWriter,
     QmdbError, RangeSubscribeProof,
 };
+use exoware_sdk::proto::PreferZstdHttpClient;
+use exoware_sdk::store::qmdb::v1::SubscribeRequest as ProtoSubscribeRequest;
+use exoware_sdk::StoreClient;
 
 type Digest = commonware_cryptography::sha256::Digest;
 type LocalDb = Immutable<
@@ -198,7 +198,7 @@ async fn immutable_connect_client_rejects_invalid_streamed_proof() {
     assert!(matches!(
         err,
         QmdbError::ProofVerification {
-            kind: store_qmdb::ProofKind::BatchMulti
+            kind: exoware_qmdb::ProofKind::BatchMulti
         }
     ));
 }

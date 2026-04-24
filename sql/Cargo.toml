@@ -17,7 +17,7 @@ buffa = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 connectrpc = { workspace = true }
-exoware-sdk-rs = { workspace = true }
+exoware-sdk = { workspace = true }
 datafusion = "52.2.0"
 futures = "0.3.32"
 hex = { workspace = true }

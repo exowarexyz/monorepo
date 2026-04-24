@@ -21,9 +21,9 @@ use exoware_proto::store::query::v1::{
     ReduceResponse as ProtoReduceResponse, Service as QueryService,
     ServiceServer as QueryServiceServer,
 };
-use exoware_sdk_rs as exoware_proto;
-use exoware_sdk_rs::keys::Key;
-use exoware_sdk_rs::StoreClient;
+use exoware_sdk as exoware_proto;
+use exoware_sdk::keys::Key;
+use exoware_sdk::StoreClient;
 use exoware_sql::{CellValue, IndexSpec, KvSchema, TableColumnConfig};
 use futures::stream;
 use std::pin::Pin;

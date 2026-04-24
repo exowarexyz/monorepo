@@ -1,19 +1,19 @@
 use bytes::Bytes;
 use commonware_codec::Encode;
 use connectrpc::client::ClientConfig;
-use exoware_sdk_rs::common::MatchKey as ProtoMatchKey;
-use exoware_sdk_rs::compact::{
+use exoware_sdk::common::MatchKey as ProtoMatchKey;
+use exoware_sdk::compact::{
     policy, policy_retain, KeysScope as ProtoKeysScope, Policy, PolicyGroupBy, PolicyOrderBy,
     PolicyOrderEncoding, PolicyRetain, PruneRequest, RetainGreaterThan, RetainKeepLatest,
     ServiceClient as CompactServiceClient,
 };
-use exoware_sdk_rs::keys::{Key, KeyCodec};
-use exoware_sdk_rs::kv_codec::{
+use exoware_sdk::keys::{Key, KeyCodec};
+use exoware_sdk::kv_codec::{
     KvExpr, KvFieldKind, KvFieldRef, KvReducedValue, StoredRow, StoredValue,
 };
-use exoware_sdk_rs::match_key::MatchKey as DomainMatchKey;
-use exoware_sdk_rs::prune_policy;
-use exoware_sdk_rs::{
+use exoware_sdk::match_key::MatchKey as DomainMatchKey;
+use exoware_sdk::prune_policy;
+use exoware_sdk::{
     connect_compression_registry, PreferZstdHttpClient, RangeMode, RangeReduceOp,
     RangeReduceRequest, RangeReducerSpec, RetryConfig, StoreClient,
 };

@@ -19,16 +19,16 @@ use commonware_storage::qmdb::{
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use exoware_sdk_rs::proto::PreferZstdHttpClient;
-use exoware_sdk_rs::store::common::v1::{
-    bytes_filter as proto_bytes_filter, BytesFilter as ProtoBytesFilter,
-};
-use exoware_sdk_rs::store::qmdb::v1::SubscribeRequest as ProtoSubscribeRequest;
-use exoware_sdk_rs::StoreClient;
-use store_qmdb::{
+use exoware_qmdb::{
     ordered_connect_stack, recover_boundary_state, CurrentBoundaryState, OrderedClient,
     OrderedRangeConnectClient, OrderedWriter, QmdbError, RangeSubscribeProof, MAX_OPERATION_SIZE,
 };
+use exoware_sdk::proto::PreferZstdHttpClient;
+use exoware_sdk::store::common::v1::{
+    bytes_filter as proto_bytes_filter, BytesFilter as ProtoBytesFilter,
+};
+use exoware_sdk::store::qmdb::v1::SubscribeRequest as ProtoSubscribeRequest;
+use exoware_sdk::StoreClient;
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
@@ -64,17 +64,17 @@ async fn boundary_from_local_db(
                 .range_proof(&mut hasher, location, NZU64!(1))
                 .await
                 .map_err(|error| {
-                    store_qmdb::QmdbError::CorruptData(format!(
+                    exoware_qmdb::QmdbError::CorruptData(format!(
                         "local current range proof at {location}: {error}"
                     ))
                 })?;
             proof_ops.pop().ok_or_else(|| {
-                store_qmdb::QmdbError::CorruptData(format!(
+                exoware_qmdb::QmdbError::CorruptData(format!(
                     "local current range proof at {location} returned no operations"
                 ))
             })?;
             let chunk = chunks.pop().ok_or_else(|| {
-                store_qmdb::QmdbError::CorruptData(format!(
+                exoware_qmdb::QmdbError::CorruptData(format!(
                     "local current range proof at {location} returned no chunks"
                 ))
             })?;
@@ -291,7 +291,7 @@ async fn ordered_range_connect_client_rejects_invalid_streamed_proof() {
     assert!(matches!(
         err,
         QmdbError::ProofVerification {
-            kind: store_qmdb::ProofKind::BatchMulti
+            kind: exoware_qmdb::ProofKind::BatchMulti
         }
     ));
 }

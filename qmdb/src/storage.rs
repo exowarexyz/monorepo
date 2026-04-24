@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
 use commonware_storage::mmr::{self, storage::Storage as MmrStorage, Location, Position};
-use exoware_sdk_rs::{RangeMode, SerializableReadSession};
+use exoware_sdk::{RangeMode, SerializableReadSession};
 
 use crate::auth::encode_auth_node_key;
 use crate::auth::AuthenticatedBackendNamespace;

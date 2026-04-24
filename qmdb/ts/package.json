@@ -1,6 +1,6 @@
 {
-  "name": "exoware-qmdb-ts",
-  "version": "2026.4.0",
+  "name": "@exowarexyz/qmdb",
+  "version": "2026.4.1",
   "description": "Browser client for the ordered Exoware QMDB proof API.",
   "type": "module",
   "license": "(MIT OR Apache-2.0)",
@@ -9,6 +9,9 @@
     "type": "git",
     "url": "https://github.com/exowarexyz/monorepo.git",
     "directory": "qmdb/ts"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -24,14 +27,14 @@
   ],
   "scripts": {
     "build:wasm": "wasm-pack build ../wasm --target web --mode no-install --no-opt --out-dir ../ts/src/generated/wasm --out-name exoware_qmdb_wasm",
-    "build": "npm run build:wasm && tsc && rm -rf dist/generated && mkdir -p dist/generated && cp -R src/generated/wasm dist/generated/wasm",
+    "build": "npm run build:wasm && tsc && rm -rf dist/generated && mkdir -p dist/generated && cp -R src/generated/wasm dist/generated/wasm && rm -f dist/generated/wasm/.gitignore",
     "lint": "tsc --noEmit",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.11.0",
     "@connectrpc/connect": "^2.1.1",
-    "exoware-sdk-ts": "file:../../sdk-ts"
+    "@exowarexyz/sdk": "file:../../sdk-ts"
   },
   "devDependencies": {
     "typescript": "^5.5.3"

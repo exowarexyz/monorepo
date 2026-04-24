@@ -18,15 +18,15 @@ use commonware_storage::qmdb::{
 use commonware_utils::Array;
 use connectrpc::client::ClientConfig;
 use connectrpc::{ConnectError, ConnectRpcService, Context};
-use exoware_sdk_rs::proto::PreferZstdHttpClient;
-use exoware_sdk_rs::store::qmdb::v1::{
-    RangeService, RangeServiceClient, RangeServiceServer, SubscribeRequestView, SubscribeResponse,
-};
-use exoware_sdk_rs::{StoreBatchUpload, StoreClient};
-use store_qmdb::{
+use exoware_qmdb::{
     CurrentBoundaryState, ImmutableWriter, KeylessWriter, OrderedWriter, QmdbError,
     UnorderedWriter, UploadReceipt,
 };
+use exoware_sdk::proto::PreferZstdHttpClient;
+use exoware_sdk::store::qmdb::v1::{
+    RangeService, RangeServiceClient, RangeServiceServer, SubscribeRequestView, SubscribeResponse,
+};
+use exoware_sdk::{StoreBatchUpload, StoreClient};
 
 /// Keep `_dir` and `_server` alive for the whole test.
 pub async fn local_store_client() -> (tempfile::TempDir, tokio::task::JoinHandle<()>, StoreClient) {
@@ -220,7 +220,7 @@ pub async fn spawn_static_range_service(
 ) -> (tokio::task::JoinHandle<()>, String) {
     spawn_range_service(
         ConnectRpcService::new(RangeServiceServer::new(service))
-            .with_compression(exoware_sdk_rs::connect_compression_registry()),
+            .with_compression(exoware_sdk::connect_compression_registry()),
     )
     .await
 }

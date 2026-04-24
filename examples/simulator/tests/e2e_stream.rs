@@ -1,12 +1,12 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use exoware_sdk_rs::keys::{Key, KeyCodec};
-use exoware_sdk_rs::kv_codec::Utf8;
-use exoware_sdk_rs::match_key::MatchKey;
-use exoware_sdk_rs::stream_filter::StreamFilter;
-use exoware_sdk_rs::{RetryConfig, StoreClient};
-use store_qmdb::prune::{drop_all_batches, keep_latest_batches};
+use exoware_qmdb::prune::{drop_all_batches, keep_latest_batches};
+use exoware_sdk::keys::{Key, KeyCodec};
+use exoware_sdk::kv_codec::Utf8;
+use exoware_sdk::match_key::MatchKey;
+use exoware_sdk::stream_filter::StreamFilter;
+use exoware_sdk::{RetryConfig, StoreClient};
 use tempfile::tempdir;
 
 async fn spawn_client() -> (tokio::task::JoinHandle<()>, StoreClient) {
@@ -40,9 +40,9 @@ fn filter(family: u16) -> StreamFilter {
 }
 
 async fn next_with_timeout(
-    sub: &mut exoware_sdk_rs::StreamSubscription,
+    sub: &mut exoware_sdk::StreamSubscription,
     ms: u64,
-) -> Option<exoware_sdk_rs::StreamSubscriptionFrame> {
+) -> Option<exoware_sdk::StreamSubscriptionFrame> {
     tokio::time::timeout(Duration::from_millis(ms), sub.next())
         .await
         .ok()
@@ -408,7 +408,7 @@ async fn slow_subscriber_drops_without_blocking_ingest() {
 
 #[tokio::test]
 async fn value_filter_restricts_to_matching_values() {
-    use exoware_sdk_rs::stream_filter::BytesFilter;
+    use exoware_sdk::stream_filter::BytesFilter;
     let (_h, client) = spawn_client().await;
     let f = StreamFilter {
         match_keys: vec![MatchKey {

@@ -8,7 +8,7 @@ SQL engine backed by the Exoware API.
 
 ## Library usage
 
-`exoware-sql` is library-first: register `KvSchema` tables against a [`StoreClient`](https://docs.rs/exoware-sdk-rs), then run SQL.
+`exoware-sql` is library-first: register `KvSchema` tables against a [`StoreClient`](https://docs.rs/exoware-sdk), then run SQL.
 
 All table registration goes through `KvSchema`, which auto-assigns compact
 codec prefixes so multiple tables can coexist on a single KV store while still
@@ -20,7 +20,7 @@ give each instance a distinct SDK `StoreKeyPrefix` and pass that prefixed
 `StoreClient` to `KvSchema`.
 
 ```rust
-use exoware_sdk_rs::StoreClient;
+use exoware_sdk::StoreClient;
 use exoware_sql::{IndexSpec, KvSchema, TableColumnConfig};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::prelude::SessionContext;
@@ -98,7 +98,7 @@ let fixed_width = exoware_sql::prune::keep_latest_versions(3, 16, 1)?;
 let utf8 = exoware_sql::prune::keep_latest_versions_utf8(3, 1)?;
 ```
 
-This emits the shared `exoware_sdk_rs::prune_policy::PrunePolicy` shape expected by
+This emits the shared `exoware_sdk::prune_policy::PrunePolicy` shape expected by
 the ingest admin prune-policy control plane.
 
 Any composite PK (not just versioned) can be created via `table()` with
@@ -721,4 +721,4 @@ older rows still require backfill.
   - index scan is used only when required columns are covered by index key + cover columns
   - otherwise planner falls back to primary-key scan (no index lookup fanout fallback)
 - value serialization uses `commonware_codec`; `decode_base_row` uses
-  `exoware_sdk_rs::kv_codec::decode_stored_row`
+  `exoware_sdk::kv_codec::decode_stored_row`

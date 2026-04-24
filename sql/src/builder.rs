@@ -9,7 +9,7 @@ use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::{i256, DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DataFusionError, Result as DataFusionResult};
-use exoware_sdk_rs::kv_codec::{StoredRow, StoredValue};
+use exoware_sdk::kv_codec::{StoredRow, StoredValue};
 
 use crate::filter::*;
 use crate::types::*;

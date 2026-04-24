@@ -15,7 +15,7 @@ commonware-storage = "2026.3.0"
 connectrpc = { workspace = true }
 datafusion = "52.2.0"
 exoware-qmdb = { workspace = true }
-exoware-sdk-rs = { workspace = true }
+exoware-sdk = { workspace = true }
 exoware-simulator = { path = "../examples/simulator" }
 exoware-sql = { path = "../sql" }
 futures = { workspace = true }

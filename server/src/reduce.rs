@@ -7,9 +7,9 @@ use bytes::Bytes;
 use exoware_proto::{
     RangeReduceGroup, RangeReduceOp, RangeReduceRequest, RangeReduceResponse, RangeReduceResult,
 };
-use exoware_sdk_rs as exoware_proto;
-use exoware_sdk_rs::keys::Key;
-use exoware_sdk_rs::kv_codec::{
+use exoware_sdk as exoware_proto;
+use exoware_sdk::keys::Key;
+use exoware_sdk::kv_codec::{
     canonicalize_reduced_group_values, decode_stored_row, encode_reduced_group_key, eval_expr,
     eval_predicate, expr_needs_value, predicate_needs_value, KvReducedValue,
 };
@@ -358,12 +358,12 @@ pub fn reduce_over_rows(
 mod tests {
     use bytes::Bytes;
     use commonware_codec::Encode as _;
-    use exoware_sdk_rs::keys::Key;
-    use exoware_sdk_rs::kv_codec::{
+    use exoware_sdk::keys::Key;
+    use exoware_sdk::kv_codec::{
         KvExpr, KvFieldKind, KvFieldRef, KvPredicate, KvPredicateCheck, KvPredicateConstraint,
         KvReducedValue, StoredRow, StoredValue,
     };
-    use exoware_sdk_rs::{RangeReduceOp, RangeReduceRequest, RangeReducerSpec};
+    use exoware_sdk::{RangeReduceOp, RangeReduceRequest, RangeReducerSpec};
 
     use super::reduce_over_rows;
 

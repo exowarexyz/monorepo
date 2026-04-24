@@ -17,11 +17,11 @@ use commonware_storage::qmdb::{
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use exoware_sdk_rs::{StoreBatchUpload, StoreClient};
-use store_qmdb::{
+use exoware_qmdb::{
     ordered_connect_stack, recover_boundary_state, CurrentBoundaryState, OrderedClient,
     OrderedWriter, MAX_OPERATION_SIZE,
 };
+use exoware_sdk::{StoreBatchUpload, StoreClient};
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
@@ -114,17 +114,17 @@ async fn boundary_from_local_db(
                 .range_proof(&mut hasher, location, NZU64!(1))
                 .await
                 .map_err(|error| {
-                    store_qmdb::QmdbError::CorruptData(format!(
+                    exoware_qmdb::QmdbError::CorruptData(format!(
                         "local current range proof at {location}: {error}"
                     ))
                 })?;
             proof_ops.pop().ok_or_else(|| {
-                store_qmdb::QmdbError::CorruptData(format!(
+                exoware_qmdb::QmdbError::CorruptData(format!(
                     "local current range proof at {location} returned no operations"
                 ))
             })?;
             let chunk = chunks.pop().ok_or_else(|| {
-                store_qmdb::QmdbError::CorruptData(format!(
+                exoware_qmdb::QmdbError::CorruptData(format!(
                     "local current range proof at {location} returned no chunks"
                 ))
             })?;
@@ -229,7 +229,7 @@ async fn seed(
                     .filter(|op| matches!(op, BatchOperation::CommitFloor(_, _)))
                     .count() as u64;
                 let counter = batches_so_far * 3;
-                let writer_state = store_qmdb::WriterState::from_proof::<Sha256, _>(
+                let writer_state = exoware_qmdb::WriterState::from_proof::<Sha256, _>(
                     latest,
                     Location::new(0),
                     &proof,

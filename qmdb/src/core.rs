@@ -8,8 +8,8 @@ use commonware_storage::qmdb::{
     any::ordered::variable::Operation as QmdbOperation,
     any::unordered::variable::Operation as UnorderedQmdbOperation, operation::Key as QmdbKey,
 };
-use exoware_sdk_rs::keys::Key;
-use exoware_sdk_rs::{ClientError, RangeMode, SerializableReadSession, StoreClient};
+use exoware_sdk::keys::Key;
+use exoware_sdk::{ClientError, RangeMode, SerializableReadSession, StoreClient};
 
 use crate::codec::{
     decode_digest, decode_operation_location_key, decode_update_location,

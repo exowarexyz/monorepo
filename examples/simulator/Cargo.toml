@@ -26,7 +26,7 @@ tower-http = { workspace = true }
 commonware-codec = { workspace = true }
 connectrpc = { workspace = true }
 exoware-qmdb = { workspace = true }
-exoware-sdk-rs = { workspace = true }
+exoware-sdk = { workspace = true }
 http = { workspace = true }
 tempfile = { workspace = true }
 

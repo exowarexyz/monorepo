@@ -4,7 +4,7 @@ use commonware_codec::{Codec, Decode, Encode, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_storage::{mmr::Location, qmdb::immutable::Operation as ImmutableOperation};
 use commonware_utils::Array;
-use exoware_sdk_rs::{SerializableReadSession, StoreClient};
+use exoware_sdk::{SerializableReadSession, StoreClient};
 
 use crate::auth::AuthenticatedBackendNamespace;
 use crate::auth::{

@@ -1,6 +1,6 @@
 //! Local E2E: ephemeral RocksDB dir + simulator on an ephemeral port (no env vars).
 
-use exoware_sdk_rs::StoreClient;
+use exoware_sdk::StoreClient;
 
 pub async fn local_store_client() -> (tempfile::TempDir, tokio::task::JoinHandle<()>, StoreClient) {
     let dir = tempfile::tempdir().expect("tempdir");

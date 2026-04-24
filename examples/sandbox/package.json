@@ -1,7 +1,7 @@
 {
   "name": "exoware-sandbox",
   "private": true,
-  "version": "2026.4.0",
+  "version": "2026.4.1",
   "type": "module",
   "scripts": {
     "postinstall": "npm --prefix ../../sdk-ts install --include=dev && npm --prefix ../../sdk-ts run build && npm --prefix ../../qmdb/ts install --include=dev && npm --prefix ../../qmdb/ts run build:wasm && npm --prefix ../../sql/ts install --include=dev && npm --prefix ../../sql/ts run build",
@@ -13,7 +13,7 @@
   "dependencies": {
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "exoware-sdk-ts": "file:../../sdk-ts",
+    "@exowarexyz/sdk": "file:../../sdk-ts",
     "buffer": "^6.0.3"
   },
   "devDependencies": {

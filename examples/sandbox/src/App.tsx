@@ -6,7 +6,7 @@ import {
   type QueryResultItem,
   type StoreBatch,
   type StoreClient
-} from 'exoware-sdk-ts';
+} from '@exowarexyz/sdk';
 import { Buffer } from 'buffer';
 import './App.css';
 import { QMDB_URL, QmdbPanel } from './QmdbPanel';

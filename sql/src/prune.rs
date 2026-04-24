@@ -1,6 +1,6 @@
-use exoware_sdk_rs::kv_codec::Utf8;
-use exoware_sdk_rs::match_key::MatchKey;
-use exoware_sdk_rs::prune_policy::{
+use exoware_sdk::kv_codec::Utf8;
+use exoware_sdk::match_key::MatchKey;
+use exoware_sdk::prune_policy::{
     GroupBy, KeysScope, OrderBy, OrderEncoding, PolicyScope, PrunePolicy, RetainPolicy,
 };
 
@@ -92,9 +92,9 @@ mod tests {
     use crate::types::{KvTableConfig, TableColumnConfig, TableModel};
     use crate::CellValue;
     use datafusion::arrow::datatypes::DataType;
-    use exoware_sdk_rs::kv_codec::Utf8;
-    use exoware_sdk_rs::match_key::compile_payload_regex;
-    use exoware_sdk_rs::prune_policy::{validate_policy, OrderEncoding, PolicyScope, RetainPolicy};
+    use exoware_sdk::kv_codec::Utf8;
+    use exoware_sdk::match_key::compile_payload_regex;
+    use exoware_sdk::prune_policy::{validate_policy, OrderEncoding, PolicyScope, RetainPolicy};
 
     fn keys_scope(policy: &super::PrunePolicy) -> &super::KeysScope {
         match &policy.scope {

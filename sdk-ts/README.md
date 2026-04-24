@@ -1,19 +1,19 @@
-# exoware-sdk-ts
+# @exowarexyz/sdk
 
-[![npm](https://img.shields.io/npm/v/exoware-sdk-ts.svg)](https://www.npmjs.com/package/exoware-sdk-ts)
+[![npm](https://img.shields.io/npm/v/@exowarexyz/sdk.svg)](https://www.npmjs.com/package/@exowarexyz/sdk)
 
 Interact with the Exoware API in TypeScript.
 
 ## Status
 
-`exoware-sdk-ts` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
+`@exowarexyz/sdk` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
 
 ## Store Key Prefixes
 
 Use `StoreKeyPrefix` when multiple logical QMDB, SQL, or raw KV instances share one Store database. The prefix is applied by the SDK, so higher-level clients keep using their normal logical keys:
 
 ```ts
-import { Client, StoreKeyPrefix, StoreWriteBatch } from 'exoware-sdk-ts';
+import { Client, StoreKeyPrefix, StoreWriteBatch } from '@exowarexyz/sdk';
 
 const base = new Client('http://localhost:10000').store();
 const orders = base.withKeyPrefix(new StoreKeyPrefix(4, 1));

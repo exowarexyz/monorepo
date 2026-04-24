@@ -11,10 +11,10 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use connectrpc::ConnectError;
-use exoware_sdk_rs::common::KvEntry;
-use exoware_sdk_rs::keys::KeyCodec;
-use exoware_sdk_rs::match_key::compile_payload_regex;
-use exoware_sdk_rs::stream_filter::{validate_filter, CompiledBytesFilters, StreamFilter};
+use exoware_sdk::common::KvEntry;
+use exoware_sdk::keys::KeyCodec;
+use exoware_sdk::match_key::compile_payload_regex;
+use exoware_sdk::stream_filter::{validate_filter, CompiledBytesFilters, StreamFilter};
 use regex::bytes::Regex;
 use tokio::sync::Notify;
 
@@ -131,9 +131,9 @@ impl StreamHub {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use exoware_sdk_rs::kv_codec::Utf8;
-    use exoware_sdk_rs::match_key::MatchKey;
-    use exoware_sdk_rs::stream_filter::BytesFilter;
+    use exoware_sdk::kv_codec::Utf8;
+    use exoware_sdk::match_key::MatchKey;
+    use exoware_sdk::stream_filter::BytesFilter;
 
     fn filter(prefix: u16, regex: &str) -> StreamFilter {
         StreamFilter {

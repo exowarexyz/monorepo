@@ -12,8 +12,8 @@ use commonware_storage::qmdb::{
     store::LogStore as _,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use exoware_sdk_rs::StoreClient;
-use store_qmdb::{KeylessClient, KeylessWriter};
+use exoware_qmdb::{KeylessClient, KeylessWriter};
+use exoware_sdk::StoreClient;
 
 use common::retry;
 

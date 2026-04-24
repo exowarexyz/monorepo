@@ -1,7 +1,7 @@
 use datafusion::arrow::util::pretty::print_batches;
 use datafusion::common::Result as DataFusionResult;
 use datafusion::prelude::SessionContext;
-use exoware_sdk_rs::StoreClient;
+use exoware_sdk::StoreClient;
 use exoware_sql::{default_orders_index_specs, KvSchema};
 
 #[tokio::main]

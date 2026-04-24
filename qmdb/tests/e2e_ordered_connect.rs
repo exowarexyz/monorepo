@@ -22,17 +22,17 @@ use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use connectrpc::client::ClientConfig;
 use connectrpc::{ConnectError, ConnectRpcService, Context};
-use exoware_sdk_rs::proto::PreferZstdHttpClient;
-use exoware_sdk_rs::store::qmdb::v1::{
+use exoware_qmdb::{
+    ordered_connect_stack, recover_boundary_state, CurrentBoundaryState, OrderedClient,
+    OrderedConnectClient, OrderedWriter, QmdbError, MAX_OPERATION_SIZE,
+};
+use exoware_sdk::proto::PreferZstdHttpClient;
+use exoware_sdk::store::qmdb::v1::{
     GetManyRequest as ProtoGetManyRequest, GetManyResponse as ProtoGetManyResponse,
     GetRequest as ProtoGetRequest, GetResponse as ProtoGetResponse, OrderedService,
     OrderedServiceClient, OrderedServiceServer,
 };
-use exoware_sdk_rs::StoreClient;
-use store_qmdb::{
-    ordered_connect_stack, recover_boundary_state, CurrentBoundaryState, OrderedClient,
-    OrderedConnectClient, OrderedWriter, QmdbError, MAX_OPERATION_SIZE,
-};
+use exoware_sdk::StoreClient;
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
@@ -109,17 +109,17 @@ async fn boundary_from_local_db(
                 .range_proof(&mut hasher, location, NZU64!(1))
                 .await
                 .map_err(|error| {
-                    store_qmdb::QmdbError::CorruptData(format!(
+                    exoware_qmdb::QmdbError::CorruptData(format!(
                         "local current range proof at {location}: {error}"
                     ))
                 })?;
             proof_ops.pop().ok_or_else(|| {
-                store_qmdb::QmdbError::CorruptData(format!(
+                exoware_qmdb::QmdbError::CorruptData(format!(
                     "local current range proof at {location} returned no operations"
                 ))
             })?;
             let chunk = chunks.pop().ok_or_else(|| {
-                store_qmdb::QmdbError::CorruptData(format!(
+                exoware_qmdb::QmdbError::CorruptData(format!(
                     "local current range proof at {location} returned no chunks"
                 ))
             })?;
@@ -247,7 +247,7 @@ impl OrderedService for StaticOrderedService {
     fn get(
         &self,
         ctx: Context,
-        _request: buffa::view::OwnedView<exoware_sdk_rs::store::qmdb::v1::GetRequestView<'static>>,
+        _request: buffa::view::OwnedView<exoware_sdk::store::qmdb::v1::GetRequestView<'static>>,
     ) -> impl std::future::Future<Output = Result<(ProtoGetResponse, Context), ConnectError>> + Send
     {
         let response = self.get_response.clone();
@@ -257,9 +257,7 @@ impl OrderedService for StaticOrderedService {
     fn get_many(
         &self,
         ctx: Context,
-        _request: buffa::view::OwnedView<
-            exoware_sdk_rs::store::qmdb::v1::GetManyRequestView<'static>,
-        >,
+        _request: buffa::view::OwnedView<exoware_sdk::store::qmdb::v1::GetManyRequestView<'static>>,
     ) -> impl std::future::Future<Output = Result<(ProtoGetManyResponse, Context), ConnectError>> + Send
     {
         let response = self.get_many_response.clone();
@@ -274,7 +272,7 @@ async fn spawn_static_server(
         .route("/health", get(health))
         .fallback_service(
             ConnectRpcService::new(OrderedServiceServer::new(service))
-                .with_compression(exoware_sdk_rs::connect_compression_registry()),
+                .with_compression(exoware_sdk::connect_compression_registry()),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -417,7 +415,7 @@ async fn ordered_connect_client_rejects_invalid_get_proof() {
     assert!(matches!(
         err,
         QmdbError::ProofVerification {
-            kind: store_qmdb::ProofKind::CurrentKeyValue
+            kind: exoware_qmdb::ProofKind::CurrentKeyValue
         }
     ));
 }
@@ -475,7 +473,7 @@ async fn ordered_connect_client_rejects_invalid_get_many_proof() {
     assert!(matches!(
         err,
         QmdbError::ProofVerification {
-            kind: store_qmdb::ProofKind::HistoricalMultiKey
+            kind: exoware_qmdb::ProofKind::HistoricalMultiKey
         }
     ));
 }

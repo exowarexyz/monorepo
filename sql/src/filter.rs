@@ -1,8 +1,8 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use exoware_sdk_rs::keys::{Key, KeyCodec};
-use exoware_sdk_rs::kv_codec::{eval_predicate, KvPredicate, KvPredicateCheck, StoredRow};
+use exoware_sdk::keys::{Key, KeyCodec};
+use exoware_sdk::kv_codec::{eval_predicate, KvPredicate, KvPredicateCheck, StoredRow};
 
 use crate::aggregate::{
     compile_kv_predicate_constraint, index_row_field_ref, pk_field_ref_for_secondary_index,

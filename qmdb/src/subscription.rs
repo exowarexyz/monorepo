@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use commonware_storage::mmr::Location;
-use exoware_sdk_rs::keys::Key;
-use exoware_sdk_rs::match_key::MatchKey;
-use exoware_sdk_rs::stream_filter::StreamFilter;
-use exoware_sdk_rs::{StoreClient, StreamSubscription};
+use exoware_sdk::keys::Key;
+use exoware_sdk::match_key::MatchKey;
+use exoware_sdk::stream_filter::StreamFilter;
+use exoware_sdk::{StoreClient, StreamSubscription};
 
 use crate::auth::{
     decode_auth_operation_location, decode_auth_presence_location, decode_auth_watermark_location,
@@ -44,8 +44,8 @@ pub(crate) async fn open_store_subscription(
 pub(crate) fn classify_and_filter(
     namespace: Option<AuthenticatedBackendNamespace>,
 ) -> (Classify, StreamFilter) {
-    use exoware_sdk_rs::keys::{Key as StoreKey, KeyCodec};
-    use exoware_sdk_rs::kv_codec::Utf8;
+    use exoware_sdk::keys::{Key as StoreKey, KeyCodec};
+    use exoware_sdk::kv_codec::Utf8;
 
     type DecodeLocation = Arc<dyn Fn(&StoreKey) -> Option<Location> + Send + Sync>;
 

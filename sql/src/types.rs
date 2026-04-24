@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::{i256, DataType, Field, Schema, SchemaRef, TimeUnit};
-use exoware_sdk_rs::keys::{Key, KeyCodec};
-use exoware_sdk_rs::StoreClient;
+use exoware_sdk::keys::{Key, KeyCodec};
+use exoware_sdk::StoreClient;
 
 use crate::codec::{primary_key_codec, secondary_index_codec};
 

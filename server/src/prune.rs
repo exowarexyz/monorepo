@@ -12,9 +12,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use exoware_sdk_rs::keys::KeyCodec;
-use exoware_sdk_rs::match_key::compile_payload_regex;
-use exoware_sdk_rs::prune_policy::{
+use exoware_sdk::keys::KeyCodec;
+use exoware_sdk::match_key::compile_payload_regex;
+use exoware_sdk::prune_policy::{
     KeysScope, OrderEncoding, PolicyScope, PrunePolicyDocument, RetainPolicy,
 };
 use regex::bytes::Regex;
@@ -229,9 +229,9 @@ fn execute_batch_log_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use exoware_sdk_rs::kv_codec::Utf8;
-    use exoware_sdk_rs::match_key::MatchKey;
-    use exoware_sdk_rs::prune_policy::{GroupBy, OrderBy};
+    use exoware_sdk::kv_codec::Utf8;
+    use exoware_sdk::match_key::MatchKey;
+    use exoware_sdk::prune_policy::{GroupBy, OrderBy};
 
     fn make_scope() -> KeysScope {
         KeysScope {

@@ -10,8 +10,8 @@ use exoware_proto::{
     parse_range_traversal_direction, with_bad_request_detail, with_error_info_detail,
     RangeTraversalModeError,
 };
-use exoware_sdk_rs as exoware_proto;
-use exoware_sdk_rs::keys::{validate_key_size, MAX_KEY_LEN};
+use exoware_sdk as exoware_proto;
+use exoware_sdk::keys::{validate_key_size, MAX_KEY_LEN};
 
 pub const MAX_VALUE_LEN: usize = 10 * 1024 * 1024;
 

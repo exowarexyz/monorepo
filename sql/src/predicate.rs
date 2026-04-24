@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use datafusion::arrow::datatypes::i256;
 use datafusion::common::{DataFusionError, Result as DataFusionResult, ScalarValue};
 use datafusion::logical_expr::{Expr, Operator};
-use exoware_sdk_rs::keys::Key;
-use exoware_sdk_rs::kv_codec::{interleave_ordered_key_fields, StoredValue};
+use exoware_sdk::keys::Key;
+use exoware_sdk::kv_codec::{interleave_ordered_key_fields, StoredValue};
 
 use crate::codec::*;
 use crate::types::*;

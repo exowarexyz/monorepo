@@ -33,10 +33,10 @@ use exoware_proto::{
     with_query_detail, with_retry_info_detail, RangeTraversalDirection,
     QUERY_DETAIL_RESPONSE_HEADER,
 };
-use exoware_sdk_rs as exoware_proto;
-use exoware_sdk_rs::keys::Key;
-use exoware_sdk_rs::match_key::MatchKey;
-use exoware_sdk_rs::store::common::v1::bytes_filter::KindView as ProtoBytesFilterKindView;
+use exoware_sdk as exoware_proto;
+use exoware_sdk::keys::Key;
+use exoware_sdk::match_key::MatchKey;
+use exoware_sdk::store::common::v1::bytes_filter::KindView as ProtoBytesFilterKindView;
 use futures::{stream as stream_util, Stream};
 use http::header::HeaderValue;
 use http::HeaderName;
@@ -741,7 +741,7 @@ fn domain_filter_from_subscribe_view(
         match_keys.push(MatchKey {
             reserved_bits,
             prefix,
-            payload_regex: exoware_sdk_rs::kv_codec::Utf8::from(mk.payload_regex),
+            payload_regex: exoware_sdk::kv_codec::Utf8::from(mk.payload_regex),
         });
     }
     let mut value_filters = Vec::with_capacity(req.value_filters.len());
@@ -916,8 +916,8 @@ mod tests {
     use buffa::Message;
     use exoware_proto::store::common::v1::MatchKey as ProtoMatchKey;
     use exoware_proto::store::stream::v1::SubscribeRequest;
-    use exoware_sdk_rs::decode_connect_error;
-    use exoware_sdk_rs::keys::KeyCodec;
+    use exoware_sdk::decode_connect_error;
+    use exoware_sdk::keys::KeyCodec;
     use futures::StreamExt;
 
     const TEST_RESERVED_BITS: u8 = 4;

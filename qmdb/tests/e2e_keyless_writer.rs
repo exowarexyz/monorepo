@@ -14,8 +14,8 @@ use commonware_storage::qmdb::{
     store::LogStore as _,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use exoware_sdk_rs::StoreClient;
-use store_qmdb::{KeylessClient, KeylessWriter};
+use exoware_qmdb::{KeylessClient, KeylessWriter};
+use exoware_sdk::StoreClient;
 
 use common::retry;
 
@@ -307,7 +307,7 @@ async fn bounded_pipeline_advances_watermark_via_contiguous_acks() {
 
     use futures::future::BoxFuture;
     let mut in_flight: FuturesUnordered<
-        BoxFuture<'static, Result<store_qmdb::UploadReceipt, store_qmdb::QmdbError>>,
+        BoxFuture<'static, Result<exoware_qmdb::UploadReceipt, exoware_qmdb::QmdbError>>,
     > = FuturesUnordered::new();
     let mut results = Vec::with_capacity(BATCHES);
     for batch in slices {
@@ -395,7 +395,7 @@ async fn local_proof_resumes_from_existing_store_state() {
     // Second "session": reconstruct the frontier from known local proof
     // material and continue writing from there.
     {
-        let state = store_qmdb::WriterState::from_proof::<commonware_cryptography::Sha256, _>(
+        let state = exoware_qmdb::WriterState::from_proof::<commonware_cryptography::Sha256, _>(
             latest_two,
             Location::new(0),
             &proof_two,

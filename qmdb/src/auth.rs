@@ -2,8 +2,8 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Hasher;
 use commonware_storage::mmr::{self, iterator::PeakIterator, Location, Position, StandardHasher};
 use commonware_utils::Array;
-use exoware_sdk_rs::keys::{Key, KeyCodec};
-use exoware_sdk_rs::{RangeMode, SerializableReadSession};
+use exoware_sdk::keys::{Key, KeyCodec};
+use exoware_sdk::{RangeMode, SerializableReadSession};
 
 use crate::codec::{
     decode_digest, encode_ordered_update_payload, ensure_encoded_value_size,

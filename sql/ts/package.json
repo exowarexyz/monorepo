@@ -1,6 +1,6 @@
 {
-  "name": "exoware-sql-ts",
-  "version": "2026.4.0",
+  "name": "@exowarexyz/sql",
+  "version": "2026.4.1",
   "description": "Browser client for the Exoware SQL streaming service.",
   "type": "module",
   "license": "(MIT OR Apache-2.0)",
@@ -9,6 +9,9 @@
     "type": "git",
     "url": "https://github.com/exowarexyz/monorepo.git",
     "directory": "sql/ts"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -30,7 +33,7 @@
   "dependencies": {
     "@bufbuild/protobuf": "2.11.0",
     "@connectrpc/connect": "2.1.1",
-    "exoware-sdk-ts": "file:../../sdk-ts"
+    "@exowarexyz/sdk": "file:../../sdk-ts"
   },
   "devDependencies": {
     "typescript": "^5.5.3"
