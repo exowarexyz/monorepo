@@ -67,7 +67,7 @@ async fn boundary_from_local_db(
 
 async fn mirror_local(client: &StoreClient, local: &LocalReference) {
     let writer: TestOrderedWriter = TestOrderedWriter::empty(client.clone());
-    common::commit_ordered_upload(&client, &writer, &local.operations, &local.current_boundary)
+    common::commit_ordered_upload(client, &writer, &local.operations, &local.current_boundary)
         .await
         .expect("commit upload");
 }
