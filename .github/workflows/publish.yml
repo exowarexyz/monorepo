@@ -33,13 +33,13 @@ jobs:
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-    - name: Publish exoware-qmdb
-      run: cargo publish --manifest-path qmdb/Cargo.toml
+    - name: Publish exoware-simulator
+      run: cargo publish --manifest-path examples/simulator/Cargo.toml
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-    - name: Publish exoware-simulator
-      run: cargo publish --manifest-path examples/simulator/Cargo.toml
+    - name: Publish exoware-qmdb
+      run: cargo publish --manifest-path qmdb/Cargo.toml
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

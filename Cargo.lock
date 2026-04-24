@@ -2421,7 +2421,6 @@ dependencies = [
  "clap",
  "commonware-codec",
  "connectrpc",
- "exoware-qmdb",
  "exoware-sdk",
  "exoware-server",
  "http",
