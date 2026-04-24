@@ -429,7 +429,7 @@ function toStoreBatch(
                     value: entry.value,
                 },
             ];
-        }).filter((entry) => !logicalFilter || logicalFilter.matches(entry.key, entry.value)),
+        }).filter((entry) => !logicalFilter || logicalFilter.matches(entry.key)),
     };
 }
 
@@ -462,16 +462,6 @@ function prefixSubscribeFilters(
         ...filters,
         matchKeys: filters.matchKeys.map((matchKey) => prefix.prefixStreamMatchKey(matchKey)),
     };
-}
-
-function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
-    if (left.length !== right.length) return false;
-    return left.every((byte, index) => byte === right[index]);
-}
-
-function bytesStartsWith(bytes: Uint8Array, prefix: Uint8Array): boolean {
-    if (prefix.length > bytes.length) return false;
-    return prefix.every((byte, index) => byte === bytes[index]);
 }
 
 function bytesToBinaryString(bytes: Uint8Array): string {
@@ -543,58 +533,17 @@ class ClientKeyMatcher {
     }
 }
 
-class ClientBytesFilters {
-    private readonly exacts: Uint8Array[] = [];
-    private readonly prefixes: Uint8Array[] = [];
-    private readonly regexes: RegExp[] = [];
-
-    constructor(filters: NonNullable<SubscribeFilters['valueFilters']>) {
-        for (const filter of filters) {
-            switch (filter.kind?.case) {
-                case 'exact':
-                    this.exacts.push(filter.kind.value);
-                    break;
-                case 'prefix':
-                    this.prefixes.push(filter.kind.value);
-                    break;
-                case 'regex':
-                    this.regexes.push(compileRustBytesRegex(filter.kind.value));
-                    break;
-                case undefined:
-                    break;
-            }
-        }
-    }
-
-    matches(bytes: Uint8Array): boolean {
-        return (
-            this.exacts.some((exact) => bytesEqual(bytes, exact)) ||
-            this.prefixes.some((prefix) => bytesStartsWith(bytes, prefix)) ||
-            this.regexes.some((regex) => {
-                regex.lastIndex = 0;
-                return regex.test(bytesToBinaryString(bytes));
-            })
-        );
-    }
-}
-
 class ClientStreamFilter {
     private readonly keyMatchers: ClientKeyMatcher[];
-    private readonly valueFilters?: ClientBytesFilters;
 
     constructor(filters: SubscribeFilters) {
         this.keyMatchers = filters.matchKeys.map(
             (matchKey) => new ClientKeyMatcher(create(MatchKeySchema, matchKey)),
         );
-        const valueFilters = filters.valueFilters ?? [];
-        this.valueFilters = valueFilters.length > 0 ? new ClientBytesFilters(valueFilters) : undefined;
     }
 
-    matches(key: Uint8Array, value: Uint8Array): boolean {
-        return (
-            this.keyMatchers.some((matcher) => matcher.matches(key)) &&
-            (!this.valueFilters || this.valueFilters.matches(value))
-        );
+    matches(key: Uint8Array): boolean {
+        return this.keyMatchers.some((matcher) => matcher.matches(key));
     }
 }
 
