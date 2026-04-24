@@ -115,12 +115,11 @@ async fn build_local_batch() -> LocalBatch {
     .expect("join")
 }
 
-async fn upload_and_publish(client: &StoreClient, batch: &LocalBatch) {
+async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
     let writer: UnorderedWriter<Sha256, Vec<u8>, Vec<u8>> = UnorderedWriter::empty(client.clone());
-    writer
-        .upload_and_publish(&batch.operations)
+    common::commit_unordered_upload(client, &writer, &batch.operations)
         .await
-        .expect("upload_and_publish");
+        .expect("commit upload");
 }
 
 #[tokio::test]
@@ -141,7 +140,7 @@ async fn unordered_connect_subscribe_emits_verifiable_range_proof() {
         .expect("subscribe");
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    upload_and_publish(&store_client, &local).await;
+    commit_upload(&store_client, &local).await;
 
     let frame: RangeSubscribeProof<Digest, BatchOperation> =
         tokio::time::timeout(Duration::from_secs(5), stream.message())
@@ -164,7 +163,7 @@ async fn unordered_connect_subscribe_emits_verifiable_range_proof() {
 async fn unordered_connect_client_rejects_invalid_streamed_proof() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
-    upload_and_publish(&store_client, &local).await;
+    commit_upload(&store_client, &local).await;
 
     let unordered_client = Arc::new(TestUnorderedClient::from_client(
         store_client.clone(),

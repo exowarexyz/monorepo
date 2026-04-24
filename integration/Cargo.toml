@@ -1,0 +1,24 @@
+[package]
+name = "exoware-integration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Unpublished cross-crate integration tests for Exoware."
+
+[dependencies]
+axum = { workspace = true }
+buffa = { workspace = true }
+bytes = { workspace = true }
+commonware-cryptography = "2026.3.0"
+commonware-storage = "2026.3.0"
+connectrpc = { workspace = true }
+datafusion = "52.2.0"
+exoware-qmdb = { workspace = true }
+exoware-sdk-rs = { workspace = true }
+exoware-simulator = { path = "../examples/simulator" }
+exoware-sql = { path = "../sql" }
+futures = { workspace = true }
+reqwest = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

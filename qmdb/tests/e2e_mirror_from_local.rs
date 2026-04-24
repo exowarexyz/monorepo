@@ -6,7 +6,7 @@
 //!   1. Apply batches to the local Db.
 //!   2. Pull ops via `historical_proof` (or `ops_historical_proof` for
 //!      ordered).
-//!   3. Feed to `*Writer::upload_and_publish`.
+//!   3. Prepare/stage/commit the writer rows through `StoreWriteBatch`.
 //!   4. Verify the remote root matches the local root.
 //!   5. Simulate a restart: create a fresh writer from explicit local frontier
 //!      state, apply more local batches, and verify again.
@@ -50,7 +50,9 @@ async fn mirror_keyless_from_local() {
     ]])
     .await;
     let writer: KeylessWriter<Sha256, Vec<u8>> = KeylessWriter::empty(client.clone());
-    writer.upload_and_publish(&ops1).await.expect("upload 1");
+    common::commit_keyless_upload(&client, &writer, &ops1)
+        .await
+        .expect("upload 1");
     let reader: KeylessClient<Sha256, Vec<u8>> =
         KeylessClient::from_client(client.clone(), ((0..=MAX_OPERATION_SIZE).into(), ()));
     assert_eq!(
@@ -69,7 +71,9 @@ async fn mirror_keyless_from_local() {
         .expect("writer state");
     let writer2: KeylessWriter<Sha256, Vec<u8>> = KeylessWriter::new(client.clone(), state);
     let delta = &ops_total[ops1.len()..];
-    writer2.upload_and_publish(delta).await.expect("upload 2");
+    common::commit_keyless_upload(&client, &writer2, delta)
+        .await
+        .expect("upload 2");
     assert_eq!(
         reader.root_at(latest2).await.expect("root_at 2"),
         root2,
@@ -143,7 +147,9 @@ async fn mirror_unordered_from_local() {
     ]])
     .await;
     let writer: UnorderedWriter<Sha256, Vec<u8>, Vec<u8>> = UnorderedWriter::empty(client.clone());
-    writer.upload_and_publish(&ops1).await.expect("upload 1");
+    common::commit_unordered_upload(&client, &writer, &ops1)
+        .await
+        .expect("upload 1");
     let reader: UnorderedClient<Sha256, Vec<u8>, Vec<u8>> = UnorderedClient::from_client(
         client.clone(),
         (
@@ -177,7 +183,9 @@ async fn mirror_unordered_from_local() {
     let writer2: UnorderedWriter<Sha256, Vec<u8>, Vec<u8>> =
         UnorderedWriter::new(client.clone(), state);
     let delta = &ops_total[ops1.len()..];
-    writer2.upload_and_publish(delta).await.expect("upload 2");
+    common::commit_unordered_upload(&client, &writer2, delta)
+        .await
+        .expect("upload 2");
     assert_eq!(
         reader.root_at(latest2).await.expect("root_at 2"),
         root2,
@@ -252,7 +260,9 @@ async fn mirror_immutable_from_local() {
     ]])
     .await;
     let writer: ImmutableWriter<Sha256, ImmK, Vec<u8>> = ImmutableWriter::empty(client.clone());
-    writer.upload_and_publish(&ops1).await.expect("upload 1");
+    common::commit_immutable_upload(&client, &writer, &ops1)
+        .await
+        .expect("upload 1");
     let reader: ImmutableClient<Sha256, ImmK, Vec<u8>> = ImmutableClient::from_client(
         client.clone(),
         ((0..=MAX_OPERATION_SIZE).into(), ()),
@@ -277,7 +287,9 @@ async fn mirror_immutable_from_local() {
     let writer2: ImmutableWriter<Sha256, ImmK, Vec<u8>> =
         ImmutableWriter::new(client.clone(), state);
     let delta = &ops_total[ops1.len()..];
-    writer2.upload_and_publish(delta).await.expect("upload 2");
+    common::commit_immutable_upload(&client, &writer2, delta)
+        .await
+        .expect("upload 2");
     assert_eq!(
         reader.root_at(latest2).await.expect("root_at 2"),
         root2,
@@ -392,8 +404,7 @@ async fn mirror_ordered_from_local() {
     )
     .await;
     let writer: OrderedWriter<Sha256, Vec<u8>, Vec<u8>, N> = OrderedWriter::empty(client.clone());
-    writer
-        .upload_and_publish(&ops1, &boundary1)
+    common::commit_ordered_upload(&client, &writer, &ops1, &boundary1)
         .await
         .expect("upload 1");
 
@@ -432,8 +443,7 @@ async fn mirror_ordered_from_local() {
     let writer2: OrderedWriter<Sha256, Vec<u8>, Vec<u8>, N> =
         OrderedWriter::new(client.clone(), state);
     let delta_ops = &ops_total[ops1.len()..];
-    writer2
-        .upload_and_publish(delta_ops, &boundary_delta)
+    common::commit_ordered_upload(&client, &writer2, delta_ops, &boundary_delta)
         .await
         .expect("upload 2");
     assert_eq!(

@@ -162,12 +162,11 @@ async fn build_local_batch() -> LocalBatch {
     .expect("join")
 }
 
-async fn upload_and_publish(client: &StoreClient, batch: &LocalBatch) {
+async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
     let writer: OrderedWriter<Sha256, Vec<u8>, Vec<u8>, N> = OrderedWriter::empty(client.clone());
-    writer
-        .upload_and_publish(&batch.operations, &batch.current_boundary)
+    common::commit_ordered_upload(client, &writer, &batch.operations, &batch.current_boundary)
         .await
-        .expect("upload_and_publish");
+        .expect("commit upload");
 }
 
 fn match_exact(key: &[u8]) -> ProtoBytesFilter {
@@ -228,7 +227,7 @@ async fn ordered_range_connect_subscribe_emits_verifiable_range_proof() {
         .expect("subscribe");
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    upload_and_publish(&store_client, &local).await;
+    commit_upload(&store_client, &local).await;
 
     let frame: RangeSubscribeProof<Digest, BatchOperation> =
         tokio::time::timeout(Duration::from_secs(5), stream.message())
@@ -251,7 +250,7 @@ async fn ordered_range_connect_subscribe_emits_verifiable_range_proof() {
 async fn ordered_range_connect_client_rejects_invalid_streamed_proof() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
-    upload_and_publish(&store_client, &local).await;
+    commit_upload(&store_client, &local).await;
 
     let ordered_client = Arc::new(TestOrderedClient::from_client(
         store_client.clone(),
@@ -318,7 +317,7 @@ async fn ordered_range_connect_subscribe_emits_multi_proof_for_matching_keys() {
         .expect("subscribe");
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    upload_and_publish(&store_client, &local).await;
+    commit_upload(&store_client, &local).await;
 
     let frame: RangeSubscribeProof<Digest, BatchOperation> =
         tokio::time::timeout(Duration::from_secs(5), stream.message())
@@ -345,7 +344,7 @@ async fn ordered_range_connect_subscribe_replays_since_cursor() {
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client.clone()).await;
     let client = validated_client(&qmdb_url);
 
-    upload_and_publish(&store_client, &local).await;
+    commit_upload(&store_client, &local).await;
 
     let mut stream = client
         .subscribe(ProtoSubscribeRequest {
@@ -395,7 +394,7 @@ async fn ordered_range_connect_subscribe_matches_prefix_and_regex_filters() {
         .expect("regex subscribe");
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    upload_and_publish(&store_client, &local).await;
+    commit_upload(&store_client, &local).await;
 
     let prefix_frame = tokio::time::timeout(Duration::from_secs(5), prefix_stream.message())
         .await
@@ -440,7 +439,7 @@ async fn ordered_range_connect_subscribe_filters_by_value_regex_without_key() {
         .expect("subscribe");
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    upload_and_publish(&store_client, &local).await;
+    commit_upload(&store_client, &local).await;
 
     let frame: RangeSubscribeProof<Digest, BatchOperation> =
         tokio::time::timeout(Duration::from_secs(5), stream.message())
@@ -478,7 +477,7 @@ async fn ordered_range_connect_subscribe_intersects_key_and_value_filters() {
         .expect("subscribe");
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    upload_and_publish(&store_client, &local).await;
+    commit_upload(&store_client, &local).await;
 
     let frame = tokio::time::timeout(Duration::from_secs(5), stream.message())
         .await

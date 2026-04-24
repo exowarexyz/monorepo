@@ -210,12 +210,11 @@ async fn build_local_batch() -> LocalBatch {
     .expect("join")
 }
 
-async fn upload_and_publish(client: &StoreClient, batch: &LocalBatch) {
+async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
     let writer: OrderedWriter<Sha256, Vec<u8>, Vec<u8>, N> = OrderedWriter::empty(client.clone());
-    writer
-        .upload_and_publish(&batch.operations, &batch.current_boundary)
+    common::commit_ordered_upload(client, &writer, &batch.operations, &batch.current_boundary)
         .await
-        .expect("upload_and_publish");
+        .expect("commit upload");
 }
 
 fn latest_operation_for_key(
@@ -312,7 +311,7 @@ async fn ordered_connect_get_returns_current_key_value_proof() {
         op_cfg(),
         update_row_cfg(),
     ));
-    upload_and_publish(&store_client, &local).await;
+    commit_upload(&store_client, &local).await;
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client.clone()).await;
     let client = validated_client(&qmdb_url);
 
@@ -340,7 +339,7 @@ async fn ordered_connect_get_many_returns_historical_multi_proof() {
         op_cfg(),
         update_row_cfg(),
     ));
-    upload_and_publish(&store_client, &local).await;
+    commit_upload(&store_client, &local).await;
     let historical_root = ordered_client
         .root_at(local.latest_location)
         .await
@@ -369,7 +368,7 @@ async fn ordered_connect_get_many_returns_historical_multi_proof() {
 async fn ordered_connect_client_rejects_invalid_get_proof() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
-    upload_and_publish(&store_client, &local).await;
+    commit_upload(&store_client, &local).await;
 
     let ordered_client = Arc::new(TestOrderedClient::from_client(
         store_client.clone(),
@@ -427,7 +426,7 @@ async fn ordered_connect_client_rejects_invalid_get_proof() {
 async fn ordered_connect_client_rejects_invalid_get_many_proof() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
-    upload_and_publish(&store_client, &local).await;
+    commit_upload(&store_client, &local).await;
 
     let ordered_client = Arc::new(TestOrderedClient::from_client(
         store_client.clone(),

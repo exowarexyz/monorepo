@@ -19,7 +19,7 @@ pub use types::{
     CellValue, IndexBackfillEvent, IndexBackfillOptions, IndexBackfillReport, IndexLayout,
     IndexSpec, TableColumnConfig,
 };
-pub use writer::{BatchWriter, TableWriter};
+pub use writer::{BatchReceipt, BatchWriter, PreparedBatch, TableWriter};
 
 #[cfg(test)]
 mod tests {
@@ -46,7 +46,7 @@ mod tests {
         canonicalize_reduced_group_values, decode_stored_row, encode_reduced_group_key,
         eval_predicate, KvReducedValue, StoredRow,
     };
-    use exoware_sdk_rs::{RangeReduceOp, RangeReduceRequest, StoreClient};
+    use exoware_sdk_rs::{RangeReduceOp, RangeReduceRequest, StoreBatchUpload, StoreClient};
     use std::collections::{BTreeMap, HashSet};
     use std::ops::Bound::{Included, Unbounded};
     use std::pin::Pin;
@@ -3006,6 +3006,36 @@ mod tests {
             batch.pending_keys[0][0], batch.pending_keys[1][0],
             "table prefix byte must differ"
         );
+    }
+
+    #[tokio::test]
+    async fn batch_writer_trait_failure_requeues_prepared_before_new_pending() {
+        let client = StoreClient::new("http://localhost:10000");
+        let schema = KvSchema::new(client)
+            .table(
+                "t",
+                vec![TableColumnConfig::new("id", DataType::Int64, false)],
+                vec!["id".to_string()],
+                vec![],
+            )
+            .unwrap();
+
+        let mut batch = schema.batch_writer();
+        batch.insert("t", vec![CellValue::Int64(1)]).unwrap();
+        let prepared = batch.prepare_flush().unwrap().expect("prepared row");
+        assert_eq!(prepared.request_id(), 0);
+        assert_eq!(prepared.entry_count(), 1);
+
+        batch.insert("t", vec![CellValue::Int64(2)]).unwrap();
+        StoreBatchUpload::mark_upload_failed(&batch, prepared, "commit failed".to_string()).await;
+        assert_eq!(batch.pending_count(), 2);
+
+        let retry = batch.prepare_flush().unwrap().expect("retry row");
+        assert_eq!(retry.request_id(), 0);
+        assert_eq!(retry.entry_count(), 1);
+        let next = batch.prepare_flush().unwrap().expect("new pending row");
+        assert_eq!(next.request_id(), 1);
+        assert_eq!(next.entry_count(), 1);
     }
 
     #[test]

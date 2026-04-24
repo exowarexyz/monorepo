@@ -67,10 +67,9 @@ async fn boundary_from_local_db(
 
 async fn mirror_local(client: &StoreClient, local: &LocalReference) {
     let writer: TestOrderedWriter = TestOrderedWriter::empty(client.clone());
-    writer
-        .upload_and_publish(&local.operations, &local.current_boundary)
+    common::commit_ordered_upload(client, &writer, &local.operations, &local.current_boundary)
         .await
-        .expect("upload_and_publish");
+        .expect("commit upload");
 }
 
 fn op_cfg() -> <BatchOperation as commonware_codec::Read>::Cfg {

@@ -17,7 +17,7 @@ use commonware_storage::qmdb::{
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use exoware_sdk_rs::StoreClient;
+use exoware_sdk_rs::{StoreBatchUpload, StoreClient};
 use store_qmdb::{
     ordered_connect_stack, recover_boundary_state, CurrentBoundaryState, OrderedClient,
     OrderedWriter, MAX_OPERATION_SIZE,
@@ -29,6 +29,7 @@ const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
 type BatchOperation = QmdbOperation<Vec<u8>, Vec<u8>>;
 type LocalDb = LocalQmdbDb<cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>;
+type DemoWriter = OrderedWriter<Sha256, Vec<u8>, Vec<u8>, N>;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -66,6 +67,19 @@ enum Command {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+async fn commit_ordered_upload(
+    client: &StoreClient,
+    writer: &DemoWriter,
+    ops: &[BatchOperation],
+    boundary: &CurrentBoundaryState<Digest, N>,
+) {
+    let prepared = writer.prepare_upload(ops, boundary).await.expect("prepare");
+    writer
+        .commit_upload(client, prepared)
+        .await
+        .expect("commit upload");
 }
 
 fn op_cfg() -> <BatchOperation as commonware_codec::Read>::Cfg {
@@ -198,7 +212,7 @@ async fn seed(
             let bounds = db.bounds().await;
             let (mut previous_ops, mut counter, writer) = if *bounds.end == 0 {
                 info!("starting from empty local DB");
-                let writer = OrderedWriter::<Sha256, Vec<u8>, Vec<u8>, N>::empty(store);
+                let writer = OrderedWriter::<Sha256, Vec<u8>, Vec<u8>, N>::empty(store.clone());
                 (Vec::<BatchOperation>::new(), 0u64, writer)
             } else {
                 let latest = bounds.end - 1;
@@ -228,7 +242,8 @@ async fn seed(
                     next_key_index = counter,
                     "resuming from persisted local DB",
                 );
-                let writer = OrderedWriter::<Sha256, Vec<u8>, Vec<u8>, N>::new(store, writer_state);
+                let writer =
+                    OrderedWriter::<Sha256, Vec<u8>, Vec<u8>, N>::new(store.clone(), writer_state);
                 (cumulative, counter, writer)
             };
 
@@ -282,10 +297,7 @@ async fn seed(
                 let boundary = boundary_from_local_db(&db, previous_slice, &cumulative_ops).await;
                 let delta = &cumulative_ops[previous_ops.len()..];
 
-                writer
-                    .upload_and_publish(delta, &boundary)
-                    .await
-                    .expect("upload_and_publish");
+                commit_ordered_upload(&store, &writer, delta, &boundary).await;
 
                 let historical_root = reader.root_at(latest).await.expect("historical root");
                 let current_root = reader.current_root_at(latest).await.expect("current root");

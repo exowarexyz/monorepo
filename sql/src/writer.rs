@@ -2,6 +2,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use commonware_codec::Encode;
@@ -20,8 +21,8 @@ use exoware_sdk_rs::keys::Key;
 #[cfg(test)]
 use exoware_sdk_rs::kv_codec::decode_stored_row;
 use exoware_sdk_rs::kv_codec::{StoredRow, StoredValue};
-use exoware_sdk_rs::StoreClient;
-use futures::TryStreamExt;
+use exoware_sdk_rs::{StoreBatchUpload, StoreClient, StoreWriteBatch};
+use futures::{future::BoxFuture, TryStreamExt};
 
 use crate::builder::archived_non_pk_value_is_valid;
 use crate::codec::*;
@@ -61,8 +62,39 @@ impl TableWriter {
 pub struct BatchWriter {
     client: StoreClient,
     tables: HashMap<String, TableWriter>,
+    next_request_id: u64,
+    failed_prepared: Mutex<Vec<PreparedBatch>>,
     pub(crate) pending_keys: Vec<Key>,
     pub(crate) pending_values: Vec<Vec<u8>>,
+}
+
+#[derive(Debug)]
+#[must_use]
+pub struct PreparedBatch {
+    request_id: u64,
+    keys: Vec<Key>,
+    values: Vec<Vec<u8>>,
+}
+
+impl PreparedBatch {
+    pub fn request_id(&self) -> u64 {
+        self.request_id
+    }
+
+    pub fn entry_count(&self) -> usize {
+        self.keys.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BatchReceipt {
+    pub writer_request_id: u64,
+    pub entry_count: usize,
+    pub store_sequence_number: u64,
 }
 
 impl BatchWriter {
@@ -82,6 +114,8 @@ impl BatchWriter {
         Self {
             client,
             tables,
+            next_request_id: 0,
+            failed_prepared: Mutex::new(Vec::new()),
             pending_keys: Vec::new(),
             pending_values: Vec::new(),
         }
@@ -106,19 +140,134 @@ impl BatchWriter {
 
     pub fn pending_count(&self) -> usize {
         self.pending_keys.len()
+            + self
+                .failed_prepared
+                .lock()
+                .expect("failed prepared mutex poisoned")
+                .iter()
+                .map(PreparedBatch::entry_count)
+                .sum::<usize>()
     }
 
     /// Flush pending rows to ingest and return the post-ingest consistency token.
     pub async fn flush(&mut self) -> DataFusionResult<u64> {
-        if self.pending_keys.is_empty() {
-            return Ok(0);
+        Ok(self
+            .flush_with_receipt()
+            .await?
+            .map(|receipt| receipt.store_sequence_number)
+            .unwrap_or(0))
+    }
+
+    /// Flush pending rows to ingest and return metadata for the persisted batch.
+    pub async fn flush_with_receipt(&mut self) -> DataFusionResult<Option<BatchReceipt>> {
+        let Some(prepared) = self.prepare_flush()? else {
+            return Ok(None);
+        };
+        Ok(Some(self.commit_upload(&self.client, prepared).await?))
+    }
+
+    pub fn prepare_flush(&mut self) -> DataFusionResult<Option<PreparedBatch>> {
+        if let Some(prepared) = self.take_failed_prepared() {
+            return Ok(Some(prepared));
         }
-        flush_ingest_batch(
-            &self.client,
-            &mut self.pending_keys,
-            &mut self.pending_values,
-        )
-        .await
+        if self.pending_keys.is_empty() {
+            return Ok(None);
+        }
+        let request_id = self.next_request_id;
+        self.next_request_id += 1;
+        Ok(Some(PreparedBatch {
+            request_id,
+            keys: std::mem::take(&mut self.pending_keys),
+            values: std::mem::take(&mut self.pending_values),
+        }))
+    }
+
+    pub fn stage_flush(
+        &self,
+        prepared: &PreparedBatch,
+        batch: &mut StoreWriteBatch,
+    ) -> DataFusionResult<()> {
+        for (key, value) in prepared.keys.iter().zip(prepared.values.iter()) {
+            batch
+                .push(&self.client, key, value)
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        }
+        Ok(())
+    }
+
+    pub fn mark_flush_persisted(
+        &self,
+        prepared: PreparedBatch,
+        sequence_number: u64,
+    ) -> BatchReceipt {
+        BatchReceipt {
+            writer_request_id: prepared.request_id,
+            entry_count: prepared.entry_count(),
+            store_sequence_number: sequence_number,
+        }
+    }
+
+    pub fn mark_flush_failed(&self, prepared: PreparedBatch) {
+        self.failed_prepared
+            .lock()
+            .expect("failed prepared mutex poisoned")
+            .push(prepared);
+    }
+
+    fn take_failed_prepared(&self) -> Option<PreparedBatch> {
+        let mut failed = self
+            .failed_prepared
+            .lock()
+            .expect("failed prepared mutex poisoned");
+        let (idx, _) = failed
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, prepared)| prepared.request_id)?;
+        Some(failed.remove(idx))
+    }
+}
+
+impl StoreBatchUpload for BatchWriter {
+    type Prepared = PreparedBatch;
+    type Receipt = BatchReceipt;
+    type Error = DataFusionError;
+
+    fn stage_upload(
+        &self,
+        prepared: &Self::Prepared,
+        batch: &mut StoreWriteBatch,
+    ) -> Result<(), Self::Error> {
+        self.stage_flush(prepared, batch)
+    }
+
+    fn commit_error(&self, error: exoware_sdk_rs::ClientError) -> Self::Error {
+        DataFusionError::External(Box::new(error))
+    }
+
+    fn mark_upload_persisted<'a>(
+        &'a self,
+        prepared: Self::Prepared,
+        sequence_number: u64,
+    ) -> BoxFuture<'a, Self::Receipt>
+    where
+        Self: Sync + 'a,
+        Self::Prepared: 'a,
+    {
+        Box::pin(async move { self.mark_flush_persisted(prepared, sequence_number) })
+    }
+
+    fn mark_upload_failed<'a>(
+        &'a self,
+        prepared: Self::Prepared,
+        _error: String,
+    ) -> BoxFuture<'a, ()>
+    where
+        Self: Sync + 'a,
+        Self::Prepared: 'a,
+    {
+        Box::pin(async move {
+            self.mark_flush_failed(prepared);
+        })
     }
 }
 
@@ -805,14 +954,14 @@ pub(crate) async fn flush_ingest_batch(
     if keys.is_empty() {
         return Ok(0);
     }
-    let refs: Vec<(&Key, &[u8])> = keys
-        .iter()
-        .zip(values.iter())
-        .map(|(key, value)| (key, value.as_slice()))
-        .collect();
-    let token = client
-        .ingest()
-        .put(&refs)
+    let mut batch = StoreWriteBatch::new();
+    for (key, value) in keys.iter().zip(values.iter()) {
+        batch
+            .push(client, key, value)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+    }
+    let token = batch
+        .commit(client)
         .await
         .map_err(|e| DataFusionError::External(Box::new(e)))?;
     keys.clear();

@@ -6,6 +6,7 @@ members = [
     "qmdb",
     "qmdb/wasm",
     "sql",
+    "integration",
 ]
 resolver = "2"
 

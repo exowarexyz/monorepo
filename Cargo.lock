@@ -2300,6 +2300,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "exoware-integration"
+version = "2026.4.0"
+dependencies = [
+ "axum",
+ "buffa",
+ "bytes",
+ "commonware-cryptography",
+ "commonware-storage",
+ "connectrpc",
+ "datafusion",
+ "exoware-qmdb",
+ "exoware-sdk-rs",
+ "exoware-simulator",
+ "exoware-sql",
+ "futures",
+ "reqwest",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "exoware-qmdb"
 version = "2026.4.0"
 dependencies = [

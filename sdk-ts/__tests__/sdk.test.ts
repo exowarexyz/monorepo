@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { create } from '@bufbuild/protobuf';
 import { Client } from '../src/client';
-import { TraversalMode } from '../src/store';
+import { StoreKeyPrefix, StoreWriteBatch, TraversalMode } from '../src/store';
 import {
     ReduceParamsSchema,
     RangeReducerSpecSchema,
@@ -43,6 +43,25 @@ function makeStreamMatchKey(prefix: string) {
         prefix: 0,
         payloadRegex: `(?s-u)^${prefix}.*$`,
     });
+}
+
+async function nextWithTimeout<T>(
+    iterator: AsyncIterator<T>,
+    timeoutMs: number = 5_000,
+): Promise<IteratorResult<T>> {
+    let timeout: NodeJS.Timeout | undefined;
+    try {
+        return await Promise.race([
+            iterator.next(),
+            new Promise<IteratorResult<T>>((_, reject) => {
+                timeout = setTimeout(() => reject(new Error('timed out waiting for stream')), timeoutMs);
+            }),
+        ]);
+    } finally {
+        if (timeout) {
+            clearTimeout(timeout);
+        }
+    }
 }
 
 describe('Exoware TS SDK', () => {
@@ -172,6 +191,76 @@ describe('Exoware TS SDK', () => {
             expect(batches[0].entries.map((entry) => Buffer.from(entry.value))).toEqual(
                 kvs.map((kv) => Buffer.from(kv.value)),
             );
+        });
+
+        it('should isolate prefixed stores and commit a cross-prefix batch', async () => {
+            const base = client.store();
+            const a = client.store(new StoreKeyPrefix(4, 1));
+            const b = client.store(new StoreKeyPrefix(4, 2));
+            const encoder = new TextEncoder();
+            const key = encoder.encode('prefixed-store-shared-key');
+
+            const batch = new StoreWriteBatch();
+            batch.push(a, key, Buffer.from('value-a'));
+            batch.push(b, key, Buffer.from('value-b'));
+            const sequenceNumber = await batch.commit(base);
+
+            const resultA = await a.get(key);
+            const resultB = await b.get(key);
+            const resultBase = await base.get(key);
+
+            expect(Buffer.from(resultA!.value)).toEqual(Buffer.from('value-a'));
+            expect(Buffer.from(resultB!.value)).toEqual(Buffer.from('value-b'));
+            expect(resultBase).toBeNull();
+
+            const rangeA = await a.query(key, key);
+            expect(rangeA.results).toHaveLength(1);
+            expect(Buffer.from(rangeA.results[0].key)).toEqual(Buffer.from(key));
+            expect(Buffer.from(rangeA.results[0].value)).toEqual(Buffer.from('value-a'));
+
+            const batchA = await a.getBatch(sequenceNumber);
+            expect(batchA).not.toBeNull();
+            expect(batchA!.entries).toHaveLength(1);
+            expect(Buffer.from(batchA!.entries[0].key)).toEqual(Buffer.from(key));
+            expect(Buffer.from(batchA!.entries[0].value)).toEqual(Buffer.from('value-a'));
+        });
+
+        it('should subscribe to logical regex matches for non-byte-aligned prefixes', async () => {
+            const store = client.store(new StoreKeyPrefix(4, 3));
+            const encoder = new TextEncoder();
+            const missKey = encoder.encode('prefixed-stream-miss');
+            const hitKey = encoder.encode('prefixed-stream-hit');
+            const missSequence = await store.set(missKey, Buffer.from('miss'));
+            const hitSequence = await store.set(hitKey, Buffer.from('hit'));
+
+            const iterator = store
+                .subscribe({
+                    matchKeys: [
+                        create(MatchKeySchema, {
+                            reservedBits: 0,
+                            prefix: 0,
+                            payloadRegex: '(?s-u)^prefixed-stream-hit$',
+                        }),
+                    ],
+                    sinceSequenceNumber: missSequence,
+                })
+                [Symbol.asyncIterator]();
+
+            try {
+                const next = await nextWithTimeout(iterator);
+                expect(next.done).toBe(false);
+                expect(next.value.sequenceNumber).toBe(hitSequence);
+                expect(
+                    next.value.entries.map((entry: { key: Uint8Array }) => Buffer.from(entry.key)),
+                ).toEqual([Buffer.from(hitKey)]);
+                expect(
+                    next.value.entries.map((entry: { value: Uint8Array }) =>
+                        Buffer.from(entry.value),
+                    ),
+                ).toEqual([Buffer.from('hit')]);
+            } finally {
+                await iterator.return?.();
+            }
         });
 
         it('should getMany', async () => {

@@ -1,6 +1,6 @@
 import { createClient, type Client as ConnectClient, type Interceptor, Code, ConnectError } from '@connectrpc/connect';
 import { createConnectTransport } from '@connectrpc/connect-web';
-import { StoreClient } from './store.js';
+import { StoreClient, type StoreKeyPrefix } from './store.js';
 import { Service as CompactService } from './gen/ts/store/v1/compact_pb.js';
 import { Service as IngestService } from './gen/ts/store/v1/ingest_pb.js';
 import { Service as QueryService } from './gen/ts/store/v1/query_pb.js';
@@ -102,7 +102,7 @@ export class Client {
         this.stream = createClient(StreamService, transport);
     }
 
-    public store(): StoreClient {
-        return new StoreClient(this);
+    public store(prefix?: StoreKeyPrefix): StoreClient {
+        return new StoreClient(this, prefix);
     }
 }

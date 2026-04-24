@@ -23,9 +23,14 @@ Explore the Exoware API.
 
    ```bash
    cd examples/sandbox
-   npm install
+   npm install --include=dev
    npm run dev
    ```
+
+   The app and local package build steps use dev dependencies (`vite`,
+   `typescript`, and `wasm-pack`-driven build tooling). `--include=dev` keeps
+   this working even if your shell or npm config omits dev dependencies by
+   default.
 
 3. **Open the web UI**
 
@@ -38,6 +43,15 @@ Explore the Exoware API.
   proofs and live subscribe streaming.
 - **SQL** (optional, requires `VITE_SQL_URL`): run ad-hoc SQL queries and
   subscribe to a SQL WHERE predicate evaluated per ingested batch.
+
+## Store namespace
+
+The sandbox currently runs raw Store KV, Ordered QMDB, and SQL against the same
+unpartitioned simulator Store. QMDB and SQL each use their own internal key
+families, but the demo binaries do not assign distinct SDK `StoreKeyPrefix`
+values, and raw KV can write arbitrary Store keys. This means the sandbox is
+useful for exercising the individual panels, but it should not be treated as an
+example of isolated multi-instance Store partitioning.
 
 ## Ordered QMDB panel
 

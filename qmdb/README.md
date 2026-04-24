@@ -139,6 +139,12 @@ authenticated prefix. This keeps immutable `get_at(key, watermark)` efficient:
 read the latest keyed row with `location <= watermark`, then load exactly that
 operation location to recover the typed value.
 
+Run multiple QMDB instances, or multiple QMDB variants, on one Store by giving
+each instance a distinct SDK `StoreKeyPrefix` and constructing the QMDB client
+or writer from that prefixed `StoreClient`. This pass leaves the existing QMDB
+family constants intact, so collapsing those constants remains a separate
+logical/on-disk format decision.
+
 ## Historical proof path
 
 Historical helpers operate on the exact uploaded ordered operation log:
@@ -436,24 +442,42 @@ not allowed:
 ## Writers
 
 Each backend exposes a `*Writer` helper for sole-writer ingest. Writers hold
-cached MMR peaks + a pending-batch queue in memory; `upload_and_publish`
-dispatches a single atomic PUT per batch with zero store reads in the hot
-loop. Construction always starts from caller-supplied frontier state.
-Multiple `upload_and_publish` calls may be issued concurrently against the
-same writer; the writer handles location assignment, in-flight pipelining, and
-contiguous watermark publication internally.
+cached MMR peaks + a pending-batch queue in memory; `prepare_upload` reserves
+writer state and encodes store rows with zero store reads in the hot loop.
+Construction always starts from caller-supplied frontier state. Multiple
+`prepare_upload` calls may be issued concurrently against the same writer; the
+writer handles location assignment, in-flight pipelining, and contiguous
+watermark publication internally. Callers own the enclosing `StoreWriteBatch`:
+stage prepared uploads and prepared watermark publications from one or more
+instances, commit once, then mark each prepared handle persisted with the
+returned Store sequence number.
+
+The generic Store traits cover the prepared-handle lifecycle:
+
+- `StoreBatchUpload`: stage prepared upload rows and report success/failure
+- `StoreBatchPublication`: stage prepared publication rows and report
+  success/failure
+- `StorePublicationFrontierWriter`: prepare and flush a stateful publication frontier
+
+QMDB uses `StorePublicationFrontierWriter` for the part SQL does not have: the
+in-memory frontier, in-flight upload queue, and catch-up watermark flush.
+Upload preparation remains an inherent method because each backend's inputs
+differ; ordered QMDB, for example, also needs caller-supplied current boundary
+state.
 
 ```rust,ignore
 use std::sync::Arc;
+use exoware_sdk_rs::{StoreBatchPublication, StoreBatchUpload, StorePublicationFrontierWriter};
 use store_qmdb::{KeylessWriter, WriterState};
 
 let writer: Arc<KeylessWriter<Sha256, Vec<u8>>> =
     Arc::new(KeylessWriter::new(client.clone(), WriterState::empty()));
 
-// Sequential usage — awaits each upload.
-writer.upload_and_publish(&batch_ops).await?;
+// Sequential single-instance usage still goes through an explicit Store batch.
+let prepared = writer.prepare_upload(&batch_ops).await?;
+let receipt = writer.commit_upload(&client, prepared).await?;
 
-// Pipelined usage — dispatch concurrent PUTs up to a bounded depth.
+// Pipelined usage — prepare/commit concurrent Store batches up to a bounded depth.
 use futures::stream::{FuturesUnordered, StreamExt};
 let mut in_flight = FuturesUnordered::new();
 for batch in batches {
@@ -461,10 +485,14 @@ for batch in batches {
         in_flight.next().await.unwrap()?;
     }
     let w = writer.clone();
-    in_flight.push(Box::pin(async move { w.upload_and_publish(&batch).await }));
+    let c = client.clone();
+    in_flight.push(Box::pin(async move {
+        let prepared = w.prepare_upload(&batch).await?;
+        w.commit_upload(&c, prepared).await
+    }));
 }
 while let Some(r) = in_flight.next().await { r?; }
-writer.flush().await?;  // publish the tail watermark
+StorePublicationFrontierWriter::flush_publication(writer.as_ref()).await?;  // publish tail watermark
 ```
 
 ### Ordered local-DB flow
@@ -484,7 +512,7 @@ The intended flow is:
 3. call `recover_boundary_state(previous_operations, operations, db.root(), prove_at)`
    against that same local DB state
 4. pass both `operations` and the recovered boundary state into
-   `OrderedWriter::upload_and_publish`
+   `OrderedWriter::prepare_upload`, then stage and commit the prepared rows
 
 `recover_boundary_state(...)` does not talk to the remote store. It is just
 the adapter that turns local Commonware proofs into the `CurrentBoundaryState`
@@ -512,7 +540,9 @@ lags the dispatch frontier by at most the pipeline depth — never unbounded.
 
 `flush()` awaits all in-flight PUTs and, if the last dispatched batch's
 `latest_location` is ahead of the published watermark, issues one standalone
-watermark-row PUT to catch up. Needed only:
+watermark-row Store batch to catch up. Watermark publication implements
+`StoreBatchPublication`, so atomic callers can stage a prepared watermark into
+the same Store batch as prepared uploads. Needed only:
 
 - at end-of-stream to publish the tail after the last dispatch, or
 - if you want to block until all pending writes are both ACKd and
@@ -523,12 +553,12 @@ watermark advancing on its own.
 
 ### Failure recovery
 
-Any PUT failure poisons the writer. `upload_and_publish` returns the error
-and future calls return `WriterPoisoned`. The caller constructs a fresh writer
-from caller-owned committed frontier state (for example, reconstructed from a
-local Commonware proof) and re-submits any still-pending batches from its own
-durable source. Re-submission is safe: PUT rows are content-addressed by key
-and MMR math is deterministic.
+Any stage or commit failure must be reported with `mark_upload_failed`, which
+poisons the writer. Future calls return `WriterPoisoned`. The caller constructs
+a fresh writer from caller-owned committed frontier state (for example,
+reconstructed from a local Commonware proof) and re-submits any still-pending
+batches from its own durable source. Re-submission is safe: PUT rows are
+content-addressed by key and MMR math is deterministic.
 
 ### Sole-writer contract
 

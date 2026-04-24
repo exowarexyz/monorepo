@@ -4,14 +4,29 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use axum::{routing::get, Router};
+use commonware_codec::{Codec, Decode, Encode};
+use commonware_cryptography::Hasher;
+use commonware_storage::qmdb::{
+    any::{
+        ordered::variable::Operation as OrderedOperation,
+        unordered::variable::Operation as UnorderedOperation,
+    },
+    immutable::Operation as ImmutableOperation,
+    keyless::Operation as KeylessOperation,
+    operation::Key as QmdbKey,
+};
+use commonware_utils::Array;
 use connectrpc::client::ClientConfig;
 use connectrpc::{ConnectError, ConnectRpcService, Context};
 use exoware_sdk_rs::proto::PreferZstdHttpClient;
 use exoware_sdk_rs::store::qmdb::v1::{
     RangeService, RangeServiceClient, RangeServiceServer, SubscribeRequestView, SubscribeResponse,
 };
-use exoware_sdk_rs::StoreClient;
-use store_qmdb::QmdbError;
+use exoware_sdk_rs::{StoreBatchUpload, StoreClient};
+use store_qmdb::{
+    CurrentBoundaryState, ImmutableWriter, KeylessWriter, OrderedWriter, QmdbError,
+    UnorderedWriter, UploadReceipt,
+};
 
 /// Keep `_dir` and `_server` alive for the whole test.
 pub async fn local_store_client() -> (tempfile::TempDir, tokio::task::JoinHandle<()>, StoreClient) {
@@ -40,6 +55,74 @@ where
         }
     }
     panic!("{label}: exhausted retries");
+}
+
+#[allow(dead_code)]
+pub async fn commit_keyless_upload<H, V>(
+    commit_client: &StoreClient,
+    writer: &KeylessWriter<H, V>,
+    ops: &[KeylessOperation<V>],
+) -> Result<UploadReceipt, QmdbError>
+where
+    H: Hasher + Sync,
+    V: Codec + Clone + Send + Sync,
+    KeylessOperation<V>: Encode,
+{
+    let prepared = writer.prepare_upload(ops).await?;
+    writer.commit_upload(commit_client, prepared).await
+}
+
+#[allow(dead_code)]
+pub async fn commit_unordered_upload<H, K, V>(
+    commit_client: &StoreClient,
+    writer: &UnorderedWriter<H, K, V>,
+    ops: &[UnorderedOperation<K, V>],
+) -> Result<UploadReceipt, QmdbError>
+where
+    H: Hasher + Sync,
+    K: QmdbKey + Codec + Sync,
+    V: Codec + Clone + Send + Sync,
+    V::Cfg: Clone,
+    UnorderedOperation<K, V>: Encode,
+{
+    let prepared = writer.prepare_upload(ops).await?;
+    writer.commit_upload(commit_client, prepared).await
+}
+
+#[allow(dead_code)]
+pub async fn commit_ordered_upload<H, K, V, const N: usize>(
+    commit_client: &StoreClient,
+    writer: &OrderedWriter<H, K, V, N>,
+    ops: &[OrderedOperation<K, V>],
+    current_boundary: &CurrentBoundaryState<H::Digest, N>,
+) -> Result<UploadReceipt, QmdbError>
+where
+    H: Hasher + Sync,
+    K: QmdbKey + Codec + Sync,
+    V: Codec + Clone + Send + Sync,
+    V::Cfg: Clone,
+    OrderedOperation<K, V>: Encode + Decode,
+{
+    let prepared = writer.prepare_upload(ops, current_boundary).await?;
+    writer.commit_upload(commit_client, prepared).await
+}
+
+#[allow(dead_code)]
+pub async fn commit_immutable_upload<H, K, V>(
+    commit_client: &StoreClient,
+    writer: &ImmutableWriter<H, K, V>,
+    ops: &[ImmutableOperation<K, V>],
+) -> Result<UploadReceipt, QmdbError>
+where
+    H: Hasher + Sync,
+    K: Array + Codec + Clone + AsRef<[u8]> + Sync,
+    V: Codec + Clone + Send + Sync,
+    V::Cfg: Clone,
+    K::Cfg: Clone,
+    ImmutableOperation<K, V>: Encode + Decode<Cfg = V::Cfg> + Clone,
+{
+    let prepared = writer.prepare_upload(ops).await?;
+    writer.commit_upload(commit_client, prepared).await
 }
 
 #[allow(dead_code)]

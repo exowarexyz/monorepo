@@ -2,6 +2,8 @@ export { Client, createTransport, type ClientOptions, type RetryConfig } from '.
 export {
     SerializableReadSession,
     StoreClient,
+    StoreKeyPrefix,
+    StoreWriteBatch,
     TraversalMode,
     type GetResult,
     type GetManyResultItem,
