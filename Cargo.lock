@@ -2301,7 +2301,7 @@ dependencies = [
 
 [[package]]
 name = "exoware-integration"
-version = "2026.4.0"
+version = "2026.4.1"
 dependencies = [
  "axum",
  "buffa",
@@ -2322,7 +2322,7 @@ dependencies = [
 
 [[package]]
 name = "exoware-qmdb"
-version = "2026.4.0"
+version = "2026.4.1"
 dependencies = [
  "axum",
  "buffa",
@@ -2355,7 +2355,7 @@ dependencies = [
 
 [[package]]
 name = "exoware-qmdb-wasm"
-version = "2026.4.0"
+version = "2026.4.1"
 dependencies = [
  "buffa",
  "commonware-codec",
@@ -2371,7 +2371,7 @@ dependencies = [
 
 [[package]]
 name = "exoware-sdk"
-version = "2026.4.0"
+version = "2026.4.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -2398,7 +2398,7 @@ dependencies = [
 
 [[package]]
 name = "exoware-server"
-version = "2026.4.0"
+version = "2026.4.1"
 dependencies = [
  "buffa",
  "buffa-types",
@@ -2414,7 +2414,7 @@ dependencies = [
 
 [[package]]
 name = "exoware-simulator"
-version = "2026.4.0"
+version = "2026.4.1"
 dependencies = [
  "axum",
  "bytes",
@@ -2436,7 +2436,7 @@ dependencies = [
 
 [[package]]
 name = "exoware-sql"
-version = "2026.4.0"
+version = "2026.4.1"
 dependencies = [
  "async-trait",
  "axum",

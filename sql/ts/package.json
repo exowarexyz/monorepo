@@ -1,6 +1,6 @@
 {
   "name": "@exowarexyz/sql",
-  "version": "2026.4.0",
+  "version": "2026.4.1",
   "description": "Browser client for the Exoware SQL streaming service.",
   "type": "module",
   "license": "(MIT OR Apache-2.0)",

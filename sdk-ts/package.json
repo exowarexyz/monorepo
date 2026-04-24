@@ -1,6 +1,6 @@
 {
     "name": "@exowarexyz/sdk",
-    "version": "2026.4.0",
+    "version": "2026.4.1",
     "description": "Interact with the Exoware API in TypeScript.",
     "type": "module",
     "license": "(MIT OR Apache-2.0)",

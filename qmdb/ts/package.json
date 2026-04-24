@@ -1,6 +1,6 @@
 {
   "name": "@exowarexyz/qmdb",
-  "version": "2026.4.0",
+  "version": "2026.4.1",
   "description": "Browser client for the ordered Exoware QMDB proof API.",
   "type": "module",
   "license": "(MIT OR Apache-2.0)",
