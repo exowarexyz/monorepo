@@ -7,9 +7,6 @@ import {
   type CertifiedBlockFrame,
 } from '@simplex-ts';
 
-export const SIMPLEX_SQL_URL = (
-  import.meta.env.VITE_SIMPLEX_SQL_URL || import.meta.env.VITE_SIMPLEX_URL
-) as string | undefined;
 export const SIMPLEX_STORE_URL = (
   import.meta.env.VITE_SIMPLEX_STORE_URL
   || import.meta.env.VITE_SIMULATOR_URL
@@ -25,6 +22,18 @@ interface NotificationFn {
 }
 
 type KindFilter = 'all' | 'notarized' | 'finalized';
+
+function parseRequiredBigInt(value: string, label: string): bigint {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new Error(`${label} is required`);
+  }
+  const parsed = BigInt(trimmed);
+  if (parsed < 0n) {
+    throw new Error(`${label} must be non-negative`);
+  }
+  return parsed;
+}
 
 function parseOptionalBigInt(value: string): bigint | undefined {
   const trimmed = value.trim();
@@ -54,18 +63,42 @@ function requestKind(kind: KindFilter): 'notarized' | 'finalized' | undefined {
   return kind === 'all' ? undefined : kind;
 }
 
+function blockDetails(event: CertifiedBlockFrame) {
+  return (
+    <>
+      <p>
+        <strong>Sequence:</strong> {event.sequenceNumber.toString()}
+        {' · '}
+        <strong>Kind:</strong> {event.kind}
+        {' · '}
+        <strong>Height:</strong> {event.height.toString()}
+      </p>
+      <p>
+        <strong>Epoch:</strong> {event.epoch.toString()}
+        {' · '}
+        <strong>View:</strong> {event.view.toString()}
+      </p>
+      <p><strong>Block Digest:</strong> {formatHex(event.blockDigest)}</p>
+      <p><strong>Block Key:</strong> {formatHex(event.blockKey)}</p>
+      <p>
+        <strong>Certificate:</strong> {formatBytesLength(event.encodedCertificate)}
+        {' · '}
+        <strong>Block:</strong> {formatBytesLength(event.encodedBlock)}
+      </p>
+    </>
+  );
+}
+
 export function SimplexPanel({
-  simplexSqlUrl,
   storeUrl,
   showNotification,
 }: {
-  simplexSqlUrl: string;
   storeUrl: string;
   showNotification: NotificationFn;
 }) {
   const client = useMemo(
-    () => new SimplexClient(simplexSqlUrl, { storeUrl }),
-    [simplexSqlUrl, storeUrl],
+    () => new SimplexClient(storeUrl),
+    [storeUrl],
   );
   const subscribeAbortRef = useRef<AbortController | null>(null);
 
@@ -76,17 +109,25 @@ export function SimplexPanel({
   const [sinceSequenceNumber, setSinceSequenceNumber] = useState('');
   const [events, setEvents] = useState<CertifiedBlockFrame[]>([]);
   const [isSubscribing, setIsSubscribing] = useState(false);
+  const [lookupKind, setLookupKind] = useState<'notarized' | 'finalized'>('finalized');
+  const [lookupEpoch, setLookupEpoch] = useState('0');
+  const [lookupView, setLookupView] = useState('');
+  const [lookupHeight, setLookupHeight] = useState('');
+  const [lookupResult, setLookupResult] = useState<CertifiedBlockFrame | null>(null);
+  const [isLookingUp, setIsLookingUp] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
     void (async () => {
       try {
-        const response = await fetch(`${simplexSqlUrl.replace(/\/$/, '')}/health`, {
-          signal: controller.signal,
-        });
-        setIsConnected(response.ok);
+        await client.health();
+        if (!controller.signal.aborted) {
+          setIsConnected(true);
+        }
       } catch {
-        setIsConnected(false);
+        if (!controller.signal.aborted) {
+          setIsConnected(false);
+        }
       }
     })();
 
@@ -94,23 +135,26 @@ export function SimplexPanel({
       controller.abort();
       subscribeAbortRef.current?.abort();
     };
-  }, [simplexSqlUrl]);
+  }, [client]);
+
+  const buildVerifier = () => {
+    const trimmedIdentity = identityHex.trim();
+    if (!trimmedIdentity) {
+      throw new Error('Committee identity is required');
+    }
+    const trimmedNamespace = namespace.trim();
+    if (!trimmedNamespace) {
+      throw new Error('Namespace is required');
+    }
+    return wasmCertifiedBlockVerifier({
+      identity: hexToBytes(trimmedIdentity),
+      namespace: trimmedNamespace,
+    });
+  };
 
   const handleStartSubscribe = () => {
     try {
-      const trimmedIdentity = identityHex.trim();
-      if (!trimmedIdentity) {
-        throw new Error('Committee identity is required');
-      }
-      const trimmedNamespace = namespace.trim();
-      if (!trimmedNamespace) {
-        throw new Error('Namespace is required');
-      }
-
-      const verifier = wasmCertifiedBlockVerifier({
-        identity: hexToBytes(trimmedIdentity),
-        namespace: trimmedNamespace,
-      });
+      const verifier = buildVerifier();
 
       subscribeAbortRef.current?.abort();
       setEvents([]);
@@ -162,6 +206,46 @@ export function SimplexPanel({
     setIsSubscribing(false);
   };
 
+  const handleLookupByView = async () => {
+    try {
+      setIsLookingUp(true);
+      const verifier = buildVerifier();
+      const epoch = parseRequiredBigInt(lookupEpoch.trim() || '0', 'Epoch');
+      const view = parseRequiredBigInt(lookupView, 'View');
+      const block = await client.certifiedBlockByView(lookupKind, view, { epoch, verifier });
+      setLookupResult(block ?? null);
+      showNotification(
+        block ? 'success' : 'error',
+        'Simplex Lookup',
+        block ? `Fetched verified ${lookupKind} block` : 'No block found for that view',
+      );
+    } catch (error) {
+      showNotification('error', 'Simplex Lookup Failed', String(error));
+    } finally {
+      setIsLookingUp(false);
+    }
+  };
+
+  const handleLookupFinalizedByHeight = async () => {
+    try {
+      setIsLookingUp(true);
+      const verifier = buildVerifier();
+      const epoch = parseRequiredBigInt(lookupEpoch.trim() || '0', 'Epoch');
+      const height = parseRequiredBigInt(lookupHeight, 'Height');
+      const block = await client.finalizedBlockByHeight(height, { epoch, verifier });
+      setLookupResult(block ?? null);
+      showNotification(
+        block ? 'success' : 'error',
+        'Simplex Lookup',
+        block ? 'Fetched verified finalized block' : 'No finalized block found for that height',
+      );
+    } catch (error) {
+      showNotification('error', 'Simplex Lookup Failed', String(error));
+    } finally {
+      setIsLookingUp(false);
+    }
+  };
+
   return (
     <div className="card fade-in">
       <h2>Simplex</h2>
@@ -169,10 +253,9 @@ export function SimplexPanel({
       <div className="form-section">
         <h3>Connection</h3>
         <p className="section-note">
-          Streams certified rows from <code>simplex_blocks</code>, fetches each raw block from KV,
-          and verifies the notarization or finalization certificate in WASM before showing it.
+          Streams certified block records from Store, fetches each raw block from KV, and verifies
+          the notarization or finalization certificate in WASM before showing it.
         </p>
-        <p><strong>SQL Server:</strong> {simplexSqlUrl}</p>
         <p><strong>Store Server:</strong> {storeUrl}</p>
         <p><strong>Status:</strong> {isConnected ? 'Connected' : 'Disconnected'}</p>
       </div>
@@ -248,6 +331,77 @@ export function SimplexPanel({
           </button>
         </div>
 
+        <div className="form-section">
+          <h3>Lookup</h3>
+          <div className="form-row">
+            <div className="form-group">
+              <label htmlFor="simplex-lookup-kind">Kind</label>
+              <select
+                id="simplex-lookup-kind"
+                value={lookupKind}
+                onChange={(event) => setLookupKind(event.target.value as 'notarized' | 'finalized')}
+              >
+                <option value="finalized">finalized</option>
+                <option value="notarized">notarized</option>
+              </select>
+            </div>
+            <div className="form-group">
+              <label htmlFor="simplex-lookup-epoch">Epoch</label>
+              <input
+                id="simplex-lookup-epoch"
+                type="number"
+                min="0"
+                value={lookupEpoch}
+                onChange={(event) => setLookupEpoch(event.target.value)}
+              />
+            </div>
+          </div>
+          <div className="form-row">
+            <div className="form-group">
+              <label htmlFor="simplex-lookup-view">View</label>
+              <input
+                id="simplex-lookup-view"
+                type="number"
+                min="0"
+                value={lookupView}
+                onChange={(event) => setLookupView(event.target.value)}
+              />
+            </div>
+            <div className="form-group">
+              <label htmlFor="simplex-lookup-height">Finalized Height</label>
+              <input
+                id="simplex-lookup-height"
+                type="number"
+                min="0"
+                value={lookupHeight}
+                onChange={(event) => setLookupHeight(event.target.value)}
+              />
+            </div>
+          </div>
+          <div className="button-row">
+            <button
+              className={`btn-secondary ${isLookingUp ? 'loading' : ''}`}
+              onClick={() => void handleLookupByView()}
+              disabled={isLookingUp || !identityHex.trim() || !namespace.trim() || !lookupView.trim()}
+            >
+              Get by View
+            </button>
+            <button
+              className={`btn-secondary ${isLookingUp ? 'loading' : ''}`}
+              onClick={() => void handleLookupFinalizedByHeight()}
+              disabled={isLookingUp || !identityHex.trim() || !namespace.trim() || !lookupHeight.trim()}
+            >
+              Get Finalized by Height
+            </button>
+          </div>
+          {lookupResult && (
+            <div className="result fade-in">
+              <h4>Lookup Result</h4>
+              <div className="result-row-block">{blockDetails(lookupResult)}</div>
+            </div>
+          )}
+        </div>
+
         <div className="result fade-in">
           <h4>Verified Blocks ({events.length})</h4>
           {events.length === 0 ? (
@@ -259,25 +413,7 @@ export function SimplexPanel({
                   key={`${event.sequenceNumber.toString()}-${event.kind}-${event.view.toString()}-${index}`}
                   className="result-row-block"
                 >
-                  <p>
-                    <strong>Sequence:</strong> {event.sequenceNumber.toString()}
-                    {' · '}
-                    <strong>Kind:</strong> {event.kind}
-                    {' · '}
-                    <strong>Height:</strong> {event.height.toString()}
-                  </p>
-                  <p>
-                    <strong>Epoch:</strong> {event.epoch.toString()}
-                    {' · '}
-                    <strong>View:</strong> {event.view.toString()}
-                  </p>
-                  <p><strong>Block Digest:</strong> {formatHex(event.blockDigest)}</p>
-                  <p><strong>Block Key:</strong> {formatHex(event.blockKey)}</p>
-                  <p>
-                    <strong>Certificate:</strong> {formatBytesLength(event.encodedCertificate)}
-                    {' · '}
-                    <strong>Block:</strong> {formatBytesLength(event.encodedBlock)}
-                  </p>
+                  {blockDetails(event)}
                 </div>
               ))}
             </div>

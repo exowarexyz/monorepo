@@ -1,54 +1,26 @@
 use commonware_codec::Encode;
-use commonware_consensus::simplex::types::{Activity, Attributable, Finalization, Notarization};
+use commonware_consensus::simplex::types::{Finalization, Notarization};
 use commonware_consensus::{Epochable, Heightable, Viewable};
-use commonware_cryptography::{Digest, Digestible, Hasher, Sha256};
-use datafusion::arrow::datatypes::DataType;
-use exoware_sdk::{Key, KeyCodec, StoreBatchUpload, StoreClient, StoreWriteBatch};
-use exoware_sql::{
-    BatchReceipt, BatchWriter, CellValue, IndexSpec, KvSchema, PreparedBatch, TableColumnConfig,
+use commonware_cryptography::{Digest, Digestible};
+use exoware_sdk::{
+    store::simplex::v1::{BlockKind as ProtoBlockKind, CertifiedBlock as ProtoCertifiedBlock},
+    Key, KeyCodec, StoreBatchUpload, StoreClient, StoreWriteBatch,
 };
 use futures::future::BoxFuture;
 
-pub const SIGNED_ACTIVITY_TABLE: &str = "simplex_signed_activity";
-pub const CERTIFICATE_ACTIVITY_TABLE: &str = "simplex_certificate_activity";
-pub const BLOCK_TABLE: &str = "simplex_blocks";
-
-const DIGEST_LEN: i32 = 32;
-const BLOCK_KEY_LEN: i32 = 33;
+const DIGEST_LEN: usize = 32;
+const BLOCK_KEY_LEN: usize = 33;
 const RESERVED_BITS: u8 = 4;
+pub const FINALIZED_BLOCK_HEIGHT_FAMILY: u16 = 12;
+pub const CERTIFIED_BLOCK_VIEW_FAMILY: u16 = 13;
+pub const CERTIFIED_BLOCK_FAMILY: u16 = 14;
 const BLOCK_FAMILY: u16 = 15;
+const FINALIZED_BLOCK_HEIGHT_KEY_CODEC: KeyCodec =
+    KeyCodec::new(RESERVED_BITS, FINALIZED_BLOCK_HEIGHT_FAMILY);
+const CERTIFIED_BLOCK_VIEW_KEY_CODEC: KeyCodec =
+    KeyCodec::new(RESERVED_BITS, CERTIFIED_BLOCK_VIEW_FAMILY);
+const CERTIFIED_BLOCK_KEY_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, CERTIFIED_BLOCK_FAMILY);
 const BLOCK_KEY_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, BLOCK_FAMILY);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ActivityKind {
-    Notarize,
-    Notarization,
-    Certification,
-    Nullify,
-    Nullification,
-    Finalize,
-    Finalization,
-    ConflictingNotarize,
-    ConflictingFinalize,
-    NullifyFinalize,
-}
-
-impl ActivityKind {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Notarize => "notarize",
-            Self::Notarization => "notarization",
-            Self::Certification => "certification",
-            Self::Nullify => "nullify",
-            Self::Nullification => "nullification",
-            Self::Finalize => "finalize",
-            Self::Finalization => "finalization",
-            Self::ConflictingNotarize => "conflicting_notarize",
-            Self::ConflictingFinalize => "conflicting_finalize",
-            Self::NullifyFinalize => "nullify_finalize",
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlockKind {
@@ -66,16 +38,6 @@ impl BlockKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ActivityRecord {
-    pub kind: ActivityKind,
-    pub epoch: u64,
-    pub view: u64,
-    pub signer: Option<u64>,
-    pub proposal_digest: Option<Vec<u8>>,
-    pub encoded_activity: Vec<u8>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockRecord {
     pub kind: BlockKind,
     pub epoch: u64,
@@ -88,15 +50,15 @@ pub struct BlockRecord {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct PendingBlock {
+struct PendingEntry {
     key: Key,
     value: Vec<u8>,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum SimplexError {
-    #[error("sql error: {0}")]
-    Sql(String),
+    #[error("store error: {0}")]
+    Store(String),
     #[error("block digest does not match certificate proposal payload")]
     DigestMismatch,
     #[error("digest length must be {expected}, got {got}")]
@@ -104,9 +66,9 @@ pub enum SimplexError {
 }
 
 fn fixed_digest(bytes: Vec<u8>) -> Result<Vec<u8>, SimplexError> {
-    if bytes.len() != DIGEST_LEN as usize {
+    if bytes.len() != DIGEST_LEN {
         return Err(SimplexError::DigestLength {
-            expected: DIGEST_LEN as usize,
+            expected: DIGEST_LEN,
             got: bytes.len(),
         });
     }
@@ -117,248 +79,130 @@ pub fn block_key(block_digest: &[u8]) -> Result<Key, SimplexError> {
     let digest = fixed_digest(block_digest.to_vec())?;
     BLOCK_KEY_CODEC
         .encode(&digest)
-        .map_err(|e| SimplexError::Sql(e.to_string()))
+        .map_err(|e| SimplexError::Store(e.to_string()))
 }
 
-fn activity_kind<S, D>(activity: &Activity<S, D>) -> ActivityKind
-where
-    S: commonware_cryptography::certificate::Scheme,
-    D: Digest,
-{
-    match activity {
-        Activity::Notarize(_) => ActivityKind::Notarize,
-        Activity::Notarization(_) => ActivityKind::Notarization,
-        Activity::Certification(_) => ActivityKind::Certification,
-        Activity::Nullify(_) => ActivityKind::Nullify,
-        Activity::Nullification(_) => ActivityKind::Nullification,
-        Activity::Finalize(_) => ActivityKind::Finalize,
-        Activity::Finalization(_) => ActivityKind::Finalization,
-        Activity::ConflictingNotarize(_) => ActivityKind::ConflictingNotarize,
-        Activity::ConflictingFinalize(_) => ActivityKind::ConflictingFinalize,
-        Activity::NullifyFinalize(_) => ActivityKind::NullifyFinalize,
+fn block_kind_key_byte(kind: BlockKind) -> u8 {
+    match kind {
+        BlockKind::Notarized => 0,
+        BlockKind::Finalized => 1,
     }
 }
 
-fn activity_signer<S, D>(activity: &Activity<S, D>) -> Option<u64>
-where
-    S: commonware_cryptography::certificate::Scheme,
-    D: Digest,
-{
-    let signer = match activity {
-        Activity::Notarize(v) => v.signer(),
-        Activity::Nullify(v) => v.signer(),
-        Activity::Finalize(v) => v.signer(),
-        Activity::ConflictingNotarize(v) => v.signer(),
-        Activity::ConflictingFinalize(v) => v.signer(),
-        Activity::NullifyFinalize(v) => v.signer(),
-        Activity::Notarization(_)
-        | Activity::Certification(_)
-        | Activity::Nullification(_)
-        | Activity::Finalization(_) => return None,
+fn proto_block_kind(kind: BlockKind) -> ProtoBlockKind {
+    match kind {
+        BlockKind::Notarized => ProtoBlockKind::BLOCK_KIND_NOTARIZED,
+        BlockKind::Finalized => ProtoBlockKind::BLOCK_KIND_FINALIZED,
+    }
+}
+
+pub fn certified_block_key(record: &BlockRecord) -> Result<Key, SimplexError> {
+    let digest = fixed_digest(record.block_digest.clone())?;
+    let mut payload = Vec::with_capacity(1 + 8 + 8 + 8 + digest.len());
+    payload.push(block_kind_key_byte(record.kind));
+    payload.extend_from_slice(&record.epoch.to_be_bytes());
+    payload.extend_from_slice(&record.view.to_be_bytes());
+    payload.extend_from_slice(&record.height.to_be_bytes());
+    payload.extend_from_slice(&digest);
+    CERTIFIED_BLOCK_KEY_CODEC
+        .encode(&payload)
+        .map_err(|e| SimplexError::Store(e.to_string()))
+}
+
+pub fn certified_block_view_key(record: &BlockRecord) -> Result<Key, SimplexError> {
+    let digest = fixed_digest(record.block_digest.clone())?;
+    let mut payload = Vec::with_capacity(1 + 8 + 8 + 8 + digest.len());
+    payload.push(block_kind_key_byte(record.kind));
+    payload.extend_from_slice(&record.epoch.to_be_bytes());
+    payload.extend_from_slice(&record.view.to_be_bytes());
+    payload.extend_from_slice(&record.height.to_be_bytes());
+    payload.extend_from_slice(&digest);
+    CERTIFIED_BLOCK_VIEW_KEY_CODEC
+        .encode(&payload)
+        .map_err(|e| SimplexError::Store(e.to_string()))
+}
+
+pub fn finalized_block_height_key(record: &BlockRecord) -> Result<Option<Key>, SimplexError> {
+    if record.kind != BlockKind::Finalized {
+        return Ok(None);
+    }
+    let digest = fixed_digest(record.block_digest.clone())?;
+    let mut payload = Vec::with_capacity(8 + 8 + 8 + digest.len());
+    payload.extend_from_slice(&record.epoch.to_be_bytes());
+    payload.extend_from_slice(&record.height.to_be_bytes());
+    payload.extend_from_slice(&record.view.to_be_bytes());
+    payload.extend_from_slice(&digest);
+    FINALIZED_BLOCK_HEIGHT_KEY_CODEC
+        .encode(&payload)
+        .map(Some)
+        .map_err(|e| SimplexError::Store(e.to_string()))
+}
+
+fn certified_block_value(record: BlockRecord) -> Result<Vec<u8>, SimplexError> {
+    use buffa::Message;
+
+    let block_digest = fixed_digest(record.block_digest)?;
+    let block_key = if record.block_key.is_empty() {
+        block_key(&block_digest)?.to_vec()
+    } else {
+        record.block_key
     };
-    let signer: usize = signer.into();
-    Some(signer as u64)
-}
-
-fn activity_proposal_digest<S, D>(activity: &Activity<S, D>) -> Option<Vec<u8>>
-where
-    S: commonware_cryptography::certificate::Scheme,
-    D: Digest,
-{
-    let digest = match activity {
-        Activity::Notarize(v) => v.proposal.payload.encode().to_vec(),
-        Activity::Notarization(v) => v.proposal.payload.encode().to_vec(),
-        Activity::Certification(v) => v.proposal.payload.encode().to_vec(),
-        Activity::Finalize(v) => v.proposal.payload.encode().to_vec(),
-        Activity::Finalization(v) => v.proposal.payload.encode().to_vec(),
-        Activity::Nullify(_)
-        | Activity::Nullification(_)
-        | Activity::ConflictingNotarize(_)
-        | Activity::ConflictingFinalize(_)
-        | Activity::NullifyFinalize(_) => return None,
-    };
-    Some(digest)
-}
-
-fn activity_id(kind: ActivityKind, epoch: u64, view: u64, encoded_activity: &[u8]) -> String {
-    format!(
-        "{}:{:020}:{:020}:{}",
-        kind.as_str(),
-        epoch,
-        view,
-        hex::encode(Sha256::hash(encoded_activity))
-    )
-}
-
-pub fn schema(client: StoreClient) -> Result<KvSchema, String> {
-    let digest_type = DataType::FixedSizeBinary(DIGEST_LEN);
-    let block_key_type = DataType::FixedSizeBinary(BLOCK_KEY_LEN);
-    KvSchema::new(client)
-        .table(
-            SIGNED_ACTIVITY_TABLE,
-            vec![
-                TableColumnConfig::new("activity_id", DataType::Utf8, false),
-                TableColumnConfig::new("kind", DataType::Utf8, false),
-                TableColumnConfig::new("epoch", DataType::UInt64, false),
-                TableColumnConfig::new("view", DataType::UInt64, false),
-                TableColumnConfig::new("signer", DataType::UInt64, false),
-                TableColumnConfig::new("proposal_digest", digest_type.clone(), true),
-                TableColumnConfig::new("encoded_activity_hex", DataType::Utf8, false),
-            ],
-            vec!["activity_id".to_string()],
-            vec![
-                IndexSpec::lexicographic(
-                    "signed_activity_kind_view",
-                    vec!["kind".to_string(), "epoch".to_string(), "view".to_string()],
-                )?,
-                IndexSpec::lexicographic(
-                    "signed_activity_signer_view",
-                    vec![
-                        "signer".to_string(),
-                        "epoch".to_string(),
-                        "view".to_string(),
-                    ],
-                )?,
-            ],
-        )?
-        .table(
-            CERTIFICATE_ACTIVITY_TABLE,
-            vec![
-                TableColumnConfig::new("activity_id", DataType::Utf8, false),
-                TableColumnConfig::new("kind", DataType::Utf8, false),
-                TableColumnConfig::new("epoch", DataType::UInt64, false),
-                TableColumnConfig::new("view", DataType::UInt64, false),
-                TableColumnConfig::new("proposal_digest", digest_type.clone(), true),
-                TableColumnConfig::new("encoded_activity_hex", DataType::Utf8, false),
-            ],
-            vec!["activity_id".to_string()],
-            vec![IndexSpec::lexicographic(
-                "certificate_activity_kind_view",
-                vec!["kind".to_string(), "epoch".to_string(), "view".to_string()],
-            )?],
-        )?
-        .table(
-            BLOCK_TABLE,
-            vec![
-                TableColumnConfig::new("block_id", DataType::Utf8, false),
-                TableColumnConfig::new("kind", DataType::Utf8, false),
-                TableColumnConfig::new("epoch", DataType::UInt64, false),
-                TableColumnConfig::new("view", DataType::UInt64, false),
-                TableColumnConfig::new("height", DataType::UInt64, false),
-                TableColumnConfig::new("block_digest", digest_type, false),
-                TableColumnConfig::new("encoded_certificate_hex", DataType::Utf8, false),
-                TableColumnConfig::new("block_key", block_key_type, false),
-                TableColumnConfig::new("block_size", DataType::UInt64, false),
-            ],
-            vec!["block_id".to_string()],
-            vec![
-                IndexSpec::lexicographic(
-                    "blocks_kind_view",
-                    vec!["kind".to_string(), "view".to_string()],
-                )?,
-                IndexSpec::lexicographic("blocks_height", vec!["height".to_string()])?,
-            ],
-        )
+    if block_key.len() != BLOCK_KEY_LEN {
+        return Err(SimplexError::DigestLength {
+            expected: BLOCK_KEY_LEN,
+            got: block_key.len(),
+        });
+    }
+    Ok(ProtoCertifiedBlock {
+        kind: proto_block_kind(record.kind).into(),
+        epoch: record.epoch,
+        view: record.view,
+        height: record.height,
+        block_digest,
+        encoded_certificate: record.encoded_certificate,
+        block_key,
+        block_size: record.block_size,
+        ..Default::default()
+    }
+    .encode_to_vec())
 }
 
 #[derive(Debug)]
-pub struct SimplexWriter {
+pub struct SimplexStoreWriter {
     client: StoreClient,
-    inner: BatchWriter,
-    pending_blocks: Vec<PendingBlock>,
-    failed_prepared: std::sync::Mutex<Vec<PreparedSimplexBatch>>,
+    pending_certificates: Vec<PendingEntry>,
+    pending_indexes: Vec<PendingEntry>,
+    pending_raw_blocks: Vec<PendingEntry>,
+    failed_prepared: std::sync::Mutex<Vec<PreparedSimplexStoreBatch>>,
 }
+
+pub type SimplexWriter = SimplexStoreWriter;
 
 #[derive(Debug)]
 #[must_use]
-pub struct PreparedSimplexBatch {
-    sql: Option<PreparedBatch>,
-    blocks: Vec<PendingBlock>,
+pub struct PreparedSimplexStoreBatch {
+    certificates: Vec<PendingEntry>,
+    indexes: Vec<PendingEntry>,
+    raw_blocks: Vec<PendingEntry>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SimplexReceipt {
-    pub sql: Option<BatchReceipt>,
-    pub block_count: usize,
+pub struct SimplexStoreReceipt {
+    pub certificate_count: usize,
+    pub index_count: usize,
+    pub raw_block_count: usize,
     pub store_sequence_number: u64,
 }
 
-impl SimplexWriter {
-    pub fn new(client: StoreClient) -> Result<Self, String> {
-        Ok(Self {
-            inner: schema(client.clone())?.batch_writer(),
+impl SimplexStoreWriter {
+    pub fn new(client: StoreClient) -> Self {
+        Self {
             client,
-            pending_blocks: Vec::new(),
+            pending_certificates: Vec::new(),
+            pending_indexes: Vec::new(),
+            pending_raw_blocks: Vec::new(),
             failed_prepared: std::sync::Mutex::new(Vec::new()),
-        })
-    }
-
-    pub fn insert_activity<S, D>(
-        &mut self,
-        activity: &Activity<S, D>,
-    ) -> Result<&mut Self, SimplexError>
-    where
-        S: commonware_cryptography::certificate::Scheme,
-        D: Digest,
-        Activity<S, D>: Encode + Epochable + Viewable,
-    {
-        let encoded = activity.encode().to_vec();
-        let record = ActivityRecord {
-            kind: activity_kind(activity),
-            epoch: activity.epoch().get(),
-            view: activity.view().get(),
-            signer: activity_signer(activity),
-            proposal_digest: activity_proposal_digest(activity),
-            encoded_activity: encoded,
-        };
-        self.insert_activity_record(record)
-    }
-
-    pub fn insert_activity_record(
-        &mut self,
-        record: ActivityRecord,
-    ) -> Result<&mut Self, SimplexError> {
-        let digest = record
-            .proposal_digest
-            .map(fixed_digest)
-            .transpose()?
-            .map(CellValue::FixedBinary)
-            .unwrap_or(CellValue::Null);
-        let id = activity_id(
-            record.kind,
-            record.epoch,
-            record.view,
-            &record.encoded_activity,
-        );
-        self.inner
-            .insert(
-                if record.signer.is_some() {
-                    SIGNED_ACTIVITY_TABLE
-                } else {
-                    CERTIFICATE_ACTIVITY_TABLE
-                },
-                match record.signer {
-                    Some(signer) => vec![
-                        CellValue::Utf8(id),
-                        CellValue::Utf8(record.kind.as_str().to_string()),
-                        CellValue::UInt64(record.epoch),
-                        CellValue::UInt64(record.view),
-                        CellValue::UInt64(signer),
-                        digest,
-                        CellValue::Utf8(hex::encode(record.encoded_activity)),
-                    ],
-                    None => vec![
-                        CellValue::Utf8(id),
-                        CellValue::Utf8(record.kind.as_str().to_string()),
-                        CellValue::UInt64(record.epoch),
-                        CellValue::UInt64(record.view),
-                        digest,
-                        CellValue::Utf8(hex::encode(record.encoded_activity)),
-                    ],
-                },
-            )
-            .map_err(SimplexError::Sql)?;
-        Ok(self)
+        }
     }
 
     pub fn insert_notarized<S, D, B>(
@@ -429,65 +273,52 @@ impl SimplexWriter {
         encoded_block: Vec<u8>,
     ) -> Result<Key, SimplexError> {
         let key = block_key(&block_digest)?;
-        self.pending_blocks.push(PendingBlock {
-            key: key.clone(),
-            value: encoded_block,
-        });
+        if !self.pending_raw_blocks.iter().any(|block| block.key == key) {
+            self.pending_raw_blocks.push(PendingEntry {
+                key: key.clone(),
+                value: encoded_block,
+            });
+        }
         Ok(key)
     }
 
     pub fn insert_block_record(&mut self, record: BlockRecord) -> Result<&mut Self, SimplexError> {
-        let block_digest = fixed_digest(record.block_digest)?;
-        let block_key = if record.block_key.is_empty() {
-            block_key(&block_digest)?.to_vec()
-        } else {
-            record.block_key
-        };
-        if block_key.len() != BLOCK_KEY_LEN as usize {
-            return Err(SimplexError::DigestLength {
-                expected: BLOCK_KEY_LEN as usize,
-                got: block_key.len(),
-            });
+        let key = certified_block_key(&record)?;
+        let view_key = certified_block_view_key(&record)?;
+        let height_key = finalized_block_height_key(&record)?;
+        let value = certified_block_value(record)?;
+        self.pending_certificates.push(PendingEntry {
+            key,
+            value: value.clone(),
+        });
+        self.pending_indexes.push(PendingEntry {
+            key: view_key,
+            value: value.clone(),
+        });
+        if let Some(key) = height_key {
+            self.pending_indexes.push(PendingEntry { key, value });
         }
-        let id = format!(
-            "{}:{:020}:{:020}:{}",
-            record.kind.as_str(),
-            record.height,
-            record.view,
-            hex::encode(&block_digest)
-        );
-        self.inner
-            .insert(
-                BLOCK_TABLE,
-                vec![
-                    CellValue::Utf8(id),
-                    CellValue::Utf8(record.kind.as_str().to_string()),
-                    CellValue::UInt64(record.epoch),
-                    CellValue::UInt64(record.view),
-                    CellValue::UInt64(record.height),
-                    CellValue::FixedBinary(block_digest),
-                    CellValue::Utf8(hex::encode(record.encoded_certificate)),
-                    CellValue::FixedBinary(block_key),
-                    CellValue::UInt64(record.block_size),
-                ],
-            )
-            .map_err(SimplexError::Sql)?;
         Ok(self)
     }
 
     pub fn pending_count(&self) -> usize {
-        self.inner.pending_count()
-            + self.pending_blocks.len()
+        self.pending_certificates.len()
+            + self.pending_indexes.len()
+            + self.pending_raw_blocks.len()
             + self
                 .failed_prepared
                 .lock()
                 .expect("failed prepared mutex poisoned")
                 .iter()
-                .map(|prepared| prepared.blocks.len())
+                .map(|prepared| {
+                    prepared.certificates.len() + prepared.indexes.len() + prepared.raw_blocks.len()
+                })
                 .sum::<usize>()
     }
 
-    pub async fn flush_with_receipt(&mut self) -> Result<Option<SimplexReceipt>, SimplexError> {
+    pub async fn flush_with_receipt(
+        &mut self,
+    ) -> Result<Option<SimplexStoreReceipt>, SimplexError> {
         let Some(prepared) = self.prepare_flush()? else {
             return Ok(None);
         };
@@ -504,45 +335,44 @@ impl SimplexWriter {
             .unwrap_or(0))
     }
 
-    pub fn prepare_flush(&mut self) -> Result<Option<PreparedSimplexBatch>, SimplexError> {
+    pub fn prepare_flush(&mut self) -> Result<Option<PreparedSimplexStoreBatch>, SimplexError> {
         if let Some(prepared) = self.take_failed_prepared() {
             return Ok(Some(prepared));
         }
-        let sql = self
-            .inner
-            .prepare_flush()
-            .map_err(|e| SimplexError::Sql(e.to_string()))?;
-        let blocks = std::mem::take(&mut self.pending_blocks);
-        if sql.is_none() && blocks.is_empty() {
+        if self.pending_certificates.is_empty()
+            && self.pending_indexes.is_empty()
+            && self.pending_raw_blocks.is_empty()
+        {
             return Ok(None);
         }
-        Ok(Some(PreparedSimplexBatch { sql, blocks }))
+        Ok(Some(PreparedSimplexStoreBatch {
+            certificates: std::mem::take(&mut self.pending_certificates),
+            indexes: std::mem::take(&mut self.pending_indexes),
+            raw_blocks: std::mem::take(&mut self.pending_raw_blocks),
+        }))
     }
 
     fn mark_persisted(
         &self,
-        prepared: PreparedSimplexBatch,
+        prepared: PreparedSimplexStoreBatch,
         sequence_number: u64,
-    ) -> SimplexReceipt {
-        let block_count = prepared.blocks.len();
-        let sql = prepared
-            .sql
-            .map(|prepared| self.inner.mark_flush_persisted(prepared, sequence_number));
-        SimplexReceipt {
-            sql,
-            block_count,
+    ) -> SimplexStoreReceipt {
+        SimplexStoreReceipt {
+            certificate_count: prepared.certificates.len(),
+            index_count: prepared.indexes.len(),
+            raw_block_count: prepared.raw_blocks.len(),
             store_sequence_number: sequence_number,
         }
     }
 
-    fn mark_failed(&self, prepared: PreparedSimplexBatch) {
+    fn mark_failed(&self, prepared: PreparedSimplexStoreBatch) {
         self.failed_prepared
             .lock()
             .expect("failed prepared mutex poisoned")
             .push(prepared);
     }
 
-    fn take_failed_prepared(&self) -> Option<PreparedSimplexBatch> {
+    fn take_failed_prepared(&self) -> Option<PreparedSimplexStoreBatch> {
         self.failed_prepared
             .lock()
             .expect("failed prepared mutex poisoned")
@@ -550,53 +380,9 @@ impl SimplexWriter {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn schema_builds_sql_server() {
-        let client = StoreClient::new("http://127.0.0.1:0");
-        let schema = schema(client).expect("simplex schema");
-        let _server = exoware_sql::SqlServer::new(schema).expect("sql server");
-    }
-
-    #[test]
-    fn long_signed_activity_uses_short_primary_key() {
-        let client = StoreClient::new("http://127.0.0.1:0");
-        let mut writer = SimplexWriter::new(client).expect("writer");
-        writer
-            .insert_activity_record(ActivityRecord {
-                kind: ActivityKind::Notarize,
-                epoch: 0,
-                view: 1,
-                signer: Some(2),
-                proposal_digest: Some(vec![0; DIGEST_LEN as usize]),
-                encoded_activity: vec![0xAB; 512],
-            })
-            .expect("insert signed activity");
-    }
-
-    #[test]
-    fn long_certificate_activity_uses_short_primary_key() {
-        let client = StoreClient::new("http://127.0.0.1:0");
-        let mut writer = SimplexWriter::new(client).expect("writer");
-        writer
-            .insert_activity_record(ActivityRecord {
-                kind: ActivityKind::Notarization,
-                epoch: 0,
-                view: 1,
-                signer: None,
-                proposal_digest: Some(vec![0; DIGEST_LEN as usize]),
-                encoded_activity: vec![0xCD; 512],
-            })
-            .expect("insert certificate activity");
-    }
-}
-
-impl StoreBatchUpload for SimplexWriter {
-    type Prepared = PreparedSimplexBatch;
-    type Receipt = SimplexReceipt;
+impl StoreBatchUpload for SimplexStoreWriter {
+    type Prepared = PreparedSimplexStoreBatch;
+    type Receipt = SimplexStoreReceipt;
     type Error = SimplexError;
 
     fn stage_upload(
@@ -604,21 +390,21 @@ impl StoreBatchUpload for SimplexWriter {
         prepared: &Self::Prepared,
         batch: &mut StoreWriteBatch,
     ) -> Result<(), Self::Error> {
-        if let Some(sql) = &prepared.sql {
-            self.inner
-                .stage_upload(sql, batch)
-                .map_err(|e| SimplexError::Sql(e.to_string()))?;
-        }
-        for block in &prepared.blocks {
+        for entry in prepared
+            .certificates
+            .iter()
+            .chain(prepared.indexes.iter())
+            .chain(prepared.raw_blocks.iter())
+        {
             batch
-                .push(&self.client, &block.key, &block.value)
-                .map_err(|e| SimplexError::Sql(e.to_string()))?;
+                .push(&self.client, &entry.key, &entry.value)
+                .map_err(|e| SimplexError::Store(e.to_string()))?;
         }
         Ok(())
     }
 
     fn commit_error(&self, error: exoware_sdk::ClientError) -> Self::Error {
-        SimplexError::Sql(error.to_string())
+        SimplexError::Store(error.to_string())
     }
 
     fn mark_upload_persisted<'a>(
@@ -646,5 +432,46 @@ impl StoreBatchUpload for SimplexWriter {
             let _ = error;
             self.mark_failed(prepared);
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn certified_block_record_uses_short_stream_key() {
+        let record = BlockRecord {
+            kind: BlockKind::Finalized,
+            epoch: 1,
+            view: 2,
+            height: 3,
+            block_digest: vec![0x11; DIGEST_LEN],
+            encoded_certificate: vec![0x22; 512],
+            block_key: Vec::new(),
+            block_size: 128,
+        };
+        let key = certified_block_key(&record).expect("certified block key");
+        let view_key = certified_block_view_key(&record).expect("certified block view key");
+        let height_key = finalized_block_height_key(&record)
+            .expect("finalized block height key")
+            .expect("height key");
+        assert!(key.len() <= 64, "unexpected key length {}", key.len());
+        assert!(
+            view_key.len() <= 64,
+            "unexpected view key length {}",
+            view_key.len()
+        );
+        assert!(
+            height_key.len() <= 64,
+            "unexpected height key length {}",
+            height_key.len()
+        );
+
+        let mut writer = SimplexStoreWriter::new(StoreClient::new("http://127.0.0.1:0"));
+        writer
+            .insert_block_record(record)
+            .expect("insert certified block");
+        assert_eq!(writer.pending_count(), 3);
     }
 }

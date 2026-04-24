@@ -32,9 +32,9 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
+    "@bufbuild/protobuf": "^2.11.0",
     "@connectrpc/connect": "2.1.1",
-    "@exowarexyz/sdk": "file:../../sdk-ts",
-    "@exowarexyz/sql": "file:../../sql/ts"
+    "@exowarexyz/sdk": "file:../../sdk-ts"
   },
   "devDependencies": {
     "typescript": "^5.5.3"

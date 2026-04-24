@@ -1,14 +1,10 @@
-use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
-
-use axum::{routing::get, Router};
 use bytes::{Buf, BufMut};
 use clap::{Parser, Subcommand};
 use commonware_codec::{varint::UInt, Encode, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::{
     simplex::{
         scheme::bls12381_threshold::vrf as bls12381_threshold,
-        types::{Activity, Finalization, Finalize, Notarization, Notarize, Proposal},
+        types::{Finalization, Finalize, Notarization, Notarize, Proposal},
     },
     types::{Epoch, Height, Round, View},
     Heightable,
@@ -22,10 +18,8 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Sequential;
 use exoware_sdk::StoreClient;
-use exoware_simplex::{schema, SimplexWriter};
-use exoware_sql::{sql_connect_stack, SqlServer};
+use exoware_simplex::SimplexStoreWriter;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use tower_http::cors::CorsLayer;
 use tracing::info;
 
 type PublicKey = ed25519::PublicKey;
@@ -33,11 +27,7 @@ type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
 type Identity = <MinSig as Variant>::Public;
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "simplex",
-    version,
-    about = "Simplex SQL server and demo seed writer."
-)]
+#[command(name = "simplex", version, about = "Simplex demo seed writer.")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -45,14 +35,6 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    Run {
-        #[arg(long)]
-        store_url: String,
-        #[arg(long, default_value = "0.0.0.0")]
-        host: IpAddr,
-        #[arg(long, default_value_t = 8083)]
-        port: u16,
-    },
     Seed {
         #[arg(long)]
         store_url: String,
@@ -162,36 +144,6 @@ impl EncodeSize for DemoBlock {
     }
 }
 
-async fn health() -> &'static str {
-    "ok"
-}
-
-fn build_server(
-    store_url: &str,
-) -> Result<Arc<SqlServer>, Box<dyn std::error::Error + Send + Sync>> {
-    let client = StoreClient::new(store_url);
-    let server = SqlServer::new(schema(client).map_err(|e| format!("configure schema: {e}"))?)?;
-    Ok(Arc::new(server))
-}
-
-async fn run(
-    store_url: &str,
-    host: IpAddr,
-    port: u16,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let server = build_server(store_url)?;
-    let app = Router::new()
-        .route("/health", get(health))
-        .fallback_service(sql_connect_stack(server))
-        .layer(CorsLayer::very_permissive());
-
-    let addr = SocketAddr::from((host, port));
-    info!(%addr, store_url, "simplex sql server listening");
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
-    Ok(())
-}
-
 fn generated_namespace() -> String {
     format!("simplex-demo-{:016x}", rand::thread_rng().next_u64())
 }
@@ -210,7 +162,7 @@ async fn seed(
     namespace: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client = StoreClient::new(store_url);
-    let mut writer = SimplexWriter::new(client)?;
+    let mut writer = SimplexStoreWriter::new(client);
     let namespace = namespace.unwrap_or_else(generated_namespace);
     let (schemes, identity) = committee(rng_seed, namespace.as_bytes());
 
@@ -246,34 +198,28 @@ async fn seed(
             .iter()
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).expect("sign notarize"))
             .collect();
-        for vote in &notarizes {
-            writer.insert_activity(&Activity::Notarize(vote.clone()))?;
-        }
         let notarization =
             Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).expect("notarize");
-        writer.insert_activity(&Activity::Notarization(notarization.clone()))?;
         writer.insert_notarized(&notarization, &block)?;
 
         let finalizes: Vec<_> = schemes
             .iter()
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("sign finalize"))
             .collect();
-        for vote in &finalizes {
-            writer.insert_activity(&Activity::Finalize(vote.clone()))?;
-        }
         let finalization =
             Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).expect("finalize");
-        writer.insert_activity(&Activity::Finalization(finalization.clone()))?;
         writer.insert_finalized(&finalization, &block)?;
 
         if let Some(receipt) = writer.flush_with_receipt().await? {
             println!(
-                "sequence={} height={} view={} digest=0x{} blocks={}",
+                "sequence={} height={} view={} digest=0x{} certificates={} indexes={} raw_blocks={}",
                 receipt.store_sequence_number,
                 height,
                 block.view.get(),
                 hex::encode(block.digest()),
-                receipt.block_count
+                receipt.certificate_count,
+                receipt.index_count,
+                receipt.raw_block_count
             );
         }
 
@@ -299,11 +245,6 @@ async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Command::Run {
-            store_url,
-            host,
-            port,
-        } => run(&store_url, host, port).await,
         Command::Seed {
             store_url,
             interval_secs,

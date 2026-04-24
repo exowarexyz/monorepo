@@ -2554,22 +2554,19 @@ dependencies = [
 name = "exoware-simplex"
 version = "2026.4.1"
 dependencies = [
- "axum",
+ "buffa",
  "bytes",
  "clap",
  "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
  "commonware-parallel",
- "datafusion",
  "exoware-sdk",
- "exoware-sql",
  "futures",
  "hex",
  "rand 0.8.5",
  "thiserror 2.0.18",
  "tokio",
- "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
 ]

@@ -14,7 +14,7 @@ export const file_store_v1_simplex: GenFile = /*@__PURE__*/
   fileDesc("ChZzdG9yZS92MS9zaW1wbGV4LnByb3RvEhBzdG9yZS5zaW1wbGV4LnYxIsoBCg5TaWduZWRBY3Rpdml0eRI2CgRraW5kGAEgASgOMh4uc3RvcmUuc2ltcGxleC52MS5BY3Rpdml0eUtpbmRCCLpIBYIBAhABEg0KBWVwb2NoGAIgASgEEgwKBHZpZXcYAyABKAQSDgoGc2lnbmVyGAQgASgEEhwKD3Byb3Bvc2FsX2RpZ2VzdBgFIAEoDEgAiAEBEiEKEGVuY29kZWRfYWN0aXZpdHkYBiABKAxCB7pIBHoCEAFCEgoQX3Byb3Bvc2FsX2RpZ2VzdCK/AQoTQ2VydGlmaWNhdGVBY3Rpdml0eRI2CgRraW5kGAEgASgOMh4uc3RvcmUuc2ltcGxleC52MS5BY3Rpdml0eUtpbmRCCLpIBYIBAhABEg0KBWVwb2NoGAIgASgEEgwKBHZpZXcYAyABKAQSHAoPcHJvcG9zYWxfZGlnZXN0GAQgASgMSACIAQESIQoQZW5jb2RlZF9hY3Rpdml0eRgFIAEoDEIHukgEegIQAUISChBfcHJvcG9zYWxfZGlnZXN0IoMBCghBY3Rpdml0eRIyCgZzaWduZWQYASABKAsyIC5zdG9yZS5zaW1wbGV4LnYxLlNpZ25lZEFjdGl2aXR5SAASPAoLY2VydGlmaWNhdGUYAiABKAsyJS5zdG9yZS5zaW1wbGV4LnYxLkNlcnRpZmljYXRlQWN0aXZpdHlIAEIFCgNyb3ci5wEKDkNlcnRpZmllZEJsb2NrEjMKBGtpbmQYASABKA4yGy5zdG9yZS5zaW1wbGV4LnYxLkJsb2NrS2luZEIIukgFggECEAESDQoFZXBvY2gYAiABKAQSDAoEdmlldxgDIAEoBBIOCgZoZWlnaHQYBCABKAQSHQoMYmxvY2tfZGlnZXN0GAUgASgMQge6SAR6AhABEiQKE2VuY29kZWRfY2VydGlmaWNhdGUYBiABKAxCB7pIBHoCEAESGgoJYmxvY2tfa2V5GAcgASgMQge6SAR6AhABEhIKCmJsb2NrX3NpemUYCCABKAQq9gIKDEFjdGl2aXR5S2luZBIdChlBQ1RJVklUWV9LSU5EX1VOU1BFQ0lGSUVEEAASGgoWQUNUSVZJVFlfS0lORF9OT1RBUklaRRABEh4KGkFDVElWSVRZX0tJTkRfTk9UQVJJWkFUSU9OEAISHwobQUNUSVZJVFlfS0lORF9DRVJUSUZJQ0FUSU9OEAMSGQoVQUNUSVZJVFlfS0lORF9OVUxMSUZZEAQSHwobQUNUSVZJVFlfS0lORF9OVUxMSUZJQ0FUSU9OEAUSGgoWQUNUSVZJVFlfS0lORF9GSU5BTElaRRAGEh4KGkFDVElWSVRZX0tJTkRfRklOQUxJWkFUSU9OEAcSJgoiQUNUSVZJVFlfS0lORF9DT05GTElDVElOR19OT1RBUklaRRAIEiYKIkFDVElWSVRZX0tJTkRfQ09ORkxJQ1RJTkdfRklOQUxJWkUQCRIiCh5BQ1RJVklUWV9LSU5EX05VTExJRllfRklOQUxJWkUQCipbCglCbG9ja0tpbmQSGgoWQkxPQ0tfS0lORF9VTlNQRUNJRklFRBAAEhgKFEJMT0NLX0tJTkRfTk9UQVJJWkVEEAESGAoUQkxPQ0tfS0lORF9GSU5BTElaRUQQAmIGcHJvdG8z", [file_buf_validate_validate]);
 
 /**
- * Decoded view of a signed Simplex activity row from `simplex_signed_activity`.
+ * Decoded view of a signed Simplex activity record.
  * The encoded activity bytes are Commonware's native codec bytes for
  * `simplex::types::Activity<S, D>`.
  *
@@ -60,8 +60,7 @@ export const SignedActivitySchema: GenMessage<SignedActivity> = /*@__PURE__*/
   messageDesc(file_store_v1_simplex, 0);
 
 /**
- * Decoded view of a certificate Simplex activity row from
- * `simplex_certificate_activity`.
+ * Decoded view of a certificate Simplex activity record.
  *
  * @generated from message store.simplex.v1.CertificateActivity
  */
@@ -100,7 +99,7 @@ export const CertificateActivitySchema: GenMessage<CertificateActivity> = /*@__P
   messageDesc(file_store_v1_simplex, 1);
 
 /**
- * Decoded view of any stored Simplex activity row.
+ * Decoded view of any stored Simplex activity record.
  *
  * @generated from message store.simplex.v1.Activity
  */
@@ -131,10 +130,11 @@ export const ActivitySchema: GenMessage<Activity> = /*@__PURE__*/
   messageDesc(file_store_v1_simplex, 2);
 
 /**
- * Decoded view of a stored notarized/finalized certificate row. The certificate
- * bytes are Commonware's native codec bytes for either `Notarization<S, D>` or
- * `Finalization<S, D>` depending on `kind`. `block_key` points at the raw Store
- * KV value containing the native-encoded block bytes.
+ * Decoded view of a stored notarized/finalized certified block record. The
+ * certificate bytes are Commonware's native codec bytes for either
+ * `Notarization<S, D>` or `Finalization<S, D>` depending on `kind`.
+ * `block_key` points at the raw Store KV value containing the native-encoded
+ * block bytes.
  *
  * @generated from message store.simplex.v1.CertifiedBlock
  */
@@ -256,7 +256,7 @@ export const ActivityKindSchema: GenEnum<ActivityKind> = /*@__PURE__*/
   enumDesc(file_store_v1_simplex, 0);
 
 /**
- * Stable labels for certificate/block rows.
+ * Stable labels for certificate/block records.
  *
  * @generated from enum store.simplex.v1.BlockKind
  */

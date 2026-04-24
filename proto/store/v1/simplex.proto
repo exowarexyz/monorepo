@@ -19,14 +19,14 @@ enum ActivityKind {
   ACTIVITY_KIND_NULLIFY_FINALIZE = 10;
 }
 
-// Stable labels for certificate/block rows.
+// Stable labels for certificate/block records.
 enum BlockKind {
   BLOCK_KIND_UNSPECIFIED = 0;
   BLOCK_KIND_NOTARIZED = 1;
   BLOCK_KIND_FINALIZED = 2;
 }
 
-// Decoded view of a signed Simplex activity row from `simplex_signed_activity`.
+// Decoded view of a signed Simplex activity record.
 // The encoded activity bytes are Commonware's native codec bytes for
 // `simplex::types::Activity<S, D>`.
 message SignedActivity {
@@ -38,8 +38,7 @@ message SignedActivity {
   bytes encoded_activity = 6 [(buf.validate.field).bytes.min_len = 1];
 }
 
-// Decoded view of a certificate Simplex activity row from
-// `simplex_certificate_activity`.
+// Decoded view of a certificate Simplex activity record.
 message CertificateActivity {
   ActivityKind kind = 1 [(buf.validate.field).enum.defined_only = true];
   uint64 epoch = 2;
@@ -48,7 +47,7 @@ message CertificateActivity {
   bytes encoded_activity = 5 [(buf.validate.field).bytes.min_len = 1];
 }
 
-// Decoded view of any stored Simplex activity row.
+// Decoded view of any stored Simplex activity record.
 message Activity {
   oneof row {
     SignedActivity signed = 1;
@@ -56,10 +55,11 @@ message Activity {
   }
 }
 
-// Decoded view of a stored notarized/finalized certificate row. The certificate
-// bytes are Commonware's native codec bytes for either `Notarization<S, D>` or
-// `Finalization<S, D>` depending on `kind`. `block_key` points at the raw Store
-// KV value containing the native-encoded block bytes.
+// Decoded view of a stored notarized/finalized certified block record. The
+// certificate bytes are Commonware's native codec bytes for either
+// `Notarization<S, D>` or `Finalization<S, D>` depending on `kind`.
+// `block_key` points at the raw Store KV value containing the native-encoded
+// block bytes.
 message CertifiedBlock {
   BlockKind kind = 1 [(buf.validate.field).enum.defined_only = true];
   uint64 epoch = 2;

@@ -190,7 +190,7 @@ impl ::buffa::Enumeration for ActivityKind {
         }
     }
 }
-/// Stable labels for certificate/block rows.
+/// Stable labels for certificate/block records.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[repr(i32)]
 pub enum BlockKind {
@@ -323,7 +323,7 @@ impl ::buffa::Enumeration for BlockKind {
         }
     }
 }
-/// Decoded view of a signed Simplex activity row from `simplex_signed_activity`.
+/// Decoded view of a signed Simplex activity record.
 /// The encoded activity bytes are Commonware's native codec bytes for
 /// `simplex::types::Activity<S, D>`.
 #[derive(Clone, PartialEq, Default)]
@@ -613,7 +613,7 @@ pub const __SIGNED_ACTIVITY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::b
     from_json: ::buffa::type_registry::any_from_json::<SignedActivity>,
     is_wkt: false,
 };
-/// Decoded view of a signed Simplex activity row from `simplex_signed_activity`.
+/// Decoded view of a signed Simplex activity record.
 /// The encoded activity bytes are Commonware's native codec bytes for
 /// `simplex::types::Activity<S, D>`.
 #[derive(Clone, Debug, Default)]
@@ -783,8 +783,7 @@ unsafe impl ::buffa::DefaultViewInstance for SignedActivityView<'static> {
 unsafe impl<'a> ::buffa::HasDefaultViewInstance for SignedActivityView<'a> {
     type Static = SignedActivityView<'static>;
 }
-/// Decoded view of a certificate Simplex activity row from
-/// `simplex_certificate_activity`.
+/// Decoded view of a certificate Simplex activity record.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
@@ -1045,8 +1044,7 @@ pub const __CERTIFICATE_ACTIVITY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry 
     from_json: ::buffa::type_registry::any_from_json::<CertificateActivity>,
     is_wkt: false,
 };
-/// Decoded view of a certificate Simplex activity row from
-/// `simplex_certificate_activity`.
+/// Decoded view of a certificate Simplex activity record.
 #[derive(Clone, Debug, Default)]
 pub struct CertificateActivityView<'a> {
     /// Field 1: `kind`
@@ -1201,7 +1199,7 @@ unsafe impl ::buffa::DefaultViewInstance for CertificateActivityView<'static> {
 unsafe impl<'a> ::buffa::HasDefaultViewInstance for CertificateActivityView<'a> {
     type Static = CertificateActivityView<'static>;
 }
-/// Decoded view of any stored Simplex activity row.
+/// Decoded view of any stored Simplex activity record.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize)]
 #[serde(default)]
@@ -1471,7 +1469,7 @@ pub const __ACTIVITY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::t
     from_json: ::buffa::type_registry::any_from_json::<Activity>,
     is_wkt: false,
 };
-/// Decoded view of any stored Simplex activity row.
+/// Decoded view of any stored Simplex activity record.
 #[derive(Clone, Debug, Default)]
 pub struct ActivityView<'a> {
     pub row: ::core::option::Option<activity::RowView<'a>>,
@@ -1678,10 +1676,11 @@ pub mod activity {
         Certificate(::buffa::alloc::boxed::Box<super::CertificateActivityView<'a>>),
     }
 }
-/// Decoded view of a stored notarized/finalized certificate row. The certificate
-/// bytes are Commonware's native codec bytes for either `Notarization<S, D>` or
-/// `Finalization<S, D>` depending on `kind`. `block_key` points at the raw Store
-/// KV value containing the native-encoded block bytes.
+/// Decoded view of a stored notarized/finalized certified block record. The
+/// certificate bytes are Commonware's native codec bytes for either
+/// `Notarization<S, D>` or `Finalization<S, D>` depending on `kind`.
+/// `block_key` points at the raw Store KV value containing the native-encoded
+/// block bytes.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
@@ -2024,10 +2023,11 @@ pub const __CERTIFIED_BLOCK_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::b
     from_json: ::buffa::type_registry::any_from_json::<CertifiedBlock>,
     is_wkt: false,
 };
-/// Decoded view of a stored notarized/finalized certificate row. The certificate
-/// bytes are Commonware's native codec bytes for either `Notarization<S, D>` or
-/// `Finalization<S, D>` depending on `kind`. `block_key` points at the raw Store
-/// KV value containing the native-encoded block bytes.
+/// Decoded view of a stored notarized/finalized certified block record. The
+/// certificate bytes are Commonware's native codec bytes for either
+/// `Notarization<S, D>` or `Finalization<S, D>` depending on `kind`.
+/// `block_key` points at the raw Store KV value containing the native-encoded
+/// block bytes.
 #[derive(Clone, Debug, Default)]
 pub struct CertifiedBlockView<'a> {
     /// Field 1: `kind`

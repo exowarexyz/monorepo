@@ -3,7 +3,7 @@ name = "exoware-simplex"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Simplex consensus activity and certificate storage backed by Exoware SQL."
+description = "Simplex consensus certificate and block streaming backed by Exoware Store."
 readme = "README.md"
 homepage.workspace = true
 repository = "https://github.com/exowarexyz/monorepo/tree/main/simplex"
@@ -14,21 +14,18 @@ name = "simplex"
 path = "src/bin/simplex.rs"
 
 [dependencies]
-axum = { workspace = true }
+buffa = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 commonware-codec = { workspace = true }
 commonware-consensus = { workspace = true, features = ["mocks"] }
 commonware-cryptography = { workspace = true, features = ["mocks"] }
 commonware-parallel = "2026.3.0"
-datafusion = "52.2.0"
 exoware-sdk = { workspace = true }
-exoware-sql = { workspace = true }
 futures = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tower-http = { workspace = true, features = ["cors"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }

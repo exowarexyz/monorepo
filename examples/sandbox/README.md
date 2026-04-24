@@ -43,9 +43,9 @@ Explore the Exoware API.
   proofs and live subscribe streaming.
 - **SQL** (optional, requires `VITE_SQL_URL`): run ad-hoc SQL queries and
   subscribe to a SQL WHERE predicate evaluated per ingested batch.
-- **Simplex** (optional, requires `VITE_SIMPLEX_SQL_URL` and
-  `VITE_SIMPLEX_STORE_URL`): stream notarized or finalized blocks, fetch raw
-  blocks from KV, and verify certificates in WASM.
+- **Simplex** (optional, requires `VITE_SIMPLEX_STORE_URL` or
+  `VITE_SIMULATOR_URL`): stream notarized or finalized blocks, fetch raw blocks
+  from KV, and verify certificates in WASM.
 
 ## Store namespace
 
@@ -151,51 +151,41 @@ In addition to the simulator running above:
 
 ## Simplex panel
 
-The Simplex panel is only rendered when both `VITE_SIMPLEX_SQL_URL` and
-`VITE_SIMPLEX_STORE_URL` are set. It reads certificate metadata from the
-Simplex SQL server, fetches the block at the row's `block_key` from raw Store
-KV, then verifies the notarization/finalization certificate against the row's
-`block_digest` before emitting it to the UI.
-
-The Simplex SQL server registers `simplex_signed_activity` for signer-indexed
-votes and evidence, `simplex_certificate_activity` for certificate activity,
-and `simplex_blocks` for notarized/finalized block rows.
+The Simplex panel is only rendered when `VITE_SIMPLEX_STORE_URL` is set. It
+subscribes to Store entries containing `store.simplex.v1.CertifiedBlock`
+records, fetches the block at the record's `block_key` from raw Store KV, then
+verifies the notarization/finalization certificate against the record's
+`block_digest` before emitting it to the UI. The Simplex Store writer also
+publishes view-indexed certified block records and height-indexed finalized
+block records for direct lookups from TypeScript.
 
 In addition to the simulator running above:
 
-1. **Start the Simplex SQL server** on port 8083
-
-```bash
-cargo run --package exoware-simplex --bin simplex -- \
-  run --store-url http://127.0.0.1:8080 --port 8083
-```
-
-2. **Seed Simplex activity and certified blocks** (keeps running). The seed
+1. **Seed Simplex certified blocks** (keeps running). The seed
    command prints the committee identity and generated namespace to paste into
    the UI or export as `VITE_SIMPLEX_IDENTITY` and `VITE_SIMPLEX_NAMESPACE`.
 
-```bash
-cargo run --package exoware-simplex --bin simplex -- \
-  seed --store-url http://127.0.0.1:8080 --interval-secs 2
-```
+   ```bash
+   cargo run --package exoware-simplex --bin simplex -- \
+     seed --store-url http://127.0.0.1:8080 --interval-secs 2
+   ```
 
 Each seed run starts with:
 
-```text
-simplex_identity=0x...
-simplex_namespace=simplex-demo-...
-```
+   ```text
+   simplex_identity=0x...
+   simplex_namespace=simplex-demo-...
+   ```
 
-3. **Point the web app at the Simplex SQL server and Store server**:
+2. **Point the web app at the Store server**:
 
-```bash
-VITE_SIMPLEX_SQL_URL=http://127.0.0.1:8083 \
-VITE_SIMPLEX_STORE_URL=http://127.0.0.1:8080 \
-VITE_SIMPLEX_IDENTITY=0x... \
-VITE_SIMPLEX_NAMESPACE=simplex-demo-... \
-npm run dev
-```
+   ```bash
+   VITE_SIMPLEX_STORE_URL=http://127.0.0.1:8080 \
+   VITE_SIMPLEX_IDENTITY=0x... \
+   VITE_SIMPLEX_NAMESPACE=simplex-demo-... \
+   npm run dev
+   ```
 
 Both `VITE_SIMPLEX_IDENTITY` and `VITE_SIMPLEX_NAMESPACE` can also be pasted
-into the panel directly. `VITE_SIMPLEX_URL` is still accepted as a shorthand
-only when Store and SQL are served from the same base URL.
+into the panel directly. `VITE_SIMULATOR_URL` or `VITE_SIMPLEX_URL` can also
+provide the Store URL when `VITE_SIMPLEX_STORE_URL` is not set.

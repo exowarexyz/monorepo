@@ -1,13 +1,15 @@
+import { fromBinary } from '@bufbuild/protobuf';
 import type { CallOptions } from '@connectrpc/connect';
 import {
   Client,
+  SimplexBlockKind,
+  SimplexCertifiedBlockSchema,
   StoreClient,
+  StoreKeyPrefix,
+  TraversalMode,
   type ClientOptions as SdkClientOptions,
+  type SimplexCertifiedBlock,
 } from '@exowarexyz/sdk';
-import {
-  SqlClient,
-  type DecodedRow,
-} from '@exowarexyz/sql';
 import initWasm, {
   verify_certified_block,
 } from './generated/wasm/exoware_simplex_wasm.js';
@@ -20,7 +22,6 @@ export interface WasmCertifiedBlockVerifierOptions {
 }
 
 export interface SimplexClientOptions extends SdkClientOptions {
-  sqlUrl?: string;
   storeUrl?: string;
   verifier?: CertifiedBlockVerifier;
   identity?: BytesLike;
@@ -36,6 +37,7 @@ export interface CertifiedBlockFrame {
   blockDigest: Uint8Array;
   encodedCertificate: Uint8Array;
   blockKey: Uint8Array;
+  blockSize: bigint;
   encodedBlock: Uint8Array;
 }
 
@@ -48,7 +50,35 @@ export interface SimplexSubscribeRequest {
   sinceSequenceNumber?: bigint;
 }
 
+export interface SimplexLookupOptions {
+  epoch?: bigint;
+  verifier?: CertifiedBlockVerifier;
+}
+
 const DEFAULT_NAMESPACE = new TextEncoder().encode('_ALTO');
+export const SIMPLEX_CERTIFIED_BLOCK_RESERVED_BITS = 4;
+export const SIMPLEX_FINALIZED_BLOCK_HEIGHT_FAMILY = 12;
+export const SIMPLEX_CERTIFIED_BLOCK_VIEW_FAMILY = 13;
+export const SIMPLEX_CERTIFIED_BLOCK_FAMILY = 14;
+export const SIMPLEX_RAW_BLOCK_FAMILY = 15;
+const FINALIZED_BLOCK_HEIGHT_PREFIX = new StoreKeyPrefix(
+  SIMPLEX_CERTIFIED_BLOCK_RESERVED_BITS,
+  SIMPLEX_FINALIZED_BLOCK_HEIGHT_FAMILY,
+);
+const CERTIFIED_BLOCK_VIEW_PREFIX = new StoreKeyPrefix(
+  SIMPLEX_CERTIFIED_BLOCK_RESERVED_BITS,
+  SIMPLEX_CERTIFIED_BLOCK_VIEW_FAMILY,
+);
+const CERTIFIED_BLOCK_PREFIX = new StoreKeyPrefix(
+  SIMPLEX_CERTIFIED_BLOCK_RESERVED_BITS,
+  SIMPLEX_CERTIFIED_BLOCK_FAMILY,
+);
+const RAW_BLOCK_PREFIX = new StoreKeyPrefix(
+  SIMPLEX_CERTIFIED_BLOCK_RESERVED_BITS,
+  SIMPLEX_RAW_BLOCK_FAMILY,
+);
+const STREAM_PAYLOAD_REGEX = '(?s-u).*';
+const U64_MAX = (1n << 64n) - 1n;
 let wasmReady: Promise<unknown> | undefined;
 
 function ensureWasm(): Promise<unknown> {
@@ -89,7 +119,6 @@ function identityToBytes(value: BytesLike): Uint8Array {
 
 function sdkOptions(options: SimplexClientOptions): SdkClientOptions {
   const {
-    sqlUrl: _sqlUrl,
     storeUrl: _storeUrl,
     verifier: _verifier,
     identity: _identity,
@@ -116,59 +145,143 @@ export function wasmCertifiedBlockVerifier(
   };
 }
 
-function requireBigInt(row: DecodedRow, column: string): bigint {
-  const value = row.values[column];
-  if (typeof value !== 'bigint') {
-    throw new Error(`simplex row column ${column} must be bigint`);
+function frameKindFromProto(kind: SimplexBlockKind): CertifiedBlockFrame['kind'] {
+  switch (kind) {
+    case SimplexBlockKind.NOTARIZED:
+      return 'notarized';
+    case SimplexBlockKind.FINALIZED:
+      return 'finalized';
+    default:
+      throw new Error(`unexpected simplex block kind ${kind}`);
   }
-  return value;
 }
 
-function requireString(row: DecodedRow, column: string): string {
-  const value = row.values[column];
-  if (typeof value !== 'string') {
-    throw new Error(`simplex row column ${column} must be string`);
-  }
-  return value;
+function keyByteForFrameKind(kind: CertifiedBlockFrame['kind']): number {
+  return kind === 'notarized' ? 0 : 1;
 }
 
-function requireBytes(row: DecodedRow, column: string): Uint8Array {
-  const value = row.values[column];
-  if (!(value instanceof Uint8Array)) {
-    throw new Error(`simplex row column ${column} must be bytes`);
+function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.byteLength !== right.byteLength) {
+    return false;
   }
-  return value;
+  for (let i = 0; i < left.byteLength; i++) {
+    if (left[i] !== right[i]) {
+      return false;
+    }
+  }
+  return true;
 }
 
-function certifiedBlockFromRow(row: DecodedRow): Omit<CertifiedBlockFrame, 'sequenceNumber'> {
-  const kind = requireString(row, 'kind');
-  if (kind !== 'notarized' && kind !== 'finalized') {
-    throw new Error(`unexpected simplex block kind ${kind}`);
+function u64Bytes(value: bigint, label: string): Uint8Array {
+  if (value < 0n || value > U64_MAX) {
+    throw new RangeError(`${label} must fit in uint64`);
   }
+  const out = new Uint8Array(8);
+  for (let i = 7; i >= 0; i--) {
+    out[i] = Number(value & 0xffn);
+    value >>= 8n;
+  }
+  return out;
+}
+
+function concatBytes(...parts: Uint8Array[]): Uint8Array {
+  const len = parts.reduce((sum, part) => sum + part.byteLength, 0);
+  const out = new Uint8Array(len);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.byteLength;
+  }
+  return out;
+}
+
+function incrementBytes(value: Uint8Array): Uint8Array | undefined {
+  const out = new Uint8Array(value);
+  for (let i = out.byteLength - 1; i >= 0; i--) {
+    if (out[i] !== 0xff) {
+      out[i] += 1;
+      out.fill(0, i + 1);
+      return out;
+    }
+  }
+  return undefined;
+}
+
+function exactPrefixRange(
+  prefix: StoreKeyPrefix,
+  payloadPrefix: Uint8Array,
+): { start: Uint8Array; end: Uint8Array } {
+  const end = incrementBytes(payloadPrefix);
+  if (!end) {
+    throw new RangeError('lookup prefix upper bound overflow');
+  }
+  return prefix.encodeRange(payloadPrefix, end);
+}
+
+function expectedBlockKey(blockDigest: Uint8Array): Uint8Array {
+  return RAW_BLOCK_PREFIX.encodeKey(blockDigest);
+}
+
+function certifiedBlockFromValue(value: Uint8Array): Omit<CertifiedBlockFrame, 'sequenceNumber'> {
+  const decoded = fromBinary(
+    SimplexCertifiedBlockSchema as unknown as Parameters<typeof fromBinary>[0],
+    value,
+  ) as SimplexCertifiedBlock;
   return {
-    kind,
-    epoch: requireBigInt(row, 'epoch'),
-    view: requireBigInt(row, 'view'),
-    height: requireBigInt(row, 'height'),
-    blockDigest: requireBytes(row, 'block_digest'),
-    encodedCertificate: hexToBytes(requireString(row, 'encoded_certificate_hex')),
-    blockKey: requireBytes(row, 'block_key'),
+    kind: frameKindFromProto(decoded.kind),
+    epoch: decoded.epoch,
+    view: decoded.view,
+    height: decoded.height,
+    blockDigest: decoded.blockDigest,
+    encodedCertificate: decoded.encodedCertificate,
+    blockKey: decoded.blockKey,
+    blockSize: decoded.blockSize,
     encodedBlock: new Uint8Array(),
   };
 }
 
-function whereFor(request: SimplexSubscribeRequest): string {
-  return request.kind ? `kind = '${request.kind}'` : '';
+function certifiedBlockRange(
+  kind?: CertifiedBlockFrame['kind'],
+): { start: Uint8Array; end: Uint8Array } {
+  if (!kind) {
+    return CERTIFIED_BLOCK_PREFIX.prefixBounds();
+  }
+  const start = new Uint8Array([keyByteForFrameKind(kind)]);
+  const end = new Uint8Array([keyByteForFrameKind(kind) + 1]);
+  return CERTIFIED_BLOCK_PREFIX.encodeRange(start, end);
+}
+
+function certifiedBlockViewRange(
+  kind: CertifiedBlockFrame['kind'],
+  epoch: bigint,
+  view: bigint,
+): { start: Uint8Array; end: Uint8Array } {
+  return exactPrefixRange(
+    CERTIFIED_BLOCK_VIEW_PREFIX,
+    concatBytes(
+      new Uint8Array([keyByteForFrameKind(kind)]),
+      u64Bytes(epoch, 'epoch'),
+      u64Bytes(view, 'view'),
+    ),
+  );
+}
+
+function finalizedBlockHeightRange(
+  epoch: bigint,
+  height: bigint,
+): { start: Uint8Array; end: Uint8Array } {
+  return exactPrefixRange(
+    FINALIZED_BLOCK_HEIGHT_PREFIX,
+    concatBytes(u64Bytes(epoch, 'epoch'), u64Bytes(height, 'height')),
+  );
 }
 
 export class SimplexClient {
-  private readonly sql: SqlClient;
   private readonly store: StoreClient;
   private readonly verifier?: CertifiedBlockVerifier;
 
   constructor(baseUrl: string, options: SimplexClientOptions = {}) {
     const sdk = sdkOptions(options);
-    this.sql = new SqlClient(options.sqlUrl ?? baseUrl, sdk);
     this.store = new Client(options.storeUrl ?? baseUrl, sdk).store();
     this.verifier = options.verifier ?? (
       options.identity
@@ -180,6 +293,64 @@ export class SimplexClient {
     );
   }
 
+  async health(): Promise<boolean> {
+    await this.store.query(undefined, undefined, 1);
+    return true;
+  }
+
+  private async hydrateAndVerify(
+    partial: Omit<CertifiedBlockFrame, 'sequenceNumber'>,
+    sequenceNumber: bigint,
+    verifier: CertifiedBlockVerifier,
+  ): Promise<CertifiedBlockFrame> {
+    const expectedKey = expectedBlockKey(partial.blockDigest);
+    if (!bytesEqual(partial.blockKey, expectedKey)) {
+      throw new Error(
+        `simplex block key ${bytesToHex(partial.blockKey)} does not match digest ${bytesToHex(partial.blockDigest)}`,
+      );
+    }
+    const block = await this.store.get(
+      partial.blockKey,
+      sequenceNumber > 0n ? sequenceNumber : undefined,
+    );
+    if (!block) {
+      throw new Error(
+        `simplex block ${bytesToHex(partial.blockDigest)} missing at ${bytesToHex(partial.blockKey)}`,
+      );
+    }
+    const candidate = {
+      ...partial,
+      encodedBlock: block.value,
+    };
+    if (!(await verifier(candidate))) {
+      throw new Error(
+        `simplex ${candidate.kind} certificate failed verification for block ${bytesToHex(candidate.blockDigest)}`,
+      );
+    }
+    return {
+      sequenceNumber,
+      ...candidate,
+    };
+  }
+
+  private async queryOneCertifiedBlock(
+    range: { start: Uint8Array; end: Uint8Array },
+    verifier: CertifiedBlockVerifier,
+  ): Promise<CertifiedBlockFrame | undefined> {
+    const result = await this.store.query(
+      range.start,
+      range.end,
+      1,
+      4096,
+      TraversalMode.REVERSE,
+    );
+    const item = result.results[0];
+    if (!item) {
+      return undefined;
+    }
+    return this.hydrateAndVerify(certifiedBlockFromValue(item.value), 0n, verifier);
+  }
+
   async *subscribeCertifiedBlocks(
     request: SimplexSubscribeRequest,
     verifier?: CertifiedBlockVerifier,
@@ -189,37 +360,27 @@ export class SimplexClient {
     if (!resolvedVerifier) {
       throw new Error('simplex certificate verifier is required');
     }
-    const stream = this.sql.subscribe(
+    const stream = this.store.subscribe(
       {
-        table: 'simplex_blocks',
-        whereSql: whereFor(request),
+        matchKeys: [
+          {
+            reservedBits: SIMPLEX_CERTIFIED_BLOCK_RESERVED_BITS,
+            prefix: SIMPLEX_CERTIFIED_BLOCK_FAMILY,
+            payloadRegex: STREAM_PAYLOAD_REGEX,
+          },
+        ],
         sinceSequenceNumber: request.sinceSequenceNumber,
       },
       options,
     );
 
-    for await (const frame of stream) {
-      for (const row of frame.rows) {
-        const partial = certifiedBlockFromRow(row);
-        const block = await this.store.get(partial.blockKey, frame.sequenceNumber);
-        if (!block) {
-          throw new Error(
-            `simplex block ${bytesToHex(partial.blockDigest)} missing at ${bytesToHex(partial.blockKey)}`,
-          );
+    for await (const batch of stream) {
+      for (const entry of batch.entries) {
+        const partial = certifiedBlockFromValue(entry.value);
+        if (request.kind && partial.kind !== request.kind) {
+          continue;
         }
-        const candidate = {
-          ...partial,
-          encodedBlock: block.value,
-        };
-        if (!(await resolvedVerifier(candidate))) {
-          throw new Error(
-            `simplex ${candidate.kind} certificate failed verification for block ${bytesToHex(candidate.blockDigest)}`,
-          );
-        }
-        yield {
-          sequenceNumber: frame.sequenceNumber,
-          ...candidate,
-        };
+        yield await this.hydrateAndVerify(partial, batch.sequenceNumber, resolvedVerifier);
       }
     }
   }
@@ -232,32 +393,60 @@ export class SimplexClient {
     if (!resolvedVerifier) {
       throw new Error('simplex certificate verifier is required');
     }
-    const result = await this.sql.query(
-      `SELECT * FROM simplex_blocks WHERE kind = '${kind}' ORDER BY epoch DESC, view DESC LIMIT 1`,
+    const range = certifiedBlockRange(kind);
+    return this.queryOneCertifiedBlock(range, resolvedVerifier);
+  }
+
+  async certifiedBlockByView(
+    kind: 'notarized' | 'finalized',
+    view: bigint,
+    options: SimplexLookupOptions = {},
+  ): Promise<CertifiedBlockFrame | undefined> {
+    const resolvedVerifier = options.verifier ?? this.verifier;
+    if (!resolvedVerifier) {
+      throw new Error('simplex certificate verifier is required');
+    }
+    const epoch = options.epoch ?? 0n;
+    const frame = await this.queryOneCertifiedBlock(
+      certifiedBlockViewRange(kind, epoch, view),
+      resolvedVerifier,
     );
-    const row = result.rows[0];
-    if (!row) {
-      return undefined;
+    if (frame && (frame.kind !== kind || frame.epoch !== epoch || frame.view !== view)) {
+      throw new Error('simplex certified block response does not match view query');
     }
-    const partial = certifiedBlockFromRow(row);
-    const block = await this.store.get(partial.blockKey);
-    if (!block) {
-      throw new Error(
-        `simplex block ${bytesToHex(partial.blockDigest)} missing at ${bytesToHex(partial.blockKey)}`,
-      );
+    return frame;
+  }
+
+  async notarizedBlockByView(
+    view: bigint,
+    options: SimplexLookupOptions = {},
+  ): Promise<CertifiedBlockFrame | undefined> {
+    return this.certifiedBlockByView('notarized', view, options);
+  }
+
+  async finalizedBlockByView(
+    view: bigint,
+    options: SimplexLookupOptions = {},
+  ): Promise<CertifiedBlockFrame | undefined> {
+    return this.certifiedBlockByView('finalized', view, options);
+  }
+
+  async finalizedBlockByHeight(
+    height: bigint,
+    options: SimplexLookupOptions = {},
+  ): Promise<CertifiedBlockFrame | undefined> {
+    const resolvedVerifier = options.verifier ?? this.verifier;
+    if (!resolvedVerifier) {
+      throw new Error('simplex certificate verifier is required');
     }
-    const candidate = {
-      ...partial,
-      encodedBlock: block.value,
-    };
-    if (!(await resolvedVerifier(candidate))) {
-      throw new Error(
-        `simplex ${candidate.kind} certificate failed verification for block ${bytesToHex(candidate.blockDigest)}`,
-      );
+    const epoch = options.epoch ?? 0n;
+    const frame = await this.queryOneCertifiedBlock(
+      finalizedBlockHeightRange(epoch, height),
+      resolvedVerifier,
+    );
+    if (frame && (frame.kind !== 'finalized' || frame.epoch !== epoch || frame.height !== height)) {
+      throw new Error('simplex finalized block response does not match height query');
     }
-    return {
-      sequenceNumber: 0n,
-      ...candidate,
-    };
+    return frame;
   }
 }
