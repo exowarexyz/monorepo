@@ -45,6 +45,25 @@ function makeStreamMatchKey(prefix: string) {
     });
 }
 
+async function nextWithTimeout<T>(
+    iterator: AsyncIterator<T>,
+    timeoutMs: number = 5_000,
+): Promise<IteratorResult<T>> {
+    let timeout: NodeJS.Timeout | undefined;
+    try {
+        return await Promise.race([
+            iterator.next(),
+            new Promise<IteratorResult<T>>((_, reject) => {
+                timeout = setTimeout(() => reject(new Error('timed out waiting for stream')), timeoutMs);
+            }),
+        ]);
+    } finally {
+        if (timeout) {
+            clearTimeout(timeout);
+        }
+    }
+}
+
 describe('Exoware TS SDK', () => {
     let client: Client;
 
@@ -204,6 +223,44 @@ describe('Exoware TS SDK', () => {
             expect(batchA!.entries).toHaveLength(1);
             expect(Buffer.from(batchA!.entries[0].key)).toEqual(Buffer.from(key));
             expect(Buffer.from(batchA!.entries[0].value)).toEqual(Buffer.from('value-a'));
+        });
+
+        it('should subscribe to logical regex matches for non-byte-aligned prefixes', async () => {
+            const store = client.store(new StoreKeyPrefix(4, 3));
+            const encoder = new TextEncoder();
+            const missKey = encoder.encode('prefixed-stream-miss');
+            const hitKey = encoder.encode('prefixed-stream-hit');
+            const missSequence = await store.set(missKey, Buffer.from('miss'));
+            const hitSequence = await store.set(hitKey, Buffer.from('hit'));
+
+            const iterator = store
+                .subscribe({
+                    matchKeys: [
+                        create(MatchKeySchema, {
+                            reservedBits: 0,
+                            prefix: 0,
+                            payloadRegex: '(?s-u)^prefixed-stream-hit$',
+                        }),
+                    ],
+                    sinceSequenceNumber: missSequence,
+                })
+                [Symbol.asyncIterator]();
+
+            try {
+                const next = await nextWithTimeout(iterator);
+                expect(next.done).toBe(false);
+                expect(next.value.sequenceNumber).toBe(hitSequence);
+                expect(
+                    next.value.entries.map((entry: { key: Uint8Array }) => Buffer.from(entry.key)),
+                ).toEqual([Buffer.from(hitKey)]);
+                expect(
+                    next.value.entries.map((entry: { value: Uint8Array }) =>
+                        Buffer.from(entry.value),
+                    ),
+                ).toEqual([Buffer.from('hit')]);
+            } finally {
+                await iterator.return?.();
+            }
         });
 
         it('should getMany', async () => {

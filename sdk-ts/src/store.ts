@@ -36,6 +36,7 @@ import {
 } from './gen/ts/store/v1/stream_pb.js';
 
 const QUERY_DETAIL_HEADER = 'x-store-query-detail-bin';
+const STREAM_SERVER_PAYLOAD_REGEX = '(?s-u).*';
 
 type DetailObserver = (detail: Detail) => void;
 
@@ -220,6 +221,17 @@ export class StoreKeyPrefix {
     }
 
     prefixMatchKey(matchKey: MessageInitShape<typeof MatchKeySchema>): MatchKey {
+        return this.prefixMatchKeyWithRegex(matchKey, matchKey.payloadRegex ?? '');
+    }
+
+    prefixStreamMatchKey(matchKey: MessageInitShape<typeof MatchKeySchema>): MatchKey {
+        return this.prefixMatchKeyWithRegex(matchKey, STREAM_SERVER_PAYLOAD_REGEX);
+    }
+
+    private prefixMatchKeyWithRegex(
+        matchKey: MessageInitShape<typeof MatchKeySchema>,
+        payloadRegex: string,
+    ): MatchKey {
         const logicalReservedBits = matchKey.reservedBits ?? 0;
         const logicalPrefix = matchKey.prefix ?? 0;
         validatePrefix(logicalReservedBits, logicalPrefix);
@@ -234,7 +246,7 @@ export class StoreKeyPrefix {
         return create(MatchKeySchema, {
             reservedBits,
             prefix,
-            payloadRegex: matchKey.payloadRegex ?? '',
+            payloadRegex,
         });
     }
 }
@@ -403,6 +415,7 @@ function toStoreBatch(
         entries: { key: Uint8Array; value: Uint8Array }[];
     },
     prefix?: StoreKeyPrefix,
+    logicalFilter?: ClientStreamFilter,
 ): StoreBatch {
     return {
         sequenceNumber: response.sequenceNumber,
@@ -416,7 +429,7 @@ function toStoreBatch(
                     value: entry.value,
                 },
             ];
-        }),
+        }).filter((entry) => !logicalFilter || logicalFilter.matches(entry.key, entry.value)),
     };
 }
 
@@ -447,8 +460,142 @@ function prefixSubscribeFilters(
     if (!prefix) return filters;
     return {
         ...filters,
-        matchKeys: filters.matchKeys.map((matchKey) => prefix.prefixMatchKey(matchKey)),
+        matchKeys: filters.matchKeys.map((matchKey) => prefix.prefixStreamMatchKey(matchKey)),
     };
+}
+
+function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+    if (left.length !== right.length) return false;
+    return left.every((byte, index) => byte === right[index]);
+}
+
+function bytesStartsWith(bytes: Uint8Array, prefix: Uint8Array): boolean {
+    if (prefix.length > bytes.length) return false;
+    return prefix.every((byte, index) => byte === bytes[index]);
+}
+
+function bytesToBinaryString(bytes: Uint8Array): string {
+    let out = '';
+    for (const byte of bytes) {
+        out += String.fromCharCode(byte);
+    }
+    return out;
+}
+
+function compileRustBytesRegex(pattern: string): RegExp {
+    if (pattern.trim() === '') {
+        throw new RangeError('regex filter must not be empty');
+    }
+    let source = pattern;
+    let flags = '';
+    const inlineFlags = source.match(/^\(\?([A-Za-z-]+)\)/);
+    if (inlineFlags) {
+        const [enabled] = inlineFlags.slice(1);
+        let disabling = false;
+        for (const flag of enabled) {
+            if (flag === '-') {
+                disabling = true;
+                continue;
+            }
+            if (flag === 's' || flag === 'i' || flag === 'm') {
+                if (disabling) {
+                    flags = flags.replace(flag, '');
+                } else if (!flags.includes(flag)) {
+                    flags += flag;
+                }
+                continue;
+            }
+            if (flag === 'u') {
+                continue;
+            }
+            throw new RangeError(`unsupported regex flag '${flag}' in '${pattern}'`);
+        }
+        source = source.slice(inlineFlags[0].length);
+    }
+    source = source.replace(/\(\?P<([A-Za-z_][A-Za-z0-9_]*)>/g, '(?<$1>');
+    try {
+        return new RegExp(source, flags);
+    } catch (e) {
+        throw new RangeError(`invalid regex '${pattern}': ${e instanceof Error ? e.message : e}`);
+    }
+}
+
+class ClientKeyMatcher {
+    private readonly regex: RegExp;
+
+    constructor(private readonly matchKey: MatchKey) {
+        validatePrefix(matchKey.reservedBits, matchKey.prefix);
+        this.regex = compileRustBytesRegex(matchKey.payloadRegex);
+    }
+
+    matches(key: Uint8Array): boolean {
+        if (key.length < Math.ceil(this.matchKey.reservedBits / 8)) {
+            return false;
+        }
+        if (readPrefixBits(key, this.matchKey.reservedBits) !== this.matchKey.prefix) {
+            return false;
+        }
+        const payloadLen = payloadCapacityForKeyLen(this.matchKey.reservedBits, key.length);
+        const payload = new Uint8Array(payloadLen);
+        readBitsToBytes(key, this.matchKey.reservedBits, payload, payloadLen * 8);
+        this.regex.lastIndex = 0;
+        return this.regex.test(bytesToBinaryString(payload));
+    }
+}
+
+class ClientBytesFilters {
+    private readonly exacts: Uint8Array[] = [];
+    private readonly prefixes: Uint8Array[] = [];
+    private readonly regexes: RegExp[] = [];
+
+    constructor(filters: NonNullable<SubscribeFilters['valueFilters']>) {
+        for (const filter of filters) {
+            switch (filter.kind?.case) {
+                case 'exact':
+                    this.exacts.push(filter.kind.value);
+                    break;
+                case 'prefix':
+                    this.prefixes.push(filter.kind.value);
+                    break;
+                case 'regex':
+                    this.regexes.push(compileRustBytesRegex(filter.kind.value));
+                    break;
+                case undefined:
+                    break;
+            }
+        }
+    }
+
+    matches(bytes: Uint8Array): boolean {
+        return (
+            this.exacts.some((exact) => bytesEqual(bytes, exact)) ||
+            this.prefixes.some((prefix) => bytesStartsWith(bytes, prefix)) ||
+            this.regexes.some((regex) => {
+                regex.lastIndex = 0;
+                return regex.test(bytesToBinaryString(bytes));
+            })
+        );
+    }
+}
+
+class ClientStreamFilter {
+    private readonly keyMatchers: ClientKeyMatcher[];
+    private readonly valueFilters?: ClientBytesFilters;
+
+    constructor(filters: SubscribeFilters) {
+        this.keyMatchers = filters.matchKeys.map(
+            (matchKey) => new ClientKeyMatcher(create(MatchKeySchema, matchKey)),
+        );
+        const valueFilters = filters.valueFilters ?? [];
+        this.valueFilters = valueFilters.length > 0 ? new ClientBytesFilters(valueFilters) : undefined;
+    }
+
+    matches(key: Uint8Array, value: Uint8Array): boolean {
+        return (
+            this.keyMatchers.some((matcher) => matcher.matches(key)) &&
+            (!this.valueFilters || this.valueFilters.matches(value))
+        );
+    }
 }
 
 function shiftBitOffset(bitOffset: number, prefixBits: number): number {
@@ -712,6 +859,7 @@ async function* performSubscribe(
     prefix?: StoreKeyPrefix,
     options?: CallOptions,
 ): AsyncIterable<StoreBatch> {
+    const logicalFilter = prefix ? new ClientStreamFilter(filters) : undefined;
     const prefixed = prefixSubscribeFilters(filters, prefix);
     const req = create(SubscribeRequestSchema, {
         matchKeys: prefixed.matchKeys,
@@ -723,7 +871,11 @@ async function* performSubscribe(
     try {
         const stream = client.stream.subscribe(req, options);
         for await (const frame of stream) {
-            yield toStoreBatch(frame, prefix);
+            const batch = toStoreBatch(frame, prefix, logicalFilter);
+            if (batch.entries.length === 0) {
+                continue;
+            }
+            yield batch;
         }
     } catch (e) {
         mapConnectToHttpError(e);

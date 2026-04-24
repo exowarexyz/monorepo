@@ -118,18 +118,6 @@ pub struct PublishedCheckpoint {
     pub sequence_number: u64,
 }
 
-impl PartialEq<Location> for PublishedCheckpoint {
-    fn eq(&self, other: &Location) -> bool {
-        self.location == *other
-    }
-}
-
-impl PartialEq<PublishedCheckpoint> for Location {
-    fn eq(&self, other: &PublishedCheckpoint) -> bool {
-        *self == other.location
-    }
-}
-
 /// Caller-owned frontier for resuming a single-writer helper without reading
 /// the store.
 #[derive(Clone, Debug, PartialEq, Eq)]
