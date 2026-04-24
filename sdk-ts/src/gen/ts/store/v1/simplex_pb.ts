@@ -11,15 +11,16 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file store/v1/simplex.proto.
  */
 export const file_store_v1_simplex: GenFile = /*@__PURE__*/
-  fileDesc("ChZzdG9yZS92MS9zaW1wbGV4LnByb3RvEhBzdG9yZS5zaW1wbGV4LnYxItQBCghBY3Rpdml0eRI2CgRraW5kGAEgASgOMh4uc3RvcmUuc2ltcGxleC52MS5BY3Rpdml0eUtpbmRCCLpIBYIBAhABEg0KBWVwb2NoGAIgASgEEgwKBHZpZXcYAyABKAQSEwoGc2lnbmVyGAQgASgESACIAQESHAoPcHJvcG9zYWxfZGlnZXN0GAUgASgMSAGIAQESIQoQZW5jb2RlZF9hY3Rpdml0eRgGIAEoDEIHukgEegIQAUIJCgdfc2lnbmVyQhIKEF9wcm9wb3NhbF9kaWdlc3Qi5wEKDkNlcnRpZmllZEJsb2NrEjMKBGtpbmQYASABKA4yGy5zdG9yZS5zaW1wbGV4LnYxLkJsb2NrS2luZEIIukgFggECEAESDQoFZXBvY2gYAiABKAQSDAoEdmlldxgDIAEoBBIOCgZoZWlnaHQYBCABKAQSHQoMYmxvY2tfZGlnZXN0GAUgASgMQge6SAR6AhABEiQKE2VuY29kZWRfY2VydGlmaWNhdGUYBiABKAxCB7pIBHoCEAESGgoJYmxvY2tfa2V5GAcgASgMQge6SAR6AhABEhIKCmJsb2NrX3NpemUYCCABKAQq9gIKDEFjdGl2aXR5S2luZBIdChlBQ1RJVklUWV9LSU5EX1VOU1BFQ0lGSUVEEAASGgoWQUNUSVZJVFlfS0lORF9OT1RBUklaRRABEh4KGkFDVElWSVRZX0tJTkRfTk9UQVJJWkFUSU9OEAISHwobQUNUSVZJVFlfS0lORF9DRVJUSUZJQ0FUSU9OEAMSGQoVQUNUSVZJVFlfS0lORF9OVUxMSUZZEAQSHwobQUNUSVZJVFlfS0lORF9OVUxMSUZJQ0FUSU9OEAUSGgoWQUNUSVZJVFlfS0lORF9GSU5BTElaRRAGEh4KGkFDVElWSVRZX0tJTkRfRklOQUxJWkFUSU9OEAcSJgoiQUNUSVZJVFlfS0lORF9DT05GTElDVElOR19OT1RBUklaRRAIEiYKIkFDVElWSVRZX0tJTkRfQ09ORkxJQ1RJTkdfRklOQUxJWkUQCRIiCh5BQ1RJVklUWV9LSU5EX05VTExJRllfRklOQUxJWkUQCipbCglCbG9ja0tpbmQSGgoWQkxPQ0tfS0lORF9VTlNQRUNJRklFRBAAEhgKFEJMT0NLX0tJTkRfTk9UQVJJWkVEEAESGAoUQkxPQ0tfS0lORF9GSU5BTElaRUQQAmIGcHJvdG8z", [file_buf_validate_validate]);
+  fileDesc("ChZzdG9yZS92MS9zaW1wbGV4LnByb3RvEhBzdG9yZS5zaW1wbGV4LnYxIsoBCg5TaWduZWRBY3Rpdml0eRI2CgRraW5kGAEgASgOMh4uc3RvcmUuc2ltcGxleC52MS5BY3Rpdml0eUtpbmRCCLpIBYIBAhABEg0KBWVwb2NoGAIgASgEEgwKBHZpZXcYAyABKAQSDgoGc2lnbmVyGAQgASgEEhwKD3Byb3Bvc2FsX2RpZ2VzdBgFIAEoDEgAiAEBEiEKEGVuY29kZWRfYWN0aXZpdHkYBiABKAxCB7pIBHoCEAFCEgoQX3Byb3Bvc2FsX2RpZ2VzdCK/AQoTQ2VydGlmaWNhdGVBY3Rpdml0eRI2CgRraW5kGAEgASgOMh4uc3RvcmUuc2ltcGxleC52MS5BY3Rpdml0eUtpbmRCCLpIBYIBAhABEg0KBWVwb2NoGAIgASgEEgwKBHZpZXcYAyABKAQSHAoPcHJvcG9zYWxfZGlnZXN0GAQgASgMSACIAQESIQoQZW5jb2RlZF9hY3Rpdml0eRgFIAEoDEIHukgEegIQAUISChBfcHJvcG9zYWxfZGlnZXN0IoMBCghBY3Rpdml0eRIyCgZzaWduZWQYASABKAsyIC5zdG9yZS5zaW1wbGV4LnYxLlNpZ25lZEFjdGl2aXR5SAASPAoLY2VydGlmaWNhdGUYAiABKAsyJS5zdG9yZS5zaW1wbGV4LnYxLkNlcnRpZmljYXRlQWN0aXZpdHlIAEIFCgNyb3ci5wEKDkNlcnRpZmllZEJsb2NrEjMKBGtpbmQYASABKA4yGy5zdG9yZS5zaW1wbGV4LnYxLkJsb2NrS2luZEIIukgFggECEAESDQoFZXBvY2gYAiABKAQSDAoEdmlldxgDIAEoBBIOCgZoZWlnaHQYBCABKAQSHQoMYmxvY2tfZGlnZXN0GAUgASgMQge6SAR6AhABEiQKE2VuY29kZWRfY2VydGlmaWNhdGUYBiABKAxCB7pIBHoCEAESGgoJYmxvY2tfa2V5GAcgASgMQge6SAR6AhABEhIKCmJsb2NrX3NpemUYCCABKAQq9gIKDEFjdGl2aXR5S2luZBIdChlBQ1RJVklUWV9LSU5EX1VOU1BFQ0lGSUVEEAASGgoWQUNUSVZJVFlfS0lORF9OT1RBUklaRRABEh4KGkFDVElWSVRZX0tJTkRfTk9UQVJJWkFUSU9OEAISHwobQUNUSVZJVFlfS0lORF9DRVJUSUZJQ0FUSU9OEAMSGQoVQUNUSVZJVFlfS0lORF9OVUxMSUZZEAQSHwobQUNUSVZJVFlfS0lORF9OVUxMSUZJQ0FUSU9OEAUSGgoWQUNUSVZJVFlfS0lORF9GSU5BTElaRRAGEh4KGkFDVElWSVRZX0tJTkRfRklOQUxJWkFUSU9OEAcSJgoiQUNUSVZJVFlfS0lORF9DT05GTElDVElOR19OT1RBUklaRRAIEiYKIkFDVElWSVRZX0tJTkRfQ09ORkxJQ1RJTkdfRklOQUxJWkUQCRIiCh5BQ1RJVklUWV9LSU5EX05VTExJRllfRklOQUxJWkUQCipbCglCbG9ja0tpbmQSGgoWQkxPQ0tfS0lORF9VTlNQRUNJRklFRBAAEhgKFEJMT0NLX0tJTkRfTk9UQVJJWkVEEAESGAoUQkxPQ0tfS0lORF9GSU5BTElaRUQQAmIGcHJvdG8z", [file_buf_validate_validate]);
 
 /**
- * Decoded view of a stored Simplex activity row. The encoded activity bytes are
- * Commonware's native codec bytes for `simplex::types::Activity<S, D>`.
+ * Decoded view of a signed Simplex activity row from `simplex_signed_activity`.
+ * The encoded activity bytes are Commonware's native codec bytes for
+ * `simplex::types::Activity<S, D>`.
  *
- * @generated from message store.simplex.v1.Activity
+ * @generated from message store.simplex.v1.SignedActivity
  */
-export type Activity = Message<"store.simplex.v1.Activity"> & {
+export type SignedActivity = Message<"store.simplex.v1.SignedActivity"> & {
   /**
    * @generated from field: store.simplex.v1.ActivityKind kind = 1;
    */
@@ -36,9 +37,9 @@ export type Activity = Message<"store.simplex.v1.Activity"> & {
   view: bigint;
 
   /**
-   * @generated from field: optional uint64 signer = 4;
+   * @generated from field: uint64 signer = 4;
    */
-  signer?: bigint;
+  signer: bigint;
 
   /**
    * @generated from field: optional bytes proposal_digest = 5;
@@ -52,11 +53,82 @@ export type Activity = Message<"store.simplex.v1.Activity"> & {
 };
 
 /**
+ * Describes the message store.simplex.v1.SignedActivity.
+ * Use `create(SignedActivitySchema)` to create a new message.
+ */
+export const SignedActivitySchema: GenMessage<SignedActivity> = /*@__PURE__*/
+  messageDesc(file_store_v1_simplex, 0);
+
+/**
+ * Decoded view of a certificate Simplex activity row from
+ * `simplex_certificate_activity`.
+ *
+ * @generated from message store.simplex.v1.CertificateActivity
+ */
+export type CertificateActivity = Message<"store.simplex.v1.CertificateActivity"> & {
+  /**
+   * @generated from field: store.simplex.v1.ActivityKind kind = 1;
+   */
+  kind: ActivityKind;
+
+  /**
+   * @generated from field: uint64 epoch = 2;
+   */
+  epoch: bigint;
+
+  /**
+   * @generated from field: uint64 view = 3;
+   */
+  view: bigint;
+
+  /**
+   * @generated from field: optional bytes proposal_digest = 4;
+   */
+  proposalDigest?: Uint8Array;
+
+  /**
+   * @generated from field: bytes encoded_activity = 5;
+   */
+  encodedActivity: Uint8Array;
+};
+
+/**
+ * Describes the message store.simplex.v1.CertificateActivity.
+ * Use `create(CertificateActivitySchema)` to create a new message.
+ */
+export const CertificateActivitySchema: GenMessage<CertificateActivity> = /*@__PURE__*/
+  messageDesc(file_store_v1_simplex, 1);
+
+/**
+ * Decoded view of any stored Simplex activity row.
+ *
+ * @generated from message store.simplex.v1.Activity
+ */
+export type Activity = Message<"store.simplex.v1.Activity"> & {
+  /**
+   * @generated from oneof store.simplex.v1.Activity.row
+   */
+  row: {
+    /**
+     * @generated from field: store.simplex.v1.SignedActivity signed = 1;
+     */
+    value: SignedActivity;
+    case: "signed";
+  } | {
+    /**
+     * @generated from field: store.simplex.v1.CertificateActivity certificate = 2;
+     */
+    value: CertificateActivity;
+    case: "certificate";
+  } | { case: undefined; value?: undefined };
+};
+
+/**
  * Describes the message store.simplex.v1.Activity.
  * Use `create(ActivitySchema)` to create a new message.
  */
 export const ActivitySchema: GenMessage<Activity> = /*@__PURE__*/
-  messageDesc(file_store_v1_simplex, 0);
+  messageDesc(file_store_v1_simplex, 2);
 
 /**
  * Decoded view of a stored notarized/finalized certificate row. The certificate
@@ -113,7 +185,7 @@ export type CertifiedBlock = Message<"store.simplex.v1.CertifiedBlock"> & {
  * Use `create(CertifiedBlockSchema)` to create a new message.
  */
 export const CertifiedBlockSchema: GenMessage<CertifiedBlock> = /*@__PURE__*/
-  messageDesc(file_store_v1_simplex, 1);
+  messageDesc(file_store_v1_simplex, 3);
 
 /**
  * Stable labels for Commonware Simplex activity variants.

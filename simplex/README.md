@@ -4,9 +4,11 @@
 blocks in Exoware.
 
 Activity is written through `exoware-sql` so votes, certificates, views, and
-signers can be queried with SQL. Notarized and finalized blocks are stored in a
-separate SQL table so consumers can subscribe to certificate/block rows and
-verify them before accepting them.
+signers can be queried with SQL. Signed activity is stored in
+`simplex_signed_activity` with a non-null `signer` column for voting analytics.
+Certificate activity is stored separately in `simplex_certificate_activity`.
+Notarized and finalized blocks are stored in `simplex_blocks` so consumers can
+subscribe to certificate/block rows and verify them before accepting them.
 
 ## Run locally
 
@@ -16,8 +18,8 @@ Start the simulator Store:
 cargo run --package exoware-simulator -- --verbose server run --port 8080
 ```
 
-Start the Simplex SQL server, which registers `simplex_activity` and
-`simplex_blocks` over that Store:
+Start the Simplex SQL server, which registers `simplex_signed_activity`,
+`simplex_certificate_activity`, and `simplex_blocks` over that Store:
 
 ```bash
 cargo run --package exoware-simplex --bin simplex -- \
@@ -31,11 +33,18 @@ cargo run --package exoware-simplex --bin simplex -- \
   seed --store-url http://127.0.0.1:8080 --interval-secs 2
 ```
 
-The seed process prints:
+The seed process generates a namespace for the run and prints it with the
+committee identity:
 
 ```text
 simplex_identity=0x...
-simplex_namespace=_ALTO
+simplex_namespace=simplex-demo-...
 ```
 
-Use that identity in the TypeScript verifier or the sandbox panel.
+Use both values in the TypeScript verifier or the sandbox panel. To continue a
+run with the same verifier namespace, pass it back explicitly:
+
+```bash
+cargo run --package exoware-simplex --bin simplex -- \
+  seed --store-url http://127.0.0.1:8080 --namespace simplex-demo-...
+```

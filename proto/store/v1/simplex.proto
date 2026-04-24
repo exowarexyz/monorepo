@@ -26,15 +26,34 @@ enum BlockKind {
   BLOCK_KIND_FINALIZED = 2;
 }
 
-// Decoded view of a stored Simplex activity row. The encoded activity bytes are
-// Commonware's native codec bytes for `simplex::types::Activity<S, D>`.
-message Activity {
+// Decoded view of a signed Simplex activity row from `simplex_signed_activity`.
+// The encoded activity bytes are Commonware's native codec bytes for
+// `simplex::types::Activity<S, D>`.
+message SignedActivity {
   ActivityKind kind = 1 [(buf.validate.field).enum.defined_only = true];
   uint64 epoch = 2;
   uint64 view = 3;
-  optional uint64 signer = 4;
+  uint64 signer = 4;
   optional bytes proposal_digest = 5;
   bytes encoded_activity = 6 [(buf.validate.field).bytes.min_len = 1];
+}
+
+// Decoded view of a certificate Simplex activity row from
+// `simplex_certificate_activity`.
+message CertificateActivity {
+  ActivityKind kind = 1 [(buf.validate.field).enum.defined_only = true];
+  uint64 epoch = 2;
+  uint64 view = 3;
+  optional bytes proposal_digest = 4;
+  bytes encoded_activity = 5 [(buf.validate.field).bytes.min_len = 1];
+}
+
+// Decoded view of any stored Simplex activity row.
+message Activity {
+  oneof row {
+    SignedActivity signed = 1;
+    CertificateActivity certificate = 2;
+  }
 }
 
 // Decoded view of a stored notarized/finalized certificate row. The certificate

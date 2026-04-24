@@ -17,7 +17,7 @@ export const SIMPLEX_STORE_URL = (
 ) as string | undefined;
 
 const MAX_EVENTS = 10;
-const DEFAULT_NAMESPACE = import.meta.env.VITE_SIMPLEX_NAMESPACE || '_ALTO';
+const DEFAULT_NAMESPACE = import.meta.env.VITE_SIMPLEX_NAMESPACE || '';
 const DEFAULT_IDENTITY = import.meta.env.VITE_SIMPLEX_IDENTITY || '';
 
 interface NotificationFn {
@@ -102,10 +102,14 @@ export function SimplexPanel({
       if (!trimmedIdentity) {
         throw new Error('Committee identity is required');
       }
+      const trimmedNamespace = namespace.trim();
+      if (!trimmedNamespace) {
+        throw new Error('Namespace is required');
+      }
 
       const verifier = wasmCertifiedBlockVerifier({
         identity: hexToBytes(trimmedIdentity),
-        namespace: namespace.trim() || DEFAULT_NAMESPACE,
+        namespace: trimmedNamespace,
       });
 
       subscribeAbortRef.current?.abort();
@@ -224,7 +228,7 @@ export function SimplexPanel({
           <button
             className={`btn-primary ${isSubscribing ? 'loading' : ''}`}
             onClick={handleStartSubscribe}
-            disabled={isSubscribing || !identityHex.trim()}
+            disabled={isSubscribing || !identityHex.trim() || !namespace.trim()}
           >
             {isSubscribing ? 'Listening...' : 'Start Subscribe'}
           </button>

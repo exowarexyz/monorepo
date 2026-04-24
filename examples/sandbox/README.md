@@ -157,6 +157,10 @@ Simplex SQL server, fetches the block at the row's `block_key` from raw Store
 KV, then verifies the notarization/finalization certificate against the row's
 `block_digest` before emitting it to the UI.
 
+The Simplex SQL server registers `simplex_signed_activity` for signer-indexed
+votes and evidence, `simplex_certificate_activity` for certificate activity,
+and `simplex_blocks` for notarized/finalized block rows.
+
 In addition to the simulator running above:
 
 1. **Start the Simplex SQL server** on port 8083
@@ -167,8 +171,8 @@ cargo run --package exoware-simplex --bin simplex -- \
 ```
 
 2. **Seed Simplex activity and certified blocks** (keeps running). The seed
-   command prints the committee identity to paste into the UI or export as
-   `VITE_SIMPLEX_IDENTITY`.
+   command prints the committee identity and generated namespace to paste into
+   the UI or export as `VITE_SIMPLEX_IDENTITY` and `VITE_SIMPLEX_NAMESPACE`.
 
 ```bash
 cargo run --package exoware-simplex --bin simplex -- \
@@ -179,7 +183,7 @@ Each seed run starts with:
 
 ```text
 simplex_identity=0x...
-simplex_namespace=_ALTO
+simplex_namespace=simplex-demo-...
 ```
 
 3. **Point the web app at the Simplex SQL server and Store server**:
@@ -188,10 +192,10 @@ simplex_namespace=_ALTO
 VITE_SIMPLEX_SQL_URL=http://127.0.0.1:8083 \
 VITE_SIMPLEX_STORE_URL=http://127.0.0.1:8080 \
 VITE_SIMPLEX_IDENTITY=0x... \
-VITE_SIMPLEX_NAMESPACE=_ALTO \
+VITE_SIMPLEX_NAMESPACE=simplex-demo-... \
 npm run dev
 ```
 
-`VITE_SIMPLEX_NAMESPACE` defaults to `_ALTO`. `VITE_SIMPLEX_IDENTITY` can also
-be pasted into the panel directly as hex. `VITE_SIMPLEX_URL` is still accepted
-as a shorthand only when Store and SQL are served from the same base URL.
+Both `VITE_SIMPLEX_IDENTITY` and `VITE_SIMPLEX_NAMESPACE` can also be pasted
+into the panel directly. `VITE_SIMPLEX_URL` is still accepted as a shorthand
+only when Store and SQL are served from the same base URL.

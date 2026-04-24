@@ -1,7 +1,7 @@
 use commonware_codec::Encode;
 use commonware_consensus::simplex::types::{Activity, Attributable, Finalization, Notarization};
 use commonware_consensus::{Epochable, Heightable, Viewable};
-use commonware_cryptography::{Digest, Digestible};
+use commonware_cryptography::{Digest, Digestible, Hasher, Sha256};
 use datafusion::arrow::datatypes::DataType;
 use exoware_sdk::{Key, KeyCodec, StoreBatchUpload, StoreClient, StoreWriteBatch};
 use exoware_sql::{
@@ -9,7 +9,8 @@ use exoware_sql::{
 };
 use futures::future::BoxFuture;
 
-pub const ACTIVITY_TABLE: &str = "simplex_activity";
+pub const SIGNED_ACTIVITY_TABLE: &str = "simplex_signed_activity";
+pub const CERTIFICATE_ACTIVITY_TABLE: &str = "simplex_certificate_activity";
 pub const BLOCK_TABLE: &str = "simplex_blocks";
 
 const DIGEST_LEN: i32 = 32;
@@ -179,29 +180,39 @@ where
     Some(digest)
 }
 
+fn activity_id(kind: ActivityKind, epoch: u64, view: u64, encoded_activity: &[u8]) -> String {
+    format!(
+        "{}:{:020}:{:020}:{}",
+        kind.as_str(),
+        epoch,
+        view,
+        hex::encode(Sha256::hash(encoded_activity))
+    )
+}
+
 pub fn schema(client: StoreClient) -> Result<KvSchema, String> {
     let digest_type = DataType::FixedSizeBinary(DIGEST_LEN);
     let block_key_type = DataType::FixedSizeBinary(BLOCK_KEY_LEN);
     KvSchema::new(client)
         .table(
-            ACTIVITY_TABLE,
+            SIGNED_ACTIVITY_TABLE,
             vec![
                 TableColumnConfig::new("activity_id", DataType::Utf8, false),
                 TableColumnConfig::new("kind", DataType::Utf8, false),
                 TableColumnConfig::new("epoch", DataType::UInt64, false),
                 TableColumnConfig::new("view", DataType::UInt64, false),
-                TableColumnConfig::new("signer", DataType::UInt64, true),
+                TableColumnConfig::new("signer", DataType::UInt64, false),
                 TableColumnConfig::new("proposal_digest", digest_type.clone(), true),
                 TableColumnConfig::new("encoded_activity_hex", DataType::Utf8, false),
             ],
             vec!["activity_id".to_string()],
             vec![
                 IndexSpec::lexicographic(
-                    "activity_kind_view",
+                    "signed_activity_kind_view",
                     vec!["kind".to_string(), "epoch".to_string(), "view".to_string()],
                 )?,
                 IndexSpec::lexicographic(
-                    "activity_signer_view",
+                    "signed_activity_signer_view",
                     vec![
                         "signer".to_string(),
                         "epoch".to_string(),
@@ -209,6 +220,22 @@ pub fn schema(client: StoreClient) -> Result<KvSchema, String> {
                     ],
                 )?,
             ],
+        )?
+        .table(
+            CERTIFICATE_ACTIVITY_TABLE,
+            vec![
+                TableColumnConfig::new("activity_id", DataType::Utf8, false),
+                TableColumnConfig::new("kind", DataType::Utf8, false),
+                TableColumnConfig::new("epoch", DataType::UInt64, false),
+                TableColumnConfig::new("view", DataType::UInt64, false),
+                TableColumnConfig::new("proposal_digest", digest_type.clone(), true),
+                TableColumnConfig::new("encoded_activity_hex", DataType::Utf8, false),
+            ],
+            vec!["activity_id".to_string()],
+            vec![IndexSpec::lexicographic(
+                "certificate_activity_kind_view",
+                vec!["kind".to_string(), "epoch".to_string(), "view".to_string()],
+            )?],
         )?
         .table(
             BLOCK_TABLE,
@@ -297,28 +324,38 @@ impl SimplexWriter {
             .transpose()?
             .map(CellValue::FixedBinary)
             .unwrap_or(CellValue::Null);
-        let id = format!(
-            "{}:{:020}:{:020}:{}",
-            record.kind.as_str(),
+        let id = activity_id(
+            record.kind,
             record.epoch,
             record.view,
-            hex::encode(&record.encoded_activity)
+            &record.encoded_activity,
         );
         self.inner
             .insert(
-                ACTIVITY_TABLE,
-                vec![
-                    CellValue::Utf8(id),
-                    CellValue::Utf8(record.kind.as_str().to_string()),
-                    CellValue::UInt64(record.epoch),
-                    CellValue::UInt64(record.view),
-                    record
-                        .signer
-                        .map(CellValue::UInt64)
-                        .unwrap_or(CellValue::Null),
-                    digest,
-                    CellValue::Utf8(hex::encode(record.encoded_activity)),
-                ],
+                if record.signer.is_some() {
+                    SIGNED_ACTIVITY_TABLE
+                } else {
+                    CERTIFICATE_ACTIVITY_TABLE
+                },
+                match record.signer {
+                    Some(signer) => vec![
+                        CellValue::Utf8(id),
+                        CellValue::Utf8(record.kind.as_str().to_string()),
+                        CellValue::UInt64(record.epoch),
+                        CellValue::UInt64(record.view),
+                        CellValue::UInt64(signer),
+                        digest,
+                        CellValue::Utf8(hex::encode(record.encoded_activity)),
+                    ],
+                    None => vec![
+                        CellValue::Utf8(id),
+                        CellValue::Utf8(record.kind.as_str().to_string()),
+                        CellValue::UInt64(record.epoch),
+                        CellValue::UInt64(record.view),
+                        digest,
+                        CellValue::Utf8(hex::encode(record.encoded_activity)),
+                    ],
+                },
             )
             .map_err(SimplexError::Sql)?;
         Ok(self)
@@ -510,6 +547,50 @@ impl SimplexWriter {
             .lock()
             .expect("failed prepared mutex poisoned")
             .pop()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schema_builds_sql_server() {
+        let client = StoreClient::new("http://127.0.0.1:0");
+        let schema = schema(client).expect("simplex schema");
+        let _server = exoware_sql::SqlServer::new(schema).expect("sql server");
+    }
+
+    #[test]
+    fn long_signed_activity_uses_short_primary_key() {
+        let client = StoreClient::new("http://127.0.0.1:0");
+        let mut writer = SimplexWriter::new(client).expect("writer");
+        writer
+            .insert_activity_record(ActivityRecord {
+                kind: ActivityKind::Notarize,
+                epoch: 0,
+                view: 1,
+                signer: Some(2),
+                proposal_digest: Some(vec![0; DIGEST_LEN as usize]),
+                encoded_activity: vec![0xAB; 512],
+            })
+            .expect("insert signed activity");
+    }
+
+    #[test]
+    fn long_certificate_activity_uses_short_primary_key() {
+        let client = StoreClient::new("http://127.0.0.1:0");
+        let mut writer = SimplexWriter::new(client).expect("writer");
+        writer
+            .insert_activity_record(ActivityRecord {
+                kind: ActivityKind::Notarization,
+                epoch: 0,
+                view: 1,
+                signer: None,
+                proposal_digest: Some(vec![0; DIGEST_LEN as usize]),
+                encoded_activity: vec![0xCD; 512],
+            })
+            .expect("insert certificate activity");
     }
 }
 

@@ -24,11 +24,9 @@ use commonware_parallel::Sequential;
 use exoware_sdk::StoreClient;
 use exoware_simplex::{schema, SimplexWriter};
 use exoware_sql::{sql_connect_stack, SqlServer};
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{rngs::StdRng, RngCore, SeedableRng};
 use tower_http::cors::CorsLayer;
 use tracing::info;
-
-const NAMESPACE: &[u8] = b"_ALTO";
 
 type PublicKey = ed25519::PublicKey;
 type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
@@ -62,6 +60,8 @@ enum Command {
         interval_secs: u64,
         #[arg(long, default_value_t = 7)]
         rng_seed: u64,
+        #[arg(long)]
+        namespace: Option<String>,
     },
 }
 
@@ -192,9 +192,13 @@ async fn run(
     Ok(())
 }
 
-fn committee(seed: u64) -> (Vec<Scheme>, Identity) {
+fn generated_namespace() -> String {
+    format!("simplex-demo-{:016x}", rand::thread_rng().next_u64())
+}
+
+fn committee(seed: u64, namespace: &[u8]) -> (Vec<Scheme>, Identity) {
     let mut rng = StdRng::seed_from_u64(seed);
-    let Fixture { schemes, .. } = bls12381_threshold::fixture::<MinSig, _>(&mut rng, NAMESPACE, 4);
+    let Fixture { schemes, .. } = bls12381_threshold::fixture::<MinSig, _>(&mut rng, namespace, 4);
     let identity = *schemes[0].identity();
     (schemes, identity)
 }
@@ -203,15 +207,17 @@ async fn seed(
     store_url: &str,
     interval_secs: u64,
     rng_seed: u64,
+    namespace: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client = StoreClient::new(store_url);
     let mut writer = SimplexWriter::new(client)?;
-    let (schemes, identity) = committee(rng_seed);
+    let namespace = namespace.unwrap_or_else(generated_namespace);
+    let (schemes, identity) = committee(rng_seed, namespace.as_bytes());
 
     println!("simplex_identity=0x{}", hex::encode(identity.encode()));
-    println!("simplex_namespace={}", String::from_utf8_lossy(NAMESPACE));
+    println!("simplex_namespace={namespace}");
 
-    info!(store_url, interval_secs, "starting simplex seed");
+    info!(store_url, interval_secs, namespace, "starting simplex seed");
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -302,7 +308,8 @@ async fn main() -> std::process::ExitCode {
             store_url,
             interval_secs,
             rng_seed,
-        } => seed(&store_url, interval_secs, rng_seed).await,
+            namespace,
+        } => seed(&store_url, interval_secs, rng_seed, namespace).await,
     };
 
     match result {

@@ -323,12 +323,13 @@ impl ::buffa::Enumeration for BlockKind {
         }
     }
 }
-/// Decoded view of a stored Simplex activity row. The encoded activity bytes are
-/// Commonware's native codec bytes for `simplex::types::Activity<S, D>`.
+/// Decoded view of a signed Simplex activity row from `simplex_signed_activity`.
+/// The encoded activity bytes are Commonware's native codec bytes for
+/// `simplex::types::Activity<S, D>`.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
-pub struct Activity {
+pub struct SignedActivity {
     /// Field 1: `kind`
     #[serde(
         rename = "kind",
@@ -353,10 +354,10 @@ pub struct Activity {
     /// Field 4: `signer`
     #[serde(
         rename = "signer",
-        with = "::buffa::json_helpers::opt_uint64",
-        skip_serializing_if = "Option::is_none"
+        with = "::buffa::json_helpers::uint64",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
     )]
-    pub signer: Option<u64>,
+    pub signer: u64,
     /// Field 5: `proposal_digest`
     #[serde(
         rename = "proposalDigest",
@@ -380,9 +381,9 @@ pub struct Activity {
     #[serde(skip)]
     pub __buffa_cached_size: ::buffa::__private::CachedSize,
 }
-impl ::core::fmt::Debug for Activity {
+impl ::core::fmt::Debug for SignedActivity {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("Activity")
+        f.debug_struct("SignedActivity")
             .field("kind", &self.kind)
             .field("epoch", &self.epoch)
             .field("view", &self.view)
@@ -392,20 +393,20 @@ impl ::core::fmt::Debug for Activity {
             .finish()
     }
 }
-impl Activity {
+impl SignedActivity {
     /// Protobuf type URL for this message, for use with `Any::pack` and
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.simplex.v1.Activity";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/store.simplex.v1.SignedActivity";
 }
-unsafe impl ::buffa::DefaultInstance for Activity {
+unsafe impl ::buffa::DefaultInstance for SignedActivity {
     fn default_instance() -> &'static Self {
-        static VALUE: ::buffa::__private::OnceBox<Activity> = ::buffa::__private::OnceBox::new();
+        static VALUE: ::buffa::__private::OnceBox<SignedActivity> = ::buffa::__private::OnceBox::new();
         VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
     }
 }
-impl ::buffa::Message for Activity {
+impl ::buffa::Message for SignedActivity {
     /// Returns the total encoded size in bytes.
     ///
     /// The result is a `u32`; the protobuf specification requires all
@@ -427,8 +428,8 @@ impl ::buffa::Message for Activity {
         if self.view != 0u64 {
             size += 1u32 + ::buffa::types::uint64_encoded_len(self.view) as u32;
         }
-        if let Some(v) = self.signer {
-            size += 1u32 + ::buffa::types::uint64_encoded_len(v) as u32;
+        if self.signer != 0u64 {
+            size += 1u32 + ::buffa::types::uint64_encoded_len(self.signer) as u32;
         }
         if let Some(ref v) = self.proposal_digest {
             size += 1u32 + ::buffa::types::bytes_encoded_len(v) as u32;
@@ -463,10 +464,10 @@ impl ::buffa::Message for Activity {
                 .encode(buf);
             ::buffa::types::encode_uint64(self.view, buf);
         }
-        if let Some(v) = self.signer {
+        if self.signer != 0u64 {
             ::buffa::encoding::Tag::new(4u32, ::buffa::encoding::WireType::Varint)
                 .encode(buf);
-            ::buffa::types::encode_uint64(v, buf);
+            ::buffa::types::encode_uint64(self.signer, buf);
         }
         if let Some(ref v) = self.proposal_digest {
             ::buffa::encoding::Tag::new(
@@ -535,9 +536,7 @@ impl ::buffa::Message for Activity {
                         actual: tag.wire_type() as u8,
                     });
                 }
-                self.signer = ::core::option::Option::Some(
-                    ::buffa::types::decode_uint64(buf)?,
-                );
+                self.signer = ::buffa::types::decode_uint64(buf)?;
             }
             5u32 => {
                 if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
@@ -578,15 +577,15 @@ impl ::buffa::Message for Activity {
         self.kind = ::buffa::EnumValue::from(0);
         self.epoch = 0u64;
         self.view = 0u64;
-        self.signer = ::core::option::Option::None;
+        self.signer = 0u64;
         self.proposal_digest = ::core::option::Option::None;
         self.encoded_activity.clear();
         self.__buffa_unknown_fields.clear();
         self.__buffa_cached_size.set(0);
     }
 }
-impl ::buffa::ExtensionSet for Activity {
-    const PROTO_FQN: &'static str = "store.simplex.v1.Activity";
+impl ::buffa::ExtensionSet for SignedActivity {
+    const PROTO_FQN: &'static str = "store.simplex.v1.SignedActivity";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -594,7 +593,7 @@ impl ::buffa::ExtensionSet for Activity {
         &mut self.__buffa_unknown_fields
     }
 }
-impl ::buffa::json_helpers::ProtoElemJson for Activity {
+impl ::buffa::json_helpers::ProtoElemJson for SignedActivity {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
         s: S,
@@ -608,16 +607,17 @@ impl ::buffa::json_helpers::ProtoElemJson for Activity {
     }
 }
 #[doc(hidden)]
-pub const __ACTIVITY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.simplex.v1.Activity",
-    to_json: ::buffa::type_registry::any_to_json::<Activity>,
-    from_json: ::buffa::type_registry::any_from_json::<Activity>,
+pub const __SIGNED_ACTIVITY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/store.simplex.v1.SignedActivity",
+    to_json: ::buffa::type_registry::any_to_json::<SignedActivity>,
+    from_json: ::buffa::type_registry::any_from_json::<SignedActivity>,
     is_wkt: false,
 };
-/// Decoded view of a stored Simplex activity row. The encoded activity bytes are
-/// Commonware's native codec bytes for `simplex::types::Activity<S, D>`.
+/// Decoded view of a signed Simplex activity row from `simplex_signed_activity`.
+/// The encoded activity bytes are Commonware's native codec bytes for
+/// `simplex::types::Activity<S, D>`.
 #[derive(Clone, Debug, Default)]
-pub struct ActivityView<'a> {
+pub struct SignedActivityView<'a> {
     /// Field 1: `kind`
     pub kind: ::buffa::EnumValue<ActivityKind>,
     /// Field 2: `epoch`
@@ -625,14 +625,14 @@ pub struct ActivityView<'a> {
     /// Field 3: `view`
     pub view: u64,
     /// Field 4: `signer`
-    pub signer: ::core::option::Option<u64>,
+    pub signer: u64,
     /// Field 5: `proposal_digest`
     pub proposal_digest: ::core::option::Option<&'a [u8]>,
     /// Field 6: `encoded_activity`
     pub encoded_activity: &'a [u8],
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
-impl<'a> ActivityView<'a> {
+impl<'a> SignedActivityView<'a> {
     /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
     ///
     /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
@@ -710,7 +710,7 @@ impl<'a> ActivityView<'a> {
                             actual: tag.wire_type() as u8,
                         });
                     }
-                    view.signer = Some(::buffa::types::decode_uint64(&mut cur)?);
+                    view.signer = ::buffa::types::decode_uint64(&mut cur)?;
                 }
                 5u32 => {
                     if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
@@ -742,6 +742,839 @@ impl<'a> ActivityView<'a> {
         ::core::result::Result::Ok(())
     }
 }
+impl<'a> ::buffa::MessageView<'a> for SignedActivityView<'a> {
+    type Owned = SignedActivity;
+    fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        Self::_decode_depth(buf, ::buffa::RECURSION_LIMIT)
+    }
+    fn decode_view_with_limit(
+        buf: &'a [u8],
+        depth: u32,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        Self::_decode_depth(buf, depth)
+    }
+    /// Convert this view to the owned message type.
+    #[allow(clippy::redundant_closure, clippy::useless_conversion)]
+    fn to_owned_message(&self) -> SignedActivity {
+        #[allow(unused_imports)]
+        use ::buffa::alloc::string::ToString as _;
+        SignedActivity {
+            kind: self.kind,
+            epoch: self.epoch,
+            view: self.view,
+            signer: self.signer,
+            proposal_digest: self.proposal_digest.map(|b| (b).to_vec()),
+            encoded_activity: (self.encoded_activity).to_vec(),
+            __buffa_unknown_fields: self
+                .__buffa_unknown_fields
+                .to_owned()
+                .unwrap_or_default()
+                .into(),
+            ..::core::default::Default::default()
+        }
+    }
+}
+unsafe impl ::buffa::DefaultViewInstance for SignedActivityView<'static> {
+    fn default_view_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<SignedActivityView<'static>> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+unsafe impl<'a> ::buffa::HasDefaultViewInstance for SignedActivityView<'a> {
+    type Static = SignedActivityView<'static>;
+}
+/// Decoded view of a certificate Simplex activity row from
+/// `simplex_certificate_activity`.
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct CertificateActivity {
+    /// Field 1: `kind`
+    #[serde(
+        rename = "kind",
+        with = "::buffa::json_helpers::proto_enum",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_default_enum_value"
+    )]
+    pub kind: ::buffa::EnumValue<ActivityKind>,
+    /// Field 2: `epoch`
+    #[serde(
+        rename = "epoch",
+        with = "::buffa::json_helpers::uint64",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
+    )]
+    pub epoch: u64,
+    /// Field 3: `view`
+    #[serde(
+        rename = "view",
+        with = "::buffa::json_helpers::uint64",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
+    )]
+    pub view: u64,
+    /// Field 4: `proposal_digest`
+    #[serde(
+        rename = "proposalDigest",
+        alias = "proposal_digest",
+        with = "::buffa::json_helpers::opt_bytes",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub proposal_digest: Option<::buffa::alloc::vec::Vec<u8>>,
+    /// Field 5: `encoded_activity`
+    #[serde(
+        rename = "encodedActivity",
+        alias = "encoded_activity",
+        with = "::buffa::json_helpers::bytes",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
+    )]
+    pub encoded_activity: ::buffa::alloc::vec::Vec<u8>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub __buffa_cached_size: ::buffa::__private::CachedSize,
+}
+impl ::core::fmt::Debug for CertificateActivity {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CertificateActivity")
+            .field("kind", &self.kind)
+            .field("epoch", &self.epoch)
+            .field("view", &self.view)
+            .field("proposal_digest", &self.proposal_digest)
+            .field("encoded_activity", &self.encoded_activity)
+            .finish()
+    }
+}
+impl CertificateActivity {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/store.simplex.v1.CertificateActivity";
+}
+unsafe impl ::buffa::DefaultInstance for CertificateActivity {
+    fn default_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<CertificateActivity> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+impl ::buffa::Message for CertificateActivity {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// The result is a `u32`; the protobuf specification requires all
+    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
+    /// compliant message will never overflow this type.
+    fn compute_size(&self) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        {
+            let val = self.kind.to_i32();
+            if val != 0 {
+                size += 1u32 + ::buffa::types::int32_encoded_len(val) as u32;
+            }
+        }
+        if self.epoch != 0u64 {
+            size += 1u32 + ::buffa::types::uint64_encoded_len(self.epoch) as u32;
+        }
+        if self.view != 0u64 {
+            size += 1u32 + ::buffa::types::uint64_encoded_len(self.view) as u32;
+        }
+        if let Some(ref v) = self.proposal_digest {
+            size += 1u32 + ::buffa::types::bytes_encoded_len(v) as u32;
+        }
+        if !self.encoded_activity.is_empty() {
+            size
+                += 1u32
+                    + ::buffa::types::bytes_encoded_len(&self.encoded_activity) as u32;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        self.__buffa_cached_size.set(size);
+        size
+    }
+    fn write_to(&self, buf: &mut impl ::buffa::bytes::BufMut) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        {
+            let val = self.kind.to_i32();
+            if val != 0 {
+                ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Varint)
+                    .encode(buf);
+                ::buffa::types::encode_int32(val, buf);
+            }
+        }
+        if self.epoch != 0u64 {
+            ::buffa::encoding::Tag::new(2u32, ::buffa::encoding::WireType::Varint)
+                .encode(buf);
+            ::buffa::types::encode_uint64(self.epoch, buf);
+        }
+        if self.view != 0u64 {
+            ::buffa::encoding::Tag::new(3u32, ::buffa::encoding::WireType::Varint)
+                .encode(buf);
+            ::buffa::types::encode_uint64(self.view, buf);
+        }
+        if let Some(ref v) = self.proposal_digest {
+            ::buffa::encoding::Tag::new(
+                    4u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::types::encode_bytes(v, buf);
+        }
+        if !self.encoded_activity.is_empty() {
+            ::buffa::encoding::Tag::new(
+                    5u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::types::encode_bytes(&self.encoded_activity, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 1u32,
+                        expected: 0u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                self.kind = ::buffa::EnumValue::from(::buffa::types::decode_int32(buf)?);
+            }
+            2u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 2u32,
+                        expected: 0u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                self.epoch = ::buffa::types::decode_uint64(buf)?;
+            }
+            3u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 3u32,
+                        expected: 0u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                self.view = ::buffa::types::decode_uint64(buf)?;
+            }
+            4u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 4u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                ::buffa::types::merge_bytes(
+                    self
+                        .proposal_digest
+                        .get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                    buf,
+                )?;
+            }
+            5u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 5u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                ::buffa::types::merge_bytes(&mut self.encoded_activity, buf)?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn cached_size(&self) -> u32 {
+        self.__buffa_cached_size.get()
+    }
+    fn clear(&mut self) {
+        self.kind = ::buffa::EnumValue::from(0);
+        self.epoch = 0u64;
+        self.view = 0u64;
+        self.proposal_digest = ::core::option::Option::None;
+        self.encoded_activity.clear();
+        self.__buffa_unknown_fields.clear();
+        self.__buffa_cached_size.set(0);
+    }
+}
+impl ::buffa::ExtensionSet for CertificateActivity {
+    const PROTO_FQN: &'static str = "store.simplex.v1.CertificateActivity";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for CertificateActivity {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __CERTIFICATE_ACTIVITY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/store.simplex.v1.CertificateActivity",
+    to_json: ::buffa::type_registry::any_to_json::<CertificateActivity>,
+    from_json: ::buffa::type_registry::any_from_json::<CertificateActivity>,
+    is_wkt: false,
+};
+/// Decoded view of a certificate Simplex activity row from
+/// `simplex_certificate_activity`.
+#[derive(Clone, Debug, Default)]
+pub struct CertificateActivityView<'a> {
+    /// Field 1: `kind`
+    pub kind: ::buffa::EnumValue<ActivityKind>,
+    /// Field 2: `epoch`
+    pub epoch: u64,
+    /// Field 3: `view`
+    pub view: u64,
+    /// Field 4: `proposal_digest`
+    pub proposal_digest: ::core::option::Option<&'a [u8]>,
+    /// Field 5: `encoded_activity`
+    pub encoded_activity: &'a [u8],
+    pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+}
+impl<'a> CertificateActivityView<'a> {
+    /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
+    ///
+    /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
+    /// and by generated sub-message decode arms with `depth - 1`.
+    ///
+    /// **Not part of the public API.** Named with a leading underscore to
+    /// signal that it is for generated-code use only.
+    #[doc(hidden)]
+    pub fn _decode_depth(
+        buf: &'a [u8],
+        depth: u32,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        let mut view = Self::default();
+        view._merge_into_view(buf, depth)?;
+        ::core::result::Result::Ok(view)
+    }
+    /// Merge fields from `buf` into this view (proto merge semantics).
+    ///
+    /// Repeated fields append; singular fields last-wins; singular
+    /// MESSAGE fields merge recursively. Used by sub-message decode
+    /// arms when the same field appears multiple times on the wire.
+    ///
+    /// **Not part of the public API.**
+    #[doc(hidden)]
+    pub fn _merge_into_view(
+        &mut self,
+        buf: &'a [u8],
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        let _ = depth;
+        #[allow(unused_variables)]
+        let view = self;
+        let mut cur: &'a [u8] = buf;
+        while !cur.is_empty() {
+            let before_tag = cur;
+            let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
+            match tag.field_number() {
+                1u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 1u32,
+                            expected: 0u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    view.kind = ::buffa::EnumValue::from(
+                        ::buffa::types::decode_int32(&mut cur)?,
+                    );
+                }
+                2u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 2u32,
+                            expected: 0u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    view.epoch = ::buffa::types::decode_uint64(&mut cur)?;
+                }
+                3u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 3u32,
+                            expected: 0u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    view.view = ::buffa::types::decode_uint64(&mut cur)?;
+                }
+                4u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 4u32,
+                            expected: 2u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    view.proposal_digest = Some(::buffa::types::borrow_bytes(&mut cur)?);
+                }
+                5u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 5u32,
+                            expected: 2u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    view.encoded_activity = ::buffa::types::borrow_bytes(&mut cur)?;
+                }
+                _ => {
+                    ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
+                    let span_len = before_tag.len() - cur.len();
+                    view.__buffa_unknown_fields.push_raw(&before_tag[..span_len]);
+                }
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+}
+impl<'a> ::buffa::MessageView<'a> for CertificateActivityView<'a> {
+    type Owned = CertificateActivity;
+    fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        Self::_decode_depth(buf, ::buffa::RECURSION_LIMIT)
+    }
+    fn decode_view_with_limit(
+        buf: &'a [u8],
+        depth: u32,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        Self::_decode_depth(buf, depth)
+    }
+    /// Convert this view to the owned message type.
+    #[allow(clippy::redundant_closure, clippy::useless_conversion)]
+    fn to_owned_message(&self) -> CertificateActivity {
+        #[allow(unused_imports)]
+        use ::buffa::alloc::string::ToString as _;
+        CertificateActivity {
+            kind: self.kind,
+            epoch: self.epoch,
+            view: self.view,
+            proposal_digest: self.proposal_digest.map(|b| (b).to_vec()),
+            encoded_activity: (self.encoded_activity).to_vec(),
+            __buffa_unknown_fields: self
+                .__buffa_unknown_fields
+                .to_owned()
+                .unwrap_or_default()
+                .into(),
+            ..::core::default::Default::default()
+        }
+    }
+}
+unsafe impl ::buffa::DefaultViewInstance for CertificateActivityView<'static> {
+    fn default_view_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<CertificateActivityView<'static>> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+unsafe impl<'a> ::buffa::HasDefaultViewInstance for CertificateActivityView<'a> {
+    type Static = CertificateActivityView<'static>;
+}
+/// Decoded view of any stored Simplex activity row.
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize)]
+#[serde(default)]
+pub struct Activity {
+    #[serde(flatten)]
+    pub row: Option<activity::Row>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub __buffa_cached_size: ::buffa::__private::CachedSize,
+}
+impl ::core::fmt::Debug for Activity {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("Activity").field("row", &self.row).finish()
+    }
+}
+impl Activity {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/store.simplex.v1.Activity";
+}
+unsafe impl ::buffa::DefaultInstance for Activity {
+    fn default_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<Activity> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+impl ::buffa::Message for Activity {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// The result is a `u32`; the protobuf specification requires all
+    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
+    /// compliant message will never overflow this type.
+    fn compute_size(&self) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        if let ::core::option::Option::Some(ref v) = self.row {
+            match v {
+                activity::Row::Signed(x) => {
+                    let inner = x.compute_size();
+                    size
+                        += 1u32 + ::buffa::encoding::varint_len(inner as u64) as u32
+                            + inner;
+                }
+                activity::Row::Certificate(x) => {
+                    let inner = x.compute_size();
+                    size
+                        += 1u32 + ::buffa::encoding::varint_len(inner as u64) as u32
+                            + inner;
+                }
+            }
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        self.__buffa_cached_size.set(size);
+        size
+    }
+    fn write_to(&self, buf: &mut impl ::buffa::bytes::BufMut) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let ::core::option::Option::Some(ref v) = self.row {
+            match v {
+                activity::Row::Signed(x) => {
+                    ::buffa::encoding::Tag::new(
+                            1u32,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )
+                        .encode(buf);
+                    ::buffa::encoding::encode_varint(x.cached_size() as u64, buf);
+                    x.write_to(buf);
+                }
+                activity::Row::Certificate(x) => {
+                    ::buffa::encoding::Tag::new(
+                            2u32,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )
+                        .encode(buf);
+                    ::buffa::encoding::encode_varint(x.cached_size() as u64, buf);
+                    x.write_to(buf);
+                }
+            }
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 1u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                if let ::core::option::Option::Some(
+                    activity::Row::Signed(ref mut existing),
+                ) = self.row
+                {
+                    ::buffa::Message::merge_length_delimited(
+                        &mut **existing,
+                        buf,
+                        depth,
+                    )?;
+                } else {
+                    let mut val = ::core::default::Default::default();
+                    ::buffa::Message::merge_length_delimited(&mut val, buf, depth)?;
+                    self.row = ::core::option::Option::Some(
+                        activity::Row::Signed(::buffa::alloc::boxed::Box::new(val)),
+                    );
+                }
+            }
+            2u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 2u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                if let ::core::option::Option::Some(
+                    activity::Row::Certificate(ref mut existing),
+                ) = self.row
+                {
+                    ::buffa::Message::merge_length_delimited(
+                        &mut **existing,
+                        buf,
+                        depth,
+                    )?;
+                } else {
+                    let mut val = ::core::default::Default::default();
+                    ::buffa::Message::merge_length_delimited(&mut val, buf, depth)?;
+                    self.row = ::core::option::Option::Some(
+                        activity::Row::Certificate(::buffa::alloc::boxed::Box::new(val)),
+                    );
+                }
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn cached_size(&self) -> u32 {
+        self.__buffa_cached_size.get()
+    }
+    fn clear(&mut self) {
+        self.row = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+        self.__buffa_cached_size.set(0);
+    }
+}
+impl ::buffa::ExtensionSet for Activity {
+    const PROTO_FQN: &'static str = "store.simplex.v1.Activity";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl<'de> serde::Deserialize<'de> for Activity {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct _V;
+        impl<'de> serde::de::Visitor<'de> for _V {
+            type Value = Activity;
+            fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.write_str("struct Activity")
+            }
+            #[allow(clippy::field_reassign_with_default)]
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Activity, A::Error> {
+                let mut __oneof_row: Option<activity::Row> = None;
+                while let Some(key) = map.next_key::<::buffa::alloc::string::String>()? {
+                    match key.as_str() {
+                        "signed" => {
+                            let v: Option<SignedActivity> = map
+                                .next_value_seed(
+                                    ::buffa::json_helpers::NullableDeserializeSeed(
+                                        ::buffa::json_helpers::DefaultDeserializeSeed::<
+                                            SignedActivity,
+                                        >::new(),
+                                    ),
+                                )?;
+                            if let Some(v) = v {
+                                if __oneof_row.is_some() {
+                                    return Err(
+                                        serde::de::Error::custom(
+                                            "multiple oneof fields set for 'row'",
+                                        ),
+                                    );
+                                }
+                                __oneof_row = Some(
+                                    activity::Row::Signed(::buffa::alloc::boxed::Box::new(v)),
+                                );
+                            }
+                        }
+                        "certificate" => {
+                            let v: Option<CertificateActivity> = map
+                                .next_value_seed(
+                                    ::buffa::json_helpers::NullableDeserializeSeed(
+                                        ::buffa::json_helpers::DefaultDeserializeSeed::<
+                                            CertificateActivity,
+                                        >::new(),
+                                    ),
+                                )?;
+                            if let Some(v) = v {
+                                if __oneof_row.is_some() {
+                                    return Err(
+                                        serde::de::Error::custom(
+                                            "multiple oneof fields set for 'row'",
+                                        ),
+                                    );
+                                }
+                                __oneof_row = Some(
+                                    activity::Row::Certificate(
+                                        ::buffa::alloc::boxed::Box::new(v),
+                                    ),
+                                );
+                            }
+                        }
+                        _ => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                let mut __r = <Activity as ::core::default::Default>::default();
+                __r.row = __oneof_row;
+                Ok(__r)
+            }
+        }
+        d.deserialize_map(_V)
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for Activity {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __ACTIVITY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/store.simplex.v1.Activity",
+    to_json: ::buffa::type_registry::any_to_json::<Activity>,
+    from_json: ::buffa::type_registry::any_from_json::<Activity>,
+    is_wkt: false,
+};
+/// Decoded view of any stored Simplex activity row.
+#[derive(Clone, Debug, Default)]
+pub struct ActivityView<'a> {
+    pub row: ::core::option::Option<activity::RowView<'a>>,
+    pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+}
+impl<'a> ActivityView<'a> {
+    /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
+    ///
+    /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
+    /// and by generated sub-message decode arms with `depth - 1`.
+    ///
+    /// **Not part of the public API.** Named with a leading underscore to
+    /// signal that it is for generated-code use only.
+    #[doc(hidden)]
+    pub fn _decode_depth(
+        buf: &'a [u8],
+        depth: u32,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        let mut view = Self::default();
+        view._merge_into_view(buf, depth)?;
+        ::core::result::Result::Ok(view)
+    }
+    /// Merge fields from `buf` into this view (proto merge semantics).
+    ///
+    /// Repeated fields append; singular fields last-wins; singular
+    /// MESSAGE fields merge recursively. Used by sub-message decode
+    /// arms when the same field appears multiple times on the wire.
+    ///
+    /// **Not part of the public API.**
+    #[doc(hidden)]
+    pub fn _merge_into_view(
+        &mut self,
+        buf: &'a [u8],
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        let _ = depth;
+        #[allow(unused_variables)]
+        let view = self;
+        let mut cur: &'a [u8] = buf;
+        while !cur.is_empty() {
+            let before_tag = cur;
+            let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
+            match tag.field_number() {
+                1u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 1u32,
+                            expected: 2u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    if depth == 0 {
+                        return Err(::buffa::DecodeError::RecursionLimitExceeded);
+                    }
+                    let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                    if let Some(activity::RowView::Signed(ref mut existing)) = view.row {
+                        existing._merge_into_view(sub, depth - 1)?;
+                    } else {
+                        view.row = Some(
+                            activity::RowView::Signed(
+                                ::buffa::alloc::boxed::Box::new(
+                                    SignedActivityView::_decode_depth(sub, depth - 1)?,
+                                ),
+                            ),
+                        );
+                    }
+                }
+                2u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 2u32,
+                            expected: 2u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    if depth == 0 {
+                        return Err(::buffa::DecodeError::RecursionLimitExceeded);
+                    }
+                    let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                    if let Some(activity::RowView::Certificate(ref mut existing)) = view
+                        .row
+                    {
+                        existing._merge_into_view(sub, depth - 1)?;
+                    } else {
+                        view.row = Some(
+                            activity::RowView::Certificate(
+                                ::buffa::alloc::boxed::Box::new(
+                                    CertificateActivityView::_decode_depth(sub, depth - 1)?,
+                                ),
+                            ),
+                        );
+                    }
+                }
+                _ => {
+                    ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
+                    let span_len = before_tag.len() - cur.len();
+                    view.__buffa_unknown_fields.push_raw(&before_tag[..span_len]);
+                }
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+}
 impl<'a> ::buffa::MessageView<'a> for ActivityView<'a> {
     type Owned = Activity;
     fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
@@ -759,12 +1592,21 @@ impl<'a> ::buffa::MessageView<'a> for ActivityView<'a> {
         #[allow(unused_imports)]
         use ::buffa::alloc::string::ToString as _;
         Activity {
-            kind: self.kind,
-            epoch: self.epoch,
-            view: self.view,
-            signer: self.signer,
-            proposal_digest: self.proposal_digest.map(|b| (b).to_vec()),
-            encoded_activity: (self.encoded_activity).to_vec(),
+            row: self
+                .row
+                .as_ref()
+                .map(|v| match v {
+                    activity::RowView::Signed(v) => {
+                        activity::Row::Signed(
+                            ::buffa::alloc::boxed::Box::new(v.to_owned_message()),
+                        )
+                    }
+                    activity::RowView::Certificate(v) => {
+                        activity::Row::Certificate(
+                            ::buffa::alloc::boxed::Box::new(v.to_owned_message()),
+                        )
+                    }
+                }),
             __buffa_unknown_fields: self
                 .__buffa_unknown_fields
                 .to_owned()
@@ -782,6 +1624,59 @@ unsafe impl ::buffa::DefaultViewInstance for ActivityView<'static> {
 }
 unsafe impl<'a> ::buffa::HasDefaultViewInstance for ActivityView<'a> {
     type Static = ActivityView<'static>;
+}
+pub mod activity {
+    #[allow(unused_imports)]
+    use super::*;
+    #[derive(Clone, PartialEq, Debug)]
+    pub enum Row {
+        Signed(::buffa::alloc::boxed::Box<super::SignedActivity>),
+        Certificate(::buffa::alloc::boxed::Box<super::CertificateActivity>),
+    }
+    impl ::buffa::Oneof for Row {}
+    impl From<super::SignedActivity> for Row {
+        fn from(v: super::SignedActivity) -> Self {
+            Self::Signed(::buffa::alloc::boxed::Box::new(v))
+        }
+    }
+    impl From<super::SignedActivity> for ::core::option::Option<Row> {
+        fn from(v: super::SignedActivity) -> Self {
+            Self::Some(Row::from(v))
+        }
+    }
+    impl From<super::CertificateActivity> for Row {
+        fn from(v: super::CertificateActivity) -> Self {
+            Self::Certificate(::buffa::alloc::boxed::Box::new(v))
+        }
+    }
+    impl From<super::CertificateActivity> for ::core::option::Option<Row> {
+        fn from(v: super::CertificateActivity) -> Self {
+            Self::Some(Row::from(v))
+        }
+    }
+    impl serde::Serialize for Row {
+        fn serialize<S: serde::Serializer>(
+            &self,
+            s: S,
+        ) -> ::core::result::Result<S::Ok, S::Error> {
+            use serde::ser::SerializeMap;
+            let mut map = s.serialize_map(Some(1))?;
+            match self {
+                Row::Signed(v) => {
+                    map.serialize_entry("signed", v)?;
+                }
+                Row::Certificate(v) => {
+                    map.serialize_entry("certificate", v)?;
+                }
+            }
+            map.end()
+        }
+    }
+    #[derive(Clone, Debug)]
+    pub enum RowView<'a> {
+        Signed(::buffa::alloc::boxed::Box<super::SignedActivityView<'a>>),
+        Certificate(::buffa::alloc::boxed::Box<super::CertificateActivityView<'a>>),
+    }
 }
 /// Decoded view of a stored notarized/finalized certificate row. The certificate
 /// bytes are Commonware's native codec bytes for either `Notarization<S, D>` or
