@@ -44,6 +44,15 @@ Explore the Exoware API.
 - **SQL** (optional, requires `VITE_SQL_URL`): run ad-hoc SQL queries and
   subscribe to a SQL WHERE predicate evaluated per ingested batch.
 
+## Store namespace
+
+The sandbox currently runs raw Store KV, Ordered QMDB, and SQL against the same
+unpartitioned simulator Store. QMDB and SQL each use their own internal key
+families, but the demo binaries do not assign distinct SDK `StoreKeyPrefix`
+values, and raw KV can write arbitrary Store keys. This means the sandbox is
+useful for exercising the individual panels, but it should not be treated as an
+example of isolated multi-instance Store partitioning.
+
 ## Ordered QMDB panel
 
 The QMDB panel is only rendered when `VITE_QMDB_URL` is set, since it requires
