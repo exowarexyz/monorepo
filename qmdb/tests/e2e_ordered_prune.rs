@@ -209,8 +209,7 @@ async fn mirror_ordered_prune_past_chunk_zero() {
     );
 
     for outcome in &batches {
-        writer
-            .upload_and_publish(&outcome.delta_ops, &outcome.boundary)
+        common::commit_ordered_upload(&client, &writer, &outcome.delta_ops, &outcome.boundary)
             .await
             .expect("upload");
         let remote_root = reader

@@ -9,7 +9,8 @@ use commonware_storage::mmr::{Location, Position};
 use commonware_storage::qmdb::immutable::Operation as ImmutableOperation;
 use commonware_utils::Array;
 use exoware_sdk_rs::keys::Key;
-use exoware_sdk_rs::StoreClient;
+use exoware_sdk_rs::{StoreBatchPublication, StoreBatchUpload, StoreClient, StoreWriteBatch};
+use futures::future::BoxFuture;
 
 use crate::auth::{
     build_auth_immutable_upload_rows, encode_auth_node_key, encode_auth_watermark_key,
@@ -18,7 +19,7 @@ use crate::auth::{
 use crate::core::extend_mmr_from_peaks;
 use crate::error::QmdbError;
 use crate::writer::core::{Cache, WriterCore};
-use crate::{UploadReceipt, WriterState};
+use crate::{PublishedCheckpoint, UploadReceipt, WriterState};
 
 const NAMESPACE: AuthenticatedBackendNamespace = AuthenticatedBackendNamespace::Immutable;
 
@@ -110,10 +111,14 @@ where
         self.core.latest_published().await
     }
 
-    pub async fn upload_and_publish(
+    pub async fn latest_published_checkpoint(&self) -> Option<PublishedCheckpoint> {
+        self.core.latest_published_checkpoint().await
+    }
+
+    pub async fn prepare_upload(
         &self,
         ops: &[ImmutableOperation<K, V>],
-    ) -> Result<UploadReceipt, QmdbError> {
+    ) -> Result<super::PreparedUpload, QmdbError> {
         let prepared = self
             .core
             .prepare(ops.len() as u64, |ctx| {
@@ -131,45 +136,84 @@ where
                 })
             })
             .await?;
+        Ok(super::PreparedUpload {
+            dispatch_id: prepared.dispatch_id,
+            latest_location: prepared.latest_location,
+            writer_location_watermark: prepared.watermark_at,
+            rows: prepared.output,
+        })
+    }
 
-        let refs: Vec<(&Key, &[u8])> = prepared
-            .output
-            .iter()
-            .map(|(k, v)| (k, v.as_slice()))
-            .collect();
-        match self.client.ingest().put(&refs).await {
-            Ok(_) => {
-                self.core.ack_success(prepared.dispatch_id).await;
-                Ok(UploadReceipt {
-                    latest_location: prepared.latest_location,
-                    writer_location_watermark: prepared.watermark_at,
-                })
-            }
-            Err(err) => {
-                let msg = format!(
-                    "immutable upload ending at {} failed: {err}",
-                    prepared.latest_location
-                );
-                self.core.ack_failure(msg).await;
-                Err(QmdbError::Client(err))
-            }
+    pub fn stage_upload(
+        &self,
+        prepared: &super::PreparedUpload,
+        batch: &mut StoreWriteBatch,
+    ) -> Result<(), QmdbError> {
+        super::stage_rows(&self.client, batch, &prepared.rows)
+    }
+
+    pub async fn mark_upload_persisted(
+        &self,
+        prepared: super::PreparedUpload,
+        sequence_number: u64,
+    ) -> UploadReceipt {
+        self.core
+            .ack_success(prepared.dispatch_id, sequence_number)
+            .await;
+        super::upload_receipt(&prepared, sequence_number)
+    }
+
+    pub async fn mark_upload_failed(&self, prepared: super::PreparedUpload, err: impl ToString) {
+        let msg = format!(
+            "immutable upload ending at {} failed: {}",
+            prepared.latest_location,
+            err.to_string()
+        );
+        self.core.ack_failure(msg).await;
+    }
+
+    pub async fn prepare_flush(&self) -> Result<Option<super::PreparedWatermark>, QmdbError> {
+        let Some(target) = self.core.pending_watermark().await? else {
+            return Ok(None);
+        };
+        Ok(Some(super::PreparedWatermark {
+            location: target,
+            row: (encode_auth_watermark_key(NAMESPACE, target), Vec::new()),
+        }))
+    }
+
+    pub fn stage_flush(
+        &self,
+        prepared: &super::PreparedWatermark,
+        batch: &mut StoreWriteBatch,
+    ) -> Result<(), QmdbError> {
+        super::stage_watermark(&self.client, batch, prepared)
+    }
+
+    pub async fn mark_flush_persisted(
+        &self,
+        prepared: super::PreparedWatermark,
+        sequence_number: u64,
+    ) -> PublishedCheckpoint {
+        self.core
+            .mark_watermark_published(prepared.location, sequence_number)
+            .await;
+        PublishedCheckpoint {
+            location: prepared.location,
+            sequence_number,
         }
     }
 
-    pub async fn flush(&self) -> Result<(), QmdbError> {
+    pub async fn flush_with_receipt(&self) -> Result<Option<PublishedCheckpoint>, QmdbError> {
         self.core.await_drain().await;
-        let Some(target) = self.core.pending_watermark().await? else {
-            return Ok(());
+        let Some(prepared) = self.prepare_flush().await? else {
+            return Ok(None);
         };
-        let key = encode_auth_watermark_key(NAMESPACE, target);
-        let empty: &[u8] = &[];
-        self.client
-            .ingest()
-            .put(&[(&key, empty)])
-            .await
-            .map_err(QmdbError::Client)?;
-        self.core.mark_watermark_published(target).await;
-        Ok(())
+        Ok(Some(self.commit_publication(&self.client, prepared).await?))
+    }
+
+    pub async fn flush(&self) -> Result<(), QmdbError> {
+        self.flush_with_receipt().await.map(|_| ())
     }
 }
 
@@ -181,5 +225,99 @@ where
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ImmutableWriter").finish_non_exhaustive()
+    }
+}
+
+impl<H, K, V> StoreBatchUpload for ImmutableWriter<H, K, V>
+where
+    H: Hasher + Sync,
+    K: Array + Codec + Clone + AsRef<[u8]> + Sync,
+    V: Codec + Clone + Send + Sync,
+    V::Cfg: Clone,
+    K::Cfg: Clone,
+    ImmutableOperation<K, V>: Encode + Decode<Cfg = V::Cfg> + Clone,
+{
+    type Prepared = super::PreparedUpload;
+    type Receipt = UploadReceipt;
+    type Error = QmdbError;
+
+    fn stage_upload(
+        &self,
+        prepared: &Self::Prepared,
+        batch: &mut StoreWriteBatch,
+    ) -> Result<(), Self::Error> {
+        ImmutableWriter::stage_upload(self, prepared, batch)
+    }
+
+    fn commit_error(&self, error: exoware_sdk_rs::ClientError) -> Self::Error {
+        QmdbError::Client(error)
+    }
+
+    fn mark_upload_persisted<'a>(
+        &'a self,
+        prepared: Self::Prepared,
+        sequence_number: u64,
+    ) -> BoxFuture<'a, Self::Receipt>
+    where
+        Self: Sync + 'a,
+        Self::Prepared: 'a,
+    {
+        Box::pin(async move {
+            ImmutableWriter::mark_upload_persisted(self, prepared, sequence_number).await
+        })
+    }
+
+    fn mark_upload_failed<'a>(
+        &'a self,
+        prepared: Self::Prepared,
+        error: String,
+    ) -> BoxFuture<'a, ()>
+    where
+        Self: Sync + 'a,
+        Self::Prepared: 'a,
+    {
+        Box::pin(async move {
+            ImmutableWriter::mark_upload_failed(self, prepared, error).await;
+        })
+    }
+}
+
+impl<H, K, V> StoreBatchPublication for ImmutableWriter<H, K, V>
+where
+    H: Hasher + Sync,
+    K: Array + Codec + Clone + AsRef<[u8]> + Sync,
+    V: Codec + Clone + Send + Sync,
+    V::Cfg: Clone,
+    K::Cfg: Clone,
+    ImmutableOperation<K, V>: Encode + Decode<Cfg = V::Cfg> + Clone,
+{
+    type PreparedPublication = super::PreparedWatermark;
+    type PublicationReceipt = PublishedCheckpoint;
+    type Error = QmdbError;
+
+    fn stage_publication(
+        &self,
+        prepared: &Self::PreparedPublication,
+        batch: &mut StoreWriteBatch,
+    ) -> Result<(), Self::Error> {
+        ImmutableWriter::stage_flush(self, prepared, batch)
+    }
+
+    fn publication_commit_error(&self, error: exoware_sdk_rs::ClientError) -> Self::Error {
+        QmdbError::Client(error)
+    }
+
+    fn mark_publication_persisted<'a>(
+        &'a self,
+        prepared: Self::PreparedPublication,
+        sequence_number: u64,
+    ) -> BoxFuture<'a, Self::PublicationReceipt>
+    where
+        Self: Sync + 'a,
+        Self::PreparedPublication: 'a,
+    {
+        Box::pin(async move {
+            ImmutableWriter::mark_flush_persisted(self, prepared, sequence_number).await
+        })
     }
 }

@@ -176,13 +176,15 @@ async fn sequential_upload_matches_local_root() {
     .await;
 
     let writer = fresh_writer(client.clone());
-    let receipt = writer
-        .upload_and_publish(&local.operations, &local.current_boundary)
-        .await
-        .expect("upload");
+    let receipt =
+        common::commit_ordered_upload(&client, &writer, &local.operations, &local.current_boundary)
+            .await
+            .expect("upload");
     assert_eq!(receipt.latest_location, local.latest_location);
     assert_eq!(
-        receipt.writer_location_watermark,
+        receipt
+            .writer_location_watermark
+            .map(|checkpoint| checkpoint.location),
         Some(local.latest_location)
     );
 
@@ -228,10 +230,13 @@ async fn pipelined_batches_require_flush_to_catch_up_watermark() {
     let w1 = writer.clone();
     let w2 = writer.clone();
     let w3 = writer.clone();
+    let c1 = client.clone();
+    let c2 = client.clone();
+    let c3 = client.clone();
     let (r1, r2, r3) = tokio::join!(
-        async move { w1.upload_and_publish(&ops1, &after1.current_boundary).await },
-        async move { w2.upload_and_publish(&ops2, &after2.current_boundary).await },
-        async move { w3.upload_and_publish(&ops3, &after3.current_boundary).await }
+        async move { common::commit_ordered_upload(&c1, &w1, &ops1, &after1.current_boundary).await },
+        async move { common::commit_ordered_upload(&c2, &w2, &ops2, &after2.current_boundary).await },
+        async move { common::commit_ordered_upload(&c3, &w3, &ops3, &after3.current_boundary).await }
     );
     let _ = r1.expect("b1");
     let _ = r2.expect("b2");

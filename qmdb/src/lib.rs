@@ -55,7 +55,8 @@ pub use unordered::UnorderedClient;
 pub use writer::{
     build_immutable_upload, build_keyless_upload, build_ordered_upload, build_unordered_upload,
     BuiltImmutableUpload, BuiltKeylessUpload, BuiltOrderedUpload, BuiltUnorderedUpload,
-    ImmutableWriter, KeylessWriter, OrderedWriter, UnorderedWriter,
+    ImmutableWriter, KeylessWriter, OrderedWriter, PreparedUpload, PreparedWatermark,
+    UnorderedWriter,
 };
 
 pub use boundary::recover_boundary_state;
@@ -97,11 +98,36 @@ pub struct VersionedValue<K, V> {
 /// Metadata returned after uploading one batch of QMDB operations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UploadReceipt {
+    /// Monotonic request id assigned by the writer for this upload.
+    pub writer_request_id: u64,
     /// Inclusive maximum Location of ops in this batch.
     pub latest_location: Location,
+    /// Store sequence number at which this upload's rows became durable.
+    pub store_sequence_number: u64,
     /// The watermark this batch published, if any. `None` when pipelining
     /// deferred the watermark to a later `flush()` or batch.
-    pub writer_location_watermark: Option<Location>,
+    pub writer_location_watermark: Option<PublishedCheckpoint>,
+}
+
+/// Writer publication point that is known to be durable in Store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PublishedCheckpoint {
+    /// Inclusive maximum QMDB Location authorized by this checkpoint.
+    pub location: Location,
+    /// Store sequence number at which the checkpoint became visible.
+    pub sequence_number: u64,
+}
+
+impl PartialEq<Location> for PublishedCheckpoint {
+    fn eq(&self, other: &Location) -> bool {
+        self.location == *other
+    }
+}
+
+impl PartialEq<PublishedCheckpoint> for Location {
+    fn eq(&self, other: &PublishedCheckpoint) -> bool {
+        *self == other.location
+    }
 }
 
 /// Caller-owned frontier for resuming a single-writer helper without reading
@@ -190,7 +216,7 @@ impl<D: Digest> WriterState<D> {
 ///
 /// Callers typically obtain it from [`recover_boundary_state`], using a local
 /// Commonware `current::ordered::Db`, and then pass it to
-/// [`OrderedWriter::upload_and_publish`].
+/// [`OrderedWriter::prepare_upload`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurrentBoundaryState<D: Digest, const N: usize> {
     /// Canonical current-state root at this batch boundary.

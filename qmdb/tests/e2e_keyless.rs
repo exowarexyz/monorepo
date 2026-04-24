@@ -106,10 +106,9 @@ async fn keyless_round_trip() {
     let local = build_local_db().await;
 
     let writer = fresh_writer(client.clone());
-    writer
-        .upload_and_publish(&local.operations)
+    common::commit_keyless_upload(&client, &writer, &local.operations)
         .await
-        .expect("upload_and_publish");
+        .expect("commit upload");
 
     let root = retry(
         || {

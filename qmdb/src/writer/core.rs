@@ -28,7 +28,7 @@ use commonware_storage::mmr::{Location, Position};
 use tokio::sync::{Mutex, Notify};
 
 use crate::error::QmdbError;
-use crate::WriterState;
+use crate::{PublishedCheckpoint, WriterState};
 
 /// MMR/pipeline state held in memory by a single-writer helper.
 #[derive(Debug)]
@@ -43,7 +43,7 @@ pub(crate) struct Cache<D: Digest> {
     /// Highest watermark location definitely committed by an ACKed PUT (or a
     /// successful `flush()` watermark PUT). Recovery helpers must report this
     /// value, not the speculative `latest_published`.
-    pub latest_committed_published: Option<Location>,
+    pub latest_committed_published: Option<PublishedCheckpoint>,
     pub latest_dispatched: Option<Location>,
     /// Dispatched-but-not-yet-ACKd batches, in dispatch order. Per-batch
     /// `acked` lets us handle out-of-order ACKs correctly: we only advance
@@ -198,7 +198,7 @@ impl<D: Digest> WriterCore<D> {
     /// Record a PUT success for the batch with this `dispatch_id`. Marks it
     /// ACKd in `pending`, then advances `latest_contiguous_acked` by popping
     /// any contiguous-acked prefix off the front.
-    pub(crate) async fn ack_success(&self, dispatch_id: u64) {
+    pub(crate) async fn ack_success(&self, dispatch_id: u64, sequence_number: u64) {
         let mut matched = false;
         {
             let mut state = self.state.lock().await;
@@ -211,11 +211,15 @@ impl<D: Digest> WriterCore<D> {
                 Some(p) => {
                     p.acked = true;
                     if let Some(wm) = p.watermark_at {
-                        cache.latest_committed_published = Some(
-                            cache
-                                .latest_committed_published
-                                .map_or(wm, |cur| cur.max(wm)),
-                        );
+                        let checkpoint = PublishedCheckpoint {
+                            location: wm,
+                            sequence_number,
+                        };
+                        cache.latest_committed_published =
+                            Some(match cache.latest_committed_published {
+                                Some(cur) if cur.location > checkpoint.location => cur,
+                                _ => checkpoint,
+                            });
                     }
                     matched = true;
                 }
@@ -284,9 +288,9 @@ impl<D: Digest> WriterCore<D> {
     pub(crate) async fn pending_watermark(&self) -> Result<Option<Location>, QmdbError> {
         let state = self.state.lock().await;
         match &*state {
-            State::Ready(c) => Ok(match (c.latest_committed_published, c.latest_dispatched) {
-                (Some(p), Some(d)) if p >= d => None,
-                (_, Some(d)) => Some(d),
+            State::Ready(c) => Ok(match c.latest_dispatched {
+                Some(d) if c.latest_published.is_some_and(|p| p >= d) => None,
+                Some(d) => Some(d),
                 _ => None,
             }),
             State::Uninit => unreachable!("writer core is always constructed with state"),
@@ -295,16 +299,26 @@ impl<D: Digest> WriterCore<D> {
     }
 
     /// Mark a catch-up watermark (emitted by `flush()`) as published.
-    pub(crate) async fn mark_watermark_published(&self, location: Location) {
+    pub(crate) async fn mark_watermark_published(&self, location: Location, sequence_number: u64) {
         let mut state = self.state.lock().await;
         if let State::Ready(c) = &mut *state {
             c.latest_published = Some(location);
-            c.latest_committed_published = Some(location);
+            c.latest_committed_published = Some(PublishedCheckpoint {
+                location,
+                sequence_number,
+            });
         }
     }
 
     /// Snapshot of the latest published watermark from local state.
     pub(crate) async fn latest_published(&self) -> Option<Location> {
+        self.latest_published_checkpoint()
+            .await
+            .map(|checkpoint| checkpoint.location)
+    }
+
+    /// Snapshot of the latest published checkpoint from local state.
+    pub(crate) async fn latest_published_checkpoint(&self) -> Option<PublishedCheckpoint> {
         match &*self.state.lock().await {
             State::Ready(c) => c.latest_committed_published,
             State::Poisoned { cache, .. } => cache.latest_committed_published,
@@ -316,12 +330,16 @@ impl<D: Digest> WriterCore<D> {
 impl<D: Digest> Cache<D> {
     pub(crate) fn from_writer_state(state: WriterState<D>) -> Self {
         let latest_committed = state.latest_committed_location();
+        let latest_committed_published = latest_committed.map(|location| PublishedCheckpoint {
+            location,
+            sequence_number: 0,
+        });
         Self {
             peaks: state.peaks,
             ops_size: state.ops_size,
             next_location: state.next_location,
             latest_published: latest_committed,
-            latest_committed_published: latest_committed,
+            latest_committed_published,
             latest_dispatched: None,
             pending: VecDeque::new(),
             latest_contiguous_acked: latest_committed,
@@ -380,7 +398,10 @@ mod tests {
             ops_size: Position::new(0),
             next_location,
             latest_published,
-            latest_committed_published: latest_published,
+            latest_committed_published: latest_published.map(|location| PublishedCheckpoint {
+                location,
+                sequence_number: 0,
+            }),
             latest_dispatched: latest_published,
             pending: VecDeque::new(),
             latest_contiguous_acked: latest_published,
@@ -428,8 +449,8 @@ mod tests {
         assert_eq!(third.watermark_at, None);
 
         // Later batches ACK first, but the prefix still has a hole at batch 0.
-        core.ack_success(third.dispatch_id).await;
-        core.ack_success(second.dispatch_id).await;
+        core.ack_success(third.dispatch_id, 30).await;
+        core.ack_success(second.dispatch_id, 20).await;
         assert_eq!(
             core.latest_published().await,
             None,
@@ -455,7 +476,7 @@ mod tests {
 
         // Once the missing first batch ACKs, the contiguous frontier jumps to
         // the highest already-acked predecessor (batch 2 / location 2).
-        core.ack_success(first.dispatch_id).await;
+        core.ack_success(first.dispatch_id, 10).await;
         {
             let state = core.state.lock().await;
             let cache = match &*state {
@@ -463,7 +484,18 @@ mod tests {
                 other => panic!("unexpected writer state: {other:?}"),
             };
             assert_eq!(cache.latest_contiguous_acked, Some(loc(2)));
-            assert_eq!(cache.latest_committed_published, Some(loc(0)));
+            assert_eq!(
+                cache
+                    .latest_committed_published
+                    .map(|checkpoint| checkpoint.location),
+                Some(loc(0))
+            );
+            assert_eq!(
+                cache
+                    .latest_committed_published
+                    .map(|checkpoint| checkpoint.sequence_number),
+                Some(10)
+            );
         }
 
         // With batch 3 still in flight, the next dispatch should publish the
@@ -494,8 +526,8 @@ mod tests {
         assert_eq!(first.watermark_at, Some(loc(8)));
         assert_eq!(second.watermark_at, None);
 
-        core.ack_success(first.dispatch_id).await;
-        core.ack_success(second.dispatch_id).await;
+        core.ack_success(first.dispatch_id, 11).await;
+        core.ack_success(second.dispatch_id, 12).await;
         core.await_drain().await;
 
         assert_eq!(
@@ -504,8 +536,14 @@ mod tests {
             "flush should publish exactly the trailing batch boundary",
         );
 
-        core.mark_watermark_published(loc(9)).await;
+        core.mark_watermark_published(loc(9), 13).await;
         assert_eq!(core.latest_published().await, Some(loc(9)));
+        assert_eq!(
+            core.latest_published_checkpoint()
+                .await
+                .map(|checkpoint| checkpoint.sequence_number),
+            Some(13)
+        );
         assert_eq!(
             core.pending_watermark().await.expect("pending watermark"),
             None,

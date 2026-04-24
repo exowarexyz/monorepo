@@ -95,13 +95,12 @@ async fn build_local_batch() -> LocalBatch {
     .expect("join")
 }
 
-async fn upload_and_publish(client: &StoreClient, batch: &LocalBatch) {
+async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
     let writer: KeylessWriter<commonware_cryptography::Sha256, Vec<u8>> =
         KeylessWriter::empty(client.clone());
-    writer
-        .upload_and_publish(&batch.operations)
+    common::commit_keyless_upload(client, &writer, &batch.operations)
         .await
-        .expect("upload_and_publish");
+        .expect("commit upload");
 }
 
 #[tokio::test]
@@ -121,7 +120,7 @@ async fn keyless_connect_subscribe_emits_verifiable_multi_proof() {
         .expect("subscribe");
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    upload_and_publish(&store_client, &local).await;
+    commit_upload(&store_client, &local).await;
 
     let frame: RangeSubscribeProof<Digest, BatchOperation> =
         tokio::time::timeout(Duration::from_secs(5), stream.message())
@@ -145,7 +144,7 @@ async fn keyless_connect_subscribe_emits_verifiable_multi_proof() {
 async fn keyless_connect_client_rejects_invalid_streamed_proof() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
-    upload_and_publish(&store_client, &local).await;
+    commit_upload(&store_client, &local).await;
 
     let keyless_client = Arc::new(TestKeylessClient::from_client(
         store_client.clone(),
@@ -225,7 +224,7 @@ async fn keyless_connect_subscribe_filters_by_value_regex() {
         .expect("subscribe");
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    upload_and_publish(&store_client, &local).await;
+    commit_upload(&store_client, &local).await;
 
     let frame: RangeSubscribeProof<Digest, BatchOperation> =
         tokio::time::timeout(Duration::from_secs(5), stream.message())
@@ -272,7 +271,7 @@ async fn keyless_connect_subscribe_rejects_key_filters() {
     // Even if we upload a batch that would otherwise match, the stream must
     // not emit a proof — keyless rejects key_filters server-side before it
     // opens the store subscription.
-    upload_and_publish(&store_client, &local).await;
+    commit_upload(&store_client, &local).await;
 
     match tokio::time::timeout(Duration::from_millis(500), stream.message()).await {
         Ok(Ok(Some(_))) => {

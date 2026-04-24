@@ -43,6 +43,7 @@ use exoware_proto::{
     PreferZstdHttpClient as ProtoPreferZstdHttpClient,
     QUERY_DETAIL_RESPONSE_HEADER as PROTO_QUERY_DETAIL_RESPONSE_HEADER,
 };
+use futures::future::BoxFuture;
 use http::HeaderMap;
 use keys::is_valid_key_size;
 use kv_codec::{KvExpr, KvFieldRef, KvReducedValue};
@@ -326,6 +327,153 @@ impl StoreWriteBatch {
             .map(|(key, value)| (key, value.as_ref()))
             .collect();
         client.put_physical(&refs).await
+    }
+}
+
+/// A writer that can stage an already-prepared upload into a shared Store
+/// write batch and then be notified of the batch outcome.
+///
+/// Implementations should keep `prepare_*` methods as inherent APIs because
+/// each writer's input shape differs. Once a caller has a prepared handle,
+/// this trait provides the common lifecycle:
+///
+/// 1. stage rows into a [`StoreWriteBatch`]
+/// 2. commit that batch
+/// 3. mark the prepared handle persisted with the returned Store sequence
+///    number, or failed if staging/commit does not complete
+pub trait StoreBatchUpload {
+    type Prepared: Send;
+    type Receipt: Send;
+    type Error: std::fmt::Display + Send;
+
+    fn stage_upload(
+        &self,
+        prepared: &Self::Prepared,
+        batch: &mut StoreWriteBatch,
+    ) -> Result<(), Self::Error>;
+
+    fn commit_error(&self, error: ClientError) -> Self::Error;
+
+    fn mark_upload_persisted<'a>(
+        &'a self,
+        prepared: Self::Prepared,
+        sequence_number: u64,
+    ) -> BoxFuture<'a, Self::Receipt>
+    where
+        Self: Sync + 'a,
+        Self::Prepared: 'a;
+
+    fn mark_upload_failed<'a>(
+        &'a self,
+        prepared: Self::Prepared,
+        error: String,
+    ) -> BoxFuture<'a, ()>
+    where
+        Self: Sync + 'a,
+        Self::Prepared: 'a;
+
+    fn commit_upload<'a>(
+        &'a self,
+        client: &'a StoreClient,
+        prepared: Self::Prepared,
+    ) -> BoxFuture<'a, Result<Self::Receipt, Self::Error>>
+    where
+        Self: Sync + Sized + 'a,
+        Self::Prepared: 'a,
+        Self::Receipt: 'a,
+        Self::Error: 'a,
+    {
+        Box::pin(async move {
+            let mut batch = StoreWriteBatch::new();
+            if let Err(err) = self.stage_upload(&prepared, &mut batch) {
+                let message = err.to_string();
+                self.mark_upload_failed(prepared, message).await;
+                return Err(err);
+            }
+            match batch.commit(client).await {
+                Ok(sequence_number) => {
+                    Ok(self.mark_upload_persisted(prepared, sequence_number).await)
+                }
+                Err(err) => {
+                    let message = err.to_string();
+                    self.mark_upload_failed(prepared, message).await;
+                    Err(self.commit_error(err))
+                }
+            }
+        })
+    }
+}
+
+/// A writer that can stage an already-prepared publication record into a
+/// shared Store write batch and then be notified of the batch outcome.
+///
+/// This is the companion to [`StoreBatchUpload`] for metadata that publishes
+/// already-staged data, such as QMDB watermarks. Implementations should keep
+/// `prepare_*` methods as inherent APIs because each publisher decides when a
+/// publication is needed.
+pub trait StoreBatchPublication {
+    type PreparedPublication: Send;
+    type PublicationReceipt: Send;
+    type Error: std::fmt::Display + Send;
+
+    fn stage_publication(
+        &self,
+        prepared: &Self::PreparedPublication,
+        batch: &mut StoreWriteBatch,
+    ) -> Result<(), Self::Error>;
+
+    fn publication_commit_error(&self, error: ClientError) -> Self::Error;
+
+    fn mark_publication_persisted<'a>(
+        &'a self,
+        prepared: Self::PreparedPublication,
+        sequence_number: u64,
+    ) -> BoxFuture<'a, Self::PublicationReceipt>
+    where
+        Self: Sync + 'a,
+        Self::PreparedPublication: 'a;
+
+    fn mark_publication_failed<'a>(
+        &'a self,
+        _prepared: Self::PreparedPublication,
+        _error: String,
+    ) -> BoxFuture<'a, ()>
+    where
+        Self: Sync + 'a,
+        Self::PreparedPublication: 'a,
+    {
+        Box::pin(async {})
+    }
+
+    fn commit_publication<'a>(
+        &'a self,
+        client: &'a StoreClient,
+        prepared: Self::PreparedPublication,
+    ) -> BoxFuture<'a, Result<Self::PublicationReceipt, Self::Error>>
+    where
+        Self: Sync + Sized + 'a,
+        Self::PreparedPublication: 'a,
+        Self::PublicationReceipt: 'a,
+        Self::Error: 'a,
+    {
+        Box::pin(async move {
+            let mut batch = StoreWriteBatch::new();
+            if let Err(err) = self.stage_publication(&prepared, &mut batch) {
+                let message = err.to_string();
+                self.mark_publication_failed(prepared, message).await;
+                return Err(err);
+            }
+            match batch.commit(client).await {
+                Ok(sequence_number) => Ok(self
+                    .mark_publication_persisted(prepared, sequence_number)
+                    .await),
+                Err(err) => {
+                    let message = err.to_string();
+                    self.mark_publication_failed(prepared, message).await;
+                    Err(self.publication_commit_error(err))
+                }
+            }
+        })
     }
 }
 

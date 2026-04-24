@@ -117,10 +117,9 @@ async fn unordered_round_trip() {
     let local = build_local_db().await;
 
     let writer: UnorderedWriter<Sha256, Vec<u8>, Vec<u8>> = UnorderedWriter::empty(client.clone());
-    writer
-        .upload_and_publish(&local.operations)
+    common::commit_unordered_upload(&client, &writer, &local.operations)
         .await
-        .expect("upload_and_publish");
+        .expect("commit upload");
 
     let c = TestUnorderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
     let watermark = c.writer_location_watermark().await.expect("watermark");

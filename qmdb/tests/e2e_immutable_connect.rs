@@ -107,13 +107,12 @@ async fn build_local_batch() -> LocalBatch {
     .expect("join")
 }
 
-async fn upload_and_publish(client: &StoreClient, batch: &LocalBatch) {
+async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
     let writer: ImmutableWriter<commonware_cryptography::Sha256, FixedBytes<32>, Vec<u8>> =
         ImmutableWriter::empty(client.clone());
-    writer
-        .upload_and_publish(&batch.operations)
+    common::commit_immutable_upload(client, &writer, &batch.operations)
         .await
-        .expect("upload_and_publish");
+        .expect("commit upload");
 }
 
 #[tokio::test]
@@ -134,7 +133,7 @@ async fn immutable_connect_subscribe_emits_verifiable_multi_proof() {
         .expect("subscribe");
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    upload_and_publish(&store_client, &local).await;
+    commit_upload(&store_client, &local).await;
 
     let frame: RangeSubscribeProof<Digest, BatchOperation> =
         tokio::time::timeout(Duration::from_secs(5), stream.message())
@@ -158,7 +157,7 @@ async fn immutable_connect_subscribe_emits_verifiable_multi_proof() {
 async fn immutable_connect_client_rejects_invalid_streamed_proof() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
-    upload_and_publish(&store_client, &local).await;
+    commit_upload(&store_client, &local).await;
 
     let immutable_client = Arc::new(TestImmutableClient::from_client(
         store_client.clone(),
