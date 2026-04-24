@@ -26,7 +26,7 @@ use commonware_storage::qmdb::{
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use store_qmdb::{
+use exoware_qmdb::{
     recover_boundary_state, CurrentBoundaryState, OrderedClient, OrderedWriter, MAX_OPERATION_SIZE,
 };
 
@@ -63,17 +63,17 @@ async fn boundary_from_db(
                 .range_proof(&mut hasher, location, NZU64!(1))
                 .await
                 .map_err(|e| {
-                    store_qmdb::QmdbError::CorruptData(format!(
+                    exoware_qmdb::QmdbError::CorruptData(format!(
                         "local current range proof at {location}: {e}"
                     ))
                 })?;
             proof_ops.pop().ok_or_else(|| {
-                store_qmdb::QmdbError::CorruptData(format!(
+                exoware_qmdb::QmdbError::CorruptData(format!(
                     "local current range proof at {location} returned no ops"
                 ))
             })?;
             let chunk = chunks.pop().ok_or_else(|| {
-                store_qmdb::QmdbError::CorruptData(format!(
+                exoware_qmdb::QmdbError::CorruptData(format!(
                     "local current range proof at {location} returned no chunks"
                 ))
             })?;

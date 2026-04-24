@@ -19,15 +19,15 @@ use commonware_storage::{
 };
 
 use connectrpc::{Chain, ConnectError, ConnectRpcService, Context, ErrorCode, Limits};
-use exoware_sdk_rs::store::common::v1::bytes_filter::KindView as ProtoBytesFilterKindView;
-use exoware_sdk_rs::store::qmdb::v1::{
+use exoware_sdk::store::common::v1::bytes_filter::KindView as ProtoBytesFilterKindView;
+use exoware_sdk::store::qmdb::v1::{
     CurrentKeyValueProof as ProtoCurrentKeyValueProof, CurrentRangeProof as ProtoCurrentRangeProof,
     GetManyRequestView, GetManyResponse, GetRequestView, GetResponse,
     HistoricalMultiProof as ProtoHistoricalMultiProof, MmrProof as ProtoMmrProof,
     MultiProofOperation as ProtoMultiProofOperation, OrderedService, OrderedServiceServer,
     RangeService, RangeServiceServer, SubscribeRequestView, SubscribeResponse,
 };
-use exoware_sdk_rs::stream_filter::{BytesFilter, CompiledBytesFilters};
+use exoware_sdk::stream_filter::{BytesFilter, CompiledBytesFilters};
 use futures::future::BoxFuture;
 use futures::{FutureExt, Stream};
 
@@ -210,8 +210,8 @@ pub trait RangeBackend: Clone + Send + Sync + 'static {
     /// ops have no logical key).
     const REJECTS_KEY_FILTERS: bool = false;
 
-    fn store_client(&self) -> &exoware_sdk_rs::StoreClient;
-    fn classify_and_filter(&self) -> (Classify, exoware_sdk_rs::stream_filter::StreamFilter);
+    fn store_client(&self) -> &exoware_sdk::StoreClient;
+    fn classify_and_filter(&self) -> (Classify, exoware_sdk::stream_filter::StreamFilter);
     fn extract_operation_kv(
         &self,
         location: Location,
@@ -253,11 +253,11 @@ where
 {
     type Digest = H::Digest;
 
-    fn store_client(&self) -> &exoware_sdk_rs::StoreClient {
+    fn store_client(&self) -> &exoware_sdk::StoreClient {
         OrderedClient::store_client(self)
     }
 
-    fn classify_and_filter(&self) -> (Classify, exoware_sdk_rs::stream_filter::StreamFilter) {
+    fn classify_and_filter(&self) -> (Classify, exoware_sdk::stream_filter::StreamFilter) {
         sub::classify_and_filter(None)
     }
 
@@ -293,11 +293,11 @@ where
 {
     type Digest = H::Digest;
 
-    fn store_client(&self) -> &exoware_sdk_rs::StoreClient {
+    fn store_client(&self) -> &exoware_sdk::StoreClient {
         UnorderedClient::store_client(self)
     }
 
-    fn classify_and_filter(&self) -> (Classify, exoware_sdk_rs::stream_filter::StreamFilter) {
+    fn classify_and_filter(&self) -> (Classify, exoware_sdk::stream_filter::StreamFilter) {
         sub::classify_and_filter(None)
     }
 
@@ -339,11 +339,11 @@ where
 {
     type Digest = H::Digest;
 
-    fn store_client(&self) -> &exoware_sdk_rs::StoreClient {
+    fn store_client(&self) -> &exoware_sdk::StoreClient {
         ImmutableClient::store_client(self)
     }
 
-    fn classify_and_filter(&self) -> (Classify, exoware_sdk_rs::stream_filter::StreamFilter) {
+    fn classify_and_filter(&self) -> (Classify, exoware_sdk::stream_filter::StreamFilter) {
         sub::classify_and_filter(Some(AuthenticatedBackendNamespace::Immutable))
     }
 
@@ -379,11 +379,11 @@ where
     type Digest = H::Digest;
     const REJECTS_KEY_FILTERS: bool = true;
 
-    fn store_client(&self) -> &exoware_sdk_rs::StoreClient {
+    fn store_client(&self) -> &exoware_sdk::StoreClient {
         KeylessClient::store_client(self)
     }
 
-    fn classify_and_filter(&self) -> (Classify, exoware_sdk_rs::stream_filter::StreamFilter) {
+    fn classify_and_filter(&self) -> (Classify, exoware_sdk::stream_filter::StreamFilter) {
         sub::classify_and_filter(Some(AuthenticatedBackendNamespace::Keyless))
     }
 
@@ -438,7 +438,7 @@ fn parse_bytes_filters<'a, 'b, I>(
     label: &str,
 ) -> Result<Option<CompiledBytesFilters>, String>
 where
-    I: IntoIterator<Item = &'b exoware_sdk_rs::store::common::v1::BytesFilterView<'a>>,
+    I: IntoIterator<Item = &'b exoware_sdk::store::common::v1::BytesFilterView<'a>>,
     'a: 'b,
 {
     let mut domain = Vec::new();
@@ -489,7 +489,7 @@ struct BatchSubscribeStream<D: commonware_cryptography::Digest> {
     classify: Classify,
     extract_kv: ExtractKv,
     build_proof: BuildBatchProof<D>,
-    sub: exoware_sdk_rs::StreamSubscription,
+    sub: exoware_sdk::StreamSubscription,
     pending: BTreeMap<Location, PendingBatch>,
     watermarks: BTreeMap<Location, u64>,
     ready: VecDeque<ReadyBatch>,
@@ -503,7 +503,7 @@ impl<D: commonware_cryptography::Digest> BatchSubscribeStream<D> {
         classify: Classify,
         extract_kv: ExtractKv,
         build_proof: BuildBatchProof<D>,
-        sub: exoware_sdk_rs::StreamSubscription,
+        sub: exoware_sdk::StreamSubscription,
     ) -> Self {
         Self {
             key_matcher,
@@ -521,7 +521,7 @@ impl<D: commonware_cryptography::Digest> BatchSubscribeStream<D> {
 
     fn ingest_frame(
         &mut self,
-        frame: &exoware_sdk_rs::StreamSubscriptionFrame,
+        frame: &exoware_sdk::StreamSubscriptionFrame,
     ) -> Result<(), BoxConnectError> {
         let mut saw_operation = false;
         let mut latest: Option<Location> = None;
@@ -782,7 +782,7 @@ impl<B: RangeBackend> RangeService for RangeConnect<B> {
 fn wrap_stack<D: ::connectrpc::Dispatcher>(dispatcher: D) -> ConnectRpcService<D> {
     ConnectRpcService::new(dispatcher)
         .with_limits(connect_limits())
-        .with_compression(exoware_sdk_rs::connect_compression_registry())
+        .with_compression(exoware_sdk::connect_compression_registry())
 }
 
 pub type OrderedConnectStack<H, K, V, const N: usize> = ConnectRpcService<

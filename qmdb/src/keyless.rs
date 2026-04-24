@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::Hasher;
 use commonware_storage::{mmr::Location, qmdb::keyless::Operation as KeylessOperation};
-use exoware_sdk_rs::{SerializableReadSession, StoreClient};
+use exoware_sdk::{SerializableReadSession, StoreClient};
 
 use crate::auth::AuthenticatedBackendNamespace;
 use crate::auth::{

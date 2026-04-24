@@ -18,7 +18,7 @@ homepage = "https://exoware.xyz"
 
 [workspace.dependencies]
 exoware-qmdb = { version = "2026.4.0", path = "qmdb" }
-exoware-sdk-rs = { version = "2026.4.0", path = "sdk-rs" }
+exoware-sdk = { version = "2026.4.0", path = "sdk-rs" }
 exoware-server = { version = "2026.4.0", path = "server" }
 tokio = "1.43.0"
 clap = "4.5.18"

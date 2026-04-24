@@ -41,12 +41,12 @@ mod tests {
     use datafusion::logical_expr::{Expr, Operator};
     use datafusion::physical_plan::ExecutionPlan;
     use datafusion::prelude::SessionContext;
-    use exoware_sdk_rs::keys::{Key, KeyCodec};
-    use exoware_sdk_rs::kv_codec::{
+    use exoware_sdk::keys::{Key, KeyCodec};
+    use exoware_sdk::kv_codec::{
         canonicalize_reduced_group_values, decode_stored_row, encode_reduced_group_key,
         eval_predicate, KvReducedValue, StoredRow,
     };
-    use exoware_sdk_rs::{RangeReduceOp, RangeReduceRequest, StoreBatchUpload, StoreClient};
+    use exoware_sdk::{RangeReduceOp, RangeReduceRequest, StoreBatchUpload, StoreClient};
     use std::collections::{BTreeMap, HashSet};
     use std::ops::Bound::{Included, Unbounded};
     use std::pin::Pin;
@@ -57,25 +57,25 @@ mod tests {
     use axum::Router;
     use bytes::Bytes;
     use connectrpc::{Chain, ConnectError, ConnectRpcService, Context};
-    use exoware_sdk_rs::connect_compression_registry;
-    use exoware_sdk_rs::kv_codec::{eval_expr, expr_needs_value};
-    use exoware_sdk_rs::store::common::v1::KvEntry as ProtoKvEntry;
-    use exoware_sdk_rs::store::ingest::v1::{
+    use exoware_sdk::connect_compression_registry;
+    use exoware_sdk::kv_codec::{eval_expr, expr_needs_value};
+    use exoware_sdk::store::common::v1::KvEntry as ProtoKvEntry;
+    use exoware_sdk::store::ingest::v1::{
         PutResponse as ProtoPutResponse, Service as IngestService,
         ServiceServer as IngestServiceServer,
     };
-    use exoware_sdk_rs::store::query::v1::{
+    use exoware_sdk::store::query::v1::{
         GetManyEntry as ProtoGetManyEntry, GetManyFrame as ProtoGetManyFrame,
         GetResponse as ProtoGetResponse, RangeFrame as ProtoRangeFrame,
         ReduceResponse as ProtoReduceResponse, Service as QueryService,
         ServiceServer as QueryServiceServer,
     };
-    use exoware_sdk_rs::RangeMode;
-    use exoware_sdk_rs::{
+    use exoware_sdk::RangeMode;
+    use exoware_sdk::{
         parse_range_traversal_direction, to_domain_reduce_request, to_proto_optional_reduced_value,
         to_proto_reduced_value, RangeTraversalDirection, RangeTraversalModeError,
     };
-    use exoware_sdk_rs::{RangeReduceGroup, RangeReduceResponse, RangeReduceResult};
+    use exoware_sdk::{RangeReduceGroup, RangeReduceResponse, RangeReduceResult};
     use futures::{stream, Stream, TryStreamExt};
     use tokio::sync::{mpsc, oneshot, Notify};
 
@@ -219,7 +219,7 @@ mod tests {
             || request
                 .filter
                 .as_ref()
-                .is_some_and(exoware_sdk_rs::kv_codec::predicate_needs_value);
+                .is_some_and(exoware_sdk::kv_codec::predicate_needs_value);
         let archived = if needs_value {
             decode_stored_row(value.as_ref()).ok()
         } else {
@@ -282,12 +282,12 @@ mod tests {
     }
 
     fn query_detail_trailer_ctx(sequence_number: u64) -> Context {
-        let detail = exoware_sdk_rs::store::query::v1::Detail {
+        let detail = exoware_sdk::store::query::v1::Detail {
             sequence_number,
             read_stats: Default::default(),
             ..Default::default()
         };
-        exoware_sdk_rs::with_query_detail_trailer(Context::default(), &detail)
+        exoware_sdk::with_query_detail_trailer(Context::default(), &detail)
     }
 
     #[derive(Clone)]
@@ -300,7 +300,7 @@ mod tests {
             &self,
             ctx: Context,
             request: buffa::view::OwnedView<
-                exoware_sdk_rs::store::ingest::v1::PutRequestView<'static>,
+                exoware_sdk::store::ingest::v1::PutRequestView<'static>,
             >,
         ) -> Result<(ProtoPutResponse, Context), ConnectError> {
             let mut parsed = Vec::<(Key, Bytes)>::new();
@@ -335,16 +335,14 @@ mod tests {
         async fn get(
             &self,
             _ctx: Context,
-            request: buffa::view::OwnedView<
-                exoware_sdk_rs::store::query::v1::GetRequestView<'static>,
-            >,
+            request: buffa::view::OwnedView<exoware_sdk::store::query::v1::GetRequestView<'static>>,
         ) -> Result<(ProtoGetResponse, Context), ConnectError> {
             ensure_min_sequence_number(&self.state.sequence_number, request.min_sequence_number)?;
             let key: Key = request.key.to_vec().into();
             let guard = self.state.kv.lock().expect("kv mutex poisoned");
             let value = guard.get(&key).cloned();
             let token = self.state.sequence_number.load(AtomicOrdering::Relaxed);
-            let detail = exoware_sdk_rs::store::query::v1::Detail {
+            let detail = exoware_sdk::store::query::v1::Detail {
                 sequence_number: token,
                 read_stats: Default::default(),
                 ..Default::default()
@@ -354,7 +352,7 @@ mod tests {
                     value: value.map(|v| v.to_vec()),
                     ..Default::default()
                 },
-                exoware_sdk_rs::with_query_detail_response_header(Context::default(), &detail),
+                exoware_sdk::with_query_detail_response_header(Context::default(), &detail),
             ))
         }
 
@@ -362,7 +360,7 @@ mod tests {
             &self,
             _ctx: Context,
             request: buffa::view::OwnedView<
-                exoware_sdk_rs::store::query::v1::RangeRequestView<'static>,
+                exoware_sdk::store::query::v1::RangeRequestView<'static>,
             >,
         ) -> Result<
             (
@@ -428,14 +426,14 @@ mod tests {
                     ..Default::default()
                 }));
             }
-            let detail = exoware_sdk_rs::store::query::v1::Detail {
+            let detail = exoware_sdk::store::query::v1::Detail {
                 sequence_number: token,
                 read_stats: Default::default(),
                 ..Default::default()
             };
             Ok((
                 Box::pin(stream::iter(frames)),
-                exoware_sdk_rs::with_query_detail_trailer(Context::default(), &detail),
+                exoware_sdk::with_query_detail_trailer(Context::default(), &detail),
             ))
         }
 
@@ -443,7 +441,7 @@ mod tests {
             &self,
             _ctx: Context,
             request: buffa::view::OwnedView<
-                exoware_sdk_rs::store::query::v1::GetManyRequestView<'static>,
+                exoware_sdk::store::query::v1::GetManyRequestView<'static>,
             >,
         ) -> Result<
             (
@@ -476,14 +474,14 @@ mod tests {
                     ..Default::default()
                 }));
             }
-            let detail = exoware_sdk_rs::store::query::v1::Detail {
+            let detail = exoware_sdk::store::query::v1::Detail {
                 sequence_number: token,
                 read_stats: Default::default(),
                 ..Default::default()
             };
             Ok((
                 Box::pin(stream::iter(frames)),
-                exoware_sdk_rs::with_query_detail_trailer(Context::default(), &detail),
+                exoware_sdk::with_query_detail_trailer(Context::default(), &detail),
             ))
         }
 
@@ -491,7 +489,7 @@ mod tests {
             &self,
             _ctx: Context,
             request: buffa::view::OwnedView<
-                exoware_sdk_rs::store::query::v1::ReduceRequestView<'static>,
+                exoware_sdk::store::query::v1::ReduceRequestView<'static>,
             >,
         ) -> Result<(ProtoReduceResponse, Context), ConnectError> {
             ensure_min_sequence_number(&self.state.sequence_number, request.min_sequence_number)?;
@@ -638,7 +636,7 @@ mod tests {
             };
             drop(guard);
             let token = state.sequence_number.load(AtomicOrdering::Relaxed);
-            let detail = exoware_sdk_rs::store::query::v1::Detail {
+            let detail = exoware_sdk::store::query::v1::Detail {
                 sequence_number: token,
                 read_stats: Default::default(),
                 ..Default::default()
@@ -648,12 +646,10 @@ mod tests {
                     results: response
                         .results
                         .into_iter()
-                        .map(
-                            |result| exoware_sdk_rs::store::query::v1::RangeReduceResult {
-                                value: result.value.map(to_proto_reduced_value).into(),
-                                ..Default::default()
-                            },
-                        )
+                        .map(|result| exoware_sdk::store::query::v1::RangeReduceResult {
+                            value: result.value.map(to_proto_reduced_value).into(),
+                            ..Default::default()
+                        })
                         .collect(),
                     groups: response
                         .groups
@@ -661,7 +657,7 @@ mod tests {
                         .map(|group| {
                             let group_values_present: Vec<bool> =
                                 group.group_values.iter().map(|v| v.is_some()).collect();
-                            exoware_sdk_rs::store::query::v1::RangeReduceGroup {
+                            exoware_sdk::store::query::v1::RangeReduceGroup {
                                 group_values: group
                                     .group_values
                                     .into_iter()
@@ -672,7 +668,7 @@ mod tests {
                                     .results
                                     .into_iter()
                                     .map(|result| {
-                                        exoware_sdk_rs::store::query::v1::RangeReduceResult {
+                                        exoware_sdk::store::query::v1::RangeReduceResult {
                                             value: result.value.map(to_proto_reduced_value).into(),
                                             ..Default::default()
                                         }
@@ -684,7 +680,7 @@ mod tests {
                         .collect(),
                     ..Default::default()
                 },
-                exoware_sdk_rs::with_query_detail_response_header(Context::default(), &detail),
+                exoware_sdk::with_query_detail_response_header(Context::default(), &detail),
             ))
         }
     }
@@ -4291,7 +4287,7 @@ mod tests {
             &model,
         )
         .expect("max-length UTF-8 PK should encode");
-        assert_eq!(key.len(), exoware_sdk_rs::keys::MAX_KEY_LEN);
+        assert_eq!(key.len(), exoware_sdk::keys::MAX_KEY_LEN);
         let decoded = decode_primary_key(model.table_prefix, &key, &model)
             .expect("max-length PK should decode");
         assert!(matches!(
@@ -4394,7 +4390,7 @@ mod tests {
             },
         )
         .expect("secondary key at max payload should encode");
-        assert_eq!(key.len(), exoware_sdk_rs::keys::MAX_KEY_LEN);
+        assert_eq!(key.len(), exoware_sdk::keys::MAX_KEY_LEN);
         let decoded =
             decode_secondary_index_key(model.table_prefix, spec, &model, &key).expect("decode");
         assert!(matches!(
@@ -4454,7 +4450,7 @@ mod tests {
             &archived,
         )
         .expect("backfill path should encode max payload");
-        assert_eq!(key.len(), exoware_sdk_rs::keys::MAX_KEY_LEN);
+        assert_eq!(key.len(), exoware_sdk::keys::MAX_KEY_LEN);
 
         let err = encode_secondary_index_key_from_parts(
             model.table_prefix,
@@ -5566,7 +5562,7 @@ mod tests {
             &self,
             _ctx: Context,
             _request: buffa::view::OwnedView<
-                exoware_sdk_rs::store::query::v1::GetRequestView<'static>,
+                exoware_sdk::store::query::v1::GetRequestView<'static>,
             >,
         ) -> Result<(ProtoGetResponse, Context), ConnectError> {
             Err(ConnectError::unimplemented("test harness"))
@@ -5576,7 +5572,7 @@ mod tests {
             &self,
             _ctx: Context,
             _request: buffa::view::OwnedView<
-                exoware_sdk_rs::store::query::v1::GetManyRequestView<'static>,
+                exoware_sdk::store::query::v1::GetManyRequestView<'static>,
             >,
         ) -> Result<
             (
@@ -5592,7 +5588,7 @@ mod tests {
             &self,
             _ctx: Context,
             _request: buffa::view::OwnedView<
-                exoware_sdk_rs::store::query::v1::RangeRequestView<'static>,
+                exoware_sdk::store::query::v1::RangeRequestView<'static>,
             >,
         ) -> Result<
             (
@@ -5631,7 +5627,7 @@ mod tests {
             &self,
             _ctx: Context,
             _request: buffa::view::OwnedView<
-                exoware_sdk_rs::store::query::v1::ReduceRequestView<'static>,
+                exoware_sdk::store::query::v1::ReduceRequestView<'static>,
             >,
         ) -> Result<(ProtoReduceResponse, Context), ConnectError> {
             Err(ConnectError::unimplemented("test harness"))
@@ -5651,7 +5647,7 @@ mod tests {
             &self,
             _ctx: Context,
             _request: buffa::view::OwnedView<
-                exoware_sdk_rs::store::query::v1::GetRequestView<'static>,
+                exoware_sdk::store::query::v1::GetRequestView<'static>,
             >,
         ) -> Result<(ProtoGetResponse, Context), ConnectError> {
             Err(ConnectError::unimplemented("test harness"))
@@ -5661,7 +5657,7 @@ mod tests {
             &self,
             _ctx: Context,
             _request: buffa::view::OwnedView<
-                exoware_sdk_rs::store::query::v1::GetManyRequestView<'static>,
+                exoware_sdk::store::query::v1::GetManyRequestView<'static>,
             >,
         ) -> Result<
             (
@@ -5677,7 +5673,7 @@ mod tests {
             &self,
             _ctx: Context,
             request: buffa::view::OwnedView<
-                exoware_sdk_rs::store::query::v1::RangeRequestView<'static>,
+                exoware_sdk::store::query::v1::RangeRequestView<'static>,
             >,
         ) -> Result<
             (
@@ -5718,7 +5714,7 @@ mod tests {
             &self,
             _ctx: Context,
             _request: buffa::view::OwnedView<
-                exoware_sdk_rs::store::query::v1::ReduceRequestView<'static>,
+                exoware_sdk::store::query::v1::ReduceRequestView<'static>,
             >,
         ) -> Result<(ProtoReduceResponse, Context), ConnectError> {
             Err(ConnectError::unimplemented("test harness"))
@@ -5736,7 +5732,7 @@ mod tests {
             &self,
             _ctx: Context,
             _request: buffa::view::OwnedView<
-                exoware_sdk_rs::store::query::v1::GetRequestView<'static>,
+                exoware_sdk::store::query::v1::GetRequestView<'static>,
             >,
         ) -> Result<(ProtoGetResponse, Context), ConnectError> {
             Err(ConnectError::unimplemented("test harness"))
@@ -5746,7 +5742,7 @@ mod tests {
             &self,
             _ctx: Context,
             _request: buffa::view::OwnedView<
-                exoware_sdk_rs::store::query::v1::GetManyRequestView<'static>,
+                exoware_sdk::store::query::v1::GetManyRequestView<'static>,
             >,
         ) -> Result<
             (
@@ -5762,7 +5758,7 @@ mod tests {
             &self,
             _ctx: Context,
             request: buffa::view::OwnedView<
-                exoware_sdk_rs::store::query::v1::RangeRequestView<'static>,
+                exoware_sdk::store::query::v1::RangeRequestView<'static>,
             >,
         ) -> Result<
             (
@@ -5793,7 +5789,7 @@ mod tests {
             &self,
             _ctx: Context,
             _request: buffa::view::OwnedView<
-                exoware_sdk_rs::store::query::v1::ReduceRequestView<'static>,
+                exoware_sdk::store::query::v1::ReduceRequestView<'static>,
             >,
         ) -> Result<(ProtoReduceResponse, Context), ConnectError> {
             Err(ConnectError::unimplemented("test harness"))
@@ -7634,7 +7630,7 @@ mod tests {
         use super::*;
         use axum::{routing::get, Router};
         use datafusion::prelude::SessionContext;
-        use exoware_sdk_rs::StoreClient;
+        use exoware_sdk::StoreClient;
         use exoware_server::{connect_stack, AppState};
         use exoware_simulator::RocksStore;
         use tempfile::tempdir;

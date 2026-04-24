@@ -1,5 +1,5 @@
 {
-  "name": "exoware-qmdb-ts",
+  "name": "@exowarexyz/qmdb",
   "version": "2026.4.0",
   "description": "Browser client for the ordered Exoware QMDB proof API.",
   "type": "module",
@@ -9,6 +9,9 @@
     "type": "git",
     "url": "https://github.com/exowarexyz/monorepo.git",
     "directory": "qmdb/ts"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -31,7 +34,7 @@
   "dependencies": {
     "@bufbuild/protobuf": "^2.11.0",
     "@connectrpc/connect": "^2.1.1",
-    "exoware-sdk-ts": "file:../../sdk-ts"
+    "@exowarexyz/sdk": "file:../../sdk-ts"
   },
   "devDependencies": {
     "typescript": "^5.5.3"

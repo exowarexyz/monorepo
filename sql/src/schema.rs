@@ -11,8 +11,8 @@ use datafusion::logical_expr::dml::InsertOp;
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, TableType};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
-use exoware_sdk_rs::kv_codec::decode_stored_row;
-use exoware_sdk_rs::StoreClient;
+use exoware_sdk::kv_codec::decode_stored_row;
+use exoware_sdk::StoreClient;
 
 use crate::aggregate::KvAggregatePushdownRule;
 use crate::codec::*;

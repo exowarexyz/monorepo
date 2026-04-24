@@ -6,9 +6,6 @@ license.workspace = true
 description = "QMDB instance backed by the Exoware API."
 readme = "README.md"
 
-[lib]
-name = "store_qmdb"
-
 [features]
 test-utils = []
 
@@ -24,7 +21,7 @@ commonware-cryptography = "2026.3.0"
 commonware-storage = "2026.3.0"
 commonware-utils = "2026.3.0"
 connectrpc = { workspace = true }
-exoware-sdk-rs = { workspace = true }
+exoware-sdk = { workspace = true }
 hex = { workspace = true }
 http-body = "1"
 regex = { workspace = true }

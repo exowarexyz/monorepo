@@ -1,4 +1,4 @@
-# exoware-qmdb-ts
+# @exowarexyz/qmdb
 
 Browser client for the ordered QMDB ConnectRPC proof API.
 

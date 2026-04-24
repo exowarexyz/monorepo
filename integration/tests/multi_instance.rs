@@ -10,25 +10,25 @@ use connectrpc::client::ClientConfig;
 use datafusion::arrow::array::Int64Array;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::prelude::SessionContext;
-use exoware_sdk_rs::keys::Key;
-use exoware_sdk_rs::kv_codec::Utf8;
-use exoware_sdk_rs::match_key::MatchKey;
-use exoware_sdk_rs::proto::PreferZstdHttpClient;
-use exoware_sdk_rs::store::qmdb::v1::SubscribeRequest as QmdbSubscribeRequest;
-use exoware_sdk_rs::store::sql::v1::{
+use exoware_qmdb::{
+    keyless_range_connect_stack, KeylessClient, KeylessRangeConnectClient, KeylessWriter,
+    QmdbError, RangeSubscribeProof,
+};
+use exoware_sdk::keys::Key;
+use exoware_sdk::kv_codec::Utf8;
+use exoware_sdk::match_key::MatchKey;
+use exoware_sdk::proto::PreferZstdHttpClient;
+use exoware_sdk::store::qmdb::v1::SubscribeRequest as QmdbSubscribeRequest;
+use exoware_sdk::store::sql::v1::{
     cell, ServiceClient as SqlServiceClient, SubscribeRequest as SqlSubscribeRequest,
 };
-use exoware_sdk_rs::stream_filter::StreamFilter;
-use exoware_sdk_rs::{
+use exoware_sdk::stream_filter::StreamFilter;
+use exoware_sdk::{
     RetryConfig, StoreBatchPublication, StoreBatchUpload, StoreClient, StoreKeyPrefix,
     StorePublicationFrontierWriter, StoreWriteBatch, StreamSubscription, StreamSubscriptionFrame,
 };
 use exoware_sql::{sql_connect_stack, CellValue, KvSchema, SqlServer, TableColumnConfig};
 use futures::stream::{FuturesUnordered, StreamExt};
-use store_qmdb::{
-    keyless_range_connect_stack, KeylessClient, KeylessRangeConnectClient, KeylessWriter,
-    QmdbError, RangeSubscribeProof,
-};
 
 type Digest = commonware_cryptography::sha256::Digest;
 type QmdbOp = KeylessOperation<Vec<u8>>;
@@ -153,7 +153,7 @@ async fn commit_qmdb_upload(
     commit_client: &StoreClient,
     writer: &QmdbWriter,
     ops: &[QmdbOp],
-) -> Result<store_qmdb::UploadReceipt, QmdbError> {
+) -> Result<exoware_qmdb::UploadReceipt, QmdbError> {
     let prepared = writer.prepare_upload(ops).await?;
     writer.commit_upload(commit_client, prepared).await
 }
@@ -188,7 +188,7 @@ async fn drive_qmdb_writer(
     writer_client: StoreClient,
     writer: Arc<QmdbWriter>,
     batches: Vec<Vec<QmdbOp>>,
-) -> (Vec<QmdbOp>, Vec<store_qmdb::UploadReceipt>) {
+) -> (Vec<QmdbOp>, Vec<exoware_qmdb::UploadReceipt>) {
     let expected: Vec<QmdbOp> = batches.iter().flatten().cloned().collect();
     let mut in_flight = FuturesUnordered::new();
     for batch in batches {
@@ -211,7 +211,7 @@ fn sorted_ops(mut ops: Vec<QmdbOp>) -> Vec<QmdbOp> {
     ops
 }
 
-fn row_int64(row: &exoware_sdk_rs::store::sql::v1::Row, index: usize) -> i64 {
+fn row_int64(row: &exoware_sdk::store::sql::v1::Row, index: usize) -> i64 {
     match row.cells.get(index).and_then(|cell| cell.kind.as_ref()) {
         Some(cell::Kind::Int64Value(value)) => *value,
         other => panic!("expected int64 cell at {index}, got {other:?}"),

@@ -11,8 +11,8 @@ use commonware_storage::{
         operation::{Key as QmdbKey, Operation as _},
     },
 };
-use exoware_sdk_rs::keys::Key;
-use exoware_sdk_rs::{RangeMode, SerializableReadSession, StoreClient};
+use exoware_sdk::keys::Key;
+use exoware_sdk::{RangeMode, SerializableReadSession, StoreClient};
 
 use crate::codec::{
     bitmap_chunk_bits, chunk_index_for_location, clear_below_floor, decode_digest,

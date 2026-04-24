@@ -128,7 +128,7 @@ impl ::buffa::Enumeration for TraversalMode {
         }
     }
 }
-/// --- Range-reduction DSL (`Reduce`); mirrors `exoware_sdk_rs::kv_codec` ---
+/// --- Range-reduction DSL (`Reduce`); mirrors `exoware_sdk::kv_codec` ---
 ///
 /// Scalar type of a field extracted from a stored key or value.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

@@ -16,7 +16,7 @@ import {
   createTransport,
   type BytesFilter,
   type ClientOptions as SdkClientOptions,
-} from 'exoware-sdk-ts';
+} from '@exowarexyz/sdk';
 import initWasm, {
   verify_current_key_value_proof,
   verify_historical_multi_proof,

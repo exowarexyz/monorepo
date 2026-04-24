@@ -17,11 +17,11 @@ use datafusion::common::{DataFusionError, Result as DataFusionResult};
 use datafusion::datasource::sink::DataSink;
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, SendableRecordBatchStream};
-use exoware_sdk_rs::keys::Key;
+use exoware_sdk::keys::Key;
 #[cfg(test)]
-use exoware_sdk_rs::kv_codec::decode_stored_row;
-use exoware_sdk_rs::kv_codec::{StoredRow, StoredValue};
-use exoware_sdk_rs::{StoreBatchUpload, StoreClient, StoreWriteBatch};
+use exoware_sdk::kv_codec::decode_stored_row;
+use exoware_sdk::kv_codec::{StoredRow, StoredValue};
+use exoware_sdk::{StoreBatchUpload, StoreClient, StoreWriteBatch};
 use futures::{future::BoxFuture, TryStreamExt};
 
 use crate::builder::archived_non_pk_value_is_valid;
@@ -240,7 +240,7 @@ impl StoreBatchUpload for BatchWriter {
         self.stage_flush(prepared, batch)
     }
 
-    fn commit_error(&self, error: exoware_sdk_rs::ClientError) -> Self::Error {
+    fn commit_error(&self, error: exoware_sdk::ClientError) -> Self::Error {
         DataFusionError::External(Box::new(error))
     }
 

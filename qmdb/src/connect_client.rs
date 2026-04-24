@@ -22,12 +22,12 @@ use commonware_storage::{
 };
 use connectrpc::client::{ClientConfig, ClientTransport, ServerStream};
 use connectrpc::ConnectError;
-use exoware_sdk_rs::proto::PreferZstdHttpClient;
-use exoware_sdk_rs::store::qmdb::v1::{
+use exoware_sdk::proto::PreferZstdHttpClient;
+use exoware_sdk::store::qmdb::v1::{
     CurrentKeyValueProof, GetManyRequest, GetRequest, HistoricalMultiProof, OrderedServiceClient,
     RangeServiceClient, SubscribeRequest, SubscribeResponseView,
 };
-use exoware_sdk_rs::ClientError;
+use exoware_sdk::ClientError;
 use http_body::Body;
 
 use crate::proof::{RawMmrProof, VerifiedKeyValue, VerifiedMultiOperations};
@@ -260,7 +260,7 @@ fn decode_digest<D: Digest + DecodeExt<()>>(bytes: &[u8], label: &str) -> Result
 }
 
 fn raw_mmr_from_proto<D: Digest + Decode>(
-    proto: &exoware_sdk_rs::store::qmdb::v1::MmrProof,
+    proto: &exoware_sdk::store::qmdb::v1::MmrProof,
 ) -> Result<RawMmrProof<D>, QmdbError> {
     Ok(RawMmrProof {
         leaves: Location::new(proto.leaves),

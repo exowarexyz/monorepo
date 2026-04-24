@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::Hasher;
 use commonware_storage::mmr::Location;
-use exoware_sdk_rs::{SerializableReadSession, StoreClient};
+use exoware_sdk::{SerializableReadSession, StoreClient};
 
 use crate::codec::mmr_size_for_watermark;
 use crate::connect::OperationKv;

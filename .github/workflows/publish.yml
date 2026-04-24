@@ -23,7 +23,7 @@ jobs:
       run: buf push
       env:
         BUF_TOKEN: ${{ secrets.BUF_TOKEN }}
-    - name: Publish sdk-rs
+    - name: Publish exoware-sdk
       run: cargo publish --manifest-path sdk-rs/Cargo.toml
       continue-on-error: true
       env:
@@ -48,11 +48,42 @@ jobs:
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-    - name: Publish sdk-ts
+    - name: Install wasm32 target
+      run: rustup target add wasm32-unknown-unknown
+    - name: Install wasm-pack + wasm-bindgen-cli
+      uses: taiki-e/install-action@v2
+      with:
+        tool: wasm-pack@0.13.1,wasm-bindgen-cli@0.2.117
+    - name: Publish @exowarexyz/sdk
       run: |
         cd sdk-ts
-        npm install
-        npm publish
+        npm ci
+        npm run build
+        npm publish --access public --ignore-scripts
+      continue-on-error: true
+      env:
+        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    - name: Publish @exowarexyz/qmdb
+      run: |
+        cd qmdb/ts
+        npm ci
+        npm run build
+        cd ../..
+        node .github/workflows/scripts/prepare-npm-publish.mjs qmdb/ts
+        cd qmdb/ts
+        npm publish --access public --ignore-scripts
+      continue-on-error: true
+      env:
+        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    - name: Publish @exowarexyz/sql
+      run: |
+        cd sql/ts
+        npm ci
+        npm run build
+        cd ../..
+        node .github/workflows/scripts/prepare-npm-publish.mjs sql/ts
+        cd sql/ts
+        npm publish --access public --ignore-scripts
       continue-on-error: true
       env:
         NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

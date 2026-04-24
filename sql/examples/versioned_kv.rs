@@ -1,7 +1,7 @@
 use datafusion::arrow::datatypes::DataType;
 use datafusion::arrow::util::pretty::print_batches;
 use datafusion::prelude::SessionContext;
-use exoware_sdk_rs::StoreClient;
+use exoware_sdk::StoreClient;
 use exoware_sql::{CellValue, KvSchema, TableColumnConfig};
 
 const DOC_ID_HEX: &str = "d0c1aabbccddeeff0011223344556677";

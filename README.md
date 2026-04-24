@@ -8,8 +8,8 @@
 
 _Primitives are designed for production use. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a primitive)._
 
-* [sdk-rs](./sdk-rs/README.md): Interact with the Exoware API in Rust.
-* [sdk-ts](./sdk-ts/README.md): Interact with the Exoware API in TypeScript.
+* [exoware-sdk](./sdk-rs/README.md): Interact with the Exoware API in Rust.
+* [@exowarexyz/sdk](./sdk-ts/README.md): Interact with the Exoware API in TypeScript.
 * [server](./server/README.md): Serve the Exoware API.
 * [qmdb](./qmdb/README.md): QMDB instance backed by the Exoware API.
 * [sql](./sql/README.md): SQL engine backed by the Exoware API.

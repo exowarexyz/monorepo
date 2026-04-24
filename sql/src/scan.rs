@@ -13,10 +13,10 @@ use datafusion::physical_plan::{
     stream::RecordBatchStreamAdapter, DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
     SendableRecordBatchStream,
 };
-use exoware_sdk_rs::keys::Key;
-use exoware_sdk_rs::kv_codec::decode_stored_row;
-use exoware_sdk_rs::SerializableReadSession;
-use exoware_sdk_rs::StoreClient;
+use exoware_sdk::keys::Key;
+use exoware_sdk::kv_codec::decode_stored_row;
+use exoware_sdk::SerializableReadSession;
+use exoware_sdk::StoreClient;
 use futures::SinkExt;
 
 use crate::builder::*;

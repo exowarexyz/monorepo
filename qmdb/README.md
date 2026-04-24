@@ -103,12 +103,12 @@ This makes historical "latest update for key at or below watermark" lookups fast
 ### Compaction prune-policy helpers
 
 Callers do not need to hand-write generic prune-policy regexes for the standard
-QMDB update-row family. `exoware-qmdb` exposes typed builders in `store_qmdb::prune`:
+QMDB update-row family. `exoware-qmdb` exposes typed builders in `exoware_qmdb::prune`:
 
-- `store_qmdb::prune::keep_latest_updates(count)`
-- `store_qmdb::prune::keep_positions_gte(min_location)`
+- `exoware_qmdb::prune::keep_latest_updates(count)`
+- `exoware_qmdb::prune::keep_positions_gte(min_location)`
 
- These return `exoware_sdk_rs::prune_policy::PrunePolicy` values using the crate's
+ These return `exoware_sdk::prune_policy::PrunePolicy` values using the crate's
  actual update-key layout:
 
 - ordered raw key bytes where:
@@ -467,8 +467,8 @@ state.
 
 ```rust,ignore
 use std::sync::Arc;
-use exoware_sdk_rs::{StoreBatchPublication, StoreBatchUpload, StorePublicationFrontierWriter};
-use store_qmdb::{KeylessWriter, WriterState};
+use exoware_sdk::{StoreBatchPublication, StoreBatchUpload, StorePublicationFrontierWriter};
+use exoware_qmdb::{KeylessWriter, WriterState};
 
 let writer: Arc<KeylessWriter<Sha256, Vec<u8>>> =
     Arc::new(KeylessWriter::new(client.clone(), WriterState::empty()));

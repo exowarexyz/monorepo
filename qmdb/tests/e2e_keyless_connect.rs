@@ -14,16 +14,16 @@ use commonware_storage::qmdb::{
     store::LogStore as _,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use exoware_sdk_rs::proto::PreferZstdHttpClient;
-use exoware_sdk_rs::store::common::v1::{
-    bytes_filter as proto_bytes_filter, BytesFilter as ProtoBytesFilter,
-};
-use exoware_sdk_rs::store::qmdb::v1::SubscribeRequest as ProtoSubscribeRequest;
-use exoware_sdk_rs::StoreClient;
-use store_qmdb::{
+use exoware_qmdb::{
     keyless_range_connect_stack, KeylessClient, KeylessRangeConnectClient, KeylessWriter,
     QmdbError, RangeSubscribeProof,
 };
+use exoware_sdk::proto::PreferZstdHttpClient;
+use exoware_sdk::store::common::v1::{
+    bytes_filter as proto_bytes_filter, BytesFilter as ProtoBytesFilter,
+};
+use exoware_sdk::store::qmdb::v1::SubscribeRequest as ProtoSubscribeRequest;
+use exoware_sdk::StoreClient;
 
 type Digest = commonware_cryptography::sha256::Digest;
 type LocalDb = Keyless<deterministic::Context, Vec<u8>, commonware_cryptography::Sha256>;
@@ -184,7 +184,7 @@ async fn keyless_connect_client_rejects_invalid_streamed_proof() {
     assert!(matches!(
         err,
         QmdbError::ProofVerification {
-            kind: store_qmdb::ProofKind::BatchMulti
+            kind: exoware_qmdb::ProofKind::BatchMulti
         }
     ));
 }

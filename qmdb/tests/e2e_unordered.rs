@@ -16,7 +16,7 @@ use commonware_storage::qmdb::{
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use store_qmdb::{UnorderedClient, UnorderedWriter, MAX_OPERATION_SIZE};
+use exoware_qmdb::{UnorderedClient, UnorderedWriter, MAX_OPERATION_SIZE};
 
 type Digest = commonware_cryptography::sha256::Digest;
 type BatchProof = commonware_storage::mmr::Proof<Digest>;

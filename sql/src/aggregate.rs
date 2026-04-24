@@ -27,12 +27,12 @@ use exoware_proto::{
     RangeReduceGroup, RangeReduceOp, RangeReduceRequest, RangeReduceResponse, RangeReduceResult,
     RangeReducerSpec,
 };
-use exoware_sdk_rs as exoware_proto;
-use exoware_sdk_rs::kv_codec::{
+use exoware_sdk as exoware_proto;
+use exoware_sdk::kv_codec::{
     canonicalize_reduced_group_values, encode_reduced_group_key, KvExpr, KvFieldKind, KvFieldRef,
     KvPredicate, KvPredicateCheck, KvPredicateConstraint, KvReducedValue,
 };
-use exoware_sdk_rs::{SerializableReadSession, StoreClient};
+use exoware_sdk::{SerializableReadSession, StoreClient};
 use futures::SinkExt;
 
 use crate::diagnostics::*;

@@ -1,7 +1,7 @@
 use datafusion::arrow::datatypes::i256;
 use datafusion::common::{DataFusionError, Result as DataFusionResult};
-use exoware_sdk_rs::keys::{Key, KeyCodec, KeyMut};
-use exoware_sdk_rs::kv_codec::{interleave_ordered_key_fields, StoredRow, StoredValue};
+use exoware_sdk::keys::{Key, KeyCodec, KeyMut};
+use exoware_sdk::kv_codec::{interleave_ordered_key_fields, StoredRow, StoredValue};
 
 use crate::builder::archived_non_pk_value_is_valid;
 use crate::types::*;
@@ -145,11 +145,11 @@ pub(crate) fn encode_string_variable(value: &str) -> Result<Vec<u8>, String> {
         }
     }
     out.push(STRING_KEY_TERMINATOR);
-    if out.len() > exoware_sdk_rs::keys::MAX_KEY_LEN {
+    if out.len() > exoware_sdk::keys::MAX_KEY_LEN {
         return Err(format!(
             "indexed string value '{}' exceeds max encoded key length {}",
             value,
-            exoware_sdk_rs::keys::MAX_KEY_LEN
+            exoware_sdk::keys::MAX_KEY_LEN
         ));
     }
     Ok(out)
@@ -740,7 +740,7 @@ pub(crate) fn decode_secondary_index_key_with_masks(
             .codec
             .read_payload(key, 0, spec.key_columns_width)
             .ok()?;
-        Some(exoware_sdk_rs::kv_codec::deinterleave_ordered_key_fields(
+        Some(exoware_sdk::kv_codec::deinterleave_ordered_key_fields(
             &index_key_bytes,
             &spec
                 .key_columns
@@ -833,5 +833,5 @@ pub(crate) fn decode_secondary_index_primary_key(
 }
 
 pub(crate) fn next_key(key: &Key) -> Option<Key> {
-    exoware_sdk_rs::keys::next_key(key)
+    exoware_sdk::keys::next_key(key)
 }

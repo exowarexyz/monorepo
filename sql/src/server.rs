@@ -32,17 +32,17 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DataFusionError, Result as DataFusionResult};
 use datafusion::datasource::MemTable;
 use datafusion::prelude::SessionContext;
-use exoware_sdk_rs::keys::Key;
-use exoware_sdk_rs::kv_codec::{decode_stored_row, Utf8};
-use exoware_sdk_rs::match_key::MatchKey;
-use exoware_sdk_rs::store::sql::v1::{
+use exoware_sdk::keys::Key;
+use exoware_sdk::kv_codec::{decode_stored_row, Utf8};
+use exoware_sdk::match_key::MatchKey;
+use exoware_sdk::store::sql::v1::{
     cell::Kind as ProtoCellKind, Cell as ProtoCell, Column as ProtoColumn, Index as ProtoIndex,
     IndexLayout as ProtoIndexLayout, ListValue as ProtoListValue, Null as ProtoNull,
     QueryRequestView, QueryResponse, Row as ProtoRow, Service, ServiceServer, SubscribeRequestView,
     SubscribeResponse, Table as ProtoTable, TablesRequestView, TablesResponse,
 };
-use exoware_sdk_rs::stream_filter::StreamFilter;
-use exoware_sdk_rs::{StoreClient, StreamSubscription};
+use exoware_sdk::stream_filter::StreamFilter;
+use exoware_sdk::{StoreClient, StreamSubscription};
 use futures::future::BoxFuture;
 use futures::stream::Stream;
 use futures::FutureExt;
@@ -249,7 +249,7 @@ pub fn sql_connect_stack(server: Arc<SqlServer>) -> ConnectRpcService<ServiceSer
                 .max_request_body_size(MAX_CONNECTRPC_BODY_BYTES)
                 .max_message_size(MAX_CONNECTRPC_BODY_BYTES),
         )
-        .with_compression(exoware_sdk_rs::connect_compression_registry())
+        .with_compression(exoware_sdk::connect_compression_registry())
 }
 
 /// Connect handler implementing `store.sql.v1.Service`.
@@ -692,7 +692,7 @@ fn datafusion_error_to_connect(err: DataFusionError) -> ConnectError {
     }
 }
 
-fn client_error_to_connect(err: exoware_sdk_rs::ClientError) -> ConnectError {
+fn client_error_to_connect(err: exoware_sdk::ClientError) -> ConnectError {
     if let Some(rpc) = err.rpc_error() {
         ConnectError::new(rpc.code, rpc.message.clone().unwrap_or_default())
     } else {

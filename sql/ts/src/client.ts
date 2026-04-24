@@ -15,7 +15,7 @@ import {
   type SqlRow,
   type SqlSubscribeResponse,
   type SqlTable,
-} from 'exoware-sdk-ts';
+} from '@exowarexyz/sdk';
 
 export type SqlClientOptions = SdkClientOptions;
 

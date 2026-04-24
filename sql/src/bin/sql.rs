@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::{routing::get, Router};
 use clap::{Parser, Subcommand};
-use exoware_sdk_rs::StoreClient;
+use exoware_sdk::StoreClient;
 use exoware_sql::{default_orders_index_specs, sql_connect_stack, KvSchema, SqlServer};
 use tower_http::cors::CorsLayer;
 use tracing::info;

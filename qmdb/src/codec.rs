@@ -1,7 +1,7 @@
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
 use commonware_storage::mmr::{Location, Position};
-use exoware_sdk_rs::keys::{Key, KeyCodec};
+use exoware_sdk::keys::{Key, KeyCodec};
 
 use crate::error::QmdbError;
 use crate::MAX_OPERATION_SIZE;

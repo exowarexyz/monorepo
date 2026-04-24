@@ -1,5 +1,5 @@
 {
-    "name": "exoware-sdk-ts",
+    "name": "@exowarexyz/sdk",
     "version": "2026.4.0",
     "description": "Interact with the Exoware API in TypeScript.",
     "type": "module",
@@ -9,6 +9,9 @@
         "type": "git",
         "url": "https://github.com/exowarexyz/monorepo.git",
         "directory": "sdk-ts"
+    },
+    "publishConfig": {
+        "access": "public"
     },
     "main": "dist/index.js",
     "types": "dist/index.d.ts",

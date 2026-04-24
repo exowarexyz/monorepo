@@ -30,7 +30,7 @@ pub use ordered::{build_ordered_upload, BuiltOrderedUpload, OrderedWriter};
 pub use unordered::{build_unordered_upload, BuiltUnorderedUpload, UnorderedWriter};
 
 use commonware_storage::mmr::Location;
-use exoware_sdk_rs::{keys::Key, StoreClient, StoreWriteBatch};
+use exoware_sdk::{keys::Key, StoreClient, StoreWriteBatch};
 
 use crate::{PublishedCheckpoint, QmdbError, UploadReceipt};
 

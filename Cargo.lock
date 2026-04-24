@@ -2311,7 +2311,7 @@ dependencies = [
  "connectrpc",
  "datafusion",
  "exoware-qmdb",
- "exoware-sdk-rs",
+ "exoware-sdk",
  "exoware-simulator",
  "exoware-sql",
  "futures",
@@ -2335,7 +2335,7 @@ dependencies = [
  "commonware-utils",
  "connectrpc",
  "exoware-qmdb",
- "exoware-sdk-rs",
+ "exoware-sdk",
  "exoware-server",
  "exoware-simulator",
  "futures",
@@ -2370,7 +2370,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "exoware-sdk-rs"
+name = "exoware-sdk"
 version = "2026.4.0"
 dependencies = [
  "anyhow",
@@ -2405,7 +2405,7 @@ dependencies = [
  "bytes",
  "commonware-codec",
  "connectrpc",
- "exoware-sdk-rs",
+ "exoware-sdk",
  "futures",
  "http",
  "regex",
@@ -2422,7 +2422,7 @@ dependencies = [
  "commonware-codec",
  "connectrpc",
  "exoware-qmdb",
- "exoware-sdk-rs",
+ "exoware-sdk",
  "exoware-server",
  "http",
  "reqwest",
@@ -2447,7 +2447,7 @@ dependencies = [
  "connectrpc",
  "criterion 0.5.1",
  "datafusion",
- "exoware-sdk-rs",
+ "exoware-sdk",
  "exoware-server",
  "exoware-simulator",
  "futures",
