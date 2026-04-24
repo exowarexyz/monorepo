@@ -43,15 +43,18 @@ Explore the Exoware API.
   proofs and live subscribe streaming.
 - **SQL** (optional, requires `VITE_SQL_URL`): run ad-hoc SQL queries and
   subscribe to a SQL WHERE predicate evaluated per ingested batch.
+- **Simplex** (optional, requires `VITE_SIMPLEX_SQL_URL` and
+  `VITE_SIMPLEX_STORE_URL`): stream notarized or finalized blocks, fetch raw
+  blocks from KV, and verify certificates in WASM.
 
 ## Store namespace
 
-The sandbox currently runs raw Store KV, Ordered QMDB, and SQL against the same
-unpartitioned simulator Store. QMDB and SQL each use their own internal key
-families, but the demo binaries do not assign distinct SDK `StoreKeyPrefix`
-values, and raw KV can write arbitrary Store keys. This means the sandbox is
-useful for exercising the individual panels, but it should not be treated as an
-example of isolated multi-instance Store partitioning.
+The sandbox currently runs raw Store KV, Ordered QMDB, SQL, and Simplex against
+the same unpartitioned simulator Store. QMDB, SQL, and Simplex each use their
+own internal key families, but the demo binaries do not assign distinct SDK
+`StoreKeyPrefix` values, and raw KV can write arbitrary Store keys. This means
+the sandbox is useful for exercising the individual panels, but it should not be
+treated as an example of isolated multi-instance Store partitioning.
 
 ## Ordered QMDB panel
 
@@ -145,3 +148,50 @@ In addition to the simulator running above:
      given WHERE predicate. Leave the predicate empty to emit every decoded
      row. Paste `SubscribeResponse.sequence_number + 1` into Since Sequence
      to resume.
+
+## Simplex panel
+
+The Simplex panel is only rendered when both `VITE_SIMPLEX_SQL_URL` and
+`VITE_SIMPLEX_STORE_URL` are set. It reads certificate metadata from the
+Simplex SQL server, fetches the block at the row's `block_key` from raw Store
+KV, then verifies the notarization/finalization certificate against the row's
+`block_digest` before emitting it to the UI.
+
+In addition to the simulator running above:
+
+1. **Start the Simplex SQL server** on port 8083
+
+```bash
+cargo run --package exoware-simplex --bin simplex -- \
+  run --store-url http://127.0.0.1:8080 --port 8083
+```
+
+2. **Seed Simplex activity and certified blocks** (keeps running). The seed
+   command prints the committee identity to paste into the UI or export as
+   `VITE_SIMPLEX_IDENTITY`.
+
+```bash
+cargo run --package exoware-simplex --bin simplex -- \
+  seed --store-url http://127.0.0.1:8080 --interval-secs 2
+```
+
+Each seed run starts with:
+
+```text
+simplex_identity=0x...
+simplex_namespace=_ALTO
+```
+
+3. **Point the web app at the Simplex SQL server and Store server**:
+
+```bash
+VITE_SIMPLEX_SQL_URL=http://127.0.0.1:8083 \
+VITE_SIMPLEX_STORE_URL=http://127.0.0.1:8080 \
+VITE_SIMPLEX_IDENTITY=0x... \
+VITE_SIMPLEX_NAMESPACE=_ALTO \
+npm run dev
+```
+
+`VITE_SIMPLEX_NAMESPACE` defaults to `_ALTO`. `VITE_SIMPLEX_IDENTITY` can also
+be pasted into the panel directly as hex. `VITE_SIMPLEX_URL` is still accepted
+as a shorthand only when Store and SQL are served from the same base URL.

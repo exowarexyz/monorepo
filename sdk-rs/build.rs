@@ -28,6 +28,7 @@ fn main() {
             "store/v1/ingest.proto",
             "store/v1/qmdb.proto",
             "store/v1/query.proto",
+            "store/v1/simplex.proto",
             "store/v1/sql.proto",
             "store/v1/stream.proto",
         ])

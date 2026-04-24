@@ -1,0 +1,42 @@
+{
+  "name": "@exowarexyz/simplex",
+  "version": "2026.4.1",
+  "description": "Browser client helpers for Exoware Simplex certificate streams.",
+  "type": "module",
+  "license": "(MIT OR Apache-2.0)",
+  "homepage": "https://exoware.xyz",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/exowarexyz/monorepo.git",
+    "directory": "simplex/ts"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build:wasm": "wasm-pack build ../wasm --target web --mode no-install --no-opt --out-dir ../ts/src/generated/wasm --out-name exoware_simplex_wasm",
+    "build": "npm run build:wasm && tsc && rm -rf dist/generated && mkdir -p dist/generated && cp -R src/generated/wasm dist/generated/wasm && rm -f dist/generated/wasm/.gitignore",
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@connectrpc/connect": "2.1.1",
+    "@exowarexyz/sdk": "file:../../sdk-ts",
+    "@exowarexyz/sql": "file:../../sql/ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.3"
+  }
+}

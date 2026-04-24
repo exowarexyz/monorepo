@@ -5,6 +5,8 @@ members = [
     "examples/simulator",
     "qmdb",
     "qmdb/wasm",
+    "simplex",
+    "simplex/wasm",
     "sql",
     "integration",
 ]
@@ -20,6 +22,8 @@ homepage = "https://exoware.xyz"
 exoware-qmdb = { version = "2026.4.1", path = "qmdb" }
 exoware-sdk = { version = "2026.4.1", path = "sdk-rs" }
 exoware-server = { version = "2026.4.1", path = "server" }
+exoware-simplex = { version = "2026.4.1", path = "simplex" }
+exoware-sql = { version = "2026.4.1", path = "sql" }
 tokio = "1.43.0"
 clap = "4.5.18"
 tracing = "0.1.41"
@@ -30,6 +34,8 @@ base64 = "0.22.1"
 hex = "0.4"
 regex = "1"
 commonware-codec = "2026.3.0"
+commonware-consensus = "2026.3.0"
+commonware-cryptography = "2026.3.0"
 rocksdb = "0.22.0"
 rand = "0.8.5"
 bincode = "1.3.3"

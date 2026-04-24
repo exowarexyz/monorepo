@@ -153,6 +153,16 @@ export type {
     TablesRequest as SqlTablesRequest,
     TablesResponse as SqlTablesResponse,
 } from './gen/ts/store/v1/sql_pb.js';
+export {
+    ActivityKind as SimplexActivityKind,
+    ActivitySchema as SimplexActivitySchema,
+    BlockKind as SimplexBlockKind,
+    CertifiedBlockSchema as SimplexCertifiedBlockSchema,
+} from './gen/ts/store/v1/simplex_pb.js';
+export type {
+    Activity as SimplexActivity,
+    CertifiedBlock as SimplexCertifiedBlock,
+} from './gen/ts/store/v1/simplex_pb.js';
 export type {
     CurrentKeyValueProof,
     CurrentRangeProof,
