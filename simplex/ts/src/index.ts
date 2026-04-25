@@ -1,0 +1,18 @@
+export {
+  SimplexClient,
+  SIMPLEX_CERTIFIED_BLOCK_FAMILY,
+  SIMPLEX_CERTIFIED_BLOCK_RESERVED_BITS,
+  SIMPLEX_CERTIFIED_BLOCK_VIEW_FAMILY,
+  SIMPLEX_FINALIZED_BLOCK_HEIGHT_FAMILY,
+  SIMPLEX_RAW_BLOCK_FAMILY,
+  bytesToHex,
+  hexToBytes,
+  wasmCertifiedBlockVerifier,
+  type BytesLike,
+  type CertifiedBlockFrame,
+  type CertifiedBlockVerifier,
+  type SimplexClientOptions,
+  type SimplexLookupOptions,
+  type SimplexSubscribeRequest,
+  type WasmCertifiedBlockVerifierOptions,
+} from './client.js';

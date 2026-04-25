@@ -941,6 +941,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-broadcast"
+version = "2026.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b67e4fed57f8d77c8d92b7bdd7512aee03d9d27ce4c0d3d8f93dd50358e9efc"
+dependencies = [
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-utils",
+ "prometheus-client",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "commonware-codec"
 version = "2026.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -953,6 +970,59 @@ dependencies = [
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "commonware-coding"
+version = "2026.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "824b7b9371af121e60f7bb3f28ff891f03ba5f9b51cc22053994007d3083c30b"
+dependencies = [
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-math",
+ "commonware-parallel",
+ "commonware-storage",
+ "commonware-utils",
+ "num-rational",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "rayon",
+ "reed-solomon-simd",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "commonware-consensus"
+version = "2026.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52bdbc3361f501adce253ff92e652a997758e57c1e6298a4bc06836952b66b0c"
+dependencies = [
+ "bytes",
+ "cfg-if",
+ "commonware-broadcast",
+ "commonware-codec",
+ "commonware-coding",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-math",
+ "commonware-p2p",
+ "commonware-parallel",
+ "commonware-resolver",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-utils",
+ "futures",
+ "pin-project",
+ "prometheus-client",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "rand_distr",
+ "rayon",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -1028,6 +1098,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-p2p"
+version = "2026.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b493b3ff98ef12a54162d9eae90175a6ff56e12df90f7b3381eff3cea84a8deb"
+dependencies = [
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-parallel",
+ "commonware-runtime",
+ "commonware-stream",
+ "commonware-utils",
+ "either",
+ "futures",
+ "num-bigint",
+ "num-integer",
+ "num-rational",
+ "num-traits",
+ "prometheus-client",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "rand_distr",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "commonware-parallel"
 version = "2026.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1036,6 +1133,27 @@ dependencies = [
  "cfg-if",
  "commonware-macros",
  "rayon",
+]
+
+[[package]]
+name = "commonware-resolver"
+version = "2026.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6e386bcb3a39c2ef1315df245cee346a8d9143961defebeabde518e189f6f54"
+dependencies = [
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-stream",
+ "commonware-utils",
+ "futures",
+ "prometheus-client",
+ "rand 0.8.5",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -1097,6 +1215,26 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "zstd",
+]
+
+[[package]]
+name = "commonware-stream"
+version = "2026.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24852a37e87406ba53fc95a53574016362cc9f527faf68d298fb1a3f50159950"
+dependencies = [
+ "chacha20poly1305",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-runtime",
+ "commonware-utils",
+ "futures",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "thiserror 2.0.18",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
@@ -2410,6 +2548,40 @@ dependencies = [
  "http",
  "regex",
  "tokio",
+]
+
+[[package]]
+name = "exoware-simplex"
+version = "2026.4.1"
+dependencies = [
+ "buffa",
+ "bytes",
+ "clap",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-parallel",
+ "exoware-sdk",
+ "futures",
+ "hex",
+ "rand 0.8.5",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "exoware-simplex-wasm"
+version = "2026.4.1"
+dependencies = [
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-parallel",
+ "getrandom 0.3.4",
+ "rand 0.8.5",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -4204,6 +4376,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rand_distr"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32cb0b9bc82b0a0876c2dd994a7e7a2683d3e7390ca40e6886785ef0c7e3ee31"
+dependencies = [
+ "num-traits",
+ "rand 0.8.5",
+]
+
+[[package]]
 name = "raw-cpuid"
 version = "11.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4233,6 +4415,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "readme-rustdocifier"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08ad765b21a08b1a8e5cdce052719188a23772bcbefb3c439f0baaf62c56ceac"
+
+[[package]]
 name = "recursive"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4259,6 +4447,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
  "bitflags",
+]
+
+[[package]]
+name = "reed-solomon-simd"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cffef0520d30fbd4151fb20e262947ae47fb0ab276a744a19b6398438105a072"
+dependencies = [
+ "cpufeatures 0.2.17",
+ "fixedbitset",
+ "once_cell",
+ "readme-rustdocifier",
 ]
 
 [[package]]

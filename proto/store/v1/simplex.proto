@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+package store.simplex.v1;
+
+import "buf/validate/validate.proto";
+
+// Stable labels for Commonware Simplex activity variants.
+enum ActivityKind {
+  ACTIVITY_KIND_UNSPECIFIED = 0;
+  ACTIVITY_KIND_NOTARIZE = 1;
+  ACTIVITY_KIND_NOTARIZATION = 2;
+  ACTIVITY_KIND_CERTIFICATION = 3;
+  ACTIVITY_KIND_NULLIFY = 4;
+  ACTIVITY_KIND_NULLIFICATION = 5;
+  ACTIVITY_KIND_FINALIZE = 6;
+  ACTIVITY_KIND_FINALIZATION = 7;
+  ACTIVITY_KIND_CONFLICTING_NOTARIZE = 8;
+  ACTIVITY_KIND_CONFLICTING_FINALIZE = 9;
+  ACTIVITY_KIND_NULLIFY_FINALIZE = 10;
+}
+
+// Stable labels for certificate/block records.
+enum BlockKind {
+  BLOCK_KIND_UNSPECIFIED = 0;
+  BLOCK_KIND_NOTARIZED = 1;
+  BLOCK_KIND_FINALIZED = 2;
+}
+
+// Decoded view of a signed Simplex activity record.
+// The encoded activity bytes are Commonware's native codec bytes for
+// `simplex::types::Activity<S, D>`.
+message SignedActivity {
+  ActivityKind kind = 1 [(buf.validate.field).enum.defined_only = true];
+  uint64 epoch = 2;
+  uint64 view = 3;
+  uint64 signer = 4;
+  optional bytes proposal_digest = 5;
+  bytes encoded_activity = 6 [(buf.validate.field).bytes.min_len = 1];
+}
+
+// Decoded view of a certificate Simplex activity record.
+message CertificateActivity {
+  ActivityKind kind = 1 [(buf.validate.field).enum.defined_only = true];
+  uint64 epoch = 2;
+  uint64 view = 3;
+  optional bytes proposal_digest = 4;
+  bytes encoded_activity = 5 [(buf.validate.field).bytes.min_len = 1];
+}
+
+// Decoded view of any stored Simplex activity record.
+message Activity {
+  oneof row {
+    SignedActivity signed = 1;
+    CertificateActivity certificate = 2;
+  }
+}
+
+// Decoded view of a stored notarized/finalized certified block record. The
+// certificate bytes are Commonware's native codec bytes for either
+// `Notarization<S, D>` or `Finalization<S, D>` depending on `kind`.
+// `block_key` points at the raw Store KV value containing the native-encoded
+// block bytes.
+message CertifiedBlock {
+  BlockKind kind = 1 [(buf.validate.field).enum.defined_only = true];
+  uint64 epoch = 2;
+  uint64 view = 3;
+  uint64 height = 4;
+  bytes block_digest = 5 [(buf.validate.field).bytes.min_len = 1];
+  bytes encoded_certificate = 6 [(buf.validate.field).bytes.min_len = 1];
+  bytes block_key = 7 [(buf.validate.field).bytes.min_len = 1];
+  uint64 block_size = 8;
+}

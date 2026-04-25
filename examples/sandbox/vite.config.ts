@@ -8,6 +8,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@qmdb-ts': fileURLToPath(new URL('../../qmdb/ts/src/index.ts', import.meta.url)),
+      '@simplex-ts': fileURLToPath(new URL('../../simplex/ts/src/index.ts', import.meta.url)),
       '@sql-ts': fileURLToPath(new URL('../../sql/ts/src/index.ts', import.meta.url)),
     },
   },

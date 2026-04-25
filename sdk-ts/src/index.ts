@@ -153,6 +153,20 @@ export type {
     TablesRequest as SqlTablesRequest,
     TablesResponse as SqlTablesResponse,
 } from './gen/ts/store/v1/sql_pb.js';
+export {
+    ActivityKind as SimplexActivityKind,
+    ActivitySchema as SimplexActivitySchema,
+    BlockKind as SimplexBlockKind,
+    CertificateActivitySchema as SimplexCertificateActivitySchema,
+    CertifiedBlockSchema as SimplexCertifiedBlockSchema,
+    SignedActivitySchema as SimplexSignedActivitySchema,
+} from './gen/ts/store/v1/simplex_pb.js';
+export type {
+    Activity as SimplexActivity,
+    CertificateActivity as SimplexCertificateActivity,
+    CertifiedBlock as SimplexCertifiedBlock,
+    SignedActivity as SimplexSignedActivity,
+} from './gen/ts/store/v1/simplex_pb.js';
 export type {
     CurrentKeyValueProof,
     CurrentRangeProof,

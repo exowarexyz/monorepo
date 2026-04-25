@@ -1,0 +1,27 @@
+[package]
+name = "exoware-simplex-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+commonware-codec = { workspace = true }
+commonware-consensus = { workspace = true }
+commonware-cryptography = { workspace = true }
+commonware-parallel = "2026.3.0"
+rand = { workspace = true }
+wasm-bindgen = "0.2"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
+version = "0.3.4"
+features = ["wasm_js"]
+
+[dev-dependencies]
+commonware-consensus = { workspace = true, features = ["mocks"] }
+commonware-cryptography = { workspace = true, features = ["mocks"] }
+

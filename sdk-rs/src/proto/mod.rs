@@ -63,6 +63,16 @@ pub mod store {
         }
     }
 
+    pub mod simplex {
+        pub mod v1 {
+            #![allow(non_camel_case_types)]
+            #![allow(unused_imports)]
+            #![allow(clippy::derivable_impls)]
+            #![allow(clippy::match_single_binding)]
+            include!("../gen/store.v1.simplex.rs");
+        }
+    }
+
     pub mod stream {
         pub mod v1 {
             #![allow(non_camel_case_types)]
@@ -130,6 +140,14 @@ pub mod sql {
     #![allow(clippy::derivable_impls)]
     #![allow(clippy::match_single_binding)]
     pub use crate::store::sql::v1::*;
+}
+
+pub mod simplex {
+    #![allow(non_camel_case_types)]
+    #![allow(unused_imports)]
+    #![allow(clippy::derivable_impls)]
+    #![allow(clippy::match_single_binding)]
+    pub use crate::store::simplex::v1::*;
 }
 
 pub mod stream {
