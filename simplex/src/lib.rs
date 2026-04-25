@@ -63,6 +63,8 @@ pub enum SimplexError {
     DigestMismatch,
     #[error("digest length must be {expected}, got {got}")]
     DigestLength { expected: usize, got: usize },
+    #[error("block key length must be {expected}, got {got}")]
+    BlockKeyLength { expected: usize, got: usize },
 }
 
 fn fixed_digest(bytes: Vec<u8>) -> Result<Vec<u8>, SimplexError> {
@@ -96,7 +98,7 @@ fn proto_block_kind(kind: BlockKind) -> ProtoBlockKind {
     }
 }
 
-pub fn certified_block_key(record: &BlockRecord) -> Result<Key, SimplexError> {
+fn encode_certified_block_key(codec: KeyCodec, record: &BlockRecord) -> Result<Key, SimplexError> {
     let digest = fixed_digest(record.block_digest.clone())?;
     let mut payload = Vec::with_capacity(1 + 8 + 8 + 8 + digest.len());
     payload.push(block_kind_key_byte(record.kind));
@@ -104,22 +106,17 @@ pub fn certified_block_key(record: &BlockRecord) -> Result<Key, SimplexError> {
     payload.extend_from_slice(&record.view.to_be_bytes());
     payload.extend_from_slice(&record.height.to_be_bytes());
     payload.extend_from_slice(&digest);
-    CERTIFIED_BLOCK_KEY_CODEC
+    codec
         .encode(&payload)
         .map_err(|e| SimplexError::Store(e.to_string()))
 }
 
+pub fn certified_block_key(record: &BlockRecord) -> Result<Key, SimplexError> {
+    encode_certified_block_key(CERTIFIED_BLOCK_KEY_CODEC, record)
+}
+
 pub fn certified_block_view_key(record: &BlockRecord) -> Result<Key, SimplexError> {
-    let digest = fixed_digest(record.block_digest.clone())?;
-    let mut payload = Vec::with_capacity(1 + 8 + 8 + 8 + digest.len());
-    payload.push(block_kind_key_byte(record.kind));
-    payload.extend_from_slice(&record.epoch.to_be_bytes());
-    payload.extend_from_slice(&record.view.to_be_bytes());
-    payload.extend_from_slice(&record.height.to_be_bytes());
-    payload.extend_from_slice(&digest);
-    CERTIFIED_BLOCK_VIEW_KEY_CODEC
-        .encode(&payload)
-        .map_err(|e| SimplexError::Store(e.to_string()))
+    encode_certified_block_key(CERTIFIED_BLOCK_VIEW_KEY_CODEC, record)
 }
 
 pub fn finalized_block_height_key(record: &BlockRecord) -> Result<Option<Key>, SimplexError> {
@@ -148,7 +145,7 @@ fn certified_block_value(record: BlockRecord) -> Result<Vec<u8>, SimplexError> {
         record.block_key
     };
     if block_key.len() != BLOCK_KEY_LEN {
-        return Err(SimplexError::DigestLength {
+        return Err(SimplexError::BlockKeyLength {
             expected: BLOCK_KEY_LEN,
             got: block_key.len(),
         });
@@ -175,8 +172,6 @@ pub struct SimplexStoreWriter {
     pending_raw_blocks: Vec<PendingEntry>,
     failed_prepared: std::sync::Mutex<Vec<PreparedSimplexStoreBatch>>,
 }
-
-pub type SimplexWriter = SimplexStoreWriter;
 
 #[derive(Debug)]
 #[must_use]
