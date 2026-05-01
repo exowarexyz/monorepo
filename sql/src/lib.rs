@@ -1587,6 +1587,54 @@ mod tests {
     }
 
     #[test]
+    fn null_predicate_merges_are_order_independent() {
+        use datafusion::logical_expr::col;
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", DataType::Int64, false),
+                TableColumnConfig::new("label", DataType::Utf8, true),
+            ],
+            vec!["id".to_string()],
+            vec![],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let label_idx = *model.columns_by_name.get("label").unwrap();
+        let eq_foo = col("label").eq(Expr::Literal(
+            ScalarValue::Utf8(Some("foo".to_string())),
+            None,
+        ));
+        let is_null = col("label").is_null();
+        let is_not_null = col("label").is_not_null();
+        let row_foo = KvRow {
+            values: vec![CellValue::Int64(1), CellValue::Utf8("foo".to_string())],
+        };
+
+        // (label = 'foo') AND (label IS NOT NULL) — IS NOT NULL is implied;
+        // predicate must reduce to StringEq('foo') in either order.
+        for filters in [
+            [&eq_foo, &is_not_null],
+            [&is_not_null, &eq_foo],
+        ] {
+            let owned: Vec<Expr> = filters.iter().map(|e| (*e).clone()).collect();
+            let pred = QueryPredicate::from_filters(&owned, &model);
+            assert!(!pred.contradiction);
+            assert!(matches!(
+                pred.constraints.get(&label_idx),
+                Some(PredicateConstraint::StringEq(s)) if s == "foo"
+            ));
+            assert!(pred.matches_row(&row_foo));
+        }
+
+        // (label = 'foo') AND (label IS NULL) — must contradict in either order.
+        for filters in [[&eq_foo, &is_null], [&is_null, &eq_foo]] {
+            let owned: Vec<Expr> = filters.iter().map(|e| (*e).clone()).collect();
+            assert!(QueryPredicate::from_filters(&owned, &model).contradiction);
+        }
+    }
+
+    #[test]
     fn table_config_accepts_date32_column() {
         let config = KvTableConfig::new(
             0,
