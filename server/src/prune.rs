@@ -165,12 +165,13 @@ fn execute_user_keys_policy(
 
     let mut groups: BTreeMap<Vec<u8>, Vec<KeyEntry>> = BTreeMap::new();
 
-    for (key, _value) in &rows {
-        if !codec.matches(key) {
+    for row in rows {
+        let (key, _value) = row.map_err(PruneError::Engine)?;
+        if !codec.matches(&key) {
             continue;
         }
         let payload_len = codec.payload_capacity_bytes_for_key_len(key.len());
-        let payload = match codec.read_payload(key, 0, payload_len) {
+        let payload = match codec.read_payload(&key, 0, payload_len) {
             Ok(p) => p,
             Err(_) => continue,
         };
@@ -185,10 +186,10 @@ fn execute_user_keys_policy(
 
         let order_value = extract_order_value(&payload, &regex, scope).unwrap_or_default();
 
-        groups.entry(group_key).or_default().push(KeyEntry {
-            key: key.clone(),
-            order_value,
-        });
+        groups
+            .entry(group_key)
+            .or_default()
+            .push(KeyEntry { key, order_value });
     }
 
     let mut all_deletes = Vec::new();
@@ -229,9 +230,75 @@ fn execute_batch_log_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    use crate::RangeScanIter;
+    use exoware_sdk::keys::KeyCodec;
     use exoware_sdk::kv_codec::Utf8;
     use exoware_sdk::match_key::MatchKey;
-    use exoware_sdk::prune_policy::{GroupBy, OrderBy};
+    use exoware_sdk::prune_policy::{GroupBy, OrderBy, PrunePolicy, PRUNE_POLICY_DOCUMENT_VERSION};
+
+    struct FakePruneEngine {
+        rows: Vec<(Bytes, Bytes)>,
+        deleted: Mutex<Vec<Bytes>>,
+    }
+
+    impl FakePruneEngine {
+        fn new(rows: Vec<(Bytes, Bytes)>) -> Self {
+            Self {
+                rows,
+                deleted: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn deleted(&self) -> Vec<Bytes> {
+            self.deleted.lock().expect("lock").clone()
+        }
+    }
+
+    impl StoreEngine for FakePruneEngine {
+        fn put_batch(&self, _kvs: &[(Bytes, Bytes)]) -> Result<u64, String> {
+            Ok(0)
+        }
+
+        fn get(&self, _key: &[u8]) -> Result<Option<Vec<u8>>, String> {
+            Ok(None)
+        }
+
+        fn range_scan(
+            &self,
+            _start: &[u8],
+            _end: &[u8],
+            _limit: usize,
+            _forward: bool,
+        ) -> Result<RangeScanIter<'_>, String> {
+            Ok(Box::new(self.rows.clone().into_iter().map(Ok)))
+        }
+
+        fn delete_batch(&self, keys: &[&[u8]]) -> Result<u64, String> {
+            self.deleted
+                .lock()
+                .expect("lock")
+                .extend(keys.iter().map(|key| Bytes::copy_from_slice(key)));
+            Ok(1)
+        }
+
+        fn current_sequence(&self) -> u64 {
+            0
+        }
+
+        fn get_batch(&self, _sequence_number: u64) -> Result<Option<Vec<(Bytes, Bytes)>>, String> {
+            Ok(None)
+        }
+
+        fn oldest_retained_batch(&self) -> Result<Option<u64>, String> {
+            Ok(None)
+        }
+
+        fn prune_batch_log(&self, _cutoff_exclusive: u64) -> Result<u64, String> {
+            Ok(0)
+        }
+    }
 
     fn make_scope() -> KeysScope {
         KeysScope {
@@ -257,6 +324,15 @@ mod tests {
             key: Bytes::from(vec![order as u8]),
             order_value: order.to_be_bytes().to_vec(),
         }
+    }
+
+    fn encoded_policy_key(logical: &[u8], version: u64) -> Bytes {
+        let codec = KeyCodec::new(4, 1);
+        let mut payload = Vec::new();
+        payload.extend_from_slice(logical);
+        payload.extend_from_slice(b"\0\0");
+        payload.extend_from_slice(&version.to_be_bytes());
+        codec.encode(&payload).expect("encode key")
     }
 
     #[test]
@@ -303,5 +379,27 @@ mod tests {
         let entries = vec![make_entry(3), make_entry(5), make_entry(7)];
         let deletes = keys_to_delete(entries, &scope, &retain);
         assert_eq!(deletes.len(), 1);
+    }
+
+    #[test]
+    fn execute_prune_deletes_keys_from_range_iterator() {
+        let old = encoded_policy_key(b"acct", 1);
+        let new = encoded_policy_key(b"acct", 2);
+        let engine = Arc::new(FakePruneEngine::new(vec![
+            (old.clone(), Bytes::from_static(b"old")),
+            (new.clone(), Bytes::from_static(b"new")),
+        ]));
+        let store: Arc<dyn StoreEngine> = engine.clone();
+        let document = PrunePolicyDocument {
+            version: PRUNE_POLICY_DOCUMENT_VERSION,
+            policies: vec![PrunePolicy {
+                scope: PolicyScope::Keys(make_scope()),
+                retain: RetainPolicy::KeepLatest { count: 1 },
+            }],
+        };
+
+        execute_prune(&store, &document).expect("prune");
+
+        assert_eq!(engine.deleted(), vec![old]);
     }
 }

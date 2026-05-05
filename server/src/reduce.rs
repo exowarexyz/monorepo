@@ -326,32 +326,53 @@ fn finalize_reduce_response(
     }
 }
 
+pub(crate) struct RangeReducer<'a> {
+    request: &'a RangeReduceRequest,
+    scalar_states: Option<Vec<ReductionState>>,
+    grouped_states: BTreeMap<Vec<u8>, GroupedReductionState>,
+}
+
+impl<'a> RangeReducer<'a> {
+    pub(crate) fn new(request: &'a RangeReduceRequest) -> Result<Self, RangeError> {
+        validate_reduce_request(request)?;
+        Ok(Self {
+            request,
+            scalar_states: request.group_by.is_empty().then(|| {
+                request
+                    .reducers
+                    .iter()
+                    .map(|reducer| ReductionState::from_op(reducer.op))
+                    .collect::<Vec<_>>()
+            }),
+            grouped_states: BTreeMap::new(),
+        })
+    }
+
+    pub(crate) fn update(&mut self, key: &Key, value: &Bytes) -> Result<(), RangeError> {
+        reduce_row_into_response(
+            key,
+            value,
+            self.request,
+            self.scalar_states.as_deref_mut(),
+            &mut self.grouped_states,
+        )
+    }
+
+    pub(crate) fn finish(self) -> RangeReduceResponse {
+        finalize_reduce_response(self.scalar_states, self.grouped_states)
+    }
+}
+
 /// Run a grouped or scalar reduction over materialized rows.
 pub fn reduce_over_rows(
     rows: &[(Key, Bytes)],
     request: &RangeReduceRequest,
 ) -> Result<RangeReduceResponse, RangeError> {
-    validate_reduce_request(request)?;
-    let mut scalar_states = request.group_by.is_empty().then(|| {
-        request
-            .reducers
-            .iter()
-            .map(|reducer| ReductionState::from_op(reducer.op))
-            .collect::<Vec<_>>()
-    });
-    let mut grouped_states = BTreeMap::<Vec<u8>, GroupedReductionState>::new();
-
+    let mut reducer = RangeReducer::new(request)?;
     for (key, value) in rows {
-        reduce_row_into_response(
-            key,
-            value,
-            request,
-            scalar_states.as_deref_mut(),
-            &mut grouped_states,
-        )?;
+        reducer.update(key, value)?;
     }
-
-    Ok(finalize_reduce_response(scalar_states, grouped_states))
+    Ok(reducer.finish())
 }
 
 #[cfg(test)]
@@ -365,7 +386,7 @@ mod tests {
     };
     use exoware_sdk::{RangeReduceOp, RangeReduceRequest, RangeReducerSpec};
 
-    use super::reduce_over_rows;
+    use super::{reduce_over_rows, RangeReducer};
 
     fn make_row(key: &[u8], values: Vec<Option<StoredValue>>) -> (Key, Bytes) {
         let encoded = StoredRow { values }.encode();
@@ -418,6 +439,17 @@ mod tests {
 
     fn result_f64(v: f64) -> Option<KvReducedValue> {
         Some(KvReducedValue::Float64(v))
+    }
+
+    fn reduce_incrementally(
+        rows: &[(Key, Bytes)],
+        request: &RangeReduceRequest,
+    ) -> super::RangeReduceResponse {
+        let mut reducer = RangeReducer::new(request).unwrap();
+        for (key, value) in rows {
+            reducer.update(key, value).unwrap();
+        }
+        reducer.finish()
     }
 
     #[test]
@@ -630,6 +662,90 @@ mod tests {
         };
         let response = reduce_over_rows(&rows, &request).unwrap();
         assert_eq!(response.results[0].value, result_i64(50));
+    }
+
+    #[test]
+    fn incremental_reducer_matches_materialized_scalar() {
+        let rows = vec![
+            make_row(b"a", vec![Some(StoredValue::Int64(10))]),
+            make_row(b"b", vec![None]),
+            make_row(b"c", vec![Some(StoredValue::Int64(30))]),
+        ];
+        let request = scalar_request(vec![
+            reducer(RangeReduceOp::CountAll, None),
+            reducer(RangeReduceOp::SumField, Some(int64_value_field(0))),
+        ]);
+        assert_eq!(
+            reduce_incrementally(&rows, &request),
+            reduce_over_rows(&rows, &request).unwrap()
+        );
+    }
+
+    #[test]
+    fn incremental_reducer_matches_materialized_grouped() {
+        let rows = vec![
+            make_row(
+                b"a",
+                vec![
+                    Some(StoredValue::Utf8("west".into())),
+                    Some(StoredValue::Int64(10)),
+                ],
+            ),
+            make_row(
+                b"b",
+                vec![
+                    Some(StoredValue::Utf8("east".into())),
+                    Some(StoredValue::Int64(20)),
+                ],
+            ),
+            make_row(
+                b"c",
+                vec![
+                    Some(StoredValue::Utf8("west".into())),
+                    Some(StoredValue::Int64(30)),
+                ],
+            ),
+        ];
+        let request = RangeReduceRequest {
+            reducers: vec![reducer(RangeReduceOp::SumField, Some(int64_value_field(1)))],
+            group_by: vec![utf8_value_field(0)],
+            filter: None,
+        };
+        assert_eq!(
+            reduce_incrementally(&rows, &request),
+            reduce_over_rows(&rows, &request).unwrap()
+        );
+    }
+
+    #[test]
+    fn incremental_reducer_matches_materialized_filtered() {
+        let rows = vec![
+            make_row(b"a", vec![Some(StoredValue::Int64(10))]),
+            make_row(b"b", vec![Some(StoredValue::Int64(20))]),
+            make_row(b"c", vec![Some(StoredValue::Int64(30))]),
+        ];
+        let request = RangeReduceRequest {
+            reducers: vec![reducer(RangeReduceOp::CountAll, None)],
+            group_by: Vec::new(),
+            filter: Some(KvPredicate {
+                checks: vec![KvPredicateCheck {
+                    field: KvFieldRef::Value {
+                        index: 0,
+                        kind: KvFieldKind::Int64,
+                        nullable: false,
+                    },
+                    constraint: KvPredicateConstraint::IntRange {
+                        min: Some(20),
+                        max: None,
+                    },
+                }],
+                contradiction: false,
+            }),
+        };
+        assert_eq!(
+            reduce_incrementally(&rows, &request),
+            reduce_over_rows(&rows, &request).unwrap()
+        );
     }
 
     #[test]

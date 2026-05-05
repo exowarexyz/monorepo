@@ -43,7 +43,7 @@ use http::HeaderName;
 use tokio::sync::futures::OwnedNotified;
 use tokio::sync::Notify;
 
-use crate::reduce::reduce_over_rows;
+use crate::reduce::RangeReducer;
 use crate::stream::StreamHub;
 use crate::validate;
 use crate::StoreEngine;
@@ -51,17 +51,12 @@ use crate::StoreEngine;
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
 
 /// Total bytes of keys plus values for entries read from the store (reference RocksDB engine).
-fn read_bytes_for_kv_rows<K: AsRef<[u8]>, V: AsRef<[u8]>>(entries: &[(K, V)]) -> u64 {
-    entries
-        .iter()
-        .map(|(k, v)| k.as_ref().len() as u64 + v.as_ref().len() as u64)
-        .sum()
+fn read_bytes_for_kv<K: AsRef<[u8]>, V: AsRef<[u8]>>(key: &K, value: &V) -> u64 {
+    key.as_ref().len() as u64 + value.as_ref().len() as u64
 }
 
-fn read_stats_read_bytes<K: AsRef<[u8]>, V: AsRef<[u8]>>(
-    entries: &[(K, V)],
-) -> HashMap<String, u64> {
-    [("read_bytes".to_string(), read_bytes_for_kv_rows(entries))]
+fn read_stats_read_bytes(read_bytes: u64) -> HashMap<String, u64> {
+    [("read_bytes".to_string(), read_bytes)]
         .into_iter()
         .collect()
 }
@@ -351,44 +346,38 @@ impl QueryApi for QueryConnect {
             .engine
             .range_scan(start_key.as_ref(), end_key.as_ref(), limit, forward)
             .map_err(ConnectError::internal)?;
-        let detail = Detail {
-            sequence_number,
-            read_stats: read_stats_read_bytes(&entries),
-            ..Default::default()
-        };
-        Self::apply_query_detail_trailer(&mut ctx, &detail);
 
+        let mut read_bytes = 0u64;
         let mut frames = Vec::new();
         let mut chunk = Vec::new();
-        for (key, value) in entries {
-            chunk.push((key, value));
+        for row in entries {
+            let (key, value) = row.map_err(ConnectError::internal)?;
+            read_bytes += read_bytes_for_kv(&key, &value);
+            chunk.push(KvEntry {
+                key: key.into(),
+                value: value.into(),
+                ..Default::default()
+            });
             if chunk.len() >= batch_size {
                 frames.push(Ok(RangeFrame {
-                    results: chunk
-                        .drain(..)
-                        .map(|(k, v)| KvEntry {
-                            key: k.into(),
-                            value: v.into(),
-                            ..Default::default()
-                        })
-                        .collect(),
+                    results: std::mem::take(&mut chunk),
                     ..Default::default()
                 }));
             }
         }
         if !chunk.is_empty() {
             frames.push(Ok(RangeFrame {
-                results: chunk
-                    .into_iter()
-                    .map(|(k, v)| KvEntry {
-                        key: k.into(),
-                        value: v.into(),
-                        ..Default::default()
-                    })
-                    .collect(),
+                results: chunk,
                 ..Default::default()
             }));
         }
+
+        let detail = Detail {
+            sequence_number,
+            read_stats: read_stats_read_bytes(read_bytes),
+            ..Default::default()
+        };
+        Self::apply_query_detail_trailer(&mut ctx, &detail);
 
         Ok((Box::pin(stream_util::iter(frames)), ctx))
     }
@@ -400,7 +389,7 @@ impl QueryApi for QueryConnect {
             exoware_proto::store::query::v1::ReduceRequestView<'static>,
         >,
     ) -> Result<(ReduceResponse, Context), ConnectError> {
-        validate::validate_reduce_request(&request)?; // proto-level; reduce_over_rows re-validates per-reducer constraints
+        validate::validate_reduce_request(&request)?;
         let token = self.ensure_min_sequence_number(request.min_sequence_number)?;
         let wire = request.bytes();
         let start_key: Key = wire.slice_ref(request.start);
@@ -414,11 +403,20 @@ impl QueryApi for QueryConnect {
             .range_scan(start_key.as_ref(), end_key.as_ref(), usize::MAX, true)
             .map_err(ConnectError::internal)?;
 
-        let response = reduce_over_rows(&rows, &domain)
+        let mut reducer = RangeReducer::new(&domain)
             .map_err(|e: crate::RangeError| ConnectError::internal(e.to_string()))?;
+        let mut read_bytes = 0u64;
+        for row in rows {
+            let (key, value) = row.map_err(ConnectError::internal)?;
+            read_bytes += read_bytes_for_kv(&key, &value);
+            reducer
+                .update(&key, &value)
+                .map_err(|e: crate::RangeError| ConnectError::internal(e.to_string()))?;
+        }
+        let response = reducer.finish();
         let detail = Detail {
             sequence_number: token,
-            read_stats: read_stats_read_bytes(&rows),
+            read_stats: read_stats_read_bytes(read_bytes),
             ..Default::default()
         };
         Self::apply_query_detail_header(&mut ctx, &detail);
@@ -915,10 +913,15 @@ mod tests {
 
     use buffa::Message;
     use exoware_proto::store::common::v1::MatchKey as ProtoMatchKey;
-    use exoware_proto::store::stream::v1::SubscribeRequest;
-    use exoware_sdk::decode_connect_error;
+    use exoware_proto::store::stream::v1::{SubscribeRequest, SubscribeRequestView};
     use exoware_sdk::keys::KeyCodec;
+    use exoware_sdk::kv_codec::KvReducedValue;
+    use exoware_sdk::{
+        decode_connect_error, decode_query_detail_header_value, to_domain_reduce_response,
+    };
     use futures::StreamExt;
+
+    use crate::RangeScanIter;
 
     const TEST_RESERVED_BITS: u8 = 4;
     const TEST_PREFIX: u16 = 1;
@@ -936,6 +939,8 @@ mod tests {
         batches: BTreeMap<u64, Option<Vec<(Bytes, Bytes)>>>,
         oldest_retained: Option<u64>,
         publish_on_get_batch: Option<PublishDuringReplay>,
+        range_rows: Vec<(Bytes, Bytes)>,
+        range_next_count: usize,
     }
 
     #[derive(Default)]
@@ -985,6 +990,14 @@ mod tests {
                 kvs,
             });
         }
+
+        fn set_range_rows(&self, rows: Vec<(Bytes, Bytes)>) {
+            self.state.lock().expect("lock").range_rows = rows;
+        }
+
+        fn range_next_count(&self) -> usize {
+            self.state.lock().expect("lock").range_next_count
+        }
     }
 
     impl StoreEngine for FakeEngine {
@@ -1006,8 +1019,18 @@ mod tests {
             _end: &[u8],
             _limit: usize,
             _forward: bool,
-        ) -> Result<Vec<(Bytes, Bytes)>, String> {
-            Ok(Vec::new())
+        ) -> Result<RangeScanIter<'_>, String> {
+            let rows = self
+                .state
+                .lock()
+                .map_err(|e| e.to_string())?
+                .range_rows
+                .clone();
+            let state = &self.state;
+            Ok(Box::new(rows.into_iter().map(move |row| {
+                state.lock().expect("lock").range_next_count += 1;
+                Ok(row)
+            })))
         }
 
         fn delete_batch(&self, _keys: &[&[u8]]) -> Result<u64, String> {
@@ -1093,6 +1116,54 @@ mod tests {
             .expect("decode subscribe request");
         let (stream, _ctx) = StreamApi::subscribe(connect, Context::default(), request).await?;
         Ok(stream)
+    }
+
+    #[tokio::test]
+    async fn reduce_consumes_range_iterator_and_reports_read_bytes() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(7);
+        engine.set_range_rows(vec![
+            (Bytes::from_static(b"a"), Bytes::from_static(b"xx")),
+            (Bytes::from_static(b"bb"), Bytes::from_static(b"yyy")),
+        ]);
+        let connect = QueryConnect::new(AppState::new(engine.clone()));
+        let bytes = exoware_proto::query::ReduceRequest {
+            start: b"a".to_vec(),
+            end: b"z".to_vec(),
+            params: Some(exoware_proto::query::ReduceParams {
+                reducers: vec![exoware_proto::query::RangeReducerSpec {
+                    op: exoware_proto::query::RangeReduceOp::RANGE_REDUCE_OP_COUNT_ALL.into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let request = buffa::view::OwnedView::<
+            exoware_proto::store::query::v1::ReduceRequestView<'static>,
+        >::decode(bytes.into())
+        .expect("decode reduce request");
+
+        let (response, ctx) = QueryApi::reduce(&connect, Context::default(), request)
+            .await
+            .expect("reduce");
+        let response = to_domain_reduce_response(response).expect("decode reduce response");
+
+        assert_eq!(engine.range_next_count(), 2);
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].value, Some(KvReducedValue::UInt64(2)));
+
+        let detail_value = ctx
+            .response_headers
+            .get(QUERY_DETAIL_RESPONSE_HEADER)
+            .expect("query detail header")
+            .to_str()
+            .expect("query detail header string");
+        let detail = decode_query_detail_header_value(detail_value).expect("decode detail");
+        assert_eq!(detail.sequence_number, 7);
+        assert_eq!(detail.read_stats.get("read_bytes"), Some(&8));
     }
 
     #[tokio::test]

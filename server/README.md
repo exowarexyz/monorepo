@@ -17,12 +17,12 @@ Implement the `StoreEngine` trait for your storage backend, wrap it in
 ingest, query, and compact services.
 
 ```rust
-use exoware_server::{AppState, StoreEngine, connect_stack};
+use exoware_server::{AppState, RangeScanIter, StoreEngine, connect_stack};
 
 // Implement StoreEngine for your backend:
 //   fn put_batch(&self, kvs: &[(Bytes, Bytes)]) -> Result<u64, String>;
 //   fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, String>;
-//   fn range_scan(&self, start: &[u8], end: &[u8], limit: usize, forward: bool) -> Result<Vec<(Bytes, Bytes)>, String>;
+//   fn range_scan(&self, start: &[u8], end: &[u8], limit: usize, forward: bool) -> Result<RangeScanIter<'_>, String>;
 //   fn delete_batch(&self, keys: &[&[u8]]) -> Result<u64, String>;
 //   fn current_sequence(&self) -> u64;
 ```

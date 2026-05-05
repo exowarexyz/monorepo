@@ -5,6 +5,8 @@
 
 use bytes::Bytes;
 
+pub type RangeScanIter<'a> = Box<dyn Iterator<Item = Result<(Bytes, Bytes), String>> + Send + 'a>;
+
 /// Implement these operations for your store. All methods must be thread-safe.
 pub trait StoreEngine: Send + Sync + 'static {
     /// Persist key-value pairs atomically and return the new global sequence number for this write.
@@ -15,14 +17,14 @@ pub trait StoreEngine: Send + Sync + 'static {
 
     /// Keys in `[start, end]` (inclusive) when `end` is non-empty; empty `end` means unbounded
     /// above. Matches `store.query.v1.RangeRequest` / `ReduceRequest` on the wire. `limit` caps
-    /// rows returned.
+    /// rows yielded.
     fn range_scan(
         &self,
         start: &[u8],
         end: &[u8],
         limit: usize,
         forward: bool,
-    ) -> Result<Vec<(Bytes, Bytes)>, String>;
+    ) -> Result<RangeScanIter<'_>, String>;
 
     /// Batch-get: returns `(key, Option<value>)` for each input key, preserving order.
     fn get_many(&self, keys: &[&[u8]]) -> Result<Vec<(Vec<u8>, Option<Vec<u8>>)>, String> {
