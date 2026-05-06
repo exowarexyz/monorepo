@@ -44,7 +44,7 @@ use tokio::sync::futures::OwnedNotified;
 use tokio::sync::Notify;
 
 use crate::reduce::RangeReducer;
-use crate::stream::StreamHub;
+use crate::stream::{StreamHub, StreamNotifier};
 use crate::validate;
 use crate::{BatchLog, Ingest, Prune, Query, StoreEngine};
 
@@ -119,8 +119,26 @@ pub struct IngestState {
     pub ingest: Arc<dyn Ingest>,
     /// Gates ingest writes only.
     pub ready: Arc<AtomicBool>,
-    /// Shared fan-out hub for `store.stream.v1.Subscribe`.
-    pub stream: Arc<StreamHub>,
+    /// Optional live-stream notifier.
+    pub notifier: Option<Arc<dyn StreamNotifier>>,
+}
+
+impl IngestState {
+    pub fn new(ingest: Arc<dyn Ingest>) -> Self {
+        Self {
+            ingest,
+            ready: Arc::new(AtomicBool::new(true)),
+            notifier: None,
+        }
+    }
+
+    pub fn with_notifier(ingest: Arc<dyn Ingest>, notifier: Arc<dyn StreamNotifier>) -> Self {
+        Self {
+            ingest,
+            ready: Arc::new(AtomicBool::new(true)),
+            notifier: Some(notifier),
+        }
+    }
 }
 
 impl From<AppState> for IngestState {
@@ -128,7 +146,7 @@ impl From<AppState> for IngestState {
         Self {
             ingest: state.ingest,
             ready: state.ready,
-            stream: state.stream,
+            notifier: Some(state.stream),
         }
     }
 }
@@ -162,14 +180,23 @@ impl From<AppState> for CompactState {
 #[derive(Clone)]
 pub struct StreamState {
     pub batch_log: Arc<dyn BatchLog>,
-    pub stream: Arc<StreamHub>,
+    pub notifier: Arc<dyn StreamNotifier>,
+}
+
+impl StreamState {
+    pub fn new(batch_log: Arc<dyn BatchLog>, notifier: Arc<dyn StreamNotifier>) -> Self {
+        Self {
+            batch_log,
+            notifier,
+        }
+    }
 }
 
 impl From<AppState> for StreamState {
     fn from(state: AppState) -> Self {
         Self {
             batch_log: state.batch_log,
-            stream: state.stream,
+            notifier: state.stream,
         }
     }
 }
@@ -220,10 +247,12 @@ impl IngestApi for IngestConnect {
             .put_batch(&batch)
             .map_err(ConnectError::internal)?;
 
-        // Fan out the just-committed batch to stream subscribers. `publish`
-        // only announces the new sequence number; subscribers pull the batch
-        // from the batch log at their own pace.
-        self.state.stream.publish(seq);
+        // Single-process deployments can fan out the just-committed sequence
+        // immediately. Split deployments let the serving process advance its
+        // own stream notifier after observing durable state.
+        if let Some(notifier) = &self.state.notifier {
+            notifier.advance(seq);
+        }
 
         Ok((
             ProtoPutResponse {
@@ -728,7 +757,7 @@ impl SubscriptionStream {
     }
 
     fn next_live_frame(&mut self) -> Result<LiveProgress, ConnectError> {
-        let current = self.state.stream.current_sequence();
+        let current = self.state.notifier.current_sequence();
         if self.next_live_sequence > current {
             return Ok(LiveProgress::NeedWait);
         }
@@ -788,7 +817,7 @@ impl Stream for SubscriptionStream {
                     if self.live_wait.is_none() {
                         self.live_wait = Some(Box::pin(self.live_notify.clone().notified_owned()));
                     }
-                    if self.next_live_sequence <= self.state.stream.current_sequence() {
+                    if self.next_live_sequence <= self.state.notifier.current_sequence() {
                         self.live_wait = None;
                         continue;
                     }
@@ -878,7 +907,10 @@ impl StreamApi for StreamConnect {
         // wakeups. The stream then walks the batch log by sequence cursor, so
         // live delivery is paced by client reads instead of server-side
         // buffering.
-        let (matchers, replay_bound, live_notify) = self.state.stream.subscribe(filter)?;
+        let matchers = crate::stream::compile_matchers(&filter)?;
+        let subscription = self.state.notifier.subscribe();
+        let replay_bound = subscription.current_sequence;
+        let live_notify = subscription.notify;
 
         // Optional replay. Validate the starting batch eagerly so an
         // already-evicted cursor fails the RPC immediately; later replay holes
@@ -1059,6 +1091,7 @@ pub fn connect_stack(state: AppState) -> ConnectStack {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::sync::atomic::AtomicU64;
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -1072,7 +1105,9 @@ mod tests {
     };
     use futures::StreamExt;
 
-    use crate::{BatchLog, Ingest, Prune, Query, RangeScanIter, Sequence};
+    use crate::{
+        BatchLog, Ingest, Prune, Query, RangeScanIter, Sequence, StreamNotification, StreamNotifier,
+    };
 
     const TEST_RESERVED_BITS: u8 = 4;
     const TEST_PREFIX: u16 = 1;
@@ -1267,6 +1302,38 @@ mod tests {
         }
     }
 
+    struct ManualNotifier {
+        current_sequence: AtomicU64,
+        notify: Arc<Notify>,
+    }
+
+    impl ManualNotifier {
+        fn new(current_sequence: u64) -> Self {
+            Self {
+                current_sequence: AtomicU64::new(current_sequence),
+                notify: Arc::new(Notify::new()),
+            }
+        }
+    }
+
+    impl StreamNotifier for ManualNotifier {
+        fn subscribe(&self) -> StreamNotification {
+            StreamNotification {
+                current_sequence: self.current_sequence.load(Ordering::Acquire),
+                notify: self.notify.clone(),
+            }
+        }
+
+        fn current_sequence(&self) -> u64 {
+            self.current_sequence.load(Ordering::Acquire)
+        }
+
+        fn advance(&self, seq: u64) {
+            self.current_sequence.fetch_max(seq, Ordering::SeqCst);
+            self.notify.notify_waiters();
+        }
+    }
+
     fn matching_kv(payload: &[u8], value: &[u8]) -> (Bytes, Bytes) {
         let codec = KeyCodec::new(TEST_RESERVED_BITS, TEST_PREFIX);
         let key = codec.encode(payload).expect("encode key");
@@ -1346,6 +1413,27 @@ mod tests {
         let _compact = compact_service(state.clone().into());
         let _stream = stream_service(state.clone().into());
         let _query_stack = query_stack(state.clone().into(), state.into());
+    }
+
+    #[tokio::test]
+    async fn stream_can_be_advanced_by_external_notifier() {
+        let engine = Arc::new(FakeEngine::default());
+        let notifier = Arc::new(ManualNotifier::new(0));
+        let connect = StreamConnect::new(StreamState::new(engine.clone(), notifier.clone()));
+        let mut stream = subscribe_stream(&connect, None).await.expect("subscribe");
+
+        engine.set_current_sequence(1);
+        engine.set_batch(1, Some(vec![matching_kv(b"hit", b"v1")]));
+        notifier.advance(1);
+
+        let frame = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("stream should yield")
+            .expect("frame should exist")
+            .expect("frame should be ok");
+        assert_eq!(frame.sequence_number, 1);
+        assert_eq!(frame.entries.len(), 1);
+        assert_eq!(frame.entries[0].value.as_slice(), b"v1");
     }
 
     #[tokio::test]

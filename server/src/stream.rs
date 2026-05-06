@@ -1,9 +1,8 @@
 //! Live stream coordination for `store.stream.v1`.
 //!
-//! `StreamHub::publish` is called synchronously after `Ingest::put_batch`
-//! returns `Ok`. The hub only tracks the highest published batch sequence and
-//! wakes subscribers; each subscriber then pulls batches from the engine at its
-//! own pace, so live delivery is naturally paced by client reads instead of an
+//! A [`StreamNotifier`] tracks the highest published batch sequence and wakes
+//! subscribers. Each subscriber then pulls batches from the batch log at its own
+//! pace, so live delivery is naturally paced by client reads instead of an
 //! internal per-subscriber backlog.
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -92,6 +91,25 @@ pub(crate) fn apply_filter(matchers: &CompiledMatchers, kvs: &[(Bytes, Bytes)]) 
     out
 }
 
+#[derive(Clone)]
+pub struct StreamNotification {
+    pub current_sequence: u64,
+    pub notify: Arc<Notify>,
+}
+
+/// Notification capability for stream subscribers.
+pub trait StreamNotifier: Send + Sync + 'static {
+    /// Atomically snapshot the visible batch frontier and return a notifier
+    /// that wakes when the frontier may have advanced.
+    fn subscribe(&self) -> StreamNotification;
+
+    /// Highest batch sequence currently visible to live subscribers.
+    fn current_sequence(&self) -> u64;
+
+    /// Announce that batches through `seq` may now be visible.
+    fn advance(&self, seq: u64);
+}
+
 pub struct StreamHub {
     published_sequence: AtomicU64,
     notify: Arc<Notify>,
@@ -105,26 +123,27 @@ impl StreamHub {
         }
     }
 
-    /// Compile the filter and atomically snapshot the highest published batch
-    /// sequence that should be considered "already visible" to this
-    /// subscription. Later publishes wake the returned notifier.
-    pub(crate) fn subscribe(
-        &self,
-        filter: StreamFilter,
-    ) -> Result<(CompiledMatchers, u64, Arc<Notify>), ConnectError> {
-        let matchers = compile_matchers(&filter)?;
-        let floor = self.published_sequence.load(Ordering::Acquire);
-        Ok((matchers, floor, self.notify.clone()))
-    }
-
     /// Announce a newly committed batch sequence to subscribers.
     pub fn publish(&self, seq: u64) {
-        self.published_sequence.fetch_max(seq, Ordering::SeqCst);
-        self.notify.notify_waiters();
+        self.advance(seq);
+    }
+}
+
+impl StreamNotifier for StreamHub {
+    fn subscribe(&self) -> StreamNotification {
+        StreamNotification {
+            current_sequence: self.published_sequence.load(Ordering::Acquire),
+            notify: self.notify.clone(),
+        }
     }
 
-    pub(crate) fn current_sequence(&self) -> u64 {
+    fn current_sequence(&self) -> u64 {
         self.published_sequence.load(Ordering::Acquire)
+    }
+
+    fn advance(&self, seq: u64) {
+        self.published_sequence.fetch_max(seq, Ordering::SeqCst);
+        self.notify.notify_waiters();
     }
 }
 
@@ -180,8 +199,8 @@ mod tests {
     #[test]
     fn subscribe_snapshots_current_sequence() {
         let hub = StreamHub::new(11);
-        let (_matchers, floor, _notify) = hub.subscribe(filter(1, "(?s).*")).unwrap();
-        assert_eq!(floor, 11);
+        let subscription = hub.subscribe();
+        assert_eq!(subscription.current_sequence, 11);
     }
 
     #[test]
@@ -198,12 +217,11 @@ mod tests {
 
     #[test]
     fn subscribe_rejects_invalid_filter() {
-        let hub = StreamHub::new(0);
         let bad = StreamFilter {
             match_keys: vec![],
             value_filters: vec![],
         };
-        assert!(hub.subscribe(bad).is_err());
+        assert!(compile_matchers(&bad).is_err());
     }
 
     #[test]

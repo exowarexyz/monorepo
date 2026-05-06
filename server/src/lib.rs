@@ -19,4 +19,4 @@ pub use connect::{
 pub use engine::{BatchLog, Ingest, Prune, Query, RangeScanIter, Sequence, StoreEngine};
 pub use prune::{execute_prune, PruneError};
 pub use reduce::RangeError;
-pub use stream::StreamHub;
+pub use stream::{StreamHub, StreamNotification, StreamNotifier};
