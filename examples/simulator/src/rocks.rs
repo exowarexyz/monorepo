@@ -103,6 +103,7 @@ impl RocksStore {
         } else if end.is_empty() {
             self.db.iterator(IteratorMode::End)
         } else {
+            // seek_for_prev starts at the largest key <= end, so reverse scans only need the lower-bound stop below.
             self.db
                 .iterator(IteratorMode::From(end.as_ref(), Direction::Reverse))
         };

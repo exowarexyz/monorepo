@@ -414,6 +414,8 @@ impl QueryApi for QueryConnect {
                 .map_err(|e: crate::RangeError| ConnectError::internal(e.to_string()))?;
         }
         let response = reducer.finish();
+
+        // Reduce is unary, so headers can include stats computed while consuming the iterator.
         let detail = Detail {
             sequence_number: token,
             read_stats: read_stats_read_bytes(read_bytes),
