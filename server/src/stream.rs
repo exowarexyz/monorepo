@@ -1,6 +1,6 @@
 //! Live stream coordination for `store.stream.v1`.
 //!
-//! `StreamHub::publish` is called synchronously after `StoreEngine::put_batch`
+//! `StreamHub::publish` is called synchronously after `Ingest::put_batch`
 //! returns `Ok`. The hub only tracks the highest published batch sequence and
 //! wakes subscribers; each subscriber then pulls batches from the engine at its
 //! own pace, so live delivery is naturally paced by client reads instead of an

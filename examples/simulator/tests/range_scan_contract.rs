@@ -1,7 +1,7 @@
-//! Contract tests for `StoreEngine` (RocksDB simulator).
+//! Contract tests for store capabilities (RocksDB simulator).
 
 use bytes::Bytes;
-use exoware_server::StoreEngine;
+use exoware_server::{Ingest, Prune, Query, Sequence};
 use exoware_simulator::RocksStore;
 use tempfile::tempdir;
 

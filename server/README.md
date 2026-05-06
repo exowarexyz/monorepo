@@ -12,17 +12,32 @@ Serve the Exoware API.
 ## Overview
 
 `exoware-server` provides a backend-less ConnectRPC server for the Exoware API.
-Implement the `StoreEngine` trait for your storage backend, wrap it in
-`AppState`, and call `connect_stack` to get a ready-to-serve router with
-ingest, query, and compact services.
+Implement the storage capability traits for your backend, wrap them in `AppState`,
+and call `connect_stack` to get a ready-to-serve router with ingest, query,
+compact, and stream services. Backends that implement every capability
+automatically implement the `StoreEngine` compatibility facade.
 
 ```rust
-use exoware_server::{AppState, RangeScanIter, StoreEngine, connect_stack};
+use exoware_server::{
+    AppState, BatchLog, Ingest, Prune, Query, RangeScanIter, Sequence, connect_stack,
+};
 
-// Implement StoreEngine for your backend:
+// Implement the capabilities your component serves:
+//   Sequence:
+//   fn current_sequence(&self) -> u64;
+//
+//   Ingest:
 //   fn put_batch(&self, kvs: &[(Bytes, Bytes)]) -> Result<u64, String>;
+//
+//   Query:
 //   fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, String>;
 //   fn range_scan(&self, start: &[u8], end: &[u8], limit: usize, forward: bool) -> Result<RangeScanIter<'_>, String>;
+//
+//   Prune:
 //   fn delete_batch(&self, keys: &[&[u8]]) -> Result<u64, String>;
-//   fn current_sequence(&self) -> u64;
+//   fn prune_batch_log(&self, cutoff_exclusive: u64) -> Result<u64, String>;
+//
+//   BatchLog:
+//   fn get_batch(&self, sequence_number: u64) -> Result<Option<Vec<(Bytes, Bytes)>>, String>;
+//   fn oldest_retained_batch(&self) -> Result<Option<u64>, String>;
 ```

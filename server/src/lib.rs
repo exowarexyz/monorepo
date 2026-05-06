@@ -1,7 +1,7 @@
 #![allow(clippy::result_large_err, clippy::type_complexity)]
 //! Store server for ingest/query/compact APIs.
 //!
-//! Provide an [`StoreEngine`] implementation and wrap it in [`AppState`], then call [`connect_stack`].
+//! Provide store capability implementations and wrap them in [`AppState`], then call [`connect_stack`].
 
 mod connect;
 mod engine;
@@ -11,9 +11,12 @@ mod stream;
 mod validate;
 
 pub use connect::{
-    connect_stack, AppState, CompactConnect, IngestConnect, QueryConnect, StreamConnect,
+    compact_service, connect_stack, ingest_service, query_service, query_stack, stream_service,
+    AppState, CompactConnect, CompactService, CompactState, ConnectStack, IngestConnect,
+    IngestService, IngestState, QueryConnect, QueryService, QueryStack, QueryState, StreamConnect,
+    StreamService, StreamState,
 };
-pub use engine::{RangeScanIter, StoreEngine};
+pub use engine::{BatchLog, Ingest, Prune, Query, RangeScanIter, Sequence, StoreEngine};
 pub use prune::{execute_prune, PruneError};
 pub use reduce::RangeError;
 pub use stream::StreamHub;

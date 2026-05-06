@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use exoware_server::{RangeScanIter, StoreEngine};
+use exoware_server::{BatchLog, Ingest, Prune, Query, RangeScanIter, Sequence};
 use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, Direction, IteratorMode, Options, DB};
 
 /// One reserved key for the sequence counter (not visible to normal range scans that skip it).
@@ -151,11 +151,19 @@ impl RocksStore {
     }
 }
 
-impl StoreEngine for RocksStore {
+impl Sequence for RocksStore {
+    fn current_sequence(&self) -> u64 {
+        self.sequence.load(Ordering::SeqCst)
+    }
+}
+
+impl Ingest for RocksStore {
     fn put_batch(&self, kvs: &[(Bytes, Bytes)]) -> Result<u64, String> {
         self.batch_put_rocksdb(kvs).map_err(|e| e.to_string())
     }
+}
 
+impl Query for RocksStore {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, String> {
         self.get_rocksdb(key).map_err(|e| e.to_string())
     }
@@ -183,7 +191,9 @@ impl StoreEngine for RocksStore {
             })
             .collect()
     }
+}
 
+impl Prune for RocksStore {
     fn delete_batch(&self, keys: &[&[u8]]) -> Result<u64, String> {
         let next = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
         let mut batch = rocksdb::WriteBatch::default();
@@ -207,10 +217,31 @@ impl StoreEngine for RocksStore {
         Ok(next)
     }
 
-    fn current_sequence(&self) -> u64 {
-        self.sequence.load(Ordering::SeqCst)
+    fn prune_batch_log(&self, cutoff_exclusive: u64) -> Result<u64, String> {
+        // Count before deleting so callers know how much was pruned. For the
+        // simulator a simple iterator scan is fine; a production engine would
+        // expose delete_range_cf and return the logical count separately.
+        let cf = self.batch_log_cf();
+        let end_key = cutoff_exclusive.to_be_bytes();
+        let mut deleted = 0u64;
+        let mut batch = rocksdb::WriteBatch::default();
+        let iter = self.db.iterator_cf(cf, IteratorMode::Start);
+        for item in iter {
+            let (k, _) = item.map_err(|e| e.to_string())?;
+            if k.as_ref() >= &end_key[..] {
+                break;
+            }
+            batch.delete_cf(cf, k.as_ref());
+            deleted += 1;
+        }
+        if deleted > 0 {
+            self.db.write(batch).map_err(|e| e.to_string())?;
+        }
+        Ok(deleted)
     }
+}
 
+impl BatchLog for RocksStore {
     fn get_batch(&self, sequence_number: u64) -> Result<Option<Vec<(Bytes, Bytes)>>, String> {
         let cf = self.batch_log_cf();
         match self
@@ -241,29 +272,6 @@ impl StoreEngine for RocksStore {
                 Ok(Some(u64::from_be_bytes(buf)))
             }
         }
-    }
-
-    fn prune_batch_log(&self, cutoff_exclusive: u64) -> Result<u64, String> {
-        // Count before deleting so callers know how much was pruned. For the
-        // simulator a simple iterator scan is fine; a production engine would
-        // expose delete_range_cf and return the logical count separately.
-        let cf = self.batch_log_cf();
-        let end_key = cutoff_exclusive.to_be_bytes();
-        let mut deleted = 0u64;
-        let mut batch = rocksdb::WriteBatch::default();
-        let iter = self.db.iterator_cf(cf, IteratorMode::Start);
-        for item in iter {
-            let (k, _) = item.map_err(|e| e.to_string())?;
-            if k.as_ref() >= &end_key[..] {
-                break;
-            }
-            batch.delete_cf(cf, k.as_ref());
-            deleted += 1;
-        }
-        if deleted > 0 {
-            self.db.write(batch).map_err(|e| e.to_string())?;
-        }
-        Ok(deleted)
     }
 }
 
