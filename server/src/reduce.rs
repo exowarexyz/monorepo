@@ -363,18 +363,6 @@ impl<'a> RangeReducer<'a> {
     }
 }
 
-/// Run a grouped or scalar reduction over materialized rows.
-pub fn reduce_over_rows(
-    rows: &[(Key, Bytes)],
-    request: &RangeReduceRequest,
-) -> Result<RangeReduceResponse, RangeError> {
-    let mut reducer = RangeReducer::new(request)?;
-    for (key, value) in rows {
-        reducer.update(key, value)?;
-    }
-    Ok(reducer.finish())
-}
-
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
@@ -386,7 +374,7 @@ mod tests {
     };
     use exoware_sdk::{RangeReduceOp, RangeReduceRequest, RangeReducerSpec};
 
-    use super::{reduce_over_rows, RangeReducer};
+    use super::RangeReducer;
 
     fn make_row(key: &[u8], values: Vec<Option<StoredValue>>) -> (Key, Bytes) {
         let encoded = StoredRow { values }.encode();
@@ -444,18 +432,18 @@ mod tests {
     fn reduce_incrementally(
         rows: &[(Key, Bytes)],
         request: &RangeReduceRequest,
-    ) -> super::RangeReduceResponse {
-        let mut reducer = RangeReducer::new(request).unwrap();
+    ) -> Result<super::RangeReduceResponse, super::RangeError> {
+        let mut reducer = RangeReducer::new(request)?;
         for (key, value) in rows {
-            reducer.update(key, value).unwrap();
+            reducer.update(key, value)?;
         }
-        reducer.finish()
+        Ok(reducer.finish())
     }
 
     #[test]
     fn count_all_over_empty_rows() {
         let request = scalar_request(vec![reducer(RangeReduceOp::CountAll, None)]);
-        let response = reduce_over_rows(&[], &request).unwrap();
+        let response = reduce_incrementally(&[], &request).unwrap();
         assert_eq!(response.results.len(), 1);
         assert_eq!(response.results[0].value, result_u64(0));
     }
@@ -468,7 +456,7 @@ mod tests {
             make_row(b"c", vec![]),
         ];
         let request = scalar_request(vec![reducer(RangeReduceOp::CountAll, None)]);
-        let response = reduce_over_rows(&rows, &request).unwrap();
+        let response = reduce_incrementally(&rows, &request).unwrap();
         assert_eq!(response.results[0].value, result_u64(3));
     }
 
@@ -483,7 +471,7 @@ mod tests {
             RangeReduceOp::CountField,
             Some(int64_value_field(0)),
         )]);
-        let response = reduce_over_rows(&rows, &request).unwrap();
+        let response = reduce_incrementally(&rows, &request).unwrap();
         assert_eq!(response.results[0].value, result_u64(2));
     }
 
@@ -498,7 +486,7 @@ mod tests {
             RangeReduceOp::SumField,
             Some(int64_value_field(0)),
         )]);
-        let response = reduce_over_rows(&rows, &request).unwrap();
+        let response = reduce_incrementally(&rows, &request).unwrap();
         assert_eq!(response.results[0].value, result_i64(25));
     }
 
@@ -512,7 +500,7 @@ mod tests {
             RangeReduceOp::SumField,
             Some(float64_value_field(0)),
         )]);
-        let response = reduce_over_rows(&rows, &request).unwrap();
+        let response = reduce_incrementally(&rows, &request).unwrap();
         assert_eq!(response.results[0].value, result_f64(4.0));
     }
 
@@ -527,7 +515,7 @@ mod tests {
             RangeReduceOp::MinField,
             Some(int64_value_field(0)),
         )]);
-        let response = reduce_over_rows(&rows, &request).unwrap();
+        let response = reduce_incrementally(&rows, &request).unwrap();
         assert_eq!(response.results[0].value, result_i64(10));
     }
 
@@ -542,7 +530,7 @@ mod tests {
             RangeReduceOp::MaxField,
             Some(int64_value_field(0)),
         )]);
-        let response = reduce_over_rows(&rows, &request).unwrap();
+        let response = reduce_incrementally(&rows, &request).unwrap();
         assert_eq!(response.results[0].value, result_i64(50));
     }
 
@@ -560,7 +548,7 @@ mod tests {
             group_by: vec![utf8_value_field(0)],
             filter: None,
         };
-        let response = reduce_over_rows(&rows, &request).unwrap();
+        let response = reduce_incrementally(&rows, &request).unwrap();
         assert!(response.results.is_empty());
         assert_eq!(response.groups.len(), 2);
 
@@ -596,7 +584,7 @@ mod tests {
             group_by: Vec::new(),
             filter: None,
         };
-        let err = reduce_over_rows(&[], &request).unwrap_err();
+        let err = reduce_incrementally(&[], &request).unwrap_err();
         assert!(
             err.to_string().contains("at least one reducer"),
             "unexpected error: {err}"
@@ -609,7 +597,7 @@ mod tests {
             RangeReduceOp::CountAll,
             Some(int64_value_field(0)),
         )]);
-        let err = reduce_over_rows(&[], &request).unwrap_err();
+        let err = reduce_incrementally(&[], &request).unwrap_err();
         assert!(
             err.to_string()
                 .contains("count_all reducer must not specify an expression"),
@@ -626,7 +614,7 @@ mod tests {
             RangeReduceOp::CountField,
         ] {
             let request = scalar_request(vec![reducer(op, None)]);
-            let err = reduce_over_rows(&[], &request).unwrap_err();
+            let err = reduce_incrementally(&[], &request).unwrap_err();
             assert!(
                 err.to_string()
                     .contains("expression reducer requires an expression"),
@@ -660,12 +648,12 @@ mod tests {
                 contradiction: false,
             }),
         };
-        let response = reduce_over_rows(&rows, &request).unwrap();
+        let response = reduce_incrementally(&rows, &request).unwrap();
         assert_eq!(response.results[0].value, result_i64(50));
     }
 
     #[test]
-    fn incremental_reducer_matches_materialized_scalar() {
+    fn scalar_reducer_handles_multiple_specs() {
         let rows = vec![
             make_row(b"a", vec![Some(StoredValue::Int64(10))]),
             make_row(b"b", vec![None]),
@@ -675,14 +663,14 @@ mod tests {
             reducer(RangeReduceOp::CountAll, None),
             reducer(RangeReduceOp::SumField, Some(int64_value_field(0))),
         ]);
-        assert_eq!(
-            reduce_incrementally(&rows, &request),
-            reduce_over_rows(&rows, &request).unwrap()
-        );
+        let response = reduce_incrementally(&rows, &request).unwrap();
+        assert_eq!(response.results.len(), 2);
+        assert_eq!(response.results[0].value, result_u64(3));
+        assert_eq!(response.results[1].value, result_i64(40));
     }
 
     #[test]
-    fn incremental_reducer_matches_materialized_grouped() {
+    fn grouped_reducer_sums_per_group() {
         let rows = vec![
             make_row(
                 b"a",
@@ -711,14 +699,37 @@ mod tests {
             group_by: vec![utf8_value_field(0)],
             filter: None,
         };
+        let response = reduce_incrementally(&rows, &request).unwrap();
+        assert!(response.results.is_empty());
+        assert_eq!(response.groups.len(), 2);
+
+        let mut sums: Vec<(Option<KvReducedValue>, Option<KvReducedValue>)> = response
+            .groups
+            .iter()
+            .map(|g| (g.group_values[0].clone(), g.results[0].value.clone()))
+            .collect();
+        sums.sort_by(|a, b| {
+            let a_str = match &a.0 {
+                Some(KvReducedValue::Utf8(s)) => s.clone(),
+                _ => String::new(),
+            };
+            let b_str = match &b.0 {
+                Some(KvReducedValue::Utf8(s)) => s.clone(),
+                _ => String::new(),
+            };
+            a_str.cmp(&b_str)
+        });
         assert_eq!(
-            reduce_incrementally(&rows, &request),
-            reduce_over_rows(&rows, &request).unwrap()
+            sums,
+            vec![
+                (Some(KvReducedValue::Utf8("east".into())), result_i64(20),),
+                (Some(KvReducedValue::Utf8("west".into())), result_i64(40),),
+            ]
         );
     }
 
     #[test]
-    fn incremental_reducer_matches_materialized_filtered() {
+    fn filtered_reducer_counts_matching_rows() {
         let rows = vec![
             make_row(b"a", vec![Some(StoredValue::Int64(10))]),
             make_row(b"b", vec![Some(StoredValue::Int64(20))]),
@@ -742,10 +753,9 @@ mod tests {
                 contradiction: false,
             }),
         };
-        assert_eq!(
-            reduce_incrementally(&rows, &request),
-            reduce_over_rows(&rows, &request).unwrap()
-        );
+        let response = reduce_incrementally(&rows, &request).unwrap();
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].value, result_u64(2));
     }
 
     #[test]

@@ -15,5 +15,5 @@ pub use connect::{
 };
 pub use engine::{RangeScanIter, StoreEngine};
 pub use prune::{execute_prune, PruneError};
-pub use reduce::{reduce_over_rows, RangeError};
+pub use reduce::RangeError;
 pub use stream::StreamHub;

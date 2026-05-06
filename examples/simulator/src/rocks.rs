@@ -129,9 +129,6 @@ impl RocksStore {
                     continue;
                 }
                 if forward {
-                    if key_ref < start.as_ref() {
-                        continue;
-                    }
                     if !end.is_empty() && key_ref > end.as_ref() {
                         done = true;
                         return None;

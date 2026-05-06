@@ -55,10 +55,8 @@ fn read_bytes_for_kv<K: AsRef<[u8]>, V: AsRef<[u8]>>(key: &K, value: &V) -> u64 
     key.as_ref().len() as u64 + value.as_ref().len() as u64
 }
 
-fn read_stats_read_bytes(read_bytes: u64) -> HashMap<String, u64> {
-    [("read_bytes".to_string(), read_bytes)]
-        .into_iter()
-        .collect()
+fn read_stats(read_bytes: u64) -> HashMap<String, u64> {
+    HashMap::from([("read_bytes".to_string(), read_bytes)])
 }
 
 #[derive(Clone)]
@@ -241,9 +239,7 @@ impl QueryApi for QueryConnect {
             key.as_ref().len() as u64 + value.as_ref().map_or(0u64, |v| v.len() as u64);
         let detail = Detail {
             sequence_number: token,
-            read_stats: [("read_bytes".to_string(), read_bytes)]
-                .into_iter()
-                .collect(),
+            read_stats: read_stats(read_bytes),
             ..Default::default()
         };
         Self::apply_query_detail_header(&mut ctx, &detail);
@@ -284,9 +280,7 @@ impl QueryApi for QueryConnect {
             .sum();
         let detail = Detail {
             sequence_number,
-            read_stats: [("read_bytes".to_string(), read_bytes)]
-                .into_iter()
-                .collect(),
+            read_stats: read_stats(read_bytes),
             ..Default::default()
         };
         Self::apply_query_detail_trailer(&mut ctx, &detail);
@@ -374,7 +368,7 @@ impl QueryApi for QueryConnect {
 
         let detail = Detail {
             sequence_number,
-            read_stats: read_stats_read_bytes(read_bytes),
+            read_stats: read_stats(read_bytes),
             ..Default::default()
         };
         Self::apply_query_detail_trailer(&mut ctx, &detail);
@@ -418,7 +412,7 @@ impl QueryApi for QueryConnect {
         // Reduce is unary, so headers can include stats computed while consuming the iterator.
         let detail = Detail {
             sequence_number: token,
-            read_stats: read_stats_read_bytes(read_bytes),
+            read_stats: read_stats(read_bytes),
             ..Default::default()
         };
         Self::apply_query_detail_header(&mut ctx, &detail);
