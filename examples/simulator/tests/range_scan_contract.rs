@@ -19,6 +19,20 @@ fn keys(rows: &[(Bytes, Bytes)]) -> Vec<&[u8]> {
     rows.iter().map(|(k, _)| k.as_ref()).collect()
 }
 
+fn scan(
+    store: &RocksStore,
+    start: &[u8],
+    end: &[u8],
+    limit: usize,
+    forward: bool,
+) -> Vec<(Bytes, Bytes)> {
+    store
+        .range_scan(start, end, limit, forward)
+        .expect("open scan")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("scan")
+}
+
 // -- get --
 
 #[test]
@@ -76,9 +90,7 @@ fn range_scan_inclusive_end_includes_end_key() {
     let store = RocksStore::open(dir.path()).expect("open db");
     seed_abc(&store);
 
-    let rows = store
-        .range_scan(b"a", b"c", usize::MAX, true)
-        .expect("scan");
+    let rows = scan(&store, b"a", b"c", usize::MAX, true);
     assert_eq!(keys(&rows), vec![b"a".as_slice(), b"b", b"c"]);
 }
 
@@ -93,7 +105,7 @@ fn range_scan_empty_end_is_unbounded_above() {
         ])
         .expect("put_batch");
 
-    let rows = store.range_scan(b"m", b"", usize::MAX, true).expect("scan");
+    let rows = scan(&store, b"m", b"", usize::MAX, true);
     assert_eq!(rows.len(), 2);
 }
 
@@ -103,7 +115,7 @@ fn range_scan_forward_respects_limit() {
     let store = RocksStore::open(dir.path()).expect("open db");
     seed_abc(&store);
 
-    let rows = store.range_scan(b"a", b"c", 2, true).expect("scan");
+    let rows = scan(&store, b"a", b"c", 2, true);
     assert_eq!(keys(&rows), vec![b"a".as_slice(), b"b"]);
 }
 
@@ -113,9 +125,7 @@ fn range_scan_returns_empty_when_no_keys_match() {
     let store = RocksStore::open(dir.path()).expect("open db");
     seed_abc(&store);
 
-    let rows = store
-        .range_scan(b"d", b"f", usize::MAX, true)
-        .expect("scan");
+    let rows = scan(&store, b"d", b"f", usize::MAX, true);
     assert!(rows.is_empty());
 }
 
@@ -125,7 +135,7 @@ fn range_scan_limit_zero_returns_empty() {
     let store = RocksStore::open(dir.path()).expect("open db");
     seed_abc(&store);
 
-    let rows = store.range_scan(b"a", b"c", 0, true).expect("scan");
+    let rows = scan(&store, b"a", b"c", 0, true);
     assert!(rows.is_empty());
 }
 
@@ -140,7 +150,7 @@ fn range_scan_excludes_seq_meta_key() {
         )])
         .expect("put_batch");
 
-    let rows = store.range_scan(b"", b"", usize::MAX, true).expect("scan");
+    let rows = scan(&store, b"", b"", usize::MAX, true);
     for (k, _) in &rows {
         assert_ne!(k.as_ref(), b"__simulator_seq__");
     }
@@ -154,9 +164,7 @@ fn range_scan_reverse_returns_descending_order() {
     let store = RocksStore::open(dir.path()).expect("open db");
     seed_abc(&store);
 
-    let rows = store
-        .range_scan(b"a", b"c", usize::MAX, false)
-        .expect("scan");
+    let rows = scan(&store, b"a", b"c", usize::MAX, false);
     assert_eq!(keys(&rows), vec![b"c".as_slice(), b"b", b"a"]);
 }
 
@@ -166,7 +174,7 @@ fn range_scan_reverse_respects_limit() {
     let store = RocksStore::open(dir.path()).expect("open db");
     seed_abc(&store);
 
-    let rows = store.range_scan(b"a", b"c", 2, false).expect("scan");
+    let rows = scan(&store, b"a", b"c", 2, false);
     assert_eq!(keys(&rows), vec![b"c".as_slice(), b"b"]);
 }
 
@@ -176,9 +184,7 @@ fn range_scan_reverse_unbounded_end() {
     let store = RocksStore::open(dir.path()).expect("open db");
     seed_abc(&store);
 
-    let rows = store
-        .range_scan(b"a", b"", usize::MAX, false)
-        .expect("scan");
+    let rows = scan(&store, b"a", b"", usize::MAX, false);
     assert_eq!(keys(&rows), vec![b"c".as_slice(), b"b", b"a"]);
 }
 
@@ -188,9 +194,7 @@ fn range_scan_single_key() {
     let store = RocksStore::open(dir.path()).expect("open db");
     seed_abc(&store);
 
-    let rows = store
-        .range_scan(b"b", b"b", usize::MAX, true)
-        .expect("scan");
+    let rows = scan(&store, b"b", b"b", usize::MAX, true);
     assert_eq!(keys(&rows), vec![b"b".as_slice()]);
 }
 

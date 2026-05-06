@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use exoware_server::StoreEngine;
+use exoware_server::{RangeScanIter, StoreEngine};
 use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, Direction, IteratorMode, Options, DB};
 
 /// One reserved key for the sequence counter (not visible to normal range scans that skip it).
@@ -94,40 +94,60 @@ impl RocksStore {
         end: &[u8],
         limit: usize,
         forward: bool,
-    ) -> Result<Vec<(Bytes, Bytes)>, rocksdb::Error> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let mode = IteratorMode::From(start, Direction::Forward);
-        let mut tmp = Vec::new();
-        for item in self.db.iterator(mode) {
-            let (k, v) = item?;
-            if k.as_ref() == SEQ_META_KEY {
-                continue;
+    ) -> RangeScanIter<'_> {
+        let start = Bytes::copy_from_slice(start);
+        let end = Bytes::copy_from_slice(end);
+        let mut iter = if forward {
+            self.db
+                .iterator(IteratorMode::From(start.as_ref(), Direction::Forward))
+        } else if end.is_empty() {
+            self.db.iterator(IteratorMode::End)
+        } else {
+            // seek_for_prev starts at the largest key <= end, so reverse scans only need the lower-bound stop below.
+            self.db
+                .iterator(IteratorMode::From(end.as_ref(), Direction::Reverse))
+        };
+        let mut emitted = 0usize;
+        let mut done = limit == 0;
+
+        Box::new(std::iter::from_fn(move || {
+            if done {
+                return None;
             }
-            if k.as_ref() < start {
-                continue;
+
+            loop {
+                let item = iter.next()?;
+                let (key, value) = match item {
+                    Ok(row) => row,
+                    Err(e) => {
+                        done = true;
+                        return Some(Err(e.to_string()));
+                    }
+                };
+                let key_ref = key.as_ref();
+                if key_ref == SEQ_META_KEY {
+                    continue;
+                }
+                if forward {
+                    if !end.is_empty() && key_ref > end.as_ref() {
+                        done = true;
+                        return None;
+                    }
+                } else if key_ref < start.as_ref() {
+                    done = true;
+                    return None;
+                }
+
+                emitted += 1;
+                if emitted >= limit {
+                    done = true;
+                }
+                return Some(Ok((
+                    Bytes::copy_from_slice(key_ref),
+                    Bytes::copy_from_slice(value.as_ref()),
+                )));
             }
-            if !end.is_empty() && k.as_ref() > end {
-                break;
-            }
-            tmp.push((
-                Bytes::copy_from_slice(k.as_ref()),
-                Bytes::copy_from_slice(&v),
-            ));
-        }
-        if tmp.is_empty() {
-            return Ok(tmp);
-        }
-        if forward {
-            tmp.truncate(limit);
-            return Ok(tmp);
-        }
-        if tmp.len() > limit {
-            tmp = tmp.split_off(tmp.len() - limit);
-        }
-        tmp.reverse();
-        Ok(tmp)
+        }))
     }
 }
 
@@ -146,9 +166,8 @@ impl StoreEngine for RocksStore {
         end: &[u8],
         limit: usize,
         forward: bool,
-    ) -> Result<Vec<(Bytes, Bytes)>, String> {
-        self.range_scan_rocksdb(start, end, limit, forward)
-            .map_err(|e| e.to_string())
+    ) -> Result<RangeScanIter<'_>, String> {
+        Ok(self.range_scan_rocksdb(start, end, limit, forward))
     }
 
     fn get_many(&self, keys: &[&[u8]]) -> Result<Vec<(Vec<u8>, Option<Vec<u8>>)>, String> {

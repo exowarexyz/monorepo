@@ -165,12 +165,13 @@ fn execute_user_keys_policy(
 
     let mut groups: BTreeMap<Vec<u8>, Vec<KeyEntry>> = BTreeMap::new();
 
-    for (key, _value) in &rows {
-        if !codec.matches(key) {
+    for row in rows {
+        let (key, _value) = row.map_err(PruneError::Engine)?;
+        if !codec.matches(&key) {
             continue;
         }
         let payload_len = codec.payload_capacity_bytes_for_key_len(key.len());
-        let payload = match codec.read_payload(key, 0, payload_len) {
+        let payload = match codec.read_payload(&key, 0, payload_len) {
             Ok(p) => p,
             Err(_) => continue,
         };
@@ -185,10 +186,10 @@ fn execute_user_keys_policy(
 
         let order_value = extract_order_value(&payload, &regex, scope).unwrap_or_default();
 
-        groups.entry(group_key).or_default().push(KeyEntry {
-            key: key.clone(),
-            order_value,
-        });
+        groups
+            .entry(group_key)
+            .or_default()
+            .push(KeyEntry { key, order_value });
     }
 
     let mut all_deletes = Vec::new();
@@ -229,6 +230,7 @@ fn execute_batch_log_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use exoware_sdk::kv_codec::Utf8;
     use exoware_sdk::match_key::MatchKey;
     use exoware_sdk::prune_policy::{GroupBy, OrderBy};
