@@ -1,4 +1,4 @@
-//! Ingest, query, and compact services; storage is provided by [`crate::StoreEngine`].
+//! Ingest, query, compact, and stream services; storage is provided by capability traits.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -44,9 +44,9 @@ use tokio::sync::futures::OwnedNotified;
 use tokio::sync::Notify;
 
 use crate::reduce::RangeReducer;
-use crate::stream::StreamHub;
+use crate::stream::{StreamHub, StreamNotifier};
 use crate::validate;
-use crate::StoreEngine;
+use crate::{BatchLog, Ingest, Prune, Query, StoreEngine};
 
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
 
@@ -61,21 +61,53 @@ fn read_stats(read_bytes: u64) -> HashMap<String, u64> {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub engine: Arc<dyn StoreEngine>,
+    pub ingest: Arc<dyn Ingest>,
+    pub query: Arc<dyn Query>,
+    pub prune: Arc<dyn Prune>,
+    pub batch_log: Arc<dyn BatchLog>,
     /// Gates ingest (writes) only. Query and compact remain available during drains so that
     /// in-flight reads can complete while the worker sheds write traffic.
     pub ready: Arc<AtomicBool>,
     /// Shared fan-out hub for `store.stream.v1.Subscribe`. `IngestConnect::put`
     /// calls `publish` on successful commit so subscribers receive exactly
-    /// the rows that landed in the engine.
+    /// the rows that landed in the backend.
     pub stream: Arc<StreamHub>,
 }
 
 impl AppState {
     pub fn new(engine: Arc<dyn StoreEngine>) -> Self {
         let current_sequence = engine.current_sequence();
-        Self {
+        Self::from_parts_with_sequence(
+            engine.clone(),
+            engine.clone(),
+            engine.clone(),
             engine,
+            current_sequence,
+        )
+    }
+
+    pub fn from_parts(
+        ingest: Arc<dyn Ingest>,
+        query: Arc<dyn Query>,
+        prune: Arc<dyn Prune>,
+        batch_log: Arc<dyn BatchLog>,
+    ) -> Self {
+        let current_sequence = batch_log.current_sequence();
+        Self::from_parts_with_sequence(ingest, query, prune, batch_log, current_sequence)
+    }
+
+    fn from_parts_with_sequence(
+        ingest: Arc<dyn Ingest>,
+        query: Arc<dyn Query>,
+        prune: Arc<dyn Prune>,
+        batch_log: Arc<dyn BatchLog>,
+        current_sequence: u64,
+    ) -> Self {
+        Self {
+            ingest,
+            query,
+            prune,
+            batch_log,
             ready: Arc::new(AtomicBool::new(true)),
             stream: Arc::new(StreamHub::new(current_sequence)),
         }
@@ -83,13 +115,102 @@ impl AppState {
 }
 
 #[derive(Clone)]
+pub struct IngestState {
+    pub ingest: Arc<dyn Ingest>,
+    /// Gates ingest writes only.
+    pub ready: Arc<AtomicBool>,
+    /// Optional live-stream notifier.
+    pub notifier: Option<Arc<dyn StreamNotifier>>,
+}
+
+impl IngestState {
+    pub fn new(ingest: Arc<dyn Ingest>) -> Self {
+        Self {
+            ingest,
+            ready: Arc::new(AtomicBool::new(true)),
+            notifier: None,
+        }
+    }
+
+    pub fn with_notifier(ingest: Arc<dyn Ingest>, notifier: Arc<dyn StreamNotifier>) -> Self {
+        Self {
+            ingest,
+            ready: Arc::new(AtomicBool::new(true)),
+            notifier: Some(notifier),
+        }
+    }
+}
+
+impl From<AppState> for IngestState {
+    fn from(state: AppState) -> Self {
+        Self {
+            ingest: state.ingest,
+            ready: state.ready,
+            notifier: Some(state.stream),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct QueryState {
+    pub query: Arc<dyn Query>,
+}
+
+impl From<AppState> for QueryState {
+    fn from(state: AppState) -> Self {
+        Self { query: state.query }
+    }
+}
+
+#[derive(Clone)]
+pub struct CompactState {
+    pub query: Arc<dyn Query>,
+    pub prune: Arc<dyn Prune>,
+}
+
+impl From<AppState> for CompactState {
+    fn from(state: AppState) -> Self {
+        Self {
+            query: state.query,
+            prune: state.prune,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct StreamState {
+    pub batch_log: Arc<dyn BatchLog>,
+    pub notifier: Arc<dyn StreamNotifier>,
+}
+
+impl StreamState {
+    pub fn new(batch_log: Arc<dyn BatchLog>, notifier: Arc<dyn StreamNotifier>) -> Self {
+        Self {
+            batch_log,
+            notifier,
+        }
+    }
+}
+
+impl From<AppState> for StreamState {
+    fn from(state: AppState) -> Self {
+        Self {
+            batch_log: state.batch_log,
+            notifier: state.stream,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct IngestConnect {
-    state: AppState,
+    state: IngestState,
 }
 
 impl IngestConnect {
-    pub fn new(state: AppState) -> Self {
-        Self { state }
+    pub fn new(state: impl Into<IngestState>) -> Self {
+        Self {
+            state: state.into(),
+        }
     }
 }
 
@@ -122,14 +243,16 @@ impl IngestApi for IngestConnect {
 
         let seq = self
             .state
-            .engine
+            .ingest
             .put_batch(&batch)
             .map_err(ConnectError::internal)?;
 
-        // Fan out the just-committed batch to stream subscribers. `publish`
-        // only announces the new sequence number; subscribers pull the batch
-        // from the engine at their own pace.
-        self.state.stream.publish(seq);
+        // Single-process deployments can fan out the just-committed sequence
+        // immediately. Split deployments let the serving process advance its
+        // own stream notifier after observing durable state.
+        if let Some(notifier) = &self.state.notifier {
+            notifier.advance(seq);
+        }
 
         Ok((
             ProtoPutResponse {
@@ -143,16 +266,18 @@ impl IngestApi for IngestConnect {
 
 #[derive(Clone)]
 pub struct QueryConnect {
-    state: AppState,
+    state: QueryState,
 }
 
 impl QueryConnect {
-    pub fn new(state: AppState) -> Self {
-        Self { state }
+    pub fn new(state: impl Into<QueryState>) -> Self {
+        Self {
+            state: state.into(),
+        }
     }
 
     fn current_sequence_number(&self) -> u64 {
-        self.state.engine.current_sequence()
+        self.state.query.current_sequence()
     }
 
     fn error_detail(&self) -> Detail {
@@ -232,7 +357,7 @@ impl QueryApi for QueryConnect {
         let key: Key = wire.slice_ref(request.key);
         let value = self
             .state
-            .engine
+            .query
             .get(key.as_ref())
             .map_err(ConnectError::internal)?;
         let read_bytes =
@@ -271,7 +396,7 @@ impl QueryApi for QueryConnect {
         let key_refs: Vec<&[u8]> = request.keys.iter().copied().collect();
         let entries = self
             .state
-            .engine
+            .query
             .get_many(&key_refs)
             .map_err(ConnectError::internal)?;
         let read_bytes: u64 = entries
@@ -337,7 +462,7 @@ impl QueryApi for QueryConnect {
 
         let entries = self
             .state
-            .engine
+            .query
             .range_scan(start_key.as_ref(), end_key.as_ref(), limit, forward)
             .map_err(ConnectError::internal)?;
 
@@ -393,7 +518,7 @@ impl QueryApi for QueryConnect {
 
         let rows = self
             .state
-            .engine
+            .query
             .range_scan(start_key.as_ref(), end_key.as_ref(), usize::MAX, true)
             .map_err(ConnectError::internal)?;
 
@@ -461,12 +586,14 @@ impl QueryApi for QueryConnect {
 
 #[derive(Clone)]
 pub struct CompactConnect {
-    state: AppState,
+    state: CompactState,
 }
 
 impl CompactConnect {
-    pub fn new(state: AppState) -> Self {
-        Self { state }
+    pub fn new(state: impl Into<CompactState>) -> Self {
+        Self {
+            state: state.into(),
+        }
     }
 }
 
@@ -481,7 +608,7 @@ impl CompactApi for CompactConnect {
         validate::validate_prune_request(&request)?;
         let document = exoware_proto::prune_policy_document_from_prune_request_view(&request)
             .map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
-        crate::prune::execute_prune(&self.state.engine, &document)
+        crate::prune::execute_prune(&*self.state.query, &*self.state.prune, &document)
             .map_err(|e| ConnectError::internal(e.to_string()))?;
         Ok((PruneResponse::default(), ctx))
     }
@@ -489,12 +616,14 @@ impl CompactApi for CompactConnect {
 
 #[derive(Clone)]
 pub struct StreamConnect {
-    state: AppState,
+    state: StreamState,
 }
 
 impl StreamConnect {
-    pub fn new(state: AppState) -> Self {
-        Self { state }
+    pub fn new(state: impl Into<StreamState>) -> Self {
+        Self {
+            state: state.into(),
+        }
     }
 
     fn batch_evicted_connect_error(oldest_retained: Option<u64>) -> ConnectError {
@@ -564,7 +693,7 @@ enum LiveProgress {
 }
 
 struct SubscriptionStream {
-    state: AppState,
+    state: StreamState,
     matchers: crate::stream::CompiledMatchers,
     replay: Option<ReplayState>,
     next_live_sequence: u64,
@@ -576,7 +705,7 @@ struct SubscriptionStream {
 
 impl SubscriptionStream {
     fn new(
-        state: AppState,
+        state: StreamState,
         matchers: crate::stream::CompiledMatchers,
         replay: Option<ReplayState>,
         next_live_sequence: u64,
@@ -603,7 +732,7 @@ impl SubscriptionStream {
             Some(first_batch)
         } else {
             self.state
-                .engine
+                .batch_log
                 .get_batch(seq)
                 .map_err(ConnectError::internal)?
         };
@@ -614,7 +743,7 @@ impl SubscriptionStream {
         let Some(kvs) = kvs else {
             let oldest = self
                 .state
-                .engine
+                .batch_log
                 .oldest_retained_batch()
                 .map_err(ConnectError::internal)?;
             return Err(StreamConnect::batch_evicted_connect_error(oldest));
@@ -628,7 +757,7 @@ impl SubscriptionStream {
     }
 
     fn next_live_frame(&mut self) -> Result<LiveProgress, ConnectError> {
-        let current = self.state.stream.current_sequence();
+        let current = self.state.notifier.current_sequence();
         if self.next_live_sequence > current {
             return Ok(LiveProgress::NeedWait);
         }
@@ -636,13 +765,13 @@ impl SubscriptionStream {
         self.next_live_sequence += 1;
         let kvs = self
             .state
-            .engine
+            .batch_log
             .get_batch(seq)
             .map_err(ConnectError::internal)?;
         let Some(kvs) = kvs else {
             let oldest = self
                 .state
-                .engine
+                .batch_log
                 .oldest_retained_batch()
                 .map_err(ConnectError::internal)?;
             return Err(StreamConnect::batch_evicted_connect_error(oldest));
@@ -688,7 +817,7 @@ impl Stream for SubscriptionStream {
                     if self.live_wait.is_none() {
                         self.live_wait = Some(Box::pin(self.live_notify.clone().notified_owned()));
                     }
-                    if self.next_live_sequence <= self.state.stream.current_sequence() {
+                    if self.next_live_sequence <= self.state.notifier.current_sequence() {
                         self.live_wait = None;
                         continue;
                     }
@@ -778,7 +907,10 @@ impl StreamApi for StreamConnect {
         // wakeups. The stream then walks the batch log by sequence cursor, so
         // live delivery is paced by client reads instead of server-side
         // buffering.
-        let (matchers, replay_bound, live_notify) = self.state.stream.subscribe(filter)?;
+        let matchers = crate::stream::compile_matchers(&filter)?;
+        let subscription = self.state.notifier.subscribe();
+        let replay_bound = subscription.current_sequence;
+        let live_notify = subscription.notify;
 
         // Optional replay. Validate the starting batch eagerly so an
         // already-evicted cursor fails the RPC immediately; later replay holes
@@ -788,13 +920,13 @@ impl StreamApi for StreamConnect {
             Some(s) if s <= replay_bound && s > 0 => {
                 let first_batch = self
                     .state
-                    .engine
+                    .batch_log
                     .get_batch(s)
                     .map_err(ConnectError::internal)?;
                 let Some(first_batch) = first_batch else {
                     let oldest = self
                         .state
-                        .engine
+                        .batch_log
                         .oldest_retained_batch()
                         .map_err(ConnectError::internal)?;
                     return Err(self.batch_evicted_error(oldest));
@@ -829,7 +961,7 @@ impl StreamApi for StreamConnect {
         let seq = request.sequence_number;
         match self
             .state
-            .engine
+            .batch_log
             .get_batch(seq)
             .map_err(ConnectError::internal)?
         {
@@ -852,14 +984,14 @@ impl StreamApi for StreamConnect {
                 ))
             }
             None => {
-                let current = self.state.engine.current_sequence();
+                let current = self.state.batch_log.current_sequence();
                 // Distinguish "never existed" (seq > current) vs "evicted".
                 if seq > current {
                     Err(self.batch_not_found_error())
                 } else {
                     let oldest = self
                         .state
-                        .engine
+                        .batch_log
                         .oldest_retained_batch()
                         .map_err(ConnectError::internal)?;
                     Err(self.batch_evicted_error(oldest))
@@ -875,9 +1007,13 @@ fn connect_limits() -> Limits {
         .max_message_size(MAX_CONNECTRPC_BODY_BYTES)
 }
 
-pub fn connect_stack(
-    state: AppState,
-) -> ConnectRpcService<
+pub type IngestService = ConnectRpcService<IngestServiceServer<IngestConnect>>;
+pub type QueryService = ConnectRpcService<QueryServiceServer<QueryConnect>>;
+pub type CompactService = ConnectRpcService<CompactServiceServer<CompactConnect>>;
+pub type StreamService = ConnectRpcService<StreamServiceServer<StreamConnect>>;
+pub type QueryStack =
+    ConnectRpcService<Chain<QueryServiceServer<QueryConnect>, StreamServiceServer<StreamConnect>>>;
+pub type ConnectStack = ConnectRpcService<
     Chain<
         IngestServiceServer<IngestConnect>,
         Chain<
@@ -885,14 +1021,65 @@ pub fn connect_stack(
             Chain<CompactServiceServer<CompactConnect>, StreamServiceServer<StreamConnect>>,
         >,
     >,
-> {
+>;
+
+fn ingest_server(state: IngestState) -> IngestServiceServer<IngestConnect> {
+    IngestServiceServer::new(IngestConnect::new(state))
+}
+
+fn query_server(state: QueryState) -> QueryServiceServer<QueryConnect> {
+    QueryServiceServer::new(QueryConnect::new(state))
+}
+
+fn compact_server(state: CompactState) -> CompactServiceServer<CompactConnect> {
+    CompactServiceServer::new(CompactConnect::new(state))
+}
+
+fn stream_server(state: StreamState) -> StreamServiceServer<StreamConnect> {
+    StreamServiceServer::new(StreamConnect::new(state))
+}
+
+pub fn ingest_service(state: IngestState) -> IngestService {
+    ConnectRpcService::new(ingest_server(state))
+        .with_limits(connect_limits())
+        .with_compression(connect_compression_registry())
+}
+
+pub fn query_service(state: QueryState) -> QueryService {
+    ConnectRpcService::new(query_server(state))
+        .with_limits(connect_limits())
+        .with_compression(connect_compression_registry())
+}
+
+pub fn compact_service(state: CompactState) -> CompactService {
+    ConnectRpcService::new(compact_server(state))
+        .with_limits(connect_limits())
+        .with_compression(connect_compression_registry())
+}
+
+pub fn stream_service(state: StreamState) -> StreamService {
+    ConnectRpcService::new(stream_server(state))
+        .with_limits(connect_limits())
+        .with_compression(connect_compression_registry())
+}
+
+pub fn query_stack(query_state: QueryState, stream_state: StreamState) -> QueryStack {
     ConnectRpcService::new(Chain(
-        IngestServiceServer::new(IngestConnect::new(state.clone())),
+        query_server(query_state),
+        stream_server(stream_state),
+    ))
+    .with_limits(connect_limits())
+    .with_compression(connect_compression_registry())
+}
+
+pub fn connect_stack(state: AppState) -> ConnectStack {
+    ConnectRpcService::new(Chain(
+        ingest_server(state.clone().into()),
         Chain(
-            QueryServiceServer::new(QueryConnect::new(state.clone())),
+            query_server(state.clone().into()),
             Chain(
-                CompactServiceServer::new(CompactConnect::new(state.clone())),
-                StreamServiceServer::new(StreamConnect::new(state)),
+                compact_server(state.clone().into()),
+                stream_server(state.into()),
             ),
         ),
     ))
@@ -904,6 +1091,7 @@ pub fn connect_stack(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::sync::atomic::AtomicU64;
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -917,7 +1105,9 @@ mod tests {
     };
     use futures::StreamExt;
 
-    use crate::RangeScanIter;
+    use crate::{
+        BatchLog, Ingest, Prune, Query, RangeScanIter, Sequence, StreamNotification, StreamNotifier,
+    };
 
     const TEST_RESERVED_BITS: u8 = 4;
     const TEST_PREFIX: u16 = 1;
@@ -996,7 +1186,13 @@ mod tests {
         }
     }
 
-    impl StoreEngine for FakeEngine {
+    impl Sequence for FakeEngine {
+        fn current_sequence(&self) -> u64 {
+            self.state.lock().expect("lock").current_sequence
+        }
+    }
+
+    impl Ingest for FakeEngine {
         fn put_batch(&self, kvs: &[(Bytes, Bytes)]) -> Result<u64, String> {
             let mut state = self.state.lock().map_err(|e| e.to_string())?;
             state.current_sequence += 1;
@@ -1004,7 +1200,9 @@ mod tests {
             state.batches.insert(seq, Some(kvs.to_vec()));
             Ok(seq)
         }
+    }
 
+    impl Query for FakeEngine {
         fn get(&self, _key: &[u8]) -> Result<Option<Vec<u8>>, String> {
             Ok(None)
         }
@@ -1028,17 +1226,21 @@ mod tests {
                 Ok(row)
             })))
         }
+    }
 
+    impl Prune for FakeEngine {
         fn delete_batch(&self, _keys: &[&[u8]]) -> Result<u64, String> {
             let mut state = self.state.lock().map_err(|e| e.to_string())?;
             state.current_sequence += 1;
             Ok(state.current_sequence)
         }
 
-        fn current_sequence(&self) -> u64 {
-            self.state.lock().expect("lock").current_sequence
+        fn prune_batch_log(&self, _cutoff_exclusive: u64) -> Result<u64, String> {
+            Ok(0)
         }
+    }
 
+    impl BatchLog for FakeEngine {
         fn get_batch(&self, sequence_number: u64) -> Result<Option<Vec<(Bytes, Bytes)>>, String> {
             let (publish, batch) = {
                 let mut state = self.state.lock().map_err(|e| e.to_string())?;
@@ -1071,9 +1273,64 @@ mod tests {
                 .map_err(|e| e.to_string())?
                 .oldest_retained)
         }
+    }
 
-        fn prune_batch_log(&self, _cutoff_exclusive: u64) -> Result<u64, String> {
-            Ok(0)
+    struct QueryOnlyEngine {
+        sequence_number: u64,
+        value: Option<Vec<u8>>,
+    }
+
+    impl Sequence for QueryOnlyEngine {
+        fn current_sequence(&self) -> u64 {
+            self.sequence_number
+        }
+    }
+
+    impl Query for QueryOnlyEngine {
+        fn get(&self, _key: &[u8]) -> Result<Option<Vec<u8>>, String> {
+            Ok(self.value.clone())
+        }
+
+        fn range_scan(
+            &self,
+            _start: &[u8],
+            _end: &[u8],
+            _limit: usize,
+            _forward: bool,
+        ) -> Result<RangeScanIter<'_>, String> {
+            Ok(Box::new(std::iter::empty()))
+        }
+    }
+
+    struct ManualNotifier {
+        current_sequence: AtomicU64,
+        notify: Arc<Notify>,
+    }
+
+    impl ManualNotifier {
+        fn new(current_sequence: u64) -> Self {
+            Self {
+                current_sequence: AtomicU64::new(current_sequence),
+                notify: Arc::new(Notify::new()),
+            }
+        }
+    }
+
+    impl StreamNotifier for ManualNotifier {
+        fn subscribe(&self) -> StreamNotification {
+            StreamNotification {
+                current_sequence: self.current_sequence.load(Ordering::Acquire),
+                notify: self.notify.clone(),
+            }
+        }
+
+        fn current_sequence(&self) -> u64 {
+            self.current_sequence.load(Ordering::Acquire)
+        }
+
+        fn advance(&self, seq: u64) {
+            self.current_sequence.fetch_max(seq, Ordering::SeqCst);
+            self.notify.notify_waiters();
         }
     }
 
@@ -1112,6 +1369,71 @@ mod tests {
             .expect("decode subscribe request");
         let (stream, _ctx) = StreamApi::subscribe(connect, Context::default(), request).await?;
         Ok(stream)
+    }
+
+    #[tokio::test]
+    async fn query_connect_accepts_query_only_engine() {
+        let query: Arc<dyn Query> = Arc::new(QueryOnlyEngine {
+            sequence_number: 9,
+            value: Some(b"value".to_vec()),
+        });
+        let connect = QueryConnect::new(QueryState { query });
+        let bytes = exoware_proto::query::GetRequest {
+            key: b"k".to_vec(),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let request = buffa::view::OwnedView::<
+            exoware_proto::store::query::v1::GetRequestView<'static>,
+        >::decode(bytes.into())
+        .expect("decode get request");
+
+        let (response, ctx) = QueryApi::get(&connect, Context::default(), request)
+            .await
+            .expect("get");
+
+        assert_eq!(response.value.as_deref(), Some(b"value".as_slice()));
+        let detail_value = ctx
+            .response_headers
+            .get(QUERY_DETAIL_RESPONSE_HEADER)
+            .expect("query detail header")
+            .to_str()
+            .expect("query detail header string");
+        let detail = decode_query_detail_header_value(detail_value).expect("decode detail");
+        assert_eq!(detail.sequence_number, 9);
+    }
+
+    #[test]
+    fn split_service_constructors_build_independent_process_surfaces() {
+        let engine = Arc::new(FakeEngine::default());
+        let state = AppState::new(engine);
+
+        let _ingest = ingest_service(state.clone().into());
+        let _query = query_service(state.clone().into());
+        let _compact = compact_service(state.clone().into());
+        let _stream = stream_service(state.clone().into());
+        let _query_stack = query_stack(state.clone().into(), state.into());
+    }
+
+    #[tokio::test]
+    async fn stream_can_be_advanced_by_external_notifier() {
+        let engine = Arc::new(FakeEngine::default());
+        let notifier = Arc::new(ManualNotifier::new(0));
+        let connect = StreamConnect::new(StreamState::new(engine.clone(), notifier.clone()));
+        let mut stream = subscribe_stream(&connect, None).await.expect("subscribe");
+
+        engine.set_current_sequence(1);
+        engine.set_batch(1, Some(vec![matching_kv(b"hit", b"v1")]));
+        notifier.advance(1);
+
+        let frame = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("stream should yield")
+            .expect("frame should exist")
+            .expect("frame should be ok");
+        assert_eq!(frame.sequence_number, 1);
+        assert_eq!(frame.entries.len(), 1);
+        assert_eq!(frame.entries[0].value.as_slice(), b"v1");
     }
 
     #[tokio::test]

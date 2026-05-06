@@ -5,11 +5,10 @@
 //!   `group_by` capture groups, order within each group, and delete entries
 //!   that don't survive `retain`.
 //! - `BatchLog` — translate `retain` into a cutoff sequence number and call
-//!   `StoreEngine::prune_batch_log`. No key scan; no grouping.
+//!   `Prune::prune_batch_log`. No key scan; no grouping.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use bytes::Bytes;
 use exoware_sdk::keys::KeyCodec;
@@ -19,7 +18,7 @@ use exoware_sdk::prune_policy::{
 };
 use regex::bytes::Regex;
 
-use crate::StoreEngine;
+use crate::{Prune, Query};
 
 #[derive(Debug)]
 pub enum PruneError {
@@ -133,16 +132,17 @@ fn keys_to_delete(
 }
 
 pub fn execute_prune(
-    engine: &Arc<dyn StoreEngine>,
+    query: &dyn Query,
+    prune: &dyn Prune,
     document: &PrunePolicyDocument,
 ) -> Result<(), PruneError> {
     for policy in &document.policies {
         match &policy.scope {
             PolicyScope::Keys(scope) => {
-                execute_user_keys_policy(engine, scope, &policy.retain)?;
+                execute_user_keys_policy(query, prune, scope, &policy.retain)?;
             }
             PolicyScope::Sequence => {
-                execute_batch_log_policy(engine, &policy.retain)?;
+                execute_batch_log_policy(prune, &policy.retain)?;
             }
         }
     }
@@ -150,7 +150,8 @@ pub fn execute_prune(
 }
 
 fn execute_user_keys_policy(
-    engine: &Arc<dyn StoreEngine>,
+    query: &dyn Query,
+    prune: &dyn Prune,
     scope: &KeysScope,
     retain: &RetainPolicy,
 ) -> Result<(), PruneError> {
@@ -159,7 +160,7 @@ fn execute_user_keys_policy(
         .map_err(|e| PruneError::Policy(e.to_string()))?;
 
     let (start, end) = codec.prefix_bounds();
-    let rows = engine
+    let rows = query
         .range_scan(start.as_ref(), end.as_ref(), usize::MAX, true)
         .map_err(PruneError::Engine)?;
 
@@ -199,17 +200,14 @@ fn execute_user_keys_policy(
 
     if !all_deletes.is_empty() {
         let refs: Vec<&[u8]> = all_deletes.iter().map(|k| k.as_ref()).collect();
-        engine.delete_batch(&refs).map_err(PruneError::Engine)?;
+        prune.delete_batch(&refs).map_err(PruneError::Engine)?;
     }
 
     Ok(())
 }
 
-fn execute_batch_log_policy(
-    engine: &Arc<dyn StoreEngine>,
-    retain: &RetainPolicy,
-) -> Result<(), PruneError> {
-    let current = engine.current_sequence();
+fn execute_batch_log_policy(prune: &dyn Prune, retain: &RetainPolicy) -> Result<(), PruneError> {
+    let current = prune.current_sequence();
     let cutoff_exclusive = match retain {
         RetainPolicy::KeepLatest { count } => {
             // Keep the last N batches: cutoff = current + 1 - N (saturating).
@@ -221,7 +219,7 @@ fn execute_batch_log_policy(
         RetainPolicy::DropAll => current.saturating_add(1),
     };
 
-    engine
+    prune
         .prune_batch_log(cutoff_exclusive)
         .map_err(PruneError::Engine)?;
     Ok(())
@@ -233,7 +231,10 @@ mod tests {
 
     use exoware_sdk::kv_codec::Utf8;
     use exoware_sdk::match_key::MatchKey;
-    use exoware_sdk::prune_policy::{GroupBy, OrderBy};
+    use exoware_sdk::prune_policy::{GroupBy, OrderBy, PrunePolicy};
+    use std::sync::Mutex;
+
+    use crate::{RangeScanIter, Sequence};
 
     fn make_scope() -> KeysScope {
         KeysScope {
@@ -258,6 +259,69 @@ mod tests {
         KeyEntry {
             key: Bytes::from(vec![order as u8]),
             order_value: order.to_be_bytes().to_vec(),
+        }
+    }
+
+    struct FakeQuery {
+        rows: Vec<(Bytes, Bytes)>,
+    }
+
+    impl Sequence for FakeQuery {
+        fn current_sequence(&self) -> u64 {
+            0
+        }
+    }
+
+    impl Query for FakeQuery {
+        fn get(&self, _key: &[u8]) -> Result<Option<Vec<u8>>, String> {
+            Ok(None)
+        }
+
+        fn range_scan(
+            &self,
+            _start: &[u8],
+            _end: &[u8],
+            _limit: usize,
+            _forward: bool,
+        ) -> Result<RangeScanIter<'_>, String> {
+            Ok(Box::new(self.rows.clone().into_iter().map(Ok)))
+        }
+    }
+
+    struct FakePrune {
+        current_sequence: u64,
+        deleted: Mutex<Vec<Vec<u8>>>,
+        cutoffs: Mutex<Vec<u64>>,
+    }
+
+    impl FakePrune {
+        fn new(current_sequence: u64) -> Self {
+            Self {
+                current_sequence,
+                deleted: Mutex::new(Vec::new()),
+                cutoffs: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl Sequence for FakePrune {
+        fn current_sequence(&self) -> u64 {
+            self.current_sequence
+        }
+    }
+
+    impl Prune for FakePrune {
+        fn delete_batch(&self, keys: &[&[u8]]) -> Result<u64, String> {
+            self.deleted
+                .lock()
+                .expect("lock")
+                .extend(keys.iter().map(|key| key.to_vec()));
+            Ok(self.current_sequence + 1)
+        }
+
+        fn prune_batch_log(&self, cutoff_exclusive: u64) -> Result<u64, String> {
+            self.cutoffs.lock().expect("lock").push(cutoff_exclusive);
+            Ok(1)
         }
     }
 
@@ -305,5 +369,57 @@ mod tests {
         let entries = vec![make_entry(3), make_entry(5), make_entry(7)];
         let deletes = keys_to_delete(entries, &scope, &retain);
         assert_eq!(deletes.len(), 1);
+    }
+
+    #[test]
+    fn key_scope_uses_query_for_scan_and_prune_for_delete() {
+        let codec = KeyCodec::new(4, 1);
+        let key = codec.encode(b"row").expect("encode key");
+        let query = FakeQuery {
+            rows: vec![(
+                Bytes::copy_from_slice(key.as_ref()),
+                Bytes::from_static(b"value"),
+            )],
+        };
+        let prune = FakePrune::new(7);
+        let document = PrunePolicyDocument {
+            version: 1,
+            policies: vec![PrunePolicy {
+                scope: PolicyScope::Keys(KeysScope {
+                    match_key: MatchKey {
+                        reserved_bits: 4,
+                        prefix: 1,
+                        payload_regex: Utf8::from("(?s).*"),
+                    },
+                    group_by: GroupBy::default(),
+                    order_by: None,
+                }),
+                retain: RetainPolicy::DropAll,
+            }],
+        };
+
+        execute_prune(&query, &prune, &document).expect("prune");
+
+        let deleted = prune.deleted.lock().expect("lock");
+        assert_eq!(deleted.as_slice(), &[key.as_ref().to_vec()]);
+        assert!(prune.cutoffs.lock().expect("lock").is_empty());
+    }
+
+    #[test]
+    fn sequence_scope_uses_prune_frontier_and_batch_log_prune() {
+        let query = FakeQuery { rows: Vec::new() };
+        let prune = FakePrune::new(10);
+        let document = PrunePolicyDocument {
+            version: 1,
+            policies: vec![PrunePolicy {
+                scope: PolicyScope::Sequence,
+                retain: RetainPolicy::KeepLatest { count: 3 },
+            }],
+        };
+
+        execute_prune(&query, &prune, &document).expect("prune");
+
+        assert!(prune.deleted.lock().expect("lock").is_empty());
+        assert_eq!(prune.cutoffs.lock().expect("lock").as_slice(), &[8]);
     }
 }
