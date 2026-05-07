@@ -101,7 +101,7 @@ async fn boundary_from_local_db(
     previous_operations: Option<&[QmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>]>,
     operations: &[QmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>],
 ) -> CurrentBoundaryState<commonware_cryptography::sha256::Digest, N, mmr::Family> {
-    recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
+    let mut boundary = recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
         previous_operations,
         operations,
         db.root(),
@@ -129,7 +129,14 @@ async fn boundary_from_local_db(
         },
     )
     .await
-    .expect("recover boundary state")
+    .expect("recover boundary state");
+    let mut hasher = commonware_storage::qmdb::hasher::<Sha256>();
+    boundary.ops_root_witness = Some(
+        db.ops_root_witness(&mut hasher)
+            .await
+            .expect("ops root witness"),
+    );
+    boundary
 }
 
 async fn run(

@@ -4,17 +4,15 @@ use std::marker::PhantomData;
 use commonware_codec::{Codec, Decode, Encode, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_storage::merkle::{Graftable, Location};
-use commonware_storage::qmdb::current::proof::{
-    OperationProof as CurrentOperationProof, RangeProof as CurrentRangeProof,
-};
+use commonware_storage::qmdb::current::proof::{OperationProof, OpsRootWitness, RangeProof};
 use commonware_utils::bitmap::Readable as BitmapReadable;
 use exoware_sdk::keys::Key;
 use exoware_sdk::{RangeMode, SerializableReadSession, StoreClient};
 
 use crate::codec::{
     bitmap_chunk_bits, chunk_index_for_location, clear_below_floor, decode_digest,
-    decode_update_location, encode_chunk_key, encode_current_meta_key, merkle_size_for_watermark,
-    UpdateRow,
+    decode_update_location, encode_chunk_key, encode_current_meta_key, encode_ops_root_witness_key,
+    merkle_size_for_watermark, UpdateRow,
 };
 use crate::connect::OperationKv;
 use crate::core::HistoricalOpsClientCore;
@@ -234,8 +232,11 @@ where
             .core()
             .compute_ops_root::<H>(&session, watermark)
             .await?;
-        crate::proof::build_batch_multi_proof::<F, H, _>(&storage, watermark, root, operations)
-            .await
+        let mut proof =
+            crate::proof::build_batch_multi_proof::<F, H, _>(&storage, watermark, root, operations)
+                .await?;
+        proof.ops_root_witness = self.load_ops_root_witness(&session, watermark).await?;
+        Ok(proof)
     }
 
     async fn operation_range_checkpoint_in_session(
@@ -262,7 +263,7 @@ where
             .core()
             .load_operation_bytes_range(session, start_location, end)
             .await?;
-        crate::proof::build_operation_range_checkpoint::<F, H, _>(
+        let mut checkpoint = crate::proof::build_operation_range_checkpoint::<F, H, _>(
             &storage,
             watermark,
             start_location,
@@ -270,7 +271,9 @@ where
             root,
             encoded_operations,
         )
-        .await
+        .await?;
+        checkpoint.ops_root_witness = self.load_ops_root_witness(session, watermark).await?;
+        Ok(checkpoint)
     }
 
     /// Verified contiguous range of operations.
@@ -513,6 +516,23 @@ where
         )
     }
 
+    async fn load_ops_root_witness(
+        &self,
+        session: &SerializableReadSession,
+        location: Location<F>,
+    ) -> Result<Option<OpsRootWitness<H::Digest>>, QmdbError> {
+        let Some(bytes) = session.get(&encode_ops_root_witness_key(location)).await? else {
+            return Ok(None);
+        };
+        OpsRootWitness::<H::Digest>::decode_cfg(bytes.as_ref(), &())
+            .map(Some)
+            .map_err(|e| {
+                QmdbError::CorruptData(format!(
+                    "current ops-root witness at {location} decode error: {e}"
+                ))
+            })
+    }
+
     async fn materialize_bitmap_status<const N: usize>(
         &self,
         session: &SerializableReadSession,
@@ -572,7 +592,7 @@ where
         session: &SerializableReadSession,
         watermark: Location<F>,
         location: Location<F>,
-    ) -> Result<CurrentOperationProof<F, H::Digest, N>, QmdbError> {
+    ) -> Result<OperationProof<F, H::Digest, N>, QmdbError> {
         self.core()
             .require_published_watermark(session, watermark)
             .await?;
@@ -590,7 +610,7 @@ where
             _marker: PhantomData,
         };
         let mut hasher = H::default();
-        CurrentOperationProof::new(
+        OperationProof::new(
             &mut hasher,
             &status,
             &storage,
@@ -610,7 +630,7 @@ where
         watermark: Location<F>,
         start_location: Location<F>,
         end_location_exclusive: Location<F>,
-    ) -> Result<CurrentRangeProof<F, H::Digest>, QmdbError> {
+    ) -> Result<RangeProof<F, H::Digest>, QmdbError> {
         let inactivity_floor = self.load_inactivity_floor_at(session, watermark).await?;
         let status = self
             .materialize_bitmap_status::<N>(session, watermark, inactivity_floor)
@@ -622,7 +642,7 @@ where
             _marker: PhantomData,
         };
         let mut hasher = H::default();
-        CurrentRangeProof::new(
+        RangeProof::new(
             &mut hasher,
             &status,
             &storage,

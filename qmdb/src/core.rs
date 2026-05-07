@@ -17,8 +17,8 @@ use exoware_sdk::{ClientError, RangeMode, SerializableReadSession, StoreClient};
 use crate::codec::{
     decode_digest, decode_operation_location_key, decode_update_location,
     decode_watermark_location, encode_chunk_key, encode_current_meta_key, encode_grafted_node_key,
-    encode_node_key, encode_operation_key, encode_presence_key, encode_update_key,
-    encode_watermark_key, ensure_encoded_value_size, grafting_height_for,
+    encode_node_key, encode_operation_key, encode_ops_root_witness_key, encode_presence_key,
+    encode_update_key, encode_watermark_key, ensure_encoded_value_size, grafting_height_for,
     merkle_size_for_watermark, ops_to_grafted_pos, UpdateRow, WATERMARK_CODEC,
 };
 use crate::error::QmdbError;
@@ -419,6 +419,12 @@ impl PreparedCurrentBoundaryUpload {
             encode_current_meta_key(latest_location),
             current_boundary.root.as_ref().to_vec(),
         ));
+        if let Some(witness) = &current_boundary.ops_root_witness {
+            rows.push((
+                encode_ops_root_witness_key(latest_location),
+                witness.encode().to_vec(),
+            ));
+        }
         for &(chunk_index, chunk) in &current_boundary.chunks {
             rows.push((
                 encode_chunk_key(chunk_index, latest_location),
@@ -453,6 +459,7 @@ mod tests {
         let latest_location = Location::new(1024);
         let boundary = crate::CurrentBoundaryState::<_, 32, mmr::Family> {
             root: digest,
+            ops_root_witness: None,
             chunks: Vec::new(),
             grafted_nodes: vec![(ops_position, digest)],
         };

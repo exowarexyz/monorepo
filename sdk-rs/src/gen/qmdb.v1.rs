@@ -1643,6 +1643,26 @@ pub struct HistoricalMultiProof {
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
     pub operations: ::buffa::alloc::vec::Vec<MultiProofOperation>,
+    /// Optional opaque Commonware `current::proof::OpsRootWitness` bytes. When
+    /// present, `ops_root` is first authenticated against the caller's trusted
+    /// current/global root, then `proof` is verified against that ops root.
+    ///
+    /// Field 3: `ops_root`
+    #[serde(
+        rename = "opsRoot",
+        alias = "ops_root",
+        with = "::buffa::json_helpers::bytes",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
+    )]
+    pub ops_root: ::buffa::alloc::vec::Vec<u8>,
+    /// Field 4: `ops_root_witness`
+    #[serde(
+        rename = "opsRootWitness",
+        alias = "ops_root_witness",
+        with = "::buffa::json_helpers::bytes",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
+    )]
+    pub ops_root_witness: ::buffa::alloc::vec::Vec<u8>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -1655,6 +1675,8 @@ impl ::core::fmt::Debug for HistoricalMultiProof {
         f.debug_struct("HistoricalMultiProof")
             .field("proof", &self.proof)
             .field("operations", &self.operations)
+            .field("ops_root", &self.ops_root)
+            .field("ops_root_witness", &self.ops_root_witness)
             .finish()
     }
 }
@@ -1684,6 +1706,14 @@ impl ::buffa::Message for HistoricalMultiProof {
         if !self.proof.is_empty() {
             size += 1u32 + ::buffa::types::bytes_encoded_len(&self.proof) as u32;
         }
+        if !self.ops_root.is_empty() {
+            size += 1u32 + ::buffa::types::bytes_encoded_len(&self.ops_root) as u32;
+        }
+        if !self.ops_root_witness.is_empty() {
+            size
+                += 1u32
+                    + ::buffa::types::bytes_encoded_len(&self.ops_root_witness) as u32;
+        }
         for v in &self.operations {
             let inner_size = v.compute_size();
             size
@@ -1704,6 +1734,22 @@ impl ::buffa::Message for HistoricalMultiProof {
                 )
                 .encode(buf);
             ::buffa::types::encode_bytes(&self.proof, buf);
+        }
+        if !self.ops_root.is_empty() {
+            ::buffa::encoding::Tag::new(
+                    3u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::types::encode_bytes(&self.ops_root, buf);
+        }
+        if !self.ops_root_witness.is_empty() {
+            ::buffa::encoding::Tag::new(
+                    4u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::types::encode_bytes(&self.ops_root_witness, buf);
         }
         for v in &self.operations {
             ::buffa::encoding::Tag::new(
@@ -1737,6 +1783,26 @@ impl ::buffa::Message for HistoricalMultiProof {
                 }
                 ::buffa::types::merge_bytes(&mut self.proof, buf)?;
             }
+            3u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 3u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                ::buffa::types::merge_bytes(&mut self.ops_root, buf)?;
+            }
+            4u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 4u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                ::buffa::types::merge_bytes(&mut self.ops_root_witness, buf)?;
+            }
             2u32 => {
                 if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                     return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
@@ -1761,6 +1827,8 @@ impl ::buffa::Message for HistoricalMultiProof {
     }
     fn clear(&mut self) {
         self.proof.clear();
+        self.ops_root.clear();
+        self.ops_root_witness.clear();
         self.operations.clear();
         self.__buffa_unknown_fields.clear();
         self.__buffa_cached_size.set(0);
@@ -1802,6 +1870,14 @@ pub struct HistoricalMultiProofView<'a> {
     pub proof: &'a [u8],
     /// Field 2: `operations`
     pub operations: ::buffa::RepeatedView<'a, MultiProofOperationView<'a>>,
+    /// Optional opaque Commonware `current::proof::OpsRootWitness` bytes. When
+    /// present, `ops_root` is first authenticated against the caller's trusted
+    /// current/global root, then `proof` is verified against that ops root.
+    ///
+    /// Field 3: `ops_root`
+    pub ops_root: &'a [u8],
+    /// Field 4: `ops_root_witness`
+    pub ops_root_witness: &'a [u8],
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> HistoricalMultiProofView<'a> {
@@ -1852,6 +1928,26 @@ impl<'a> HistoricalMultiProofView<'a> {
                     }
                     view.proof = ::buffa::types::borrow_bytes(&mut cur)?;
                 }
+                3u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 3u32,
+                            expected: 2u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    view.ops_root = ::buffa::types::borrow_bytes(&mut cur)?;
+                }
+                4u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 4u32,
+                            expected: 2u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    view.ops_root_witness = ::buffa::types::borrow_bytes(&mut cur)?;
+                }
                 2u32 => {
                     if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                         return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
@@ -1896,6 +1992,8 @@ impl<'a> ::buffa::MessageView<'a> for HistoricalMultiProofView<'a> {
         HistoricalMultiProof {
             proof: (self.proof).to_vec(),
             operations: self.operations.iter().map(|v| v.to_owned_message()).collect(),
+            ops_root: (self.ops_root).to_vec(),
+            ops_root_witness: (self.ops_root_witness).to_vec(),
             __buffa_unknown_fields: self
                 .__buffa_unknown_fields
                 .to_owned()
@@ -1942,6 +2040,26 @@ pub struct HistoricalOperationRangeProof {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec"
     )]
     pub encoded_operations: ::buffa::alloc::vec::Vec<::buffa::alloc::vec::Vec<u8>>,
+    /// Optional opaque Commonware `current::proof::OpsRootWitness` bytes. When
+    /// present, `ops_root` is first authenticated against the caller's trusted
+    /// current/global root, then `proof` is verified against that ops root.
+    ///
+    /// Field 4: `ops_root`
+    #[serde(
+        rename = "opsRoot",
+        alias = "ops_root",
+        with = "::buffa::json_helpers::bytes",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
+    )]
+    pub ops_root: ::buffa::alloc::vec::Vec<u8>,
+    /// Field 5: `ops_root_witness`
+    #[serde(
+        rename = "opsRootWitness",
+        alias = "ops_root_witness",
+        with = "::buffa::json_helpers::bytes",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
+    )]
+    pub ops_root_witness: ::buffa::alloc::vec::Vec<u8>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -1955,6 +2073,8 @@ impl ::core::fmt::Debug for HistoricalOperationRangeProof {
             .field("proof", &self.proof)
             .field("start_location", &self.start_location)
             .field("encoded_operations", &self.encoded_operations)
+            .field("ops_root", &self.ops_root)
+            .field("ops_root_witness", &self.ops_root_witness)
             .finish()
     }
 }
@@ -1988,6 +2108,14 @@ impl ::buffa::Message for HistoricalOperationRangeProof {
             size
                 += 1u32 + ::buffa::types::uint64_encoded_len(self.start_location) as u32;
         }
+        if !self.ops_root.is_empty() {
+            size += 1u32 + ::buffa::types::bytes_encoded_len(&self.ops_root) as u32;
+        }
+        if !self.ops_root_witness.is_empty() {
+            size
+                += 1u32
+                    + ::buffa::types::bytes_encoded_len(&self.ops_root_witness) as u32;
+        }
         for v in &self.encoded_operations {
             size += 1u32 + ::buffa::types::bytes_encoded_len(v) as u32;
         }
@@ -2010,6 +2138,22 @@ impl ::buffa::Message for HistoricalOperationRangeProof {
             ::buffa::encoding::Tag::new(2u32, ::buffa::encoding::WireType::Varint)
                 .encode(buf);
             ::buffa::types::encode_uint64(self.start_location, buf);
+        }
+        if !self.ops_root.is_empty() {
+            ::buffa::encoding::Tag::new(
+                    4u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::types::encode_bytes(&self.ops_root, buf);
+        }
+        if !self.ops_root_witness.is_empty() {
+            ::buffa::encoding::Tag::new(
+                    5u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::types::encode_bytes(&self.ops_root_witness, buf);
         }
         for v in &self.encoded_operations {
             ::buffa::encoding::Tag::new(
@@ -2052,6 +2196,26 @@ impl ::buffa::Message for HistoricalOperationRangeProof {
                 }
                 self.start_location = ::buffa::types::decode_uint64(buf)?;
             }
+            4u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 4u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                ::buffa::types::merge_bytes(&mut self.ops_root, buf)?;
+            }
+            5u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 5u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                ::buffa::types::merge_bytes(&mut self.ops_root_witness, buf)?;
+            }
             3u32 => {
                 if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                     return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
@@ -2075,6 +2239,8 @@ impl ::buffa::Message for HistoricalOperationRangeProof {
     fn clear(&mut self) {
         self.proof.clear();
         self.start_location = 0u64;
+        self.ops_root.clear();
+        self.ops_root_witness.clear();
         self.encoded_operations.clear();
         self.__buffa_unknown_fields.clear();
         self.__buffa_cached_size.set(0);
@@ -2118,6 +2284,14 @@ pub struct HistoricalOperationRangeProofView<'a> {
     pub start_location: u64,
     /// Field 3: `encoded_operations`
     pub encoded_operations: ::buffa::RepeatedView<'a, &'a [u8]>,
+    /// Optional opaque Commonware `current::proof::OpsRootWitness` bytes. When
+    /// present, `ops_root` is first authenticated against the caller's trusted
+    /// current/global root, then `proof` is verified against that ops root.
+    ///
+    /// Field 4: `ops_root`
+    pub ops_root: &'a [u8],
+    /// Field 5: `ops_root_witness`
+    pub ops_root_witness: &'a [u8],
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> HistoricalOperationRangeProofView<'a> {
@@ -2178,6 +2352,26 @@ impl<'a> HistoricalOperationRangeProofView<'a> {
                     }
                     view.start_location = ::buffa::types::decode_uint64(&mut cur)?;
                 }
+                4u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 4u32,
+                            expected: 2u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    view.ops_root = ::buffa::types::borrow_bytes(&mut cur)?;
+                }
+                5u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 5u32,
+                            expected: 2u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    view.ops_root_witness = ::buffa::types::borrow_bytes(&mut cur)?;
+                }
                 3u32 => {
                     if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                         return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
@@ -2223,6 +2417,8 @@ impl<'a> ::buffa::MessageView<'a> for HistoricalOperationRangeProofView<'a> {
                 .iter()
                 .map(|b| (b).to_vec())
                 .collect(),
+            ops_root: (self.ops_root).to_vec(),
+            ops_root_witness: (self.ops_root_witness).to_vec(),
             __buffa_unknown_fields: self
                 .__buffa_unknown_fields
                 .to_owned()
@@ -4024,8 +4220,10 @@ pub struct SubscribeResponse {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
     )]
     pub proof: ::buffa::MessageField<HistoricalMultiProof>,
-    /// Published operation-log watermark this proof verifies against. Clients
-    /// verify using their trusted operation-log root for this tip.
+    /// Published operation-log watermark this proof verifies against. When
+    /// `proof.ops_root_witness` is present, clients verify using their trusted
+    /// current/global root for this tip; otherwise they verify against the
+    /// backend's operation-log root.
     ///
     /// Field 3: `tip`
     #[serde(
@@ -4217,8 +4415,10 @@ pub struct SubscribeResponseView<'a> {
     pub resume_sequence_number: u64,
     /// Field 2: `proof`
     pub proof: ::buffa::MessageFieldView<HistoricalMultiProofView<'a>>,
-    /// Published operation-log watermark this proof verifies against. Clients
-    /// verify using their trusted operation-log root for this tip.
+    /// Published operation-log watermark this proof verifies against. When
+    /// `proof.ops_root_witness` is present, clients verify using their trusted
+    /// current/global root for this tip; otherwise they verify against the
+    /// backend's operation-log root.
     ///
     /// Field 3: `tip`
     pub tip: u64,

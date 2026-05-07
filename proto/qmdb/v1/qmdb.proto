@@ -112,6 +112,11 @@ message MultiProofOperation {
 message HistoricalMultiProof {
   bytes proof = 1;
   repeated MultiProofOperation operations = 2;
+  // Optional opaque Commonware `current::proof::OpsRootWitness` bytes. When
+  // present, `ops_root` is first authenticated against the caller's trusted
+  // current/global root, then `proof` is verified against that ops root.
+  bytes ops_root = 3;
+  bytes ops_root_witness = 4;
 }
 
 // Historical QMDB range proof over a contiguous operation interval.
@@ -119,6 +124,11 @@ message HistoricalOperationRangeProof {
   bytes proof = 1;
   uint64 start_location = 2;
   repeated bytes encoded_operations = 3;
+  // Optional opaque Commonware `current::proof::OpsRootWitness` bytes. When
+  // present, `ops_root` is first authenticated against the caller's trusted
+  // current/global root, then `proof` is verified against that ops root.
+  bytes ops_root = 4;
+  bytes ops_root_witness = 5;
 }
 
 // Current QMDB operation range proof. `proof` is opaque Commonware
@@ -167,8 +177,10 @@ message SubscribeResponse {
   // Underlying store stream sequence that made this proof readable end-to-end.
   uint64 resume_sequence_number = 1;
   HistoricalMultiProof proof = 2;
-  // Published operation-log watermark this proof verifies against. Clients
-  // verify using their trusted operation-log root for this tip.
+  // Published operation-log watermark this proof verifies against. When
+  // `proof.ops_root_witness` is present, clients verify using their trusted
+  // current/global root for this tip; otherwise they verify against the
+  // backend's operation-log root.
   uint64 tip = 3;
 }
 

@@ -62,7 +62,7 @@ async fn boundary_from_local_db(
     previous_operations: Option<&[BatchOperation]>,
     operations: &[BatchOperation],
 ) -> CurrentBoundaryState<Digest, N, mmr::Family> {
-    recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
+    let mut boundary = recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
         previous_operations,
         operations,
         db.root(),
@@ -90,7 +90,14 @@ async fn boundary_from_local_db(
         },
     )
     .await
-    .expect("recover_boundary_state")
+    .expect("recover_boundary_state");
+    let mut hasher = commonware_storage::qmdb::hasher::<Sha256>();
+    boundary.ops_root_witness = Some(
+        db.ops_root_witness(&mut hasher)
+            .await
+            .expect("ops root witness"),
+    );
+    boundary
 }
 
 fn op_cfg() -> <BatchOperation as commonware_codec::Read>::Cfg {
@@ -112,7 +119,6 @@ fn update_row_cfg() -> (
 
 struct LocalBatch {
     operations: Vec<BatchOperation>,
-    operation_root: Digest,
     current_boundary: CurrentBoundaryState<Digest, N, mmr::Family>,
 }
 
@@ -153,14 +159,11 @@ async fn build_local_batch() -> LocalBatch {
                 .await
                 .expect("proof");
             let boundary = boundary_from_local_db(&db, None, &ops).await;
-            let operation_root = db.ops_root();
-
             db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
 
             LocalBatch {
                 operations: ops,
-                operation_root,
                 current_boundary: boundary,
             }
         })
@@ -280,7 +283,7 @@ async fn ordered_range_connect_subscribe_emits_verifiable_range_proof() {
     let frame: OperationLogSubscribeProof<Digest, BatchOperation, mmr::Family> =
         tokio::time::timeout(
             Duration::from_secs(5),
-            stream.message_with_root(common::trusted_root(local.operation_root)),
+            stream.message_with_root(common::trusted_root(local.current_boundary.root)),
         )
         .await
         .expect("timeout")
@@ -336,7 +339,7 @@ async fn ordered_range_connect_client_rejects_invalid_streamed_proof() {
         .expect("subscribe");
 
     let err = stream
-        .message_with_root(common::trusted_root(local.operation_root))
+        .message_with_root(common::trusted_root(local.current_boundary.root))
         .await
         .expect_err("tampered streamed proof should fail");
     assert!(matches!(
@@ -373,7 +376,7 @@ async fn ordered_range_connect_subscribe_emits_multi_proof_for_matching_keys() {
     let frame: OperationLogSubscribeProof<Digest, BatchOperation, mmr::Family> =
         tokio::time::timeout(
             Duration::from_secs(5),
-            stream.message_with_root(common::trusted_root(local.operation_root)),
+            stream.message_with_root(common::trusted_root(local.current_boundary.root)),
         )
         .await
         .expect("timeout")
@@ -411,7 +414,7 @@ async fn ordered_range_connect_subscribe_replays_since_cursor() {
 
     let frame = tokio::time::timeout(
         Duration::from_secs(5),
-        stream.message_with_root(common::trusted_root(local.operation_root)),
+        stream.message_with_root(common::trusted_root(local.current_boundary.root)),
     )
     .await
     .expect("timeout")
@@ -455,7 +458,7 @@ async fn ordered_range_connect_subscribe_matches_prefix_and_regex_filters() {
 
     let prefix_frame = tokio::time::timeout(
         Duration::from_secs(5),
-        prefix_stream.message_with_root(common::trusted_root(local.operation_root)),
+        prefix_stream.message_with_root(common::trusted_root(local.current_boundary.root)),
     )
     .await
     .expect("prefix timeout")
@@ -463,7 +466,7 @@ async fn ordered_range_connect_subscribe_matches_prefix_and_regex_filters() {
     .expect("prefix stream frame");
     let regex_frame = tokio::time::timeout(
         Duration::from_secs(5),
-        regex_stream.message_with_root(common::trusted_root(local.operation_root)),
+        regex_stream.message_with_root(common::trusted_root(local.current_boundary.root)),
     )
     .await
     .expect("regex timeout")
@@ -507,7 +510,7 @@ async fn ordered_range_connect_subscribe_filters_by_value_regex_without_key() {
     let frame: OperationLogSubscribeProof<Digest, BatchOperation, mmr::Family> =
         tokio::time::timeout(
             Duration::from_secs(5),
-            stream.message_with_root(common::trusted_root(local.operation_root)),
+            stream.message_with_root(common::trusted_root(local.current_boundary.root)),
         )
         .await
         .expect("timeout")
@@ -547,7 +550,7 @@ async fn ordered_range_connect_subscribe_intersects_key_and_value_filters() {
 
     let frame = tokio::time::timeout(
         Duration::from_secs(5),
-        stream.message_with_root(common::trusted_root(local.operation_root)),
+        stream.message_with_root(common::trusted_root(local.current_boundary.root)),
     )
     .await
     .expect("timeout")

@@ -109,9 +109,7 @@ export interface OrderedSubscribeProof {
   proof: VerifiedHistoricalMultiProof;
 }
 
-export type OperationLogRootResolver = (
-  tip: bigint,
-) => BytesLike | Promise<BytesLike>;
+export type TrustedRootResolver = (tip: bigint) => BytesLike | Promise<BytesLike>;
 
 export type OrderedQmdbClientOptions = SdkClientOptions & {
   merkleFamily?: MerkleFamily;
@@ -265,7 +263,7 @@ export class OrderedQmdbClient {
       valueFilters?: MessageInitShape<typeof BytesFilterSchema>[];
       sinceSequenceNumber?: bigint;
     },
-    rootForTip: OperationLogRootResolver,
+    rootForTip: TrustedRootResolver,
     options?: CallOptions,
   ): AsyncIterable<OrderedSubscribeProof> {
     await ensureWasm();

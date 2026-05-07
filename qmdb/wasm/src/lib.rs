@@ -16,11 +16,8 @@ use commonware_storage::{
             ordered::{variable::Operation as OrderedOperation, Update},
             value::VariableEncoding,
         },
-        current::ordered::{
-            db::KeyValueProof as CurrentKeyValueProofObject,
-            ExclusionProof as CurrentExclusionProofObject,
-        },
-        current::proof::RangeProof as CurrentRangeProofObject,
+        current::ordered::{db::KeyValueProof, ExclusionProof},
+        current::proof::{OpsRootWitness, RangeProof},
         verify::{verify_multi_proof, verify_proof},
     },
 };
@@ -96,6 +93,33 @@ fn normalize_family<'a>(family: &'a str, label: &str) -> Result<&'a str, String>
     }
 }
 
+fn historical_target_root(
+    ops_root: &[u8],
+    ops_root_witness: &[u8],
+    expected_root: &commonware_cryptography::sha256::Digest,
+) -> Result<commonware_cryptography::sha256::Digest, String> {
+    match (ops_root.is_empty(), ops_root_witness.is_empty()) {
+        (true, true) => Ok(*expected_root),
+        (false, false) => {
+            let ops_root = decode_digest(ops_root, "historical ops root")?;
+            let witness = OpsRootWitness::<commonware_cryptography::sha256::Digest>::decode_cfg(
+                ops_root_witness,
+                &(),
+            )
+            .map_err(|err| format!("failed to decode historical ops-root witness: {err}"))?;
+            let mut hasher = commonware_storage::qmdb::hasher::<Sha256>();
+            if !witness.verify(&mut hasher, &ops_root, expected_root) {
+                return Err("historical ops-root witness failed verification".to_string());
+            }
+            Ok(ops_root)
+        }
+        _ => Err(
+            "historical proof must include both ops_root and ops_root_witness, or neither"
+                .to_string(),
+        ),
+    }
+}
+
 fn verify_multi_from_proto<F>(
     proto: &HistoricalMultiProof,
     root: &commonware_cryptography::sha256::Digest,
@@ -124,6 +148,7 @@ where
             ))
         })
         .collect::<Result<Vec<_>, String>>()?;
+    let target_root = historical_target_root(&proto.ops_root, &proto.ops_root_witness, root)?;
     let max_digests = proof_digest_cap(&proto.proof);
     let proof = merkle::Proof::<F, commonware_cryptography::sha256::Digest>::decode_cfg(
         proto.proof.as_slice(),
@@ -131,7 +156,7 @@ where
     )
     .map_err(|err| format!("failed to decode historical multi proof: {err}"))?;
     let hasher = commonware_storage::qmdb::hasher::<Sha256>();
-    if !verify_multi_proof(&hasher, &proof, &operations, root) {
+    if !verify_multi_proof(&hasher, &proof, &operations, &target_root) {
         return Err("historical multi proof failed verification".to_string());
     }
     Ok(operations)
@@ -149,6 +174,7 @@ where
     if proto.encoded_operations.is_empty() {
         return Err("historical operation range proof has no operations".to_string());
     }
+    let target_root = historical_target_root(&proto.ops_root, &proto.ops_root_witness, root)?;
     let max_digests = proof_digest_cap(&proto.proof);
     let proof = merkle::Proof::<F, commonware_cryptography::sha256::Digest>::decode_cfg(
         proto.proof.as_slice(),
@@ -187,7 +213,7 @@ where
         .map(|(_, operation)| operation.clone())
         .collect::<Vec<_>>();
     let hasher = commonware_storage::qmdb::hasher::<Sha256>();
-    if !verify_proof(&hasher, &proof, start, &ordered_operations, root) {
+    if !verify_proof(&hasher, &proof, start, &ordered_operations, &target_root) {
         return Err("historical operation range proof failed verification".to_string());
     }
     Ok(operations)
@@ -209,12 +235,11 @@ where
         return Err("current operation range proof has no chunks".to_string());
     }
     let max_digests = proof_digest_cap(&proto.proof);
-    let proof =
-        CurrentRangeProofObject::<F, commonware_cryptography::sha256::Digest>::decode_cfg(
-            proto.proof.as_slice(),
-            &max_digests,
-        )
-        .map_err(|err| format!("failed to decode current operation range proof: {err}"))?;
+    let proof = RangeProof::<F, commonware_cryptography::sha256::Digest>::decode_cfg(
+        proto.proof.as_slice(),
+        &max_digests,
+    )
+    .map_err(|err| format!("failed to decode current operation range proof: {err}"))?;
     let start = Location::new(proto.start_location);
     let operations = proto
         .encoded_operations
@@ -288,7 +313,7 @@ where
     };
     let max_digests = proof_digest_cap(&proto.proof);
     let proof =
-        CurrentKeyValueProofObject::<F, Vec<u8>, commonware_cryptography::sha256::Digest, 32>::decode_cfg(
+        KeyValueProof::<F, Vec<u8>, commonware_cryptography::sha256::Digest, 32>::decode_cfg(
             proto.proof.as_slice(),
             &(max_digests, ((0..=MAX_OPERATION_SIZE).into(), ())),
         )
@@ -314,7 +339,7 @@ where
         Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
 {
     let max_digests = proof_digest_cap(&proto.proof);
-    let proof = CurrentExclusionProofObject::<
+    let proof = ExclusionProof::<
         F,
         Vec<u8>,
         VariableEncoding<Vec<u8>>,
@@ -330,7 +355,7 @@ where
     )
     .map_err(|err| format!("failed to decode current key-exclusion proof: {err}"))?;
     let (op_proof, operation, boundary) = match proof {
-        CurrentExclusionProofObject::KeyValue(op_proof, update) => {
+        ExclusionProof::KeyValue(op_proof, update) => {
             let span_start = update.key.as_slice();
             let span_end = update.next_key.as_slice();
             if span_start == requested_key {
@@ -350,7 +375,7 @@ where
             };
             (op_proof, OrderedOperation::Update(update), boundary)
         }
-        CurrentExclusionProofObject::Commit(op_proof, value) => {
+        ExclusionProof::Commit(op_proof, value) => {
             let floor = op_proof.loc;
             (
                 op_proof,

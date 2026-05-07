@@ -8,10 +8,8 @@ use commonware_storage::{
     qmdb::{
         any::ordered::variable::Operation as QmdbOperation,
         current::{
-            ordered::{
-                db::KeyValueProof as CurrentKeyValueProof, ExclusionProof as CurrentExclusionProof,
-            },
-            proof::{OperationProof as CurrentOperationProof, RangeProof as CurrentRangeProof},
+            ordered::{db::KeyValueProof, ExclusionProof},
+            proof::{OperationProof, OpsRootWitness, RangeProof},
         },
         operation::{Key as QmdbKey, Operation as _},
     },
@@ -22,8 +20,8 @@ use exoware_sdk::{RangeMode, SerializableReadSession, StoreClient};
 
 use crate::codec::{
     bitmap_chunk_bits, chunk_index_for_location, clear_below_floor, decode_digest,
-    decode_update_location, encode_chunk_key, encode_current_meta_key, encode_update_key,
-    merkle_size_for_watermark, UpdateRow, UPDATE_CODEC,
+    decode_update_location, encode_chunk_key, encode_current_meta_key, encode_ops_root_witness_key,
+    encode_update_key, merkle_size_for_watermark, UpdateRow, UPDATE_CODEC,
 };
 use crate::connect::OperationKv;
 use crate::core::HistoricalOpsClientCore;
@@ -358,8 +356,11 @@ where
             _marker: PhantomData,
         };
         let root = self.compute_ops_root(&session, watermark).await?;
-        crate::proof::build_batch_multi_proof::<F, H, _>(&storage, watermark, root, operations)
-            .await
+        let mut proof =
+            crate::proof::build_batch_multi_proof::<F, H, _>(&storage, watermark, root, operations)
+                .await?;
+        proof.ops_root_witness = self.load_ops_root_witness(&session, watermark).await?;
+        Ok(proof)
     }
 
     /// Verified raw multi-proof over a set of keys.
@@ -446,7 +447,7 @@ where
             .core()
             .load_operation_bytes_range(session, start_location, end)
             .await?;
-        crate::proof::build_operation_range_checkpoint::<F, H, _>(
+        let mut checkpoint = crate::proof::build_operation_range_checkpoint::<F, H, _>(
             &storage,
             watermark,
             start_location,
@@ -454,7 +455,9 @@ where
             root,
             encoded_operations,
         )
-        .await
+        .await?;
+        checkpoint.ops_root_witness = self.load_ops_root_witness(session, watermark).await?;
+        Ok(checkpoint)
     }
 
     /// Verified contiguous range of operations for the given variant.
@@ -658,7 +661,7 @@ where
         let operation_proof = self
             .build_current_operation_proof(session, watermark, location)
             .await?;
-        let proof = CurrentKeyValueProof {
+        let proof = KeyValueProof {
             proof: operation_proof,
             next_key: update.next_key.clone(),
         };
@@ -802,7 +805,7 @@ where
             let op_proof = self
                 .build_current_operation_proof(session, watermark, watermark)
                 .await?;
-            CurrentExclusionProof::Commit(op_proof, value)
+            ExclusionProof::Commit(op_proof, value)
         } else {
             let mut span = None;
             for active in &active {
@@ -828,7 +831,7 @@ where
             let op_proof = self
                 .build_current_operation_proof(session, watermark, location)
                 .await?;
-            CurrentExclusionProof::KeyValue(op_proof, update)
+            ExclusionProof::KeyValue(op_proof, update)
         };
 
         let raw = RawKeyExclusionProof {
@@ -1018,6 +1021,23 @@ where
         )
     }
 
+    async fn load_ops_root_witness(
+        &self,
+        session: &SerializableReadSession,
+        location: Location<F>,
+    ) -> Result<Option<OpsRootWitness<H::Digest>>, QmdbError> {
+        let Some(bytes) = session.get(&encode_ops_root_witness_key(location)).await? else {
+            return Ok(None);
+        };
+        OpsRootWitness::<H::Digest>::decode_cfg(bytes.as_ref(), &())
+            .map(Some)
+            .map_err(|e| {
+                QmdbError::CorruptData(format!(
+                    "current ops-root witness at {location} decode error: {e}"
+                ))
+            })
+    }
+
     pub(crate) async fn compute_ops_root(
         &self,
         session: &SerializableReadSession,
@@ -1086,7 +1106,7 @@ where
         watermark: Location<F>,
         start_location: Location<F>,
         end_location_exclusive: Location<F>,
-    ) -> Result<CurrentRangeProof<F, H::Digest>, QmdbError> {
+    ) -> Result<RangeProof<F, H::Digest>, QmdbError> {
         let inactivity_floor = self.load_inactivity_floor_at(session, watermark).await?;
         let status = self
             .materialize_bitmap_status(session, watermark, inactivity_floor)
@@ -1098,7 +1118,7 @@ where
             _marker: PhantomData,
         };
         let mut hasher = H::default();
-        CurrentRangeProof::new(
+        RangeProof::new(
             &mut hasher,
             &status,
             &storage,
@@ -1115,7 +1135,7 @@ where
         session: &SerializableReadSession,
         watermark: Location<F>,
         location: Location<F>,
-    ) -> Result<CurrentOperationProof<F, H::Digest, N>, QmdbError> {
+    ) -> Result<OperationProof<F, H::Digest, N>, QmdbError> {
         self.core()
             .require_published_watermark(session, watermark)
             .await?;
@@ -1133,7 +1153,7 @@ where
             _marker: PhantomData,
         };
         let mut hasher = H::default();
-        CurrentOperationProof::new(
+        OperationProof::new(
             &mut hasher,
             &status,
             &storage,

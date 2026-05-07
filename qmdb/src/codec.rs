@@ -15,6 +15,7 @@ pub(crate) const NODE_FAMILY: u16 = 0x5;
 pub(crate) const GRAFTED_NODE_FAMILY: u16 = 0x6;
 pub(crate) const CHUNK_FAMILY: u16 = 0x7;
 pub(crate) const CURRENT_META_FAMILY: u16 = 0x8;
+pub(crate) const OPS_ROOT_WITNESS_FAMILY: u16 = 0x9;
 
 pub(crate) const UPDATE_VERSION_LEN: usize = 8;
 pub(crate) const ORDERED_KEY_ESCAPE_BYTE: u8 = 0x00;
@@ -29,6 +30,8 @@ pub(crate) const NODE_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, NODE_FAMILY
 pub(crate) const CURRENT_META_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, CURRENT_META_FAMILY);
 pub(crate) const GRAFTED_NODE_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, GRAFTED_NODE_FAMILY);
 pub(crate) const CHUNK_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, CHUNK_FAMILY);
+pub(crate) const OPS_ROOT_WITNESS_CODEC: KeyCodec =
+    KeyCodec::new(RESERVED_BITS, OPS_ROOT_WITNESS_FAMILY);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct UpdateRow<K, V> {
@@ -314,6 +317,17 @@ pub(crate) fn encode_current_meta_key<F: Family>(location: Location<F>) -> Key {
     codec
         .write_payload(&mut key, 0, &location.as_u64().to_be_bytes())
         .expect("current meta location fits");
+    key.freeze()
+}
+
+pub(crate) fn encode_ops_root_witness_key<F: Family>(location: Location<F>) -> Key {
+    let codec = OPS_ROOT_WITNESS_CODEC;
+    let mut key = codec
+        .new_key_with_len(codec.min_key_len_for_payload(8))
+        .expect("ops root witness key length should fit");
+    codec
+        .write_payload(&mut key, 0, &location.as_u64().to_be_bytes())
+        .expect("ops root witness location fits");
     key.freeze()
 }
 

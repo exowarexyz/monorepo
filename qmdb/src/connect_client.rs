@@ -13,12 +13,8 @@ use commonware_storage::{
             ordered::variable::Operation as QmdbOperation,
             unordered::variable::Operation as UnorderedQmdbOperation, value::VariableEncoding,
         },
-        current::ordered::{
-            db::KeyValueProof as CurrentKeyValueProof, ExclusionProof as CurrentExclusionProof,
-        },
-        current::proof::{
-            OperationProof as CurrentOperationProof, RangeProof as CurrentRangeProof,
-        },
+        current::ordered::{db::KeyValueProof, ExclusionProof},
+        current::proof::{OperationProof, OpsRootWitness, RangeProof},
         operation::Key as QmdbKey,
         verify::{verify_multi_proof, verify_proof},
     },
@@ -608,6 +604,41 @@ fn proof_digest_cap<D: Digest>(encoded_proof: &[u8]) -> usize {
     encoded_proof.len() / D::SIZE + 1
 }
 
+fn historical_target_root<H: Hasher>(
+    ops_root: &[u8],
+    ops_root_witness: &[u8],
+    expected_root: &H::Digest,
+) -> Result<H::Digest, QmdbError>
+where
+    H::Digest: DecodeExt<()>,
+{
+    match (ops_root.is_empty(), ops_root_witness.is_empty()) {
+        (true, true) => Ok(*expected_root),
+        (false, false) => {
+            let ops_root = H::Digest::decode_cfg(ops_root, &()).map_err(|err| {
+                QmdbError::CorruptData(format!("failed to decode historical ops root: {err}"))
+            })?;
+            let witness =
+                OpsRootWitness::<H::Digest>::decode_cfg(ops_root_witness, &()).map_err(|err| {
+                    QmdbError::CorruptData(format!(
+                        "failed to decode historical ops-root witness: {err}"
+                    ))
+                })?;
+            let mut hasher = commonware_storage::qmdb::hasher::<H>();
+            if !witness.verify(&mut hasher, &ops_root, expected_root) {
+                return Err(QmdbError::ProofVerification {
+                    kind: crate::ProofKind::BatchMulti,
+                });
+            }
+            Ok(ops_root)
+        }
+        _ => Err(QmdbError::CorruptData(
+            "historical proof must include both ops_root and ops_root_witness, or neither"
+                .to_string(),
+        )),
+    }
+}
+
 enum ExclusionBoundary {
     Span { start: Vec<u8>, end: Vec<u8> },
     Empty,
@@ -640,13 +671,14 @@ where
             Ok((Location::<F>::new(op.location), decoded))
         })
         .collect::<Result<Vec<_>, QmdbError>>()?;
+    let target_root = historical_target_root::<H>(&proto.ops_root, &proto.ops_root_witness, root)?;
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
     let proof =
         Proof::<F, H::Digest>::decode_cfg(proto.proof.as_slice(), &max_digests).map_err(|err| {
             QmdbError::CorruptData(format!("failed to decode historical multi proof: {err}"))
         })?;
     let hasher = commonware_storage::qmdb::hasher::<H>();
-    if !verify_multi_proof(&hasher, &proof, &operations, root) {
+    if !verify_multi_proof(&hasher, &proof, &operations, &target_root) {
         return Err(QmdbError::ProofVerification { kind });
     }
     Ok((*root, operations))
@@ -670,6 +702,7 @@ where
             "historical operation range proof has no operations".to_string(),
         ));
     }
+    let target_root = historical_target_root::<H>(&proto.ops_root, &proto.ops_root_witness, root)?;
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
     let proof =
         Proof::<F, H::Digest>::decode_cfg(proto.proof.as_slice(), &max_digests).map_err(|err| {
@@ -689,7 +722,7 @@ where
         })
         .collect::<Result<Vec<_>, QmdbError>>()?;
     let hasher = commonware_storage::qmdb::hasher::<H>();
-    if !verify_proof(&hasher, &proof, start, &decoded_operations, root) {
+    if !verify_proof(&hasher, &proof, start, &decoded_operations, &target_root) {
         return Err(QmdbError::ProofVerification {
             kind: crate::ProofKind::RangeCheckpoint,
         });
@@ -729,7 +762,7 @@ where
         ));
     }
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
-    let proof = CurrentRangeProof::<F, H::Digest>::decode_cfg(proto.proof.as_slice(), &max_digests)
+    let proof = RangeProof::<F, H::Digest>::decode_cfg(proto.proof.as_slice(), &max_digests)
         .map_err(|err| {
             QmdbError::CorruptData(format!(
                 "failed to decode current operation range proof: {err}"
@@ -813,7 +846,7 @@ where
         ));
     };
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
-    let proof = CurrentKeyValueProof::<F, K, H::Digest, N>::decode_cfg(
+    let proof = KeyValueProof::<F, K, H::Digest, N>::decode_cfg(
         proto.proof.as_slice(),
         &(max_digests, op_cfg.0.clone()),
     )
@@ -870,11 +903,10 @@ where
         });
     }
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
-    let proof =
-        CurrentOperationProof::<F, H::Digest, N>::decode_cfg(proto.proof.as_slice(), &max_digests)
-            .map_err(|err| {
-                QmdbError::CorruptData(format!("failed to decode unordered current proof: {err}"))
-            })?;
+    let proof = OperationProof::<F, H::Digest, N>::decode_cfg(proto.proof.as_slice(), &max_digests)
+        .map_err(|err| {
+            QmdbError::CorruptData(format!("failed to decode unordered current proof: {err}"))
+        })?;
     let mut hasher = H::default();
     if !proof.verify(&mut hasher, operation.clone(), root) {
         return Err(QmdbError::ProofVerification {
@@ -903,7 +935,7 @@ where
     QmdbOperation<F, K, V>: Decode + Read<Cfg = (K::Cfg, V::Cfg)>,
 {
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
-    let proof = CurrentExclusionProof::<F, K, VariableEncoding<V>, H::Digest, N>::decode_cfg(
+    let proof = ExclusionProof::<F, K, VariableEncoding<V>, H::Digest, N>::decode_cfg(
         proto.proof.as_slice(),
         &(max_digests, op_cfg.clone(), op_cfg.1.clone()),
     )
@@ -913,7 +945,7 @@ where
         ))
     })?;
     let (op_proof, operation, boundary) = match proof {
-        CurrentExclusionProof::KeyValue(op_proof, update) => {
+        ExclusionProof::KeyValue(op_proof, update) => {
             let span_start = <K as AsRef<[u8]>>::as_ref(&update.key);
             let span_end = <K as AsRef<[u8]>>::as_ref(&update.next_key);
             if span_start == requested_key {
@@ -937,7 +969,7 @@ where
             };
             (op_proof, QmdbOperation::<F, K, V>::Update(update), boundary)
         }
-        CurrentExclusionProof::Commit(op_proof, value) => {
+        ExclusionProof::Commit(op_proof, value) => {
             let floor = op_proof.loc;
             (
                 op_proof,

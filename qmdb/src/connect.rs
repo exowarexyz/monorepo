@@ -111,6 +111,16 @@ fn raw_batch_multi_proof_to_proto<D: commonware_cryptography::Digest, F: Family>
                 ..Default::default()
             })
             .collect(),
+        ops_root: proof
+            .ops_root_witness
+            .as_ref()
+            .map(|_| proof.root.as_ref().to_vec())
+            .unwrap_or_default(),
+        ops_root_witness: proof
+            .ops_root_witness
+            .as_ref()
+            .map(|witness| witness.encode().to_vec())
+            .unwrap_or_default(),
         ..Default::default()
     }
 }
@@ -122,6 +132,16 @@ fn operation_range_checkpoint_to_proto<D: commonware_cryptography::Digest, F: Fa
         proof: proof.proof.encode().to_vec(),
         start_location: proof.start_location.as_u64(),
         encoded_operations: proof.encoded_operations.clone(),
+        ops_root: proof
+            .ops_root_witness
+            .as_ref()
+            .map(|_| proof.root.as_ref().to_vec())
+            .unwrap_or_default(),
+        ops_root_witness: proof
+            .ops_root_witness
+            .as_ref()
+            .map(|witness| witness.encode().to_vec())
+            .unwrap_or_default(),
         ..Default::default()
     }
 }

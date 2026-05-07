@@ -10,9 +10,8 @@ use commonware_storage::{
         any::unordered::variable::Operation as UnorderedQmdbOperation,
         any::value::VariableEncoding,
         current::{
-            ordered::db::KeyValueProof as CurrentKeyValueProof,
-            ordered::ExclusionProof as CurrentExclusionProof,
-            proof::{OperationProof as CurrentOperationProof, RangeProof as CurrentRangeProof},
+            ordered::{db::KeyValueProof, ExclusionProof},
+            proof::{OperationProof, OpsRootWitness, RangeProof},
         },
         operation::Key as QmdbKey,
         verify::{verify_multi_proof, verify_proof, verify_proof_and_extract_digests},
@@ -43,6 +42,7 @@ impl EncodeSize for EncodedOperation<'_> {
 pub struct OperationRangeCheckpoint<D: Digest, F: Family> {
     pub watermark: Location<F>,
     pub root: D,
+    pub ops_root_witness: Option<OpsRootWitness<D>>,
     pub start_location: Location<F>,
     pub proof: Proof<F, D>,
     pub encoded_operations: Vec<Vec<u8>>,
@@ -140,6 +140,7 @@ where
 pub struct RawBatchMultiProof<D: Digest, F: Family> {
     pub watermark: Location<F>,
     pub root: D,
+    pub ops_root_witness: Option<OpsRootWitness<D>>,
     pub proof: Proof<F, D>,
     pub operations: Vec<(Location<F>, Vec<u8>)>,
 }
@@ -205,6 +206,7 @@ where
     let raw = RawBatchMultiProof {
         watermark,
         root,
+        ops_root_witness: None,
         proof,
         operations,
     };
@@ -244,6 +246,7 @@ where
     let checkpoint = OperationRangeCheckpoint {
         watermark,
         root,
+        ops_root_witness: None,
         start_location,
         proof,
         encoded_operations,
@@ -268,7 +271,7 @@ pub struct RawKeyValueProof<
 > {
     pub watermark: Location<F>,
     pub root: D,
-    pub proof: CurrentKeyValueProof<F, K, D, N>,
+    pub proof: KeyValueProof<F, K, D, N>,
     pub operation: QmdbOperation<F, K, V>,
 }
 
@@ -309,7 +312,7 @@ pub struct RawKeyExclusionProof<
     pub watermark: Location<F>,
     pub root: D,
     pub requested_key: Vec<u8>,
-    pub proof: CurrentExclusionProof<F, K, VariableEncoding<V>, D, N>,
+    pub proof: ExclusionProof<F, K, VariableEncoding<V>, D, N>,
 }
 
 impl<
@@ -324,7 +327,7 @@ where
 {
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
         let (op_proof, operation) = match &self.proof {
-            CurrentExclusionProof::KeyValue(op_proof, update) => {
+            ExclusionProof::KeyValue(op_proof, update) => {
                 let span_start = update.key.as_ref();
                 let span_end = update.next_key.as_ref();
                 let key = self.requested_key.as_slice();
@@ -341,7 +344,7 @@ where
                 }
                 (op_proof, QmdbOperation::Update(update.clone()))
             }
-            CurrentExclusionProof::Commit(op_proof, value) => (
+            ExclusionProof::Commit(op_proof, value) => (
                 op_proof,
                 QmdbOperation::CommitFloor(value.clone(), op_proof.loc),
             ),
@@ -409,7 +412,7 @@ pub struct RawUnorderedKeyValueProof<
 > {
     pub watermark: Location<F>,
     pub root: D,
-    pub proof: CurrentOperationProof<F, D, N>,
+    pub proof: OperationProof<F, D, N>,
     pub operation: UnorderedQmdbOperation<F, K, V>,
 }
 
@@ -600,7 +603,7 @@ pub struct CurrentOperationRangeProofResult<D: Digest, Op, const N: usize, F: Fa
     pub watermark: Location<F>,
     pub root: D,
     pub start_location: Location<F>,
-    pub proof: CurrentRangeProof<F, D>,
+    pub proof: RangeProof<F, D>,
     pub operations: Vec<Op>,
     pub chunks: Vec<[u8; N]>,
 }
@@ -632,7 +635,7 @@ pub(crate) struct KeyValueProofResult<
 > {
     pub watermark: Location<F>,
     pub root: D,
-    pub proof: CurrentKeyValueProof<F, K, D, N>,
+    pub proof: KeyValueProof<F, K, D, N>,
     pub operation: QmdbOperation<F, K, V>,
 }
 

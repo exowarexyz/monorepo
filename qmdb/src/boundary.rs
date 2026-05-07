@@ -7,9 +7,7 @@ use commonware_storage::merkle::{
     hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
     Family, Graftable, Location, Position,
 };
-use commonware_storage::qmdb::{
-    current::proof::RangeProof as CurrentRangeProof, operation::Operation as QmdbOperation,
-};
+use commonware_storage::qmdb::{current::proof::RangeProof, operation::Operation as QmdbOperation};
 
 use crate::codec::{
     bitmap_chunk_bits, chunk_index_for_location, grafting_height_for, ops_to_grafted_pos,
@@ -75,7 +73,7 @@ where
     Op: QmdbOperation<M> + Codec,
     Op::Key: AsRef<[u8]>,
     Prove: FnMut(Location<M>) -> Fut,
-    Fut: Future<Output = Result<(CurrentRangeProof<M, H::Digest>, [u8; N]), QmdbError>>,
+    Fut: Future<Output = Result<(RangeProof<M, H::Digest>, [u8; N]), QmdbError>>,
 {
     if operations.is_empty() {
         return Err(QmdbError::EmptyBatch);
@@ -161,6 +159,7 @@ where
 
     Ok(CurrentBoundaryState {
         root,
+        ops_root_witness: None,
         chunks: chunks.into_iter().collect(),
         grafted_nodes: grafted_nodes.into_iter().collect(),
     })

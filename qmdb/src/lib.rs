@@ -77,6 +77,7 @@ pub use connect_client::{
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::merkle::{self, Family, Location, Position, Proof};
+use commonware_storage::qmdb::current::proof::OpsRootWitness;
 
 /// Maximum encoded operation size for QMDB key and value payloads (u16 length on the wire).
 pub const MAX_OPERATION_SIZE: usize = u16::MAX as usize;
@@ -214,6 +215,8 @@ impl<D: Digest, F: Family> WriterState<D, F> {
 pub struct CurrentBoundaryState<D: Digest, const N: usize, F: Family> {
     /// Canonical current-state root at this batch boundary.
     pub root: D,
+    /// Optional proof that the raw operation-log root is committed by `root`.
+    pub ops_root_witness: Option<OpsRootWitness<D>>,
     /// Changed bitmap chunks keyed by chunk index.
     pub chunks: Vec<(u64, [u8; N])>,
     /// Changed grafted digests keyed by ops-space Merkle position.
