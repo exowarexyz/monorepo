@@ -26,11 +26,37 @@ fn scan(
     limit: usize,
     forward: bool,
 ) -> Vec<(Bytes, Bytes)> {
-    store
-        .range_scan(start, end, limit, forward)
-        .expect("open scan")
-        .collect::<Result<Vec<_>, _>>()
-        .expect("scan")
+    let mut cursor = store
+        .range_scan(
+            Bytes::copy_from_slice(start),
+            Bytes::copy_from_slice(end),
+            limit,
+            forward,
+        )
+        .expect("open scan");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let mut rows = Vec::new();
+    loop {
+        let batch = runtime
+            .block_on(cursor.next_batch(usize::MAX))
+            .expect("scan");
+        if batch.is_empty() {
+            break;
+        }
+        rows.extend(batch);
+    }
+    rows
+}
+
+fn get_value(store: &RocksStore, key: &[u8]) -> Option<Vec<u8>> {
+    store.get(key).expect("get").0
+}
+
+fn get_many_values(store: &RocksStore, keys: &[&[u8]]) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+    store.get_many(keys).expect("get_many").0
 }
 
 // -- get --
@@ -39,7 +65,7 @@ fn scan(
 fn get_returns_none_for_missing_key() {
     let dir = tempdir().expect("tempdir");
     let store = RocksStore::open(dir.path()).expect("open db");
-    assert!(store.get(b"missing").expect("get").is_none());
+    assert!(get_value(&store, b"missing").is_none());
 }
 
 #[test]
@@ -49,10 +75,7 @@ fn get_returns_value_after_put() {
     store
         .put_batch(&[(Bytes::from_static(b"k"), Bytes::from_static(b"v"))])
         .expect("put_batch");
-    assert_eq!(
-        store.get(b"k").expect("get").as_deref(),
-        Some(b"v".as_slice())
-    );
+    assert_eq!(get_value(&store, b"k").as_deref(), Some(b"v".as_slice()));
 }
 
 #[test]
@@ -62,7 +85,7 @@ fn get_hides_internal_seq_meta_key() {
     store
         .put_batch(&[(Bytes::from_static(b"x"), Bytes::from_static(b"y"))])
         .expect("put_batch");
-    assert!(store.get(b"__simulator_seq__").expect("get").is_none());
+    assert!(get_value(&store, b"__simulator_seq__").is_none());
 }
 
 // -- put_batch / sequence --
@@ -206,7 +229,7 @@ fn get_many_returns_found_and_missing() {
     let store = RocksStore::open(dir.path()).expect("open db");
     seed_abc(&store);
 
-    let results = store.get_many(&[b"a", b"missing", b"c"]).expect("get_many");
+    let results = get_many_values(&store, &[b"a", b"missing", b"c"]);
     assert_eq!(results.len(), 3);
     assert_eq!(results[0], (b"a".to_vec(), Some(b"1".to_vec())));
     assert_eq!(results[1], (b"missing".to_vec(), None));
@@ -219,9 +242,7 @@ fn get_many_returns_none_for_seq_meta_key() {
     let store = RocksStore::open(dir.path()).expect("open db");
     seed_abc(&store);
 
-    let results = store
-        .get_many(&[b"__simulator_seq__", b"a"])
-        .expect("get_many");
+    let results = get_many_values(&store, &[b"__simulator_seq__", b"a"]);
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].1, None);
     assert_eq!(results[1], (b"a".to_vec(), Some(b"1".to_vec())));
@@ -236,12 +257,9 @@ fn delete_batch_removes_keys() {
     seed_abc(&store);
 
     store.delete_batch(&[b"a", b"c"]).expect("delete_batch");
-    assert!(store.get(b"a").expect("get").is_none());
-    assert_eq!(
-        store.get(b"b").expect("get").as_deref(),
-        Some(b"2".as_slice())
-    );
-    assert!(store.get(b"c").expect("get").is_none());
+    assert!(get_value(&store, b"a").is_none());
+    assert_eq!(get_value(&store, b"b").as_deref(), Some(b"2".as_slice()));
+    assert!(get_value(&store, b"c").is_none());
 }
 
 #[test]

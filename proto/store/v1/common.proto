@@ -10,9 +10,7 @@ import "buf/validate/validate.proto";
 // Keys must be between 0 and 254 bytes (inclusive) anywhere this message is
 // used for ingestion.
 message KvEntry {
-  // Row key bytes.
   bytes key = 1 [(buf.validate.field).bytes.max_len = 254];
-  // Row value bytes.
   bytes value = 2;
 }
 
@@ -40,11 +38,8 @@ message MatchKey {
 // APIs that operate above the store-row `KeyCodec` layer.
 message BytesFilter {
   oneof kind {
-    // Exact byte-string match.
     bytes exact = 1;
-    // Prefix byte-string match.
     bytes prefix = 2;
-    // Full-string regex match.
     string regex = 3;
   }
 }

@@ -10,8 +10,6 @@
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct KvEntry {
-    /// Row key bytes.
-    ///
     /// Field 1: `key`
     #[serde(
         rename = "key",
@@ -19,8 +17,6 @@ pub struct KvEntry {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
     pub key: ::buffa::alloc::vec::Vec<u8>,
-    /// Row value bytes.
-    ///
     /// Field 2: `value`
     #[serde(
         rename = "value",
@@ -181,12 +177,8 @@ pub const __KV_ENTRY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::t
 /// used for ingestion.
 #[derive(Clone, Debug, Default)]
 pub struct KvEntryView<'a> {
-    /// Row key bytes.
-    ///
     /// Field 1: `key`
     pub key: &'a [u8],
-    /// Row value bytes.
-    ///
     /// Field 2: `value`
     pub value: &'a [u8],
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,

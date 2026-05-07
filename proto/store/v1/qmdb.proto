@@ -11,9 +11,7 @@ import "store/v1/common.proto";
 // returns a historical multi-proof over one or more logical keys. Both are
 // ordered-backend only.
 service OrderedService {
-  // Return a current proof for one logical key.
   rpc Get(GetRequest) returns (GetResponse);
-  // Return a historical multi-proof for one or more logical keys.
   rpc GetMany(GetManyRequest) returns (GetManyResponse);
 }
 
@@ -28,7 +26,6 @@ service OrderedService {
 // batch produces a proof covering all of its operations; keyless backends
 // require `match_keys` to be empty.
 service RangeService {
-  // Stream historical proofs for matching operations.
   rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
 }
 
@@ -84,53 +81,38 @@ message GetManyRequest {
 
 // Stable mirror of an MMR proof payload.
 message MmrProof {
-  // Number of leaves covered by the MMR.
   uint64 leaves = 1;
-  // Sibling digests needed to verify the proof.
   repeated bytes digests = 2;
 }
 
 // One historical operation proven by a multi-proof.
 message MultiProofOperation {
-  // Operation location in the historical log.
   uint64 location = 1;
-  // Canonical encoded operation bytes.
   bytes encoded_operation = 2;
 }
 
 // Historical QMDB multi-proof over a set of operation locations.
 message HistoricalMultiProof {
   reserved 1;
-  // Historical ops root at the proof tip.
   bytes root = 2;
-  // MMR proof over operation locations.
   MmrProof proof = 3;
-  // Operations proven by this multi-proof.
   repeated MultiProofOperation operations = 4;
 }
 
 // Stable mirror of a current ordered range proof payload.
 message CurrentRangeProof {
-  // MMR proof for the current range.
   MmrProof proof = 1;
-  // Optional digest for a partially covered chunk.
   optional bytes partial_chunk_digest = 2;
-  // Root of the historical operations tree.
   bytes ops_root = 3;
 }
 
 // Current ordered proof for one active key.
 message CurrentKeyValueProof {
   reserved 1;
-  // Current root at the proof tip.
   bytes root = 2;
-  // Key location in the ordered structure.
   uint64 location = 3;
-  // Encoded chunk containing the key.
   bytes chunk = 4;
-  // Range proof for the containing chunk.
   CurrentRangeProof range_proof = 5;
-  // Canonical encoded operation bytes.
   bytes encoded_operation = 6;
 }
 
@@ -138,18 +120,15 @@ message CurrentKeyValueProof {
 message SubscribeResponse {
   // Underlying store stream sequence that made this proof readable end-to-end.
   uint64 resume_sequence_number = 1;
-  // Proof emitted for the matching batch.
   HistoricalMultiProof proof = 2;
 }
 
 // Unary current key proof response.
 message GetResponse {
-  // Current proof for the requested key.
   CurrentKeyValueProof proof = 1;
 }
 
 // Unary historical many-key proof response.
 message GetManyResponse {
-  // Historical multi-proof for the requested keys.
   HistoricalMultiProof proof = 1;
 }

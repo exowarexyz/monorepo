@@ -59,7 +59,6 @@ message TablesRequest {}
 
 // Describes every table registered in the server-side `KvSchema`.
 message TablesResponse {
-  // Registered tables.
   repeated Table tables = 1;
 }
 
@@ -77,13 +76,11 @@ message Table {
 
 // One column of a registered `Table`.
 message Column {
-  // Column name.
   string name = 1;
   // Arrow DataType rendered as its stable debug string (e.g. `Int64`,
   // `Utf8`, `Timestamp(Microsecond, None)`, `Decimal128(38, 10)`). Clients
   // that need typed handling should match against these exact strings.
   string data_type = 2;
-  // Whether the column may contain SQL NULL.
   bool nullable = 3;
 }
 
@@ -98,9 +95,7 @@ enum IndexLayout {
 
 // Secondary index declared on a `Table`.
 message Index {
-  // Index name.
   string name = 1;
-  // Index key layout.
   IndexLayout layout = 2;
   // Indices into `Table.columns` that make up the index key, in sort order.
   repeated uint32 key_columns = 3;
@@ -111,7 +106,6 @@ message Index {
 
 // Ad-hoc SQL statement.
 message QueryRequest {
-  // SQL statement to execute.
   string sql = 1
     [(buf.validate.field).string.min_len = 1,
      (buf.validate.field).string.max_len = 65535];
@@ -119,15 +113,12 @@ message QueryRequest {
 
 // Result set from `Query`.
 message QueryResponse {
-  // Column names in `rows[].cells` order.
   repeated string column = 1;
-  // Returned rows.
   repeated Row rows = 2;
 }
 
 // Typed row. `cells[i]` aligns with `column[i]` in the parent message.
 message Row {
-  // Cells in parent column order.
   repeated Cell cells = 1;
 }
 
@@ -138,7 +129,6 @@ message Null {}
 // Ordered list of scalar cells. Used for `List<...>` columns. Elements must
 // all carry the same inner kind (Int64, Float64, Boolean, or Utf8).
 message ListValue {
-  // List elements.
   repeated Cell elements = 1;
 }
 

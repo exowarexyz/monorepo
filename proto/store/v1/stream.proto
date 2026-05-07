@@ -15,9 +15,7 @@ import "store/v1/common.proto";
 // applied server-side). `SubscribeResponse` and `GetResponse` carry the
 // same shape so callers can share decoders.
 service Service {
-  // Subscribe to matching batches.
   rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
-  // Fetch one retained batch by sequence number.
   rpc Get(GetRequest) returns (GetResponse);
 }
 
@@ -49,7 +47,6 @@ message SubscribeRequest {
 
 // Point-lookup for one historical batch. Always returns the complete batch.
 message GetRequest {
-  // Sequence number to fetch.
   uint64 sequence_number = 1;
 }
 
@@ -58,17 +55,13 @@ message GetRequest {
 // are indistinguishable by content; only the observed `sequence_number`
 // (strictly monotonically increasing either way) differs.
 message SubscribeResponse {
-  // Sequence number of this batch.
   uint64 sequence_number = 1;
-  // Matched entries from this batch.
   repeated store.common.v1.KvEntry entries = 2;
 }
 
 // Response for `Get`: the full contents of the batch at the requested
 // sequence number, with no server-side filter applied.
 message GetResponse {
-  // Sequence number of this batch.
   uint64 sequence_number = 1;
-  // All entries in this batch.
   repeated store.common.v1.KvEntry entries = 2;
 }

@@ -91,11 +91,8 @@ message KvFieldRef {
   }
 
   oneof field {
-    // Field decoded from raw key bytes.
     KeyField key = 1;
-    // Field decoded from a Z-order key.
     ZOrderKeyField z_order_key = 2;
-    // Field decoded from stored value bytes.
     ValueField value = 3;
   }
 }
@@ -105,27 +102,16 @@ message KvFieldRef {
 // it participates in.
 message KvReducedValue {
   oneof value {
-    // Signed 64-bit integer.
     int64 int64_value = 1;
-    // Unsigned 64-bit integer.
     uint64 uint64_value = 2;
-    // 64-bit floating-point number.
     double float64_value = 3;
-    // Boolean value.
     bool boolean_value = 4;
-    // UTF-8 string.
     string utf8_value = 5;
-    // DATE32 days since Unix epoch.
     int32 date32_value = 6;
-    // DATE64 milliseconds since Unix epoch.
     int64 date64_value = 7;
-    // TIMESTAMP microseconds since Unix epoch.
     int64 timestamp_value = 8;
-    // Raw Decimal128 bytes.
     bytes decimal128_value = 9;
-    // Raw fixed-size binary bytes.
     bytes fixed_size_binary_value = 10;
-    // Raw Decimal256 bytes.
     bytes decimal256_value = 11;
   }
 }
@@ -136,9 +122,7 @@ message KvReducedValue {
 message KvExpr {
   // Binary arithmetic operation on two sub-expressions.
   message BinaryExpr {
-    // Left operand.
     KvExpr left = 1;
-    // Right operand.
     KvExpr right = 2;
   }
 
@@ -167,23 +151,18 @@ message KvExpr {
 message KvPredicateConstraint {
   // Inclusive integer range. Omit `min` or `max` for a one-sided bound.
   message IntRange {
-    // Inclusive lower bound.
     optional int64 min = 1;
-    // Inclusive upper bound.
     optional int64 max = 2;
   }
 
   // Inclusive uint64 range. Omit `min` or `max` for a one-sided bound.
   message UInt64Range {
-    // Inclusive lower bound.
     optional uint64 min = 1;
-    // Inclusive upper bound.
     optional uint64 max = 2;
   }
 
   // A single bound for a float range, with an inclusivity flag.
   message FloatBound {
-    // Numeric bound value.
     double value = 1;
     // When true the bound includes `value` itself (<=/>= semantics).
     bool inclusive = 2;
@@ -191,49 +170,39 @@ message KvPredicateConstraint {
 
   // Float range with independently inclusive/exclusive bounds.
   message FloatRange {
-    // Lower bound.
     optional FloatBound min = 1;
-    // Upper bound.
     optional FloatBound max = 2;
   }
 
   // Inclusive Decimal128 range (16-byte little-endian).
   message Decimal128Range {
-    // Inclusive lower bound.
     optional bytes min = 1;
-    // Inclusive upper bound.
     optional bytes max = 2;
   }
 
   // Inclusive Decimal256 range (32-byte little-endian).
   message Decimal256Range {
-    // Inclusive lower bound.
     optional bytes min = 1;
-    // Inclusive upper bound.
     optional bytes max = 2;
   }
 
   // Set membership test for UTF-8 strings.
   message StringIn {
-    // Allowed strings.
     repeated string values = 1;
   }
 
   // Set membership test for int64 values.
   message IntIn {
-    // Allowed int64 values.
     repeated int64 values = 1;
   }
 
   // Set membership test for uint64 values.
   message UInt64In {
-    // Allowed uint64 values.
     repeated uint64 values = 1;
   }
 
   // Set membership test for fixed-size binary values.
   message FixedSizeBinaryIn {
-    // Allowed fixed-size binary values.
     repeated bytes values = 1;
   }
 
@@ -327,7 +296,6 @@ message ReduceParams {
 // The result of a single reducer. Absent when no rows contributed (e.g. SUM
 // over zero matching rows).
 message RangeReduceResult {
-  // Reducer output when rows contributed.
   optional KvReducedValue value = 1;
 }
 
@@ -386,7 +354,7 @@ message GetResponse {
   reserved 1;
   // The value associated with the key; absent when the key does not exist.
   optional bytes value = 2;
-  // Query sequence and read counters for this lookup.
+  // Query sequence and server-defined metadata for this lookup.
   Detail detail = 3;
 }
 
@@ -394,12 +362,8 @@ message GetResponse {
 // containing one or more entries. Each entry includes its key so results may
 // arrive in any order. Missing keys have `value` absent.
 message GetManyRequest {
-  // Keys to look up.
   repeated bytes keys = 1 [(buf.validate.field).repeated = {min_items: 1, items: {bytes: {max_len: 254}}}];
-  // Optional freshness gate. See service-level comment.
   optional uint64 min_sequence_number = 2;
-  // Requested maximum lookup results per response frame. Servers may apply a
-  // lower cap.
   uint32 batch_size = 3 [(buf.validate.field).uint32.gt = 0];
 }
 
@@ -413,11 +377,10 @@ message GetManyEntry {
 
 // A batch of GetMany lookup results.
 message GetManyFrame {
-  // Lookup results in this frame.
   repeated GetManyEntry results = 1;
   // Running query detail after the entries in this frame have been read. For a
   // successful stream, the last detail observed by the client is the final
-  // sequence/read-counter summary.
+  // sequence/metadata summary.
   Detail detail = 2;
 }
 
@@ -429,17 +392,12 @@ message GetManyFrame {
 // prefix as `end`, or use an empty `end` when scanning through the end of the
 // keyspace is intended.
 message RangeRequest {
-  // Inclusive lower bound.
   bytes start = 1 [(buf.validate.field).bytes.max_len = 254];
   // Empty means unbounded above.
   bytes end = 2 [(buf.validate.field).bytes.max_len = 254];
-  // Maximum rows to return. Unset means no explicit row limit.
   optional uint32 limit = 3;
-  // Requested maximum rows per response frame. Servers may apply a lower cap.
   uint32 batch_size = 4 [(buf.validate.field).uint32.gt = 0];
-  // Traversal direction. Defaults to forward when unset.
   TraversalMode mode = 5 [(buf.validate.field).enum.defined_only = true];
-  // Optional freshness gate. See service-level comment.
   optional uint64 min_sequence_number = 6;
 }
 
@@ -447,24 +405,20 @@ message RangeRequest {
 // rows in that frame have been read. For an empty result, the stream contains a
 // single frame with empty `results` and populated `detail`.
 message RangeFrame {
-  // Rows in this frame.
   repeated store.common.v1.KvEntry results = 1;
   // Running query detail after the rows in this frame have been read. For a
   // successful stream, the last detail observed by the client is the final
-  // sequence/read-counter summary.
+  // sequence/metadata summary.
   Detail detail = 2;
 }
 
 // Same key-range semantics as `RangeRequest`: inclusive `[start, end]` over raw bytes when `end` is
 // non-empty; empty `end` means unbounded above.
 message ReduceRequest {
-  // Inclusive lower bound.
   bytes start = 1 [(buf.validate.field).bytes.max_len = 254];
   // Empty means unbounded above.
   bytes end = 2 [(buf.validate.field).bytes.max_len = 254];
-  // Aggregation parameters.
   ReduceParams params = 3 [(buf.validate.field).required = true];
-  // Optional freshness gate. See service-level comment.
   optional uint64 min_sequence_number = 4;
 }
 
@@ -476,6 +430,6 @@ message ReduceResponse {
   repeated RangeReduceResult results = 1;
   // Per-group reducer results. Populated only when `group_by` is non-empty.
   repeated RangeReduceGroup groups = 2;
-  // Query sequence and read counters for this reduction.
+  // Query sequence and server-defined metadata for this reduction.
   Detail detail = 3;
 }

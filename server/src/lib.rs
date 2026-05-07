@@ -14,7 +14,7 @@ pub use connect::{
     connect_stack, AppState, CompactConnect, IngestConnect, QueryConnect, StreamConnect,
 };
 pub use engine::{
-    range_scan_cursor_from_iter, QueryExtra, RangeScan, RangeScanCursor, RangeScanIter, StoreEngine,
+    range_scan_cursor_from_iter, QueryExtra, RangeScan, RangeScanCursor, StoreEngine,
 };
 pub use prune::{execute_prune, PruneError};
 pub use reduce::RangeError;

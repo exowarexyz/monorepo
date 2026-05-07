@@ -412,8 +412,6 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for SubscribeRequestView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct GetRequest {
-    /// Sequence number to fetch.
-    ///
     /// Field 1: `sequence_number`
     #[serde(
         rename = "sequenceNumber",
@@ -547,8 +545,6 @@ pub const __GET_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa
 /// Point-lookup for one historical batch. Always returns the complete batch.
 #[derive(Clone, Debug, Default)]
 pub struct GetRequestView<'a> {
-    /// Sequence number to fetch.
-    ///
     /// Field 1: `sequence_number`
     pub sequence_number: u64,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -655,8 +651,6 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for GetRequestView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct SubscribeResponse {
-    /// Sequence number of this batch.
-    ///
     /// Field 1: `sequence_number`
     #[serde(
         rename = "sequenceNumber",
@@ -665,8 +659,6 @@ pub struct SubscribeResponse {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
     )]
     pub sequence_number: u64,
-    /// Matched entries from this batch.
-    ///
     /// Field 2: `entries`
     #[serde(
         rename = "entries",
@@ -831,12 +823,8 @@ pub const __SUBSCRIBE_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = 
 /// (strictly monotonically increasing either way) differs.
 #[derive(Clone, Debug, Default)]
 pub struct SubscribeResponseView<'a> {
-    /// Sequence number of this batch.
-    ///
     /// Field 1: `sequence_number`
     pub sequence_number: u64,
-    /// Matched entries from this batch.
-    ///
     /// Field 2: `entries`
     pub entries: ::buffa::RepeatedView<'a, super::super::common::v1::KvEntryView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -962,8 +950,6 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for SubscribeResponseView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct GetResponse {
-    /// Sequence number of this batch.
-    ///
     /// Field 1: `sequence_number`
     #[serde(
         rename = "sequenceNumber",
@@ -972,8 +958,6 @@ pub struct GetResponse {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
     )]
     pub sequence_number: u64,
-    /// All entries in this batch.
-    ///
     /// Field 2: `entries`
     #[serde(
         rename = "entries",
@@ -1136,12 +1120,8 @@ pub const __GET_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buff
 /// sequence number, with no server-side filter applied.
 #[derive(Clone, Debug, Default)]
 pub struct GetResponseView<'a> {
-    /// Sequence number of this batch.
-    ///
     /// Field 1: `sequence_number`
     pub sequence_number: u64,
-    /// All entries in this batch.
-    ///
     /// Field 2: `entries`
     pub entries: ::buffa::RepeatedView<'a, super::super::common::v1::KvEntryView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -1284,7 +1264,7 @@ pub const SERVICE_SERVICE_NAME: &str = "store.stream.v1.Service";
 /// for zero-copy access patterns and when `to_owned_message()` is needed.
 #[allow(clippy::type_complexity)]
 pub trait Service: Send + Sync + 'static {
-    /// Subscribe to matching batches.
+    /// Handle the Subscribe RPC.
     fn subscribe(
         &self,
         ctx: ::connectrpc::Context,
@@ -1304,7 +1284,7 @@ pub trait Service: Send + Sync + 'static {
             ::connectrpc::ConnectError,
         >,
     > + Send;
-    /// Fetch one retained batch by sequence number.
+    /// Handle the Get RPC.
     fn get(
         &self,
         ctx: ::connectrpc::Context,

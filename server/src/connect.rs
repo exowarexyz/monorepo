@@ -37,7 +37,7 @@ use exoware_sdk::match_key::MatchKey;
 use exoware_sdk::store::common::v1::bytes_filter::KindView as ProtoBytesFilterKindView;
 use futures::{stream as stream_util, Stream};
 use tokio::sync::futures::OwnedNotified;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::Notify;
 
 use crate::reduce::RangeReducer;
 use crate::stream::StreamHub;
@@ -45,7 +45,6 @@ use crate::validate;
 use crate::{QueryExtra, StoreEngine};
 
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
-const RANGE_STREAM_BUFFERED_FRAMES: usize = 1;
 const RANGE_STREAM_MAX_FRAME_ROWS: usize = 4096;
 const REDUCE_SCAN_BATCH_SIZE: usize = 4096;
 
@@ -55,10 +54,6 @@ fn query_detail(sequence_number: u64, extra: QueryExtra) -> Detail {
         extra,
         ..Default::default()
     }
-}
-
-fn empty_query_detail(sequence_number: u64) -> Detail {
-    query_detail(sequence_number, QueryExtra::default())
 }
 
 struct RangeStreamRequest {
@@ -73,42 +68,40 @@ struct RangeStreamRequest {
 fn range_stream(
     engine: Arc<dyn StoreEngine>,
     request: RangeStreamRequest,
-) -> Pin<Box<dyn Stream<Item = Result<RangeFrame, ConnectError>> + Send>> {
-    let (tx, rx) = mpsc::channel(RANGE_STREAM_BUFFERED_FRAMES);
+) -> Result<Pin<Box<dyn Stream<Item = Result<RangeFrame, ConnectError>> + Send>>, ConnectError> {
+    let RangeStreamRequest {
+        start_key,
+        end_key,
+        limit,
+        batch_size,
+        forward,
+        sequence_number,
+    } = request;
+    let entries = engine
+        .range_scan(start_key, end_key, limit, forward)
+        .map_err(ConnectError::internal)?;
 
-    // The bounded channel is the backpressure point: slow clients pause range
-    // scanning at frame boundaries.
-    tokio::spawn(async move {
-        let RangeStreamRequest {
-            start_key,
-            end_key,
-            limit,
-            batch_size,
-            forward,
-            sequence_number,
-        } = request;
-        let mut entries = match engine.range_scan_cursor(start_key, end_key, limit, forward) {
-            Ok(entries) => entries,
-            Err(e) => {
-                let _ = tx.send(Err(ConnectError::internal(e))).await;
-                return;
-            }
-        };
-
-        let mut emitted_frame = false;
-        loop {
-            if tx.is_closed() {
-                return;
-            }
+    Ok(Box::pin(stream_util::unfold(
+        Some((entries, false)),
+        move |state| async move {
+            let Some((mut entries, emitted_frame)) = state else {
+                return None;
+            };
             let rows = match entries.next_batch(batch_size).await {
                 Ok(rows) => rows,
-                Err(e) => {
-                    let _ = tx.send(Err(ConnectError::internal(e))).await;
-                    return;
-                }
+                Err(e) => return Some((Err(ConnectError::internal(e)), None)),
             };
             if rows.is_empty() {
-                break;
+                if emitted_frame {
+                    return None;
+                }
+                return Some((
+                    Ok(RangeFrame {
+                        detail: Some(query_detail(sequence_number, entries.extra())).into(),
+                        ..Default::default()
+                    }),
+                    None,
+                ));
             }
 
             let mut chunk = Vec::with_capacity(rows.len());
@@ -119,31 +112,17 @@ fn range_stream(
                     ..Default::default()
                 });
             }
-            let frame = RangeFrame {
-                results: chunk,
-                detail: Some(query_detail(sequence_number, entries.extra())).into(),
-                ..Default::default()
-            };
-            if tx.send(Ok(frame)).await.is_err() {
-                return;
-            }
-            tokio::task::yield_now().await;
-            emitted_frame = true;
-        }
-
-        if !emitted_frame {
-            let _ = tx
-                .send(Ok(RangeFrame {
-                    detail: Some(query_detail(sequence_number, entries.extra())).into(),
+            let detail = query_detail(sequence_number, entries.extra());
+            Some((
+                Ok(RangeFrame {
+                    results: chunk,
+                    detail: Some(detail).into(),
                     ..Default::default()
-                }))
-                .await;
-        }
-    });
-
-    Box::pin(stream_util::unfold(rx, |mut rx| async move {
-        rx.recv().await.map(|item| (item, rx))
-    }))
+                }),
+                Some((entries, true)),
+            ))
+        },
+    )))
 }
 
 #[derive(Clone)]
@@ -303,7 +282,7 @@ impl QueryApi for QueryConnect {
         let (value, extra) = self
             .state
             .engine
-            .get_with_extra(key.as_ref())
+            .get(key.as_ref())
             .map_err(ConnectError::internal)?;
         let detail = query_detail(token, extra);
         Ok((
@@ -336,12 +315,12 @@ impl QueryApi for QueryConnect {
         let (entries, extra) = self
             .state
             .engine
-            .get_many_with_extra(&key_refs)
+            .get_many(&key_refs)
             .map_err(ConnectError::internal)?;
+        let detail = query_detail(sequence_number, extra);
         let batch_size = (request.batch_size as usize).min(RANGE_STREAM_MAX_FRAME_ROWS);
         let mut frames = Vec::new();
         let mut chunk = Vec::new();
-        let mut emitted_frame = false;
         for (key, value) in entries {
             chunk.push(GetManyEntry {
                 key,
@@ -351,25 +330,22 @@ impl QueryApi for QueryConnect {
             if chunk.len() >= batch_size {
                 frames.push(Ok(GetManyFrame {
                     results: std::mem::take(&mut chunk),
-                    detail: Some(empty_query_detail(sequence_number)).into(),
+                    detail: Some(detail.clone()).into(),
                     ..Default::default()
                 }));
-                emitted_frame = true;
             }
         }
         if !chunk.is_empty() {
             frames.push(Ok(GetManyFrame {
                 results: chunk,
-                detail: Some(query_detail(sequence_number, extra)).into(),
+                detail: Some(detail).into(),
                 ..Default::default()
             }));
-        } else if !emitted_frame {
+        } else if frames.is_empty() {
             frames.push(Ok(GetManyFrame {
-                detail: Some(query_detail(sequence_number, extra)).into(),
+                detail: Some(detail).into(),
                 ..Default::default()
             }));
-        } else if let Some(Ok(frame)) = frames.last_mut() {
-            frame.detail = Some(query_detail(sequence_number, extra)).into();
         }
 
         Ok((Box::pin(stream_util::iter(frames)), ctx))
@@ -392,7 +368,7 @@ impl QueryApi for QueryConnect {
         let start_key: Key = wire.slice_ref(request.start);
         let end_key: Key = wire.slice_ref(request.end);
         let limit = request.limit.map(|v| v as usize).unwrap_or(usize::MAX);
-        let batch_size = request.batch_size as usize;
+        let batch_size = (request.batch_size as usize).min(RANGE_STREAM_MAX_FRAME_ROWS);
         let forward = match parse_range_traversal_direction(request.mode) {
             Ok(RangeTraversalDirection::Forward) => true,
             Ok(RangeTraversalDirection::Reverse) => false,
@@ -409,7 +385,7 @@ impl QueryApi for QueryConnect {
                     forward,
                     sequence_number,
                 },
-            ),
+            )?,
             ctx,
         ))
     }
@@ -432,7 +408,7 @@ impl QueryApi for QueryConnect {
         let mut rows = self
             .state
             .engine
-            .range_scan_cursor(start_key, end_key, usize::MAX, true)
+            .range_scan(start_key, end_key, usize::MAX, true)
             .map_err(ConnectError::internal)?;
 
         let mut reducer = RangeReducer::new(&domain)
@@ -521,6 +497,7 @@ impl CompactApi for CompactConnect {
         let document = exoware_proto::prune_policy_document_from_prune_request_view(&request)
             .map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
         crate::prune::execute_prune(&self.state.engine, &document)
+            .await
             .map_err(|e| ConnectError::internal(e.to_string()))?;
         Ok((PruneResponse::default(), ctx))
     }
@@ -954,7 +931,7 @@ mod tests {
     use exoware_sdk::{decode_connect_error, to_domain_reduce_response};
     use futures::StreamExt;
 
-    use crate::{range_scan_cursor_from_iter, QueryExtra, RangeScanCursor, RangeScanIter};
+    use crate::{range_scan_cursor_from_iter, QueryExtra, RangeScanCursor};
 
     const TEST_RESERVED_BITS: u8 = 4;
     const TEST_PREFIX: u16 = 1;
@@ -1047,21 +1024,17 @@ mod tests {
             Ok(seq)
         }
 
-        fn get(&self, _key: &[u8]) -> Result<Option<Vec<u8>>, String> {
-            Ok(None)
-        }
-
-        fn get_with_extra(&self, key: &[u8]) -> Result<(Option<Vec<u8>>, QueryExtra), String> {
+        fn get(&self, _key: &[u8]) -> Result<(Option<Vec<u8>>, QueryExtra), String> {
             let extra = self
                 .state
                 .lock()
                 .map_err(|e| e.to_string())?
                 .query_extra
                 .clone();
-            Ok((self.get(key)?, extra))
+            Ok((None, extra))
         }
 
-        fn get_many_with_extra(
+        fn get_many(
             &self,
             keys: &[&[u8]],
         ) -> Result<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra), String> {
@@ -1071,30 +1044,10 @@ mod tests {
                 .map_err(|e| e.to_string())?
                 .query_extra
                 .clone();
-            Ok((self.get_many(keys)?, extra))
+            Ok((keys.iter().map(|key| (key.to_vec(), None)).collect(), extra))
         }
 
         fn range_scan(
-            &self,
-            _start: &[u8],
-            _end: &[u8],
-            _limit: usize,
-            _forward: bool,
-        ) -> Result<RangeScanIter<'_>, String> {
-            let rows = self
-                .state
-                .lock()
-                .map_err(|e| e.to_string())?
-                .range_rows
-                .clone();
-            let state = self.state.clone();
-            Ok(Box::new(rows.into_iter().map(move |row| {
-                state.lock().expect("lock").range_next_count += 1;
-                Ok(row)
-            })))
-        }
-
-        fn range_scan_cursor(
             &self,
             _start: Bytes,
             _end: Bytes,

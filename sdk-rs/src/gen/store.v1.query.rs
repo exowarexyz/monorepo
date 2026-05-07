@@ -4885,16 +4885,12 @@ pub mod kv_expr {
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct BinaryExpr {
-        /// Left operand.
-        ///
         /// Field 1: `left`
         #[serde(
             rename = "left",
             skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
         )]
         pub left: ::buffa::MessageField<KvExpr>,
-        /// Right operand.
-        ///
         /// Field 2: `right`
         #[serde(
             rename = "right",
@@ -5066,12 +5062,8 @@ pub mod kv_expr {
     /// Binary arithmetic operation on two sub-expressions.
     #[derive(Clone, Debug, Default)]
     pub struct BinaryExprView<'a> {
-        /// Left operand.
-        ///
         /// Field 1: `left`
         pub left: ::buffa::MessageFieldView<KvExprView<'a>>,
-        /// Right operand.
-        ///
         /// Field 2: `right`
         pub right: ::buffa::MessageFieldView<KvExprView<'a>>,
         pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -6807,8 +6799,6 @@ pub mod kv_predicate_constraint {
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct IntRange {
-        /// Inclusive lower bound.
-        ///
         /// Field 1: `min`
         #[serde(
             rename = "min",
@@ -6816,8 +6806,6 @@ pub mod kv_predicate_constraint {
             skip_serializing_if = "Option::is_none"
         )]
         pub min: Option<i64>,
-        /// Inclusive upper bound.
-        ///
         /// Field 2: `max`
         #[serde(
             rename = "max",
@@ -6972,12 +6960,8 @@ pub mod kv_predicate_constraint {
     /// Inclusive integer range. Omit `min` or `max` for a one-sided bound.
     #[derive(Clone, Debug, Default)]
     pub struct IntRangeView<'a> {
-        /// Inclusive lower bound.
-        ///
         /// Field 1: `min`
         pub min: ::core::option::Option<i64>,
-        /// Inclusive upper bound.
-        ///
         /// Field 2: `max`
         pub max: ::core::option::Option<i64>,
         pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -7094,8 +7078,6 @@ pub mod kv_predicate_constraint {
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct UInt64Range {
-        /// Inclusive lower bound.
-        ///
         /// Field 1: `min`
         #[serde(
             rename = "min",
@@ -7103,8 +7085,6 @@ pub mod kv_predicate_constraint {
             skip_serializing_if = "Option::is_none"
         )]
         pub min: Option<u64>,
-        /// Inclusive upper bound.
-        ///
         /// Field 2: `max`
         #[serde(
             rename = "max",
@@ -7259,12 +7239,8 @@ pub mod kv_predicate_constraint {
     /// Inclusive uint64 range. Omit `min` or `max` for a one-sided bound.
     #[derive(Clone, Debug, Default)]
     pub struct UInt64RangeView<'a> {
-        /// Inclusive lower bound.
-        ///
         /// Field 1: `min`
         pub min: ::core::option::Option<u64>,
-        /// Inclusive upper bound.
-        ///
         /// Field 2: `max`
         pub max: ::core::option::Option<u64>,
         pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -7381,8 +7357,6 @@ pub mod kv_predicate_constraint {
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct FloatBound {
-        /// Numeric bound value.
-        ///
         /// Field 1: `value`
         #[serde(
             rename = "value",
@@ -7542,8 +7516,6 @@ pub mod kv_predicate_constraint {
     /// A single bound for a float range, with an inclusivity flag.
     #[derive(Clone, Debug, Default)]
     pub struct FloatBoundView<'a> {
-        /// Numeric bound value.
-        ///
         /// Field 1: `value`
         pub value: f64,
         /// When true the bound includes `value` itself (\<=/\>= semantics).
@@ -7664,16 +7636,12 @@ pub mod kv_predicate_constraint {
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct FloatRange {
-        /// Lower bound.
-        ///
         /// Field 1: `min`
         #[serde(
             rename = "min",
             skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
         )]
         pub min: ::buffa::MessageField<kv_predicate_constraint::FloatBound>,
-        /// Upper bound.
-        ///
         /// Field 2: `max`
         #[serde(
             rename = "max",
@@ -7845,12 +7813,8 @@ pub mod kv_predicate_constraint {
     /// Float range with independently inclusive/exclusive bounds.
     #[derive(Clone, Debug, Default)]
     pub struct FloatRangeView<'a> {
-        /// Lower bound.
-        ///
         /// Field 1: `min`
         pub min: ::buffa::MessageFieldView<kv_predicate_constraint::FloatBoundView<'a>>,
-        /// Upper bound.
-        ///
         /// Field 2: `max`
         pub max: ::buffa::MessageFieldView<kv_predicate_constraint::FloatBoundView<'a>>,
         pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -8013,8 +7977,6 @@ pub mod kv_predicate_constraint {
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct Decimal128Range {
-        /// Inclusive lower bound.
-        ///
         /// Field 1: `min`
         #[serde(
             rename = "min",
@@ -8022,8 +7984,6 @@ pub mod kv_predicate_constraint {
             skip_serializing_if = "Option::is_none"
         )]
         pub min: Option<::buffa::alloc::vec::Vec<u8>>,
-        /// Inclusive upper bound.
-        ///
         /// Field 2: `max`
         #[serde(
             rename = "max",
@@ -8186,12 +8146,8 @@ pub mod kv_predicate_constraint {
     /// Inclusive Decimal128 range (16-byte little-endian).
     #[derive(Clone, Debug, Default)]
     pub struct Decimal128RangeView<'a> {
-        /// Inclusive lower bound.
-        ///
         /// Field 1: `min`
         pub min: ::core::option::Option<&'a [u8]>,
-        /// Inclusive upper bound.
-        ///
         /// Field 2: `max`
         pub max: ::core::option::Option<&'a [u8]>,
         pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -8312,8 +8268,6 @@ pub mod kv_predicate_constraint {
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct Decimal256Range {
-        /// Inclusive lower bound.
-        ///
         /// Field 1: `min`
         #[serde(
             rename = "min",
@@ -8321,8 +8275,6 @@ pub mod kv_predicate_constraint {
             skip_serializing_if = "Option::is_none"
         )]
         pub min: Option<::buffa::alloc::vec::Vec<u8>>,
-        /// Inclusive upper bound.
-        ///
         /// Field 2: `max`
         #[serde(
             rename = "max",
@@ -8485,12 +8437,8 @@ pub mod kv_predicate_constraint {
     /// Inclusive Decimal256 range (32-byte little-endian).
     #[derive(Clone, Debug, Default)]
     pub struct Decimal256RangeView<'a> {
-        /// Inclusive lower bound.
-        ///
         /// Field 1: `min`
         pub min: ::core::option::Option<&'a [u8]>,
-        /// Inclusive upper bound.
-        ///
         /// Field 2: `max`
         pub max: ::core::option::Option<&'a [u8]>,
         pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -8611,8 +8559,6 @@ pub mod kv_predicate_constraint {
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct StringIn {
-        /// Allowed strings.
-        ///
         /// Field 1: `values`
         #[serde(
             rename = "values",
@@ -8744,8 +8690,6 @@ pub mod kv_predicate_constraint {
     /// Set membership test for UTF-8 strings.
     #[derive(Clone, Debug, Default)]
     pub struct StringInView<'a> {
-        /// Allowed strings.
-        ///
         /// Field 1: `values`
         pub values: ::buffa::RepeatedView<'a, &'a str>,
         pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -8853,8 +8797,6 @@ pub mod kv_predicate_constraint {
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct IntIn {
-        /// Allowed int64 values.
-        ///
         /// Field 1: `values`
         #[serde(
             rename = "values",
@@ -9021,8 +8963,6 @@ pub mod kv_predicate_constraint {
     /// Set membership test for int64 values.
     #[derive(Clone, Debug, Default)]
     pub struct IntInView<'a> {
-        /// Allowed int64 values.
-        ///
         /// Field 1: `values`
         pub values: ::buffa::RepeatedView<'a, i64>,
         pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -9138,8 +9078,6 @@ pub mod kv_predicate_constraint {
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct UInt64In {
-        /// Allowed uint64 values.
-        ///
         /// Field 1: `values`
         #[serde(
             rename = "values",
@@ -9306,8 +9244,6 @@ pub mod kv_predicate_constraint {
     /// Set membership test for uint64 values.
     #[derive(Clone, Debug, Default)]
     pub struct UInt64InView<'a> {
-        /// Allowed uint64 values.
-        ///
         /// Field 1: `values`
         pub values: ::buffa::RepeatedView<'a, u64>,
         pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -9423,8 +9359,6 @@ pub mod kv_predicate_constraint {
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct FixedSizeBinaryIn {
-        /// Allowed fixed-size binary values.
-        ///
         /// Field 1: `values`
         #[serde(
             rename = "values",
@@ -9556,8 +9490,6 @@ pub mod kv_predicate_constraint {
     /// Set membership test for fixed-size binary values.
     #[derive(Clone, Debug, Default)]
     pub struct FixedSizeBinaryInView<'a> {
-        /// Allowed fixed-size binary values.
-        ///
         /// Field 1: `values`
         pub values: ::buffa::RepeatedView<'a, &'a [u8]>,
         pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -11236,8 +11168,6 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for ReduceParamsView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct RangeReduceResult {
-    /// Reducer output when rows contributed.
-    ///
     /// Field 1: `value`
     #[serde(
         rename = "value",
@@ -11377,8 +11307,6 @@ pub const __RANGE_REDUCE_RESULT_JSON_ANY: ::buffa::type_registry::JsonAnyEntry =
 /// over zero matching rows).
 #[derive(Clone, Debug, Default)]
 pub struct RangeReduceResultView<'a> {
-    /// Reducer output when rows contributed.
-    ///
     /// Field 1: `value`
     pub value: ::buffa::MessageFieldView<KvReducedValueView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -12201,7 +12129,7 @@ pub struct GetResponse {
         skip_serializing_if = "Option::is_none"
     )]
     pub value: Option<::buffa::alloc::vec::Vec<u8>>,
-    /// Query sequence and read counters for this lookup.
+    /// Query sequence and server-defined metadata for this lookup.
     ///
     /// Field 3: `detail`
     #[serde(
@@ -12373,7 +12301,7 @@ pub struct GetResponseView<'a> {
     ///
     /// Field 2: `value`
     pub value: ::core::option::Option<&'a [u8]>,
-    /// Query sequence and read counters for this lookup.
+    /// Query sequence and server-defined metadata for this lookup.
     ///
     /// Field 3: `detail`
     pub detail: ::buffa::MessageFieldView<DetailView<'a>>,
@@ -12505,8 +12433,6 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for GetResponseView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct GetManyRequest {
-    /// Keys to look up.
-    ///
     /// Field 1: `keys`
     #[serde(
         rename = "keys",
@@ -12514,8 +12440,6 @@ pub struct GetManyRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec"
     )]
     pub keys: ::buffa::alloc::vec::Vec<::buffa::alloc::vec::Vec<u8>>,
-    /// Optional freshness gate. See service-level comment.
-    ///
     /// Field 2: `min_sequence_number`
     #[serde(
         rename = "minSequenceNumber",
@@ -12524,9 +12448,6 @@ pub struct GetManyRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub min_sequence_number: Option<u64>,
-    /// Requested maximum lookup results per response frame. Servers may apply a
-    /// lower cap.
-    ///
     /// Field 3: `batch_size`
     #[serde(
         rename = "batchSize",
@@ -12705,17 +12626,10 @@ pub const __GET_MANY_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::
 /// arrive in any order. Missing keys have `value` absent.
 #[derive(Clone, Debug, Default)]
 pub struct GetManyRequestView<'a> {
-    /// Keys to look up.
-    ///
     /// Field 1: `keys`
     pub keys: ::buffa::RepeatedView<'a, &'a [u8]>,
-    /// Optional freshness gate. See service-level comment.
-    ///
     /// Field 2: `min_sequence_number`
     pub min_sequence_number: ::core::option::Option<u64>,
-    /// Requested maximum lookup results per response frame. Servers may apply a
-    /// lower cap.
-    ///
     /// Field 3: `batch_size`
     pub batch_size: u32,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -13133,8 +13047,6 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for GetManyEntryView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct GetManyFrame {
-    /// Lookup results in this frame.
-    ///
     /// Field 1: `results`
     #[serde(
         rename = "results",
@@ -13144,7 +13056,7 @@ pub struct GetManyFrame {
     pub results: ::buffa::alloc::vec::Vec<GetManyEntry>,
     /// Running query detail after the entries in this frame have been read. For a
     /// successful stream, the last detail observed by the client is the final
-    /// sequence/read-counter summary.
+    /// sequence/metadata summary.
     ///
     /// Field 2: `detail`
     #[serde(
@@ -13315,13 +13227,11 @@ pub const __GET_MANY_FRAME_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::bu
 /// A batch of GetMany lookup results.
 #[derive(Clone, Debug, Default)]
 pub struct GetManyFrameView<'a> {
-    /// Lookup results in this frame.
-    ///
     /// Field 1: `results`
     pub results: ::buffa::RepeatedView<'a, GetManyEntryView<'a>>,
     /// Running query detail after the entries in this frame have been read. For a
     /// successful stream, the last detail observed by the client is the final
-    /// sequence/read-counter summary.
+    /// sequence/metadata summary.
     ///
     /// Field 2: `detail`
     pub detail: ::buffa::MessageFieldView<DetailView<'a>>,
@@ -13461,8 +13371,6 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for GetManyFrameView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct RangeRequest {
-    /// Inclusive lower bound.
-    ///
     /// Field 1: `start`
     #[serde(
         rename = "start",
@@ -13479,8 +13387,6 @@ pub struct RangeRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
     pub end: ::buffa::alloc::vec::Vec<u8>,
-    /// Maximum rows to return. Unset means no explicit row limit.
-    ///
     /// Field 3: `limit`
     #[serde(
         rename = "limit",
@@ -13488,8 +13394,6 @@ pub struct RangeRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub limit: Option<u32>,
-    /// Requested maximum rows per response frame. Servers may apply a lower cap.
-    ///
     /// Field 4: `batch_size`
     #[serde(
         rename = "batchSize",
@@ -13498,8 +13402,6 @@ pub struct RangeRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u32"
     )]
     pub batch_size: u32,
-    /// Traversal direction. Defaults to forward when unset.
-    ///
     /// Field 5: `mode`
     #[serde(
         rename = "mode",
@@ -13507,8 +13409,6 @@ pub struct RangeRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_default_enum_value"
     )]
     pub mode: ::buffa::EnumValue<TraversalMode>,
-    /// Optional freshness gate. See service-level comment.
-    ///
     /// Field 6: `min_sequence_number`
     #[serde(
         rename = "minSequenceNumber",
@@ -13762,28 +13662,18 @@ pub const __RANGE_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buf
 /// keyspace is intended.
 #[derive(Clone, Debug, Default)]
 pub struct RangeRequestView<'a> {
-    /// Inclusive lower bound.
-    ///
     /// Field 1: `start`
     pub start: &'a [u8],
     /// Empty means unbounded above.
     ///
     /// Field 2: `end`
     pub end: &'a [u8],
-    /// Maximum rows to return. Unset means no explicit row limit.
-    ///
     /// Field 3: `limit`
     pub limit: ::core::option::Option<u32>,
-    /// Requested maximum rows per response frame. Servers may apply a lower cap.
-    ///
     /// Field 4: `batch_size`
     pub batch_size: u32,
-    /// Traversal direction. Defaults to forward when unset.
-    ///
     /// Field 5: `mode`
     pub mode: ::buffa::EnumValue<TraversalMode>,
-    /// Optional freshness gate. See service-level comment.
-    ///
     /// Field 6: `min_sequence_number`
     pub min_sequence_number: ::core::option::Option<u64>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -13948,8 +13838,6 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for RangeRequestView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct RangeFrame {
-    /// Rows in this frame.
-    ///
     /// Field 1: `results`
     #[serde(
         rename = "results",
@@ -13959,7 +13847,7 @@ pub struct RangeFrame {
     pub results: ::buffa::alloc::vec::Vec<super::super::common::v1::KvEntry>,
     /// Running query detail after the rows in this frame have been read. For a
     /// successful stream, the last detail observed by the client is the final
-    /// sequence/read-counter summary.
+    /// sequence/metadata summary.
     ///
     /// Field 2: `detail`
     #[serde(
@@ -14132,13 +14020,11 @@ pub const __RANGE_FRAME_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa
 /// single frame with empty `results` and populated `detail`.
 #[derive(Clone, Debug, Default)]
 pub struct RangeFrameView<'a> {
-    /// Rows in this frame.
-    ///
     /// Field 1: `results`
     pub results: ::buffa::RepeatedView<'a, super::super::common::v1::KvEntryView<'a>>,
     /// Running query detail after the rows in this frame have been read. For a
     /// successful stream, the last detail observed by the client is the final
-    /// sequence/read-counter summary.
+    /// sequence/metadata summary.
     ///
     /// Field 2: `detail`
     pub detail: ::buffa::MessageFieldView<DetailView<'a>>,
@@ -14279,8 +14165,6 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for RangeFrameView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct ReduceRequest {
-    /// Inclusive lower bound.
-    ///
     /// Field 1: `start`
     #[serde(
         rename = "start",
@@ -14297,16 +14181,12 @@ pub struct ReduceRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
     pub end: ::buffa::alloc::vec::Vec<u8>,
-    /// Aggregation parameters.
-    ///
     /// Field 3: `params`
     #[serde(
         rename = "params",
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
     )]
     pub params: ::buffa::MessageField<ReduceParams>,
-    /// Optional freshness gate. See service-level comment.
-    ///
     /// Field 4: `min_sequence_number`
     #[serde(
         rename = "minSequenceNumber",
@@ -14518,20 +14398,14 @@ pub const __REDUCE_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::bu
 /// non-empty; empty `end` means unbounded above.
 #[derive(Clone, Debug, Default)]
 pub struct ReduceRequestView<'a> {
-    /// Inclusive lower bound.
-    ///
     /// Field 1: `start`
     pub start: &'a [u8],
     /// Empty means unbounded above.
     ///
     /// Field 2: `end`
     pub end: &'a [u8],
-    /// Aggregation parameters.
-    ///
     /// Field 3: `params`
     pub params: ::buffa::MessageFieldView<ReduceParamsView<'a>>,
-    /// Optional freshness gate. See service-level comment.
-    ///
     /// Field 4: `min_sequence_number`
     pub min_sequence_number: ::core::option::Option<u64>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -14706,7 +14580,7 @@ pub struct ReduceResponse {
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
     pub groups: ::buffa::alloc::vec::Vec<RangeReduceGroup>,
-    /// Query sequence and read counters for this reduction.
+    /// Query sequence and server-defined metadata for this reduction.
     ///
     /// Field 3: `detail`
     #[serde(
@@ -14916,7 +14790,7 @@ pub struct ReduceResponseView<'a> {
     ///
     /// Field 2: `groups`
     pub groups: ::buffa::RepeatedView<'a, RangeReduceGroupView<'a>>,
-    /// Query sequence and read counters for this reduction.
+    /// Query sequence and server-defined metadata for this reduction.
     ///
     /// Field 3: `detail`
     pub detail: ::buffa::MessageFieldView<DetailView<'a>>,

@@ -21,6 +21,8 @@ use regex::bytes::Regex;
 
 use crate::StoreEngine;
 
+const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
+
 #[derive(Debug)]
 pub enum PruneError {
     Engine(String),
@@ -132,14 +134,14 @@ fn keys_to_delete(
     }
 }
 
-pub fn execute_prune(
+pub async fn execute_prune(
     engine: &Arc<dyn StoreEngine>,
     document: &PrunePolicyDocument,
 ) -> Result<(), PruneError> {
     for policy in &document.policies {
         match &policy.scope {
             PolicyScope::Keys(scope) => {
-                execute_user_keys_policy(engine, scope, &policy.retain)?;
+                execute_user_keys_policy(engine, scope, &policy.retain).await?;
             }
             PolicyScope::Sequence => {
                 execute_batch_log_policy(engine, &policy.retain)?;
@@ -149,7 +151,7 @@ pub fn execute_prune(
     Ok(())
 }
 
-fn execute_user_keys_policy(
+async fn execute_user_keys_policy(
     engine: &Arc<dyn StoreEngine>,
     scope: &KeysScope,
     retain: &RetainPolicy,
@@ -159,37 +161,46 @@ fn execute_user_keys_policy(
         .map_err(|e| PruneError::Policy(e.to_string()))?;
 
     let (start, end) = codec.prefix_bounds();
-    let rows = engine
-        .range_scan(start.as_ref(), end.as_ref(), usize::MAX, true)
+    let mut rows = engine
+        .range_scan(start, end, usize::MAX, true)
         .map_err(PruneError::Engine)?;
 
     let mut groups: BTreeMap<Vec<u8>, Vec<KeyEntry>> = BTreeMap::new();
 
-    for row in rows {
-        let (key, _value) = row.map_err(PruneError::Engine)?;
-        if !codec.matches(&key) {
-            continue;
-        }
-        let payload_len = codec.payload_capacity_bytes_for_key_len(key.len());
-        let payload = match codec.read_payload(&key, 0, payload_len) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        if !regex.is_match(&payload) {
-            continue;
+    loop {
+        let batch = rows
+            .next_batch(PRUNE_SCAN_BATCH_SIZE)
+            .await
+            .map_err(PruneError::Engine)?;
+        if batch.is_empty() {
+            break;
         }
 
-        let group_key = match extract_group_key(&payload, &regex, scope) {
-            Some(gk) => gk,
-            None => continue,
-        };
+        for (key, _value) in batch {
+            if !codec.matches(&key) {
+                continue;
+            }
+            let payload_len = codec.payload_capacity_bytes_for_key_len(key.len());
+            let payload = match codec.read_payload(&key, 0, payload_len) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if !regex.is_match(&payload) {
+                continue;
+            }
 
-        let order_value = extract_order_value(&payload, &regex, scope).unwrap_or_default();
+            let group_key = match extract_group_key(&payload, &regex, scope) {
+                Some(gk) => gk,
+                None => continue,
+            };
 
-        groups
-            .entry(group_key)
-            .or_default()
-            .push(KeyEntry { key, order_value });
+            let order_value = extract_order_value(&payload, &regex, scope).unwrap_or_default();
+
+            groups
+                .entry(group_key)
+                .or_default()
+                .push(KeyEntry { key, order_value });
+        }
     }
 
     let mut all_deletes = Vec::new();

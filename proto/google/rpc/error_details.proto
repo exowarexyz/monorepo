@@ -9,26 +9,19 @@ package google.rpc;
 import "google/protobuf/duration.proto";
 
 message ErrorInfo {
-  // Stable error reason.
   string reason = 1;
-  // Logical error domain.
   string domain = 2;
-  // Additional string metadata.
   map<string, string> metadata = 3;
 }
 
 message RetryInfo {
-  // Suggested retry delay.
   google.protobuf.Duration retry_delay = 1;
 }
 
 message BadRequest {
   message FieldViolation {
-    // Field path that failed validation.
     string field = 1;
-    // Human-readable violation description.
     string description = 2;
   }
-  // Validation violations in the request.
   repeated FieldViolation field_violations = 1;
 }

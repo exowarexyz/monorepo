@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use exoware_server::{RangeScan, RangeScanCursor, RangeScanIter, StoreEngine};
+use exoware_server::{QueryExtra, RangeScan, RangeScanCursor, StoreEngine};
 use futures::future::BoxFuture;
 use rocksdb::{
     ColumnFamily, ColumnFamilyDescriptor, DBIterator, Direction, IteratorMode, Options, DB,
@@ -75,7 +75,7 @@ impl RocksRangeScanState {
             return Ok(Vec::new());
         }
 
-        let mut batch = Vec::with_capacity(max_items);
+        let mut batch = Vec::new();
         while batch.len() < max_items && !self.done {
             let Some(item) = self.iterator.next() else {
                 self.done = true;
@@ -145,6 +145,10 @@ impl RangeScan for RocksRangeScanCursor {
             self.state = Some(state);
             result
         })
+    }
+
+    fn extra(&self) -> QueryExtra {
+        QueryExtra::default()
     }
 }
 
@@ -218,69 +222,6 @@ impl RocksStore {
         }
         self.db.get(key)
     }
-
-    /// Inclusive `end` when non-empty: include keys `k` with `start <= k <= end`.
-    fn range_scan_rocksdb(
-        &self,
-        start: &[u8],
-        end: &[u8],
-        limit: usize,
-        forward: bool,
-    ) -> RangeScanIter<'_> {
-        let start = Bytes::copy_from_slice(start);
-        let end = Bytes::copy_from_slice(end);
-        let mut iter = if forward {
-            self.db
-                .iterator(IteratorMode::From(start.as_ref(), Direction::Forward))
-        } else if end.is_empty() {
-            self.db.iterator(IteratorMode::End)
-        } else {
-            // seek_for_prev starts at the largest key <= end, so reverse scans only need the lower-bound stop below.
-            self.db
-                .iterator(IteratorMode::From(end.as_ref(), Direction::Reverse))
-        };
-        let mut emitted = 0usize;
-        let mut done = limit == 0;
-
-        Box::new(std::iter::from_fn(move || {
-            if done {
-                return None;
-            }
-
-            loop {
-                let item = iter.next()?;
-                let (key, value) = match item {
-                    Ok(row) => row,
-                    Err(e) => {
-                        done = true;
-                        return Some(Err(e.to_string()));
-                    }
-                };
-                let key_ref = key.as_ref();
-                if key_ref == SEQ_META_KEY {
-                    continue;
-                }
-                if forward {
-                    if !end.is_empty() && key_ref > end.as_ref() {
-                        done = true;
-                        return None;
-                    }
-                } else if key_ref < start.as_ref() {
-                    done = true;
-                    return None;
-                }
-
-                emitted += 1;
-                if emitted >= limit {
-                    done = true;
-                }
-                return Some(Ok((
-                    Bytes::copy_from_slice(key_ref),
-                    Bytes::copy_from_slice(value.as_ref()),
-                )));
-            }
-        }))
-    }
 }
 
 impl StoreEngine for RocksStore {
@@ -288,21 +229,13 @@ impl StoreEngine for RocksStore {
         self.batch_put_rocksdb(kvs).map_err(|e| e.to_string())
     }
 
-    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, String> {
-        self.get_rocksdb(key).map_err(|e| e.to_string())
+    fn get(&self, key: &[u8]) -> Result<(Option<Vec<u8>>, QueryExtra), String> {
+        self.get_rocksdb(key)
+            .map(|value| (value, QueryExtra::default()))
+            .map_err(|e| e.to_string())
     }
 
     fn range_scan(
-        &self,
-        start: &[u8],
-        end: &[u8],
-        limit: usize,
-        forward: bool,
-    ) -> Result<RangeScanIter<'_>, String> {
-        Ok(self.range_scan_rocksdb(start, end, limit, forward))
-    }
-
-    fn range_scan_cursor(
         &self,
         start: Bytes,
         end: Bytes,
@@ -318,9 +251,13 @@ impl StoreEngine for RocksStore {
         )))
     }
 
-    fn get_many(&self, keys: &[&[u8]]) -> Result<Vec<(Vec<u8>, Option<Vec<u8>>)>, String> {
+    fn get_many(
+        &self,
+        keys: &[&[u8]],
+    ) -> Result<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra), String> {
         let results = self.db.multi_get(keys);
-        keys.iter()
+        let entries = keys
+            .iter()
             .zip(results)
             .map(|(k, r)| {
                 if *k == SEQ_META_KEY {
@@ -329,7 +266,8 @@ impl StoreEngine for RocksStore {
                 let value = r.map_err(|e| e.to_string())?;
                 Ok((k.to_vec(), value))
             })
-            .collect()
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok((entries, QueryExtra::default()))
     }
 
     fn delete_batch(&self, keys: &[&[u8]]) -> Result<u64, String> {
