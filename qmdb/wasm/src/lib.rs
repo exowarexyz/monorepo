@@ -564,12 +564,12 @@ where
         let boundary = verify_key_exclusion_from_proto::<F>(start_proof, start_key, current_root)
             .map_err(js_err)?;
         match (end_key, boundary) {
-            (Some(end_key), ExclusionBoundary::Span { start, end }) => {
-                if !span_contains_key(&start, &end, end_key) && end.as_slice() != end_key {
-                    return Err(js_err(
-                        "empty getRange boundary does not cover requested end",
-                    ));
-                }
+            (Some(end_key), ExclusionBoundary::Span { start, end })
+                if !span_contains_key(&start, &end, end_key) && end.as_slice() != end_key =>
+            {
+                return Err(js_err(
+                    "empty getRange boundary does not cover requested end",
+                ));
             }
             (None, ExclusionBoundary::Span { end, .. }) if end.as_slice() > start_key => {
                 return Err(js_err(
