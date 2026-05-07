@@ -4,7 +4,11 @@ use commonware_codec::{Codec, Decode, Encode, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{Family, Location},
-    qmdb::immutable::variable::Operation as ImmutableOperation,
+    qmdb::{
+        any::value::{ValueEncoding, VariableEncoding},
+        immutable,
+        operation::Key as QmdbKey,
+    },
 };
 use commonware_utils::Array;
 use exoware_sdk::{SerializableReadSession, StoreClient};
@@ -23,15 +27,37 @@ use crate::proof::{OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperati
 use crate::storage::AuthKvMerkleStorage;
 use crate::VersionedValue;
 
-#[derive(Clone, Debug)]
-pub struct ImmutableClient<F: Family, H: Hasher, K: AsRef<[u8]> + Codec, V: Codec + Send + Sync> {
+#[derive(Clone)]
+pub struct ImmutableClient<
+    F: Family,
+    H: Hasher,
+    K: QmdbKey + AsRef<[u8]>,
+    V: Codec + Send + Sync,
+    E: ValueEncoding<Value = V> = VariableEncoding<V>,
+> where
+    immutable::Operation<F, K, E>: CodecRead,
+{
     client: StoreClient,
-    operation_cfg: (K::Cfg, V::Cfg),
+    operation_cfg: <immutable::Operation<F, K, E> as CodecRead>::Cfg,
     update_row_cfg: (K::Cfg, V::Cfg),
-    _marker: PhantomData<(F, H, K)>,
+    _marker: PhantomData<(F, H, K, E)>,
 }
 
-impl<F, H, K, V> ImmutableClient<F, H, K, V>
+impl<F, H, K, V, E> std::fmt::Debug for ImmutableClient<F, H, K, V, E>
+where
+    F: Family,
+    H: Hasher,
+    K: QmdbKey + AsRef<[u8]>,
+    V: Codec + Send + Sync,
+    E: ValueEncoding<Value = V>,
+    immutable::Operation<F, K, E>: CodecRead,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImmutableClient").finish_non_exhaustive()
+    }
+}
+
+impl<F, H, K, V, E> ImmutableClient<F, H, K, V, E>
 where
     F: Family,
     H: Hasher,
@@ -39,11 +65,12 @@ where
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
     K::Cfg: Clone,
-    ImmutableOperation<F, K, V>: Encode + Decode<Cfg = (K::Cfg, V::Cfg)> + Clone,
+    E: ValueEncoding<Value = V>,
+    immutable::Operation<F, K, E>: Encode + Decode + Clone,
 {
     pub fn new(
         url: &str,
-        operation_cfg: (K::Cfg, V::Cfg),
+        operation_cfg: <immutable::Operation<F, K, E> as CodecRead>::Cfg,
         update_row_cfg: (K::Cfg, V::Cfg),
     ) -> Self {
         Self::from_client(StoreClient::new(url), operation_cfg, update_row_cfg)
@@ -51,7 +78,7 @@ where
 
     pub fn from_client(
         client: StoreClient,
-        operation_cfg: (K::Cfg, V::Cfg),
+        operation_cfg: <immutable::Operation<F, K, E> as CodecRead>::Cfg,
         update_row_cfg: (K::Cfg, V::Cfg),
     ) -> Self {
         Self {
@@ -74,17 +101,18 @@ where
     where
         V: AsRef<[u8]>,
     {
-        let op =
-            ImmutableOperation::<F, K, V>::decode_cfg(bytes, &self.operation_cfg).map_err(|e| {
+        let op = immutable::Operation::<F, K, E>::decode_cfg(bytes, &self.operation_cfg).map_err(
+            |e| {
                 QmdbError::CorruptData(format!(
                     "failed to decode immutable operation at location {location}: {e}"
                 ))
-            })?;
+            },
+        )?;
         let key = op.key().map(|k| <K as AsRef<[u8]>>::as_ref(k).to_vec());
         let value = match &op {
-            ImmutableOperation::Set(_, value) => Some(value.as_ref().to_vec()),
-            ImmutableOperation::Commit(Some(value), _) => Some(value.as_ref().to_vec()),
-            ImmutableOperation::Commit(None, _) => None,
+            immutable::Operation::Set(_, value) => Some(value.as_ref().to_vec()),
+            immutable::Operation::Commit(Some(value), _) => Some(value.as_ref().to_vec()),
+            immutable::Operation::Commit(None, _) => None,
         };
         Ok(OperationKv { key, value })
     }
@@ -129,7 +157,7 @@ where
                 "authenticated immutable update row key mismatch at location {location}"
             )));
         }
-        let operation = load_auth_operation_at::<F, ImmutableOperation<F, K, V>>(
+        let operation = load_auth_operation_at::<F, immutable::Operation<F, K, E>>(
             &session,
             namespace,
             location,
@@ -137,17 +165,17 @@ where
         )
         .await?;
         match operation {
-            ImmutableOperation::Set(operation_key, value) if operation_key == *key => {
+            immutable::Operation::Set(operation_key, value) if operation_key == *key => {
                 Ok(Some(VersionedValue {
                     key: operation_key,
                     location,
                     value: Some(value),
                 }))
             }
-            ImmutableOperation::Set(_, _) => Err(QmdbError::CorruptData(format!(
+            immutable::Operation::Set(_, _) => Err(QmdbError::CorruptData(format!(
                 "authenticated immutable update row does not match operation key at location {location}"
             ))),
-            ImmutableOperation::Commit(_, _) => Err(QmdbError::CorruptData(format!(
+            immutable::Operation::Commit(_, _) => Err(QmdbError::CorruptData(format!(
                 "authenticated immutable update row points at commit location {location}"
             ))),
         }
@@ -227,7 +255,8 @@ where
         watermark: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
-    ) -> Result<VerifiedOperationRange<H::Digest, ImmutableOperation<F, K, V>, F>, QmdbError> {
+    ) -> Result<VerifiedOperationRange<H::Digest, immutable::Operation<F, K, E>, F>, QmdbError>
+    {
         let checkpoint = self
             .operation_range_checkpoint(watermark, start_location, max_locations)
             .await?;
@@ -237,7 +266,7 @@ where
             .enumerate()
             .map(|(offset, bytes)| {
                 let location = checkpoint.start_location + offset as u64;
-                ImmutableOperation::<F, K, V>::decode_cfg(bytes.as_slice(), &self.operation_cfg)
+                immutable::Operation::<F, K, E>::decode_cfg(bytes.as_slice(), &self.operation_cfg)
                     .map_err(|e| {
                         QmdbError::CorruptData(format!(
                             "failed to decode authenticated operation at location {location}: {e}"

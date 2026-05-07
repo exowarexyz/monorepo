@@ -1,10 +1,13 @@
 use std::marker::PhantomData;
 
-use commonware_codec::{Codec, Decode, Encode};
+use commonware_codec::{Codec, Decode, Encode, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{Family, Location},
-    qmdb::keyless::variable::Operation as KeylessOperation,
+    qmdb::{
+        any::value::{ValueEncoding, VariableEncoding},
+        keyless,
+    },
 };
 use exoware_sdk::{SerializableReadSession, StoreClient};
 
@@ -20,29 +23,53 @@ use crate::error::QmdbError;
 use crate::proof::{OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange};
 use crate::storage::AuthKvMerkleStorage;
 
-#[derive(Clone, Debug)]
-pub struct KeylessClient<F: Family, H: Hasher, V: Codec + Send + Sync> {
+#[derive(Clone)]
+pub struct KeylessClient<
+    F: Family,
+    H: Hasher,
+    V: Codec + Send + Sync,
+    E: ValueEncoding<Value = V> = VariableEncoding<V>,
+> where
+    keyless::Operation<F, E>: CodecRead,
+{
     client: StoreClient,
-    value_cfg: V::Cfg,
-    _marker: PhantomData<(F, H)>,
+    op_cfg: <keyless::Operation<F, E> as CodecRead>::Cfg,
+    _marker: PhantomData<(F, H, E)>,
 }
 
-impl<F, H, V> KeylessClient<F, H, V>
+impl<F, H, V, E> std::fmt::Debug for KeylessClient<F, H, V, E>
+where
+    F: Family,
+    H: Hasher,
+    V: Codec + Send + Sync,
+    E: ValueEncoding<Value = V>,
+    keyless::Operation<F, E>: CodecRead,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeylessClient").finish_non_exhaustive()
+    }
+}
+
+impl<F, H, V, E> KeylessClient<F, H, V, E>
 where
     F: Family,
     H: Hasher,
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
-    KeylessOperation<F, V>: Encode + Decode<Cfg = V::Cfg> + Clone,
+    E: ValueEncoding<Value = V>,
+    keyless::Operation<F, E>: Encode + Decode + Clone,
 {
-    pub fn new(url: &str, value_cfg: V::Cfg) -> Self {
-        Self::from_client(StoreClient::new(url), value_cfg)
+    pub fn new(url: &str, op_cfg: <keyless::Operation<F, E> as CodecRead>::Cfg) -> Self {
+        Self::from_client(StoreClient::new(url), op_cfg)
     }
 
-    pub fn from_client(client: StoreClient, value_cfg: V::Cfg) -> Self {
+    pub fn from_client(
+        client: StoreClient,
+        op_cfg: <keyless::Operation<F, E> as CodecRead>::Cfg,
+    ) -> Self {
         Self {
             client,
-            value_cfg,
+            op_cfg,
             _marker: PhantomData,
         }
     }
@@ -59,15 +86,15 @@ where
     where
         V: AsRef<[u8]>,
     {
-        let op = KeylessOperation::<F, V>::decode_cfg(bytes, &self.value_cfg).map_err(|e| {
+        let op = keyless::Operation::<F, E>::decode_cfg(bytes, &self.op_cfg).map_err(|e| {
             QmdbError::CorruptData(format!(
                 "failed to decode keyless operation at location {location}: {e}"
             ))
         })?;
         let value = match &op {
-            KeylessOperation::Append(value) => Some(value.as_ref().to_vec()),
-            KeylessOperation::Commit(Some(value), _) => Some(value.as_ref().to_vec()),
-            KeylessOperation::Commit(None, _) => None,
+            keyless::Operation::Append(value) => Some(value.as_ref().to_vec()),
+            keyless::Operation::Commit(Some(value), _) => Some(value.as_ref().to_vec()),
+            keyless::Operation::Commit(None, _) => None,
         };
         Ok(OperationKv { key: None, value })
     }
@@ -107,11 +134,11 @@ where
                 count: count.as_u64(),
             });
         }
-        let operation = load_auth_operation_at::<F, KeylessOperation<F, V>>(
+        let operation = load_auth_operation_at::<F, keyless::Operation<F, E>>(
             &session,
             namespace,
             location,
-            &self.value_cfg,
+            &self.op_cfg,
         )
         .await?;
         Ok(operation.into_value())
@@ -191,7 +218,7 @@ where
         watermark: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
-    ) -> Result<VerifiedOperationRange<H::Digest, KeylessOperation<F, V>, F>, QmdbError> {
+    ) -> Result<VerifiedOperationRange<H::Digest, keyless::Operation<F, E>, F>, QmdbError> {
         let checkpoint = self
             .operation_range_checkpoint(watermark, start_location, max_locations)
             .await?;
@@ -201,7 +228,7 @@ where
             .enumerate()
             .map(|(offset, bytes)| {
                 let location = checkpoint.start_location + offset as u64;
-                KeylessOperation::<F, V>::decode_cfg(bytes.as_slice(), &self.value_cfg).map_err(
+                keyless::Operation::<F, E>::decode_cfg(bytes.as_slice(), &self.op_cfg).map_err(
                     |e| {
                         QmdbError::CorruptData(format!(
                             "failed to decode authenticated operation at location {location}: {e}"

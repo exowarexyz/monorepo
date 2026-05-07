@@ -16,7 +16,10 @@ use exoware_qmdb::{
     OperationLogSubscribeProof, QmdbError,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::qmdb::v1::SubscribeRequest as ProtoSubscribeRequest;
+use exoware_sdk::qmdb::v1::{
+    GetOperationRangeRequest as ProtoGetOperationRangeRequest,
+    SubscribeRequest as ProtoSubscribeRequest,
+};
 use exoware_sdk::store::common::v1::{
     bytes_filter as proto_bytes_filter, BytesFilter as ProtoBytesFilter,
 };
@@ -135,6 +138,40 @@ async fn keyless_connect_subscribe_emits_verifiable_multi_proof() {
         .map(|(i, op)| (Location::new(i as u64), op.clone()))
         .collect();
     assert_eq!(frame.operations, expected);
+}
+
+#[tokio::test]
+async fn keyless_connect_get_operation_range_returns_verifiable_proof() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_local_batch().await;
+    commit_upload(&store_client, &local).await;
+
+    let keyless_client = Arc::new(TestKeylessClient::from_client(
+        store_client.clone(),
+        ((0..=10000).into(), ()),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
+    let client = validated_client(&qmdb_url);
+
+    let proof = client
+        .get_operation_range(
+            ProtoGetOperationRangeRequest {
+                tip: u64::try_from(local.operations.len() - 1).expect("tip fits"),
+                start_location: 1,
+                max_locations: 1,
+                ..Default::default()
+            },
+            &local.root,
+        )
+        .await
+        .expect("get operation range");
+
+    assert_eq!(proof.root, local.root);
+    assert_eq!(proof.start_location, Location::new(1));
+    assert_eq!(
+        proof.operations,
+        vec![(Location::new(1), local.operations[1].clone())]
+    );
 }
 
 #[tokio::test]

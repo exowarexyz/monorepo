@@ -324,15 +324,17 @@ pub(crate) fn build_auth_upload_rows<F: Family>(
 
 /// Encodes `operations` exactly once — the encoded bytes move into the
 /// returned `PreparedUpload`'s `op_rows`.
-pub(crate) fn build_auth_immutable_upload_rows<F: Family, K, V>(
+pub(crate) fn build_auth_immutable_upload_rows<F: Family, K, E>(
     latest_location: Location<F>,
-    operations: &[commonware_storage::qmdb::immutable::variable::Operation<F, K, V>],
+    operations: &[commonware_storage::qmdb::immutable::Operation<F, K, E>],
 ) -> Result<crate::core::PreparedUpload, QmdbError>
 where
-    K: Array + AsRef<[u8]>,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: Array + commonware_codec::Codec + Clone + AsRef<[u8]>,
+    E: commonware_storage::qmdb::any::value::ValueEncoding,
+    E::Value: commonware_codec::Codec + Clone + Send + Sync,
+    commonware_storage::qmdb::immutable::Operation<F, K, E>: Encode,
 {
-    use commonware_storage::qmdb::immutable::variable::Operation as ImmutableOperation;
+    use commonware_storage::qmdb::immutable::Operation as ImmutableOperation;
 
     let count = operations.len();
     let count_u64 = count as u64;

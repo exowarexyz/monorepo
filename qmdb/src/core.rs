@@ -4,8 +4,8 @@ use std::time::Duration;
 use commonware_codec::{Codec, Encode, Read as CodecRead};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::qmdb::{
-    any::ordered::variable::Operation as QmdbOperation,
-    any::unordered::variable::Operation as UnorderedQmdbOperation, operation::Key as QmdbKey,
+    any::{ordered, unordered, value::ValueEncoding},
+    operation::Key as QmdbKey,
 };
 use commonware_storage::{
     merkle::hasher::Hasher as MerkleHasher,
@@ -315,37 +315,45 @@ impl PreparedUpload {
 }
 
 impl PreparedUpload {
-    pub(crate) fn build<F: Family, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync>(
+    pub(crate) fn build<
+        F: Family,
+        K: QmdbKey + Codec,
+        V: Codec + Clone + Send + Sync,
+        E: ValueEncoding<Value = V>,
+    >(
         latest_location: Location<F>,
-        operations: &[QmdbOperation<F, K, V>],
+        operations: &[ordered::Operation<F, K, E>],
     ) -> Result<Self, QmdbError>
     where
-        QmdbOperation<F, K, V>: Encode,
+        ordered::Operation<F, K, E>: Encode,
     {
-        use commonware_storage::qmdb::any::ordered::Update as QmdbUpdate;
         Self::build_from_ops(latest_location, operations, |op| match op {
-            QmdbOperation::Update(QmdbUpdate {
+            ordered::Operation::Update(ordered::Update {
                 key,
                 value,
                 next_key: _,
             }) => Some((key, Some(value))),
-            QmdbOperation::Delete(key) => Some((key, None)),
-            QmdbOperation::CommitFloor(_, _) => None,
+            ordered::Operation::Delete(key) => Some((key, None)),
+            ordered::Operation::CommitFloor(_, _) => None,
         })
     }
 
-    pub(crate) fn build_unordered<F: Family, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync>(
+    pub(crate) fn build_unordered<
+        F: Family,
+        K: QmdbKey + Codec,
+        V: Codec + Clone + Send + Sync,
+        E: ValueEncoding<Value = V>,
+    >(
         latest_location: Location<F>,
-        operations: &[UnorderedQmdbOperation<F, K, V>],
+        operations: &[unordered::Operation<F, K, E>],
     ) -> Result<Self, QmdbError>
     where
-        UnorderedQmdbOperation<F, K, V>: Encode,
+        unordered::Operation<F, K, E>: Encode,
     {
-        use commonware_storage::qmdb::any::unordered::Update as UnorderedUpdate;
         Self::build_from_ops(latest_location, operations, |op| match op {
-            UnorderedQmdbOperation::Update(UnorderedUpdate(key, value)) => Some((key, Some(value))),
-            UnorderedQmdbOperation::Delete(key) => Some((key, None)),
-            UnorderedQmdbOperation::CommitFloor(_, _) => None,
+            unordered::Operation::Update(unordered::Update(key, value)) => Some((key, Some(value))),
+            unordered::Operation::Delete(key) => Some((key, None)),
+            unordered::Operation::CommitFloor(_, _) => None,
         })
     }
 

@@ -9,8 +9,12 @@ use std::num::NonZeroU64;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
+use commonware_storage::journal::contiguous::fixed::Config as FixedJournalConfig;
 use commonware_storage::merkle::{mmb, mmr, Family, Graftable, Location, Proof};
+use commonware_storage::qmdb::any::ordered::fixed::Operation as FixedQmdbOperation;
 use commonware_storage::qmdb::any::ordered::variable::Operation as QmdbOperation;
+use commonware_storage::qmdb::any::value::FixedEncoding;
+use commonware_storage::qmdb::current::ordered::fixed::Db as LocalFixedQmdbDb;
 use commonware_storage::qmdb::current::ordered::variable::Db as LocalQmdbDb;
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -21,9 +25,13 @@ use exoware_sdk::StoreClient;
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
 type BatchOperation<F> = QmdbOperation<F, Vec<u8>, Vec<u8>>;
+type FixedBatchOperation<F> = FixedQmdbOperation<F, Digest, Digest>;
 type TestOrderedClient<F> = OrderedClient<F, Sha256, Vec<u8>, Vec<u8>, N>;
 type TestOrderedWriter<F> = OrderedWriter<F, Sha256, Vec<u8>, Vec<u8>, N>;
+type FixedTestOrderedClient<F> = OrderedClient<F, Sha256, Digest, Digest, N, FixedEncoding<Digest>>;
+type FixedTestOrderedWriter<F> = OrderedWriter<F, Sha256, Digest, Digest, N, FixedEncoding<Digest>>;
 type LocalDb<F> = LocalQmdbDb<F, cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>;
+type FixedLocalDb<F> = LocalFixedQmdbDb<F, cw_tokio::Context, Digest, Digest, Sha256, TwoCap, N>;
 
 async fn boundary_from_local_db<F>(
     db: &LocalDb<F>,
@@ -83,6 +91,52 @@ where
         .expect("commit upload");
 }
 
+async fn boundary_from_fixed_local_db<F>(
+    db: &FixedLocalDb<F>,
+    previous_operations: Option<&[FixedBatchOperation<F>]>,
+    operations: &[FixedBatchOperation<F>],
+) -> CurrentBoundaryState<Digest, N, F>
+where
+    F: Graftable,
+    FixedBatchOperation<F>: commonware_codec::CodecFixed<Cfg = ()> + Send + Sync,
+{
+    let mut ops_root_hasher = commonware_storage::qmdb::hasher::<Sha256>();
+    let ops_root_witness = db
+        .ops_root_witness(&mut ops_root_hasher)
+        .await
+        .expect("fixed ops root witness");
+    recover_boundary_state::<F, Sha256, _, N, _, _>(
+        previous_operations,
+        operations,
+        db.root(),
+        ops_root_witness,
+        |location| async move {
+            let mut hasher = Sha256::default();
+            let (proof, mut proof_ops, mut chunks) = db
+                .range_proof(&mut hasher, location, NZU64!(1))
+                .await
+                .map_err(|error| {
+                    exoware_qmdb::QmdbError::CorruptData(format!(
+                        "local fixed current range proof at {location}: {error}"
+                    ))
+                })?;
+            proof_ops.pop().ok_or_else(|| {
+                exoware_qmdb::QmdbError::CorruptData(format!(
+                    "local fixed current range proof at {location} returned no operations"
+                ))
+            })?;
+            let chunk = chunks.pop().ok_or_else(|| {
+                exoware_qmdb::QmdbError::CorruptData(format!(
+                    "local fixed current range proof at {location} returned no chunks"
+                ))
+            })?;
+            Ok((proof, chunk))
+        },
+    )
+    .await
+    .expect("recover fixed boundary state")
+}
+
 fn op_cfg<F: Family>() -> <BatchOperation<F> as commonware_codec::Read>::Cfg {
     (
         ((0..=MAX_OPERATION_SIZE).into(), ()),
@@ -100,11 +154,31 @@ fn update_row_cfg() -> (
     )
 }
 
+fn fixed_op_cfg<F: Family>() -> <FixedBatchOperation<F> as commonware_codec::Read>::Cfg
+where
+    FixedBatchOperation<F>: commonware_codec::Read<Cfg = ()>,
+{
+}
+
+fn fixed_update_row_cfg() -> (
+    <Digest as commonware_codec::Read>::Cfg,
+    <Digest as commonware_codec::Read>::Cfg,
+) {
+    ((), ())
+}
+
 struct LocalReference<F: Family> {
     latest_location: Location<F>,
     operations: Vec<BatchOperation<F>>,
     current_boundary: CurrentBoundaryState<Digest, N, F>,
     values: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+}
+
+struct FixedLocalReference<F: Family> {
+    latest_location: Location<F>,
+    operations: Vec<FixedBatchOperation<F>>,
+    current_boundary: CurrentBoundaryState<Digest, N, F>,
+    values: std::collections::BTreeMap<Vec<u8>, Option<Digest>>,
 }
 
 async fn build_local_db<F>() -> LocalReference<F>
@@ -157,6 +231,81 @@ where
             db.destroy().await.expect("destroy");
 
             LocalReference {
+                latest_location: latest,
+                operations: ops,
+                current_boundary: boundary,
+                values,
+            }
+        })
+    })
+    .await
+    .expect("join")
+}
+
+async fn build_fixed_local_db<F>() -> FixedLocalReference<F>
+where
+    F: Graftable,
+    FixedBatchOperation<F>: commonware_codec::CodecFixed<Cfg = ()> + Clone + Send + Sync,
+{
+    tokio::task::spawn_blocking(|| {
+        cw_tokio::Runner::default().start(|context| async move {
+            use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = commonware_storage::qmdb::current::Config {
+                merkle_config: common::merkle_config("ordered_fixed", page_cache.clone()),
+                journal_config: FixedJournalConfig {
+                    partition: "ordered_fixed_log".to_string(),
+                    items_per_blob: NZU64!(8),
+                    page_cache,
+                    write_buffer: NZUsize!(1024),
+                },
+                grafted_metadata_partition: "ordered_fixed_grafted_metadata".to_string(),
+                translator: TwoCap,
+            };
+            let mut db: FixedLocalDb<F> =
+                FixedLocalDb::init(context.with_label("ordered_fixed"), cfg)
+                    .await
+                    .expect("init fixed");
+
+            let alpha = Sha256::fill(0xA1);
+            let beta = Sha256::fill(0xB2);
+            let one = Sha256::fill(0x01);
+            let two = Sha256::fill(0x02);
+            let finalized = {
+                let batch = db
+                    .new_batch()
+                    .write(alpha, Some(one))
+                    .write(beta, Some(two));
+                batch
+                    .merkleize(&db, None::<Digest>)
+                    .await
+                    .expect("fixed merkleize")
+            };
+            db.apply_batch(finalized).await.expect("apply fixed");
+
+            let latest = db.bounds().await.end - 1;
+            let n = NonZeroU64::new(*latest + 1).unwrap();
+            let (_proof, ops): (Proof<F, Digest>, Vec<FixedBatchOperation<F>>) = db
+                .ops_historical_proof(latest + 1, Location::<F>::new(0), n)
+                .await
+                .expect("fixed proof");
+
+            let boundary = boundary_from_fixed_local_db(&db, None, &ops).await;
+
+            let mut values = std::collections::BTreeMap::new();
+            values.insert(
+                alpha.as_ref().to_vec(),
+                db.get(&alpha).await.expect("get alpha"),
+            );
+            values.insert(
+                beta.as_ref().to_vec(),
+                db.get(&beta).await.expect("get beta"),
+            );
+
+            db.sync().await.expect("sync fixed");
+            db.destroy().await.expect("destroy fixed");
+
+            FixedLocalReference {
                 latest_location: latest,
                 operations: ops,
                 current_boundary: boundary,
@@ -255,6 +404,71 @@ async fn ordered_mmb_round_trip() {
             assert_eq!(update.value, b"one".to_vec());
         }
         _ => panic!("expected Update operation"),
+    }
+}
+
+#[tokio::test]
+async fn ordered_fixed_round_trip() {
+    let (_dir, _server, client) = common::local_store_client().await;
+    let local = build_fixed_local_db::<mmr::Family>().await;
+
+    let writer: FixedTestOrderedWriter<mmr::Family> = FixedTestOrderedWriter::empty(client.clone());
+    common::commit_ordered_upload(&client, &writer, &local.operations, &local.current_boundary)
+        .await
+        .expect("commit fixed upload");
+
+    let c = FixedTestOrderedClient::<mmr::Family>::from_client(
+        client.clone(),
+        fixed_op_cfg::<mmr::Family>(),
+        fixed_update_row_cfg(),
+    );
+    let watermark = c.writer_location_watermark().await.expect("watermark");
+    assert_eq!(watermark, Some(local.latest_location));
+
+    let keys: Vec<Vec<u8>> = local.values.keys().cloned().collect();
+    let queried = c
+        .query_many_at(&keys, local.latest_location)
+        .await
+        .expect("fixed query_many_at");
+    for (key, value) in keys.iter().zip(queried.iter()) {
+        assert_eq!(
+            value.as_ref().and_then(|value| value.value),
+            local.values[key.as_slice()]
+        );
+    }
+
+    let range = c
+        .operation_range_proof(
+            local.latest_location,
+            Location::<mmr::Family>::new(0),
+            local.operations.len() as u32,
+        )
+        .await
+        .expect("fixed operation range proof");
+    assert_eq!(range.operations, local.operations);
+
+    let current = c
+        .current_operation_range_proof(
+            local.latest_location,
+            Location::<mmr::Family>::new(0),
+            local.operations.len() as u32,
+        )
+        .await
+        .expect("fixed current operation range proof");
+    assert_eq!(current.operations, local.operations);
+
+    let alpha = Sha256::fill(0xA1);
+    let one = Sha256::fill(0x01);
+    let key_proof = c
+        .key_value_proof_at(local.latest_location, alpha.as_ref())
+        .await
+        .expect("fixed key_value_proof_at");
+    match &key_proof.operation {
+        FixedQmdbOperation::Update(update) => {
+            assert_eq!(update.key, alpha);
+            assert_eq!(update.value, one);
+        }
+        _ => panic!("expected fixed Update operation"),
     }
 }
 

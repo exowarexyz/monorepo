@@ -10,11 +10,10 @@ use commonware_storage::{
     merkle::{Family, Graftable, Location},
     qmdb::{
         any::{
-            ordered::variable::Operation as QmdbOperation,
-            unordered::variable::Operation as UnorderedQmdbOperation,
+            ordered, unordered,
+            value::{ValueEncoding, VariableEncoding},
         },
-        immutable::variable::Operation as ImmutableOperation,
-        keyless::variable::Operation as KeylessOperation,
+        immutable, keyless,
     },
 };
 
@@ -173,11 +172,12 @@ fn raw_key_value_proof_to_proto<
     V: commonware_codec::Codec + Clone + Send + Sync,
     const N: usize,
     F: Graftable,
+    E: ValueEncoding<Value = V>,
 >(
-    proof: &RawKeyValueProof<D, K, V, N, F>,
+    proof: &RawKeyValueProof<D, K, V, N, F, E>,
 ) -> ProtoCurrentKeyValueProof
 where
-    QmdbOperation<F, K, V>: Encode,
+    ordered::Operation<F, K, E>: Encode,
 {
     ProtoCurrentKeyValueProof {
         proof: proof.proof.encode().to_vec(),
@@ -192,11 +192,12 @@ fn raw_unordered_key_value_proof_to_proto<
     V: commonware_codec::Codec + Clone + Send + Sync,
     const N: usize,
     F: Graftable,
+    E: ValueEncoding<Value = V>,
 >(
-    proof: &RawUnorderedKeyValueProof<D, K, V, N, F>,
+    proof: &RawUnorderedKeyValueProof<D, K, V, N, F, E>,
 ) -> ProtoCurrentKeyValueProof
 where
-    UnorderedQmdbOperation<F, K, V>: Encode,
+    unordered::Operation<F, K, E>: Encode,
 {
     ProtoCurrentKeyValueProof {
         proof: proof.proof.encode().to_vec(),
@@ -211,14 +212,12 @@ fn raw_key_exclusion_proof_to_proto<
     V: commonware_codec::Codec + Clone + Send + Sync,
     const N: usize,
     F: Graftable,
+    E: ValueEncoding<Value = V>,
 >(
-    proof: &RawKeyExclusionProof<D, K, V, N, F>,
+    proof: &RawKeyExclusionProof<D, K, V, N, F, E>,
 ) -> ProtoCurrentKeyExclusionProof
 where
-    commonware_storage::qmdb::any::ordered::Update<
-        K,
-        commonware_storage::qmdb::any::value::VariableEncoding<V>,
-    >: Encode,
+    commonware_storage::qmdb::current::ordered::ExclusionProof<F, K, E, D, N>: Encode,
 {
     ProtoCurrentKeyExclusionProof {
         proof: proof.proof.encode().to_vec(),
@@ -232,15 +231,13 @@ fn raw_key_range_proof_to_proto<
     V: commonware_codec::Codec + Clone + Send + Sync,
     const N: usize,
     F: Graftable,
+    E: ValueEncoding<Value = V>,
 >(
-    proof: &RawKeyRangeProof<D, K, V, N, F>,
+    proof: &RawKeyRangeProof<D, K, V, N, F, E>,
 ) -> GetRangeResponse
 where
-    QmdbOperation<F, K, V>: Encode,
-    commonware_storage::qmdb::any::ordered::Update<
-        K,
-        commonware_storage::qmdb::any::value::VariableEncoding<V>,
-    >: Encode,
+    ordered::Operation<F, K, E>: Encode,
+    commonware_storage::qmdb::current::ordered::ExclusionProof<F, K, E, D, N>: Encode,
 {
     GetRangeResponse {
         entries: proof
@@ -275,41 +272,51 @@ pub struct OrderedConnect<
     K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
     const N: usize,
-> {
-    client: Arc<OrderedClient<F, H, K, V, N>>,
+    E: ValueEncoding<Value = V> = VariableEncoding<V>,
+> where
+    ordered::Operation<F, K, E>: commonware_codec::Read,
+{
+    client: Arc<OrderedClient<F, H, K, V, N, E>>,
 }
 
 #[derive(Clone)]
 pub struct UnorderedConnect<
     F: Graftable,
     H: Hasher,
-    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec,
+    K: commonware_utils::Array + commonware_storage::qmdb::operation::Key + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
     const N: usize,
-> {
-    client: Arc<UnorderedClient<F, H, K, V>>,
+    E: ValueEncoding<Value = V> = VariableEncoding<V>,
+> where
+    unordered::Operation<F, K, E>: commonware_codec::Read,
+{
+    client: Arc<UnorderedClient<F, H, K, V, E>>,
 }
 
-impl<F, H, K, V, const N: usize> UnorderedConnect<F, H, K, V, N>
+impl<F, H, K, V, const N: usize, E> UnorderedConnect<F, H, K, V, N, E>
 where
     F: Graftable,
     H: Hasher,
-    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec,
+    K: commonware_utils::Array + commonware_storage::qmdb::operation::Key + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V>,
+    unordered::Operation<F, K, E>: commonware_codec::Read,
 {
-    pub fn new(client: Arc<UnorderedClient<F, H, K, V>>) -> Self {
+    pub fn new(client: Arc<UnorderedClient<F, H, K, V, E>>) -> Self {
         Self { client }
     }
 }
 
-impl<F, H, K, V, const N: usize> OrderedConnect<F, H, K, V, N>
+impl<F, H, K, V, const N: usize, E> OrderedConnect<F, H, K, V, N, E>
 where
     F: Graftable,
     H: Hasher,
     K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V>,
+    ordered::Operation<F, K, E>: commonware_codec::Read,
 {
-    pub fn new(client: Arc<OrderedClient<F, H, K, V, N>>) -> Self {
+    pub fn new(client: Arc<OrderedClient<F, H, K, V, N, E>>) -> Self {
         Self { client }
     }
 }
@@ -399,13 +406,14 @@ where
     }
 }
 
-impl<F, H, K, V, const N: usize> OperationLogBackend for Arc<OrderedClient<F, H, K, V, N>>
+impl<F, H, K, V, const N: usize, E> OperationLogBackend for Arc<OrderedClient<F, H, K, V, N, E>>
 where
     F: Graftable,
     H: Hasher + Send + Sync + 'static,
     K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    QmdbOperation<F, K, V>: Encode + commonware_codec::Decode,
+    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    ordered::Operation<F, K, E>: Encode + commonware_codec::Decode,
 {
     type Family = F;
     type Digest = H::Digest;
@@ -451,14 +459,15 @@ where
     }
 }
 
-impl<F, H, K, V> OperationLogBackend for Arc<UnorderedClient<F, H, K, V>>
+impl<F, H, K, V, E> OperationLogBackend for Arc<UnorderedClient<F, H, K, V, E>>
 where
     F: Graftable,
     H: Hasher + Send + Sync + 'static,
     K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     V::Cfg: Clone,
-    UnorderedQmdbOperation<F, K, V>: Encode + commonware_codec::Decode,
+    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    unordered::Operation<F, K, E>: Encode + commonware_codec::Decode,
 {
     type Family = F;
     type Digest = H::Digest;
@@ -504,7 +513,7 @@ where
     }
 }
 
-impl<F, H, K, V> OperationLogBackend for Arc<ImmutableClient<F, H, K, V>>
+impl<F, H, K, V, E> OperationLogBackend for Arc<ImmutableClient<F, H, K, V, E>>
 where
     F: Family,
     H: Hasher + Send + Sync + 'static,
@@ -518,7 +527,8 @@ where
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     V::Cfg: Clone,
     K::Cfg: Clone,
-    ImmutableOperation<F, K, V>: Encode + commonware_codec::Decode<Cfg = (K::Cfg, V::Cfg)> + Clone,
+    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    immutable::Operation<F, K, E>: Encode + commonware_codec::Decode + Clone,
 {
     type Family = F;
     type Digest = H::Digest;
@@ -564,13 +574,14 @@ where
     }
 }
 
-impl<F, H, V> OperationLogBackend for Arc<KeylessClient<F, H, V>>
+impl<F, H, V, E> OperationLogBackend for Arc<KeylessClient<F, H, V, E>>
 where
     F: Family,
     H: Hasher + Send + Sync + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     V::Cfg: Clone,
-    KeylessOperation<F, V>: Encode + commonware_codec::Decode<Cfg = V::Cfg> + Clone,
+    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    keyless::Operation<F, E>: Encode + commonware_codec::Decode + Clone,
 {
     type Family = F;
     type Digest = H::Digest;
@@ -617,18 +628,19 @@ where
     }
 }
 
-impl<F, H, K, V, const N: usize> CurrentOperationRangeBackend<N>
-    for Arc<OrderedClient<F, H, K, V, N>>
+impl<F, H, K, V, const N: usize, E> CurrentOperationRangeBackend<N>
+    for Arc<OrderedClient<F, H, K, V, N, E>>
 where
     F: Graftable,
     H: Hasher + Send + Sync + 'static,
     K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    QmdbOperation<F, K, V>: Encode + commonware_codec::Decode,
+    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    ordered::Operation<F, K, E>: Encode + commonware_codec::Decode,
 {
     type Family = F;
     type Digest = H::Digest;
-    type Operation = QmdbOperation<F, K, V>;
+    type Operation = ordered::Operation<F, K, E>;
 
     fn current_operation_range_proof(
         &self,
@@ -650,8 +662,8 @@ where
     }
 }
 
-impl<F, H, K, V, const N: usize> CurrentOperationRangeBackend<N>
-    for Arc<UnorderedClient<F, H, K, V>>
+impl<F, H, K, V, const N: usize, E> CurrentOperationRangeBackend<N>
+    for Arc<UnorderedClient<F, H, K, V, E>>
 where
     F: Graftable,
     H: Hasher + Send + Sync + 'static,
@@ -663,11 +675,12 @@ where
         + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     V::Cfg: Clone,
-    UnorderedQmdbOperation<F, K, V>: Encode + commonware_codec::Decode,
+    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    unordered::Operation<F, K, E>: Encode + commonware_codec::Decode,
 {
     type Family = F;
     type Digest = H::Digest;
-    type Operation = UnorderedQmdbOperation<F, K, V>;
+    type Operation = unordered::Operation<F, K, E>;
 
     fn current_operation_range_proof(
         &self,
@@ -968,17 +981,15 @@ fn decode_since(since: Option<u64>) -> Option<u64> {
     }
 }
 
-impl<F, H, K, V, const N: usize> KeyLookupService for OrderedConnect<F, H, K, V, N>
+impl<F, H, K, V, const N: usize, E> KeyLookupService for OrderedConnect<F, H, K, V, N, E>
 where
     F: Graftable,
     H: Hasher + Send + Sync + 'static,
     K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    QmdbOperation<F, K, V>: Encode + commonware_codec::Decode,
-    commonware_storage::qmdb::any::ordered::Update<
-        K,
-        commonware_storage::qmdb::any::value::VariableEncoding<V>,
-    >: Encode,
+    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    ordered::Operation<F, K, E>: Encode + commonware_codec::Decode,
+    commonware_storage::qmdb::current::ordered::ExclusionProof<F, K, E, H::Digest, N>: Encode,
 {
     fn get(
         &self,
@@ -1046,7 +1057,7 @@ where
     }
 }
 
-impl<F, H, K, V, const N: usize> KeyLookupService for UnorderedConnect<F, H, K, V, N>
+impl<F, H, K, V, const N: usize, E> KeyLookupService for UnorderedConnect<F, H, K, V, N, E>
 where
     F: Graftable,
     H: Hasher + Send + Sync + 'static,
@@ -1058,7 +1069,8 @@ where
         + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     V::Cfg: Clone,
-    UnorderedQmdbOperation<F, K, V>: Encode + commonware_codec::Decode,
+    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    unordered::Operation<F, K, E>: Encode + commonware_codec::Decode,
 {
     fn get(
         &self,
@@ -1100,7 +1112,7 @@ where
                 .iter()
                 .map(|proof| ProtoCurrentKeyLookupResult {
                     key: match &proof.operation {
-                        UnorderedQmdbOperation::Update(update) => update.0.as_ref().to_vec(),
+                        unordered::Operation::Update(update) => update.0.as_ref().to_vec(),
                         _ => Vec::new(),
                     },
                     result: Some(current_key_lookup_result::Result::Hit(Box::new(
@@ -1120,17 +1132,15 @@ where
     }
 }
 
-impl<F, H, K, V, const N: usize> OrderedKeyRangeService for OrderedConnect<F, H, K, V, N>
+impl<F, H, K, V, const N: usize, E> OrderedKeyRangeService for OrderedConnect<F, H, K, V, N, E>
 where
     F: Graftable,
     H: Hasher + Send + Sync + 'static,
     K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    QmdbOperation<F, K, V>: Encode + commonware_codec::Decode,
-    commonware_storage::qmdb::any::ordered::Update<
-        K,
-        commonware_storage::qmdb::any::value::VariableEncoding<V>,
-    >: Encode,
+    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    ordered::Operation<F, K, E>: Encode + commonware_codec::Decode,
+    commonware_storage::qmdb::current::ordered::ExclusionProof<F, K, E, H::Digest, N>: Encode,
 {
     fn get_range(
         &self,
@@ -1288,15 +1298,13 @@ pub fn ordered_connect_stack<
     K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     const N: usize,
+    E: ValueEncoding<Value = V> + Send + Sync + 'static,
 >(
-    client: Arc<OrderedClient<F, H, K, V, N>>,
+    client: Arc<OrderedClient<F, H, K, V, N, E>>,
 ) -> ConnectRpcService<impl ::connectrpc::Dispatcher>
 where
-    QmdbOperation<F, K, V>: Encode + commonware_codec::Decode,
-    commonware_storage::qmdb::any::ordered::Update<
-        K,
-        commonware_storage::qmdb::any::value::VariableEncoding<V>,
-    >: Encode,
+    ordered::Operation<F, K, E>: Encode + commonware_codec::Decode,
+    commonware_storage::qmdb::current::ordered::ExclusionProof<F, K, E, H::Digest, N>: Encode,
 {
     wrap_stack(Chain(
         KeyLookupServiceServer::new(OrderedConnect::new(client.clone())),
@@ -1326,15 +1334,16 @@ pub fn unordered_connect_stack<
         + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     const N: usize,
+    E: ValueEncoding<Value = V> + Send + Sync + 'static,
 >(
-    client: Arc<UnorderedClient<F, H, K, V>>,
+    client: Arc<UnorderedClient<F, H, K, V, E>>,
 ) -> ConnectRpcService<impl ::connectrpc::Dispatcher>
 where
     V::Cfg: Clone,
-    UnorderedQmdbOperation<F, K, V>: Encode + commonware_codec::Decode,
+    unordered::Operation<F, K, E>: Encode + commonware_codec::Decode,
 {
     wrap_stack(Chain(
-        KeyLookupServiceServer::new(UnorderedConnect::<F, H, K, V, N>::new(client.clone())),
+        KeyLookupServiceServer::new(UnorderedConnect::<F, H, K, V, N, E>::new(client.clone())),
         Chain(
             CurrentOperationServiceServer::new(CurrentOperationConnect::<_, N>::new(
                 client.clone(),
@@ -1349,12 +1358,13 @@ pub fn unordered_operation_log_connect_stack<
     H: Hasher + Send + Sync + 'static,
     K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
+    E: ValueEncoding<Value = V> + Send + Sync + 'static,
 >(
-    client: Arc<UnorderedClient<F, H, K, V>>,
+    client: Arc<UnorderedClient<F, H, K, V, E>>,
 ) -> ConnectRpcService<impl ::connectrpc::Dispatcher>
 where
     V::Cfg: Clone,
-    UnorderedQmdbOperation<F, K, V>: Encode + commonware_codec::Decode,
+    unordered::Operation<F, K, E>: Encode + commonware_codec::Decode,
 {
     wrap_stack(OperationLogServiceServer::new(OperationLogConnect::new(
         client,
@@ -1366,13 +1376,14 @@ pub fn immutable_operation_log_connect_stack<
     H: Hasher + Send + Sync + 'static,
     K: commonware_utils::Array + commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
+    E: ValueEncoding<Value = V> + Send + Sync + 'static,
 >(
-    client: Arc<ImmutableClient<F, H, K, V>>,
+    client: Arc<ImmutableClient<F, H, K, V, E>>,
 ) -> ConnectRpcService<impl ::connectrpc::Dispatcher>
 where
     V::Cfg: Clone,
     K::Cfg: Clone,
-    ImmutableOperation<F, K, V>: Encode + commonware_codec::Decode<Cfg = (K::Cfg, V::Cfg)> + Clone,
+    immutable::Operation<F, K, E>: Encode + commonware_codec::Decode + Clone,
 {
     wrap_stack(OperationLogServiceServer::new(OperationLogConnect::new(
         client,
@@ -1383,12 +1394,13 @@ pub fn keyless_operation_log_connect_stack<
     F: Family,
     H: Hasher + Send + Sync + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
+    E: ValueEncoding<Value = V> + Send + Sync + 'static,
 >(
-    client: Arc<KeylessClient<F, H, V>>,
+    client: Arc<KeylessClient<F, H, V, E>>,
 ) -> ConnectRpcService<impl ::connectrpc::Dispatcher>
 where
     V::Cfg: Clone,
-    KeylessOperation<F, V>: Encode + commonware_codec::Decode<Cfg = V::Cfg> + Clone,
+    keyless::Operation<F, E>: Encode + commonware_codec::Decode + Clone,
 {
     wrap_stack(OperationLogServiceServer::new(OperationLogConnect::new(
         client,

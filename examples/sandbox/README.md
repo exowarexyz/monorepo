@@ -100,12 +100,12 @@ In addition to the simulator running above:
    - **Get Many** verifies current hit/miss lookup proofs against the same root.
    - **Get Range** verifies an ordered current range plus boundary proofs
      against the same root.
+   - **Subscribe** verifies each emitted historical proof from the trusted
+     current root for that emitted tip. Paste seed output lines into Trusted
+     Roots when replaying or following multiple tips.
 
    The client-side verifier rejects any proof whose recomputed root doesn't
    match the pasted anchor.
-
-Subscribe streams live matches and does not require an expected root — each
-batch's root is anchored by the stream's own `resumeSequenceNumber`.
 
 ## SQL panel
 

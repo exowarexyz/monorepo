@@ -10,8 +10,8 @@ use commonware_storage::{
     merkle::{Family, Graftable, Location, Proof},
     qmdb::{
         any::{
-            ordered::variable::Operation as QmdbOperation,
-            unordered::variable::Operation as UnorderedQmdbOperation, value::VariableEncoding,
+            ordered, unordered,
+            value::{ValueEncoding, VariableEncoding},
         },
         current::ordered::{db::KeyValueProof, ExclusionProof},
         current::proof::{OperationProof, OpsRootWitness, RangeProof},
@@ -47,32 +47,55 @@ pub struct OrderedConnectClient<
     K: QmdbKey + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
     const N: usize,
-> {
+    E: ValueEncoding<Value = V> = VariableEncoding<V>,
+> where
+    ordered::Operation<F, K, E>: Read,
+    ordered::Update<K, E>: Read,
+{
     rpc: KeyLookupServiceClient<T>,
     range_rpc: OrderedKeyRangeServiceClient<T>,
-    op_cfg: Arc<<QmdbOperation<F, K, V> as Read>::Cfg>,
-    _marker: PhantomData<(F, H, K, V)>,
+    op_cfg: Arc<<ordered::Operation<F, K, E> as Read>::Cfg>,
+    update_cfg: Arc<<ordered::Update<K, E> as Read>::Cfg>,
+    key_cfg: Arc<K::Cfg>,
+    value_cfg: Arc<V::Cfg>,
+    _marker: PhantomData<(F, H, K, V, E)>,
 }
 
-impl<F, H, K, V, const N: usize> OrderedConnectClient<PreferZstdHttpClient, F, H, K, V, N>
+impl<F, H, K, V, const N: usize, E> OrderedConnectClient<PreferZstdHttpClient, F, H, K, V, N, E>
 where
     F: Graftable,
     H: Hasher,
     H::Digest: DecodeExt<()>,
     K: QmdbKey + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
-    QmdbOperation<F, K, V>: Decode + Read<Cfg = (K::Cfg, V::Cfg)>,
+    E: ValueEncoding<Value = V>,
+    K::Cfg: Clone,
+    <ordered::Update<K, E> as Read>::Cfg: Clone,
+    V::Cfg: Clone,
+    ordered::Operation<F, K, E>: Decode + Encode + Read,
+    ordered::Update<K, E>: Read,
+    ExclusionProof<F, K, E, H::Digest, N>:
+        Read<Cfg = (usize, <ordered::Update<K, E> as Read>::Cfg, V::Cfg)>,
 {
-    pub fn plaintext(base: &str, op_cfg: <QmdbOperation<F, K, V> as Read>::Cfg) -> Self {
+    pub fn plaintext(
+        base: &str,
+        op_cfg: <ordered::Operation<F, K, E> as Read>::Cfg,
+        update_cfg: <ordered::Update<K, E> as Read>::Cfg,
+        key_cfg: K::Cfg,
+        value_cfg: V::Cfg,
+    ) -> Self {
         Self::new(
             PreferZstdHttpClient::plaintext(),
             ClientConfig::new(base.parse().expect("qmdb uri")),
             op_cfg,
+            update_cfg,
+            key_cfg,
+            value_cfg,
         )
     }
 }
 
-impl<T, F, H, K, V, const N: usize> OrderedConnectClient<T, F, H, K, V, N>
+impl<T, F, H, K, V, const N: usize, E> OrderedConnectClient<T, F, H, K, V, N, E>
 where
     T: ClientTransport + Clone,
     T::ResponseBody: Body<Data = Bytes> + Unpin,
@@ -82,29 +105,48 @@ where
     H::Digest: DecodeExt<()>,
     K: QmdbKey + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
-    QmdbOperation<F, K, V>: Decode + Read<Cfg = (K::Cfg, V::Cfg)>,
+    E: ValueEncoding<Value = V>,
+    K::Cfg: Clone,
+    <ordered::Update<K, E> as Read>::Cfg: Clone,
+    V::Cfg: Clone,
+    ordered::Operation<F, K, E>: Decode + Encode + Read,
+    ordered::Update<K, E>: Read,
+    ExclusionProof<F, K, E, H::Digest, N>:
+        Read<Cfg = (usize, <ordered::Update<K, E> as Read>::Cfg, V::Cfg)>,
 {
     pub fn new(
         transport: T,
         config: ClientConfig,
-        op_cfg: <QmdbOperation<F, K, V> as Read>::Cfg,
+        op_cfg: <ordered::Operation<F, K, E> as Read>::Cfg,
+        update_cfg: <ordered::Update<K, E> as Read>::Cfg,
+        key_cfg: K::Cfg,
+        value_cfg: V::Cfg,
     ) -> Self {
         Self::from_service_clients(
             KeyLookupServiceClient::new(transport.clone(), config.clone()),
             OrderedKeyRangeServiceClient::new(transport, config),
             op_cfg,
+            update_cfg,
+            key_cfg,
+            value_cfg,
         )
     }
 
     pub fn from_service_clients(
         rpc: KeyLookupServiceClient<T>,
         range_rpc: OrderedKeyRangeServiceClient<T>,
-        op_cfg: <QmdbOperation<F, K, V> as Read>::Cfg,
+        op_cfg: <ordered::Operation<F, K, E> as Read>::Cfg,
+        update_cfg: <ordered::Update<K, E> as Read>::Cfg,
+        key_cfg: K::Cfg,
+        value_cfg: V::Cfg,
     ) -> Self {
         Self {
             rpc,
             range_rpc,
             op_cfg: Arc::new(op_cfg),
+            update_cfg: Arc::new(update_cfg),
+            key_cfg: Arc::new(key_cfg),
+            value_cfg: Arc::new(value_cfg),
             _marker: PhantomData,
         }
     }
@@ -113,7 +155,7 @@ where
         &self,
         request: GetRequest,
         expected_root: &H::Digest,
-    ) -> Result<VerifiedKeyValue<H::Digest, K, V, F>, QmdbError> {
+    ) -> Result<VerifiedKeyValue<H::Digest, K, V, F, E>, QmdbError> {
         let response = self
             .rpc
             .get(request)
@@ -125,14 +167,19 @@ where
             .proof
             .as_option()
             .ok_or_else(|| QmdbError::CorruptData("qmdb get response missing proof".to_string()))?;
-        verify_key_value_from_proto::<F, H, K, V, N>(proof, expected_root, self.op_cfg.as_ref())
+        verify_key_value_from_proto::<F, H, K, V, N, E>(
+            proof,
+            expected_root,
+            self.op_cfg.as_ref(),
+            self.key_cfg.as_ref(),
+        )
     }
 
     pub async fn get_many(
         &self,
         request: GetManyRequest,
         expected_root: &H::Digest,
-    ) -> Result<Vec<VerifiedKeyLookup<H::Digest, K, V, F>>, QmdbError> {
+    ) -> Result<Vec<VerifiedKeyLookup<H::Digest, K, V, F, E>>, QmdbError> {
         let response = self
             .rpc
             .get_many(request)
@@ -145,19 +192,21 @@ where
             .iter()
             .map(|result| match result.result.as_ref() {
                 Some(current_key_lookup_result::Result::Hit(proof)) => {
-                    verify_key_value_from_proto::<F, H, K, V, N>(
+                    verify_key_value_from_proto::<F, H, K, V, N, E>(
                         proof,
                         expected_root,
                         self.op_cfg.as_ref(),
+                        self.key_cfg.as_ref(),
                     )
                     .map(VerifiedKeyLookup::Hit)
                 }
                 Some(current_key_lookup_result::Result::Miss(proof)) => {
-                    verify_key_exclusion_from_proto::<F, H, K, V, N>(
+                    verify_key_exclusion_from_proto::<F, H, K, V, N, E>(
                         proof,
                         result.key.as_slice(),
                         expected_root,
-                        self.op_cfg.as_ref(),
+                        self.update_cfg.as_ref(),
+                        self.value_cfg.as_ref(),
                     )?;
                     Ok(VerifiedKeyLookup::Miss {
                         key: result.key.clone(),
@@ -174,7 +223,7 @@ where
         &self,
         request: GetRangeRequest,
         expected_root: &H::Digest,
-    ) -> Result<VerifiedKeyRange<H::Digest, K, V, F>, QmdbError> {
+    ) -> Result<VerifiedKeyRange<H::Digest, K, V, F, E>, QmdbError> {
         let start_key = request.start_key.clone();
         let end_key = request.end_key.clone();
         let response = self
@@ -184,12 +233,15 @@ where
             .map_err(connect_error_to_qmdb)?
             .into_view()
             .to_owned_message();
-        verify_get_range_from_proto::<F, H, K, V, N>(
+        verify_get_range_from_proto::<F, H, K, V, N, E>(
             &response,
             expected_root,
             start_key.as_slice(),
             end_key.as_deref(),
             self.op_cfg.as_ref(),
+            self.update_cfg.as_ref(),
+            self.key_cfg.as_ref(),
+            self.value_cfg.as_ref(),
         )
     }
 }
@@ -199,25 +251,29 @@ pub struct UnorderedConnectClient<
     T,
     F: Graftable,
     H: Hasher,
-    K: QmdbKey + commonware_codec::Codec,
+    K: commonware_utils::Array + QmdbKey + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
     const N: usize,
-> {
+    E: ValueEncoding<Value = V> = VariableEncoding<V>,
+> where
+    unordered::Operation<F, K, E>: Read,
+{
     rpc: KeyLookupServiceClient<T>,
-    op_cfg: Arc<<UnorderedQmdbOperation<F, K, V> as Read>::Cfg>,
-    _marker: PhantomData<(F, H, K, V)>,
+    op_cfg: Arc<<unordered::Operation<F, K, E> as Read>::Cfg>,
+    _marker: PhantomData<(F, H, K, V, E)>,
 }
 
-impl<F, H, K, V, const N: usize> UnorderedConnectClient<PreferZstdHttpClient, F, H, K, V, N>
+impl<F, H, K, V, const N: usize, E> UnorderedConnectClient<PreferZstdHttpClient, F, H, K, V, N, E>
 where
     F: Graftable,
     H: Hasher,
     H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
+    K: commonware_utils::Array + QmdbKey + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
-    UnorderedQmdbOperation<F, K, V>: Decode + Read<Cfg = (K::Cfg, V::Cfg)>,
+    E: ValueEncoding<Value = V>,
+    unordered::Operation<F, K, E>: Decode + Encode + Read,
 {
-    pub fn plaintext(base: &str, op_cfg: <UnorderedQmdbOperation<F, K, V> as Read>::Cfg) -> Self {
+    pub fn plaintext(base: &str, op_cfg: <unordered::Operation<F, K, E> as Read>::Cfg) -> Self {
         Self::new(
             PreferZstdHttpClient::plaintext(),
             ClientConfig::new(base.parse().expect("qmdb uri")),
@@ -226,7 +282,7 @@ where
     }
 }
 
-impl<T, F, H, K, V, const N: usize> UnorderedConnectClient<T, F, H, K, V, N>
+impl<T, F, H, K, V, const N: usize, E> UnorderedConnectClient<T, F, H, K, V, N, E>
 where
     T: ClientTransport + Clone,
     T::ResponseBody: Body<Data = Bytes> + Unpin,
@@ -234,21 +290,22 @@ where
     F: Graftable,
     H: Hasher,
     H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
+    K: commonware_utils::Array + QmdbKey + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
-    UnorderedQmdbOperation<F, K, V>: Decode + Read<Cfg = (K::Cfg, V::Cfg)>,
+    E: ValueEncoding<Value = V>,
+    unordered::Operation<F, K, E>: Decode + Encode + Read,
 {
     pub fn new(
         transport: T,
         config: ClientConfig,
-        op_cfg: <UnorderedQmdbOperation<F, K, V> as Read>::Cfg,
+        op_cfg: <unordered::Operation<F, K, E> as Read>::Cfg,
     ) -> Self {
         Self::from_service_client(KeyLookupServiceClient::new(transport, config), op_cfg)
     }
 
     pub fn from_service_client(
         rpc: KeyLookupServiceClient<T>,
-        op_cfg: <UnorderedQmdbOperation<F, K, V> as Read>::Cfg,
+        op_cfg: <unordered::Operation<F, K, E> as Read>::Cfg,
     ) -> Self {
         Self {
             rpc,
@@ -261,7 +318,7 @@ where
         &self,
         request: GetRequest,
         expected_root: &H::Digest,
-    ) -> Result<VerifiedUnorderedKeyValue<H::Digest, K, V, F>, QmdbError> {
+    ) -> Result<VerifiedUnorderedKeyValue<H::Digest, K, V, F, E>, QmdbError> {
         let requested_key = request.key.clone();
         let response = self
             .rpc
@@ -274,7 +331,7 @@ where
             .proof
             .as_option()
             .ok_or_else(|| QmdbError::CorruptData("qmdb get response missing proof".to_string()))?;
-        verify_unordered_key_value_from_proto::<F, H, K, V, N>(
+        verify_unordered_key_value_from_proto::<F, H, K, V, N, E>(
             proof,
             requested_key.as_slice(),
             expected_root,
@@ -286,7 +343,7 @@ where
         &self,
         request: GetManyRequest,
         expected_root: &H::Digest,
-    ) -> Result<Vec<VerifiedUnorderedKeyValue<H::Digest, K, V, F>>, QmdbError> {
+    ) -> Result<Vec<VerifiedUnorderedKeyValue<H::Digest, K, V, F, E>>, QmdbError> {
         let requested_keys = request.keys.clone();
         let response = self
             .rpc
@@ -325,7 +382,7 @@ where
                 last_index = Some(request_index);
                 match result.result.as_ref() {
                     Some(current_key_lookup_result::Result::Hit(proof)) => {
-                        verify_unordered_key_value_from_proto::<F, H, K, V, N>(
+                        verify_unordered_key_value_from_proto::<F, H, K, V, N, E>(
                             proof,
                             result.key.as_slice(),
                             expected_root,
@@ -633,8 +690,7 @@ where
             Ok(ops_root)
         }
         _ => Err(QmdbError::CorruptData(
-            "historical proof must include both ops_root and ops_root_witness, or neither"
-                .to_string(),
+            "historical proof must include ops_root and ops_root_witness together".to_string(),
         )),
     }
 }
@@ -819,28 +875,30 @@ where
     Ok((*root, operations, chunks))
 }
 
-fn verify_key_value_from_proto<F, H, K, V, const N: usize>(
+fn verify_key_value_from_proto<F, H, K, V, const N: usize, E>(
     proto: &ProtoCurrentKeyValueProof,
     root: &H::Digest,
-    op_cfg: &(K::Cfg, V::Cfg),
-) -> Result<VerifiedKeyValue<H::Digest, K, V, F>, QmdbError>
+    op_cfg: &<ordered::Operation<F, K, E> as Read>::Cfg,
+    key_cfg: &K::Cfg,
+) -> Result<VerifiedKeyValue<H::Digest, K, V, F, E>, QmdbError>
 where
     F: Graftable,
     H: Hasher,
     H::Digest: DecodeExt<()>,
     K: QmdbKey + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
-    QmdbOperation<F, K, V>: Decode + Read<Cfg = (K::Cfg, V::Cfg)>,
+    E: ValueEncoding<Value = V>,
+    K::Cfg: Clone,
+    ordered::Operation<F, K, E>: Decode + Encode + Read,
 {
     let operation =
-        QmdbOperation::<F, K, V>::decode_cfg(proto.encoded_operation.as_slice(), op_cfg).map_err(
-            |err| {
+        ordered::Operation::<F, K, E>::decode_cfg(proto.encoded_operation.as_slice(), op_cfg)
+            .map_err(|err| {
                 QmdbError::CorruptData(format!(
                     "failed to decode current key-value operation: {err}",
                 ))
-            },
-        )?;
-    let QmdbOperation::Update(update) = &operation else {
+            })?;
+    let ordered::Operation::Update(update) = &operation else {
         return Err(QmdbError::CorruptData(
             "current key-value proof operation must be an update".to_string(),
         ));
@@ -848,7 +906,7 @@ where
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
     let proof = KeyValueProof::<F, K, H::Digest, N>::decode_cfg(
         proto.proof.as_slice(),
-        &(max_digests, op_cfg.0.clone()),
+        &(max_digests, key_cfg.clone()),
     )
     .map_err(|err| {
         QmdbError::CorruptData(format!("failed to decode current key-value proof: {err}"))
@@ -871,28 +929,29 @@ where
     })
 }
 
-fn verify_unordered_key_value_from_proto<F, H, K, V, const N: usize>(
+fn verify_unordered_key_value_from_proto<F, H, K, V, const N: usize, E>(
     proto: &ProtoCurrentKeyValueProof,
     requested_key: &[u8],
     root: &H::Digest,
-    op_cfg: &(K::Cfg, V::Cfg),
-) -> Result<VerifiedUnorderedKeyValue<H::Digest, K, V, F>, QmdbError>
+    op_cfg: &<unordered::Operation<F, K, E> as Read>::Cfg,
+) -> Result<VerifiedUnorderedKeyValue<H::Digest, K, V, F, E>, QmdbError>
 where
     F: Graftable,
     H: Hasher,
     H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
+    K: commonware_utils::Array + QmdbKey + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
-    UnorderedQmdbOperation<F, K, V>: Decode + Read<Cfg = (K::Cfg, V::Cfg)>,
+    E: ValueEncoding<Value = V>,
+    unordered::Operation<F, K, E>: Decode + Encode + Read,
 {
     let operation =
-        UnorderedQmdbOperation::<F, K, V>::decode_cfg(proto.encoded_operation.as_slice(), op_cfg)
+        unordered::Operation::<F, K, E>::decode_cfg(proto.encoded_operation.as_slice(), op_cfg)
             .map_err(|err| {
-            QmdbError::CorruptData(format!(
-                "failed to decode unordered current key-value operation: {err}",
-            ))
-        })?;
-    let UnorderedQmdbOperation::Update(update) = &operation else {
+                QmdbError::CorruptData(format!(
+                    "failed to decode unordered current key-value operation: {err}",
+                ))
+            })?;
+    let unordered::Operation::Update(update) = &operation else {
         return Err(QmdbError::CorruptData(
             "unordered current key-value proof operation must be an update".to_string(),
         ));
@@ -920,11 +979,12 @@ where
     })
 }
 
-fn verify_key_exclusion_from_proto<F, H, K, V, const N: usize>(
+fn verify_key_exclusion_from_proto<F, H, K, V, const N: usize, E>(
     proto: &ProtoCurrentKeyExclusionProof,
     requested_key: &[u8],
     root: &H::Digest,
-    op_cfg: &(K::Cfg, V::Cfg),
+    update_cfg: &<ordered::Update<K, E> as Read>::Cfg,
+    value_cfg: &V::Cfg,
 ) -> Result<ExclusionBoundary, QmdbError>
 where
     F: Graftable,
@@ -932,12 +992,18 @@ where
     H::Digest: DecodeExt<()>,
     K: QmdbKey + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
-    QmdbOperation<F, K, V>: Decode + Read<Cfg = (K::Cfg, V::Cfg)>,
+    E: ValueEncoding<Value = V>,
+    <ordered::Update<K, E> as Read>::Cfg: Clone,
+    V::Cfg: Clone,
+    ordered::Operation<F, K, E>: Decode + Encode + Read,
+    ordered::Update<K, E>: Read,
+    ExclusionProof<F, K, E, H::Digest, N>:
+        Read<Cfg = (usize, <ordered::Update<K, E> as Read>::Cfg, V::Cfg)>,
 {
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
-    let proof = ExclusionProof::<F, K, VariableEncoding<V>, H::Digest, N>::decode_cfg(
+    let proof = ExclusionProof::<F, K, E, H::Digest, N>::decode_cfg(
         proto.proof.as_slice(),
-        &(max_digests, op_cfg.clone(), op_cfg.1.clone()),
+        &(max_digests, update_cfg.clone(), value_cfg.clone()),
     )
     .map_err(|err| {
         QmdbError::CorruptData(format!(
@@ -967,13 +1033,17 @@ where
                 start: span_start.to_vec(),
                 end: span_end.to_vec(),
             };
-            (op_proof, QmdbOperation::<F, K, V>::Update(update), boundary)
+            (
+                op_proof,
+                ordered::Operation::<F, K, E>::Update(update),
+                boundary,
+            )
         }
         ExclusionProof::Commit(op_proof, value) => {
             let floor = op_proof.loc;
             (
                 op_proof,
-                QmdbOperation::<F, K, V>::CommitFloor(value, floor),
+                ordered::Operation::<F, K, E>::CommitFloor(value, floor),
                 ExclusionBoundary::Empty,
             )
         }
@@ -995,28 +1065,39 @@ fn span_contains_key(span_start: &[u8], span_end: &[u8], key: &[u8]) -> bool {
     }
 }
 
-fn verify_get_range_from_proto<F, H, K, V, const N: usize>(
+fn verify_get_range_from_proto<F, H, K, V, const N: usize, E>(
     response: &GetRangeResponse,
     root: &H::Digest,
     start_key: &[u8],
     end_key: Option<&[u8]>,
-    op_cfg: &(K::Cfg, V::Cfg),
-) -> Result<VerifiedKeyRange<H::Digest, K, V, F>, QmdbError>
+    op_cfg: &<ordered::Operation<F, K, E> as Read>::Cfg,
+    update_cfg: &<ordered::Update<K, E> as Read>::Cfg,
+    key_cfg: &K::Cfg,
+    value_cfg: &V::Cfg,
+) -> Result<VerifiedKeyRange<H::Digest, K, V, F, E>, QmdbError>
 where
     F: Graftable,
     H: Hasher,
     H::Digest: DecodeExt<()>,
     K: QmdbKey + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
-    QmdbOperation<F, K, V>: Decode + Read<Cfg = (K::Cfg, V::Cfg)>,
+    E: ValueEncoding<Value = V>,
+    K::Cfg: Clone,
+    <ordered::Update<K, E> as Read>::Cfg: Clone,
+    V::Cfg: Clone,
+    ordered::Operation<F, K, E>: Decode + Encode + Read,
+    ordered::Update<K, E>: Read,
+    ExclusionProof<F, K, E, H::Digest, N>:
+        Read<Cfg = (usize, <ordered::Update<K, E> as Read>::Cfg, V::Cfg)>,
 {
     let mut entries = Vec::with_capacity(response.entries.len());
     for entry in &response.entries {
         let proof = entry.proof.as_option().ok_or_else(|| {
             QmdbError::CorruptData("qmdb get_range entry missing proof".to_string())
         })?;
-        let verified = verify_key_value_from_proto::<F, H, K, V, N>(proof, root, op_cfg)?;
-        let QmdbOperation::Update(update) = &verified.operation else {
+        let verified =
+            verify_key_value_from_proto::<F, H, K, V, N, E>(proof, root, op_cfg, key_cfg)?;
+        let ordered::Operation::Update(update) = &verified.operation else {
             return Err(QmdbError::CorruptData(
                 "qmdb get_range entry proof did not verify an update".to_string(),
             ));
@@ -1030,7 +1111,7 @@ where
     }
 
     if let Some(first) = entries.first() {
-        let QmdbOperation::Update(first_update) = &first.operation else {
+        let ordered::Operation::Update(first_update) = &first.operation else {
             unreachable!("range entries were checked as updates");
         };
         if <K as AsRef<[u8]>>::as_ref(&first_update.key) != start_key {
@@ -1039,11 +1120,12 @@ where
                     "qmdb get_range response missing start boundary proof".to_string(),
                 )
             })?;
-            match verify_key_exclusion_from_proto::<F, H, K, V, N>(
+            match verify_key_exclusion_from_proto::<F, H, K, V, N, E>(
                 start_proof,
                 start_key,
                 root,
-                op_cfg,
+                update_cfg,
+                value_cfg,
             )? {
                 ExclusionBoundary::Span { end, .. }
                     if end.as_slice() == <K as AsRef<[u8]>>::as_ref(&first_update.key) => {}
@@ -1060,8 +1142,13 @@ where
                 "empty qmdb get_range response missing start boundary proof".to_string(),
             )
         })?;
-        let boundary =
-            verify_key_exclusion_from_proto::<F, H, K, V, N>(start_proof, start_key, root, op_cfg)?;
+        let boundary = verify_key_exclusion_from_proto::<F, H, K, V, N, E>(
+            start_proof,
+            start_key,
+            root,
+            update_cfg,
+            value_cfg,
+        )?;
         match (end_key, boundary) {
             (Some(end_key), ExclusionBoundary::Span { start, end }) => {
                 if !span_contains_key(&start, &end, end_key) && end.as_slice() != end_key {
@@ -1080,10 +1167,10 @@ where
     }
 
     for pair in entries.windows(2) {
-        let QmdbOperation::Update(left) = &pair[0].operation else {
+        let ordered::Operation::Update(left) = &pair[0].operation else {
             unreachable!("range entries were checked as updates");
         };
-        let QmdbOperation::Update(right) = &pair[1].operation else {
+        let ordered::Operation::Update(right) = &pair[1].operation else {
             unreachable!("range entries were checked as updates");
         };
         if <K as AsRef<[u8]>>::as_ref(&left.next_key) != <K as AsRef<[u8]>>::as_ref(&right.key) {
@@ -1099,7 +1186,7 @@ where
                 "truncated qmdb get_range response has no final entry".to_string(),
             ));
         };
-        let QmdbOperation::Update(last_update) = &last.operation else {
+        let ordered::Operation::Update(last_update) = &last.operation else {
             unreachable!("range entries were checked as updates");
         };
         if response.next_start_key.as_slice() != <K as AsRef<[u8]>>::as_ref(&last_update.next_key) {
@@ -1109,10 +1196,10 @@ where
         }
     } else if let Some(first) = entries.first() {
         let last = entries.last().expect("first exists");
-        let QmdbOperation::Update(first_update) = &first.operation else {
+        let ordered::Operation::Update(first_update) = &first.operation else {
             unreachable!("range entries were checked as updates");
         };
-        let QmdbOperation::Update(last_update) = &last.operation else {
+        let ordered::Operation::Update(last_update) = &last.operation else {
             unreachable!("range entries were checked as updates");
         };
         if let Some(end_key) = end_key {

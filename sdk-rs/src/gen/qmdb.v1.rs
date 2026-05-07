@@ -1643,9 +1643,8 @@ pub struct HistoricalMultiProof {
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
     pub operations: ::buffa::alloc::vec::Vec<MultiProofOperation>,
-    /// Optional opaque Commonware `current::proof::OpsRootWitness` bytes. When
-    /// present, `ops_root` is first authenticated against the caller's trusted
-    /// current/global root, then `proof` is verified against that ops root.
+    /// Operation-log root authenticated by `ops_root_witness` for
+    /// current-boundary-backed endpoints.
     ///
     /// Field 3: `ops_root`
     #[serde(
@@ -1655,6 +1654,10 @@ pub struct HistoricalMultiProof {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
     pub ops_root: ::buffa::alloc::vec::Vec<u8>,
+    /// Opaque Commonware `current::proof::OpsRootWitness` bytes encoded with
+    /// `commonware-codec`. Ordered/unordered full stacks populate this with
+    /// `ops_root`, so clients verify from their trusted current/global root.
+    ///
     /// Field 4: `ops_root_witness`
     #[serde(
         rename = "opsRootWitness",
@@ -1870,12 +1873,15 @@ pub struct HistoricalMultiProofView<'a> {
     pub proof: &'a [u8],
     /// Field 2: `operations`
     pub operations: ::buffa::RepeatedView<'a, MultiProofOperationView<'a>>,
-    /// Optional opaque Commonware `current::proof::OpsRootWitness` bytes. When
-    /// present, `ops_root` is first authenticated against the caller's trusted
-    /// current/global root, then `proof` is verified against that ops root.
+    /// Operation-log root authenticated by `ops_root_witness` for
+    /// current-boundary-backed endpoints.
     ///
     /// Field 3: `ops_root`
     pub ops_root: &'a [u8],
+    /// Opaque Commonware `current::proof::OpsRootWitness` bytes encoded with
+    /// `commonware-codec`. Ordered/unordered full stacks populate this with
+    /// `ops_root`, so clients verify from their trusted current/global root.
+    ///
     /// Field 4: `ops_root_witness`
     pub ops_root_witness: &'a [u8],
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -2040,9 +2046,8 @@ pub struct HistoricalOperationRangeProof {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec"
     )]
     pub encoded_operations: ::buffa::alloc::vec::Vec<::buffa::alloc::vec::Vec<u8>>,
-    /// Optional opaque Commonware `current::proof::OpsRootWitness` bytes. When
-    /// present, `ops_root` is first authenticated against the caller's trusted
-    /// current/global root, then `proof` is verified against that ops root.
+    /// Operation-log root authenticated by `ops_root_witness` for
+    /// current-boundary-backed endpoints.
     ///
     /// Field 4: `ops_root`
     #[serde(
@@ -2052,6 +2057,10 @@ pub struct HistoricalOperationRangeProof {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
     pub ops_root: ::buffa::alloc::vec::Vec<u8>,
+    /// Opaque Commonware `current::proof::OpsRootWitness` bytes encoded with
+    /// `commonware-codec`. Ordered/unordered full stacks populate this with
+    /// `ops_root`, so clients verify from their trusted current/global root.
+    ///
     /// Field 5: `ops_root_witness`
     #[serde(
         rename = "opsRootWitness",
@@ -2284,12 +2293,15 @@ pub struct HistoricalOperationRangeProofView<'a> {
     pub start_location: u64,
     /// Field 3: `encoded_operations`
     pub encoded_operations: ::buffa::RepeatedView<'a, &'a [u8]>,
-    /// Optional opaque Commonware `current::proof::OpsRootWitness` bytes. When
-    /// present, `ops_root` is first authenticated against the caller's trusted
-    /// current/global root, then `proof` is verified against that ops root.
+    /// Operation-log root authenticated by `ops_root_witness` for
+    /// current-boundary-backed endpoints.
     ///
     /// Field 4: `ops_root`
     pub ops_root: &'a [u8],
+    /// Opaque Commonware `current::proof::OpsRootWitness` bytes encoded with
+    /// `commonware-codec`. Ordered/unordered full stacks populate this with
+    /// `ops_root`, so clients verify from their trusted current/global root.
+    ///
     /// Field 5: `ops_root_witness`
     pub ops_root_witness: &'a [u8],
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -4220,10 +4232,9 @@ pub struct SubscribeResponse {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
     )]
     pub proof: ::buffa::MessageField<HistoricalMultiProof>,
-    /// Published operation-log watermark this proof verifies against. When
-    /// `proof.ops_root_witness` is present, clients verify using their trusted
-    /// current/global root for this tip; otherwise they verify against the
-    /// backend's operation-log root.
+    /// Published backend tip. For current-boundary-backed endpoints, clients use
+    /// their trusted current/global root for this tip and the proof's embedded
+    /// ops-root witness to authenticate the historical operation-log root.
     ///
     /// Field 3: `tip`
     #[serde(
@@ -4415,10 +4426,9 @@ pub struct SubscribeResponseView<'a> {
     pub resume_sequence_number: u64,
     /// Field 2: `proof`
     pub proof: ::buffa::MessageFieldView<HistoricalMultiProofView<'a>>,
-    /// Published operation-log watermark this proof verifies against. When
-    /// `proof.ops_root_witness` is present, clients verify using their trusted
-    /// current/global root for this tip; otherwise they verify against the
-    /// backend's operation-log root.
+    /// Published backend tip. For current-boundary-backed endpoints, clients use
+    /// their trusted current/global root for this tip and the proof's embedded
+    /// ops-root witness to authenticate the historical operation-log root.
     ///
     /// Field 3: `tip`
     pub tip: u64,

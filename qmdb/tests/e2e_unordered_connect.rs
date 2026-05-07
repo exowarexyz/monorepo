@@ -20,14 +20,16 @@ use connectrpc::client::ClientConfig;
 use connectrpc::ErrorCode;
 use exoware_qmdb::{
     recover_boundary_state, unordered_connect_stack, unordered_operation_log_connect_stack,
-    CurrentBoundaryState, OperationLogClient, OperationLogSubscribeProof, QmdbError,
-    UnorderedClient, UnorderedConnectClient, UnorderedWriter, MAX_OPERATION_SIZE,
+    CurrentBoundaryState, CurrentOperationClient, OperationLogClient, OperationLogSubscribeProof,
+    QmdbError, UnorderedClient, UnorderedConnectClient, UnorderedWriter, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
 use exoware_sdk::qmdb::v1::{
-    GetManyRequest as ProtoGetManyRequest, GetRangeRequest as ProtoGetRangeRequest,
-    GetRequest as ProtoGetRequest, KeyLookupServiceClient, OrderedKeyRangeServiceClient,
-    SubscribeRequest as ProtoSubscribeRequest,
+    GetCurrentOperationRangeRequest as ProtoGetCurrentOperationRangeRequest,
+    GetManyRequest as ProtoGetManyRequest,
+    GetOperationRangeRequest as ProtoGetOperationRangeRequest,
+    GetRangeRequest as ProtoGetRangeRequest, GetRequest as ProtoGetRequest, KeyLookupServiceClient,
+    OrderedKeyRangeServiceClient, SubscribeRequest as ProtoSubscribeRequest,
 };
 use exoware_sdk::StoreClient;
 
@@ -57,6 +59,7 @@ async fn spawn_qmdb_full_server(
         Digest,
         Vec<u8>,
         N,
+        _,
     >(client))
     .await
 }
@@ -71,6 +74,12 @@ fn validated_key_client(
     base: &str,
 ) -> UnorderedConnectClient<PreferZstdHttpClient, mmr::Family, Sha256, Digest, Vec<u8>, N> {
     UnorderedConnectClient::plaintext(base, fixed_op_cfg())
+}
+
+fn validated_current_operation_client(
+    base: &str,
+) -> CurrentOperationClient<PreferZstdHttpClient, mmr::Family, Sha256, FixedBatchOperation, N> {
+    CurrentOperationClient::plaintext(base, fixed_op_cfg())
 }
 
 fn key_lookup_rpc_client(base: &str) -> KeyLookupServiceClient<PreferZstdHttpClient> {
@@ -286,7 +295,7 @@ async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
 async fn commit_fixed_upload(client: &StoreClient, batch: &FixedLocalBatch) {
     let writer: UnorderedWriter<mmr::Family, Sha256, Digest, Vec<u8>> =
         UnorderedWriter::empty(client.clone());
-    common::commit_unordered_current_upload::<_, _, _, _, N>(
+    common::commit_unordered_current_upload::<_, _, _, _, N, _>(
         client,
         &writer,
         &batch.operations,
@@ -349,6 +358,41 @@ async fn unordered_range_stack_does_not_expose_key_lookup_or_ordered_range_servi
 }
 
 #[tokio::test]
+async fn unordered_connect_get_operation_range_returns_verifiable_proof() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_local_batch().await;
+    commit_upload(&store_client, &local).await;
+
+    let unordered_client = Arc::new(TestUnorderedClient::from_client(
+        store_client,
+        op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_range_server(unordered_client).await;
+    let client = validated_client(&qmdb_url);
+
+    let proof = client
+        .get_operation_range(
+            ProtoGetOperationRangeRequest {
+                tip: u64::try_from(local.operations.len() - 1).expect("tip fits"),
+                start_location: 1,
+                max_locations: 1,
+                ..Default::default()
+            },
+            &local.root,
+        )
+        .await
+        .expect("get operation range");
+
+    assert_eq!(proof.root, local.root);
+    assert_eq!(proof.start_location, Location::new(1));
+    assert_eq!(
+        proof.operations,
+        vec![(Location::new(1), local.operations[1].clone())]
+    );
+}
+
+#[tokio::test]
 async fn unordered_connect_get_many_returns_present_key_proofs() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
     let local = build_fixed_local_batch().await;
@@ -397,6 +441,45 @@ async fn unordered_connect_get_many_returns_present_key_proofs() {
         .expect("get");
     assert_eq!(one.location, expected_alpha.0);
     assert_eq!(one.operation, expected_alpha.1);
+}
+
+#[tokio::test]
+async fn unordered_current_operation_range_connect_returns_verifiable_proof() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_fixed_local_batch().await;
+    commit_fixed_upload(&store_client, &local).await;
+
+    let unordered_client = Arc::new(FixedTestUnorderedClient::from_client(
+        store_client,
+        fixed_op_cfg(),
+        fixed_update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_full_server(unordered_client).await;
+    let client = validated_current_operation_client(&qmdb_url);
+
+    let proof = client
+        .get_current_operation_range(
+            ProtoGetCurrentOperationRangeRequest {
+                tip: local.latest_location.as_u64(),
+                start_location: 0,
+                max_locations: local.operations.len() as u32,
+                ..Default::default()
+            },
+            &local.root,
+        )
+        .await
+        .expect("current operation range");
+
+    let expected: Vec<_> = local
+        .operations
+        .iter()
+        .enumerate()
+        .map(|(index, operation)| (Location::new(index as u64), operation.clone()))
+        .collect();
+    assert_eq!(proof.root, local.root);
+    assert_eq!(proof.start_location, Location::new(0));
+    assert_eq!(proof.operations, expected);
+    assert!(!proof.chunks.is_empty());
 }
 
 #[tokio::test]

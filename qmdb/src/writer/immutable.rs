@@ -6,7 +6,10 @@ use std::marker::PhantomData;
 use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::Hasher;
 use commonware_storage::merkle::{Family, Location, Position};
-use commonware_storage::qmdb::immutable::variable::Operation as ImmutableOperation;
+use commonware_storage::qmdb::{
+    any::value::{ValueEncoding, VariableEncoding},
+    immutable,
+};
 use commonware_utils::Array;
 use exoware_sdk::keys::Key;
 use exoware_sdk::{
@@ -38,11 +41,11 @@ pub struct BuiltImmutableUpload<D, F: Family> {
     pub includes_watermark: bool,
 }
 
-pub fn build_immutable_upload<F, H, K, V>(
+pub fn build_immutable_upload<F, H, K, V, E>(
     peaks: Vec<(Position<F>, u32, H::Digest)>,
     prev_ops_size: Position<F>,
     latest_location: Location<F>,
-    ops: &[ImmutableOperation<F, K, V>],
+    ops: &[immutable::Operation<F, K, E>],
     watermark_at: Option<Location<F>>,
 ) -> Result<BuiltImmutableUpload<H::Digest, F>, QmdbError>
 where
@@ -50,7 +53,8 @@ where
     H: Hasher,
     K: Array + Codec + Clone + AsRef<[u8]>,
     V: Codec + Clone + Send + Sync,
-    ImmutableOperation<F, K, V>: Encode,
+    E: ValueEncoding<Value = V>,
+    immutable::Operation<F, K, E>: Encode,
 {
     if ops.is_empty() {
         return Err(QmdbError::EmptyBatch);
@@ -83,13 +87,19 @@ where
 /// Sole-writer immutable QMDB helper. Pipelining, flushing, failure, and
 /// sole-writer contract are identical to
 /// [`KeylessWriter`](crate::KeylessWriter) — see its docs for details.
-pub struct ImmutableWriter<F: Family, H: Hasher, K: Array + Codec, V: Codec + Clone + Send + Sync> {
+pub struct ImmutableWriter<
+    F: Family,
+    H: Hasher,
+    K: Array + Codec,
+    V: Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V> = VariableEncoding<V>,
+> {
     client: StoreClient,
     core: WriterCore<H::Digest, F>,
-    _marker: PhantomData<(F, K, V)>,
+    _marker: PhantomData<(F, K, E)>,
 }
 
-impl<F, H, K, V> ImmutableWriter<F, H, K, V>
+impl<F, H, K, V, E> ImmutableWriter<F, H, K, V, E>
 where
     F: Family,
     H: Hasher,
@@ -97,7 +107,8 @@ where
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
     K::Cfg: Clone,
-    ImmutableOperation<F, K, V>: Encode + Decode<Cfg = (K::Cfg, V::Cfg)> + Clone,
+    E: ValueEncoding<Value = V>,
+    immutable::Operation<F, K, E>: Encode + Decode + Clone,
 {
     /// Construct a writer from caller-supplied frontier state. No store I/O.
     pub fn new(client: StoreClient, state: WriterState<H::Digest, F>) -> Self {
@@ -122,12 +133,12 @@ where
 
     pub async fn prepare_upload(
         &self,
-        ops: &[ImmutableOperation<F, K, V>],
+        ops: &[immutable::Operation<F, K, E>],
     ) -> Result<super::PreparedUpload<F>, QmdbError> {
         let prepared = self
             .core
             .prepare(ops.len() as u64, |ctx| {
-                let built = build_immutable_upload::<F, H, K, V>(
+                let built = build_immutable_upload::<F, H, K, V, E>(
                     ctx.peaks,
                     ctx.ops_size,
                     ctx.latest_location,
@@ -222,19 +233,20 @@ where
     }
 }
 
-impl<F, H, K, V> std::fmt::Debug for ImmutableWriter<F, H, K, V>
+impl<F, H, K, V, E> std::fmt::Debug for ImmutableWriter<F, H, K, V, E>
 where
     F: Family,
     H: Hasher,
     K: Array + Codec,
     V: Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V>,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ImmutableWriter").finish_non_exhaustive()
     }
 }
 
-impl<F, H, K, V> StoreBatchUpload for ImmutableWriter<F, H, K, V>
+impl<F, H, K, V, E> StoreBatchUpload for ImmutableWriter<F, H, K, V, E>
 where
     F: Family,
     H: Hasher + Sync,
@@ -242,7 +254,8 @@ where
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
     K::Cfg: Clone,
-    ImmutableOperation<F, K, V>: Encode + Decode<Cfg = (K::Cfg, V::Cfg)> + Clone,
+    E: ValueEncoding<Value = V> + Sync,
+    immutable::Operation<F, K, E>: Encode + Decode + Clone,
 {
     type Prepared = super::PreparedUpload<F>;
     type Receipt = UploadReceipt<F>;
@@ -289,7 +302,7 @@ where
     }
 }
 
-impl<F, H, K, V> StoreBatchPublication for ImmutableWriter<F, H, K, V>
+impl<F, H, K, V, E> StoreBatchPublication for ImmutableWriter<F, H, K, V, E>
 where
     F: Family,
     H: Hasher + Sync,
@@ -297,7 +310,8 @@ where
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
     K::Cfg: Clone,
-    ImmutableOperation<F, K, V>: Encode + Decode<Cfg = (K::Cfg, V::Cfg)> + Clone,
+    E: ValueEncoding<Value = V> + Sync,
+    immutable::Operation<F, K, E>: Encode + Decode + Clone,
 {
     type PreparedPublication = super::PreparedWatermark<F>;
     type PublicationReceipt = PublishedCheckpoint<F>;
@@ -330,7 +344,7 @@ where
     }
 }
 
-impl<F, H, K, V> StorePublicationFrontierWriter for ImmutableWriter<F, H, K, V>
+impl<F, H, K, V, E> StorePublicationFrontierWriter for ImmutableWriter<F, H, K, V, E>
 where
     F: Family,
     H: Hasher + Sync,
@@ -338,7 +352,8 @@ where
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
     K::Cfg: Clone,
-    ImmutableOperation<F, K, V>: Encode + Decode<Cfg = (K::Cfg, V::Cfg)> + Clone,
+    E: ValueEncoding<Value = V> + Sync,
+    immutable::Operation<F, K, E>: Encode + Decode + Clone,
 {
     fn latest_publication_receipt<'a>(&'a self) -> BoxFuture<'a, Option<PublishedCheckpoint<F>>>
     where

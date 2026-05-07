@@ -5,7 +5,10 @@ use std::marker::PhantomData;
 use commonware_codec::{Codec, Encode};
 use commonware_cryptography::Hasher;
 use commonware_storage::merkle::{Family, Location, Position};
-use commonware_storage::qmdb::keyless::variable::Operation as KeylessOperation;
+use commonware_storage::qmdb::{
+    any::value::{ValueEncoding, VariableEncoding},
+    keyless,
+};
 use exoware_sdk::keys::Key;
 use exoware_sdk::{
     StoreBatchPublication, StoreBatchUpload, StoreClient, StorePublicationFrontierWriter,
@@ -43,15 +46,19 @@ pub struct BuiltKeylessUpload<D, F: Family> {
 /// The caller is responsible for ensuring `loc` is safe to publish (i.e. the
 /// entire prefix up to `loc` has committed); `WriterCore::prepare` computes
 /// this safely for in-writer use.
-pub fn build_keyless_upload<F: Family, H: Hasher, V: Codec + Clone + Send + Sync>(
+pub fn build_keyless_upload<F, H, V, E>(
     peaks: Vec<(Position<F>, u32, H::Digest)>,
     prev_ops_size: Position<F>,
     latest_location: Location<F>,
-    ops: &[KeylessOperation<F, V>],
+    ops: &[keyless::Operation<F, E>],
     watermark_at: Option<Location<F>>,
 ) -> Result<BuiltKeylessUpload<H::Digest, F>, QmdbError>
 where
-    KeylessOperation<F, V>: Encode,
+    F: Family,
+    H: Hasher,
+    V: Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V>,
+    keyless::Operation<F, E>: Encode,
 {
     if ops.is_empty() {
         return Err(QmdbError::EmptyBatch);
@@ -119,18 +126,24 @@ where
 /// extension and will corrupt each other's Merkle state. The contract assumed
 /// throughout is "one writer per namespace." The store's ingest layer is not
 /// aware of this constraint; it's the caller's responsibility.
-pub struct KeylessWriter<F: Family, H: Hasher, V: Codec + Clone + Send + Sync> {
+pub struct KeylessWriter<
+    F: Family,
+    H: Hasher,
+    V: Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V> = VariableEncoding<V>,
+> {
     client: StoreClient,
     core: WriterCore<H::Digest, F>,
-    _marker: PhantomData<(F, V)>,
+    _marker: PhantomData<(F, E)>,
 }
 
-impl<F, H, V> KeylessWriter<F, H, V>
+impl<F, H, V, E> KeylessWriter<F, H, V, E>
 where
     F: Family,
     H: Hasher,
     V: Codec + Clone + Send + Sync,
-    KeylessOperation<F, V>: Encode,
+    E: ValueEncoding<Value = V>,
+    keyless::Operation<F, E>: Encode,
 {
     /// Construct a writer from caller-supplied frontier state. No store I/O.
     pub fn new(client: StoreClient, state: WriterState<H::Digest, F>) -> Self {
@@ -155,12 +168,12 @@ where
 
     pub async fn prepare_upload(
         &self,
-        ops: &[KeylessOperation<F, V>],
+        ops: &[keyless::Operation<F, E>],
     ) -> Result<super::PreparedUpload<F>, QmdbError> {
         let prepared = self
             .core
             .prepare(ops.len() as u64, |ctx| {
-                let built = build_keyless_upload::<F, H, V>(
+                let built = build_keyless_upload::<F, H, V, E>(
                     ctx.peaks,
                     ctx.ops_size,
                     ctx.latest_location,
@@ -255,23 +268,25 @@ where
     }
 }
 
-impl<F, H, V> std::fmt::Debug for KeylessWriter<F, H, V>
+impl<F, H, V, E> std::fmt::Debug for KeylessWriter<F, H, V, E>
 where
     F: Family,
     H: Hasher,
     V: Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V>,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KeylessWriter").finish_non_exhaustive()
     }
 }
 
-impl<F, H, V> StoreBatchUpload for KeylessWriter<F, H, V>
+impl<F, H, V, E> StoreBatchUpload for KeylessWriter<F, H, V, E>
 where
     F: Family,
     H: Hasher + Sync,
     V: Codec + Clone + Send + Sync,
-    KeylessOperation<F, V>: Encode,
+    E: ValueEncoding<Value = V> + Sync,
+    keyless::Operation<F, E>: Encode,
 {
     type Prepared = super::PreparedUpload<F>;
     type Receipt = UploadReceipt<F>;
@@ -318,12 +333,13 @@ where
     }
 }
 
-impl<F, H, V> StoreBatchPublication for KeylessWriter<F, H, V>
+impl<F, H, V, E> StoreBatchPublication for KeylessWriter<F, H, V, E>
 where
     F: Family,
     H: Hasher + Sync,
     V: Codec + Clone + Send + Sync,
-    KeylessOperation<F, V>: Encode,
+    E: ValueEncoding<Value = V> + Sync,
+    keyless::Operation<F, E>: Encode,
 {
     type PreparedPublication = super::PreparedWatermark<F>;
     type PublicationReceipt = PublishedCheckpoint<F>;
@@ -356,12 +372,13 @@ where
     }
 }
 
-impl<F, H, V> StorePublicationFrontierWriter for KeylessWriter<F, H, V>
+impl<F, H, V, E> StorePublicationFrontierWriter for KeylessWriter<F, H, V, E>
 where
     F: Family,
     H: Hasher + Sync,
     V: Codec + Clone + Send + Sync,
-    KeylessOperation<F, V>: Encode,
+    E: ValueEncoding<Value = V> + Sync,
+    keyless::Operation<F, E>: Encode,
 {
     fn latest_publication_receipt<'a>(&'a self) -> BoxFuture<'a, Option<PublishedCheckpoint<F>>>
     where
@@ -395,16 +412,17 @@ mod tests {
     use commonware_cryptography::Sha256;
     use commonware_storage::merkle::mmr;
 
-    type TestOp = KeylessOperation<mmr::Family, Vec<u8>>;
+    type TestEncoding = VariableEncoding<Vec<u8>>;
+    type TestOp = keyless::Operation<mmr::Family, TestEncoding>;
 
     fn op(v: &[u8]) -> TestOp {
-        KeylessOperation::Append(v.to_vec())
+        keyless::Operation::Append(v.to_vec())
     }
 
     #[test]
     fn build_from_empty_peaks_includes_all_expected_row_families() {
         let ops = vec![op(b"one"), op(b"two"), op(b"three")];
-        let built = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>>(
+        let built = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>, TestEncoding>(
             Vec::new(),
             Position::new(0),
             Location::new(2),
@@ -421,7 +439,7 @@ mod tests {
     #[test]
     fn excluding_watermark_row_drops_exactly_one_row() {
         let ops = vec![op(b"x"), op(b"y")];
-        let with_wm = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>>(
+        let with_wm = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>, TestEncoding>(
             Vec::new(),
             Position::new(0),
             Location::new(1),
@@ -429,7 +447,7 @@ mod tests {
             Some(Location::new(1)),
         )
         .expect("with wm");
-        let without_wm = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>>(
+        let without_wm = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>, TestEncoding>(
             Vec::new(),
             Position::new(0),
             Location::new(1),
@@ -443,7 +461,7 @@ mod tests {
     #[test]
     fn build_is_deterministic_on_same_inputs() {
         let ops = vec![op(b"a"), op(b"b"), op(b"c"), op(b"d")];
-        let a = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>>(
+        let a = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>, TestEncoding>(
             Vec::new(),
             Position::new(0),
             Location::new(3),
@@ -451,7 +469,7 @@ mod tests {
             Some(Location::new(3)),
         )
         .expect("a");
-        let b = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>>(
+        let b = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>, TestEncoding>(
             Vec::new(),
             Position::new(0),
             Location::new(3),
@@ -468,7 +486,7 @@ mod tests {
     #[test]
     fn incremental_fold_matches_single_fold() {
         let all = vec![op(b"p"), op(b"q"), op(b"r"), op(b"s")];
-        let single = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>>(
+        let single = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>, TestEncoding>(
             Vec::new(),
             Position::new(0),
             Location::new(3),
@@ -477,7 +495,7 @@ mod tests {
         )
         .expect("single");
 
-        let first = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>>(
+        let first = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>, TestEncoding>(
             Vec::new(),
             Position::new(0),
             Location::new(1),
@@ -485,7 +503,7 @@ mod tests {
             None,
         )
         .expect("first");
-        let second = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>>(
+        let second = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>, TestEncoding>(
             first.new_peaks.clone(),
             first.new_ops_size,
             Location::new(3),
@@ -501,7 +519,7 @@ mod tests {
 
     #[test]
     fn empty_batch_rejected() {
-        let res = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>>(
+        let res = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>, TestEncoding>(
             Vec::new(),
             Position::new(0),
             Location::new(0),

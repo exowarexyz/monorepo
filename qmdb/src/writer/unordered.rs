@@ -7,7 +7,11 @@ use commonware_codec::{Codec, Encode};
 use commonware_cryptography::Hasher;
 use commonware_storage::merkle::{Graftable, Location, Position};
 use commonware_storage::qmdb::{
-    any::unordered::variable::Operation as UnorderedQmdbOperation, operation::Key as QmdbKey,
+    any::{
+        unordered,
+        value::{ValueEncoding, VariableEncoding},
+    },
+    operation::Key as QmdbKey,
 };
 use exoware_sdk::keys::Key;
 use exoware_sdk::{
@@ -40,11 +44,11 @@ pub struct BuiltUnorderedUpload<D, F: Graftable> {
 /// Pure row-build for an unordered batch. Produces op rows, update-index
 /// rows for keyed ops, presence row, Merkle node rows, and (optionally) the
 /// watermark row.
-pub fn build_unordered_upload<F, H, K, V>(
+pub fn build_unordered_upload<F, H, K, V, E>(
     peaks: Vec<(Position<F>, u32, H::Digest)>,
     prev_ops_size: Position<F>,
     latest_location: Location<F>,
-    ops: &[UnorderedQmdbOperation<F, K, V>],
+    ops: &[unordered::Operation<F, K, E>],
     watermark_at: Option<Location<F>>,
 ) -> Result<BuiltUnorderedUpload<H::Digest, F>, QmdbError>
 where
@@ -52,7 +56,8 @@ where
     H: Hasher,
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
-    UnorderedQmdbOperation<F, K, V>: Encode,
+    E: ValueEncoding<Value = V>,
+    unordered::Operation<F, K, E>: Encode,
 {
     if ops.is_empty() {
         return Err(QmdbError::EmptyBatch);
@@ -81,11 +86,11 @@ where
     })
 }
 
-pub fn build_unordered_current_upload<F, H, K, V, const N: usize>(
+pub fn build_unordered_current_upload<F, H, K, V, const N: usize, E>(
     peaks: Vec<(Position<F>, u32, H::Digest)>,
     prev_ops_size: Position<F>,
     latest_location: Location<F>,
-    ops: &[UnorderedQmdbOperation<F, K, V>],
+    ops: &[unordered::Operation<F, K, E>],
     current_boundary: &CurrentBoundaryState<H::Digest, N, F>,
     watermark_at: Option<Location<F>>,
 ) -> Result<BuiltUnorderedUpload<H::Digest, F>, QmdbError>
@@ -94,9 +99,10 @@ where
     H: Hasher,
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
-    UnorderedQmdbOperation<F, K, V>: Encode,
+    E: ValueEncoding<Value = V>,
+    unordered::Operation<F, K, E>: Encode,
 {
-    let mut built = build_unordered_upload::<F, H, K, V>(
+    let mut built = build_unordered_upload::<F, H, K, V, E>(
         peaks,
         prev_ops_size,
         latest_location,
@@ -116,20 +122,22 @@ pub struct UnorderedWriter<
     H: Hasher,
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > {
     client: StoreClient,
     core: WriterCore<H::Digest, F>,
-    _marker: PhantomData<(F, K, V)>,
+    _marker: PhantomData<(F, K, V, E)>,
 }
 
-impl<F, H, K, V> UnorderedWriter<F, H, K, V>
+impl<F, H, K, V, E> UnorderedWriter<F, H, K, V, E>
 where
     F: Graftable,
     H: Hasher,
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
-    UnorderedQmdbOperation<F, K, V>: Encode,
+    E: ValueEncoding<Value = V>,
+    unordered::Operation<F, K, E>: Encode,
 {
     /// Construct a writer from caller-supplied frontier state. No store I/O.
     pub fn new(client: StoreClient, state: WriterState<H::Digest, F>) -> Self {
@@ -154,12 +162,12 @@ where
 
     pub async fn prepare_upload(
         &self,
-        ops: &[UnorderedQmdbOperation<F, K, V>],
+        ops: &[unordered::Operation<F, K, E>],
     ) -> Result<super::PreparedUpload<F>, QmdbError> {
         let prepared = self
             .core
             .prepare(ops.len() as u64, |ctx| {
-                let built = build_unordered_upload::<F, H, K, V>(
+                let built = build_unordered_upload::<F, H, K, V, E>(
                     ctx.peaks,
                     ctx.ops_size,
                     ctx.latest_location,
@@ -183,13 +191,13 @@ where
 
     pub async fn prepare_current_upload<const N: usize>(
         &self,
-        ops: &[UnorderedQmdbOperation<F, K, V>],
+        ops: &[unordered::Operation<F, K, E>],
         current_boundary: &CurrentBoundaryState<H::Digest, N, F>,
     ) -> Result<super::PreparedUpload<F>, QmdbError> {
         let prepared = self
             .core
             .prepare(ops.len() as u64, |ctx| {
-                let built = build_unordered_current_upload::<F, H, K, V, N>(
+                let built = build_unordered_current_upload::<F, H, K, V, N, E>(
                     ctx.peaks,
                     ctx.ops_size,
                     ctx.latest_location,
@@ -285,26 +293,28 @@ where
     }
 }
 
-impl<F, H, K, V> std::fmt::Debug for UnorderedWriter<F, H, K, V>
+impl<F, H, K, V, E> std::fmt::Debug for UnorderedWriter<F, H, K, V, E>
 where
     F: Graftable,
     H: Hasher,
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V>,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UnorderedWriter").finish_non_exhaustive()
     }
 }
 
-impl<F, H, K, V> StoreBatchUpload for UnorderedWriter<F, H, K, V>
+impl<F, H, K, V, E> StoreBatchUpload for UnorderedWriter<F, H, K, V, E>
 where
     F: Graftable,
     H: Hasher + Sync,
     K: QmdbKey + Codec + Sync,
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
-    UnorderedQmdbOperation<F, K, V>: Encode,
+    E: ValueEncoding<Value = V> + Sync,
+    unordered::Operation<F, K, E>: Encode,
 {
     type Prepared = super::PreparedUpload<F>;
     type Receipt = UploadReceipt<F>;
@@ -351,14 +361,15 @@ where
     }
 }
 
-impl<F, H, K, V> StoreBatchPublication for UnorderedWriter<F, H, K, V>
+impl<F, H, K, V, E> StoreBatchPublication for UnorderedWriter<F, H, K, V, E>
 where
     F: Graftable,
     H: Hasher + Sync,
     K: QmdbKey + Codec + Sync,
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
-    UnorderedQmdbOperation<F, K, V>: Encode,
+    E: ValueEncoding<Value = V> + Sync,
+    unordered::Operation<F, K, E>: Encode,
 {
     type PreparedPublication = super::PreparedWatermark<F>;
     type PublicationReceipt = PublishedCheckpoint<F>;
@@ -391,14 +402,15 @@ where
     }
 }
 
-impl<F, H, K, V> StorePublicationFrontierWriter for UnorderedWriter<F, H, K, V>
+impl<F, H, K, V, E> StorePublicationFrontierWriter for UnorderedWriter<F, H, K, V, E>
 where
     F: Graftable,
     H: Hasher + Sync,
     K: QmdbKey + Codec + Sync,
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
-    UnorderedQmdbOperation<F, K, V>: Encode,
+    E: ValueEncoding<Value = V> + Sync,
+    unordered::Operation<F, K, E>: Encode,
 {
     fn latest_publication_receipt<'a>(&'a self) -> BoxFuture<'a, Option<PublishedCheckpoint<F>>>
     where

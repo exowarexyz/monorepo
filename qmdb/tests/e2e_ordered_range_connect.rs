@@ -25,6 +25,7 @@ use exoware_qmdb::{
 use exoware_sdk::proto::PreferZstdHttpClient;
 use exoware_sdk::qmdb::v1::{
     GetCurrentOperationRangeRequest as ProtoGetCurrentOperationRangeRequest,
+    GetOperationRangeRequest as ProtoGetOperationRangeRequest,
     SubscribeRequest as ProtoSubscribeRequest,
 };
 use exoware_sdk::store::common::v1::{
@@ -215,6 +216,54 @@ async fn ordered_current_operation_range_connect_emits_verifiable_proof() {
             .collect::<Vec<_>>(),
         local.operations
     );
+}
+
+#[tokio::test]
+async fn ordered_operation_range_connect_uses_current_root_witness() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_local_batch().await;
+    commit_upload(&store_client, &local).await;
+
+    let ordered_client = Arc::new(TestOrderedClient::from_client(
+        store_client.clone(),
+        op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client).await;
+    let request = ProtoGetOperationRangeRequest {
+        tip: (local.operations.len() - 1) as u64,
+        start_location: 0,
+        max_locations: local.operations.len() as u32,
+        ..Default::default()
+    };
+
+    let raw_response = common::operation_log_rpc_client(&qmdb_url)
+        .get_operation_range(request.clone())
+        .await
+        .expect("raw get operation range")
+        .into_view()
+        .to_owned_message();
+    let raw_proof = raw_response
+        .proof
+        .as_option()
+        .expect("operation range proof");
+    assert!(!raw_proof.ops_root.is_empty());
+    assert!(!raw_proof.ops_root_witness.is_empty());
+
+    let client = validated_client(&qmdb_url);
+    let proof = client
+        .get_operation_range(request, &local.current_boundary.root)
+        .await
+        .expect("get operation range");
+    assert_eq!(proof.root, local.current_boundary.root);
+    assert_eq!(proof.start_location, Location::new(0));
+    let expected: Vec<(Location<mmr::Family>, BatchOperation)> = local
+        .operations
+        .iter()
+        .enumerate()
+        .map(|(index, operation)| (Location::new(index as u64), operation.clone()))
+        .collect();
+    assert_eq!(proof.operations, expected);
 }
 
 fn match_exact(key: &[u8]) -> ProtoBytesFilter {

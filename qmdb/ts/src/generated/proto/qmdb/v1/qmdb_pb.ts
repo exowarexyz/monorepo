@@ -195,15 +195,18 @@ export type HistoricalMultiProof = Message<"qmdb.v1.HistoricalMultiProof"> & {
   operations: MultiProofOperation[];
 
   /**
-   * Optional opaque Commonware `current::proof::OpsRootWitness` bytes. When
-   * present, `ops_root` is first authenticated against the caller's trusted
-   * current/global root, then `proof` is verified against that ops root.
+   * Operation-log root authenticated by `ops_root_witness` for
+   * current-boundary-backed endpoints.
    *
    * @generated from field: bytes ops_root = 3;
    */
   opsRoot: Uint8Array;
 
   /**
+   * Opaque Commonware `current::proof::OpsRootWitness` bytes encoded with
+   * `commonware-codec`. Ordered/unordered full stacks populate this with
+   * `ops_root`, so clients verify from their trusted current/global root.
+   *
    * @generated from field: bytes ops_root_witness = 4;
    */
   opsRootWitness: Uint8Array;
@@ -238,15 +241,18 @@ export type HistoricalOperationRangeProof = Message<"qmdb.v1.HistoricalOperation
   encodedOperations: Uint8Array[];
 
   /**
-   * Optional opaque Commonware `current::proof::OpsRootWitness` bytes. When
-   * present, `ops_root` is first authenticated against the caller's trusted
-   * current/global root, then `proof` is verified against that ops root.
+   * Operation-log root authenticated by `ops_root_witness` for
+   * current-boundary-backed endpoints.
    *
    * @generated from field: bytes ops_root = 4;
    */
   opsRoot: Uint8Array;
 
   /**
+   * Opaque Commonware `current::proof::OpsRootWitness` bytes encoded with
+   * `commonware-codec`. Ordered/unordered full stacks populate this with
+   * `ops_root`, so clients verify from their trusted current/global root.
+   *
    * @generated from field: bytes ops_root_witness = 5;
    */
   opsRootWitness: Uint8Array;
@@ -420,10 +426,9 @@ export type SubscribeResponse = Message<"qmdb.v1.SubscribeResponse"> & {
   proof?: HistoricalMultiProof;
 
   /**
-   * Published operation-log watermark this proof verifies against. When
-   * `proof.ops_root_witness` is present, clients verify using their trusted
-   * current/global root for this tip; otherwise they verify against the
-   * backend's operation-log root.
+   * Published backend tip. For current-boundary-backed endpoints, clients use
+   * their trusted current/global root for this tip and the proof's embedded
+   * ops-root witness to authenticate the historical operation-log root.
    *
    * @generated from field: uint64 tip = 3;
    */

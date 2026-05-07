@@ -10,15 +10,18 @@ QMDB instance backed by the Exoware API.
 
 The crate supports multiple Commonware authenticated backends:
 
-- **Ordered QMDB** (`OrderedClient`): `qmdb::any::ordered::variable` plus
+- **Ordered QMDB** (`OrderedClient`): `qmdb::any::ordered` plus
   `qmdb::current::ordered`
-- **Unordered QMDB** (`UnorderedClient`): `qmdb::any::unordered::variable` plus
+- **Unordered QMDB** (`UnorderedClient`): `qmdb::any::unordered` plus
   current unordered hit/range proofs when current-boundary rows are uploaded
-- **Immutable** (`ImmutableClient`): `qmdb::immutable::variable`
-- **Keyless** (`KeylessClient`): `qmdb::keyless::variable`
+- **Immutable** (`ImmutableClient`): `qmdb::immutable`
+- **Keyless** (`KeylessClient`): `qmdb::keyless`
 
 The Rust clients, writers, and proof wrappers are generic over the Commonware
 Merkle family (`F: merkle::Family`, or `F: merkle::Graftable` for current QMDB).
+They are also generic over Commonware value encodings (`E: ValueEncoding`):
+the default is `VariableEncoding<V>`, and callers can select `FixedEncoding<V>`
+for the fixed operation/proof variants.
 The demo CLI uses MMR, but the store-backed library path is tested with both
 MMR and MMB. QMDB row keys are scoped by the SDK `StoreKeyPrefix` / Store
 namespace supplied to the client; they do not embed a separate Merkle-family tag.
@@ -58,9 +61,9 @@ pattern as the ordered QMDB path instead of replaying the whole operation prefix
 
 ### OrderedClient
 
-`OrderedClient` requires exact Commonware ordered-variable operations:
+`OrderedClient` requires exact Commonware ordered operations:
 
-- `qmdb::any::ordered::variable::Operation<F, K, V>`
+- `qmdb::any::ordered::Operation<F, K, E>`
 
 That is why plain key-value batch uploads are rejected for the ordered path:
 the client cannot safely invent the predecessor-repair operations or `next_key`
@@ -77,16 +80,16 @@ or, if the caller already has both pieces ready at once:
 
 ### UnorderedClient
 
-`UnorderedClient` operates on unordered-variable operations:
+`UnorderedClient` operates on unordered operations:
 
-- `qmdb::any::unordered::variable::Operation<F, K, V>`
+- `qmdb::any::unordered::Operation<F, K, E>`
 
 It provides the same upload/publish/proof flow as the ordered client. If callers
 only upload historical rows, mount the operation-log-only Connect stack. If
-callers also upload current-boundary rows, unordered can prove current operation
-ranges and present-key hits. Missing-key proofs are intentionally not exposed
-for unordered QMDB because Commonware does not provide unordered exclusion
-semantics.
+callers also upload current-boundary rows and use `commonware_utils::Array` keys,
+unordered can prove current operation ranges and present-key hits. Missing-key
+proofs are intentionally not exposed for unordered QMDB because Commonware does
+not provide unordered exclusion semantics.
 
 - `upload_operations(latest_location, operations)`
 - `publish_writer_location_watermark(location)`
@@ -96,12 +99,10 @@ semantics.
 
 ### Fixed Commonware variants
 
-The store-backed bridge currently models the variable Commonware operation
-families. Supplying fixed-width data as `Vec<u8>` is only a byte-level
-application convention; it is not the same as using Commonware's fixed
-operation/proof types. Treat fixed ordered/unordered/immutable/keyless facade
-support as future work unless a wrapper explicitly names the fixed Commonware
-module.
+The store-backed Rust bridge is generic over `E: ValueEncoding`. It defaults to
+`VariableEncoding<V>`, but fixed ordered, unordered, immutable, and keyless
+facades can be instantiated with `FixedEncoding<V>` and use Commonware's fixed
+operation/proof types.
 
 ## Stored key families
 
@@ -553,8 +554,9 @@ rows the store-backed ordered mirror needs.
 `CurrentBoundaryState` always includes the op-root witness. Connect historical
 proofs from current-boundary backed clients include the opaque witness bytes,
 letting Rust and TS/WASM clients verify operation-log proofs from the caller's
-trusted current/global root. Operation-log-only clients do not upload current
-boundary rows and still verify directly against an operation-log root.
+trusted current/global root. Operation-log-only clients are a separate
+contract: they do not upload current-boundary rows, so callers verify against
+a trusted operation-log root for that backend.
 
 ### Watermark rule (per-batch)
 
@@ -635,8 +637,9 @@ Live QMDB keyed proofs now go through ConnectRPC services:
 Immutable and keyless Connect stacks expose only `qmdb.v1.OperationLogService` today.
 They do not expose proof-bearing logical point-read RPCs even though Rust
 `get_at` helpers exist. Unordered current key-value proofs require the same
-current-boundary publication path that ordered uses; callers that upload only
-historical unordered rows should mount `unordered_operation_log_connect_stack`,
+current-boundary publication path that ordered uses, and the current unordered
+Connect stack follows Commonware's array-key requirement; callers that upload
+only historical unordered rows should mount `unordered_operation_log_connect_stack`,
 while callers that upload current-boundary rows can mount `unordered_connect_stack`
 for present-key `Get` / `GetMany` and current operation ranges.
 

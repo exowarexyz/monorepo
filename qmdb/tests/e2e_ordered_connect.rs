@@ -98,7 +98,8 @@ fn range_rpc_client(base: &str) -> OrderedKeyRangeServiceClient<PreferZstdHttpCl
 fn validated_client(
     base: &str,
 ) -> OrderedConnectClient<PreferZstdHttpClient, mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> {
-    OrderedConnectClient::plaintext(base, op_cfg())
+    let (key_cfg, value_cfg) = update_row_cfg();
+    OrderedConnectClient::plaintext(base, op_cfg(), op_cfg(), key_cfg, value_cfg)
 }
 
 async fn boundary_from_local_db(

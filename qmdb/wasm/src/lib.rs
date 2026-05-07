@@ -113,10 +113,9 @@ fn historical_target_root(
             }
             Ok(ops_root)
         }
-        _ => Err(
-            "historical proof must include both ops_root and ops_root_witness, or neither"
-                .to_string(),
-        ),
+        _ => {
+            Err("historical proof must include ops_root and ops_root_witness together".to_string())
+        }
     }
 }
 

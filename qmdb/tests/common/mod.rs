@@ -10,12 +10,7 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Sequential;
 use commonware_runtime::buffer::paged::CacheRef;
 use commonware_storage::qmdb::{
-    any::{
-        ordered::variable::Operation as OrderedOperation,
-        unordered::variable::Operation as UnorderedOperation,
-    },
-    immutable::variable::Operation as ImmutableOperation,
-    keyless::variable::Operation as KeylessOperation,
+    any::{ordered, unordered, value::ValueEncoding},
     operation::Key as QmdbKey,
 };
 use commonware_storage::{
@@ -165,26 +160,27 @@ where
 }
 
 #[allow(dead_code)]
-pub async fn commit_keyless_upload<F, H, V>(
+pub async fn commit_keyless_upload<F, H, V, E>(
     commit_client: &StoreClient,
-    writer: &KeylessWriter<F, H, V>,
-    ops: &[KeylessOperation<F, V>],
+    writer: &KeylessWriter<F, H, V, E>,
+    ops: &[keyless::Operation<F, E>],
 ) -> Result<UploadReceipt<F>, QmdbError>
 where
     F: Family,
     H: Hasher + Sync,
     V: Codec + Clone + Send + Sync,
-    KeylessOperation<F, V>: Encode,
+    E: ValueEncoding<Value = V> + Sync,
+    keyless::Operation<F, E>: Encode,
 {
     let prepared = writer.prepare_upload(ops).await?;
     writer.commit_upload(commit_client, prepared).await
 }
 
 #[allow(dead_code)]
-pub async fn commit_unordered_upload<F, H, K, V>(
+pub async fn commit_unordered_upload<F, H, K, V, E>(
     commit_client: &StoreClient,
-    writer: &UnorderedWriter<F, H, K, V>,
-    ops: &[UnorderedOperation<F, K, V>],
+    writer: &UnorderedWriter<F, H, K, V, E>,
+    ops: &[unordered::Operation<F, K, E>],
 ) -> Result<UploadReceipt<F>, QmdbError>
 where
     F: Graftable,
@@ -192,17 +188,18 @@ where
     K: QmdbKey + Codec + Sync,
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
-    UnorderedOperation<F, K, V>: Encode,
+    E: ValueEncoding<Value = V> + Sync,
+    unordered::Operation<F, K, E>: Encode,
 {
     let prepared = writer.prepare_upload(ops).await?;
     writer.commit_upload(commit_client, prepared).await
 }
 
 #[allow(dead_code)]
-pub async fn commit_unordered_current_upload<F, H, K, V, const N: usize>(
+pub async fn commit_unordered_current_upload<F, H, K, V, const N: usize, E>(
     commit_client: &StoreClient,
-    writer: &UnorderedWriter<F, H, K, V>,
-    ops: &[UnorderedOperation<F, K, V>],
+    writer: &UnorderedWriter<F, H, K, V, E>,
+    ops: &[unordered::Operation<F, K, E>],
     current_boundary: &CurrentBoundaryState<H::Digest, N, F>,
 ) -> Result<UploadReceipt<F>, QmdbError>
 where
@@ -211,17 +208,18 @@ where
     K: QmdbKey + Codec + Sync,
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
-    UnorderedOperation<F, K, V>: Encode,
+    E: ValueEncoding<Value = V> + Sync,
+    unordered::Operation<F, K, E>: Encode,
 {
     let prepared = writer.prepare_current_upload(ops, current_boundary).await?;
     writer.commit_upload(commit_client, prepared).await
 }
 
 #[allow(dead_code)]
-pub async fn commit_ordered_upload<F, H, K, V, const N: usize>(
+pub async fn commit_ordered_upload<F, H, K, V, const N: usize, E>(
     commit_client: &StoreClient,
-    writer: &OrderedWriter<F, H, K, V, N>,
-    ops: &[OrderedOperation<F, K, V>],
+    writer: &OrderedWriter<F, H, K, V, N, E>,
+    ops: &[ordered::Operation<F, K, E>],
     current_boundary: &CurrentBoundaryState<H::Digest, N, F>,
 ) -> Result<UploadReceipt<F>, QmdbError>
 where
@@ -230,17 +228,18 @@ where
     K: QmdbKey + Codec + Sync,
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
-    OrderedOperation<F, K, V>: Encode + Decode,
+    E: ValueEncoding<Value = V> + Sync,
+    ordered::Operation<F, K, E>: Encode + Decode,
 {
     let prepared = writer.prepare_upload(ops, current_boundary).await?;
     writer.commit_upload(commit_client, prepared).await
 }
 
 #[allow(dead_code)]
-pub async fn commit_immutable_upload<F, H, K, V>(
+pub async fn commit_immutable_upload<F, H, K, V, E>(
     commit_client: &StoreClient,
-    writer: &ImmutableWriter<F, H, K, V>,
-    ops: &[ImmutableOperation<F, K, V>],
+    writer: &ImmutableWriter<F, H, K, V, E>,
+    ops: &[immutable::Operation<F, K, E>],
 ) -> Result<UploadReceipt<F>, QmdbError>
 where
     F: Family,
@@ -249,7 +248,8 @@ where
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
     K::Cfg: Clone,
-    ImmutableOperation<F, K, V>: Encode + Decode<Cfg = (K::Cfg, V::Cfg)> + Clone,
+    E: ValueEncoding<Value = V> + Sync,
+    immutable::Operation<F, K, E>: Encode + Decode + Clone,
 {
     let prepared = writer.prepare_upload(ops).await?;
     writer.commit_upload(commit_client, prepared).await
