@@ -84,9 +84,7 @@ fn range_stream(
     Ok(Box::pin(stream_util::unfold(
         Some((entries, false)),
         move |state| async move {
-            let Some((mut entries, emitted_frame)) = state else {
-                return None;
-            };
+            let (mut entries, emitted_frame) = state?;
             let batch = match entries.next_batch(batch_size).await {
                 Ok(batch) => batch,
                 Err(e) => return Some((Err(ConnectError::internal(e)), None)),
