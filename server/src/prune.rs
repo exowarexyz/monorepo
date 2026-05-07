@@ -144,7 +144,7 @@ pub async fn execute_prune(
                 execute_user_keys_policy(query, prune, scope, &policy.retain).await?;
             }
             PolicyScope::Sequence => {
-                execute_batch_log_policy(prune, &policy.retain)?;
+                execute_batch_log_policy(prune, &policy.retain).await?;
             }
         }
     }
@@ -164,6 +164,7 @@ async fn execute_user_keys_policy(
     let (start, end) = codec.prefix_bounds();
     let mut rows = query
         .range_scan(start, end, usize::MAX, true)
+        .await
         .map_err(PruneError::Engine)?;
 
     let mut groups: BTreeMap<Vec<u8>, Vec<KeyEntry>> = BTreeMap::new();
@@ -211,13 +212,19 @@ async fn execute_user_keys_policy(
 
     if !all_deletes.is_empty() {
         let refs: Vec<&[u8]> = all_deletes.iter().map(|k| k.as_ref()).collect();
-        prune.delete_batch(&refs).map_err(PruneError::Engine)?;
+        prune
+            .delete_batch(&refs)
+            .await
+            .map_err(PruneError::Engine)?;
     }
 
     Ok(())
 }
 
-fn execute_batch_log_policy(prune: &dyn Prune, retain: &RetainPolicy) -> Result<(), PruneError> {
+async fn execute_batch_log_policy(
+    prune: &dyn Prune,
+    retain: &RetainPolicy,
+) -> Result<(), PruneError> {
     let current = prune.current_sequence();
     let cutoff_exclusive = match retain {
         RetainPolicy::KeepLatest { count } => {
@@ -232,6 +239,7 @@ fn execute_batch_log_policy(prune: &dyn Prune, retain: &RetainPolicy) -> Result<
 
     prune
         .prune_batch_log(cutoff_exclusive)
+        .await
         .map_err(PruneError::Engine)?;
     Ok(())
 }
@@ -243,10 +251,10 @@ mod tests {
     use exoware_sdk::kv_codec::Utf8;
     use exoware_sdk::match_key::MatchKey;
     use exoware_sdk::prune_policy::{GroupBy, OrderBy, PrunePolicy};
-    use futures::future::{ready, BoxFuture};
+    use futures::future::ready;
     use std::sync::Mutex;
 
-    use crate::{QueryExtra, RangeScan, RangeScanBatch, RangeScanCursor, Sequence};
+    use crate::{QueryExtra, RangeScan, RangeScanBatch, RangeScanCursor, Sequence, StoreFuture};
 
     fn make_scope() -> KeysScope {
         KeysScope {
@@ -283,10 +291,7 @@ mod tests {
     }
 
     impl RangeScan for FakeRangeScan {
-        fn next_batch<'a>(
-            &'a mut self,
-            max_items: usize,
-        ) -> BoxFuture<'a, Result<RangeScanBatch, String>> {
+        fn next_batch<'a>(&'a mut self, max_items: usize) -> StoreFuture<'a, RangeScanBatch> {
             let rows = self.rows.by_ref().take(max_items).collect();
             Box::pin(ready(Ok(RangeScanBatch {
                 rows,
@@ -302,30 +307,31 @@ mod tests {
     }
 
     impl Query for FakeQuery {
-        fn get(&self, _key: &[u8]) -> Result<(Option<Vec<u8>>, QueryExtra), String> {
-            Ok((None, QueryExtra::default()))
+        fn get<'a>(&'a self, _key: &'a [u8]) -> StoreFuture<'a, (Option<Vec<u8>>, QueryExtra)> {
+            Box::pin(ready(Ok((None, QueryExtra::default()))))
         }
 
-        fn range_scan(
-            &self,
+        fn range_scan<'a>(
+            &'a self,
             _start: Bytes,
             _end: Bytes,
             _limit: usize,
             _forward: bool,
-        ) -> Result<RangeScanCursor, String> {
-            Ok(Box::new(FakeRangeScan {
+        ) -> StoreFuture<'a, RangeScanCursor> {
+            let cursor: RangeScanCursor = Box::new(FakeRangeScan {
                 rows: self.rows.clone().into_iter(),
-            }))
+            });
+            Box::pin(ready(Ok(cursor)))
         }
 
-        fn get_many(
-            &self,
-            keys: &[&[u8]],
-        ) -> Result<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra), String> {
-            Ok((
+        fn get_many<'a>(
+            &'a self,
+            keys: &'a [&'a [u8]],
+        ) -> StoreFuture<'a, (Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra)> {
+            Box::pin(ready(Ok((
                 keys.iter().map(|key| (key.to_vec(), None)).collect(),
                 QueryExtra::default(),
-            ))
+            ))))
         }
     }
 
@@ -352,17 +358,17 @@ mod tests {
     }
 
     impl Prune for FakePrune {
-        fn delete_batch(&self, keys: &[&[u8]]) -> Result<u64, String> {
+        fn delete_batch<'a>(&'a self, keys: &'a [&'a [u8]]) -> StoreFuture<'a, u64> {
             self.deleted
                 .lock()
                 .expect("lock")
                 .extend(keys.iter().map(|key| key.to_vec()));
-            Ok(self.current_sequence + 1)
+            Box::pin(ready(Ok(self.current_sequence + 1)))
         }
 
-        fn prune_batch_log(&self, cutoff_exclusive: u64) -> Result<u64, String> {
+        fn prune_batch_log<'a>(&'a self, cutoff_exclusive: u64) -> StoreFuture<'a, u64> {
             self.cutoffs.lock().expect("lock").push(cutoff_exclusive);
-            Ok(1)
+            Box::pin(ready(Ok(1)))
         }
     }
 

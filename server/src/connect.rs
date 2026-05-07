@@ -1,11 +1,9 @@
 //! Ingest, query, compact, and stream services; storage is provided by capability traits.
 
 use std::collections::HashMap;
-use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::task::{Context as TaskContext, Poll};
 
 use bytes::Bytes;
 use connectrpc::{Chain, ConnectError, ConnectRpcService, Context, Limits};
@@ -36,7 +34,6 @@ use exoware_sdk::keys::Key;
 use exoware_sdk::match_key::MatchKey;
 use exoware_sdk::store::common::v1::bytes_filter::KindView as ProtoBytesFilterKindView;
 use futures::{stream as stream_util, Stream};
-use tokio::sync::futures::OwnedNotified;
 use tokio::sync::Notify;
 
 use crate::reduce::RangeReducer;
@@ -65,7 +62,7 @@ struct RangeStreamRequest {
     sequence_number: u64,
 }
 
-fn range_stream(
+async fn range_stream(
     query: Arc<dyn Query>,
     request: RangeStreamRequest,
 ) -> Result<Pin<Box<dyn Stream<Item = Result<RangeFrame, ConnectError>> + Send>>, ConnectError> {
@@ -79,6 +76,7 @@ fn range_stream(
     } = request;
     let entries = query
         .range_scan(start_key, end_key, limit, forward)
+        .await
         .map_err(ConnectError::internal)?;
 
     Ok(Box::pin(stream_util::unfold(
@@ -309,6 +307,7 @@ impl IngestApi for IngestConnect {
             .state
             .ingest
             .put_batch(&batch)
+            .await
             .map_err(ConnectError::internal)?;
 
         // Single-process deployments can fan out the just-committed sequence
@@ -406,6 +405,7 @@ impl QueryApi for QueryConnect {
             .state
             .query
             .get(key.as_ref())
+            .await
             .map_err(ConnectError::internal)?;
         let detail = query_detail(token, extra);
         Ok((
@@ -439,6 +439,7 @@ impl QueryApi for QueryConnect {
             .state
             .query
             .get_many(&key_refs)
+            .await
             .map_err(ConnectError::internal)?;
         let detail = query_detail(sequence_number, extra);
         let batch_size = (request.batch_size as usize).min(RANGE_STREAM_MAX_FRAME_ROWS);
@@ -508,7 +509,8 @@ impl QueryApi for QueryConnect {
                     forward,
                     sequence_number,
                 },
-            )?,
+            )
+            .await?,
             ctx,
         ))
     }
@@ -532,6 +534,7 @@ impl QueryApi for QueryConnect {
             .state
             .query
             .range_scan(start_key, end_key, usize::MAX, true)
+            .await
             .map_err(ConnectError::internal)?;
 
         let mut reducer = RangeReducer::new(&domain)
@@ -708,18 +711,16 @@ enum LiveProgress {
     NeedWait,
 }
 
-struct SubscriptionStream {
+struct SubscriptionState {
     state: StreamState,
     matchers: crate::stream::CompiledMatchers,
     replay: Option<ReplayState>,
     next_live_sequence: u64,
     live_notify: Arc<Notify>,
-    live_wait: Option<Pin<Box<OwnedNotified>>>,
-    terminal_error: Option<ConnectError>,
     terminated: bool,
 }
 
-impl SubscriptionStream {
+impl SubscriptionState {
     fn new(
         state: StreamState,
         matchers: crate::stream::CompiledMatchers,
@@ -733,13 +734,47 @@ impl SubscriptionStream {
             replay,
             next_live_sequence,
             live_notify,
-            live_wait: None,
-            terminal_error: None,
             terminated: false,
         }
     }
 
-    fn next_replay_frame(&mut self) -> Result<ReplayProgress, ConnectError> {
+    fn into_stream(
+        self,
+    ) -> Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>> {
+        Box::pin(stream_util::unfold(self, |mut state| async move {
+            loop {
+                if state.terminated {
+                    return None;
+                }
+
+                if state.replay.is_some() {
+                    match state.next_replay_frame().await {
+                        Ok(ReplayProgress::Frame(frame)) => return Some((Ok(frame), state)),
+                        Ok(ReplayProgress::Advanced) => continue,
+                        Ok(ReplayProgress::Done) => {}
+                        Err(err) => {
+                            state.terminated = true;
+                            return Some((Err(err), state));
+                        }
+                    }
+                }
+
+                match state.next_live_frame().await {
+                    Ok(LiveProgress::Frame(frame)) => return Some((Ok(frame), state)),
+                    Ok(LiveProgress::Advanced) => continue,
+                    Ok(LiveProgress::NeedWait) => {
+                        state.wait_for_live().await;
+                    }
+                    Err(err) => {
+                        state.terminated = true;
+                        return Some((Err(err), state));
+                    }
+                }
+            }
+        }))
+    }
+
+    async fn next_replay_frame(&mut self) -> Result<ReplayProgress, ConnectError> {
         let Some(replay) = &mut self.replay else {
             return Ok(ReplayProgress::Done);
         };
@@ -750,6 +785,7 @@ impl SubscriptionStream {
             self.state
                 .batch_log
                 .get_batch(seq)
+                .await
                 .map_err(ConnectError::internal)?
         };
         replay.next_sequence += 1;
@@ -761,6 +797,7 @@ impl SubscriptionStream {
                 .state
                 .batch_log
                 .oldest_retained_batch()
+                .await
                 .map_err(ConnectError::internal)?;
             return Err(StreamConnect::batch_evicted_connect_error(oldest));
         };
@@ -772,7 +809,7 @@ impl SubscriptionStream {
         )
     }
 
-    fn next_live_frame(&mut self) -> Result<LiveProgress, ConnectError> {
+    async fn next_live_frame(&mut self) -> Result<LiveProgress, ConnectError> {
         let current = self.state.notifier.current_sequence();
         if self.next_live_sequence > current {
             return Ok(LiveProgress::NeedWait);
@@ -783,12 +820,14 @@ impl SubscriptionStream {
             .state
             .batch_log
             .get_batch(seq)
+            .await
             .map_err(ConnectError::internal)?;
         let Some(kvs) = kvs else {
             let oldest = self
                 .state
                 .batch_log
                 .oldest_retained_batch()
+                .await
                 .map_err(ConnectError::internal)?;
             return Err(StreamConnect::batch_evicted_connect_error(oldest));
         };
@@ -799,64 +838,16 @@ impl SubscriptionStream {
             },
         )
     }
-}
 
-impl Stream for SubscriptionStream {
-    type Item = Result<SubscribeResponse, ConnectError>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            if let Some(err) = self.terminal_error.take() {
-                self.terminated = true;
-                return Poll::Ready(Some(Err(err)));
-            }
-            if self.terminated {
-                return Poll::Ready(None);
-            }
-
-            if self.replay.is_some() {
-                match self.next_replay_frame() {
-                    Ok(ReplayProgress::Frame(frame)) => return Poll::Ready(Some(Ok(frame))),
-                    Ok(ReplayProgress::Advanced) => continue,
-                    Ok(ReplayProgress::Done) => {}
-                    Err(err) => {
-                        self.terminal_error = Some(err);
-                        continue;
-                    }
-                }
-            }
-
-            match self.next_live_frame() {
-                Ok(LiveProgress::Frame(frame)) => return Poll::Ready(Some(Ok(frame))),
-                Ok(LiveProgress::Advanced) => continue,
-                Ok(LiveProgress::NeedWait) => {
-                    if self.live_wait.is_none() {
-                        self.live_wait = Some(Box::pin(self.live_notify.clone().notified_owned()));
-                    }
-                    if self.next_live_sequence <= self.state.notifier.current_sequence() {
-                        self.live_wait = None;
-                        continue;
-                    }
-                    match self
-                        .live_wait
-                        .as_mut()
-                        .expect("wait future")
-                        .as_mut()
-                        .poll(cx)
-                    {
-                        Poll::Ready(()) => {
-                            self.live_wait = None;
-                            continue;
-                        }
-                        Poll::Pending => return Poll::Pending,
-                    }
-                }
-                Err(err) => {
-                    self.terminal_error = Some(err);
-                    continue;
-                }
-            }
+    async fn wait_for_live(&self) {
+        if self.next_live_sequence <= self.state.notifier.current_sequence() {
+            return;
         }
+        let notified = self.live_notify.clone().notified_owned();
+        if self.next_live_sequence <= self.state.notifier.current_sequence() {
+            return;
+        }
+        notified.await;
     }
 }
 
@@ -938,12 +929,14 @@ impl StreamApi for StreamConnect {
                     .state
                     .batch_log
                     .get_batch(s)
+                    .await
                     .map_err(ConnectError::internal)?;
                 let Some(first_batch) = first_batch else {
                     let oldest = self
                         .state
                         .batch_log
                         .oldest_retained_batch()
+                        .await
                         .map_err(ConnectError::internal)?;
                     return Err(self.batch_evicted_error(oldest));
                 };
@@ -958,13 +951,14 @@ impl StreamApi for StreamConnect {
         let next_live_sequence = replay_bound.saturating_add(1);
 
         Ok((
-            Box::pin(SubscriptionStream::new(
+            SubscriptionState::new(
                 self.state.clone(),
                 matchers,
                 replay,
                 next_live_sequence,
                 live_notify,
-            )),
+            )
+            .into_stream(),
             ctx,
         ))
     }
@@ -979,6 +973,7 @@ impl StreamApi for StreamConnect {
             .state
             .batch_log
             .get_batch(seq)
+            .await
             .map_err(ConnectError::internal)?
         {
             Some(kvs) => {
@@ -1009,6 +1004,7 @@ impl StreamApi for StreamConnect {
                         .state
                         .batch_log
                         .oldest_retained_batch()
+                        .await
                         .map_err(ConnectError::internal)?;
                     Err(self.batch_evicted_error(oldest))
                 }
@@ -1117,12 +1113,12 @@ mod tests {
     use exoware_sdk::keys::KeyCodec;
     use exoware_sdk::kv_codec::KvReducedValue;
     use exoware_sdk::{decode_connect_error, to_domain_reduce_response};
-    use futures::future::{ready, BoxFuture};
+    use futures::future::ready;
     use futures::StreamExt;
 
     use crate::{
         BatchLog, Ingest, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, RangeScanCursor,
-        Sequence, StreamNotification, StreamNotifier,
+        Sequence, StoreFuture, StreamNotification, StreamNotifier,
     };
 
     const TEST_RESERVED_BITS: u8 = 4;
@@ -1156,10 +1152,7 @@ mod tests {
     }
 
     impl RangeScan for IteratorRangeScan {
-        fn next_batch<'a>(
-            &'a mut self,
-            max_items: usize,
-        ) -> BoxFuture<'a, Result<RangeScanBatch, String>> {
+        fn next_batch<'a>(&'a mut self, max_items: usize) -> StoreFuture<'a, RangeScanBatch> {
             let mut rows = Vec::new();
             let result = (|| {
                 for row in self.iter.by_ref().take(max_items) {
@@ -1246,75 +1239,90 @@ mod tests {
     }
 
     impl Ingest for FakeEngine {
-        fn put_batch(&self, kvs: &[(Bytes, Bytes)]) -> Result<u64, String> {
-            let mut state = self.state.lock().map_err(|e| e.to_string())?;
-            state.current_sequence += 1;
-            let seq = state.current_sequence;
-            state.batches.insert(seq, Some(kvs.to_vec()));
-            Ok(seq)
+        fn put_batch<'a>(&'a self, kvs: &'a [(Bytes, Bytes)]) -> StoreFuture<'a, u64> {
+            let result = (|| {
+                let mut state = self.state.lock().map_err(|e| e.to_string())?;
+                state.current_sequence += 1;
+                let seq = state.current_sequence;
+                state.batches.insert(seq, Some(kvs.to_vec()));
+                Ok(seq)
+            })();
+            Box::pin(ready(result))
         }
     }
 
     impl Query for FakeEngine {
-        fn get(&self, _key: &[u8]) -> Result<(Option<Vec<u8>>, QueryExtra), String> {
-            let extra = self
+        fn get<'a>(&'a self, _key: &'a [u8]) -> StoreFuture<'a, (Option<Vec<u8>>, QueryExtra)> {
+            let result = self
                 .state
                 .lock()
-                .map_err(|e| e.to_string())?
-                .query_extra
-                .clone();
-            Ok((None, extra))
+                .map(|state| (None, state.query_extra.clone()))
+                .map_err(|e| e.to_string());
+            Box::pin(ready(result))
         }
 
-        fn get_many(
-            &self,
-            keys: &[&[u8]],
-        ) -> Result<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra), String> {
-            let extra = self
+        fn get_many<'a>(
+            &'a self,
+            keys: &'a [&'a [u8]],
+        ) -> StoreFuture<'a, (Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra)> {
+            let result = self
                 .state
                 .lock()
-                .map_err(|e| e.to_string())?
-                .query_extra
-                .clone();
-            Ok((keys.iter().map(|key| (key.to_vec(), None)).collect(), extra))
+                .map(|state| {
+                    let entries = keys.iter().map(|key| (key.to_vec(), None)).collect();
+                    (entries, state.query_extra.clone())
+                })
+                .map_err(|e| e.to_string());
+            Box::pin(ready(result))
         }
 
-        fn range_scan(
-            &self,
+        fn range_scan<'a>(
+            &'a self,
             _start: Bytes,
             _end: Bytes,
             _limit: usize,
             _forward: bool,
-        ) -> Result<RangeScanCursor, String> {
-            let rows = self
+        ) -> StoreFuture<'a, RangeScanCursor> {
+            let result = self
                 .state
                 .lock()
-                .map_err(|e| e.to_string())?
-                .range_rows
-                .clone();
+                .map(|state| state.range_rows.clone())
+                .map_err(|e| e.to_string());
             let state = self.state.clone();
-            Ok(range_scan_from_iter(rows.into_iter().map(move |row| {
-                state.lock().expect("lock").range_next_count += 1;
-                Ok(row)
-            })))
+            let cursor = result.map(|rows| {
+                range_scan_from_iter(rows.into_iter().map(move |row| {
+                    state.lock().expect("lock").range_next_count += 1;
+                    Ok(row)
+                }))
+            });
+            Box::pin(ready(cursor))
         }
     }
 
     impl Prune for FakeEngine {
-        fn delete_batch(&self, _keys: &[&[u8]]) -> Result<u64, String> {
-            let mut state = self.state.lock().map_err(|e| e.to_string())?;
-            state.current_sequence += 1;
-            Ok(state.current_sequence)
+        fn delete_batch<'a>(&'a self, _keys: &'a [&'a [u8]]) -> StoreFuture<'a, u64> {
+            let result = self
+                .state
+                .lock()
+                .map(|mut state| {
+                    state.current_sequence += 1;
+                    state.current_sequence
+                })
+                .map_err(|e| e.to_string());
+            Box::pin(ready(result))
         }
 
-        fn prune_batch_log(&self, _cutoff_exclusive: u64) -> Result<u64, String> {
-            Ok(0)
+        fn prune_batch_log<'a>(&'a self, _cutoff_exclusive: u64) -> StoreFuture<'a, u64> {
+            Box::pin(ready(Ok(0)))
         }
     }
 
     impl BatchLog for FakeEngine {
-        fn get_batch(&self, sequence_number: u64) -> Result<Option<Vec<(Bytes, Bytes)>>, String> {
-            let (publish, batch) = {
+        fn get_batch<'a>(
+            &'a self,
+            sequence_number: u64,
+        ) -> StoreFuture<'a, Option<Vec<(Bytes, Bytes)>>> {
+            let result: Result<_, String> = (|| {
                 let mut state = self.state.lock().map_err(|e| e.to_string())?;
                 let publish = state.publish_on_get_batch.clone();
                 if let Some(publish) = publish.as_ref() {
@@ -1325,25 +1333,30 @@ mod tests {
                         .entry(live_sequence)
                         .or_insert_with(|| Some(publish.kvs.clone()));
                 }
-                (
+                Ok((
                     publish,
                     state.batches.get(&sequence_number).cloned().unwrap_or(None),
-                )
+                ))
+            })();
+            let (publish, batch) = match result {
+                Ok(values) => values,
+                Err(e) => return Box::pin(ready(Err(e))),
             };
             if let Some(publish) = publish {
                 publish
                     .hub
                     .publish(publish.sequence_offset + sequence_number);
             }
-            Ok(batch)
+            Box::pin(ready(Ok(batch)))
         }
 
-        fn oldest_retained_batch(&self) -> Result<Option<u64>, String> {
-            Ok(self
+        fn oldest_retained_batch<'a>(&'a self) -> StoreFuture<'a, Option<u64>> {
+            let result = self
                 .state
                 .lock()
-                .map_err(|e| e.to_string())?
-                .oldest_retained)
+                .map(|state| state.oldest_retained)
+                .map_err(|e| e.to_string());
+            Box::pin(ready(result))
         }
     }
 
@@ -1359,28 +1372,28 @@ mod tests {
     }
 
     impl Query for QueryOnlyEngine {
-        fn get(&self, _key: &[u8]) -> Result<(Option<Vec<u8>>, QueryExtra), String> {
-            Ok((self.value.clone(), QueryExtra::default()))
+        fn get<'a>(&'a self, _key: &'a [u8]) -> StoreFuture<'a, (Option<Vec<u8>>, QueryExtra)> {
+            Box::pin(ready(Ok((self.value.clone(), QueryExtra::default()))))
         }
 
-        fn range_scan(
-            &self,
+        fn range_scan<'a>(
+            &'a self,
             _start: Bytes,
             _end: Bytes,
             _limit: usize,
             _forward: bool,
-        ) -> Result<RangeScanCursor, String> {
-            Ok(range_scan_from_iter(std::iter::empty()))
+        ) -> StoreFuture<'a, RangeScanCursor> {
+            Box::pin(ready(Ok(range_scan_from_iter(std::iter::empty()))))
         }
 
-        fn get_many(
-            &self,
-            keys: &[&[u8]],
-        ) -> Result<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra), String> {
-            Ok((
+        fn get_many<'a>(
+            &'a self,
+            keys: &'a [&'a [u8]],
+        ) -> StoreFuture<'a, (Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra)> {
+            Box::pin(ready(Ok((
                 keys.iter().map(|key| (key.to_vec(), None)).collect(),
                 QueryExtra::default(),
-            ))
+            ))))
         }
     }
 

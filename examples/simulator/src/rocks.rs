@@ -4,16 +4,14 @@
 //! can serve replay and point lookups. Batch-log pruning is driven exclusively by the compact
 //! service's `Sequence` scope (see `server::prune::execute_prune`).
 
-use std::future::Future;
 use std::path::Path;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
 use exoware_server::{
     BatchLog, Ingest, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, RangeScanCursor,
-    Sequence,
+    Sequence, StoreFuture,
 };
 use rocksdb::{
     ColumnFamily, ColumnFamilyDescriptor, DBIterator, Direction, IteratorMode, Options, DB,
@@ -23,7 +21,6 @@ use rocksdb::{
 const SEQ_META_KEY: &[u8] = b"__simulator_seq__";
 const BATCH_LOG_CF: &str = "batch_log";
 type RocksIterItem = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
-type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 struct OwnedRocksIterator {
     iter: DBIterator<'static>,
@@ -133,10 +130,7 @@ impl RocksRangeScanCursor {
 }
 
 impl RangeScan for RocksRangeScanCursor {
-    fn next_batch<'a>(
-        &'a mut self,
-        max_items: usize,
-    ) -> BoxFuture<'a, Result<RangeScanBatch, String>> {
+    fn next_batch<'a>(&'a mut self, max_items: usize) -> StoreFuture<'a, RangeScanBatch> {
         Box::pin(async move {
             let Some(mut state) = self.state.take() else {
                 return Ok(RangeScanBatch::default());
@@ -235,133 +229,151 @@ impl Sequence for RocksStore {
 }
 
 impl Ingest for RocksStore {
-    fn put_batch(&self, kvs: &[(Bytes, Bytes)]) -> Result<u64, String> {
-        self.batch_put_rocksdb(kvs).map_err(|e| e.to_string())
+    fn put_batch<'a>(&'a self, kvs: &'a [(Bytes, Bytes)]) -> StoreFuture<'a, u64> {
+        Box::pin(async move { self.batch_put_rocksdb(kvs).map_err(|e| e.to_string()) })
     }
 }
 
 impl Query for RocksStore {
-    fn get(&self, key: &[u8]) -> Result<(Option<Vec<u8>>, QueryExtra), String> {
-        self.get_rocksdb(key)
-            .map(|value| (value, QueryExtra::default()))
-            .map_err(|e| e.to_string())
+    fn get<'a>(&'a self, key: &'a [u8]) -> StoreFuture<'a, (Option<Vec<u8>>, QueryExtra)> {
+        Box::pin(async move {
+            self.get_rocksdb(key)
+                .map(|value| (value, QueryExtra::default()))
+                .map_err(|e| e.to_string())
+        })
     }
 
-    fn range_scan(
-        &self,
+    fn range_scan<'a>(
+        &'a self,
         start: Bytes,
         end: Bytes,
         limit: usize,
         forward: bool,
-    ) -> Result<RangeScanCursor, String> {
-        Ok(Box::new(RocksRangeScanCursor::new(
-            self.db.clone(),
-            start,
-            end,
-            limit,
-            forward,
-        )))
+    ) -> StoreFuture<'a, RangeScanCursor> {
+        Box::pin(async move {
+            let cursor: RangeScanCursor = Box::new(RocksRangeScanCursor::new(
+                self.db.clone(),
+                start,
+                end,
+                limit,
+                forward,
+            ));
+            Ok(cursor)
+        })
     }
 
-    fn get_many(
-        &self,
-        keys: &[&[u8]],
-    ) -> Result<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra), String> {
-        let results = self.db.multi_get(keys);
-        let entries = keys
-            .iter()
-            .zip(results)
-            .map(|(k, r)| {
-                if *k == SEQ_META_KEY {
-                    return Ok((k.to_vec(), None));
-                }
-                let value = r.map_err(|e| e.to_string())?;
-                Ok((k.to_vec(), value))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        Ok((entries, QueryExtra::default()))
+    fn get_many<'a>(
+        &'a self,
+        keys: &'a [&'a [u8]],
+    ) -> StoreFuture<'a, (Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra)> {
+        Box::pin(async move {
+            let results = self.db.multi_get(keys);
+            let entries = keys
+                .iter()
+                .zip(results)
+                .map(|(k, r)| {
+                    if *k == SEQ_META_KEY {
+                        return Ok((k.to_vec(), None));
+                    }
+                    let value = r.map_err(|e| e.to_string())?;
+                    Ok((k.to_vec(), value))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok((entries, QueryExtra::default()))
+        })
     }
 }
 
 impl Prune for RocksStore {
-    fn delete_batch(&self, keys: &[&[u8]]) -> Result<u64, String> {
-        let next = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
-        let mut batch = rocksdb::WriteBatch::default();
-        for k in keys {
-            batch.delete(k);
-        }
-        batch.put(SEQ_META_KEY, next.to_le_bytes());
-        // delete_batch is a second-class writer with no payload to log; record
-        // an empty batch so sequence numbers remain contiguous and GetBatch
-        // can distinguish "this sequence happened but contained no tracked
-        // entries" from "evicted / never existed".
-        batch.put_cf(
-            self.batch_log_cf(),
-            next.to_be_bytes(),
-            encode_batch_entries(&[]),
-        );
-        self.db.write(batch).map_err(|e| e.to_string())?;
-        if let Some(obs) = &self.observer {
-            obs.store(next, Ordering::SeqCst);
-        }
-        Ok(next)
+    fn delete_batch<'a>(&'a self, keys: &'a [&'a [u8]]) -> StoreFuture<'a, u64> {
+        Box::pin(async move {
+            let next = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
+            let mut batch = rocksdb::WriteBatch::default();
+            for k in keys {
+                batch.delete(k);
+            }
+            batch.put(SEQ_META_KEY, next.to_le_bytes());
+            // delete_batch is a second-class writer with no payload to log; record
+            // an empty batch so sequence numbers remain contiguous and GetBatch
+            // can distinguish "this sequence happened but contained no tracked
+            // entries" from "evicted / never existed".
+            batch.put_cf(
+                self.batch_log_cf(),
+                next.to_be_bytes(),
+                encode_batch_entries(&[]),
+            );
+            self.db.write(batch).map_err(|e| e.to_string())?;
+            if let Some(obs) = &self.observer {
+                obs.store(next, Ordering::SeqCst);
+            }
+            Ok(next)
+        })
     }
 
-    fn prune_batch_log(&self, cutoff_exclusive: u64) -> Result<u64, String> {
-        // Count before deleting so callers know how much was pruned. For the
-        // simulator a simple iterator scan is fine; a production engine would
-        // expose delete_range_cf and return the logical count separately.
-        let cf = self.batch_log_cf();
-        let end_key = cutoff_exclusive.to_be_bytes();
-        let mut deleted = 0u64;
-        let mut batch = rocksdb::WriteBatch::default();
-        let iter = self.db.iterator_cf(cf, IteratorMode::Start);
-        for item in iter {
-            let (k, _) = item.map_err(|e| e.to_string())?;
-            if k.as_ref() >= &end_key[..] {
-                break;
+    fn prune_batch_log<'a>(&'a self, cutoff_exclusive: u64) -> StoreFuture<'a, u64> {
+        Box::pin(async move {
+            // Count before deleting so callers know how much was pruned. For the
+            // simulator a simple iterator scan is fine; a production engine would
+            // expose delete_range_cf and return the logical count separately.
+            let cf = self.batch_log_cf();
+            let end_key = cutoff_exclusive.to_be_bytes();
+            let mut deleted = 0u64;
+            let mut batch = rocksdb::WriteBatch::default();
+            let iter = self.db.iterator_cf(cf, IteratorMode::Start);
+            for item in iter {
+                let (k, _) = item.map_err(|e| e.to_string())?;
+                if k.as_ref() >= &end_key[..] {
+                    break;
+                }
+                batch.delete_cf(cf, k.as_ref());
+                deleted += 1;
             }
-            batch.delete_cf(cf, k.as_ref());
-            deleted += 1;
-        }
-        if deleted > 0 {
-            self.db.write(batch).map_err(|e| e.to_string())?;
-        }
-        Ok(deleted)
+            if deleted > 0 {
+                self.db.write(batch).map_err(|e| e.to_string())?;
+            }
+            Ok(deleted)
+        })
     }
 }
 
 impl BatchLog for RocksStore {
-    fn get_batch(&self, sequence_number: u64) -> Result<Option<Vec<(Bytes, Bytes)>>, String> {
-        let cf = self.batch_log_cf();
-        match self
-            .db
-            .get_cf(cf, sequence_number.to_be_bytes())
-            .map_err(|e| e.to_string())?
-        {
-            Some(raw) => Ok(Some(decode_batch_entries(&raw).map_err(|e| e.to_string())?)),
-            None => Ok(None),
-        }
+    fn get_batch<'a>(
+        &'a self,
+        sequence_number: u64,
+    ) -> StoreFuture<'a, Option<Vec<(Bytes, Bytes)>>> {
+        Box::pin(async move {
+            let cf = self.batch_log_cf();
+            match self
+                .db
+                .get_cf(cf, sequence_number.to_be_bytes())
+                .map_err(|e| e.to_string())?
+            {
+                Some(raw) => Ok(Some(decode_batch_entries(&raw).map_err(|e| e.to_string())?)),
+                None => Ok(None),
+            }
+        })
     }
 
-    fn oldest_retained_batch(&self) -> Result<Option<u64>, String> {
-        let cf = self.batch_log_cf();
-        let mut it = self.db.iterator_cf(cf, IteratorMode::Start);
-        match it.next() {
-            None => Ok(None),
-            Some(item) => {
-                let (key, _) = item.map_err(|e| e.to_string())?;
-                if key.len() != 8 {
-                    return Err(format!(
-                        "batch_log CF key has unexpected length {}",
-                        key.len()
-                    ));
+    fn oldest_retained_batch<'a>(&'a self) -> StoreFuture<'a, Option<u64>> {
+        Box::pin(async move {
+            let cf = self.batch_log_cf();
+            let mut it = self.db.iterator_cf(cf, IteratorMode::Start);
+            match it.next() {
+                None => Ok(None),
+                Some(item) => {
+                    let (key, _) = item.map_err(|e| e.to_string())?;
+                    if key.len() != 8 {
+                        return Err(format!(
+                            "batch_log CF key has unexpected length {}",
+                            key.len()
+                        ));
+                    }
+                    let mut buf = [0u8; 8];
+                    buf.copy_from_slice(key.as_ref());
+                    Ok(Some(u64::from_be_bytes(buf)))
                 }
-                let mut buf = [0u8; 8];
-                buf.copy_from_slice(key.as_ref());
-                Ok(Some(u64::from_be_bytes(buf)))
             }
-        }
+        })
     }
 }
 
