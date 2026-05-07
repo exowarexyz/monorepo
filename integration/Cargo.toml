@@ -10,8 +10,8 @@ description = "Unpublished cross-crate integration tests for Exoware."
 axum = { workspace = true }
 buffa = { workspace = true }
 bytes = { workspace = true }
-commonware-cryptography = "2026.3.0"
-commonware-storage = "2026.3.0"
+commonware-cryptography = { git = "https://github.com/commonwarexyz/monorepo", rev = "980c293c9ede99e60e02a8c538a26f7ee0783d20" }
+commonware-storage = { git = "https://github.com/commonwarexyz/monorepo", rev = "980c293c9ede99e60e02a8c538a26f7ee0783d20" }
 connectrpc = { workspace = true }
 datafusion = "52.2.0"
 exoware-qmdb = { workspace = true }

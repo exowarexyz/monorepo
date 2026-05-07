@@ -2,4 +2,6 @@
 
 Browser client for the Exoware SQL streaming service.
 
-This package exposes a TypeScript client for `store.sql.v1.SqlService` over Connect-Web and reuses `@exowarexyz/sdk` transport and generated protobuf types.
+This package exposes a TypeScript client for `sql.v1.Service` over Connect-Web.
+It reuses `@exowarexyz/sdk` transport setup and owns its generated `sql.v1`
+protobuf bindings.

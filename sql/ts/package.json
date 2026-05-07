@@ -26,7 +26,8 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc",
+    "build:proto": "buf generate --template buf.gen.yaml",
+    "build": "npm run build:proto && tsc",
     "lint": "tsc --noEmit",
     "prepublishOnly": "npm run build"
   },

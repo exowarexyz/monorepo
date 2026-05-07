@@ -70,7 +70,7 @@ pub fn build_ordered_upload<H, K, V, const N: usize>(
     peaks: Vec<(Position, u32, H::Digest)>,
     prev_ops_size: Position,
     latest_location: Location,
-    ops: &[QmdbOperation<K, V>],
+    ops: &[QmdbOperation<commonware_storage::mmr::Family, K, V>],
     current_boundary: &CurrentBoundaryState<H::Digest, N>,
     watermark_at: Option<Location>,
 ) -> Result<BuiltOrderedUpload<H::Digest>, QmdbError>
@@ -78,7 +78,7 @@ where
     H: Hasher,
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
-    QmdbOperation<K, V>: Encode,
+    QmdbOperation<commonware_storage::mmr::Family, K, V>: Encode,
 {
     if ops.is_empty() {
         return Err(QmdbError::EmptyBatch);
@@ -132,7 +132,7 @@ where
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
-    QmdbOperation<K, V>: Encode + Decode,
+    QmdbOperation<commonware_storage::mmr::Family, K, V>: Encode + Decode,
 {
     /// Construct a writer from caller-supplied frontier state. No store I/O.
     pub fn new(client: StoreClient, state: WriterState<H::Digest>) -> Self {
@@ -168,7 +168,7 @@ where
     /// correct contiguous watermark semantics internally.
     pub async fn prepare_upload(
         &self,
-        ops: &[QmdbOperation<K, V>],
+        ops: &[QmdbOperation<commonware_storage::mmr::Family, K, V>],
         current_boundary: &CurrentBoundaryState<H::Digest, N>,
     ) -> Result<super::PreparedUpload, QmdbError> {
         let prepared = self
@@ -287,7 +287,7 @@ where
     K: QmdbKey + Codec + Sync,
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
-    QmdbOperation<K, V>: Encode + Decode,
+    QmdbOperation<commonware_storage::mmr::Family, K, V>: Encode + Decode,
 {
     type Prepared = super::PreparedUpload;
     type Receipt = UploadReceipt;
@@ -340,7 +340,7 @@ where
     K: QmdbKey + Codec + Sync,
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
-    QmdbOperation<K, V>: Encode + Decode,
+    QmdbOperation<commonware_storage::mmr::Family, K, V>: Encode + Decode,
 {
     type PreparedPublication = super::PreparedWatermark;
     type PublicationReceipt = PublishedCheckpoint;
@@ -379,7 +379,7 @@ where
     K: QmdbKey + Codec + Sync,
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
-    QmdbOperation<K, V>: Encode + Decode,
+    QmdbOperation<commonware_storage::mmr::Family, K, V>: Encode + Decode,
 {
     fn latest_publication_receipt<'a>(&'a self) -> BoxFuture<'a, Option<PublishedCheckpoint>>
     where

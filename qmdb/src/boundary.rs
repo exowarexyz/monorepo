@@ -3,13 +3,13 @@ use std::future::Future;
 
 use commonware_codec::{Codec, Encode};
 use commonware_cryptography::Hasher;
-use commonware_storage::mmr::{
-    self,
-    iterator::{PathIterator, PeakIterator},
-    Location, Position, StandardHasher,
-};
 use commonware_storage::qmdb::{
-    any::ordered::variable::Operation as QmdbOperation, operation::Key as QmdbKey,
+    any::ordered::variable::Operation as QmdbOperation,
+    current::proof::RangeProof as CurrentRangeProof, operation::Key as QmdbKey,
+};
+use commonware_storage::{
+    merkle::hasher::Hasher as MerkleHasher,
+    mmr::{iterator::PeakIterator, Location, Position, StandardHasher},
 };
 
 use crate::codec::{
@@ -72,8 +72,8 @@ fn grafted_to_ops_pos(grafted_pos: Position, grafting_height: u32) -> Position {
 /// exposes the bitmap-chunk and grafted-subtree deltas needed to publish one
 /// batch boundary directly.
 pub async fn recover_boundary_state<H, K, V, const N: usize, F, Fut>(
-    previous_operations: Option<&[QmdbOperation<K, V>]>,
-    operations: &[QmdbOperation<K, V>],
+    previous_operations: Option<&[QmdbOperation<commonware_storage::mmr::Family, K, V>]>,
+    operations: &[QmdbOperation<commonware_storage::mmr::Family, K, V>],
     root: H::Digest,
     mut prove_at: F,
 ) -> Result<CurrentBoundaryState<H::Digest, N>, QmdbError>
@@ -81,9 +81,17 @@ where
     H: Hasher,
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
-    QmdbOperation<K, V>: Encode,
+    QmdbOperation<commonware_storage::mmr::Family, K, V>: Codec,
     F: FnMut(Location) -> Fut,
-    Fut: Future<Output = Result<(mmr::Proof<H::Digest>, [u8; N]), QmdbError>>,
+    Fut: Future<
+        Output = Result<
+            (
+                CurrentRangeProof<commonware_storage::mmr::Family, H::Digest>,
+                [u8; N],
+            ),
+            QmdbError,
+        >,
+    >,
 {
     if operations.is_empty() {
         return Err(QmdbError::EmptyBatch);
@@ -112,21 +120,42 @@ where
         let (proof, chunk) = prove_at(location).await?;
         chunks.entry(chunk_index).or_insert(chunk);
 
-        if chunk_index as usize >= complete_chunks {
-            continue;
-        }
-
         let operation = operations.get(*location as usize).ok_or_else(|| {
             QmdbError::CorruptData(format!(
                 "missing operation at location {location} in current boundary input"
             ))
         })?;
+        let mut hasher = H::default();
+        if !proof.verify(
+            &mut hasher,
+            location,
+            std::slice::from_ref(operation),
+            std::slice::from_ref(&chunk),
+            &root,
+        ) {
+            return Err(QmdbError::ProofVerification {
+                kind: crate::ProofKind::CurrentRange,
+            });
+        }
+
+        if chunk_index as usize >= complete_chunks {
+            continue;
+        }
+
         let elements = [operation.encode().to_vec()];
         let chunk_refs = vec![chunk.as_ref()];
-        let mut verifier = ProofVerifier::<H>::new(grafting_height, chunk_index, chunk_refs);
-        let mut collected = Vec::new();
-        proof
-            .reconstruct_peak_digests(&mut verifier, &elements, location, Some(&mut collected))
+        let verifier = ProofVerifier::<H>::new(grafting_height, chunk_index, chunk_refs);
+        let inner_root = proof
+            .proof
+            .reconstruct_root(&verifier, &elements, location)
+            .map_err(|e| {
+                QmdbError::CorruptData(format!(
+                    "failed to reconstruct current proof root for location {location}: {e}"
+                ))
+            })?;
+        let collected = proof
+            .proof
+            .verify_range_inclusion_and_extract_digests(&verifier, &elements, location, &inner_root)
             .map_err(|e| {
                 QmdbError::CorruptData(format!(
                     "failed to reconstruct current proof digests for location {location}: {e}"
@@ -153,13 +182,13 @@ where
 }
 
 fn validate_recovery_input<K, V>(
-    previous_operations: Option<&[QmdbOperation<K, V>]>,
-    operations: &[QmdbOperation<K, V>],
+    previous_operations: Option<&[QmdbOperation<commonware_storage::mmr::Family, K, V>]>,
+    operations: &[QmdbOperation<commonware_storage::mmr::Family, K, V>],
 ) -> Result<(), QmdbError>
 where
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
-    QmdbOperation<K, V>: Encode,
+    QmdbOperation<commonware_storage::mmr::Family, K, V>: Encode,
 {
     if !matches!(operations.last(), Some(QmdbOperation::CommitFloor(_, _))) {
         return Err(QmdbError::CorruptData(
@@ -201,8 +230,8 @@ where
 }
 
 fn changed_chunk_representatives<K, V, const N: usize>(
-    previous_operations: Option<&[QmdbOperation<K, V>]>,
-    operations: &[QmdbOperation<K, V>],
+    previous_operations: Option<&[QmdbOperation<commonware_storage::mmr::Family, K, V>]>,
+    operations: &[QmdbOperation<commonware_storage::mmr::Family, K, V>],
 ) -> BTreeMap<u64, Location>
 where
     K: QmdbKey + Codec,
@@ -301,12 +330,34 @@ fn changed_grafted_positions_for_chunk(
     let grafted_peak_height = peak_height - grafting_height;
 
     let mut positions = vec![leaf_ops_pos];
-    for (parent_grafted_pos, _) in
-        PathIterator::new(grafted_leaf_pos, grafted_peak_pos, grafted_peak_height)
+    for parent_grafted_pos in
+        grafted_path_parent_positions(grafted_leaf_pos, grafted_peak_pos, grafted_peak_height)
     {
         positions.push(grafted_to_ops_pos(parent_grafted_pos, grafting_height));
     }
     Ok(positions)
+}
+
+fn grafted_path_parent_positions(
+    leaf_pos: Position,
+    peak_pos: Position,
+    peak_height: u32,
+) -> Vec<Position> {
+    let mut positions = Vec::with_capacity(peak_height as usize);
+    let mut node_pos = peak_pos;
+    let mut two_h = 1u64 << peak_height;
+    while two_h > 1 {
+        positions.push(node_pos);
+        let left_pos = node_pos - two_h;
+        let right_pos = node_pos - 1;
+        two_h >>= 1;
+        node_pos = if left_pos < leaf_pos {
+            right_pos
+        } else {
+            left_pos
+        };
+    }
+    positions
 }
 
 fn containing_peak(mmr_size: Position, position: Position) -> Option<(Position, u32)> {
@@ -324,9 +375,9 @@ fn ops_pos_to_chunk_idx(ops_pos: Position, grafting_height: u32) -> u64 {
 }
 
 // TODO: replace this local mirror with
-// `commonware_storage::qmdb::current::grafting::Verifier` once upstream makes
-// that verifier public (it is still `pub(super)` in commonware-storage
-// v2026.3.0).
+// `commonware_storage::qmdb::current::grafting::Verifier` once upstream exposes
+// it; the verifier is still private in the pinned Commonware revision.
+#[derive(Clone)]
 struct ProofVerifier<'a, H: Hasher> {
     inner: StandardHasher<H>,
     grafting_height: u32,
@@ -337,7 +388,7 @@ struct ProofVerifier<'a, H: Hasher> {
 impl<'a, H: Hasher> ProofVerifier<'a, H> {
     fn new(grafting_height: u32, start_chunk_index: u64, chunks: Vec<&'a [u8]>) -> Self {
         Self {
-            inner: StandardHasher::<H>::new(),
+            inner: commonware_storage::qmdb::hasher::<H>(),
             grafting_height,
             chunks,
             start_chunk_index,
@@ -345,16 +396,23 @@ impl<'a, H: Hasher> ProofVerifier<'a, H> {
     }
 }
 
-impl<H: Hasher> mmr::hasher::Hasher for ProofVerifier<'_, H> {
+impl<H: Hasher> MerkleHasher<commonware_storage::mmr::Family> for ProofVerifier<'_, H> {
     type Digest = H::Digest;
-    type Inner = H;
 
-    fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> Self::Digest {
+    fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
+        self.inner.hash(parts)
+    }
+
+    fn root_bagging(&self) -> commonware_storage::merkle::Bagging {
+        self.inner.root_bagging()
+    }
+
+    fn leaf_digest(&self, pos: Position, element: &[u8]) -> Self::Digest {
         self.inner.leaf_digest(pos, element)
     }
 
     fn node_digest(
-        &mut self,
+        &self,
         pos: Position,
         left: &Self::Digest,
         right: &Self::Digest,
@@ -377,36 +435,9 @@ impl<H: Hasher> mmr::hasher::Hasher for ProofVerifier<'_, H> {
                 if chunk.iter().all(|&byte| byte == 0) {
                     ops_subtree_root
                 } else {
-                    self.inner.inner().update(chunk);
-                    self.inner.inner().update(&ops_subtree_root);
-                    self.inner.inner().finalize()
+                    self.inner.hash([chunk, ops_subtree_root.as_ref()])
                 }
             }
-        }
-    }
-
-    fn root<'a>(
-        &mut self,
-        leaves: Location,
-        peak_digests: impl Iterator<Item = &'a Self::Digest>,
-    ) -> Self::Digest {
-        self.inner.root(leaves, peak_digests)
-    }
-
-    fn digest(&mut self, data: &[u8]) -> Self::Digest {
-        self.inner.digest(data)
-    }
-
-    fn inner(&mut self) -> &mut Self::Inner {
-        self.inner.inner()
-    }
-
-    fn fork(&self) -> impl mmr::hasher::Hasher<Digest = Self::Digest> {
-        Self {
-            inner: StandardHasher::<H>::new(),
-            grafting_height: self.grafting_height,
-            chunks: self.chunks.clone(),
-            start_chunk_index: self.start_chunk_index,
         }
     }
 }
@@ -420,7 +451,10 @@ mod tests {
     };
     use std::collections::BTreeMap;
 
-    fn update(key: &[u8], value: &[u8]) -> TestOperation<Vec<u8>, Vec<u8>> {
+    fn update(
+        key: &[u8],
+        value: &[u8],
+    ) -> TestOperation<commonware_storage::mmr::Family, Vec<u8>, Vec<u8>> {
         TestOperation::Update(OrderedUpdate {
             key: key.to_vec(),
             value: value.to_vec(),
@@ -428,11 +462,11 @@ mod tests {
         })
     }
 
-    fn commit(floor: u64) -> TestOperation<Vec<u8>, Vec<u8>> {
+    fn commit(floor: u64) -> TestOperation<commonware_storage::mmr::Family, Vec<u8>, Vec<u8>> {
         TestOperation::CommitFloor(None, Location::new(floor))
     }
 
-    fn previous_ops() -> Vec<TestOperation<Vec<u8>, Vec<u8>>> {
+    fn previous_ops() -> Vec<TestOperation<commonware_storage::mmr::Family, Vec<u8>, Vec<u8>>> {
         let mut ops = vec![commit(0)];
         for index in 1..8 {
             ops.push(update(

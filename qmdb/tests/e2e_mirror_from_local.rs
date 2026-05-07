@@ -20,11 +20,10 @@ use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics as _, Runner as _};
 use commonware_storage::mmr::{Location, Proof as BatchProof};
 use commonware_storage::qmdb::{
-    any::{unordered::variable::Db as LocalUnorderedDb, VariableConfig as UnorderedVariableConfig},
-    current::{ordered::variable::Db as LocalOrderedDb, VariableConfig as OrderedVariableConfig},
-    immutable::{Config as ImmutableConfig, Immutable, Operation as ImmutableOperation},
-    keyless::{Config as KeylessConfig, Keyless, Operation as KeylessOperation},
-    store::LogStore as _,
+    any::unordered::variable::Db as LocalUnorderedDb,
+    current::ordered::variable::Db as LocalOrderedDb,
+    immutable::variable::{Db as Immutable, Operation as ImmutableOperation},
+    keyless::variable::{Db as Keyless, Operation as KeylessOperation},
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
@@ -84,37 +83,35 @@ async fn mirror_keyless_from_local() {
 async fn run_keyless_local(
     batches: Vec<Vec<Vec<u8>>>,
 ) -> (
-    Vec<KeylessOperation<Vec<u8>>>,
+    Vec<KeylessOperation<commonware_storage::mmr::Family, Vec<u8>>>,
     BatchProof<Digest>,
     Location,
     Digest,
 ) {
     tokio::task::spawn_blocking(move || {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = KeylessConfig {
-                mmr_journal_partition: "mirror-keyless-mmr-journal".into(),
-                mmr_metadata_partition: "mirror-keyless-mmr-metadata".into(),
-                mmr_items_per_blob: NZU64!(8),
-                mmr_write_buffer: NZUsize!(1024),
-                log_partition: "mirror-keyless-log".into(),
-                log_write_buffer: NZUsize!(1024),
-                log_compression: None,
-                log_codec_config: ((0..=MAX_OPERATION_SIZE).into(), ()),
-                log_items_per_section: NZU64!(7),
-                thread_pool: None,
-                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8)),
-            };
-            let mut db: Keyless<deterministic::Context, Vec<u8>, Sha256> =
-                Keyless::init(context.with_label("db"), cfg)
-                    .await
-                    .expect("init");
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = common::keyless_config(
+                "mirror-keyless",
+                page_cache,
+                ((0..=MAX_OPERATION_SIZE).into(), ()),
+                NZU64!(7),
+            );
+            let mut db: Keyless<
+                commonware_storage::mmr::Family,
+                deterministic::Context,
+                Vec<u8>,
+                Sha256,
+            > = Keyless::init(context.with_label("db"), cfg)
+                .await
+                .expect("init");
             for batch in batches {
                 let finalized = {
                     let mut b = db.new_batch();
                     for v in batch {
-                        b.append(v);
+                        b = b.append(v);
                     }
-                    b.merkleize(None::<Vec<u8>>).finalize()
+                    b.merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
                 };
                 db.apply_batch(finalized).await.expect("apply");
             }
@@ -135,7 +132,11 @@ async fn run_keyless_local(
 
 // -------------------- Unordered --------------------
 
-type UnorderedOp = commonware_storage::qmdb::any::unordered::variable::Operation<Vec<u8>, Vec<u8>>;
+type UnorderedOp = commonware_storage::qmdb::any::unordered::variable::Operation<
+    commonware_storage::mmr::Family,
+    Vec<u8>,
+    Vec<u8>,
+>;
 
 #[tokio::test]
 async fn mirror_unordered_from_local() {
@@ -200,36 +201,35 @@ async fn run_unordered_local(
 ) -> (Vec<UnorderedOp>, BatchProof<Digest>, Location, Digest) {
     tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
-            let cfg = UnorderedVariableConfig {
-                mmr_journal_partition: "mirror-unordered-mmr-journal".into(),
-                mmr_items_per_blob: NZU64!(8),
-                mmr_write_buffer: NZUsize!(1024),
-                mmr_metadata_partition: "mirror-unordered-mmr-metadata".into(),
-                log_partition: "mirror-unordered-log".into(),
-                log_write_buffer: NZUsize!(1024),
-                log_compression: None,
-                log_codec_config: (
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = common::unordered_variable_config(
+                "mirror-unordered",
+                page_cache,
+                (
                     ((0..=MAX_OPERATION_SIZE).into(), ()),
                     ((0..=MAX_OPERATION_SIZE).into(), ()),
                 ),
-                log_items_per_blob: NZU64!(8),
-                translator: TwoCap,
-                thread_pool: None,
-                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8)),
-            };
-            let mut db: LocalUnorderedDb<cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap> =
-                LocalUnorderedDb::init(context.with_label("db"), cfg)
-                    .await
-                    .expect("init");
+                NZU64!(8),
+            );
+            let mut db: LocalUnorderedDb<
+                commonware_storage::mmr::Family,
+                cw_tokio::Context,
+                Vec<u8>,
+                Vec<u8>,
+                Sha256,
+                TwoCap,
+            > = LocalUnorderedDb::init(context.with_label("db"), cfg)
+                .await
+                .expect("init");
             for batch in batches {
                 let finalized = {
                     let mut b = db.new_batch();
                     for (k, v) in batch {
-                        b.write(k, v);
+                        b = b.write(k, v);
                     }
-                    b.merkleize(None::<Vec<u8>>).await.expect("merkleize")
+                    b.merkleize(&db, None::<Vec<u8>>).await.expect("merkleize")
                 };
-                db.apply_batch(finalized.finalize()).await.expect("apply");
+                db.apply_batch(finalized).await.expect("apply");
             }
             let latest = db.bounds().await.end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -265,7 +265,7 @@ async fn mirror_immutable_from_local() {
         .expect("upload 1");
     let reader: ImmutableClient<Sha256, ImmK, Vec<u8>> = ImmutableClient::from_client(
         client.clone(),
-        ((0..=MAX_OPERATION_SIZE).into(), ()),
+        ((), ((0..=MAX_OPERATION_SIZE).into(), ())),
         ((), ((0..=MAX_OPERATION_SIZE).into(), ())),
     );
     assert_eq!(
@@ -300,38 +300,37 @@ async fn mirror_immutable_from_local() {
 async fn run_immutable_local(
     batches: Vec<Vec<(ImmK, Vec<u8>)>>,
 ) -> (
-    Vec<ImmutableOperation<ImmK, Vec<u8>>>,
+    Vec<ImmutableOperation<commonware_storage::mmr::Family, ImmK, Vec<u8>>>,
     BatchProof<Digest>,
     Location,
     Digest,
 ) {
     tokio::task::spawn_blocking(move || {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = ImmutableConfig {
-                mmr_journal_partition: "mirror-immutable-mmr-journal".into(),
-                mmr_metadata_partition: "mirror-immutable-mmr-metadata".into(),
-                mmr_items_per_blob: NZU64!(8),
-                mmr_write_buffer: NZUsize!(1024),
-                log_partition: "mirror-immutable-log".into(),
-                log_items_per_section: NZU64!(5),
-                log_compression: None,
-                log_codec_config: ((0..=MAX_OPERATION_SIZE).into(), ()),
-                log_write_buffer: NZUsize!(1024),
-                translator: TwoCap,
-                thread_pool: None,
-                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8)),
-            };
-            let mut db: Immutable<deterministic::Context, ImmK, Vec<u8>, Sha256, TwoCap> =
-                Immutable::init(context.with_label("db"), cfg)
-                    .await
-                    .expect("init");
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = common::immutable_variable_config(
+                "mirror-immutable",
+                page_cache,
+                ((), ((0..=MAX_OPERATION_SIZE).into(), ())),
+                NZU64!(5),
+            );
+            let mut db: Immutable<
+                commonware_storage::mmr::Family,
+                deterministic::Context,
+                ImmK,
+                Vec<u8>,
+                Sha256,
+                TwoCap,
+            > = Immutable::init(context.with_label("db"), cfg)
+                .await
+                .expect("init");
             for batch in batches {
                 let finalized = {
                     let mut b = db.new_batch();
                     for (k, v) in batch {
-                        b.set(k, v);
+                        b = b.set(k, v);
                     }
-                    b.merkleize(None::<Vec<u8>>).finalize()
+                    b.merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
                 };
                 db.apply_batch(finalized).await.expect("apply");
             }
@@ -353,10 +352,22 @@ async fn run_immutable_local(
 // -------------------- Ordered (with current boundary) --------------------
 
 const N: usize = 32;
-type OrderedOp = commonware_storage::qmdb::any::ordered::variable::Operation<Vec<u8>, Vec<u8>>;
+type OrderedOp = commonware_storage::qmdb::any::ordered::variable::Operation<
+    commonware_storage::mmr::Family,
+    Vec<u8>,
+    Vec<u8>,
+>;
 
 async fn ordered_boundary_from_local_db(
-    db: &LocalOrderedDb<cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>,
+    db: &LocalOrderedDb<
+        commonware_storage::mmr::Family,
+        cw_tokio::Context,
+        Vec<u8>,
+        Vec<u8>,
+        Sha256,
+        TwoCap,
+        N,
+    >,
     previous_operations: Option<&[OrderedOp]>,
     operations: &[OrderedOp],
 ) -> CurrentBoundaryState<Digest, N> {
@@ -384,7 +395,7 @@ async fn ordered_boundary_from_local_db(
                     "local current range proof at {location} returned no chunks"
                 ))
             })?;
-            Ok((proof.proof, chunk))
+            Ok((proof, chunk))
         },
     )
     .await
@@ -468,37 +479,36 @@ async fn run_ordered_local(
     let batches_clone = batches.clone();
     let (ops, proof, latest, root, boundary) = tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
-            let cfg = OrderedVariableConfig {
-                mmr_journal_partition: "mirror-ordered-mmr-journal".into(),
-                mmr_items_per_blob: NZU64!(8),
-                mmr_write_buffer: NZUsize!(1024),
-                mmr_metadata_partition: "mirror-ordered-mmr-metadata".into(),
-                log_partition: "mirror-ordered-log".into(),
-                log_write_buffer: NZUsize!(1024),
-                log_compression: None,
-                log_codec_config: (
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = common::ordered_variable_config(
+                "mirror-ordered",
+                page_cache,
+                (
                     ((0..=MAX_OPERATION_SIZE).into(), ()),
                     ((0..=MAX_OPERATION_SIZE).into(), ()),
                 ),
-                log_items_per_blob: NZU64!(8),
-                grafted_mmr_metadata_partition: "mirror-ordered-grafted-metadata".into(),
-                translator: TwoCap,
-                thread_pool: None,
-                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8)),
-            };
-            let mut db: LocalOrderedDb<cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N> =
-                LocalOrderedDb::init(context.with_label("db"), cfg)
-                    .await
-                    .expect("init");
+                NZU64!(8),
+            );
+            let mut db: LocalOrderedDb<
+                commonware_storage::mmr::Family,
+                cw_tokio::Context,
+                Vec<u8>,
+                Vec<u8>,
+                Sha256,
+                TwoCap,
+                N,
+            > = LocalOrderedDb::init(context.with_label("db"), cfg)
+                .await
+                .expect("init");
             for batch in batches_clone {
                 let finalized = {
                     let mut b = db.new_batch();
                     for (k, v) in batch {
-                        b.write(k, v);
+                        b = b.write(k, v);
                     }
-                    b.merkleize(None::<Vec<u8>>).await.expect("merkleize")
+                    b.merkleize(&db, None::<Vec<u8>>).await.expect("merkleize")
                 };
-                db.apply_batch(finalized.finalize()).await.expect("apply");
+                db.apply_batch(finalized).await.expect("apply");
             }
             let latest = db.bounds().await.end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();

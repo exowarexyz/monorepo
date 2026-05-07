@@ -2,7 +2,9 @@ use std::marker::PhantomData;
 
 use commonware_codec::{Codec, Decode, Encode, Read as CodecRead};
 use commonware_cryptography::Hasher;
-use commonware_storage::{mmr::Location, qmdb::immutable::Operation as ImmutableOperation};
+use commonware_storage::{
+    mmr::Location, qmdb::immutable::variable::Operation as ImmutableOperation,
+};
 use commonware_utils::Array;
 use exoware_sdk::{SerializableReadSession, StoreClient};
 
@@ -23,7 +25,7 @@ use crate::VersionedValue;
 #[derive(Clone, Debug)]
 pub struct ImmutableClient<H: Hasher, K: AsRef<[u8]> + Codec, V: Codec + Send + Sync> {
     client: StoreClient,
-    value_cfg: V::Cfg,
+    operation_cfg: (K::Cfg, V::Cfg),
     update_row_cfg: (K::Cfg, V::Cfg),
     _marker: PhantomData<(H, K)>,
 }
@@ -35,20 +37,25 @@ where
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
     K::Cfg: Clone,
-    ImmutableOperation<K, V>: Encode + Decode<Cfg = V::Cfg> + Clone,
+    ImmutableOperation<commonware_storage::mmr::Family, K, V>:
+        Encode + Decode<Cfg = (K::Cfg, V::Cfg)> + Clone,
 {
-    pub fn new(url: &str, value_cfg: V::Cfg, update_row_cfg: (K::Cfg, V::Cfg)) -> Self {
-        Self::from_client(StoreClient::new(url), value_cfg, update_row_cfg)
+    pub fn new(
+        url: &str,
+        operation_cfg: (K::Cfg, V::Cfg),
+        update_row_cfg: (K::Cfg, V::Cfg),
+    ) -> Self {
+        Self::from_client(StoreClient::new(url), operation_cfg, update_row_cfg)
     }
 
     pub fn from_client(
         client: StoreClient,
-        value_cfg: V::Cfg,
+        operation_cfg: (K::Cfg, V::Cfg),
         update_row_cfg: (K::Cfg, V::Cfg),
     ) -> Self {
         Self {
             client,
-            value_cfg,
+            operation_cfg,
             update_row_cfg,
             _marker: PhantomData,
         }
@@ -66,7 +73,11 @@ where
     where
         V: AsRef<[u8]>,
     {
-        let op = ImmutableOperation::<K, V>::decode_cfg(bytes, &self.value_cfg).map_err(|e| {
+        let op = ImmutableOperation::<commonware_storage::mmr::Family, K, V>::decode_cfg(
+            bytes,
+            &self.operation_cfg,
+        )
+        .map_err(|e| {
             QmdbError::CorruptData(format!(
                 "failed to decode immutable operation at location {location}: {e}"
             ))
@@ -74,8 +85,8 @@ where
         let key = op.key().map(|k| <K as AsRef<[u8]>>::as_ref(k).to_vec());
         let value = match &op {
             ImmutableOperation::Set(_, value) => Some(value.as_ref().to_vec()),
-            ImmutableOperation::Commit(Some(value)) => Some(value.as_ref().to_vec()),
-            ImmutableOperation::Commit(None) => None,
+            ImmutableOperation::Commit(Some(value), _) => Some(value.as_ref().to_vec()),
+            ImmutableOperation::Commit(None, _) => None,
         };
         Ok((key, value))
     }
@@ -119,12 +130,9 @@ where
                 "authenticated immutable update row key mismatch at location {location}"
             )));
         }
-        let operation = load_auth_operation_at::<ImmutableOperation<K, V>>(
-            &session,
-            namespace,
-            location,
-            &self.value_cfg,
-        )
+        let operation = load_auth_operation_at::<
+            ImmutableOperation<commonware_storage::mmr::Family, K, V>,
+        >(&session, namespace, location, &self.operation_cfg)
         .await?;
         match operation {
             ImmutableOperation::Set(operation_key, value) if operation_key == *key => {
@@ -137,7 +145,7 @@ where
             ImmutableOperation::Set(_, _) => Err(QmdbError::CorruptData(format!(
                 "authenticated immutable update row does not match operation key at location {location}"
             ))),
-            ImmutableOperation::Commit(_) => Err(QmdbError::CorruptData(format!(
+            ImmutableOperation::Commit(_, _) => Err(QmdbError::CorruptData(format!(
                 "authenticated immutable update row points at commit location {location}"
             ))),
         }
@@ -216,7 +224,13 @@ where
         watermark: Location,
         start_location: Location,
         max_locations: u32,
-    ) -> Result<VerifiedOperationRange<H::Digest, ImmutableOperation<K, V>>, QmdbError> {
+    ) -> Result<
+        VerifiedOperationRange<
+            H::Digest,
+            ImmutableOperation<commonware_storage::mmr::Family, K, V>,
+        >,
+        QmdbError,
+    > {
         let checkpoint = self
             .operation_range_checkpoint(watermark, start_location, max_locations)
             .await?;
@@ -226,13 +240,15 @@ where
             .enumerate()
             .map(|(offset, bytes)| {
                 let location = checkpoint.start_location + offset as u64;
-                ImmutableOperation::<K, V>::decode_cfg(bytes.as_slice(), &self.value_cfg).map_err(
-                    |e| {
-                        QmdbError::CorruptData(format!(
-                            "failed to decode authenticated operation at location {location}: {e}"
-                        ))
-                    },
+                ImmutableOperation::<commonware_storage::mmr::Family, K, V>::decode_cfg(
+                    bytes.as_slice(),
+                    &self.operation_cfg,
                 )
+                .map_err(|e| {
+                    QmdbError::CorruptData(format!(
+                        "failed to decode authenticated operation at location {location}: {e}"
+                    ))
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(VerifiedOperationRange {

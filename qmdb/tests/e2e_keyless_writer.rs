@@ -9,10 +9,7 @@ use std::sync::Arc;
 
 use commonware_runtime::{deterministic, Runner as _};
 use commonware_storage::mmr::{Location, Proof as BatchProof};
-use commonware_storage::qmdb::{
-    keyless::{Config as KeylessConfig, Keyless, Operation as KeylessOperation},
-    store::LogStore as _,
-};
+use commonware_storage::qmdb::keyless::variable::{Db as Keyless, Operation as KeylessOperation};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{KeylessClient, KeylessWriter};
 use exoware_sdk::StoreClient;
@@ -20,7 +17,12 @@ use exoware_sdk::StoreClient;
 use common::retry;
 
 type Digest = commonware_cryptography::sha256::Digest;
-type LocalDb = Keyless<deterministic::Context, Vec<u8>, commonware_cryptography::Sha256>;
+type LocalDb = Keyless<
+    commonware_storage::mmr::Family,
+    deterministic::Context,
+    Vec<u8>,
+    commonware_cryptography::Sha256,
+>;
 type TestKeylessClient = KeylessClient<commonware_cryptography::Sha256, Vec<u8>>;
 type TestKeylessWriter = KeylessWriter<commonware_cryptography::Sha256, Vec<u8>>;
 
@@ -39,25 +41,15 @@ async fn build_local_reference(
 ) -> (
     Digest,
     BatchProof<Digest>,
-    Vec<KeylessOperation<Vec<u8>>>,
+    Vec<KeylessOperation<commonware_storage::mmr::Family, Vec<u8>>>,
     Location,
 ) {
     tokio::task::spawn_blocking(move || {
         deterministic::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
-            let cfg = KeylessConfig {
-                mmr_journal_partition: "keyless-mmr-journal".into(),
-                mmr_metadata_partition: "keyless-mmr-metadata".into(),
-                mmr_items_per_blob: NZU64!(8),
-                mmr_write_buffer: NZUsize!(1024),
-                log_partition: "keyless-log".into(),
-                log_write_buffer: NZUsize!(1024),
-                log_compression: None,
-                log_codec_config: ((0..=10000).into(), ()),
-                log_items_per_section: NZU64!(7),
-                thread_pool: None,
-                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8)),
-            };
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg =
+                common::keyless_config("keyless", page_cache, ((0..=10000).into(), ()), NZU64!(7));
             let mut db: LocalDb = LocalDb::init(context.with_label("db"), cfg)
                 .await
                 .expect("init");
@@ -66,9 +58,9 @@ async fn build_local_reference(
                 let finalized = {
                     let mut batch = db.new_batch();
                     for v in batch_values {
-                        batch.append(v.clone());
+                        batch = batch.append(v.clone());
                     }
-                    batch.merkleize(None::<Vec<u8>>).finalize()
+                    batch.merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
                 };
                 db.apply_batch(finalized).await.expect("apply");
             }
@@ -92,7 +84,9 @@ async fn build_local_reference(
 /// corresponding to `batches` lengths. (Commonware's keyless DB inserts a
 /// Commit op at each batch boundary; for this test we pass the full flat
 /// sequence to the writer, which mirrors what the local DB produced.)
-fn flat_to_writer_ops(ops: &[KeylessOperation<Vec<u8>>]) -> Vec<KeylessOperation<Vec<u8>>> {
+fn flat_to_writer_ops(
+    ops: &[KeylessOperation<commonware_storage::mmr::Family, Vec<u8>>],
+) -> Vec<KeylessOperation<commonware_storage::mmr::Family, Vec<u8>>> {
     ops.to_vec()
 }
 

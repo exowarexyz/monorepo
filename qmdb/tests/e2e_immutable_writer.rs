@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use commonware_runtime::{deterministic, Runner as _};
 use commonware_storage::mmr::Location;
-use commonware_storage::qmdb::immutable::{
-    Config as ImmutableConfig, Immutable, Operation as ImmutableOperation,
+use commonware_storage::qmdb::immutable::variable::{
+    Db as Immutable, Operation as ImmutableOperation,
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
@@ -22,12 +22,23 @@ use common::retry;
 type Digest = commonware_cryptography::sha256::Digest;
 type K = FixedBytes<32>;
 type V = Vec<u8>;
-type LocalDb = Immutable<deterministic::Context, K, V, commonware_cryptography::Sha256, TwoCap>;
+type LocalDb = Immutable<
+    commonware_storage::mmr::Family,
+    deterministic::Context,
+    K,
+    V,
+    commonware_cryptography::Sha256,
+    TwoCap,
+>;
 type TestReader = ImmutableClient<commonware_cryptography::Sha256, K, V>;
 type TestWriter = ImmutableWriter<commonware_cryptography::Sha256, K, V>;
 
 fn fresh_reader(c: StoreClient) -> TestReader {
-    TestReader::from_client(c, ((0..=10000).into(), ()), ((), ((0..=10000).into(), ())))
+    TestReader::from_client(
+        c,
+        ((), ((0..=10000).into(), ())),
+        ((), ((0..=10000).into(), ())),
+    )
 }
 
 fn fresh_writer(c: StoreClient) -> TestWriter {
@@ -37,27 +48,20 @@ fn fresh_writer(c: StoreClient) -> TestWriter {
 struct LocalReference {
     latest_location: Location,
     root: Digest,
-    operations: Vec<ImmutableOperation<K, V>>,
+    operations: Vec<ImmutableOperation<commonware_storage::mmr::Family, K, V>>,
 }
 
 async fn build_local_reference(batches: Vec<Vec<(K, V)>>) -> LocalReference {
     tokio::task::spawn_blocking(move || {
         deterministic::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
-            let cfg = ImmutableConfig {
-                mmr_journal_partition: "immutable-mmr-journal".into(),
-                mmr_metadata_partition: "immutable-mmr-metadata".into(),
-                mmr_items_per_blob: NZU64!(8),
-                mmr_write_buffer: NZUsize!(1024),
-                log_partition: "immutable-log".into(),
-                log_items_per_section: NZU64!(5),
-                log_compression: None,
-                log_codec_config: ((0..=10000).into(), ()),
-                log_write_buffer: NZUsize!(1024),
-                translator: TwoCap,
-                thread_pool: None,
-                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8)),
-            };
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = common::immutable_variable_config(
+                "immutable-writer",
+                page_cache,
+                ((), ((0..=10000).into(), ())),
+                NZU64!(5),
+            );
             let mut db: LocalDb = LocalDb::init(context.with_label("db"), cfg)
                 .await
                 .expect("init");
@@ -65,9 +69,9 @@ async fn build_local_reference(batches: Vec<Vec<(K, V)>>) -> LocalReference {
                 let finalized = {
                     let mut batch = db.new_batch();
                     for (k, v) in batch_writes {
-                        batch.set(k.clone(), v.clone());
+                        batch = batch.set(k.clone(), v.clone());
                     }
-                    batch.merkleize(None::<Vec<u8>>).finalize()
+                    batch.merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
                 };
                 db.apply_batch(finalized).await.expect("apply");
             }

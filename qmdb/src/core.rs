@@ -3,10 +3,13 @@ use std::time::Duration;
 
 use commonware_codec::{Codec, Encode, Read as CodecRead};
 use commonware_cryptography::{Digest, Hasher};
-use commonware_storage::mmr::{self, iterator::PeakIterator, Location, Position, StandardHasher};
 use commonware_storage::qmdb::{
     any::ordered::variable::Operation as QmdbOperation,
     any::unordered::variable::Operation as UnorderedQmdbOperation, operation::Key as QmdbKey,
+};
+use commonware_storage::{
+    merkle::hasher::Hasher as MerkleHasher,
+    mmr::{iterator::PeakIterator, Location, Position},
 };
 use exoware_sdk::keys::Key;
 use exoware_sdk::{ClientError, RangeMode, SerializableReadSession, StoreClient};
@@ -15,8 +18,8 @@ use crate::codec::{
     decode_digest, decode_operation_location_key, decode_update_location,
     decode_watermark_location, encode_chunk_key, encode_current_meta_key, encode_grafted_node_key,
     encode_node_key, encode_operation_key, encode_presence_key, encode_update_key,
-    encode_watermark_key, ensure_encoded_value_size, mmr_size_for_watermark, UpdateRow,
-    WATERMARK_CODEC,
+    encode_watermark_key, ensure_encoded_value_size, grafting_height_for, mmr_size_for_watermark,
+    ops_to_grafted_pos, UpdateRow, WATERMARK_CODEC,
 };
 use crate::error::QmdbError;
 use crate::VersionedValue;
@@ -190,8 +193,10 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
                 format!("MMR peak node at position {peak_pos}"),
             )?);
         }
-        let mut hasher = StandardHasher::<H>::new();
-        Ok(mmr::hasher::Hasher::root(&mut hasher, leaves, peaks.iter()))
+        let hasher = commonware_storage::qmdb::hasher::<H>();
+        hasher
+            .root(leaves, 0, peaks.iter())
+            .map_err(|e| QmdbError::CommonwareMmr(e.to_string()))
     }
 
     pub(crate) async fn load_operation_bytes_at(
@@ -310,10 +315,10 @@ impl PreparedUpload {
 impl PreparedUpload {
     pub(crate) fn build<K: QmdbKey + Codec, V: Codec + Clone + Send + Sync>(
         latest_location: Location,
-        operations: &[QmdbOperation<K, V>],
+        operations: &[QmdbOperation<commonware_storage::mmr::Family, K, V>],
     ) -> Result<Self, QmdbError>
     where
-        QmdbOperation<K, V>: Encode,
+        QmdbOperation<commonware_storage::mmr::Family, K, V>: Encode,
     {
         use commonware_storage::qmdb::any::ordered::Update as QmdbUpdate;
         Self::build_from_ops(latest_location, operations, |op| match op {
@@ -329,10 +334,10 @@ impl PreparedUpload {
 
     pub(crate) fn build_unordered<K: QmdbKey + Codec, V: Codec + Clone + Send + Sync>(
         latest_location: Location,
-        operations: &[UnorderedQmdbOperation<K, V>],
+        operations: &[UnorderedQmdbOperation<commonware_storage::mmr::Family, K, V>],
     ) -> Result<Self, QmdbError>
     where
-        UnorderedQmdbOperation<K, V>: Encode,
+        UnorderedQmdbOperation<commonware_storage::mmr::Family, K, V>: Encode,
     {
         use commonware_storage::qmdb::any::unordered::Update as UnorderedUpdate;
         Self::build_from_ops(latest_location, operations, |op| match op {
@@ -418,13 +423,47 @@ impl PreparedCurrentBoundaryUpload {
                 chunk.to_vec(),
             ));
         }
-        for &(grafted_position, digest) in &current_boundary.grafted_nodes {
+        for &(ops_position, digest) in &current_boundary.grafted_nodes {
+            let grafted_position = ops_to_grafted_pos(ops_position, grafting_height_for::<N>());
             rows.push((
                 encode_grafted_node_key(grafted_position, latest_location),
                 digest.as_ref().to_vec(),
             ));
         }
         Ok(Self { rows })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::Sha256;
+
+    #[test]
+    fn current_boundary_upload_keys_grafted_nodes_by_grafted_space_position() {
+        let mut hasher = Sha256::default();
+        hasher.update(b"grafted-node");
+        let digest = hasher.finalize();
+
+        let ops_position = Position::new(2046);
+        let latest_location = Location::new(1024);
+        let boundary = crate::CurrentBoundaryState::<_, 32> {
+            root: digest,
+            chunks: Vec::new(),
+            grafted_nodes: vec![(ops_position, digest)],
+        };
+
+        let upload =
+            PreparedCurrentBoundaryUpload::build(latest_location, &boundary).expect("upload");
+        let grafted_position = ops_to_grafted_pos(ops_position, grafting_height_for::<32>());
+        let expected_key = encode_grafted_node_key(grafted_position, latest_location);
+        let stale_ops_key = encode_grafted_node_key(ops_position, latest_location);
+
+        assert!(upload
+            .rows
+            .iter()
+            .any(|(key, value)| key == &expected_key && value.as_slice() == digest.as_ref()));
+        assert!(!upload.rows.iter().any(|(key, _)| key == &stale_ops_key));
     }
 }
 
@@ -447,12 +486,12 @@ pub(crate) fn extend_mmr_from_peaks<H: Hasher, Op: AsRef<[u8]>>(
 ) -> Result<MmrExtension<H::Digest>, QmdbError> {
     let mut current_size = previous_size;
     let mut new_nodes = Vec::<(Position, H::Digest)>::new();
-    let mut hasher = StandardHasher::<H>::new();
+    let hasher = commonware_storage::qmdb::hasher::<H>();
     for encoded in encoded_operations {
         let encoded = encoded.as_ref();
         ensure_encoded_value_size(encoded.len())?;
         let leaf_pos = current_size;
-        let leaf_digest = mmr::hasher::Hasher::leaf_digest(&mut hasher, leaf_pos, encoded);
+        let leaf_digest = hasher.leaf_digest(leaf_pos, encoded);
         new_nodes.push((leaf_pos, leaf_digest));
         current_size = Position::new(*current_size + 1);
 
@@ -465,12 +504,7 @@ pub(crate) fn extend_mmr_from_peaks<H: Hasher, Op: AsRef<[u8]>>(
         {
             let (_, _, left_digest) = peaks.pop().expect("peak exists");
             let parent_pos = current_size;
-            let parent_digest = mmr::hasher::Hasher::node_digest(
-                &mut hasher,
-                parent_pos,
-                &left_digest,
-                &carry_digest,
-            );
+            let parent_digest = hasher.node_digest(parent_pos, &left_digest, &carry_digest);
             new_nodes.push((parent_pos, parent_digest));
             current_size = Position::new(*current_size + 1);
             carry_pos = parent_pos;
@@ -481,11 +515,9 @@ pub(crate) fn extend_mmr_from_peaks<H: Hasher, Op: AsRef<[u8]>>(
     }
     let leaves = Location::try_from(current_size)
         .map_err(|e| QmdbError::CorruptData(format!("invalid incremental ops size: {e}")))?;
-    let root = mmr::hasher::Hasher::root(
-        &mut hasher,
-        leaves,
-        peaks.iter().map(|(_, _, digest)| digest),
-    );
+    let root = hasher
+        .root(leaves, 0, peaks.iter().map(|(_, _, digest)| digest))
+        .map_err(|e| QmdbError::CommonwareMmr(e.to_string()))?;
     Ok(MmrExtension {
         size: current_size,
         peaks,

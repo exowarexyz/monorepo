@@ -5,24 +5,31 @@ import {
   type Client as ConnectClient,
 } from '@connectrpc/connect';
 import {
-  BytesFilterSchema,
-  CurrentKeyValueProofSchema,
-  HistoricalMultiProofSchema,
-  OrderedService,
-  QmdbGetManyRequestSchema,
-  QmdbGetRequestSchema,
-  QmdbSubscribeRequestSchema,
-  RangeService,
   createTransport,
-  type BytesFilter,
   type ClientOptions as SdkClientOptions,
 } from '@exowarexyz/sdk';
+import {
+  CurrentKeyValueProofSchema,
+  GetManyRequestSchema,
+  GetManyResponseSchema,
+  GetRequestSchema,
+  HistoricalMultiProofSchema,
+  OrderedService,
+  RangeService,
+  SubscribeRequestSchema,
+} from './generated/proto/qmdb/v1/qmdb_pb.js';
+import {
+  BytesFilterSchema,
+  type BytesFilter,
+} from './generated/proto/store/v1/common_pb.js';
 import initWasm, {
   verify_current_key_value_proof,
+  verify_get_many_response,
   verify_historical_multi_proof,
 } from './generated/wasm/exoware_qmdb_wasm.js';
 
 export type BytesLike = Uint8Array | string;
+export type MerkleFamily = 'mmr' | 'mmb';
 
 export type OrderedOperation =
   | {
@@ -47,56 +54,37 @@ export interface LocatedOrderedOperation {
 }
 
 export interface VerifiedHistoricalMultiProof {
-  root: Uint8Array;
   operations: LocatedOrderedOperation[];
 }
 
 export interface VerifiedCurrentKeyValueProof {
-  root: Uint8Array;
   location: bigint;
   operation: OrderedOperation;
 }
 
 export interface OrderedSubscribeProof {
   resumeSequenceNumber: bigint;
+  root: Uint8Array;
   proof: VerifiedHistoricalMultiProof;
 }
 
-export type OrderedQmdbClientOptions = SdkClientOptions;
+export type OrderedQmdbClientOptions = SdkClientOptions & {
+  merkleFamily?: MerkleFamily;
+};
 
 let wasmReady: Promise<unknown> | undefined;
 
 function ensureWasm(): Promise<unknown> {
-  if (!wasmReady) {
-    wasmReady = initWasm();
-  }
-  return wasmReady;
+  return (wasmReady ??= initWasm());
 }
 
 function toBytes(value: BytesLike): Uint8Array {
   return typeof value === 'string' ? new TextEncoder().encode(value) : value;
 }
 
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    if (a[i] !== b[i]) return false;
-  }
-  return true;
-}
-
-function hex(bytes: Uint8Array): string {
-  return Array.from(bytes)
-    .map((byte) => byte.toString(16).padStart(2, '0'))
-    .join('');
-}
-
-function assertRootMatches(actual: Uint8Array, expected: BytesLike, label: string): void {
-  const expectedBytes = toBytes(expected);
-  if (!bytesEqual(actual, expectedBytes)) {
-    throw new Error(
-      `${label} root mismatch: expected 0x${hex(expectedBytes)}, got 0x${hex(actual)}`,
-    );
+function assertMerkleFamily(value: MerkleFamily, label: string): void {
+  if (value !== 'mmr' && value !== 'mmb') {
+    throw new Error(`${label} unsupported Merkle family ${String(value)}`);
   }
 }
 
@@ -130,9 +118,13 @@ export function matchRegex(regex: string): BytesFilter {
 export class OrderedQmdbClient {
   private readonly rpc: ConnectClient<typeof OrderedService>;
   private readonly range: ConnectClient<typeof RangeService>;
+  private readonly merkleFamily: MerkleFamily;
 
   constructor(baseUrl: string, options: OrderedQmdbClientOptions = {}) {
-    const transport = createTransport(baseUrl, options);
+    const { merkleFamily = 'mmr', ...transportOptions } = options;
+    assertMerkleFamily(merkleFamily, 'qmdb client');
+    this.merkleFamily = merkleFamily;
+    const transport = createTransport(baseUrl, transportOptions);
     this.rpc = createClient(OrderedService, transport);
     this.range = createClient(RangeService, transport);
   }
@@ -145,7 +137,7 @@ export class OrderedQmdbClient {
   ): Promise<VerifiedCurrentKeyValueProof> {
     await ensureWasm();
     const response = await this.rpc.get(
-      create(QmdbGetRequestSchema, {
+      create(GetRequestSchema, {
         key: toBytes(key),
         tip,
       }),
@@ -156,8 +148,9 @@ export class OrderedQmdbClient {
     }
     const verified = verify_current_key_value_proof(
       toBinary(CurrentKeyValueProofSchema, response.proof),
+      toBytes(expectedRoot),
+      this.merkleFamily,
     ) as VerifiedCurrentKeyValueProof;
-    assertRootMatches(verified.root, expectedRoot, 'qmdb get');
     return verified;
   }
 
@@ -169,7 +162,7 @@ export class OrderedQmdbClient {
   ): Promise<VerifiedHistoricalMultiProof> {
     await ensureWasm();
     const response = await this.rpc.getMany(
-      create(QmdbGetManyRequestSchema, {
+      create(GetManyRequestSchema, {
         keys: keys.map((key) => toBytes(key)),
         tip,
       }),
@@ -178,10 +171,11 @@ export class OrderedQmdbClient {
     if (!response.proof) {
       throw new Error('qmdb getMany response missing proof');
     }
-    const verified = verify_historical_multi_proof(
-      toBinary(HistoricalMultiProofSchema, response.proof),
+    const verified = verify_get_many_response(
+      toBinary(GetManyResponseSchema, response),
+      toBytes(expectedRoot),
+      this.merkleFamily,
     ) as VerifiedHistoricalMultiProof;
-    assertRootMatches(verified.root, expectedRoot, 'qmdb getMany');
     return verified;
   }
 
@@ -195,7 +189,7 @@ export class OrderedQmdbClient {
   ): AsyncIterable<OrderedSubscribeProof> {
     await ensureWasm();
     const stream = this.range.subscribe(
-      create(QmdbSubscribeRequestSchema, {
+      create(SubscribeRequestSchema, {
         keyFilters: filters.keyFilters ?? [],
         valueFilters: filters.valueFilters ?? [],
         ...(filters.sinceSequenceNumber !== undefined
@@ -208,11 +202,15 @@ export class OrderedQmdbClient {
       if (!frame.proof) {
         throw new Error('qmdb subscribe response missing proof');
       }
+      const proof = verify_historical_multi_proof(
+        toBinary(HistoricalMultiProofSchema, frame.proof),
+        frame.root,
+        this.merkleFamily,
+      ) as VerifiedHistoricalMultiProof;
       yield {
         resumeSequenceNumber: frame.resumeSequenceNumber,
-        proof: verify_historical_multi_proof(
-          toBinary(HistoricalMultiProofSchema, frame.proof),
-        ) as VerifiedHistoricalMultiProof,
+        root: frame.root,
+        proof,
       };
     }
   }

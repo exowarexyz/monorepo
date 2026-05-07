@@ -2,20 +2,22 @@ import { create } from '@bufbuild/protobuf';
 import { createClient, type CallOptions, type Client as ConnectClient } from '@connectrpc/connect';
 import {
   createTransport,
-  SqlIndexLayout,
-  SqlService,
-  SqlQueryRequestSchema,
-  SqlSubscribeRequestSchema,
-  SqlTablesRequestSchema,
   type ClientOptions as SdkClientOptions,
-  type SqlCell,
-  type SqlColumn,
-  type SqlIndex,
-  type SqlQueryResponse,
-  type SqlRow,
-  type SqlSubscribeResponse,
-  type SqlTable,
 } from '@exowarexyz/sdk';
+import {
+  IndexLayout as SqlIndexLayout,
+  Service as SqlService,
+  QueryRequestSchema as SqlQueryRequestSchema,
+  SubscribeRequestSchema as SqlSubscribeRequestSchema,
+  TablesRequestSchema as SqlTablesRequestSchema,
+  type Cell as SqlCell,
+  type Column as SqlColumn,
+  type Index as SqlIndex,
+  type QueryResponse as SqlQueryResponse,
+  type Row as SqlRow,
+  type SubscribeResponse as SqlSubscribeResponse,
+  type Table as SqlTable,
+} from './generated/proto/sql/v1/sql_pb.js';
 
 export type SqlClientOptions = SdkClientOptions;
 
@@ -174,7 +176,7 @@ function decodeTable(table: SqlTable): DecodedTable {
 }
 
 /**
- * Thin wrapper around the `store.sql.v1.Service` Connect client.
+ * Thin wrapper around the `sql.v1.Service` Connect client.
  *
  * `subscribe` re-runs the server-side predicate on every ingest batch that
  * touches the named table and yields one frame per batch of matching rows.

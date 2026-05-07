@@ -30,8 +30,6 @@ pub(crate) const CURRENT_META_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, CUR
 pub(crate) const GRAFTED_NODE_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, GRAFTED_NODE_FAMILY);
 pub(crate) const CHUNK_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, CHUNK_FAMILY);
 
-pub(crate) const NO_PARTIAL_CHUNK: u64 = 0;
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct UpdateRow<K, V> {
     pub(crate) key: K,

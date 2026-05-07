@@ -21,8 +21,7 @@ use commonware_runtime::{buffer::paged::CacheRef, Metrics as _, Runner as _};
 use commonware_storage::mmr::Location;
 use commonware_storage::qmdb::{
     any::ordered::variable::Operation as OrderedOp,
-    current::{ordered::variable::Db as LocalOrderedDb, VariableConfig as OrderedVariableConfig},
-    store::LogStore as _,
+    current::ordered::variable::Db as LocalOrderedDb,
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -32,8 +31,16 @@ use exoware_qmdb::{
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
-type BatchOp = OrderedOp<Vec<u8>, Vec<u8>>;
-type LocalDb = LocalOrderedDb<cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>;
+type BatchOp = OrderedOp<commonware_storage::mmr::Family, Vec<u8>, Vec<u8>>;
+type LocalDb = LocalOrderedDb<
+    commonware_storage::mmr::Family,
+    cw_tokio::Context,
+    Vec<u8>,
+    Vec<u8>,
+    Sha256,
+    TwoCap,
+    N,
+>;
 
 /// Each batch appends 3 fresh writes and rewrites the key 3 counter-positions
 /// behind. With `N = 32` the bitmap chunk spans 256 bits; the inactivity floor
@@ -77,7 +84,7 @@ async fn boundary_from_db(
                     "local current range proof at {location} returned no chunks"
                 ))
             })?;
-            Ok((proof.proof, chunk))
+            Ok((proof, chunk))
         },
     )
     .await
@@ -93,24 +100,16 @@ async fn mirror_ordered_prune_past_chunk_zero() {
     // boundary recovery must not panic even once chunk 0 has been pruned.
     let (batches, chunk_zero_pruned) = tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(move |context| async move {
-            let cfg = OrderedVariableConfig {
-                mmr_journal_partition: "prune-mmr-journal".into(),
-                mmr_items_per_blob: NZU64!(8),
-                mmr_write_buffer: NZUsize!(1024),
-                mmr_metadata_partition: "prune-mmr-metadata".into(),
-                log_partition: "prune-log".into(),
-                log_write_buffer: NZUsize!(1024),
-                log_compression: None,
-                log_codec_config: (
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = common::ordered_variable_config(
+                "prune",
+                page_cache,
+                (
                     ((0..=MAX_OPERATION_SIZE).into(), ()),
                     ((0..=MAX_OPERATION_SIZE).into(), ()),
                 ),
-                log_items_per_blob: NZU64!(8),
-                grafted_mmr_metadata_partition: "prune-grafted-metadata".into(),
-                translator: TwoCap,
-                thread_pool: None,
-                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8)),
-            };
+                NZU64!(8),
+            );
             let mut db: LocalDb = LocalDb::init(context.with_label("db"), cfg)
                 .await
                 .expect("init");
@@ -125,17 +124,25 @@ async fn mirror_ordered_prune_past_chunk_zero() {
                     for offset in 0..3u64 {
                         let key = format!("k-{:08x}", counter + offset).into_bytes();
                         let value = format!("v-{:08x}", counter + offset).into_bytes();
-                        batch.write(key, Some(value));
+                        batch = batch.write(key, Some(value));
                     }
                     if counter >= 3 {
                         let rewrite_key = format!("k-{:08x}", counter - 3).into_bytes();
                         let rewrite_value = format!("v-{:08x}-r", counter).into_bytes();
-                        batch.write(rewrite_key, Some(rewrite_value));
+                        batch = batch.write(rewrite_key, Some(rewrite_value));
                     }
                     counter += 3;
-                    batch.merkleize(None::<Vec<u8>>).await.expect("merkleize")
+                    batch
+                        .merkleize(&db, None::<Vec<u8>>)
+                        .await
+                        .expect("merkleize")
                 };
-                db.apply_batch(finalized.finalize()).await.expect("apply");
+                db.apply_batch(finalized).await.expect("apply");
+                // Current pruning is now explicit in Commonware. Keep the
+                // historical operation log intact for this mirror test while
+                // allowing the current bitmap/grafted overlay to prune as far
+                // as the sync boundary permits.
+                db.prune(Location::new(0)).await.expect("prune current");
 
                 let latest = db.bounds().await.end - 1;
                 let total = NonZeroU64::new(*latest + 1).expect("non-zero");

@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::Hasher;
 use commonware_storage::mmr::{Location, Position};
-use commonware_storage::qmdb::immutable::Operation as ImmutableOperation;
+use commonware_storage::qmdb::immutable::variable::Operation as ImmutableOperation;
 use commonware_utils::Array;
 use exoware_sdk::keys::Key;
 use exoware_sdk::{
@@ -42,14 +42,14 @@ pub fn build_immutable_upload<H, K, V>(
     peaks: Vec<(Position, u32, H::Digest)>,
     prev_ops_size: Position,
     latest_location: Location,
-    ops: &[ImmutableOperation<K, V>],
+    ops: &[ImmutableOperation<commonware_storage::mmr::Family, K, V>],
     watermark_at: Option<Location>,
 ) -> Result<BuiltImmutableUpload<H::Digest>, QmdbError>
 where
     H: Hasher,
     K: Array + Codec + Clone + AsRef<[u8]>,
     V: Codec + Clone + Send + Sync,
-    ImmutableOperation<K, V>: Encode,
+    ImmutableOperation<commonware_storage::mmr::Family, K, V>: Encode,
 {
     if ops.is_empty() {
         return Err(QmdbError::EmptyBatch);
@@ -95,7 +95,8 @@ where
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
     K::Cfg: Clone,
-    ImmutableOperation<K, V>: Encode + Decode<Cfg = V::Cfg> + Clone,
+    ImmutableOperation<commonware_storage::mmr::Family, K, V>:
+        Encode + Decode<Cfg = (K::Cfg, V::Cfg)> + Clone,
 {
     /// Construct a writer from caller-supplied frontier state. No store I/O.
     pub fn new(client: StoreClient, state: WriterState<H::Digest>) -> Self {
@@ -120,7 +121,7 @@ where
 
     pub async fn prepare_upload(
         &self,
-        ops: &[ImmutableOperation<K, V>],
+        ops: &[ImmutableOperation<commonware_storage::mmr::Family, K, V>],
     ) -> Result<super::PreparedUpload, QmdbError> {
         let prepared = self
             .core
@@ -238,7 +239,8 @@ where
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
     K::Cfg: Clone,
-    ImmutableOperation<K, V>: Encode + Decode<Cfg = V::Cfg> + Clone,
+    ImmutableOperation<commonware_storage::mmr::Family, K, V>:
+        Encode + Decode<Cfg = (K::Cfg, V::Cfg)> + Clone,
 {
     type Prepared = super::PreparedUpload;
     type Receipt = UploadReceipt;
@@ -292,7 +294,8 @@ where
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
     K::Cfg: Clone,
-    ImmutableOperation<K, V>: Encode + Decode<Cfg = V::Cfg> + Clone,
+    ImmutableOperation<commonware_storage::mmr::Family, K, V>:
+        Encode + Decode<Cfg = (K::Cfg, V::Cfg)> + Clone,
 {
     type PreparedPublication = super::PreparedWatermark;
     type PublicationReceipt = PublishedCheckpoint;
@@ -332,7 +335,8 @@ where
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
     K::Cfg: Clone,
-    ImmutableOperation<K, V>: Encode + Decode<Cfg = V::Cfg> + Clone,
+    ImmutableOperation<commonware_storage::mmr::Family, K, V>:
+        Encode + Decode<Cfg = (K::Cfg, V::Cfg)> + Clone,
 {
     fn latest_publication_receipt<'a>(&'a self) -> BoxFuture<'a, Option<PublishedCheckpoint>>
     where

@@ -47,9 +47,8 @@ pub use immutable::ImmutableClient;
 pub use keyless::KeylessClient;
 pub use ordered::OrderedClient;
 pub use proof::{
-    OperationRangeCheckpoint, RawCurrentRangeProof, RawKeyValueProof, RawMmrProof, RawMultiProof,
-    VariantRoot, VerifiedCurrentRange, VerifiedKeyValue, VerifiedMultiOperations,
-    VerifiedOperationRange, VerifiedVariantRange,
+    OperationRangeCheckpoint, RawKeyValueProof, RawMultiProof, VariantRoot, VerifiedCurrentRange,
+    VerifiedKeyValue, VerifiedMultiOperations, VerifiedOperationRange, VerifiedVariantRange,
 };
 pub use unordered::UnorderedClient;
 pub use writer::{
@@ -73,7 +72,7 @@ pub use connect_client::{
 
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
-use commonware_storage::mmr::{iterator::PeakIterator, Location, Position, Proof, StandardHasher};
+use commonware_storage::mmr::{Location, Position, Proof};
 
 /// Maximum encoded operation size for QMDB key and value payloads (u16 length on the wire).
 pub const MAX_OPERATION_SIZE: usize = u16::MAX as usize;
@@ -167,26 +166,28 @@ impl<D: Digest> WriterState<D> {
     {
         let encoded_operations: Vec<Vec<u8>> =
             operations.iter().map(|op| op.encode().to_vec()).collect();
-        let mut hasher = StandardHasher::<H>::new();
-        let peak_digests = proof
-            .reconstruct_peak_digests(&mut hasher, &encoded_operations, start_location, None)
-            .map_err(|e| QmdbError::CorruptData(format!("reconstruct proof peaks failed: {e}")))?;
+        if start_location != Location::new(0)
+            || encoded_operations.len() as u64 != proof.leaves.as_u64()
+        {
+            return Err(QmdbError::CorruptData(
+                "WriterState::from_proof requires a full operation-prefix proof".into(),
+            ));
+        }
         let ops_size = Position::try_from(proof.leaves)
             .map_err(|e| QmdbError::CorruptData(format!("invalid proof leaf count: {e}")))?;
-        let peak_entries: Vec<(Position, u32)> = PeakIterator::new(ops_size).collect();
-        if peak_entries.len() != peak_digests.len() {
+        let extension = crate::core::extend_mmr_from_peaks::<H, _>(
+            Vec::new(),
+            Position::new(0),
+            encoded_operations.iter().map(Vec::as_slice),
+        )?;
+        if extension.size != ops_size {
             return Err(QmdbError::CorruptData(format!(
-                "proof peak count mismatch: expected {}, got {}",
-                peak_entries.len(),
-                peak_digests.len()
+                "proof size mismatch: expected {ops_size}, got {}",
+                extension.size
             )));
         }
         Ok(Self {
-            peaks: peak_entries
-                .into_iter()
-                .zip(peak_digests)
-                .map(|((pos, height), digest)| (pos, height, digest))
-                .collect(),
+            peaks: extension.peaks,
             ops_size,
             next_location: watermark
                 .checked_add(1)

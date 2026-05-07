@@ -1,6 +1,9 @@
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Hasher;
-use commonware_storage::mmr::{self, iterator::PeakIterator, Location, Position, StandardHasher};
+use commonware_storage::{
+    merkle::hasher::Hasher as MerkleHasher,
+    mmr::{iterator::PeakIterator, Location, Position},
+};
 use commonware_utils::Array;
 use exoware_sdk::keys::{Key, KeyCodec};
 use exoware_sdk::{RangeMode, SerializableReadSession};
@@ -324,13 +327,17 @@ pub(crate) fn build_auth_upload_rows(
 /// returned `PreparedUpload`'s `op_rows`.
 pub(crate) fn build_auth_immutable_upload_rows<K, V>(
     latest_location: Location,
-    operations: &[commonware_storage::qmdb::immutable::Operation<K, V>],
+    operations: &[commonware_storage::qmdb::immutable::variable::Operation<
+        commonware_storage::mmr::Family,
+        K,
+        V,
+    >],
 ) -> Result<crate::core::PreparedUpload, QmdbError>
 where
     K: Array + AsRef<[u8]>,
     V: commonware_codec::Codec + Clone + Send + Sync,
 {
-    use commonware_storage::qmdb::immutable::Operation as ImmutableOperation;
+    use commonware_storage::qmdb::immutable::variable::Operation as ImmutableOperation;
 
     let count = operations.len();
     let count_u64 = count as u64;
@@ -419,8 +426,10 @@ pub(crate) async fn compute_auth_root<H: Hasher>(
             format!("authenticated peak node at position {peak_pos}"),
         )?);
     }
-    let mut hasher = StandardHasher::<H>::new();
-    Ok(mmr::hasher::Hasher::root(&mut hasher, leaves, peaks.iter()))
+    let hasher = commonware_storage::qmdb::hasher::<H>();
+    hasher
+        .root(leaves, 0, peaks.iter())
+        .map_err(|e| QmdbError::CommonwareMmr(e.to_string()))
 }
 
 pub(crate) async fn load_auth_operation_at<Op>(

@@ -1,21 +1,31 @@
 //! Local E2E: ephemeral RocksDB dir + simulator on an ephemeral port (no env vars).
 
+use std::num::NonZeroU64;
 use std::pin::Pin;
 use std::time::Duration;
 
 use axum::{routing::get, Router};
 use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::Hasher;
+use commonware_parallel::Sequential;
+use commonware_runtime::buffer::paged::CacheRef;
 use commonware_storage::qmdb::{
     any::{
         ordered::variable::Operation as OrderedOperation,
         unordered::variable::Operation as UnorderedOperation,
     },
-    immutable::Operation as ImmutableOperation,
-    keyless::Operation as KeylessOperation,
+    immutable::variable::Operation as ImmutableOperation,
+    keyless::variable::Operation as KeylessOperation,
     operation::Key as QmdbKey,
 };
+use commonware_storage::{
+    journal::contiguous::variable::Config as VariableJournalConfig,
+    mmr::full::Config as MerkleConfig,
+    qmdb::{any, current, immutable, keyless},
+    translator::TwoCap,
+};
 use commonware_utils::Array;
+use commonware_utils::{NZUsize, NZU64};
 use connectrpc::client::ClientConfig;
 use connectrpc::{ConnectError, ConnectRpcService, Context};
 use exoware_qmdb::{
@@ -23,10 +33,105 @@ use exoware_qmdb::{
     UnorderedWriter, UploadReceipt,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::store::qmdb::v1::{
+use exoware_sdk::qmdb::v1::{
     RangeService, RangeServiceClient, RangeServiceServer, SubscribeRequestView, SubscribeResponse,
 };
 use exoware_sdk::{StoreBatchUpload, StoreClient};
+
+#[allow(dead_code)]
+pub fn merkle_config(prefix: &str, page_cache: CacheRef) -> MerkleConfig<Sequential> {
+    MerkleConfig {
+        journal_partition: format!("{prefix}-mmr-journal"),
+        metadata_partition: format!("{prefix}-mmr-metadata"),
+        items_per_blob: NZU64!(8),
+        write_buffer: NZUsize!(1024),
+        strategy: Sequential,
+        page_cache,
+    }
+}
+
+#[allow(dead_code)]
+pub fn variable_journal_config<C>(
+    prefix: &str,
+    page_cache: CacheRef,
+    codec_config: C,
+    items_per_section: NonZeroU64,
+) -> VariableJournalConfig<C> {
+    VariableJournalConfig {
+        partition: format!("{prefix}-log"),
+        items_per_section,
+        compression: None,
+        codec_config,
+        page_cache,
+        write_buffer: NZUsize!(1024),
+    }
+}
+
+#[allow(dead_code)]
+pub fn keyless_config<C>(
+    prefix: &str,
+    page_cache: CacheRef,
+    codec_config: C,
+    items_per_section: NonZeroU64,
+) -> keyless::variable::Config<C> {
+    keyless::Config {
+        merkle: merkle_config(prefix, page_cache.clone()),
+        log: variable_journal_config(prefix, page_cache, codec_config, items_per_section),
+    }
+}
+
+#[allow(dead_code)]
+pub fn unordered_variable_config<C>(
+    prefix: &str,
+    page_cache: CacheRef,
+    codec_config: C,
+    items_per_section: NonZeroU64,
+) -> any::VariableConfig<TwoCap, C> {
+    any::Config {
+        merkle_config: merkle_config(prefix, page_cache.clone()),
+        journal_config: variable_journal_config(
+            prefix,
+            page_cache,
+            codec_config,
+            items_per_section,
+        ),
+        translator: TwoCap,
+    }
+}
+
+#[allow(dead_code)]
+pub fn ordered_variable_config<C>(
+    prefix: &str,
+    page_cache: CacheRef,
+    codec_config: C,
+    items_per_section: NonZeroU64,
+) -> current::VariableConfig<TwoCap, C> {
+    current::Config {
+        merkle_config: merkle_config(prefix, page_cache.clone()),
+        journal_config: variable_journal_config(
+            prefix,
+            page_cache,
+            codec_config,
+            items_per_section,
+        ),
+        grafted_metadata_partition: format!("{prefix}-grafted-metadata"),
+        translator: TwoCap,
+    }
+}
+
+#[allow(dead_code)]
+pub fn immutable_variable_config<C>(
+    prefix: &str,
+    page_cache: CacheRef,
+    codec_config: C,
+    items_per_section: NonZeroU64,
+) -> immutable::variable::Config<TwoCap, C> {
+    immutable::Config {
+        merkle_config: merkle_config(prefix, page_cache.clone()),
+        log: variable_journal_config(prefix, page_cache, codec_config, items_per_section),
+        translator: TwoCap,
+    }
+}
 
 /// Keep `_dir` and `_server` alive for the whole test.
 pub async fn local_store_client() -> (tempfile::TempDir, tokio::task::JoinHandle<()>, StoreClient) {
@@ -61,12 +166,12 @@ where
 pub async fn commit_keyless_upload<H, V>(
     commit_client: &StoreClient,
     writer: &KeylessWriter<H, V>,
-    ops: &[KeylessOperation<V>],
+    ops: &[KeylessOperation<commonware_storage::mmr::Family, V>],
 ) -> Result<UploadReceipt, QmdbError>
 where
     H: Hasher + Sync,
     V: Codec + Clone + Send + Sync,
-    KeylessOperation<V>: Encode,
+    KeylessOperation<commonware_storage::mmr::Family, V>: Encode,
 {
     let prepared = writer.prepare_upload(ops).await?;
     writer.commit_upload(commit_client, prepared).await
@@ -76,14 +181,14 @@ where
 pub async fn commit_unordered_upload<H, K, V>(
     commit_client: &StoreClient,
     writer: &UnorderedWriter<H, K, V>,
-    ops: &[UnorderedOperation<K, V>],
+    ops: &[UnorderedOperation<commonware_storage::mmr::Family, K, V>],
 ) -> Result<UploadReceipt, QmdbError>
 where
     H: Hasher + Sync,
     K: QmdbKey + Codec + Sync,
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
-    UnorderedOperation<K, V>: Encode,
+    UnorderedOperation<commonware_storage::mmr::Family, K, V>: Encode,
 {
     let prepared = writer.prepare_upload(ops).await?;
     writer.commit_upload(commit_client, prepared).await
@@ -93,7 +198,7 @@ where
 pub async fn commit_ordered_upload<H, K, V, const N: usize>(
     commit_client: &StoreClient,
     writer: &OrderedWriter<H, K, V, N>,
-    ops: &[OrderedOperation<K, V>],
+    ops: &[OrderedOperation<commonware_storage::mmr::Family, K, V>],
     current_boundary: &CurrentBoundaryState<H::Digest, N>,
 ) -> Result<UploadReceipt, QmdbError>
 where
@@ -101,7 +206,7 @@ where
     K: QmdbKey + Codec + Sync,
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
-    OrderedOperation<K, V>: Encode + Decode,
+    OrderedOperation<commonware_storage::mmr::Family, K, V>: Encode + Decode,
 {
     let prepared = writer.prepare_upload(ops, current_boundary).await?;
     writer.commit_upload(commit_client, prepared).await
@@ -111,7 +216,7 @@ where
 pub async fn commit_immutable_upload<H, K, V>(
     commit_client: &StoreClient,
     writer: &ImmutableWriter<H, K, V>,
-    ops: &[ImmutableOperation<K, V>],
+    ops: &[ImmutableOperation<commonware_storage::mmr::Family, K, V>],
 ) -> Result<UploadReceipt, QmdbError>
 where
     H: Hasher + Sync,
@@ -119,7 +224,8 @@ where
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
     K::Cfg: Clone,
-    ImmutableOperation<K, V>: Encode + Decode<Cfg = V::Cfg> + Clone,
+    ImmutableOperation<commonware_storage::mmr::Family, K, V>:
+        Encode + Decode<Cfg = (K::Cfg, V::Cfg)> + Clone,
 {
     let prepared = writer.prepare_upload(ops).await?;
     writer.commit_upload(commit_client, prepared).await
@@ -227,8 +333,6 @@ pub async fn spawn_static_range_service(
 
 #[allow(dead_code)]
 pub fn tamper_subscribe_response(mut response: SubscribeResponse) -> SubscribeResponse {
-    let mut proof = response.proof.as_option().cloned().expect("multi proof");
-    proof.root[0] ^= 0x01;
-    response.proof = Some(proof).into();
+    response.root[0] ^= 0x01;
     response
 }

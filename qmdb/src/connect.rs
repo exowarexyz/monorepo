@@ -13,28 +13,25 @@ use commonware_storage::{
             ordered::variable::Operation as QmdbOperation,
             unordered::variable::Operation as UnorderedQmdbOperation,
         },
-        immutable::Operation as ImmutableOperation,
-        keyless::Operation as KeylessOperation,
+        immutable::variable::Operation as ImmutableOperation,
+        keyless::variable::Operation as KeylessOperation,
     },
 };
 
 use connectrpc::{Chain, ConnectError, ConnectRpcService, Context, ErrorCode, Limits};
-use exoware_sdk::store::common::v1::bytes_filter::KindView as ProtoBytesFilterKindView;
-use exoware_sdk::store::qmdb::v1::{
-    CurrentKeyValueProof as ProtoCurrentKeyValueProof, CurrentRangeProof as ProtoCurrentRangeProof,
-    GetManyRequestView, GetManyResponse, GetRequestView, GetResponse,
-    HistoricalMultiProof as ProtoHistoricalMultiProof, MmrProof as ProtoMmrProof,
+use exoware_sdk::qmdb::v1::{
+    CurrentKeyValueProof as ProtoCurrentKeyValueProof, GetManyRequestView, GetManyResponse,
+    GetRequestView, GetResponse, HistoricalMultiProof as ProtoHistoricalMultiProof,
     MultiProofOperation as ProtoMultiProofOperation, OrderedService, OrderedServiceServer,
     RangeService, RangeServiceServer, SubscribeRequestView, SubscribeResponse,
 };
+use exoware_sdk::store::common::v1::bytes_filter::KindView as ProtoBytesFilterKindView;
 use exoware_sdk::stream_filter::{BytesFilter, CompiledBytesFilters};
 use futures::future::BoxFuture;
 use futures::{FutureExt, Stream};
 
 use crate::auth::AuthenticatedBackendNamespace;
-use crate::proof::{
-    RawBatchMultiProof, RawCurrentRangeProof, RawKeyValueProof, RawMmrProof, RawMultiProof,
-};
+use crate::proof::{RawBatchMultiProof, RawKeyValueProof, RawMultiProof};
 use crate::subscription::{self as sub, Classify, Family};
 use crate::{ImmutableClient, KeylessClient, OrderedClient, QmdbError, UnorderedClient};
 
@@ -84,34 +81,6 @@ fn qmdb_error_to_connect(err: QmdbError) -> ConnectError {
     }
 }
 
-fn raw_mmr_proof_to_proto<D: commonware_cryptography::Digest>(
-    proof: &RawMmrProof<D>,
-) -> ProtoMmrProof {
-    ProtoMmrProof {
-        leaves: *proof.leaves,
-        digests: proof
-            .digests
-            .iter()
-            .map(|digest| digest.encode().to_vec())
-            .collect(),
-        ..Default::default()
-    }
-}
-
-fn raw_current_range_proof_to_proto<D: commonware_cryptography::Digest>(
-    proof: &RawCurrentRangeProof<D>,
-) -> ProtoCurrentRangeProof {
-    ProtoCurrentRangeProof {
-        proof: Some(raw_mmr_proof_to_proto(&proof.proof)).into(),
-        partial_chunk_digest: proof
-            .partial_chunk_digest
-            .as_ref()
-            .map(|digest| digest.encode().to_vec()),
-        ops_root: proof.ops_root.encode().to_vec(),
-        ..Default::default()
-    }
-}
-
 fn raw_multi_proof_to_proto<
     D: commonware_cryptography::Digest,
     K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec,
@@ -120,11 +89,10 @@ fn raw_multi_proof_to_proto<
     proof: &RawMultiProof<D, K, V>,
 ) -> ProtoHistoricalMultiProof
 where
-    QmdbOperation<K, V>: Encode,
+    QmdbOperation<commonware_storage::mmr::Family, K, V>: Encode,
 {
     ProtoHistoricalMultiProof {
-        root: proof.root.encode().to_vec(),
-        proof: Some(raw_mmr_proof_to_proto(&proof.proof)).into(),
+        proof: proof.proof.encode().to_vec(),
         operations: proof
             .operations
             .iter()
@@ -142,8 +110,7 @@ fn raw_batch_multi_proof_to_proto<D: commonware_cryptography::Digest>(
     proof: &RawBatchMultiProof<D>,
 ) -> ProtoHistoricalMultiProof {
     ProtoHistoricalMultiProof {
-        root: proof.root.encode().to_vec(),
-        proof: Some(raw_mmr_proof_to_proto(&proof.proof)).into(),
+        proof: proof.proof.encode().to_vec(),
         operations: proof
             .operations
             .iter()
@@ -166,13 +133,10 @@ fn raw_key_value_proof_to_proto<
     proof: &RawKeyValueProof<D, K, V, N>,
 ) -> ProtoCurrentKeyValueProof
 where
-    QmdbOperation<K, V>: Encode,
+    QmdbOperation<commonware_storage::mmr::Family, K, V>: Encode,
 {
     ProtoCurrentKeyValueProof {
-        root: proof.root.encode().to_vec(),
-        location: *proof.location,
-        chunk: proof.chunk.to_vec(),
-        range_proof: Some(raw_current_range_proof_to_proto(&proof.range_proof)).into(),
+        proof: proof.proof.encode().to_vec(),
         encoded_operation: proof.operation.encode().to_vec(),
         ..Default::default()
     }
@@ -249,7 +213,7 @@ where
     H: Hasher + Send + Sync + 'static,
     K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    QmdbOperation<K, V>: Encode + commonware_codec::Decode,
+    QmdbOperation<commonware_storage::mmr::Family, K, V>: Encode + commonware_codec::Decode,
 {
     type Digest = H::Digest;
 
@@ -289,7 +253,8 @@ where
     H: Hasher + Send + Sync + 'static,
     K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    UnorderedQmdbOperation<K, V>: Encode + commonware_codec::Decode,
+    UnorderedQmdbOperation<commonware_storage::mmr::Family, K, V>:
+        Encode + commonware_codec::Decode,
 {
     type Digest = H::Digest;
 
@@ -335,7 +300,8 @@ where
         + Sync
         + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    ImmutableOperation<K, V>: Encode + commonware_codec::Decode<Cfg = V::Cfg> + Clone,
+    ImmutableOperation<commonware_storage::mmr::Family, K, V>:
+        Encode + commonware_codec::Decode<Cfg = (K::Cfg, V::Cfg)> + Clone,
 {
     type Digest = H::Digest;
 
@@ -374,7 +340,8 @@ impl<H, V> RangeBackend for Arc<KeylessClient<H, V>>
 where
     H: Hasher + Send + Sync + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    KeylessOperation<V>: Encode + commonware_codec::Decode<Cfg = V::Cfg> + Clone,
+    KeylessOperation<commonware_storage::mmr::Family, V>:
+        Encode + commonware_codec::Decode<Cfg = V::Cfg> + Clone,
 {
     type Digest = H::Digest;
     const REJECTS_KEY_FILTERS: bool = true;
@@ -632,6 +599,7 @@ impl<D: commonware_cryptography::Digest> Stream for BatchSubscribeStream<D> {
                     Ok(SubscribeResponse {
                         resume_sequence_number: batch.batch_sequence,
                         proof: Some(raw_batch_multi_proof_to_proto(&proof)).into(),
+                        root: proof.root.encode().to_vec(),
                         ..Default::default()
                     })
                 }
@@ -679,7 +647,7 @@ where
     H: Hasher + Send + Sync + 'static,
     K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    QmdbOperation<K, V>: Encode + commonware_codec::Decode,
+    QmdbOperation<commonware_storage::mmr::Family, K, V>: Encode + commonware_codec::Decode,
 {
     fn get(
         &self,
@@ -717,9 +685,32 @@ where
                 .multi_proof_raw_at(tip, &keys)
                 .await
                 .map_err(qmdb_error_to_connect)?;
+            let (anchor_location, _) = proof.operations.first().ok_or_else(|| {
+                ConnectError::internal("qmdb get_many produced no proof operations")
+            })?;
+            let current_proof = client
+                .current_operation_proof_raw_at(tip, *anchor_location)
+                .await
+                .map_err(qmdb_error_to_connect)?;
+            let anchor_operation = proof
+                .operations
+                .first()
+                .map(|(_, operation)| operation.clone())
+                .ok_or_else(|| ConnectError::internal("qmdb get_many produced no anchor op"))?;
+            let mut hasher = H::default();
+            let current_root = client
+                .current_root_at(tip)
+                .await
+                .map_err(qmdb_error_to_connect)?;
+            if !current_proof.verify(&mut hasher, anchor_operation, &current_root) {
+                return Err(ConnectError::internal(
+                    "current anchor proof failed local verification",
+                ));
+            }
             Ok((
                 GetManyResponse {
                     proof: Some(raw_multi_proof_to_proto(&proof)).into(),
+                    current_proof: current_proof.encode().to_vec(),
                     ..Default::default()
                 },
                 ctx,
@@ -803,7 +794,7 @@ pub fn ordered_connect_stack<
     client: Arc<OrderedClient<H, K, V, N>>,
 ) -> OrderedConnectStack<H, K, V, N>
 where
-    QmdbOperation<K, V>: Encode + commonware_codec::Decode,
+    QmdbOperation<commonware_storage::mmr::Family, K, V>: Encode + commonware_codec::Decode,
 {
     wrap_stack(Chain(
         OrderedServiceServer::new(OrderedConnect::new(client.clone())),
@@ -819,7 +810,8 @@ pub fn unordered_range_connect_stack<
     client: Arc<UnorderedClient<H, K, V>>,
 ) -> ConnectRpcService<RangeServiceServer<UnorderedRangeConnect<H, K, V>>>
 where
-    UnorderedQmdbOperation<K, V>: Encode + commonware_codec::Decode,
+    UnorderedQmdbOperation<commonware_storage::mmr::Family, K, V>:
+        Encode + commonware_codec::Decode,
 {
     wrap_stack(RangeServiceServer::new(UnorderedRangeConnect::new(client)))
 }
@@ -832,7 +824,8 @@ pub fn immutable_range_connect_stack<
     client: Arc<ImmutableClient<H, K, V>>,
 ) -> ConnectRpcService<RangeServiceServer<ImmutableRangeConnect<H, K, V>>>
 where
-    ImmutableOperation<K, V>: Encode + commonware_codec::Decode<Cfg = V::Cfg> + Clone,
+    ImmutableOperation<commonware_storage::mmr::Family, K, V>:
+        Encode + commonware_codec::Decode<Cfg = (K::Cfg, V::Cfg)> + Clone,
 {
     wrap_stack(RangeServiceServer::new(ImmutableRangeConnect::new(client)))
 }
@@ -844,7 +837,8 @@ pub fn keyless_range_connect_stack<
     client: Arc<KeylessClient<H, V>>,
 ) -> ConnectRpcService<RangeServiceServer<KeylessRangeConnect<H, V>>>
 where
-    KeylessOperation<V>: Encode + commonware_codec::Decode<Cfg = V::Cfg> + Clone,
+    KeylessOperation<commonware_storage::mmr::Family, V>:
+        Encode + commonware_codec::Decode<Cfg = V::Cfg> + Clone,
 {
     wrap_stack(RangeServiceServer::new(KeylessRangeConnect::new(client)))
 }

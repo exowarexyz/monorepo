@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use commonware_runtime::{deterministic, Runner as _};
 use commonware_storage::mmr::Location;
-use commonware_storage::qmdb::immutable::{
-    Config as ImmutableConfig, Immutable, Operation as ImmutableOperation,
+use commonware_storage::qmdb::immutable::variable::{
+    Db as Immutable, Operation as ImmutableOperation,
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
@@ -19,11 +19,12 @@ use exoware_qmdb::{
     QmdbError, RangeSubscribeProof,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::store::qmdb::v1::SubscribeRequest as ProtoSubscribeRequest;
+use exoware_sdk::qmdb::v1::SubscribeRequest as ProtoSubscribeRequest;
 use exoware_sdk::StoreClient;
 
 type Digest = commonware_cryptography::sha256::Digest;
 type LocalDb = Immutable<
+    commonware_storage::mmr::Family,
     deterministic::Context,
     FixedBytes<32>,
     Vec<u8>,
@@ -32,7 +33,7 @@ type LocalDb = Immutable<
 >;
 type TestImmutableClient =
     ImmutableClient<commonware_cryptography::Sha256, FixedBytes<32>, Vec<u8>>;
-type BatchOperation = ImmutableOperation<FixedBytes<32>, Vec<u8>>;
+type BatchOperation = ImmutableOperation<commonware_storage::mmr::Family, FixedBytes<32>, Vec<u8>>;
 
 async fn spawn_qmdb_server(
     client: Arc<TestImmutableClient>,
@@ -48,7 +49,7 @@ fn validated_client(
     FixedBytes<32>,
     Vec<u8>,
 > {
-    ImmutableRangeConnectClient::plaintext(base, ((0..=10000).into(), ()))
+    ImmutableRangeConnectClient::plaintext(base, ((), ((0..=10000).into(), ())))
 }
 
 struct LocalBatch {
@@ -60,20 +61,13 @@ async fn build_local_batch() -> LocalBatch {
     tokio::task::spawn_blocking(|| {
         deterministic::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
-            let cfg = ImmutableConfig {
-                mmr_journal_partition: "immutable-mmr-journal".into(),
-                mmr_metadata_partition: "immutable-mmr-metadata".into(),
-                mmr_items_per_blob: NZU64!(8),
-                mmr_write_buffer: NZUsize!(1024),
-                log_partition: "immutable-log".into(),
-                log_items_per_section: NZU64!(5),
-                log_compression: None,
-                log_codec_config: ((0..=10000).into(), ()),
-                log_write_buffer: NZUsize!(1024),
-                translator: TwoCap,
-                thread_pool: None,
-                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8)),
-            };
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = common::immutable_variable_config(
+                "immutable-connect",
+                page_cache,
+                ((), ((0..=10000).into(), ())),
+                NZU64!(5),
+            );
             let mut db: LocalDb = LocalDb::init(context.with_label("db"), cfg)
                 .await
                 .expect("init");
@@ -81,10 +75,11 @@ async fn build_local_batch() -> LocalBatch {
             let key_a = FixedBytes::new([0x11; 32]);
             let key_b = FixedBytes::new([0x22; 32]);
             let finalized = {
-                let mut batch = db.new_batch();
-                batch.set(key_a, b"alpha".to_vec());
-                batch.set(key_b, b"beta".to_vec());
-                batch.merkleize(None::<Vec<u8>>).finalize()
+                let batch = db
+                    .new_batch()
+                    .set(key_a, b"alpha".to_vec())
+                    .set(key_b, b"beta".to_vec());
+                batch.merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
             };
             db.apply_batch(finalized).await.expect("apply");
 
@@ -121,7 +116,7 @@ async fn immutable_connect_subscribe_emits_verifiable_multi_proof() {
     let local = build_local_batch().await;
     let immutable_client = Arc::new(TestImmutableClient::from_client(
         store_client.clone(),
-        ((0..=10000).into(), ()),
+        ((), ((0..=10000).into(), ())),
         ((), ((0..=10000).into(), ())),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(immutable_client).await;
@@ -161,7 +156,7 @@ async fn immutable_connect_client_rejects_invalid_streamed_proof() {
 
     let immutable_client = Arc::new(TestImmutableClient::from_client(
         store_client.clone(),
-        ((0..=10000).into(), ()),
+        ((), ((0..=10000).into(), ())),
         ((), ((0..=10000).into(), ())),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(immutable_client).await;

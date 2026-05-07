@@ -14,9 +14,7 @@ use commonware_runtime::Runner as _;
 use commonware_storage::mmr::Location;
 use commonware_storage::qmdb::any::ordered::variable::Operation as QmdbOperation;
 use commonware_storage::qmdb::{
-    any::ordered::Update,
-    current::{ordered::variable::Db as LocalQmdbDb, VariableConfig},
-    store::LogStore as _,
+    any::ordered::Update, current::ordered::variable::Db as LocalQmdbDb,
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -27,7 +25,7 @@ use exoware_qmdb::{
     OrderedConnectClient, OrderedWriter, QmdbError, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::store::qmdb::v1::{
+use exoware_sdk::qmdb::v1::{
     GetManyRequest as ProtoGetManyRequest, GetManyResponse as ProtoGetManyResponse,
     GetRequest as ProtoGetRequest, GetResponse as ProtoGetResponse, OrderedService,
     OrderedServiceClient, OrderedServiceServer,
@@ -37,9 +35,17 @@ use exoware_sdk::StoreClient;
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
 type BatchProof = commonware_storage::mmr::Proof<Digest>;
-type BatchOperation = QmdbOperation<Vec<u8>, Vec<u8>>;
+type BatchOperation = QmdbOperation<commonware_storage::mmr::Family, Vec<u8>, Vec<u8>>;
 type TestOrderedClient = OrderedClient<Sha256, Vec<u8>, Vec<u8>, N>;
-type LocalDb = LocalQmdbDb<cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>;
+type LocalDb = LocalQmdbDb<
+    commonware_storage::mmr::Family,
+    cw_tokio::Context,
+    Vec<u8>,
+    Vec<u8>,
+    Sha256,
+    TwoCap,
+    N,
+>;
 
 async fn health() -> &'static str {
     "ok"
@@ -123,7 +129,7 @@ async fn boundary_from_local_db(
                     "local current range proof at {location} returned no chunks"
                 ))
             })?;
-            Ok((proof.proof, chunk))
+            Ok((proof, chunk))
         },
     )
     .await
@@ -154,38 +160,47 @@ struct LocalBatch {
 }
 
 async fn build_local_batch() -> LocalBatch {
+    build_local_batch_with_writes(
+        "ordered-connect",
+        &[
+            (b"alpha".to_vec(), b"one".to_vec()),
+            (b"beta".to_vec(), b"two".to_vec()),
+        ],
+    )
+    .await
+}
+
+async fn build_local_batch_with_writes(label: &str, writes: &[(Vec<u8>, Vec<u8>)]) -> LocalBatch {
+    let label = label.to_string();
+    let writes = writes.to_vec();
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
-            let cfg = VariableConfig {
-                mmr_journal_partition: "mmr-journal".into(),
-                mmr_items_per_blob: NZU64!(8),
-                mmr_write_buffer: NZUsize!(1024),
-                mmr_metadata_partition: "mmr-metadata".into(),
-                log_partition: "log".into(),
-                log_write_buffer: NZUsize!(1024),
-                log_compression: None,
-                log_codec_config: (
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = common::ordered_variable_config(
+                &label,
+                page_cache,
+                (
                     ((0..=MAX_OPERATION_SIZE).into(), ()),
                     ((0..=MAX_OPERATION_SIZE).into(), ()),
                 ),
-                log_items_per_blob: NZU64!(8),
-                grafted_mmr_metadata_partition: "grafted-metadata".into(),
-                translator: TwoCap,
-                thread_pool: None,
-                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8)),
-            };
+                NZU64!(8),
+            );
             let mut db: LocalDb = LocalDb::init(context.with_label("qmdb"), cfg)
                 .await
                 .expect("init");
 
             let finalized = {
                 let mut batch = db.new_batch();
-                batch.write(b"alpha".to_vec(), Some(b"one".to_vec()));
-                batch.write(b"beta".to_vec(), Some(b"two".to_vec()));
-                batch.merkleize(None::<Vec<u8>>).await.expect("merkleize")
+                for (key, value) in writes {
+                    batch = batch.write(key, Some(value));
+                }
+                batch
+                    .merkleize(&db, None::<Vec<u8>>)
+                    .await
+                    .expect("merkleize")
             };
-            db.apply_batch(finalized.finalize()).await.expect("apply");
+            db.apply_batch(finalized).await.expect("apply");
 
             let latest = db.bounds().await.end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -208,6 +223,18 @@ async fn build_local_batch() -> LocalBatch {
     })
     .await
     .expect("join")
+}
+
+async fn build_grafted_boundary_local_batch() -> LocalBatch {
+    let writes = (0..1_100u64)
+        .map(|index| {
+            (
+                format!("k-{index:08x}").into_bytes(),
+                format!("v-{index:08x}").into_bytes(),
+            )
+        })
+        .collect::<Vec<_>>();
+    build_local_batch_with_writes("ordered-connect-grafted", &writes).await
 }
 
 async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
@@ -247,7 +274,7 @@ impl OrderedService for StaticOrderedService {
     fn get(
         &self,
         ctx: Context,
-        _request: buffa::view::OwnedView<exoware_sdk::store::qmdb::v1::GetRequestView<'static>>,
+        _request: buffa::view::OwnedView<exoware_sdk::qmdb::v1::GetRequestView<'static>>,
     ) -> impl std::future::Future<Output = Result<(ProtoGetResponse, Context), ConnectError>> + Send
     {
         let response = self.get_response.clone();
@@ -257,7 +284,7 @@ impl OrderedService for StaticOrderedService {
     fn get_many(
         &self,
         ctx: Context,
-        _request: buffa::view::OwnedView<exoware_sdk::store::qmdb::v1::GetManyRequestView<'static>>,
+        _request: buffa::view::OwnedView<exoware_sdk::qmdb::v1::GetManyRequestView<'static>>,
     ) -> impl std::future::Future<Output = Result<(ProtoGetManyResponse, Context), ConnectError>> + Send
     {
         let response = self.get_many_response.clone();
@@ -288,14 +315,14 @@ async fn spawn_static_server(
 
 fn tamper_get_response(mut response: ProtoGetResponse) -> ProtoGetResponse {
     let mut proof = response.proof.as_option().cloned().expect("get proof");
-    proof.root[0] ^= 0x01;
+    proof.proof[0] ^= 0x01;
     response.proof = Some(proof).into();
     response
 }
 
 fn tamper_get_many_response(mut response: ProtoGetManyResponse) -> ProtoGetManyResponse {
     let mut proof = response.proof.as_option().cloned().expect("get_many proof");
-    proof.root[0] ^= 0x01;
+    proof.proof[0] ^= 0x01;
     response.proof = Some(proof).into();
     response
 }
@@ -314,15 +341,46 @@ async fn ordered_connect_get_returns_current_key_value_proof() {
     let client = validated_client(&qmdb_url);
 
     let proof = client
-        .get(ProtoGetRequest {
-            key: b"alpha".to_vec(),
-            tip: local.latest_location.as_u64(),
-            ..Default::default()
-        })
+        .get(
+            ProtoGetRequest {
+                key: b"alpha".to_vec(),
+                tip: local.latest_location.as_u64(),
+                ..Default::default()
+            },
+            &local.current_boundary.root,
+        )
         .await
         .expect("get");
 
     let expected = latest_operation_for_key(&local.operations, b"alpha");
+    assert_eq!(proof.root, local.current_boundary.root);
+    assert_eq!(proof.location, expected.0);
+    assert_eq!(proof.operation, expected.1);
+}
+
+#[tokio::test]
+async fn ordered_get_after_grafted_boundary_returns_current_key_value_proof() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_grafted_boundary_local_batch().await;
+    let ordered_client =
+        TestOrderedClient::from_client(store_client.clone(), op_cfg(), update_row_cfg());
+    let writer: OrderedWriter<Sha256, Vec<u8>, Vec<u8>, N> =
+        OrderedWriter::empty(store_client.clone());
+    common::commit_ordered_upload(
+        &store_client,
+        &writer,
+        &local.operations,
+        &local.current_boundary,
+    )
+    .await
+    .expect("commit upload");
+
+    let key = b"k-00000400".to_vec();
+    let proof = ordered_client
+        .key_value_proof_at(local.latest_location, key.as_slice())
+        .await
+        .expect("get after grafted boundary");
+    let expected = latest_operation_for_key(&local.operations, &key);
     assert_eq!(proof.root, local.current_boundary.root);
     assert_eq!(proof.location, expected.0);
     assert_eq!(proof.operation, expected.1);
@@ -346,11 +404,14 @@ async fn ordered_connect_get_many_returns_historical_multi_proof() {
     let client = validated_client(&qmdb_url);
 
     let proof = client
-        .get_many(ProtoGetManyRequest {
-            keys: vec![b"alpha".to_vec(), b"beta".to_vec()],
-            tip: local.latest_location.as_u64(),
-            ..Default::default()
-        })
+        .get_many(
+            ProtoGetManyRequest {
+                keys: vec![b"alpha".to_vec(), b"beta".to_vec()],
+                tip: local.latest_location.as_u64(),
+                ..Default::default()
+            },
+            &local.current_boundary.root,
+        )
         .await
         .expect("get_many");
 
@@ -405,11 +466,14 @@ async fn ordered_connect_client_rejects_invalid_get_proof() {
     let client = validated_client(&static_url);
 
     let err = client
-        .get(ProtoGetRequest {
-            key: b"alpha".to_vec(),
-            tip: local.latest_location.as_u64(),
-            ..Default::default()
-        })
+        .get(
+            ProtoGetRequest {
+                key: b"alpha".to_vec(),
+                tip: local.latest_location.as_u64(),
+                ..Default::default()
+            },
+            &local.current_boundary.root,
+        )
         .await
         .expect_err("tampered get proof should fail");
     assert!(matches!(
@@ -463,11 +527,14 @@ async fn ordered_connect_client_rejects_invalid_get_many_proof() {
     let client = validated_client(&static_url);
 
     let err = client
-        .get_many(ProtoGetManyRequest {
-            keys: vec![b"alpha".to_vec(), b"beta".to_vec()],
-            tip: local.latest_location.as_u64(),
-            ..Default::default()
-        })
+        .get_many(
+            ProtoGetManyRequest {
+                keys: vec![b"alpha".to_vec(), b"beta".to_vec()],
+                tip: local.latest_location.as_u64(),
+                ..Default::default()
+            },
+            &local.current_boundary.root,
+        )
         .await
         .expect_err("tampered get_many proof should fail");
     assert!(matches!(

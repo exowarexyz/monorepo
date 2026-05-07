@@ -6,11 +6,8 @@ mod common;
 use std::num::NonZeroU64;
 
 use commonware_runtime::{deterministic, Runner as _};
-use commonware_storage::mmr::{Location, StandardHasher};
-use commonware_storage::qmdb::{
-    keyless::{Config as KeylessConfig, Keyless, Operation as KeylessOperation},
-    store::LogStore as _,
-};
+use commonware_storage::mmr::Location;
+use commonware_storage::qmdb::keyless::variable::{Db as Keyless, Operation as KeylessOperation};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{KeylessClient, KeylessWriter};
 use exoware_sdk::StoreClient;
@@ -18,7 +15,12 @@ use exoware_sdk::StoreClient;
 use common::retry;
 
 type Digest = commonware_cryptography::sha256::Digest;
-type LocalDb = Keyless<deterministic::Context, Vec<u8>, commonware_cryptography::Sha256>;
+type LocalDb = Keyless<
+    commonware_storage::mmr::Family,
+    deterministic::Context,
+    Vec<u8>,
+    commonware_cryptography::Sha256,
+>;
 
 type TestKeylessClient = KeylessClient<commonware_cryptography::Sha256, Vec<u8>>;
 type TestKeylessWriter = KeylessWriter<commonware_cryptography::Sha256, Vec<u8>>;
@@ -34,7 +36,7 @@ fn fresh_writer(c: StoreClient) -> TestKeylessWriter {
 struct LocalReference {
     latest_location: Location,
     root: Digest,
-    operations: Vec<KeylessOperation<Vec<u8>>>,
+    operations: Vec<KeylessOperation<commonware_storage::mmr::Family, Vec<u8>>>,
     queried_location: Location,
     queried_value: Vec<u8>,
 }
@@ -43,19 +45,9 @@ async fn build_local_db() -> LocalReference {
     tokio::task::spawn_blocking(|| {
         deterministic::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
-            let cfg = KeylessConfig {
-                mmr_journal_partition: "keyless-mmr-journal".into(),
-                mmr_metadata_partition: "keyless-mmr-metadata".into(),
-                mmr_items_per_blob: NZU64!(8),
-                mmr_write_buffer: NZUsize!(1024),
-                log_partition: "keyless-log".into(),
-                log_write_buffer: NZUsize!(1024),
-                log_compression: None,
-                log_codec_config: ((0..=10000).into(), ()),
-                log_items_per_section: NZU64!(7),
-                thread_pool: None,
-                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8)),
-            };
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg =
+                common::keyless_config("keyless", page_cache, ((0..=10000).into(), ()), NZU64!(7));
             let mut db: LocalDb = LocalDb::init(context.with_label("db"), cfg)
                 .await
                 .expect("init");
@@ -63,10 +55,8 @@ async fn build_local_db() -> LocalReference {
             let first = b"first-value".to_vec();
             let second = b"second-value".to_vec();
             let finalized = {
-                let mut batch = db.new_batch();
-                batch.append(first.clone());
-                batch.append(second);
-                batch.merkleize(None::<Vec<u8>>).finalize()
+                let batch = db.new_batch().append(first.clone()).append(second);
+                batch.merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
             };
             db.apply_batch(finalized).await.expect("apply");
 
@@ -151,11 +141,13 @@ async fn keyless_round_trip() {
     let peaks = checkpoint
         .reconstruct_peaks::<commonware_cryptography::Sha256>()
         .expect("reconstruct_peaks");
-    let mut hasher = StandardHasher::<commonware_cryptography::Sha256>::new();
+    let mut hasher = commonware_storage::qmdb::hasher::<commonware_cryptography::Sha256>();
     let reconstructed_root = commonware_storage::mmr::hasher::Hasher::root(
         &mut hasher,
         checkpoint.proof.leaves,
+        0,
         peaks.iter().map(|(_, _, digest)| digest),
-    );
+    )
+    .expect("reconstruct root");
     assert_eq!(reconstructed_root, checkpoint.root);
 }

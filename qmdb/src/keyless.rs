@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::Hasher;
-use commonware_storage::{mmr::Location, qmdb::keyless::Operation as KeylessOperation};
+use commonware_storage::{mmr::Location, qmdb::keyless::variable::Operation as KeylessOperation};
 use exoware_sdk::{SerializableReadSession, StoreClient};
 
 use crate::auth::AuthenticatedBackendNamespace;
@@ -29,7 +29,7 @@ where
     H: Hasher,
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
-    KeylessOperation<V>: Encode + Decode<Cfg = V::Cfg> + Clone,
+    KeylessOperation<commonware_storage::mmr::Family, V>: Encode + Decode<Cfg = V::Cfg> + Clone,
 {
     pub fn new(url: &str, value_cfg: V::Cfg) -> Self {
         Self::from_client(StoreClient::new(url), value_cfg)
@@ -55,15 +55,19 @@ where
     where
         V: AsRef<[u8]>,
     {
-        let op = KeylessOperation::<V>::decode_cfg(bytes, &self.value_cfg).map_err(|e| {
+        let op = KeylessOperation::<commonware_storage::mmr::Family, V>::decode_cfg(
+            bytes,
+            &self.value_cfg,
+        )
+        .map_err(|e| {
             QmdbError::CorruptData(format!(
                 "failed to decode keyless operation at location {location}: {e}"
             ))
         })?;
         let value = match &op {
             KeylessOperation::Append(value) => Some(value.as_ref().to_vec()),
-            KeylessOperation::Commit(Some(value)) => Some(value.as_ref().to_vec()),
-            KeylessOperation::Commit(None) => None,
+            KeylessOperation::Commit(Some(value), _) => Some(value.as_ref().to_vec()),
+            KeylessOperation::Commit(None, _) => None,
         };
         Ok((None, value))
     }
@@ -102,12 +106,9 @@ where
                 count,
             });
         }
-        let operation = load_auth_operation_at::<KeylessOperation<V>>(
-            &session,
-            namespace,
-            location,
-            &self.value_cfg,
-        )
+        let operation = load_auth_operation_at::<
+            KeylessOperation<commonware_storage::mmr::Family, V>,
+        >(&session, namespace, location, &self.value_cfg)
         .await?;
         Ok(operation.into_value())
     }
@@ -185,7 +186,10 @@ where
         watermark: Location,
         start_location: Location,
         max_locations: u32,
-    ) -> Result<VerifiedOperationRange<H::Digest, KeylessOperation<V>>, QmdbError> {
+    ) -> Result<
+        VerifiedOperationRange<H::Digest, KeylessOperation<commonware_storage::mmr::Family, V>>,
+        QmdbError,
+    > {
         let checkpoint = self
             .operation_range_checkpoint(watermark, start_location, max_locations)
             .await?;
@@ -195,7 +199,11 @@ where
             .enumerate()
             .map(|(offset, bytes)| {
                 let location = checkpoint.start_location + offset as u64;
-                KeylessOperation::<V>::decode_cfg(bytes.as_slice(), &self.value_cfg).map_err(|e| {
+                KeylessOperation::<commonware_storage::mmr::Family, V>::decode_cfg(
+                    bytes.as_slice(),
+                    &self.value_cfg,
+                )
+                .map_err(|e| {
                     QmdbError::CorruptData(format!(
                         "failed to decode authenticated operation at location {location}: {e}"
                     ))

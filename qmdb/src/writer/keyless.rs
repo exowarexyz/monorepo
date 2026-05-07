@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use commonware_codec::{Codec, Encode};
 use commonware_cryptography::Hasher;
 use commonware_storage::mmr::{Location, Position};
-use commonware_storage::qmdb::keyless::Operation as KeylessOperation;
+use commonware_storage::qmdb::keyless::variable::Operation as KeylessOperation;
 use exoware_sdk::keys::Key;
 use exoware_sdk::{
     StoreBatchPublication, StoreBatchUpload, StoreClient, StorePublicationFrontierWriter,
@@ -47,11 +47,11 @@ pub fn build_keyless_upload<H: Hasher, V: Codec + Clone + Send + Sync>(
     peaks: Vec<(Position, u32, H::Digest)>,
     prev_ops_size: Position,
     latest_location: Location,
-    ops: &[KeylessOperation<V>],
+    ops: &[KeylessOperation<commonware_storage::mmr::Family, V>],
     watermark_at: Option<Location>,
 ) -> Result<BuiltKeylessUpload<H::Digest>, QmdbError>
 where
-    KeylessOperation<V>: Encode,
+    KeylessOperation<commonware_storage::mmr::Family, V>: Encode,
 {
     if ops.is_empty() {
         return Err(QmdbError::EmptyBatch);
@@ -129,7 +129,7 @@ impl<H, V> KeylessWriter<H, V>
 where
     H: Hasher,
     V: Codec + Clone + Send + Sync,
-    KeylessOperation<V>: Encode,
+    KeylessOperation<commonware_storage::mmr::Family, V>: Encode,
 {
     /// Construct a writer from caller-supplied frontier state. No store I/O.
     pub fn new(client: StoreClient, state: WriterState<H::Digest>) -> Self {
@@ -154,7 +154,7 @@ where
 
     pub async fn prepare_upload(
         &self,
-        ops: &[KeylessOperation<V>],
+        ops: &[KeylessOperation<commonware_storage::mmr::Family, V>],
     ) -> Result<super::PreparedUpload, QmdbError> {
         let prepared = self
             .core
@@ -268,7 +268,7 @@ impl<H, V> StoreBatchUpload for KeylessWriter<H, V>
 where
     H: Hasher + Sync,
     V: Codec + Clone + Send + Sync,
-    KeylessOperation<V>: Encode,
+    KeylessOperation<commonware_storage::mmr::Family, V>: Encode,
 {
     type Prepared = super::PreparedUpload;
     type Receipt = UploadReceipt;
@@ -319,7 +319,7 @@ impl<H, V> StoreBatchPublication for KeylessWriter<H, V>
 where
     H: Hasher + Sync,
     V: Codec + Clone + Send + Sync,
-    KeylessOperation<V>: Encode,
+    KeylessOperation<commonware_storage::mmr::Family, V>: Encode,
 {
     type PreparedPublication = super::PreparedWatermark;
     type PublicationReceipt = PublishedCheckpoint;
@@ -356,7 +356,7 @@ impl<H, V> StorePublicationFrontierWriter for KeylessWriter<H, V>
 where
     H: Hasher + Sync,
     V: Codec + Clone + Send + Sync,
-    KeylessOperation<V>: Encode,
+    KeylessOperation<commonware_storage::mmr::Family, V>: Encode,
 {
     fn latest_publication_receipt<'a>(&'a self) -> BoxFuture<'a, Option<PublishedCheckpoint>>
     where
@@ -389,7 +389,7 @@ mod tests {
     use super::*;
     use commonware_cryptography::Sha256;
 
-    type TestOp = KeylessOperation<Vec<u8>>;
+    type TestOp = KeylessOperation<commonware_storage::mmr::Family, Vec<u8>>;
 
     fn op(v: &[u8]) -> TestOp {
         KeylessOperation::Append(v.to_vec())

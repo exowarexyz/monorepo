@@ -2,7 +2,10 @@ use std::marker::PhantomData;
 
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
-use commonware_storage::mmr::{self, storage::Storage as MmrStorage, Location, Position};
+use commonware_storage::{
+    merkle::storage::Storage as MerkleStorage,
+    mmr::{self, Location, Position},
+};
 use exoware_sdk::{RangeMode, SerializableReadSession};
 
 use crate::auth::encode_auth_node_key;
@@ -18,7 +21,9 @@ pub(crate) struct KvMmrStorage<'a, D: Digest> {
     pub(crate) _marker: PhantomData<D>,
 }
 
-impl<D: Digest> MmrStorage<D> for KvMmrStorage<'_, D> {
+impl<D: Digest> MerkleStorage<commonware_storage::mmr::Family> for KvMmrStorage<'_, D> {
+    type Digest = D;
+
     async fn size(&self) -> Position {
         self.mmr_size
     }
@@ -51,7 +56,11 @@ pub(crate) struct KvCurrentStorage<'a, D: Digest, const N: usize> {
     pub(crate) _marker: PhantomData<D>,
 }
 
-impl<D: Digest, const N: usize> MmrStorage<D> for KvCurrentStorage<'_, D, N> {
+impl<D: Digest, const N: usize> MerkleStorage<commonware_storage::mmr::Family>
+    for KvCurrentStorage<'_, D, N>
+{
+    type Digest = D;
+
     async fn size(&self) -> Position {
         self.mmr_size
     }
@@ -106,7 +115,9 @@ pub(crate) struct AuthKvMmrStorage<'a, D: Digest> {
     pub(crate) _marker: PhantomData<D>,
 }
 
-impl<D: Digest> MmrStorage<D> for AuthKvMmrStorage<'_, D> {
+impl<D: Digest> MerkleStorage<commonware_storage::mmr::Family> for AuthKvMmrStorage<'_, D> {
+    type Digest = D;
+
     async fn size(&self) -> Position {
         self.mmr_size
     }

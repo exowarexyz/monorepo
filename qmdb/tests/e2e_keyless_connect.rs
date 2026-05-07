@@ -9,26 +9,28 @@ use std::time::Duration;
 
 use commonware_runtime::{deterministic, Runner as _};
 use commonware_storage::mmr::Location;
-use commonware_storage::qmdb::{
-    keyless::{Config as KeylessConfig, Keyless, Operation as KeylessOperation},
-    store::LogStore as _,
-};
+use commonware_storage::qmdb::keyless::variable::{Db as Keyless, Operation as KeylessOperation};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
     keyless_range_connect_stack, KeylessClient, KeylessRangeConnectClient, KeylessWriter,
     QmdbError, RangeSubscribeProof,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
+use exoware_sdk::qmdb::v1::SubscribeRequest as ProtoSubscribeRequest;
 use exoware_sdk::store::common::v1::{
     bytes_filter as proto_bytes_filter, BytesFilter as ProtoBytesFilter,
 };
-use exoware_sdk::store::qmdb::v1::SubscribeRequest as ProtoSubscribeRequest;
 use exoware_sdk::StoreClient;
 
 type Digest = commonware_cryptography::sha256::Digest;
-type LocalDb = Keyless<deterministic::Context, Vec<u8>, commonware_cryptography::Sha256>;
+type LocalDb = Keyless<
+    commonware_storage::mmr::Family,
+    deterministic::Context,
+    Vec<u8>,
+    commonware_cryptography::Sha256,
+>;
 type TestKeylessClient = KeylessClient<commonware_cryptography::Sha256, Vec<u8>>;
-type BatchOperation = KeylessOperation<Vec<u8>>;
+type BatchOperation = KeylessOperation<commonware_storage::mmr::Family, Vec<u8>>;
 
 async fn spawn_qmdb_server(
     client: Arc<TestKeylessClient>,
@@ -51,28 +53,19 @@ async fn build_local_batch() -> LocalBatch {
     tokio::task::spawn_blocking(|| {
         deterministic::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
-            let cfg = KeylessConfig {
-                mmr_journal_partition: "keyless-mmr-journal".into(),
-                mmr_metadata_partition: "keyless-mmr-metadata".into(),
-                mmr_items_per_blob: NZU64!(8),
-                mmr_write_buffer: NZUsize!(1024),
-                log_partition: "keyless-log".into(),
-                log_write_buffer: NZUsize!(1024),
-                log_compression: None,
-                log_codec_config: ((0..=10000).into(), ()),
-                log_items_per_section: NZU64!(7),
-                thread_pool: None,
-                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8)),
-            };
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg =
+                common::keyless_config("keyless", page_cache, ((0..=10000).into(), ()), NZU64!(7));
             let mut db: LocalDb = LocalDb::init(context.with_label("db"), cfg)
                 .await
                 .expect("init");
 
             let finalized = {
-                let mut batch = db.new_batch();
-                batch.append(b"first-value".to_vec());
-                batch.append(b"second-value".to_vec());
-                batch.merkleize(None::<Vec<u8>>).finalize()
+                let batch = db
+                    .new_batch()
+                    .append(b"first-value".to_vec())
+                    .append(b"second-value".to_vec());
+                batch.merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
             };
             db.apply_batch(finalized).await.expect("apply");
 

@@ -21,7 +21,7 @@ use commonware_storage::qmdb::{
 #[derive(Clone)]
 pub struct UnorderedClient<H: Hasher, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> {
     client: StoreClient,
-    op_cfg: <UnorderedQmdbOperation<K, V> as commonware_codec::Read>::Cfg,
+    op_cfg: <UnorderedQmdbOperation<commonware_storage::mmr::Family, K, V> as commonware_codec::Read>::Cfg,
     update_row_cfg: (K::Cfg, V::Cfg),
     _marker: PhantomData<(H, K)>,
 }
@@ -40,7 +40,7 @@ where
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
-    UnorderedQmdbOperation<K, V>: Encode + Decode,
+    UnorderedQmdbOperation<commonware_storage::mmr::Family, K, V>: Encode + Decode,
 {
     fn core(&self) -> HistoricalOpsClientCore<'_, H::Digest, K, V> {
         HistoricalOpsClientCore {
@@ -52,7 +52,7 @@ where
 
     pub fn new(
         url: &str,
-        op_cfg: <UnorderedQmdbOperation<K, V> as commonware_codec::Read>::Cfg,
+        op_cfg: <UnorderedQmdbOperation<commonware_storage::mmr::Family, K, V> as commonware_codec::Read>::Cfg,
         update_row_cfg: (K::Cfg, V::Cfg),
     ) -> Self {
         Self::from_client(StoreClient::new(url), op_cfg, update_row_cfg)
@@ -60,7 +60,7 @@ where
 
     pub fn from_client(
         client: StoreClient,
-        op_cfg: <UnorderedQmdbOperation<K, V> as commonware_codec::Read>::Cfg,
+        op_cfg: <UnorderedQmdbOperation<commonware_storage::mmr::Family, K, V> as commonware_codec::Read>::Cfg,
         update_row_cfg: (K::Cfg, V::Cfg),
     ) -> Self {
         Self {
@@ -83,7 +83,11 @@ where
     where
         V: AsRef<[u8]>,
     {
-        let op = UnorderedQmdbOperation::<K, V>::decode_cfg(bytes, &self.op_cfg).map_err(|e| {
+        let op = UnorderedQmdbOperation::<commonware_storage::mmr::Family, K, V>::decode_cfg(
+            bytes,
+            &self.op_cfg,
+        )
+        .map_err(|e| {
             QmdbError::CorruptData(format!(
                 "failed to decode unordered operation at location {location}: {e}"
             ))
@@ -200,19 +204,28 @@ where
         watermark: Location,
         start_location: Location,
         max_locations: u32,
-    ) -> Result<VerifiedOperationRange<H::Digest, UnorderedQmdbOperation<K, V>>, QmdbError> {
+    ) -> Result<
+        VerifiedOperationRange<
+            H::Digest,
+            UnorderedQmdbOperation<commonware_storage::mmr::Family, K, V>,
+        >,
+        QmdbError,
+    > {
         let checkpoint = self
             .operation_range_checkpoint(watermark, start_location, max_locations)
             .await?;
         let mut operations = Vec::with_capacity(checkpoint.encoded_operations.len());
         for (offset, value) in checkpoint.encoded_operations.iter().enumerate() {
             let location = checkpoint.start_location + offset as u64;
-            let op = UnorderedQmdbOperation::<K, V>::decode_cfg(value.as_slice(), &self.op_cfg)
-                .map_err(|e| {
-                    QmdbError::CorruptData(format!(
-                        "failed to decode unordered operation at location {location}: {e}"
-                    ))
-                })?;
+            let op = UnorderedQmdbOperation::<commonware_storage::mmr::Family, K, V>::decode_cfg(
+                value.as_slice(),
+                &self.op_cfg,
+            )
+            .map_err(|e| {
+                QmdbError::CorruptData(format!(
+                    "failed to decode unordered operation at location {location}: {e}"
+                ))
+            })?;
             operations.push(op);
         }
         Ok(VerifiedOperationRange {

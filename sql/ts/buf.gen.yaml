@@ -1,0 +1,13 @@
+version: v2
+plugins:
+  - remote: buf.build/bufbuild/es:v2.2.3
+    out: src/generated/proto
+    opt:
+      - target=ts
+inputs:
+  - directory: ../../proto
+    paths:
+      - ../../proto/sql/v1/sql.proto
+  - module: buf.build/bufbuild/protovalidate
+    paths:
+      - buf/validate/validate.proto

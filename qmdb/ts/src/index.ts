@@ -5,6 +5,7 @@ export {
   OrderedQmdbClient,
   type BytesLike,
   type LocatedOrderedOperation,
+  type MerkleFamily,
   type OrderedOperation,
   type OrderedQmdbClientOptions,
   type OrderedSubscribeProof,

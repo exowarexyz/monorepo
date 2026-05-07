@@ -13,9 +13,7 @@ use commonware_runtime::Runner as _;
 use commonware_storage::mmr::Location;
 use commonware_storage::qmdb::any::ordered::variable::Operation as QmdbOperation;
 use commonware_storage::qmdb::{
-    any::ordered::Update,
-    current::{ordered::variable::Db as LocalQmdbDb, VariableConfig},
-    store::LogStore as _,
+    any::ordered::Update, current::ordered::variable::Db as LocalQmdbDb,
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -24,18 +22,26 @@ use exoware_qmdb::{
     OrderedRangeConnectClient, OrderedWriter, QmdbError, RangeSubscribeProof, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
+use exoware_sdk::qmdb::v1::SubscribeRequest as ProtoSubscribeRequest;
 use exoware_sdk::store::common::v1::{
     bytes_filter as proto_bytes_filter, BytesFilter as ProtoBytesFilter,
 };
-use exoware_sdk::store::qmdb::v1::SubscribeRequest as ProtoSubscribeRequest;
 use exoware_sdk::StoreClient;
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
 type BatchProof = commonware_storage::mmr::Proof<Digest>;
-type BatchOperation = QmdbOperation<Vec<u8>, Vec<u8>>;
+type BatchOperation = QmdbOperation<commonware_storage::mmr::Family, Vec<u8>, Vec<u8>>;
 type TestOrderedClient = OrderedClient<Sha256, Vec<u8>, Vec<u8>, N>;
-type LocalDb = LocalQmdbDb<cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>;
+type LocalDb = LocalQmdbDb<
+    commonware_storage::mmr::Family,
+    cw_tokio::Context,
+    Vec<u8>,
+    Vec<u8>,
+    Sha256,
+    TwoCap,
+    N,
+>;
 
 async fn spawn_qmdb_server(
     client: Arc<TestOrderedClient>,
@@ -78,7 +84,7 @@ async fn boundary_from_local_db(
                     "local current range proof at {location} returned no chunks"
                 ))
             })?;
-            Ok((proof.proof, chunk))
+            Ok((proof, chunk))
         },
     )
     .await
@@ -111,35 +117,31 @@ async fn build_local_batch() -> LocalBatch {
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
-            let cfg = VariableConfig {
-                mmr_journal_partition: "mmr-journal".into(),
-                mmr_items_per_blob: NZU64!(8),
-                mmr_write_buffer: NZUsize!(1024),
-                mmr_metadata_partition: "mmr-metadata".into(),
-                log_partition: "log".into(),
-                log_write_buffer: NZUsize!(1024),
-                log_compression: None,
-                log_codec_config: (
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = common::ordered_variable_config(
+                "ordered-range-connect",
+                page_cache,
+                (
                     ((0..=MAX_OPERATION_SIZE).into(), ()),
                     ((0..=MAX_OPERATION_SIZE).into(), ()),
                 ),
-                log_items_per_blob: NZU64!(8),
-                grafted_mmr_metadata_partition: "grafted-metadata".into(),
-                translator: TwoCap,
-                thread_pool: None,
-                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8)),
-            };
+                NZU64!(8),
+            );
             let mut db: LocalDb = LocalDb::init(context.with_label("qmdb"), cfg)
                 .await
                 .expect("init");
 
             let finalized = {
-                let mut batch = db.new_batch();
-                batch.write(b"alpha".to_vec(), Some(b"one".to_vec()));
-                batch.write(b"beta".to_vec(), Some(b"two".to_vec()));
-                batch.merkleize(None::<Vec<u8>>).await.expect("merkleize")
+                let batch = db
+                    .new_batch()
+                    .write(b"alpha".to_vec(), Some(b"one".to_vec()))
+                    .write(b"beta".to_vec(), Some(b"two".to_vec()));
+                batch
+                    .merkleize(&db, None::<Vec<u8>>)
+                    .await
+                    .expect("merkleize")
             };
-            db.apply_batch(finalized.finalize()).await.expect("apply");
+            db.apply_batch(finalized).await.expect("apply");
 
             let latest = db.bounds().await.end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();

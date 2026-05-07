@@ -108,7 +108,6 @@ export function QmdbPanel({
   const [isConnected, setIsConnected] = useState(false);
   const [tip, setTip] = useState('');
   const [expectedCurrentRoot, setExpectedCurrentRoot] = useState('');
-  const [expectedHistoricalRoot, setExpectedHistoricalRoot] = useState('');
 
   const [getKey, setGetKey] = useState('k-00000000');
   const [getProof, setGetProof] = useState<VerifiedCurrentKeyValueProof | null>(null);
@@ -181,7 +180,7 @@ export function QmdbPanel({
       const proof = await client.getMany(
         keys,
         parseTip(tip),
-        parseHexRoot(expectedHistoricalRoot),
+        parseHexRoot(expectedCurrentRoot),
       );
       setManyProof(proof);
       showNotification(
@@ -261,9 +260,8 @@ export function QmdbPanel({
         <p className="section-note">
           Proofs are anchored to roots the writer emits per batch. Run `qmdb run`
           locally and `qmdb seed` to stream fresh tips; each line prints
-          `tip=N current_root=0x.. historical_root=0x..`. Get Proof verifies
-          against the current root; Get Multi-Proof verifies against the
-          historical root.
+          `tip=N root=0x..`. Get Proof and Get Multi-Proof verify against
+          that current root.
         </p>
         <p><strong>Server:</strong> {qmdbUrl}</p>
         <p><strong>Status:</strong> {isConnected ? 'Connected' : 'Disconnected'}</p>
@@ -280,23 +278,13 @@ export function QmdbPanel({
             />
           </div>
           <div className="form-group form-group-wide">
-            <label htmlFor="qmdb-current-root">Expected Current Root (hex)</label>
+            <label htmlFor="qmdb-current-root">Expected Root (hex)</label>
             <input
               id="qmdb-current-root"
               type="text"
               placeholder="0x..."
               value={expectedCurrentRoot}
               onChange={(event) => setExpectedCurrentRoot(event.target.value)}
-            />
-          </div>
-          <div className="form-group form-group-wide">
-            <label htmlFor="qmdb-historical-root">Expected Historical Root (hex)</label>
-            <input
-              id="qmdb-historical-root"
-              type="text"
-              placeholder="0x..."
-              value={expectedHistoricalRoot}
-              onChange={(event) => setExpectedHistoricalRoot(event.target.value)}
             />
           </div>
         </div>
@@ -328,7 +316,6 @@ export function QmdbPanel({
           <div className="result fade-in">
             <h4>Verified Current Proof</h4>
             <p><strong>Location:</strong> {getProof.location.toString()}</p>
-            <p><strong>Root:</strong> {formatBytes(getProof.root)}</p>
             {renderOperation(getProof.operation)}
           </div>
         )}
@@ -351,7 +338,7 @@ export function QmdbPanel({
           className={`btn-primary ${isGettingMany ? 'loading' : ''}`}
           onClick={handleGetMany}
           disabled={
-            isGettingMany || !manyKeys.trim() || !tip.trim() || !expectedHistoricalRoot.trim()
+            isGettingMany || !manyKeys.trim() || !tip.trim() || !expectedCurrentRoot.trim()
           }
         >
           {isGettingMany ? 'Verifying...' : 'Get Multi-Proof'}
@@ -359,7 +346,6 @@ export function QmdbPanel({
         {manyProof && (
           <div className="result fade-in">
             <h4>Verified Historical Multi-Proof</h4>
-            <p><strong>Root:</strong> {formatBytes(manyProof.root)}</p>
             <div className="result-list">
               {manyProof.operations.map((operation, index) => (
                 <div key={`${operation.location.toString()}-${index}`} className="result-row-block">
@@ -493,7 +479,7 @@ export function QmdbPanel({
                       {' · '}
                       <strong>Locations:</strong> {locationRange}
                     </p>
-                    <p><strong>Historical Root:</strong> {formatBytes(event.proof.root)}</p>
+                    <p><strong>Historical Root:</strong> {formatBytes(event.root)}</p>
                     {ops.length > 0 && (
                       <div className="result-list">
                         {ops.map((op, opIndex) => (

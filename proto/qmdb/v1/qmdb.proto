@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package store.qmdb.v1;
+package qmdb.v1;
 
 import "buf/validate/validate.proto";
 import "store/v1/common.proto";
@@ -58,10 +58,8 @@ message GetRequest {
   // Raw logical QMDB key (`K::as_ref()` bytes), not a store row key.
   bytes key = 1;
 
-  // Published ordered-QMDB batch-boundary to prove against. The server
-  // builds the proof at this tip and returns the resulting current root;
-  // the client is expected to compare that root to the one it already
-  // trusts for this tip.
+  // Published ordered-QMDB batch-boundary to prove against. The client must
+  // already know the trusted current/global root for this tip.
   uint64 tip = 2;
 }
 
@@ -72,17 +70,10 @@ message GetManyRequest {
     [(buf.validate.field).repeated.min_items = 1,
      (buf.validate.field).repeated.max_items = 1024];
 
-  // Published ordered-QMDB historical watermark to prove against. The
-  // server builds the multi-proof at this tip and returns the resulting
-  // historical ops root; the client is expected to compare that root to
-  // the one it already trusts for this tip.
+  // Published ordered-QMDB batch-boundary to prove against. The server
+  // returns a historical multi-proof plus a current-root proof that anchors
+  // the historical ops root to the canonical current/global root for this tip.
   uint64 tip = 2;
-}
-
-// Stable mirror of an MMR proof payload.
-message MmrProof {
-  uint64 leaves = 1;
-  repeated bytes digests = 2;
 }
 
 // One historical operation proven by a multi-proof.
@@ -93,27 +84,14 @@ message MultiProofOperation {
 
 // Historical QMDB multi-proof over a set of operation locations.
 message HistoricalMultiProof {
-  reserved 1;
-  bytes root = 2;
-  MmrProof proof = 3;
-  repeated MultiProofOperation operations = 4;
-}
-
-// Stable mirror of a current ordered range proof payload.
-message CurrentRangeProof {
-  MmrProof proof = 1;
-  optional bytes partial_chunk_digest = 2;
-  bytes ops_root = 3;
+  bytes proof = 1;
+  repeated MultiProofOperation operations = 2;
 }
 
 // Current ordered proof for one active key.
 message CurrentKeyValueProof {
-  reserved 1;
-  bytes root = 2;
-  uint64 location = 3;
-  bytes chunk = 4;
-  CurrentRangeProof range_proof = 5;
-  bytes encoded_operation = 6;
+  bytes proof = 1;
+  bytes encoded_operation = 2;
 }
 
 // One emitted proof for a subscribed batch.
@@ -121,6 +99,9 @@ message SubscribeResponse {
   // Underlying store stream sequence that made this proof readable end-to-end.
   uint64 resume_sequence_number = 1;
   HistoricalMultiProof proof = 2;
+  // Historical ops root for the subscribed batch proof. Range subscriptions
+  // are backend-generic and may not have an ordered current/global root.
+  bytes root = 3;
 }
 
 // Unary current key proof response.
@@ -131,4 +112,10 @@ message GetResponse {
 // Unary historical many-key proof response.
 message GetManyResponse {
   HistoricalMultiProof proof = 1;
+
+  // Opaque Commonware `current::proof::OperationProof` for one operation
+  // already included in `proof.operations`. Clients verify this against their
+  // trusted canonical current/global root and use its authenticated ops root
+  // to verify `proof`.
+  bytes current_proof = 2;
 }
