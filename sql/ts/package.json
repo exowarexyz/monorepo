@@ -37,6 +37,7 @@
     "@exowarexyz/sdk": "file:../../sdk-ts"
   },
   "devDependencies": {
+    "@bufbuild/buf": "^1.67.0",
     "typescript": "^5.5.3"
   }
 }

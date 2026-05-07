@@ -314,7 +314,10 @@ where
     ) -> Result<
         CurrentOperationRangeProofResult<H::Digest, UnorderedQmdbOperation<F, K, V>, N, F>,
         QmdbError,
-    > {
+    >
+    where
+        K: commonware_utils::Array,
+    {
         self.core()
             .require_published_watermark(session, watermark)
             .await?;
@@ -357,7 +360,10 @@ where
     ) -> Result<
         CurrentOperationRangeProofResult<H::Digest, UnorderedQmdbOperation<F, K, V>, N, F>,
         QmdbError,
-    > {
+    >
+    where
+        K: commonware_utils::Array,
+    {
         let session = self.client.create_session();
         self.current_operation_range_proof_raw_in_session::<N>(
             &session,
@@ -373,7 +379,10 @@ where
         session: &SerializableReadSession,
         watermark: Location<F>,
         key: Q,
-    ) -> Result<RawUnorderedKeyValueProof<H::Digest, K, V, N, F>, QmdbError> {
+    ) -> Result<RawUnorderedKeyValueProof<H::Digest, K, V, N, F>, QmdbError>
+    where
+        K: commonware_utils::Array,
+    {
         self.core()
             .require_published_watermark(session, watermark)
             .await?;
@@ -445,7 +454,10 @@ where
         &self,
         watermark: Location<F>,
         key: Q,
-    ) -> Result<RawUnorderedKeyValueProof<H::Digest, K, V, N, F>, QmdbError> {
+    ) -> Result<RawUnorderedKeyValueProof<H::Digest, K, V, N, F>, QmdbError>
+    where
+        K: commonware_utils::Array,
+    {
         let session = self.client.create_session();
         self.key_value_proof_raw_in_session::<N, _>(&session, watermark, key)
             .await
@@ -456,7 +468,10 @@ where
         &self,
         watermark: Location<F>,
         key: Q,
-    ) -> Result<VerifiedUnorderedKeyValue<H::Digest, K, V, F>, QmdbError> {
+    ) -> Result<VerifiedUnorderedKeyValue<H::Digest, K, V, F>, QmdbError>
+    where
+        K: commonware_utils::Array,
+    {
         let raw = self.key_value_proof_raw_at::<N, _>(watermark, key).await?;
         Ok(VerifiedUnorderedKeyValue {
             root: raw.root,
@@ -473,7 +488,10 @@ where
         &self,
         watermark: Location<F>,
         keys: &[Q],
-    ) -> Result<Vec<RawUnorderedKeyValueProof<H::Digest, K, V, N, F>>, QmdbError> {
+    ) -> Result<Vec<RawUnorderedKeyValueProof<H::Digest, K, V, N, F>>, QmdbError>
+    where
+        K: commonware_utils::Array,
+    {
         if keys.is_empty() {
             return Err(QmdbError::EmptyProofRequest);
         }

@@ -655,7 +655,12 @@ impl<F, H, K, V, const N: usize> CurrentOperationRangeBackend<N>
 where
     F: Graftable,
     H: Hasher + Send + Sync + 'static,
-    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
+    K: commonware_utils::Array
+        + commonware_storage::qmdb::operation::Key
+        + commonware_codec::Codec
+        + Send
+        + Sync
+        + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     V::Cfg: Clone,
     UnorderedQmdbOperation<F, K, V>: Encode + commonware_codec::Decode,
@@ -1045,7 +1050,12 @@ impl<F, H, K, V, const N: usize> KeyLookupService for UnorderedConnect<F, H, K, 
 where
     F: Graftable,
     H: Hasher + Send + Sync + 'static,
-    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
+    K: commonware_utils::Array
+        + commonware_storage::qmdb::operation::Key
+        + commonware_codec::Codec
+        + Send
+        + Sync
+        + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     V::Cfg: Clone,
     UnorderedQmdbOperation<F, K, V>: Encode + commonware_codec::Decode,
@@ -1308,7 +1318,12 @@ where
 pub fn unordered_connect_stack<
     F: Graftable,
     H: Hasher + Send + Sync + 'static,
-    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
+    K: commonware_utils::Array
+        + commonware_storage::qmdb::operation::Key
+        + commonware_codec::Codec
+        + Send
+        + Sync
+        + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     const N: usize,
 >(
