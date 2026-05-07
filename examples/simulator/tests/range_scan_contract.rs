@@ -43,10 +43,10 @@ fn scan(
         let batch = runtime
             .block_on(cursor.next_batch(usize::MAX))
             .expect("scan");
-        if batch.is_empty() {
+        if batch.rows.is_empty() {
             break;
         }
-        rows.extend(batch);
+        rows.extend(batch.rows);
     }
     rows
 }

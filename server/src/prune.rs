@@ -172,11 +172,11 @@ async fn execute_user_keys_policy(
             .next_batch(PRUNE_SCAN_BATCH_SIZE)
             .await
             .map_err(PruneError::Engine)?;
-        if batch.is_empty() {
+        if batch.rows.is_empty() {
             break;
         }
 
-        for (key, _value) in batch {
+        for (key, _value) in batch.rows {
             if !codec.matches(&key) {
                 continue;
             }

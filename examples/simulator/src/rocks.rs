@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use exoware_server::{QueryExtra, RangeScan, RangeScanCursor, StoreEngine};
+use exoware_server::{QueryExtra, RangeScan, RangeScanBatch, RangeScanCursor, StoreEngine};
 use rocksdb::{
     ColumnFamily, ColumnFamilyDescriptor, DBIterator, Direction, IteratorMode, Options, DB,
 };
@@ -133,10 +133,10 @@ impl RangeScan for RocksRangeScanCursor {
     fn next_batch<'a>(
         &'a mut self,
         max_items: usize,
-    ) -> BoxFuture<'a, Result<Vec<(Bytes, Bytes)>, String>> {
+    ) -> BoxFuture<'a, Result<RangeScanBatch, String>> {
         Box::pin(async move {
             let Some(mut state) = self.state.take() else {
-                return Ok(Vec::new());
+                return Ok(RangeScanBatch::default());
             };
             let (state, result) = tokio::task::spawn_blocking(move || {
                 let result = state.next_batch(max_items);
@@ -145,12 +145,11 @@ impl RangeScan for RocksRangeScanCursor {
             .await
             .map_err(|e| format!("range scan task failed: {e}"))?;
             self.state = Some(state);
-            result
+            result.map(|rows| RangeScanBatch {
+                rows,
+                extra: QueryExtra::default(),
+            })
         })
-    }
-
-    fn extra(&self) -> QueryExtra {
-        QueryExtra::default()
     }
 }
 

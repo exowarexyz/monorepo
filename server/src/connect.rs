@@ -87,32 +87,32 @@ fn range_stream(
             let Some((mut entries, emitted_frame)) = state else {
                 return None;
             };
-            let rows = match entries.next_batch(batch_size).await {
-                Ok(rows) => rows,
+            let batch = match entries.next_batch(batch_size).await {
+                Ok(batch) => batch,
                 Err(e) => return Some((Err(ConnectError::internal(e)), None)),
             };
-            if rows.is_empty() {
+            let detail = query_detail(sequence_number, batch.extra);
+            if batch.rows.is_empty() {
                 if emitted_frame {
                     return None;
                 }
                 return Some((
                     Ok(RangeFrame {
-                        detail: Some(query_detail(sequence_number, entries.extra())).into(),
+                        detail: Some(detail).into(),
                         ..Default::default()
                     }),
                     None,
                 ));
             }
 
-            let mut chunk = Vec::with_capacity(rows.len());
-            for (key, value) in rows {
+            let mut chunk = Vec::with_capacity(batch.rows.len());
+            for (key, value) in batch.rows {
                 chunk.push(KvEntry {
                     key: key.into(),
                     value: value.into(),
                     ..Default::default()
                 });
             }
-            let detail = query_detail(sequence_number, entries.extra());
             Some((
                 Ok(RangeFrame {
                     results: chunk,
@@ -413,23 +413,25 @@ impl QueryApi for QueryConnect {
 
         let mut reducer = RangeReducer::new(&domain)
             .map_err(|e: crate::RangeError| ConnectError::internal(e.to_string()))?;
-        loop {
+        let mut latest_extra = None;
+        let final_extra = loop {
             let batch = rows
                 .next_batch(REDUCE_SCAN_BATCH_SIZE)
                 .await
                 .map_err(ConnectError::internal)?;
-            if batch.is_empty() {
-                break;
+            if batch.rows.is_empty() {
+                break latest_extra.unwrap_or(batch.extra);
             }
-            for (key, value) in batch {
+            latest_extra = Some(batch.extra);
+            for (key, value) in batch.rows {
                 reducer
                     .update(&key, &value)
                     .map_err(|e: crate::RangeError| ConnectError::internal(e.to_string()))?;
             }
-        }
+        };
         let response = reducer.finish();
 
-        let detail = query_detail(token, rows.extra());
+        let detail = query_detail(token, final_extra);
 
         Ok((
             ReduceResponse {
@@ -929,9 +931,10 @@ mod tests {
     use exoware_sdk::keys::KeyCodec;
     use exoware_sdk::kv_codec::KvReducedValue;
     use exoware_sdk::{decode_connect_error, to_domain_reduce_response};
+    use futures::future::{ready, BoxFuture};
     use futures::StreamExt;
 
-    use crate::{range_scan_from_iter, QueryExtra, RangeScanCursor};
+    use crate::{QueryExtra, RangeScan, RangeScanBatch, RangeScanCursor};
 
     const TEST_RESERVED_BITS: u8 = 4;
     const TEST_PREFIX: u16 = 1;
@@ -957,6 +960,38 @@ mod tests {
     #[derive(Default)]
     struct FakeEngine {
         state: Arc<Mutex<FakeEngineState>>,
+    }
+
+    struct IteratorRangeScan {
+        iter: Box<dyn Iterator<Item = Result<(Bytes, Bytes), String>> + Send + 'static>,
+    }
+
+    impl RangeScan for IteratorRangeScan {
+        fn next_batch<'a>(
+            &'a mut self,
+            max_items: usize,
+        ) -> BoxFuture<'a, Result<RangeScanBatch, String>> {
+            let mut rows = Vec::new();
+            let result = (|| {
+                for row in self.iter.by_ref().take(max_items) {
+                    rows.push(row?);
+                }
+                Ok(RangeScanBatch {
+                    rows,
+                    extra: QueryExtra::default(),
+                })
+            })();
+            Box::pin(ready(result))
+        }
+    }
+
+    fn range_scan_from_iter<I>(iter: I) -> RangeScanCursor
+    where
+        I: Iterator<Item = Result<(Bytes, Bytes), String>> + Send + 'static,
+    {
+        Box::new(IteratorRangeScan {
+            iter: Box::new(iter),
+        })
     }
 
     impl FakeEngine {

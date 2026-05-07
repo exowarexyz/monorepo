@@ -6,61 +6,30 @@
 use std::collections::HashMap;
 
 use bytes::Bytes;
-use futures::future::{ready, BoxFuture};
+use futures::future::BoxFuture;
 
 pub type QueryExtra = HashMap<String, buffa_types::google::protobuf::Value>;
 pub type RangeScanCursor = Box<dyn RangeScan + Send + 'static>;
+
+#[derive(Clone, Debug, Default)]
+pub struct RangeScanBatch {
+    /// Rows read by this cursor pull.
+    pub rows: Vec<(Bytes, Bytes)>,
+    /// Backend-specific query metadata after reading these rows.
+    pub extra: QueryExtra,
+}
 
 /// Owned pull-based range cursor for query RPCs.
 ///
 /// Implementations own any state needed to produce batches, allowing query
 /// handlers to pull rows lazily without borrowing the engine.
 pub trait RangeScan: Send {
+    /// Pull up to `max_items` rows. Returning an empty `rows` batch marks EOF.
+    /// `extra` is emitted with the response frame built from the same batch.
     fn next_batch<'a>(
         &'a mut self,
         max_items: usize,
-    ) -> BoxFuture<'a, Result<Vec<(Bytes, Bytes)>, String>>;
-
-    /// Current query metadata for this cursor. Called after `next_batch` so
-    /// implementations can expose backend-specific running scan statistics.
-    fn extra(&self) -> QueryExtra;
-}
-
-struct IteratorRangeScan {
-    iter: Box<dyn Iterator<Item = Result<(Bytes, Bytes), String>> + Send + 'static>,
-}
-
-impl RangeScan for IteratorRangeScan {
-    fn next_batch<'a>(
-        &'a mut self,
-        max_items: usize,
-    ) -> BoxFuture<'a, Result<Vec<(Bytes, Bytes)>, String>> {
-        let mut batch = Vec::new();
-        let result = (|| {
-            for row in self.iter.by_ref().take(max_items) {
-                batch.push(row?);
-            }
-            Ok(batch)
-        })();
-        Box::pin(ready(result))
-    }
-
-    fn extra(&self) -> QueryExtra {
-        QueryExtra::default()
-    }
-}
-
-/// Adapt an owned iterator into a range cursor.
-///
-/// This is intended for simple owned iterators. Engines with more specialized
-/// cursor requirements should implement [`RangeScan`] directly.
-pub fn range_scan_from_iter<I>(iter: I) -> RangeScanCursor
-where
-    I: Iterator<Item = Result<(Bytes, Bytes), String>> + Send + 'static,
-{
-    Box::new(IteratorRangeScan {
-        iter: Box::new(iter),
-    })
+    ) -> BoxFuture<'a, Result<RangeScanBatch, String>>;
 }
 
 /// Implement these operations for your store. All methods must be thread-safe.
