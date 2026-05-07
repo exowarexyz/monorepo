@@ -7,7 +7,10 @@ use commonware_storage::merkle::{
     hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
     Family, Graftable, Location, Position,
 };
-use commonware_storage::qmdb::{current::proof::RangeProof, operation::Operation as QmdbOperation};
+use commonware_storage::qmdb::{
+    current::proof::{OpsRootWitness, RangeProof},
+    operation::Operation as QmdbOperation,
+};
 
 use crate::codec::{
     bitmap_chunk_bits, chunk_index_for_location, grafting_height_for, ops_to_grafted_pos,
@@ -36,6 +39,8 @@ fn grafted_to_ops_pos<F: Graftable>(grafted_pos: Position<F>, grafting_height: u
 /// that must be uploaded for that batch boundary:
 ///
 /// - `root`: the local current DB root after applying `operations`
+/// - `ops_root_witness`: the local proof that the operation-log root is
+///   committed by `root`
 /// - `chunks`: only the bitmap chunks whose contents changed at this boundary
 /// - `grafted_nodes`: only the complete-chunk grafted nodes whose digests
 ///   changed at this boundary
@@ -65,6 +70,7 @@ pub async fn recover_boundary_state<M, H, Op, const N: usize, Prove, Fut>(
     previous_operations: Option<&[Op]>,
     operations: &[Op],
     root: H::Digest,
+    ops_root_witness: OpsRootWitness<H::Digest>,
     mut prove_at: Prove,
 ) -> Result<CurrentBoundaryState<H::Digest, N, M>, QmdbError>
 where
@@ -159,7 +165,7 @@ where
 
     Ok(CurrentBoundaryState {
         root,
-        ops_root_witness: None,
+        ops_root_witness,
         chunks: chunks.into_iter().collect(),
         grafted_nodes: grafted_nodes.into_iter().collect(),
     })

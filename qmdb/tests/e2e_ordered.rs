@@ -9,7 +9,7 @@ use std::num::NonZeroU64;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
-use commonware_storage::merkle::{mmr, Location, Proof};
+use commonware_storage::merkle::{mmb, mmr, Family, Graftable, Location, Proof};
 use commonware_storage::qmdb::any::ordered::variable::Operation as QmdbOperation;
 use commonware_storage::qmdb::current::ordered::variable::Db as LocalQmdbDb;
 use commonware_storage::translator::TwoCap;
@@ -20,21 +20,30 @@ use exoware_sdk::StoreClient;
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
-type BatchProof = Proof<mmr::Family, Digest>;
-type BatchOperation = QmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>;
-type TestOrderedClient = OrderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N>;
-type TestOrderedWriter = OrderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N>;
-type LocalDb = LocalQmdbDb<mmr::Family, cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>;
+type BatchOperation<F> = QmdbOperation<F, Vec<u8>, Vec<u8>>;
+type TestOrderedClient<F> = OrderedClient<F, Sha256, Vec<u8>, Vec<u8>, N>;
+type TestOrderedWriter<F> = OrderedWriter<F, Sha256, Vec<u8>, Vec<u8>, N>;
+type LocalDb<F> = LocalQmdbDb<F, cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>;
 
-async fn boundary_from_local_db(
-    db: &LocalDb,
-    previous_operations: Option<&[BatchOperation]>,
-    operations: &[BatchOperation],
-) -> CurrentBoundaryState<Digest, N, mmr::Family> {
-    recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
+async fn boundary_from_local_db<F>(
+    db: &LocalDb<F>,
+    previous_operations: Option<&[BatchOperation<F>]>,
+    operations: &[BatchOperation<F>],
+) -> CurrentBoundaryState<Digest, N, F>
+where
+    F: Graftable,
+    BatchOperation<F>: commonware_codec::Codec,
+{
+    let mut ops_root_hasher = commonware_storage::qmdb::hasher::<Sha256>();
+    let ops_root_witness = db
+        .ops_root_witness(&mut ops_root_hasher)
+        .await
+        .expect("ops root witness");
+    recover_boundary_state::<F, Sha256, _, N, _, _>(
         previous_operations,
         operations,
         db.root(),
+        ops_root_witness,
         |location| async move {
             let mut hasher = Sha256::default();
             let (proof, mut proof_ops, mut chunks) = db
@@ -62,14 +71,19 @@ async fn boundary_from_local_db(
     .expect("recover_boundary_state")
 }
 
-async fn mirror_local(client: &StoreClient, local: &LocalReference) {
-    let writer: TestOrderedWriter = TestOrderedWriter::empty(client.clone());
+async fn mirror_local<F>(client: &StoreClient, local: &LocalReference<F>)
+where
+    F: Graftable,
+    BatchOperation<F>:
+        commonware_codec::Codec + commonware_codec::Encode + commonware_codec::Decode,
+{
+    let writer: TestOrderedWriter<F> = TestOrderedWriter::empty(client.clone());
     common::commit_ordered_upload(client, &writer, &local.operations, &local.current_boundary)
         .await
         .expect("commit upload");
 }
 
-fn op_cfg() -> <BatchOperation as commonware_codec::Read>::Cfg {
+fn op_cfg<F: Family>() -> <BatchOperation<F> as commonware_codec::Read>::Cfg {
     (
         ((0..=MAX_OPERATION_SIZE).into(), ()),
         ((0..=MAX_OPERATION_SIZE).into(), ()),
@@ -86,28 +100,25 @@ fn update_row_cfg() -> (
     )
 }
 
-struct LocalReference {
-    latest_location: Location<mmr::Family>,
-    operations: Vec<BatchOperation>,
-    current_boundary: CurrentBoundaryState<Digest, N, mmr::Family>,
+struct LocalReference<F: Family> {
+    latest_location: Location<F>,
+    operations: Vec<BatchOperation<F>>,
+    current_boundary: CurrentBoundaryState<Digest, N, F>,
     values: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 }
 
-async fn build_local_db() -> LocalReference {
+async fn build_local_db<F>() -> LocalReference<F>
+where
+    F: Graftable,
+    BatchOperation<F>: commonware_codec::Codec + Clone,
+{
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
-            let cfg = common::ordered_variable_config(
-                "ordered",
-                page_cache,
-                (
-                    ((0..=MAX_OPERATION_SIZE).into(), ()),
-                    ((0..=MAX_OPERATION_SIZE).into(), ()),
-                ),
-                NZU64!(8),
-            );
-            let mut db: LocalDb = LocalDb::init(context.with_label("qmdb"), cfg)
+            let cfg =
+                common::ordered_variable_config("ordered", page_cache, op_cfg::<F>(), NZU64!(8));
+            let mut db: LocalDb<F> = LocalDb::init(context.with_label("qmdb"), cfg)
                 .await
                 .expect("init");
 
@@ -125,8 +136,8 @@ async fn build_local_db() -> LocalReference {
 
             let latest = db.bounds().await.end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
-            let (_proof, ops): (BatchProof, Vec<BatchOperation>) = db
-                .ops_historical_proof(latest + 1, Location::new(0), n)
+            let (_proof, ops): (Proof<F, Digest>, Vec<BatchOperation<F>>) = db
+                .ops_historical_proof(latest + 1, Location::<F>::new(0), n)
                 .await
                 .expect("proof");
 
@@ -160,11 +171,15 @@ async fn build_local_db() -> LocalReference {
 #[tokio::test]
 async fn ordered_round_trip() {
     let (_dir, _server, client) = common::local_store_client().await;
-    let local = build_local_db().await;
+    let local = build_local_db::<mmr::Family>().await;
 
     mirror_local(&client, &local).await;
 
-    let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
+    let c = TestOrderedClient::<mmr::Family>::from_client(
+        client.clone(),
+        op_cfg::<mmr::Family>(),
+        update_row_cfg(),
+    );
     let watermark = c.writer_location_watermark().await.expect("watermark");
     assert_eq!(watermark, Some(local.latest_location));
 
@@ -187,7 +202,7 @@ async fn ordered_round_trip() {
     let proof = c
         .operation_range_proof(
             local.latest_location,
-            Location::new(0),
+            Location::<mmr::Family>::new(0),
             local.operations.len() as u32,
         )
         .await
@@ -196,13 +211,65 @@ async fn ordered_round_trip() {
 }
 
 #[tokio::test]
-async fn current_root_at() {
+async fn ordered_mmb_round_trip() {
     let (_dir, _server, client) = common::local_store_client().await;
-    let local = build_local_db().await;
+    let local = build_local_db::<mmb::Family>().await;
 
     mirror_local(&client, &local).await;
 
-    let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
+    let c = TestOrderedClient::<mmb::Family>::from_client(
+        client.clone(),
+        op_cfg::<mmb::Family>(),
+        update_row_cfg(),
+    );
+    let watermark = c.writer_location_watermark().await.expect("watermark");
+    assert_eq!(watermark, Some(local.latest_location));
+
+    let range = c
+        .operation_range_proof(
+            local.latest_location,
+            Location::<mmb::Family>::new(0),
+            local.operations.len() as u32,
+        )
+        .await
+        .expect("operation range proof");
+    assert_eq!(range.operations, local.operations);
+
+    let current = c
+        .current_operation_range_proof(
+            local.latest_location,
+            Location::<mmb::Family>::new(0),
+            local.operations.len() as u32,
+        )
+        .await
+        .expect("current operation range proof");
+    assert_eq!(current.operations, local.operations);
+
+    let key_proof = c
+        .key_value_proof_at(local.latest_location, b"alpha".as_slice())
+        .await
+        .expect("key_value_proof_at");
+    match &key_proof.operation {
+        QmdbOperation::Update(update) => {
+            assert_eq!(update.key, b"alpha".to_vec());
+            assert_eq!(update.value, b"one".to_vec());
+        }
+        _ => panic!("expected Update operation"),
+    }
+}
+
+#[tokio::test]
+async fn current_root_at() {
+    let (_dir, _server, client) = common::local_store_client().await;
+    let local = build_local_db::<mmr::Family>().await;
+
+    mirror_local(&client, &local).await;
+
+    let c = TestOrderedClient::<mmr::Family>::from_client(
+        client.clone(),
+        op_cfg::<mmr::Family>(),
+        update_row_cfg(),
+    );
     let root = c
         .current_root_at(local.latest_location)
         .await
@@ -213,15 +280,19 @@ async fn current_root_at() {
 #[tokio::test]
 async fn current_operation_range_proof() {
     let (_dir, _server, client) = common::local_store_client().await;
-    let local = build_local_db().await;
+    let local = build_local_db::<mmr::Family>().await;
 
     mirror_local(&client, &local).await;
 
-    let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
+    let c = TestOrderedClient::<mmr::Family>::from_client(
+        client.clone(),
+        op_cfg::<mmr::Family>(),
+        update_row_cfg(),
+    );
     let proof = c
         .current_operation_range_proof(
             local.latest_location,
-            Location::new(0),
+            Location::<mmr::Family>::new(0),
             local.operations.len() as u32,
         )
         .await
@@ -232,11 +303,15 @@ async fn current_operation_range_proof() {
 #[tokio::test]
 async fn key_value_proof() {
     let (_dir, _server, client) = common::local_store_client().await;
-    let local = build_local_db().await;
+    let local = build_local_db::<mmr::Family>().await;
 
     mirror_local(&client, &local).await;
 
-    let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
+    let c = TestOrderedClient::<mmr::Family>::from_client(
+        client.clone(),
+        op_cfg::<mmr::Family>(),
+        update_row_cfg(),
+    );
     let result = c
         .key_value_proof_at(local.latest_location, b"alpha".as_slice())
         .await
@@ -253,11 +328,15 @@ async fn key_value_proof() {
 #[tokio::test]
 async fn multi_proof() {
     let (_dir, _server, client) = common::local_store_client().await;
-    let local = build_local_db().await;
+    let local = build_local_db::<mmr::Family>().await;
 
     mirror_local(&client, &local).await;
 
-    let c = TestOrderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
+    let c = TestOrderedClient::<mmr::Family>::from_client(
+        client.clone(),
+        op_cfg::<mmr::Family>(),
+        update_row_cfg(),
+    );
     let result = c
         .multi_proof_at(
             local.latest_location,

@@ -413,18 +413,16 @@ impl PreparedCurrentBoundaryUpload {
         current_boundary: &crate::CurrentBoundaryState<D, N, F>,
     ) -> Result<Self, QmdbError> {
         let mut rows = Vec::with_capacity(
-            1 + current_boundary.chunks.len() + current_boundary.grafted_nodes.len(),
+            2 + current_boundary.chunks.len() + current_boundary.grafted_nodes.len(),
         );
         rows.push((
             encode_current_meta_key(latest_location),
             current_boundary.root.as_ref().to_vec(),
         ));
-        if let Some(witness) = &current_boundary.ops_root_witness {
-            rows.push((
-                encode_ops_root_witness_key(latest_location),
-                witness.encode().to_vec(),
-            ));
-        }
+        rows.push((
+            encode_ops_root_witness_key(latest_location),
+            current_boundary.ops_root_witness.encode().to_vec(),
+        ));
         for &(chunk_index, chunk) in &current_boundary.chunks {
             rows.push((
                 encode_chunk_key(chunk_index, latest_location),
@@ -459,7 +457,10 @@ mod tests {
         let latest_location = Location::new(1024);
         let boundary = crate::CurrentBoundaryState::<_, 32, mmr::Family> {
             root: digest,
-            ops_root_witness: None,
+            ops_root_witness: commonware_storage::qmdb::current::proof::OpsRootWitness {
+                grafted_root: digest,
+                partial_chunk: None,
+            },
             chunks: Vec::new(),
             grafted_nodes: vec![(ops_position, digest)],
         };

@@ -359,7 +359,7 @@ where
         let mut proof =
             crate::proof::build_batch_multi_proof::<F, H, _>(&storage, watermark, root, operations)
                 .await?;
-        proof.ops_root_witness = self.load_ops_root_witness(&session, watermark).await?;
+        proof.ops_root_witness = Some(self.load_ops_root_witness(&session, watermark).await?);
         Ok(proof)
     }
 
@@ -456,7 +456,7 @@ where
             encoded_operations,
         )
         .await?;
-        checkpoint.ops_root_witness = self.load_ops_root_witness(session, watermark).await?;
+        checkpoint.ops_root_witness = Some(self.load_ops_root_witness(session, watermark).await?);
         Ok(checkpoint)
     }
 
@@ -1025,17 +1025,17 @@ where
         &self,
         session: &SerializableReadSession,
         location: Location<F>,
-    ) -> Result<Option<OpsRootWitness<H::Digest>>, QmdbError> {
+    ) -> Result<OpsRootWitness<H::Digest>, QmdbError> {
         let Some(bytes) = session.get(&encode_ops_root_witness_key(location)).await? else {
-            return Ok(None);
+            return Err(QmdbError::CurrentBoundaryStateMissing {
+                location: location.as_u64(),
+            });
         };
-        OpsRootWitness::<H::Digest>::decode_cfg(bytes.as_ref(), &())
-            .map(Some)
-            .map_err(|e| {
-                QmdbError::CorruptData(format!(
-                    "current ops-root witness at {location} decode error: {e}"
-                ))
-            })
+        OpsRootWitness::<H::Digest>::decode_cfg(bytes.as_ref(), &()).map_err(|e| {
+            QmdbError::CorruptData(format!(
+                "current ops-root witness at {location} decode error: {e}"
+            ))
+        })
     }
 
     pub(crate) async fn compute_ops_root(

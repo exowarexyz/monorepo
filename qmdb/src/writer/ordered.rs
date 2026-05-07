@@ -2,7 +2,8 @@
 //!
 //! In addition to op / presence / update-index / Merkle node / watermark rows,
 //! ordered batches carry current-state rows (bitmap chunks, grafted Merkle
-//! nodes, and the current-state root) keyed by the batch boundary Location.
+//! nodes, current-state root, and op-root witness) keyed by the batch boundary
+//! Location.
 //! Those are deterministic from the full op history but require running a
 //! local commonware `current::ordered::Db` to compute; the writer takes them
 //! as an input rather than trying to compute them internally.

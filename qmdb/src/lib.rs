@@ -201,22 +201,22 @@ impl<D: Digest, F: Family> WriterState<D, F> {
     }
 }
 
-/// Current-state rows for one uploaded ordered batch boundary.
+/// Current-state rows for one uploaded current batch boundary.
 ///
-/// Ordered QMDB uploads carry more than the historical op log: each published
-/// batch boundary also stores the current-state root plus the subset of bitmap
-/// chunks and grafted nodes that changed at that boundary. This struct is
-/// that versioned delta payload.
+/// Current QMDB uploads carry more than the historical op log: each published
+/// batch boundary also stores the current-state root, op-root witness, and the
+/// subset of bitmap chunks and grafted nodes that changed at that boundary.
+/// This struct is that versioned delta payload.
 ///
 /// Callers typically obtain it from [`recover_boundary_state`], using a local
-/// Commonware `current::ordered::Db`, and then pass it to
-/// [`OrderedWriter::prepare_upload`].
+/// Commonware current DB, and then pass it to ordered or unordered writer
+/// APIs that upload current-boundary material.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurrentBoundaryState<D: Digest, const N: usize, F: Family> {
     /// Canonical current-state root at this batch boundary.
     pub root: D,
-    /// Optional proof that the raw operation-log root is committed by `root`.
-    pub ops_root_witness: Option<OpsRootWitness<D>>,
+    /// Proof that the raw operation-log root is committed by `root`.
+    pub ops_root_witness: OpsRootWitness<D>,
     /// Changed bitmap chunks keyed by chunk index.
     pub chunks: Vec<(u64, [u8; N])>,
     /// Changed grafted digests keyed by ops-space Merkle position.

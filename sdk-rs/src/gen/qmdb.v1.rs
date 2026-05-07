@@ -7399,10 +7399,9 @@ pub const OPERATION_LOG_SERVICE_SERVICE_NAME: &str = "qmdb.v1.OperationLogServic
 /// Clients dial the endpoint bound to the backend variant they want to read
 /// (ordered, unordered, immutable, or keyless). The wire protocol is identical
 /// across all four.
-/// With `match_keys` set, only batches touching a matched logical key produce
-/// a proof (ordered/unordered/immutable). With `match_keys` empty, every
-/// batch produces a proof covering all of its operations; keyless backends
-/// require `match_keys` to be empty.
+/// Subscribe applies `key_filters` and `value_filters` to decoded operations.
+/// With filters empty, every batch produces a proof covering all of its
+/// operations; keyless backends require both filter lists to be empty.
 ///
 /// # Implementing handlers
 ///
