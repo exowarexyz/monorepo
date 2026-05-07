@@ -22,7 +22,8 @@ stream service accepts a `StreamNotifier`; `StreamHub` is the in-process default
 
 ```rust
 use exoware_server::{
-    AppState, BatchLog, Ingest, Prune, Query, RangeScanIter, Sequence, connect_stack,
+    AppState, BatchLog, Ingest, Prune, Query, QueryExtra, RangeScanCursor, Sequence,
+    StoreEngine, connect_stack,
 };
 
 // Implement the capabilities your component serves:
@@ -33,8 +34,9 @@ use exoware_server::{
 //   fn put_batch(&self, kvs: &[(Bytes, Bytes)]) -> Result<u64, String>;
 //
 //   Query:
-//   fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, String>;
-//   fn range_scan(&self, start: &[u8], end: &[u8], limit: usize, forward: bool) -> Result<RangeScanIter<'_>, String>;
+//   fn get(&self, key: &[u8]) -> Result<(Option<Vec<u8>>, QueryExtra), String>;
+//   fn range_scan(&self, start: Bytes, end: Bytes, limit: usize, forward: bool) -> Result<RangeScanCursor, String>;
+//   fn get_many(&self, keys: &[&[u8]]) -> Result<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra), String>;
 //
 //   Prune:
 //   fn delete_batch(&self, keys: &[&[u8]]) -> Result<u64, String>;

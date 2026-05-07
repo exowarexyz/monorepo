@@ -16,7 +16,10 @@ pub use connect::{
     IngestService, IngestState, QueryConnect, QueryService, QueryStack, QueryState, StreamConnect,
     StreamService, StreamState,
 };
-pub use engine::{BatchLog, Ingest, Prune, Query, RangeScanIter, Sequence, StoreEngine};
+pub use engine::{
+    BatchLog, Ingest, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, RangeScanCursor,
+    Sequence, StoreEngine,
+};
 pub use prune::{execute_prune, PruneError};
 pub use reduce::RangeError;
 pub use stream::{StreamHub, StreamNotification, StreamNotifier};

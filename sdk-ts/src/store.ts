@@ -1,4 +1,4 @@
-import { create, fromBinary, type MessageInitShape } from '@bufbuild/protobuf';
+import { create, type MessageInitShape } from '@bufbuild/protobuf';
 import { Code, ConnectError } from '@connectrpc/connect';
 import type { CallOptions } from '@connectrpc/connect';
 import type { Client } from './client.js';
@@ -14,7 +14,6 @@ import type { MatchKey } from './gen/ts/store/v1/common_pb.js';
 import { ErrorInfoSchema } from './gen/ts/google/rpc/error_details_pb.js';
 import { PutRequestSchema } from './gen/ts/store/v1/ingest_pb.js';
 import {
-    DetailSchema,
     GetManyRequestSchema,
     GetRequestSchema as QueryGetRequestSchema,
     RangeRequestSchema,
@@ -35,7 +34,6 @@ import {
     SubscribeRequestSchema,
 } from './gen/ts/store/v1/stream_pb.js';
 
-const QUERY_DETAIL_HEADER = 'x-store-query-detail-bin';
 const STREAM_SERVER_PAYLOAD_REGEX = '(?s-u).*';
 
 type DetailObserver = (detail: Detail) => void;
@@ -360,47 +358,6 @@ function connectCodeToHttpStatus(code: Code): number {
     }
 }
 
-function parseDetailFromHeaders(headers: Headers): Detail | undefined {
-    const raw = headers.get(QUERY_DETAIL_HEADER);
-    if (!raw) return undefined;
-    try {
-        const binaryStr = atob(raw);
-        const bytes = new Uint8Array(binaryStr.length);
-        for (let i = 0; i < binaryStr.length; i++) {
-            bytes[i] = binaryStr.charCodeAt(i);
-        }
-        return fromBinary(DetailSchema, bytes);
-    } catch {
-        return undefined;
-    }
-}
-
-function mergeCallOptionsWithDetailObserver(
-    detailObserver?: DetailObserver,
-    options?: CallOptions,
-): CallOptions | undefined {
-    if (!detailObserver) {
-        return options;
-    }
-    return {
-        ...options,
-        onHeader: (headers) => {
-            options?.onHeader?.(headers);
-            const detail = parseDetailFromHeaders(headers);
-            if (detail) {
-                detailObserver(detail);
-            }
-        },
-        onTrailer: (trailers) => {
-            options?.onTrailer?.(trailers);
-            const detail = parseDetailFromHeaders(trailers);
-            if (detail) {
-                detailObserver(detail);
-            }
-        },
-    };
-}
-
 function isMissingBatchError(err: ConnectError): boolean {
     return err.findDetails(ErrorInfoSchema).some(
         (detail) =>
@@ -669,7 +626,10 @@ async function performGet(
         ...(effective !== undefined ? { minSequenceNumber: effective } : {}),
     });
     try {
-        const res = await client.query.get(req, mergeCallOptionsWithDetailObserver(detailObserver));
+        const res = await client.query.get(req);
+        if (res.detail) {
+            detailObserver?.(res.detail);
+        }
         if (res.value === undefined) {
             return null;
         }
@@ -696,7 +656,7 @@ async function performGetMany(
     });
     const results: GetManyResultItem[] = [];
     try {
-        const stream = client.query.getMany(req, mergeCallOptionsWithDetailObserver(detailObserver));
+        const stream = client.query.getMany(req);
         for await (const frame of stream) {
             const chunk: GetManyResultItem[] = [];
             for (const entry of frame.results) {
@@ -705,10 +665,13 @@ async function performGetMany(
                     value: entry.value,
                 });
             }
-            if (onChunk) {
+            if (onChunk && chunk.length > 0) {
                 onChunk(chunk);
             }
             results.push(...chunk);
+            if (frame.detail) {
+                detailObserver?.(frame.detail);
+            }
         }
         return results;
     } catch (e) {
@@ -739,10 +702,13 @@ async function performQuery(
     });
     const results: QueryResultItem[] = [];
     try {
-        const stream = client.query.range(req, mergeCallOptionsWithDetailObserver(detailObserver));
+        const stream = client.query.range(req);
         for await (const frame of stream) {
             for (const row of frame.results) {
                 results.push({ key: decodeStoreKey(prefix, row.key), value: row.value });
+            }
+            if (frame.detail) {
+                detailObserver?.(frame.detail);
             }
         }
         return { results };
@@ -769,7 +735,11 @@ async function performReduce(
         ...(effective !== undefined ? { minSequenceNumber: effective } : {}),
     });
     try {
-        return await client.query.reduce(req, mergeCallOptionsWithDetailObserver(detailObserver));
+        const res = await client.query.reduce(req);
+        if (res.detail) {
+            detailObserver?.(res.detail);
+        }
+        return res;
     } catch (e) {
         mapConnectToHttpError(e);
     }

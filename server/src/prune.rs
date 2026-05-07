@@ -20,6 +20,8 @@ use regex::bytes::Regex;
 
 use crate::{Prune, Query};
 
+const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
+
 #[derive(Debug)]
 pub enum PruneError {
     Engine(String),
@@ -131,7 +133,7 @@ fn keys_to_delete(
     }
 }
 
-pub fn execute_prune(
+pub async fn execute_prune(
     query: &dyn Query,
     prune: &dyn Prune,
     document: &PrunePolicyDocument,
@@ -139,7 +141,7 @@ pub fn execute_prune(
     for policy in &document.policies {
         match &policy.scope {
             PolicyScope::Keys(scope) => {
-                execute_user_keys_policy(query, prune, scope, &policy.retain)?;
+                execute_user_keys_policy(query, prune, scope, &policy.retain).await?;
             }
             PolicyScope::Sequence => {
                 execute_batch_log_policy(prune, &policy.retain)?;
@@ -149,7 +151,7 @@ pub fn execute_prune(
     Ok(())
 }
 
-fn execute_user_keys_policy(
+async fn execute_user_keys_policy(
     query: &dyn Query,
     prune: &dyn Prune,
     scope: &KeysScope,
@@ -160,37 +162,46 @@ fn execute_user_keys_policy(
         .map_err(|e| PruneError::Policy(e.to_string()))?;
 
     let (start, end) = codec.prefix_bounds();
-    let rows = query
-        .range_scan(start.as_ref(), end.as_ref(), usize::MAX, true)
+    let mut rows = query
+        .range_scan(start, end, usize::MAX, true)
         .map_err(PruneError::Engine)?;
 
     let mut groups: BTreeMap<Vec<u8>, Vec<KeyEntry>> = BTreeMap::new();
 
-    for row in rows {
-        let (key, _value) = row.map_err(PruneError::Engine)?;
-        if !codec.matches(&key) {
-            continue;
-        }
-        let payload_len = codec.payload_capacity_bytes_for_key_len(key.len());
-        let payload = match codec.read_payload(&key, 0, payload_len) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        if !regex.is_match(&payload) {
-            continue;
+    loop {
+        let batch = rows
+            .next_batch(PRUNE_SCAN_BATCH_SIZE)
+            .await
+            .map_err(PruneError::Engine)?;
+        if batch.rows.is_empty() {
+            break;
         }
 
-        let group_key = match extract_group_key(&payload, &regex, scope) {
-            Some(gk) => gk,
-            None => continue,
-        };
+        for (key, _value) in batch.rows {
+            if !codec.matches(&key) {
+                continue;
+            }
+            let payload_len = codec.payload_capacity_bytes_for_key_len(key.len());
+            let payload = match codec.read_payload(&key, 0, payload_len) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if !regex.is_match(&payload) {
+                continue;
+            }
 
-        let order_value = extract_order_value(&payload, &regex, scope).unwrap_or_default();
+            let group_key = match extract_group_key(&payload, &regex, scope) {
+                Some(gk) => gk,
+                None => continue,
+            };
 
-        groups
-            .entry(group_key)
-            .or_default()
-            .push(KeyEntry { key, order_value });
+            let order_value = extract_order_value(&payload, &regex, scope).unwrap_or_default();
+
+            groups
+                .entry(group_key)
+                .or_default()
+                .push(KeyEntry { key, order_value });
+        }
     }
 
     let mut all_deletes = Vec::new();
@@ -232,9 +243,10 @@ mod tests {
     use exoware_sdk::kv_codec::Utf8;
     use exoware_sdk::match_key::MatchKey;
     use exoware_sdk::prune_policy::{GroupBy, OrderBy, PrunePolicy};
+    use futures::future::{ready, BoxFuture};
     use std::sync::Mutex;
 
-    use crate::{RangeScanIter, Sequence};
+    use crate::{QueryExtra, RangeScan, RangeScanBatch, RangeScanCursor, Sequence};
 
     fn make_scope() -> KeysScope {
         KeysScope {
@@ -266,6 +278,23 @@ mod tests {
         rows: Vec<(Bytes, Bytes)>,
     }
 
+    struct FakeRangeScan {
+        rows: std::vec::IntoIter<(Bytes, Bytes)>,
+    }
+
+    impl RangeScan for FakeRangeScan {
+        fn next_batch<'a>(
+            &'a mut self,
+            max_items: usize,
+        ) -> BoxFuture<'a, Result<RangeScanBatch, String>> {
+            let rows = self.rows.by_ref().take(max_items).collect();
+            Box::pin(ready(Ok(RangeScanBatch {
+                rows,
+                extra: QueryExtra::default(),
+            })))
+        }
+    }
+
     impl Sequence for FakeQuery {
         fn current_sequence(&self) -> u64 {
             0
@@ -273,18 +302,30 @@ mod tests {
     }
 
     impl Query for FakeQuery {
-        fn get(&self, _key: &[u8]) -> Result<Option<Vec<u8>>, String> {
-            Ok(None)
+        fn get(&self, _key: &[u8]) -> Result<(Option<Vec<u8>>, QueryExtra), String> {
+            Ok((None, QueryExtra::default()))
         }
 
         fn range_scan(
             &self,
-            _start: &[u8],
-            _end: &[u8],
+            _start: Bytes,
+            _end: Bytes,
             _limit: usize,
             _forward: bool,
-        ) -> Result<RangeScanIter<'_>, String> {
-            Ok(Box::new(self.rows.clone().into_iter().map(Ok)))
+        ) -> Result<RangeScanCursor, String> {
+            Ok(Box::new(FakeRangeScan {
+                rows: self.rows.clone().into_iter(),
+            }))
+        }
+
+        fn get_many(
+            &self,
+            keys: &[&[u8]],
+        ) -> Result<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra), String> {
+            Ok((
+                keys.iter().map(|key| (key.to_vec(), None)).collect(),
+                QueryExtra::default(),
+            ))
         }
     }
 
@@ -371,8 +412,8 @@ mod tests {
         assert_eq!(deletes.len(), 1);
     }
 
-    #[test]
-    fn key_scope_uses_query_for_scan_and_prune_for_delete() {
+    #[tokio::test]
+    async fn key_scope_uses_query_for_scan_and_prune_for_delete() {
         let codec = KeyCodec::new(4, 1);
         let key = codec.encode(b"row").expect("encode key");
         let query = FakeQuery {
@@ -398,15 +439,17 @@ mod tests {
             }],
         };
 
-        execute_prune(&query, &prune, &document).expect("prune");
+        execute_prune(&query, &prune, &document)
+            .await
+            .expect("prune");
 
         let deleted = prune.deleted.lock().expect("lock");
         assert_eq!(deleted.as_slice(), &[key.as_ref().to_vec()]);
         assert!(prune.cutoffs.lock().expect("lock").is_empty());
     }
 
-    #[test]
-    fn sequence_scope_uses_prune_frontier_and_batch_log_prune() {
+    #[tokio::test]
+    async fn sequence_scope_uses_prune_frontier_and_batch_log_prune() {
         let query = FakeQuery { rows: Vec::new() };
         let prune = FakePrune::new(10);
         let document = PrunePolicyDocument {
@@ -417,7 +460,9 @@ mod tests {
             }],
         };
 
-        execute_prune(&query, &prune, &document).expect("prune");
+        execute_prune(&query, &prune, &document)
+            .await
+            .expect("prune");
 
         assert!(prune.deleted.lock().expect("lock").is_empty());
         assert_eq!(prune.cutoffs.lock().expect("lock").as_slice(), &[8]);
