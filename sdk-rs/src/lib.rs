@@ -521,6 +521,22 @@ pub enum RangeMode {
     Reverse,
 }
 
+#[derive(Clone, Debug)]
+pub struct RangeChunk {
+    /// Rows returned in this stream frame.
+    pub rows: Vec<(Key, Bytes)>,
+    /// Query detail reported after reading this chunk.
+    pub detail: Option<proto_query::Detail>,
+}
+
+#[derive(Clone, Debug)]
+pub struct GetManyChunk {
+    /// Lookup entries returned in this stream frame.
+    pub entries: Vec<(Key, Option<Bytes>)>,
+    /// Query detail reported after reading this chunk.
+    pub detail: Option<proto_query::Detail>,
+}
+
 /// Iterator-like async range stream.
 pub struct RangeStream {
     stream:
@@ -528,7 +544,6 @@ pub struct RangeStream {
     pending_frame: Option<exoware_proto::query::RangeFrame>,
     rows_seen: usize,
     final_count: Option<usize>,
-    final_detail: Option<proto_query::Detail>,
     finished: bool,
     observed_sequence: Option<Arc<AtomicU64>>,
     key_prefix: Option<StoreKeyPrefix>,
@@ -548,7 +563,6 @@ impl RangeStream {
             pending_frame: None,
             rows_seen: 0,
             final_count: None,
-            final_detail: None,
             finished: false,
             observed_sequence,
             key_prefix,
@@ -557,17 +571,6 @@ impl RangeStream {
 
     pub fn final_count(&self) -> Option<usize> {
         self.final_count
-    }
-
-    pub fn final_detail(&self) -> Option<proto_query::Detail> {
-        self.final_detail.clone()
-    }
-
-    fn observe_detail(&mut self, detail: &proto_query::Detail) {
-        self.final_detail = Some(detail.clone());
-        if let Some(sequence_store) = &self.observed_sequence {
-            sequence_store.fetch_max(detail.sequence_number, Ordering::SeqCst);
-        }
     }
 
     async fn prefetch_first_frame(&mut self) -> Result<(), ConnectError> {
@@ -591,7 +594,7 @@ impl RangeStream {
         }
     }
 
-    pub async fn next_chunk(&mut self) -> Result<Option<Vec<(Key, Bytes)>>, ClientError> {
+    pub async fn next_chunk(&mut self) -> Result<Option<RangeChunk>, ClientError> {
         loop {
             if self.finished {
                 return Ok(None);
@@ -616,11 +619,13 @@ impl RangeStream {
                 frame.to_owned_message()
             };
 
-            if let Some(detail) = frame.detail.as_option() {
-                self.observe_detail(detail);
+            let detail = frame.detail.as_option().cloned();
+            if let (Some(sequence_store), Some(detail)) = (&self.observed_sequence, detail.as_ref())
+            {
+                sequence_store.fetch_max(detail.sequence_number, Ordering::SeqCst);
             }
             let n = frame.results.len();
-            if n == 0 {
+            if n == 0 && detail.is_none() {
                 continue;
             }
 
@@ -634,14 +639,14 @@ impl RangeStream {
                 out.push((key, Bytes::copy_from_slice(&entry.value)));
             }
             self.rows_seen += n;
-            return Ok(Some(out));
+            return Ok(Some(RangeChunk { rows: out, detail }));
         }
     }
 
     pub async fn collect(mut self) -> Result<Vec<(Key, Bytes)>, ClientError> {
         let mut entries = Vec::new();
         while let Some(chunk) = self.next_chunk().await? {
-            entries.extend(chunk);
+            entries.extend(chunk.rows);
         }
         Ok(entries)
     }
@@ -651,18 +656,12 @@ pub struct GetManyStream {
     stream:
         ConnectServerStream<hyper::body::Incoming, exoware_proto::query::GetManyFrameView<'static>>,
     pending_frame: Option<exoware_proto::query::GetManyFrame>,
-    entries_seen: usize,
-    final_detail: Option<proto_query::Detail>,
     finished: bool,
     observed_sequence: Option<Arc<AtomicU64>>,
     key_prefix: Option<StoreKeyPrefix>,
 }
 
 impl GetManyStream {
-    pub fn final_detail(&self) -> Option<proto_query::Detail> {
-        self.final_detail.clone()
-    }
-
     fn from_connect_stream(
         stream: ConnectServerStream<
             hyper::body::Incoming,
@@ -674,18 +673,9 @@ impl GetManyStream {
         Self {
             stream,
             pending_frame: None,
-            entries_seen: 0,
-            final_detail: None,
             finished: false,
             observed_sequence,
             key_prefix,
-        }
-    }
-
-    fn observe_detail(&mut self, detail: &proto_query::Detail) {
-        self.final_detail = Some(detail.clone());
-        if let Some(sequence_store) = &self.observed_sequence {
-            sequence_store.fetch_max(detail.sequence_number, Ordering::SeqCst);
         }
     }
 
@@ -709,7 +699,7 @@ impl GetManyStream {
         }
     }
 
-    pub async fn next_chunk(&mut self) -> Result<Option<Vec<(Key, Option<Bytes>)>>, ClientError> {
+    pub async fn next_chunk(&mut self) -> Result<Option<GetManyChunk>, ClientError> {
         loop {
             if self.finished {
                 return Ok(None);
@@ -732,11 +722,13 @@ impl GetManyStream {
                 frame.to_owned_message()
             };
 
-            if let Some(detail) = frame.detail.as_option() {
-                self.observe_detail(detail);
+            let detail = frame.detail.as_option().cloned();
+            if let (Some(sequence_store), Some(detail)) = (&self.observed_sequence, detail.as_ref())
+            {
+                sequence_store.fetch_max(detail.sequence_number, Ordering::SeqCst);
             }
             let n = frame.results.len();
-            if n == 0 {
+            if n == 0 && detail.is_none() {
                 continue;
             }
 
@@ -750,15 +742,17 @@ impl GetManyStream {
                 let value = entry.value.as_ref().map(|v| Bytes::copy_from_slice(v));
                 out.push((key, value));
             }
-            self.entries_seen += n;
-            return Ok(Some(out));
+            return Ok(Some(GetManyChunk {
+                entries: out,
+                detail,
+            }));
         }
     }
 
     pub async fn collect(mut self) -> Result<HashMap<Key, Bytes>, ClientError> {
         let mut map = HashMap::new();
         while let Some(chunk) = self.next_chunk().await? {
-            for (key, value) in chunk {
+            for (key, value) in chunk.entries {
                 if let Some(v) = value {
                     map.insert(key, v);
                 }
@@ -1193,9 +1187,8 @@ pub struct StoreClient {
 /// responses reflect at least that point in the write log.
 ///
 /// Streamed query reads (`get_many`, `range_stream`) expose their sequence in
-/// each response frame's running detail, so if one of those is the first
-/// successful read, the session is pinned once the first detail-bearing frame
-/// is consumed.
+/// each returned chunk's detail, so if one of those is the first successful
+/// read, the session is pinned once the first detail-bearing chunk is consumed.
 #[derive(Clone, Debug)]
 pub struct SerializableReadSession {
     client: StoreClient,
@@ -1329,7 +1322,7 @@ impl StoreClient {
     ///
     /// The first successful unary read fixes the session's sequence floor from
     /// the server response. Streamed query reads fix that floor once a
-    /// detail-bearing frame is consumed.
+    /// detail-bearing chunk is consumed.
     pub fn create_session(&self) -> SerializableReadSession {
         self.create_session_with_sequence(0)
     }
@@ -2474,7 +2467,7 @@ impl SerializableReadSession {
     ///
     /// Fresh sessions start with `None` unless created via
     /// [`StoreClient::create_session_with_sequence`]. A first streamed query
-    /// read (`get_many`, `range_stream`) sets this once a detail-bearing frame
+    /// read (`get_many`, `range_stream`) sets this once a detail-bearing chunk
     /// is consumed.
     pub fn fixed_sequence(&self) -> Option<u64> {
         self.state.fixed_sequence()

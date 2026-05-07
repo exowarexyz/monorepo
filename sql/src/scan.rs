@@ -269,7 +269,7 @@ pub(crate) async fn stream_pk_scan(
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))?
         {
-            for (key, value) in &chunk {
+            for (key, value) in &chunk.rows {
                 if emitted + batch_builder.row_count() >= target_rows {
                     break;
                 }
@@ -343,7 +343,7 @@ pub(crate) async fn stream_index_lookup_scan(
             .map_err(|e| DataFusionError::External(Box::new(e)))?
         {
             let mut pk_batch: Vec<Key> = Vec::new();
-            for (key, _index_value) in &chunk {
+            for (key, _index_value) in &chunk.rows {
                 if emitted + batch_builder.row_count() + pk_batch.len() >= target_rows {
                     break;
                 }
@@ -371,12 +371,12 @@ pub(crate) async fn stream_index_lookup_scan(
                     .get_many(&pk_refs, flush_threshold as u32)
                     .await
                     .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                while let Some(entries) = get_stream
+                while let Some(chunk) = get_stream
                     .next_chunk()
                     .await
                     .map_err(|e| DataFusionError::External(Box::new(e)))?
                 {
-                    for (pk_key, base_value) in entries {
+                    for (pk_key, base_value) in chunk.entries {
                         let Some(base_value) = base_value else {
                             continue;
                         };
@@ -456,7 +456,7 @@ pub(crate) async fn stream_index_scan(
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))?
         {
-            for (key, index_value) in &chunk {
+            for (key, index_value) in &chunk.rows {
                 if emitted + batch_builder.row_count() >= target_rows {
                     break;
                 }
