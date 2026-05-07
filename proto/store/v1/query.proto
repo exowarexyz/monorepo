@@ -3,19 +3,21 @@ syntax = "proto3";
 package store.query.v1;
 
 import "buf/validate/validate.proto";
+import "google/protobuf/struct.proto";
 import "store/v1/common.proto";
 
 // --- Query wire types ---
 
-// Visible store sequence number plus read counters for query RPCs. On success, carried in unary
-// response metadata (`Get` / `Reduce`) or streaming trailers (`Range` / `GetMany`); also attached as a `google.rpc` error
-// detail when the RPC fails (same message shape in both cases).
-//
-// The reference RocksDB engine reports `read_bytes`: the sum of key length plus value length for
-// each entry read by the RPC (for `Get`, the looked-up key plus returned value if any).
+// Visible store sequence number plus server-defined metadata for query RPCs. On
+// success, carried in the typed response body; also attached as a `google.rpc`
+// error detail when the RPC fails (same message shape in both cases).
 message Detail {
+  // Store sequence number at which the query was evaluated. Clients can reuse
+  // this as `min_sequence_number` on later reads to preserve monotonic
+  // read-after-write/session consistency.
   uint64 sequence_number = 1;
-  map<string, uint64> read_stats = 2;
+  // Optional server-defined metadata. The built-in server leaves this empty.
+  map<string, google.protobuf.Value> extra = 2;
 }
 
 // Default when `RangeRequest.mode` is unset (proto3 implicit enum).
@@ -352,6 +354,8 @@ message GetResponse {
   reserved 1;
   // The value associated with the key; absent when the key does not exist.
   optional bytes value = 2;
+  // Query sequence and server-defined metadata for this lookup.
+  Detail detail = 3;
 }
 
 // GetMany performs batch point lookups. Results stream back as frames, each
@@ -374,14 +378,19 @@ message GetManyEntry {
 // A batch of GetMany lookup results.
 message GetManyFrame {
   repeated GetManyEntry results = 1;
+  // Running query detail after the entries in this frame have been read. For a
+  // successful stream, the last detail observed by the client is the final
+  // sequence/metadata summary.
+  Detail detail = 2;
 }
 
 // Range reads keys in lexicographic order over raw `bytes` keys.
 //
-// Semantics match `StoreEngine::range_scan`: keys satisfy `start <= key <= end` when `end` is
-// non-empty (inclusive upper bound). When `end` is empty, the upper bound is unbounded (all keys
-// `>= start`). For prefix scans, pass the lexicographic maximum key of the prefix as `end`, or
-// use an empty `end` when scanning through the end of the keyspace is intended.
+// Keys satisfy `start <= key <= end` when `end` is non-empty (inclusive upper
+// bound). When `end` is empty, the upper bound is unbounded (all keys
+// `>= start`). For prefix scans, pass the lexicographic maximum key of the
+// prefix as `end`, or use an empty `end` when scanning through the end of the
+// keyspace is intended.
 message RangeRequest {
   bytes start = 1 [(buf.validate.field).bytes.max_len = 254];
   // Empty means unbounded above.
@@ -392,10 +401,15 @@ message RangeRequest {
   optional uint64 min_sequence_number = 6;
 }
 
-// Each stream message is a batch of rows; the stream ends at HTTP END_STREAM.
-// `Detail` (sequence + read_stats) is carried only in trailers (`x-store-query-detail-bin`).
+// Each stream message is a batch of rows plus running query detail after the
+// rows in that frame have been read. For an empty result, the stream contains a
+// single frame with empty `results` and populated `detail`.
 message RangeFrame {
   repeated store.common.v1.KvEntry results = 1;
+  // Running query detail after the rows in this frame have been read. For a
+  // successful stream, the last detail observed by the client is the final
+  // sequence/metadata summary.
+  Detail detail = 2;
 }
 
 // Same key-range semantics as `RangeRequest`: inclusive `[start, end]` over raw bytes when `end` is
@@ -416,4 +430,6 @@ message ReduceResponse {
   repeated RangeReduceResult results = 1;
   // Per-group reducer results. Populated only when `group_by` is non-empty.
   repeated RangeReduceGroup groups = 2;
+  // Query sequence and server-defined metadata for this reduction.
+  Detail detail = 3;
 }

@@ -3,35 +3,61 @@
 //! Implement this trait for your backend. Errors are surfaced to clients as internal RPC failures
 //! (string message only; keep messages safe to expose if you rely on that).
 
-use bytes::Bytes;
+use std::collections::HashMap;
 
-pub type RangeScanIter<'a> = Box<dyn Iterator<Item = Result<(Bytes, Bytes), String>> + Send + 'a>;
+use bytes::Bytes;
+use futures::future::BoxFuture;
+
+pub type QueryExtra = HashMap<String, buffa_types::google::protobuf::Value>;
+pub type RangeScanCursor = Box<dyn RangeScan + Send + 'static>;
+
+#[derive(Clone, Debug, Default)]
+pub struct RangeScanBatch {
+    /// Rows read by this cursor pull.
+    pub rows: Vec<(Bytes, Bytes)>,
+    /// Backend-specific query metadata after reading these rows.
+    pub extra: QueryExtra,
+}
+
+/// Owned pull-based range cursor for query RPCs.
+///
+/// Implementations own any state needed to produce batches, allowing query
+/// handlers to pull rows lazily without borrowing the engine.
+pub trait RangeScan: Send {
+    /// Pull up to `max_items` rows. Returning an empty `rows` batch marks EOF.
+    /// `extra` is emitted with the response frame built from the same batch.
+    fn next_batch<'a>(
+        &'a mut self,
+        max_items: usize,
+    ) -> BoxFuture<'a, Result<RangeScanBatch, String>>;
+}
 
 /// Implement these operations for your store. All methods must be thread-safe.
 pub trait StoreEngine: Send + Sync + 'static {
     /// Persist key-value pairs atomically and return the new global sequence number for this write.
     fn put_batch(&self, kvs: &[(Bytes, Bytes)]) -> Result<u64, String>;
 
-    /// Fetch the value for a single key. Returns `None` when the key does not exist.
-    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, String>;
+    /// Fetch the value for a single key plus backend-specific query metadata.
+    /// Returns `None` when the key does not exist.
+    fn get(&self, key: &[u8]) -> Result<(Option<Vec<u8>>, QueryExtra), String>;
 
-    /// Keys in `[start, end]` (inclusive) when `end` is non-empty; empty `end` means unbounded
-    /// above. Matches `store.query.v1.RangeRequest` / `ReduceRequest` on the wire. `limit` caps
-    /// rows yielded.
+    /// Cursor over keys in `[start, end]` (inclusive) when `end` is non-empty;
+    /// empty `end` means unbounded above. Matches `store.query.v1.RangeRequest`
+    /// / `ReduceRequest` on the wire. `limit` caps rows yielded.
     fn range_scan(
         &self,
-        start: &[u8],
-        end: &[u8],
+        start: Bytes,
+        end: Bytes,
         limit: usize,
         forward: bool,
-    ) -> Result<RangeScanIter<'_>, String>;
+    ) -> Result<RangeScanCursor, String>;
 
-    /// Batch-get: returns `(key, Option<value>)` for each input key, preserving order.
-    fn get_many(&self, keys: &[&[u8]]) -> Result<Vec<(Vec<u8>, Option<Vec<u8>>)>, String> {
-        keys.iter()
-            .map(|k| Ok((k.to_vec(), self.get(k)?)))
-            .collect()
-    }
+    /// Batch-get plus backend-specific query metadata. Returns `(key, Option<value>)`
+    /// for each input key, preserving order.
+    fn get_many(
+        &self,
+        keys: &[&[u8]],
+    ) -> Result<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra), String>;
 
     /// Delete a batch of keys atomically. Returns the new global sequence number.
     fn delete_batch(&self, keys: &[&[u8]]) -> Result<u64, String>;
