@@ -449,44 +449,6 @@ impl PreparedCurrentBoundaryUpload {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use commonware_cryptography::Sha256;
-    use commonware_storage::merkle::mmr;
-
-    #[test]
-    fn current_boundary_upload_keys_grafted_nodes_by_grafted_space_position() {
-        let mut hasher = Sha256::default();
-        hasher.update(b"grafted-node");
-        let digest = hasher.finalize();
-
-        let ops_position = Position::new(2046);
-        let latest_location = Location::new(1024);
-        let boundary = crate::CurrentBoundaryState::<_, 32, mmr::Family> {
-            root: digest,
-            ops_root_witness: commonware_storage::qmdb::current::proof::OpsRootWitness {
-                grafted_root: digest,
-                partial_chunk: None,
-            },
-            chunks: Vec::new(),
-            grafted_nodes: vec![(ops_position, digest)],
-        };
-
-        let upload =
-            PreparedCurrentBoundaryUpload::build(latest_location, &boundary).expect("upload");
-        let grafted_position = ops_to_grafted_pos(ops_position, grafting_height_for::<32>());
-        let expected_key = encode_grafted_node_key(grafted_position, latest_location);
-        let stale_ops_key = encode_grafted_node_key(ops_position, latest_location);
-
-        assert!(upload
-            .rows
-            .iter()
-            .any(|(key, value)| key == &expected_key && value.as_slice() == digest.as_ref()));
-        assert!(!upload.rows.iter().any(|(key, _)| key == &stale_ops_key));
-    }
-}
-
 /// Pure Merkle-family extension: from existing peaks + size, fold
 /// `encoded_operations` into new leaves and compute the resulting peaks, size,
 /// root, and the full list of newly-created nodes the caller can persist.
@@ -561,4 +523,42 @@ pub(crate) fn extend_merkle_from_peaks<F: Family, H: Hasher, Op: AsRef<[u8]>>(
         root,
         new_nodes,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::Sha256;
+    use commonware_storage::merkle::mmr;
+
+    #[test]
+    fn current_boundary_upload_keys_grafted_nodes_by_grafted_space_position() {
+        let mut hasher = Sha256::default();
+        hasher.update(b"grafted-node");
+        let digest = hasher.finalize();
+
+        let ops_position = Position::new(2046);
+        let latest_location = Location::new(1024);
+        let boundary = crate::CurrentBoundaryState::<_, 32, mmr::Family> {
+            root: digest,
+            ops_root_witness: commonware_storage::qmdb::current::proof::OpsRootWitness {
+                grafted_root: digest,
+                partial_chunk: None,
+            },
+            chunks: Vec::new(),
+            grafted_nodes: vec![(ops_position, digest)],
+        };
+
+        let upload =
+            PreparedCurrentBoundaryUpload::build(latest_location, &boundary).expect("upload");
+        let grafted_position = ops_to_grafted_pos(ops_position, grafting_height_for::<32>());
+        let expected_key = encode_grafted_node_key(grafted_position, latest_location);
+        let stale_ops_key = encode_grafted_node_key(ops_position, latest_location);
+
+        assert!(upload
+            .rows
+            .iter()
+            .any(|(key, value)| key == &expected_key && value.as_slice() == digest.as_ref()));
+        assert!(!upload.rows.iter().any(|(key, _)| key == &stale_ops_key));
+    }
 }

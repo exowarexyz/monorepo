@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 use crate::proto::qmdb::v1::{
     current_key_lookup_result, CurrentKeyExclusionProof, CurrentKeyValueProof,
     CurrentKeyValueProofView, CurrentOperationRangeProof, CurrentOperationRangeProofView,

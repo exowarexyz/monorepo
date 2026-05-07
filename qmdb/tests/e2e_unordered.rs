@@ -48,8 +48,6 @@ fn update_row_cfg() -> (
     )
 }
 
-fn fixed_op_cfg() -> <FixedUnorderedBatchOperation as commonware_codec::Read>::Cfg {}
-
 fn fixed_update_row_cfg() -> (
     <Digest as commonware_codec::Read>::Cfg,
     <Digest as commonware_codec::Read>::Cfg,
@@ -250,11 +248,7 @@ async fn unordered_fixed_round_trip() {
         .await
         .expect("commit fixed upload");
 
-    let c = FixedTestUnorderedClient::from_client(
-        client.clone(),
-        fixed_op_cfg(),
-        fixed_update_row_cfg(),
-    );
+    let c = FixedTestUnorderedClient::from_client(client.clone(), (), fixed_update_row_cfg());
     let watermark = c.writer_location_watermark().await.expect("watermark");
     assert_eq!(watermark, Some(local.latest_location));
 

@@ -178,7 +178,7 @@ fn validate_recovery_input<F: Family, Op>(
 where
     Op: QmdbOperation<F> + Encode,
 {
-    if !operations.last().is_some_and(|op| op.has_floor().is_some()) {
+    if operations.last().is_none_or(|op| op.has_floor().is_none()) {
         return Err(QmdbError::CorruptData(
             "recover_boundary_state requires operations to end with a commit floor".into(),
         ));
@@ -207,7 +207,7 @@ where
         )));
     }
 
-    if !delta.last().is_some_and(|op| op.has_floor().is_some()) {
+    if delta.last().is_none_or(|op| op.has_floor().is_none()) {
         return Err(QmdbError::CorruptData(
             "recover_boundary_state requires the appended batch delta to end with a commit floor"
                 .into(),

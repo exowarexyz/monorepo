@@ -154,12 +154,6 @@ fn update_row_cfg() -> (
     )
 }
 
-fn fixed_op_cfg<F: Family>() -> <FixedBatchOperation<F> as commonware_codec::Read>::Cfg
-where
-    FixedBatchOperation<F>: commonware_codec::Read<Cfg = ()>,
-{
-}
-
 fn fixed_update_row_cfg() -> (
     <Digest as commonware_codec::Read>::Cfg,
     <Digest as commonware_codec::Read>::Cfg,
@@ -419,7 +413,7 @@ async fn ordered_fixed_round_trip() {
 
     let c = FixedTestOrderedClient::<mmr::Family>::from_client(
         client.clone(),
-        fixed_op_cfg::<mmr::Family>(),
+        (),
         fixed_update_row_cfg(),
     );
     let watermark = c.writer_location_watermark().await.expect("watermark");

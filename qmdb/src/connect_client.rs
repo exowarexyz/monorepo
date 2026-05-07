@@ -1067,6 +1067,7 @@ fn span_contains_key(span_start: &[u8], span_end: &[u8], key: &[u8]) -> bool {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn verify_get_range_from_proto<F, H, K, V, const N: usize, E>(
     response: &GetRangeResponse,
     root: &H::Digest,
@@ -1152,12 +1153,12 @@ where
             value_cfg,
         )?;
         match (end_key, boundary) {
-            (Some(end_key), ExclusionBoundary::Span { start, end }) => {
-                if !span_contains_key(&start, &end, end_key) && end.as_slice() != end_key {
-                    return Err(QmdbError::ProofVerification {
-                        kind: crate::ProofKind::CurrentKeyExclusion,
-                    });
-                }
+            (Some(end_key), ExclusionBoundary::Span { start, end })
+                if !span_contains_key(&start, &end, end_key) && end.as_slice() != end_key =>
+            {
+                return Err(QmdbError::ProofVerification {
+                    kind: crate::ProofKind::CurrentKeyExclusion,
+                });
             }
             (None, ExclusionBoundary::Span { end, .. }) if end.as_slice() > start_key => {
                 return Err(QmdbError::ProofVerification {

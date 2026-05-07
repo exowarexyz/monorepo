@@ -1150,7 +1150,7 @@ where
         let client = self.client.clone();
         async move {
             let tip = Location::new(request.tip);
-            let end_key = request.end_key.as_deref();
+            let end_key = request.end_key;
             let proof = client
                 .key_range_proof_raw_at(tip, request.start_key, end_key, request.limit)
                 .await

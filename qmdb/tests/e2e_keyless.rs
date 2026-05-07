@@ -233,9 +233,9 @@ where
     let peaks = checkpoint
         .reconstruct_peaks::<commonware_cryptography::Sha256>()
         .expect("reconstruct_peaks");
-    let mut hasher = commonware_storage::qmdb::hasher::<commonware_cryptography::Sha256>();
+    let hasher = commonware_storage::qmdb::hasher::<commonware_cryptography::Sha256>();
     let reconstructed_root = commonware_storage::merkle::hasher::Hasher::<F>::root(
-        &mut hasher,
+        &hasher,
         checkpoint.proof.leaves,
         0,
         peaks.iter().map(|(_, _, digest)| digest),

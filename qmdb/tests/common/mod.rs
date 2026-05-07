@@ -327,18 +327,15 @@ pub struct StaticOperationLogService {
 }
 
 impl OperationLogService for StaticOperationLogService {
-    fn get_operation_range(
+    async fn get_operation_range(
         &self,
         _ctx: Context,
         _request: buffa::view::OwnedView<GetOperationRangeRequestView<'static>>,
-    ) -> impl std::future::Future<Output = Result<(GetOperationRangeResponse, Context), ConnectError>>
-           + Send {
-        async move {
-            Err(ConnectError::new(
-                ErrorCode::Unimplemented,
-                "not implemented",
-            ))
-        }
+    ) -> Result<(GetOperationRangeResponse, Context), ConnectError> {
+        Err(ConnectError::new(
+            ErrorCode::Unimplemented,
+            "not implemented",
+        ))
     }
 
     fn subscribe(
