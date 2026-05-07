@@ -9,7 +9,7 @@ use std::num::NonZeroU64;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
-use commonware_storage::mmr::Location;
+use commonware_storage::merkle::{mmr, Location, Proof};
 use commonware_storage::qmdb::any::ordered::variable::Operation as QmdbOperation;
 use commonware_storage::qmdb::current::ordered::variable::Db as LocalQmdbDb;
 use commonware_storage::translator::TwoCap;
@@ -20,26 +20,18 @@ use exoware_sdk::StoreClient;
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
-type BatchProof = commonware_storage::mmr::Proof<Digest>;
-type BatchOperation = QmdbOperation<commonware_storage::mmr::Family, Vec<u8>, Vec<u8>>;
-type TestOrderedClient = OrderedClient<Sha256, Vec<u8>, Vec<u8>, N>;
-type TestOrderedWriter = OrderedWriter<Sha256, Vec<u8>, Vec<u8>, N>;
-type LocalDb = LocalQmdbDb<
-    commonware_storage::mmr::Family,
-    cw_tokio::Context,
-    Vec<u8>,
-    Vec<u8>,
-    Sha256,
-    TwoCap,
-    N,
->;
+type BatchProof = Proof<mmr::Family, Digest>;
+type BatchOperation = QmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>;
+type TestOrderedClient = OrderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N>;
+type TestOrderedWriter = OrderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N>;
+type LocalDb = LocalQmdbDb<mmr::Family, cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>;
 
 async fn boundary_from_local_db(
     db: &LocalDb,
     previous_operations: Option<&[BatchOperation]>,
     operations: &[BatchOperation],
-) -> CurrentBoundaryState<Digest, N> {
-    recover_boundary_state::<Sha256, _, N, _, _>(
+) -> CurrentBoundaryState<Digest, N, mmr::Family> {
+    recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
         previous_operations,
         operations,
         db.root(),
@@ -95,9 +87,9 @@ fn update_row_cfg() -> (
 }
 
 struct LocalReference {
-    latest_location: Location,
+    latest_location: Location<mmr::Family>,
     operations: Vec<BatchOperation>,
-    current_boundary: CurrentBoundaryState<Digest, N>,
+    current_boundary: CurrentBoundaryState<Digest, N, mmr::Family>,
     values: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 }
 

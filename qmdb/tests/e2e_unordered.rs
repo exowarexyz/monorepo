@@ -8,7 +8,7 @@ use std::num::NonZeroU64;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
-use commonware_storage::mmr::Location;
+use commonware_storage::merkle::{mmr, Location, Proof};
 use commonware_storage::qmdb::any::unordered::variable::Db as LocalUnorderedDb;
 use commonware_storage::qmdb::any::unordered::variable::Operation as UnorderedQmdbOperation;
 use commonware_storage::translator::TwoCap;
@@ -16,18 +16,10 @@ use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{UnorderedClient, UnorderedWriter, MAX_OPERATION_SIZE};
 
 type Digest = commonware_cryptography::sha256::Digest;
-type BatchProof = commonware_storage::mmr::Proof<Digest>;
-type UnorderedBatchOperation =
-    UnorderedQmdbOperation<commonware_storage::mmr::Family, Vec<u8>, Vec<u8>>;
-type TestUnorderedClient = UnorderedClient<Sha256, Vec<u8>, Vec<u8>>;
-type LocalDb = LocalUnorderedDb<
-    commonware_storage::mmr::Family,
-    cw_tokio::Context,
-    Vec<u8>,
-    Vec<u8>,
-    Sha256,
-    TwoCap,
->;
+type BatchProof = Proof<mmr::Family, Digest>;
+type UnorderedBatchOperation = UnorderedQmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>;
+type TestUnorderedClient = UnorderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>>;
+type LocalDb = LocalUnorderedDb<mmr::Family, cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap>;
 
 fn op_cfg() -> <UnorderedBatchOperation as commonware_codec::Read>::Cfg {
     (
@@ -47,7 +39,7 @@ fn update_row_cfg() -> (
 }
 
 struct LocalReference {
-    latest_location: Location,
+    latest_location: Location<mmr::Family>,
     operations: Vec<UnorderedBatchOperation>,
     values: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 }
@@ -118,7 +110,8 @@ async fn unordered_round_trip() {
     let (_dir, _server, client) = common::local_store_client().await;
     let local = build_local_db().await;
 
-    let writer: UnorderedWriter<Sha256, Vec<u8>, Vec<u8>> = UnorderedWriter::empty(client.clone());
+    let writer: UnorderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>> =
+        UnorderedWriter::empty(client.clone());
     common::commit_unordered_upload(&client, &writer, &local.operations)
         .await
         .expect("commit upload");

@@ -10,7 +10,7 @@ use std::time::Duration;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
-use commonware_storage::mmr::Location;
+use commonware_storage::merkle::{mmr, Location, Proof};
 use commonware_storage::qmdb::any::ordered::variable::Operation as QmdbOperation;
 use commonware_storage::qmdb::{
     any::ordered::Update, current::ordered::variable::Db as LocalQmdbDb,
@@ -18,11 +18,15 @@ use commonware_storage::qmdb::{
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
-    ordered_connect_stack, recover_boundary_state, CurrentBoundaryState, OrderedClient,
-    OrderedRangeConnectClient, OrderedWriter, QmdbError, RangeSubscribeProof, MAX_OPERATION_SIZE,
+    ordered_connect_stack, recover_boundary_state, CurrentBoundaryState, CurrentOperationClient,
+    OperationLogClient, OperationLogSubscribeProof, OrderedClient, OrderedWriter, QmdbError,
+    MAX_OPERATION_SIZE,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::qmdb::v1::SubscribeRequest as ProtoSubscribeRequest;
+use exoware_sdk::qmdb::v1::{
+    GetCurrentOperationRangeRequest as ProtoGetCurrentOperationRangeRequest,
+    SubscribeRequest as ProtoSubscribeRequest,
+};
 use exoware_sdk::store::common::v1::{
     bytes_filter as proto_bytes_filter, BytesFilter as ProtoBytesFilter,
 };
@@ -30,37 +34,35 @@ use exoware_sdk::StoreClient;
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
-type BatchProof = commonware_storage::mmr::Proof<Digest>;
-type BatchOperation = QmdbOperation<commonware_storage::mmr::Family, Vec<u8>, Vec<u8>>;
-type TestOrderedClient = OrderedClient<Sha256, Vec<u8>, Vec<u8>, N>;
-type LocalDb = LocalQmdbDb<
-    commonware_storage::mmr::Family,
-    cw_tokio::Context,
-    Vec<u8>,
-    Vec<u8>,
-    Sha256,
-    TwoCap,
-    N,
->;
+type BatchProof = Proof<mmr::Family, Digest>;
+type BatchOperation = QmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>;
+type TestOrderedClient = OrderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N>;
+type LocalDb = LocalQmdbDb<mmr::Family, cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>;
 
 async fn spawn_qmdb_server(
     client: Arc<TestOrderedClient>,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_range_service(ordered_connect_stack(client)).await
+    common::spawn_operation_log_service(ordered_connect_stack(client)).await
 }
 
 fn validated_client(
     base: &str,
-) -> OrderedRangeConnectClient<PreferZstdHttpClient, Sha256, Vec<u8>, Vec<u8>> {
-    OrderedRangeConnectClient::plaintext(base, op_cfg())
+) -> OperationLogClient<PreferZstdHttpClient, mmr::Family, Sha256, BatchOperation> {
+    OperationLogClient::plaintext(base, op_cfg())
+}
+
+fn current_operation_client(
+    base: &str,
+) -> CurrentOperationClient<PreferZstdHttpClient, mmr::Family, Sha256, BatchOperation, N> {
+    CurrentOperationClient::plaintext(base, op_cfg())
 }
 
 async fn boundary_from_local_db(
     db: &LocalDb,
     previous_operations: Option<&[BatchOperation]>,
     operations: &[BatchOperation],
-) -> CurrentBoundaryState<Digest, N> {
-    recover_boundary_state::<Sha256, _, N, _, _>(
+) -> CurrentBoundaryState<Digest, N, mmr::Family> {
+    recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
         previous_operations,
         operations,
         db.root(),
@@ -110,7 +112,8 @@ fn update_row_cfg() -> (
 
 struct LocalBatch {
     operations: Vec<BatchOperation>,
-    current_boundary: CurrentBoundaryState<Digest, N>,
+    operation_root: Digest,
+    current_boundary: CurrentBoundaryState<Digest, N, mmr::Family>,
 }
 
 async fn build_local_batch() -> LocalBatch {
@@ -150,12 +153,14 @@ async fn build_local_batch() -> LocalBatch {
                 .await
                 .expect("proof");
             let boundary = boundary_from_local_db(&db, None, &ops).await;
+            let operation_root = db.ops_root();
 
             db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
 
             LocalBatch {
                 operations: ops,
+                operation_root,
                 current_boundary: boundary,
             }
         })
@@ -165,10 +170,49 @@ async fn build_local_batch() -> LocalBatch {
 }
 
 async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
-    let writer: OrderedWriter<Sha256, Vec<u8>, Vec<u8>, N> = OrderedWriter::empty(client.clone());
+    let writer: OrderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
+        OrderedWriter::empty(client.clone());
     common::commit_ordered_upload(client, &writer, &batch.operations, &batch.current_boundary)
         .await
         .expect("commit upload");
+}
+
+#[tokio::test]
+async fn ordered_current_operation_range_connect_emits_verifiable_proof() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_local_batch().await;
+    commit_upload(&store_client, &local).await;
+
+    let ordered_client = Arc::new(TestOrderedClient::from_client(
+        store_client.clone(),
+        op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client).await;
+    let current = current_operation_client(&qmdb_url);
+    let proof = current
+        .get_current_operation_range(
+            ProtoGetCurrentOperationRangeRequest {
+                tip: (local.operations.len() - 1) as u64,
+                start_location: 0,
+                max_locations: local.operations.len() as u32,
+                ..Default::default()
+            },
+            &local.current_boundary.root,
+        )
+        .await
+        .expect("get current operation range");
+    assert_eq!(proof.root, local.current_boundary.root);
+    assert_eq!(proof.start_location, Location::new(0));
+    assert_eq!(proof.chunks.len(), 1);
+    assert_eq!(
+        proof
+            .operations
+            .into_iter()
+            .map(|(_, operation)| operation)
+            .collect::<Vec<_>>(),
+        local.operations
+    );
 }
 
 fn match_exact(key: &[u8]) -> ProtoBytesFilter {
@@ -195,17 +239,19 @@ fn match_regex(regex: &str) -> ProtoBytesFilter {
 fn all_operations_for_key(
     operations: &[BatchOperation],
     key: &[u8],
-) -> Vec<(Location, BatchOperation)> {
+) -> Vec<(Location<mmr::Family>, BatchOperation)> {
     operations
         .iter()
         .enumerate()
         .filter_map(|(index, operation)| match operation {
-            BatchOperation::Delete(found) if found.as_slice() == key => {
-                Some((Location::new(index as u64), operation.clone()))
-            }
-            BatchOperation::Update(Update { key: found, .. }) if found.as_slice() == key => {
-                Some((Location::new(index as u64), operation.clone()))
-            }
+            BatchOperation::Delete(found) if found.as_slice() == key => Some((
+                Location::<mmr::Family>::new(index as u64),
+                operation.clone(),
+            )),
+            BatchOperation::Update(Update { key: found, .. }) if found.as_slice() == key => Some((
+                Location::<mmr::Family>::new(index as u64),
+                operation.clone(),
+            )),
             _ => None,
         })
         .collect()
@@ -231,19 +277,22 @@ async fn ordered_range_connect_subscribe_emits_verifiable_range_proof() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     commit_upload(&store_client, &local).await;
 
-    let frame: RangeSubscribeProof<Digest, BatchOperation> =
-        tokio::time::timeout(Duration::from_secs(5), stream.message())
-            .await
-            .expect("timeout")
-            .expect("stream result")
-            .expect("stream frame");
+    let frame: OperationLogSubscribeProof<Digest, BatchOperation, mmr::Family> =
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            stream.message_with_root(common::trusted_root(local.operation_root)),
+        )
+        .await
+        .expect("timeout")
+        .expect("stream result")
+        .expect("stream frame");
 
     assert!(frame.resume_sequence_number > 0);
-    let expected: Vec<(Location, BatchOperation)> = local
+    let expected: Vec<(Location<mmr::Family>, BatchOperation)> = local
         .operations
         .iter()
         .enumerate()
-        .map(|(i, op)| (Location::new(i as u64), op.clone()))
+        .map(|(i, op)| (Location::<mmr::Family>::new(i as u64), op.clone()))
         .collect();
     assert_eq!(frame.operations, expected);
 }
@@ -260,7 +309,7 @@ async fn ordered_range_connect_client_rejects_invalid_streamed_proof() {
         update_row_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client).await;
-    let rpc = common::rpc_client(&qmdb_url);
+    let rpc = common::operation_log_rpc_client(&qmdb_url);
     let mut raw_stream = rpc
         .subscribe(ProtoSubscribeRequest {
             since_sequence_number: Some(1),
@@ -276,7 +325,7 @@ async fn ordered_range_connect_client_rejects_invalid_streamed_proof() {
         .to_owned_message();
 
     let (_static_server, static_url) =
-        common::spawn_static_range_service(common::StaticRangeService {
+        common::spawn_static_operation_log_service(common::StaticOperationLogService {
             subscribe_response: common::tamper_subscribe_response(raw_response),
         })
         .await;
@@ -287,7 +336,7 @@ async fn ordered_range_connect_client_rejects_invalid_streamed_proof() {
         .expect("subscribe");
 
     let err = stream
-        .message()
+        .message_with_root(common::trusted_root(local.operation_root))
         .await
         .expect_err("tampered streamed proof should fail");
     assert!(matches!(
@@ -321,12 +370,15 @@ async fn ordered_range_connect_subscribe_emits_multi_proof_for_matching_keys() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     commit_upload(&store_client, &local).await;
 
-    let frame: RangeSubscribeProof<Digest, BatchOperation> =
-        tokio::time::timeout(Duration::from_secs(5), stream.message())
-            .await
-            .expect("timeout")
-            .expect("stream result")
-            .expect("stream frame");
+    let frame: OperationLogSubscribeProof<Digest, BatchOperation, mmr::Family> =
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            stream.message_with_root(common::trusted_root(local.operation_root)),
+        )
+        .await
+        .expect("timeout")
+        .expect("stream result")
+        .expect("stream frame");
 
     let expected = all_operations_for_key(&local.operations, b"alpha");
     assert!(!expected.is_empty());
@@ -357,11 +409,14 @@ async fn ordered_range_connect_subscribe_replays_since_cursor() {
         .await
         .expect("subscribe");
 
-    let frame = tokio::time::timeout(Duration::from_secs(5), stream.message())
-        .await
-        .expect("timeout")
-        .expect("stream result")
-        .expect("stream frame");
+    let frame = tokio::time::timeout(
+        Duration::from_secs(5),
+        stream.message_with_root(common::trusted_root(local.operation_root)),
+    )
+    .await
+    .expect("timeout")
+    .expect("stream result")
+    .expect("stream frame");
 
     let expected = all_operations_for_key(&local.operations, b"alpha");
     assert!(!expected.is_empty());
@@ -398,16 +453,22 @@ async fn ordered_range_connect_subscribe_matches_prefix_and_regex_filters() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     commit_upload(&store_client, &local).await;
 
-    let prefix_frame = tokio::time::timeout(Duration::from_secs(5), prefix_stream.message())
-        .await
-        .expect("prefix timeout")
-        .expect("prefix stream result")
-        .expect("prefix stream frame");
-    let regex_frame = tokio::time::timeout(Duration::from_secs(5), regex_stream.message())
-        .await
-        .expect("regex timeout")
-        .expect("regex stream result")
-        .expect("regex stream frame");
+    let prefix_frame = tokio::time::timeout(
+        Duration::from_secs(5),
+        prefix_stream.message_with_root(common::trusted_root(local.operation_root)),
+    )
+    .await
+    .expect("prefix timeout")
+    .expect("prefix stream result")
+    .expect("prefix stream frame");
+    let regex_frame = tokio::time::timeout(
+        Duration::from_secs(5),
+        regex_stream.message_with_root(common::trusted_root(local.operation_root)),
+    )
+    .await
+    .expect("regex timeout")
+    .expect("regex stream result")
+    .expect("regex stream frame");
 
     let alpha = all_operations_for_key(&local.operations, b"alpha");
     let beta = all_operations_for_key(&local.operations, b"beta");
@@ -443,12 +504,15 @@ async fn ordered_range_connect_subscribe_filters_by_value_regex_without_key() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     commit_upload(&store_client, &local).await;
 
-    let frame: RangeSubscribeProof<Digest, BatchOperation> =
-        tokio::time::timeout(Duration::from_secs(5), stream.message())
-            .await
-            .expect("timeout")
-            .expect("stream result")
-            .expect("stream frame");
+    let frame: OperationLogSubscribeProof<Digest, BatchOperation, mmr::Family> =
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            stream.message_with_root(common::trusted_root(local.operation_root)),
+        )
+        .await
+        .expect("timeout")
+        .expect("stream result")
+        .expect("stream frame");
 
     let expected = all_operations_for_key(&local.operations, b"alpha");
     assert!(!expected.is_empty());
@@ -481,11 +545,14 @@ async fn ordered_range_connect_subscribe_intersects_key_and_value_filters() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     commit_upload(&store_client, &local).await;
 
-    let frame = tokio::time::timeout(Duration::from_secs(5), stream.message())
-        .await
-        .expect("timeout")
-        .expect("stream result")
-        .expect("stream frame");
+    let frame = tokio::time::timeout(
+        Duration::from_secs(5),
+        stream.message_with_root(common::trusted_root(local.operation_root)),
+    )
+    .await
+    .expect("timeout")
+    .expect("stream result")
+    .expect("stream frame");
 
     let expected = all_operations_for_key(&local.operations, b"beta");
     assert!(!expected.is_empty());

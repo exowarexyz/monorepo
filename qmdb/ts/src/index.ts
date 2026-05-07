@@ -9,6 +9,7 @@ export {
   type OrderedOperation,
   type OrderedQmdbClientOptions,
   type OrderedSubscribeProof,
+  type VerifiedCurrentOperationRangeProof,
   type VerifiedCurrentKeyLookupProof,
   type VerifiedCurrentKeyLookupResult,
   type VerifiedCurrentKeyRangeEntry,

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
-use commonware_storage::mmr::Location;
+use commonware_storage::merkle::{mmr, Location, Proof};
 use commonware_storage::qmdb::any::unordered::variable::Db as LocalUnorderedDb;
 use commonware_storage::qmdb::any::unordered::variable::Operation as UnorderedQmdbOperation;
 use commonware_storage::translator::TwoCap;
@@ -21,19 +21,11 @@ use exoware_sdk::StoreClient;
 use common::retry;
 
 type Digest = commonware_cryptography::sha256::Digest;
-type BatchProof = commonware_storage::mmr::Proof<Digest>;
-type UnorderedBatchOperation =
-    UnorderedQmdbOperation<commonware_storage::mmr::Family, Vec<u8>, Vec<u8>>;
-type TestReader = UnorderedClient<Sha256, Vec<u8>, Vec<u8>>;
-type TestWriter = UnorderedWriter<Sha256, Vec<u8>, Vec<u8>>;
-type LocalDb = LocalUnorderedDb<
-    commonware_storage::mmr::Family,
-    cw_tokio::Context,
-    Vec<u8>,
-    Vec<u8>,
-    Sha256,
-    TwoCap,
->;
+type BatchProof = Proof<mmr::Family, Digest>;
+type UnorderedBatchOperation = UnorderedQmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>;
+type TestReader = UnorderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>>;
+type TestWriter = UnorderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>>;
+type LocalDb = LocalUnorderedDb<mmr::Family, cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap>;
 
 fn op_cfg() -> <UnorderedBatchOperation as commonware_codec::Read>::Cfg {
     (
@@ -61,7 +53,7 @@ fn fresh_writer(c: StoreClient) -> TestWriter {
 }
 
 struct LocalReference {
-    latest_location: Location,
+    latest_location: Location<mmr::Family>,
     root: Digest,
     operations: Vec<UnorderedBatchOperation>,
 }
@@ -101,7 +93,7 @@ async fn build_local_reference(batches: Vec<WriteBatch>) -> LocalReference {
             let latest = db.bounds().await.end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
             let (_proof, ops): (BatchProof, Vec<UnorderedBatchOperation>) = db
-                .historical_proof(latest + 1, Location::new(0), n)
+                .historical_proof(latest + 1, Location::<mmr::Family>::new(0), n)
                 .await
                 .expect("proof");
             let root = db.root();

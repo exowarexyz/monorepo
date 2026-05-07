@@ -8,15 +8,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use commonware_runtime::{deterministic, Runner as _};
-use commonware_storage::mmr::Location;
+use commonware_storage::merkle::{mmr, Location};
 use commonware_storage::qmdb::immutable::variable::{
     Db as Immutable, Operation as ImmutableOperation,
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
-    immutable_range_connect_stack, ImmutableClient, ImmutableRangeConnectClient, ImmutableWriter,
-    QmdbError, RangeSubscribeProof,
+    immutable_operation_log_connect_stack, ImmutableClient, ImmutableWriter, OperationLogClient,
+    OperationLogSubscribeProof, QmdbError,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
 use exoware_sdk::qmdb::v1::SubscribeRequest as ProtoSubscribeRequest;
@@ -24,7 +24,7 @@ use exoware_sdk::StoreClient;
 
 type Digest = commonware_cryptography::sha256::Digest;
 type LocalDb = Immutable<
-    commonware_storage::mmr::Family,
+    mmr::Family,
     deterministic::Context,
     FixedBytes<32>,
     Vec<u8>,
@@ -32,24 +32,24 @@ type LocalDb = Immutable<
     TwoCap,
 >;
 type TestImmutableClient =
-    ImmutableClient<commonware_cryptography::Sha256, FixedBytes<32>, Vec<u8>>;
-type BatchOperation = ImmutableOperation<commonware_storage::mmr::Family, FixedBytes<32>, Vec<u8>>;
+    ImmutableClient<mmr::Family, commonware_cryptography::Sha256, FixedBytes<32>, Vec<u8>>;
+type BatchOperation = ImmutableOperation<mmr::Family, FixedBytes<32>, Vec<u8>>;
 
 async fn spawn_qmdb_server(
     client: Arc<TestImmutableClient>,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_range_service(immutable_range_connect_stack(client)).await
+    common::spawn_operation_log_service(immutable_operation_log_connect_stack(client)).await
 }
 
 fn validated_client(
     base: &str,
-) -> ImmutableRangeConnectClient<
+) -> OperationLogClient<
     PreferZstdHttpClient,
+    mmr::Family,
     commonware_cryptography::Sha256,
-    FixedBytes<32>,
-    Vec<u8>,
+    BatchOperation,
 > {
-    ImmutableRangeConnectClient::plaintext(base, ((), ((0..=10000).into(), ())))
+    OperationLogClient::plaintext(base, ((), ((0..=10000).into(), ())))
 }
 
 struct LocalBatch {
@@ -103,8 +103,12 @@ async fn build_local_batch() -> LocalBatch {
 }
 
 async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
-    let writer: ImmutableWriter<commonware_cryptography::Sha256, FixedBytes<32>, Vec<u8>> =
-        ImmutableWriter::empty(client.clone());
+    let writer: ImmutableWriter<
+        mmr::Family,
+        commonware_cryptography::Sha256,
+        FixedBytes<32>,
+        Vec<u8>,
+    > = ImmutableWriter::empty(client.clone());
     common::commit_immutable_upload(client, &writer, &batch.operations)
         .await
         .expect("commit upload");
@@ -130,16 +134,19 @@ async fn immutable_connect_subscribe_emits_verifiable_multi_proof() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     commit_upload(&store_client, &local).await;
 
-    let frame: RangeSubscribeProof<Digest, BatchOperation> =
-        tokio::time::timeout(Duration::from_secs(5), stream.message())
-            .await
-            .expect("timeout")
-            .expect("stream result")
-            .expect("stream frame");
+    let frame: OperationLogSubscribeProof<Digest, BatchOperation, mmr::Family> =
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            stream.message_with_root(common::trusted_root(local.root)),
+        )
+        .await
+        .expect("timeout")
+        .expect("stream result")
+        .expect("stream frame");
 
     assert!(frame.resume_sequence_number > 0);
     assert_eq!(frame.root, local.root);
-    let expected: Vec<(Location, BatchOperation)> = local
+    let expected: Vec<(Location<mmr::Family>, BatchOperation)> = local
         .operations
         .iter()
         .enumerate()
@@ -160,7 +167,7 @@ async fn immutable_connect_client_rejects_invalid_streamed_proof() {
         ((), ((0..=10000).into(), ())),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(immutable_client).await;
-    let rpc = common::rpc_client(&qmdb_url);
+    let rpc = common::operation_log_rpc_client(&qmdb_url);
     let mut raw_stream = rpc
         .subscribe(ProtoSubscribeRequest {
             since_sequence_number: Some(1),
@@ -176,7 +183,7 @@ async fn immutable_connect_client_rejects_invalid_streamed_proof() {
         .to_owned_message();
 
     let (_static_server, static_url) =
-        common::spawn_static_range_service(common::StaticRangeService {
+        common::spawn_static_operation_log_service(common::StaticOperationLogService {
             subscribe_response: common::tamper_subscribe_response(raw_response),
         })
         .await;
@@ -187,7 +194,7 @@ async fn immutable_connect_client_rejects_invalid_streamed_proof() {
         .expect("subscribe");
 
     let err = stream
-        .message()
+        .message_with_root(common::trusted_root(local.root))
         .await
         .expect_err("tampered streamed proof should fail");
     assert!(matches!(

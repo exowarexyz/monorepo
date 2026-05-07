@@ -18,7 +18,7 @@ use std::num::NonZeroU64;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::{buffer::paged::CacheRef, Metrics as _, Runner as _};
-use commonware_storage::mmr::Location;
+use commonware_storage::merkle::{mmr, Location};
 use commonware_storage::qmdb::{
     any::ordered::variable::Operation as OrderedOp,
     current::ordered::variable::Db as LocalOrderedDb,
@@ -31,16 +31,8 @@ use exoware_qmdb::{
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
-type BatchOp = OrderedOp<commonware_storage::mmr::Family, Vec<u8>, Vec<u8>>;
-type LocalDb = LocalOrderedDb<
-    commonware_storage::mmr::Family,
-    cw_tokio::Context,
-    Vec<u8>,
-    Vec<u8>,
-    Sha256,
-    TwoCap,
-    N,
->;
+type BatchOp = OrderedOp<mmr::Family, Vec<u8>, Vec<u8>>;
+type LocalDb = LocalOrderedDb<mmr::Family, cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>;
 
 /// Each batch appends 3 fresh writes and rewrites the key 3 counter-positions
 /// behind. With `N = 32` the bitmap chunk spans 256 bits; the inactivity floor
@@ -49,18 +41,18 @@ type LocalDb = LocalOrderedDb<
 const BATCHES: u64 = 150;
 
 struct BatchOutcome {
-    watermark: Location,
+    watermark: Location<mmr::Family>,
     root: Digest,
     delta_ops: Vec<BatchOp>,
-    boundary: CurrentBoundaryState<Digest, N>,
+    boundary: CurrentBoundaryState<Digest, N, mmr::Family>,
 }
 
 async fn boundary_from_db(
     db: &LocalDb,
     previous_ops: Option<&[BatchOp]>,
     operations: &[BatchOp],
-) -> CurrentBoundaryState<Digest, N> {
-    recover_boundary_state::<Sha256, _, N, _, _>(
+) -> CurrentBoundaryState<Digest, N, mmr::Family> {
+    recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
         previous_ops,
         operations,
         db.root(),
@@ -142,12 +134,14 @@ async fn mirror_ordered_prune_past_chunk_zero() {
                 // historical operation log intact for this mirror test while
                 // allowing the current bitmap/grafted overlay to prune as far
                 // as the sync boundary permits.
-                db.prune(Location::new(0)).await.expect("prune current");
+                db.prune(Location::<mmr::Family>::new(0))
+                    .await
+                    .expect("prune current");
 
                 let latest = db.bounds().await.end - 1;
                 let total = NonZeroU64::new(*latest + 1).expect("non-zero");
                 let (_proof, cumulative) = db
-                    .ops_historical_proof(latest + 1, Location::new(0), total)
+                    .ops_historical_proof(latest + 1, Location::<mmr::Family>::new(0), total)
                     .await
                     .expect("ops_historical_proof");
                 let previous_slice = if previous_ops.is_empty() {
@@ -173,7 +167,7 @@ async fn mirror_ordered_prune_past_chunk_zero() {
             let chunk_zero_pruned = {
                 let mut hasher = Sha256::default();
                 match db
-                    .range_proof(&mut hasher, Location::new(0), NZU64!(1))
+                    .range_proof(&mut hasher, Location::<mmr::Family>::new(0), NZU64!(1))
                     .await
                 {
                     Err(e) => e.to_string().contains("operation pruned"),
@@ -202,18 +196,20 @@ async fn mirror_ordered_prune_past_chunk_zero() {
     // when it was last published; the server-side masking in
     // `load_bitmap_chunk` must fold that bit to 0 for the root recomputation
     // to match.
-    let writer: OrderedWriter<Sha256, Vec<u8>, Vec<u8>, N> = OrderedWriter::empty(client.clone());
-    let reader: OrderedClient<Sha256, Vec<u8>, Vec<u8>, N> = OrderedClient::from_client(
-        client.clone(),
-        (
-            ((0..=MAX_OPERATION_SIZE).into(), ()),
-            ((0..=MAX_OPERATION_SIZE).into(), ()),
-        ),
-        (
-            ((0..=MAX_OPERATION_SIZE).into(), ()),
-            ((0..=MAX_OPERATION_SIZE).into(), ()),
-        ),
-    );
+    let writer: OrderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
+        OrderedWriter::empty(client.clone());
+    let reader: OrderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
+        OrderedClient::from_client(
+            client.clone(),
+            (
+                ((0..=MAX_OPERATION_SIZE).into(), ()),
+                ((0..=MAX_OPERATION_SIZE).into(), ()),
+            ),
+            (
+                ((0..=MAX_OPERATION_SIZE).into(), ()),
+                ((0..=MAX_OPERATION_SIZE).into(), ()),
+            ),
+        );
 
     for outcome in &batches {
         common::commit_ordered_upload(&client, &writer, &outcome.delta_ops, &outcome.boundary)

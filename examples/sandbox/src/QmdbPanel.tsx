@@ -264,6 +264,7 @@ export function QmdbPanel({
             valueFilters: valueFilter ? [valueFilter] : [],
             sinceSequenceNumber: since,
           },
+          () => parseHexRoot(expectedCurrentRoot),
           { signal: controller.signal },
         )) {
           setEvents((previous) => [proof, ...previous].slice(0, MAX_EVENTS));
@@ -584,11 +585,12 @@ export function QmdbPanel({
                     <p>
                       <strong>Resume Sequence:</strong> {event.resumeSequenceNumber.toString()}
                       {' · '}
+                      <strong>Tip:</strong> {event.tip.toString()}
+                      {' · '}
                       <strong>Matched:</strong> {ops.length}
                       {' · '}
                       <strong>Locations:</strong> {locationRange}
                     </p>
-                    <p><strong>Historical Root:</strong> {formatBytes(event.root)}</p>
                     {ops.length > 0 && (
                       <div className="result-list">
                         {ops.map((op, opIndex) => (

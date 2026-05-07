@@ -10,7 +10,7 @@ use axum::{routing::get, Router};
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
-use commonware_storage::mmr::Location;
+use commonware_storage::merkle::{mmr, Location, Proof};
 use commonware_storage::qmdb::any::ordered::variable::Operation as QmdbOperation;
 use commonware_storage::qmdb::{
     any::ordered::Update, current::ordered::variable::Db as LocalQmdbDb,
@@ -36,18 +36,10 @@ use exoware_sdk::StoreClient;
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
-type BatchProof = commonware_storage::mmr::Proof<Digest>;
-type BatchOperation = QmdbOperation<commonware_storage::mmr::Family, Vec<u8>, Vec<u8>>;
-type TestOrderedClient = OrderedClient<Sha256, Vec<u8>, Vec<u8>, N>;
-type LocalDb = LocalQmdbDb<
-    commonware_storage::mmr::Family,
-    cw_tokio::Context,
-    Vec<u8>,
-    Vec<u8>,
-    Sha256,
-    TwoCap,
-    N,
->;
+type BatchProof = Proof<mmr::Family, Digest>;
+type BatchOperation = QmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>;
+type TestOrderedClient = OrderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N>;
+type LocalDb = LocalQmdbDb<mmr::Family, cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>;
 
 async fn health() -> &'static str {
     "ok"
@@ -105,7 +97,7 @@ fn range_rpc_client(base: &str) -> OrderedKeyRangeServiceClient<PreferZstdHttpCl
 
 fn validated_client(
     base: &str,
-) -> OrderedConnectClient<PreferZstdHttpClient, Sha256, Vec<u8>, Vec<u8>, N> {
+) -> OrderedConnectClient<PreferZstdHttpClient, mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> {
     OrderedConnectClient::plaintext(base, op_cfg())
 }
 
@@ -113,8 +105,8 @@ async fn boundary_from_local_db(
     db: &LocalDb,
     previous_operations: Option<&[BatchOperation]>,
     operations: &[BatchOperation],
-) -> CurrentBoundaryState<Digest, N> {
-    recover_boundary_state::<Sha256, _, N, _, _>(
+) -> CurrentBoundaryState<Digest, N, mmr::Family> {
+    recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
         previous_operations,
         operations,
         db.root(),
@@ -163,9 +155,9 @@ fn update_row_cfg() -> (
 }
 
 struct LocalBatch {
-    latest_location: Location,
+    latest_location: Location<mmr::Family>,
     operations: Vec<BatchOperation>,
-    current_boundary: CurrentBoundaryState<Digest, N>,
+    current_boundary: CurrentBoundaryState<Digest, N, mmr::Family>,
 }
 
 async fn build_local_batch() -> LocalBatch {
@@ -247,7 +239,8 @@ async fn build_grafted_boundary_local_batch() -> LocalBatch {
 }
 
 async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
-    let writer: OrderedWriter<Sha256, Vec<u8>, Vec<u8>, N> = OrderedWriter::empty(client.clone());
+    let writer: OrderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
+        OrderedWriter::empty(client.clone());
     common::commit_ordered_upload(client, &writer, &batch.operations, &batch.current_boundary)
         .await
         .expect("commit upload");
@@ -256,7 +249,7 @@ async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
 fn latest_operation_for_key(
     operations: &[BatchOperation],
     key: &[u8],
-) -> (Location, BatchOperation) {
+) -> (Location<mmr::Family>, BatchOperation) {
     operations
         .iter()
         .enumerate()
@@ -389,7 +382,7 @@ async fn ordered_get_after_grafted_boundary_returns_current_key_value_proof() {
     let local = build_grafted_boundary_local_batch().await;
     let ordered_client =
         TestOrderedClient::from_client(store_client.clone(), op_cfg(), update_row_cfg());
-    let writer: OrderedWriter<Sha256, Vec<u8>, Vec<u8>, N> =
+    let writer: OrderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
         OrderedWriter::empty(store_client.clone());
     common::commit_ordered_upload(
         &store_client,

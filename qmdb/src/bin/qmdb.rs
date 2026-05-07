@@ -15,8 +15,7 @@ use commonware_storage::qmdb::current::{ordered::variable::Db as LocalQmdbDb, Va
 use commonware_storage::translator::TwoCap;
 use commonware_storage::{
     journal::contiguous::variable::Config as JournalConfig,
-    merkle::full::Config as MerkleConfig,
-    mmr::{self, Location},
+    merkle::{full::Config as MerkleConfig, mmr, Location},
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
@@ -28,10 +27,6 @@ use tower_http::cors::CorsLayer;
 use tracing::info;
 
 const N: usize = 32;
-type Digest = commonware_cryptography::sha256::Digest;
-type BatchOperation = QmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>;
-type LocalDb = LocalQmdbDb<mmr::Family, cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>;
-type DemoWriter = OrderedWriter<Sha256, Vec<u8>, Vec<u8>, N>;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -73,9 +68,9 @@ async fn health() -> &'static str {
 
 async fn commit_ordered_upload(
     client: &StoreClient,
-    writer: &DemoWriter,
-    ops: &[BatchOperation],
-    boundary: &CurrentBoundaryState<Digest, N>,
+    writer: &OrderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N>,
+    ops: &[QmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>],
+    boundary: &CurrentBoundaryState<commonware_cryptography::sha256::Digest, N, mmr::Family>,
 ) {
     let prepared = writer.prepare_upload(ops, boundary).await.expect("prepare");
     writer
@@ -84,7 +79,7 @@ async fn commit_ordered_upload(
         .expect("commit upload");
 }
 
-fn op_cfg() -> <BatchOperation as commonware_codec::Read>::Cfg {
+fn op_cfg() -> <QmdbOperation<mmr::Family, Vec<u8>, Vec<u8>> as commonware_codec::Read>::Cfg {
     (
         ((0..=MAX_OPERATION_SIZE).into(), ()),
         ((0..=MAX_OPERATION_SIZE).into(), ()),
@@ -102,11 +97,11 @@ fn update_row_cfg() -> (
 }
 
 async fn boundary_from_local_db(
-    db: &LocalDb,
-    previous_operations: Option<&[BatchOperation]>,
-    operations: &[BatchOperation],
-) -> CurrentBoundaryState<Digest, N> {
-    recover_boundary_state::<Sha256, _, N, _, _>(
+    db: &LocalQmdbDb<mmr::Family, cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>,
+    previous_operations: Option<&[QmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>]>,
+    operations: &[QmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>],
+) -> CurrentBoundaryState<commonware_cryptography::sha256::Digest, N, mmr::Family> {
+    recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
         previous_operations,
         operations,
         db.root(),
@@ -142,11 +137,13 @@ async fn run(
     host: IpAddr,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let client = Arc::new(OrderedClient::<Sha256, Vec<u8>, Vec<u8>, N>::new(
-        store_url,
-        op_cfg(),
-        update_row_cfg(),
-    ));
+    let client = Arc::new(
+        OrderedClient::<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N>::new(
+            store_url,
+            op_cfg(),
+            update_row_cfg(),
+        ),
+    );
     let app = Router::new()
         .route("/health", get(health))
         .fallback_service(ordered_connect_stack(client))
@@ -178,7 +175,7 @@ async fn seed(
     );
 
     let store = StoreClient::new(store_url);
-    let reader = OrderedClient::<Sha256, Vec<u8>, Vec<u8>, N>::from_client(
+    let reader = OrderedClient::<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N>::from_client(
         store.clone(),
         op_cfg(),
         update_row_cfg(),
@@ -213,20 +210,33 @@ async fn seed(
                 grafted_metadata_partition: "grafted-metadata".into(),
                 translator: TwoCap,
             };
-            let mut db: LocalDb = LocalDb::init(context.with_label("qmdb_seed"), cfg)
-                .await
-                .expect("init local ordered db");
+            let mut db = LocalQmdbDb::<
+                mmr::Family,
+                cw_tokio::Context,
+                Vec<u8>,
+                Vec<u8>,
+                Sha256,
+                TwoCap,
+                N,
+            >::init(context.with_label("qmdb_seed"), cfg)
+            .await
+            .expect("init local ordered db");
 
             let bounds = db.bounds().await;
             let (mut previous_ops, mut counter, writer) = if *bounds.end == 0 {
                 info!("starting from empty local DB");
-                let writer = OrderedWriter::<Sha256, Vec<u8>, Vec<u8>, N>::empty(store.clone());
-                (Vec::<BatchOperation>::new(), 0u64, writer)
+                let writer =
+                    OrderedWriter::<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N>::empty(store.clone());
+                (
+                    Vec::<QmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>>::new(),
+                    0u64,
+                    writer,
+                )
             } else {
                 let latest = bounds.end - 1;
                 let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");
                 let (proof, cumulative) = db
-                    .ops_historical_proof(latest + 1, Location::new(0), count)
+                    .ops_historical_proof(latest + 1, Location::<mmr::Family>::new(0), count)
                     .await
                     .expect(
                         "resume: failed to load cumulative ops from local DB; \
@@ -234,12 +244,12 @@ async fn seed(
                     );
                 let batches_so_far = cumulative
                     .iter()
-                    .filter(|op| matches!(op, BatchOperation::CommitFloor(_, _)))
+                    .filter(|op| matches!(op, QmdbOperation::CommitFloor(_, _)))
                     .count() as u64;
                 let counter = batches_so_far * 3;
                 let writer_state = exoware_qmdb::WriterState::from_proof::<Sha256, _>(
                     latest,
-                    Location::new(0),
+                    Location::<mmr::Family>::new(0),
                     &proof,
                     &cumulative,
                 )
@@ -250,8 +260,10 @@ async fn seed(
                     next_key_index = counter,
                     "resuming from persisted local DB",
                 );
-                let writer =
-                    OrderedWriter::<Sha256, Vec<u8>, Vec<u8>, N>::new(store.clone(), writer_state);
+                let writer = OrderedWriter::<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N>::new(
+                    store.clone(),
+                    writer_state,
+                );
                 (cumulative, counter, writer)
             };
 
@@ -295,7 +307,7 @@ async fn seed(
                 let latest = db.bounds().await.end - 1;
                 let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");
                 let (_proof, cumulative_ops) = db
-                    .ops_historical_proof(latest + 1, Location::new(0), count)
+                    .ops_historical_proof(latest + 1, Location::<mmr::Family>::new(0), count)
                     .await
                     .expect("historical proof");
                 let previous_slice = if previous_ops.is_empty() {

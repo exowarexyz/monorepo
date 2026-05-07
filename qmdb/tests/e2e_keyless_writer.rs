@@ -8,7 +8,7 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use commonware_runtime::{deterministic, Runner as _};
-use commonware_storage::mmr::{Location, Proof as BatchProof};
+use commonware_storage::merkle::{mmr, Location, Proof};
 use commonware_storage::qmdb::keyless::variable::{Db as Keyless, Operation as KeylessOperation};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{KeylessClient, KeylessWriter};
@@ -17,14 +17,10 @@ use exoware_sdk::StoreClient;
 use common::retry;
 
 type Digest = commonware_cryptography::sha256::Digest;
-type LocalDb = Keyless<
-    commonware_storage::mmr::Family,
-    deterministic::Context,
-    Vec<u8>,
-    commonware_cryptography::Sha256,
->;
-type TestKeylessClient = KeylessClient<commonware_cryptography::Sha256, Vec<u8>>;
-type TestKeylessWriter = KeylessWriter<commonware_cryptography::Sha256, Vec<u8>>;
+type LocalDb =
+    Keyless<mmr::Family, deterministic::Context, Vec<u8>, commonware_cryptography::Sha256>;
+type TestKeylessClient = KeylessClient<mmr::Family, commonware_cryptography::Sha256, Vec<u8>>;
+type TestKeylessWriter = KeylessWriter<mmr::Family, commonware_cryptography::Sha256, Vec<u8>>;
 
 fn fresh_reader(c: StoreClient) -> TestKeylessClient {
     TestKeylessClient::from_client(c, ((0..=10000).into(), ()))
@@ -40,9 +36,9 @@ async fn build_local_reference(
     batches: Vec<Vec<Vec<u8>>>,
 ) -> (
     Digest,
-    BatchProof<Digest>,
-    Vec<KeylessOperation<commonware_storage::mmr::Family, Vec<u8>>>,
-    Location,
+    Proof<mmr::Family, Digest>,
+    Vec<KeylessOperation<mmr::Family, Vec<u8>>>,
+    Location<mmr::Family>,
 ) {
     tokio::task::spawn_blocking(move || {
         deterministic::Runner::default().start(|context| async move {
@@ -68,7 +64,7 @@ async fn build_local_reference(
             let latest = db.bounds().await.end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
             let (proof, ops) = db
-                .historical_proof(latest + 1, Location::new(0), n)
+                .historical_proof(latest + 1, Location::<mmr::Family>::new(0), n)
                 .await
                 .expect("proof");
             let root = db.root();
@@ -85,8 +81,8 @@ async fn build_local_reference(
 /// Commit op at each batch boundary; for this test we pass the full flat
 /// sequence to the writer, which mirrors what the local DB produced.)
 fn flat_to_writer_ops(
-    ops: &[KeylessOperation<commonware_storage::mmr::Family, Vec<u8>>],
-) -> Vec<KeylessOperation<commonware_storage::mmr::Family, Vec<u8>>> {
+    ops: &[KeylessOperation<mmr::Family, Vec<u8>>],
+) -> Vec<KeylessOperation<mmr::Family, Vec<u8>>> {
     ops.to_vec()
 }
 
@@ -134,7 +130,11 @@ async fn sequential_upload_matches_local_root() {
 
     // Proof round-trip.
     let proof = reader
-        .operation_range_proof(latest, Location::new(0), writer_ops.len() as u32)
+        .operation_range_proof(
+            latest,
+            Location::<mmr::Family>::new(0),
+            writer_ops.len() as u32,
+        )
         .await
         .expect("proof");
     assert_eq!(proof.root, local_root);
@@ -163,7 +163,7 @@ async fn multiple_sequential_batches_each_publish_watermarks_in_band() {
     assert_eq!(
         r1.writer_location_watermark
             .map(|checkpoint| checkpoint.location),
-        Some(Location::new(1))
+        Some(Location::<mmr::Family>::new(1))
     );
     let r2 = common::commit_keyless_upload(&client, &writer, &local_ops[2..3])
         .await
@@ -171,7 +171,7 @@ async fn multiple_sequential_batches_each_publish_watermarks_in_band() {
     assert_eq!(
         r2.writer_location_watermark
             .map(|checkpoint| checkpoint.location),
-        Some(Location::new(2))
+        Some(Location::<mmr::Family>::new(2))
     );
     let r3 = common::commit_keyless_upload(&client, &writer, &local_ops[3..])
         .await
@@ -301,7 +301,10 @@ async fn bounded_pipeline_advances_watermark_via_contiguous_acks() {
 
     use futures::future::BoxFuture;
     let mut in_flight: FuturesUnordered<
-        BoxFuture<'static, Result<exoware_qmdb::UploadReceipt, exoware_qmdb::QmdbError>>,
+        BoxFuture<
+            'static,
+            Result<exoware_qmdb::UploadReceipt<mmr::Family>, exoware_qmdb::QmdbError>,
+        >,
     > = FuturesUnordered::new();
     let mut results = Vec::with_capacity(BATCHES);
     for batch in slices {
@@ -391,7 +394,7 @@ async fn local_proof_resumes_from_existing_store_state() {
     {
         let state = exoware_qmdb::WriterState::from_proof::<commonware_cryptography::Sha256, _>(
             latest_two,
-            Location::new(0),
+            Location::<mmr::Family>::new(0),
             &proof_two,
             &local_ops_two,
         )

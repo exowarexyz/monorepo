@@ -3,24 +3,27 @@ use std::marker::PhantomData;
 
 use commonware_codec::{Codec, Decode, Encode, Read as CodecRead};
 use commonware_cryptography::Hasher;
-use commonware_storage::mmr::Location;
-use commonware_storage::qmdb::current::proof::OperationProof as CurrentOperationProof;
+use commonware_storage::merkle::{Graftable, Location};
+use commonware_storage::qmdb::current::proof::{
+    OperationProof as CurrentOperationProof, RangeProof as CurrentRangeProof,
+};
 use commonware_utils::bitmap::Readable as BitmapReadable;
 use exoware_sdk::keys::Key;
 use exoware_sdk::{RangeMode, SerializableReadSession, StoreClient};
 
 use crate::codec::{
-    bitmap_chunk_bits, clear_below_floor, decode_digest, decode_update_location, encode_chunk_key,
-    encode_current_meta_key, mmr_size_for_watermark, UpdateRow,
+    bitmap_chunk_bits, chunk_index_for_location, clear_below_floor, decode_digest,
+    decode_update_location, encode_chunk_key, encode_current_meta_key, merkle_size_for_watermark,
+    UpdateRow,
 };
 use crate::connect::OperationKv;
 use crate::core::HistoricalOpsClientCore;
 use crate::error::QmdbError;
 use crate::proof::{
-    OperationRangeCheckpoint, RawBatchMultiProof, RawUnorderedKeyValueProof,
-    VerifiedOperationRange, VerifiedUnorderedKeyValue,
+    CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
+    RawUnorderedKeyValueProof, VerifiedOperationRange, VerifiedUnorderedKeyValue,
 };
-use crate::storage::{KvCurrentStorage, KvMmrStorage};
+use crate::storage::{KvCurrentStorage, KvMerkleStorage};
 use crate::VersionedValue;
 
 use commonware_storage::qmdb::{
@@ -76,30 +79,36 @@ impl<const N: usize> BitmapReadable<N> for MaterializedBitmapStatus<N> {
 }
 
 #[derive(Clone)]
-pub struct UnorderedClient<H: Hasher, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> {
+pub struct UnorderedClient<
+    F: Graftable,
+    H: Hasher,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+> {
     client: StoreClient,
-    op_cfg: <UnorderedQmdbOperation<commonware_storage::mmr::Family, K, V> as commonware_codec::Read>::Cfg,
+    op_cfg: <UnorderedQmdbOperation<F, K, V> as commonware_codec::Read>::Cfg,
     update_row_cfg: (K::Cfg, V::Cfg),
-    _marker: PhantomData<(H, K)>,
+    _marker: PhantomData<(F, H, K)>,
 }
 
-impl<H: Hasher, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> std::fmt::Debug
-    for UnorderedClient<H, K, V>
+impl<F: Graftable, H: Hasher, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> std::fmt::Debug
+    for UnorderedClient<F, H, K, V>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UnorderedClient").finish_non_exhaustive()
     }
 }
 
-impl<H, K, V> UnorderedClient<H, K, V>
+impl<F, H, K, V> UnorderedClient<F, H, K, V>
 where
+    F: Graftable,
     H: Hasher,
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
-    UnorderedQmdbOperation<commonware_storage::mmr::Family, K, V>: Encode + Decode,
+    UnorderedQmdbOperation<F, K, V>: Encode + Decode,
 {
-    fn core(&self) -> HistoricalOpsClientCore<'_, H::Digest, K, V> {
+    fn core(&self) -> HistoricalOpsClientCore<'_, F, H::Digest, K, V> {
         HistoricalOpsClientCore {
             client: &self.client,
             update_row_cfg: self.update_row_cfg.clone(),
@@ -109,7 +118,7 @@ where
 
     pub fn new(
         url: &str,
-        op_cfg: <UnorderedQmdbOperation<commonware_storage::mmr::Family, K, V> as commonware_codec::Read>::Cfg,
+        op_cfg: <UnorderedQmdbOperation<F, K, V> as commonware_codec::Read>::Cfg,
         update_row_cfg: (K::Cfg, V::Cfg),
     ) -> Self {
         Self::from_client(StoreClient::new(url), op_cfg, update_row_cfg)
@@ -117,7 +126,7 @@ where
 
     pub fn from_client(
         client: StoreClient,
-        op_cfg: <UnorderedQmdbOperation<commonware_storage::mmr::Family, K, V> as commonware_codec::Read>::Cfg,
+        op_cfg: <UnorderedQmdbOperation<F, K, V> as commonware_codec::Read>::Cfg,
         update_row_cfg: (K::Cfg, V::Cfg),
     ) -> Self {
         Self {
@@ -134,21 +143,18 @@ where
 
     pub(crate) fn extract_operation_kv(
         &self,
-        location: Location,
+        location: Location<F>,
         bytes: &[u8],
     ) -> Result<OperationKv, QmdbError>
     where
         V: AsRef<[u8]>,
     {
-        let op = UnorderedQmdbOperation::<commonware_storage::mmr::Family, K, V>::decode_cfg(
-            bytes,
-            &self.op_cfg,
-        )
-        .map_err(|e| {
-            QmdbError::CorruptData(format!(
-                "failed to decode unordered operation at location {location}: {e}"
-            ))
-        })?;
+        let op =
+            UnorderedQmdbOperation::<F, K, V>::decode_cfg(bytes, &self.op_cfg).map_err(|e| {
+                QmdbError::CorruptData(format!(
+                    "failed to decode unordered operation at location {location}: {e}"
+                ))
+            })?;
         let key = op.key().map(|k| <K as AsRef<[u8]>>::as_ref(k).to_vec());
         let value = match &op {
             UnorderedQmdbOperation::Update(update) => Some(update.1.as_ref().to_vec()),
@@ -157,22 +163,22 @@ where
                 None
             }
         };
-        Ok((key, value))
+        Ok(OperationKv { key, value })
     }
 
-    pub async fn writer_location_watermark(&self) -> Result<Option<Location>, QmdbError> {
+    pub async fn writer_location_watermark(&self) -> Result<Option<Location<F>>, QmdbError> {
         self.core().writer_location_watermark().await
     }
 
     pub async fn query_many_at<Q: AsRef<[u8]>>(
         &self,
         keys: &[Q],
-        watermark: Location,
-    ) -> Result<Vec<Option<VersionedValue<K, V>>>, QmdbError> {
+        watermark: Location<F>,
+    ) -> Result<Vec<Option<VersionedValue<K, V, F>>>, QmdbError> {
         self.core().query_many_at(keys, watermark).await
     }
 
-    pub async fn root_at(&self, watermark: Location) -> Result<H::Digest, QmdbError> {
+    pub async fn root_at(&self, watermark: Location<F>) -> Result<H::Digest, QmdbError> {
         let session = self.client.create_session();
         self.core()
             .require_published_watermark(&session, watermark)
@@ -180,7 +186,7 @@ where
         self.core().compute_ops_root::<H>(&session, watermark).await
     }
 
-    pub async fn current_root_at(&self, watermark: Location) -> Result<H::Digest, QmdbError> {
+    pub async fn current_root_at(&self, watermark: Location<F>) -> Result<H::Digest, QmdbError> {
         let session = self.client.create_session();
         self.core()
             .require_published_watermark(&session, watermark)
@@ -193,10 +199,10 @@ where
 
     pub async fn operation_range_checkpoint(
         &self,
-        watermark: Location,
-        start_location: Location,
+        watermark: Location<F>,
+        start_location: Location<F>,
         max_locations: u32,
-    ) -> Result<OperationRangeCheckpoint<H::Digest>, QmdbError> {
+    ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
         let session = self.client.create_session();
         self.operation_range_checkpoint_in_session(
             &session,
@@ -210,41 +216,42 @@ where
     pub(crate) async fn batch_multi_proof_with_read_floor(
         &self,
         read_floor_sequence: u64,
-        watermark: Location,
-        operations: Vec<(Location, Vec<u8>)>,
-    ) -> Result<RawBatchMultiProof<H::Digest>, QmdbError> {
+        watermark: Location<F>,
+        operations: Vec<(Location<F>, Vec<u8>)>,
+    ) -> Result<RawBatchMultiProof<H::Digest, F>, QmdbError> {
         let session = self
             .client
             .create_session_with_sequence(read_floor_sequence);
         self.core()
             .require_published_watermark(&session, watermark)
             .await?;
-        let storage = KvMmrStorage::<H::Digest> {
+        let storage = KvMerkleStorage::<F, H::Digest> {
             session: &session,
-            mmr_size: mmr_size_for_watermark(watermark)?,
+            size: merkle_size_for_watermark(watermark)?,
             _marker: PhantomData,
         };
         let root = self
             .core()
             .compute_ops_root::<H>(&session, watermark)
             .await?;
-        crate::proof::build_batch_multi_proof::<H, _>(&storage, watermark, root, operations).await
+        crate::proof::build_batch_multi_proof::<F, H, _>(&storage, watermark, root, operations)
+            .await
     }
 
     async fn operation_range_checkpoint_in_session(
         &self,
         session: &SerializableReadSession,
-        watermark: Location,
-        start_location: Location,
+        watermark: Location<F>,
+        start_location: Location<F>,
         max_locations: u32,
-    ) -> Result<OperationRangeCheckpoint<H::Digest>, QmdbError> {
+    ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
         self.core()
             .require_published_watermark(session, watermark)
             .await?;
         let end = crate::proof::resolve_range_bounds(watermark, start_location, max_locations)?;
-        let storage = KvMmrStorage::<H::Digest> {
+        let storage = KvMerkleStorage::<F, H::Digest> {
             session,
-            mmr_size: mmr_size_for_watermark(watermark)?,
+            size: merkle_size_for_watermark(watermark)?,
             _marker: PhantomData,
         };
         let root = self
@@ -255,7 +262,7 @@ where
             .core()
             .load_operation_bytes_range(session, start_location, end)
             .await?;
-        crate::proof::build_operation_range_checkpoint::<H, _>(
+        crate::proof::build_operation_range_checkpoint::<F, H, _>(
             &storage,
             watermark,
             start_location,
@@ -269,31 +276,23 @@ where
     /// Verified contiguous range of operations.
     pub async fn operation_range_proof(
         &self,
-        watermark: Location,
-        start_location: Location,
+        watermark: Location<F>,
+        start_location: Location<F>,
         max_locations: u32,
-    ) -> Result<
-        VerifiedOperationRange<
-            H::Digest,
-            UnorderedQmdbOperation<commonware_storage::mmr::Family, K, V>,
-        >,
-        QmdbError,
-    > {
+    ) -> Result<VerifiedOperationRange<H::Digest, UnorderedQmdbOperation<F, K, V>, F>, QmdbError>
+    {
         let checkpoint = self
             .operation_range_checkpoint(watermark, start_location, max_locations)
             .await?;
         let mut operations = Vec::with_capacity(checkpoint.encoded_operations.len());
         for (offset, value) in checkpoint.encoded_operations.iter().enumerate() {
             let location = checkpoint.start_location + offset as u64;
-            let op = UnorderedQmdbOperation::<commonware_storage::mmr::Family, K, V>::decode_cfg(
-                value.as_slice(),
-                &self.op_cfg,
-            )
-            .map_err(|e| {
-                QmdbError::CorruptData(format!(
-                    "failed to decode unordered operation at location {location}: {e}"
-                ))
-            })?;
+            let op = UnorderedQmdbOperation::<F, K, V>::decode_cfg(value.as_slice(), &self.op_cfg)
+                .map_err(|e| {
+                    QmdbError::CorruptData(format!(
+                        "failed to decode unordered operation at location {location}: {e}"
+                    ))
+                })?;
             operations.push(op);
         }
         Ok(VerifiedOperationRange {
@@ -303,12 +302,75 @@ where
         })
     }
 
+    async fn current_operation_range_proof_raw_in_session<const N: usize>(
+        &self,
+        session: &SerializableReadSession,
+        watermark: Location<F>,
+        start_location: Location<F>,
+        max_locations: u32,
+    ) -> Result<
+        CurrentOperationRangeProofResult<H::Digest, UnorderedQmdbOperation<F, K, V>, N, F>,
+        QmdbError,
+    > {
+        self.core()
+            .require_published_watermark(session, watermark)
+            .await?;
+        self.core()
+            .require_batch_boundary(session, watermark)
+            .await?;
+        let end = crate::proof::resolve_range_bounds(watermark, start_location, max_locations)?;
+        let proof = self
+            .build_current_range_proof::<N>(session, watermark, start_location, end)
+            .await?;
+        let root = self.load_current_boundary_root(session, watermark).await?;
+        let operations = self
+            .load_operation_range(session, start_location, end)
+            .await?;
+        let chunks = self
+            .load_bitmap_chunks::<N>(session, watermark, start_location, end)
+            .await?;
+        let raw = CurrentOperationRangeProofResult {
+            watermark,
+            root,
+            start_location,
+            proof,
+            operations,
+            chunks,
+        };
+        if !raw.verify::<H>() {
+            return Err(QmdbError::ProofVerification {
+                kind: crate::ProofKind::CurrentRange,
+            });
+        }
+        Ok(raw)
+    }
+
+    /// Verified raw current-state proof for a contiguous operation range.
+    pub async fn current_operation_range_proof_raw_at<const N: usize>(
+        &self,
+        watermark: Location<F>,
+        start_location: Location<F>,
+        max_locations: u32,
+    ) -> Result<
+        CurrentOperationRangeProofResult<H::Digest, UnorderedQmdbOperation<F, K, V>, N, F>,
+        QmdbError,
+    > {
+        let session = self.client.create_session();
+        self.current_operation_range_proof_raw_in_session::<N>(
+            &session,
+            watermark,
+            start_location,
+            max_locations,
+        )
+        .await
+    }
+
     async fn key_value_proof_raw_in_session<const N: usize, Q: AsRef<[u8]>>(
         &self,
         session: &SerializableReadSession,
-        watermark: Location,
+        watermark: Location<F>,
         key: Q,
-    ) -> Result<RawUnorderedKeyValueProof<H::Digest, K, V, N>, QmdbError> {
+    ) -> Result<RawUnorderedKeyValueProof<H::Digest, K, V, N, F>, QmdbError> {
         self.core()
             .require_published_watermark(session, watermark)
             .await?;
@@ -322,7 +384,7 @@ where
             .await?
         else {
             return Err(QmdbError::ProofKeyNotFound {
-                watermark,
+                watermark: watermark.as_u64(),
                 key: key_bytes,
             });
         };
@@ -332,13 +394,13 @@ where
                 .map_err(|e| QmdbError::CorruptData(format!("update row decode: {e}")))?;
         if <K as AsRef<[u8]>>::as_ref(&decoded.key) != key.as_ref() {
             return Err(QmdbError::ProofKeyNotFound {
-                watermark,
+                watermark: watermark.as_u64(),
                 key: key.as_ref().to_vec(),
             });
         }
         if decoded.value.is_none() {
             return Err(QmdbError::KeyNotActive {
-                watermark,
+                watermark: watermark.as_u64(),
                 key: key.as_ref().to_vec(),
             });
         }
@@ -346,7 +408,7 @@ where
         let operation = self.load_operation_at(session, location).await?;
         let UnorderedQmdbOperation::Update(update) = &operation else {
             return Err(QmdbError::KeyNotActive {
-                watermark,
+                watermark: watermark.as_u64(),
                 key: key.as_ref().to_vec(),
             });
         };
@@ -378,9 +440,9 @@ where
     /// Verified raw current-state proof for a single active unordered key.
     pub async fn key_value_proof_raw_at<const N: usize, Q: AsRef<[u8]>>(
         &self,
-        watermark: Location,
+        watermark: Location<F>,
         key: Q,
-    ) -> Result<RawUnorderedKeyValueProof<H::Digest, K, V, N>, QmdbError> {
+    ) -> Result<RawUnorderedKeyValueProof<H::Digest, K, V, N, F>, QmdbError> {
         let session = self.client.create_session();
         self.key_value_proof_raw_in_session::<N, _>(&session, watermark, key)
             .await
@@ -389,9 +451,9 @@ where
     /// Verified current-state proof for a single active unordered key.
     pub async fn key_value_proof_at<const N: usize, Q: AsRef<[u8]>>(
         &self,
-        watermark: Location,
+        watermark: Location<F>,
         key: Q,
-    ) -> Result<VerifiedUnorderedKeyValue<H::Digest, K, V>, QmdbError> {
+    ) -> Result<VerifiedUnorderedKeyValue<H::Digest, K, V, F>, QmdbError> {
         let raw = self.key_value_proof_raw_at::<N, _>(watermark, key).await?;
         Ok(VerifiedUnorderedKeyValue {
             root: raw.root,
@@ -406,9 +468,9 @@ where
     /// omitted rather than proven.
     pub async fn key_lookup_proofs_raw_at<const N: usize, Q: AsRef<[u8]>>(
         &self,
-        watermark: Location,
+        watermark: Location<F>,
         keys: &[Q],
-    ) -> Result<Vec<RawUnorderedKeyValueProof<H::Digest, K, V, N>>, QmdbError> {
+    ) -> Result<Vec<RawUnorderedKeyValueProof<H::Digest, K, V, N, F>>, QmdbError> {
         if keys.is_empty() {
             return Err(QmdbError::EmptyProofRequest);
         }
@@ -438,10 +500,12 @@ where
     async fn load_current_boundary_root(
         &self,
         session: &SerializableReadSession,
-        location: Location,
+        location: Location<F>,
     ) -> Result<H::Digest, QmdbError> {
         let Some(bytes) = session.get(&encode_current_meta_key(location)).await? else {
-            return Err(QmdbError::CurrentBoundaryStateMissing { location });
+            return Err(QmdbError::CurrentBoundaryStateMissing {
+                location: location.as_u64(),
+            });
         };
         decode_digest(
             bytes.as_ref(),
@@ -452,8 +516,8 @@ where
     async fn materialize_bitmap_status<const N: usize>(
         &self,
         session: &SerializableReadSession,
-        watermark: Location,
-        inactivity_floor: Location,
+        watermark: Location<F>,
+        inactivity_floor: Location<F>,
     ) -> Result<MaterializedBitmapStatus<N>, QmdbError> {
         let leaves = watermark
             .checked_add(1)
@@ -506,10 +570,9 @@ where
     async fn build_current_operation_proof<const N: usize>(
         &self,
         session: &SerializableReadSession,
-        watermark: Location,
-        location: Location,
-    ) -> Result<CurrentOperationProof<commonware_storage::mmr::Family, H::Digest, N>, QmdbError>
-    {
+        watermark: Location<F>,
+        location: Location<F>,
+    ) -> Result<CurrentOperationProof<F, H::Digest, N>, QmdbError> {
         self.core()
             .require_published_watermark(session, watermark)
             .await?;
@@ -520,10 +583,10 @@ where
         let status = self
             .materialize_bitmap_status::<N>(session, watermark, inactivity_floor)
             .await?;
-        let storage = KvCurrentStorage::<H::Digest, N> {
+        let storage = KvCurrentStorage::<F, H::Digest, N> {
             session,
             watermark,
-            mmr_size: mmr_size_for_watermark(watermark)?,
+            size: merkle_size_for_watermark(watermark)?,
             _marker: PhantomData,
         };
         let mut hasher = H::default();
@@ -538,14 +601,46 @@ where
                 .await?,
         )
         .await
-        .map_err(|e| QmdbError::CommonwareMmr(e.to_string()))
+        .map_err(|e| QmdbError::CommonwareMerkle(e.to_string()))
+    }
+
+    async fn build_current_range_proof<const N: usize>(
+        &self,
+        session: &SerializableReadSession,
+        watermark: Location<F>,
+        start_location: Location<F>,
+        end_location_exclusive: Location<F>,
+    ) -> Result<CurrentRangeProof<F, H::Digest>, QmdbError> {
+        let inactivity_floor = self.load_inactivity_floor_at(session, watermark).await?;
+        let status = self
+            .materialize_bitmap_status::<N>(session, watermark, inactivity_floor)
+            .await?;
+        let storage = KvCurrentStorage::<F, H::Digest, N> {
+            session,
+            watermark,
+            size: merkle_size_for_watermark(watermark)?,
+            _marker: PhantomData,
+        };
+        let mut hasher = H::default();
+        CurrentRangeProof::new(
+            &mut hasher,
+            &status,
+            &storage,
+            inactivity_floor,
+            start_location..end_location_exclusive,
+            self.core()
+                .compute_ops_root::<H>(session, watermark)
+                .await?,
+        )
+        .await
+        .map_err(|e| QmdbError::CommonwareMerkle(e.to_string()))
     }
 
     async fn load_inactivity_floor_at(
         &self,
         session: &SerializableReadSession,
-        watermark: Location,
-    ) -> Result<Location, QmdbError> {
+        watermark: Location<F>,
+    ) -> Result<Location<F>, QmdbError> {
         let operation = self.load_operation_at(session, watermark).await?;
         match operation {
             UnorderedQmdbOperation::CommitFloor(_, floor) => Ok(floor),
@@ -558,11 +653,11 @@ where
     async fn load_bitmap_chunk_with_floor<const N: usize>(
         &self,
         session: &SerializableReadSession,
-        watermark: Location,
-        inactivity_floor: Location,
+        watermark: Location<F>,
+        inactivity_floor: Location<F>,
         chunk_index: u64,
     ) -> Result<[u8; N], QmdbError> {
-        let start = encode_chunk_key(chunk_index, Location::new(0));
+        let start = encode_chunk_key(chunk_index, Location::<F>::new(0));
         let end = encode_chunk_key(chunk_index, watermark);
         let rows = session
             .range_with_mode(&start, &end, 1, RangeMode::Reverse)
@@ -591,34 +686,70 @@ where
                 [0u8; N]
             }
         };
-        clear_below_floor::<N>(&mut chunk, chunk_index, inactivity_floor);
+        clear_below_floor::<F, N>(&mut chunk, chunk_index, inactivity_floor);
         Ok(chunk)
+    }
+
+    async fn load_bitmap_chunks<const N: usize>(
+        &self,
+        session: &SerializableReadSession,
+        watermark: Location<F>,
+        start_location: Location<F>,
+        end_location_exclusive: Location<F>,
+    ) -> Result<Vec<[u8; N]>, QmdbError> {
+        let floor = self.load_inactivity_floor_at(session, watermark).await?;
+        let start_chunk = chunk_index_for_location::<F, N>(start_location);
+        let end_chunk = chunk_index_for_location::<F, N>(end_location_exclusive - 1);
+        futures::future::try_join_all((start_chunk..=end_chunk).map(|chunk_index| {
+            self.load_bitmap_chunk_with_floor::<N>(session, watermark, floor, chunk_index)
+        }))
+        .await
     }
 
     async fn load_operation_at(
         &self,
         session: &SerializableReadSession,
-        location: Location,
-    ) -> Result<UnorderedQmdbOperation<commonware_storage::mmr::Family, K, V>, QmdbError> {
+        location: Location<F>,
+    ) -> Result<UnorderedQmdbOperation<F, K, V>, QmdbError> {
         let bytes = self
             .core()
             .load_operation_bytes_at(session, location)
             .await?;
-        UnorderedQmdbOperation::<commonware_storage::mmr::Family, K, V>::decode_cfg(
-            bytes.as_slice(),
-            &self.op_cfg,
-        )
-        .map_err(|e| {
+        UnorderedQmdbOperation::<F, K, V>::decode_cfg(bytes.as_slice(), &self.op_cfg).map_err(|e| {
             QmdbError::CorruptData(format!(
                 "failed to decode unordered operation at location {location}: {e}"
             ))
         })
     }
 
+    async fn load_operation_range(
+        &self,
+        session: &SerializableReadSession,
+        start_location: Location<F>,
+        end_location_exclusive: Location<F>,
+    ) -> Result<Vec<UnorderedQmdbOperation<F, K, V>>, QmdbError> {
+        let rows = self
+            .core()
+            .load_operation_bytes_range(session, start_location, end_location_exclusive)
+            .await?;
+        rows.into_iter()
+            .enumerate()
+            .map(|(offset, bytes)| {
+                let location = start_location + offset as u64;
+                UnorderedQmdbOperation::<F, K, V>::decode_cfg(bytes.as_slice(), &self.op_cfg)
+                    .map_err(|e| {
+                        QmdbError::CorruptData(format!(
+                            "failed to decode unordered operation at location {location}: {e}"
+                        ))
+                    })
+            })
+            .collect()
+    }
+
     async fn load_latest_update_row(
         &self,
         session: &SerializableReadSession,
-        watermark: Location,
+        watermark: Location<F>,
         key: &[u8],
     ) -> Result<Option<(Key, Vec<u8>)>, QmdbError> {
         self.core()

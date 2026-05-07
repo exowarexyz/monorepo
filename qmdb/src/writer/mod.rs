@@ -2,7 +2,7 @@
 //! the store in the hot loop.
 //!
 //! Each variant exposes a pure `build_*_upload` function that deterministically
-//! turns (MMR peaks, ops) into the full set of store rows, plus a stateful
+//! turns (Merkle peaks, ops) into the full set of store rows, plus a stateful
 //! `*Writer` wrapper around [`core::WriterCore`] that starts from caller-supplied
 //! frontier state, prepares rows for caller-owned Store write batches, gates
 //! in-band watermark emission on pipeline emptiness, and exposes a `flush()` to
@@ -15,8 +15,9 @@
 //! publication still follows the contiguous-committed prefix.
 //!
 //! Callers own durability. On any PUT error the writer poisons; the caller must
-//! construct a fresh writer from a caller-owned committed frontier. Since PUT rows are
-//! content-addressed and MMR math is deterministic, retries are idempotent.
+//! construct a fresh writer from a caller-owned committed frontier. Since PUT
+//! rows are content-addressed and Merkle math is deterministic, retries are
+//! idempotent.
 
 mod core;
 mod immutable;
@@ -29,7 +30,7 @@ pub use keyless::{build_keyless_upload, BuiltKeylessUpload, KeylessWriter};
 pub use ordered::{build_ordered_upload, BuiltOrderedUpload, OrderedWriter};
 pub use unordered::{build_unordered_upload, BuiltUnorderedUpload, UnorderedWriter};
 
-use commonware_storage::mmr::Location;
+use commonware_storage::merkle::{Family, Location};
 use exoware_sdk::{keys::Key, StoreClient, StoreWriteBatch};
 
 use crate::{PublishedCheckpoint, QmdbError, UploadReceipt};
@@ -41,23 +42,23 @@ use crate::{PublishedCheckpoint, QmdbError, UploadReceipt};
 /// the batch, then mark the upload persisted with the returned Store sequence.
 #[derive(Debug)]
 #[must_use]
-pub struct PreparedUpload {
+pub struct PreparedUpload<F: Family> {
     pub(crate) dispatch_id: u64,
-    pub(crate) latest_location: Location,
-    pub(crate) writer_location_watermark: Option<Location>,
+    pub(crate) latest_location: Location<F>,
+    pub(crate) writer_location_watermark: Option<Location<F>>,
     pub(crate) rows: Vec<(Key, Vec<u8>)>,
 }
 
-impl PreparedUpload {
+impl<F: Family> PreparedUpload<F> {
     pub fn request_id(&self) -> u64 {
         self.dispatch_id
     }
 
-    pub fn latest_location(&self) -> Location {
+    pub fn latest_location(&self) -> Location<F> {
         self.latest_location
     }
 
-    pub fn writer_location_watermark(&self) -> Option<Location> {
+    pub fn writer_location_watermark(&self) -> Option<Location<F>> {
         self.writer_location_watermark
     }
 
@@ -70,13 +71,13 @@ impl PreparedUpload {
 /// batch as the uploads it publishes.
 #[derive(Debug)]
 #[must_use]
-pub struct PreparedWatermark {
-    pub(crate) location: Location,
+pub struct PreparedWatermark<F: Family> {
+    pub(crate) location: Location<F>,
     pub(crate) row: (Key, Vec<u8>),
 }
 
-impl PreparedWatermark {
-    pub fn location(&self) -> Location {
+impl<F: Family> PreparedWatermark<F> {
+    pub fn location(&self) -> Location<F> {
         self.location
     }
 }
@@ -95,14 +96,17 @@ pub(crate) fn stage_rows(
 pub(crate) fn stage_watermark(
     client: &StoreClient,
     batch: &mut StoreWriteBatch,
-    watermark: &PreparedWatermark,
+    watermark: &PreparedWatermark<impl Family>,
 ) -> Result<(), QmdbError> {
     let (key, value) = &watermark.row;
     batch.push(client, key, value)?;
     Ok(())
 }
 
-pub(crate) fn upload_receipt(prepared: &PreparedUpload, sequence_number: u64) -> UploadReceipt {
+pub(crate) fn upload_receipt<F: Family>(
+    prepared: &PreparedUpload<F>,
+    sequence_number: u64,
+) -> UploadReceipt<F> {
     UploadReceipt {
         writer_request_id: prepared.dispatch_id,
         latest_location: prepared.latest_location,

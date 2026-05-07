@@ -1,7 +1,7 @@
 //! Single-writer helper for the ordered QMDB variant.
 //!
-//! In addition to op / presence / update-index / MMR node / watermark rows,
-//! ordered batches carry current-state rows (bitmap chunks, grafted-MMR
+//! In addition to op / presence / update-index / Merkle node / watermark rows,
+//! ordered batches carry current-state rows (bitmap chunks, grafted Merkle
 //! nodes, and the current-state root) keyed by the batch boundary Location.
 //! Those are deterministic from the full op history but require running a
 //! local commonware `current::ordered::Db` to compute; the writer takes them
@@ -31,7 +31,7 @@ use std::marker::PhantomData;
 
 use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::Hasher;
-use commonware_storage::mmr::{Location, Position};
+use commonware_storage::merkle::{Graftable, Location, Position};
 use commonware_storage::qmdb::{
     any::ordered::variable::Operation as QmdbOperation, operation::Key as QmdbKey,
 };
@@ -44,48 +44,49 @@ use futures::future::BoxFuture;
 
 use crate::codec::{encode_node_key, encode_watermark_key};
 use crate::core::{
-    extend_mmr_from_peaks, PreparedCurrentBoundaryUpload, PreparedUpload as CorePreparedUpload,
+    extend_merkle_from_peaks, PreparedCurrentBoundaryUpload, PreparedUpload as CorePreparedUpload,
 };
 use crate::error::QmdbError;
 use crate::writer::core::{Cache, WriterCore};
 use crate::{CurrentBoundaryState, PublishedCheckpoint, UploadReceipt, WriterState};
 
 #[derive(Clone, Debug)]
-pub struct BuiltOrderedUpload<D> {
+pub struct BuiltOrderedUpload<D, F: Graftable> {
     pub rows: Vec<(Key, Vec<u8>)>,
-    pub new_peaks: Vec<(Position, u32, D)>,
-    pub new_ops_size: Position,
+    pub new_peaks: Vec<(Position<F>, u32, D)>,
+    pub new_ops_size: Position<F>,
     pub new_ops_root: D,
-    pub latest_location: Location,
+    pub latest_location: Location<F>,
     pub operation_count: u32,
     pub keyed_operation_count: u32,
     pub includes_watermark: bool,
 }
 
 /// Build every store row for one ordered batch: op rows, update-index rows,
-/// presence row, MMR node rows (derived from the supplied peaks), current-state
+/// presence row, Merkle node rows (derived from the supplied peaks), current-state
 /// rows (from the caller-supplied `current_boundary`), and optionally the
 /// watermark row. No I/O.
-pub fn build_ordered_upload<H, K, V, const N: usize>(
-    peaks: Vec<(Position, u32, H::Digest)>,
-    prev_ops_size: Position,
-    latest_location: Location,
-    ops: &[QmdbOperation<commonware_storage::mmr::Family, K, V>],
-    current_boundary: &CurrentBoundaryState<H::Digest, N>,
-    watermark_at: Option<Location>,
-) -> Result<BuiltOrderedUpload<H::Digest>, QmdbError>
+pub fn build_ordered_upload<F, H, K, V, const N: usize>(
+    peaks: Vec<(Position<F>, u32, H::Digest)>,
+    prev_ops_size: Position<F>,
+    latest_location: Location<F>,
+    ops: &[QmdbOperation<F, K, V>],
+    current_boundary: &CurrentBoundaryState<H::Digest, N, F>,
+    watermark_at: Option<Location<F>>,
+) -> Result<BuiltOrderedUpload<H::Digest, F>, QmdbError>
 where
+    F: Graftable,
     H: Hasher,
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
-    QmdbOperation<commonware_storage::mmr::Family, K, V>: Encode,
+    QmdbOperation<F, K, V>: Encode,
 {
     if ops.is_empty() {
         return Err(QmdbError::EmptyBatch);
     }
     let prepared_ops = CorePreparedUpload::build(latest_location, ops)?;
     let prepared_current = PreparedCurrentBoundaryUpload::build(latest_location, current_boundary)?;
-    let ext = extend_mmr_from_peaks::<H, _>(peaks, prev_ops_size, prepared_ops.op_bytes())?;
+    let ext = extend_merkle_from_peaks::<F, H, _>(peaks, prev_ops_size, prepared_ops.op_bytes())?;
     let operation_count = prepared_ops.operation_count;
     let keyed_operation_count = prepared_ops.keyed_operation_count;
 
@@ -116,26 +117,28 @@ where
 /// `prepare_upload` additionally requires the caller-supplied
 /// `CurrentBoundaryState` for the batch.
 pub struct OrderedWriter<
+    F: Graftable,
     H: Hasher,
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
     const N: usize,
 > {
     client: StoreClient,
-    core: WriterCore<H::Digest>,
-    _marker: PhantomData<(K, V)>,
+    core: WriterCore<H::Digest, F>,
+    _marker: PhantomData<(F, K, V)>,
 }
 
-impl<H, K, V, const N: usize> OrderedWriter<H, K, V, N>
+impl<F, H, K, V, const N: usize> OrderedWriter<F, H, K, V, N>
 where
+    F: Graftable,
     H: Hasher,
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
-    QmdbOperation<commonware_storage::mmr::Family, K, V>: Encode + Decode,
+    QmdbOperation<F, K, V>: Encode + Decode,
 {
     /// Construct a writer from caller-supplied frontier state. No store I/O.
-    pub fn new(client: StoreClient, state: WriterState<H::Digest>) -> Self {
+    pub fn new(client: StoreClient, state: WriterState<H::Digest, F>) -> Self {
         Self {
             client,
             core: WriterCore::from_cache(Cache::from_writer_state(state)),
@@ -147,11 +150,11 @@ where
         Self::new(client, WriterState::empty())
     }
 
-    pub async fn latest_published_watermark(&self) -> Option<Location> {
+    pub async fn latest_published_watermark(&self) -> Option<Location<F>> {
         self.core.latest_published().await
     }
 
-    pub async fn latest_published_checkpoint(&self) -> Option<PublishedCheckpoint> {
+    pub async fn latest_published_checkpoint(&self) -> Option<PublishedCheckpoint<F>> {
         self.core.latest_published_checkpoint().await
     }
 
@@ -168,13 +171,13 @@ where
     /// correct contiguous watermark semantics internally.
     pub async fn prepare_upload(
         &self,
-        ops: &[QmdbOperation<commonware_storage::mmr::Family, K, V>],
-        current_boundary: &CurrentBoundaryState<H::Digest, N>,
-    ) -> Result<super::PreparedUpload, QmdbError> {
+        ops: &[QmdbOperation<F, K, V>],
+        current_boundary: &CurrentBoundaryState<H::Digest, N, F>,
+    ) -> Result<super::PreparedUpload<F>, QmdbError> {
         let prepared = self
             .core
             .prepare(ops.len() as u64, |ctx| {
-                let built = build_ordered_upload::<H, K, V, N>(
+                let built = build_ordered_upload::<F, H, K, V, N>(
                     ctx.peaks,
                     ctx.ops_size,
                     ctx.latest_location,
@@ -189,7 +192,7 @@ where
                 })
             })
             .await?;
-        Ok(super::PreparedUpload {
+        Ok(super::PreparedUpload::<F> {
             dispatch_id: prepared.dispatch_id,
             latest_location: prepared.latest_location,
             writer_location_watermark: prepared.watermark_at,
@@ -199,7 +202,7 @@ where
 
     pub fn stage_upload(
         &self,
-        prepared: &super::PreparedUpload,
+        prepared: &super::PreparedUpload<F>,
         batch: &mut StoreWriteBatch,
     ) -> Result<(), QmdbError> {
         super::stage_rows(&self.client, batch, &prepared.rows)
@@ -207,16 +210,16 @@ where
 
     pub async fn mark_upload_persisted(
         &self,
-        prepared: super::PreparedUpload,
+        prepared: super::PreparedUpload<F>,
         sequence_number: u64,
-    ) -> UploadReceipt {
+    ) -> UploadReceipt<F> {
         self.core
             .ack_success(prepared.dispatch_id, sequence_number)
             .await;
         super::upload_receipt(&prepared, sequence_number)
     }
 
-    pub async fn mark_upload_failed(&self, prepared: super::PreparedUpload, err: impl ToString) {
+    pub async fn mark_upload_failed(&self, prepared: super::PreparedUpload<F>, err: impl ToString) {
         let msg = format!(
             "ordered upload ending at {} failed: {}",
             prepared.latest_location,
@@ -225,11 +228,11 @@ where
         self.core.ack_failure(msg).await;
     }
 
-    pub async fn prepare_flush(&self) -> Result<Option<super::PreparedWatermark>, QmdbError> {
+    pub async fn prepare_flush(&self) -> Result<Option<super::PreparedWatermark<F>>, QmdbError> {
         let Some(target) = self.core.pending_watermark().await? else {
             return Ok(None);
         };
-        Ok(Some(super::PreparedWatermark {
+        Ok(Some(super::PreparedWatermark::<F> {
             location: target,
             row: (encode_watermark_key(target), Vec::new()),
         }))
@@ -237,7 +240,7 @@ where
 
     pub fn stage_flush(
         &self,
-        prepared: &super::PreparedWatermark,
+        prepared: &super::PreparedWatermark<F>,
         batch: &mut StoreWriteBatch,
     ) -> Result<(), QmdbError> {
         super::stage_watermark(&self.client, batch, prepared)
@@ -245,9 +248,9 @@ where
 
     pub async fn mark_flush_persisted(
         &self,
-        prepared: super::PreparedWatermark,
+        prepared: super::PreparedWatermark<F>,
         sequence_number: u64,
-    ) -> PublishedCheckpoint {
+    ) -> PublishedCheckpoint<F> {
         self.core
             .mark_watermark_published(prepared.location, sequence_number)
             .await;
@@ -257,7 +260,7 @@ where
         }
     }
 
-    pub async fn flush_with_receipt(&self) -> Result<Option<PublishedCheckpoint>, QmdbError> {
+    pub async fn flush_with_receipt(&self) -> Result<Option<PublishedCheckpoint<F>>, QmdbError> {
         self.core.await_drain().await;
         let Some(prepared) = self.prepare_flush().await? else {
             return Ok(None);
@@ -270,8 +273,9 @@ where
     }
 }
 
-impl<H, K, V, const N: usize> std::fmt::Debug for OrderedWriter<H, K, V, N>
+impl<F, H, K, V, const N: usize> std::fmt::Debug for OrderedWriter<F, H, K, V, N>
 where
+    F: Graftable,
     H: Hasher,
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
@@ -281,16 +285,17 @@ where
     }
 }
 
-impl<H, K, V, const N: usize> StoreBatchUpload for OrderedWriter<H, K, V, N>
+impl<F, H, K, V, const N: usize> StoreBatchUpload for OrderedWriter<F, H, K, V, N>
 where
+    F: Graftable,
     H: Hasher + Sync,
     K: QmdbKey + Codec + Sync,
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
-    QmdbOperation<commonware_storage::mmr::Family, K, V>: Encode + Decode,
+    QmdbOperation<F, K, V>: Encode + Decode,
 {
-    type Prepared = super::PreparedUpload;
-    type Receipt = UploadReceipt;
+    type Prepared = super::PreparedUpload<F>;
+    type Receipt = UploadReceipt<F>;
     type Error = QmdbError;
 
     fn stage_upload(
@@ -334,16 +339,17 @@ where
     }
 }
 
-impl<H, K, V, const N: usize> StoreBatchPublication for OrderedWriter<H, K, V, N>
+impl<F, H, K, V, const N: usize> StoreBatchPublication for OrderedWriter<F, H, K, V, N>
 where
+    F: Graftable,
     H: Hasher + Sync,
     K: QmdbKey + Codec + Sync,
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
-    QmdbOperation<commonware_storage::mmr::Family, K, V>: Encode + Decode,
+    QmdbOperation<F, K, V>: Encode + Decode,
 {
-    type PreparedPublication = super::PreparedWatermark;
-    type PublicationReceipt = PublishedCheckpoint;
+    type PreparedPublication = super::PreparedWatermark<F>;
+    type PublicationReceipt = PublishedCheckpoint<F>;
     type Error = QmdbError;
 
     fn stage_publication(
@@ -373,15 +379,16 @@ where
     }
 }
 
-impl<H, K, V, const N: usize> StorePublicationFrontierWriter for OrderedWriter<H, K, V, N>
+impl<F, H, K, V, const N: usize> StorePublicationFrontierWriter for OrderedWriter<F, H, K, V, N>
 where
+    F: Graftable,
     H: Hasher + Sync,
     K: QmdbKey + Codec + Sync,
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
-    QmdbOperation<commonware_storage::mmr::Family, K, V>: Encode + Decode,
+    QmdbOperation<F, K, V>: Encode + Decode,
 {
-    fn latest_publication_receipt<'a>(&'a self) -> BoxFuture<'a, Option<PublishedCheckpoint>>
+    fn latest_publication_receipt<'a>(&'a self) -> BoxFuture<'a, Option<PublishedCheckpoint<F>>>
     where
         Self: Sync + 'a,
     {
@@ -390,7 +397,7 @@ where
 
     fn prepare_publication<'a>(
         &'a self,
-    ) -> BoxFuture<'a, Result<Option<super::PreparedWatermark>, QmdbError>>
+    ) -> BoxFuture<'a, Result<Option<super::PreparedWatermark<F>>, QmdbError>>
     where
         Self: Sync + 'a,
     {
@@ -399,7 +406,7 @@ where
 
     fn flush_publication_with_receipt<'a>(
         &'a self,
-    ) -> BoxFuture<'a, Result<Option<PublishedCheckpoint>, QmdbError>>
+    ) -> BoxFuture<'a, Result<Option<PublishedCheckpoint<F>>, QmdbError>>
     where
         Self: Sync + 'a,
     {

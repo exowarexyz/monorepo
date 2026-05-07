@@ -6,7 +6,7 @@ mod common;
 use std::num::NonZeroU64;
 
 use commonware_runtime::{deterministic, Runner as _};
-use commonware_storage::mmr::Location;
+use commonware_storage::merkle::{mmr, Location};
 use commonware_storage::qmdb::immutable::variable::{
     Db as Immutable, Operation as ImmutableOperation,
 };
@@ -19,7 +19,7 @@ use common::retry;
 
 type Digest = commonware_cryptography::sha256::Digest;
 type LocalDb = Immutable<
-    commonware_storage::mmr::Family,
+    mmr::Family,
     deterministic::Context,
     FixedBytes<32>,
     Vec<u8>,
@@ -28,7 +28,7 @@ type LocalDb = Immutable<
 >;
 
 type TestImmutableClient =
-    ImmutableClient<commonware_cryptography::Sha256, FixedBytes<32>, Vec<u8>>;
+    ImmutableClient<mmr::Family, commonware_cryptography::Sha256, FixedBytes<32>, Vec<u8>>;
 
 fn fresh_immutable(c: StoreClient) -> TestImmutableClient {
     TestImmutableClient::from_client(
@@ -39,16 +39,16 @@ fn fresh_immutable(c: StoreClient) -> TestImmutableClient {
 }
 
 type TestImmutableWriter =
-    ImmutableWriter<commonware_cryptography::Sha256, FixedBytes<32>, Vec<u8>>;
+    ImmutableWriter<mmr::Family, commonware_cryptography::Sha256, FixedBytes<32>, Vec<u8>>;
 
 fn fresh_writer(c: StoreClient) -> TestImmutableWriter {
     TestImmutableWriter::empty(c)
 }
 
 struct LocalReference {
-    latest_location: Location,
+    latest_location: Location<mmr::Family>,
     root: Digest,
-    operations: Vec<ImmutableOperation<commonware_storage::mmr::Family, FixedBytes<32>, Vec<u8>>>,
+    operations: Vec<ImmutableOperation<mmr::Family, FixedBytes<32>, Vec<u8>>>,
     queried_key: FixedBytes<32>,
     queried_value: Vec<u8>,
 }
@@ -85,7 +85,7 @@ async fn build_local_db() -> LocalReference {
             let latest = db.bounds().await.end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
             let (_proof, ops) = db
-                .historical_proof(latest + 1, Location::new(0), n)
+                .historical_proof(latest + 1, Location::<mmr::Family>::new(0), n)
                 .await
                 .expect("proof");
             let root = db.root();
@@ -137,7 +137,7 @@ async fn immutable_round_trip() {
     let proof = c
         .operation_range_proof(
             local.latest_location,
-            Location::new(0),
+            Location::<mmr::Family>::new(0),
             local.operations.len() as u32,
         )
         .await

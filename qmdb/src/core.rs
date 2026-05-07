@@ -9,7 +9,7 @@ use commonware_storage::qmdb::{
 };
 use commonware_storage::{
     merkle::hasher::Hasher as MerkleHasher,
-    mmr::{iterator::PeakIterator, Location, Position},
+    merkle::{Family, Graftable, Location, Position},
 };
 use exoware_sdk::keys::Key;
 use exoware_sdk::{ClientError, RangeMode, SerializableReadSession, StoreClient};
@@ -18,8 +18,8 @@ use crate::codec::{
     decode_digest, decode_operation_location_key, decode_update_location,
     decode_watermark_location, encode_chunk_key, encode_current_meta_key, encode_grafted_node_key,
     encode_node_key, encode_operation_key, encode_presence_key, encode_update_key,
-    encode_watermark_key, ensure_encoded_value_size, grafting_height_for, mmr_size_for_watermark,
-    ops_to_grafted_pos, UpdateRow, WATERMARK_CODEC,
+    encode_watermark_key, ensure_encoded_value_size, grafting_height_for,
+    merkle_size_for_watermark, ops_to_grafted_pos, UpdateRow, WATERMARK_CODEC,
 };
 use crate::error::QmdbError;
 use crate::VersionedValue;
@@ -75,14 +75,14 @@ where
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct HistoricalOpsClientCore<'a, D: Digest, K: Codec, V: Codec> {
+pub(crate) struct HistoricalOpsClientCore<'a, F: Family, D: Digest, K: Codec, V: Codec> {
     pub(crate) client: &'a StoreClient,
     pub(crate) update_row_cfg: (K::Cfg, V::Cfg),
-    pub(crate) _marker: PhantomData<(D, K, V)>,
+    pub(crate) _marker: PhantomData<(F, D, K, V)>,
 }
 
-impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
-    pub(crate) async fn writer_location_watermark(&self) -> Result<Option<Location>, QmdbError> {
+impl<'a, F: Family, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, F, D, K, V> {
+    pub(crate) async fn writer_location_watermark(&self) -> Result<Option<Location<F>>, QmdbError> {
         retry_transient_post_ingest_query(|| {
             let session = self.client.create_session();
             async move { self.read_latest_watermark(&session).await }
@@ -93,7 +93,7 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
     pub(crate) async fn read_latest_watermark(
         &self,
         session: &SerializableReadSession,
-    ) -> Result<Option<Location>, QmdbError> {
+    ) -> Result<Option<Location<F>>, QmdbError> {
         let (start, end) = WATERMARK_CODEC.prefix_bounds();
         let rows = session
             .range_with_mode(&start, &end, 1, RangeMode::Reverse)
@@ -107,7 +107,7 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
     pub(crate) async fn require_published_watermark(
         &self,
         session: &SerializableReadSession,
-        watermark: Location,
+        watermark: Location<F>,
     ) -> Result<(), QmdbError> {
         let available = self
             .read_latest_watermark(session)
@@ -121,8 +121,8 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
             || (!watermark_exists && available == Location::new(0) && watermark == Location::new(0))
         {
             return Err(QmdbError::WatermarkTooLow {
-                requested: watermark,
-                available,
+                requested: watermark.as_u64(),
+                available: available.as_u64(),
             });
         }
         Ok(())
@@ -131,22 +131,24 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
     pub(crate) async fn require_batch_boundary(
         &self,
         session: &SerializableReadSession,
-        location: Location,
+        location: Location<F>,
     ) -> Result<(), QmdbError> {
         if session.get(&encode_presence_key(location)).await?.is_some() {
             Ok(())
         } else {
-            Err(QmdbError::CurrentProofRequiresBatchBoundary { location })
+            Err(QmdbError::CurrentProofRequiresBatchBoundary {
+                location: location.as_u64(),
+            })
         }
     }
 
     pub(crate) async fn load_latest_update_row(
         &self,
         session: &SerializableReadSession,
-        watermark: Location,
+        watermark: Location<F>,
         key: &[u8],
     ) -> Result<Option<(Key, Vec<u8>)>, QmdbError> {
-        let start = encode_update_key(key, Location::new(0))?;
+        let start = encode_update_key(key, Location::<F>::new(0))?;
         let end = encode_update_key(key, watermark)?;
         let rows = session
             .range_with_mode(&start, &end, 1, RangeMode::Reverse)
@@ -160,13 +162,13 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
     pub(crate) async fn compute_ops_root<H: Hasher<Digest = D>>(
         &self,
         session: &SerializableReadSession,
-        watermark: Location,
+        watermark: Location<F>,
     ) -> Result<D, QmdbError> {
-        let size = mmr_size_for_watermark(watermark)?;
+        let size = merkle_size_for_watermark(watermark)?;
         let leaves = watermark
             .checked_add(1)
             .ok_or_else(|| QmdbError::CorruptData("watermark overflow".to_string()))?;
-        let peak_positions: Vec<(Position, u32)> = PeakIterator::new(size).collect();
+        let peak_positions: Vec<(Position<F>, u32)> = F::peaks(size).collect();
         let fetched = if peak_positions.is_empty() {
             std::collections::HashMap::new()
         } else {
@@ -185,24 +187,24 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
         for (peak_pos, _) in &peak_positions {
             let Some(bytes) = fetched.get(&encode_node_key(*peak_pos)) else {
                 return Err(QmdbError::CorruptData(format!(
-                    "missing MMR peak node at position {peak_pos}"
+                    "missing Merkle peak node at position {peak_pos}"
                 )));
             };
             peaks.push(decode_digest(
                 bytes.as_ref(),
-                format!("MMR peak node at position {peak_pos}"),
+                format!("Merkle peak node at position {peak_pos}"),
             )?);
         }
         let hasher = commonware_storage::qmdb::hasher::<H>();
         hasher
             .root(leaves, 0, peaks.iter())
-            .map_err(|e| QmdbError::CommonwareMmr(e.to_string()))
+            .map_err(|e| QmdbError::CommonwareMerkle(e.to_string()))
     }
 
     pub(crate) async fn load_operation_bytes_at(
         &self,
         session: &SerializableReadSession,
-        location: Location,
+        location: Location<F>,
     ) -> Result<Vec<u8>, QmdbError> {
         let Some(bytes) = session.get(&encode_operation_key(location)).await? else {
             return Err(QmdbError::CorruptData(format!(
@@ -215,8 +217,8 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
     pub(crate) async fn load_operation_bytes_range(
         &self,
         session: &SerializableReadSession,
-        start_location: Location,
-        end_location_exclusive: Location,
+        start_location: Location<F>,
+        end_location_exclusive: Location<F>,
     ) -> Result<Vec<Vec<u8>>, QmdbError> {
         if start_location >= end_location_exclusive {
             return Ok(Vec::new());
@@ -254,8 +256,8 @@ impl<'a, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, D, K, V> {
     pub(crate) async fn query_many_at<Q: AsRef<[u8]>>(
         &self,
         keys: &[Q],
-        max_location: Location,
-    ) -> Result<Vec<Option<VersionedValue<K, V>>>, QmdbError> {
+        max_location: Location<F>,
+    ) -> Result<Vec<Option<VersionedValue<K, V, F>>>, QmdbError> {
         let session = self.client.create_session();
         self.require_published_watermark(&session, max_location)
             .await?;
@@ -291,7 +293,7 @@ pub(crate) struct PreparedUpload {
     pub(crate) operation_count: u32,
     pub(crate) keyed_operation_count: u32,
     /// Op rows in location order. Values are canonical encoded bytes; writers
-    /// feed references from here to `extend_mmr_from_peaks` without cloning.
+    /// feed references from here to `extend_merkle_from_peaks` without cloning.
     pub(crate) op_rows: Vec<(Key, Vec<u8>)>,
     /// Update-index rows (for keyed ops) plus the presence row. Order is
     /// opaque to the store — rows are indexed by key, not position.
@@ -299,7 +301,7 @@ pub(crate) struct PreparedUpload {
 }
 
 impl PreparedUpload {
-    /// Byte-slice view over the op rows for feeding to `extend_mmr_from_peaks`.
+    /// Byte-slice view over the op rows for feeding to `extend_merkle_from_peaks`.
     pub(crate) fn op_bytes(&self) -> impl Iterator<Item = &[u8]> {
         self.op_rows.iter().map(|(_, v)| v.as_slice())
     }
@@ -313,12 +315,12 @@ impl PreparedUpload {
 }
 
 impl PreparedUpload {
-    pub(crate) fn build<K: QmdbKey + Codec, V: Codec + Clone + Send + Sync>(
-        latest_location: Location,
-        operations: &[QmdbOperation<commonware_storage::mmr::Family, K, V>],
+    pub(crate) fn build<F: Family, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync>(
+        latest_location: Location<F>,
+        operations: &[QmdbOperation<F, K, V>],
     ) -> Result<Self, QmdbError>
     where
-        QmdbOperation<commonware_storage::mmr::Family, K, V>: Encode,
+        QmdbOperation<F, K, V>: Encode,
     {
         use commonware_storage::qmdb::any::ordered::Update as QmdbUpdate;
         Self::build_from_ops(latest_location, operations, |op| match op {
@@ -332,12 +334,12 @@ impl PreparedUpload {
         })
     }
 
-    pub(crate) fn build_unordered<K: QmdbKey + Codec, V: Codec + Clone + Send + Sync>(
-        latest_location: Location,
-        operations: &[UnorderedQmdbOperation<commonware_storage::mmr::Family, K, V>],
+    pub(crate) fn build_unordered<F: Family, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync>(
+        latest_location: Location<F>,
+        operations: &[UnorderedQmdbOperation<F, K, V>],
     ) -> Result<Self, QmdbError>
     where
-        UnorderedQmdbOperation<commonware_storage::mmr::Family, K, V>: Encode,
+        UnorderedQmdbOperation<F, K, V>: Encode,
     {
         use commonware_storage::qmdb::any::unordered::Update as UnorderedUpdate;
         Self::build_from_ops(latest_location, operations, |op| match op {
@@ -347,8 +349,8 @@ impl PreparedUpload {
         })
     }
 
-    fn build_from_ops<Op: Encode, K: AsRef<[u8]> + Encode + Clone, V: Encode + Clone>(
-        latest_location: Location,
+    fn build_from_ops<F: Family, Op: Encode, K: AsRef<[u8]> + Encode + Clone, V: Encode + Clone>(
+        latest_location: Location<F>,
         operations: &[Op],
         extract_keyed: impl Fn(&Op) -> Option<(&K, Option<&V>)>,
     ) -> Result<Self, QmdbError> {
@@ -361,8 +363,8 @@ impl PreparedUpload {
             .and_then(|n| n.checked_sub(count_u64))
         else {
             return Err(QmdbError::InvalidLocationRange {
-                start_location: Location::new(0),
-                latest_location,
+                start_location: 0,
+                latest_location: latest_location.as_u64(),
                 count: operations.len(),
             });
         };
@@ -406,9 +408,9 @@ pub(crate) struct PreparedCurrentBoundaryUpload {
 }
 
 impl PreparedCurrentBoundaryUpload {
-    pub(crate) fn build<D: Digest, const N: usize>(
-        latest_location: Location,
-        current_boundary: &crate::CurrentBoundaryState<D, N>,
+    pub(crate) fn build<F: Graftable, D: Digest, const N: usize>(
+        latest_location: Location<F>,
+        current_boundary: &crate::CurrentBoundaryState<D, N, F>,
     ) -> Result<Self, QmdbError> {
         let mut rows = Vec::with_capacity(
             1 + current_boundary.chunks.len() + current_boundary.grafted_nodes.len(),
@@ -424,7 +426,8 @@ impl PreparedCurrentBoundaryUpload {
             ));
         }
         for &(ops_position, digest) in &current_boundary.grafted_nodes {
-            let grafted_position = ops_to_grafted_pos(ops_position, grafting_height_for::<N>());
+            let grafted_position =
+                ops_to_grafted_pos::<F>(ops_position, grafting_height_for::<N>());
             rows.push((
                 encode_grafted_node_key(grafted_position, latest_location),
                 digest.as_ref().to_vec(),
@@ -438,6 +441,7 @@ impl PreparedCurrentBoundaryUpload {
 mod tests {
     use super::*;
     use commonware_cryptography::Sha256;
+    use commonware_storage::merkle::mmr;
 
     #[test]
     fn current_boundary_upload_keys_grafted_nodes_by_grafted_space_position() {
@@ -447,7 +451,7 @@ mod tests {
 
         let ops_position = Position::new(2046);
         let latest_location = Location::new(1024);
-        let boundary = crate::CurrentBoundaryState::<_, 32> {
+        let boundary = crate::CurrentBoundaryState::<_, 32, mmr::Family> {
             root: digest,
             chunks: Vec::new(),
             grafted_nodes: vec![(ops_position, digest)],
@@ -467,58 +471,75 @@ mod tests {
     }
 }
 
-/// Pure MMR extension: from existing peaks + size, fold `encoded_operations`
-/// into new leaves and compute the resulting peaks, size, root, and the full
-/// list of newly-created nodes the caller can persist. Shared between the
-/// unauthenticated and authenticated publish paths; also used by writers that
-/// maintain peaks in memory to avoid storage reads in the hot loop.
-pub(crate) struct MmrExtension<D: Digest> {
-    pub(crate) size: Position,
-    pub(crate) peaks: Vec<(Position, u32, D)>,
+/// Pure Merkle-family extension: from existing peaks + size, fold
+/// `encoded_operations` into new leaves and compute the resulting peaks, size,
+/// root, and the full list of newly-created nodes the caller can persist.
+pub(crate) struct MerkleExtension<F: Family, D: Digest> {
+    pub(crate) size: Position<F>,
+    pub(crate) peaks: Vec<(Position<F>, u32, D)>,
     pub(crate) root: D,
-    pub(crate) new_nodes: Vec<(Position, D)>,
+    pub(crate) new_nodes: Vec<(Position<F>, D)>,
 }
 
-pub(crate) fn extend_mmr_from_peaks<H: Hasher, Op: AsRef<[u8]>>(
-    mut peaks: Vec<(Position, u32, H::Digest)>,
-    previous_size: Position,
+pub(crate) fn extend_merkle_from_peaks<F: Family, H: Hasher, Op: AsRef<[u8]>>(
+    peaks: Vec<(Position<F>, u32, H::Digest)>,
+    previous_size: Position<F>,
     encoded_operations: impl IntoIterator<Item = Op>,
-) -> Result<MmrExtension<H::Digest>, QmdbError> {
+) -> Result<MerkleExtension<F, H::Digest>, QmdbError> {
+    let mut peak_map: std::collections::BTreeMap<Position<F>, (u32, H::Digest)> = peaks
+        .into_iter()
+        .map(|(pos, height, digest)| (pos, (height, digest)))
+        .collect();
     let mut current_size = previous_size;
-    let mut new_nodes = Vec::<(Position, H::Digest)>::new();
+    let mut new_nodes = Vec::<(Position<F>, H::Digest)>::new();
     let hasher = commonware_storage::qmdb::hasher::<H>();
     for encoded in encoded_operations {
         let encoded = encoded.as_ref();
         ensure_encoded_value_size(encoded.len())?;
+        let current_leaves = Location::<F>::try_from(current_size)
+            .map_err(|e| QmdbError::CorruptData(format!("invalid incremental ops size: {e}")))?;
         let leaf_pos = current_size;
         let leaf_digest = hasher.leaf_digest(leaf_pos, encoded);
+        peak_map.insert(leaf_pos, (0, leaf_digest));
         new_nodes.push((leaf_pos, leaf_digest));
-        current_size = Position::new(*current_size + 1);
+        current_size = current_size
+            .checked_add(1)
+            .ok_or_else(|| QmdbError::CorruptData("merkle size overflow".to_string()))?;
 
-        let mut carry_pos = leaf_pos;
-        let mut carry_digest = leaf_digest;
-        let mut carry_height = 0u32;
-        while peaks
-            .last()
-            .is_some_and(|(_, height, _)| *height == carry_height)
-        {
-            let (_, _, left_digest) = peaks.pop().expect("peak exists");
+        for parent_height in F::parent_heights(current_leaves) {
             let parent_pos = current_size;
-            let parent_digest = hasher.node_digest(parent_pos, &left_digest, &carry_digest);
+            let (left_pos, right_pos) = F::children(parent_pos, parent_height);
+            let (_, left_digest) = peak_map.remove(&left_pos).ok_or_else(|| {
+                QmdbError::CorruptData(format!(
+                    "missing left child {left_pos} while extending merkle tree"
+                ))
+            })?;
+            let (_, right_digest) = peak_map.remove(&right_pos).ok_or_else(|| {
+                QmdbError::CorruptData(format!(
+                    "missing right child {right_pos} while extending merkle tree"
+                ))
+            })?;
+            let parent_digest = hasher.node_digest(parent_pos, &left_digest, &right_digest);
             new_nodes.push((parent_pos, parent_digest));
-            current_size = Position::new(*current_size + 1);
-            carry_pos = parent_pos;
-            carry_digest = parent_digest;
-            carry_height += 1;
+            peak_map.insert(parent_pos, (parent_height, parent_digest));
+            current_size = current_size
+                .checked_add(1)
+                .ok_or_else(|| QmdbError::CorruptData("merkle size overflow".to_string()))?;
         }
-        peaks.push((carry_pos, carry_height, carry_digest));
     }
     let leaves = Location::try_from(current_size)
         .map_err(|e| QmdbError::CorruptData(format!("invalid incremental ops size: {e}")))?;
+    let mut peaks = Vec::new();
+    for (pos, height) in F::peaks(current_size) {
+        let (_, digest) = peak_map.remove(&pos).ok_or_else(|| {
+            QmdbError::CorruptData(format!("missing peak {pos} after merkle extension"))
+        })?;
+        peaks.push((pos, height, digest));
+    }
     let root = hasher
         .root(leaves, 0, peaks.iter().map(|(_, _, digest)| digest))
-        .map_err(|e| QmdbError::CommonwareMmr(e.to_string()))?;
-    Ok(MmrExtension {
+        .map_err(|e| QmdbError::CommonwareMerkle(e.to_string()))?;
+    Ok(MerkleExtension {
         size: current_size,
         peaks,
         root,

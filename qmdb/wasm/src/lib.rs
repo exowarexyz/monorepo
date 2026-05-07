@@ -1,7 +1,9 @@
 use crate::proto::qmdb::v1::{
     current_key_lookup_result, CurrentKeyExclusionProof, CurrentKeyValueProof,
-    CurrentKeyValueProofView, GetManyResponse, GetManyResponseView, GetRangeResponse,
-    GetRangeResponseView, HistoricalMultiProof, HistoricalMultiProofView,
+    CurrentKeyValueProofView, CurrentOperationRangeProof, CurrentOperationRangeProofView,
+    GetManyResponse, GetManyResponseView, GetRangeResponse, GetRangeResponseView,
+    HistoricalMultiProof, HistoricalMultiProofView, HistoricalOperationRangeProof,
+    HistoricalOperationRangeProofView,
 };
 use buffa::MessageView;
 use commonware_codec::{Decode, DecodeExt, Encode, FixedSize, RangeCfg, Read};
@@ -18,7 +20,8 @@ use commonware_storage::{
             db::KeyValueProof as CurrentKeyValueProofObject,
             ExclusionProof as CurrentExclusionProofObject,
         },
-        verify::verify_multi_proof,
+        current::proof::RangeProof as CurrentRangeProofObject,
+        verify::{verify_multi_proof, verify_proof},
     },
 };
 use js_sys::{Array, BigInt, Object, Reflect, Uint8Array};
@@ -56,20 +59,16 @@ pub mod proto {
 
 const MAX_OPERATION_SIZE: usize = u16::MAX as usize;
 
-type ShaDigest = commonware_cryptography::sha256::Digest;
-type DecodedOperation<F> = OrderedOperation<F, Vec<u8>, Vec<u8>>;
-type OperationReadCfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()));
-type MultiProofOperations<F> = Vec<(Location<F>, DecodedOperation<F>)>;
-
 enum ExclusionBoundary {
     Span { start: Vec<u8>, end: Vec<u8> },
     Empty,
 }
 
-fn op_cfg<F>() -> <DecodedOperation<F> as Read>::Cfg
+fn op_cfg<F>() -> <OrderedOperation<F, Vec<u8>, Vec<u8>> as Read>::Cfg
 where
     F: merkle::Family,
-    DecodedOperation<F>: Read<Cfg = OperationReadCfg>,
+    OrderedOperation<F, Vec<u8>, Vec<u8>>:
+        Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
 {
     (
         ((0..=MAX_OPERATION_SIZE).into(), ()),
@@ -86,7 +85,7 @@ fn decode_digest<D: Digest + DecodeExt<()>>(bytes: &[u8], label: &str) -> Result
 }
 
 fn proof_digest_cap(encoded_proof: &[u8]) -> usize {
-    encoded_proof.len() / ShaDigest::SIZE + 1
+    encoded_proof.len() / commonware_cryptography::sha256::Digest::SIZE + 1
 }
 
 fn normalize_family<'a>(family: &'a str, label: &str) -> Result<&'a str, String> {
@@ -99,11 +98,12 @@ fn normalize_family<'a>(family: &'a str, label: &str) -> Result<&'a str, String>
 
 fn verify_multi_from_proto<F>(
     proto: &HistoricalMultiProof,
-    root: &ShaDigest,
-) -> Result<MultiProofOperations<F>, String>
+    root: &commonware_cryptography::sha256::Digest,
+) -> Result<Vec<(Location<F>, OrderedOperation<F, Vec<u8>, Vec<u8>>)>, String>
 where
     F: merkle::Family,
-    DecodedOperation<F>: Decode + Encode + Read<Cfg = OperationReadCfg>,
+    OrderedOperation<F, Vec<u8>, Vec<u8>>:
+        Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
 {
     let operations = proto
         .operations
@@ -111,7 +111,7 @@ where
         .map(|operation| {
             Ok((
                 Location::new(operation.location),
-                DecodedOperation::<F>::decode_cfg(
+                OrderedOperation::<F, Vec<u8>, Vec<u8>>::decode_cfg(
                     operation.encoded_operation.as_slice(),
                     &op_cfg::<F>(),
                 )
@@ -125,8 +125,11 @@ where
         })
         .collect::<Result<Vec<_>, String>>()?;
     let max_digests = proof_digest_cap(&proto.proof);
-    let proof = merkle::Proof::<F, ShaDigest>::decode_cfg(proto.proof.as_slice(), &max_digests)
-        .map_err(|err| format!("failed to decode historical multi proof: {err}"))?;
+    let proof = merkle::Proof::<F, commonware_cryptography::sha256::Digest>::decode_cfg(
+        proto.proof.as_slice(),
+        &max_digests,
+    )
+    .map_err(|err| format!("failed to decode historical multi proof: {err}"))?;
     let hasher = commonware_storage::qmdb::hasher::<Sha256>();
     if !verify_multi_proof(&hasher, &proof, &operations, root) {
         return Err("historical multi proof failed verification".to_string());
@@ -134,26 +137,162 @@ where
     Ok(operations)
 }
 
-fn verify_key_value_from_proto<F>(
-    proto: &CurrentKeyValueProof,
-    root: &ShaDigest,
-) -> Result<(Location<F>, DecodedOperation<F>), String>
+fn verify_operation_range_from_proto<F>(
+    proto: &HistoricalOperationRangeProof,
+    root: &commonware_cryptography::sha256::Digest,
+) -> Result<Vec<(Location<F>, OrderedOperation<F, Vec<u8>, Vec<u8>>)>, String>
+where
+    F: merkle::Family,
+    OrderedOperation<F, Vec<u8>, Vec<u8>>:
+        Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
+{
+    if proto.encoded_operations.is_empty() {
+        return Err("historical operation range proof has no operations".to_string());
+    }
+    let max_digests = proof_digest_cap(&proto.proof);
+    let proof = merkle::Proof::<F, commonware_cryptography::sha256::Digest>::decode_cfg(
+        proto.proof.as_slice(),
+        &max_digests,
+    )
+    .map_err(|err| format!("failed to decode historical operation range proof: {err}"))?;
+    let start = Location::new(proto.start_location);
+    let operations = proto
+        .encoded_operations
+        .iter()
+        .enumerate()
+        .map(|(offset, bytes)| {
+            let offset = u64::try_from(offset)
+                .map_err(|err| format!("operation range offset overflow: {err}"))?;
+            let location = Location::new(
+                proto
+                    .start_location
+                    .checked_add(offset)
+                    .ok_or_else(|| "operation range location overflow".to_string())?,
+            );
+            let operation = OrderedOperation::<F, Vec<u8>, Vec<u8>>::decode_cfg(
+                bytes.as_slice(),
+                &op_cfg::<F>(),
+            )
+            .map_err(|err| {
+                format!(
+                    "failed to decode operation range entry at {}: {err}",
+                    *location
+                )
+            })?;
+            Ok((location, operation))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let ordered_operations = operations
+        .iter()
+        .map(|(_, operation)| operation.clone())
+        .collect::<Vec<_>>();
+    let hasher = commonware_storage::qmdb::hasher::<Sha256>();
+    if !verify_proof(&hasher, &proof, start, &ordered_operations, root) {
+        return Err("historical operation range proof failed verification".to_string());
+    }
+    Ok(operations)
+}
+
+fn verify_current_operation_range_from_proto<F>(
+    proto: &CurrentOperationRangeProof,
+    root: &commonware_cryptography::sha256::Digest,
+) -> Result<Vec<(Location<F>, OrderedOperation<F, Vec<u8>, Vec<u8>>)>, String>
 where
     F: merkle::Graftable,
-    DecodedOperation<F>: Decode + Encode + Read<Cfg = OperationReadCfg>,
+    OrderedOperation<F, Vec<u8>, Vec<u8>>:
+        Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
 {
-    let operation =
-        DecodedOperation::<F>::decode_cfg(proto.encoded_operation.as_slice(), &op_cfg::<F>())
-            .map_err(|err| format!("failed to decode current key-value operation: {err}"))?;
+    if proto.encoded_operations.is_empty() {
+        return Err("current operation range proof has no operations".to_string());
+    }
+    if proto.chunks.is_empty() {
+        return Err("current operation range proof has no chunks".to_string());
+    }
+    let max_digests = proof_digest_cap(&proto.proof);
+    let proof =
+        CurrentRangeProofObject::<F, commonware_cryptography::sha256::Digest>::decode_cfg(
+            proto.proof.as_slice(),
+            &max_digests,
+        )
+        .map_err(|err| format!("failed to decode current operation range proof: {err}"))?;
+    let start = Location::new(proto.start_location);
+    let operations = proto
+        .encoded_operations
+        .iter()
+        .enumerate()
+        .map(|(offset, bytes)| {
+            let offset = u64::try_from(offset)
+                .map_err(|err| format!("operation range offset overflow: {err}"))?;
+            let location = Location::new(
+                proto
+                    .start_location
+                    .checked_add(offset)
+                    .ok_or_else(|| "operation range location overflow".to_string())?,
+            );
+            let operation = OrderedOperation::<F, Vec<u8>, Vec<u8>>::decode_cfg(
+                bytes.as_slice(),
+                &op_cfg::<F>(),
+            )
+            .map_err(|err| {
+                format!(
+                    "failed to decode current operation range entry at {}: {err}",
+                    *location
+                )
+            })?;
+            Ok((location, operation))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let ordered_operations = operations
+        .iter()
+        .map(|(_, operation)| operation.clone())
+        .collect::<Vec<_>>();
+    let chunks = proto
+        .chunks
+        .iter()
+        .enumerate()
+        .map(|(index, bytes)| {
+            if bytes.len() != 32 {
+                return Err(format!(
+                    "current operation range chunk {index} has invalid length {}",
+                    bytes.len()
+                ));
+            }
+            let mut chunk = [0u8; 32];
+            chunk.copy_from_slice(bytes);
+            Ok(chunk)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let mut hasher = Sha256::default();
+    if !proof.verify(&mut hasher, start, &ordered_operations, &chunks, root) {
+        return Err("current operation range proof failed verification".to_string());
+    }
+    Ok(operations)
+}
+
+fn verify_key_value_from_proto<F>(
+    proto: &CurrentKeyValueProof,
+    root: &commonware_cryptography::sha256::Digest,
+) -> Result<(Location<F>, OrderedOperation<F, Vec<u8>, Vec<u8>>), String>
+where
+    F: merkle::Graftable,
+    OrderedOperation<F, Vec<u8>, Vec<u8>>:
+        Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
+{
+    let operation = OrderedOperation::<F, Vec<u8>, Vec<u8>>::decode_cfg(
+        proto.encoded_operation.as_slice(),
+        &op_cfg::<F>(),
+    )
+    .map_err(|err| format!("failed to decode current key-value operation: {err}"))?;
     let OrderedOperation::Update(update) = &operation else {
         return Err("current key-value proof operation must be an update".to_string());
     };
     let max_digests = proof_digest_cap(&proto.proof);
-    let proof = CurrentKeyValueProofObject::<F, Vec<u8>, ShaDigest, 32>::decode_cfg(
-        proto.proof.as_slice(),
-        &(max_digests, ((0..=MAX_OPERATION_SIZE).into(), ())),
-    )
-    .map_err(|err| format!("failed to decode current key-value proof: {err}"))?;
+    let proof =
+        CurrentKeyValueProofObject::<F, Vec<u8>, commonware_cryptography::sha256::Digest, 32>::decode_cfg(
+            proto.proof.as_slice(),
+            &(max_digests, ((0..=MAX_OPERATION_SIZE).into(), ())),
+        )
+        .map_err(|err| format!("failed to decode current key-value proof: {err}"))?;
     if proof.next_key != update.next_key {
         return Err("current key-value proof next_key mismatch".to_string());
     }
@@ -167,18 +306,19 @@ where
 fn verify_key_exclusion_from_proto<F>(
     proto: &CurrentKeyExclusionProof,
     requested_key: &[u8],
-    current_root: &ShaDigest,
+    current_root: &commonware_cryptography::sha256::Digest,
 ) -> Result<ExclusionBoundary, String>
 where
     F: merkle::Graftable,
-    DecodedOperation<F>: Decode + Encode + Read<Cfg = OperationReadCfg>,
+    OrderedOperation<F, Vec<u8>, Vec<u8>>:
+        Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
 {
     let max_digests = proof_digest_cap(&proto.proof);
     let proof = CurrentExclusionProofObject::<
         F,
         Vec<u8>,
         VariableEncoding<Vec<u8>>,
-        ShaDigest,
+        commonware_cryptography::sha256::Digest,
         32,
     >::decode_cfg(
         proto.proof.as_slice(),
@@ -248,7 +388,9 @@ fn location_to_bigint<F: merkle::Family>(location: Location<F>) -> Result<JsValu
     u64_to_bigint(*location)
 }
 
-fn to_js_operation<F: merkle::Family>(operation: DecodedOperation<F>) -> Result<JsValue, JsValue> {
+fn to_js_operation<F: merkle::Family>(
+    operation: OrderedOperation<F, Vec<u8>, Vec<u8>>,
+) -> Result<JsValue, JsValue> {
     let object = Object::new();
     match operation {
         OrderedOperation::Update(Update {
@@ -276,7 +418,9 @@ fn to_js_operation<F: merkle::Family>(operation: DecodedOperation<F>) -> Result<
     Ok(object.into())
 }
 
-fn historical_to_js<F>(decoded_operations: MultiProofOperations<F>) -> Result<JsValue, JsValue>
+fn historical_to_js<F>(
+    decoded_operations: Vec<(Location<F>, OrderedOperation<F, Vec<u8>, Vec<u8>>)>,
+) -> Result<JsValue, JsValue>
 where
     F: merkle::Family,
 {
@@ -294,11 +438,12 @@ where
 
 fn lookup_results_to_js<F>(
     proto: &GetManyResponse,
-    current_root: &ShaDigest,
+    current_root: &commonware_cryptography::sha256::Digest,
 ) -> Result<JsValue, JsValue>
 where
     F: merkle::Graftable,
-    DecodedOperation<F>: Decode + Encode + Read<Cfg = OperationReadCfg>,
+    OrderedOperation<F, Vec<u8>, Vec<u8>>:
+        Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
 {
     let results = Array::new();
     for result in &proto.results {
@@ -339,15 +484,16 @@ fn span_contains_key(span_start: &[u8], span_end: &[u8], key: &[u8]) -> bool {
 
 fn verify_get_range_from_proto<F>(
     proto: &GetRangeResponse,
-    current_root: &ShaDigest,
+    current_root: &commonware_cryptography::sha256::Digest,
     start_key: &[u8],
     end_key: Option<&[u8]>,
 ) -> Result<JsValue, JsValue>
 where
     F: merkle::Graftable,
-    DecodedOperation<F>: Decode + Encode + Read<Cfg = OperationReadCfg>,
+    OrderedOperation<F, Vec<u8>, Vec<u8>>:
+        Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
 {
-    let mut decoded = Vec::<(Vec<u8>, Location<F>, DecodedOperation<F>)>::new();
+    let mut decoded = Vec::<(Vec<u8>, Location<F>, OrderedOperation<F, Vec<u8>, Vec<u8>>)>::new();
     for entry in &proto.entries {
         let proof = entry
             .proof
@@ -465,7 +611,7 @@ where
 
 fn current_to_js<F>(
     location: Location<F>,
-    operation: DecodedOperation<F>,
+    operation: OrderedOperation<F, Vec<u8>, Vec<u8>>,
 ) -> Result<JsValue, JsValue>
 where
     F: merkle::Family,
@@ -493,6 +639,50 @@ pub fn verify_historical_multi_proof(
         "mmb" => {
             historical_to_js(verify_multi_from_proto::<mmb::Family>(&proto, &root).map_err(js_err)?)
         }
+        _ => unreachable!("normalize_family only returns supported values"),
+    }
+}
+
+#[wasm_bindgen]
+pub fn verify_historical_operation_range_proof(
+    bytes: &[u8],
+    root: &[u8],
+    merkle_family: &str,
+) -> Result<JsValue, JsValue> {
+    let proto = HistoricalOperationRangeProofView::decode_view(bytes)
+        .map_err(|err| js_err(format!("decode historical operation range proof: {err}")))?
+        .to_owned_message();
+    let root = decode_digest(root, "historical operation range root").map_err(js_err)?;
+    match normalize_family(merkle_family, "historical operation range proof").map_err(js_err)? {
+        "mmr" => historical_to_js(
+            verify_operation_range_from_proto::<mmr::Family>(&proto, &root).map_err(js_err)?,
+        ),
+        "mmb" => historical_to_js(
+            verify_operation_range_from_proto::<mmb::Family>(&proto, &root).map_err(js_err)?,
+        ),
+        _ => unreachable!("normalize_family only returns supported values"),
+    }
+}
+
+#[wasm_bindgen]
+pub fn verify_current_operation_range_proof(
+    bytes: &[u8],
+    root: &[u8],
+    merkle_family: &str,
+) -> Result<JsValue, JsValue> {
+    let proto = CurrentOperationRangeProofView::decode_view(bytes)
+        .map_err(|err| js_err(format!("decode current operation range proof: {err}")))?
+        .to_owned_message();
+    let root = decode_digest(root, "current operation range root").map_err(js_err)?;
+    match normalize_family(merkle_family, "current operation range proof").map_err(js_err)? {
+        "mmr" => historical_to_js(
+            verify_current_operation_range_from_proto::<mmr::Family>(&proto, &root)
+                .map_err(js_err)?,
+        ),
+        "mmb" => historical_to_js(
+            verify_current_operation_range_from_proto::<mmb::Family>(&proto, &root)
+                .map_err(js_err)?,
+        ),
         _ => unreachable!("normalize_family only returns supported values"),
     }
 }

@@ -24,10 +24,10 @@ proofs at uploaded batch boundaries.
 The ordered client stores:
 - exact ordered QMDB operations by global `Location`
 - per-key historical update rows for `key <= watermark` lookup
-- historical ops-MMR nodes by global `Position`
+- historical ops Merkle nodes by global `Position`
 - versioned current-state deltas:
   - bitmap chunks
-  - grafted MMR nodes
+  - grafted Merkle nodes
 
 ### Why the ordered client exists
 
@@ -89,7 +89,7 @@ The crate stores several store key families using `KeyCodec` prefixes:
 - presence rows
 - operation rows
 - keyed historical update rows
-- historical ops-MMR node rows
+- historical ops Merkle node rows
 - current bitmap chunk delta rows
 - current grafted-node delta rows
 
@@ -156,7 +156,7 @@ Historical helpers operate on the exact uploaded ordered operation log:
   - `root_for_variant(watermark, QmdbVariant::Any)`
   - `operation_range_proof_for_variant(watermark, QmdbVariant::Any, start_location, max_locations)`
 
-These use persisted ops-MMR nodes keyed by global `Position`.
+These use persisted ops Merkle nodes keyed by global `Position`.
 
 ASCII view:
 
@@ -203,7 +203,7 @@ These uploads are sparse:
 
 At proof time, the reader fetches:
 
-- historical ops-MMR peaks from persisted global node rows
+- historical ops Merkle peaks from persisted global node rows
 - the latest bitmap chunk rows at or below the requested watermark
 - the latest grafted-node rows at or below the requested watermark
 
@@ -213,7 +213,7 @@ without requiring full-prefix replay during proof reads.
 ASCII view:
 
 ```text
-historical ops MMR rows             current-state rows at batch boundaries
+historical ops Merkle rows          current-state rows at batch boundaries
 
 Position -> digest                  (chunk, boundary)        -> chunk bytes
                                     (grafted_node, boundary) -> grafted digest
@@ -336,7 +336,7 @@ rows. It only:
 
 - checks that the requested watermark is an uploaded batch boundary
 - checks that current boundary state has already been uploaded for that boundary
-- persists the historical ops-MMR node delta for the newly published suffix
+- persists the historical ops Merkle node delta for the newly published suffix
 - writes the watermark row that fences readers
 
 So current-state work can be staged ahead of time with uploads, while watermark
@@ -408,7 +408,7 @@ Once that happens:
 
 - uploads were still concurrent
 - batch-boundary current state could have been staged before publication
-- publication only processed the suffix's historical ops-MMR node delta and
+- publication only processed the suffix's historical ops Merkle node delta and
   then advanced the trusted frontier
 - current proofs can still be asked for lower uploaded batch boundaries like 199
   because the current-state rows were versioned by batch location
@@ -442,7 +442,7 @@ not allowed:
 ## Writers
 
 Each backend exposes a `*Writer` helper for sole-writer ingest. Writers hold
-cached MMR peaks + a pending-batch queue in memory; `prepare_upload` reserves
+cached Merkle peaks + a pending-batch queue in memory; `prepare_upload` reserves
 writer state and encodes store rows with zero store reads in the hot loop.
 Construction always starts from caller-supplied frontier state. Multiple
 `prepare_upload` calls may be issued concurrently against the same writer; the
@@ -558,12 +558,12 @@ poisons the writer. Future calls return `WriterPoisoned`. The caller constructs
 a fresh writer from caller-owned committed frontier state (for example,
 reconstructed from a local Commonware proof) and re-submits any still-pending
 batches from its own durable source. Re-submission is safe: PUT rows are
-content-addressed by key and MMR math is deterministic.
+content-addressed by key and Merkle math is deterministic.
 
 ### Sole-writer contract
 
 Writers assume they are the only publisher for a namespace at a time.
-Concurrent writers would race on MMR peak extension and corrupt each other's
+Concurrent writers would race on Merkle peak extension and corrupt each other's
 state. The store's ingest layer does not enforce this — it's on the caller.
 
 ## Live Proofs
@@ -579,7 +579,9 @@ Live QMDB keyed proofs now go through ConnectRPC services:
   Commonware does not expose unordered exclusion proofs.
 - `qmdb.v1.OrderedKeyRangeService.GetRange` returns an ordered current key
   range plus boundary proofs. Only ordered QMDB exposes this service.
-- `qmdb.v1.RangeService.Subscribe` listens to the ordered batch log
+- `qmdb.v1.OperationLogService.GetOperationRange` returns a historical
+  operation-log range proof for a contiguous operation interval.
+- `qmdb.v1.OperationLogService.Subscribe` listens to the operation log
   server-side and emits a historical multi-proof when any subscribed logical
   key is touched.
 - `SubscribeRequest.match_keys` supports exact bytes, prefixes, and regexes
@@ -587,23 +589,12 @@ Live QMDB keyed proofs now go through ConnectRPC services:
 - `SubscribeResponse.resume_sequence_number + 1` is the reconnect cursor for
   lossless replay after a disconnect.
 
-Immutable and keyless Connect stacks expose only `qmdb.v1.RangeService` today.
+Immutable and keyless Connect stacks expose only `qmdb.v1.OperationLogService` today.
 They do not expose logical current-key proofs. Unordered current key-value
 proofs require the same current-boundary publication path that ordered uses;
 callers that upload only historical unordered rows should mount
-`unordered_range_connect_stack`, while callers that upload current-boundary
+`unordered_operation_log_connect_stack`, while callers that upload current-boundary
 rows can mount `unordered_connect_stack` for present-key `Get` / `GetMany`.
-
-Historical batch-range streaming now goes through ConnectRPC as well:
-
-- `qmdb.v1.OrderedRangeService`
-- `qmdb.v1.UnorderedRangeService`
-- `qmdb.v1.ImmutableRangeService`
-- `qmdb.v1.KeylessRangeService`
-
-Each `Subscribe` emits a historical contiguous range checkpoint for one
-published batch, and `RangeSubscribeResponse.resume_sequence_number + 1` is
-the reconnect cursor.
 
 This crate still exposes direct proof/query APIs for historical ranges,
 historical multi-proofs, and current ordered key proofs.

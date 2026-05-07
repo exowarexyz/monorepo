@@ -10,7 +10,7 @@ use std::time::Duration;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
-use commonware_storage::mmr::Location;
+use commonware_storage::merkle::{mmr, Location, Proof};
 use commonware_storage::qmdb::any::unordered::variable::Db as LocalUnorderedDb;
 use commonware_storage::qmdb::any::unordered::variable::Operation as UnorderedQmdbOperation;
 use commonware_storage::qmdb::current::unordered::variable::Db as LocalCurrentUnorderedDb;
@@ -19,9 +19,9 @@ use commonware_utils::{NZUsize, NZU16, NZU64};
 use connectrpc::client::ClientConfig;
 use connectrpc::ErrorCode;
 use exoware_qmdb::{
-    recover_boundary_state, unordered_connect_stack, unordered_range_connect_stack,
-    CurrentBoundaryState, QmdbError, RangeSubscribeProof, UnorderedClient, UnorderedConnectClient,
-    UnorderedRangeConnectClient, UnorderedWriter, MAX_OPERATION_SIZE,
+    recover_boundary_state, unordered_connect_stack, unordered_operation_log_connect_stack,
+    CurrentBoundaryState, OperationLogClient, OperationLogSubscribeProof, QmdbError,
+    UnorderedClient, UnorderedConnectClient, UnorderedWriter, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
 use exoware_sdk::qmdb::v1::{
@@ -33,53 +33,43 @@ use exoware_sdk::StoreClient;
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
-type BatchProof = commonware_storage::mmr::Proof<Digest>;
-type BatchOperation = UnorderedQmdbOperation<commonware_storage::mmr::Family, Vec<u8>, Vec<u8>>;
-type FixedBatchOperation = UnorderedQmdbOperation<commonware_storage::mmr::Family, Digest, Vec<u8>>;
-type TestUnorderedClient = UnorderedClient<Sha256, Vec<u8>, Vec<u8>>;
-type FixedTestUnorderedClient = UnorderedClient<Sha256, Digest, Vec<u8>>;
-type LocalDb = LocalUnorderedDb<
-    commonware_storage::mmr::Family,
-    cw_tokio::Context,
-    Vec<u8>,
-    Vec<u8>,
-    Sha256,
-    TwoCap,
->;
-type LocalCurrentDb = LocalCurrentUnorderedDb<
-    commonware_storage::mmr::Family,
-    cw_tokio::Context,
-    Digest,
-    Vec<u8>,
-    Sha256,
-    TwoCap,
-    N,
->;
+type BatchProof = Proof<mmr::Family, Digest>;
+type BatchOperation = UnorderedQmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>;
+type FixedBatchOperation = UnorderedQmdbOperation<mmr::Family, Digest, Vec<u8>>;
+type TestUnorderedClient = UnorderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>>;
+type FixedTestUnorderedClient = UnorderedClient<mmr::Family, Sha256, Digest, Vec<u8>>;
+type LocalDb = LocalUnorderedDb<mmr::Family, cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap>;
+type LocalCurrentDb =
+    LocalCurrentUnorderedDb<mmr::Family, cw_tokio::Context, Digest, Vec<u8>, Sha256, TwoCap, N>;
 
 async fn spawn_qmdb_range_server(
     client: Arc<TestUnorderedClient>,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_range_service(unordered_range_connect_stack(client)).await
+    common::spawn_operation_log_service(unordered_operation_log_connect_stack(client)).await
 }
 
 async fn spawn_qmdb_full_server(
     client: Arc<FixedTestUnorderedClient>,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_range_service(unordered_connect_stack::<Sha256, Digest, Vec<u8>, N>(
-        client,
-    ))
+    common::spawn_operation_log_service(unordered_connect_stack::<
+        mmr::Family,
+        Sha256,
+        Digest,
+        Vec<u8>,
+        N,
+    >(client))
     .await
 }
 
 fn validated_client(
     base: &str,
-) -> UnorderedRangeConnectClient<PreferZstdHttpClient, Sha256, Vec<u8>, Vec<u8>> {
-    UnorderedRangeConnectClient::plaintext(base, op_cfg())
+) -> OperationLogClient<PreferZstdHttpClient, mmr::Family, Sha256, BatchOperation> {
+    OperationLogClient::plaintext(base, op_cfg())
 }
 
 fn validated_key_client(
     base: &str,
-) -> UnorderedConnectClient<PreferZstdHttpClient, Sha256, Digest, Vec<u8>, N> {
+) -> UnorderedConnectClient<PreferZstdHttpClient, mmr::Family, Sha256, Digest, Vec<u8>, N> {
     UnorderedConnectClient::plaintext(base, fixed_op_cfg())
 }
 
@@ -127,21 +117,23 @@ fn fixed_update_row_cfg() -> (
 
 struct LocalBatch {
     operations: Vec<BatchOperation>,
+    root: Digest,
 }
 
 struct FixedLocalBatch {
-    latest_location: Location,
+    latest_location: Location<mmr::Family>,
     alpha: Digest,
     beta: Digest,
+    root: Digest,
     operations: Vec<FixedBatchOperation>,
-    current_boundary: CurrentBoundaryState<Digest, N>,
+    current_boundary: CurrentBoundaryState<Digest, N, mmr::Family>,
 }
 
 async fn boundary_from_local_current_db(
     db: &LocalCurrentDb,
     operations: &[FixedBatchOperation],
-) -> CurrentBoundaryState<Digest, N> {
-    recover_boundary_state::<Sha256, _, N, _, _>(
+) -> CurrentBoundaryState<Digest, N, mmr::Family> {
+    recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
         None,
         operations,
         db.root(),
@@ -208,11 +200,15 @@ async fn build_local_batch() -> LocalBatch {
                 .historical_proof(latest + 1, Location::new(0), n)
                 .await
                 .expect("proof");
+            let root = db.root();
 
             db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
 
-            LocalBatch { operations: ops }
+            LocalBatch {
+                operations: ops,
+                root,
+            }
         })
     })
     .await
@@ -263,6 +259,7 @@ async fn build_fixed_local_batch() -> FixedLocalBatch {
                 latest_location: latest,
                 alpha,
                 beta,
+                root: boundary.root,
                 operations: ops,
                 current_boundary: boundary,
             }
@@ -273,15 +270,17 @@ async fn build_fixed_local_batch() -> FixedLocalBatch {
 }
 
 async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
-    let writer: UnorderedWriter<Sha256, Vec<u8>, Vec<u8>> = UnorderedWriter::empty(client.clone());
+    let writer: UnorderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>> =
+        UnorderedWriter::empty(client.clone());
     common::commit_unordered_upload(client, &writer, &batch.operations)
         .await
         .expect("commit upload");
 }
 
 async fn commit_fixed_upload(client: &StoreClient, batch: &FixedLocalBatch) {
-    let writer: UnorderedWriter<Sha256, Digest, Vec<u8>> = UnorderedWriter::empty(client.clone());
-    common::commit_unordered_current_upload::<_, _, _, N>(
+    let writer: UnorderedWriter<mmr::Family, Sha256, Digest, Vec<u8>> =
+        UnorderedWriter::empty(client.clone());
+    common::commit_unordered_current_upload::<_, _, _, _, N>(
         client,
         &writer,
         &batch.operations,
@@ -294,7 +293,7 @@ async fn commit_fixed_upload(client: &StoreClient, batch: &FixedLocalBatch) {
 fn latest_fixed_operation_for_key(
     operations: &[FixedBatchOperation],
     key: &[u8],
-) -> (Location, FixedBatchOperation) {
+) -> (Location<mmr::Family>, FixedBatchOperation) {
     operations
         .iter()
         .enumerate()
@@ -364,7 +363,7 @@ async fn unordered_connect_get_many_returns_present_key_proofs() {
                 tip: local.latest_location.as_u64(),
                 ..Default::default()
             },
-            &local.current_boundary.root,
+            &local.root,
         )
         .await
         .expect("get_many");
@@ -372,10 +371,10 @@ async fn unordered_connect_get_many_returns_present_key_proofs() {
     let expected_alpha = latest_fixed_operation_for_key(&local.operations, local.alpha.as_ref());
     let expected_beta = latest_fixed_operation_for_key(&local.operations, local.beta.as_ref());
     assert_eq!(results.len(), 2);
-    assert_eq!(results[0].root, local.current_boundary.root);
+    assert_eq!(results[0].root, local.root);
     assert_eq!(results[0].location, expected_alpha.0);
     assert_eq!(results[0].operation, expected_alpha.1);
-    assert_eq!(results[1].root, local.current_boundary.root);
+    assert_eq!(results[1].root, local.root);
     assert_eq!(results[1].location, expected_beta.0);
     assert_eq!(results[1].operation, expected_beta.1);
 
@@ -386,7 +385,7 @@ async fn unordered_connect_get_many_returns_present_key_proofs() {
                 tip: local.latest_location.as_u64(),
                 ..Default::default()
             },
-            &local.current_boundary.root,
+            &local.root,
         )
         .await
         .expect("get");
@@ -416,7 +415,7 @@ async fn unordered_connect_omits_missing_and_rejects_duplicate_range_and_stale_r
                 tip: local.latest_location.as_u64(),
                 ..Default::default()
             },
-            &local.current_boundary.root,
+            &local.root,
         )
         .await
         .expect("unordered get_many with missing key");
@@ -486,15 +485,18 @@ async fn unordered_connect_subscribe_emits_verifiable_range_proof() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     commit_upload(&store_client, &local).await;
 
-    let frame: RangeSubscribeProof<Digest, BatchOperation> =
-        tokio::time::timeout(Duration::from_secs(5), stream.message())
-            .await
-            .expect("timeout")
-            .expect("stream result")
-            .expect("stream frame");
+    let frame: OperationLogSubscribeProof<Digest, BatchOperation, mmr::Family> =
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            stream.message_with_root(common::trusted_root(local.root)),
+        )
+        .await
+        .expect("timeout")
+        .expect("stream result")
+        .expect("stream frame");
 
     assert!(frame.resume_sequence_number > 0);
-    let expected: Vec<(Location, BatchOperation)> = local
+    let expected: Vec<(Location<mmr::Family>, BatchOperation)> = local
         .operations
         .iter()
         .enumerate()
@@ -515,7 +517,7 @@ async fn unordered_connect_client_rejects_invalid_streamed_proof() {
         update_row_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_range_server(unordered_client).await;
-    let rpc = common::rpc_client(&qmdb_url);
+    let rpc = common::operation_log_rpc_client(&qmdb_url);
     let mut raw_stream = rpc
         .subscribe(ProtoSubscribeRequest {
             since_sequence_number: Some(1),
@@ -531,7 +533,7 @@ async fn unordered_connect_client_rejects_invalid_streamed_proof() {
         .to_owned_message();
 
     let (_static_server, static_url) =
-        common::spawn_static_range_service(common::StaticRangeService {
+        common::spawn_static_operation_log_service(common::StaticOperationLogService {
             subscribe_response: common::tamper_subscribe_response(raw_response),
         })
         .await;
@@ -542,7 +544,7 @@ async fn unordered_connect_client_rejects_invalid_streamed_proof() {
         .expect("subscribe");
 
     let err = stream
-        .message()
+        .message_with_root(common::trusted_root(local.root))
         .await
         .expect_err("tampered streamed proof should fail");
     assert!(matches!(

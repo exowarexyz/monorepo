@@ -3,7 +3,8 @@ use std::marker::PhantomData;
 use commonware_codec::{Codec, Decode, Encode, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
-    mmr::Location, qmdb::immutable::variable::Operation as ImmutableOperation,
+    merkle::{Family, Location},
+    qmdb::immutable::variable::Operation as ImmutableOperation,
 };
 use commonware_utils::Array;
 use exoware_sdk::{SerializableReadSession, StoreClient};
@@ -14,31 +15,31 @@ use crate::auth::{
     load_auth_operation_bytes_range, load_latest_auth_immutable_update_row,
     read_latest_auth_watermark, require_published_auth_watermark,
 };
-use crate::codec::{mmr_size_for_watermark, UpdateRow};
+use crate::codec::{merkle_size_for_watermark, UpdateRow};
 use crate::connect::OperationKv;
 use crate::core::retry_transient_post_ingest_query;
 use crate::error::QmdbError;
 use crate::proof::{OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange};
-use crate::storage::AuthKvMmrStorage;
+use crate::storage::AuthKvMerkleStorage;
 use crate::VersionedValue;
 
 #[derive(Clone, Debug)]
-pub struct ImmutableClient<H: Hasher, K: AsRef<[u8]> + Codec, V: Codec + Send + Sync> {
+pub struct ImmutableClient<F: Family, H: Hasher, K: AsRef<[u8]> + Codec, V: Codec + Send + Sync> {
     client: StoreClient,
     operation_cfg: (K::Cfg, V::Cfg),
     update_row_cfg: (K::Cfg, V::Cfg),
-    _marker: PhantomData<(H, K)>,
+    _marker: PhantomData<(F, H, K)>,
 }
 
-impl<H, K, V> ImmutableClient<H, K, V>
+impl<F, H, K, V> ImmutableClient<F, H, K, V>
 where
+    F: Family,
     H: Hasher,
     K: Array + Codec + Clone + AsRef<[u8]>,
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
     K::Cfg: Clone,
-    ImmutableOperation<commonware_storage::mmr::Family, K, V>:
-        Encode + Decode<Cfg = (K::Cfg, V::Cfg)> + Clone,
+    ImmutableOperation<F, K, V>: Encode + Decode<Cfg = (K::Cfg, V::Cfg)> + Clone,
 {
     pub fn new(
         url: &str,
@@ -67,52 +68,50 @@ where
 
     pub(crate) fn extract_operation_kv(
         &self,
-        location: Location,
+        location: Location<F>,
         bytes: &[u8],
     ) -> Result<OperationKv, QmdbError>
     where
         V: AsRef<[u8]>,
     {
-        let op = ImmutableOperation::<commonware_storage::mmr::Family, K, V>::decode_cfg(
-            bytes,
-            &self.operation_cfg,
-        )
-        .map_err(|e| {
-            QmdbError::CorruptData(format!(
-                "failed to decode immutable operation at location {location}: {e}"
-            ))
-        })?;
+        let op =
+            ImmutableOperation::<F, K, V>::decode_cfg(bytes, &self.operation_cfg).map_err(|e| {
+                QmdbError::CorruptData(format!(
+                    "failed to decode immutable operation at location {location}: {e}"
+                ))
+            })?;
         let key = op.key().map(|k| <K as AsRef<[u8]>>::as_ref(k).to_vec());
         let value = match &op {
             ImmutableOperation::Set(_, value) => Some(value.as_ref().to_vec()),
             ImmutableOperation::Commit(Some(value), _) => Some(value.as_ref().to_vec()),
             ImmutableOperation::Commit(None, _) => None,
         };
-        Ok((key, value))
+        Ok(OperationKv { key, value })
     }
 
-    pub async fn writer_location_watermark(&self) -> Result<Option<Location>, QmdbError> {
+    pub async fn writer_location_watermark(&self) -> Result<Option<Location<F>>, QmdbError> {
         retry_transient_post_ingest_query(|| {
             let session = self.client.create_session();
             async move {
-                read_latest_auth_watermark(&session, AuthenticatedBackendNamespace::Immutable).await
+                read_latest_auth_watermark::<F>(&session, AuthenticatedBackendNamespace::Immutable)
+                    .await
             }
         })
         .await
     }
 
-    pub async fn root_at(&self, watermark: Location) -> Result<H::Digest, QmdbError> {
+    pub async fn root_at(&self, watermark: Location<F>) -> Result<H::Digest, QmdbError> {
         let namespace = AuthenticatedBackendNamespace::Immutable;
         let session = self.client.create_session();
         require_published_auth_watermark(&session, namespace, watermark).await?;
-        compute_auth_root::<H>(&session, namespace, watermark).await
+        compute_auth_root::<F, H>(&session, namespace, watermark).await
     }
 
     pub async fn get_at(
         &self,
         key: &K,
-        watermark: Location,
-    ) -> Result<Option<VersionedValue<K, V>>, QmdbError> {
+        watermark: Location<F>,
+    ) -> Result<Option<VersionedValue<K, V, F>>, QmdbError> {
         let namespace = AuthenticatedBackendNamespace::Immutable;
         let session = self.client.create_session();
         require_published_auth_watermark(&session, namespace, watermark).await?;
@@ -121,7 +120,7 @@ where
         else {
             return Ok(None);
         };
-        let location = decode_auth_immutable_update_location(&row_key)?;
+        let location = decode_auth_immutable_update_location::<F>(&row_key)?;
         let decoded =
             <UpdateRow<K, V> as CodecRead>::read_cfg(&mut row_value.as_ref(), &self.update_row_cfg)
                 .map_err(|e| QmdbError::CorruptData(format!("update row decode: {e}")))?;
@@ -130,9 +129,12 @@ where
                 "authenticated immutable update row key mismatch at location {location}"
             )));
         }
-        let operation = load_auth_operation_at::<
-            ImmutableOperation<commonware_storage::mmr::Family, K, V>,
-        >(&session, namespace, location, &self.operation_cfg)
+        let operation = load_auth_operation_at::<F, ImmutableOperation<F, K, V>>(
+            &session,
+            namespace,
+            location,
+            &self.operation_cfg,
+        )
         .await?;
         match operation {
             ImmutableOperation::Set(operation_key, value) if operation_key == *key => {
@@ -153,10 +155,10 @@ where
 
     pub async fn operation_range_checkpoint(
         &self,
-        watermark: Location,
-        start_location: Location,
+        watermark: Location<F>,
+        start_location: Location<F>,
         max_locations: u32,
-    ) -> Result<OperationRangeCheckpoint<H::Digest>, QmdbError> {
+    ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
         let session = self.client.create_session();
         self.operation_range_checkpoint_in_session(
             &session,
@@ -170,44 +172,45 @@ where
     pub(crate) async fn batch_multi_proof_with_read_floor(
         &self,
         read_floor_sequence: u64,
-        watermark: Location,
-        operations: Vec<(Location, Vec<u8>)>,
-    ) -> Result<RawBatchMultiProof<H::Digest>, QmdbError> {
+        watermark: Location<F>,
+        operations: Vec<(Location<F>, Vec<u8>)>,
+    ) -> Result<RawBatchMultiProof<H::Digest, F>, QmdbError> {
         let namespace = AuthenticatedBackendNamespace::Immutable;
         let session = self
             .client
             .create_session_with_sequence(read_floor_sequence);
         require_published_auth_watermark(&session, namespace, watermark).await?;
-        let storage = AuthKvMmrStorage {
+        let storage = AuthKvMerkleStorage::<F, H::Digest> {
             session: &session,
             namespace,
-            mmr_size: mmr_size_for_watermark(watermark)?,
+            size: merkle_size_for_watermark(watermark)?,
             _marker: PhantomData::<H::Digest>,
         };
-        let root = compute_auth_root::<H>(&session, namespace, watermark).await?;
-        crate::proof::build_batch_multi_proof::<H, _>(&storage, watermark, root, operations).await
+        let root = compute_auth_root::<F, H>(&session, namespace, watermark).await?;
+        crate::proof::build_batch_multi_proof::<F, H, _>(&storage, watermark, root, operations)
+            .await
     }
 
     async fn operation_range_checkpoint_in_session(
         &self,
         session: &SerializableReadSession,
-        watermark: Location,
-        start_location: Location,
+        watermark: Location<F>,
+        start_location: Location<F>,
         max_locations: u32,
-    ) -> Result<OperationRangeCheckpoint<H::Digest>, QmdbError> {
+    ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
         let namespace = AuthenticatedBackendNamespace::Immutable;
         require_published_auth_watermark(session, namespace, watermark).await?;
         let end = crate::proof::resolve_range_bounds(watermark, start_location, max_locations)?;
-        let storage = AuthKvMmrStorage {
+        let storage = AuthKvMerkleStorage::<F, H::Digest> {
             session,
             namespace,
-            mmr_size: mmr_size_for_watermark(watermark)?,
+            size: merkle_size_for_watermark(watermark)?,
             _marker: PhantomData::<H::Digest>,
         };
-        let root = compute_auth_root::<H>(session, namespace, watermark).await?;
+        let root = compute_auth_root::<F, H>(session, namespace, watermark).await?;
         let encoded_operations =
             load_auth_operation_bytes_range(session, namespace, start_location, end).await?;
-        crate::proof::build_operation_range_checkpoint::<H, _>(
+        crate::proof::build_operation_range_checkpoint::<F, H, _>(
             &storage,
             watermark,
             start_location,
@@ -221,16 +224,10 @@ where
     /// Verified contiguous range of operations.
     pub async fn operation_range_proof(
         &self,
-        watermark: Location,
-        start_location: Location,
+        watermark: Location<F>,
+        start_location: Location<F>,
         max_locations: u32,
-    ) -> Result<
-        VerifiedOperationRange<
-            H::Digest,
-            ImmutableOperation<commonware_storage::mmr::Family, K, V>,
-        >,
-        QmdbError,
-    > {
+    ) -> Result<VerifiedOperationRange<H::Digest, ImmutableOperation<F, K, V>, F>, QmdbError> {
         let checkpoint = self
             .operation_range_checkpoint(watermark, start_location, max_locations)
             .await?;
@@ -240,15 +237,12 @@ where
             .enumerate()
             .map(|(offset, bytes)| {
                 let location = checkpoint.start_location + offset as u64;
-                ImmutableOperation::<commonware_storage::mmr::Family, K, V>::decode_cfg(
-                    bytes.as_slice(),
-                    &self.operation_cfg,
-                )
-                .map_err(|e| {
-                    QmdbError::CorruptData(format!(
-                        "failed to decode authenticated operation at location {location}: {e}"
-                    ))
-                })
+                ImmutableOperation::<F, K, V>::decode_cfg(bytes.as_slice(), &self.operation_cfg)
+                    .map_err(|e| {
+                        QmdbError::CorruptData(format!(
+                            "failed to decode authenticated operation at location {location}: {e}"
+                        ))
+                    })
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(VerifiedOperationRange {

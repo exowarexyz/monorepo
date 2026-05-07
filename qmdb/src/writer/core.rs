@@ -1,6 +1,6 @@
 //! Shared pipeline machinery for single-writer helpers.
 //!
-//! Every variant writer tracks the same thing: MMR peaks, the next Location,
+//! Every variant writer tracks the same thing: Merkle peaks, the next Location,
 //! a last-published watermark, and a per-dispatched-batch queue so each new
 //! PUT can ride a watermark at the latest **safe** location — the highest
 //! `latest_location` whose entire predecessor prefix has ACKd.
@@ -24,58 +24,58 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use commonware_cryptography::Digest;
-use commonware_storage::mmr::{Location, Position};
+use commonware_storage::merkle::{Family, Location, Position};
 use tokio::sync::{Mutex, Notify};
 
 use crate::error::QmdbError;
 use crate::{PublishedCheckpoint, WriterState};
 
-/// MMR/pipeline state held in memory by a single-writer helper.
+/// Merkle/pipeline state held in memory by a single-writer helper.
 #[derive(Debug)]
-pub(crate) struct Cache<D: Digest> {
-    pub peaks: Vec<(Position, u32, D)>,
-    pub ops_size: Position,
-    pub next_location: Location,
+pub(crate) struct Cache<D: Digest, F: Family> {
+    pub peaks: Vec<(Position<F>, u32, D)>,
+    pub ops_size: Position<F>,
+    pub next_location: Location<F>,
     /// Highest watermark location already included in some prepared or
     /// committed PUT by this writer instance. This suppresses duplicate
     /// watermark rows while batches are still in flight.
-    pub latest_published: Option<Location>,
+    pub latest_published: Option<Location<F>>,
     /// Highest watermark location definitely committed by an ACKed PUT (or a
     /// successful `flush()` watermark PUT). Recovery helpers must report this
     /// value, not the speculative `latest_published`.
-    pub latest_committed_published: Option<PublishedCheckpoint>,
-    pub latest_dispatched: Option<Location>,
+    pub latest_committed_published: Option<PublishedCheckpoint<F>>,
+    pub latest_dispatched: Option<Location<F>>,
     /// Dispatched-but-not-yet-ACKd batches, in dispatch order. Per-batch
     /// `acked` lets us handle out-of-order ACKs correctly: we only advance
     /// `latest_contiguous_acked` when the FRONT of the queue has ACKd (and
     /// then keep popping while the new front is also ACKd).
-    pub pending: VecDeque<PendingBatch>,
+    pub pending: VecDeque<PendingBatch<F>>,
     /// Highest `latest_location` of a batch in the contiguous-acked prefix
     /// from the start. Monotonic — never moves backward.
-    pub latest_contiguous_acked: Option<Location>,
+    pub latest_contiguous_acked: Option<Location<F>>,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct PendingBatch {
+pub(crate) struct PendingBatch<F: Family> {
     pub id: u64,
-    pub latest: Location,
-    pub watermark_at: Option<Location>,
+    pub latest: Location<F>,
+    pub watermark_at: Option<Location<F>>,
     pub acked: bool,
 }
 
 #[derive(Debug)]
-pub(crate) enum State<D: Digest> {
+pub(crate) enum State<D: Digest, F: Family> {
     /// Transient sentinel used while moving a poisoned cache out of the enum.
     Uninit,
-    Ready(Cache<D>),
+    Ready(Cache<D, F>),
     Poisoned {
         msg: String,
-        cache: Cache<D>,
+        cache: Cache<D, F>,
     },
 }
 
-pub(crate) struct WriterCore<D: Digest> {
-    state: Mutex<State<D>>,
+pub(crate) struct WriterCore<D: Digest, F: Family> {
+    state: Mutex<State<D, F>>,
     /// Monotonic counter of `advance` calls — also the next dispatch_id.
     dispatched: AtomicU64,
     /// Monotonic counter of `ack_success` + `ack_failure` calls. Used only
@@ -87,35 +87,35 @@ pub(crate) struct WriterCore<D: Digest> {
 
 /// Snapshot of cache state handed to the variant-specific build closure
 /// inside [`WriterCore::prepare`]. Ownership of `peaks` transfers so the
-/// closure can feed them directly to `extend_mmr_from_peaks` without cloning.
-pub(crate) struct BuildContext<D: Digest> {
-    pub peaks: Vec<(Position, u32, D)>,
-    pub ops_size: Position,
-    pub latest_location: Location,
+/// closure can feed them directly to `extend_merkle_from_peaks` without cloning.
+pub(crate) struct BuildContext<D: Digest, F: Family> {
+    pub peaks: Vec<(Position<F>, u32, D)>,
+    pub ops_size: Position<F>,
+    pub latest_location: Location<F>,
     /// Location to emit the watermark row at for this batch's PUT, or `None`
     /// if no safe location is available.
-    pub watermark_at: Option<Location>,
+    pub watermark_at: Option<Location<F>>,
 }
 
-/// What the build closure returns: updated MMR state plus variant-specific
+/// What the build closure returns: updated Merkle state plus variant-specific
 /// output (the row list the writer will PUT).
-pub(crate) struct BuildResult<D: Digest, R> {
-    pub new_peaks: Vec<(Position, u32, D)>,
-    pub new_ops_size: Position,
+pub(crate) struct BuildResult<D: Digest, F: Family, R> {
+    pub new_peaks: Vec<(Position<F>, u32, D)>,
+    pub new_ops_size: Position<F>,
     pub output: R,
 }
 
 /// What [`WriterCore::prepare`] returns: the variant's build output plus the
 /// dispatch metadata the writer needs to dispatch + ACK the PUT.
-pub(crate) struct PreparedDispatch<R> {
+pub(crate) struct PreparedDispatch<F: Family, R> {
     pub output: R,
     pub dispatch_id: u64,
-    pub watermark_at: Option<Location>,
-    pub latest_location: Location,
+    pub watermark_at: Option<Location<F>>,
+    pub latest_location: Location<F>,
 }
 
-impl<D: Digest> WriterCore<D> {
-    pub(crate) fn from_cache(cache: Cache<D>) -> Self {
+impl<D: Digest, F: Family> WriterCore<D, F> {
+    pub(crate) fn from_cache(cache: Cache<D, F>) -> Self {
         Self {
             state: Mutex::new(State::Ready(cache)),
             dispatched: AtomicU64::new(0),
@@ -125,7 +125,7 @@ impl<D: Digest> WriterCore<D> {
     }
 
     /// Atomically reserve a batch slot, run the variant-specific `build`
-    /// closure under the state mutex, and commit the resulting MMR delta to
+    /// closure under the state mutex, and commit the resulting Merkle delta to
     /// the cache — all in one locked step. This is what prevents the
     /// `dispatch_id` race: because the cache (peaks, size, next_location,
     /// pending) is updated inside the same lock that `build` runs under, no
@@ -137,8 +137,8 @@ impl<D: Digest> WriterCore<D> {
     pub(crate) async fn prepare<R>(
         &self,
         ops_len: u64,
-        build: impl FnOnce(BuildContext<D>) -> Result<BuildResult<D, R>, QmdbError>,
-    ) -> Result<PreparedDispatch<R>, QmdbError> {
+        build: impl FnOnce(BuildContext<D, F>) -> Result<BuildResult<D, F, R>, QmdbError>,
+    ) -> Result<PreparedDispatch<F, R>, QmdbError> {
         let mut state = self.state.lock().await;
         let cache = match &mut *state {
             State::Ready(c) => c,
@@ -285,7 +285,7 @@ impl<D: Digest> WriterCore<D> {
     /// If the latest dispatched batch's `latest_location` is ahead of the
     /// currently published watermark, return that location so the caller can
     /// issue a catch-up watermark PUT.
-    pub(crate) async fn pending_watermark(&self) -> Result<Option<Location>, QmdbError> {
+    pub(crate) async fn pending_watermark(&self) -> Result<Option<Location<F>>, QmdbError> {
         let state = self.state.lock().await;
         match &*state {
             State::Ready(c) => Ok(match c.latest_dispatched {
@@ -299,7 +299,11 @@ impl<D: Digest> WriterCore<D> {
     }
 
     /// Mark a catch-up watermark (emitted by `flush()`) as published.
-    pub(crate) async fn mark_watermark_published(&self, location: Location, sequence_number: u64) {
+    pub(crate) async fn mark_watermark_published(
+        &self,
+        location: Location<F>,
+        sequence_number: u64,
+    ) {
         let mut state = self.state.lock().await;
         if let State::Ready(c) = &mut *state {
             c.latest_published = Some(location);
@@ -311,14 +315,14 @@ impl<D: Digest> WriterCore<D> {
     }
 
     /// Snapshot of the latest published watermark from local state.
-    pub(crate) async fn latest_published(&self) -> Option<Location> {
+    pub(crate) async fn latest_published(&self) -> Option<Location<F>> {
         self.latest_published_checkpoint()
             .await
             .map(|checkpoint| checkpoint.location)
     }
 
     /// Snapshot of the latest published checkpoint from local state.
-    pub(crate) async fn latest_published_checkpoint(&self) -> Option<PublishedCheckpoint> {
+    pub(crate) async fn latest_published_checkpoint(&self) -> Option<PublishedCheckpoint<F>> {
         match &*self.state.lock().await {
             State::Ready(c) => c.latest_committed_published,
             State::Poisoned { cache, .. } => cache.latest_committed_published,
@@ -327,8 +331,8 @@ impl<D: Digest> WriterCore<D> {
     }
 }
 
-impl<D: Digest> Cache<D> {
-    pub(crate) fn from_writer_state(state: WriterState<D>) -> Self {
+impl<D: Digest, F: Family> Cache<D, F> {
+    pub(crate) fn from_writer_state(state: WriterState<D, F>) -> Self {
         let latest_committed = state.latest_committed_location();
         let latest_committed_published = latest_committed.map(|location| PublishedCheckpoint {
             location,
@@ -351,8 +355,9 @@ impl<D: Digest> Cache<D> {
 mod tests {
     use super::*;
     use commonware_cryptography::sha256::Digest as Sha256Digest;
+    use commonware_storage::merkle::mmr;
 
-    fn fresh_core() -> WriterCore<Sha256Digest> {
+    fn fresh_core() -> WriterCore<Sha256Digest, mmr::Family> {
         WriterCore::from_cache(Cache {
             peaks: Vec::new(),
             ops_size: Position::new(0),
@@ -385,14 +390,14 @@ mod tests {
             .expect("await_drain must complete when acked >= dispatched");
     }
 
-    fn loc(n: u64) -> Location {
+    fn loc(n: u64) -> Location<mmr::Family> {
         Location::new(n)
     }
 
     fn ready_cache(
-        next_location: Location,
-        latest_published: Option<Location>,
-    ) -> Cache<Sha256Digest> {
+        next_location: Location<mmr::Family>,
+        latest_published: Option<Location<mmr::Family>>,
+    ) -> Cache<Sha256Digest, mmr::Family> {
         Cache {
             peaks: Vec::new(),
             ops_size: Position::new(0),
@@ -409,8 +414,8 @@ mod tests {
     }
 
     fn passthrough_build(
-        ctx: BuildContext<Sha256Digest>,
-    ) -> Result<BuildResult<Sha256Digest, ()>, QmdbError> {
+        ctx: BuildContext<Sha256Digest, mmr::Family>,
+    ) -> Result<BuildResult<Sha256Digest, mmr::Family, ()>, QmdbError> {
         Ok(BuildResult {
             new_peaks: ctx.peaks,
             new_ops_size: ctx.ops_size,
@@ -420,7 +425,10 @@ mod tests {
 
     #[tokio::test]
     async fn restored_writer_state_reports_committed_watermark_immediately() {
-        let core = WriterCore::from_cache(Cache::from_writer_state(WriterState::<Sha256Digest> {
+        let core = WriterCore::from_cache(Cache::from_writer_state(WriterState::<
+            Sha256Digest,
+            mmr::Family,
+        > {
             peaks: Vec::new(),
             ops_size: Position::new(8),
             next_location: loc(8),
@@ -509,7 +517,10 @@ mod tests {
 
     #[tokio::test]
     async fn seeded_state_flush_path_only_needs_one_tail_publication() {
-        let core = WriterCore::from_cache(Cache::from_writer_state(WriterState::<Sha256Digest> {
+        let core = WriterCore::from_cache(Cache::from_writer_state(WriterState::<
+            Sha256Digest,
+            mmr::Family,
+        > {
             peaks: Vec::new(),
             ops_size: Position::new(8),
             next_location: loc(8),

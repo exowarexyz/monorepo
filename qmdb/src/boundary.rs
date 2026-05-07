@@ -3,37 +3,30 @@ use std::future::Future;
 
 use commonware_codec::{Codec, Encode};
 use commonware_cryptography::Hasher;
+use commonware_storage::merkle::{
+    hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
+    Family, Graftable, Location, Position,
+};
 use commonware_storage::qmdb::{
     current::proof::RangeProof as CurrentRangeProof, operation::Operation as QmdbOperation,
-};
-use commonware_storage::{
-    merkle::hasher::Hasher as MerkleHasher,
-    mmr::{iterator::PeakIterator, Location, Position, StandardHasher},
 };
 
 use crate::codec::{
     bitmap_chunk_bits, chunk_index_for_location, grafting_height_for, ops_to_grafted_pos,
-    position_height,
 };
 use crate::error::QmdbError;
 use crate::CurrentBoundaryState;
 
-fn chunk_idx_to_ops_pos(chunk_idx: u64, grafting_height: u32) -> Position {
-    let first_leaf_loc = Location::new(chunk_idx << grafting_height);
-    let first_leaf_pos = Position::try_from(first_leaf_loc).expect("chunk_idx_to_ops_pos overflow");
-    Position::new(*first_leaf_pos + (1u64 << (grafting_height + 1)) - 2)
+fn chunk_idx_to_ops_pos<F: Graftable>(chunk_idx: u64, grafting_height: u32) -> Position<F> {
+    F::subtree_root_position(Location::new(chunk_idx << grafting_height), grafting_height)
 }
 
-fn grafted_to_ops_pos(grafted_pos: Position, grafting_height: u32) -> Position {
-    let grafted_height = position_height(grafted_pos);
-    let leftmost_grafted_leaf_pos = grafted_pos + 2 - (1u64 << (grafted_height + 1));
-    let chunk_idx = *Location::try_from(leftmost_grafted_leaf_pos)
-        .expect("leftmost leaf is not a valid grafted leaf");
+fn grafted_to_ops_pos<F: Graftable>(grafted_pos: Position<F>, grafting_height: u32) -> Position<F> {
+    let grafted_height = F::pos_to_height(grafted_pos);
+    let chunk_idx = *F::leftmost_leaf(grafted_pos, grafted_height);
     let ops_leaf_loc = chunk_idx << grafting_height;
-    let ops_leaf_pos =
-        Position::try_from(Location::new(ops_leaf_loc)).expect("ops leaf loc overflow");
     let ops_height = grafted_height + grafting_height;
-    Position::new(*ops_leaf_pos + (1u64 << (ops_height + 1)) - 2)
+    F::subtree_root_position(Location::new(ops_leaf_loc), ops_height)
 }
 
 /// Recover the current-boundary delta for one batch from local proof material
@@ -70,26 +63,19 @@ fn grafted_to_ops_pos(grafted_pos: Position, grafting_height: u32) -> Position {
 /// `commonware_storage::qmdb::current::batch::MerkleizedBatch` once upstream
 /// exposes the bitmap-chunk and grafted-subtree deltas needed to publish one
 /// batch boundary directly.
-pub async fn recover_boundary_state<H, Op, const N: usize, F, Fut>(
+pub async fn recover_boundary_state<M, H, Op, const N: usize, Prove, Fut>(
     previous_operations: Option<&[Op]>,
     operations: &[Op],
     root: H::Digest,
-    mut prove_at: F,
-) -> Result<CurrentBoundaryState<H::Digest, N>, QmdbError>
+    mut prove_at: Prove,
+) -> Result<CurrentBoundaryState<H::Digest, N, M>, QmdbError>
 where
+    M: Graftable,
     H: Hasher,
-    Op: QmdbOperation<commonware_storage::mmr::Family> + Codec,
+    Op: QmdbOperation<M> + Codec,
     Op::Key: AsRef<[u8]>,
-    F: FnMut(Location) -> Fut,
-    Fut: Future<
-        Output = Result<
-            (
-                CurrentRangeProof<commonware_storage::mmr::Family, H::Digest>,
-                [u8; N],
-            ),
-            QmdbError,
-        >,
-    >,
+    Prove: FnMut(Location<M>) -> Fut,
+    Fut: Future<Output = Result<(CurrentRangeProof<M, H::Digest>, [u8; N]), QmdbError>>,
 {
     if operations.is_empty() {
         return Err(QmdbError::EmptyBatch);
@@ -103,16 +89,16 @@ where
             previous_len
         )));
     }
-    validate_recovery_input(previous_operations, operations)?;
+    validate_recovery_input::<M, Op>(previous_operations, operations)?;
 
-    let changed_chunks = changed_chunk_representatives::<Op, N>(previous_operations, operations);
+    let changed_chunks = changed_chunk_representatives::<M, Op, N>(previous_operations, operations);
     let complete_chunks = operations.len() / bitmap_chunk_bits::<N>() as usize;
-    let mmr_size = Position::try_from(Location::new(operations.len() as u64))
+    let merkle_size = Position::try_from(Location::new(operations.len() as u64))
         .map_err(|e| QmdbError::CorruptData(format!("invalid current proof leaf count: {e}")))?;
     let grafting_height = grafting_height_for::<N>();
 
     let mut chunks = BTreeMap::<u64, [u8; N]>::new();
-    let mut grafted_nodes = BTreeMap::<Position, H::Digest>::new();
+    let mut grafted_nodes = BTreeMap::<Position<M>, H::Digest>::new();
 
     for (chunk_index, location) in changed_chunks {
         let (proof, chunk) = prove_at(location).await?;
@@ -142,7 +128,7 @@ where
 
         let elements = [operation.encode().to_vec()];
         let chunk_refs = vec![chunk.as_ref()];
-        let verifier = ProofVerifier::<H>::new(grafting_height, chunk_index, chunk_refs);
+        let verifier = ProofVerifier::<M, H>::new(grafting_height, chunk_index, chunk_refs);
         let inner_root = proof
             .proof
             .reconstruct_root(&verifier, &elements, location)
@@ -159,9 +145,10 @@ where
                     "failed to reconstruct current proof digests for location {location}: {e}"
                 ))
             })?;
-        let digest_map: BTreeMap<Position, H::Digest> = collected.into_iter().collect();
+        let digest_map: BTreeMap<Position<M>, H::Digest> = collected.into_iter().collect();
 
-        for position in changed_grafted_positions_for_chunk(chunk_index, mmr_size, grafting_height)?
+        for position in
+            changed_grafted_positions_for_chunk::<M>(chunk_index, merkle_size, grafting_height)?
         {
             let Some(digest) = digest_map.get(&position).copied() else {
                 return Err(QmdbError::CorruptData(format!(
@@ -179,12 +166,12 @@ where
     })
 }
 
-fn validate_recovery_input<Op>(
+fn validate_recovery_input<F: Family, Op>(
     previous_operations: Option<&[Op]>,
     operations: &[Op],
 ) -> Result<(), QmdbError>
 where
-    Op: QmdbOperation<commonware_storage::mmr::Family> + Encode,
+    Op: QmdbOperation<F> + Encode,
 {
     if !operations.last().is_some_and(|op| op.has_floor().is_some()) {
         return Err(QmdbError::CorruptData(
@@ -225,12 +212,12 @@ where
     Ok(())
 }
 
-fn changed_chunk_representatives<Op, const N: usize>(
+fn changed_chunk_representatives<F: Family, Op, const N: usize>(
     previous_operations: Option<&[Op]>,
     operations: &[Op],
-) -> BTreeMap<u64, Location>
+) -> BTreeMap<u64, Location<F>>
 where
-    Op: QmdbOperation<commonware_storage::mmr::Family>,
+    Op: QmdbOperation<F>,
     Op::Key: AsRef<[u8]>,
 {
     // The inactivity floor of the batch being recovered lives in the trailing
@@ -248,13 +235,13 @@ where
     let first_alive_location = floor_chunk.saturating_mul(chunk_bits);
 
     let previous_len = previous_operations.map_or(0usize, |ops| ops.len());
-    let mut changed = BTreeMap::<u64, Location>::new();
+    let mut changed = BTreeMap::<u64, Location<F>>::new();
 
     for raw_location in previous_len..operations.len() {
         let location = Location::new(raw_location as u64);
         if raw_location as u64 >= first_alive_location {
             changed
-                .entry(chunk_index_for_location::<N>(location))
+                .entry(chunk_index_for_location::<F, N>(location))
                 .or_insert(location);
         }
     }
@@ -285,7 +272,7 @@ where
         if let Some(key) = previous[index].key() {
             if touched_keys.remove(key.as_ref()) && previous[index].is_update() {
                 changed
-                    .entry(chunk_index_for_location::<N>(location))
+                    .entry(chunk_index_for_location::<F, N>(location))
                     .or_insert(location);
             }
         }
@@ -294,41 +281,42 @@ where
     changed
 }
 
-fn changed_grafted_positions_for_chunk(
+fn changed_grafted_positions_for_chunk<F: Graftable>(
     chunk_index: u64,
-    mmr_size: Position,
+    merkle_size: Position<F>,
     grafting_height: u32,
-) -> Result<Vec<Position>, QmdbError> {
-    let leaf_ops_pos = chunk_idx_to_ops_pos(chunk_index, grafting_height);
-    let (peak_pos, peak_height) = containing_peak(mmr_size, leaf_ops_pos).ok_or_else(|| {
-        QmdbError::CorruptData(format!(
-            "missing containing peak for chunk {chunk_index} at ops position {leaf_ops_pos}"
-        ))
-    })?;
+) -> Result<Vec<Position<F>>, QmdbError> {
+    let leaf_ops_pos = chunk_idx_to_ops_pos::<F>(chunk_index, grafting_height);
+    let (peak_pos, peak_height) =
+        containing_peak::<F>(merkle_size, leaf_ops_pos).ok_or_else(|| {
+            QmdbError::CorruptData(format!(
+                "missing containing peak for chunk {chunk_index} at ops position {leaf_ops_pos}"
+            ))
+        })?;
 
     if peak_height < grafting_height {
         return Ok(Vec::new());
     }
 
-    let grafted_leaf_pos = Position::try_from(Location::new(chunk_index))
+    let grafted_leaf_pos = Position::<F>::try_from(Location::new(chunk_index))
         .expect("chunk index is a valid leaf location");
-    let grafted_peak_pos = ops_to_grafted_pos(peak_pos, grafting_height);
+    let grafted_peak_pos = ops_to_grafted_pos::<F>(peak_pos, grafting_height);
     let grafted_peak_height = peak_height - grafting_height;
 
     let mut positions = vec![leaf_ops_pos];
     for parent_grafted_pos in
         grafted_path_parent_positions(grafted_leaf_pos, grafted_peak_pos, grafted_peak_height)
     {
-        positions.push(grafted_to_ops_pos(parent_grafted_pos, grafting_height));
+        positions.push(grafted_to_ops_pos::<F>(parent_grafted_pos, grafting_height));
     }
     Ok(positions)
 }
 
-fn grafted_path_parent_positions(
-    leaf_pos: Position,
-    peak_pos: Position,
+fn grafted_path_parent_positions<F: Family>(
+    leaf_pos: Position<F>,
+    peak_pos: Position<F>,
     peak_height: u32,
-) -> Vec<Position> {
+) -> Vec<Position<F>> {
     let mut positions = Vec::with_capacity(peak_height as usize);
     let mut node_pos = peak_pos;
     let mut two_h = 1u64 << peak_height;
@@ -346,17 +334,20 @@ fn grafted_path_parent_positions(
     positions
 }
 
-fn containing_peak(mmr_size: Position, position: Position) -> Option<(Position, u32)> {
-    PeakIterator::new(mmr_size).find(|(peak_pos, height)| {
-        let leftmost = *peak_pos + 2 - (1u64 << (height + 1));
-        leftmost <= position && position <= *peak_pos
+fn containing_peak<F: Graftable>(
+    merkle_size: Position<F>,
+    position: Position<F>,
+) -> Option<(Position<F>, u32)> {
+    F::peaks(merkle_size).find(|(peak_pos, height)| {
+        let leftmost = F::leftmost_leaf(*peak_pos, *height);
+        let rightmost = leftmost + ((1u64 << *height) - 1);
+        let position_leaf = F::leftmost_leaf(position, F::pos_to_height(position));
+        leftmost <= position_leaf && position_leaf <= rightmost
     })
 }
 
-fn ops_pos_to_chunk_idx(ops_pos: Position, grafting_height: u32) -> u64 {
-    let leftmost_leaf_pos = *ops_pos + 2 - (1u64 << (grafting_height + 1));
-    let location = Location::try_from(Position::new(leftmost_leaf_pos))
-        .expect("ops_pos_to_chunk_idx expects a grafting-height position");
+fn ops_pos_to_chunk_idx<F: Graftable>(ops_pos: Position<F>, grafting_height: u32) -> u64 {
+    let location = F::leftmost_leaf(ops_pos, grafting_height);
     *location >> grafting_height
 }
 
@@ -364,25 +355,27 @@ fn ops_pos_to_chunk_idx(ops_pos: Position, grafting_height: u32) -> u64 {
 // `commonware_storage::qmdb::current::grafting::Verifier` once upstream exposes
 // it; the verifier is still private in the pinned Commonware revision.
 #[derive(Clone)]
-struct ProofVerifier<'a, H: Hasher> {
+struct ProofVerifier<'a, F: Graftable, H: Hasher> {
     inner: StandardHasher<H>,
     grafting_height: u32,
     chunks: Vec<&'a [u8]>,
     start_chunk_index: u64,
+    _marker: std::marker::PhantomData<F>,
 }
 
-impl<'a, H: Hasher> ProofVerifier<'a, H> {
+impl<'a, F: Graftable, H: Hasher> ProofVerifier<'a, F, H> {
     fn new(grafting_height: u32, start_chunk_index: u64, chunks: Vec<&'a [u8]>) -> Self {
         Self {
             inner: commonware_storage::qmdb::hasher::<H>(),
             grafting_height,
             chunks,
             start_chunk_index,
+            _marker: std::marker::PhantomData,
         }
     }
 }
 
-impl<H: Hasher> MerkleHasher<commonware_storage::mmr::Family> for ProofVerifier<'_, H> {
+impl<F: Graftable, H: Hasher> MerkleHasher<F> for ProofVerifier<'_, F, H> {
     type Digest = H::Digest;
 
     fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
@@ -393,23 +386,23 @@ impl<H: Hasher> MerkleHasher<commonware_storage::mmr::Family> for ProofVerifier<
         self.inner.root_bagging()
     }
 
-    fn leaf_digest(&self, pos: Position, element: &[u8]) -> Self::Digest {
+    fn leaf_digest(&self, pos: Position<F>, element: &[u8]) -> Self::Digest {
         self.inner.leaf_digest(pos, element)
     }
 
     fn node_digest(
         &self,
-        pos: Position,
+        pos: Position<F>,
         left: &Self::Digest,
         right: &Self::Digest,
     ) -> Self::Digest {
-        match position_height(pos).cmp(&self.grafting_height) {
+        match F::pos_to_height(pos).cmp(&self.grafting_height) {
             std::cmp::Ordering::Less | std::cmp::Ordering::Greater => {
                 self.inner.node_digest(pos, left, right)
             }
             std::cmp::Ordering::Equal => {
                 let ops_subtree_root = self.inner.node_digest(pos, left, right);
-                let chunk_idx = ops_pos_to_chunk_idx(pos, self.grafting_height);
+                let chunk_idx = ops_pos_to_chunk_idx::<F>(pos, self.grafting_height);
                 let Some(local_idx) = chunk_idx
                     .checked_sub(self.start_chunk_index)
                     .filter(|index| *index < self.chunks.len() as u64)
@@ -431,16 +424,13 @@ impl<H: Hasher> MerkleHasher<commonware_storage::mmr::Family> for ProofVerifier<
 #[cfg(test)]
 mod tests {
     use super::changed_chunk_representatives;
-    use commonware_storage::mmr::Location;
+    use commonware_storage::merkle::{mmr, Location};
     use commonware_storage::qmdb::any::ordered::{
         variable::Operation as TestOperation, Update as OrderedUpdate,
     };
     use std::collections::BTreeMap;
 
-    fn update(
-        key: &[u8],
-        value: &[u8],
-    ) -> TestOperation<commonware_storage::mmr::Family, Vec<u8>, Vec<u8>> {
+    fn update(key: &[u8], value: &[u8]) -> TestOperation<mmr::Family, Vec<u8>, Vec<u8>> {
         TestOperation::Update(OrderedUpdate {
             key: key.to_vec(),
             value: value.to_vec(),
@@ -448,11 +438,11 @@ mod tests {
         })
     }
 
-    fn commit(floor: u64) -> TestOperation<commonware_storage::mmr::Family, Vec<u8>, Vec<u8>> {
+    fn commit(floor: u64) -> TestOperation<mmr::Family, Vec<u8>, Vec<u8>> {
         TestOperation::CommitFloor(None, Location::new(floor))
     }
 
-    fn previous_ops() -> Vec<TestOperation<commonware_storage::mmr::Family, Vec<u8>, Vec<u8>>> {
+    fn previous_ops() -> Vec<TestOperation<mmr::Family, Vec<u8>, Vec<u8>>> {
         let mut ops = vec![commit(0)];
         for index in 1..8 {
             ops.push(update(
@@ -478,7 +468,7 @@ mod tests {
         let mut operations = previous.clone();
         operations.push(update(b"target", b"new"));
 
-        let changed = changed_chunk_representatives::<TestOperation<_, _, _>, 1>(
+        let changed = changed_chunk_representatives::<mmr::Family, TestOperation<_, _, _>, 1>(
             Some(&previous),
             &operations,
         );
@@ -502,7 +492,7 @@ mod tests {
         operations.push(update(b"target", b"new"));
         operations.push(commit(16));
 
-        let changed = changed_chunk_representatives::<TestOperation<_, _, _>, 1>(
+        let changed = changed_chunk_representatives::<mmr::Family, TestOperation<_, _, _>, 1>(
             Some(&previous),
             &operations,
         );
@@ -525,7 +515,7 @@ mod tests {
         operations.push(update(b"neighbor3", b"v"));
         operations.push(commit(18));
 
-        let changed = changed_chunk_representatives::<TestOperation<_, _, _>, 1>(
+        let changed = changed_chunk_representatives::<mmr::Family, TestOperation<_, _, _>, 1>(
             Some(&previous),
             &operations,
         );
@@ -542,7 +532,7 @@ mod tests {
         let err =
             super::validate_recovery_input(Some(&previous), &operations).expect_err("must reject");
         assert!(
-            err.to_string().contains("end with CommitFloor"),
+            err.to_string().contains("end with a commit floor"),
             "unexpected error: {err}"
         );
     }
@@ -557,7 +547,7 @@ mod tests {
         let err =
             super::validate_recovery_input(Some(&previous), &operations).expect_err("must reject");
         assert!(
-            err.to_string().contains("exactly one CommitFloor"),
+            err.to_string().contains("exactly one commit floor"),
             "unexpected error: {err}"
         );
     }

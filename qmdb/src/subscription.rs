@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use commonware_storage::mmr::Location;
+use commonware_storage::merkle::{Family, Location};
 use exoware_sdk::keys::Key;
 use exoware_sdk::match_key::MatchKey;
 use exoware_sdk::stream_filter::StreamFilter;
@@ -17,13 +17,30 @@ use crate::codec::{
 use crate::QmdbError;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Family {
+pub(crate) enum RowFamily {
     Op,
     Presence,
     Watermark,
 }
 
-pub type Classify = Arc<dyn Fn(&Key, &[u8]) -> Option<(Family, Location)> + Send + Sync + 'static>;
+#[derive(Clone)]
+pub(crate) struct RowClassifier<F: Family> {
+    classify: Arc<dyn Fn(&Key, &[u8]) -> Option<(RowFamily, Location<F>)> + Send + Sync + 'static>,
+}
+
+impl<F: Family> RowClassifier<F> {
+    fn new(
+        classify: impl Fn(&Key, &[u8]) -> Option<(RowFamily, Location<F>)> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            classify: Arc::new(classify),
+        }
+    }
+
+    pub(crate) fn classify(&self, key: &Key, value: &[u8]) -> Option<(RowFamily, Location<F>)> {
+        (self.classify)(key, value)
+    }
+}
 
 pub(crate) async fn open_store_subscription(
     client: &StoreClient,
@@ -41,32 +58,36 @@ pub(crate) async fn open_store_subscription(
 /// Watermark rows of a QMDB backend's historical op log. Pass
 /// `Some(namespace)` for the authenticated backends (immutable, keyless) and
 /// `None` for the plain-store backends (ordered, unordered).
-pub(crate) fn classify_and_filter(
+pub(crate) fn classify_and_filter<F: Family>(
     namespace: Option<AuthenticatedBackendNamespace>,
-) -> (Classify, StreamFilter) {
+) -> (RowClassifier<F>, StreamFilter) {
     use exoware_sdk::keys::{Key as StoreKey, KeyCodec};
     use exoware_sdk::kv_codec::Utf8;
 
-    type DecodeLocation = Arc<dyn Fn(&StoreKey) -> Option<Location> + Send + Sync>;
+    struct RowRule<F: Family> {
+        codec: KeyCodec,
+        family: RowFamily,
+        decode: Arc<dyn Fn(&StoreKey) -> Option<Location<F>> + Send + Sync>,
+    }
 
     let (compiled, op_prefix, presence_prefix, watermark_prefix, payload_regex) = match namespace {
         None => {
-            let compiled: [(KeyCodec, Family, DecodeLocation); 3] = [
-                (
-                    KeyCodec::new(RESERVED_BITS, OP_FAMILY),
-                    Family::Op,
-                    Arc::new(|key| decode_operation_location_key(key).ok()),
-                ),
-                (
-                    KeyCodec::new(RESERVED_BITS, PRESENCE_FAMILY),
-                    Family::Presence,
-                    Arc::new(|key| decode_presence_location(key).ok()),
-                ),
-                (
-                    KeyCodec::new(RESERVED_BITS, WATERMARK_FAMILY),
-                    Family::Watermark,
-                    Arc::new(|key| decode_watermark_location(key).ok()),
-                ),
+            let compiled: [RowRule<F>; 3] = [
+                RowRule {
+                    codec: KeyCodec::new(RESERVED_BITS, OP_FAMILY),
+                    family: RowFamily::Op,
+                    decode: Arc::new(|key| decode_operation_location_key::<F>(key).ok()),
+                },
+                RowRule {
+                    codec: KeyCodec::new(RESERVED_BITS, PRESENCE_FAMILY),
+                    family: RowFamily::Presence,
+                    decode: Arc::new(|key| decode_presence_location::<F>(key).ok()),
+                },
+                RowRule {
+                    codec: KeyCodec::new(RESERVED_BITS, WATERMARK_FAMILY),
+                    family: RowFamily::Watermark,
+                    decode: Arc::new(|key| decode_watermark_location::<F>(key).ok()),
+                },
             ];
             (
                 compiled,
@@ -77,22 +98,22 @@ pub(crate) fn classify_and_filter(
             )
         }
         Some(ns) => {
-            let compiled: [(KeyCodec, Family, DecodeLocation); 3] = [
-                (
-                    AUTH_OPERATION_CODEC,
-                    Family::Op,
-                    Arc::new(move |key| decode_auth_operation_location(ns, key).ok()),
-                ),
-                (
-                    AUTH_PRESENCE_CODEC,
-                    Family::Presence,
-                    Arc::new(move |key| decode_auth_presence_location(ns, key).ok()),
-                ),
-                (
-                    AUTH_WATERMARK_CODEC,
-                    Family::Watermark,
-                    Arc::new(move |key| decode_auth_watermark_location(ns, key).ok()),
-                ),
+            let compiled: [RowRule<F>; 3] = [
+                RowRule {
+                    codec: AUTH_OPERATION_CODEC,
+                    family: RowFamily::Op,
+                    decode: Arc::new(move |key| decode_auth_operation_location::<F>(ns, key).ok()),
+                },
+                RowRule {
+                    codec: AUTH_PRESENCE_CODEC,
+                    family: RowFamily::Presence,
+                    decode: Arc::new(move |key| decode_auth_presence_location::<F>(ns, key).ok()),
+                },
+                RowRule {
+                    codec: AUTH_WATERMARK_CODEC,
+                    family: RowFamily::Watermark,
+                    decode: Arc::new(move |key| decode_auth_watermark_location::<F>(ns, key).ok()),
+                },
             ];
             (
                 compiled,
@@ -104,10 +125,10 @@ pub(crate) fn classify_and_filter(
         }
     };
 
-    let classify: Classify = Arc::new(move |key: &StoreKey, _value: &[u8]| {
-        for (codec, family, decode) in &compiled {
-            if codec.matches(key) {
-                return decode(key).map(|location| (*family, location));
+    let classify = RowClassifier::new(move |key: &StoreKey, _value: &[u8]| {
+        for rule in &compiled {
+            if rule.codec.matches(key) {
+                return (rule.decode)(key).map(|location| (rule.family, location));
             }
         }
         None

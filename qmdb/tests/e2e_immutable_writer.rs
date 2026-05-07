@@ -8,7 +8,7 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use commonware_runtime::{deterministic, Runner as _};
-use commonware_storage::mmr::Location;
+use commonware_storage::merkle::{mmr, Location};
 use commonware_storage::qmdb::immutable::variable::{
     Db as Immutable, Operation as ImmutableOperation,
 };
@@ -22,16 +22,10 @@ use common::retry;
 type Digest = commonware_cryptography::sha256::Digest;
 type K = FixedBytes<32>;
 type V = Vec<u8>;
-type LocalDb = Immutable<
-    commonware_storage::mmr::Family,
-    deterministic::Context,
-    K,
-    V,
-    commonware_cryptography::Sha256,
-    TwoCap,
->;
-type TestReader = ImmutableClient<commonware_cryptography::Sha256, K, V>;
-type TestWriter = ImmutableWriter<commonware_cryptography::Sha256, K, V>;
+type LocalDb =
+    Immutable<mmr::Family, deterministic::Context, K, V, commonware_cryptography::Sha256, TwoCap>;
+type TestReader = ImmutableClient<mmr::Family, commonware_cryptography::Sha256, K, V>;
+type TestWriter = ImmutableWriter<mmr::Family, commonware_cryptography::Sha256, K, V>;
 
 fn fresh_reader(c: StoreClient) -> TestReader {
     TestReader::from_client(
@@ -46,9 +40,9 @@ fn fresh_writer(c: StoreClient) -> TestWriter {
 }
 
 struct LocalReference {
-    latest_location: Location,
+    latest_location: Location<mmr::Family>,
     root: Digest,
-    operations: Vec<ImmutableOperation<commonware_storage::mmr::Family, K, V>>,
+    operations: Vec<ImmutableOperation<mmr::Family, K, V>>,
 }
 
 async fn build_local_reference(batches: Vec<Vec<(K, V)>>) -> LocalReference {
@@ -78,7 +72,7 @@ async fn build_local_reference(batches: Vec<Vec<(K, V)>>) -> LocalReference {
             let latest = db.bounds().await.end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
             let (_proof, ops) = db
-                .historical_proof(latest + 1, Location::new(0), n)
+                .historical_proof(latest + 1, Location::<mmr::Family>::new(0), n)
                 .await
                 .expect("proof");
             let root = db.root();

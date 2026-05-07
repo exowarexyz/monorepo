@@ -24,7 +24,7 @@ service OrderedKeyRangeService {
   rpc GetRange(GetRangeRequest) returns (GetRangeResponse);
 }
 
-// Subscription service over a QMDB backend's historical op log.
+// Historical operation-log proof service over a QMDB backend.
 //
 // Clients dial the endpoint bound to the backend variant they want to read
 // (ordered, unordered, immutable, or keyless). The wire protocol is identical
@@ -34,8 +34,16 @@ service OrderedKeyRangeService {
 // a proof (ordered/unordered/immutable). With `match_keys` empty, every
 // batch produces a proof covering all of its operations; keyless backends
 // require `match_keys` to be empty.
-service RangeService {
+service OperationLogService {
+  rpc GetOperationRange(GetOperationRangeRequest) returns (GetOperationRangeResponse);
   rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
+}
+
+// Current operation proof service for QMDB backends that upload current-state
+// boundary material. Ordered and unordered backends can expose this when the
+// requested tip is an uploaded batch boundary.
+service CurrentOperationService {
+  rpc GetCurrentOperationRange(GetCurrentOperationRangeRequest) returns (GetCurrentOperationRangeResponse);
 }
 
 // Subscribe to operations whose logical key and/or value match the given
@@ -106,6 +114,25 @@ message HistoricalMultiProof {
   repeated MultiProofOperation operations = 2;
 }
 
+// Historical QMDB range proof over a contiguous operation interval.
+message HistoricalOperationRangeProof {
+  bytes proof = 1;
+  uint64 start_location = 2;
+  repeated bytes encoded_operations = 3;
+}
+
+// Current QMDB operation range proof. `proof` is opaque Commonware
+// `current::proof::RangeProof` bytes encoded with `commonware-codec`.
+// `encoded_operations` are the contiguous operations starting at
+// `start_location`; `chunks` are the raw bitmap chunks required by Commonware
+// verification.
+message CurrentOperationRangeProof {
+  bytes proof = 1;
+  uint64 start_location = 2;
+  repeated bytes encoded_operations = 3;
+  repeated bytes chunks = 4;
+}
+
 // Current proof for one active key. `proof` is opaque Commonware proof bytes
 // encoded with `commonware-codec`: ordered endpoints use
 // `current::ordered::db::KeyValueProof`; unordered endpoints use
@@ -140,9 +167,34 @@ message SubscribeResponse {
   // Underlying store stream sequence that made this proof readable end-to-end.
   uint64 resume_sequence_number = 1;
   HistoricalMultiProof proof = 2;
-  // Historical ops root for the subscribed batch proof. Range subscriptions
-  // are backend-generic and may not have an ordered current/global root.
-  bytes root = 3;
+  // Published operation-log watermark this proof verifies against. Clients
+  // verify using their trusted operation-log root for this tip.
+  uint64 tip = 3;
+}
+
+// Unary operation-log range proof request. The proof covers
+// `[start_location, min(start_location + max_locations, tip + 1))`.
+message GetOperationRangeRequest {
+  uint64 tip = 1;
+  uint64 start_location = 2;
+  uint32 max_locations = 3 [(buf.validate.field).uint32.gt = 0];
+}
+
+message GetOperationRangeResponse {
+  HistoricalOperationRangeProof proof = 1;
+}
+
+// Unary current operation-range proof request. The proof covers
+// `[start_location, min(start_location + max_locations, tip + 1))` in the
+// current-state tree at `tip`.
+message GetCurrentOperationRangeRequest {
+  uint64 tip = 1;
+  uint64 start_location = 2;
+  uint32 max_locations = 3 [(buf.validate.field).uint32.gt = 0];
+}
+
+message GetCurrentOperationRangeResponse {
+  CurrentOperationRangeProof proof = 1;
 }
 
 // Unary current key proof response.
