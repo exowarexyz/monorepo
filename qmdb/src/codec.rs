@@ -1,6 +1,6 @@
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
-use commonware_storage::mmr::{Location, Position};
+use commonware_storage::merkle::{Family, Graftable, Location, Position};
 use exoware_sdk::keys::{Key, KeyCodec};
 
 use crate::error::QmdbError;
@@ -15,6 +15,7 @@ pub(crate) const NODE_FAMILY: u16 = 0x5;
 pub(crate) const GRAFTED_NODE_FAMILY: u16 = 0x6;
 pub(crate) const CHUNK_FAMILY: u16 = 0x7;
 pub(crate) const CURRENT_META_FAMILY: u16 = 0x8;
+pub(crate) const OPS_ROOT_WITNESS_FAMILY: u16 = 0x9;
 
 pub(crate) const UPDATE_VERSION_LEN: usize = 8;
 pub(crate) const ORDERED_KEY_ESCAPE_BYTE: u8 = 0x00;
@@ -29,8 +30,8 @@ pub(crate) const NODE_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, NODE_FAMILY
 pub(crate) const CURRENT_META_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, CURRENT_META_FAMILY);
 pub(crate) const GRAFTED_NODE_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, GRAFTED_NODE_FAMILY);
 pub(crate) const CHUNK_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, CHUNK_FAMILY);
-
-pub(crate) const NO_PARTIAL_CHUNK: u64 = 0;
+pub(crate) const OPS_ROOT_WITNESS_CODEC: KeyCodec =
+    KeyCodec::new(RESERVED_BITS, OPS_ROOT_WITNESS_FAMILY);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct UpdateRow<K, V> {
@@ -77,40 +78,23 @@ pub(crate) const fn grafting_height_for<const N: usize>() -> u32 {
     bitmap_chunk_bits::<N>().trailing_zeros()
 }
 
-pub(crate) fn chunk_index_for_location<const N: usize>(location: Location) -> u64 {
+pub(crate) fn chunk_index_for_location<F: Family, const N: usize>(location: Location<F>) -> u64 {
     *location / bitmap_chunk_bits::<N>()
 }
 
-pub(crate) fn ops_to_grafted_pos(ops_pos: Position, grafting_height: u32) -> Position {
-    let ops_height = position_height(ops_pos);
+pub(crate) fn ops_to_grafted_pos<F: Graftable>(
+    ops_pos: Position<F>,
+    grafting_height: u32,
+) -> Position<F> {
+    let ops_height = F::pos_to_height(ops_pos);
     assert!(
         ops_height >= grafting_height,
         "position height {ops_height} < grafting height {grafting_height}"
     );
     let grafted_height = ops_height - grafting_height;
-    let leftmost_ops_leaf_pos = *ops_pos + 2 - (1u64 << (ops_height + 1));
-    let ops_leaf_loc = Location::try_from(Position::new(leftmost_ops_leaf_pos))
-        .expect("leftmost ops leaf is not a valid leaf");
+    let ops_leaf_loc = F::leftmost_leaf(ops_pos, ops_height);
     let chunk_idx = *ops_leaf_loc >> grafting_height;
-    let grafted_leaf_pos =
-        Position::try_from(Location::new(chunk_idx)).expect("chunk index overflow");
-    Position::new(*grafted_leaf_pos + (1u64 << (grafted_height + 1)) - 2)
-}
-
-pub(crate) fn position_height(pos: Position) -> u32 {
-    let mut pos = pos.as_u64();
-    if pos == 0 {
-        return 0;
-    }
-
-    let mut size = u64::MAX >> pos.leading_zeros();
-    while size != 0 {
-        if pos >= size {
-            pos -= size;
-        }
-        size >>= 1;
-    }
-    pos as u32
+    F::subtree_root_position(Location::new(chunk_idx), grafted_height)
 }
 
 pub(crate) fn decode_digest<D: Digest>(bytes: &[u8], label: String) -> Result<D, QmdbError> {
@@ -123,12 +107,14 @@ pub(crate) fn decode_digest<D: Digest>(bytes: &[u8], label: String) -> Result<D,
     D::decode(bytes).map_err(|e| QmdbError::CorruptData(format!("{label} decode error: {e}")))
 }
 
-pub(crate) fn mmr_size_for_watermark(watermark: Location) -> Result<Position, QmdbError> {
+pub(crate) fn merkle_size_for_watermark<F: Family>(
+    watermark: Location<F>,
+) -> Result<Position<F>, QmdbError> {
     let leaves = watermark
         .checked_add(1)
         .ok_or_else(|| QmdbError::CorruptData("watermark overflow".to_string()))?;
     Position::try_from(leaves)
-        .map_err(|e| QmdbError::CorruptData(format!("invalid MMR size for watermark: {e}")))
+        .map_err(|e| QmdbError::CorruptData(format!("invalid merkle size for watermark: {e}")))
 }
 
 pub(crate) fn ensure_encoded_value_size(len: usize) -> Result<(), QmdbError> {
@@ -219,7 +205,10 @@ pub(crate) fn encode_ordered_update_payload(
     Ok(encoded)
 }
 
-pub(crate) fn encode_update_key(raw_key: &[u8], location: Location) -> Result<Key, QmdbError> {
+pub(crate) fn encode_update_key<F: Family>(
+    raw_key: &[u8],
+    location: Location<F>,
+) -> Result<Key, QmdbError> {
     let codec = UPDATE_CODEC;
     let ordered_key = encode_ordered_update_payload(codec, raw_key, UPDATE_VERSION_LEN)?;
     let total_len = codec.min_key_len_for_payload(ordered_key.len() + UPDATE_VERSION_LEN);
@@ -239,7 +228,7 @@ pub(crate) fn encode_update_key(raw_key: &[u8], location: Location) -> Result<Ke
     Ok(key.freeze())
 }
 
-pub(crate) fn decode_update_location(key: &Key) -> Result<Location, QmdbError> {
+pub(crate) fn decode_update_location<F: Family>(key: &Key) -> Result<Location<F>, QmdbError> {
     let codec = UPDATE_CODEC;
     if !codec.matches(key) {
         return Err(QmdbError::CorruptData(
@@ -263,7 +252,7 @@ pub(crate) fn decode_update_location(key: &Key) -> Result<Location, QmdbError> {
     Ok(Location::new(u64::from_be_bytes(bytes)))
 }
 
-pub(crate) fn encode_presence_key(latest_location: Location) -> Key {
+pub(crate) fn encode_presence_key<F: Family>(latest_location: Location<F>) -> Key {
     let codec = PRESENCE_CODEC;
     let mut key = codec
         .new_key_with_len(codec.min_key_len_for_payload(8))
@@ -274,7 +263,7 @@ pub(crate) fn encode_presence_key(latest_location: Location) -> Key {
     key.freeze()
 }
 
-pub(crate) fn encode_watermark_key(location: Location) -> Key {
+pub(crate) fn encode_watermark_key<F: Family>(location: Location<F>) -> Key {
     let codec = WATERMARK_CODEC;
     let mut key = codec
         .new_key_with_len(codec.min_key_len_for_payload(8))
@@ -285,7 +274,7 @@ pub(crate) fn encode_watermark_key(location: Location) -> Key {
     key.freeze()
 }
 
-pub(crate) fn decode_watermark_location(key: &Key) -> Result<Location, QmdbError> {
+pub(crate) fn decode_watermark_location<F: Family>(key: &Key) -> Result<Location<F>, QmdbError> {
     let codec = WATERMARK_CODEC;
     if !codec.matches(key) {
         return Err(QmdbError::CorruptData(
@@ -298,7 +287,7 @@ pub(crate) fn decode_watermark_location(key: &Key) -> Result<Location, QmdbError
     Ok(Location::new(u64::from_be_bytes(bytes)))
 }
 
-pub(crate) fn encode_operation_key(location: Location) -> Key {
+pub(crate) fn encode_operation_key<F: Family>(location: Location<F>) -> Key {
     let codec = OPERATION_CODEC;
     let mut key = codec
         .new_key_with_len(codec.min_key_len_for_payload(8))
@@ -309,7 +298,7 @@ pub(crate) fn encode_operation_key(location: Location) -> Key {
     key.freeze()
 }
 
-pub(crate) fn encode_node_key(position: Position) -> Key {
+pub(crate) fn encode_node_key<F: Family>(position: Position<F>) -> Key {
     let codec = NODE_CODEC;
     let mut key = codec
         .new_key_with_len(codec.min_key_len_for_payload(8))
@@ -320,7 +309,7 @@ pub(crate) fn encode_node_key(position: Position) -> Key {
     key.freeze()
 }
 
-pub(crate) fn encode_current_meta_key(location: Location) -> Key {
+pub(crate) fn encode_current_meta_key<F: Family>(location: Location<F>) -> Key {
     let codec = CURRENT_META_CODEC;
     let mut key = codec
         .new_key_with_len(codec.min_key_len_for_payload(8))
@@ -331,7 +320,21 @@ pub(crate) fn encode_current_meta_key(location: Location) -> Key {
     key.freeze()
 }
 
-pub(crate) fn encode_grafted_node_key(position: Position, watermark: Location) -> Key {
+pub(crate) fn encode_ops_root_witness_key<F: Family>(location: Location<F>) -> Key {
+    let codec = OPS_ROOT_WITNESS_CODEC;
+    let mut key = codec
+        .new_key_with_len(codec.min_key_len_for_payload(8))
+        .expect("ops root witness key length should fit");
+    codec
+        .write_payload(&mut key, 0, &location.as_u64().to_be_bytes())
+        .expect("ops root witness location fits");
+    key.freeze()
+}
+
+pub(crate) fn encode_grafted_node_key<F: Family>(
+    position: Position<F>,
+    watermark: Location<F>,
+) -> Key {
     let codec = GRAFTED_NODE_CODEC;
     let mut key = codec
         .new_key_with_len(codec.min_key_len_for_payload(16))
@@ -345,7 +348,7 @@ pub(crate) fn encode_grafted_node_key(position: Position, watermark: Location) -
     key.freeze()
 }
 
-pub(crate) fn encode_chunk_key(chunk_index: u64, watermark: Location) -> Key {
+pub(crate) fn encode_chunk_key<F: Family>(chunk_index: u64, watermark: Location<F>) -> Key {
     let codec = CHUNK_CODEC;
     let mut key = codec
         .new_key_with_len(codec.min_key_len_for_payload(16))
@@ -367,10 +370,10 @@ pub(crate) fn encode_chunk_key(chunk_index: u64, watermark: Location) -> Key {
 /// in deterministically at read time. Mirrors the bit layout used by
 /// `commonware_utils::bitmap::BitMap`: byte offset within the chunk is
 /// `(L / 8) % N`, bit mask is `1 << (L % 8)`.
-pub(crate) fn clear_below_floor<const N: usize>(
+pub(crate) fn clear_below_floor<F: Family, const N: usize>(
     chunk: &mut [u8; N],
     chunk_index: u64,
-    floor: Location,
+    floor: Location<F>,
 ) {
     let chunk_bits = bitmap_chunk_bits::<N>();
     let chunk_start = chunk_index.saturating_mul(chunk_bits);
@@ -393,7 +396,9 @@ pub(crate) fn clear_below_floor<const N: usize>(
     }
 }
 
-pub(crate) fn decode_operation_location_key(key: &Key) -> Result<Location, QmdbError> {
+pub(crate) fn decode_operation_location_key<F: Family>(
+    key: &Key,
+) -> Result<Location<F>, QmdbError> {
     let codec = OPERATION_CODEC;
     if !codec.matches(key) {
         return Err(QmdbError::CorruptData(
@@ -406,7 +411,7 @@ pub(crate) fn decode_operation_location_key(key: &Key) -> Result<Location, QmdbE
     Ok(Location::new(u64::from_be_bytes(bytes)))
 }
 
-pub(crate) fn decode_presence_location(key: &Key) -> Result<Location, QmdbError> {
+pub(crate) fn decode_presence_location<F: Family>(key: &Key) -> Result<Location<F>, QmdbError> {
     let codec = PRESENCE_CODEC;
     if !codec.matches(key) {
         return Err(QmdbError::CorruptData(
@@ -422,11 +427,12 @@ pub(crate) fn decode_presence_location(key: &Key) -> Result<Location, QmdbError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_storage::merkle::mmr;
 
-    fn clear_below_floor_bitwise<const N: usize>(
+    fn clear_below_floor_bitwise<F: Family, const N: usize>(
         chunk: &mut [u8; N],
         chunk_index: u64,
-        floor: Location,
+        floor: Location<F>,
     ) {
         let chunk_bits = bitmap_chunk_bits::<N>();
         let chunk_start = chunk_index.saturating_mul(chunk_bits);
@@ -455,8 +461,12 @@ mod tests {
                 let original = [0xAB_u8; N];
                 let mut optimized = original;
                 let mut reference = original;
-                clear_below_floor::<N>(&mut optimized, chunk_index, Location::new(floor_bit));
-                clear_below_floor_bitwise::<N>(
+                clear_below_floor::<mmr::Family, N>(
+                    &mut optimized,
+                    chunk_index,
+                    Location::new(floor_bit),
+                );
+                clear_below_floor_bitwise::<mmr::Family, N>(
                     &mut reference,
                     chunk_index,
                     Location::new(floor_bit),

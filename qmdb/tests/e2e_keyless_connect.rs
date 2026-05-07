@@ -8,38 +8,41 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use commonware_runtime::{deterministic, Runner as _};
-use commonware_storage::mmr::Location;
-use commonware_storage::qmdb::{
-    keyless::{Config as KeylessConfig, Keyless, Operation as KeylessOperation},
-    store::LogStore as _,
-};
+use commonware_storage::merkle::{mmr, Location};
+use commonware_storage::qmdb::keyless::variable::{Db as Keyless, Operation as KeylessOperation};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
-    keyless_range_connect_stack, KeylessClient, KeylessRangeConnectClient, KeylessWriter,
-    QmdbError, RangeSubscribeProof,
+    keyless_operation_log_connect_stack, KeylessClient, KeylessWriter, OperationLogClient,
+    OperationLogSubscribeProof, QmdbError,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
+use exoware_sdk::qmdb::v1::SubscribeRequest as ProtoSubscribeRequest;
 use exoware_sdk::store::common::v1::{
     bytes_filter as proto_bytes_filter, BytesFilter as ProtoBytesFilter,
 };
-use exoware_sdk::store::qmdb::v1::SubscribeRequest as ProtoSubscribeRequest;
 use exoware_sdk::StoreClient;
 
 type Digest = commonware_cryptography::sha256::Digest;
-type LocalDb = Keyless<deterministic::Context, Vec<u8>, commonware_cryptography::Sha256>;
-type TestKeylessClient = KeylessClient<commonware_cryptography::Sha256, Vec<u8>>;
-type BatchOperation = KeylessOperation<Vec<u8>>;
+type LocalDb =
+    Keyless<mmr::Family, deterministic::Context, Vec<u8>, commonware_cryptography::Sha256>;
+type TestKeylessClient = KeylessClient<mmr::Family, commonware_cryptography::Sha256, Vec<u8>>;
+type BatchOperation = KeylessOperation<mmr::Family, Vec<u8>>;
 
 async fn spawn_qmdb_server(
     client: Arc<TestKeylessClient>,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_range_service(keyless_range_connect_stack(client)).await
+    common::spawn_operation_log_service(keyless_operation_log_connect_stack(client)).await
 }
 
 fn validated_client(
     base: &str,
-) -> KeylessRangeConnectClient<PreferZstdHttpClient, commonware_cryptography::Sha256, Vec<u8>> {
-    KeylessRangeConnectClient::plaintext(base, ((0..=10000).into(), ()))
+) -> OperationLogClient<
+    PreferZstdHttpClient,
+    mmr::Family,
+    commonware_cryptography::Sha256,
+    BatchOperation,
+> {
+    OperationLogClient::plaintext(base, ((0..=10000).into(), ()))
 }
 
 struct LocalBatch {
@@ -51,28 +54,19 @@ async fn build_local_batch() -> LocalBatch {
     tokio::task::spawn_blocking(|| {
         deterministic::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
-            let cfg = KeylessConfig {
-                mmr_journal_partition: "keyless-mmr-journal".into(),
-                mmr_metadata_partition: "keyless-mmr-metadata".into(),
-                mmr_items_per_blob: NZU64!(8),
-                mmr_write_buffer: NZUsize!(1024),
-                log_partition: "keyless-log".into(),
-                log_write_buffer: NZUsize!(1024),
-                log_compression: None,
-                log_codec_config: ((0..=10000).into(), ()),
-                log_items_per_section: NZU64!(7),
-                thread_pool: None,
-                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8)),
-            };
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg =
+                common::keyless_config("keyless", page_cache, ((0..=10000).into(), ()), NZU64!(7));
             let mut db: LocalDb = LocalDb::init(context.with_label("db"), cfg)
                 .await
                 .expect("init");
 
             let finalized = {
-                let mut batch = db.new_batch();
-                batch.append(b"first-value".to_vec());
-                batch.append(b"second-value".to_vec());
-                batch.merkleize(None::<Vec<u8>>).finalize()
+                let batch = db
+                    .new_batch()
+                    .append(b"first-value".to_vec())
+                    .append(b"second-value".to_vec());
+                batch.merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
             };
             db.apply_batch(finalized).await.expect("apply");
 
@@ -96,7 +90,7 @@ async fn build_local_batch() -> LocalBatch {
 }
 
 async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
-    let writer: KeylessWriter<commonware_cryptography::Sha256, Vec<u8>> =
+    let writer: KeylessWriter<mmr::Family, commonware_cryptography::Sha256, Vec<u8>> =
         KeylessWriter::empty(client.clone());
     common::commit_keyless_upload(client, &writer, &batch.operations)
         .await
@@ -122,16 +116,19 @@ async fn keyless_connect_subscribe_emits_verifiable_multi_proof() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     commit_upload(&store_client, &local).await;
 
-    let frame: RangeSubscribeProof<Digest, BatchOperation> =
-        tokio::time::timeout(Duration::from_secs(5), stream.message())
-            .await
-            .expect("timeout")
-            .expect("stream result")
-            .expect("stream frame");
+    let frame: OperationLogSubscribeProof<Digest, BatchOperation, mmr::Family> =
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            stream.message_with_root(common::trusted_root(local.root)),
+        )
+        .await
+        .expect("timeout")
+        .expect("stream result")
+        .expect("stream frame");
 
     assert!(frame.resume_sequence_number > 0);
     assert_eq!(frame.root, local.root);
-    let expected: Vec<(Location, BatchOperation)> = local
+    let expected: Vec<(Location<mmr::Family>, BatchOperation)> = local
         .operations
         .iter()
         .enumerate()
@@ -151,7 +148,7 @@ async fn keyless_connect_client_rejects_invalid_streamed_proof() {
         ((0..=10000).into(), ()),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
-    let rpc = common::rpc_client(&qmdb_url);
+    let rpc = common::operation_log_rpc_client(&qmdb_url);
     let mut raw_stream = rpc
         .subscribe(ProtoSubscribeRequest {
             since_sequence_number: Some(1),
@@ -167,7 +164,7 @@ async fn keyless_connect_client_rejects_invalid_streamed_proof() {
         .to_owned_message();
 
     let (_static_server, static_url) =
-        common::spawn_static_range_service(common::StaticRangeService {
+        common::spawn_static_operation_log_service(common::StaticOperationLogService {
             subscribe_response: common::tamper_subscribe_response(raw_response),
         })
         .await;
@@ -178,7 +175,7 @@ async fn keyless_connect_client_rejects_invalid_streamed_proof() {
         .expect("subscribe");
 
     let err = stream
-        .message()
+        .message_with_root(common::trusted_root(local.root))
         .await
         .expect_err("tampered streamed proof should fail");
     assert!(matches!(
@@ -226,15 +223,18 @@ async fn keyless_connect_subscribe_filters_by_value_regex() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     commit_upload(&store_client, &local).await;
 
-    let frame: RangeSubscribeProof<Digest, BatchOperation> =
-        tokio::time::timeout(Duration::from_secs(5), stream.message())
-            .await
-            .expect("timeout")
-            .expect("stream result")
-            .expect("stream frame");
+    let frame: OperationLogSubscribeProof<Digest, BatchOperation, mmr::Family> =
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            stream.message_with_root(common::trusted_root(local.root)),
+        )
+        .await
+        .expect("timeout")
+        .expect("stream result")
+        .expect("stream frame");
 
     assert_eq!(frame.root, local.root);
-    let expected: Vec<(Location, BatchOperation)> = local
+    let expected: Vec<(Location<mmr::Family>, BatchOperation)> = local
         .operations
         .iter()
         .enumerate()
@@ -259,7 +259,7 @@ async fn keyless_connect_subscribe_rejects_key_filters() {
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
 
-    let rpc = common::rpc_client(&qmdb_url);
+    let rpc = common::operation_log_rpc_client(&qmdb_url);
     let mut stream = rpc
         .subscribe(ProtoSubscribeRequest {
             key_filters: vec![match_exact(b"anything")],

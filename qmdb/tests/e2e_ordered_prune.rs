@@ -18,11 +18,10 @@ use std::num::NonZeroU64;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::{buffer::paged::CacheRef, Metrics as _, Runner as _};
-use commonware_storage::mmr::Location;
+use commonware_storage::merkle::{mmr, Location};
 use commonware_storage::qmdb::{
     any::ordered::variable::Operation as OrderedOp,
-    current::{ordered::variable::Db as LocalOrderedDb, VariableConfig as OrderedVariableConfig},
-    store::LogStore as _,
+    current::ordered::variable::Db as LocalOrderedDb,
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -32,8 +31,8 @@ use exoware_qmdb::{
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
-type BatchOp = OrderedOp<Vec<u8>, Vec<u8>>;
-type LocalDb = LocalOrderedDb<cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>;
+type BatchOp = OrderedOp<mmr::Family, Vec<u8>, Vec<u8>>;
+type LocalDb = LocalOrderedDb<mmr::Family, cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>;
 
 /// Each batch appends 3 fresh writes and rewrites the key 3 counter-positions
 /// behind. With `N = 32` the bitmap chunk spans 256 bits; the inactivity floor
@@ -42,21 +41,27 @@ type LocalDb = LocalOrderedDb<cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCa
 const BATCHES: u64 = 150;
 
 struct BatchOutcome {
-    watermark: Location,
+    watermark: Location<mmr::Family>,
     root: Digest,
     delta_ops: Vec<BatchOp>,
-    boundary: CurrentBoundaryState<Digest, N>,
+    boundary: CurrentBoundaryState<Digest, N, mmr::Family>,
 }
 
 async fn boundary_from_db(
     db: &LocalDb,
     previous_ops: Option<&[BatchOp]>,
     operations: &[BatchOp],
-) -> CurrentBoundaryState<Digest, N> {
-    recover_boundary_state::<Sha256, _, _, N, _, _>(
+) -> CurrentBoundaryState<Digest, N, mmr::Family> {
+    let mut ops_root_hasher = commonware_storage::qmdb::hasher::<Sha256>();
+    let ops_root_witness = db
+        .ops_root_witness(&mut ops_root_hasher)
+        .await
+        .expect("ops root witness");
+    recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
         previous_ops,
         operations,
         db.root(),
+        ops_root_witness,
         |location| async move {
             let mut hasher = Sha256::default();
             let (proof, mut proof_ops, mut chunks) = db
@@ -77,7 +82,7 @@ async fn boundary_from_db(
                     "local current range proof at {location} returned no chunks"
                 ))
             })?;
-            Ok((proof.proof, chunk))
+            Ok((proof, chunk))
         },
     )
     .await
@@ -93,24 +98,16 @@ async fn mirror_ordered_prune_past_chunk_zero() {
     // boundary recovery must not panic even once chunk 0 has been pruned.
     let (batches, chunk_zero_pruned) = tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(move |context| async move {
-            let cfg = OrderedVariableConfig {
-                mmr_journal_partition: "prune-mmr-journal".into(),
-                mmr_items_per_blob: NZU64!(8),
-                mmr_write_buffer: NZUsize!(1024),
-                mmr_metadata_partition: "prune-mmr-metadata".into(),
-                log_partition: "prune-log".into(),
-                log_write_buffer: NZUsize!(1024),
-                log_compression: None,
-                log_codec_config: (
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = common::ordered_variable_config(
+                "prune",
+                page_cache,
+                (
                     ((0..=MAX_OPERATION_SIZE).into(), ()),
                     ((0..=MAX_OPERATION_SIZE).into(), ()),
                 ),
-                log_items_per_blob: NZU64!(8),
-                grafted_mmr_metadata_partition: "prune-grafted-metadata".into(),
-                translator: TwoCap,
-                thread_pool: None,
-                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8)),
-            };
+                NZU64!(8),
+            );
             let mut db: LocalDb = LocalDb::init(context.with_label("db"), cfg)
                 .await
                 .expect("init");
@@ -125,22 +122,32 @@ async fn mirror_ordered_prune_past_chunk_zero() {
                     for offset in 0..3u64 {
                         let key = format!("k-{:08x}", counter + offset).into_bytes();
                         let value = format!("v-{:08x}", counter + offset).into_bytes();
-                        batch.write(key, Some(value));
+                        batch = batch.write(key, Some(value));
                     }
                     if counter >= 3 {
                         let rewrite_key = format!("k-{:08x}", counter - 3).into_bytes();
                         let rewrite_value = format!("v-{:08x}-r", counter).into_bytes();
-                        batch.write(rewrite_key, Some(rewrite_value));
+                        batch = batch.write(rewrite_key, Some(rewrite_value));
                     }
                     counter += 3;
-                    batch.merkleize(None::<Vec<u8>>).await.expect("merkleize")
+                    batch
+                        .merkleize(&db, None::<Vec<u8>>)
+                        .await
+                        .expect("merkleize")
                 };
-                db.apply_batch(finalized.finalize()).await.expect("apply");
+                db.apply_batch(finalized).await.expect("apply");
+                // Current pruning is now explicit in Commonware. Keep the
+                // historical operation log intact for this mirror test while
+                // allowing the current bitmap/grafted overlay to prune as far
+                // as the sync boundary permits.
+                db.prune(Location::<mmr::Family>::new(0))
+                    .await
+                    .expect("prune current");
 
                 let latest = db.bounds().await.end - 1;
                 let total = NonZeroU64::new(*latest + 1).expect("non-zero");
                 let (_proof, cumulative) = db
-                    .ops_historical_proof(latest + 1, Location::new(0), total)
+                    .ops_historical_proof(latest + 1, Location::<mmr::Family>::new(0), total)
                     .await
                     .expect("ops_historical_proof");
                 let previous_slice = if previous_ops.is_empty() {
@@ -166,7 +173,7 @@ async fn mirror_ordered_prune_past_chunk_zero() {
             let chunk_zero_pruned = {
                 let mut hasher = Sha256::default();
                 match db
-                    .range_proof(&mut hasher, Location::new(0), NZU64!(1))
+                    .range_proof(&mut hasher, Location::<mmr::Family>::new(0), NZU64!(1))
                     .await
                 {
                     Err(e) => e.to_string().contains("operation pruned"),
@@ -195,18 +202,20 @@ async fn mirror_ordered_prune_past_chunk_zero() {
     // when it was last published; the server-side masking in
     // `load_bitmap_chunk` must fold that bit to 0 for the root recomputation
     // to match.
-    let writer: OrderedWriter<Sha256, Vec<u8>, Vec<u8>, N> = OrderedWriter::empty(client.clone());
-    let reader: OrderedClient<Sha256, Vec<u8>, Vec<u8>, N> = OrderedClient::from_client(
-        client.clone(),
-        (
-            ((0..=MAX_OPERATION_SIZE).into(), ()),
-            ((0..=MAX_OPERATION_SIZE).into(), ()),
-        ),
-        (
-            ((0..=MAX_OPERATION_SIZE).into(), ()),
-            ((0..=MAX_OPERATION_SIZE).into(), ()),
-        ),
-    );
+    let writer: OrderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
+        OrderedWriter::empty(client.clone());
+    let reader: OrderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
+        OrderedClient::from_client(
+            client.clone(),
+            (
+                ((0..=MAX_OPERATION_SIZE).into(), ()),
+                ((0..=MAX_OPERATION_SIZE).into(), ()),
+            ),
+            (
+                ((0..=MAX_OPERATION_SIZE).into(), ()),
+                ((0..=MAX_OPERATION_SIZE).into(), ()),
+            ),
+        );
 
     for outcome in &batches {
         common::commit_ordered_upload(&client, &writer, &outcome.delta_ops, &outcome.boundary)

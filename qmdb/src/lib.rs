@@ -2,6 +2,8 @@
 //!
 //! The crate currently supports multiple Commonware authenticated backends:
 //! - ordered QMDB (`qmdb::any` and `qmdb::current::ordered`)
+//! - unordered QMDB (`qmdb::any::unordered` and current hit proofs when callers
+//!   upload current-boundary rows)
 //! - immutable (`qmdb::immutable`)
 //! - keyless (`qmdb::keyless`)
 //!
@@ -14,9 +16,9 @@
 //! `[0, W]` is available and may now be trusted by readers.
 //!
 //! Readers fence historical queries against that low watermark. Historical proofs
-//! use the global ops-MMR nodes stored by `Position`.
+//! use the global ops Merkle nodes stored by `Position`.
 //!
-//! Current ordered proofs use versioned current-state deltas:
+//! Current QMDB proofs use versioned current-state deltas:
 //! - bitmap chunk rows
 //! - grafted-node rows
 //!
@@ -47,9 +49,10 @@ pub use immutable::ImmutableClient;
 pub use keyless::KeylessClient;
 pub use ordered::OrderedClient;
 pub use proof::{
-    OperationRangeCheckpoint, RawCurrentRangeProof, RawKeyValueProof, RawMmrProof, RawMultiProof,
-    VariantRoot, VerifiedCurrentRange, VerifiedKeyValue, VerifiedMultiOperations,
-    VerifiedOperationRange, VerifiedVariantRange,
+    CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawKeyValueProof, RawMultiProof,
+    VariantRoot, VerifiedCurrentRange, VerifiedKeyLookup, VerifiedKeyRange, VerifiedKeyValue,
+    VerifiedMultiOperations, VerifiedOperationRange, VerifiedUnorderedKeyValue,
+    VerifiedVariantRange,
 };
 pub use unordered::UnorderedClient;
 pub use writer::{
@@ -61,19 +64,20 @@ pub use writer::{
 
 pub use boundary::recover_boundary_state;
 pub use connect::{
-    immutable_range_connect_stack, keyless_range_connect_stack, ordered_connect_stack,
-    unordered_range_connect_stack, ImmutableRangeConnect, KeylessRangeConnect, OrderedConnect,
-    OrderedRangeConnect, UnorderedRangeConnect,
+    immutable_operation_log_connect_stack, keyless_operation_log_connect_stack,
+    ordered_connect_stack, unordered_connect_stack, unordered_operation_log_connect_stack,
+    OrderedConnect, UnorderedConnect,
 };
 pub use connect_client::{
-    ImmutableRangeConnectClient, KeylessRangeConnectClient, OrderedConnectClient,
-    OrderedRangeConnectClient, RangeConnectSubscription, RangeSubscribeProof,
-    UnorderedRangeConnectClient,
+    CurrentOperationClient, CurrentOperationRangeProof, OperationLogClient, OperationLogRangeProof,
+    OperationLogSubscribeProof, OperationLogSubscription, OrderedConnectClient,
+    UnorderedConnectClient,
 };
 
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
-use commonware_storage::mmr::{iterator::PeakIterator, Location, Position, Proof, StandardHasher};
+use commonware_storage::merkle::{self, Family, Location, Position, Proof};
+use commonware_storage::qmdb::current::proof::OpsRootWitness;
 
 /// Maximum encoded operation size for QMDB key and value payloads (u16 length on the wire).
 pub const MAX_OPERATION_SIZE: usize = u16::MAX as usize;
@@ -89,31 +93,31 @@ pub enum QmdbVariant {
 
 /// Historical value resolved for one logical key.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VersionedValue<K, V> {
+pub struct VersionedValue<K, V, F: Family> {
     pub key: K,
-    pub location: Location,
+    pub location: Location<F>,
     pub value: Option<V>,
 }
 
 /// Metadata returned after uploading one batch of QMDB operations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct UploadReceipt {
+pub struct UploadReceipt<F: Family> {
     /// Monotonic request id assigned by the writer for this upload.
     pub writer_request_id: u64,
     /// Inclusive maximum Location of ops in this batch.
-    pub latest_location: Location,
+    pub latest_location: Location<F>,
     /// Store sequence number at which this upload's rows became durable.
     pub store_sequence_number: u64,
     /// The watermark this batch published, if any. `None` when pipelining
     /// deferred the watermark to a later `flush()` or batch.
-    pub writer_location_watermark: Option<PublishedCheckpoint>,
+    pub writer_location_watermark: Option<PublishedCheckpoint<F>>,
 }
 
 /// Writer publication point that is known to be durable in Store.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PublishedCheckpoint {
+pub struct PublishedCheckpoint<F: Family> {
     /// Inclusive maximum QMDB Location authorized by this checkpoint.
-    pub location: Location,
+    pub location: Location<F>,
     /// Store sequence number at which the checkpoint became visible.
     pub sequence_number: u64,
 }
@@ -121,13 +125,13 @@ pub struct PublishedCheckpoint {
 /// Caller-owned frontier for resuming a single-writer helper without reading
 /// the store.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WriterState<D: Digest> {
-    pub peaks: Vec<(Position, u32, D)>,
-    pub ops_size: Position,
-    pub next_location: Location,
+pub struct WriterState<D: Digest, F: Family> {
+    pub peaks: Vec<(Position<F>, u32, D)>,
+    pub ops_size: Position<F>,
+    pub next_location: Location<F>,
 }
 
-impl<D: Digest> WriterState<D> {
+impl<D: Digest, F: Family> WriterState<D, F> {
     pub fn empty() -> Self {
         Self {
             peaks: Vec::new(),
@@ -136,12 +140,12 @@ impl<D: Digest> WriterState<D> {
         }
     }
 
-    pub fn latest_committed_location(&self) -> Option<Location> {
+    pub fn latest_committed_location(&self) -> Option<Location<F>> {
         self.next_location.checked_sub(1)
     }
 
     pub fn from_checkpoint<H: Hasher<Digest = D>>(
-        checkpoint: &OperationRangeCheckpoint<D>,
+        checkpoint: &OperationRangeCheckpoint<D, F>,
     ) -> Result<Self, QmdbError> {
         Ok(Self {
             peaks: checkpoint.reconstruct_peaks::<H>()?,
@@ -156,9 +160,9 @@ impl<D: Digest> WriterState<D> {
     }
 
     pub fn from_proof<H, Op>(
-        watermark: Location,
-        start_location: Location,
-        proof: &Proof<D>,
+        watermark: Location<F>,
+        start_location: Location<F>,
+        proof: &Proof<F, D>,
         operations: &[Op],
     ) -> Result<Self, QmdbError>
     where
@@ -167,26 +171,28 @@ impl<D: Digest> WriterState<D> {
     {
         let encoded_operations: Vec<Vec<u8>> =
             operations.iter().map(|op| op.encode().to_vec()).collect();
-        let mut hasher = StandardHasher::<H>::new();
-        let peak_digests = proof
-            .reconstruct_peak_digests(&mut hasher, &encoded_operations, start_location, None)
-            .map_err(|e| QmdbError::CorruptData(format!("reconstruct proof peaks failed: {e}")))?;
+        if start_location != Location::new(0)
+            || encoded_operations.len() as u64 != proof.leaves.as_u64()
+        {
+            return Err(QmdbError::CorruptData(
+                "WriterState::from_proof requires a full operation-prefix proof".into(),
+            ));
+        }
         let ops_size = Position::try_from(proof.leaves)
             .map_err(|e| QmdbError::CorruptData(format!("invalid proof leaf count: {e}")))?;
-        let peak_entries: Vec<(Position, u32)> = PeakIterator::new(ops_size).collect();
-        if peak_entries.len() != peak_digests.len() {
+        let extension = crate::core::extend_merkle_from_peaks::<F, H, _>(
+            Vec::new(),
+            Position::new(0),
+            encoded_operations.iter().map(Vec::as_slice),
+        )?;
+        if extension.size != ops_size {
             return Err(QmdbError::CorruptData(format!(
-                "proof peak count mismatch: expected {}, got {}",
-                peak_entries.len(),
-                peak_digests.len()
+                "proof size mismatch: expected {ops_size}, got {}",
+                extension.size
             )));
         }
         Ok(Self {
-            peaks: peak_entries
-                .into_iter()
-                .zip(peak_digests)
-                .map(|((pos, height), digest)| (pos, height, digest))
-                .collect(),
+            peaks: extension.peaks,
             ops_size,
             next_location: watermark
                 .checked_add(1)
@@ -195,22 +201,24 @@ impl<D: Digest> WriterState<D> {
     }
 }
 
-/// Current-state rows for one uploaded ordered batch boundary.
+/// Current-state rows for one uploaded current batch boundary.
 ///
-/// Ordered QMDB uploads carry more than the historical op log: each published
-/// batch boundary also stores the current-state root plus the subset of bitmap
-/// chunks and grafted-MMR nodes that changed at that boundary. This struct is
-/// that versioned delta payload.
+/// Current QMDB uploads carry more than the historical op log: each published
+/// batch boundary also stores the current-state root, op-root witness, and the
+/// subset of bitmap chunks and grafted nodes that changed at that boundary.
+/// This struct is that versioned delta payload.
 ///
 /// Callers typically obtain it from [`recover_boundary_state`], using a local
-/// Commonware `current::ordered::Db`, and then pass it to
-/// [`OrderedWriter::prepare_upload`].
+/// Commonware current DB, and then pass it to ordered or unordered writer
+/// APIs that upload current-boundary material.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CurrentBoundaryState<D: Digest, const N: usize> {
+pub struct CurrentBoundaryState<D: Digest, const N: usize, F: Family> {
     /// Canonical current-state root at this batch boundary.
     pub root: D,
+    /// Proof that the raw operation-log root is committed by `root`.
+    pub ops_root_witness: OpsRootWitness<D>,
     /// Changed bitmap chunks keyed by chunk index.
     pub chunks: Vec<(u64, [u8; N])>,
-    /// Changed grafted-MMR digests keyed by ops-space MMR position.
-    pub grafted_nodes: Vec<(commonware_storage::mmr::Position, D)>,
+    /// Changed grafted digests keyed by ops-space Merkle position.
+    pub grafted_nodes: Vec<(merkle::Position<F>, D)>,
 }

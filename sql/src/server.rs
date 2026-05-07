@@ -1,4 +1,4 @@
-//! Connect-backed server for `store.sql.v1`.
+//! Connect-backed server for `sql.v1`.
 //!
 //! [`SqlServer`] builds a DataFusion session over a [`KvSchema`] and exposes:
 //! - [`Service::query`] unary SQL against that session.
@@ -35,7 +35,7 @@ use datafusion::prelude::SessionContext;
 use exoware_sdk::keys::Key;
 use exoware_sdk::kv_codec::{decode_stored_row, Utf8};
 use exoware_sdk::match_key::MatchKey;
-use exoware_sdk::store::sql::v1::{
+use exoware_sdk::sql::v1::{
     cell::Kind as ProtoCellKind, Cell as ProtoCell, Column as ProtoColumn, Index as ProtoIndex,
     IndexLayout as ProtoIndexLayout, ListValue as ProtoListValue, Null as ProtoNull,
     QueryRequestView, QueryResponse, Row as ProtoRow, Service, ServiceServer, SubscribeRequestView,
@@ -252,7 +252,7 @@ pub fn sql_connect_stack(server: Arc<SqlServer>) -> ConnectRpcService<ServiceSer
         .with_compression(exoware_sdk::connect_compression_registry())
 }
 
-/// Connect handler implementing `store.sql.v1.Service`.
+/// Connect handler implementing `sql.v1.Service`.
 #[derive(Clone)]
 pub struct SqlConnect {
     server: Arc<SqlServer>,

@@ -26,10 +26,10 @@ fn main() {
             "store/v1/common.proto",
             "store/v1/compact.proto",
             "store/v1/ingest.proto",
-            "store/v1/qmdb.proto",
             "store/v1/query.proto",
-            "store/v1/sql.proto",
             "store/v1/stream.proto",
+            "qmdb/v1/qmdb.proto",
+            "sql/v1/sql.proto",
         ])
         .descriptor_set(&descriptor)
         .emit_register_fn(false)
@@ -37,7 +37,24 @@ fn main() {
         .compile()
         .expect("connectrpc codegen");
 
+    rename_generated_proto(&gen_dir, "qmdb/v1/qmdb.proto", "qmdb.v1.rs");
+    rename_generated_proto(&gen_dir, "sql/v1/sql.proto", "sql.v1.rs");
+
     std::fs::remove_file(&descriptor).expect("cleanup descriptor");
+}
+
+fn rename_generated_proto(gen_dir: &Path, proto_path: &str, to: &str) {
+    let from_path = gen_dir.join(generated_rust_filename(proto_path));
+    let to_path = gen_dir.join(to);
+    if to_path.exists() {
+        std::fs::remove_file(&to_path).expect("remove stale generated proto file");
+    }
+    std::fs::rename(&from_path, &to_path).expect("rename generated proto file");
+}
+
+fn generated_rust_filename(proto_path: &str) -> String {
+    let stem = proto_path.strip_suffix(".proto").unwrap_or(proto_path);
+    format!("{}.rs", stem.replace('/', "."))
 }
 
 fn buf_build(workspace_root: &Path, descriptor_out: &Path) {

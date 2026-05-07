@@ -1,4 +1,4 @@
-//! Protobuf types and service stubs for the store API (`store.*.v1`).
+//! Protobuf types and service stubs.
 //!
 //! Proto sources: `proto/`. Run `./gen.sh` to regenerate all bindings.
 
@@ -43,26 +43,6 @@ pub mod store {
         }
     }
 
-    pub mod qmdb {
-        pub mod v1 {
-            #![allow(non_camel_case_types)]
-            #![allow(unused_imports)]
-            #![allow(clippy::derivable_impls)]
-            #![allow(clippy::match_single_binding)]
-            include!("../gen/store.v1.qmdb.rs");
-        }
-    }
-
-    pub mod sql {
-        pub mod v1 {
-            #![allow(non_camel_case_types)]
-            #![allow(unused_imports)]
-            #![allow(clippy::derivable_impls)]
-            #![allow(clippy::match_single_binding)]
-            include!("../gen/store.v1.sql.rs");
-        }
-    }
-
     pub mod stream {
         pub mod v1 {
             #![allow(non_camel_case_types)]
@@ -71,6 +51,26 @@ pub mod store {
             #![allow(clippy::match_single_binding)]
             include!("../gen/store.v1.stream.rs");
         }
+    }
+}
+
+pub mod qmdb {
+    pub mod v1 {
+        #![allow(non_camel_case_types)]
+        #![allow(unused_imports)]
+        #![allow(clippy::derivable_impls)]
+        #![allow(clippy::match_single_binding)]
+        include!("../gen/qmdb.v1.rs");
+    }
+}
+
+pub mod sql {
+    pub mod v1 {
+        #![allow(non_camel_case_types)]
+        #![allow(unused_imports)]
+        #![allow(clippy::derivable_impls)]
+        #![allow(clippy::match_single_binding)]
+        include!("../gen/sql.v1.rs");
     }
 }
 
@@ -114,22 +114,6 @@ pub mod query {
     #![allow(clippy::derivable_impls)]
     #![allow(clippy::match_single_binding)]
     pub use crate::store::query::v1::*;
-}
-
-pub mod qmdb {
-    #![allow(non_camel_case_types)]
-    #![allow(unused_imports)]
-    #![allow(clippy::derivable_impls)]
-    #![allow(clippy::match_single_binding)]
-    pub use crate::store::qmdb::v1::*;
-}
-
-pub mod sql {
-    #![allow(non_camel_case_types)]
-    #![allow(unused_imports)]
-    #![allow(clippy::derivable_impls)]
-    #![allow(clippy::match_single_binding)]
-    pub use crate::store::sql::v1::*;
 }
 
 pub mod stream {

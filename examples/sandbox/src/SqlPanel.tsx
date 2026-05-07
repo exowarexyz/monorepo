@@ -165,7 +165,7 @@ export function SqlPanel({
       <div className="form-section">
         <h3>Connection</h3>
         <p className="section-note">
-          Run `sql run` to serve `store.sql.v1` and `sql seed` to insert rows
+          Run `sql run` to serve `sql.v1` and `sql seed` to insert rows
           into <code>{DEFAULT_TABLE}</code> every few seconds. Subscribe re-runs the
           SQL WHERE predicate against every ingested batch; matching rows come
           back per-batch.

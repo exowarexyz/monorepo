@@ -71,8 +71,8 @@ In addition to the simulator running above:
      run --store-url http://127.0.0.1:8080
    ```
 
-2. **Stream fresh batches** (keeps running; prints a `tip=N
-   current_root=0x..` line every few seconds). Local ordered-QMDB state
+2. **Stream fresh batches** (keeps running; prints a `tip=N root=0x..` line
+   every few seconds). Local ordered-QMDB state
    persists under `$HOME/.exoware_qmdb_seed` so ctrl-c / restart resumes where
    the previous run left off; delete the directory to reset, or override the
    location with `--directory`.
@@ -85,7 +85,7 @@ In addition to the simulator running above:
    Each line looks like:
 
    ```
-   tip=14 current_root=0xb777..1064 historical_root=0x1a3d..cd7b
+   tip=14 root=0xb777..1064
    ```
 
 3. **Point the web app at the QMDB server**:
@@ -96,10 +96,10 @@ In addition to the simulator running above:
 
 4. **In the UI**, paste a `tip` + matching root pair from the `seed` stream,
    then pick a key (e.g. `k-00000000`):
-   - **Get Proof** verifies against `current_root` (paste into Expected Current
-     Root).
-   - **Get Multi-Proof** verifies against `historical_root` (paste into
-     Expected Historical Root).
+   - **Get Proof** verifies against the pasted current root.
+   - **Get Many** verifies current hit/miss lookup proofs against the same root.
+   - **Get Range** verifies an ordered current range plus boundary proofs
+     against the same root.
 
    The client-side verifier rejects any proof whose recomputed root doesn't
    match the pasted anchor.
@@ -110,7 +110,7 @@ batch's root is anchored by the stream's own `resumeSequenceNumber`.
 ## SQL panel
 
 The SQL panel is only rendered when `VITE_SQL_URL` is set. It hosts a thin
-Connect client for `store.sql.v1.Service` served by a separate binary that
+Connect client for `sql.v1.Service` served by a separate binary that
 owns a `KvSchema` + DataFusion session.
 
 In addition to the simulator running above:

@@ -10,24 +10,33 @@ QMDB instance backed by the Exoware API.
 
 The crate supports multiple Commonware authenticated backends:
 
-- **Ordered QMDB** (`OrderedClient`): `qmdb::any` and `qmdb::current::ordered`
-- **Unordered QMDB** (`UnorderedClient`): `qmdb::any::unordered::variable`
-- **Immutable** (`ImmutableClient`): `qmdb::immutable`
-- **Keyless** (`KeylessClient`): `qmdb::keyless`
+- **Ordered QMDB** (`OrderedClient`): `qmdb::any::ordered::variable` plus
+  `qmdb::current::ordered`
+- **Unordered QMDB** (`UnorderedClient`): `qmdb::any::unordered::variable` plus
+  current unordered hit/range proofs when current-boundary rows are uploaded
+- **Immutable** (`ImmutableClient`): `qmdb::immutable::variable`
+- **Keyless** (`KeylessClient`): `qmdb::keyless::variable`
 
-All backends share the same upload -> publish watermark -> historical root /
-range-proof flow. `OrderedClient` additionally supports current-state ordered
-proofs at uploaded batch boundaries.
+The Rust clients, writers, and proof wrappers are generic over the Commonware
+Merkle family (`F: merkle::Family`, or `F: merkle::Graftable` for current QMDB).
+The demo CLI uses MMR, but the store-backed library path is tested with both
+MMR and MMB. QMDB row keys are scoped by the SDK `StoreKeyPrefix` / Store
+namespace supplied to the client; they do not embed a separate Merkle-family tag.
+
+All backends share the same upload -> publish watermark -> operation-log root /
+range-proof flow. Ordered and unordered clients can additionally expose
+current-state proofs at uploaded batch boundaries when callers upload the
+corresponding current-boundary material.
 
 ## Ordered QMDB
 
 The ordered client stores:
 - exact ordered QMDB operations by global `Location`
 - per-key historical update rows for `key <= watermark` lookup
-- historical ops-MMR nodes by global `Position`
+- historical ops Merkle nodes by global `Position`
 - versioned current-state deltas:
   - bitmap chunks
-  - grafted MMR nodes
+  - grafted Merkle nodes
 
 ### Why the ordered client exists
 
@@ -51,7 +60,7 @@ pattern as the ordered QMDB path instead of replaying the whole operation prefix
 
 `OrderedClient` requires exact Commonware ordered-variable operations:
 
-- `qmdb::any::ordered::variable::Operation<Vec<u8>, Vec<u8>>`
+- `qmdb::any::ordered::variable::Operation<F, K, V>`
 
 That is why plain key-value batch uploads are rejected for the ordered path:
 the client cannot safely invent the predecessor-repair operations or `next_key`
@@ -70,16 +79,29 @@ or, if the caller already has both pieces ready at once:
 
 `UnorderedClient` operates on unordered-variable operations:
 
-- `qmdb::any::unordered::variable::Operation<K, V>`
+- `qmdb::any::unordered::variable::Operation<F, K, V>`
 
-It provides the same upload/publish/proof flow as the ordered client but
-without current-state ordered proofs (no bitmap chunks or grafted nodes):
+It provides the same upload/publish/proof flow as the ordered client. If callers
+only upload historical rows, mount the operation-log-only Connect stack. If
+callers also upload current-boundary rows, unordered can prove current operation
+ranges and present-key hits. Missing-key proofs are intentionally not exposed
+for unordered QMDB because Commonware does not provide unordered exclusion
+semantics.
 
 - `upload_operations(latest_location, operations)`
 - `publish_writer_location_watermark(location)`
 - `root_at(watermark)`
 - `operation_range_proof(watermark, start_location, max_locations)`
 - `query_many_at(keys, watermark)`
+
+### Fixed Commonware variants
+
+The store-backed bridge currently models the variable Commonware operation
+families. Supplying fixed-width data as `Vec<u8>` is only a byte-level
+application convention; it is not the same as using Commonware's fixed
+operation/proof types. Treat fixed ordered/unordered/immutable/keyless facade
+support as future work unless a wrapper explicitly names the fixed Commonware
+module.
 
 ## Stored key families
 
@@ -89,11 +111,12 @@ The crate stores several store key families using `KeyCodec` prefixes:
 - presence rows
 - operation rows
 - keyed historical update rows
-- historical ops-MMR node rows
+- historical ops Merkle node rows
 - current bitmap chunk delta rows
 - current grafted-node delta rows
+- current operation-root witness rows
 
- The update-row family is keyed by:
+The update-row family is keyed by:
 
 - ordered, prefix-free raw key bytes
 - global operation location
@@ -108,8 +131,8 @@ QMDB update-row family. `exoware-qmdb` exposes typed builders in `exoware_qmdb::
 - `exoware_qmdb::prune::keep_latest_updates(count)`
 - `exoware_qmdb::prune::keep_positions_gte(min_location)`
 
- These return `exoware_sdk::prune_policy::PrunePolicy` values using the crate's
- actual update-key layout:
+These return `exoware_sdk::prune_policy::PrunePolicy` values using the crate's
+actual update-key layout:
 
 - ordered raw key bytes where:
   - raw `0x00` is escaped as `0x00 0xFF`
@@ -139,29 +162,32 @@ authenticated prefix. This keeps immutable `get_at(key, watermark)` efficient:
 read the latest keyed row with `location <= watermark`, then load exactly that
 operation location to recover the typed value.
 
-Run multiple QMDB instances, or multiple QMDB variants, on one Store by giving
-each instance a distinct SDK `StoreKeyPrefix` and constructing the QMDB client
-or writer from that prefixed `StoreClient`. This pass leaves the existing QMDB
-family constants intact, so collapsing those constants remains a separate
-logical/on-disk format decision.
+Run multiple QMDB instances on one Store by constructing each QMDB client or
+writer from the intended SDK `StoreKeyPrefix` / Store namespace. The row format
+intentionally relies on that outer namespace instead of embedding the Merkle
+family in every QMDB row key.
 
 ## Historical proof path
 
-Historical helpers operate on the exact uploaded ordered operation log:
+Historical helpers operate on the exact uploaded operation log:
 
 - `root_at(watermark)`
 - `operation_range_proof(watermark, start_location, max_locations)`
-- `multi_proof_at(watermark, keys)`
+- `multi_proof_at(watermark, keys)` where the backend has keyed historical
+  lookup support
 - or the generalized variant-selected helpers:
   - `root_for_variant(watermark, QmdbVariant::Any)`
   - `operation_range_proof_for_variant(watermark, QmdbVariant::Any, start_location, max_locations)`
 
-These use persisted ops-MMR nodes keyed by global `Position`.
+These use persisted ops Merkle nodes keyed by global `Position`. The Connect
+surface exposes `qmdb.v1.OperationLogService.GetOperationRange` as the unary
+state-sync/catch-up API for contiguous operation intervals, and
+`OperationLogService.Subscribe` as the streaming API.
 
 ASCII view:
 
 ```text
-ordered operations log
+operation log
 
 loc:   0   1   2   3   4   5   6   7
        |   |   |   |   |   |   |   |
@@ -172,13 +198,15 @@ ops:  op--op--op--op--op--op--op--op
              root_at / range / multi
 ```
 
-## Current ordered proof path
+## Current QMDB proof path
 
-Current ordered helpers are:
+Current helpers for uploaded current-boundary rows are:
 
 - `current_root_at(watermark)`
 - `current_operation_range_proof(watermark, start_location, max_locations)`
-- `key_value_proof_at(watermark, key)`
+- ordered: `key_value_proof_at(watermark, key)`,
+  `key_exclusion_proof_at(watermark, key)`, and ordered key ranges
+- unordered: present-key hit proofs for explicit keys
 - or the generalized variant-selected helpers:
   - `root_for_variant(watermark, QmdbVariant::Current)`
   - `operation_range_proof_for_variant(watermark, QmdbVariant::Current, start_location, max_locations)`
@@ -203,7 +231,7 @@ These uploads are sparse:
 
 At proof time, the reader fetches:
 
-- historical ops-MMR peaks from persisted global node rows
+- historical ops Merkle peaks from persisted global node rows
 - the latest bitmap chunk rows at or below the requested watermark
 - the latest grafted-node rows at or below the requested watermark
 
@@ -213,7 +241,7 @@ without requiring full-prefix replay during proof reads.
 ASCII view:
 
 ```text
-historical ops MMR rows             current-state rows at batch boundaries
+historical ops Merkle rows          current-state rows at batch boundaries
 
 Position -> digest                  (chunk, boundary)        -> chunk bytes
                                     (grafted_node, boundary) -> grafted digest
@@ -226,7 +254,7 @@ proof at boundary B reads:
        +
   latest grafted-node rows with version <= B
        =
-  current::ordered root / proof at B
+  current QMDB root / proof at B
 ```
 
 ### What "keyed by batch location" means
@@ -336,7 +364,7 @@ rows. It only:
 
 - checks that the requested watermark is an uploaded batch boundary
 - checks that current boundary state has already been uploaded for that boundary
-- persists the historical ops-MMR node delta for the newly published suffix
+- persists the historical ops Merkle node delta for the newly published suffix
 - writes the watermark row that fences readers
 
 So current-state work can be staged ahead of time with uploads, while watermark
@@ -408,7 +436,7 @@ Once that happens:
 
 - uploads were still concurrent
 - batch-boundary current state could have been staged before publication
-- publication only processed the suffix's historical ops-MMR node delta and
+- publication only processed the suffix's historical ops Merkle node delta and
   then advanced the trusted frontier
 - current proofs can still be asked for lower uploaded batch boundaries like 199
   because the current-state rows were versioned by batch location
@@ -442,7 +470,7 @@ not allowed:
 ## Writers
 
 Each backend exposes a `*Writer` helper for sole-writer ingest. Writers hold
-cached MMR peaks + a pending-batch queue in memory; `prepare_upload` reserves
+cached Merkle peaks + a pending-batch queue in memory; `prepare_upload` reserves
 writer state and encodes store rows with zero store reads in the hot loop.
 Construction always starts from caller-supplied frontier state. Multiple
 `prepare_upload` calls may be issued concurrently against the same writer; the
@@ -467,10 +495,11 @@ state.
 
 ```rust,ignore
 use std::sync::Arc;
+use commonware_storage::merkle::mmr;
 use exoware_sdk::{StoreBatchPublication, StoreBatchUpload, StorePublicationFrontierWriter};
 use exoware_qmdb::{KeylessWriter, WriterState};
 
-let writer: Arc<KeylessWriter<Sha256, Vec<u8>>> =
+let writer: Arc<KeylessWriter<mmr::Family, Sha256, Vec<u8>>> =
     Arc::new(KeylessWriter::new(client.clone(), WriterState::empty()));
 
 // Sequential single-instance usage still goes through an explicit Store batch.
@@ -504,19 +533,28 @@ the batch boundary:
 - the current root after the batch
 - only the bitmap chunks that changed at that boundary
 - only the grafted-node digests that changed at that boundary
+- an `OpsRootWitness` proving the operation-log root from the current/global root
 
 The intended flow is:
 
 1. apply the batch to a local Commonware `current::ordered::Db`
 2. read the cumulative ordered operations after the batch
-3. call `recover_boundary_state(previous_operations, operations, db.root(), prove_at)`
+3. read `db.ops_root_witness(...)` from that same local DB state
+4. call
+   `recover_boundary_state(previous_operations, operations, db.root(), ops_root_witness, prove_at)`
    against that same local DB state
-4. pass both `operations` and the recovered boundary state into
+5. pass both `operations` and the recovered boundary state into
    `OrderedWriter::prepare_upload`, then stage and commit the prepared rows
 
 `recover_boundary_state(...)` does not talk to the remote store. It is just
 the adapter that turns local Commonware proofs into the `CurrentBoundaryState`
 rows the store-backed ordered mirror needs.
+
+`CurrentBoundaryState` always includes the op-root witness. Connect historical
+proofs from current-boundary backed clients include the opaque witness bytes,
+letting Rust and TS/WASM clients verify operation-log proofs from the caller's
+trusted current/global root. Operation-log-only clients do not upload current
+boundary rows and still verify directly against an operation-log root.
 
 ### Watermark rule (per-batch)
 
@@ -558,42 +596,53 @@ poisons the writer. Future calls return `WriterPoisoned`. The caller constructs
 a fresh writer from caller-owned committed frontier state (for example,
 reconstructed from a local Commonware proof) and re-submits any still-pending
 batches from its own durable source. Re-submission is safe: PUT rows are
-content-addressed by key and MMR math is deterministic.
+content-addressed by key and Merkle math is deterministic.
 
 ### Sole-writer contract
 
 Writers assume they are the only publisher for a namespace at a time.
-Concurrent writers would race on MMR peak extension and corrupt each other's
+Concurrent writers would race on Merkle peak extension and corrupt each other's
 state. The store's ingest layer does not enforce this — it's on the caller.
 
 ## Live Proofs
 
 The old client-side `stream_batches(since)` API has been removed.
 
-Live ordered-QMDB keyed proofs now go through the ConnectRPC
-`store.qmdb.v1.OrderedService`:
+Live QMDB keyed proofs now go through ConnectRPC services:
 
-- `Subscribe` listens to the full ordered batch log server-side and emits a
-  historical multi-proof when any subscribed logical key is touched.
-- `Get` returns a current proof for one logical key.
-- `SubscribeRequest.match_keys` supports exact bytes, prefixes, and regexes
-  over decoded logical keys.
+- `qmdb.v1.KeyLookupService.Get` returns a current proof for one logical key.
+- `qmdb.v1.KeyLookupService.GetMany` returns current proofs for explicit
+  logical keys in request order. Ordered QMDB returns hit and miss proofs;
+  unordered QMDB returns hit proofs only and omits missing keys because
+  Commonware does not expose unordered exclusion proofs.
+- `qmdb.v1.OrderedKeyRangeService.GetRange` returns an ordered current key
+  range plus boundary proofs. Only ordered QMDB exposes this service.
+- `qmdb.v1.OperationLogService.GetOperationRange` returns a historical
+  operation-log range proof for a contiguous operation interval. This is the
+  unary state-sync/catch-up path and is backend-generic.
+- `qmdb.v1.CurrentOperationService.GetCurrentOperationRange` returns an opaque
+  Commonware current range proof plus encoded operations and bitmap chunks.
+  Ordered and unordered full Connect stacks mount this service when current
+  boundary rows are available.
+- `qmdb.v1.OperationLogService.Subscribe` listens to the operation log
+  server-side and emits a historical multi-proof when any subscribed logical
+  key/value filter is touched.
+- `SubscribeRequest.key_filters` and `SubscribeRequest.value_filters` support
+  exact bytes, prefixes, and regexes over decoded logical keys and values.
 - `SubscribeResponse.resume_sequence_number + 1` is the reconnect cursor for
   lossless replay after a disconnect.
 
-Historical batch-range streaming now goes through ConnectRPC as well:
-
-- `store.qmdb.v1.OrderedRangeService`
-- `store.qmdb.v1.UnorderedRangeService`
-- `store.qmdb.v1.ImmutableRangeService`
-- `store.qmdb.v1.KeylessRangeService`
-
-Each `Subscribe` emits a historical contiguous range checkpoint for one
-published batch, and `RangeSubscribeResponse.resume_sequence_number + 1` is
-the reconnect cursor.
+Immutable and keyless Connect stacks expose only `qmdb.v1.OperationLogService` today.
+They do not expose proof-bearing logical point-read RPCs even though Rust
+`get_at` helpers exist. Unordered current key-value proofs require the same
+current-boundary publication path that ordered uses; callers that upload only
+historical unordered rows should mount `unordered_operation_log_connect_stack`,
+while callers that upload current-boundary rows can mount `unordered_connect_stack`
+for present-key `Get` / `GetMany` and current operation ranges.
 
 This crate still exposes direct proof/query APIs for historical ranges,
-historical multi-proofs, and current ordered key proofs.
+historical multi-proofs, Rust immutable/keyless `get_at`, ordered current key
+proofs, unordered current hit proofs, and current operation ranges.
 
 ## Tests
 
@@ -602,8 +651,11 @@ implementations and check:
 
 - ordered QMDB historical proof parity
 - ordered QMDB current proof parity
+- ordered QMDB MMR and MMB store-backed parity
+- unordered current hit and operation-range Connect behavior
 - immutable historical root / query / range-proof parity
 - keyless historical root / read / range-proof parity
+- keyless MMR and MMB store-backed parity
 - authenticated immutable indexed point-read behavior
 - authenticated unpublished-watermark fencing
 - authenticated partial-range and range-validation edge cases

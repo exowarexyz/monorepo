@@ -7,15 +7,16 @@ use axum::{routing::get, Router};
 use clap::{Parser, Subcommand};
 use commonware_codec::Encode;
 use commonware_cryptography::Sha256;
+use commonware_parallel::Sequential;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
-use commonware_storage::mmr::Location;
 use commonware_storage::qmdb::any::ordered::variable::Operation as QmdbOperation;
-use commonware_storage::qmdb::{
-    current::{ordered::variable::Db as LocalQmdbDb, VariableConfig},
-    store::LogStore as _,
-};
+use commonware_storage::qmdb::current::{ordered::variable::Db as LocalQmdbDb, VariableConfig};
 use commonware_storage::translator::TwoCap;
+use commonware_storage::{
+    journal::contiguous::variable::Config as JournalConfig,
+    merkle::{full::Config as MerkleConfig, mmr, Location},
+};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
     ordered_connect_stack, recover_boundary_state, CurrentBoundaryState, OrderedClient,
@@ -26,10 +27,6 @@ use tower_http::cors::CorsLayer;
 use tracing::info;
 
 const N: usize = 32;
-type Digest = commonware_cryptography::sha256::Digest;
-type BatchOperation = QmdbOperation<Vec<u8>, Vec<u8>>;
-type LocalDb = LocalQmdbDb<cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>;
-type DemoWriter = OrderedWriter<Sha256, Vec<u8>, Vec<u8>, N>;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -71,9 +68,9 @@ async fn health() -> &'static str {
 
 async fn commit_ordered_upload(
     client: &StoreClient,
-    writer: &DemoWriter,
-    ops: &[BatchOperation],
-    boundary: &CurrentBoundaryState<Digest, N>,
+    writer: &OrderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N>,
+    ops: &[QmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>],
+    boundary: &CurrentBoundaryState<commonware_cryptography::sha256::Digest, N, mmr::Family>,
 ) {
     let prepared = writer.prepare_upload(ops, boundary).await.expect("prepare");
     writer
@@ -82,7 +79,7 @@ async fn commit_ordered_upload(
         .expect("commit upload");
 }
 
-fn op_cfg() -> <BatchOperation as commonware_codec::Read>::Cfg {
+fn op_cfg() -> <QmdbOperation<mmr::Family, Vec<u8>, Vec<u8>> as commonware_codec::Read>::Cfg {
     (
         ((0..=MAX_OPERATION_SIZE).into(), ()),
         ((0..=MAX_OPERATION_SIZE).into(), ()),
@@ -100,14 +97,20 @@ fn update_row_cfg() -> (
 }
 
 async fn boundary_from_local_db(
-    db: &LocalDb,
-    previous_operations: Option<&[BatchOperation]>,
-    operations: &[BatchOperation],
-) -> CurrentBoundaryState<Digest, N> {
-    recover_boundary_state::<Sha256, _, _, N, _, _>(
+    db: &LocalQmdbDb<mmr::Family, cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>,
+    previous_operations: Option<&[QmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>]>,
+    operations: &[QmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>],
+) -> CurrentBoundaryState<commonware_cryptography::sha256::Digest, N, mmr::Family> {
+    let mut ops_root_hasher = commonware_storage::qmdb::hasher::<Sha256>();
+    let ops_root_witness = db
+        .ops_root_witness(&mut ops_root_hasher)
+        .await
+        .expect("ops root witness");
+    recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
         previous_operations,
         operations,
         db.root(),
+        ops_root_witness,
         |location| async move {
             let mut hasher = Sha256::default();
             let (proof, mut proof_ops, mut chunks) = db
@@ -128,7 +131,7 @@ async fn boundary_from_local_db(
                     "local current range proof at {location} returned no chunks"
                 ))
             })?;
-            Ok((proof.proof, chunk))
+            Ok((proof, chunk))
         },
     )
     .await
@@ -140,11 +143,13 @@ async fn run(
     host: IpAddr,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let client = Arc::new(OrderedClient::<Sha256, Vec<u8>, Vec<u8>, N>::new(
-        store_url,
-        op_cfg(),
-        update_row_cfg(),
-    ));
+    let client = Arc::new(
+        OrderedClient::<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N>::new(
+            store_url,
+            op_cfg(),
+            update_row_cfg(),
+        ),
+    );
     let app = Router::new()
         .route("/health", get(health))
         .fallback_service(ordered_connect_stack(client))
@@ -176,7 +181,7 @@ async fn seed(
     );
 
     let store = StoreClient::new(store_url);
-    let reader = OrderedClient::<Sha256, Vec<u8>, Vec<u8>, N>::from_client(
+    let reader = OrderedClient::<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N>::from_client(
         store.clone(),
         op_cfg(),
         update_row_cfg(),
@@ -187,38 +192,57 @@ async fn seed(
         cw_tokio::Runner::new(runner_cfg).start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
 
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
             let cfg = VariableConfig {
-                mmr_journal_partition: "mmr-journal".into(),
-                mmr_items_per_blob: NZU64!(8),
-                mmr_write_buffer: NZUsize!(1024),
-                mmr_metadata_partition: "mmr-metadata".into(),
-                log_partition: "log".into(),
-                log_write_buffer: NZUsize!(1024),
-                log_compression: None,
-                log_codec_config: (
-                    ((0..=MAX_OPERATION_SIZE).into(), ()),
-                    ((0..=MAX_OPERATION_SIZE).into(), ()),
-                ),
-                log_items_per_blob: NZU64!(8),
-                grafted_mmr_metadata_partition: "grafted-metadata".into(),
+                merkle_config: MerkleConfig {
+                    journal_partition: "mmr-journal".into(),
+                    metadata_partition: "mmr-metadata".into(),
+                    items_per_blob: NZU64!(8),
+                    write_buffer: NZUsize!(1024),
+                    strategy: Sequential,
+                    page_cache: page_cache.clone(),
+                },
+                journal_config: JournalConfig {
+                    partition: "log".into(),
+                    write_buffer: NZUsize!(1024),
+                    compression: None,
+                    codec_config: (
+                        ((0..=MAX_OPERATION_SIZE).into(), ()),
+                        ((0..=MAX_OPERATION_SIZE).into(), ()),
+                    ),
+                    items_per_section: NZU64!(8),
+                    page_cache,
+                },
+                grafted_metadata_partition: "grafted-metadata".into(),
                 translator: TwoCap,
-                thread_pool: None,
-                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8)),
             };
-            let mut db: LocalDb = LocalDb::init(context.with_label("qmdb-seed"), cfg)
-                .await
-                .expect("init local ordered db");
+            let mut db = LocalQmdbDb::<
+                mmr::Family,
+                cw_tokio::Context,
+                Vec<u8>,
+                Vec<u8>,
+                Sha256,
+                TwoCap,
+                N,
+            >::init(context.with_label("qmdb_seed"), cfg)
+            .await
+            .expect("init local ordered db");
 
             let bounds = db.bounds().await;
             let (mut previous_ops, mut counter, writer) = if *bounds.end == 0 {
                 info!("starting from empty local DB");
-                let writer = OrderedWriter::<Sha256, Vec<u8>, Vec<u8>, N>::empty(store.clone());
-                (Vec::<BatchOperation>::new(), 0u64, writer)
+                let writer =
+                    OrderedWriter::<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N>::empty(store.clone());
+                (
+                    Vec::<QmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>>::new(),
+                    0u64,
+                    writer,
+                )
             } else {
                 let latest = bounds.end - 1;
                 let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");
                 let (proof, cumulative) = db
-                    .ops_historical_proof(latest + 1, Location::new(0), count)
+                    .ops_historical_proof(latest + 1, Location::<mmr::Family>::new(0), count)
                     .await
                     .expect(
                         "resume: failed to load cumulative ops from local DB; \
@@ -226,12 +250,12 @@ async fn seed(
                     );
                 let batches_so_far = cumulative
                     .iter()
-                    .filter(|op| matches!(op, BatchOperation::CommitFloor(_, _)))
+                    .filter(|op| matches!(op, QmdbOperation::CommitFloor(_, _)))
                     .count() as u64;
                 let counter = batches_so_far * 3;
                 let writer_state = exoware_qmdb::WriterState::from_proof::<Sha256, _>(
                     latest,
-                    Location::new(0),
+                    Location::<mmr::Family>::new(0),
                     &proof,
                     &cumulative,
                 )
@@ -242,8 +266,10 @@ async fn seed(
                     next_key_index = counter,
                     "resuming from persisted local DB",
                 );
-                let writer =
-                    OrderedWriter::<Sha256, Vec<u8>, Vec<u8>, N>::new(store.clone(), writer_state);
+                let writer = OrderedWriter::<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N>::new(
+                    store.clone(),
+                    writer_state,
+                );
                 (cumulative, counter, writer)
             };
 
@@ -265,28 +291,29 @@ async fn seed(
                     for offset in 0..3u64 {
                         let key = format!("k-{:08x}", counter + offset).into_bytes();
                         let value = format!("v-{:08x}", counter + offset).into_bytes();
-                        batch.write(key, Some(value));
+                        batch = batch.write(key, Some(value));
                     }
                     if counter >= 3 {
                         let rewrite_key = format!("k-{:08x}", counter - 3).into_bytes();
                         let rewrite_value = format!("v-{:08x}-r", counter).into_bytes();
-                        batch.write(rewrite_key, Some(rewrite_value));
+                        batch = batch.write(rewrite_key, Some(rewrite_value));
                     }
                     if counter >= 6 && counter.is_multiple_of(12) {
                         let delete_key = format!("k-{:08x}", counter - 6).into_bytes();
-                        batch.write(delete_key, None);
+                        batch = batch.write(delete_key, None);
                     }
                     counter += 3;
-                    batch.merkleize(None::<Vec<u8>>).await.expect("merkleize")
+                    batch
+                        .merkleize(&db, None::<Vec<u8>>)
+                        .await
+                        .expect("merkleize")
                 };
-                db.apply_batch(finalized.finalize())
-                    .await
-                    .expect("apply batch");
+                db.apply_batch(finalized).await.expect("apply batch");
 
                 let latest = db.bounds().await.end - 1;
                 let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");
                 let (_proof, cumulative_ops) = db
-                    .ops_historical_proof(latest + 1, Location::new(0), count)
+                    .ops_historical_proof(latest + 1, Location::<mmr::Family>::new(0), count)
                     .await
                     .expect("historical proof");
                 let previous_slice = if previous_ops.is_empty() {
@@ -299,14 +326,8 @@ async fn seed(
 
                 commit_ordered_upload(&store, &writer, delta, &boundary).await;
 
-                let historical_root = reader.root_at(latest).await.expect("historical root");
-                let current_root = reader.current_root_at(latest).await.expect("current root");
-                println!(
-                    "tip={} current_root=0x{} historical_root=0x{}",
-                    *latest,
-                    hex::encode(current_root.encode()),
-                    hex::encode(historical_root.encode()),
-                );
+                let root = reader.current_root_at(latest).await.expect("current root");
+                println!("tip={} root=0x{}", *latest, hex::encode(root.encode()),);
 
                 previous_ops = cumulative_ops;
             }

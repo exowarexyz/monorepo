@@ -1,4 +1,3 @@
-use commonware_storage::mmr::Location;
 use exoware_sdk::ClientError;
 
 /// Which proof shape failed verification. Carried on
@@ -6,12 +5,14 @@ use exoware_sdk::ClientError;
 /// without string matching on the error message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProofKind {
-    /// Single-key current-state proof (`OrderedService.Get`).
+    /// Single-key current-state proof (`KeyLookupService.Get`).
     CurrentKeyValue,
-    /// Historical multi-proof over a set of logical keys (`OrderedService.GetMany`).
+    /// Current ordered proof that a key is inactive.
+    CurrentKeyExclusion,
+    /// Historical multi-proof over subscribed operations.
     HistoricalMultiKey,
     /// Subscribe-time multi-proof covering matched operations in one batch
-    /// (`RangeService.Subscribe`).
+    /// (`OperationLogService.Subscribe`).
     BatchMulti,
     /// Contiguous historical range proof (sync checkpoint).
     RangeCheckpoint,
@@ -23,6 +24,7 @@ impl std::fmt::Display for ProofKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             Self::CurrentKeyValue => "current key-value",
+            Self::CurrentKeyExclusion => "current key-exclusion",
             Self::HistoricalMultiKey => "historical many-key",
             Self::BatchMulti => "batch multi",
             Self::RangeCheckpoint => "range checkpoint",
@@ -38,8 +40,8 @@ pub enum QmdbError {
     Client(#[from] ClientError),
     #[error("uploaded location range [{start_location}, {latest_location}] is invalid for {count} operations")]
     InvalidLocationRange {
-        start_location: Location,
-        latest_location: Location,
+        start_location: u64,
+        latest_location: u64,
         count: usize,
     },
     #[error("batch must contain at least one operation")]
@@ -48,23 +50,25 @@ pub enum QmdbError {
     EmptyProofRequest,
     #[error("range proof max_locations must be > 0")]
     InvalidRangeLength,
+    #[error("invalid key range: start_key {start_key:?} must be less than end_key {end_key:?}")]
+    InvalidKeyRange {
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+    },
     #[error("duplicate key in proof request: {key:?}")]
     DuplicateRequestedKey { key: Vec<u8> },
     #[error("requested location {requested} is above published writer watermark {available}")]
-    WatermarkTooLow {
-        requested: Location,
-        available: Location,
-    },
+    WatermarkTooLow { requested: u64, available: u64 },
     #[error("proof key not found at watermark {watermark}: {key:?}")]
-    ProofKeyNotFound { watermark: Location, key: Vec<u8> },
+    ProofKeyNotFound { watermark: u64, key: Vec<u8> },
     #[error("requested key is not active at watermark {watermark}: {key:?}")]
-    KeyNotActive { watermark: Location, key: Vec<u8> },
+    KeyNotActive { watermark: u64, key: Vec<u8> },
     #[error("current proofs are only available at uploaded batch locations; no batch ends at {location}")]
-    CurrentProofRequiresBatchBoundary { location: Location },
+    CurrentProofRequiresBatchBoundary { location: u64 },
     #[error("current boundary state has not been uploaded for batch location {location}")]
-    CurrentBoundaryStateMissing { location: Location },
+    CurrentBoundaryStateMissing { location: u64 },
     #[error("range proof start {start} is out of bounds for watermark with {count} leaves")]
-    RangeStartOutOfBounds { start: Location, count: Location },
+    RangeStartOutOfBounds { start: u64, count: u64 },
     #[error("encoded value exceeds store value limit ({len} > {max})")]
     EncodedValueTooLarge { len: usize, max: usize },
     #[error(
@@ -79,8 +83,8 @@ pub enum QmdbError {
     ProofVerification { kind: ProofKind },
     #[error("corrupt qmdb data: {0}")]
     CorruptData(String),
-    #[error("commonware MMR error: {0}")]
-    CommonwareMmr(String),
+    #[error("commonware merkle error: {0}")]
+    CommonwareMerkle(String),
     #[error("qmdb stream transport error: {0}")]
     Stream(String),
     #[error("writer is poisoned after an earlier upload failure: {0}")]

@@ -26,7 +26,8 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc",
+    "build:proto": "buf generate --template buf.gen.yaml",
+    "build": "npm run build:proto && tsc",
     "lint": "tsc --noEmit",
     "prepublishOnly": "npm run build"
   },
@@ -36,6 +37,7 @@
     "@exowarexyz/sdk": "file:../../sdk-ts"
   },
   "devDependencies": {
+    "@bufbuild/buf": "^1.67.0",
     "typescript": "^5.5.3"
   }
 }

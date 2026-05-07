@@ -8,11 +8,8 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use commonware_runtime::{deterministic, Runner as _};
-use commonware_storage::mmr::{Location, Proof as BatchProof};
-use commonware_storage::qmdb::{
-    keyless::{Config as KeylessConfig, Keyless, Operation as KeylessOperation},
-    store::LogStore as _,
-};
+use commonware_storage::merkle::{mmr, Location, Proof};
+use commonware_storage::qmdb::keyless::variable::{Db as Keyless, Operation as KeylessOperation};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{KeylessClient, KeylessWriter};
 use exoware_sdk::StoreClient;
@@ -20,9 +17,10 @@ use exoware_sdk::StoreClient;
 use common::retry;
 
 type Digest = commonware_cryptography::sha256::Digest;
-type LocalDb = Keyless<deterministic::Context, Vec<u8>, commonware_cryptography::Sha256>;
-type TestKeylessClient = KeylessClient<commonware_cryptography::Sha256, Vec<u8>>;
-type TestKeylessWriter = KeylessWriter<commonware_cryptography::Sha256, Vec<u8>>;
+type LocalDb =
+    Keyless<mmr::Family, deterministic::Context, Vec<u8>, commonware_cryptography::Sha256>;
+type TestKeylessClient = KeylessClient<mmr::Family, commonware_cryptography::Sha256, Vec<u8>>;
+type TestKeylessWriter = KeylessWriter<mmr::Family, commonware_cryptography::Sha256, Vec<u8>>;
 
 fn fresh_reader(c: StoreClient) -> TestKeylessClient {
     TestKeylessClient::from_client(c, ((0..=10000).into(), ()))
@@ -38,26 +36,16 @@ async fn build_local_reference(
     batches: Vec<Vec<Vec<u8>>>,
 ) -> (
     Digest,
-    BatchProof<Digest>,
-    Vec<KeylessOperation<Vec<u8>>>,
-    Location,
+    Proof<mmr::Family, Digest>,
+    Vec<KeylessOperation<mmr::Family, Vec<u8>>>,
+    Location<mmr::Family>,
 ) {
     tokio::task::spawn_blocking(move || {
         deterministic::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
-            let cfg = KeylessConfig {
-                mmr_journal_partition: "keyless-mmr-journal".into(),
-                mmr_metadata_partition: "keyless-mmr-metadata".into(),
-                mmr_items_per_blob: NZU64!(8),
-                mmr_write_buffer: NZUsize!(1024),
-                log_partition: "keyless-log".into(),
-                log_write_buffer: NZUsize!(1024),
-                log_compression: None,
-                log_codec_config: ((0..=10000).into(), ()),
-                log_items_per_section: NZU64!(7),
-                thread_pool: None,
-                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8)),
-            };
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg =
+                common::keyless_config("keyless", page_cache, ((0..=10000).into(), ()), NZU64!(7));
             let mut db: LocalDb = LocalDb::init(context.with_label("db"), cfg)
                 .await
                 .expect("init");
@@ -66,9 +54,9 @@ async fn build_local_reference(
                 let finalized = {
                     let mut batch = db.new_batch();
                     for v in batch_values {
-                        batch.append(v.clone());
+                        batch = batch.append(v.clone());
                     }
-                    batch.merkleize(None::<Vec<u8>>).finalize()
+                    batch.merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
                 };
                 db.apply_batch(finalized).await.expect("apply");
             }
@@ -76,7 +64,7 @@ async fn build_local_reference(
             let latest = db.bounds().await.end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
             let (proof, ops) = db
-                .historical_proof(latest + 1, Location::new(0), n)
+                .historical_proof(latest + 1, Location::<mmr::Family>::new(0), n)
                 .await
                 .expect("proof");
             let root = db.root();
@@ -92,7 +80,9 @@ async fn build_local_reference(
 /// corresponding to `batches` lengths. (Commonware's keyless DB inserts a
 /// Commit op at each batch boundary; for this test we pass the full flat
 /// sequence to the writer, which mirrors what the local DB produced.)
-fn flat_to_writer_ops(ops: &[KeylessOperation<Vec<u8>>]) -> Vec<KeylessOperation<Vec<u8>>> {
+fn flat_to_writer_ops(
+    ops: &[KeylessOperation<mmr::Family, Vec<u8>>],
+) -> Vec<KeylessOperation<mmr::Family, Vec<u8>>> {
     ops.to_vec()
 }
 
@@ -140,7 +130,11 @@ async fn sequential_upload_matches_local_root() {
 
     // Proof round-trip.
     let proof = reader
-        .operation_range_proof(latest, Location::new(0), writer_ops.len() as u32)
+        .operation_range_proof(
+            latest,
+            Location::<mmr::Family>::new(0),
+            writer_ops.len() as u32,
+        )
         .await
         .expect("proof");
     assert_eq!(proof.root, local_root);
@@ -169,7 +163,7 @@ async fn multiple_sequential_batches_each_publish_watermarks_in_band() {
     assert_eq!(
         r1.writer_location_watermark
             .map(|checkpoint| checkpoint.location),
-        Some(Location::new(1))
+        Some(Location::<mmr::Family>::new(1))
     );
     let r2 = common::commit_keyless_upload(&client, &writer, &local_ops[2..3])
         .await
@@ -177,7 +171,7 @@ async fn multiple_sequential_batches_each_publish_watermarks_in_band() {
     assert_eq!(
         r2.writer_location_watermark
             .map(|checkpoint| checkpoint.location),
-        Some(Location::new(2))
+        Some(Location::<mmr::Family>::new(2))
     );
     let r3 = common::commit_keyless_upload(&client, &writer, &local_ops[3..])
         .await
@@ -307,7 +301,10 @@ async fn bounded_pipeline_advances_watermark_via_contiguous_acks() {
 
     use futures::future::BoxFuture;
     let mut in_flight: FuturesUnordered<
-        BoxFuture<'static, Result<exoware_qmdb::UploadReceipt, exoware_qmdb::QmdbError>>,
+        BoxFuture<
+            'static,
+            Result<exoware_qmdb::UploadReceipt<mmr::Family>, exoware_qmdb::QmdbError>,
+        >,
     > = FuturesUnordered::new();
     let mut results = Vec::with_capacity(BATCHES);
     for batch in slices {
@@ -397,7 +394,7 @@ async fn local_proof_resumes_from_existing_store_state() {
     {
         let state = exoware_qmdb::WriterState::from_proof::<commonware_cryptography::Sha256, _>(
             latest_two,
-            Location::new(0),
+            Location::<mmr::Family>::new(0),
             &proof_two,
             &local_ops_two,
         )

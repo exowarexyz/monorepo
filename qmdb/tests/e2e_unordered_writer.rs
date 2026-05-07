@@ -10,12 +10,9 @@ use std::sync::Arc;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
-use commonware_storage::mmr::Location;
+use commonware_storage::merkle::{mmr, Location, Proof};
+use commonware_storage::qmdb::any::unordered::variable::Db as LocalUnorderedDb;
 use commonware_storage::qmdb::any::unordered::variable::Operation as UnorderedQmdbOperation;
-use commonware_storage::qmdb::{
-    any::{unordered::variable::Db as LocalUnorderedDb, VariableConfig},
-    store::LogStore as _,
-};
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{UnorderedClient, UnorderedWriter, MAX_OPERATION_SIZE};
@@ -24,11 +21,11 @@ use exoware_sdk::StoreClient;
 use common::retry;
 
 type Digest = commonware_cryptography::sha256::Digest;
-type BatchProof = commonware_storage::mmr::Proof<Digest>;
-type UnorderedBatchOperation = UnorderedQmdbOperation<Vec<u8>, Vec<u8>>;
-type TestReader = UnorderedClient<Sha256, Vec<u8>, Vec<u8>>;
-type TestWriter = UnorderedWriter<Sha256, Vec<u8>, Vec<u8>>;
-type LocalDb = LocalUnorderedDb<cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap>;
+type BatchProof = Proof<mmr::Family, Digest>;
+type UnorderedBatchOperation = UnorderedQmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>;
+type TestReader = UnorderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>>;
+type TestWriter = UnorderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>>;
+type LocalDb = LocalUnorderedDb<mmr::Family, cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap>;
 
 fn op_cfg() -> <UnorderedBatchOperation as commonware_codec::Read>::Cfg {
     (
@@ -56,7 +53,7 @@ fn fresh_writer(c: StoreClient) -> TestWriter {
 }
 
 struct LocalReference {
-    latest_location: Location,
+    latest_location: Location<mmr::Family>,
     root: Digest,
     operations: Vec<UnorderedBatchOperation>,
 }
@@ -67,23 +64,16 @@ async fn build_local_reference(batches: Vec<WriteBatch>) -> LocalReference {
     tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
-            let cfg = VariableConfig {
-                mmr_journal_partition: "mmr-journal".into(),
-                mmr_items_per_blob: NZU64!(8),
-                mmr_write_buffer: NZUsize!(1024),
-                mmr_metadata_partition: "mmr-metadata".into(),
-                log_partition: "log".into(),
-                log_write_buffer: NZUsize!(1024),
-                log_compression: None,
-                log_codec_config: (
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = common::unordered_variable_config(
+                "unordered-writer",
+                page_cache,
+                (
                     ((0..=MAX_OPERATION_SIZE).into(), ()),
                     ((0..=MAX_OPERATION_SIZE).into(), ()),
                 ),
-                log_items_per_blob: NZU64!(8),
-                translator: TwoCap,
-                thread_pool: None,
-                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8)),
-            };
+                NZU64!(8),
+            );
             let mut db: LocalDb = LocalDb::init(context.with_label("unordered"), cfg)
                 .await
                 .expect("init");
@@ -91,16 +81,19 @@ async fn build_local_reference(batches: Vec<WriteBatch>) -> LocalReference {
                 let finalized = {
                     let mut batch = db.new_batch();
                     for (k, v) in batch_writes {
-                        batch.write(k.clone(), v.clone());
+                        batch = batch.write(k.clone(), v.clone());
                     }
-                    batch.merkleize(None::<Vec<u8>>).await.expect("merkleize")
+                    batch
+                        .merkleize(&db, None::<Vec<u8>>)
+                        .await
+                        .expect("merkleize")
                 };
-                db.apply_batch(finalized.finalize()).await.expect("apply");
+                db.apply_batch(finalized).await.expect("apply");
             }
             let latest = db.bounds().await.end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
             let (_proof, ops): (BatchProof, Vec<UnorderedBatchOperation>) = db
-                .historical_proof(latest + 1, Location::new(0), n)
+                .historical_proof(latest + 1, Location::<mmr::Family>::new(0), n)
                 .await
                 .expect("proof");
             let root = db.root();

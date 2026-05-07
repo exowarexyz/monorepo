@@ -10,12 +10,9 @@ use std::sync::Arc;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
-use commonware_storage::mmr::Location;
+use commonware_storage::merkle::{mmr, Location, Proof};
 use commonware_storage::qmdb::any::ordered::variable::Operation as QmdbOperation;
-use commonware_storage::qmdb::{
-    current::{ordered::variable::Db as LocalQmdbDb, VariableConfig},
-    store::LogStore as _,
-};
+use commonware_storage::qmdb::current::ordered::variable::Db as LocalQmdbDb;
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
@@ -27,21 +24,27 @@ use common::retry;
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
-type BatchProof = commonware_storage::mmr::Proof<Digest>;
-type BatchOperation = QmdbOperation<Vec<u8>, Vec<u8>>;
-type TestReader = OrderedClient<Sha256, Vec<u8>, Vec<u8>, N>;
-type TestWriter = OrderedWriter<Sha256, Vec<u8>, Vec<u8>, N>;
-type LocalDb = LocalQmdbDb<cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>;
+type BatchProof = Proof<mmr::Family, Digest>;
+type BatchOperation = QmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>;
+type TestReader = OrderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N>;
+type TestWriter = OrderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N>;
+type LocalDb = LocalQmdbDb<mmr::Family, cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>;
 
 async fn boundary_from_local_db(
     db: &LocalDb,
     previous_operations: Option<&[BatchOperation]>,
     operations: &[BatchOperation],
-) -> CurrentBoundaryState<Digest, N> {
-    recover_boundary_state::<Sha256, _, _, N, _, _>(
+) -> CurrentBoundaryState<Digest, N, mmr::Family> {
+    let mut ops_root_hasher = commonware_storage::qmdb::hasher::<Sha256>();
+    let ops_root_witness = db
+        .ops_root_witness(&mut ops_root_hasher)
+        .await
+        .expect("ops root witness");
+    recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
         previous_operations,
         operations,
         db.root(),
+        ops_root_witness,
         |location| async move {
             let mut hasher = Sha256::default();
             let (proof, mut proof_ops, mut chunks) = db
@@ -62,7 +65,7 @@ async fn boundary_from_local_db(
                     "local current range proof at {location} returned no chunks"
                 ))
             })?;
-            Ok((proof.proof, chunk))
+            Ok((proof, chunk))
         },
     )
     .await
@@ -95,10 +98,10 @@ fn fresh_writer(c: StoreClient) -> TestWriter {
 }
 
 struct LocalReference {
-    latest_location: Location,
+    latest_location: Location<mmr::Family>,
     root: Digest,
     operations: Vec<BatchOperation>,
-    current_boundary: CurrentBoundaryState<Digest, N>,
+    current_boundary: CurrentBoundaryState<Digest, N, mmr::Family>,
 }
 
 type WriteBatch = Vec<(Vec<u8>, Option<Vec<u8>>)>;
@@ -110,24 +113,16 @@ async fn build_local_reference(
     tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
-            let cfg = VariableConfig {
-                mmr_journal_partition: "mmr-journal".into(),
-                mmr_items_per_blob: NZU64!(8),
-                mmr_write_buffer: NZUsize!(1024),
-                mmr_metadata_partition: "mmr-metadata".into(),
-                log_partition: "log".into(),
-                log_write_buffer: NZUsize!(1024),
-                log_compression: None,
-                log_codec_config: (
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = common::ordered_variable_config(
+                "ordered-writer",
+                page_cache,
+                (
                     ((0..=MAX_OPERATION_SIZE).into(), ()),
                     ((0..=MAX_OPERATION_SIZE).into(), ()),
                 ),
-                log_items_per_blob: NZU64!(8),
-                grafted_mmr_metadata_partition: "grafted-metadata".into(),
-                translator: TwoCap,
-                thread_pool: None,
-                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8)),
-            };
+                NZU64!(8),
+            );
             let mut db: LocalDb = LocalDb::init(context.with_label("qmdb"), cfg)
                 .await
                 .expect("init");
@@ -135,16 +130,19 @@ async fn build_local_reference(
                 let finalized = {
                     let mut batch = db.new_batch();
                     for (k, v) in batch_writes {
-                        batch.write(k.clone(), v.clone());
+                        batch = batch.write(k.clone(), v.clone());
                     }
-                    batch.merkleize(None::<Vec<u8>>).await.expect("merkleize")
+                    batch
+                        .merkleize(&db, None::<Vec<u8>>)
+                        .await
+                        .expect("merkleize")
                 };
-                db.apply_batch(finalized.finalize()).await.expect("apply");
+                db.apply_batch(finalized).await.expect("apply");
             }
             let latest = db.bounds().await.end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
             let (_proof, ops): (BatchProof, Vec<BatchOperation>) = db
-                .ops_historical_proof(latest + 1, Location::new(0), n)
+                .ops_historical_proof(latest + 1, Location::<mmr::Family>::new(0), n)
                 .await
                 .expect("proof");
             let boundary = boundary_from_local_db(&db, previous_operations.as_deref(), &ops).await;
