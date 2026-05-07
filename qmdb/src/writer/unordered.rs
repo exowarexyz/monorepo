@@ -17,10 +17,12 @@ use exoware_sdk::{
 use futures::future::BoxFuture;
 
 use crate::codec::{encode_node_key, encode_watermark_key};
-use crate::core::{extend_mmr_from_peaks, PreparedUpload as CorePreparedUpload};
+use crate::core::{
+    extend_mmr_from_peaks, PreparedCurrentBoundaryUpload, PreparedUpload as CorePreparedUpload,
+};
 use crate::error::QmdbError;
 use crate::writer::core::{Cache, WriterCore};
-use crate::{PublishedCheckpoint, UploadReceipt, WriterState};
+use crate::{CurrentBoundaryState, PublishedCheckpoint, UploadReceipt, WriterState};
 
 /// Deterministic output of an unordered row-build.
 #[derive(Clone, Debug)]
@@ -78,6 +80,32 @@ where
     })
 }
 
+pub fn build_unordered_current_upload<H, K, V, const N: usize>(
+    peaks: Vec<(Position, u32, H::Digest)>,
+    prev_ops_size: Position,
+    latest_location: Location,
+    ops: &[UnorderedQmdbOperation<commonware_storage::mmr::Family, K, V>],
+    current_boundary: &CurrentBoundaryState<H::Digest, N>,
+    watermark_at: Option<Location>,
+) -> Result<BuiltUnorderedUpload<H::Digest>, QmdbError>
+where
+    H: Hasher,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+    UnorderedQmdbOperation<commonware_storage::mmr::Family, K, V>: Encode,
+{
+    let mut built = build_unordered_upload::<H, K, V>(
+        peaks,
+        prev_ops_size,
+        latest_location,
+        ops,
+        watermark_at,
+    )?;
+    let prepared_current = PreparedCurrentBoundaryUpload::build(latest_location, current_boundary)?;
+    built.rows.extend(prepared_current.rows);
+    Ok(built)
+}
+
 /// Sole-writer unordered QMDB helper. Pipelining, flushing, failure, and
 /// sole-writer contract are identical to
 /// [`KeylessWriter`](crate::KeylessWriter) — see its docs for details.
@@ -128,6 +156,37 @@ where
                     ctx.ops_size,
                     ctx.latest_location,
                     ops,
+                    ctx.watermark_at,
+                )?;
+                Ok(crate::writer::core::BuildResult {
+                    new_peaks: built.new_peaks,
+                    new_ops_size: built.new_ops_size,
+                    output: built.rows,
+                })
+            })
+            .await?;
+        Ok(super::PreparedUpload {
+            dispatch_id: prepared.dispatch_id,
+            latest_location: prepared.latest_location,
+            writer_location_watermark: prepared.watermark_at,
+            rows: prepared.output,
+        })
+    }
+
+    pub async fn prepare_current_upload<const N: usize>(
+        &self,
+        ops: &[UnorderedQmdbOperation<commonware_storage::mmr::Family, K, V>],
+        current_boundary: &CurrentBoundaryState<H::Digest, N>,
+    ) -> Result<super::PreparedUpload, QmdbError> {
+        let prepared = self
+            .core
+            .prepare(ops.len() as u64, |ctx| {
+                let built = build_unordered_current_upload::<H, K, V, N>(
+                    ctx.peaks,
+                    ctx.ops_size,
+                    ctx.latest_location,
+                    ops,
+                    current_boundary,
                     ctx.watermark_at,
                 )?;
                 Ok(crate::writer::core::BuildResult {

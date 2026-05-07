@@ -5,14 +5,23 @@ package qmdb.v1;
 import "buf/validate/validate.proto";
 import "store/v1/common.proto";
 
-// Current/historical key-proof service.
+// Current key lookup service for QMDB backends that can authenticate explicit
+// logical-key lookups.
 //
-// `Get` returns a current ordered key proof for one logical key; `GetMany`
-// returns a historical multi-proof over one or more logical keys. Both are
-// ordered-backend only.
-service OrderedService {
+// `GetMany` makes no ordering claim beyond preserving request order among
+// returned results. Ordered QMDB returns hit or miss proofs for requested keys.
+// Unordered QMDB returns only verifiable hits; missing keys are omitted because
+// that variant has no exclusion proof.
+service KeyLookupService {
   rpc Get(GetRequest) returns (GetResponse);
   rpc GetMany(GetManyRequest) returns (GetManyResponse);
+}
+
+// Ordered current key-range service. Only ordered QMDB backends can prove a
+// contiguous logical-key interval because they maintain adjacent `next_key`
+// links and exclusion proofs.
+service OrderedKeyRangeService {
+  rpc GetRange(GetRangeRequest) returns (GetRangeResponse);
 }
 
 // Subscription service over a QMDB backend's historical op log.
@@ -63,17 +72,26 @@ message GetRequest {
   uint64 tip = 2;
 }
 
-// Historical key proof request for one or more logical keys.
+// Current key proof request for one or more logical keys.
 message GetManyRequest {
   // Raw logical QMDB keys (`K::as_ref()` bytes), not store row keys.
   repeated bytes keys = 1
     [(buf.validate.field).repeated.min_items = 1,
      (buf.validate.field).repeated.max_items = 1024];
 
-  // Published ordered-QMDB batch-boundary to prove against. The server
-  // returns a historical multi-proof plus a current-root proof that anchors
-  // the historical ops root to the canonical current/global root for this tip.
+  // Published QMDB batch-boundary to prove against. The client must already
+  // know the trusted current/global root for this tip.
   uint64 tip = 2;
+}
+
+// Current ordered key range proof request. The range is half-open:
+// `start_key <= key < end_key` when `end_key` is set; otherwise it scans to the
+// end of the ordered keyspace. `limit` must be non-zero.
+message GetRangeRequest {
+  bytes start_key = 1;
+  optional bytes end_key = 2;
+  uint32 limit = 3 [(buf.validate.field).uint32.gt = 0];
+  uint64 tip = 4;
 }
 
 // One historical operation proven by a multi-proof.
@@ -88,10 +106,33 @@ message HistoricalMultiProof {
   repeated MultiProofOperation operations = 2;
 }
 
-// Current ordered proof for one active key.
+// Current proof for one active key. `proof` is opaque Commonware proof bytes
+// encoded with `commonware-codec`: ordered endpoints use
+// `current::ordered::db::KeyValueProof`; unordered endpoints use
+// `current::proof::OperationProof`.
 message CurrentKeyValueProof {
   bytes proof = 1;
   bytes encoded_operation = 2;
+}
+
+// Current ordered proof that one logical key is inactive. `proof` is opaque
+// Commonware `current::ordered::ExclusionProof` encoded with
+// `commonware-codec`.
+message CurrentKeyExclusionProof {
+  bytes proof = 1;
+}
+
+message CurrentKeyLookupResult {
+  bytes key = 1;
+  oneof result {
+    CurrentKeyValueProof hit = 2;
+    CurrentKeyExclusionProof miss = 3;
+  }
+}
+
+message CurrentKeyRangeEntry {
+  bytes key = 1;
+  CurrentKeyValueProof proof = 2;
 }
 
 // One emitted proof for a subscribed batch.
@@ -109,13 +150,18 @@ message GetResponse {
   CurrentKeyValueProof proof = 1;
 }
 
-// Unary historical many-key proof response.
+// Unary current many-key proof response.
 message GetManyResponse {
-  HistoricalMultiProof proof = 1;
+  repeated CurrentKeyLookupResult results = 1;
+}
 
-  // Opaque Commonware `current::proof::OperationProof` for one operation
-  // already included in `proof.operations`. Clients verify this against their
-  // trusted canonical current/global root and use its authenticated ops root
-  // to verify `proof`.
-  bytes current_proof = 2;
+// Ordered current key-range proof response. `start_proof`, when present,
+// authenticates the boundary before the first returned key (or the entire empty
+// range). `end_proof`, when present, authenticates the exclusive end boundary.
+message GetRangeResponse {
+  repeated CurrentKeyRangeEntry entries = 1;
+  optional CurrentKeyExclusionProof start_proof = 2;
+  optional CurrentKeyExclusionProof end_proof = 3;
+  bool has_more = 4;
+  bytes next_start_key = 5;
 }

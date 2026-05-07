@@ -195,6 +195,24 @@ where
 }
 
 #[allow(dead_code)]
+pub async fn commit_unordered_current_upload<H, K, V, const N: usize>(
+    commit_client: &StoreClient,
+    writer: &UnorderedWriter<H, K, V>,
+    ops: &[UnorderedOperation<commonware_storage::mmr::Family, K, V>],
+    current_boundary: &CurrentBoundaryState<H::Digest, N>,
+) -> Result<UploadReceipt, QmdbError>
+where
+    H: Hasher + Sync,
+    K: QmdbKey + Codec + Sync,
+    V: Codec + Clone + Send + Sync,
+    V::Cfg: Clone,
+    UnorderedOperation<commonware_storage::mmr::Family, K, V>: Encode,
+{
+    let prepared = writer.prepare_current_upload(ops, current_boundary).await?;
+    writer.commit_upload(commit_client, prepared).await
+}
+
+#[allow(dead_code)]
 pub async fn commit_ordered_upload<H, K, V, const N: usize>(
     commit_client: &StoreClient,
     writer: &OrderedWriter<H, K, V, N>,

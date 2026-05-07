@@ -13,7 +13,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file qmdb/v1/qmdb.proto.
  */
 export const file_qmdb_v1_qmdb: GenFile = /*@__PURE__*/
-  fileDesc("ChJxbWRiL3YxL3FtZGIucHJvdG8SB3FtZGIudjEizgEKEFN1YnNjcmliZVJlcXVlc3QSPAoLa2V5X2ZpbHRlcnMYASADKAsyHC5zdG9yZS5jb21tb24udjEuQnl0ZXNGaWx0ZXJCCbpIBpIBAxCACBI+Cg12YWx1ZV9maWx0ZXJzGAIgAygLMhwuc3RvcmUuY29tbW9uLnYxLkJ5dGVzRmlsdGVyQgm6SAaSAQMQgAgSIgoVc2luY2Vfc2VxdWVuY2VfbnVtYmVyGAMgASgESACIAQFCGAoWX3NpbmNlX3NlcXVlbmNlX251bWJlciImCgpHZXRSZXF1ZXN0EgsKA2tleRgBIAEoDBILCgN0aXAYAiABKAQiOAoOR2V0TWFueVJlcXVlc3QSGQoEa2V5cxgBIAMoDEILukgIkgEFCAEQgAgSCwoDdGlwGAIgASgEIkIKE011bHRpUHJvb2ZPcGVyYXRpb24SEAoIbG9jYXRpb24YASABKAQSGQoRZW5jb2RlZF9vcGVyYXRpb24YAiABKAwiVwoUSGlzdG9yaWNhbE11bHRpUHJvb2YSDQoFcHJvb2YYASABKAwSMAoKb3BlcmF0aW9ucxgCIAMoCzIcLnFtZGIudjEuTXVsdGlQcm9vZk9wZXJhdGlvbiJAChRDdXJyZW50S2V5VmFsdWVQcm9vZhINCgVwcm9vZhgBIAEoDBIZChFlbmNvZGVkX29wZXJhdGlvbhgCIAEoDCJvChFTdWJzY3JpYmVSZXNwb25zZRIeChZyZXN1bWVfc2VxdWVuY2VfbnVtYmVyGAEgASgEEiwKBXByb29mGAIgASgLMh0ucW1kYi52MS5IaXN0b3JpY2FsTXVsdGlQcm9vZhIMCgRyb290GAMgASgMIjsKC0dldFJlc3BvbnNlEiwKBXByb29mGAEgASgLMh0ucW1kYi52MS5DdXJyZW50S2V5VmFsdWVQcm9vZiJWCg9HZXRNYW55UmVzcG9uc2USLAoFcHJvb2YYASABKAsyHS5xbWRiLnYxLkhpc3RvcmljYWxNdWx0aVByb29mEhUKDWN1cnJlbnRfcHJvb2YYAiABKAwygAEKDk9yZGVyZWRTZXJ2aWNlEjAKA0dldBITLnFtZGIudjEuR2V0UmVxdWVzdBoULnFtZGIudjEuR2V0UmVzcG9uc2USPAoHR2V0TWFueRIXLnFtZGIudjEuR2V0TWFueVJlcXVlc3QaGC5xbWRiLnYxLkdldE1hbnlSZXNwb25zZTJUCgxSYW5nZVNlcnZpY2USRAoJU3Vic2NyaWJlEhkucW1kYi52MS5TdWJzY3JpYmVSZXF1ZXN0GhoucW1kYi52MS5TdWJzY3JpYmVSZXNwb25zZTABYgZwcm90bzM", [file_buf_validate_validate, file_store_v1_common]);
+  fileDesc("ChJxbWRiL3YxL3FtZGIucHJvdG8SB3FtZGIudjEizgEKEFN1YnNjcmliZVJlcXVlc3QSPAoLa2V5X2ZpbHRlcnMYASADKAsyHC5zdG9yZS5jb21tb24udjEuQnl0ZXNGaWx0ZXJCCbpIBpIBAxCACBI+Cg12YWx1ZV9maWx0ZXJzGAIgAygLMhwuc3RvcmUuY29tbW9uLnYxLkJ5dGVzRmlsdGVyQgm6SAaSAQMQgAgSIgoVc2luY2Vfc2VxdWVuY2VfbnVtYmVyGAMgASgESACIAQFCGAoWX3NpbmNlX3NlcXVlbmNlX251bWJlciImCgpHZXRSZXF1ZXN0EgsKA2tleRgBIAEoDBILCgN0aXAYAiABKAQiOAoOR2V0TWFueVJlcXVlc3QSGQoEa2V5cxgBIAMoDEILukgIkgEFCAEQgAgSCwoDdGlwGAIgASgEImsKD0dldFJhbmdlUmVxdWVzdBIRCglzdGFydF9rZXkYASABKAwSFAoHZW5kX2tleRgCIAEoDEgAiAEBEhYKBWxpbWl0GAMgASgNQge6SAQqAiAAEgsKA3RpcBgEIAEoBEIKCghfZW5kX2tleSJCChNNdWx0aVByb29mT3BlcmF0aW9uEhAKCGxvY2F0aW9uGAEgASgEEhkKEWVuY29kZWRfb3BlcmF0aW9uGAIgASgMIlcKFEhpc3RvcmljYWxNdWx0aVByb29mEg0KBXByb29mGAEgASgMEjAKCm9wZXJhdGlvbnMYAiADKAsyHC5xbWRiLnYxLk11bHRpUHJvb2ZPcGVyYXRpb24iQAoUQ3VycmVudEtleVZhbHVlUHJvb2YSDQoFcHJvb2YYASABKAwSGQoRZW5jb2RlZF9vcGVyYXRpb24YAiABKAwiKQoYQ3VycmVudEtleUV4Y2x1c2lvblByb29mEg0KBXByb29mGAEgASgMIpABChZDdXJyZW50S2V5TG9va3VwUmVzdWx0EgsKA2tleRgBIAEoDBIsCgNoaXQYAiABKAsyHS5xbWRiLnYxLkN1cnJlbnRLZXlWYWx1ZVByb29mSAASMQoEbWlzcxgDIAEoCzIhLnFtZGIudjEuQ3VycmVudEtleUV4Y2x1c2lvblByb29mSABCCAoGcmVzdWx0IlEKFEN1cnJlbnRLZXlSYW5nZUVudHJ5EgsKA2tleRgBIAEoDBIsCgVwcm9vZhgCIAEoCzIdLnFtZGIudjEuQ3VycmVudEtleVZhbHVlUHJvb2YibwoRU3Vic2NyaWJlUmVzcG9uc2USHgoWcmVzdW1lX3NlcXVlbmNlX251bWJlchgBIAEoBBIsCgVwcm9vZhgCIAEoCzIdLnFtZGIudjEuSGlzdG9yaWNhbE11bHRpUHJvb2YSDAoEcm9vdBgDIAEoDCI7CgtHZXRSZXNwb25zZRIsCgVwcm9vZhgBIAEoCzIdLnFtZGIudjEuQ3VycmVudEtleVZhbHVlUHJvb2YiQwoPR2V0TWFueVJlc3BvbnNlEjAKB3Jlc3VsdHMYASADKAsyHy5xbWRiLnYxLkN1cnJlbnRLZXlMb29rdXBSZXN1bHQiggIKEEdldFJhbmdlUmVzcG9uc2USLgoHZW50cmllcxgBIAMoCzIdLnFtZGIudjEuQ3VycmVudEtleVJhbmdlRW50cnkSOwoLc3RhcnRfcHJvb2YYAiABKAsyIS5xbWRiLnYxLkN1cnJlbnRLZXlFeGNsdXNpb25Qcm9vZkgAiAEBEjkKCWVuZF9wcm9vZhgDIAEoCzIhLnFtZGIudjEuQ3VycmVudEtleUV4Y2x1c2lvblByb29mSAGIAQESEAoIaGFzX21vcmUYBCABKAgSFgoObmV4dF9zdGFydF9rZXkYBSABKAxCDgoMX3N0YXJ0X3Byb29mQgwKCl9lbmRfcHJvb2YyggEKEEtleUxvb2t1cFNlcnZpY2USMAoDR2V0EhMucW1kYi52MS5HZXRSZXF1ZXN0GhQucW1kYi52MS5HZXRSZXNwb25zZRI8CgdHZXRNYW55EhcucW1kYi52MS5HZXRNYW55UmVxdWVzdBoYLnFtZGIudjEuR2V0TWFueVJlc3BvbnNlMlkKFk9yZGVyZWRLZXlSYW5nZVNlcnZpY2USPwoIR2V0UmFuZ2USGC5xbWRiLnYxLkdldFJhbmdlUmVxdWVzdBoZLnFtZGIudjEuR2V0UmFuZ2VSZXNwb25zZTJUCgxSYW5nZVNlcnZpY2USRAoJU3Vic2NyaWJlEhkucW1kYi52MS5TdWJzY3JpYmVSZXF1ZXN0GhoucW1kYi52MS5TdWJzY3JpYmVSZXNwb25zZTABYgZwcm90bzM", [file_buf_validate_validate, file_store_v1_common]);
 
 /**
  * Subscribe to operations whose logical key and/or value match the given
@@ -90,7 +90,7 @@ export const GetRequestSchema: GenMessage<GetRequest> = /*@__PURE__*/
   messageDesc(file_qmdb_v1_qmdb, 1);
 
 /**
- * Historical key proof request for one or more logical keys.
+ * Current key proof request for one or more logical keys.
  *
  * @generated from message qmdb.v1.GetManyRequest
  */
@@ -103,9 +103,8 @@ export type GetManyRequest = Message<"qmdb.v1.GetManyRequest"> & {
   keys: Uint8Array[];
 
   /**
-   * Published ordered-QMDB batch-boundary to prove against. The server
-   * returns a historical multi-proof plus a current-root proof that anchors
-   * the historical ops root to the canonical current/global root for this tip.
+   * Published QMDB batch-boundary to prove against. The client must already
+   * know the trusted current/global root for this tip.
    *
    * @generated from field: uint64 tip = 2;
    */
@@ -118,6 +117,42 @@ export type GetManyRequest = Message<"qmdb.v1.GetManyRequest"> & {
  */
 export const GetManyRequestSchema: GenMessage<GetManyRequest> = /*@__PURE__*/
   messageDesc(file_qmdb_v1_qmdb, 2);
+
+/**
+ * Current ordered key range proof request. The range is half-open:
+ * `start_key <= key < end_key` when `end_key` is set; otherwise it scans to the
+ * end of the ordered keyspace. `limit` must be non-zero.
+ *
+ * @generated from message qmdb.v1.GetRangeRequest
+ */
+export type GetRangeRequest = Message<"qmdb.v1.GetRangeRequest"> & {
+  /**
+   * @generated from field: bytes start_key = 1;
+   */
+  startKey: Uint8Array;
+
+  /**
+   * @generated from field: optional bytes end_key = 2;
+   */
+  endKey?: Uint8Array;
+
+  /**
+   * @generated from field: uint32 limit = 3;
+   */
+  limit: number;
+
+  /**
+   * @generated from field: uint64 tip = 4;
+   */
+  tip: bigint;
+};
+
+/**
+ * Describes the message qmdb.v1.GetRangeRequest.
+ * Use `create(GetRangeRequestSchema)` to create a new message.
+ */
+export const GetRangeRequestSchema: GenMessage<GetRangeRequest> = /*@__PURE__*/
+  messageDesc(file_qmdb_v1_qmdb, 3);
 
 /**
  * One historical operation proven by a multi-proof.
@@ -141,7 +176,7 @@ export type MultiProofOperation = Message<"qmdb.v1.MultiProofOperation"> & {
  * Use `create(MultiProofOperationSchema)` to create a new message.
  */
 export const MultiProofOperationSchema: GenMessage<MultiProofOperation> = /*@__PURE__*/
-  messageDesc(file_qmdb_v1_qmdb, 3);
+  messageDesc(file_qmdb_v1_qmdb, 4);
 
 /**
  * Historical QMDB multi-proof over a set of operation locations.
@@ -165,10 +200,13 @@ export type HistoricalMultiProof = Message<"qmdb.v1.HistoricalMultiProof"> & {
  * Use `create(HistoricalMultiProofSchema)` to create a new message.
  */
 export const HistoricalMultiProofSchema: GenMessage<HistoricalMultiProof> = /*@__PURE__*/
-  messageDesc(file_qmdb_v1_qmdb, 4);
+  messageDesc(file_qmdb_v1_qmdb, 5);
 
 /**
- * Current ordered proof for one active key.
+ * Current proof for one active key. `proof` is opaque Commonware proof bytes
+ * encoded with `commonware-codec`: ordered endpoints use
+ * `current::ordered::db::KeyValueProof`; unordered endpoints use
+ * `current::proof::OperationProof`.
  *
  * @generated from message qmdb.v1.CurrentKeyValueProof
  */
@@ -189,7 +227,84 @@ export type CurrentKeyValueProof = Message<"qmdb.v1.CurrentKeyValueProof"> & {
  * Use `create(CurrentKeyValueProofSchema)` to create a new message.
  */
 export const CurrentKeyValueProofSchema: GenMessage<CurrentKeyValueProof> = /*@__PURE__*/
-  messageDesc(file_qmdb_v1_qmdb, 5);
+  messageDesc(file_qmdb_v1_qmdb, 6);
+
+/**
+ * Current ordered proof that one logical key is inactive. `proof` is opaque
+ * Commonware `current::ordered::ExclusionProof` encoded with
+ * `commonware-codec`.
+ *
+ * @generated from message qmdb.v1.CurrentKeyExclusionProof
+ */
+export type CurrentKeyExclusionProof = Message<"qmdb.v1.CurrentKeyExclusionProof"> & {
+  /**
+   * @generated from field: bytes proof = 1;
+   */
+  proof: Uint8Array;
+};
+
+/**
+ * Describes the message qmdb.v1.CurrentKeyExclusionProof.
+ * Use `create(CurrentKeyExclusionProofSchema)` to create a new message.
+ */
+export const CurrentKeyExclusionProofSchema: GenMessage<CurrentKeyExclusionProof> = /*@__PURE__*/
+  messageDesc(file_qmdb_v1_qmdb, 7);
+
+/**
+ * @generated from message qmdb.v1.CurrentKeyLookupResult
+ */
+export type CurrentKeyLookupResult = Message<"qmdb.v1.CurrentKeyLookupResult"> & {
+  /**
+   * @generated from field: bytes key = 1;
+   */
+  key: Uint8Array;
+
+  /**
+   * @generated from oneof qmdb.v1.CurrentKeyLookupResult.result
+   */
+  result: {
+    /**
+     * @generated from field: qmdb.v1.CurrentKeyValueProof hit = 2;
+     */
+    value: CurrentKeyValueProof;
+    case: "hit";
+  } | {
+    /**
+     * @generated from field: qmdb.v1.CurrentKeyExclusionProof miss = 3;
+     */
+    value: CurrentKeyExclusionProof;
+    case: "miss";
+  } | { case: undefined; value?: undefined };
+};
+
+/**
+ * Describes the message qmdb.v1.CurrentKeyLookupResult.
+ * Use `create(CurrentKeyLookupResultSchema)` to create a new message.
+ */
+export const CurrentKeyLookupResultSchema: GenMessage<CurrentKeyLookupResult> = /*@__PURE__*/
+  messageDesc(file_qmdb_v1_qmdb, 8);
+
+/**
+ * @generated from message qmdb.v1.CurrentKeyRangeEntry
+ */
+export type CurrentKeyRangeEntry = Message<"qmdb.v1.CurrentKeyRangeEntry"> & {
+  /**
+   * @generated from field: bytes key = 1;
+   */
+  key: Uint8Array;
+
+  /**
+   * @generated from field: qmdb.v1.CurrentKeyValueProof proof = 2;
+   */
+  proof?: CurrentKeyValueProof;
+};
+
+/**
+ * Describes the message qmdb.v1.CurrentKeyRangeEntry.
+ * Use `create(CurrentKeyRangeEntrySchema)` to create a new message.
+ */
+export const CurrentKeyRangeEntrySchema: GenMessage<CurrentKeyRangeEntry> = /*@__PURE__*/
+  messageDesc(file_qmdb_v1_qmdb, 9);
 
 /**
  * One emitted proof for a subscribed batch.
@@ -223,7 +338,7 @@ export type SubscribeResponse = Message<"qmdb.v1.SubscribeResponse"> & {
  * Use `create(SubscribeResponseSchema)` to create a new message.
  */
 export const SubscribeResponseSchema: GenMessage<SubscribeResponse> = /*@__PURE__*/
-  messageDesc(file_qmdb_v1_qmdb, 6);
+  messageDesc(file_qmdb_v1_qmdb, 10);
 
 /**
  * Unary current key proof response.
@@ -242,28 +357,18 @@ export type GetResponse = Message<"qmdb.v1.GetResponse"> & {
  * Use `create(GetResponseSchema)` to create a new message.
  */
 export const GetResponseSchema: GenMessage<GetResponse> = /*@__PURE__*/
-  messageDesc(file_qmdb_v1_qmdb, 7);
+  messageDesc(file_qmdb_v1_qmdb, 11);
 
 /**
- * Unary historical many-key proof response.
+ * Unary current many-key proof response.
  *
  * @generated from message qmdb.v1.GetManyResponse
  */
 export type GetManyResponse = Message<"qmdb.v1.GetManyResponse"> & {
   /**
-   * @generated from field: qmdb.v1.HistoricalMultiProof proof = 1;
+   * @generated from field: repeated qmdb.v1.CurrentKeyLookupResult results = 1;
    */
-  proof?: HistoricalMultiProof;
-
-  /**
-   * Opaque Commonware `current::proof::OperationProof` for one operation
-   * already included in `proof.operations`. Clients verify this against their
-   * trusted canonical current/global root and use its authenticated ops root
-   * to verify `proof`.
-   *
-   * @generated from field: bytes current_proof = 2;
-   */
-  currentProof: Uint8Array;
+  results: CurrentKeyLookupResult[];
 };
 
 /**
@@ -271,20 +376,63 @@ export type GetManyResponse = Message<"qmdb.v1.GetManyResponse"> & {
  * Use `create(GetManyResponseSchema)` to create a new message.
  */
 export const GetManyResponseSchema: GenMessage<GetManyResponse> = /*@__PURE__*/
-  messageDesc(file_qmdb_v1_qmdb, 8);
+  messageDesc(file_qmdb_v1_qmdb, 12);
 
 /**
- * Current/historical key-proof service.
+ * Ordered current key-range proof response. `start_proof`, when present,
+ * authenticates the boundary before the first returned key (or the entire empty
+ * range). `end_proof`, when present, authenticates the exclusive end boundary.
  *
- * `Get` returns a current ordered key proof for one logical key; `GetMany`
- * returns a historical multi-proof over one or more logical keys. Both are
- * ordered-backend only.
- *
- * @generated from service qmdb.v1.OrderedService
+ * @generated from message qmdb.v1.GetRangeResponse
  */
-export const OrderedService: GenService<{
+export type GetRangeResponse = Message<"qmdb.v1.GetRangeResponse"> & {
   /**
-   * @generated from rpc qmdb.v1.OrderedService.Get
+   * @generated from field: repeated qmdb.v1.CurrentKeyRangeEntry entries = 1;
+   */
+  entries: CurrentKeyRangeEntry[];
+
+  /**
+   * @generated from field: optional qmdb.v1.CurrentKeyExclusionProof start_proof = 2;
+   */
+  startProof?: CurrentKeyExclusionProof;
+
+  /**
+   * @generated from field: optional qmdb.v1.CurrentKeyExclusionProof end_proof = 3;
+   */
+  endProof?: CurrentKeyExclusionProof;
+
+  /**
+   * @generated from field: bool has_more = 4;
+   */
+  hasMore: boolean;
+
+  /**
+   * @generated from field: bytes next_start_key = 5;
+   */
+  nextStartKey: Uint8Array;
+};
+
+/**
+ * Describes the message qmdb.v1.GetRangeResponse.
+ * Use `create(GetRangeResponseSchema)` to create a new message.
+ */
+export const GetRangeResponseSchema: GenMessage<GetRangeResponse> = /*@__PURE__*/
+  messageDesc(file_qmdb_v1_qmdb, 13);
+
+/**
+ * Current key lookup service for QMDB backends that can authenticate explicit
+ * logical-key lookups.
+ *
+ * `GetMany` makes no ordering claim beyond preserving request order among
+ * returned results. Ordered QMDB returns hit or miss proofs for requested keys.
+ * Unordered QMDB returns only verifiable hits; missing keys are omitted because
+ * that variant has no exclusion proof.
+ *
+ * @generated from service qmdb.v1.KeyLookupService
+ */
+export const KeyLookupService: GenService<{
+  /**
+   * @generated from rpc qmdb.v1.KeyLookupService.Get
    */
   get: {
     methodKind: "unary";
@@ -292,7 +440,7 @@ export const OrderedService: GenService<{
     output: typeof GetResponseSchema;
   },
   /**
-   * @generated from rpc qmdb.v1.OrderedService.GetMany
+   * @generated from rpc qmdb.v1.KeyLookupService.GetMany
    */
   getMany: {
     methodKind: "unary";
@@ -301,6 +449,25 @@ export const OrderedService: GenService<{
   },
 }> = /*@__PURE__*/
   serviceDesc(file_qmdb_v1_qmdb, 0);
+
+/**
+ * Ordered current key-range service. Only ordered QMDB backends can prove a
+ * contiguous logical-key interval because they maintain adjacent `next_key`
+ * links and exclusion proofs.
+ *
+ * @generated from service qmdb.v1.OrderedKeyRangeService
+ */
+export const OrderedKeyRangeService: GenService<{
+  /**
+   * @generated from rpc qmdb.v1.OrderedKeyRangeService.GetRange
+   */
+  getRange: {
+    methodKind: "unary";
+    input: typeof GetRangeRequestSchema;
+    output: typeof GetRangeResponseSchema;
+  },
+}> = /*@__PURE__*/
+  serviceDesc(file_qmdb_v1_qmdb, 1);
 
 /**
  * Subscription service over a QMDB backend's historical op log.
@@ -326,5 +493,5 @@ export const RangeService: GenService<{
     output: typeof SubscribeResponseSchema;
   },
 }> = /*@__PURE__*/
-  serviceDesc(file_qmdb_v1_qmdb, 1);
+  serviceDesc(file_qmdb_v1_qmdb, 2);
 

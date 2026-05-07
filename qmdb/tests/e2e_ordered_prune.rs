@@ -60,7 +60,7 @@ async fn boundary_from_db(
     previous_ops: Option<&[BatchOp]>,
     operations: &[BatchOp],
 ) -> CurrentBoundaryState<Digest, N> {
-    recover_boundary_state::<Sha256, _, _, N, _, _>(
+    recover_boundary_state::<Sha256, _, N, _, _>(
         previous_ops,
         operations,
         db.root(),

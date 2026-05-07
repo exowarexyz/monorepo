@@ -6,9 +6,11 @@ use exoware_sdk::ClientError;
 /// without string matching on the error message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProofKind {
-    /// Single-key current-state proof (`OrderedService.Get`).
+    /// Single-key current-state proof (`KeyLookupService.Get`).
     CurrentKeyValue,
-    /// Historical multi-proof over a set of logical keys (`OrderedService.GetMany`).
+    /// Current ordered proof that a key is inactive.
+    CurrentKeyExclusion,
+    /// Historical multi-proof over subscribed operations.
     HistoricalMultiKey,
     /// Subscribe-time multi-proof covering matched operations in one batch
     /// (`RangeService.Subscribe`).
@@ -23,6 +25,7 @@ impl std::fmt::Display for ProofKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             Self::CurrentKeyValue => "current key-value",
+            Self::CurrentKeyExclusion => "current key-exclusion",
             Self::HistoricalMultiKey => "historical many-key",
             Self::BatchMulti => "batch multi",
             Self::RangeCheckpoint => "range checkpoint",
@@ -48,6 +51,11 @@ pub enum QmdbError {
     EmptyProofRequest,
     #[error("range proof max_locations must be > 0")]
     InvalidRangeLength,
+    #[error("invalid key range: start_key {start_key:?} must be less than end_key {end_key:?}")]
+    InvalidKeyRange {
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+    },
     #[error("duplicate key in proof request: {key:?}")]
     DuplicateRequestedKey { key: Vec<u8> },
     #[error("requested location {requested} is above published writer watermark {available}")]

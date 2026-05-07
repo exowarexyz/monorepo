@@ -2,6 +2,8 @@
 //!
 //! The crate currently supports multiple Commonware authenticated backends:
 //! - ordered QMDB (`qmdb::any` and `qmdb::current::ordered`)
+//! - unordered QMDB (`qmdb::any::unordered` and current hit proofs when callers
+//!   upload current-boundary rows)
 //! - immutable (`qmdb::immutable`)
 //! - keyless (`qmdb::keyless`)
 //!
@@ -16,7 +18,7 @@
 //! Readers fence historical queries against that low watermark. Historical proofs
 //! use the global ops-MMR nodes stored by `Position`.
 //!
-//! Current ordered proofs use versioned current-state deltas:
+//! Current QMDB proofs use versioned current-state deltas:
 //! - bitmap chunk rows
 //! - grafted-node rows
 //!
@@ -48,7 +50,8 @@ pub use keyless::KeylessClient;
 pub use ordered::OrderedClient;
 pub use proof::{
     OperationRangeCheckpoint, RawKeyValueProof, RawMultiProof, VariantRoot, VerifiedCurrentRange,
-    VerifiedKeyValue, VerifiedMultiOperations, VerifiedOperationRange, VerifiedVariantRange,
+    VerifiedKeyLookup, VerifiedKeyRange, VerifiedKeyValue, VerifiedMultiOperations,
+    VerifiedOperationRange, VerifiedUnorderedKeyValue, VerifiedVariantRange,
 };
 pub use unordered::UnorderedClient;
 pub use writer::{
@@ -61,13 +64,14 @@ pub use writer::{
 pub use boundary::recover_boundary_state;
 pub use connect::{
     immutable_range_connect_stack, keyless_range_connect_stack, ordered_connect_stack,
-    unordered_range_connect_stack, ImmutableRangeConnect, KeylessRangeConnect, OrderedConnect,
-    OrderedRangeConnect, UnorderedRangeConnect,
+    unordered_connect_stack, unordered_range_connect_stack, ImmutableRangeConnect,
+    KeylessRangeConnect, OrderedConnect, OrderedRangeConnect, UnorderedConnect,
+    UnorderedRangeConnect,
 };
 pub use connect_client::{
     ImmutableRangeConnectClient, KeylessRangeConnectClient, OrderedConnectClient,
     OrderedRangeConnectClient, RangeConnectSubscription, RangeSubscribeProof,
-    UnorderedRangeConnectClient,
+    UnorderedConnectClient, UnorderedRangeConnectClient,
 };
 
 use commonware_codec::Encode;

@@ -12,9 +12,12 @@ import {
   CurrentKeyValueProofSchema,
   GetManyRequestSchema,
   GetManyResponseSchema,
+  GetRangeRequestSchema,
+  GetRangeResponseSchema,
   GetRequestSchema,
   HistoricalMultiProofSchema,
-  OrderedService,
+  KeyLookupService,
+  OrderedKeyRangeService,
   RangeService,
   SubscribeRequestSchema,
 } from './generated/proto/qmdb/v1/qmdb_pb.js';
@@ -25,6 +28,7 @@ import {
 import initWasm, {
   verify_current_key_value_proof,
   verify_get_many_response,
+  verify_get_range_response,
   verify_historical_multi_proof,
 } from './generated/wasm/exoware_qmdb_wasm.js';
 
@@ -60,6 +64,32 @@ export interface VerifiedHistoricalMultiProof {
 export interface VerifiedCurrentKeyValueProof {
   location: bigint;
   operation: OrderedOperation;
+}
+
+export type VerifiedCurrentKeyLookupResult =
+  | ({
+      type: 'hit';
+      key: Uint8Array;
+    } & VerifiedCurrentKeyValueProof)
+  | {
+      type: 'miss';
+      key: Uint8Array;
+    };
+
+export interface VerifiedCurrentKeyLookupProof {
+  results: VerifiedCurrentKeyLookupResult[];
+}
+
+export interface VerifiedCurrentKeyRangeEntry {
+  key: Uint8Array;
+  location: bigint;
+  operation: OrderedOperation;
+}
+
+export interface VerifiedCurrentKeyRangeProof {
+  entries: VerifiedCurrentKeyRangeEntry[];
+  hasMore: boolean;
+  nextStartKey: Uint8Array;
 }
 
 export interface OrderedSubscribeProof {
@@ -116,7 +146,8 @@ export function matchRegex(regex: string): BytesFilter {
 }
 
 export class OrderedQmdbClient {
-  private readonly rpc: ConnectClient<typeof OrderedService>;
+  private readonly lookup: ConnectClient<typeof KeyLookupService>;
+  private readonly orderedRange: ConnectClient<typeof OrderedKeyRangeService>;
   private readonly range: ConnectClient<typeof RangeService>;
   private readonly merkleFamily: MerkleFamily;
 
@@ -125,7 +156,8 @@ export class OrderedQmdbClient {
     assertMerkleFamily(merkleFamily, 'qmdb client');
     this.merkleFamily = merkleFamily;
     const transport = createTransport(baseUrl, transportOptions);
-    this.rpc = createClient(OrderedService, transport);
+    this.lookup = createClient(KeyLookupService, transport);
+    this.orderedRange = createClient(OrderedKeyRangeService, transport);
     this.range = createClient(RangeService, transport);
   }
 
@@ -136,7 +168,7 @@ export class OrderedQmdbClient {
     options?: CallOptions,
   ): Promise<VerifiedCurrentKeyValueProof> {
     await ensureWasm();
-    const response = await this.rpc.get(
+    const response = await this.lookup.get(
       create(GetRequestSchema, {
         key: toBytes(key),
         tip,
@@ -159,23 +191,54 @@ export class OrderedQmdbClient {
     tip: bigint,
     expectedRoot: BytesLike,
     options?: CallOptions,
-  ): Promise<VerifiedHistoricalMultiProof> {
+  ): Promise<VerifiedCurrentKeyLookupProof> {
     await ensureWasm();
-    const response = await this.rpc.getMany(
+    const response = await this.lookup.getMany(
       create(GetManyRequestSchema, {
         keys: keys.map((key) => toBytes(key)),
         tip,
       }),
       options,
     );
-    if (!response.proof) {
-      throw new Error('qmdb getMany response missing proof');
-    }
     const verified = verify_get_many_response(
       toBinary(GetManyResponseSchema, response),
       toBytes(expectedRoot),
       this.merkleFamily,
-    ) as VerifiedHistoricalMultiProof;
+    ) as VerifiedCurrentKeyLookupProof;
+    return verified;
+  }
+
+  async getRange(
+    request: {
+      startKey: BytesLike;
+      endKey?: BytesLike;
+      limit: number;
+      tip: bigint;
+    },
+    expectedRoot: BytesLike,
+    options?: CallOptions,
+  ): Promise<VerifiedCurrentKeyRangeProof> {
+    await ensureWasm();
+    const startKey = toBytes(request.startKey);
+    const endKey =
+      request.endKey === undefined ? undefined : toBytes(request.endKey);
+    const response = await this.orderedRange.getRange(
+      create(GetRangeRequestSchema, {
+        startKey,
+        ...(endKey === undefined ? {} : { endKey }),
+        limit: request.limit,
+        tip: request.tip,
+      }),
+      options,
+    );
+    const verified = verify_get_range_response(
+      toBinary(GetRangeResponseSchema, response),
+      toBytes(expectedRoot),
+      this.merkleFamily,
+      startKey,
+      endKey ?? new Uint8Array(),
+      endKey !== undefined,
+    ) as VerifiedCurrentKeyRangeProof;
     return verified;
   }
 

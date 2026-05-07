@@ -4,8 +4,7 @@ use std::future::Future;
 use commonware_codec::{Codec, Encode};
 use commonware_cryptography::Hasher;
 use commonware_storage::qmdb::{
-    any::ordered::variable::Operation as QmdbOperation,
-    current::proof::RangeProof as CurrentRangeProof, operation::Key as QmdbKey,
+    current::proof::RangeProof as CurrentRangeProof, operation::Operation as QmdbOperation,
 };
 use commonware_storage::{
     merkle::hasher::Hasher as MerkleHasher,
@@ -37,13 +36,13 @@ fn grafted_to_ops_pos(grafted_pos: Position, grafting_height: u32) -> Position {
     Position::new(*ops_leaf_pos + (1u64 << (ops_height + 1)) - 2)
 }
 
-/// Recover the ordered current-boundary delta for one batch from local proof
-/// material emitted by a Commonware `current::ordered::Db`.
+/// Recover the current-boundary delta for one batch from local proof material
+/// emitted by a Commonware `current` QMDB.
 ///
-/// This is the bridge between a caller-owned local Commonware current DB and
-/// [`crate::OrderedWriter`]. Callers apply a batch locally, then use this
-/// function to recover the exact versioned current-state rows that must be
-/// uploaded for that batch boundary:
+/// This is the bridge between a caller-owned local Commonware current DB and a
+/// writer that publishes current-state rows. Callers apply a batch locally,
+/// then use this function to recover the exact versioned current-state rows
+/// that must be uploaded for that batch boundary:
 ///
 /// - `root`: the local current DB root after applying `operations`
 /// - `chunks`: only the bitmap chunks whose contents changed at this boundary
@@ -64,24 +63,23 @@ fn grafted_to_ops_pos(grafted_pos: Position, grafting_height: u32) -> Position {
 /// chunk for that exact `location`, taken from the same local DB state as
 /// `root`.
 ///
-/// The returned [`CurrentBoundaryState`] can be passed directly to
-/// [`crate::OrderedWriter::prepare_upload`].
+/// The returned [`CurrentBoundaryState`] can be passed directly to ordered or
+/// unordered writer APIs that accept current-boundary state.
 ///
 /// TODO: replace this proof-driven recovery path with a thin adapter over
 /// `commonware_storage::qmdb::current::batch::MerkleizedBatch` once upstream
 /// exposes the bitmap-chunk and grafted-subtree deltas needed to publish one
 /// batch boundary directly.
-pub async fn recover_boundary_state<H, K, V, const N: usize, F, Fut>(
-    previous_operations: Option<&[QmdbOperation<commonware_storage::mmr::Family, K, V>]>,
-    operations: &[QmdbOperation<commonware_storage::mmr::Family, K, V>],
+pub async fn recover_boundary_state<H, Op, const N: usize, F, Fut>(
+    previous_operations: Option<&[Op]>,
+    operations: &[Op],
     root: H::Digest,
     mut prove_at: F,
 ) -> Result<CurrentBoundaryState<H::Digest, N>, QmdbError>
 where
     H: Hasher,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
-    QmdbOperation<commonware_storage::mmr::Family, K, V>: Codec,
+    Op: QmdbOperation<commonware_storage::mmr::Family> + Codec,
+    Op::Key: AsRef<[u8]>,
     F: FnMut(Location) -> Fut,
     Fut: Future<
         Output = Result<
@@ -107,7 +105,7 @@ where
     }
     validate_recovery_input(previous_operations, operations)?;
 
-    let changed_chunks = changed_chunk_representatives::<K, V, N>(previous_operations, operations);
+    let changed_chunks = changed_chunk_representatives::<Op, N>(previous_operations, operations);
     let complete_chunks = operations.len() / bitmap_chunk_bits::<N>() as usize;
     let mmr_size = Position::try_from(Location::new(operations.len() as u64))
         .map_err(|e| QmdbError::CorruptData(format!("invalid current proof leaf count: {e}")))?;
@@ -181,18 +179,16 @@ where
     })
 }
 
-fn validate_recovery_input<K, V>(
-    previous_operations: Option<&[QmdbOperation<commonware_storage::mmr::Family, K, V>]>,
-    operations: &[QmdbOperation<commonware_storage::mmr::Family, K, V>],
+fn validate_recovery_input<Op>(
+    previous_operations: Option<&[Op]>,
+    operations: &[Op],
 ) -> Result<(), QmdbError>
 where
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
-    QmdbOperation<commonware_storage::mmr::Family, K, V>: Encode,
+    Op: QmdbOperation<commonware_storage::mmr::Family> + Encode,
 {
-    if !matches!(operations.last(), Some(QmdbOperation::CommitFloor(_, _))) {
+    if !operations.last().is_some_and(|op| op.has_floor().is_some()) {
         return Err(QmdbError::CorruptData(
-            "recover_boundary_state requires operations to end with CommitFloor".into(),
+            "recover_boundary_state requires operations to end with a commit floor".into(),
         ));
     }
 
@@ -211,17 +207,17 @@ where
     let delta = &operations[previous.len()..];
     let commit_count = delta
         .iter()
-        .filter(|operation| matches!(operation, QmdbOperation::CommitFloor(_, _)))
+        .filter(|operation| operation.has_floor().is_some())
         .count();
     if commit_count != 1 {
         return Err(QmdbError::CorruptData(format!(
-            "recover_boundary_state requires exactly one CommitFloor in the appended batch delta, found {commit_count}"
+            "recover_boundary_state requires exactly one commit floor in the appended batch delta, found {commit_count}"
         )));
     }
 
-    if !matches!(delta.last(), Some(QmdbOperation::CommitFloor(_, _))) {
+    if !delta.last().is_some_and(|op| op.has_floor().is_some()) {
         return Err(QmdbError::CorruptData(
-            "recover_boundary_state requires the appended batch delta to end with CommitFloor"
+            "recover_boundary_state requires the appended batch delta to end with a commit floor"
                 .into(),
         ));
     }
@@ -229,13 +225,13 @@ where
     Ok(())
 }
 
-fn changed_chunk_representatives<K, V, const N: usize>(
-    previous_operations: Option<&[QmdbOperation<commonware_storage::mmr::Family, K, V>]>,
-    operations: &[QmdbOperation<commonware_storage::mmr::Family, K, V>],
+fn changed_chunk_representatives<Op, const N: usize>(
+    previous_operations: Option<&[Op]>,
+    operations: &[Op],
 ) -> BTreeMap<u64, Location>
 where
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
+    Op: QmdbOperation<commonware_storage::mmr::Family>,
+    Op::Key: AsRef<[u8]>,
 {
     // The inactivity floor of the batch being recovered lives in the trailing
     // CommitFloor op. Chunks whose entire bit range is below this floor are
@@ -243,10 +239,10 @@ where
     // proof for them and we do not need to -- `load_bitmap_chunk` folds all
     // below-floor bits to 0 deterministically at read time. Skip those chunks
     // here so we do not ask the local DB to prove a location it has discarded.
-    let floor = match operations.last() {
-        Some(QmdbOperation::CommitFloor(_, floor)) => *floor,
-        _ => Location::new(0),
-    };
+    let floor = operations
+        .last()
+        .and_then(QmdbOperation::has_floor)
+        .unwrap_or(Location::new(0));
     let chunk_bits = bitmap_chunk_bits::<N>();
     let floor_chunk = *floor / chunk_bits;
     let first_alive_location = floor_chunk.saturating_mul(chunk_bits);
@@ -274,11 +270,7 @@ where
     // not already know how to fold (chunks straddling or above the floor).
     let mut touched_keys = operations[previous_len..]
         .iter()
-        .filter_map(|operation| match operation {
-            QmdbOperation::Update(update) => Some(update.key.as_ref().to_vec()),
-            QmdbOperation::Delete(key) => Some(key.as_ref().to_vec()),
-            QmdbOperation::CommitFloor(_, _) => None,
-        })
+        .filter_map(|operation| operation.key().map(|key| key.as_ref().to_vec()))
         .collect::<BTreeSet<_>>();
 
     // Walk backwards only as far as the first alive chunk. Anything below
@@ -290,18 +282,12 @@ where
             break;
         }
         let location = Location::new(index as u64);
-        match &previous[index] {
-            QmdbOperation::Update(update) => {
-                if touched_keys.remove(update.key.as_ref()) {
-                    changed
-                        .entry(chunk_index_for_location::<N>(location))
-                        .or_insert(location);
-                }
+        if let Some(key) = previous[index].key() {
+            if touched_keys.remove(key.as_ref()) && previous[index].is_update() {
+                changed
+                    .entry(chunk_index_for_location::<N>(location))
+                    .or_insert(location);
             }
-            QmdbOperation::Delete(key) => {
-                touched_keys.remove(key.as_ref());
-            }
-            QmdbOperation::CommitFloor(_, _) => {}
         }
     }
 
@@ -492,8 +478,10 @@ mod tests {
         let mut operations = previous.clone();
         operations.push(update(b"target", b"new"));
 
-        let changed =
-            changed_chunk_representatives::<Vec<u8>, Vec<u8>, 1>(Some(&previous), &operations);
+        let changed = changed_chunk_representatives::<TestOperation<_, _, _>, 1>(
+            Some(&previous),
+            &operations,
+        );
 
         assert_eq!(
             changed,
@@ -514,8 +502,10 @@ mod tests {
         operations.push(update(b"target", b"new"));
         operations.push(commit(16));
 
-        let changed =
-            changed_chunk_representatives::<Vec<u8>, Vec<u8>, 1>(Some(&previous), &operations);
+        let changed = changed_chunk_representatives::<TestOperation<_, _, _>, 1>(
+            Some(&previous),
+            &operations,
+        );
 
         assert_eq!(changed, BTreeMap::from([(2u64, Location::new(16))]));
     }
@@ -535,8 +525,10 @@ mod tests {
         operations.push(update(b"neighbor3", b"v"));
         operations.push(commit(18));
 
-        let changed =
-            changed_chunk_representatives::<Vec<u8>, Vec<u8>, 1>(Some(&previous), &operations);
+        let changed = changed_chunk_representatives::<TestOperation<_, _, _>, 1>(
+            Some(&previous),
+            &operations,
+        );
 
         assert_eq!(changed, BTreeMap::from([(2u64, Location::new(16))]));
     }

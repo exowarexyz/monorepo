@@ -570,16 +570,29 @@ state. The store's ingest layer does not enforce this — it's on the caller.
 
 The old client-side `stream_batches(since)` API has been removed.
 
-Live ordered-QMDB keyed proofs now go through the ConnectRPC
-`qmdb.v1.OrderedService`:
+Live QMDB keyed proofs now go through ConnectRPC services:
 
-- `Subscribe` listens to the full ordered batch log server-side and emits a
-  historical multi-proof when any subscribed logical key is touched.
-- `Get` returns a current proof for one logical key.
+- `qmdb.v1.KeyLookupService.Get` returns a current proof for one logical key.
+- `qmdb.v1.KeyLookupService.GetMany` returns current proofs for explicit
+  logical keys in request order. Ordered QMDB returns hit and miss proofs;
+  unordered QMDB returns hit proofs only and omits missing keys because
+  Commonware does not expose unordered exclusion proofs.
+- `qmdb.v1.OrderedKeyRangeService.GetRange` returns an ordered current key
+  range plus boundary proofs. Only ordered QMDB exposes this service.
+- `qmdb.v1.RangeService.Subscribe` listens to the ordered batch log
+  server-side and emits a historical multi-proof when any subscribed logical
+  key is touched.
 - `SubscribeRequest.match_keys` supports exact bytes, prefixes, and regexes
   over decoded logical keys.
 - `SubscribeResponse.resume_sequence_number + 1` is the reconnect cursor for
   lossless replay after a disconnect.
+
+Immutable and keyless Connect stacks expose only `qmdb.v1.RangeService` today.
+They do not expose logical current-key proofs. Unordered current key-value
+proofs require the same current-boundary publication path that ordered uses;
+callers that upload only historical unordered rows should mount
+`unordered_range_connect_stack`, while callers that upload current-boundary
+rows can mount `unordered_connect_stack` for present-key `Get` / `GetMany`.
 
 Historical batch-range streaming now goes through ConnectRPC as well:
 

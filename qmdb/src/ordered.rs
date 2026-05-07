@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 
 use commonware_codec::{Codec, Decode, Encode, Read as CodecRead};
@@ -8,8 +8,11 @@ use commonware_storage::{
     mmr::Location,
     qmdb::{
         any::ordered::variable::Operation as QmdbOperation,
-        current::proof::{
-            OperationProof as CurrentOperationProof, RangeProof as CurrentRangeProof,
+        current::{
+            ordered::{
+                db::KeyValueProof as CurrentKeyValueProof, ExclusionProof as CurrentExclusionProof,
+            },
+            proof::{OperationProof as CurrentOperationProof, RangeProof as CurrentRangeProof},
         },
         operation::{Key as QmdbKey, Operation as _},
     },
@@ -21,15 +24,16 @@ use exoware_sdk::{RangeMode, SerializableReadSession, StoreClient};
 use crate::codec::{
     bitmap_chunk_bits, chunk_index_for_location, clear_below_floor, decode_digest,
     decode_update_location, encode_chunk_key, encode_current_meta_key, encode_update_key,
-    mmr_size_for_watermark, UpdateRow,
+    mmr_size_for_watermark, UpdateRow, UPDATE_CODEC,
 };
 use crate::connect::OperationKv;
 use crate::core::HistoricalOpsClientCore;
 use crate::error::QmdbError;
 use crate::proof::{
     CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
-    RawKeyValueProof, RawMultiProof, VariantRoot, VerifiedCurrentRange, VerifiedKeyValue,
-    VerifiedMultiOperations, VerifiedOperationRange, VerifiedVariantRange,
+    RawKeyExclusionProof, RawKeyLookupProof, RawKeyRangeEntry, RawKeyRangeProof, RawKeyValueProof,
+    RawMultiProof, VariantRoot, VerifiedCurrentRange, VerifiedKeyValue, VerifiedMultiOperations,
+    VerifiedOperationRange, VerifiedVariantRange,
 };
 use crate::storage::{KvCurrentStorage, KvMmrStorage};
 use crate::{QmdbVariant, VersionedValue};
@@ -39,6 +43,13 @@ struct MaterializedBitmapStatus<const N: usize> {
     len: u64,
     pruned_chunks: usize,
     chunks: std::collections::BTreeMap<usize, [u8; N]>,
+}
+
+#[derive(Clone, Debug)]
+struct ActiveOrderedOperation<K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> {
+    key: Vec<u8>,
+    location: Location,
+    operation: QmdbOperation<commonware_storage::mmr::Family, K, V>,
 }
 
 impl<const N: usize> BitmapReadable<N> for MaterializedBitmapStatus<N> {
@@ -609,16 +620,20 @@ where
         }
 
         let operation = self.load_operation_at(session, location).await?;
-        let QmdbOperation::Update(_) = &operation else {
+        let QmdbOperation::Update(update) = &operation else {
             return Err(QmdbError::KeyNotActive {
                 watermark,
                 key: key.as_ref().to_vec(),
             });
         };
         let root = self.load_current_boundary_root(session, watermark).await?;
-        let proof = self
+        let operation_proof = self
             .build_current_operation_proof(session, watermark, location)
             .await?;
+        let proof = CurrentKeyValueProof {
+            proof: operation_proof,
+            next_key: update.next_key.clone(),
+        };
 
         let raw = RawKeyValueProof {
             watermark,
@@ -656,8 +671,306 @@ where
         let raw = self.key_value_proof_raw_at(watermark, key).await?;
         Ok(VerifiedKeyValue {
             root: raw.root,
-            location: raw.proof.loc,
+            location: raw.proof.proof.loc,
             operation: raw.operation,
+        })
+    }
+
+    async fn active_ordered_updates_in_session(
+        &self,
+        session: &SerializableReadSession,
+        watermark: Location,
+    ) -> Result<Vec<ActiveOrderedOperation<K, V>>, QmdbError> {
+        let (start, end) = UPDATE_CODEC.prefix_bounds();
+        let mut rows = session.range_stream(&start, &end, usize::MAX, 1024).await?;
+        let mut latest = BTreeMap::<Vec<u8>, (Location, UpdateRow<K, V>)>::new();
+        while let Some(chunk) = rows.next_chunk().await? {
+            for (row_key, row_value) in chunk {
+                let location = decode_update_location(&row_key)?;
+                if location > watermark {
+                    continue;
+                }
+                let decoded = <UpdateRow<K, V> as CodecRead>::read_cfg(
+                    &mut row_value.as_ref(),
+                    &self.update_row_cfg,
+                )
+                .map_err(|e| QmdbError::CorruptData(format!("update row decode: {e}")))?;
+                let key = decoded.key.as_ref().to_vec();
+                latest
+                    .entry(key)
+                    .and_modify(|(known_location, known_row)| {
+                        if location > *known_location {
+                            *known_location = location;
+                            *known_row = decoded.clone();
+                        }
+                    })
+                    .or_insert((location, decoded));
+            }
+        }
+
+        let mut active = Vec::new();
+        for (key, (location, row)) in latest {
+            if row.value.is_none() {
+                continue;
+            }
+            let operation = self.load_operation_at(session, location).await?;
+            let QmdbOperation::Update(update) = &operation else {
+                return Err(QmdbError::CorruptData(format!(
+                    "latest active key row at {location} does not point to an update operation"
+                )));
+            };
+            if update.key.as_ref() != key.as_slice() {
+                return Err(QmdbError::CorruptData(format!(
+                    "active update key mismatch at {location}"
+                )));
+            }
+            active.push(ActiveOrderedOperation {
+                key,
+                location,
+                operation,
+            });
+        }
+        active.sort_by(|a, b| a.key.cmp(&b.key));
+        Ok(active)
+    }
+
+    fn span_contains_requested(span_start: &[u8], span_end: &[u8], requested_key: &[u8]) -> bool {
+        if span_start >= span_end {
+            requested_key >= span_start || requested_key < span_end
+        } else {
+            requested_key >= span_start && requested_key < span_end
+        }
+    }
+
+    async fn key_exclusion_proof_raw_in_session(
+        &self,
+        session: &SerializableReadSession,
+        watermark: Location,
+        key: &[u8],
+    ) -> Result<RawKeyExclusionProof<H::Digest, K, V, N>, QmdbError> {
+        self.core()
+            .require_published_watermark(session, watermark)
+            .await?;
+        self.core()
+            .require_batch_boundary(session, watermark)
+            .await?;
+        let root = self.load_current_boundary_root(session, watermark).await?;
+        let active = self
+            .active_ordered_updates_in_session(session, watermark)
+            .await?;
+
+        let proof = if active.is_empty() {
+            let operation = self.load_operation_at(session, watermark).await?;
+            let QmdbOperation::CommitFloor(value, floor) = operation else {
+                return Err(QmdbError::CorruptData(format!(
+                    "empty ordered exclusion proof expected CommitFloor at watermark {watermark}"
+                )));
+            };
+            if floor != watermark {
+                return Err(QmdbError::CorruptData(format!(
+                    "empty ordered exclusion proof expected floor {watermark}, got {floor}"
+                )));
+            }
+            let op_proof = self
+                .build_current_operation_proof(session, watermark, watermark)
+                .await?;
+            CurrentExclusionProof::Commit(op_proof, value)
+        } else {
+            let mut span = None;
+            for active in &active {
+                let QmdbOperation::Update(update) = &active.operation else {
+                    continue;
+                };
+                if update.key.as_ref() == key {
+                    return Err(QmdbError::CorruptData(
+                        "cannot build exclusion proof for active key".to_string(),
+                    ));
+                }
+                if Self::span_contains_requested(update.key.as_ref(), update.next_key.as_ref(), key)
+                {
+                    span = Some((active.location, update.clone()));
+                    break;
+                }
+            }
+            let Some((location, update)) = span else {
+                return Err(QmdbError::CorruptData(format!(
+                    "no ordered active-key span contains requested key {key:?}"
+                )));
+            };
+            let op_proof = self
+                .build_current_operation_proof(session, watermark, location)
+                .await?;
+            CurrentExclusionProof::KeyValue(op_proof, update)
+        };
+
+        let raw = RawKeyExclusionProof {
+            watermark,
+            root,
+            requested_key: key.to_vec(),
+            proof,
+        };
+        if !raw.verify::<H>() {
+            return Err(QmdbError::ProofVerification {
+                kind: crate::ProofKind::CurrentKeyExclusion,
+            });
+        }
+        Ok(raw)
+    }
+
+    /// Verified raw current-state proof that a key is absent.
+    pub async fn key_exclusion_proof_raw_at<Q: AsRef<[u8]>>(
+        &self,
+        watermark: Location,
+        key: Q,
+    ) -> Result<RawKeyExclusionProof<H::Digest, K, V, N>, QmdbError> {
+        let session = self.client.create_session();
+        self.key_exclusion_proof_raw_in_session(&session, watermark, key.as_ref())
+            .await
+    }
+
+    /// Verified current-state proofs for explicit keys, preserving request order.
+    pub async fn key_lookup_proofs_raw_at<Q: AsRef<[u8]>>(
+        &self,
+        watermark: Location,
+        keys: &[Q],
+    ) -> Result<Vec<RawKeyLookupProof<H::Digest, K, V, N>>, QmdbError> {
+        if keys.is_empty() {
+            return Err(QmdbError::EmptyProofRequest);
+        }
+
+        let session = self.client.create_session();
+        let mut seen = BTreeSet::<Vec<u8>>::new();
+        let mut proofs = Vec::with_capacity(keys.len());
+        for key in keys {
+            let key_bytes = key.as_ref().to_vec();
+            if !seen.insert(key_bytes.clone()) {
+                return Err(QmdbError::DuplicateRequestedKey { key: key_bytes });
+            }
+            match self
+                .key_value_proof_raw_in_session(&session, watermark, key.as_ref())
+                .await
+            {
+                Ok(proof) => proofs.push(RawKeyLookupProof::Hit(proof)),
+                Err(QmdbError::ProofKeyNotFound { .. } | QmdbError::KeyNotActive { .. }) => {
+                    let proof = self
+                        .key_exclusion_proof_raw_in_session(&session, watermark, key.as_ref())
+                        .await?;
+                    proofs.push(RawKeyLookupProof::Miss(proof));
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(proofs)
+    }
+
+    /// Verified ordered current-state range proof for `[start_key, end_key)`.
+    pub async fn key_range_proof_raw_at(
+        &self,
+        watermark: Location,
+        start_key: &[u8],
+        end_key: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<RawKeyRangeProof<H::Digest, K, V, N>, QmdbError> {
+        if limit == 0 {
+            return Err(QmdbError::InvalidRangeLength);
+        }
+        if end_key.is_some_and(|end| end <= start_key) {
+            return Err(QmdbError::InvalidKeyRange {
+                start_key: start_key.to_vec(),
+                end_key: end_key.unwrap().to_vec(),
+            });
+        }
+
+        let session = self.client.create_session();
+        self.core()
+            .require_published_watermark(&session, watermark)
+            .await?;
+        self.core()
+            .require_batch_boundary(&session, watermark)
+            .await?;
+
+        let active = self
+            .active_ordered_updates_in_session(&session, watermark)
+            .await?;
+        let matching: Vec<_> = active
+            .into_iter()
+            .filter(|entry| {
+                entry.key.as_slice() >= start_key
+                    && end_key.is_none_or(|end| entry.key.as_slice() < end)
+            })
+            .collect();
+        let limit = limit as usize;
+        let has_more = matching.len() > limit;
+        let selected = matching.into_iter().take(limit).collect::<Vec<_>>();
+
+        let mut entries = Vec::with_capacity(selected.len());
+        for entry in &selected {
+            let proof = self
+                .key_value_proof_raw_in_session(&session, watermark, entry.key.as_slice())
+                .await?;
+            entries.push(RawKeyRangeEntry {
+                key: entry.key.clone(),
+                proof,
+            });
+        }
+
+        let start_proof = if entries
+            .first()
+            .is_some_and(|entry| entry.key.as_slice() == start_key)
+        {
+            None
+        } else {
+            Some(
+                self.key_exclusion_proof_raw_in_session(&session, watermark, start_key)
+                    .await?,
+            )
+        };
+
+        let next_start_key = if has_more {
+            entries
+                .last()
+                .and_then(|entry| match &entry.proof.operation {
+                    QmdbOperation::Update(update) => Some(update.next_key.as_ref().to_vec()),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    QmdbError::CorruptData(
+                        "truncated key range did not include a final update entry".to_string(),
+                    )
+                })?
+        } else {
+            Vec::new()
+        };
+
+        let end_proof = if !has_more {
+            if let Some(end_key) = end_key {
+                match self
+                    .key_value_proof_raw_in_session(&session, watermark, end_key)
+                    .await
+                {
+                    Ok(_) => None,
+                    Err(QmdbError::ProofKeyNotFound { .. } | QmdbError::KeyNotActive { .. }) => {
+                        Some(
+                            self.key_exclusion_proof_raw_in_session(&session, watermark, end_key)
+                                .await?,
+                        )
+                    }
+                    Err(err) => return Err(err),
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Ok(RawKeyRangeProof {
+            watermark,
+            entries,
+            start_proof,
+            end_proof,
+            has_more,
+            next_start_key,
         })
     }
 
@@ -765,17 +1078,6 @@ where
         )
         .await
         .map_err(|e| QmdbError::CommonwareMmr(e.to_string()))
-    }
-
-    pub(crate) async fn current_operation_proof_raw_at(
-        &self,
-        watermark: Location,
-        location: Location,
-    ) -> Result<CurrentOperationProof<commonware_storage::mmr::Family, H::Digest, N>, QmdbError>
-    {
-        let session = self.client.create_session();
-        self.build_current_operation_proof(&session, watermark, location)
-            .await
     }
 
     async fn build_current_operation_proof(

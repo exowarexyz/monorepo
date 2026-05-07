@@ -1,22 +1,79 @@
+use std::collections::BTreeSet;
 use std::marker::PhantomData;
 
-use commonware_codec::{Codec, Decode, Encode};
+use commonware_codec::{Codec, Decode, Encode, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_storage::mmr::Location;
-use exoware_sdk::{SerializableReadSession, StoreClient};
+use commonware_storage::qmdb::current::proof::OperationProof as CurrentOperationProof;
+use commonware_utils::bitmap::Readable as BitmapReadable;
+use exoware_sdk::keys::Key;
+use exoware_sdk::{RangeMode, SerializableReadSession, StoreClient};
 
-use crate::codec::mmr_size_for_watermark;
+use crate::codec::{
+    bitmap_chunk_bits, clear_below_floor, decode_digest, decode_update_location, encode_chunk_key,
+    encode_current_meta_key, mmr_size_for_watermark, UpdateRow,
+};
 use crate::connect::OperationKv;
 use crate::core::HistoricalOpsClientCore;
 use crate::error::QmdbError;
-use crate::proof::{OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange};
-use crate::storage::KvMmrStorage;
+use crate::proof::{
+    OperationRangeCheckpoint, RawBatchMultiProof, RawUnorderedKeyValueProof,
+    VerifiedOperationRange, VerifiedUnorderedKeyValue,
+};
+use crate::storage::{KvCurrentStorage, KvMmrStorage};
 use crate::VersionedValue;
 
 use commonware_storage::qmdb::{
     any::unordered::variable::Operation as UnorderedQmdbOperation,
     operation::{Key as QmdbKey, Operation as _},
 };
+
+#[derive(Clone, Debug)]
+struct MaterializedBitmapStatus<const N: usize> {
+    len: u64,
+    pruned_chunks: usize,
+    chunks: std::collections::BTreeMap<usize, [u8; N]>,
+}
+
+impl<const N: usize> BitmapReadable<N> for MaterializedBitmapStatus<N> {
+    fn complete_chunks(&self) -> usize {
+        (self.len / bitmap_chunk_bits::<N>()) as usize
+    }
+
+    fn get_chunk(&self, chunk: usize) -> [u8; N] {
+        if chunk < self.pruned_chunks {
+            [0u8; N]
+        } else {
+            *self
+                .chunks
+                .get(&chunk)
+                .expect("materialized current bitmap status missing chunk")
+        }
+    }
+
+    fn last_chunk(&self) -> ([u8; N], u64) {
+        if self.len == 0 {
+            return ([0u8; N], 0);
+        }
+        let chunk_bits = bitmap_chunk_bits::<N>();
+        let rem = self.len % chunk_bits;
+        let bits_in_last = if rem == 0 { chunk_bits } else { rem };
+        let idx = if rem == 0 {
+            self.complete_chunks().saturating_sub(1)
+        } else {
+            self.complete_chunks()
+        };
+        (self.get_chunk(idx), bits_in_last)
+    }
+
+    fn pruned_chunks(&self) -> usize {
+        self.pruned_chunks
+    }
+
+    fn len(&self) -> u64 {
+        self.len
+    }
+}
 
 #[derive(Clone)]
 pub struct UnorderedClient<H: Hasher, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> {
@@ -121,6 +178,17 @@ where
             .require_published_watermark(&session, watermark)
             .await?;
         self.core().compute_ops_root::<H>(&session, watermark).await
+    }
+
+    pub async fn current_root_at(&self, watermark: Location) -> Result<H::Digest, QmdbError> {
+        let session = self.client.create_session();
+        self.core()
+            .require_published_watermark(&session, watermark)
+            .await?;
+        self.core()
+            .require_batch_boundary(&session, watermark)
+            .await?;
+        self.load_current_boundary_root(&session, watermark).await
     }
 
     pub async fn operation_range_checkpoint(
@@ -233,5 +301,328 @@ where
             start_location: checkpoint.start_location,
             operations,
         })
+    }
+
+    async fn key_value_proof_raw_in_session<const N: usize, Q: AsRef<[u8]>>(
+        &self,
+        session: &SerializableReadSession,
+        watermark: Location,
+        key: Q,
+    ) -> Result<RawUnorderedKeyValueProof<H::Digest, K, V, N>, QmdbError> {
+        self.core()
+            .require_published_watermark(session, watermark)
+            .await?;
+        self.core()
+            .require_batch_boundary(session, watermark)
+            .await?;
+
+        let key_bytes = key.as_ref().to_vec();
+        let Some((row_key, row_value)) = self
+            .load_latest_update_row(session, watermark, key.as_ref())
+            .await?
+        else {
+            return Err(QmdbError::ProofKeyNotFound {
+                watermark,
+                key: key_bytes,
+            });
+        };
+        let location = decode_update_location(&row_key)?;
+        let decoded =
+            <UpdateRow<K, V> as CodecRead>::read_cfg(&mut row_value.as_ref(), &self.update_row_cfg)
+                .map_err(|e| QmdbError::CorruptData(format!("update row decode: {e}")))?;
+        if <K as AsRef<[u8]>>::as_ref(&decoded.key) != key.as_ref() {
+            return Err(QmdbError::ProofKeyNotFound {
+                watermark,
+                key: key.as_ref().to_vec(),
+            });
+        }
+        if decoded.value.is_none() {
+            return Err(QmdbError::KeyNotActive {
+                watermark,
+                key: key.as_ref().to_vec(),
+            });
+        }
+
+        let operation = self.load_operation_at(session, location).await?;
+        let UnorderedQmdbOperation::Update(update) = &operation else {
+            return Err(QmdbError::KeyNotActive {
+                watermark,
+                key: key.as_ref().to_vec(),
+            });
+        };
+        if update.0.as_ref() != key.as_ref() {
+            return Err(QmdbError::CorruptData(format!(
+                "latest active unordered key row at {location} points to a different key"
+            )));
+        }
+
+        let root = self.load_current_boundary_root(session, watermark).await?;
+        let proof = self
+            .build_current_operation_proof::<N>(session, watermark, location)
+            .await?;
+
+        let raw = RawUnorderedKeyValueProof {
+            watermark,
+            root,
+            proof,
+            operation,
+        };
+        if !raw.verify::<H>() {
+            return Err(QmdbError::ProofVerification {
+                kind: crate::ProofKind::CurrentKeyValue,
+            });
+        }
+        Ok(raw)
+    }
+
+    /// Verified raw current-state proof for a single active unordered key.
+    pub async fn key_value_proof_raw_at<const N: usize, Q: AsRef<[u8]>>(
+        &self,
+        watermark: Location,
+        key: Q,
+    ) -> Result<RawUnorderedKeyValueProof<H::Digest, K, V, N>, QmdbError> {
+        let session = self.client.create_session();
+        self.key_value_proof_raw_in_session::<N, _>(&session, watermark, key)
+            .await
+    }
+
+    /// Verified current-state proof for a single active unordered key.
+    pub async fn key_value_proof_at<const N: usize, Q: AsRef<[u8]>>(
+        &self,
+        watermark: Location,
+        key: Q,
+    ) -> Result<VerifiedUnorderedKeyValue<H::Digest, K, V>, QmdbError> {
+        let raw = self.key_value_proof_raw_at::<N, _>(watermark, key).await?;
+        Ok(VerifiedUnorderedKeyValue {
+            root: raw.root,
+            location: raw.proof.loc,
+            operation: raw.operation,
+        })
+    }
+
+    /// Verified current-state hit proofs for explicit active keys, preserving
+    /// request order among returned hits. Unordered QMDB does not have
+    /// missing-key exclusion proofs, so missing or inactive requested keys are
+    /// omitted rather than proven.
+    pub async fn key_lookup_proofs_raw_at<const N: usize, Q: AsRef<[u8]>>(
+        &self,
+        watermark: Location,
+        keys: &[Q],
+    ) -> Result<Vec<RawUnorderedKeyValueProof<H::Digest, K, V, N>>, QmdbError> {
+        if keys.is_empty() {
+            return Err(QmdbError::EmptyProofRequest);
+        }
+
+        let session = self.client.create_session();
+        let mut seen = BTreeSet::<Vec<u8>>::new();
+        let mut proofs = Vec::with_capacity(keys.len());
+        for key in keys {
+            let key_bytes = key.as_ref().to_vec();
+            if !seen.insert(key_bytes.clone()) {
+                return Err(QmdbError::DuplicateRequestedKey { key: key_bytes });
+            }
+            match self
+                .key_value_proof_raw_in_session::<N, _>(&session, watermark, key.as_ref())
+                .await
+            {
+                Ok(proof) => proofs.push(proof),
+                Err(QmdbError::ProofKeyNotFound { .. } | QmdbError::KeyNotActive { .. }) => {
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(proofs)
+    }
+
+    async fn load_current_boundary_root(
+        &self,
+        session: &SerializableReadSession,
+        location: Location,
+    ) -> Result<H::Digest, QmdbError> {
+        let Some(bytes) = session.get(&encode_current_meta_key(location)).await? else {
+            return Err(QmdbError::CurrentBoundaryStateMissing { location });
+        };
+        decode_digest(
+            bytes.as_ref(),
+            format!("current boundary root at {location}"),
+        )
+    }
+
+    async fn materialize_bitmap_status<const N: usize>(
+        &self,
+        session: &SerializableReadSession,
+        watermark: Location,
+        inactivity_floor: Location,
+    ) -> Result<MaterializedBitmapStatus<N>, QmdbError> {
+        let leaves = watermark
+            .checked_add(1)
+            .ok_or_else(|| QmdbError::CorruptData("watermark overflow".to_string()))?;
+        let len = *leaves;
+        let chunk_bits = bitmap_chunk_bits::<N>();
+        let pruned_chunks_u64 = *inactivity_floor / chunk_bits;
+        let pruned_chunks = usize::try_from(pruned_chunks_u64).map_err(|_| {
+            QmdbError::CorruptData("current bitmap pruned chunk count overflows usize".to_string())
+        })?;
+        let last_chunk = if len == 0 {
+            None
+        } else if len % chunk_bits == 0 {
+            Some((len / chunk_bits).saturating_sub(1))
+        } else {
+            Some(len / chunk_bits)
+        };
+
+        let mut chunks = std::collections::BTreeMap::new();
+        if let Some(last_chunk) = last_chunk.filter(|last| *last >= pruned_chunks_u64) {
+            let loaded = futures::future::try_join_all((pruned_chunks_u64..=last_chunk).map(
+                |chunk_index| async move {
+                    let chunk = self
+                        .load_bitmap_chunk_with_floor::<N>(
+                            session,
+                            watermark,
+                            inactivity_floor,
+                            chunk_index,
+                        )
+                        .await?;
+                    let chunk_index = usize::try_from(chunk_index).map_err(|_| {
+                        QmdbError::CorruptData(
+                            "current bitmap chunk index overflows usize".to_string(),
+                        )
+                    })?;
+                    Ok::<_, QmdbError>((chunk_index, chunk))
+                },
+            ))
+            .await?;
+            chunks.extend(loaded);
+        }
+
+        Ok(MaterializedBitmapStatus {
+            len,
+            pruned_chunks,
+            chunks,
+        })
+    }
+
+    async fn build_current_operation_proof<const N: usize>(
+        &self,
+        session: &SerializableReadSession,
+        watermark: Location,
+        location: Location,
+    ) -> Result<CurrentOperationProof<commonware_storage::mmr::Family, H::Digest, N>, QmdbError>
+    {
+        self.core()
+            .require_published_watermark(session, watermark)
+            .await?;
+        self.core()
+            .require_batch_boundary(session, watermark)
+            .await?;
+        let inactivity_floor = self.load_inactivity_floor_at(session, watermark).await?;
+        let status = self
+            .materialize_bitmap_status::<N>(session, watermark, inactivity_floor)
+            .await?;
+        let storage = KvCurrentStorage::<H::Digest, N> {
+            session,
+            watermark,
+            mmr_size: mmr_size_for_watermark(watermark)?,
+            _marker: PhantomData,
+        };
+        let mut hasher = H::default();
+        CurrentOperationProof::new(
+            &mut hasher,
+            &status,
+            &storage,
+            inactivity_floor,
+            location,
+            self.core()
+                .compute_ops_root::<H>(session, watermark)
+                .await?,
+        )
+        .await
+        .map_err(|e| QmdbError::CommonwareMmr(e.to_string()))
+    }
+
+    async fn load_inactivity_floor_at(
+        &self,
+        session: &SerializableReadSession,
+        watermark: Location,
+    ) -> Result<Location, QmdbError> {
+        let operation = self.load_operation_at(session, watermark).await?;
+        match operation {
+            UnorderedQmdbOperation::CommitFloor(_, floor) => Ok(floor),
+            _ => Err(QmdbError::CorruptData(format!(
+                "expected CommitFloor at watermark {watermark}"
+            ))),
+        }
+    }
+
+    async fn load_bitmap_chunk_with_floor<const N: usize>(
+        &self,
+        session: &SerializableReadSession,
+        watermark: Location,
+        inactivity_floor: Location,
+        chunk_index: u64,
+    ) -> Result<[u8; N], QmdbError> {
+        let start = encode_chunk_key(chunk_index, Location::new(0));
+        let end = encode_chunk_key(chunk_index, watermark);
+        let rows = session
+            .range_with_mode(&start, &end, 1, RangeMode::Reverse)
+            .await?;
+        let mut chunk = match rows.into_iter().next() {
+            Some((_, bytes)) => {
+                if bytes.len() != N {
+                    return Err(QmdbError::CorruptData(format!(
+                        "bitmap chunk {chunk_index} has invalid length {}",
+                        bytes.len()
+                    )));
+                }
+                let mut buf = [0u8; N];
+                buf.copy_from_slice(bytes.as_ref());
+                buf
+            }
+            None => {
+                let chunk_end_exclusive = chunk_index
+                    .saturating_add(1)
+                    .saturating_mul(bitmap_chunk_bits::<N>());
+                if chunk_end_exclusive > *inactivity_floor {
+                    return Err(QmdbError::CorruptData(format!(
+                        "missing bitmap chunk {chunk_index} at watermark {watermark}"
+                    )));
+                }
+                [0u8; N]
+            }
+        };
+        clear_below_floor::<N>(&mut chunk, chunk_index, inactivity_floor);
+        Ok(chunk)
+    }
+
+    async fn load_operation_at(
+        &self,
+        session: &SerializableReadSession,
+        location: Location,
+    ) -> Result<UnorderedQmdbOperation<commonware_storage::mmr::Family, K, V>, QmdbError> {
+        let bytes = self
+            .core()
+            .load_operation_bytes_at(session, location)
+            .await?;
+        UnorderedQmdbOperation::<commonware_storage::mmr::Family, K, V>::decode_cfg(
+            bytes.as_slice(),
+            &self.op_cfg,
+        )
+        .map_err(|e| {
+            QmdbError::CorruptData(format!(
+                "failed to decode unordered operation at location {location}: {e}"
+            ))
+        })
+    }
+
+    async fn load_latest_update_row(
+        &self,
+        session: &SerializableReadSession,
+        watermark: Location,
+        key: &[u8],
+    ) -> Result<Option<(Key, Vec<u8>)>, QmdbError> {
+        self.core()
+            .load_latest_update_row(session, watermark, key)
+            .await
     }
 }

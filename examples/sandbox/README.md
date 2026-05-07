@@ -97,9 +97,9 @@ In addition to the simulator running above:
 4. **In the UI**, paste a `tip` + matching root pair from the `seed` stream,
    then pick a key (e.g. `k-00000000`):
    - **Get Proof** verifies against the pasted current root.
-   - **Get Multi-Proof** verifies a current anchor proof against the same root,
-     then verifies the historical multi-proof against the authenticated ops
-     root carried inside that anchor proof.
+   - **Get Many** verifies current hit/miss lookup proofs against the same root.
+   - **Get Range** verifies an ordered current range plus boundary proofs
+     against the same root.
 
    The client-side verifier rejects any proof whose recomputed root doesn't
    match the pasted anchor.

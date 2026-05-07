@@ -20,10 +20,15 @@ use commonware_storage::{
 
 use connectrpc::{Chain, ConnectError, ConnectRpcService, Context, ErrorCode, Limits};
 use exoware_sdk::qmdb::v1::{
+    current_key_lookup_result, CurrentKeyExclusionProof as ProtoCurrentKeyExclusionProof,
+    CurrentKeyLookupResult as ProtoCurrentKeyLookupResult,
+    CurrentKeyRangeEntry as ProtoCurrentKeyRangeEntry,
     CurrentKeyValueProof as ProtoCurrentKeyValueProof, GetManyRequestView, GetManyResponse,
-    GetRequestView, GetResponse, HistoricalMultiProof as ProtoHistoricalMultiProof,
-    MultiProofOperation as ProtoMultiProofOperation, OrderedService, OrderedServiceServer,
-    RangeService, RangeServiceServer, SubscribeRequestView, SubscribeResponse,
+    GetRangeRequestView, GetRangeResponse, GetRequestView, GetResponse,
+    HistoricalMultiProof as ProtoHistoricalMultiProof, KeyLookupService, KeyLookupServiceServer,
+    MultiProofOperation as ProtoMultiProofOperation, OrderedKeyRangeService,
+    OrderedKeyRangeServiceServer, RangeService, RangeServiceServer, SubscribeRequestView,
+    SubscribeResponse,
 };
 use exoware_sdk::store::common::v1::bytes_filter::KindView as ProtoBytesFilterKindView;
 use exoware_sdk::stream_filter::{BytesFilter, CompiledBytesFilters};
@@ -31,7 +36,10 @@ use futures::future::BoxFuture;
 use futures::{FutureExt, Stream};
 
 use crate::auth::AuthenticatedBackendNamespace;
-use crate::proof::{RawBatchMultiProof, RawKeyValueProof, RawMultiProof};
+use crate::proof::{
+    RawBatchMultiProof, RawKeyExclusionProof, RawKeyLookupProof, RawKeyRangeProof,
+    RawKeyValueProof, RawUnorderedKeyValueProof,
+};
 use crate::subscription::{self as sub, Classify, Family};
 use crate::{ImmutableClient, KeylessClient, OrderedClient, QmdbError, UnorderedClient};
 
@@ -60,6 +68,7 @@ fn qmdb_error_to_connect(err: QmdbError) -> ConnectError {
         QmdbError::EmptyBatch
         | QmdbError::EmptyProofRequest
         | QmdbError::InvalidRangeLength
+        | QmdbError::InvalidKeyRange { .. }
         | QmdbError::DuplicateRequestedKey { .. }
         | QmdbError::InvalidLocationRange { .. }
         | QmdbError::RangeStartOutOfBounds { .. }
@@ -78,31 +87,6 @@ fn qmdb_error_to_connect(err: QmdbError) -> ConnectError {
         | QmdbError::CorruptData(_)
         | QmdbError::CommonwareMmr(_)
         | QmdbError::WriterPoisoned(_) => ConnectError::internal(err.to_string()),
-    }
-}
-
-fn raw_multi_proof_to_proto<
-    D: commonware_cryptography::Digest,
-    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
->(
-    proof: &RawMultiProof<D, K, V>,
-) -> ProtoHistoricalMultiProof
-where
-    QmdbOperation<commonware_storage::mmr::Family, K, V>: Encode,
-{
-    ProtoHistoricalMultiProof {
-        proof: proof.proof.encode().to_vec(),
-        operations: proof
-            .operations
-            .iter()
-            .map(|(location, operation)| ProtoMultiProofOperation {
-                location: location.as_u64(),
-                encoded_operation: operation.encode().to_vec(),
-                ..Default::default()
-            })
-            .collect(),
-        ..Default::default()
     }
 }
 
@@ -142,6 +126,85 @@ where
     }
 }
 
+fn raw_unordered_key_value_proof_to_proto<
+    D: commonware_cryptography::Digest,
+    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec,
+    V: commonware_codec::Codec + Clone + Send + Sync,
+    const N: usize,
+>(
+    proof: &RawUnorderedKeyValueProof<D, K, V, N>,
+) -> ProtoCurrentKeyValueProof
+where
+    UnorderedQmdbOperation<commonware_storage::mmr::Family, K, V>: Encode,
+{
+    ProtoCurrentKeyValueProof {
+        proof: proof.proof.encode().to_vec(),
+        encoded_operation: proof.operation.encode().to_vec(),
+        ..Default::default()
+    }
+}
+
+fn raw_key_exclusion_proof_to_proto<
+    D: commonware_cryptography::Digest,
+    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec,
+    V: commonware_codec::Codec + Clone + Send + Sync,
+    const N: usize,
+>(
+    proof: &RawKeyExclusionProof<D, K, V, N>,
+) -> ProtoCurrentKeyExclusionProof
+where
+    commonware_storage::qmdb::any::ordered::Update<
+        K,
+        commonware_storage::qmdb::any::value::VariableEncoding<V>,
+    >: Encode,
+{
+    ProtoCurrentKeyExclusionProof {
+        proof: proof.proof.encode().to_vec(),
+        ..Default::default()
+    }
+}
+
+fn raw_key_range_proof_to_proto<
+    D: commonware_cryptography::Digest,
+    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec,
+    V: commonware_codec::Codec + Clone + Send + Sync,
+    const N: usize,
+>(
+    proof: &RawKeyRangeProof<D, K, V, N>,
+) -> GetRangeResponse
+where
+    QmdbOperation<commonware_storage::mmr::Family, K, V>: Encode,
+    commonware_storage::qmdb::any::ordered::Update<
+        K,
+        commonware_storage::qmdb::any::value::VariableEncoding<V>,
+    >: Encode,
+{
+    GetRangeResponse {
+        entries: proof
+            .entries
+            .iter()
+            .map(|entry| ProtoCurrentKeyRangeEntry {
+                key: entry.key.clone(),
+                proof: Some(raw_key_value_proof_to_proto(&entry.proof)).into(),
+                ..Default::default()
+            })
+            .collect(),
+        start_proof: proof
+            .start_proof
+            .as_ref()
+            .map(raw_key_exclusion_proof_to_proto)
+            .into(),
+        end_proof: proof
+            .end_proof
+            .as_ref()
+            .map(raw_key_exclusion_proof_to_proto)
+            .into(),
+        has_more: proof.has_more,
+        next_start_key: proof.next_start_key.clone(),
+        ..Default::default()
+    }
+}
+
 #[derive(Clone)]
 pub struct OrderedConnect<
     H: Hasher,
@@ -150,6 +213,27 @@ pub struct OrderedConnect<
     const N: usize,
 > {
     client: Arc<OrderedClient<H, K, V, N>>,
+}
+
+#[derive(Clone)]
+pub struct UnorderedConnect<
+    H: Hasher,
+    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec,
+    V: commonware_codec::Codec + Clone + Send + Sync,
+    const N: usize,
+> {
+    client: Arc<UnorderedClient<H, K, V>>,
+}
+
+impl<H, K, V, const N: usize> UnorderedConnect<H, K, V, N>
+where
+    H: Hasher,
+    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec,
+    V: commonware_codec::Codec + Clone + Send + Sync,
+{
+    pub fn new(client: Arc<UnorderedClient<H, K, V>>) -> Self {
+        Self { client }
+    }
 }
 
 impl<H, K, V, const N: usize> OrderedConnect<H, K, V, N>
@@ -642,12 +726,16 @@ fn decode_since(since: Option<u64>) -> Option<u64> {
 
 type SubscribeStream = Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>>;
 
-impl<H, K, V, const N: usize> OrderedService for OrderedConnect<H, K, V, N>
+impl<H, K, V, const N: usize> KeyLookupService for OrderedConnect<H, K, V, N>
 where
     H: Hasher + Send + Sync + 'static,
     K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     QmdbOperation<commonware_storage::mmr::Family, K, V>: Encode + commonware_codec::Decode,
+    commonware_storage::qmdb::any::ordered::Update<
+        K,
+        commonware_storage::qmdb::any::value::VariableEncoding<V>,
+    >: Encode,
 {
     fn get(
         &self,
@@ -681,40 +769,134 @@ where
         async move {
             let tip = Location::new(request.tip);
             let keys: Vec<Vec<u8>> = request.keys.iter().map(|key| key.to_vec()).collect();
-            let proof = client
-                .multi_proof_raw_at(tip, &keys)
+            let proofs = client
+                .key_lookup_proofs_raw_at(tip, &keys)
                 .await
                 .map_err(qmdb_error_to_connect)?;
-            let (anchor_location, _) = proof.operations.first().ok_or_else(|| {
-                ConnectError::internal("qmdb get_many produced no proof operations")
-            })?;
-            let current_proof = client
-                .current_operation_proof_raw_at(tip, *anchor_location)
-                .await
-                .map_err(qmdb_error_to_connect)?;
-            let anchor_operation = proof
-                .operations
-                .first()
-                .map(|(_, operation)| operation.clone())
-                .ok_or_else(|| ConnectError::internal("qmdb get_many produced no anchor op"))?;
-            let mut hasher = H::default();
-            let current_root = client
-                .current_root_at(tip)
-                .await
-                .map_err(qmdb_error_to_connect)?;
-            if !current_proof.verify(&mut hasher, anchor_operation, &current_root) {
-                return Err(ConnectError::internal(
-                    "current anchor proof failed local verification",
-                ));
-            }
+            let results = keys
+                .into_iter()
+                .zip(proofs.iter())
+                .map(|(key, proof)| {
+                    let result = match proof {
+                        RawKeyLookupProof::Hit(proof) => current_key_lookup_result::Result::Hit(
+                            Box::new(raw_key_value_proof_to_proto(proof)),
+                        ),
+                        RawKeyLookupProof::Miss(proof) => current_key_lookup_result::Result::Miss(
+                            Box::new(raw_key_exclusion_proof_to_proto(proof)),
+                        ),
+                    };
+                    ProtoCurrentKeyLookupResult {
+                        key,
+                        result: Some(result),
+                        ..Default::default()
+                    }
+                })
+                .collect();
             Ok((
                 GetManyResponse {
-                    proof: Some(raw_multi_proof_to_proto(&proof)).into(),
-                    current_proof: current_proof.encode().to_vec(),
+                    results,
                     ..Default::default()
                 },
                 ctx,
             ))
+        }
+    }
+}
+
+impl<H, K, V, const N: usize> KeyLookupService for UnorderedConnect<H, K, V, N>
+where
+    H: Hasher + Send + Sync + 'static,
+    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
+    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
+    V::Cfg: Clone,
+    UnorderedQmdbOperation<commonware_storage::mmr::Family, K, V>:
+        Encode + commonware_codec::Decode,
+{
+    fn get(
+        &self,
+        ctx: Context,
+        request: buffa::view::OwnedView<GetRequestView<'static>>,
+    ) -> impl Future<Output = Result<(GetResponse, Context), ConnectError>> + Send {
+        let client = self.client.clone();
+        async move {
+            let key = request.key.to_vec();
+            let tip = Location::new(request.tip);
+            let proof = client
+                .key_value_proof_raw_at::<N, _>(tip, key.as_slice())
+                .await
+                .map_err(qmdb_error_to_connect)?;
+            Ok((
+                GetResponse {
+                    proof: Some(raw_unordered_key_value_proof_to_proto(&proof)).into(),
+                    ..Default::default()
+                },
+                ctx,
+            ))
+        }
+    }
+
+    fn get_many(
+        &self,
+        ctx: Context,
+        request: buffa::view::OwnedView<GetManyRequestView<'static>>,
+    ) -> impl Future<Output = Result<(GetManyResponse, Context), ConnectError>> + Send {
+        let client = self.client.clone();
+        async move {
+            let tip = Location::new(request.tip);
+            let keys: Vec<Vec<u8>> = request.keys.iter().map(|key| key.to_vec()).collect();
+            let proofs = client
+                .key_lookup_proofs_raw_at::<N, _>(tip, &keys)
+                .await
+                .map_err(qmdb_error_to_connect)?;
+            let results = proofs
+                .iter()
+                .map(|proof| ProtoCurrentKeyLookupResult {
+                    key: match &proof.operation {
+                        UnorderedQmdbOperation::Update(update) => update.0.as_ref().to_vec(),
+                        _ => Vec::new(),
+                    },
+                    result: Some(current_key_lookup_result::Result::Hit(Box::new(
+                        raw_unordered_key_value_proof_to_proto(proof),
+                    ))),
+                    ..Default::default()
+                })
+                .collect();
+            Ok((
+                GetManyResponse {
+                    results,
+                    ..Default::default()
+                },
+                ctx,
+            ))
+        }
+    }
+}
+
+impl<H, K, V, const N: usize> OrderedKeyRangeService for OrderedConnect<H, K, V, N>
+where
+    H: Hasher + Send + Sync + 'static,
+    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
+    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
+    QmdbOperation<commonware_storage::mmr::Family, K, V>: Encode + commonware_codec::Decode,
+    commonware_storage::qmdb::any::ordered::Update<
+        K,
+        commonware_storage::qmdb::any::value::VariableEncoding<V>,
+    >: Encode,
+{
+    fn get_range(
+        &self,
+        ctx: Context,
+        request: buffa::view::OwnedView<GetRangeRequestView<'static>>,
+    ) -> impl Future<Output = Result<(GetRangeResponse, Context), ConnectError>> + Send {
+        let client = self.client.clone();
+        async move {
+            let tip = Location::new(request.tip);
+            let end_key = request.end_key.as_deref();
+            let proof = client
+                .key_range_proof_raw_at(tip, request.start_key, end_key, request.limit)
+                .await
+                .map_err(qmdb_error_to_connect)?;
+            Ok((raw_key_range_proof_to_proto(&proof), ctx))
         }
     }
 }
@@ -778,12 +960,22 @@ fn wrap_stack<D: ::connectrpc::Dispatcher>(dispatcher: D) -> ConnectRpcService<D
 
 pub type OrderedConnectStack<H, K, V, const N: usize> = ConnectRpcService<
     Chain<
-        OrderedServiceServer<OrderedConnect<H, K, V, N>>,
-        RangeServiceServer<OrderedRangeConnect<H, K, V, N>>,
+        KeyLookupServiceServer<OrderedConnect<H, K, V, N>>,
+        Chain<
+            OrderedKeyRangeServiceServer<OrderedConnect<H, K, V, N>>,
+            RangeServiceServer<OrderedRangeConnect<H, K, V, N>>,
+        >,
     >,
 >;
 
-/// Mount both `OrderedService` (Get/GetMany) and `RangeService` (Subscribe) on
+pub type UnorderedConnectStack<H, K, V, const N: usize> = ConnectRpcService<
+    Chain<
+        KeyLookupServiceServer<UnorderedConnect<H, K, V, N>>,
+        RangeServiceServer<UnorderedRangeConnect<H, K, V>>,
+    >,
+>;
+
+/// Mount key lookup, ordered key range, and operation subscription services on
 /// one endpoint, so a single HTTP URL serves the full ordered-QMDB surface.
 pub fn ordered_connect_stack<
     H: Hasher + Send + Sync + 'static,
@@ -795,10 +987,39 @@ pub fn ordered_connect_stack<
 ) -> OrderedConnectStack<H, K, V, N>
 where
     QmdbOperation<commonware_storage::mmr::Family, K, V>: Encode + commonware_codec::Decode,
+    commonware_storage::qmdb::any::ordered::Update<
+        K,
+        commonware_storage::qmdb::any::value::VariableEncoding<V>,
+    >: Encode,
 {
     wrap_stack(Chain(
-        OrderedServiceServer::new(OrderedConnect::new(client.clone())),
-        RangeServiceServer::new(OrderedRangeConnect::new(client)),
+        KeyLookupServiceServer::new(OrderedConnect::new(client.clone())),
+        Chain(
+            OrderedKeyRangeServiceServer::new(OrderedConnect::new(client.clone())),
+            RangeServiceServer::new(OrderedRangeConnect::new(client)),
+        ),
+    ))
+}
+
+/// Mount current key lookup and operation subscription services on one
+/// unordered-QMDB endpoint. Unordered supports hit proofs for explicit keys
+/// but does not expose key-space range or missing-key exclusion proofs.
+pub fn unordered_connect_stack<
+    H: Hasher + Send + Sync + 'static,
+    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
+    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
+    const N: usize,
+>(
+    client: Arc<UnorderedClient<H, K, V>>,
+) -> UnorderedConnectStack<H, K, V, N>
+where
+    V::Cfg: Clone,
+    UnorderedQmdbOperation<commonware_storage::mmr::Family, K, V>:
+        Encode + commonware_codec::Decode,
+{
+    wrap_stack(Chain(
+        KeyLookupServiceServer::new(UnorderedConnect::new(client.clone())),
+        RangeServiceServer::new(UnorderedRangeConnect::new(client)),
     ))
 }
 

@@ -9,6 +9,10 @@ export {
   type OrderedOperation,
   type OrderedQmdbClientOptions,
   type OrderedSubscribeProof,
+  type VerifiedCurrentKeyLookupProof,
+  type VerifiedCurrentKeyLookupResult,
+  type VerifiedCurrentKeyRangeEntry,
+  type VerifiedCurrentKeyRangeProof,
   type VerifiedCurrentKeyValueProof,
   type VerifiedHistoricalMultiProof,
 } from './client.js';

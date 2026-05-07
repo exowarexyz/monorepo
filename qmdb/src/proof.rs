@@ -5,8 +5,11 @@ use commonware_storage::{
     mmr::{self, iterator::PeakIterator, Location, Position},
     qmdb::{
         any::ordered::variable::Operation as QmdbOperation,
+        any::unordered::variable::Operation as UnorderedQmdbOperation,
+        any::value::VariableEncoding,
         current::{
             ordered::db::KeyValueProof as CurrentKeyValueProof,
+            ordered::ExclusionProof as CurrentExclusionProof,
             proof::{OperationProof as CurrentOperationProof, RangeProof as CurrentRangeProof},
         },
         operation::Key as QmdbKey,
@@ -241,7 +244,7 @@ pub struct RawKeyValueProof<
 > {
     pub watermark: Location,
     pub root: D,
-    pub proof: CurrentOperationProof<commonware_storage::mmr::Family, D, N>,
+    pub proof: CurrentKeyValueProof<commonware_storage::mmr::Family, K, D, N>,
     pub operation: QmdbOperation<commonware_storage::mmr::Family, K, V>,
 }
 
@@ -251,9 +254,135 @@ where
     QmdbOperation<commonware_storage::mmr::Family, K, V>: Encode + Clone,
 {
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
-        let QmdbOperation::Update(_) = &self.operation else {
+        let QmdbOperation::Update(update) = &self.operation else {
             return false;
         };
+        if self.proof.next_key != update.next_key {
+            return false;
+        }
+        let mut hasher = H::default();
+        self.proof
+            .proof
+            .verify(&mut hasher, self.operation.clone(), &self.root)
+    }
+}
+
+/// Current ordered key-exclusion proof payload.
+#[derive(Clone, Debug, PartialEq)]
+#[must_use]
+pub struct RawKeyExclusionProof<
+    D: Digest,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+    const N: usize,
+> {
+    pub watermark: Location,
+    pub root: D,
+    pub requested_key: Vec<u8>,
+    pub proof: CurrentExclusionProof<commonware_storage::mmr::Family, K, VariableEncoding<V>, D, N>,
+}
+
+impl<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync, const N: usize>
+    RawKeyExclusionProof<D, K, V, N>
+where
+    QmdbOperation<commonware_storage::mmr::Family, K, V>: Encode + Clone,
+{
+    pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
+        let (op_proof, operation) = match &self.proof {
+            CurrentExclusionProof::KeyValue(op_proof, update) => {
+                let span_start = update.key.as_ref();
+                let span_end = update.next_key.as_ref();
+                let key = self.requested_key.as_slice();
+                if span_start == key {
+                    return false;
+                }
+                let in_span = if span_start >= span_end {
+                    key >= span_start || key < span_end
+                } else {
+                    key >= span_start && key < span_end
+                };
+                if !in_span {
+                    return false;
+                }
+                (op_proof, QmdbOperation::Update(update.clone()))
+            }
+            CurrentExclusionProof::Commit(op_proof, value) => (
+                op_proof,
+                QmdbOperation::CommitFloor(value.clone(), op_proof.loc),
+            ),
+        };
+
+        let mut hasher = H::default();
+        op_proof.verify(&mut hasher, operation, &self.root)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[must_use]
+pub enum RawKeyLookupProof<
+    D: Digest,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+    const N: usize,
+> {
+    Hit(RawKeyValueProof<D, K, V, N>),
+    Miss(RawKeyExclusionProof<D, K, V, N>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[must_use]
+pub struct RawKeyRangeEntry<
+    D: Digest,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+    const N: usize,
+> {
+    pub key: Vec<u8>,
+    pub proof: RawKeyValueProof<D, K, V, N>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[must_use]
+pub struct RawKeyRangeProof<
+    D: Digest,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+    const N: usize,
+> {
+    pub watermark: Location,
+    pub entries: Vec<RawKeyRangeEntry<D, K, V, N>>,
+    pub start_proof: Option<RawKeyExclusionProof<D, K, V, N>>,
+    pub end_proof: Option<RawKeyExclusionProof<D, K, V, N>>,
+    pub has_more: bool,
+    pub next_start_key: Vec<u8>,
+}
+
+/// Current unordered proof for one active key. Missing-key proofs are
+/// intentionally unsupported for unordered QMDB because Commonware does not
+/// expose exclusion semantics for that variant.
+#[derive(Clone, Debug, PartialEq)]
+#[must_use]
+pub struct RawUnorderedKeyValueProof<
+    D: Digest,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+    const N: usize,
+> {
+    pub watermark: Location,
+    pub root: D,
+    pub proof: CurrentOperationProof<commonware_storage::mmr::Family, D, N>,
+    pub operation: UnorderedQmdbOperation<commonware_storage::mmr::Family, K, V>,
+}
+
+impl<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync, const N: usize>
+    RawUnorderedKeyValueProof<D, K, V, N>
+where
+    UnorderedQmdbOperation<commonware_storage::mmr::Family, K, V>: Encode + Clone,
+{
+    pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
+        if !matches!(self.operation, UnorderedQmdbOperation::Update(_)) {
+            return false;
+        }
         let mut hasher = H::default();
         self.proof
             .verify(&mut hasher, self.operation.clone(), &self.root)
@@ -293,6 +422,33 @@ pub struct VerifiedKeyValue<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Se
     pub root: D,
     pub location: Location,
     pub operation: QmdbOperation<commonware_storage::mmr::Family, K, V>,
+}
+
+/// One current unordered key-value proof verified against the current root.
+#[derive(Clone, Debug, PartialEq)]
+#[must_use]
+pub struct VerifiedUnorderedKeyValue<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync>
+{
+    pub root: D,
+    pub location: Location,
+    pub operation: UnorderedQmdbOperation<commonware_storage::mmr::Family, K, V>,
+}
+
+/// A verified current lookup result for one requested key.
+#[derive(Clone, Debug, PartialEq)]
+#[must_use]
+pub enum VerifiedKeyLookup<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> {
+    Hit(VerifiedKeyValue<D, K, V>),
+    Miss { key: Vec<u8> },
+}
+
+/// A verified ordered current key range.
+#[derive(Clone, Debug, PartialEq)]
+#[must_use]
+pub struct VerifiedKeyRange<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync> {
+    pub entries: Vec<VerifiedKeyValue<D, K, V>>,
+    pub has_more: bool,
+    pub next_start_key: Vec<u8>,
 }
 
 /// Contiguous range of operations plus bitmap chunks verified against the
@@ -422,7 +578,7 @@ impl<D: Digest, K: QmdbKey + Codec, V: Codec + Clone + Send + Sync, const N: usi
         Self {
             watermark: value.watermark,
             root: value.root,
-            proof: value.proof.proof,
+            proof: value.proof,
             operation: value.operation,
         }
     }
