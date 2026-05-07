@@ -10,7 +10,8 @@ This package:
   `getCurrentOperationRange`, and `subscribe` proofs for MMR or MMB through a small WASM module
 - supports `exact`, `prefix`, and `regex` subscription matchers
 
-Proof verification is root-driven: callers supply the current/global root, or
-the operation-log root for operation-log-only backends. The client is configured
-with a Merkle family (`mmr` by default) and uses that for all proof decoding and
+Proof verification is root-driven: callers supply the current/global root for
+current-boundary-backed services. Operation-log-only backends are a separate
+contract and use a trusted operation-log root. The client is configured with a
+Merkle family (`mmr` by default) and uses that for all proof decoding and
 verification.

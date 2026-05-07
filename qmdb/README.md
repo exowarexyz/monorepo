@@ -552,11 +552,12 @@ the adapter that turns local Commonware proofs into the `CurrentBoundaryState`
 rows the store-backed ordered mirror needs.
 
 `CurrentBoundaryState` always includes the op-root witness. Connect historical
-proofs from current-boundary backed clients include the opaque witness bytes,
-letting Rust and TS/WASM clients verify operation-log proofs from the caller's
-trusted current/global root. Operation-log-only clients are a separate
-contract: they do not upload current-boundary rows, so callers verify against
-a trusted operation-log root for that backend.
+proofs from current-boundary backed clients include the opaque witness bytes, so
+Rust and TS/WASM clients authenticate the operation-log root from the caller's
+trusted current/global root. There is no witness-optional mode for these stacks.
+Operation-log-only clients are a separate contract: they do not upload
+current-boundary rows, so callers verify against a trusted operation-log root
+for that backend.
 
 ### Watermark rule (per-batch)
 

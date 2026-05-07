@@ -1643,7 +1643,7 @@ pub struct HistoricalMultiProof {
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
     pub operations: ::buffa::alloc::vec::Vec<MultiProofOperation>,
-    /// Operation-log root authenticated by `ops_root_witness` for
+    /// Operation-log root committed by the trusted current/global root for
     /// current-boundary-backed endpoints.
     ///
     /// Field 3: `ops_root`
@@ -1655,8 +1655,8 @@ pub struct HistoricalMultiProof {
     )]
     pub ops_root: ::buffa::alloc::vec::Vec<u8>,
     /// Opaque Commonware `current::proof::OpsRootWitness` bytes encoded with
-    /// `commonware-codec`. Ordered/unordered full stacks populate this with
-    /// `ops_root`, so clients verify from their trusted current/global root.
+    /// `commonware-codec`. Ordered/unordered full stacks must populate this, so
+    /// clients authenticate `ops_root` from their trusted current/global root.
     ///
     /// Field 4: `ops_root_witness`
     #[serde(
@@ -1873,14 +1873,14 @@ pub struct HistoricalMultiProofView<'a> {
     pub proof: &'a [u8],
     /// Field 2: `operations`
     pub operations: ::buffa::RepeatedView<'a, MultiProofOperationView<'a>>,
-    /// Operation-log root authenticated by `ops_root_witness` for
+    /// Operation-log root committed by the trusted current/global root for
     /// current-boundary-backed endpoints.
     ///
     /// Field 3: `ops_root`
     pub ops_root: &'a [u8],
     /// Opaque Commonware `current::proof::OpsRootWitness` bytes encoded with
-    /// `commonware-codec`. Ordered/unordered full stacks populate this with
-    /// `ops_root`, so clients verify from their trusted current/global root.
+    /// `commonware-codec`. Ordered/unordered full stacks must populate this, so
+    /// clients authenticate `ops_root` from their trusted current/global root.
     ///
     /// Field 4: `ops_root_witness`
     pub ops_root_witness: &'a [u8],
@@ -2046,7 +2046,7 @@ pub struct HistoricalOperationRangeProof {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec"
     )]
     pub encoded_operations: ::buffa::alloc::vec::Vec<::buffa::alloc::vec::Vec<u8>>,
-    /// Operation-log root authenticated by `ops_root_witness` for
+    /// Operation-log root committed by the trusted current/global root for
     /// current-boundary-backed endpoints.
     ///
     /// Field 4: `ops_root`
@@ -2058,8 +2058,8 @@ pub struct HistoricalOperationRangeProof {
     )]
     pub ops_root: ::buffa::alloc::vec::Vec<u8>,
     /// Opaque Commonware `current::proof::OpsRootWitness` bytes encoded with
-    /// `commonware-codec`. Ordered/unordered full stacks populate this with
-    /// `ops_root`, so clients verify from their trusted current/global root.
+    /// `commonware-codec`. Ordered/unordered full stacks must populate this, so
+    /// clients authenticate `ops_root` from their trusted current/global root.
     ///
     /// Field 5: `ops_root_witness`
     #[serde(
@@ -2293,14 +2293,14 @@ pub struct HistoricalOperationRangeProofView<'a> {
     pub start_location: u64,
     /// Field 3: `encoded_operations`
     pub encoded_operations: ::buffa::RepeatedView<'a, &'a [u8]>,
-    /// Operation-log root authenticated by `ops_root_witness` for
+    /// Operation-log root committed by the trusted current/global root for
     /// current-boundary-backed endpoints.
     ///
     /// Field 4: `ops_root`
     pub ops_root: &'a [u8],
     /// Opaque Commonware `current::proof::OpsRootWitness` bytes encoded with
-    /// `commonware-codec`. Ordered/unordered full stacks populate this with
-    /// `ops_root`, so clients verify from their trusted current/global root.
+    /// `commonware-codec`. Ordered/unordered full stacks must populate this, so
+    /// clients authenticate `ops_root` from their trusted current/global root.
     ///
     /// Field 5: `ops_root_witness`
     pub ops_root_witness: &'a [u8],

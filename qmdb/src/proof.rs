@@ -12,7 +12,8 @@ use commonware_storage::{
         },
         current::{
             ordered::{db::KeyValueProof, ExclusionProof},
-            proof::{OperationProof, OpsRootWitness, RangeProof},
+            proof::{OpsRootWitness, RangeProof},
+            unordered::db::KeyValueProof as UnorderedKeyValueProof,
         },
         operation::Key as QmdbKey,
         verify::{verify_multi_proof, verify_proof, verify_proof_and_extract_digests},
@@ -432,7 +433,7 @@ pub struct RawUnorderedKeyValueProof<
 > {
     pub watermark: Location<F>,
     pub root: D,
-    pub proof: OperationProof<F, D, N>,
+    pub proof: UnorderedKeyValueProof<F, D, N>,
     pub operation: unordered::Operation<F, K, E>,
 }
 

@@ -14,7 +14,8 @@ use commonware_storage::{
             value::{ValueEncoding, VariableEncoding},
         },
         current::ordered::{db::KeyValueProof, ExclusionProof},
-        current::proof::{OperationProof, OpsRootWitness, RangeProof},
+        current::proof::{OpsRootWitness, RangeProof},
+        current::unordered::db::KeyValueProof as UnorderedKeyValueProof,
         operation::Key as QmdbKey,
         verify::{verify_multi_proof, verify_proof},
     },
@@ -962,10 +963,11 @@ where
         });
     }
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
-    let proof = OperationProof::<F, H::Digest, N>::decode_cfg(proto.proof.as_slice(), &max_digests)
-        .map_err(|err| {
-            QmdbError::CorruptData(format!("failed to decode unordered current proof: {err}"))
-        })?;
+    let proof =
+        UnorderedKeyValueProof::<F, H::Digest, N>::decode_cfg(proto.proof.as_slice(), &max_digests)
+            .map_err(|err| {
+                QmdbError::CorruptData(format!("failed to decode unordered current proof: {err}"))
+            })?;
     let mut hasher = H::default();
     if !proof.verify(&mut hasher, operation.clone(), root) {
         return Err(QmdbError::ProofVerification {
