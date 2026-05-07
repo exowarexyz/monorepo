@@ -14,7 +14,6 @@ documentation = "https://docs.rs/exoware-simulator"
 axum = { workspace = true }
 bytes = { workspace = true }
 exoware-server = { workspace = true }
-futures = { workspace = true }
 reqwest = { workspace = true }
 rocksdb = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

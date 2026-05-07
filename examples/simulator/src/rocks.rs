@@ -4,13 +4,14 @@
 //! can serve replay and point lookups. Batch-log pruning is driven exclusively by the compact
 //! service's `Sequence` scope (see `server::prune::execute_prune`).
 
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
 use exoware_server::{QueryExtra, RangeScan, RangeScanCursor, StoreEngine};
-use futures::future::BoxFuture;
 use rocksdb::{
     ColumnFamily, ColumnFamilyDescriptor, DBIterator, Direction, IteratorMode, Options, DB,
 };
@@ -19,6 +20,7 @@ use rocksdb::{
 const SEQ_META_KEY: &[u8] = b"__simulator_seq__";
 const BATCH_LOG_CF: &str = "batch_log";
 type RocksIterItem = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
+type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 struct OwnedRocksIterator {
     iter: DBIterator<'static>,
