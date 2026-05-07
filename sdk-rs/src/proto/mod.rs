@@ -1184,12 +1184,6 @@ pub use error_details::{
     with_retry_info_detail, DecodedConnectError,
 };
 
-mod query_detail_header;
-pub use query_detail_header::{
-    decode_query_detail_header_value, encode_query_detail_header_value,
-    with_query_detail_response_header, with_query_detail_trailer, QUERY_DETAIL_RESPONSE_HEADER,
-};
-
 #[cfg(test)]
 mod reduce_params_view_tests {
     use buffa::Message;

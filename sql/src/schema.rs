@@ -305,7 +305,7 @@ impl KvSchema {
                 .await
                 .map_err(|e| DataFusionError::External(Box::new(e)))?
             {
-                for (base_key, base_value) in &chunk {
+                for (base_key, base_value) in &chunk.rows {
                     last_key = Some(base_key.clone());
                     let Some(pk_values) = decode_primary_key_selected(
                         model.table_prefix,
