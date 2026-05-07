@@ -10,6 +10,8 @@ permissions:
 jobs:
   All:
     runs-on: ubuntu-latest
+    env:
+      BUF_TOKEN: ${{ secrets.BUF_TOKEN }}
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4

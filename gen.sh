@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Regenerate committed proto bindings for all SDKs.
 # Prerequisites: buf CLI, connectrpc-build (Cargo build dep).
+# Set BUF_TOKEN to authenticate remote Buf plugins and avoid low anonymous BSR limits.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"

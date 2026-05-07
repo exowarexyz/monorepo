@@ -1,0 +1,69 @@
+syntax = "proto3";
+
+package qmdb.v1;
+
+import "buf/validate/validate.proto";
+import "qmdb/v1/proof.proto";
+import "store/v1/common.proto";
+
+// Historical operation-log proof service over a QMDB backend.
+//
+// Clients dial the endpoint bound to the backend variant they want to read
+// (ordered, unordered, immutable, or keyless). The wire protocol is identical
+// across all four.
+//
+// Subscribe applies `key_filters` and `value_filters` to decoded operations.
+// With filters empty, every batch produces a proof covering all of its
+// operations; keyless backends require both filter lists to be empty.
+service OperationLogService {
+  rpc GetOperationRange(GetOperationRangeRequest)
+      returns (GetOperationRangeResponse);
+  rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
+}
+
+// Subscribe to operations whose logical key and/or value match the given
+// filters.
+//
+// An operation is included when it satisfies every non-empty filter list.
+// OR semantics within a list (any member may match); AND semantics across
+// the two lists (if both are specified, key AND value must match). Leaving
+// both empty emits a proof for every batch (required for keyless backends,
+// which have no logical key).
+message SubscribeRequest {
+  // Filters applied to each operation's decoded logical key.
+  repeated store.common.v1.BytesFilter key_filters = 1
+      [(buf.validate.field).repeated.max_items = 1024];
+
+  // Filters applied to each operation's decoded value bytes. Operations
+  // without a value (e.g. deletes, commits) never match a value filter.
+  repeated store.common.v1.BytesFilter value_filters = 2
+      [(buf.validate.field).repeated.max_items = 1024];
+
+  // Resume cursor over the underlying store batch log. Use
+  // `SubscribeResponse.resume_sequence_number + 1` to resume after a
+  // disconnect.
+  optional uint64 since_sequence_number = 3;
+}
+
+// One emitted proof for a subscribed batch.
+message SubscribeResponse {
+  // Underlying store stream sequence that made this proof readable end-to-end.
+  uint64 resume_sequence_number = 1;
+  HistoricalMultiProof proof = 2;
+  // Published backend tip. For current-boundary-backed endpoints, clients use
+  // their trusted current/global root for this tip and the proof's embedded
+  // ops-root witness to authenticate the historical operation-log root.
+  uint64 tip = 3;
+}
+
+// Unary operation-log range proof request. The proof covers
+// `[start_location, min(start_location + max_locations, tip + 1))`.
+message GetOperationRangeRequest {
+  uint64 tip = 1;
+  uint64 start_location = 2;
+  uint32 max_locations = 3 [(buf.validate.field).uint32.gt = 0];
+}
+
+message GetOperationRangeResponse {
+  HistoricalOperationRangeProof proof = 1;
+}

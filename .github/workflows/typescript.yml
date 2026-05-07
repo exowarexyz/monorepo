@@ -59,6 +59,8 @@ jobs:
     name: QMDB Web
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      BUF_TOKEN: ${{ secrets.BUF_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

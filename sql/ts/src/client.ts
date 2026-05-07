@@ -5,19 +5,25 @@ import {
   type ClientOptions as SdkClientOptions,
 } from '@exowarexyz/sdk';
 import {
-  IndexLayout as SqlIndexLayout,
-  Service as SqlService,
   QueryRequestSchema as SqlQueryRequestSchema,
-  SubscribeRequestSchema as SqlSubscribeRequestSchema,
+  type QueryResponse as SqlQueryResponse,
+} from './generated/proto/sql/v1/query_pb.js';
+import {
+  IndexLayout as SqlIndexLayout,
   TablesRequestSchema as SqlTablesRequestSchema,
-  type Cell as SqlCell,
   type Column as SqlColumn,
   type Index as SqlIndex,
-  type QueryResponse as SqlQueryResponse,
-  type Row as SqlRow,
-  type SubscribeResponse as SqlSubscribeResponse,
   type Table as SqlTable,
-} from './generated/proto/sql/v1/sql_pb.js';
+} from './generated/proto/sql/v1/schema_pb.js';
+import { Service as SqlService } from './generated/proto/sql/v1/service_pb.js';
+import {
+  SubscribeRequestSchema as SqlSubscribeRequestSchema,
+  type SubscribeResponse as SqlSubscribeResponse,
+} from './generated/proto/sql/v1/stream_pb.js';
+import {
+  type Cell as SqlCell,
+  type Row as SqlRow,
+} from './generated/proto/sql/v1/common_pb.js';
 
 export type SqlClientOptions = SdkClientOptions;
 

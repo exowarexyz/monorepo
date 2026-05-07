@@ -190,7 +190,7 @@ export function QmdbPanel({
       controller.abort();
       subscribeAbortRef.current?.abort();
     };
-  }, []);
+  }, [qmdbUrl]);
 
   const handleGet = async () => {
     setIsGetting(true);

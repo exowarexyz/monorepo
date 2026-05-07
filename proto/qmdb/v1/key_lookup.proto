@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package qmdb.v1;
+
+import "buf/validate/validate.proto";
+import "qmdb/v1/proof.proto";
+
+// Current key lookup service for QMDB backends that can authenticate explicit
+// logical-key lookups.
+//
+// `GetMany` makes no ordering claim beyond preserving request order among
+// returned results. Ordered QMDB returns hit or miss proofs for requested keys.
+// Unordered QMDB returns only verifiable hits; missing keys are omitted because
+// that variant has no exclusion proof.
+service KeyLookupService {
+  rpc Get(GetRequest) returns (GetResponse);
+  rpc GetMany(GetManyRequest) returns (GetManyResponse);
+}
+
+// Current key proof request.
+message GetRequest {
+  // Raw logical QMDB key (`K::as_ref()` bytes), not a store row key.
+  bytes key = 1;
+
+  // Published ordered-QMDB batch-boundary to prove against. The client must
+  // already know the trusted current/global root for this tip.
+  uint64 tip = 2;
+}
+
+// Current key proof request for one or more logical keys.
+message GetManyRequest {
+  // Raw logical QMDB keys (`K::as_ref()` bytes), not store row keys.
+  repeated bytes keys = 1 [
+    (buf.validate.field).repeated.min_items = 1,
+    (buf.validate.field).repeated.max_items = 1024
+  ];
+
+  // Published QMDB batch-boundary to prove against. The client must already
+  // know the trusted current/global root for this tip.
+  uint64 tip = 2;
+}
+
+// Unary current key proof response.
+message GetResponse {
+  CurrentKeyValueProof proof = 1;
+}
+
+// Unary current many-key proof response.
+message GetManyResponse {
+  repeated CurrentKeyLookupResult results = 1;
+}

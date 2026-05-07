@@ -7,7 +7,11 @@ plugins:
 inputs:
   - directory: ../../proto
     paths:
-      - ../../proto/qmdb/v1/qmdb.proto
+      - ../../proto/qmdb/v1/proof.proto
+      - ../../proto/qmdb/v1/key_lookup.proto
+      - ../../proto/qmdb/v1/key_range.proto
+      - ../../proto/qmdb/v1/operation_log.proto
+      - ../../proto/qmdb/v1/current_operation.proto
       - ../../proto/store/v1/common.proto
   - module: buf.build/bufbuild/protovalidate
     paths:

@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package sql.v1;
+
+import "sql/v1/query.proto";
+import "sql/v1/schema.proto";
+import "sql/v1/stream.proto";
+
+// Streaming SQL predicate service over a server-side `KvSchema`.
+//
+// The server registers a fixed set of SQL tables at startup (schema lives on
+// the server, not the wire). Each RPC names one of those tables.
+service Service {
+  // Re-run a SQL WHERE predicate against every incoming batch that touches
+  // `table`'s primary-key codec family. Emits one `SubscribeResponse` per
+  // matched batch containing just the rows that satisfied the predicate.
+  rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
+
+  // Ad-hoc unary SQL against the server-side session. Useful for inspecting
+  // the current table state alongside the live subscription.
+  rpc Query(QueryRequest) returns (QueryResponse);
+
+  // Describe every registered table. Carries KV-specific metadata
+  // (primary-key order, secondary indexes with their layout + cover columns)
+  // that DataFusion's `information_schema` doesn't surface.
+  rpc Tables(TablesRequest) returns (TablesResponse);
+}

@@ -11,21 +11,29 @@ import {
 import {
   CurrentKeyValueProofSchema,
   CurrentOperationRangeProofSchema,
-  CurrentOperationService,
-  GetCurrentOperationRangeRequestSchema,
-  GetManyRequestSchema,
-  GetManyResponseSchema,
-  GetOperationRangeRequestSchema,
-  GetRangeRequestSchema,
-  GetRangeResponseSchema,
-  GetRequestSchema,
   HistoricalMultiProofSchema,
   HistoricalOperationRangeProofSchema,
+} from './generated/proto/qmdb/v1/proof_pb.js';
+import {
   KeyLookupService,
-  OperationLogService,
+  GetManyRequestSchema,
+  GetManyResponseSchema,
+  GetRequestSchema,
+} from './generated/proto/qmdb/v1/key_lookup_pb.js';
+import {
   OrderedKeyRangeService,
+  GetRangeRequestSchema,
+  GetRangeResponseSchema,
+} from './generated/proto/qmdb/v1/key_range_pb.js';
+import {
+  OperationLogService,
+  GetOperationRangeRequestSchema,
   SubscribeRequestSchema,
-} from './generated/proto/qmdb/v1/qmdb_pb.js';
+} from './generated/proto/qmdb/v1/operation_log_pb.js';
+import {
+  CurrentOperationService,
+  GetCurrentOperationRangeRequestSchema,
+} from './generated/proto/qmdb/v1/current_operation_pb.js';
 import {
   BytesFilterSchema,
   type BytesFilter,
