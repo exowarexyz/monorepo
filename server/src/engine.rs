@@ -54,7 +54,7 @@ impl RangeScan for IteratorRangeScan {
 ///
 /// This is intended for simple owned iterators. Engines with more specialized
 /// cursor requirements should implement [`RangeScan`] directly.
-pub fn range_scan_cursor_from_iter<I>(iter: I) -> RangeScanCursor
+pub fn range_scan_from_iter<I>(iter: I) -> RangeScanCursor
 where
     I: Iterator<Item = Result<(Bytes, Bytes), String>> + Send + 'static,
 {

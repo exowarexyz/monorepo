@@ -931,7 +931,7 @@ mod tests {
     use exoware_sdk::{decode_connect_error, to_domain_reduce_response};
     use futures::StreamExt;
 
-    use crate::{range_scan_cursor_from_iter, QueryExtra, RangeScanCursor};
+    use crate::{range_scan_from_iter, QueryExtra, RangeScanCursor};
 
     const TEST_RESERVED_BITS: u8 = 4;
     const TEST_PREFIX: u16 = 1;
@@ -1061,12 +1061,10 @@ mod tests {
                 .range_rows
                 .clone();
             let state = self.state.clone();
-            Ok(range_scan_cursor_from_iter(rows.into_iter().map(
-                move |row| {
-                    state.lock().expect("lock").range_next_count += 1;
-                    Ok(row)
-                },
-            )))
+            Ok(range_scan_from_iter(rows.into_iter().map(move |row| {
+                state.lock().expect("lock").range_next_count += 1;
+                Ok(row)
+            })))
         }
 
         fn delete_batch(&self, _keys: &[&[u8]]) -> Result<u64, String> {
