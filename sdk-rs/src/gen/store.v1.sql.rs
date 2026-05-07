@@ -1019,6 +1019,8 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for TablesRequestView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct TablesResponse {
+    /// Registered tables.
+    ///
     /// Field 1: `tables`
     #[serde(
         rename = "tables",
@@ -1156,6 +1158,8 @@ pub const __TABLES_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::b
 /// Describes every table registered in the server-side `KvSchema`.
 #[derive(Clone, Debug, Default)]
 pub struct TablesResponseView<'a> {
+    /// Registered tables.
+    ///
     /// Field 1: `tables`
     pub tables: ::buffa::RepeatedView<'a, TableView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -1708,6 +1712,8 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for TableView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct Column {
+    /// Column name.
+    ///
     /// Field 1: `name`
     #[serde(
         rename = "name",
@@ -1727,6 +1733,8 @@ pub struct Column {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_str"
     )]
     pub data_type: ::buffa::alloc::string::String,
+    /// Whether the column may contain SQL NULL.
+    ///
     /// Field 3: `nullable`
     #[serde(
         rename = "nullable",
@@ -1903,6 +1911,8 @@ pub const __COLUMN_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::typ
 /// One column of a registered `Table`.
 #[derive(Clone, Debug, Default)]
 pub struct ColumnView<'a> {
+    /// Column name.
+    ///
     /// Field 1: `name`
     pub name: &'a str,
     /// Arrow DataType rendered as its stable debug string (e.g. `Int64`,
@@ -1911,6 +1921,8 @@ pub struct ColumnView<'a> {
     ///
     /// Field 2: `data_type`
     pub data_type: &'a str,
+    /// Whether the column may contain SQL NULL.
+    ///
     /// Field 3: `nullable`
     pub nullable: bool,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -2036,6 +2048,8 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for ColumnView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct Index {
+    /// Index name.
+    ///
     /// Field 1: `name`
     #[serde(
         rename = "name",
@@ -2043,6 +2057,8 @@ pub struct Index {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_str"
     )]
     pub name: ::buffa::alloc::string::String,
+    /// Index key layout.
+    ///
     /// Field 2: `layout`
     #[serde(
         rename = "layout",
@@ -2339,8 +2355,12 @@ pub const __INDEX_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type
 /// Secondary index declared on a `Table`.
 #[derive(Clone, Debug, Default)]
 pub struct IndexView<'a> {
+    /// Index name.
+    ///
     /// Field 1: `name`
     pub name: &'a str,
+    /// Index key layout.
+    ///
     /// Field 2: `layout`
     pub layout: ::buffa::EnumValue<IndexLayout>,
     /// Indices into `Table.columns` that make up the index key, in sort order.
@@ -2505,6 +2525,8 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for IndexView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct QueryRequest {
+    /// SQL statement to execute.
+    ///
     /// Field 1: `sql`
     #[serde(
         rename = "sql",
@@ -2636,6 +2658,8 @@ pub const __QUERY_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buf
 /// Ad-hoc SQL statement.
 #[derive(Clone, Debug, Default)]
 pub struct QueryRequestView<'a> {
+    /// SQL statement to execute.
+    ///
     /// Field 1: `sql`
     pub sql: &'a str,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -2739,6 +2763,8 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for QueryRequestView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct QueryResponse {
+    /// Column names in `rows[].cells` order.
+    ///
     /// Field 1: `column`
     #[serde(
         rename = "column",
@@ -2746,6 +2772,8 @@ pub struct QueryResponse {
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
     pub column: ::buffa::alloc::vec::Vec<::buffa::alloc::string::String>,
+    /// Returned rows.
+    ///
     /// Field 2: `rows`
     #[serde(
         rename = "rows",
@@ -2908,8 +2936,12 @@ pub const __QUERY_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::bu
 /// Result set from `Query`.
 #[derive(Clone, Debug, Default)]
 pub struct QueryResponseView<'a> {
+    /// Column names in `rows[].cells` order.
+    ///
     /// Field 1: `column`
     pub column: ::buffa::RepeatedView<'a, &'a str>,
+    /// Returned rows.
+    ///
     /// Field 2: `rows`
     pub rows: ::buffa::RepeatedView<'a, RowView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -3028,6 +3060,8 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for QueryResponseView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct Row {
+    /// Cells in parent column order.
+    ///
     /// Field 1: `cells`
     #[serde(
         rename = "cells",
@@ -3165,6 +3199,8 @@ pub const __ROW_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_r
 /// Typed row. `cells[i]` aligns with `column[i]` in the parent message.
 #[derive(Clone, Debug, Default)]
 pub struct RowView<'a> {
+    /// Cells in parent column order.
+    ///
     /// Field 1: `cells`
     pub cells: ::buffa::RepeatedView<'a, CellView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -3467,6 +3503,8 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for NullView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct ListValue {
+    /// List elements.
+    ///
     /// Field 1: `elements`
     #[serde(
         rename = "elements",
@@ -3605,6 +3643,8 @@ pub const __LIST_VALUE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa:
 /// all carry the same inner kind (Int64, Float64, Boolean, or Utf8).
 #[derive(Clone, Debug, Default)]
 pub struct ListValueView<'a> {
+    /// List elements.
+    ///
     /// Field 1: `elements`
     pub elements: ::buffa::RepeatedView<'a, CellView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,

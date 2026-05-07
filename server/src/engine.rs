@@ -3,9 +3,64 @@
 //! Implement this trait for your backend. Errors are surfaced to clients as internal RPC failures
 //! (string message only; keep messages safe to expose if you rely on that).
 
-use bytes::Bytes;
+use std::collections::HashMap;
 
+use bytes::Bytes;
+use futures::future::{ready, BoxFuture};
+
+pub type QueryExtra = HashMap<String, buffa_types::google::protobuf::Value>;
 pub type RangeScanIter<'a> = Box<dyn Iterator<Item = Result<(Bytes, Bytes), String>> + Send + 'a>;
+pub type RangeScanCursor = Box<dyn RangeScan + Send + 'static>;
+
+/// Owned pull-based range cursor for query RPCs.
+///
+/// Implementations own any state needed to produce batches, allowing query
+/// handlers to pull rows lazily without borrowing the engine.
+pub trait RangeScan: Send {
+    fn next_batch<'a>(
+        &'a mut self,
+        max_items: usize,
+    ) -> BoxFuture<'a, Result<Vec<(Bytes, Bytes)>, String>>;
+
+    /// Current query metadata for this cursor. Called after `next_batch` so
+    /// implementations can expose backend-specific running scan statistics.
+    fn extra(&self) -> QueryExtra {
+        QueryExtra::default()
+    }
+}
+
+struct IteratorRangeScan {
+    iter: Box<dyn Iterator<Item = Result<(Bytes, Bytes), String>> + Send + 'static>,
+}
+
+impl RangeScan for IteratorRangeScan {
+    fn next_batch<'a>(
+        &'a mut self,
+        max_items: usize,
+    ) -> BoxFuture<'a, Result<Vec<(Bytes, Bytes)>, String>> {
+        let mut batch = Vec::new();
+        let result = (|| {
+            for row in self.iter.by_ref().take(max_items) {
+                batch.push(row?);
+            }
+            Ok(batch)
+        })();
+        Box::pin(ready(result))
+    }
+}
+
+/// Adapt an owned iterator into a range cursor.
+///
+/// This is intended for simple owned iterators. Engines with more specialized
+/// cursor requirements should implement [`RangeScan`] directly.
+pub fn range_scan_cursor_from_iter<I>(iter: I) -> RangeScanCursor
+where
+    I: Iterator<Item = Result<(Bytes, Bytes), String>> + Send + 'static,
+{
+    Box::new(IteratorRangeScan {
+        iter: Box::new(iter),
+    })
+}
 
 /// Implement these operations for your store. All methods must be thread-safe.
 pub trait StoreEngine: Send + Sync + 'static {
@@ -14,6 +69,11 @@ pub trait StoreEngine: Send + Sync + 'static {
 
     /// Fetch the value for a single key. Returns `None` when the key does not exist.
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, String>;
+
+    /// Fetch one key plus backend-specific query metadata.
+    fn get_with_extra(&self, key: &[u8]) -> Result<(Option<Vec<u8>>, QueryExtra), String> {
+        Ok((self.get(key)?, QueryExtra::default()))
+    }
 
     /// Keys in `[start, end]` (inclusive) when `end` is non-empty; empty `end` means unbounded
     /// above. Matches `store.query.v1.RangeRequest` / `ReduceRequest` on the wire. `limit` caps
@@ -26,11 +86,27 @@ pub trait StoreEngine: Send + Sync + 'static {
         forward: bool,
     ) -> Result<RangeScanIter<'_>, String>;
 
+    fn range_scan_cursor(
+        &self,
+        start: Bytes,
+        end: Bytes,
+        limit: usize,
+        forward: bool,
+    ) -> Result<RangeScanCursor, String>;
+
     /// Batch-get: returns `(key, Option<value>)` for each input key, preserving order.
     fn get_many(&self, keys: &[&[u8]]) -> Result<Vec<(Vec<u8>, Option<Vec<u8>>)>, String> {
         keys.iter()
             .map(|k| Ok((k.to_vec(), self.get(k)?)))
             .collect()
+    }
+
+    /// Batch-get plus backend-specific query metadata.
+    fn get_many_with_extra(
+        &self,
+        keys: &[&[u8]],
+    ) -> Result<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra), String> {
+        Ok((self.get_many(keys)?, QueryExtra::default()))
     }
 
     /// Delete a batch of keys atomically. Returns the new global sequence number.

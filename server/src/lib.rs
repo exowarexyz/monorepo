@@ -13,7 +13,9 @@ mod validate;
 pub use connect::{
     connect_stack, AppState, CompactConnect, IngestConnect, QueryConnect, StreamConnect,
 };
-pub use engine::{RangeScanIter, StoreEngine};
+pub use engine::{
+    range_scan_cursor_from_iter, QueryExtra, RangeScan, RangeScanCursor, RangeScanIter, StoreEngine,
+};
 pub use prune::{execute_prune, PruneError};
 pub use reduce::RangeError;
 pub use stream::StreamHub;

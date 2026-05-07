@@ -277,17 +277,31 @@ mod tests {
                     ..Default::default()
                 })
                 .collect(),
+            detail: Some(query_detail(7)).into(),
             ..Default::default()
         }
     }
 
-    fn query_detail_trailer_ctx(sequence_number: u64) -> Context {
-        let detail = exoware_sdk::store::query::v1::Detail {
+    fn query_detail(sequence_number: u64) -> exoware_sdk::store::query::v1::Detail {
+        exoware_sdk::store::query::v1::Detail {
             sequence_number,
-            read_stats: Default::default(),
+            extra: Default::default(),
             ..Default::default()
-        };
-        exoware_sdk::with_query_detail_trailer(Context::default(), &detail)
+        }
+    }
+
+    fn final_range_detail_frame(sequence_number: u64) -> ProtoRangeFrame {
+        ProtoRangeFrame {
+            detail: Some(query_detail(sequence_number)).into(),
+            ..Default::default()
+        }
+    }
+
+    fn final_get_many_detail_frame(sequence_number: u64) -> ProtoGetManyFrame {
+        ProtoGetManyFrame {
+            detail: Some(query_detail(sequence_number)).into(),
+            ..Default::default()
+        }
     }
 
     #[derive(Clone)]
@@ -342,17 +356,13 @@ mod tests {
             let guard = self.state.kv.lock().expect("kv mutex poisoned");
             let value = guard.get(&key).cloned();
             let token = self.state.sequence_number.load(AtomicOrdering::Relaxed);
-            let detail = exoware_sdk::store::query::v1::Detail {
-                sequence_number: token,
-                read_stats: Default::default(),
-                ..Default::default()
-            };
             Ok((
                 ProtoGetResponse {
                     value: value.map(|v| v.to_vec()),
+                    detail: Some(query_detail(token)).into(),
                     ..Default::default()
                 },
-                exoware_sdk::with_query_detail_response_header(Context::default(), &detail),
+                Context::default(),
             ))
         }
 
@@ -420,21 +430,19 @@ mod tests {
             let token = state.sequence_number.load(AtomicOrdering::Relaxed);
             let batch = batch_size.max(1);
             let mut frames: Vec<Result<ProtoRangeFrame, ConnectError>> = Vec::new();
+            let mut emitted_frame = false;
             for chunk in results.chunks(batch) {
                 frames.push(Ok(ProtoRangeFrame {
                     results: chunk.to_vec(),
+                    detail: Some(query_detail(token)).into(),
                     ..Default::default()
                 }));
+                emitted_frame = true;
             }
-            let detail = exoware_sdk::store::query::v1::Detail {
-                sequence_number: token,
-                read_stats: Default::default(),
-                ..Default::default()
-            };
-            Ok((
-                Box::pin(stream::iter(frames)),
-                exoware_sdk::with_query_detail_trailer(Context::default(), &detail),
-            ))
+            if !emitted_frame {
+                frames.push(Ok(final_range_detail_frame(token)));
+            }
+            Ok((Box::pin(stream::iter(frames)), Context::default()))
         }
 
         async fn get_many(
@@ -468,21 +476,19 @@ mod tests {
             drop(guard);
             let token = self.state.sequence_number.load(AtomicOrdering::Relaxed);
             let mut frames: Vec<Result<ProtoGetManyFrame, ConnectError>> = Vec::new();
+            let mut emitted_frame = false;
             for chunk in entries.chunks(batch_size) {
                 frames.push(Ok(ProtoGetManyFrame {
                     results: chunk.to_vec(),
+                    detail: Some(query_detail(token)).into(),
                     ..Default::default()
                 }));
+                emitted_frame = true;
             }
-            let detail = exoware_sdk::store::query::v1::Detail {
-                sequence_number: token,
-                read_stats: Default::default(),
-                ..Default::default()
-            };
-            Ok((
-                Box::pin(stream::iter(frames)),
-                exoware_sdk::with_query_detail_trailer(Context::default(), &detail),
-            ))
+            if !emitted_frame {
+                frames.push(Ok(final_get_many_detail_frame(token)));
+            }
+            Ok((Box::pin(stream::iter(frames)), Context::default()))
         }
 
         async fn reduce(
@@ -636,11 +642,6 @@ mod tests {
             };
             drop(guard);
             let token = state.sequence_number.load(AtomicOrdering::Relaxed);
-            let detail = exoware_sdk::store::query::v1::Detail {
-                sequence_number: token,
-                read_stats: Default::default(),
-                ..Default::default()
-            };
             Ok((
                 ProtoReduceResponse {
                     results: response
@@ -678,9 +679,10 @@ mod tests {
                             }
                         })
                         .collect(),
+                    detail: Some(query_detail(token)).into(),
                     ..Default::default()
                 },
-                exoware_sdk::with_query_detail_response_header(Context::default(), &detail),
+                Context::default(),
             ))
         }
     }
@@ -791,7 +793,7 @@ mod tests {
         assert!(explain.contains("full_scan_like=true"));
         assert_explain_includes_query_stats_surface(
             &explain,
-            QueryStatsExplainSurface::StreamedRangeTrailer,
+            QueryStatsExplainSurface::StreamedRangeDetail,
         );
 
         let _ = shutdown_tx.send(());
@@ -839,6 +841,10 @@ mod tests {
         assert!(explain.contains("exact=false"));
         assert!(explain.contains("row_recheck=true"));
         assert!(explain.contains("full_scan_like=false"));
+        assert_explain_includes_query_stats_surface(
+            &explain,
+            QueryStatsExplainSurface::StreamedRangeDetail,
+        );
 
         let _ = shutdown_tx.send(());
     }
@@ -934,7 +940,7 @@ mod tests {
         assert!(explain.contains("row_recheck=false"));
         assert_explain_includes_query_stats_surface(
             &explain,
-            QueryStatsExplainSurface::RangeReduceHeader,
+            QueryStatsExplainSurface::RangeReduceDetail,
         );
 
         let _ = shutdown_tx.send(());
@@ -5620,7 +5626,7 @@ mod tests {
                     }
                 }
             });
-            Ok((Box::pin(stream), query_detail_trailer_ctx(7)))
+            Ok((Box::pin(stream), Context::default()))
         }
 
         async fn reduce(
@@ -5702,12 +5708,11 @@ mod tests {
                                 Ok(None)
                             }
                         }
-                        2 => Ok(None),
                         _ => Ok(None),
                     }
                 }
             });
-            Ok((Box::pin(stream), query_detail_trailer_ctx(7)))
+            Ok((Box::pin(stream), Context::default()))
         }
 
         async fn reduce(
@@ -5781,7 +5786,7 @@ mod tests {
             let entries_frame = self.entries_frame.clone();
             Ok((
                 Box::pin(stream::iter(vec![Ok(entries_frame)])),
-                query_detail_trailer_ctx(7),
+                Context::default(),
             ))
         }
 

@@ -5,6 +5,8 @@
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct ErrorInfo {
+    /// Stable error reason.
+    ///
     /// Field 1: `reason`
     #[serde(
         rename = "reason",
@@ -12,6 +14,8 @@ pub struct ErrorInfo {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_str"
     )]
     pub reason: ::buffa::alloc::string::String,
+    /// Logical error domain.
+    ///
     /// Field 2: `domain`
     #[serde(
         rename = "domain",
@@ -19,6 +23,8 @@ pub struct ErrorInfo {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_str"
     )]
     pub domain: ::buffa::alloc::string::String,
+    /// Additional string metadata.
+    ///
     /// Field 3: `metadata`
     #[serde(
         rename = "metadata",
@@ -271,10 +277,16 @@ pub const __ERROR_INFO_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa:
 };
 #[derive(Clone, Debug, Default)]
 pub struct ErrorInfoView<'a> {
+    /// Stable error reason.
+    ///
     /// Field 1: `reason`
     pub reason: &'a str,
+    /// Logical error domain.
+    ///
     /// Field 2: `domain`
     pub domain: &'a str,
+    /// Additional string metadata.
+    ///
     /// Field 3: `metadata` (map)
     pub metadata: ::buffa::MapView<'a, &'a str, &'a str>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -443,6 +455,8 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for ErrorInfoView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct RetryInfo {
+    /// Suggested retry delay.
+    ///
     /// Field 1: `retry_delay`
     #[serde(
         rename = "retryDelay",
@@ -581,6 +595,8 @@ pub const __RETRY_INFO_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa:
 };
 #[derive(Clone, Debug, Default)]
 pub struct RetryInfoView<'a> {
+    /// Suggested retry delay.
+    ///
     /// Field 1: `retry_delay`
     pub retry_delay: ::buffa::MessageFieldView<
         ::buffa_types::google::protobuf::DurationView<'a>,
@@ -706,6 +722,8 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for RetryInfoView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct BadRequest {
+    /// Validation violations in the request.
+    ///
     /// Field 1: `field_violations`
     #[serde(
         rename = "fieldViolations",
@@ -845,6 +863,8 @@ pub const __BAD_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa
 };
 #[derive(Clone, Debug, Default)]
 pub struct BadRequestView<'a> {
+    /// Validation violations in the request.
+    ///
     /// Field 1: `field_violations`
     pub field_violations: ::buffa::RepeatedView<'a, bad_request::FieldViolationView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -964,6 +984,8 @@ pub mod bad_request {
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct FieldViolation {
+        /// Field path that failed validation.
+        ///
         /// Field 1: `field`
         #[serde(
             rename = "field",
@@ -971,6 +993,8 @@ pub mod bad_request {
             skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_str"
         )]
         pub field: ::buffa::alloc::string::String,
+        /// Human-readable violation description.
+        ///
         /// Field 2: `description`
         #[serde(
             rename = "description",
@@ -1128,8 +1152,12 @@ pub mod bad_request {
     };
     #[derive(Clone, Debug, Default)]
     pub struct FieldViolationView<'a> {
+        /// Field path that failed validation.
+        ///
         /// Field 1: `field`
         pub field: &'a str,
+        /// Human-readable violation description.
+        ///
         /// Field 2: `description`
         pub description: &'a str,
         pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,

@@ -2323,6 +2323,8 @@ pub mod policy_retain {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct KeysScope {
+    /// Key family and payload pattern to scan.
+    ///
     /// Field 1: `match_key`
     #[serde(
         rename = "matchKey",
@@ -2330,6 +2332,8 @@ pub struct KeysScope {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
     )]
     pub match_key: ::buffa::MessageField<super::super::common::v1::MatchKey>,
+    /// Grouping rule applied before retention.
+    ///
     /// Field 2: `group_by`
     #[serde(
         rename = "groupBy",
@@ -2337,6 +2341,8 @@ pub struct KeysScope {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
     )]
     pub group_by: ::buffa::MessageField<PolicyGroupBy>,
+    /// Optional ordering rule within each group.
+    ///
     /// Field 3: `order_by`
     #[serde(
         rename = "orderBy",
@@ -2542,10 +2548,16 @@ pub const __KEYS_SCOPE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa:
 /// `order_by`, then apply `retain` to decide which keys to delete.
 #[derive(Clone, Debug, Default)]
 pub struct KeysScopeView<'a> {
+    /// Key family and payload pattern to scan.
+    ///
     /// Field 1: `match_key`
     pub match_key: ::buffa::MessageFieldView<super::super::common::v1::MatchKeyView<'a>>,
+    /// Grouping rule applied before retention.
+    ///
     /// Field 2: `group_by`
     pub group_by: ::buffa::MessageFieldView<PolicyGroupByView<'a>>,
+    /// Optional ordering rule within each group.
+    ///
     /// Field 3: `order_by`
     pub order_by: ::buffa::MessageFieldView<PolicyOrderByView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -2935,6 +2947,8 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for SequenceScopeView<'a> {
 #[derive(::serde::Serialize)]
 #[serde(default)]
 pub struct Policy {
+    /// Retention rule to apply within the selected scope.
+    ///
     /// Field 3: `retain`
     #[serde(
         rename = "retain",
@@ -3250,6 +3264,8 @@ pub const __POLICY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::typ
 /// to; `retain` is shared between scopes.
 #[derive(Clone, Debug, Default)]
 pub struct PolicyView<'a> {
+    /// Retention rule to apply within the selected scope.
+    ///
     /// Field 3: `retain`
     pub retain: ::buffa::MessageFieldView<PolicyRetainView<'a>>,
     pub scope: ::core::option::Option<policy::ScopeView<'a>>,

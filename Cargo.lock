@@ -2423,6 +2423,7 @@ dependencies = [
  "connectrpc",
  "exoware-sdk",
  "exoware-server",
+ "futures",
  "http",
  "reqwest",
  "rocksdb",

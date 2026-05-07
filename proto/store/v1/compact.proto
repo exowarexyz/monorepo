@@ -66,9 +66,13 @@ message RetainDropAll {}
 // Selects which entries survive pruning within each group.
 message PolicyRetain {
   oneof kind {
+    // Keep the latest N entries per group.
     RetainKeepLatest keep_latest = 1;
+    // Keep entries greater than a threshold.
     RetainGreaterThan greater_than = 2;
+    // Keep entries greater than or equal to a threshold.
     RetainGreaterThanOrEqual greater_than_or_equal = 3;
+    // Drop every matched entry.
     RetainDropAll drop_all = 4;
   }
 }
@@ -77,8 +81,11 @@ message PolicyRetain {
 // matched keys into `group_by` groups, order within each group by
 // `order_by`, then apply `retain` to decide which keys to delete.
 message KeysScope {
+  // Key family and payload pattern to scan.
   store.common.v1.MatchKey match_key = 1;
+  // Grouping rule applied before retention.
   PolicyGroupBy group_by = 2;
+  // Optional ordering rule within each group.
   optional PolicyOrderBy order_by = 3;
 }
 
@@ -98,9 +105,12 @@ message SequenceScope {}
 // to; `retain` is shared between scopes.
 message Policy {
   oneof scope {
+    // Apply the policy to user keys.
     KeysScope keys = 1;
+    // Apply the policy to the sequence log.
     SequenceScope sequence = 2;
   }
+  // Retention rule to apply within the selected scope.
   PolicyRetain retain = 3;
 }
 

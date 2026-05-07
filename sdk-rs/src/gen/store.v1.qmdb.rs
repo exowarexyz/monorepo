@@ -986,6 +986,8 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for GetManyRequestView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct MmrProof {
+    /// Number of leaves covered by the MMR.
+    ///
     /// Field 1: `leaves`
     #[serde(
         rename = "leaves",
@@ -993,6 +995,8 @@ pub struct MmrProof {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
     )]
     pub leaves: u64,
+    /// Sibling digests needed to verify the proof.
+    ///
     /// Field 2: `digests`
     #[serde(
         rename = "digests",
@@ -1146,8 +1150,12 @@ pub const __MMR_PROOF_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::
 /// Stable mirror of an MMR proof payload.
 #[derive(Clone, Debug, Default)]
 pub struct MmrProofView<'a> {
+    /// Number of leaves covered by the MMR.
+    ///
     /// Field 1: `leaves`
     pub leaves: u64,
+    /// Sibling digests needed to verify the proof.
+    ///
     /// Field 2: `digests`
     pub digests: ::buffa::RepeatedView<'a, &'a [u8]>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -1262,6 +1270,8 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for MmrProofView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct MultiProofOperation {
+    /// Operation location in the historical log.
+    ///
     /// Field 1: `location`
     #[serde(
         rename = "location",
@@ -1269,6 +1279,8 @@ pub struct MultiProofOperation {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
     )]
     pub location: u64,
+    /// Canonical encoded operation bytes.
+    ///
     /// Field 2: `encoded_operation`
     #[serde(
         rename = "encodedOperation",
@@ -1425,8 +1437,12 @@ pub const __MULTI_PROOF_OPERATION_JSON_ANY: ::buffa::type_registry::JsonAnyEntry
 /// One historical operation proven by a multi-proof.
 #[derive(Clone, Debug, Default)]
 pub struct MultiProofOperationView<'a> {
+    /// Operation location in the historical log.
+    ///
     /// Field 1: `location`
     pub location: u64,
+    /// Canonical encoded operation bytes.
+    ///
     /// Field 2: `encoded_operation`
     pub encoded_operation: &'a [u8],
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -1541,6 +1557,8 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for MultiProofOperationView<'a> 
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct HistoricalMultiProof {
+    /// Historical ops root at the proof tip.
+    ///
     /// Field 2: `root`
     #[serde(
         rename = "root",
@@ -1548,12 +1566,16 @@ pub struct HistoricalMultiProof {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
     pub root: ::buffa::alloc::vec::Vec<u8>,
+    /// MMR proof over operation locations.
+    ///
     /// Field 3: `proof`
     #[serde(
         rename = "proof",
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
     )]
     pub proof: ::buffa::MessageField<MmrProof>,
+    /// Operations proven by this multi-proof.
+    ///
     /// Field 4: `operations`
     #[serde(
         rename = "operations",
@@ -1747,10 +1769,16 @@ pub const __HISTORICAL_MULTI_PROOF_JSON_ANY: ::buffa::type_registry::JsonAnyEntr
 /// Historical QMDB multi-proof over a set of operation locations.
 #[derive(Clone, Debug, Default)]
 pub struct HistoricalMultiProofView<'a> {
+    /// Historical ops root at the proof tip.
+    ///
     /// Field 2: `root`
     pub root: &'a [u8],
+    /// MMR proof over operation locations.
+    ///
     /// Field 3: `proof`
     pub proof: ::buffa::MessageFieldView<MmrProofView<'a>>,
+    /// Operations proven by this multi-proof.
+    ///
     /// Field 4: `operations`
     pub operations: ::buffa::RepeatedView<'a, MultiProofOperationView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -1895,12 +1923,16 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for HistoricalMultiProofView<'a>
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct CurrentRangeProof {
+    /// MMR proof for the current range.
+    ///
     /// Field 1: `proof`
     #[serde(
         rename = "proof",
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
     )]
     pub proof: ::buffa::MessageField<MmrProof>,
+    /// Optional digest for a partially covered chunk.
+    ///
     /// Field 2: `partial_chunk_digest`
     #[serde(
         rename = "partialChunkDigest",
@@ -1909,6 +1941,8 @@ pub struct CurrentRangeProof {
         skip_serializing_if = "Option::is_none"
     )]
     pub partial_chunk_digest: Option<::buffa::alloc::vec::Vec<u8>>,
+    /// Root of the historical operations tree.
+    ///
     /// Field 3: `ops_root`
     #[serde(
         rename = "opsRoot",
@@ -2102,10 +2136,16 @@ pub const __CURRENT_RANGE_PROOF_JSON_ANY: ::buffa::type_registry::JsonAnyEntry =
 /// Stable mirror of a current ordered range proof payload.
 #[derive(Clone, Debug, Default)]
 pub struct CurrentRangeProofView<'a> {
+    /// MMR proof for the current range.
+    ///
     /// Field 1: `proof`
     pub proof: ::buffa::MessageFieldView<MmrProofView<'a>>,
+    /// Optional digest for a partially covered chunk.
+    ///
     /// Field 2: `partial_chunk_digest`
     pub partial_chunk_digest: ::core::option::Option<&'a [u8]>,
+    /// Root of the historical operations tree.
+    ///
     /// Field 3: `ops_root`
     pub ops_root: &'a [u8],
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -2247,6 +2287,8 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for CurrentRangeProofView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct CurrentKeyValueProof {
+    /// Current root at the proof tip.
+    ///
     /// Field 2: `root`
     #[serde(
         rename = "root",
@@ -2254,6 +2296,8 @@ pub struct CurrentKeyValueProof {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
     pub root: ::buffa::alloc::vec::Vec<u8>,
+    /// Key location in the ordered structure.
+    ///
     /// Field 3: `location`
     #[serde(
         rename = "location",
@@ -2261,6 +2305,8 @@ pub struct CurrentKeyValueProof {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
     )]
     pub location: u64,
+    /// Encoded chunk containing the key.
+    ///
     /// Field 4: `chunk`
     #[serde(
         rename = "chunk",
@@ -2268,6 +2314,8 @@ pub struct CurrentKeyValueProof {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
     pub chunk: ::buffa::alloc::vec::Vec<u8>,
+    /// Range proof for the containing chunk.
+    ///
     /// Field 5: `range_proof`
     #[serde(
         rename = "rangeProof",
@@ -2275,6 +2323,8 @@ pub struct CurrentKeyValueProof {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
     )]
     pub range_proof: ::buffa::MessageField<CurrentRangeProof>,
+    /// Canonical encoded operation bytes.
+    ///
     /// Field 6: `encoded_operation`
     #[serde(
         rename = "encodedOperation",
@@ -2508,14 +2558,24 @@ pub const __CURRENT_KEY_VALUE_PROOF_JSON_ANY: ::buffa::type_registry::JsonAnyEnt
 /// Current ordered proof for one active key.
 #[derive(Clone, Debug, Default)]
 pub struct CurrentKeyValueProofView<'a> {
+    /// Current root at the proof tip.
+    ///
     /// Field 2: `root`
     pub root: &'a [u8],
+    /// Key location in the ordered structure.
+    ///
     /// Field 3: `location`
     pub location: u64,
+    /// Encoded chunk containing the key.
+    ///
     /// Field 4: `chunk`
     pub chunk: &'a [u8],
+    /// Range proof for the containing chunk.
+    ///
     /// Field 5: `range_proof`
     pub range_proof: ::buffa::MessageFieldView<CurrentRangeProofView<'a>>,
+    /// Canonical encoded operation bytes.
+    ///
     /// Field 6: `encoded_operation`
     pub encoded_operation: &'a [u8],
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -2691,6 +2751,8 @@ pub struct SubscribeResponse {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
     )]
     pub resume_sequence_number: u64,
+    /// Proof emitted for the matching batch.
+    ///
     /// Field 2: `proof`
     #[serde(
         rename = "proof",
@@ -2858,6 +2920,8 @@ pub struct SubscribeResponseView<'a> {
     ///
     /// Field 1: `resume_sequence_number`
     pub resume_sequence_number: u64,
+    /// Proof emitted for the matching batch.
+    ///
     /// Field 2: `proof`
     pub proof: ::buffa::MessageFieldView<HistoricalMultiProofView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -2992,6 +3056,8 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for SubscribeResponseView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct GetResponse {
+    /// Current proof for the requested key.
+    ///
     /// Field 1: `proof`
     #[serde(
         rename = "proof",
@@ -3130,6 +3196,8 @@ pub const __GET_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buff
 /// Unary current key proof response.
 #[derive(Clone, Debug, Default)]
 pub struct GetResponseView<'a> {
+    /// Current proof for the requested key.
+    ///
     /// Field 1: `proof`
     pub proof: ::buffa::MessageFieldView<CurrentKeyValueProofView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -3251,6 +3319,8 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for GetResponseView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct GetManyResponse {
+    /// Historical multi-proof for the requested keys.
+    ///
     /// Field 1: `proof`
     #[serde(
         rename = "proof",
@@ -3389,6 +3459,8 @@ pub const __GET_MANY_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = :
 /// Unary historical many-key proof response.
 #[derive(Clone, Debug, Default)]
 pub struct GetManyResponseView<'a> {
+    /// Historical multi-proof for the requested keys.
+    ///
     /// Field 1: `proof`
     pub proof: ::buffa::MessageFieldView<HistoricalMultiProofView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -3525,7 +3597,7 @@ pub const ORDERED_SERVICE_SERVICE_NAME: &str = "store.qmdb.v1.OrderedService";
 /// for zero-copy access patterns and when `to_owned_message()` is needed.
 #[allow(clippy::type_complexity)]
 pub trait OrderedService: Send + Sync + 'static {
-    /// Handle the Get RPC.
+    /// Return a current proof for one logical key.
     fn get(
         &self,
         ctx: ::connectrpc::Context,
@@ -3533,7 +3605,7 @@ pub trait OrderedService: Send + Sync + 'static {
     ) -> impl ::std::future::Future<
         Output = Result<(GetResponse, ::connectrpc::Context), ::connectrpc::ConnectError>,
     > + Send;
-    /// Handle the GetMany RPC.
+    /// Return a historical multi-proof for one or more logical keys.
     fn get_many(
         &self,
         ctx: ::connectrpc::Context,
@@ -3901,7 +3973,7 @@ pub const RANGE_SERVICE_SERVICE_NAME: &str = "store.qmdb.v1.RangeService";
 /// for zero-copy access patterns and when `to_owned_message()` is needed.
 #[allow(clippy::type_complexity)]
 pub trait RangeService: Send + Sync + 'static {
-    /// Handle the Subscribe RPC.
+    /// Stream historical proofs for matching operations.
     fn subscribe(
         &self,
         ctx: ::connectrpc::Context,

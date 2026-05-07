@@ -27,36 +27,123 @@ use exoware_proto::store::stream::v1::{
 };
 use exoware_proto::stream_filter::{BytesFilter, StreamFilter};
 use exoware_proto::{
-    connect_compression_registry, encode_query_detail_header_value,
-    parse_range_traversal_direction, to_domain_reduce_request_from_view,
-    to_proto_optional_reduced_value, to_proto_reduced_value, with_error_info_detail,
-    with_query_detail, with_retry_info_detail, RangeTraversalDirection,
-    QUERY_DETAIL_RESPONSE_HEADER,
+    connect_compression_registry, parse_range_traversal_direction,
+    to_domain_reduce_request_from_view, to_proto_optional_reduced_value, to_proto_reduced_value,
+    with_error_info_detail, with_query_detail, with_retry_info_detail, RangeTraversalDirection,
 };
 use exoware_sdk as exoware_proto;
 use exoware_sdk::keys::Key;
 use exoware_sdk::match_key::MatchKey;
 use exoware_sdk::store::common::v1::bytes_filter::KindView as ProtoBytesFilterKindView;
 use futures::{stream as stream_util, Stream};
-use http::header::HeaderValue;
-use http::HeaderName;
 use tokio::sync::futures::OwnedNotified;
-use tokio::sync::Notify;
+use tokio::sync::{mpsc, Notify};
 
 use crate::reduce::RangeReducer;
 use crate::stream::StreamHub;
 use crate::validate;
-use crate::StoreEngine;
+use crate::{QueryExtra, StoreEngine};
 
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
+const RANGE_STREAM_BUFFERED_FRAMES: usize = 1;
+const RANGE_STREAM_MAX_FRAME_ROWS: usize = 4096;
+const REDUCE_SCAN_BATCH_SIZE: usize = 4096;
 
-/// Total bytes of keys plus values for entries read from the store (reference RocksDB engine).
-fn read_bytes_for_kv<K: AsRef<[u8]>, V: AsRef<[u8]>>(key: &K, value: &V) -> u64 {
-    key.as_ref().len() as u64 + value.as_ref().len() as u64
+fn query_detail(sequence_number: u64, extra: QueryExtra) -> Detail {
+    Detail {
+        sequence_number,
+        extra,
+        ..Default::default()
+    }
 }
 
-fn read_stats(read_bytes: u64) -> HashMap<String, u64> {
-    HashMap::from([("read_bytes".to_string(), read_bytes)])
+fn empty_query_detail(sequence_number: u64) -> Detail {
+    query_detail(sequence_number, QueryExtra::default())
+}
+
+struct RangeStreamRequest {
+    start_key: Key,
+    end_key: Key,
+    limit: usize,
+    batch_size: usize,
+    forward: bool,
+    sequence_number: u64,
+}
+
+fn range_stream(
+    engine: Arc<dyn StoreEngine>,
+    request: RangeStreamRequest,
+) -> Pin<Box<dyn Stream<Item = Result<RangeFrame, ConnectError>> + Send>> {
+    let (tx, rx) = mpsc::channel(RANGE_STREAM_BUFFERED_FRAMES);
+
+    // The bounded channel is the backpressure point: slow clients pause range
+    // scanning at frame boundaries.
+    tokio::spawn(async move {
+        let RangeStreamRequest {
+            start_key,
+            end_key,
+            limit,
+            batch_size,
+            forward,
+            sequence_number,
+        } = request;
+        let mut entries = match engine.range_scan_cursor(start_key, end_key, limit, forward) {
+            Ok(entries) => entries,
+            Err(e) => {
+                let _ = tx.send(Err(ConnectError::internal(e))).await;
+                return;
+            }
+        };
+
+        let mut emitted_frame = false;
+        loop {
+            if tx.is_closed() {
+                return;
+            }
+            let rows = match entries.next_batch(batch_size).await {
+                Ok(rows) => rows,
+                Err(e) => {
+                    let _ = tx.send(Err(ConnectError::internal(e))).await;
+                    return;
+                }
+            };
+            if rows.is_empty() {
+                break;
+            }
+
+            let mut chunk = Vec::with_capacity(rows.len());
+            for (key, value) in rows {
+                chunk.push(KvEntry {
+                    key: key.into(),
+                    value: value.into(),
+                    ..Default::default()
+                });
+            }
+            let frame = RangeFrame {
+                results: chunk,
+                detail: Some(query_detail(sequence_number, entries.extra())).into(),
+                ..Default::default()
+            };
+            if tx.send(Ok(frame)).await.is_err() {
+                return;
+            }
+            tokio::task::yield_now().await;
+            emitted_frame = true;
+        }
+
+        if !emitted_frame {
+            let _ = tx
+                .send(Ok(RangeFrame {
+                    detail: Some(query_detail(sequence_number, entries.extra())).into(),
+                    ..Default::default()
+                }))
+                .await;
+        }
+    });
+
+    Box::pin(stream_util::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    }))
 }
 
 #[derive(Clone)]
@@ -158,7 +245,6 @@ impl QueryConnect {
     fn error_detail(&self) -> Detail {
         Detail {
             sequence_number: self.current_sequence_number(),
-            read_stats: HashMap::new(),
             ..Default::default()
         }
     }
@@ -202,50 +288,28 @@ impl QueryConnect {
         }
         Ok(current)
     }
-
-    fn apply_query_detail_header(ctx: &mut Context, detail: &Detail) {
-        if let Ok(value) = HeaderValue::from_str(&encode_query_detail_header_value(detail)) {
-            if let Ok(name) = HeaderName::from_bytes(QUERY_DETAIL_RESPONSE_HEADER.as_bytes()) {
-                ctx.response_headers.insert(name, value);
-            }
-        }
-    }
-
-    fn apply_query_detail_trailer(ctx: &mut Context, detail: &Detail) {
-        if let Ok(value) = HeaderValue::from_str(&encode_query_detail_header_value(detail)) {
-            if let Ok(name) = HeaderName::from_bytes(QUERY_DETAIL_RESPONSE_HEADER.as_bytes()) {
-                ctx.set_trailer(name, value);
-            }
-        }
-    }
 }
 
 impl QueryApi for QueryConnect {
     async fn get(
         &self,
-        mut ctx: Context,
+        ctx: Context,
         request: buffa::view::OwnedView<exoware_proto::store::query::v1::GetRequestView<'static>>,
     ) -> Result<(GetResponse, Context), ConnectError> {
         validate::validate_get_request(&request)?;
         let token = self.ensure_min_sequence_number(request.min_sequence_number)?;
         let wire = request.bytes();
         let key: Key = wire.slice_ref(request.key);
-        let value = self
+        let (value, extra) = self
             .state
             .engine
-            .get(key.as_ref())
+            .get_with_extra(key.as_ref())
             .map_err(ConnectError::internal)?;
-        let read_bytes =
-            key.as_ref().len() as u64 + value.as_ref().map_or(0u64, |v| v.len() as u64);
-        let detail = Detail {
-            sequence_number: token,
-            read_stats: read_stats(read_bytes),
-            ..Default::default()
-        };
-        Self::apply_query_detail_header(&mut ctx, &detail);
+        let detail = query_detail(token, extra);
         Ok((
             GetResponse {
                 value,
+                detail: Some(detail).into(),
                 ..Default::default()
             },
             ctx,
@@ -254,7 +318,7 @@ impl QueryApi for QueryConnect {
 
     async fn get_many(
         &self,
-        mut ctx: Context,
+        ctx: Context,
         request: buffa::view::OwnedView<
             exoware_proto::store::query::v1::GetManyRequestView<'static>,
         >,
@@ -269,25 +333,15 @@ impl QueryApi for QueryConnect {
         let sequence_number = self.ensure_min_sequence_number(request.min_sequence_number)?;
 
         let key_refs: Vec<&[u8]> = request.keys.iter().copied().collect();
-        let entries = self
+        let (entries, extra) = self
             .state
             .engine
-            .get_many(&key_refs)
+            .get_many_with_extra(&key_refs)
             .map_err(ConnectError::internal)?;
-        let read_bytes: u64 = entries
-            .iter()
-            .map(|(k, v)| k.len() as u64 + v.as_ref().map_or(0u64, |v| v.len() as u64))
-            .sum();
-        let detail = Detail {
-            sequence_number,
-            read_stats: read_stats(read_bytes),
-            ..Default::default()
-        };
-        Self::apply_query_detail_trailer(&mut ctx, &detail);
-
-        let batch_size = request.batch_size as usize;
+        let batch_size = (request.batch_size as usize).min(RANGE_STREAM_MAX_FRAME_ROWS);
         let mut frames = Vec::new();
         let mut chunk = Vec::new();
+        let mut emitted_frame = false;
         for (key, value) in entries {
             chunk.push(GetManyEntry {
                 key,
@@ -297,15 +351,25 @@ impl QueryApi for QueryConnect {
             if chunk.len() >= batch_size {
                 frames.push(Ok(GetManyFrame {
                     results: std::mem::take(&mut chunk),
+                    detail: Some(empty_query_detail(sequence_number)).into(),
                     ..Default::default()
                 }));
+                emitted_frame = true;
             }
         }
         if !chunk.is_empty() {
             frames.push(Ok(GetManyFrame {
                 results: chunk,
+                detail: Some(query_detail(sequence_number, extra)).into(),
                 ..Default::default()
             }));
+        } else if !emitted_frame {
+            frames.push(Ok(GetManyFrame {
+                detail: Some(query_detail(sequence_number, extra)).into(),
+                ..Default::default()
+            }));
+        } else if let Some(Ok(frame)) = frames.last_mut() {
+            frame.detail = Some(query_detail(sequence_number, extra)).into();
         }
 
         Ok((Box::pin(stream_util::iter(frames)), ctx))
@@ -313,7 +377,7 @@ impl QueryApi for QueryConnect {
 
     async fn range(
         &self,
-        mut ctx: Context,
+        ctx: Context,
         request: buffa::view::OwnedView<exoware_proto::store::query::v1::RangeRequestView<'static>>,
     ) -> Result<
         (
@@ -334,51 +398,25 @@ impl QueryApi for QueryConnect {
             Ok(RangeTraversalDirection::Reverse) => false,
             Err(e) => return Err(ConnectError::internal(format!("traversal mode: {e:?}"))),
         };
-
-        let entries = self
-            .state
-            .engine
-            .range_scan(start_key.as_ref(), end_key.as_ref(), limit, forward)
-            .map_err(ConnectError::internal)?;
-
-        let mut read_bytes = 0u64;
-        let mut frames = Vec::new();
-        let mut chunk = Vec::new();
-        for row in entries {
-            let (key, value) = row.map_err(ConnectError::internal)?;
-            read_bytes += read_bytes_for_kv(&key, &value);
-            chunk.push(KvEntry {
-                key: key.into(),
-                value: value.into(),
-                ..Default::default()
-            });
-            if chunk.len() >= batch_size {
-                frames.push(Ok(RangeFrame {
-                    results: std::mem::take(&mut chunk),
-                    ..Default::default()
-                }));
-            }
-        }
-        if !chunk.is_empty() {
-            frames.push(Ok(RangeFrame {
-                results: chunk,
-                ..Default::default()
-            }));
-        }
-
-        let detail = Detail {
-            sequence_number,
-            read_stats: read_stats(read_bytes),
-            ..Default::default()
-        };
-        Self::apply_query_detail_trailer(&mut ctx, &detail);
-
-        Ok((Box::pin(stream_util::iter(frames)), ctx))
+        Ok((
+            range_stream(
+                self.state.engine.clone(),
+                RangeStreamRequest {
+                    start_key,
+                    end_key,
+                    limit,
+                    batch_size,
+                    forward,
+                    sequence_number,
+                },
+            ),
+            ctx,
+        ))
     }
 
     async fn reduce(
         &self,
-        mut ctx: Context,
+        ctx: Context,
         request: buffa::view::OwnedView<
             exoware_proto::store::query::v1::ReduceRequestView<'static>,
         >,
@@ -391,31 +429,31 @@ impl QueryApi for QueryConnect {
         let domain = to_domain_reduce_request_from_view(&request.params)
             .map_err(validate::reduce_params_error)?;
 
-        let rows = self
+        let mut rows = self
             .state
             .engine
-            .range_scan(start_key.as_ref(), end_key.as_ref(), usize::MAX, true)
+            .range_scan_cursor(start_key, end_key, usize::MAX, true)
             .map_err(ConnectError::internal)?;
 
         let mut reducer = RangeReducer::new(&domain)
             .map_err(|e: crate::RangeError| ConnectError::internal(e.to_string()))?;
-        let mut read_bytes = 0u64;
-        for row in rows {
-            let (key, value) = row.map_err(ConnectError::internal)?;
-            read_bytes += read_bytes_for_kv(&key, &value);
-            reducer
-                .update(&key, &value)
-                .map_err(|e: crate::RangeError| ConnectError::internal(e.to_string()))?;
+        loop {
+            let batch = rows
+                .next_batch(REDUCE_SCAN_BATCH_SIZE)
+                .await
+                .map_err(ConnectError::internal)?;
+            if batch.is_empty() {
+                break;
+            }
+            for (key, value) in batch {
+                reducer
+                    .update(&key, &value)
+                    .map_err(|e: crate::RangeError| ConnectError::internal(e.to_string()))?;
+            }
         }
         let response = reducer.finish();
 
-        // Reduce is unary, so headers can include stats computed while consuming the iterator.
-        let detail = Detail {
-            sequence_number: token,
-            read_stats: read_stats(read_bytes),
-            ..Default::default()
-        };
-        Self::apply_query_detail_header(&mut ctx, &detail);
+        let detail = query_detail(token, rows.extra());
 
         Ok((
             ReduceResponse {
@@ -452,6 +490,7 @@ impl QueryApi for QueryConnect {
                         }
                     })
                     .collect(),
+                detail: Some(detail).into(),
                 ..Default::default()
             },
             ctx,
@@ -903,7 +942,7 @@ pub fn connect_stack(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -912,12 +951,10 @@ mod tests {
     use exoware_proto::store::stream::v1::{SubscribeRequest, SubscribeRequestView};
     use exoware_sdk::keys::KeyCodec;
     use exoware_sdk::kv_codec::KvReducedValue;
-    use exoware_sdk::{
-        decode_connect_error, decode_query_detail_header_value, to_domain_reduce_response,
-    };
+    use exoware_sdk::{decode_connect_error, to_domain_reduce_response};
     use futures::StreamExt;
 
-    use crate::RangeScanIter;
+    use crate::{range_scan_cursor_from_iter, QueryExtra, RangeScanCursor, RangeScanIter};
 
     const TEST_RESERVED_BITS: u8 = 4;
     const TEST_PREFIX: u16 = 1;
@@ -937,11 +974,12 @@ mod tests {
         publish_on_get_batch: Option<PublishDuringReplay>,
         range_rows: Vec<(Bytes, Bytes)>,
         range_next_count: usize,
+        query_extra: QueryExtra,
     }
 
     #[derive(Default)]
     struct FakeEngine {
-        state: Mutex<FakeEngineState>,
+        state: Arc<Mutex<FakeEngineState>>,
     }
 
     impl FakeEngine {
@@ -994,6 +1032,10 @@ mod tests {
         fn range_next_count(&self) -> usize {
             self.state.lock().expect("lock").range_next_count
         }
+
+        fn set_query_extra(&self, extra: QueryExtra) {
+            self.state.lock().expect("lock").query_extra = extra;
+        }
     }
 
     impl StoreEngine for FakeEngine {
@@ -1009,6 +1051,29 @@ mod tests {
             Ok(None)
         }
 
+        fn get_with_extra(&self, key: &[u8]) -> Result<(Option<Vec<u8>>, QueryExtra), String> {
+            let extra = self
+                .state
+                .lock()
+                .map_err(|e| e.to_string())?
+                .query_extra
+                .clone();
+            Ok((self.get(key)?, extra))
+        }
+
+        fn get_many_with_extra(
+            &self,
+            keys: &[&[u8]],
+        ) -> Result<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra), String> {
+            let extra = self
+                .state
+                .lock()
+                .map_err(|e| e.to_string())?
+                .query_extra
+                .clone();
+            Ok((self.get_many(keys)?, extra))
+        }
+
         fn range_scan(
             &self,
             _start: &[u8],
@@ -1022,11 +1087,33 @@ mod tests {
                 .map_err(|e| e.to_string())?
                 .range_rows
                 .clone();
-            let state = &self.state;
+            let state = self.state.clone();
             Ok(Box::new(rows.into_iter().map(move |row| {
                 state.lock().expect("lock").range_next_count += 1;
                 Ok(row)
             })))
+        }
+
+        fn range_scan_cursor(
+            &self,
+            _start: Bytes,
+            _end: Bytes,
+            _limit: usize,
+            _forward: bool,
+        ) -> Result<RangeScanCursor, String> {
+            let rows = self
+                .state
+                .lock()
+                .map_err(|e| e.to_string())?
+                .range_rows
+                .clone();
+            let state = self.state.clone();
+            Ok(range_scan_cursor_from_iter(rows.into_iter().map(
+                move |row| {
+                    state.lock().expect("lock").range_next_count += 1;
+                    Ok(row)
+                },
+            )))
         }
 
         fn delete_batch(&self, _keys: &[&[u8]]) -> Result<u64, String> {
@@ -1115,7 +1202,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reduce_consumes_range_iterator_and_reports_read_bytes() {
+    async fn get_includes_engine_query_extra() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(5);
+        engine.set_query_extra(HashMap::from([(
+            "scanned_bytes".to_string(),
+            buffa_types::google::protobuf::Value::from(123.0),
+        )]));
+        let connect = QueryConnect::new(AppState::new(engine));
+        let bytes = exoware_proto::query::GetRequest {
+            key: b"k".to_vec(),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let request = buffa::view::OwnedView::<
+            exoware_proto::store::query::v1::GetRequestView<'static>,
+        >::decode(bytes.into())
+        .expect("decode get request");
+
+        let (response, _ctx) = QueryApi::get(&connect, Context::default(), request)
+            .await
+            .expect("get");
+        let detail = response.detail.as_option().expect("query detail");
+
+        assert_eq!(detail.sequence_number, 5);
+        assert_eq!(
+            detail
+                .extra
+                .get("scanned_bytes")
+                .and_then(|v| v.as_number()),
+            Some(123.0)
+        );
+    }
+
+    #[tokio::test]
+    async fn reduce_consumes_range_iterator_and_returns_detail() {
         let engine = Arc::new(FakeEngine::default());
         engine.set_current_sequence(7);
         engine.set_range_rows(vec![
@@ -1142,24 +1263,109 @@ mod tests {
         >::decode(bytes.into())
         .expect("decode reduce request");
 
-        let (response, ctx) = QueryApi::reduce(&connect, Context::default(), request)
+        let (response, _ctx) = QueryApi::reduce(&connect, Context::default(), request)
             .await
             .expect("reduce");
+        let detail = response.detail.as_option().expect("query detail").clone();
         let response = to_domain_reduce_response(response).expect("decode reduce response");
 
         assert_eq!(engine.range_next_count(), 2);
         assert_eq!(response.results.len(), 1);
         assert_eq!(response.results[0].value, Some(KvReducedValue::UInt64(2)));
-
-        let detail_value = ctx
-            .response_headers
-            .get(QUERY_DETAIL_RESPONSE_HEADER)
-            .expect("query detail header")
-            .to_str()
-            .expect("query detail header string");
-        let detail = decode_query_detail_header_value(detail_value).expect("decode detail");
         assert_eq!(detail.sequence_number, 7);
-        assert_eq!(detail.read_stats.get("read_bytes"), Some(&8));
+        assert!(detail.extra.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_many_populates_detail_on_each_frame() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(11);
+        let connect = QueryConnect::new(AppState::new(engine));
+        let bytes = exoware_proto::query::GetManyRequest {
+            keys: vec![b"a".to_vec(), b"bb".to_vec(), b"ccc".to_vec()],
+            batch_size: 2,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let request = buffa::view::OwnedView::<
+            exoware_proto::store::query::v1::GetManyRequestView<'static>,
+        >::decode(bytes.into())
+        .expect("decode get_many request");
+
+        let (mut stream, _ctx) = QueryApi::get_many(&connect, Context::default(), request)
+            .await
+            .expect("get_many");
+        let mut frame_sizes = Vec::new();
+        let mut detail_frames = 0usize;
+        while let Some(frame) = stream.next().await {
+            let frame = frame.expect("get_many frame");
+            frame_sizes.push(frame.results.len());
+            let detail = frame.detail.as_option().expect("query detail");
+            assert_eq!(detail.sequence_number, 11);
+            assert!(detail.extra.is_empty());
+            detail_frames += 1;
+        }
+
+        assert_eq!(frame_sizes, vec![2, 1]);
+        assert_eq!(detail_frames, 2);
+    }
+
+    #[tokio::test]
+    async fn range_returns_without_materializing_full_iterator() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(9);
+        engine.set_range_rows(
+            (0..1000)
+                .map(|i| {
+                    (
+                        Bytes::from(format!("key-{i:04}")),
+                        Bytes::from_static(b"value"),
+                    )
+                })
+                .collect(),
+        );
+        let connect = QueryConnect::new(AppState::new(engine.clone()));
+        let bytes = exoware_proto::query::RangeRequest {
+            start: b"a".to_vec(),
+            end: b"z".to_vec(),
+            limit: Some(1000),
+            batch_size: 1,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let request = buffa::view::OwnedView::<
+            exoware_proto::store::query::v1::RangeRequestView<'static>,
+        >::decode(bytes.into())
+        .expect("decode range request");
+
+        let (mut stream, _ctx) = QueryApi::range(&connect, Context::default(), request)
+            .await
+            .expect("range");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let consumed = engine.range_next_count();
+        assert!(
+            consumed < 1000,
+            "range should not consume the full iterator before the response stream is read; consumed {consumed}",
+        );
+
+        let mut rows = 0;
+        let mut latest_detail = None;
+        let mut detail_frames = 0usize;
+        while let Some(frame) = stream.next().await {
+            let frame = frame.expect("range frame");
+            rows += frame.results.len();
+            if let Some(detail) = frame.detail.as_option() {
+                detail_frames += 1;
+                latest_detail = Some(detail.clone());
+            }
+        }
+
+        assert_eq!(rows, 1000);
+        assert_eq!(detail_frames, 1000);
+        let detail = latest_detail.expect("query detail");
+        assert_eq!(detail.sequence_number, 9);
+        assert!(detail.extra.is_empty());
     }
 
     #[tokio::test]

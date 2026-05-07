@@ -342,7 +342,7 @@ impl DisplayAs for KvAggregateExec {
                 .map(|(idx, diag)| format!("job{idx}{{{}}}", format_access_path_diagnostics(diag)))
                 .collect::<Vec<_>>()
                 .join("; "),
-            format_query_stats_explain(QueryStatsExplainSurface::RangeReduceHeader)
+            format_query_stats_explain(QueryStatsExplainSurface::RangeReduceDetail)
         )
     }
 }

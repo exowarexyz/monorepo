@@ -9,12 +9,144 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use exoware_server::{RangeScanIter, StoreEngine};
-use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, Direction, IteratorMode, Options, DB};
+use exoware_server::{RangeScan, RangeScanCursor, RangeScanIter, StoreEngine};
+use futures::future::BoxFuture;
+use rocksdb::{
+    ColumnFamily, ColumnFamilyDescriptor, DBIterator, Direction, IteratorMode, Options, DB,
+};
 
 /// One reserved key for the sequence counter (not visible to normal range scans that skip it).
 const SEQ_META_KEY: &[u8] = b"__simulator_seq__";
 const BATCH_LOG_CF: &str = "batch_log";
+type RocksIterItem = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
+
+struct OwnedRocksIterator {
+    iter: DBIterator<'static>,
+    _db: Arc<DB>,
+}
+
+impl OwnedRocksIterator {
+    fn new(db: Arc<DB>, mode: IteratorMode<'_>) -> Self {
+        // SAFETY: `iter` is dropped before `db` because fields are dropped in
+        // declaration order. The RocksDB iterator therefore cannot outlive the
+        // Arc-owned DB it borrows.
+        let db_ref: &'static DB = unsafe { &*Arc::as_ptr(&db) };
+        let iter = db_ref.iterator(mode);
+        Self { iter, _db: db }
+    }
+
+    fn next(&mut self) -> Option<RocksIterItem> {
+        self.iter.next()
+    }
+}
+
+struct RocksRangeScanState {
+    iterator: OwnedRocksIterator,
+    start: Bytes,
+    end: Bytes,
+    limit: usize,
+    forward: bool,
+    emitted: usize,
+    done: bool,
+}
+
+impl RocksRangeScanState {
+    fn new(db: Arc<DB>, start: Bytes, end: Bytes, limit: usize, forward: bool) -> Self {
+        let mode = if forward {
+            IteratorMode::From(start.as_ref(), Direction::Forward)
+        } else if end.is_empty() {
+            IteratorMode::End
+        } else {
+            IteratorMode::From(end.as_ref(), Direction::Reverse)
+        };
+        Self {
+            iterator: OwnedRocksIterator::new(db, mode),
+            start,
+            end,
+            limit,
+            forward,
+            emitted: 0,
+            done: limit == 0,
+        }
+    }
+
+    fn next_batch(&mut self, max_items: usize) -> Result<Vec<(Bytes, Bytes)>, String> {
+        if max_items == 0 || self.done {
+            return Ok(Vec::new());
+        }
+
+        let mut batch = Vec::with_capacity(max_items);
+        while batch.len() < max_items && !self.done {
+            let Some(item) = self.iterator.next() else {
+                self.done = true;
+                break;
+            };
+            let (key, value) = match item {
+                Ok(row) => row,
+                Err(e) => {
+                    self.done = true;
+                    return Err(e.to_string());
+                }
+            };
+            let key_ref = key.as_ref();
+            if key_ref == SEQ_META_KEY {
+                continue;
+            }
+            if self.forward {
+                if !self.end.is_empty() && key_ref > self.end.as_ref() {
+                    self.done = true;
+                    break;
+                }
+            } else if key_ref < self.start.as_ref() {
+                self.done = true;
+                break;
+            }
+
+            self.emitted += 1;
+            if self.emitted >= self.limit {
+                self.done = true;
+            }
+            batch.push((
+                Bytes::copy_from_slice(key_ref),
+                Bytes::copy_from_slice(value.as_ref()),
+            ));
+        }
+        Ok(batch)
+    }
+}
+
+struct RocksRangeScanCursor {
+    state: Option<RocksRangeScanState>,
+}
+
+impl RocksRangeScanCursor {
+    fn new(db: Arc<DB>, start: Bytes, end: Bytes, limit: usize, forward: bool) -> Self {
+        Self {
+            state: Some(RocksRangeScanState::new(db, start, end, limit, forward)),
+        }
+    }
+}
+
+impl RangeScan for RocksRangeScanCursor {
+    fn next_batch<'a>(
+        &'a mut self,
+        max_items: usize,
+    ) -> BoxFuture<'a, Result<Vec<(Bytes, Bytes)>, String>> {
+        Box::pin(async move {
+            let Some(mut state) = self.state.take() else {
+                return Ok(Vec::new());
+            };
+            let (state, result) = tokio::task::spawn_blocking(move || {
+                let result = state.next_batch(max_items);
+                (state, result)
+            })
+            .await
+            .map_err(|e| format!("range scan task failed: {e}"))?;
+            self.state = Some(state);
+            result
+        })
+    }
+}
 
 /// Minimal RocksDB-backed store for the simulator: batch writes plus a global sequence u64
 /// plus a per-sequence batch log.
@@ -168,6 +300,22 @@ impl StoreEngine for RocksStore {
         forward: bool,
     ) -> Result<RangeScanIter<'_>, String> {
         Ok(self.range_scan_rocksdb(start, end, limit, forward))
+    }
+
+    fn range_scan_cursor(
+        &self,
+        start: Bytes,
+        end: Bytes,
+        limit: usize,
+        forward: bool,
+    ) -> Result<RangeScanCursor, String> {
+        Ok(Box::new(RocksRangeScanCursor::new(
+            self.db.clone(),
+            start,
+            end,
+            limit,
+            forward,
+        )))
     }
 
     fn get_many(&self, keys: &[&[u8]]) -> Result<Vec<(Vec<u8>, Option<Vec<u8>>)>, String> {

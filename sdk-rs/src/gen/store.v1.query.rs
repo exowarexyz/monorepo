@@ -469,16 +469,17 @@ impl ::buffa::Enumeration for RangeReduceOp {
 }
 /// --- Query wire types ---
 ///
-/// Visible store sequence number plus read counters for query RPCs. On success, carried in unary
-/// response metadata (`Get` / `Reduce`) or streaming trailers (`Range` / `GetMany`); also attached as a `google.rpc` error
-/// detail when the RPC fails (same message shape in both cases).
-///
-/// The reference RocksDB engine reports `read_bytes`: the sum of key length plus value length for
-/// each entry read by the RPC (for `Get`, the looked-up key plus returned value if any).
+/// Visible store sequence number plus server-defined metadata for query RPCs. On
+/// success, carried in the typed response body; also attached as a `google.rpc`
+/// error detail when the RPC fails (same message shape in both cases).
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct Detail {
+    /// Store sequence number at which the query was evaluated. Clients can reuse
+    /// this as `min_sequence_number` on later reads to preserve monotonic
+    /// read-after-write/session consistency.
+    ///
     /// Field 1: `sequence_number`
     #[serde(
         rename = "sequenceNumber",
@@ -487,14 +488,18 @@ pub struct Detail {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
     )]
     pub sequence_number: u64,
-    /// Field 2: `read_stats`
+    /// Optional server-defined metadata. The built-in server leaves this empty.
+    ///
+    /// Field 2: `extra`
     #[serde(
-        rename = "readStats",
-        alias = "read_stats",
-        with = "::buffa::json_helpers::proto_map",
-        skip_serializing_if = "::buffa::__private::HashMap::is_empty"
+        rename = "extra",
+        skip_serializing_if = "::buffa::__private::HashMap::is_empty",
+        deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
-    pub read_stats: ::buffa::__private::HashMap<::buffa::alloc::string::String, u64>,
+    pub extra: ::buffa::__private::HashMap<
+        ::buffa::alloc::string::String,
+        ::buffa_types::google::protobuf::Value,
+    >,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -506,7 +511,7 @@ impl ::core::fmt::Debug for Detail {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         f.debug_struct("Detail")
             .field("sequence_number", &self.sequence_number)
-            .field("read_stats", &self.read_stats)
+            .field("extra", &self.extra)
             .finish()
     }
 }
@@ -538,9 +543,13 @@ impl ::buffa::Message for Detail {
                 += 1u32
                     + ::buffa::types::uint64_encoded_len(self.sequence_number) as u32;
         }
-        for (k, v) in &self.read_stats {
+        for (k, v) in &self.extra {
             let entry_size: u32 = 1u32 + ::buffa::types::string_encoded_len(k) as u32
-                + 1u32 + ::buffa::types::uint64_encoded_len(*v) as u32;
+                + 1u32
+                + {
+                    let inner = v.compute_size();
+                    ::buffa::encoding::varint_len(inner as u64) as u32 + inner
+                };
             size
                 += 1u32 + ::buffa::encoding::varint_len(entry_size as u64) as u32
                     + entry_size;
@@ -557,9 +566,13 @@ impl ::buffa::Message for Detail {
                 .encode(buf);
             ::buffa::types::encode_uint64(self.sequence_number, buf);
         }
-        for (k, v) in &self.read_stats {
+        for (k, v) in &self.extra {
             let entry_size: u32 = 1u32 + ::buffa::types::string_encoded_len(k) as u32
-                + 1u32 + ::buffa::types::uint64_encoded_len(*v) as u32;
+                + 1u32
+                + {
+                    let inner = v.compute_size();
+                    ::buffa::encoding::varint_len(inner as u64) as u32 + inner
+                };
             ::buffa::encoding::Tag::new(
                     2u32,
                     ::buffa::encoding::WireType::LengthDelimited,
@@ -572,9 +585,13 @@ impl ::buffa::Message for Detail {
                 )
                 .encode(buf);
             ::buffa::types::encode_string(k, buf);
-            ::buffa::encoding::Tag::new(2u32, ::buffa::encoding::WireType::Varint)
+            ::buffa::encoding::Tag::new(
+                    2u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
                 .encode(buf);
-            ::buffa::types::encode_uint64(*v, buf);
+            ::buffa::encoding::encode_varint(v.cached_size() as u64, buf);
+            v.write_to(buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -635,15 +652,19 @@ impl ::buffa::Message for Detail {
                         }
                         2 => {
                             if entry_tag.wire_type()
-                                != ::buffa::encoding::WireType::Varint
+                                != ::buffa::encoding::WireType::LengthDelimited
                             {
                                 return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
                                     field_number: entry_tag.field_number(),
-                                    expected: 0u8,
+                                    expected: 2u8,
                                     actual: entry_tag.wire_type() as u8,
                                 });
                             }
-                            val = ::buffa::types::decode_uint64(buf)?;
+                            ::buffa::Message::merge_length_delimited(
+                                &mut val,
+                                buf,
+                                depth,
+                            )?;
                         }
                         _ => {
                             ::buffa::encoding::skip_field_depth(entry_tag, buf, depth)?;
@@ -660,7 +681,7 @@ impl ::buffa::Message for Detail {
                         );
                     }
                 }
-                self.read_stats.insert(key, val);
+                self.extra.insert(key, val);
             }
             _ => {
                 self.__buffa_unknown_fields
@@ -674,7 +695,7 @@ impl ::buffa::Message for Detail {
     }
     fn clear(&mut self) {
         self.sequence_number = 0u64;
-        self.read_stats.clear();
+        self.extra.clear();
         self.__buffa_unknown_fields.clear();
         self.__buffa_cached_size.set(0);
     }
@@ -710,18 +731,25 @@ pub const __DETAIL_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::typ
 };
 /// --- Query wire types ---
 ///
-/// Visible store sequence number plus read counters for query RPCs. On success, carried in unary
-/// response metadata (`Get` / `Reduce`) or streaming trailers (`Range` / `GetMany`); also attached as a `google.rpc` error
-/// detail when the RPC fails (same message shape in both cases).
-///
-/// The reference RocksDB engine reports `read_bytes`: the sum of key length plus value length for
-/// each entry read by the RPC (for `Get`, the looked-up key plus returned value if any).
+/// Visible store sequence number plus server-defined metadata for query RPCs. On
+/// success, carried in the typed response body; also attached as a `google.rpc`
+/// error detail when the RPC fails (same message shape in both cases).
 #[derive(Clone, Debug, Default)]
 pub struct DetailView<'a> {
+    /// Store sequence number at which the query was evaluated. Clients can reuse
+    /// this as `min_sequence_number` on later reads to preserve monotonic
+    /// read-after-write/session consistency.
+    ///
     /// Field 1: `sequence_number`
     pub sequence_number: u64,
-    /// Field 2: `read_stats` (map)
-    pub read_stats: ::buffa::MapView<'a, &'a str, u64>,
+    /// Optional server-defined metadata. The built-in server leaves this empty.
+    ///
+    /// Field 2: `extra` (map)
+    pub extra: ::buffa::MapView<
+        'a,
+        &'a str,
+        ::buffa_types::google::protobuf::ValueView<'a>,
+    >,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> DetailView<'a> {
@@ -801,15 +829,22 @@ impl<'a> DetailView<'a> {
                             }
                             2 => {
                                 if entry_tag.wire_type()
-                                    != ::buffa::encoding::WireType::Varint
+                                    != ::buffa::encoding::WireType::LengthDelimited
                                 {
                                     return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
                                         field_number: entry_tag.field_number(),
-                                        expected: 0u8,
+                                        expected: 2u8,
                                         actual: entry_tag.wire_type() as u8,
                                     });
                                 }
-                                val = ::buffa::types::decode_uint64(&mut entry_cur)?;
+                                if depth == 0 {
+                                    return Err(::buffa::DecodeError::RecursionLimitExceeded);
+                                }
+                                let sub = ::buffa::types::borrow_bytes(&mut entry_cur)?;
+                                val = ::buffa_types::google::protobuf::ValueView::_decode_depth(
+                                    sub,
+                                    depth - 1,
+                                )?;
                             }
                             _ => {
                                 ::buffa::encoding::skip_field_depth(
@@ -820,7 +855,7 @@ impl<'a> DetailView<'a> {
                             }
                         }
                     }
-                    view.read_stats.push(key, val);
+                    view.extra.push(key, val);
                 }
                 _ => {
                     ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
@@ -850,10 +885,10 @@ impl<'a> ::buffa::MessageView<'a> for DetailView<'a> {
         use ::buffa::alloc::string::ToString as _;
         Detail {
             sequence_number: self.sequence_number,
-            read_stats: self
-                .read_stats
+            extra: self
+                .extra
                 .iter()
-                .map(|(k, v)| (k.to_string(), *v))
+                .map(|(k, v)| (k.to_string(), v.to_owned_message()))
                 .collect(),
             __buffa_unknown_fields: self
                 .__buffa_unknown_fields
@@ -4850,12 +4885,16 @@ pub mod kv_expr {
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct BinaryExpr {
+        /// Left operand.
+        ///
         /// Field 1: `left`
         #[serde(
             rename = "left",
             skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
         )]
         pub left: ::buffa::MessageField<KvExpr>,
+        /// Right operand.
+        ///
         /// Field 2: `right`
         #[serde(
             rename = "right",
@@ -5027,8 +5066,12 @@ pub mod kv_expr {
     /// Binary arithmetic operation on two sub-expressions.
     #[derive(Clone, Debug, Default)]
     pub struct BinaryExprView<'a> {
+        /// Left operand.
+        ///
         /// Field 1: `left`
         pub left: ::buffa::MessageFieldView<KvExprView<'a>>,
+        /// Right operand.
+        ///
         /// Field 2: `right`
         pub right: ::buffa::MessageFieldView<KvExprView<'a>>,
         pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -6764,6 +6807,8 @@ pub mod kv_predicate_constraint {
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct IntRange {
+        /// Inclusive lower bound.
+        ///
         /// Field 1: `min`
         #[serde(
             rename = "min",
@@ -6771,6 +6816,8 @@ pub mod kv_predicate_constraint {
             skip_serializing_if = "Option::is_none"
         )]
         pub min: Option<i64>,
+        /// Inclusive upper bound.
+        ///
         /// Field 2: `max`
         #[serde(
             rename = "max",
@@ -6925,8 +6972,12 @@ pub mod kv_predicate_constraint {
     /// Inclusive integer range. Omit `min` or `max` for a one-sided bound.
     #[derive(Clone, Debug, Default)]
     pub struct IntRangeView<'a> {
+        /// Inclusive lower bound.
+        ///
         /// Field 1: `min`
         pub min: ::core::option::Option<i64>,
+        /// Inclusive upper bound.
+        ///
         /// Field 2: `max`
         pub max: ::core::option::Option<i64>,
         pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -7043,6 +7094,8 @@ pub mod kv_predicate_constraint {
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct UInt64Range {
+        /// Inclusive lower bound.
+        ///
         /// Field 1: `min`
         #[serde(
             rename = "min",
@@ -7050,6 +7103,8 @@ pub mod kv_predicate_constraint {
             skip_serializing_if = "Option::is_none"
         )]
         pub min: Option<u64>,
+        /// Inclusive upper bound.
+        ///
         /// Field 2: `max`
         #[serde(
             rename = "max",
@@ -7204,8 +7259,12 @@ pub mod kv_predicate_constraint {
     /// Inclusive uint64 range. Omit `min` or `max` for a one-sided bound.
     #[derive(Clone, Debug, Default)]
     pub struct UInt64RangeView<'a> {
+        /// Inclusive lower bound.
+        ///
         /// Field 1: `min`
         pub min: ::core::option::Option<u64>,
+        /// Inclusive upper bound.
+        ///
         /// Field 2: `max`
         pub max: ::core::option::Option<u64>,
         pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -7322,6 +7381,8 @@ pub mod kv_predicate_constraint {
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct FloatBound {
+        /// Numeric bound value.
+        ///
         /// Field 1: `value`
         #[serde(
             rename = "value",
@@ -7481,6 +7542,8 @@ pub mod kv_predicate_constraint {
     /// A single bound for a float range, with an inclusivity flag.
     #[derive(Clone, Debug, Default)]
     pub struct FloatBoundView<'a> {
+        /// Numeric bound value.
+        ///
         /// Field 1: `value`
         pub value: f64,
         /// When true the bound includes `value` itself (\<=/\>= semantics).
@@ -7601,12 +7664,16 @@ pub mod kv_predicate_constraint {
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct FloatRange {
+        /// Lower bound.
+        ///
         /// Field 1: `min`
         #[serde(
             rename = "min",
             skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
         )]
         pub min: ::buffa::MessageField<kv_predicate_constraint::FloatBound>,
+        /// Upper bound.
+        ///
         /// Field 2: `max`
         #[serde(
             rename = "max",
@@ -7778,8 +7845,12 @@ pub mod kv_predicate_constraint {
     /// Float range with independently inclusive/exclusive bounds.
     #[derive(Clone, Debug, Default)]
     pub struct FloatRangeView<'a> {
+        /// Lower bound.
+        ///
         /// Field 1: `min`
         pub min: ::buffa::MessageFieldView<kv_predicate_constraint::FloatBoundView<'a>>,
+        /// Upper bound.
+        ///
         /// Field 2: `max`
         pub max: ::buffa::MessageFieldView<kv_predicate_constraint::FloatBoundView<'a>>,
         pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -7942,6 +8013,8 @@ pub mod kv_predicate_constraint {
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct Decimal128Range {
+        /// Inclusive lower bound.
+        ///
         /// Field 1: `min`
         #[serde(
             rename = "min",
@@ -7949,6 +8022,8 @@ pub mod kv_predicate_constraint {
             skip_serializing_if = "Option::is_none"
         )]
         pub min: Option<::buffa::alloc::vec::Vec<u8>>,
+        /// Inclusive upper bound.
+        ///
         /// Field 2: `max`
         #[serde(
             rename = "max",
@@ -8111,8 +8186,12 @@ pub mod kv_predicate_constraint {
     /// Inclusive Decimal128 range (16-byte little-endian).
     #[derive(Clone, Debug, Default)]
     pub struct Decimal128RangeView<'a> {
+        /// Inclusive lower bound.
+        ///
         /// Field 1: `min`
         pub min: ::core::option::Option<&'a [u8]>,
+        /// Inclusive upper bound.
+        ///
         /// Field 2: `max`
         pub max: ::core::option::Option<&'a [u8]>,
         pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -8233,6 +8312,8 @@ pub mod kv_predicate_constraint {
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct Decimal256Range {
+        /// Inclusive lower bound.
+        ///
         /// Field 1: `min`
         #[serde(
             rename = "min",
@@ -8240,6 +8321,8 @@ pub mod kv_predicate_constraint {
             skip_serializing_if = "Option::is_none"
         )]
         pub min: Option<::buffa::alloc::vec::Vec<u8>>,
+        /// Inclusive upper bound.
+        ///
         /// Field 2: `max`
         #[serde(
             rename = "max",
@@ -8402,8 +8485,12 @@ pub mod kv_predicate_constraint {
     /// Inclusive Decimal256 range (32-byte little-endian).
     #[derive(Clone, Debug, Default)]
     pub struct Decimal256RangeView<'a> {
+        /// Inclusive lower bound.
+        ///
         /// Field 1: `min`
         pub min: ::core::option::Option<&'a [u8]>,
+        /// Inclusive upper bound.
+        ///
         /// Field 2: `max`
         pub max: ::core::option::Option<&'a [u8]>,
         pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -8524,6 +8611,8 @@ pub mod kv_predicate_constraint {
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct StringIn {
+        /// Allowed strings.
+        ///
         /// Field 1: `values`
         #[serde(
             rename = "values",
@@ -8655,6 +8744,8 @@ pub mod kv_predicate_constraint {
     /// Set membership test for UTF-8 strings.
     #[derive(Clone, Debug, Default)]
     pub struct StringInView<'a> {
+        /// Allowed strings.
+        ///
         /// Field 1: `values`
         pub values: ::buffa::RepeatedView<'a, &'a str>,
         pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -8762,6 +8853,8 @@ pub mod kv_predicate_constraint {
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct IntIn {
+        /// Allowed int64 values.
+        ///
         /// Field 1: `values`
         #[serde(
             rename = "values",
@@ -8928,6 +9021,8 @@ pub mod kv_predicate_constraint {
     /// Set membership test for int64 values.
     #[derive(Clone, Debug, Default)]
     pub struct IntInView<'a> {
+        /// Allowed int64 values.
+        ///
         /// Field 1: `values`
         pub values: ::buffa::RepeatedView<'a, i64>,
         pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -9043,6 +9138,8 @@ pub mod kv_predicate_constraint {
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct UInt64In {
+        /// Allowed uint64 values.
+        ///
         /// Field 1: `values`
         #[serde(
             rename = "values",
@@ -9209,6 +9306,8 @@ pub mod kv_predicate_constraint {
     /// Set membership test for uint64 values.
     #[derive(Clone, Debug, Default)]
     pub struct UInt64InView<'a> {
+        /// Allowed uint64 values.
+        ///
         /// Field 1: `values`
         pub values: ::buffa::RepeatedView<'a, u64>,
         pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -9324,6 +9423,8 @@ pub mod kv_predicate_constraint {
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct FixedSizeBinaryIn {
+        /// Allowed fixed-size binary values.
+        ///
         /// Field 1: `values`
         #[serde(
             rename = "values",
@@ -9455,6 +9556,8 @@ pub mod kv_predicate_constraint {
     /// Set membership test for fixed-size binary values.
     #[derive(Clone, Debug, Default)]
     pub struct FixedSizeBinaryInView<'a> {
+        /// Allowed fixed-size binary values.
+        ///
         /// Field 1: `values`
         pub values: ::buffa::RepeatedView<'a, &'a [u8]>,
         pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -11133,6 +11236,8 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for ReduceParamsView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct RangeReduceResult {
+    /// Reducer output when rows contributed.
+    ///
     /// Field 1: `value`
     #[serde(
         rename = "value",
@@ -11272,6 +11377,8 @@ pub const __RANGE_REDUCE_RESULT_JSON_ANY: ::buffa::type_registry::JsonAnyEntry =
 /// over zero matching rows).
 #[derive(Clone, Debug, Default)]
 pub struct RangeReduceResultView<'a> {
+    /// Reducer output when rows contributed.
+    ///
     /// Field 1: `value`
     pub value: ::buffa::MessageFieldView<KvReducedValueView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -12094,6 +12201,14 @@ pub struct GetResponse {
         skip_serializing_if = "Option::is_none"
     )]
     pub value: Option<::buffa::alloc::vec::Vec<u8>>,
+    /// Query sequence and read counters for this lookup.
+    ///
+    /// Field 3: `detail`
+    #[serde(
+        rename = "detail",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
+    )]
+    pub detail: ::buffa::MessageField<Detail>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -12103,7 +12218,10 @@ pub struct GetResponse {
 }
 impl ::core::fmt::Debug for GetResponse {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("GetResponse").field("value", &self.value).finish()
+        f.debug_struct("GetResponse")
+            .field("value", &self.value)
+            .field("detail", &self.detail)
+            .finish()
     }
 }
 impl GetResponse {
@@ -12132,6 +12250,12 @@ impl ::buffa::Message for GetResponse {
         if let Some(ref v) = self.value {
             size += 1u32 + ::buffa::types::bytes_encoded_len(v) as u32;
         }
+        if self.detail.is_set() {
+            let inner_size = self.detail.compute_size();
+            size
+                += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
+                    + inner_size;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
         self.__buffa_cached_size.set(size);
         size
@@ -12146,6 +12270,15 @@ impl ::buffa::Message for GetResponse {
                 )
                 .encode(buf);
             ::buffa::types::encode_bytes(v, buf);
+        }
+        if self.detail.is_set() {
+            ::buffa::encoding::Tag::new(
+                    3u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::encoding::encode_varint(self.detail.cached_size() as u64, buf);
+            self.detail.write_to(buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -12173,6 +12306,20 @@ impl ::buffa::Message for GetResponse {
                     buf,
                 )?;
             }
+            3u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 3u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                ::buffa::Message::merge_length_delimited(
+                    self.detail.get_or_insert_default(),
+                    buf,
+                    depth,
+                )?;
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
@@ -12185,6 +12332,7 @@ impl ::buffa::Message for GetResponse {
     }
     fn clear(&mut self) {
         self.value = ::core::option::Option::None;
+        self.detail = ::buffa::MessageField::none();
         self.__buffa_unknown_fields.clear();
         self.__buffa_cached_size.set(0);
     }
@@ -12225,6 +12373,10 @@ pub struct GetResponseView<'a> {
     ///
     /// Field 2: `value`
     pub value: ::core::option::Option<&'a [u8]>,
+    /// Query sequence and read counters for this lookup.
+    ///
+    /// Field 3: `detail`
+    pub detail: ::buffa::MessageFieldView<DetailView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> GetResponseView<'a> {
@@ -12275,6 +12427,27 @@ impl<'a> GetResponseView<'a> {
                     }
                     view.value = Some(::buffa::types::borrow_bytes(&mut cur)?);
                 }
+                3u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 3u32,
+                            expected: 2u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    if depth == 0 {
+                        return Err(::buffa::DecodeError::RecursionLimitExceeded);
+                    }
+                    let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                    match view.detail.as_mut() {
+                        Some(existing) => existing._merge_into_view(sub, depth - 1)?,
+                        None => {
+                            view.detail = ::buffa::MessageFieldView::set(
+                                DetailView::_decode_depth(sub, depth - 1)?,
+                            );
+                        }
+                    }
+                }
                 _ => {
                     ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
                     let span_len = before_tag.len() - cur.len();
@@ -12303,6 +12476,10 @@ impl<'a> ::buffa::MessageView<'a> for GetResponseView<'a> {
         use ::buffa::alloc::string::ToString as _;
         GetResponse {
             value: self.value.map(|b| (b).to_vec()),
+            detail: match self.detail.as_option() {
+                Some(v) => ::buffa::MessageField::<Detail>::some(v.to_owned_message()),
+                None => ::buffa::MessageField::none(),
+            },
             __buffa_unknown_fields: self
                 .__buffa_unknown_fields
                 .to_owned()
@@ -12328,6 +12505,8 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for GetResponseView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct GetManyRequest {
+    /// Keys to look up.
+    ///
     /// Field 1: `keys`
     #[serde(
         rename = "keys",
@@ -12335,6 +12514,8 @@ pub struct GetManyRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec"
     )]
     pub keys: ::buffa::alloc::vec::Vec<::buffa::alloc::vec::Vec<u8>>,
+    /// Optional freshness gate. See service-level comment.
+    ///
     /// Field 2: `min_sequence_number`
     #[serde(
         rename = "minSequenceNumber",
@@ -12343,6 +12524,9 @@ pub struct GetManyRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub min_sequence_number: Option<u64>,
+    /// Requested maximum lookup results per response frame. Servers may apply a
+    /// lower cap.
+    ///
     /// Field 3: `batch_size`
     #[serde(
         rename = "batchSize",
@@ -12521,10 +12705,17 @@ pub const __GET_MANY_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::
 /// arrive in any order. Missing keys have `value` absent.
 #[derive(Clone, Debug, Default)]
 pub struct GetManyRequestView<'a> {
+    /// Keys to look up.
+    ///
     /// Field 1: `keys`
     pub keys: ::buffa::RepeatedView<'a, &'a [u8]>,
+    /// Optional freshness gate. See service-level comment.
+    ///
     /// Field 2: `min_sequence_number`
     pub min_sequence_number: ::core::option::Option<u64>,
+    /// Requested maximum lookup results per response frame. Servers may apply a
+    /// lower cap.
+    ///
     /// Field 3: `batch_size`
     pub batch_size: u32,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -12942,6 +13133,8 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for GetManyEntryView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct GetManyFrame {
+    /// Lookup results in this frame.
+    ///
     /// Field 1: `results`
     #[serde(
         rename = "results",
@@ -12949,6 +13142,16 @@ pub struct GetManyFrame {
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
     pub results: ::buffa::alloc::vec::Vec<GetManyEntry>,
+    /// Running query detail after the entries in this frame have been read. For a
+    /// successful stream, the last detail observed by the client is the final
+    /// sequence/read-counter summary.
+    ///
+    /// Field 2: `detail`
+    #[serde(
+        rename = "detail",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
+    )]
+    pub detail: ::buffa::MessageField<Detail>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -12958,7 +13161,10 @@ pub struct GetManyFrame {
 }
 impl ::core::fmt::Debug for GetManyFrame {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("GetManyFrame").field("results", &self.results).finish()
+        f.debug_struct("GetManyFrame")
+            .field("results", &self.results)
+            .field("detail", &self.detail)
+            .finish()
     }
 }
 impl GetManyFrame {
@@ -12984,6 +13190,12 @@ impl ::buffa::Message for GetManyFrame {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
+        if self.detail.is_set() {
+            let inner_size = self.detail.compute_size();
+            size
+                += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
+                    + inner_size;
+        }
         for v in &self.results {
             let inner_size = v.compute_size();
             size
@@ -12997,6 +13209,15 @@ impl ::buffa::Message for GetManyFrame {
     fn write_to(&self, buf: &mut impl ::buffa::bytes::BufMut) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
+        if self.detail.is_set() {
+            ::buffa::encoding::Tag::new(
+                    2u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::encoding::encode_varint(self.detail.cached_size() as u64, buf);
+            self.detail.write_to(buf);
+        }
         for v in &self.results {
             ::buffa::encoding::Tag::new(
                     1u32,
@@ -13019,6 +13240,20 @@ impl ::buffa::Message for GetManyFrame {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         match tag.field_number() {
+            2u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 2u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                ::buffa::Message::merge_length_delimited(
+                    self.detail.get_or_insert_default(),
+                    buf,
+                    depth,
+                )?;
+            }
             1u32 => {
                 if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                     return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
@@ -13042,6 +13277,7 @@ impl ::buffa::Message for GetManyFrame {
         self.__buffa_cached_size.get()
     }
     fn clear(&mut self) {
+        self.detail = ::buffa::MessageField::none();
         self.results.clear();
         self.__buffa_unknown_fields.clear();
         self.__buffa_cached_size.set(0);
@@ -13079,8 +13315,16 @@ pub const __GET_MANY_FRAME_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::bu
 /// A batch of GetMany lookup results.
 #[derive(Clone, Debug, Default)]
 pub struct GetManyFrameView<'a> {
+    /// Lookup results in this frame.
+    ///
     /// Field 1: `results`
     pub results: ::buffa::RepeatedView<'a, GetManyEntryView<'a>>,
+    /// Running query detail after the entries in this frame have been read. For a
+    /// successful stream, the last detail observed by the client is the final
+    /// sequence/read-counter summary.
+    ///
+    /// Field 2: `detail`
+    pub detail: ::buffa::MessageFieldView<DetailView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> GetManyFrameView<'a> {
@@ -13121,6 +13365,27 @@ impl<'a> GetManyFrameView<'a> {
             let before_tag = cur;
             let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
             match tag.field_number() {
+                2u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 2u32,
+                            expected: 2u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    if depth == 0 {
+                        return Err(::buffa::DecodeError::RecursionLimitExceeded);
+                    }
+                    let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                    match view.detail.as_mut() {
+                        Some(existing) => existing._merge_into_view(sub, depth - 1)?,
+                        None => {
+                            view.detail = ::buffa::MessageFieldView::set(
+                                DetailView::_decode_depth(sub, depth - 1)?,
+                            );
+                        }
+                    }
+                }
                 1u32 => {
                     if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                         return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
@@ -13163,6 +13428,10 @@ impl<'a> ::buffa::MessageView<'a> for GetManyFrameView<'a> {
         use ::buffa::alloc::string::ToString as _;
         GetManyFrame {
             results: self.results.iter().map(|v| v.to_owned_message()).collect(),
+            detail: match self.detail.as_option() {
+                Some(v) => ::buffa::MessageField::<Detail>::some(v.to_owned_message()),
+                None => ::buffa::MessageField::none(),
+            },
             __buffa_unknown_fields: self
                 .__buffa_unknown_fields
                 .to_owned()
@@ -13183,14 +13452,17 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for GetManyFrameView<'a> {
 }
 /// Range reads keys in lexicographic order over raw `bytes` keys.
 ///
-/// Semantics match `StoreEngine::range_scan`: keys satisfy `start <= key <= end` when `end` is
-/// non-empty (inclusive upper bound). When `end` is empty, the upper bound is unbounded (all keys
-/// `>= start`). For prefix scans, pass the lexicographic maximum key of the prefix as `end`, or
-/// use an empty `end` when scanning through the end of the keyspace is intended.
+/// Keys satisfy `start <= key <= end` when `end` is non-empty (inclusive upper
+/// bound). When `end` is empty, the upper bound is unbounded (all keys
+/// `>= start`). For prefix scans, pass the lexicographic maximum key of the
+/// prefix as `end`, or use an empty `end` when scanning through the end of the
+/// keyspace is intended.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct RangeRequest {
+    /// Inclusive lower bound.
+    ///
     /// Field 1: `start`
     #[serde(
         rename = "start",
@@ -13207,6 +13479,8 @@ pub struct RangeRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
     pub end: ::buffa::alloc::vec::Vec<u8>,
+    /// Maximum rows to return. Unset means no explicit row limit.
+    ///
     /// Field 3: `limit`
     #[serde(
         rename = "limit",
@@ -13214,6 +13488,8 @@ pub struct RangeRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub limit: Option<u32>,
+    /// Requested maximum rows per response frame. Servers may apply a lower cap.
+    ///
     /// Field 4: `batch_size`
     #[serde(
         rename = "batchSize",
@@ -13222,6 +13498,8 @@ pub struct RangeRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u32"
     )]
     pub batch_size: u32,
+    /// Traversal direction. Defaults to forward when unset.
+    ///
     /// Field 5: `mode`
     #[serde(
         rename = "mode",
@@ -13229,6 +13507,8 @@ pub struct RangeRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_default_enum_value"
     )]
     pub mode: ::buffa::EnumValue<TraversalMode>,
+    /// Optional freshness gate. See service-level comment.
+    ///
     /// Field 6: `min_sequence_number`
     #[serde(
         rename = "minSequenceNumber",
@@ -13475,24 +13755,35 @@ pub const __RANGE_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buf
 };
 /// Range reads keys in lexicographic order over raw `bytes` keys.
 ///
-/// Semantics match `StoreEngine::range_scan`: keys satisfy `start <= key <= end` when `end` is
-/// non-empty (inclusive upper bound). When `end` is empty, the upper bound is unbounded (all keys
-/// `>= start`). For prefix scans, pass the lexicographic maximum key of the prefix as `end`, or
-/// use an empty `end` when scanning through the end of the keyspace is intended.
+/// Keys satisfy `start <= key <= end` when `end` is non-empty (inclusive upper
+/// bound). When `end` is empty, the upper bound is unbounded (all keys
+/// `>= start`). For prefix scans, pass the lexicographic maximum key of the
+/// prefix as `end`, or use an empty `end` when scanning through the end of the
+/// keyspace is intended.
 #[derive(Clone, Debug, Default)]
 pub struct RangeRequestView<'a> {
+    /// Inclusive lower bound.
+    ///
     /// Field 1: `start`
     pub start: &'a [u8],
     /// Empty means unbounded above.
     ///
     /// Field 2: `end`
     pub end: &'a [u8],
+    /// Maximum rows to return. Unset means no explicit row limit.
+    ///
     /// Field 3: `limit`
     pub limit: ::core::option::Option<u32>,
+    /// Requested maximum rows per response frame. Servers may apply a lower cap.
+    ///
     /// Field 4: `batch_size`
     pub batch_size: u32,
+    /// Traversal direction. Defaults to forward when unset.
+    ///
     /// Field 5: `mode`
     pub mode: ::buffa::EnumValue<TraversalMode>,
+    /// Optional freshness gate. See service-level comment.
+    ///
     /// Field 6: `min_sequence_number`
     pub min_sequence_number: ::core::option::Option<u64>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -13650,12 +13941,15 @@ unsafe impl ::buffa::DefaultViewInstance for RangeRequestView<'static> {
 unsafe impl<'a> ::buffa::HasDefaultViewInstance for RangeRequestView<'a> {
     type Static = RangeRequestView<'static>;
 }
-/// Each stream message is a batch of rows; the stream ends at HTTP END_STREAM.
-/// `Detail` (sequence + read_stats) is carried only in trailers (`x-store-query-detail-bin`).
+/// Each stream message is a batch of rows plus running query detail after the
+/// rows in that frame have been read. For an empty result, the stream contains a
+/// single frame with empty `results` and populated `detail`.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct RangeFrame {
+    /// Rows in this frame.
+    ///
     /// Field 1: `results`
     #[serde(
         rename = "results",
@@ -13663,6 +13957,16 @@ pub struct RangeFrame {
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
     pub results: ::buffa::alloc::vec::Vec<super::super::common::v1::KvEntry>,
+    /// Running query detail after the rows in this frame have been read. For a
+    /// successful stream, the last detail observed by the client is the final
+    /// sequence/read-counter summary.
+    ///
+    /// Field 2: `detail`
+    #[serde(
+        rename = "detail",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
+    )]
+    pub detail: ::buffa::MessageField<Detail>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -13672,7 +13976,10 @@ pub struct RangeFrame {
 }
 impl ::core::fmt::Debug for RangeFrame {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("RangeFrame").field("results", &self.results).finish()
+        f.debug_struct("RangeFrame")
+            .field("results", &self.results)
+            .field("detail", &self.detail)
+            .finish()
     }
 }
 impl RangeFrame {
@@ -13698,6 +14005,12 @@ impl ::buffa::Message for RangeFrame {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
+        if self.detail.is_set() {
+            let inner_size = self.detail.compute_size();
+            size
+                += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
+                    + inner_size;
+        }
         for v in &self.results {
             let inner_size = v.compute_size();
             size
@@ -13711,6 +14024,15 @@ impl ::buffa::Message for RangeFrame {
     fn write_to(&self, buf: &mut impl ::buffa::bytes::BufMut) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
+        if self.detail.is_set() {
+            ::buffa::encoding::Tag::new(
+                    2u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::encoding::encode_varint(self.detail.cached_size() as u64, buf);
+            self.detail.write_to(buf);
+        }
         for v in &self.results {
             ::buffa::encoding::Tag::new(
                     1u32,
@@ -13733,6 +14055,20 @@ impl ::buffa::Message for RangeFrame {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         match tag.field_number() {
+            2u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 2u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                ::buffa::Message::merge_length_delimited(
+                    self.detail.get_or_insert_default(),
+                    buf,
+                    depth,
+                )?;
+            }
             1u32 => {
                 if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                     return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
@@ -13756,6 +14092,7 @@ impl ::buffa::Message for RangeFrame {
         self.__buffa_cached_size.get()
     }
     fn clear(&mut self) {
+        self.detail = ::buffa::MessageField::none();
         self.results.clear();
         self.__buffa_unknown_fields.clear();
         self.__buffa_cached_size.set(0);
@@ -13790,12 +14127,21 @@ pub const __RANGE_FRAME_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa
     from_json: ::buffa::type_registry::any_from_json::<RangeFrame>,
     is_wkt: false,
 };
-/// Each stream message is a batch of rows; the stream ends at HTTP END_STREAM.
-/// `Detail` (sequence + read_stats) is carried only in trailers (`x-store-query-detail-bin`).
+/// Each stream message is a batch of rows plus running query detail after the
+/// rows in that frame have been read. For an empty result, the stream contains a
+/// single frame with empty `results` and populated `detail`.
 #[derive(Clone, Debug, Default)]
 pub struct RangeFrameView<'a> {
+    /// Rows in this frame.
+    ///
     /// Field 1: `results`
     pub results: ::buffa::RepeatedView<'a, super::super::common::v1::KvEntryView<'a>>,
+    /// Running query detail after the rows in this frame have been read. For a
+    /// successful stream, the last detail observed by the client is the final
+    /// sequence/read-counter summary.
+    ///
+    /// Field 2: `detail`
+    pub detail: ::buffa::MessageFieldView<DetailView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> RangeFrameView<'a> {
@@ -13836,6 +14182,27 @@ impl<'a> RangeFrameView<'a> {
             let before_tag = cur;
             let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
             match tag.field_number() {
+                2u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 2u32,
+                            expected: 2u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    if depth == 0 {
+                        return Err(::buffa::DecodeError::RecursionLimitExceeded);
+                    }
+                    let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                    match view.detail.as_mut() {
+                        Some(existing) => existing._merge_into_view(sub, depth - 1)?,
+                        None => {
+                            view.detail = ::buffa::MessageFieldView::set(
+                                DetailView::_decode_depth(sub, depth - 1)?,
+                            );
+                        }
+                    }
+                }
                 1u32 => {
                     if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                         return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
@@ -13884,6 +14251,10 @@ impl<'a> ::buffa::MessageView<'a> for RangeFrameView<'a> {
         use ::buffa::alloc::string::ToString as _;
         RangeFrame {
             results: self.results.iter().map(|v| v.to_owned_message()).collect(),
+            detail: match self.detail.as_option() {
+                Some(v) => ::buffa::MessageField::<Detail>::some(v.to_owned_message()),
+                None => ::buffa::MessageField::none(),
+            },
             __buffa_unknown_fields: self
                 .__buffa_unknown_fields
                 .to_owned()
@@ -13908,6 +14279,8 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for RangeFrameView<'a> {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct ReduceRequest {
+    /// Inclusive lower bound.
+    ///
     /// Field 1: `start`
     #[serde(
         rename = "start",
@@ -13924,12 +14297,16 @@ pub struct ReduceRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
     pub end: ::buffa::alloc::vec::Vec<u8>,
+    /// Aggregation parameters.
+    ///
     /// Field 3: `params`
     #[serde(
         rename = "params",
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
     )]
     pub params: ::buffa::MessageField<ReduceParams>,
+    /// Optional freshness gate. See service-level comment.
+    ///
     /// Field 4: `min_sequence_number`
     #[serde(
         rename = "minSequenceNumber",
@@ -14141,14 +14518,20 @@ pub const __REDUCE_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::bu
 /// non-empty; empty `end` means unbounded above.
 #[derive(Clone, Debug, Default)]
 pub struct ReduceRequestView<'a> {
+    /// Inclusive lower bound.
+    ///
     /// Field 1: `start`
     pub start: &'a [u8],
     /// Empty means unbounded above.
     ///
     /// Field 2: `end`
     pub end: &'a [u8],
+    /// Aggregation parameters.
+    ///
     /// Field 3: `params`
     pub params: ::buffa::MessageFieldView<ReduceParamsView<'a>>,
+    /// Optional freshness gate. See service-level comment.
+    ///
     /// Field 4: `min_sequence_number`
     pub min_sequence_number: ::core::option::Option<u64>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
@@ -14323,6 +14706,14 @@ pub struct ReduceResponse {
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
     pub groups: ::buffa::alloc::vec::Vec<RangeReduceGroup>,
+    /// Query sequence and read counters for this reduction.
+    ///
+    /// Field 3: `detail`
+    #[serde(
+        rename = "detail",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
+    )]
+    pub detail: ::buffa::MessageField<Detail>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -14335,6 +14726,7 @@ impl ::core::fmt::Debug for ReduceResponse {
         f.debug_struct("ReduceResponse")
             .field("results", &self.results)
             .field("groups", &self.groups)
+            .field("detail", &self.detail)
             .finish()
     }
 }
@@ -14361,6 +14753,12 @@ impl ::buffa::Message for ReduceResponse {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
+        if self.detail.is_set() {
+            let inner_size = self.detail.compute_size();
+            size
+                += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
+                    + inner_size;
+        }
         for v in &self.results {
             let inner_size = v.compute_size();
             size
@@ -14380,6 +14778,15 @@ impl ::buffa::Message for ReduceResponse {
     fn write_to(&self, buf: &mut impl ::buffa::bytes::BufMut) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
+        if self.detail.is_set() {
+            ::buffa::encoding::Tag::new(
+                    3u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::encoding::encode_varint(self.detail.cached_size() as u64, buf);
+            self.detail.write_to(buf);
+        }
         for v in &self.results {
             ::buffa::encoding::Tag::new(
                     1u32,
@@ -14411,6 +14818,20 @@ impl ::buffa::Message for ReduceResponse {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         match tag.field_number() {
+            3u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 3u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                ::buffa::Message::merge_length_delimited(
+                    self.detail.get_or_insert_default(),
+                    buf,
+                    depth,
+                )?;
+            }
             1u32 => {
                 if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                     return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
@@ -14446,6 +14867,7 @@ impl ::buffa::Message for ReduceResponse {
         self.__buffa_cached_size.get()
     }
     fn clear(&mut self) {
+        self.detail = ::buffa::MessageField::none();
         self.results.clear();
         self.groups.clear();
         self.__buffa_unknown_fields.clear();
@@ -14494,6 +14916,10 @@ pub struct ReduceResponseView<'a> {
     ///
     /// Field 2: `groups`
     pub groups: ::buffa::RepeatedView<'a, RangeReduceGroupView<'a>>,
+    /// Query sequence and read counters for this reduction.
+    ///
+    /// Field 3: `detail`
+    pub detail: ::buffa::MessageFieldView<DetailView<'a>>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> ReduceResponseView<'a> {
@@ -14534,6 +14960,27 @@ impl<'a> ReduceResponseView<'a> {
             let before_tag = cur;
             let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
             match tag.field_number() {
+                3u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 3u32,
+                            expected: 2u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    if depth == 0 {
+                        return Err(::buffa::DecodeError::RecursionLimitExceeded);
+                    }
+                    let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                    match view.detail.as_mut() {
+                        Some(existing) => existing._merge_into_view(sub, depth - 1)?,
+                        None => {
+                            view.detail = ::buffa::MessageFieldView::set(
+                                DetailView::_decode_depth(sub, depth - 1)?,
+                            );
+                        }
+                    }
+                }
                 1u32 => {
                     if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                         return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
@@ -14593,6 +15040,10 @@ impl<'a> ::buffa::MessageView<'a> for ReduceResponseView<'a> {
         ReduceResponse {
             results: self.results.iter().map(|v| v.to_owned_message()).collect(),
             groups: self.groups.iter().map(|v| v.to_owned_message()).collect(),
+            detail: match self.detail.as_option() {
+                Some(v) => ::buffa::MessageField::<Detail>::some(v.to_owned_message()),
+                None => ::buffa::MessageField::none(),
+            },
             __buffa_unknown_fields: self
                 .__buffa_unknown_fields
                 .to_owned()

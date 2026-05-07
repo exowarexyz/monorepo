@@ -37,14 +37,11 @@ use exoware_proto::RangeReduceRequest as DomainRangeReduceRequest;
 use exoware_proto::{
     connect_compression_registry as proto_connect_compression_registry,
     decode_connect_error as proto_decode_connect_error,
-    decode_query_detail_header_value as proto_decode_query_detail_header_value,
     to_domain_reduce_response as proto_to_domain_reduce_response,
     to_proto_reduce_params as proto_to_proto_reduce_params,
     PreferZstdHttpClient as ProtoPreferZstdHttpClient,
-    QUERY_DETAIL_RESPONSE_HEADER as PROTO_QUERY_DETAIL_RESPONSE_HEADER,
 };
 use futures::future::BoxFuture;
-use http::HeaderMap;
 use keys::is_valid_key_size;
 use kv_codec::{KvExpr, KvFieldRef, KvReducedValue};
 use std::collections::HashMap;
@@ -566,15 +563,10 @@ impl RangeStream {
         self.final_detail.clone()
     }
 
-    fn observe_detail_from_stream_trailers(&mut self) {
-        self.final_detail = self
-            .stream
-            .trailers()
-            .and_then(query_detail_from_header_map);
-        if let (Some(sequence_store), Some(d)) =
-            (&self.observed_sequence, self.final_detail.as_ref())
-        {
-            sequence_store.fetch_max(d.sequence_number, Ordering::SeqCst);
+    fn observe_detail(&mut self, detail: &proto_query::Detail) {
+        self.final_detail = Some(detail.clone());
+        if let Some(sequence_store) = &self.observed_sequence {
+            sequence_store.fetch_max(detail.sequence_number, Ordering::SeqCst);
         }
     }
 
@@ -593,7 +585,6 @@ impl RangeStream {
                     Err(err.clone())
                 } else {
                     self.final_count = Some(self.rows_seen);
-                    self.observe_detail_from_stream_trailers();
                     Ok(())
                 }
             }
@@ -601,42 +592,50 @@ impl RangeStream {
     }
 
     pub async fn next_chunk(&mut self) -> Result<Option<Vec<(Key, Bytes)>>, ClientError> {
-        if self.finished {
-            return Ok(None);
-        }
-
-        let frame = if let Some(frame) = self.pending_frame.take() {
-            frame
-        } else {
-            let Some(frame) = self
-                .stream
-                .message()
-                .await
-                .map_err(client_error_from_connect)?
-            else {
-                self.finished = true;
-                if let Some(err) = self.stream.error() {
-                    return Err(client_error_from_connect(err.clone()));
-                }
-                self.final_count = Some(self.rows_seen);
-                self.observe_detail_from_stream_trailers();
+        loop {
+            if self.finished {
                 return Ok(None);
-            };
-            frame.to_owned_message()
-        };
+            }
 
-        let n = frame.results.len();
-        self.rows_seen += n;
-        let mut out = Vec::with_capacity(n);
-        for entry in &frame.results {
-            let key = Bytes::copy_from_slice(&entry.key);
-            let key = match self.key_prefix {
-                Some(prefix) => prefix.decode_key(&key)?,
-                None => key,
+            let frame = if let Some(frame) = self.pending_frame.take() {
+                frame
+            } else {
+                let Some(frame) = self
+                    .stream
+                    .message()
+                    .await
+                    .map_err(client_error_from_connect)?
+                else {
+                    self.finished = true;
+                    if let Some(err) = self.stream.error() {
+                        return Err(client_error_from_connect(err.clone()));
+                    }
+                    self.final_count = Some(self.rows_seen);
+                    return Ok(None);
+                };
+                frame.to_owned_message()
             };
-            out.push((key, Bytes::copy_from_slice(&entry.value)));
+
+            if let Some(detail) = frame.detail.as_option() {
+                self.observe_detail(detail);
+            }
+            let n = frame.results.len();
+            if n == 0 {
+                continue;
+            }
+
+            let mut out = Vec::with_capacity(n);
+            for entry in &frame.results {
+                let key = Bytes::copy_from_slice(&entry.key);
+                let key = match self.key_prefix {
+                    Some(prefix) => prefix.decode_key(&key)?,
+                    None => key,
+                };
+                out.push((key, Bytes::copy_from_slice(&entry.value)));
+            }
+            self.rows_seen += n;
+            return Ok(Some(out));
         }
-        Ok(Some(out))
     }
 
     pub async fn collect(mut self) -> Result<Vec<(Key, Bytes)>, ClientError> {
@@ -683,15 +682,10 @@ impl GetManyStream {
         }
     }
 
-    fn observe_detail_from_stream_trailers(&mut self) {
-        self.final_detail = self
-            .stream
-            .trailers()
-            .and_then(query_detail_from_header_map);
-        if let (Some(sequence_store), Some(d)) =
-            (&self.observed_sequence, self.final_detail.as_ref())
-        {
-            sequence_store.fetch_max(d.sequence_number, Ordering::SeqCst);
+    fn observe_detail(&mut self, detail: &proto_query::Detail) {
+        self.final_detail = Some(detail.clone());
+        if let Some(sequence_store) = &self.observed_sequence {
+            sequence_store.fetch_max(detail.sequence_number, Ordering::SeqCst);
         }
     }
 
@@ -709,7 +703,6 @@ impl GetManyStream {
                 if let Some(err) = self.stream.error() {
                     Err(err.clone())
                 } else {
-                    self.observe_detail_from_stream_trailers();
                     Ok(())
                 }
             }
@@ -717,40 +710,49 @@ impl GetManyStream {
     }
 
     pub async fn next_chunk(&mut self) -> Result<Option<Vec<(Key, Option<Bytes>)>>, ClientError> {
-        if self.finished {
-            return Ok(None);
-        }
-        let frame = if let Some(frame) = self.pending_frame.take() {
-            frame
-        } else {
-            let Some(frame) = self
-                .stream
-                .message()
-                .await
-                .map_err(client_error_from_connect)?
-            else {
-                self.finished = true;
-                if let Some(err) = self.stream.error() {
-                    return Err(client_error_from_connect(err.clone()));
-                }
-                self.observe_detail_from_stream_trailers();
+        loop {
+            if self.finished {
                 return Ok(None);
+            }
+            let frame = if let Some(frame) = self.pending_frame.take() {
+                frame
+            } else {
+                let Some(frame) = self
+                    .stream
+                    .message()
+                    .await
+                    .map_err(client_error_from_connect)?
+                else {
+                    self.finished = true;
+                    if let Some(err) = self.stream.error() {
+                        return Err(client_error_from_connect(err.clone()));
+                    }
+                    return Ok(None);
+                };
+                frame.to_owned_message()
             };
-            frame.to_owned_message()
-        };
 
-        self.entries_seen += frame.results.len();
-        let mut out = Vec::with_capacity(frame.results.len());
-        for entry in &frame.results {
-            let key = Bytes::copy_from_slice(&entry.key);
-            let key = match self.key_prefix {
-                Some(prefix) => prefix.decode_key(&key)?,
-                None => key,
-            };
-            let value = entry.value.as_ref().map(|v| Bytes::copy_from_slice(v));
-            out.push((key, value));
+            if let Some(detail) = frame.detail.as_option() {
+                self.observe_detail(detail);
+            }
+            let n = frame.results.len();
+            if n == 0 {
+                continue;
+            }
+
+            let mut out = Vec::with_capacity(n);
+            for entry in &frame.results {
+                let key = Bytes::copy_from_slice(&entry.key);
+                let key = match self.key_prefix {
+                    Some(prefix) => prefix.decode_key(&key)?,
+                    None => key,
+                };
+                let value = entry.value.as_ref().map(|v| Bytes::copy_from_slice(v));
+                out.push((key, value));
+            }
+            self.entries_seen += n;
+            return Ok(Some(out));
         }
-        Ok(Some(out))
     }
 
     pub async fn collect(mut self) -> Result<HashMap<Key, Bytes>, ClientError> {
@@ -1007,19 +1009,6 @@ fn trim_connect_base(url: &str) -> String {
     url.trim_end_matches('/').to_string()
 }
 
-fn query_detail_from_header_map(map: &HeaderMap) -> Option<proto_query::Detail> {
-    let v = map.get(PROTO_QUERY_DETAIL_RESPONSE_HEADER)?;
-    let s = v.to_str().ok()?;
-    proto_decode_query_detail_header_value(s).ok()
-}
-
-fn query_detail_from_unary_metadata(
-    headers: &HeaderMap,
-    trailers: &HeaderMap,
-) -> Option<proto_query::Detail> {
-    query_detail_from_header_map(headers).or_else(|| query_detail_from_header_map(trailers))
-}
-
 fn new_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .pool_max_idle_per_host(32)
@@ -1203,9 +1192,10 @@ pub struct StoreClient {
 /// and every later read passes that fixed floor so the server guarantees all
 /// responses reflect at least that point in the write log.
 ///
-/// Streamed query reads (`get_many`, `range_stream`) only expose their final
-/// sequence in stream trailers, so if one of those is the first successful
-/// read, the session is not pinned until that stream is fully drained.
+/// Streamed query reads (`get_many`, `range_stream`) expose their sequence in
+/// each response frame's running detail, so if one of those is the first
+/// successful read, the session is pinned once the first detail-bearing frame
+/// is consumed.
 #[derive(Clone, Debug)]
 pub struct SerializableReadSession {
     client: StoreClient,
@@ -1338,8 +1328,8 @@ impl StoreClient {
     /// Create an unseeded serializable read session.
     ///
     /// The first successful unary read fixes the session's sequence floor from
-    /// the server response. Streamed query reads fix that floor only once their
-    /// trailers arrive.
+    /// the server response. Streamed query reads fix that floor once a
+    /// detail-bearing frame is consumed.
     pub fn create_session(&self) -> SerializableReadSession {
         self.create_session_with_sequence(0)
     }
@@ -1449,10 +1439,9 @@ impl StoreClient {
         key: &Key,
         min_sequence_number: Option<u64>,
     ) -> Result<Option<Bytes>, ClientError> {
-        let (response, detail) = self
+        let (response, _detail) = self
             .send_get(key, self.normalize_min_sequence_number(min_sequence_number))
             .await?;
-        let _ = detail;
         Ok(response.value.map(Bytes::from))
     }
 
@@ -1814,8 +1803,8 @@ impl StoreClient {
                     .await
             })
             .await?;
-        let detail = query_detail_from_unary_metadata(response.headers(), response.trailers());
         let owned = response.into_owned();
+        let detail = owned.detail.as_option().cloned();
         Ok((owned, detail))
     }
 
@@ -1979,8 +1968,8 @@ impl StoreClient {
                     .await
             })
             .await?;
-        let detail = query_detail_from_unary_metadata(response.headers(), response.trailers());
         let owned = response.into_owned();
+        let detail = owned.detail.as_option().cloned();
         Ok((owned, detail))
     }
 
@@ -2485,8 +2474,8 @@ impl SerializableReadSession {
     ///
     /// Fresh sessions start with `None` unless created via
     /// [`StoreClient::create_session_with_sequence`]. A first streamed query
-    /// read (`get_many`, `range_stream`) only sets this once the stream is
-    /// fully drained and trailers are available.
+    /// read (`get_many`, `range_stream`) sets this once a detail-bearing frame
+    /// is consumed.
     pub fn fixed_sequence(&self) -> Option<u64> {
         self.state.fixed_sequence()
     }

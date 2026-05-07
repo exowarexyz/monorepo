@@ -202,22 +202,28 @@ impl QueryService for BenchQuery {
             .state
             .sequence_number
             .load(std::sync::atomic::Ordering::Relaxed);
+        let detail = exoware_proto::store::query::v1::Detail {
+            sequence_number: token,
+            extra: Default::default(),
+            ..Default::default()
+        };
         let mut frames: Vec<Result<ProtoRangeFrame, connectrpc::ConnectError>> = Vec::new();
+        let mut emitted_frame = false;
         for chunk in results.chunks(batch) {
             frames.push(Ok(ProtoRangeFrame {
                 results: chunk.to_vec(),
+                detail: Some(detail.clone()).into(),
+                ..Default::default()
+            }));
+            emitted_frame = true;
+        }
+        if !emitted_frame {
+            frames.push(Ok(ProtoRangeFrame {
+                detail: Some(detail).into(),
                 ..Default::default()
             }));
         }
-        let detail = exoware_proto::store::query::v1::Detail {
-            sequence_number: token,
-            read_stats: Default::default(),
-            ..Default::default()
-        };
-        Ok((
-            Box::pin(stream::iter(frames)),
-            exoware_proto::with_query_detail_trailer(Context::default(), &detail),
-        ))
+        Ok((Box::pin(stream::iter(frames)), Context::default()))
     }
 
     async fn reduce(

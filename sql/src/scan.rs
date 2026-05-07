@@ -84,7 +84,7 @@ impl DisplayAs for KvScanExec {
                 "KvScanExec: limit={:?}, {}, query_stats={}",
                 self.limit,
                 format_access_path_diagnostics(&diag),
-                format_query_stats_explain(QueryStatsExplainSurface::StreamedRangeTrailer)
+                format_query_stats_explain(QueryStatsExplainSurface::StreamedRangeDetail)
             ),
             Err(err) => write!(
                 f,
