@@ -488,7 +488,7 @@ pub struct Detail {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
     )]
     pub sequence_number: u64,
-    /// Optional server-defined metadata. The built-in server leaves this empty.
+    /// Optional backend-defined metadata. The built-in server leaves this empty.
     ///
     /// Field 2: `extra`
     #[serde(
@@ -742,7 +742,7 @@ pub struct DetailView<'a> {
     ///
     /// Field 1: `sequence_number`
     pub sequence_number: u64,
-    /// Optional server-defined metadata. The built-in server leaves this empty.
+    /// Optional backend-defined metadata. The built-in server leaves this empty.
     ///
     /// Field 2: `extra` (map)
     pub extra: ::buffa::MapView<

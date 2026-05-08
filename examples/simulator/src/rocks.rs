@@ -370,6 +370,8 @@ impl RocksStore {
     }
 
     fn apply_prune_policies_rocksdb(&self, document: PrunePolicyDocument) -> Result<(), String> {
+        exoware_sdk::validate_prune_policy_document(&document)?;
+
         for policy in &document.policies {
             match &policy.scope {
                 PolicyScope::Keys(scope) => {

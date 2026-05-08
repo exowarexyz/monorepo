@@ -633,7 +633,7 @@ impl CompactApi for CompactConnect {
         >,
     ) -> Result<(PruneResponse, Context), ConnectError> {
         validate::validate_prune_request(&request)?;
-        let document = exoware_proto::prune_policy_document_from_prune_request_view(&request)
+        let document = exoware_proto::parse_prune_policy_document_from_prune_request_view(&request)
             .map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
 
         self.state
@@ -1123,6 +1123,7 @@ mod tests {
     use exoware_proto::store::common::v1::MatchKey as ProtoMatchKey;
     use exoware_proto::store::compact::v1::{
         policy, policy_retain, Policy as ProtoPolicy, PolicyRetain, PruneRequest, PruneRequestView,
+        RetainKeepLatest,
     };
     use exoware_proto::store::stream::v1::{SubscribeRequest, SubscribeRequestView};
     use exoware_sdk::keys::KeyCodec;
@@ -1527,6 +1528,23 @@ mod tests {
         }
     }
 
+    fn sequence_keep_latest_policy(count: u64) -> ProtoPolicy {
+        ProtoPolicy {
+            scope: Some(policy::Scope::Sequence(Box::default())),
+            retain: Some(PolicyRetain {
+                kind: Some(policy_retain::Kind::KeepLatest(Box::new(
+                    RetainKeepLatest {
+                        count,
+                        ..Default::default()
+                    },
+                ))),
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        }
+    }
+
     fn prune_request(
         policies: Vec<ProtoPolicy>,
     ) -> buffa::view::OwnedView<PruneRequestView<'static>> {
@@ -1571,7 +1589,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_validates_before_engine_prune() {
+    async fn compact_rejects_unparseable_policy_before_engine_prune() {
         let prune = Arc::new(PruneOnlyEngine::default());
         let connect = CompactConnect::new(CompactState::new(prune.clone()));
         let invalid_policy = ProtoPolicy {
@@ -1586,6 +1604,19 @@ mod tests {
 
         assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
         assert_eq!(prune.applied_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn compact_defers_parsed_policy_validation_to_engine() {
+        let prune = Arc::new(PruneOnlyEngine::default());
+        let connect = CompactConnect::new(CompactState::new(prune.clone()));
+        let request = prune_request(vec![sequence_keep_latest_policy(0)]);
+
+        CompactApi::prune(&connect, Context::default(), request)
+            .await
+            .expect("prune");
+
+        assert_eq!(prune.applied_count(), 1);
     }
 
     #[tokio::test]

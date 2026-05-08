@@ -220,22 +220,6 @@ pub fn validate_prune_request(
             [],
         ));
     }
-    for (i, policy) in request.policies.iter().enumerate() {
-        if let Some(exoware_proto::compact::policy_retain::KindView::KeepLatest(kl)) =
-            &policy.retain.kind
-        {
-            if kl.count == 0 {
-                return Err(field_error(
-                    "store.compact",
-                    format!("policies[{i}].retain.keep_latest.count"),
-                    "count must be greater than 0",
-                    "INVALID_PRUNE_REQUEST",
-                    "keep_latest count must be positive",
-                    [],
-                ));
-            }
-        }
-    }
     Ok(())
 }
 
@@ -420,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn prune_rejects_keep_latest_count_zero() {
+    fn prune_shape_accepts_keep_latest_count_zero() {
         use buffa::Message;
         let bytes = exoware_proto::compact::PruneRequest {
             policies: vec![exoware_proto::compact::Policy {
@@ -441,8 +425,7 @@ mod tests {
         .encode_to_vec();
         let view = exoware_proto::store::compact::v1::PruneRequestView::decode_view(&bytes)
             .expect("parse");
-        let err = validate_prune_request(&view).unwrap_err();
-        assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
+        validate_prune_request(&view).expect("shape should be valid");
     }
 
     // -- get_many --

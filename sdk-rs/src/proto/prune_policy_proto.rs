@@ -1,4 +1,7 @@
-//! Convert protobuf prune-policy views into `prune_policy` domain types.
+//! Parse protobuf prune-policy messages into `prune_policy` domain types.
+//!
+//! Parsing checks only protobuf shape and numeric width conversions. Call the
+//! validation helpers on the parsed output before applying policy effects.
 
 use crate::kv_codec::Utf8;
 use crate::match_key::MatchKey;
@@ -96,7 +99,7 @@ fn keys_scope_from_view(s: &KeysScopeView<'_>) -> Result<KeysScope, String> {
     })
 }
 
-fn prune_policy_from_view(p: &PolicyView<'_>) -> Result<PrunePolicy, String> {
+fn parse_prune_policy_from_view(p: &PolicyView<'_>) -> Result<PrunePolicy, String> {
     let Some(scope_view) = p.scope.as_ref() else {
         return Err("prune policy scope is required".to_string());
     };
@@ -178,7 +181,7 @@ fn keys_scope_from_proto(s: &ProtoKeysScope) -> Result<KeysScope, String> {
     })
 }
 
-pub fn prune_policy_from_proto(p: &ProtoPolicy) -> Result<PrunePolicy, String> {
+pub fn parse_prune_policy_from_proto(p: &ProtoPolicy) -> Result<PrunePolicy, String> {
     let Some(scope_proto) = p.scope.as_ref() else {
         return Err("prune policy scope is required".to_string());
     };
@@ -198,19 +201,25 @@ pub fn prune_policy_from_proto(p: &ProtoPolicy) -> Result<PrunePolicy, String> {
     Ok(PrunePolicy { scope, retain })
 }
 
-pub fn prune_policy_document_from_proto_policies(
+pub fn parse_prune_policy_document_from_proto_policies(
     policies: &[ProtoPolicy],
 ) -> Result<PrunePolicyDocument, String> {
     let mut policies_out = Vec::with_capacity(policies.len());
     for policy in policies {
-        policies_out.push(prune_policy_from_proto(policy)?);
+        policies_out.push(parse_prune_policy_from_proto(policy)?);
     }
-    let out = PrunePolicyDocument {
+    Ok(PrunePolicyDocument {
         version: PRUNE_POLICY_DOCUMENT_VERSION,
         policies: policies_out,
-    };
-    crate::prune_policy::validate_policy_document(&out).map_err(|e| e.to_string())?;
-    Ok(out)
+    })
+}
+
+pub fn validate_prune_policy(policy: &PrunePolicy) -> Result<(), String> {
+    crate::prune_policy::validate_policy(policy).map_err(|e| e.to_string())
+}
+
+pub fn validate_prune_policy_document(document: &PrunePolicyDocument) -> Result<(), String> {
+    crate::prune_policy::validate_policy_document(document).map_err(|e| e.to_string())
 }
 
 pub fn prune_policies_to_proto(policies: &[PrunePolicy]) -> Vec<crate::store::compact::v1::Policy> {
@@ -304,20 +313,18 @@ fn order_encoding_to_proto(enc: &OrderEncoding) -> PolicyOrderEncoding {
     }
 }
 
-/// Converts a `Prune` RPC request into the shared Rust document model (fixed document version).
-pub fn prune_policy_document_from_prune_request_view<'a>(
+/// Parses a `Prune` RPC request into the shared Rust document model (fixed document version).
+pub fn parse_prune_policy_document_from_prune_request_view<'a>(
     req: &PruneRequestView<'a>,
 ) -> Result<PrunePolicyDocument, String> {
     let mut policies = Vec::with_capacity(req.policies.len());
     for p in req.policies.iter() {
-        policies.push(prune_policy_from_view(p)?);
+        policies.push(parse_prune_policy_from_view(p)?);
     }
-    let out = PrunePolicyDocument {
+    Ok(PrunePolicyDocument {
         version: PRUNE_POLICY_DOCUMENT_VERSION,
         policies,
-    };
-    crate::prune_policy::validate_policy_document(&out).map_err(|e| e.to_string())?;
-    Ok(out)
+    })
 }
 
 #[cfg(test)]
@@ -355,18 +362,20 @@ mod tests {
             .pop()
             .expect("policy");
 
-        let actual = prune_policy_from_proto(&proto).expect("from proto");
+        let actual = parse_prune_policy_from_proto(&proto).expect("from proto");
 
         assert_eq!(actual, expected);
     }
 
     #[test]
-    fn owned_proto_document_validation_rejects_invalid_policy() {
+    fn parse_owned_proto_document_keeps_validation_separate() {
         let mut policy = sample_policy();
         policy.retain = RetainPolicy::KeepLatest { count: 0 };
         let proto = prune_policies_to_proto(&[policy]);
 
-        let err = prune_policy_document_from_proto_policies(&proto).expect_err("invalid policy");
+        let document =
+            parse_prune_policy_document_from_proto_policies(&proto).expect("parse policy");
+        let err = validate_prune_policy_document(&document).expect_err("invalid policy");
 
         assert!(err.contains("keep_latest count must be > 0"));
     }

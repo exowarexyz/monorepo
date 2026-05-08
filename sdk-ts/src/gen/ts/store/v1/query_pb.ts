@@ -35,7 +35,7 @@ export type Detail = Message<"store.query.v1.Detail"> & {
   sequenceNumber: bigint;
 
   /**
-   * Optional server-defined metadata. The built-in server leaves this empty.
+   * Optional backend-defined metadata. The built-in server leaves this empty.
    *
    * @generated from field: map<string, google.protobuf.Value> extra = 2;
    */

@@ -45,12 +45,15 @@ fn get_value(store: &RocksStore, key: &Bytes) -> Option<Vec<u8>> {
     block_on(store.get(key.clone())).expect("get").0
 }
 
-fn apply_prune(store: &RocksStore, policies: &[PrunePolicy]) {
-    let document = PrunePolicyDocument {
+fn prune_document(policies: &[PrunePolicy]) -> PrunePolicyDocument {
+    PrunePolicyDocument {
         version: PRUNE_POLICY_DOCUMENT_VERSION,
         policies: policies.to_vec(),
-    };
-    block_on(store.apply_prune_policies(document)).expect("apply prune policies");
+    }
+}
+
+fn apply_prune(store: &RocksStore, policies: &[PrunePolicy]) {
+    block_on(store.apply_prune_policies(prune_document(policies))).expect("apply prune policies");
 }
 
 fn version_policy(retain: RetainPolicy) -> PrunePolicy {
@@ -167,6 +170,22 @@ fn key_prune_is_idempotent_when_reapplied() {
     assert!(block_on(store.get_batch(sequence_after_first_prune + 1))
         .expect("get batch")
         .is_none());
+}
+
+#[test]
+fn invalid_key_prune_policy_is_rejected_before_mutation() {
+    let dir = tempdir().expect("tempdir");
+    let store = RocksStore::open(dir.path()).expect("open db");
+    let v1 = versioned_key(b"row", 1);
+    let initial_sequence = put_batch(&store, vec![(v1.clone(), Bytes::from_static(b"v1"))]);
+    let policy = version_policy(RetainPolicy::KeepLatest { count: 0 });
+
+    let err = block_on(store.apply_prune_policies(prune_document(&[policy])))
+        .expect_err("invalid policy");
+
+    assert!(err.contains("keep_latest count must be > 0"));
+    assert_eq!(get_value(&store, &v1).as_deref(), Some(b"v1".as_slice()));
+    assert_eq!(store.current_sequence(), initial_sequence);
 }
 
 #[test]
