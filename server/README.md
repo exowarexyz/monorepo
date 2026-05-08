@@ -22,6 +22,7 @@ stream service accepts a `StreamNotifier`; `StreamHub` is the in-process default
 
 ```rust
 use bytes::Bytes;
+use exoware_sdk::prune_policy::PrunePolicyDocument;
 use exoware_server::{
     AppState, BatchLog, Ingest, Prune, Query, QueryExtra, RangeScanCursor, Sequence,
     StoreEngine, StoreFuture, connect_stack,
@@ -40,10 +41,7 @@ use exoware_server::{
 //   fn get_many(&self, keys: Vec<Bytes>) -> StoreFuture<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra)>;
 //
 //   Prune:
-//   fn apply_prune_policies(
-//       &self,
-//       policies: Vec<exoware_sdk::store::compact::v1::Policy>,
-//   ) -> StoreFuture<()>;
+//   fn apply_prune_policies(&self, document: PrunePolicyDocument) -> StoreFuture<()>;
 //
 //   BatchLog:
 //   fn get_batch(&self, sequence_number: u64) -> StoreFuture<Option<Vec<(Bytes, Bytes)>>>;

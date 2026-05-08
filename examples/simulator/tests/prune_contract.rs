@@ -7,7 +7,8 @@ use exoware_sdk::keys::KeyCodec;
 use exoware_sdk::kv_codec::Utf8;
 use exoware_sdk::match_key::MatchKey;
 use exoware_sdk::prune_policy::{
-    GroupBy, KeysScope, OrderBy, OrderEncoding, PolicyScope, PrunePolicy, RetainPolicy,
+    GroupBy, KeysScope, OrderBy, OrderEncoding, PolicyScope, PrunePolicy, PrunePolicyDocument,
+    RetainPolicy, PRUNE_POLICY_DOCUMENT_VERSION,
 };
 use exoware_server::{BatchLog, Ingest, Prune, Query, Sequence};
 use exoware_simulator::RocksStore;
@@ -45,8 +46,11 @@ fn get_value(store: &RocksStore, key: &Bytes) -> Option<Vec<u8>> {
 }
 
 fn apply_prune(store: &RocksStore, policies: &[PrunePolicy]) {
-    let policies = exoware_sdk::prune_policies_to_proto(policies);
-    block_on(store.apply_prune_policies(policies)).expect("apply prune policies");
+    let document = PrunePolicyDocument {
+        version: PRUNE_POLICY_DOCUMENT_VERSION,
+        policies: policies.to_vec(),
+    };
+    block_on(store.apply_prune_policies(document)).expect("apply prune policies");
 }
 
 fn version_policy(retain: RetainPolicy) -> PrunePolicy {
@@ -135,6 +139,37 @@ fn keys_keep_latest_deletes_old_versions_and_advances_sequence_once() {
 }
 
 #[test]
+fn key_prune_is_idempotent_when_reapplied() {
+    let dir = tempdir().expect("tempdir");
+    let store = RocksStore::open(dir.path()).expect("open db");
+    let v1 = versioned_key(b"row", 1);
+    let v2 = versioned_key(b"row", 2);
+    let v3 = versioned_key(b"row", 3);
+    let initial_sequence = put_batch(
+        &store,
+        vec![
+            (v1.clone(), Bytes::from_static(b"v1")),
+            (v2.clone(), Bytes::from_static(b"v2")),
+            (v3.clone(), Bytes::from_static(b"v3")),
+        ],
+    );
+    let policy = version_policy(RetainPolicy::KeepLatest { count: 1 });
+
+    apply_prune(&store, std::slice::from_ref(&policy));
+    let sequence_after_first_prune = store.current_sequence();
+    apply_prune(&store, &[policy]);
+
+    assert!(get_value(&store, &v1).is_none());
+    assert!(get_value(&store, &v2).is_none());
+    assert_eq!(get_value(&store, &v3).as_deref(), Some(b"v3".as_slice()));
+    assert_eq!(sequence_after_first_prune, initial_sequence + 1);
+    assert_eq!(store.current_sequence(), sequence_after_first_prune);
+    assert!(block_on(store.get_batch(sequence_after_first_prune + 1))
+        .expect("get batch")
+        .is_none());
+}
+
+#[test]
 fn keys_threshold_retains_greater_than_or_equal_versions() {
     let dir = tempdir().expect("tempdir");
     let store = RocksStore::open(dir.path()).expect("open db");
@@ -188,4 +223,58 @@ fn sequence_scope_prunes_batch_log_without_advancing_sequence() {
     assert!(block_on(store.get_batch(1)).expect("get batch").is_none());
     assert!(block_on(store.get_batch(2)).expect("get batch").is_none());
     assert!(block_on(store.get_batch(3)).expect("get batch").is_some());
+}
+
+#[test]
+fn overlapping_prune_policies_apply_in_input_order() {
+    let sequence_then_keys_dir = tempdir().expect("tempdir");
+    let sequence_then_keys = RocksStore::open(sequence_then_keys_dir.path()).expect("open db");
+    let key = versioned_key(b"row", 1);
+    let initial_sequence = put_batch(
+        &sequence_then_keys,
+        vec![(key.clone(), Bytes::from_static(b"v1"))],
+    );
+
+    apply_prune(
+        &sequence_then_keys,
+        &[
+            sequence_policy(RetainPolicy::DropAll),
+            version_policy(RetainPolicy::DropAll),
+        ],
+    );
+
+    assert_eq!(sequence_then_keys.current_sequence(), initial_sequence + 1);
+    assert!(get_value(&sequence_then_keys, &key).is_none());
+    assert!(block_on(sequence_then_keys.get_batch(initial_sequence))
+        .expect("get batch")
+        .is_none());
+    assert_eq!(
+        block_on(sequence_then_keys.get_batch(initial_sequence + 1)).expect("get batch"),
+        Some(Vec::new())
+    );
+
+    let keys_then_sequence_dir = tempdir().expect("tempdir");
+    let keys_then_sequence = RocksStore::open(keys_then_sequence_dir.path()).expect("open db");
+    let key = versioned_key(b"row", 1);
+    let initial_sequence = put_batch(
+        &keys_then_sequence,
+        vec![(key.clone(), Bytes::from_static(b"v1"))],
+    );
+
+    apply_prune(
+        &keys_then_sequence,
+        &[
+            version_policy(RetainPolicy::DropAll),
+            sequence_policy(RetainPolicy::DropAll),
+        ],
+    );
+
+    assert_eq!(keys_then_sequence.current_sequence(), initial_sequence + 1);
+    assert!(get_value(&keys_then_sequence, &key).is_none());
+    assert!(block_on(keys_then_sequence.get_batch(initial_sequence))
+        .expect("get batch")
+        .is_none());
+    assert!(block_on(keys_then_sequence.get_batch(initial_sequence + 1))
+        .expect("get batch")
+        .is_none());
 }

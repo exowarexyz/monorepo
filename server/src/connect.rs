@@ -5,7 +5,6 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use buffa::MessageView;
 use bytes::Bytes;
 use connectrpc::{Chain, ConnectError, ConnectRpcService, Context, Limits};
 use exoware_proto::common::KvEntry;
@@ -90,7 +89,7 @@ async fn range_stream(
             };
             let detail = query_detail(sequence_number, batch.extra);
             if batch.rows.is_empty() {
-                if emitted_frame {
+                if emitted_frame && detail.extra.is_empty() {
                     return None;
                 }
                 return Some((
@@ -122,6 +121,8 @@ async fn range_stream(
     )))
 }
 
+/// All-in-one single-process composition. Split deployments construct the narrower capability
+/// states directly, while this state can derive each per-service state for the bundled stack.
 #[derive(Clone)]
 pub struct AppState {
     pub ingest: Arc<dyn Ingest>,
@@ -550,7 +551,11 @@ impl QueryApi for QueryConnect {
                 .await
                 .map_err(ConnectError::internal)?;
             if batch.rows.is_empty() {
-                break latest_extra.unwrap_or(batch.extra);
+                break if batch.extra.is_empty() {
+                    latest_extra.unwrap_or_default()
+                } else {
+                    batch.extra
+                };
             }
             latest_extra = Some(batch.extra);
             for (key, value) in batch.rows {
@@ -619,10 +624,6 @@ impl CompactConnect {
     }
 }
 
-fn prune_error_to_connect_error(err: String) -> ConnectError {
-    ConnectError::internal(err)
-}
-
 impl CompactApi for CompactConnect {
     async fn prune(
         &self,
@@ -632,19 +633,14 @@ impl CompactApi for CompactConnect {
         >,
     ) -> Result<(PruneResponse, Context), ConnectError> {
         validate::validate_prune_request(&request)?;
-        let _document = exoware_proto::prune_policy_document_from_prune_request_view(&request)
+        let document = exoware_proto::prune_policy_document_from_prune_request_view(&request)
             .map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
 
-        let policies = request
-            .policies
-            .iter()
-            .map(|policy| policy.to_owned_message())
-            .collect();
         self.state
             .prune
-            .apply_prune_policies(policies)
+            .apply_prune_policies(document)
             .await
-            .map_err(prune_error_to_connect_error)?;
+            .map_err(ConnectError::internal)?;
         Ok((PruneResponse::default(), ctx))
     }
 }
@@ -1127,11 +1123,11 @@ mod tests {
     use exoware_proto::store::common::v1::MatchKey as ProtoMatchKey;
     use exoware_proto::store::compact::v1::{
         policy, policy_retain, Policy as ProtoPolicy, PolicyRetain, PruneRequest, PruneRequestView,
-        RetainDropAll,
     };
     use exoware_proto::store::stream::v1::{SubscribeRequest, SubscribeRequestView};
     use exoware_sdk::keys::KeyCodec;
     use exoware_sdk::kv_codec::KvReducedValue;
+    use exoware_sdk::prune_policy::{PrunePolicyDocument, PRUNE_POLICY_DOCUMENT_VERSION};
     use exoware_sdk::{decode_connect_error, to_domain_reduce_response};
     use futures::future::ready;
     use futures::StreamExt;
@@ -1158,6 +1154,7 @@ mod tests {
         oldest_retained: Option<u64>,
         publish_on_get_batch: Option<PublishDuringReplay>,
         range_rows: Vec<(Bytes, Bytes)>,
+        range_eof_extra: QueryExtra,
         range_next_count: usize,
         query_extra: QueryExtra,
         prune_policy_counts: Vec<usize>,
@@ -1170,6 +1167,7 @@ mod tests {
 
     struct IteratorRangeScan {
         iter: Box<dyn Iterator<Item = Result<(Bytes, Bytes), String>> + Send + 'static>,
+        eof_extra: Option<QueryExtra>,
     }
 
     impl RangeScan for IteratorRangeScan {
@@ -1179,10 +1177,12 @@ mod tests {
                 for row in self.iter.by_ref().take(max_items) {
                     rows.push(row?);
                 }
-                Ok(RangeScanBatch {
-                    rows,
-                    extra: QueryExtra::default(),
-                })
+                let extra = if rows.is_empty() {
+                    self.eof_extra.take().unwrap_or_default()
+                } else {
+                    QueryExtra::default()
+                };
+                Ok(RangeScanBatch { rows, extra })
             })();
             Box::pin(ready(result))
         }
@@ -1192,8 +1192,16 @@ mod tests {
     where
         I: Iterator<Item = Result<(Bytes, Bytes), String>> + Send + 'static,
     {
+        range_scan_from_iter_with_eof_extra(iter, QueryExtra::default())
+    }
+
+    fn range_scan_from_iter_with_eof_extra<I>(iter: I, eof_extra: QueryExtra) -> RangeScanCursor
+    where
+        I: Iterator<Item = Result<(Bytes, Bytes), String>> + Send + 'static,
+    {
         Box::new(IteratorRangeScan {
             iter: Box::new(iter),
+            eof_extra: Some(eof_extra),
         })
     }
 
@@ -1242,6 +1250,10 @@ mod tests {
 
         fn set_range_rows(&self, rows: Vec<(Bytes, Bytes)>) {
             self.state.lock().expect("lock").range_rows = rows;
+        }
+
+        fn set_range_eof_extra(&self, extra: QueryExtra) {
+            self.state.lock().expect("lock").range_eof_extra = extra;
         }
 
         fn range_next_count(&self) -> usize {
@@ -1307,26 +1319,29 @@ mod tests {
             let result = self
                 .state
                 .lock()
-                .map(|state| state.range_rows.clone())
+                .map(|state| (state.range_rows.clone(), state.range_eof_extra.clone()))
                 .map_err(|e| e.to_string());
             let state = self.state.clone();
-            let cursor = result.map(|rows| {
-                range_scan_from_iter(rows.into_iter().map(move |row| {
-                    state.lock().expect("lock").range_next_count += 1;
-                    Ok(row)
-                }))
+            let cursor = result.map(|(rows, eof_extra)| {
+                range_scan_from_iter_with_eof_extra(
+                    rows.into_iter().map(move |row| {
+                        state.lock().expect("lock").range_next_count += 1;
+                        Ok(row)
+                    }),
+                    eof_extra,
+                )
             });
             Box::pin(ready(cursor))
         }
     }
 
     impl Prune for FakeEngine {
-        fn apply_prune_policies(&self, policies: Vec<ProtoPolicy>) -> StoreFuture<()> {
+        fn apply_prune_policies(&self, document: PrunePolicyDocument) -> StoreFuture<()> {
             let result = self
                 .state
                 .lock()
                 .map(|mut state| {
-                    state.prune_policy_counts.push(policies.len());
+                    state.prune_policy_counts.push(document.policies.len());
                 })
                 .map_err(|e| e.to_string());
             Box::pin(ready(result))
@@ -1412,22 +1427,26 @@ mod tests {
 
     #[derive(Default)]
     struct PruneOnlyEngine {
-        policy_counts: Mutex<Vec<usize>>,
+        documents: Mutex<Vec<(u32, usize)>>,
     }
 
     impl PruneOnlyEngine {
         fn applied_count(&self) -> usize {
-            self.policy_counts.lock().expect("lock").len()
+            self.documents.lock().expect("lock").len()
+        }
+
+        fn last_document(&self) -> Option<(u32, usize)> {
+            self.documents.lock().expect("lock").last().copied()
         }
     }
 
     impl Prune for PruneOnlyEngine {
-        fn apply_prune_policies(&self, policies: Vec<ProtoPolicy>) -> StoreFuture<()> {
+        fn apply_prune_policies(&self, document: PrunePolicyDocument) -> StoreFuture<()> {
             let result = self
-                .policy_counts
+                .documents
                 .lock()
-                .map(|mut counts| {
-                    counts.push(policies.len());
+                .map(|mut documents| {
+                    documents.push((document.version, document.policies.len()));
                 })
                 .map_err(|e| e.to_string());
             Box::pin(ready(result))
@@ -1475,6 +1494,13 @@ mod tests {
         )
     }
 
+    fn numeric_query_extra(name: &str, value: f64) -> QueryExtra {
+        HashMap::from([(
+            name.to_string(),
+            buffa_types::google::protobuf::Value::from(value),
+        )])
+    }
+
     fn subscribe_request_bytes(since_sequence_number: Option<u64>) -> Vec<u8> {
         SubscribeRequest {
             match_keys: vec![ProtoMatchKey {
@@ -1493,9 +1519,7 @@ mod tests {
         ProtoPolicy {
             scope: Some(policy::Scope::Sequence(Box::default())),
             retain: Some(PolicyRetain {
-                kind: Some(policy_retain::Kind::DropAll(Box::new(
-                    RetainDropAll::default(),
-                ))),
+                kind: Some(policy_retain::Kind::DropAll(Box::default())),
                 ..Default::default()
             })
             .into(),
@@ -1540,6 +1564,10 @@ mod tests {
             .expect("prune");
 
         assert_eq!(prune.applied_count(), 1);
+        assert_eq!(
+            prune.last_document(),
+            Some((PRUNE_POLICY_DOCUMENT_VERSION, 1))
+        );
     }
 
     #[tokio::test]
@@ -1695,6 +1723,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reduce_uses_eof_query_extra() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(8);
+        engine.set_range_rows(vec![
+            (Bytes::from_static(b"a"), Bytes::from_static(b"xx")),
+            (Bytes::from_static(b"bb"), Bytes::from_static(b"yyy")),
+        ]);
+        engine.set_range_eof_extra(numeric_query_extra("final_rows", 2.0));
+        let connect = QueryConnect::new(AppState::new(engine));
+        let bytes = exoware_proto::query::ReduceRequest {
+            start: b"a".to_vec(),
+            end: b"z".to_vec(),
+            params: Some(exoware_proto::query::ReduceParams {
+                reducers: vec![exoware_proto::query::RangeReducerSpec {
+                    op: exoware_proto::query::RangeReduceOp::RANGE_REDUCE_OP_COUNT_ALL.into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let request = buffa::view::OwnedView::<
+            exoware_proto::store::query::v1::ReduceRequestView<'static>,
+        >::decode(bytes.into())
+        .expect("decode reduce request");
+
+        let (response, _ctx) = QueryApi::reduce(&connect, Context::default(), request)
+            .await
+            .expect("reduce");
+        let detail = response.detail.as_option().expect("query detail");
+
+        assert_eq!(detail.sequence_number, 8);
+        assert_eq!(
+            detail.extra.get("final_rows").and_then(|v| v.as_number()),
+            Some(2.0)
+        );
+    }
+
+    #[tokio::test]
     async fn get_many_populates_detail_on_each_frame() {
         let engine = Arc::new(FakeEngine::default());
         engine.set_current_sequence(11);
@@ -1784,6 +1853,54 @@ mod tests {
         let detail = latest_detail.expect("query detail");
         assert_eq!(detail.sequence_number, 9);
         assert!(detail.extra.is_empty());
+    }
+
+    #[tokio::test]
+    async fn range_emits_eof_query_extra_after_rows() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(10);
+        engine.set_range_rows(vec![
+            (Bytes::from_static(b"a"), Bytes::from_static(b"1")),
+            (Bytes::from_static(b"b"), Bytes::from_static(b"2")),
+        ]);
+        engine.set_range_eof_extra(numeric_query_extra("final_rows", 2.0));
+        let connect = QueryConnect::new(AppState::new(engine));
+        let bytes = exoware_proto::query::RangeRequest {
+            start: b"a".to_vec(),
+            end: b"z".to_vec(),
+            limit: Some(2),
+            batch_size: 2,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let request = buffa::view::OwnedView::<
+            exoware_proto::store::query::v1::RangeRequestView<'static>,
+        >::decode(bytes.into())
+        .expect("decode range request");
+
+        let (mut stream, _ctx) = QueryApi::range(&connect, Context::default(), request)
+            .await
+            .expect("range");
+        let mut frames = Vec::new();
+        while let Some(frame) = stream.next().await {
+            frames.push(frame.expect("range frame"));
+        }
+
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].results.len(), 2);
+        let row_detail = frames[0].detail.as_option().expect("row detail");
+        assert!(row_detail.extra.is_empty());
+
+        assert!(frames[1].results.is_empty());
+        let final_detail = frames[1].detail.as_option().expect("final detail");
+        assert_eq!(final_detail.sequence_number, 10);
+        assert_eq!(
+            final_detail
+                .extra
+                .get("final_rows")
+                .and_then(|v| v.as_number()),
+            Some(2.0)
+        );
     }
 
     #[tokio::test]

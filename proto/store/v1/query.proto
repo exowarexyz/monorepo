@@ -16,7 +16,7 @@ message Detail {
   // this as `min_sequence_number` on later reads to preserve monotonic
   // read-after-write/session consistency.
   uint64 sequence_number = 1;
-  // Optional server-defined metadata. The built-in server leaves this empty.
+  // Optional backend-defined metadata. The built-in server leaves this empty.
   map<string, google.protobuf.Value> extra = 2;
 }
 

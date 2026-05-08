@@ -13,8 +13,9 @@ use std::sync::Arc;
 use bytes::Bytes;
 use exoware_sdk::keys::KeyCodec;
 use exoware_sdk::match_key::compile_payload_regex;
-use exoware_sdk::prune_policy::{KeysScope, OrderEncoding, PolicyScope, RetainPolicy};
-use exoware_sdk::store::compact::v1::Policy as ProtoPrunePolicy;
+use exoware_sdk::prune_policy::{
+    KeysScope, OrderEncoding, PolicyScope, PrunePolicyDocument, RetainPolicy,
+};
 use exoware_server::{
     BatchLog, Ingest, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, RangeScanCursor,
     RangeScanFuture, Sequence, StoreFuture,
@@ -368,8 +369,7 @@ impl RocksStore {
         Ok(deleted)
     }
 
-    fn apply_prune_policies_rocksdb(&self, policies: Vec<ProtoPrunePolicy>) -> Result<(), String> {
-        let document = exoware_sdk::prune_policy_document_from_proto_policies(&policies)?;
+    fn apply_prune_policies_rocksdb(&self, document: PrunePolicyDocument) -> Result<(), String> {
         for policy in &document.policies {
             match &policy.scope {
                 PolicyScope::Keys(scope) => {
@@ -459,6 +459,9 @@ impl Sequence for RocksStore {
     }
 }
 
+// The simulator keeps short point RocksDB operations as direct calls inside async futures to keep
+// this local reference backend simple. Long-running range cursor pulls already use
+// `spawn_blocking`; production engines should avoid blocking Tokio workers for disk I/O.
 impl Ingest for RocksStore {
     fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> StoreFuture<u64> {
         let store = self.clone();
@@ -516,9 +519,9 @@ impl Query for RocksStore {
 }
 
 impl Prune for RocksStore {
-    fn apply_prune_policies(&self, policies: Vec<ProtoPrunePolicy>) -> StoreFuture<()> {
+    fn apply_prune_policies(&self, document: PrunePolicyDocument) -> StoreFuture<()> {
         let store = self.clone();
-        Box::pin(async move { store.apply_prune_policies_rocksdb(policies) })
+        Box::pin(async move { store.apply_prune_policies_rocksdb(document) })
     }
 }
 

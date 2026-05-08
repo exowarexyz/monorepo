@@ -6,10 +6,19 @@
 use std::collections::HashMap;
 
 use bytes::Bytes;
+use exoware_sdk::prune_policy::PrunePolicyDocument;
 use futures::future::BoxFuture;
 
+/// Backend-defined query metadata.
+///
+/// Keep this lightweight: streaming query RPCs may emit detail on every frame.
 pub type QueryExtra = HashMap<String, buffa_types::google::protobuf::Value>;
 pub type RangeScanCursor = Box<dyn RangeScan + Send + 'static>;
+
+/// Owned async operation result returned by store capability methods.
+///
+/// The boxed future is `'static` so service handlers can poll it after the `&self` method call
+/// has returned.
 pub type StoreFuture<T> = BoxFuture<'static, Result<T, String>>;
 pub type RangeScanFuture<'a, T> = BoxFuture<'a, Result<T, String>>;
 
@@ -27,11 +36,15 @@ pub struct RangeScanBatch {
 /// handlers to pull rows lazily without borrowing the engine.
 pub trait RangeScan: Send {
     /// Pull up to `max_items` rows. Returning an empty `rows` batch marks EOF.
+    /// EOF may carry non-empty `extra` with final query metadata.
     /// `extra` is emitted with the response frame built from the same batch.
     fn next_batch<'a>(&'a mut self, max_items: usize) -> RangeScanFuture<'a, RangeScanBatch>;
 }
 
 /// Local sequence frontier visible to this process.
+///
+/// This is a standalone capability so split deployments can advertise a frontier without serving
+/// full query or batch-log reads.
 pub trait Sequence: Send + Sync + 'static {
     /// Highest sequence number this process can currently serve.
     fn current_sequence(&self) -> u64;
@@ -69,12 +82,12 @@ pub trait Query: Sequence {
 }
 
 /// Prune mutation capability.
+///
+/// Public point deletes are intentionally not exposed as a separate capability; engines may delete
+/// keys as an internal effect of applying prune policies.
 pub trait Prune: Send + Sync + 'static {
     /// Apply prune policies sequentially.
-    fn apply_prune_policies(
-        &self,
-        policies: Vec<exoware_sdk::store::compact::v1::Policy>,
-    ) -> StoreFuture<()>;
+    fn apply_prune_policies(&self, document: PrunePolicyDocument) -> StoreFuture<()>;
 }
 
 /// Retained per-sequence batch-log access for stream replay and lookups.
