@@ -63,27 +63,6 @@ function parseTip(value: string): bigint {
   return tip;
 }
 
-function parseTrustedRootMap(value: string): Map<bigint, Uint8Array> {
-  const roots = new Map<bigint, Uint8Array>();
-  for (const [index, rawLine] of value.split(/\r?\n/).entries()) {
-    const line = rawLine.trim();
-    if (!line) continue;
-
-    const seedMatch = line.match(
-      /\btip\s*=\s*(\d+)\b.*\broot\s*=\s*(0x[0-9a-fA-F]+|[0-9a-fA-F]+)/,
-    );
-    const compactMatch = line.match(
-      /^(\d+)\s*(?:=|,|\s)\s*(0x[0-9a-fA-F]+|[0-9a-fA-F]+)$/,
-    );
-    const match = seedMatch ?? compactMatch;
-    if (!match) {
-      throw new Error(`Trusted Roots line ${index + 1} must look like tip=14 root=0x...`);
-    }
-    roots.set(BigInt(match[1]), parseHexRoot(match[2]));
-  }
-  return roots;
-}
-
 function renderOperation(
   proofOperation: OrderedSubscribeProof['proof']['operations'][number]['operation'],
 ) {
@@ -107,7 +86,7 @@ function renderOperation(
     case 'commit_floor':
       return (
         <>
-          <p><strong>Type:</strong> commit_floor</p>
+          <p><strong>Type:</strong> commit</p>
           {proofOperation.value && (
             <p><strong>Value:</strong> {formatBytes(proofOperation.value)}</p>
           )}
@@ -130,8 +109,6 @@ export function QmdbPanel({
   const [isConnected, setIsConnected] = useState(false);
   const [tip, setTip] = useState('');
   const [expectedCurrentRoot, setExpectedCurrentRoot] = useState('');
-  const tipRef = useRef(tip);
-  const expectedCurrentRootRef = useRef(expectedCurrentRoot);
 
   const [getKey, setGetKey] = useState('k-00000000');
   const [getProof, setGetProof] = useState<VerifiedCurrentKeyValueProof | null>(null);
@@ -148,30 +125,16 @@ export function QmdbPanel({
   const [isGettingRange, setIsGettingRange] = useState(false);
 
   const [keyMatcherKind, setKeyMatcherKind] = useState<'exact' | 'prefix' | 'regex' | 'none'>(
-    'prefix',
+    'none',
   );
-  const [keyMatcherValue, setKeyMatcherValue] = useState('k-');
+  const [keyMatcherValue, setKeyMatcherValue] = useState('');
   const [valueMatcherKind, setValueMatcherKind] = useState<'exact' | 'prefix' | 'regex' | 'none'>(
     'none',
   );
   const [valueMatcherValue, setValueMatcherValue] = useState('');
   const [sinceSequenceNumber, setSinceSequenceNumber] = useState('');
-  const [trustedRoots, setTrustedRoots] = useState('');
-  const trustedRootsRef = useRef(trustedRoots);
   const [events, setEvents] = useState<OrderedSubscribeProof[]>([]);
   const [isSubscribing, setIsSubscribing] = useState(false);
-
-  useEffect(() => {
-    tipRef.current = tip;
-  }, [tip]);
-
-  useEffect(() => {
-    expectedCurrentRootRef.current = expectedCurrentRoot;
-  }, [expectedCurrentRoot]);
-
-  useEffect(() => {
-    trustedRootsRef.current = trustedRoots;
-  }, [trustedRoots]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -301,20 +264,6 @@ export function QmdbPanel({
             valueFilters: valueFilter ? [valueFilter] : [],
             sinceSequenceNumber: since,
           },
-          (frameTip) => {
-            const roots = parseTrustedRootMap(trustedRootsRef.current);
-            const mapped = roots.get(frameTip);
-            if (mapped) return mapped;
-
-            const fallbackTip = tipRef.current.trim() ? parseTip(tipRef.current) : undefined;
-            if (fallbackTip === frameTip && expectedCurrentRootRef.current.trim()) {
-              return parseHexRoot(expectedCurrentRootRef.current);
-            }
-
-            throw new Error(
-              `Trusted root missing for tip ${frameTip.toString()}; paste the matching seed root`,
-            );
-          },
           { signal: controller.signal },
         )) {
           setEvents((previous) => [proof, ...previous].slice(0, MAX_EVENTS));
@@ -331,7 +280,7 @@ export function QmdbPanel({
       }
     })();
 
-    showNotification('success', 'QMDB Subscribe', 'Listening for verified multi-proofs');
+    showNotification('success', 'QMDB Subscribe', 'Listening for streamed proofs');
   };
 
   const handleStopSubscribe = () => {
@@ -350,8 +299,8 @@ export function QmdbPanel({
           Proofs are anchored to roots the writer emits per batch. Run `qmdb run`
           locally and `qmdb seed` to stream fresh tips; each line prints
           `tip=N root=0x..`. Get Proof, Get Many, and Get Range verify
-          against that current root. Subscribe needs the matching root for
-          every emitted tip.
+          against that current root. Subscribe streams each proof with its tip
+          and included operations.
         </p>
         <p><strong>Server:</strong> {qmdbUrl}</p>
         <p><strong>Status:</strong> {isConnected ? 'Connected' : 'Disconnected'}</p>
@@ -523,8 +472,7 @@ export function QmdbPanel({
         <h3>Subscribe</h3>
         <p className="section-note">
           Key and value filters are AND'd: a proof is emitted only when an op satisfies every
-          non-empty filter. Pick "none" to leave a side unfiltered. Paste seed
-          output into Trusted Roots so each streamed proof can be anchored.
+          non-empty filter. Pick "none" to leave a side unfiltered.
         </p>
         <div className="form-row">
           <div className="form-group">
@@ -592,26 +540,11 @@ export function QmdbPanel({
             />
           </div>
         </div>
-        <div className="form-row">
-          <div className="form-group form-group-wide">
-            <label htmlFor="qmdb-trusted-roots">Trusted Roots (optional, one per line)</label>
-            <textarea
-              id="qmdb-trusted-roots"
-              rows={4}
-              placeholder={'tip=14 root=0x...\n15 0x...'}
-              value={trustedRoots}
-              onChange={(event) => setTrustedRoots(event.target.value)}
-            />
-          </div>
-        </div>
         <div className="button-row">
           <button
             className={`btn-primary ${isSubscribing ? 'loading' : ''}`}
             onClick={handleStartSubscribe}
-            disabled={
-              isSubscribing ||
-              (!trustedRoots.trim() && (!tip.trim() || !expectedCurrentRoot.trim()))
-            }
+            disabled={isSubscribing}
           >
             {isSubscribing ? 'Listening...' : 'Start Subscribe'}
           </button>
@@ -624,13 +557,22 @@ export function QmdbPanel({
           </button>
         </div>
         <div className="result fade-in">
-          <h4>Verified Events ({events.length})</h4>
+          <h4>Streamed Events ({events.length})</h4>
           {events.length === 0 ? (
             <p>No proof events yet</p>
           ) : (
             <div className="result-list">
               {events.map((event, index) => {
                 const ops = event.proof.operations;
+                const counts = ops.reduce(
+                  (acc, op) => {
+                    if (op.operation.type === 'update') acc.updates += 1;
+                    if (op.operation.type === 'delete') acc.deletes += 1;
+                    if (op.operation.type === 'commit_floor') acc.commits += 1;
+                    return acc;
+                  },
+                  { updates: 0, deletes: 0, commits: 0 },
+                );
                 let locationRange = '(none)';
                 if (ops.length > 0) {
                   let minLoc = ops[0].location;
@@ -655,6 +597,12 @@ export function QmdbPanel({
                       <strong>Tip:</strong> {event.tip.toString()}
                       {' · '}
                       <strong>Matched:</strong> {ops.length}
+                      {' · '}
+                      <strong>Updates:</strong> {counts.updates}
+                      {' · '}
+                      <strong>Deletes:</strong> {counts.deletes}
+                      {' · '}
+                      <strong>Commits:</strong> {counts.commits}
                       {' · '}
                       <strong>Locations:</strong> {locationRange}
                     </p>

@@ -4,6 +4,7 @@ export {
   matchRegex,
   OrderedQmdbClient,
   type BytesLike,
+  type DecodedHistoricalMultiProof,
   type LocatedOrderedOperation,
   type MerkleFamily,
   type OrderedOperation,

@@ -39,11 +39,11 @@ import {
   type BytesFilter,
 } from './generated/proto/store/v1/common_pb.js';
 import initWasm, {
+  decode_historical_multi_proof_operations,
   verify_current_operation_range_proof,
   verify_current_key_value_proof,
   verify_get_many_response,
   verify_get_range_response,
-  verify_historical_multi_proof,
   verify_historical_operation_range_proof,
 } from './generated/wasm/exoware_qmdb_wasm.js';
 
@@ -73,6 +73,10 @@ export interface LocatedOrderedOperation {
 }
 
 export interface VerifiedHistoricalMultiProof {
+  operations: LocatedOrderedOperation[];
+}
+
+export interface DecodedHistoricalMultiProof {
   operations: LocatedOrderedOperation[];
 }
 
@@ -114,10 +118,8 @@ export interface VerifiedCurrentKeyRangeProof {
 export interface OrderedSubscribeProof {
   resumeSequenceNumber: bigint;
   tip: bigint;
-  proof: VerifiedHistoricalMultiProof;
+  proof: DecodedHistoricalMultiProof;
 }
-
-export type TrustedRootResolver = (tip: bigint) => BytesLike | Promise<BytesLike>;
 
 export type OrderedQmdbClientOptions = SdkClientOptions & {
   merkleFamily?: MerkleFamily;
@@ -271,7 +273,6 @@ export class OrderedQmdbClient {
       valueFilters?: MessageInitShape<typeof BytesFilterSchema>[];
       sinceSequenceNumber?: bigint;
     },
-    rootForTip: TrustedRootResolver,
     options?: CallOptions,
   ): AsyncIterable<OrderedSubscribeProof> {
     await ensureWasm();
@@ -289,12 +290,10 @@ export class OrderedQmdbClient {
       if (!frame.proof) {
         throw new Error('qmdb subscribe response missing proof');
       }
-      const root = toBytes(await rootForTip(frame.tip));
-      const proof = verify_historical_multi_proof(
+      const proof = decode_historical_multi_proof_operations(
         toBinary(HistoricalMultiProofSchema, frame.proof),
-        root,
         this.merkleFamily,
-      ) as VerifiedHistoricalMultiProof;
+      ) as DecodedHistoricalMultiProof;
       yield {
         resumeSequenceNumber: frame.resumeSequenceNumber,
         tip: frame.tip,

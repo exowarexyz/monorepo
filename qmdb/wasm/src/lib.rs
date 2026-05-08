@@ -130,7 +130,30 @@ where
     OrderedOperation<F, Vec<u8>, Vec<u8>>:
         Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
 {
-    let operations = proto
+    let operations = decode_multi_operations_from_proto::<F>(proto)?;
+    let target_root = historical_target_root(&proto.ops_root, &proto.ops_root_witness, root)?;
+    let max_digests = proof_digest_cap(&proto.proof);
+    let proof = merkle::Proof::<F, commonware_cryptography::sha256::Digest>::decode_cfg(
+        proto.proof.as_slice(),
+        &max_digests,
+    )
+    .map_err(|err| format!("failed to decode historical multi proof: {err}"))?;
+    let hasher = commonware_storage::qmdb::hasher::<Sha256>();
+    if !verify_multi_proof(&hasher, &proof, &operations, &target_root) {
+        return Err("historical multi proof failed verification".to_string());
+    }
+    Ok(operations)
+}
+
+fn decode_multi_operations_from_proto<F>(
+    proto: &HistoricalMultiProof,
+) -> Result<Vec<(Location<F>, OrderedOperation<F, Vec<u8>, Vec<u8>>)>, String>
+where
+    F: merkle::Family,
+    OrderedOperation<F, Vec<u8>, Vec<u8>>:
+        Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
+{
+    proto
         .operations
         .iter()
         .map(|operation| {
@@ -148,19 +171,7 @@ where
                 })?,
             ))
         })
-        .collect::<Result<Vec<_>, String>>()?;
-    let target_root = historical_target_root(&proto.ops_root, &proto.ops_root_witness, root)?;
-    let max_digests = proof_digest_cap(&proto.proof);
-    let proof = merkle::Proof::<F, commonware_cryptography::sha256::Digest>::decode_cfg(
-        proto.proof.as_slice(),
-        &max_digests,
-    )
-    .map_err(|err| format!("failed to decode historical multi proof: {err}"))?;
-    let hasher = commonware_storage::qmdb::hasher::<Sha256>();
-    if !verify_multi_proof(&hasher, &proof, &operations, &target_root) {
-        return Err("historical multi proof failed verification".to_string());
-    }
-    Ok(operations)
+        .collect()
 }
 
 fn verify_operation_range_from_proto<F>(
@@ -646,6 +657,25 @@ where
     set_field(&verified, "location", &location_to_bigint(location)?)?;
     set_field(&verified, "operation", &to_js_operation(operation)?)?;
     Ok(verified.into())
+}
+
+#[wasm_bindgen]
+pub fn decode_historical_multi_proof_operations(
+    bytes: &[u8],
+    merkle_family: &str,
+) -> Result<JsValue, JsValue> {
+    let proto = HistoricalMultiProofView::decode_view(bytes)
+        .map_err(|err| js_err(format!("decode historical multi proof: {err}")))?
+        .to_owned_message();
+    match normalize_family(merkle_family, "historical multi proof").map_err(js_err)? {
+        "mmr" => historical_to_js(
+            decode_multi_operations_from_proto::<mmr::Family>(&proto).map_err(js_err)?,
+        ),
+        "mmb" => historical_to_js(
+            decode_multi_operations_from_proto::<mmb::Family>(&proto).map_err(js_err)?,
+        ),
+        _ => unreachable!("normalize_family only returns supported values"),
+    }
 }
 
 #[wasm_bindgen]
