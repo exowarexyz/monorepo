@@ -5,7 +5,6 @@
 
 mod connect;
 mod engine;
-mod prune;
 mod reduce;
 mod stream;
 mod validate;
@@ -20,6 +19,5 @@ pub use engine::{
     BatchLog, Ingest, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, RangeScanCursor,
     RangeScanFuture, Sequence, StoreEngine, StoreFuture,
 };
-pub use prune::{execute_prune, PruneError};
 pub use reduce::RangeError;
 pub use stream::{StreamHub, StreamNotification, StreamNotifier};

@@ -2,17 +2,24 @@
 //! RocksDB. A single reserved key holds the monotonically increasing sequence number for RPCs.
 //! A separate `batch_log` column family keeps per-sequence-number batches so the stream service
 //! can serve replay and point lookups. Batch-log pruning is driven exclusively by the compact
-//! service's `Sequence` scope (see `server::prune::execute_prune`).
+//! service's `Sequence` scope.
 
+use std::cmp::Ordering as CmpOrdering;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
+use exoware_sdk::keys::KeyCodec;
+use exoware_sdk::match_key::compile_payload_regex;
+use exoware_sdk::prune_policy::{KeysScope, OrderEncoding, PolicyScope, RetainPolicy};
+use exoware_sdk::store::compact::v1::Policy as ProtoPrunePolicy;
 use exoware_server::{
     BatchLog, Ingest, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, RangeScanCursor,
     RangeScanFuture, Sequence, StoreFuture,
 };
+use regex::bytes::Regex;
 use rocksdb::{
     ColumnFamily, ColumnFamilyDescriptor, DBIterator, Direction, IteratorMode, Options, DB,
 };
@@ -20,6 +27,7 @@ use rocksdb::{
 /// One reserved key for the sequence counter (not visible to normal range scans that skip it).
 const SEQ_META_KEY: &[u8] = b"__simulator_seq__";
 const BATCH_LOG_CF: &str = "batch_log";
+const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
 type RocksIterItem = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
 
 struct OwnedRocksIterator {
@@ -150,6 +158,100 @@ impl RangeScan for RocksRangeScanCursor {
     }
 }
 
+struct KeyEntry {
+    key: Bytes,
+    order_value: Vec<u8>,
+}
+
+fn extract_order_value(payload: &[u8], regex: &Regex, scope: &KeysScope) -> Option<Vec<u8>> {
+    let order_by = scope.order_by.as_ref()?;
+    let captures = regex.captures(payload)?;
+    let matched = captures.name(&order_by.capture_group)?;
+    let raw = matched.as_bytes();
+    match order_by.encoding {
+        OrderEncoding::BytesAsc => Some(raw.to_vec()),
+        OrderEncoding::U64Be | OrderEncoding::I64Be => {
+            if raw.len() == 8 {
+                Some(raw.to_vec())
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn extract_group_key(payload: &[u8], regex: &Regex, scope: &KeysScope) -> Option<Vec<u8>> {
+    if scope.group_by.capture_groups.is_empty() {
+        return Some(Vec::new());
+    }
+    let captures = regex.captures(payload)?;
+    let mut group_key = Vec::new();
+    for group_name in &scope.group_by.capture_groups {
+        let matched = captures.name(group_name)?;
+        let bytes = matched.as_bytes();
+        group_key.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        group_key.extend_from_slice(bytes);
+    }
+    Some(group_key)
+}
+
+fn compare_order_values(a: &[u8], b: &[u8], scope: &KeysScope) -> CmpOrdering {
+    match scope.order_by.as_ref().map(|o| &o.encoding) {
+        Some(OrderEncoding::U64Be) => {
+            let a_val = a.try_into().map(u64::from_be_bytes).unwrap_or(0);
+            let b_val = b.try_into().map(u64::from_be_bytes).unwrap_or(0);
+            a_val.cmp(&b_val)
+        }
+        Some(OrderEncoding::I64Be) => {
+            let a_val = a.try_into().map(i64::from_be_bytes).unwrap_or(0);
+            let b_val = b.try_into().map(i64::from_be_bytes).unwrap_or(0);
+            a_val.cmp(&b_val)
+        }
+        Some(OrderEncoding::BytesAsc) | None => a.cmp(b),
+    }
+}
+
+fn keys_to_delete(
+    mut entries: Vec<KeyEntry>,
+    scope: &KeysScope,
+    retain: &RetainPolicy,
+) -> Vec<Bytes> {
+    entries.sort_by(|a, b| compare_order_values(&a.order_value, &b.order_value, scope));
+
+    match retain {
+        RetainPolicy::KeepLatest { count } => {
+            if entries.len() <= *count {
+                return Vec::new();
+            }
+            entries[..entries.len() - count]
+                .iter()
+                .map(|e| e.key.clone())
+                .collect()
+        }
+        RetainPolicy::GreaterThan { threshold } => {
+            let threshold = threshold.to_be_bytes();
+            entries
+                .iter()
+                .filter(|e| {
+                    compare_order_values(&e.order_value, &threshold, scope) != CmpOrdering::Greater
+                })
+                .map(|e| e.key.clone())
+                .collect()
+        }
+        RetainPolicy::GreaterThanOrEqual { threshold } => {
+            let threshold = threshold.to_be_bytes();
+            entries
+                .iter()
+                .filter(|e| {
+                    compare_order_values(&e.order_value, &threshold, scope) == CmpOrdering::Less
+                })
+                .map(|e| e.key.clone())
+                .collect()
+        }
+        RetainPolicy::DropAll => entries.iter().map(|e| e.key.clone()).collect(),
+    }
+}
+
 /// Minimal RocksDB-backed store for the simulator: batch writes plus a global sequence u64
 /// plus a per-sequence batch log.
 #[derive(Clone)]
@@ -220,6 +322,135 @@ impl RocksStore {
         }
         self.db.get(key)
     }
+
+    fn delete_keys_rocksdb(&self, keys: &[Bytes]) -> Result<(), rocksdb::Error> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+
+        let next = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut batch = rocksdb::WriteBatch::default();
+        for k in keys {
+            batch.delete(k.as_ref());
+        }
+        batch.put(SEQ_META_KEY, next.to_le_bytes());
+
+        // Record an empty batch so sequence numbers stay contiguous for stream replay.
+        batch.put_cf(
+            self.batch_log_cf(),
+            next.to_be_bytes(),
+            encode_batch_entries(&[]),
+        );
+        self.db.write(batch)?;
+        if let Some(obs) = &self.observer {
+            obs.store(next, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    fn prune_batch_log_rocksdb(&self, cutoff_exclusive: u64) -> Result<u64, rocksdb::Error> {
+        let cf = self.batch_log_cf();
+        let end_key = cutoff_exclusive.to_be_bytes();
+        let mut deleted = 0u64;
+        let mut batch = rocksdb::WriteBatch::default();
+        let iter = self.db.iterator_cf(cf, IteratorMode::Start);
+        for item in iter {
+            let (k, _) = item?;
+            if k.as_ref() >= &end_key[..] {
+                break;
+            }
+            batch.delete_cf(cf, k.as_ref());
+            deleted += 1;
+        }
+        if deleted > 0 {
+            self.db.write(batch)?;
+        }
+        Ok(deleted)
+    }
+
+    fn apply_prune_policies_rocksdb(&self, policies: Vec<ProtoPrunePolicy>) -> Result<(), String> {
+        let document = exoware_sdk::prune_policy_document_from_proto_policies(&policies)?;
+        for policy in &document.policies {
+            match &policy.scope {
+                PolicyScope::Keys(scope) => {
+                    self.apply_key_prune_policy_rocksdb(scope, &policy.retain)?;
+                }
+                PolicyScope::Sequence => {
+                    self.apply_sequence_prune_policy_rocksdb(&policy.retain)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_key_prune_policy_rocksdb(
+        &self,
+        scope: &KeysScope,
+        retain: &RetainPolicy,
+    ) -> Result<(), String> {
+        let codec = KeyCodec::new(scope.match_key.reserved_bits, scope.match_key.prefix);
+        let regex = compile_payload_regex(&scope.match_key.payload_regex)
+            .map_err(|e| format!("policy: {e}"))?;
+
+        let (start, end) = codec.prefix_bounds();
+        let mut rows = RocksRangeScanState::new(self.db.clone(), start, end, usize::MAX, true);
+        let mut groups: BTreeMap<Vec<u8>, Vec<KeyEntry>> = BTreeMap::new();
+
+        loop {
+            let batch = rows.next_batch(PRUNE_SCAN_BATCH_SIZE)?;
+            if batch.is_empty() {
+                break;
+            }
+
+            for (key, _value) in batch {
+                if !codec.matches(&key) {
+                    continue;
+                }
+                let payload_len = codec.payload_capacity_bytes_for_key_len(key.len());
+                let payload = match codec.read_payload(&key, 0, payload_len) {
+                    Ok(payload) => payload,
+                    Err(_) => continue,
+                };
+                if !regex.is_match(&payload) {
+                    continue;
+                }
+
+                let group_key = match extract_group_key(&payload, &regex, scope) {
+                    Some(group_key) => group_key,
+                    None => continue,
+                };
+                let order_value = extract_order_value(&payload, &regex, scope).unwrap_or_default();
+
+                groups
+                    .entry(group_key)
+                    .or_default()
+                    .push(KeyEntry { key, order_value });
+            }
+        }
+
+        let mut all_deletes = Vec::new();
+        for (_group_key, entries) in groups {
+            all_deletes.extend(keys_to_delete(entries, scope, retain));
+        }
+        self.delete_keys_rocksdb(&all_deletes)
+            .map_err(|e| e.to_string())
+    }
+
+    fn apply_sequence_prune_policy_rocksdb(&self, retain: &RetainPolicy) -> Result<(), String> {
+        let current = self.sequence.load(Ordering::SeqCst);
+        let cutoff_exclusive = match retain {
+            RetainPolicy::KeepLatest { count } => {
+                let count = *count as u64;
+                current.saturating_add(1).saturating_sub(count)
+            }
+            RetainPolicy::GreaterThan { threshold } => threshold.saturating_add(1),
+            RetainPolicy::GreaterThanOrEqual { threshold } => *threshold,
+            RetainPolicy::DropAll => current.saturating_add(1),
+        };
+        self.prune_batch_log_rocksdb(cutoff_exclusive)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
 }
 
 impl Sequence for RocksStore {
@@ -285,56 +516,9 @@ impl Query for RocksStore {
 }
 
 impl Prune for RocksStore {
-    fn delete_batch(&self, keys: Vec<Bytes>) -> StoreFuture<u64> {
+    fn apply_prune_policies(&self, policies: Vec<ProtoPrunePolicy>) -> StoreFuture<()> {
         let store = self.clone();
-        Box::pin(async move {
-            let next = store.sequence.fetch_add(1, Ordering::SeqCst) + 1;
-            let mut batch = rocksdb::WriteBatch::default();
-            for k in &keys {
-                batch.delete(k.as_ref());
-            }
-            batch.put(SEQ_META_KEY, next.to_le_bytes());
-            // delete_batch is a second-class writer with no payload to log; record
-            // an empty batch so sequence numbers remain contiguous and GetBatch
-            // can distinguish "this sequence happened but contained no tracked
-            // entries" from "evicted / never existed".
-            batch.put_cf(
-                store.batch_log_cf(),
-                next.to_be_bytes(),
-                encode_batch_entries(&[]),
-            );
-            store.db.write(batch).map_err(|e| e.to_string())?;
-            if let Some(obs) = &store.observer {
-                obs.store(next, Ordering::SeqCst);
-            }
-            Ok(next)
-        })
-    }
-
-    fn prune_batch_log(&self, cutoff_exclusive: u64) -> StoreFuture<u64> {
-        let store = self.clone();
-        Box::pin(async move {
-            // Count before deleting so callers know how much was pruned. For the
-            // simulator a simple iterator scan is fine; a production engine would
-            // expose delete_range_cf and return the logical count separately.
-            let cf = store.batch_log_cf();
-            let end_key = cutoff_exclusive.to_be_bytes();
-            let mut deleted = 0u64;
-            let mut batch = rocksdb::WriteBatch::default();
-            let iter = store.db.iterator_cf(cf, IteratorMode::Start);
-            for item in iter {
-                let (k, _) = item.map_err(|e| e.to_string())?;
-                if k.as_ref() >= &end_key[..] {
-                    break;
-                }
-                batch.delete_cf(cf, k.as_ref());
-                deleted += 1;
-            }
-            if deleted > 0 {
-                store.db.write(batch).map_err(|e| e.to_string())?;
-            }
-            Ok(deleted)
-        })
+        Box::pin(async move { store.apply_prune_policies_rocksdb(policies) })
     }
 }
 

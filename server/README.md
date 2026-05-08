@@ -40,9 +40,10 @@ use exoware_server::{
 //   fn get_many(&self, keys: Vec<Bytes>) -> StoreFuture<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra)>;
 //
 //   Prune:
-//   Methods have default unsupported implementations; override the capabilities your backend serves.
-//   fn delete_batch(&self, keys: Vec<Bytes>) -> StoreFuture<u64>;
-//   fn prune_batch_log(&self, cutoff_exclusive: u64) -> StoreFuture<u64>;
+//   fn apply_prune_policies(
+//       &self,
+//       policies: Vec<exoware_sdk::store::compact::v1::Policy>,
+//   ) -> StoreFuture<()>;
 //
 //   BatchLog:
 //   fn get_batch(&self, sequence_number: u64) -> StoreFuture<Option<Vec<(Bytes, Bytes)>>>;

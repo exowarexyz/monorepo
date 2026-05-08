@@ -3,7 +3,7 @@
 use std::future::Future;
 
 use bytes::Bytes;
-use exoware_server::{Ingest, Prune, Query, Sequence};
+use exoware_server::{Ingest, Query, Sequence};
 use exoware_simulator::RocksStore;
 use tempfile::tempdir;
 
@@ -17,10 +17,6 @@ fn block_on<T>(future: impl Future<Output = T>) -> T {
 
 fn put_batch(store: &RocksStore, kvs: Vec<(Bytes, Bytes)>) -> u64 {
     block_on(store.put_batch(kvs)).expect("put_batch")
-}
-
-fn delete_batch(store: &RocksStore, keys: Vec<Bytes>) -> u64 {
-    block_on(store.delete_batch(keys)).expect("delete_batch")
 }
 
 fn seed_abc(store: &RocksStore) {
@@ -267,34 +263,4 @@ fn get_many_returns_none_for_seq_meta_key() {
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].1, None);
     assert_eq!(results[1], (b"a".to_vec(), Some(b"1".to_vec())));
-}
-
-// -- delete_batch --
-
-#[test]
-fn delete_batch_removes_keys() {
-    let dir = tempdir().expect("tempdir");
-    let store = RocksStore::open(dir.path()).expect("open db");
-    seed_abc(&store);
-
-    delete_batch(
-        &store,
-        vec![Bytes::from_static(b"a"), Bytes::from_static(b"c")],
-    );
-    assert!(get_value(&store, b"a").is_none());
-    assert_eq!(get_value(&store, b"b").as_deref(), Some(b"2".as_slice()));
-    assert!(get_value(&store, b"c").is_none());
-}
-
-#[test]
-fn delete_batch_advances_sequence() {
-    let dir = tempdir().expect("tempdir");
-    let store = RocksStore::open(dir.path()).expect("open db");
-    let s1 = put_batch(
-        &store,
-        vec![(Bytes::from_static(b"x"), Bytes::from_static(b"y"))],
-    );
-    let s2 = delete_batch(&store, vec![Bytes::from_static(b"x")]);
-    assert!(s2 > s1);
-    assert_eq!(store.current_sequence(), s2);
 }

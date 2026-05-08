@@ -2424,6 +2424,7 @@ dependencies = [
  "exoware-sdk",
  "exoware-server",
  "http",
+ "regex",
  "reqwest",
  "rocksdb",
  "tempfile",

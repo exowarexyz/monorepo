@@ -5,6 +5,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use buffa::MessageView;
 use bytes::Bytes;
 use connectrpc::{Chain, ConnectError, ConnectRpcService, Context, Limits};
 use exoware_proto::common::KvEntry;
@@ -226,16 +227,18 @@ impl From<AppState> for QueryState {
 
 #[derive(Clone)]
 pub struct CompactState {
-    pub query: Arc<dyn Query>,
     pub prune: Arc<dyn Prune>,
+}
+
+impl CompactState {
+    pub fn new(prune: Arc<dyn Prune>) -> Self {
+        Self { prune }
+    }
 }
 
 impl From<AppState> for CompactState {
     fn from(state: AppState) -> Self {
-        Self {
-            query: state.query,
-            prune: state.prune,
-        }
+        Self { prune: state.prune }
     }
 }
 
@@ -616,14 +619,8 @@ impl CompactConnect {
     }
 }
 
-fn prune_error_to_connect_error(err: crate::PruneError) -> ConnectError {
-    let message = err.to_string();
-    match err {
-        crate::PruneError::Unsupported { .. } => ConnectError::unimplemented(message),
-        crate::PruneError::Engine(_) | crate::PruneError::Policy(_) => {
-            ConnectError::internal(message)
-        }
-    }
+fn prune_error_to_connect_error(err: String) -> ConnectError {
+    ConnectError::internal(err)
 }
 
 impl CompactApi for CompactConnect {
@@ -635,9 +632,17 @@ impl CompactApi for CompactConnect {
         >,
     ) -> Result<(PruneResponse, Context), ConnectError> {
         validate::validate_prune_request(&request)?;
-        let document = exoware_proto::prune_policy_document_from_prune_request_view(&request)
+        let _document = exoware_proto::prune_policy_document_from_prune_request_view(&request)
             .map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
-        crate::prune::execute_prune(&*self.state.query, &*self.state.prune, &document)
+
+        let policies = request
+            .policies
+            .iter()
+            .map(|policy| policy.to_owned_message())
+            .collect();
+        self.state
+            .prune
+            .apply_prune_policies(policies)
             .await
             .map_err(prune_error_to_connect_error)?;
         Ok((PruneResponse::default(), ctx))
@@ -1120,6 +1125,10 @@ mod tests {
 
     use buffa::Message;
     use exoware_proto::store::common::v1::MatchKey as ProtoMatchKey;
+    use exoware_proto::store::compact::v1::{
+        policy, policy_retain, Policy as ProtoPolicy, PolicyRetain, PruneRequest, PruneRequestView,
+        RetainDropAll,
+    };
     use exoware_proto::store::stream::v1::{SubscribeRequest, SubscribeRequestView};
     use exoware_sdk::keys::KeyCodec;
     use exoware_sdk::kv_codec::KvReducedValue;
@@ -1134,15 +1143,6 @@ mod tests {
 
     const TEST_RESERVED_BITS: u8 = 4;
     const TEST_PREFIX: u16 = 1;
-
-    #[test]
-    fn unsupported_prune_maps_to_unimplemented() {
-        let err = prune_error_to_connect_error(crate::PruneError::Unsupported {
-            capability: "delete_batch",
-        });
-
-        assert_eq!(err.code, connectrpc::ErrorCode::Unimplemented);
-    }
 
     #[derive(Clone)]
     struct PublishDuringReplay {
@@ -1160,6 +1160,7 @@ mod tests {
         range_rows: Vec<(Bytes, Bytes)>,
         range_next_count: usize,
         query_extra: QueryExtra,
+        prune_policy_counts: Vec<usize>,
     }
 
     #[derive(Default)]
@@ -1320,20 +1321,15 @@ mod tests {
     }
 
     impl Prune for FakeEngine {
-        fn delete_batch(&self, _keys: Vec<Bytes>) -> StoreFuture<u64> {
+        fn apply_prune_policies(&self, policies: Vec<ProtoPolicy>) -> StoreFuture<()> {
             let result = self
                 .state
                 .lock()
                 .map(|mut state| {
-                    state.current_sequence += 1;
-                    state.current_sequence
+                    state.prune_policy_counts.push(policies.len());
                 })
                 .map_err(|e| e.to_string());
             Box::pin(ready(result))
-        }
-
-        fn prune_batch_log(&self, _cutoff_exclusive: u64) -> StoreFuture<u64> {
-            Box::pin(ready(Ok(0)))
         }
     }
 
@@ -1414,6 +1410,30 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct PruneOnlyEngine {
+        policy_counts: Mutex<Vec<usize>>,
+    }
+
+    impl PruneOnlyEngine {
+        fn applied_count(&self) -> usize {
+            self.policy_counts.lock().expect("lock").len()
+        }
+    }
+
+    impl Prune for PruneOnlyEngine {
+        fn apply_prune_policies(&self, policies: Vec<ProtoPolicy>) -> StoreFuture<()> {
+            let result = self
+                .policy_counts
+                .lock()
+                .map(|mut counts| {
+                    counts.push(policies.len());
+                })
+                .map_err(|e| e.to_string());
+            Box::pin(ready(result))
+        }
+    }
+
     struct ManualNotifier {
         current_sequence: AtomicU64,
         notify: Arc<Notify>,
@@ -1469,6 +1489,32 @@ mod tests {
         .encode_to_vec()
     }
 
+    fn sequence_drop_all_policy() -> ProtoPolicy {
+        ProtoPolicy {
+            scope: Some(policy::Scope::Sequence(Box::default())),
+            retain: Some(PolicyRetain {
+                kind: Some(policy_retain::Kind::DropAll(Box::new(
+                    RetainDropAll::default(),
+                ))),
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        }
+    }
+
+    fn prune_request(
+        policies: Vec<ProtoPolicy>,
+    ) -> buffa::view::OwnedView<PruneRequestView<'static>> {
+        let bytes = PruneRequest {
+            policies,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        buffa::view::OwnedView::<PruneRequestView<'static>>::decode(bytes.into())
+            .expect("decode prune request")
+    }
+
     async fn subscribe_stream(
         connect: &StreamConnect,
         since_sequence_number: Option<u64>,
@@ -1481,6 +1527,37 @@ mod tests {
             .expect("decode subscribe request");
         let (stream, _ctx) = StreamApi::subscribe(connect, Context::default(), request).await?;
         Ok(stream)
+    }
+
+    #[tokio::test]
+    async fn compact_connect_accepts_prune_only_engine() {
+        let prune = Arc::new(PruneOnlyEngine::default());
+        let connect = CompactConnect::new(CompactState::new(prune.clone()));
+        let request = prune_request(vec![sequence_drop_all_policy()]);
+
+        CompactApi::prune(&connect, Context::default(), request)
+            .await
+            .expect("prune");
+
+        assert_eq!(prune.applied_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn compact_validates_before_engine_prune() {
+        let prune = Arc::new(PruneOnlyEngine::default());
+        let connect = CompactConnect::new(CompactState::new(prune.clone()));
+        let invalid_policy = ProtoPolicy {
+            scope: Some(policy::Scope::Sequence(Box::default())),
+            ..Default::default()
+        };
+        let request = prune_request(vec![invalid_policy]);
+
+        let err = CompactApi::prune(&connect, Context::default(), request)
+            .await
+            .expect_err("invalid prune");
+
+        assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
+        assert_eq!(prune.applied_count(), 0);
     }
 
     #[tokio::test]

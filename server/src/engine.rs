@@ -69,22 +69,12 @@ pub trait Query: Sequence {
 }
 
 /// Prune mutation capability.
-pub(crate) const DELETE_BATCH_UNSUPPORTED: &str = "delete_batch is not supported by this engine";
-pub(crate) const PRUNE_BATCH_LOG_UNSUPPORTED: &str =
-    "prune_batch_log is not supported by this engine";
-
-pub trait Prune: Sequence {
-    /// Delete a batch of keys atomically. Returns the new global sequence number.
-    fn delete_batch(&self, _keys: Vec<Bytes>) -> StoreFuture<u64> {
-        Box::pin(async { Err(DELETE_BATCH_UNSUPPORTED.to_string()) })
-    }
-
-    /// Delete all batch-log entries with `sequence_number < cutoff_exclusive`.
-    /// Returns the number of entries deleted. Invoked only by the compact
-    /// service's batch-log policy scope — never by ingest.
-    fn prune_batch_log(&self, _cutoff_exclusive: u64) -> StoreFuture<u64> {
-        Box::pin(async { Err(PRUNE_BATCH_LOG_UNSUPPORTED.to_string()) })
-    }
+pub trait Prune: Send + Sync + 'static {
+    /// Apply prune policies sequentially.
+    fn apply_prune_policies(
+        &self,
+        policies: Vec<exoware_sdk::store::compact::v1::Policy>,
+    ) -> StoreFuture<()>;
 }
 
 /// Retained per-sequence batch-log access for stream replay and lookups.
