@@ -112,7 +112,7 @@ async fn build_local_reference(
 ) -> LocalReference {
     tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
-            use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
             let cfg = common::ordered_variable_config(
                 "ordered-writer",
@@ -123,7 +123,7 @@ async fn build_local_reference(
                 ),
                 NZU64!(8),
             );
-            let mut db: LocalDb = LocalDb::init(context.with_label("qmdb"), cfg)
+            let mut db: LocalDb = LocalDb::init(context.child("qmdb"), cfg)
                 .await
                 .expect("init");
             for batch_writes in &batches {

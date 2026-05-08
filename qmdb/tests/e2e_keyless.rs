@@ -73,13 +73,11 @@ where
 {
     tokio::task::spawn_blocking(|| {
         deterministic::Runner::default().start(|context| async move {
-            use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
             let cfg =
                 common::keyless_config("keyless", page_cache, ((0..=10000).into(), ()), NZU64!(7));
-            let mut db: LocalDb<F> = LocalDb::init(context.with_label("db"), cfg)
-                .await
-                .expect("init");
+            let mut db: LocalDb<F> = LocalDb::init(context.child("db"), cfg).await.expect("init");
 
             let first = b"first-value".to_vec();
             let second = b"second-value".to_vec();
@@ -125,7 +123,7 @@ where
 {
     tokio::task::spawn_blocking(|| {
         deterministic::Runner::default().start(|context| async move {
-            use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
             let cfg = commonware_storage::qmdb::keyless::Config {
                 merkle: common::merkle_config("keyless_fixed", page_cache.clone()),
@@ -136,10 +134,9 @@ where
                     write_buffer: NZUsize!(1024),
                 },
             };
-            let mut db: FixedLocalDb<F> =
-                FixedLocalDb::init(context.with_label("keyless_fixed"), cfg)
-                    .await
-                    .expect("init fixed");
+            let mut db: FixedLocalDb<F> = FixedLocalDb::init(context.child("keyless_fixed"), cfg)
+                .await
+                .expect("init fixed");
 
             let first = commonware_cryptography::Sha256::fill(0x11);
             let second = commonware_cryptography::Sha256::fill(0x22);

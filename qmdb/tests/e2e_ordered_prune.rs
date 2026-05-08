@@ -17,7 +17,7 @@ use std::num::NonZeroU64;
 
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
-use commonware_runtime::{buffer::paged::CacheRef, Metrics as _, Runner as _};
+use commonware_runtime::{buffer::paged::CacheRef, Runner as _, Supervisor as _};
 use commonware_storage::merkle::{mmr, Location};
 use commonware_storage::qmdb::{
     any::ordered::variable::Operation as OrderedOp,
@@ -108,9 +108,7 @@ async fn mirror_ordered_prune_past_chunk_zero() {
                 ),
                 NZU64!(8),
             );
-            let mut db: LocalDb = LocalDb::init(context.with_label("db"), cfg)
-                .await
-                .expect("init");
+            let mut db: LocalDb = LocalDb::init(context.child("db"), cfg).await.expect("init");
 
             let mut previous_ops: Vec<BatchOp> = Vec::new();
             let mut counter: u64 = 0;

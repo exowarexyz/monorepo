@@ -63,7 +63,7 @@ type WriteBatch = Vec<(Vec<u8>, Option<Vec<u8>>)>;
 async fn build_local_reference(batches: Vec<WriteBatch>) -> LocalReference {
     tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
-            use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
             let cfg = common::unordered_variable_config(
                 "unordered-writer",
@@ -74,7 +74,7 @@ async fn build_local_reference(batches: Vec<WriteBatch>) -> LocalReference {
                 ),
                 NZU64!(8),
             );
-            let mut db: LocalDb = LocalDb::init(context.with_label("unordered"), cfg)
+            let mut db: LocalDb = LocalDb::init(context.child("unordered"), cfg)
                 .await
                 .expect("init");
             for batch_writes in &batches {

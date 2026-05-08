@@ -17,13 +17,13 @@ axum = { workspace = true }
 bytes = { workspace = true }
 buffa = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
-commonware-codec = { git = "https://github.com/commonwarexyz/monorepo", rev = "980c293c9ede99e60e02a8c538a26f7ee0783d20" }
-commonware-parallel = { git = "https://github.com/commonwarexyz/monorepo", rev = "980c293c9ede99e60e02a8c538a26f7ee0783d20" }
-commonware-runtime = { git = "https://github.com/commonwarexyz/monorepo", rev = "980c293c9ede99e60e02a8c538a26f7ee0783d20" }
+commonware-codec = { workspace = true }
+commonware-parallel = { workspace = true }
+commonware-runtime = { workspace = true }
 futures = { workspace = true }
-commonware-cryptography = { git = "https://github.com/commonwarexyz/monorepo", rev = "980c293c9ede99e60e02a8c538a26f7ee0783d20" }
-commonware-storage = { git = "https://github.com/commonwarexyz/monorepo", rev = "980c293c9ede99e60e02a8c538a26f7ee0783d20" }
-commonware-utils = { git = "https://github.com/commonwarexyz/monorepo", rev = "980c293c9ede99e60e02a8c538a26f7ee0783d20" }
+commonware-cryptography = { workspace = true }
+commonware-storage = { workspace = true }
+commonware-utils = { workspace = true }
 connectrpc = { workspace = true }
 exoware-sdk = { workspace = true }
 hex = { workspace = true }
@@ -39,7 +39,7 @@ tracing-subscriber = { workspace = true }
 exoware-qmdb = { path = ".", features = ["test-utils"] }
 axum = { workspace = true }
 bytes = { workspace = true }
-commonware-runtime = { git = "https://github.com/commonwarexyz/monorepo", rev = "980c293c9ede99e60e02a8c538a26f7ee0783d20" }
+commonware-runtime = { workspace = true }
 exoware-simulator = { path = "../examples/simulator" }
 exoware-server = { workspace = true }
 hex = { workspace = true }

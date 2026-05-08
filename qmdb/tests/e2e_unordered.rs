@@ -70,7 +70,7 @@ struct FixedLocalReference {
 async fn build_local_db() -> LocalReference {
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
-            use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
             let cfg = common::unordered_variable_config(
                 "unordered",
@@ -81,7 +81,7 @@ async fn build_local_db() -> LocalReference {
                 ),
                 NZU64!(8),
             );
-            let mut db: LocalDb = LocalDb::init(context.with_label("unordered"), cfg)
+            let mut db: LocalDb = LocalDb::init(context.child("unordered"), cfg)
                 .await
                 .expect("init");
 
@@ -131,7 +131,7 @@ async fn build_local_db() -> LocalReference {
 async fn build_fixed_local_db() -> FixedLocalReference {
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
-            use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
             let cfg = commonware_storage::qmdb::any::Config {
                 merkle_config: common::merkle_config("unordered_fixed", page_cache.clone()),
@@ -143,10 +143,9 @@ async fn build_fixed_local_db() -> FixedLocalReference {
                 },
                 translator: TwoCap,
             };
-            let mut db: FixedLocalDb =
-                FixedLocalDb::init(context.with_label("unordered_fixed"), cfg)
-                    .await
-                    .expect("init fixed");
+            let mut db: FixedLocalDb = FixedLocalDb::init(context.child("unordered_fixed"), cfg)
+                .await
+                .expect("init fixed");
 
             let alpha = Sha256::fill(0xA1);
             let beta = Sha256::fill(0xB2);

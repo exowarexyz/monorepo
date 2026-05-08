@@ -17,7 +17,7 @@ use std::num::NonZeroU64;
 
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics as _, Runner as _};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner as _, Supervisor as _};
 use commonware_storage::merkle::{mmr, Location, Proof as BatchProof};
 use commonware_storage::qmdb::{
     any::unordered::variable::Db as LocalUnorderedDb,
@@ -104,9 +104,7 @@ async fn run_keyless_local(
                 NZU64!(7),
             );
             let mut db: Keyless<mmr::Family, deterministic::Context, Vec<u8>, Sha256> =
-                Keyless::init(context.with_label("db"), cfg)
-                    .await
-                    .expect("init");
+                Keyless::init(context.child("db"), cfg).await.expect("init");
             for batch in batches {
                 let finalized = {
                     let mut b = db.new_batch();
@@ -229,7 +227,7 @@ async fn run_unordered_local(
                 Vec<u8>,
                 Sha256,
                 TwoCap,
-            > = LocalUnorderedDb::init(context.with_label("db"), cfg)
+            > = LocalUnorderedDb::init(context.child("db"), cfg)
                 .await
                 .expect("init");
             for batch in batches {
@@ -338,7 +336,7 @@ async fn run_immutable_local(
                 Vec<u8>,
                 Sha256,
                 TwoCap,
-            > = Immutable::init(context.with_label("db"), cfg)
+            > = Immutable::init(context.child("db"), cfg)
                 .await
                 .expect("init");
             for batch in batches {
@@ -516,7 +514,7 @@ async fn run_ordered_local(
                 Sha256,
                 TwoCap,
                 N,
-            > = LocalOrderedDb::init(context.with_label("db"), cfg)
+            > = LocalOrderedDb::init(context.child("db"), cfg)
                 .await
                 .expect("init");
             for batch in batches_clone {

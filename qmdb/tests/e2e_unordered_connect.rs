@@ -182,7 +182,7 @@ async fn boundary_from_local_current_db(
 async fn build_local_batch() -> LocalBatch {
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
-            use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
             let cfg = common::unordered_variable_config(
                 "unordered-connect",
@@ -193,7 +193,7 @@ async fn build_local_batch() -> LocalBatch {
                 ),
                 NZU64!(8),
             );
-            let mut db: LocalDb = LocalDb::init(context.with_label("unordered"), cfg)
+            let mut db: LocalDb = LocalDb::init(context.child("unordered"), cfg)
                 .await
                 .expect("init");
 
@@ -233,7 +233,7 @@ async fn build_local_batch() -> LocalBatch {
 async fn build_fixed_local_batch() -> FixedLocalBatch {
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
-            use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
             let cfg = common::ordered_variable_config(
                 "unordered-current-connect",
@@ -241,7 +241,7 @@ async fn build_fixed_local_batch() -> FixedLocalBatch {
                 fixed_op_cfg(),
                 NZU64!(8),
             );
-            let mut db: LocalCurrentDb = LocalCurrentDb::init(context.with_label("current"), cfg)
+            let mut db: LocalCurrentDb = LocalCurrentDb::init(context.child("current"), cfg)
                 .await
                 .expect("init");
 

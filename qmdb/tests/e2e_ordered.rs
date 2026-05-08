@@ -168,6 +168,12 @@ struct LocalReference<F: Family> {
     values: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 }
 
+struct ChunkSizedLocalReference<F: Family, const M: usize> {
+    latest_location: Location<F>,
+    operations: Vec<BatchOperation<F>>,
+    current_boundary: CurrentBoundaryState<Digest, M, F>,
+}
+
 struct FixedLocalReference<F: Family> {
     latest_location: Location<F>,
     operations: Vec<FixedBatchOperation<F>>,
@@ -182,11 +188,11 @@ where
 {
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
-            use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
             let cfg =
                 common::ordered_variable_config("ordered", page_cache, op_cfg::<F>(), NZU64!(8));
-            let mut db: LocalDb<F> = LocalDb::init(context.with_label("qmdb"), cfg)
+            let mut db: LocalDb<F> = LocalDb::init(context.child("qmdb"), cfg)
                 .await
                 .expect("init");
 
@@ -236,6 +242,108 @@ where
     .expect("join")
 }
 
+async fn boundary_from_local_db_with_chunk_size<F, const M: usize>(
+    db: &LocalQmdbDb<F, cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, M>,
+    previous_operations: Option<&[BatchOperation<F>]>,
+    operations: &[BatchOperation<F>],
+) -> CurrentBoundaryState<Digest, M, F>
+where
+    F: Graftable,
+    BatchOperation<F>: commonware_codec::Codec,
+{
+    let mut ops_root_hasher = commonware_storage::qmdb::hasher::<Sha256>();
+    let ops_root_witness = db
+        .ops_root_witness(&mut ops_root_hasher)
+        .await
+        .expect("ops root witness");
+    recover_boundary_state::<F, Sha256, _, M, _, _>(
+        previous_operations,
+        operations,
+        db.root(),
+        ops_root_witness,
+        |location| async move {
+            let mut hasher = Sha256::default();
+            let (proof, mut proof_ops, mut chunks) = db
+                .range_proof(&mut hasher, location, NZU64!(1))
+                .await
+                .map_err(|error| {
+                    exoware_qmdb::QmdbError::CorruptData(format!(
+                        "local current range proof at {location}: {error}"
+                    ))
+                })?;
+            proof_ops.pop().ok_or_else(|| {
+                exoware_qmdb::QmdbError::CorruptData(format!(
+                    "local current range proof at {location} returned no operations"
+                ))
+            })?;
+            let chunk = chunks.pop().ok_or_else(|| {
+                exoware_qmdb::QmdbError::CorruptData(format!(
+                    "local current range proof at {location} returned no chunks"
+                ))
+            })?;
+            Ok((proof, chunk))
+        },
+    )
+    .await
+    .expect("recover boundary state")
+}
+
+async fn build_local_db_with_write_count<F, const M: usize>(
+    prefix: &'static str,
+    write_count: usize,
+) -> ChunkSizedLocalReference<F, M>
+where
+    F: Graftable,
+    BatchOperation<F>: commonware_codec::Codec + Clone,
+{
+    tokio::task::spawn_blocking(move || {
+        cw_tokio::Runner::default().start(|context| async move {
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = common::ordered_variable_config(prefix, page_cache, op_cfg::<F>(), NZU64!(8));
+            let mut db: LocalQmdbDb<F, cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, M> =
+                LocalQmdbDb::init(context.child(prefix), cfg)
+                    .await
+                    .expect("init");
+
+            let finalized = {
+                let mut batch = db.new_batch();
+                for index in 0..write_count {
+                    batch = batch.write(
+                        format!("k-{index:08}").into_bytes(),
+                        Some(format!("v-{index:08}").into_bytes()),
+                    );
+                }
+                batch
+                    .merkleize(&db, None::<Vec<u8>>)
+                    .await
+                    .expect("merkleize")
+            };
+            db.apply_batch(finalized).await.expect("apply");
+
+            let latest = db.bounds().await.end - 1;
+            let n = NonZeroU64::new(*latest + 1).unwrap();
+            let (_proof, ops): (Proof<F, Digest>, Vec<BatchOperation<F>>) = db
+                .ops_historical_proof(latest + 1, Location::<F>::new(0), n)
+                .await
+                .expect("proof");
+
+            let boundary = boundary_from_local_db_with_chunk_size::<F, M>(&db, None, &ops).await;
+
+            db.sync().await.expect("sync");
+            db.destroy().await.expect("destroy");
+
+            ChunkSizedLocalReference {
+                latest_location: latest,
+                operations: ops,
+                current_boundary: boundary,
+            }
+        })
+    })
+    .await
+    .expect("join")
+}
+
 async fn build_fixed_local_db<F>() -> FixedLocalReference<F>
 where
     F: Graftable,
@@ -243,7 +351,7 @@ where
 {
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
-            use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
             let cfg = commonware_storage::qmdb::current::Config {
                 merkle_config: common::merkle_config("ordered_fixed", page_cache.clone()),
@@ -256,10 +364,9 @@ where
                 grafted_metadata_partition: "ordered_fixed_grafted_metadata".to_string(),
                 translator: TwoCap,
             };
-            let mut db: FixedLocalDb<F> =
-                FixedLocalDb::init(context.with_label("ordered_fixed"), cfg)
-                    .await
-                    .expect("init fixed");
+            let mut db: FixedLocalDb<F> = FixedLocalDb::init(context.child("ordered_fixed"), cfg)
+                .await
+                .expect("init fixed");
 
             let alpha = Sha256::fill(0xA1);
             let beta = Sha256::fill(0xB2);
@@ -396,6 +503,48 @@ async fn ordered_mmb_round_trip() {
         QmdbOperation::Update(update) => {
             assert_eq!(update.key, b"alpha".to_vec());
             assert_eq!(update.value, b"one".to_vec());
+        }
+        _ => panic!("expected Update operation"),
+    }
+}
+
+#[tokio::test]
+async fn ordered_mmb_multi_peak_grafted_chunk_round_trip() {
+    let (_dir, _server, client) = common::local_store_client().await;
+    let local = build_local_db_with_write_count::<mmb::Family, N>("ordered_mmb_grafted", 511).await;
+    assert!(
+        local.current_boundary.grafted_nodes.len() >= 2,
+        "test must cross a grafted chunk boundary"
+    );
+
+    let writer: OrderedWriter<mmb::Family, Sha256, Vec<u8>, Vec<u8>, N> =
+        OrderedWriter::empty(client.clone());
+    common::commit_ordered_upload(&client, &writer, &local.operations, &local.current_boundary)
+        .await
+        .expect("commit upload");
+
+    let c: OrderedClient<mmb::Family, Sha256, Vec<u8>, Vec<u8>, N> =
+        OrderedClient::from_client(client.clone(), op_cfg::<mmb::Family>(), update_row_cfg());
+    let current = c
+        .current_operation_range_proof(
+            local.latest_location,
+            Location::<mmb::Family>::new(0),
+            local.operations.len() as u32,
+        )
+        .await
+        .expect("current operation range proof");
+    assert_eq!(current.operations, local.operations);
+
+    let key = b"k-00000007".to_vec();
+    let key_proof = c
+        .key_value_proof_at(local.latest_location, key.as_slice())
+        .await
+        .expect("key_value_proof_at");
+    assert_eq!(key_proof.root, local.current_boundary.root);
+    match &key_proof.operation {
+        QmdbOperation::Update(update) => {
+            assert_eq!(update.key, key);
+            assert_eq!(update.value, b"v-00000007".to_vec());
         }
         _ => panic!("expected Update operation"),
     }

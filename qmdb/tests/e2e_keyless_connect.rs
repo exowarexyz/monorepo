@@ -56,13 +56,11 @@ struct LocalBatch {
 async fn build_local_batch() -> LocalBatch {
     tokio::task::spawn_blocking(|| {
         deterministic::Runner::default().start(|context| async move {
-            use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
             let cfg =
                 common::keyless_config("keyless", page_cache, ((0..=10000).into(), ()), NZU64!(7));
-            let mut db: LocalDb = LocalDb::init(context.with_label("db"), cfg)
-                .await
-                .expect("init");
+            let mut db: LocalDb = LocalDb::init(context.child("db"), cfg).await.expect("init");
 
             let finalized = {
                 let batch = db

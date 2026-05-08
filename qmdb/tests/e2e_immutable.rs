@@ -99,7 +99,7 @@ struct FixedLocalReference {
 async fn build_local_db() -> LocalReference {
     tokio::task::spawn_blocking(|| {
         deterministic::Runner::default().start(|context| async move {
-            use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
             let cfg = common::immutable_variable_config(
                 "immutable",
@@ -107,9 +107,7 @@ async fn build_local_db() -> LocalReference {
                 ((), ((0..=10000).into(), ())),
                 NZU64!(5),
             );
-            let mut db: LocalDb = LocalDb::init(context.with_label("db"), cfg)
-                .await
-                .expect("init");
+            let mut db: LocalDb = LocalDb::init(context.child("db"), cfg).await.expect("init");
 
             let key_a = FixedBytes::new([0x11; 32]);
             let key_b = FixedBytes::new([0x22; 32]);
@@ -150,7 +148,7 @@ async fn build_local_db() -> LocalReference {
 async fn build_fixed_local_db() -> FixedLocalReference {
     tokio::task::spawn_blocking(|| {
         deterministic::Runner::default().start(|context| async move {
-            use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
             let cfg = commonware_storage::qmdb::immutable::Config {
                 merkle_config: common::merkle_config("immutable_fixed", page_cache.clone()),
@@ -162,10 +160,9 @@ async fn build_fixed_local_db() -> FixedLocalReference {
                 },
                 translator: TwoCap,
             };
-            let mut db: FixedLocalDb =
-                FixedLocalDb::init(context.with_label("immutable_fixed"), cfg)
-                    .await
-                    .expect("init fixed");
+            let mut db: FixedLocalDb = FixedLocalDb::init(context.child("immutable_fixed"), cfg)
+                .await
+                .expect("init fixed");
 
             let key_a = FixedBytes::new([0x11; 32]);
             let key_b = FixedBytes::new([0x22; 32]);

@@ -1,6 +1,6 @@
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
-use commonware_storage::merkle::{Family, Graftable, Location, Position};
+use commonware_storage::merkle::{Family, Location, Position};
 use exoware_sdk::keys::{Key, KeyCodec};
 
 use crate::error::QmdbError;
@@ -74,27 +74,8 @@ pub(crate) const fn bitmap_chunk_bits<const N: usize>() -> u64 {
     (N as u64) * 8
 }
 
-pub(crate) const fn grafting_height_for<const N: usize>() -> u32 {
-    bitmap_chunk_bits::<N>().trailing_zeros()
-}
-
 pub(crate) fn chunk_index_for_location<F: Family, const N: usize>(location: Location<F>) -> u64 {
     *location / bitmap_chunk_bits::<N>()
-}
-
-pub(crate) fn ops_to_grafted_pos<F: Graftable>(
-    ops_pos: Position<F>,
-    grafting_height: u32,
-) -> Position<F> {
-    let ops_height = F::pos_to_height(ops_pos);
-    assert!(
-        ops_height >= grafting_height,
-        "position height {ops_height} < grafting height {grafting_height}"
-    );
-    let grafted_height = ops_height - grafting_height;
-    let ops_leaf_loc = F::leftmost_leaf(ops_pos, ops_height);
-    let chunk_idx = *ops_leaf_loc >> grafting_height;
-    F::subtree_root_position(Location::new(chunk_idx), grafted_height)
 }
 
 pub(crate) fn decode_digest<D: Digest>(bytes: &[u8], label: String) -> Result<D, QmdbError> {

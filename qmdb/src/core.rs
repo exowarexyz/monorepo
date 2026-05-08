@@ -5,6 +5,7 @@ use commonware_codec::{Codec, Encode, Read as CodecRead};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::qmdb::{
     any::{ordered, unordered, value::ValueEncoding},
+    current::grafting,
     operation::Key as QmdbKey,
 };
 use commonware_storage::{
@@ -18,8 +19,8 @@ use crate::codec::{
     decode_digest, decode_operation_location_key, decode_update_location,
     decode_watermark_location, encode_chunk_key, encode_current_meta_key, encode_grafted_node_key,
     encode_node_key, encode_operation_key, encode_ops_root_witness_key, encode_presence_key,
-    encode_update_key, encode_watermark_key, ensure_encoded_value_size, grafting_height_for,
-    merkle_size_for_watermark, ops_to_grafted_pos, UpdateRow, WATERMARK_CODEC,
+    encode_update_key, encode_watermark_key, ensure_encoded_value_size, merkle_size_for_watermark,
+    UpdateRow, WATERMARK_CODEC,
 };
 use crate::error::QmdbError;
 use crate::VersionedValue;
@@ -439,7 +440,7 @@ impl PreparedCurrentBoundaryUpload {
         }
         for &(ops_position, digest) in &current_boundary.grafted_nodes {
             let grafted_position =
-                ops_to_grafted_pos::<F>(ops_position, grafting_height_for::<N>());
+                grafting::ops_to_grafted_pos::<F>(ops_position, grafting::height::<N>());
             rows.push((
                 encode_grafted_node_key(grafted_position, latest_location),
                 digest.as_ref().to_vec(),
@@ -551,7 +552,7 @@ mod tests {
 
         let upload =
             PreparedCurrentBoundaryUpload::build(latest_location, &boundary).expect("upload");
-        let grafted_position = ops_to_grafted_pos(ops_position, grafting_height_for::<32>());
+        let grafted_position = grafting::ops_to_grafted_pos(ops_position, grafting::height::<32>());
         let expected_key = encode_grafted_node_key(grafted_position, latest_location);
         let stale_ops_key = encode_grafted_node_key(ops_position, latest_location);
 

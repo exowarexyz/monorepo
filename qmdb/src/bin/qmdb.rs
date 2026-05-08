@@ -192,7 +192,7 @@ async fn seed(
     tokio::task::spawn_blocking(move || {
         let runner_cfg = cw_tokio::Config::new().with_storage_directory(directory);
         cw_tokio::Runner::new(runner_cfg).start(|context| async move {
-            use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
 
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
             let cfg = VariableConfig {
@@ -226,7 +226,7 @@ async fn seed(
                 Sha256,
                 TwoCap,
                 N,
-            >::init(context.with_label("qmdb_seed"), cfg)
+            >::init(context.child("qmdb_seed"), cfg)
             .await
             .expect("init local ordered db");
 

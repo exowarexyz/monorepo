@@ -12,8 +12,8 @@ crate-type = ["cdylib"]
 [dependencies]
 buffa = { workspace = true }
 commonware-codec = { workspace = true }
-commonware-cryptography = { git = "https://github.com/commonwarexyz/monorepo", rev = "980c293c9ede99e60e02a8c538a26f7ee0783d20" }
-commonware-storage = { git = "https://github.com/commonwarexyz/monorepo", rev = "980c293c9ede99e60e02a8c538a26f7ee0783d20" }
+commonware-cryptography = { workspace = true }
+commonware-storage = { workspace = true }
 connectrpc = { version = "0.3.2", default-features = false }
 futures = { workspace = true }
 http-body = "1"

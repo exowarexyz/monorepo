@@ -29,7 +29,12 @@ axum = "0.8.1"
 base64 = "0.22.1"
 hex = "0.4"
 regex = "1"
-commonware-codec = { git = "https://github.com/commonwarexyz/monorepo", rev = "980c293c9ede99e60e02a8c538a26f7ee0783d20" }
+commonware-codec = { git = "https://github.com/commonwarexyz/monorepo", rev = "cae4540e4289611309ffab844cddc599b0718c2d", package = "commonware-codec" }
+commonware-cryptography = { git = "https://github.com/commonwarexyz/monorepo", rev = "cae4540e4289611309ffab844cddc599b0718c2d", package = "commonware-cryptography" }
+commonware-parallel = { git = "https://github.com/commonwarexyz/monorepo", rev = "cae4540e4289611309ffab844cddc599b0718c2d", package = "commonware-parallel" }
+commonware-runtime = { git = "https://github.com/commonwarexyz/monorepo", rev = "cae4540e4289611309ffab844cddc599b0718c2d", package = "commonware-runtime" }
+commonware-storage = { git = "https://github.com/commonwarexyz/monorepo", rev = "cae4540e4289611309ffab844cddc599b0718c2d", package = "commonware-storage" }
+commonware-utils = { git = "https://github.com/commonwarexyz/monorepo", rev = "cae4540e4289611309ffab844cddc599b0718c2d", package = "commonware-utils" }
 rocksdb = "0.22.0"
 rand = "0.8.5"
 bincode = "1.3.3"

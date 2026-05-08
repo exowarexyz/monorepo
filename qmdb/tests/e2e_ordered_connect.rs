@@ -183,7 +183,7 @@ async fn build_local_batch_with_writes(label: &str, writes: &[(Vec<u8>, Vec<u8>)
     let writes = writes.to_vec();
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
-            use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
             let cfg = common::ordered_variable_config(
                 &label,
@@ -194,7 +194,7 @@ async fn build_local_batch_with_writes(label: &str, writes: &[(Vec<u8>, Vec<u8>)
                 ),
                 NZU64!(8),
             );
-            let mut db: LocalDb = LocalDb::init(context.with_label("qmdb"), cfg)
+            let mut db: LocalDb = LocalDb::init(context.child("qmdb"), cfg)
                 .await
                 .expect("init");
 

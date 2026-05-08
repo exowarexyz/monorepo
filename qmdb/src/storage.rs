@@ -5,13 +5,12 @@ use commonware_cryptography::Digest;
 use commonware_storage::merkle::{
     self, storage::Storage as MerkleStorage, Family, Graftable, Location, Position,
 };
+use commonware_storage::qmdb::current::grafting;
 use exoware_sdk::{RangeMode, SerializableReadSession};
 
 use crate::auth::encode_auth_node_key;
 use crate::auth::AuthenticatedBackendNamespace;
-use crate::codec::{
-    encode_grafted_node_key, encode_node_key, grafting_height_for, ops_to_grafted_pos,
-};
+use crate::codec::{encode_grafted_node_key, encode_node_key};
 
 pub(crate) struct KvMerkleStorage<'a, F: Family, D: Digest> {
     pub(crate) session: &'a SerializableReadSession,
@@ -62,7 +61,8 @@ impl<F: Graftable, D: Digest, const N: usize> MerkleStorage<F> for KvCurrentStor
     }
 
     async fn get_node(&self, position: Position<F>) -> Result<Option<D>, merkle::Error<F>> {
-        if F::pos_to_height(position) < grafting_height_for::<N>() {
+        let grafting_height = grafting::height::<N>();
+        if F::pos_to_height(position) < grafting_height {
             let key = encode_node_key(position);
             let bytes = self.session.get(&key).await.map_err(|_| {
                 merkle::Error::DataCorrupted("exoware-qmdb current ops node fetch failed")
@@ -80,7 +80,7 @@ impl<F: Graftable, D: Digest, const N: usize> MerkleStorage<F> for KvCurrentStor
             });
         }
 
-        let grafted_position = ops_to_grafted_pos::<F>(position, grafting_height_for::<N>());
+        let grafted_position = grafting::ops_to_grafted_pos::<F>(position, grafting_height);
         let start = encode_grafted_node_key(grafted_position, Location::new(0));
         let end = encode_grafted_node_key(grafted_position, self.watermark);
         let rows = self
