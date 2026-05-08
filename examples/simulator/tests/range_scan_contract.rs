@@ -3,7 +3,7 @@
 use std::future::Future;
 
 use bytes::Bytes;
-use exoware_server::{Ingest, Query, Sequence};
+use exoware_server::{Ingest, Query, RangeScan, Sequence};
 use exoware_simulator::RocksStore;
 use tempfile::tempdir;
 

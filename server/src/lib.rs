@@ -16,8 +16,7 @@ pub use connect::{
     StreamService, StreamState,
 };
 pub use engine::{
-    BatchLog, Ingest, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, RangeScanCursor,
-    RangeScanFuture, Sequence, StoreEngine, StoreFuture,
+    BatchLog, Ingest, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence, StoreEngine,
 };
 pub use reduce::RangeError;
 pub use stream::{StreamHub, StreamNotification, StreamNotifier};

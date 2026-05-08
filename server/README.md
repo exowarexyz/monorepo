@@ -24,26 +24,28 @@ stream service accepts a `StreamNotifier`; `StreamHub` is the in-process default
 use bytes::Bytes;
 use exoware_sdk::prune_policy::PrunePolicyDocument;
 use exoware_server::{
-    AppState, BatchLog, Ingest, Prune, Query, QueryExtra, RangeScanCursor, Sequence,
-    StoreEngine, StoreFuture, connect_stack,
+    AppState, BatchLog, Ingest, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence,
+    StoreEngine, connect_stack,
 };
+use std::future::Future;
 
 // Implement the capabilities your component serves:
 //   Sequence:
 //   fn current_sequence(&self) -> u64;
 //
 //   Ingest:
-//   fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> StoreFuture<u64>;
+//   fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> impl Future<Output = Result<u64, String>> + Send + '_;
 //
 //   Query:
-//   fn get(&self, key: Bytes) -> StoreFuture<(Option<Vec<u8>>, QueryExtra)>;
-//   fn range_scan(&self, start: Bytes, end: Bytes, limit: usize, forward: bool) -> StoreFuture<RangeScanCursor>;
-//   fn get_many(&self, keys: Vec<Bytes>) -> StoreFuture<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra)>;
+//   type RangeScan: RangeScan;
+//   fn get(&self, key: Bytes) -> impl Future<Output = Result<(Option<Vec<u8>>, QueryExtra), String>> + Send + '_;
+//   fn range_scan(&self, start: Bytes, end: Bytes, limit: usize, forward: bool) -> impl Future<Output = Result<Self::RangeScan, String>> + Send + '_;
+//   fn get_many(&self, keys: Vec<Bytes>) -> impl Future<Output = Result<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra), String>> + Send + '_;
 //
 //   Prune:
-//   fn apply_prune_policies(&self, document: PrunePolicyDocument) -> StoreFuture<()>;
+//   fn apply_prune_policies(&self, document: PrunePolicyDocument) -> impl Future<Output = Result<(), String>> + Send + '_;
 //
 //   BatchLog:
-//   fn get_batch(&self, sequence_number: u64) -> StoreFuture<Option<Vec<(Bytes, Bytes)>>>;
-//   fn oldest_retained_batch(&self) -> StoreFuture<Option<u64>>;
+//   fn get_batch(&self, sequence_number: u64) -> impl Future<Output = Result<Option<Vec<(Bytes, Bytes)>>, String>> + Send + '_;
+//   fn oldest_retained_batch(&self) -> impl Future<Output = Result<Option<u64>, String>> + Send + '_;
 ```

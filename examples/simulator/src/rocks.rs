@@ -17,8 +17,7 @@ use exoware_sdk::prune_policy::{
     KeysScope, OrderEncoding, PolicyScope, PrunePolicyDocument, RetainPolicy,
 };
 use exoware_server::{
-    BatchLog, Ingest, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, RangeScanCursor,
-    RangeScanFuture, Sequence, StoreFuture,
+    BatchLog, Ingest, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence,
 };
 use regex::bytes::Regex;
 use rocksdb::{
@@ -126,7 +125,7 @@ impl RocksRangeScanState {
     }
 }
 
-struct RocksRangeScanCursor {
+pub struct RocksRangeScanCursor {
     state: Option<RocksRangeScanState>,
 }
 
@@ -139,22 +138,20 @@ impl RocksRangeScanCursor {
 }
 
 impl RangeScan for RocksRangeScanCursor {
-    fn next_batch<'a>(&'a mut self, max_items: usize) -> RangeScanFuture<'a, RangeScanBatch> {
-        Box::pin(async move {
-            let Some(mut state) = self.state.take() else {
-                return Ok(RangeScanBatch::default());
-            };
-            let (state, result) = tokio::task::spawn_blocking(move || {
-                let result = state.next_batch(max_items);
-                (state, result)
-            })
-            .await
-            .map_err(|e| format!("range scan task failed: {e}"))?;
-            self.state = Some(state);
-            result.map(|rows| RangeScanBatch {
-                rows,
-                extra: QueryExtra::default(),
-            })
+    async fn next_batch(&mut self, max_items: usize) -> Result<RangeScanBatch, String> {
+        let Some(mut state) = self.state.take() else {
+            return Ok(RangeScanBatch::default());
+        };
+        let (state, result) = tokio::task::spawn_blocking(move || {
+            let result = state.next_batch(max_items);
+            (state, result)
+        })
+        .await
+        .map_err(|e| format!("range scan task failed: {e}"))?;
+        self.state = Some(state);
+        result.map(|rows| RangeScanBatch {
+            rows,
+            extra: QueryExtra::default(),
         })
     }
 }
@@ -465,105 +462,95 @@ impl Sequence for RocksStore {
 // this local reference backend simple. Long-running range cursor pulls already use
 // `spawn_blocking`; production engines should avoid blocking Tokio workers for disk I/O.
 impl Ingest for RocksStore {
-    fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> StoreFuture<u64> {
+    async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, String> {
         let store = self.clone();
-        Box::pin(async move { store.batch_put_rocksdb(&kvs).map_err(|e| e.to_string()) })
+        store.batch_put_rocksdb(&kvs).map_err(|e| e.to_string())
     }
 }
 
 impl Query for RocksStore {
-    fn get(&self, key: Bytes) -> StoreFuture<(Option<Vec<u8>>, QueryExtra)> {
+    type RangeScan = RocksRangeScanCursor;
+
+    async fn get(&self, key: Bytes) -> Result<(Option<Vec<u8>>, QueryExtra), String> {
         let store = self.clone();
-        Box::pin(async move {
-            store
-                .get_rocksdb(&key)
-                .map(|value| (value, QueryExtra::default()))
-                .map_err(|e| e.to_string())
-        })
+        store
+            .get_rocksdb(&key)
+            .map(|value| (value, QueryExtra::default()))
+            .map_err(|e| e.to_string())
     }
 
-    fn range_scan(
+    async fn range_scan(
         &self,
         start: Bytes,
         end: Bytes,
         limit: usize,
         forward: bool,
-    ) -> StoreFuture<RangeScanCursor> {
+    ) -> Result<Self::RangeScan, String> {
         let db = self.db.clone();
-        Box::pin(async move {
-            let cursor: RangeScanCursor =
-                Box::new(RocksRangeScanCursor::new(db, start, end, limit, forward));
-            Ok(cursor)
-        })
+        Ok(RocksRangeScanCursor::new(db, start, end, limit, forward))
     }
 
-    fn get_many(
+    async fn get_many(
         &self,
         keys: Vec<Bytes>,
-    ) -> StoreFuture<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra)> {
+    ) -> Result<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra), String> {
         let store = self.clone();
-        Box::pin(async move {
-            let results = store.db.multi_get(keys.iter().map(|key| key.as_ref()));
-            let entries = keys
-                .into_iter()
-                .zip(results)
-                .map(|(k, r)| {
-                    if k.as_ref() == SEQ_META_KEY {
-                        return Ok((k.to_vec(), None));
-                    }
-                    let value = r.map_err(|e| e.to_string())?;
-                    Ok((k.to_vec(), value))
-                })
-                .collect::<Result<Vec<_>, String>>()?;
-            Ok((entries, QueryExtra::default()))
-        })
+        let results = store.db.multi_get(keys.iter().map(|key| key.as_ref()));
+        let entries = keys
+            .into_iter()
+            .zip(results)
+            .map(|(k, r)| {
+                if k.as_ref() == SEQ_META_KEY {
+                    return Ok((k.to_vec(), None));
+                }
+                let value = r.map_err(|e| e.to_string())?;
+                Ok((k.to_vec(), value))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok((entries, QueryExtra::default()))
     }
 }
 
 impl Prune for RocksStore {
-    fn apply_prune_policies(&self, document: PrunePolicyDocument) -> StoreFuture<()> {
+    async fn apply_prune_policies(&self, document: PrunePolicyDocument) -> Result<(), String> {
         let store = self.clone();
-        Box::pin(async move { store.apply_prune_policies_rocksdb(document) })
+        store.apply_prune_policies_rocksdb(document)
     }
 }
 
 impl BatchLog for RocksStore {
-    fn get_batch(&self, sequence_number: u64) -> StoreFuture<Option<Vec<(Bytes, Bytes)>>> {
+    async fn get_batch(&self, sequence_number: u64) -> Result<Option<Vec<(Bytes, Bytes)>>, String> {
         let store = self.clone();
-        Box::pin(async move {
-            let cf = store.batch_log_cf();
-            match store
-                .db
-                .get_cf(cf, sequence_number.to_be_bytes())
-                .map_err(|e| e.to_string())?
-            {
-                Some(raw) => Ok(Some(decode_batch_entries(&raw).map_err(|e| e.to_string())?)),
-                None => Ok(None),
-            }
-        })
+        let cf = store.batch_log_cf();
+        match store
+            .db
+            .get_cf(cf, sequence_number.to_be_bytes())
+            .map_err(|e| e.to_string())?
+        {
+            Some(raw) => Ok(Some(decode_batch_entries(&raw).map_err(|e| e.to_string())?)),
+            None => Ok(None),
+        }
     }
 
-    fn oldest_retained_batch(&self) -> StoreFuture<Option<u64>> {
+    async fn oldest_retained_batch(&self) -> Result<Option<u64>, String> {
         let store = self.clone();
-        Box::pin(async move {
-            let cf = store.batch_log_cf();
-            let mut it = store.db.iterator_cf(cf, IteratorMode::Start);
-            match it.next() {
-                None => Ok(None),
-                Some(item) => {
-                    let (key, _) = item.map_err(|e| e.to_string())?;
-                    if key.len() != 8 {
-                        return Err(format!(
-                            "batch_log CF key has unexpected length {}",
-                            key.len()
-                        ));
-                    }
-                    let mut buf = [0u8; 8];
-                    buf.copy_from_slice(key.as_ref());
-                    Ok(Some(u64::from_be_bytes(buf)))
+        let cf = store.batch_log_cf();
+        let mut it = store.db.iterator_cf(cf, IteratorMode::Start);
+        match it.next() {
+            None => Ok(None),
+            Some(item) => {
+                let (key, _) = item.map_err(|e| e.to_string())?;
+                if key.len() != 8 {
+                    return Err(format!(
+                        "batch_log CF key has unexpected length {}",
+                        key.len()
+                    ));
                 }
+                let mut buf = [0u8; 8];
+                buf.copy_from_slice(key.as_ref());
+                Ok(Some(u64::from_be_bytes(buf)))
             }
-        })
+        }
     }
 }
 

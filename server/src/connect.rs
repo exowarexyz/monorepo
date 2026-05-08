@@ -39,7 +39,7 @@ use tokio::sync::Notify;
 use crate::reduce::RangeReducer;
 use crate::stream::{StreamHub, StreamNotifier};
 use crate::validate;
-use crate::{BatchLog, Ingest, Prune, Query, QueryExtra, StoreEngine};
+use crate::{BatchLog, Ingest, Prune, Query, QueryExtra, RangeScan, StoreEngine};
 
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
 const RANGE_STREAM_MAX_FRAME_ROWS: usize = 4096;
@@ -62,10 +62,13 @@ struct RangeStreamRequest {
     sequence_number: u64,
 }
 
-async fn range_stream(
-    query: Arc<dyn Query>,
+async fn range_stream<Q>(
+    query: Arc<Q>,
     request: RangeStreamRequest,
-) -> Result<Pin<Box<dyn Stream<Item = Result<RangeFrame, ConnectError>> + Send>>, ConnectError> {
+) -> Result<Pin<Box<dyn Stream<Item = Result<RangeFrame, ConnectError>> + Send>>, ConnectError>
+where
+    Q: Query,
+{
     let RangeStreamRequest {
         start_key,
         end_key,
@@ -123,12 +126,11 @@ async fn range_stream(
 
 /// All-in-one single-process composition. Split deployments construct the narrower capability
 /// states directly, while this state can derive each per-service state for the bundled stack.
-#[derive(Clone)]
-pub struct AppState {
-    pub ingest: Arc<dyn Ingest>,
-    pub query: Arc<dyn Query>,
-    pub prune: Arc<dyn Prune>,
-    pub batch_log: Arc<dyn BatchLog>,
+pub struct AppState<I, Q, P, B> {
+    pub ingest: Arc<I>,
+    pub query: Arc<Q>,
+    pub prune: Arc<P>,
+    pub batch_log: Arc<B>,
     /// Gates ingest (writes) only. Query and compact remain available during drains so that
     /// in-flight reads can complete while the worker sheds write traffic.
     pub ready: Arc<AtomicBool>,
@@ -138,8 +140,24 @@ pub struct AppState {
     pub stream: Arc<StreamHub>,
 }
 
-impl AppState {
-    pub fn new(engine: Arc<dyn StoreEngine>) -> Self {
+impl<I, Q, P, B> Clone for AppState<I, Q, P, B> {
+    fn clone(&self) -> Self {
+        Self {
+            ingest: self.ingest.clone(),
+            query: self.query.clone(),
+            prune: self.prune.clone(),
+            batch_log: self.batch_log.clone(),
+            ready: self.ready.clone(),
+            stream: self.stream.clone(),
+        }
+    }
+}
+
+impl<E> AppState<E, E, E, E>
+where
+    E: StoreEngine,
+{
+    pub fn new(engine: Arc<E>) -> Self {
         let current_sequence = engine.current_sequence();
         Self::from_parts_with_sequence(
             engine.clone(),
@@ -149,22 +167,25 @@ impl AppState {
             current_sequence,
         )
     }
+}
 
-    pub fn from_parts(
-        ingest: Arc<dyn Ingest>,
-        query: Arc<dyn Query>,
-        prune: Arc<dyn Prune>,
-        batch_log: Arc<dyn BatchLog>,
-    ) -> Self {
+impl<I, Q, P, B> AppState<I, Q, P, B>
+where
+    I: Ingest,
+    Q: Query,
+    P: Prune,
+    B: BatchLog,
+{
+    pub fn from_parts(ingest: Arc<I>, query: Arc<Q>, prune: Arc<P>, batch_log: Arc<B>) -> Self {
         let current_sequence = batch_log.current_sequence();
         Self::from_parts_with_sequence(ingest, query, prune, batch_log, current_sequence)
     }
 
     fn from_parts_with_sequence(
-        ingest: Arc<dyn Ingest>,
-        query: Arc<dyn Query>,
-        prune: Arc<dyn Prune>,
-        batch_log: Arc<dyn BatchLog>,
+        ingest: Arc<I>,
+        query: Arc<Q>,
+        prune: Arc<P>,
+        batch_log: Arc<B>,
         current_sequence: u64,
     ) -> Self {
         Self {
@@ -178,17 +199,29 @@ impl AppState {
     }
 }
 
-#[derive(Clone)]
-pub struct IngestState {
-    pub ingest: Arc<dyn Ingest>,
+pub struct IngestState<I> {
+    pub ingest: Arc<I>,
     /// Gates ingest writes only.
     pub ready: Arc<AtomicBool>,
     /// Optional live-stream notifier.
     pub notifier: Option<Arc<dyn StreamNotifier>>,
 }
 
-impl IngestState {
-    pub fn new(ingest: Arc<dyn Ingest>) -> Self {
+impl<I> Clone for IngestState<I> {
+    fn clone(&self) -> Self {
+        Self {
+            ingest: self.ingest.clone(),
+            ready: self.ready.clone(),
+            notifier: self.notifier.clone(),
+        }
+    }
+}
+
+impl<I> IngestState<I>
+where
+    I: Ingest,
+{
+    pub fn new(ingest: Arc<I>) -> Self {
         Self {
             ingest,
             ready: Arc::new(AtomicBool::new(true)),
@@ -196,7 +229,7 @@ impl IngestState {
         }
     }
 
-    pub fn with_notifier(ingest: Arc<dyn Ingest>, notifier: Arc<dyn StreamNotifier>) -> Self {
+    pub fn with_notifier(ingest: Arc<I>, notifier: Arc<dyn StreamNotifier>) -> Self {
         Self {
             ingest,
             ready: Arc::new(AtomicBool::new(true)),
@@ -205,8 +238,8 @@ impl IngestState {
     }
 }
 
-impl From<AppState> for IngestState {
-    fn from(state: AppState) -> Self {
+impl<I, Q, P, B> From<AppState<I, Q, P, B>> for IngestState<I> {
+    fn from(state: AppState<I, Q, P, B>) -> Self {
         Self {
             ingest: state.ingest,
             ready: state.ready,
@@ -215,42 +248,70 @@ impl From<AppState> for IngestState {
     }
 }
 
-#[derive(Clone)]
-pub struct QueryState {
-    pub query: Arc<dyn Query>,
+pub struct QueryState<Q> {
+    pub query: Arc<Q>,
 }
 
-impl From<AppState> for QueryState {
-    fn from(state: AppState) -> Self {
+impl<Q> Clone for QueryState<Q> {
+    fn clone(&self) -> Self {
+        Self {
+            query: self.query.clone(),
+        }
+    }
+}
+
+impl<I, Q, P, B> From<AppState<I, Q, P, B>> for QueryState<Q> {
+    fn from(state: AppState<I, Q, P, B>) -> Self {
         Self { query: state.query }
     }
 }
 
-#[derive(Clone)]
-pub struct CompactState {
-    pub prune: Arc<dyn Prune>,
+pub struct CompactState<P> {
+    pub prune: Arc<P>,
 }
 
-impl CompactState {
-    pub fn new(prune: Arc<dyn Prune>) -> Self {
+impl<P> Clone for CompactState<P> {
+    fn clone(&self) -> Self {
+        Self {
+            prune: self.prune.clone(),
+        }
+    }
+}
+
+impl<P> CompactState<P>
+where
+    P: Prune,
+{
+    pub fn new(prune: Arc<P>) -> Self {
         Self { prune }
     }
 }
 
-impl From<AppState> for CompactState {
-    fn from(state: AppState) -> Self {
+impl<I, Q, P, B> From<AppState<I, Q, P, B>> for CompactState<P> {
+    fn from(state: AppState<I, Q, P, B>) -> Self {
         Self { prune: state.prune }
     }
 }
 
-#[derive(Clone)]
-pub struct StreamState {
-    pub batch_log: Arc<dyn BatchLog>,
+pub struct StreamState<B> {
+    pub batch_log: Arc<B>,
     pub notifier: Arc<dyn StreamNotifier>,
 }
 
-impl StreamState {
-    pub fn new(batch_log: Arc<dyn BatchLog>, notifier: Arc<dyn StreamNotifier>) -> Self {
+impl<B> Clone for StreamState<B> {
+    fn clone(&self) -> Self {
+        Self {
+            batch_log: self.batch_log.clone(),
+            notifier: self.notifier.clone(),
+        }
+    }
+}
+
+impl<B> StreamState<B>
+where
+    B: BatchLog,
+{
+    pub fn new(batch_log: Arc<B>, notifier: Arc<dyn StreamNotifier>) -> Self {
         Self {
             batch_log,
             notifier,
@@ -258,8 +319,8 @@ impl StreamState {
     }
 }
 
-impl From<AppState> for StreamState {
-    fn from(state: AppState) -> Self {
+impl<I, Q, P, B> From<AppState<I, Q, P, B>> for StreamState<B> {
+    fn from(state: AppState<I, Q, P, B>) -> Self {
         Self {
             batch_log: state.batch_log,
             notifier: state.stream,
@@ -267,20 +328,33 @@ impl From<AppState> for StreamState {
     }
 }
 
-#[derive(Clone)]
-pub struct IngestConnect {
-    state: IngestState,
+pub struct IngestConnect<I> {
+    state: IngestState<I>,
 }
 
-impl IngestConnect {
-    pub fn new(state: impl Into<IngestState>) -> Self {
+impl<I> Clone for IngestConnect<I> {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+        }
+    }
+}
+
+impl<I> IngestConnect<I>
+where
+    I: Ingest,
+{
+    pub fn new(state: impl Into<IngestState<I>>) -> Self {
         Self {
             state: state.into(),
         }
     }
 }
 
-impl IngestApi for IngestConnect {
+impl<I> IngestApi for IngestConnect<I>
+where
+    I: Ingest,
+{
     async fn put(
         &self,
         _ctx: Context,
@@ -331,13 +405,23 @@ impl IngestApi for IngestConnect {
     }
 }
 
-#[derive(Clone)]
-pub struct QueryConnect {
-    state: QueryState,
+pub struct QueryConnect<Q> {
+    state: QueryState<Q>,
 }
 
-impl QueryConnect {
-    pub fn new(state: impl Into<QueryState>) -> Self {
+impl<Q> Clone for QueryConnect<Q> {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+        }
+    }
+}
+
+impl<Q> QueryConnect<Q>
+where
+    Q: Query,
+{
+    pub fn new(state: impl Into<QueryState<Q>>) -> Self {
         Self {
             state: state.into(),
         }
@@ -395,7 +479,10 @@ impl QueryConnect {
     }
 }
 
-impl QueryApi for QueryConnect {
+impl<Q> QueryApi for QueryConnect<Q>
+where
+    Q: Query,
+{
     async fn get(
         &self,
         ctx: Context,
@@ -611,20 +698,33 @@ impl QueryApi for QueryConnect {
     }
 }
 
-#[derive(Clone)]
-pub struct CompactConnect {
-    state: CompactState,
+pub struct CompactConnect<P> {
+    state: CompactState<P>,
 }
 
-impl CompactConnect {
-    pub fn new(state: impl Into<CompactState>) -> Self {
+impl<P> Clone for CompactConnect<P> {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+        }
+    }
+}
+
+impl<P> CompactConnect<P>
+where
+    P: Prune,
+{
+    pub fn new(state: impl Into<CompactState<P>>) -> Self {
         Self {
             state: state.into(),
         }
     }
 }
 
-impl CompactApi for CompactConnect {
+impl<P> CompactApi for CompactConnect<P>
+where
+    P: Prune,
+{
     async fn prune(
         &self,
         ctx: Context,
@@ -645,13 +745,23 @@ impl CompactApi for CompactConnect {
     }
 }
 
-#[derive(Clone)]
-pub struct StreamConnect {
-    state: StreamState,
+pub struct StreamConnect<B> {
+    state: StreamState<B>,
 }
 
-impl StreamConnect {
-    pub fn new(state: impl Into<StreamState>) -> Self {
+impl<B> Clone for StreamConnect<B> {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+        }
+    }
+}
+
+impl<B> StreamConnect<B>
+where
+    B: BatchLog,
+{
+    pub fn new(state: impl Into<StreamState<B>>) -> Self {
         Self {
             state: state.into(),
         }
@@ -723,8 +833,8 @@ enum LiveProgress {
     NeedWait,
 }
 
-struct SubscriptionState {
-    state: StreamState,
+struct SubscriptionState<B> {
+    state: StreamState<B>,
     matchers: crate::stream::CompiledMatchers,
     replay: Option<ReplayState>,
     next_live_sequence: u64,
@@ -732,9 +842,12 @@ struct SubscriptionState {
     terminated: bool,
 }
 
-impl SubscriptionState {
+impl<B> SubscriptionState<B>
+where
+    B: BatchLog,
+{
     fn new(
-        state: StreamState,
+        state: StreamState<B>,
         matchers: crate::stream::CompiledMatchers,
         replay: Option<ReplayState>,
         next_live_sequence: u64,
@@ -811,7 +924,7 @@ impl SubscriptionState {
                 .oldest_retained_batch()
                 .await
                 .map_err(ConnectError::internal)?;
-            return Err(StreamConnect::batch_evicted_connect_error(oldest));
+            return Err(StreamConnect::<B>::batch_evicted_connect_error(oldest));
         };
         Ok(
             match filtered_subscribe_response(seq, &kvs, &self.matchers) {
@@ -841,7 +954,7 @@ impl SubscriptionState {
                 .oldest_retained_batch()
                 .await
                 .map_err(ConnectError::internal)?;
-            return Err(StreamConnect::batch_evicted_connect_error(oldest));
+            return Err(StreamConnect::<B>::batch_evicted_connect_error(oldest));
         };
         Ok(
             match filtered_subscribe_response(seq, &kvs, &self.matchers) {
@@ -907,7 +1020,10 @@ fn domain_filter_from_subscribe_view(
     })
 }
 
-impl StreamApi for StreamConnect {
+impl<B> StreamApi for StreamConnect<B>
+where
+    B: BatchLog,
+{
     async fn subscribe(
         &self,
         ctx: Context,
@@ -1031,63 +1147,95 @@ fn connect_limits() -> Limits {
         .max_message_size(MAX_CONNECTRPC_BODY_BYTES)
 }
 
-pub type IngestService = ConnectRpcService<IngestServiceServer<IngestConnect>>;
-pub type QueryService = ConnectRpcService<QueryServiceServer<QueryConnect>>;
-pub type CompactService = ConnectRpcService<CompactServiceServer<CompactConnect>>;
-pub type StreamService = ConnectRpcService<StreamServiceServer<StreamConnect>>;
-pub type QueryStack =
-    ConnectRpcService<Chain<QueryServiceServer<QueryConnect>, StreamServiceServer<StreamConnect>>>;
-pub type ConnectStack = ConnectRpcService<
+pub type IngestService<I> = ConnectRpcService<IngestServiceServer<IngestConnect<I>>>;
+pub type QueryService<Q> = ConnectRpcService<QueryServiceServer<QueryConnect<Q>>>;
+pub type CompactService<P> = ConnectRpcService<CompactServiceServer<CompactConnect<P>>>;
+pub type StreamService<B> = ConnectRpcService<StreamServiceServer<StreamConnect<B>>>;
+pub type QueryStack<Q, B> = ConnectRpcService<
+    Chain<QueryServiceServer<QueryConnect<Q>>, StreamServiceServer<StreamConnect<B>>>,
+>;
+pub type ConnectStack<I, Q, P, B> = ConnectRpcService<
     Chain<
-        IngestServiceServer<IngestConnect>,
+        IngestServiceServer<IngestConnect<I>>,
         Chain<
-            QueryServiceServer<QueryConnect>,
-            Chain<CompactServiceServer<CompactConnect>, StreamServiceServer<StreamConnect>>,
+            QueryServiceServer<QueryConnect<Q>>,
+            Chain<CompactServiceServer<CompactConnect<P>>, StreamServiceServer<StreamConnect<B>>>,
         >,
     >,
 >;
 
-fn ingest_server(state: IngestState) -> IngestServiceServer<IngestConnect> {
+fn ingest_server<I>(state: IngestState<I>) -> IngestServiceServer<IngestConnect<I>>
+where
+    I: Ingest,
+{
     IngestServiceServer::new(IngestConnect::new(state))
 }
 
-fn query_server(state: QueryState) -> QueryServiceServer<QueryConnect> {
+fn query_server<Q>(state: QueryState<Q>) -> QueryServiceServer<QueryConnect<Q>>
+where
+    Q: Query,
+{
     QueryServiceServer::new(QueryConnect::new(state))
 }
 
-fn compact_server(state: CompactState) -> CompactServiceServer<CompactConnect> {
+fn compact_server<P>(state: CompactState<P>) -> CompactServiceServer<CompactConnect<P>>
+where
+    P: Prune,
+{
     CompactServiceServer::new(CompactConnect::new(state))
 }
 
-fn stream_server(state: StreamState) -> StreamServiceServer<StreamConnect> {
+fn stream_server<B>(state: StreamState<B>) -> StreamServiceServer<StreamConnect<B>>
+where
+    B: BatchLog,
+{
     StreamServiceServer::new(StreamConnect::new(state))
 }
 
-pub fn ingest_service(state: IngestState) -> IngestService {
+pub fn ingest_service<I>(state: IngestState<I>) -> IngestService<I>
+where
+    I: Ingest,
+{
     ConnectRpcService::new(ingest_server(state))
         .with_limits(connect_limits())
         .with_compression(connect_compression_registry())
 }
 
-pub fn query_service(state: QueryState) -> QueryService {
+pub fn query_service<Q>(state: QueryState<Q>) -> QueryService<Q>
+where
+    Q: Query,
+{
     ConnectRpcService::new(query_server(state))
         .with_limits(connect_limits())
         .with_compression(connect_compression_registry())
 }
 
-pub fn compact_service(state: CompactState) -> CompactService {
+pub fn compact_service<P>(state: CompactState<P>) -> CompactService<P>
+where
+    P: Prune,
+{
     ConnectRpcService::new(compact_server(state))
         .with_limits(connect_limits())
         .with_compression(connect_compression_registry())
 }
 
-pub fn stream_service(state: StreamState) -> StreamService {
+pub fn stream_service<B>(state: StreamState<B>) -> StreamService<B>
+where
+    B: BatchLog,
+{
     ConnectRpcService::new(stream_server(state))
         .with_limits(connect_limits())
         .with_compression(connect_compression_registry())
 }
 
-pub fn query_stack(query_state: QueryState, stream_state: StreamState) -> QueryStack {
+pub fn query_stack<Q, B>(
+    query_state: QueryState<Q>,
+    stream_state: StreamState<B>,
+) -> QueryStack<Q, B>
+where
+    Q: Query,
+    B: BatchLog,
+{
     ConnectRpcService::new(Chain(
         query_server(query_state),
         stream_server(stream_state),
@@ -1096,7 +1244,13 @@ pub fn query_stack(query_state: QueryState, stream_state: StreamState) -> QueryS
     .with_compression(connect_compression_registry())
 }
 
-pub fn connect_stack(state: AppState) -> ConnectStack {
+pub fn connect_stack<I, Q, P, B>(state: AppState<I, Q, P, B>) -> ConnectStack<I, Q, P, B>
+where
+    I: Ingest,
+    Q: Query,
+    P: Prune,
+    B: BatchLog,
+{
     ConnectRpcService::new(Chain(
         ingest_server(state.clone().into()),
         Chain(
@@ -1130,12 +1284,11 @@ mod tests {
     use exoware_sdk::kv_codec::KvReducedValue;
     use exoware_sdk::prune_policy::{PrunePolicyDocument, PRUNE_POLICY_DOCUMENT_VERSION};
     use exoware_sdk::{decode_connect_error, to_domain_reduce_response};
-    use futures::future::ready;
     use futures::StreamExt;
 
     use crate::{
-        BatchLog, Ingest, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, RangeScanCursor,
-        RangeScanFuture, Sequence, StoreFuture, StreamNotification, StreamNotifier,
+        BatchLog, Ingest, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence,
+        StreamNotification, StreamNotifier,
     };
 
     const TEST_RESERVED_BITS: u8 = 4;
@@ -1172,38 +1325,35 @@ mod tests {
     }
 
     impl RangeScan for IteratorRangeScan {
-        fn next_batch<'a>(&'a mut self, max_items: usize) -> RangeScanFuture<'a, RangeScanBatch> {
+        async fn next_batch(&mut self, max_items: usize) -> Result<RangeScanBatch, String> {
             let mut rows = Vec::new();
-            let result = (|| {
-                for row in self.iter.by_ref().take(max_items) {
-                    rows.push(row?);
-                }
-                let extra = if rows.is_empty() {
-                    self.eof_extra.take().unwrap_or_default()
-                } else {
-                    QueryExtra::default()
-                };
-                Ok(RangeScanBatch { rows, extra })
-            })();
-            Box::pin(ready(result))
+            for row in self.iter.by_ref().take(max_items) {
+                rows.push(row?);
+            }
+            let extra = if rows.is_empty() {
+                self.eof_extra.take().unwrap_or_default()
+            } else {
+                QueryExtra::default()
+            };
+            Ok(RangeScanBatch { rows, extra })
         }
     }
 
-    fn range_scan_from_iter<I>(iter: I) -> RangeScanCursor
+    fn range_scan_from_iter<I>(iter: I) -> IteratorRangeScan
     where
         I: Iterator<Item = Result<(Bytes, Bytes), String>> + Send + 'static,
     {
         range_scan_from_iter_with_eof_extra(iter, QueryExtra::default())
     }
 
-    fn range_scan_from_iter_with_eof_extra<I>(iter: I, eof_extra: QueryExtra) -> RangeScanCursor
+    fn range_scan_from_iter_with_eof_extra<I>(iter: I, eof_extra: QueryExtra) -> IteratorRangeScan
     where
         I: Iterator<Item = Result<(Bytes, Bytes), String>> + Send + 'static,
     {
-        Box::new(IteratorRangeScan {
+        IteratorRangeScan {
             iter: Box::new(iter),
             eof_extra: Some(eof_extra),
-        })
+        }
     }
 
     impl FakeEngine {
@@ -1273,50 +1423,45 @@ mod tests {
     }
 
     impl Ingest for FakeEngine {
-        fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> StoreFuture<u64> {
-            let result = (|| {
-                let mut state = self.state.lock().map_err(|e| e.to_string())?;
-                state.current_sequence += 1;
-                let seq = state.current_sequence;
-                state.batches.insert(seq, Some(kvs));
-                Ok(seq)
-            })();
-            Box::pin(ready(result))
+        async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, String> {
+            let mut state = self.state.lock().map_err(|e| e.to_string())?;
+            state.current_sequence += 1;
+            let seq = state.current_sequence;
+            state.batches.insert(seq, Some(kvs));
+            Ok(seq)
         }
     }
 
     impl Query for FakeEngine {
-        fn get(&self, _key: Bytes) -> StoreFuture<(Option<Vec<u8>>, QueryExtra)> {
-            let result = self
-                .state
+        type RangeScan = IteratorRangeScan;
+
+        async fn get(&self, _key: Bytes) -> Result<(Option<Vec<u8>>, QueryExtra), String> {
+            self.state
                 .lock()
                 .map(|state| (None, state.query_extra.clone()))
-                .map_err(|e| e.to_string());
-            Box::pin(ready(result))
+                .map_err(|e| e.to_string())
         }
 
-        fn get_many(
+        async fn get_many(
             &self,
             keys: Vec<Bytes>,
-        ) -> StoreFuture<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra)> {
-            let result = self
-                .state
+        ) -> Result<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra), String> {
+            self.state
                 .lock()
                 .map(|state| {
                     let entries = keys.into_iter().map(|key| (key.to_vec(), None)).collect();
                     (entries, state.query_extra.clone())
                 })
-                .map_err(|e| e.to_string());
-            Box::pin(ready(result))
+                .map_err(|e| e.to_string())
         }
 
-        fn range_scan(
+        async fn range_scan(
             &self,
             _start: Bytes,
             _end: Bytes,
             _limit: usize,
             _forward: bool,
-        ) -> StoreFuture<RangeScanCursor> {
+        ) -> Result<Self::RangeScan, String> {
             let result = self
                 .state
                 .lock()
@@ -1332,25 +1477,26 @@ mod tests {
                     eof_extra,
                 )
             });
-            Box::pin(ready(cursor))
+            cursor
         }
     }
 
     impl Prune for FakeEngine {
-        fn apply_prune_policies(&self, document: PrunePolicyDocument) -> StoreFuture<()> {
-            let result = self
-                .state
+        async fn apply_prune_policies(&self, document: PrunePolicyDocument) -> Result<(), String> {
+            self.state
                 .lock()
                 .map(|mut state| {
                     state.prune_policy_counts.push(document.policies.len());
                 })
-                .map_err(|e| e.to_string());
-            Box::pin(ready(result))
+                .map_err(|e| e.to_string())
         }
     }
 
     impl BatchLog for FakeEngine {
-        fn get_batch(&self, sequence_number: u64) -> StoreFuture<Option<Vec<(Bytes, Bytes)>>> {
+        async fn get_batch(
+            &self,
+            sequence_number: u64,
+        ) -> Result<Option<Vec<(Bytes, Bytes)>>, String> {
             let result: Result<_, String> = (|| {
                 let mut state = self.state.lock().map_err(|e| e.to_string())?;
                 let publish = state.publish_on_get_batch.clone();
@@ -1367,25 +1513,20 @@ mod tests {
                     state.batches.get(&sequence_number).cloned().unwrap_or(None),
                 ))
             })();
-            let (publish, batch) = match result {
-                Ok(values) => values,
-                Err(e) => return Box::pin(ready(Err(e))),
-            };
+            let (publish, batch) = result?;
             if let Some(publish) = publish {
                 publish
                     .hub
                     .publish(publish.sequence_offset + sequence_number);
             }
-            Box::pin(ready(Ok(batch)))
+            Ok(batch)
         }
 
-        fn oldest_retained_batch(&self) -> StoreFuture<Option<u64>> {
-            let result = self
-                .state
+        async fn oldest_retained_batch(&self) -> Result<Option<u64>, String> {
+            self.state
                 .lock()
                 .map(|state| state.oldest_retained)
-                .map_err(|e| e.to_string());
-            Box::pin(ready(result))
+                .map_err(|e| e.to_string())
         }
     }
 
@@ -1401,28 +1542,30 @@ mod tests {
     }
 
     impl Query for QueryOnlyEngine {
-        fn get(&self, _key: Bytes) -> StoreFuture<(Option<Vec<u8>>, QueryExtra)> {
-            Box::pin(ready(Ok((self.value.clone(), QueryExtra::default()))))
+        type RangeScan = IteratorRangeScan;
+
+        async fn get(&self, _key: Bytes) -> Result<(Option<Vec<u8>>, QueryExtra), String> {
+            Ok((self.value.clone(), QueryExtra::default()))
         }
 
-        fn range_scan(
+        async fn range_scan(
             &self,
             _start: Bytes,
             _end: Bytes,
             _limit: usize,
             _forward: bool,
-        ) -> StoreFuture<RangeScanCursor> {
-            Box::pin(ready(Ok(range_scan_from_iter(std::iter::empty()))))
+        ) -> Result<Self::RangeScan, String> {
+            Ok(range_scan_from_iter(std::iter::empty()))
         }
 
-        fn get_many(
+        async fn get_many(
             &self,
             keys: Vec<Bytes>,
-        ) -> StoreFuture<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra)> {
-            Box::pin(ready(Ok((
+        ) -> Result<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra), String> {
+            Ok((
                 keys.into_iter().map(|key| (key.to_vec(), None)).collect(),
                 QueryExtra::default(),
-            ))))
+            ))
         }
     }
 
@@ -1442,15 +1585,13 @@ mod tests {
     }
 
     impl Prune for PruneOnlyEngine {
-        fn apply_prune_policies(&self, document: PrunePolicyDocument) -> StoreFuture<()> {
-            let result = self
-                .documents
+        async fn apply_prune_policies(&self, document: PrunePolicyDocument) -> Result<(), String> {
+            self.documents
                 .lock()
                 .map(|mut documents| {
                     documents.push((document.version, document.policies.len()));
                 })
-                .map_err(|e| e.to_string());
-            Box::pin(ready(result))
+                .map_err(|e| e.to_string())
         }
     }
 
@@ -1557,13 +1698,16 @@ mod tests {
             .expect("decode prune request")
     }
 
-    async fn subscribe_stream(
-        connect: &StreamConnect,
+    async fn subscribe_stream<B>(
+        connect: &StreamConnect<B>,
         since_sequence_number: Option<u64>,
     ) -> Result<
         Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>>,
         ConnectError,
-    > {
+    >
+    where
+        B: BatchLog,
+    {
         let bytes = subscribe_request_bytes(since_sequence_number);
         let request = buffa::view::OwnedView::<SubscribeRequestView<'static>>::decode(bytes.into())
             .expect("decode subscribe request");
@@ -1621,7 +1765,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_connect_accepts_query_only_engine() {
-        let query: Arc<dyn Query> = Arc::new(QueryOnlyEngine {
+        let query = Arc::new(QueryOnlyEngine {
             sequence_number: 9,
             value: Some(b"value".to_vec()),
         });
