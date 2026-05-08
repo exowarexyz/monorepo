@@ -11,7 +11,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use exoware_server::{
     BatchLog, Ingest, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, RangeScanCursor,
-    Sequence, StoreFuture,
+    RangeScanFuture, Sequence, StoreFuture,
 };
 use rocksdb::{
     ColumnFamily, ColumnFamilyDescriptor, DBIterator, Direction, IteratorMode, Options, DB,
@@ -130,7 +130,7 @@ impl RocksRangeScanCursor {
 }
 
 impl RangeScan for RocksRangeScanCursor {
-    fn next_batch<'a>(&'a mut self, max_items: usize) -> StoreFuture<'a, RangeScanBatch> {
+    fn next_batch<'a>(&'a mut self, max_items: usize) -> RangeScanFuture<'a, RangeScanBatch> {
         Box::pin(async move {
             let Some(mut state) = self.state.take() else {
                 return Ok(RangeScanBatch::default());
@@ -229,50 +229,50 @@ impl Sequence for RocksStore {
 }
 
 impl Ingest for RocksStore {
-    fn put_batch<'a>(&'a self, kvs: &'a [(Bytes, Bytes)]) -> StoreFuture<'a, u64> {
-        Box::pin(async move { self.batch_put_rocksdb(kvs).map_err(|e| e.to_string()) })
+    fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> StoreFuture<u64> {
+        let store = self.clone();
+        Box::pin(async move { store.batch_put_rocksdb(&kvs).map_err(|e| e.to_string()) })
     }
 }
 
 impl Query for RocksStore {
-    fn get<'a>(&'a self, key: &'a [u8]) -> StoreFuture<'a, (Option<Vec<u8>>, QueryExtra)> {
+    fn get(&self, key: Bytes) -> StoreFuture<(Option<Vec<u8>>, QueryExtra)> {
+        let store = self.clone();
         Box::pin(async move {
-            self.get_rocksdb(key)
+            store
+                .get_rocksdb(&key)
                 .map(|value| (value, QueryExtra::default()))
                 .map_err(|e| e.to_string())
         })
     }
 
-    fn range_scan<'a>(
-        &'a self,
+    fn range_scan(
+        &self,
         start: Bytes,
         end: Bytes,
         limit: usize,
         forward: bool,
-    ) -> StoreFuture<'a, RangeScanCursor> {
+    ) -> StoreFuture<RangeScanCursor> {
+        let db = self.db.clone();
         Box::pin(async move {
-            let cursor: RangeScanCursor = Box::new(RocksRangeScanCursor::new(
-                self.db.clone(),
-                start,
-                end,
-                limit,
-                forward,
-            ));
+            let cursor: RangeScanCursor =
+                Box::new(RocksRangeScanCursor::new(db, start, end, limit, forward));
             Ok(cursor)
         })
     }
 
-    fn get_many<'a>(
-        &'a self,
-        keys: &'a [&'a [u8]],
-    ) -> StoreFuture<'a, (Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra)> {
+    fn get_many(
+        &self,
+        keys: Vec<Bytes>,
+    ) -> StoreFuture<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra)> {
+        let store = self.clone();
         Box::pin(async move {
-            let results = self.db.multi_get(keys);
+            let results = store.db.multi_get(keys.iter().map(|key| key.as_ref()));
             let entries = keys
-                .iter()
+                .into_iter()
                 .zip(results)
                 .map(|(k, r)| {
-                    if *k == SEQ_META_KEY {
+                    if k.as_ref() == SEQ_META_KEY {
                         return Ok((k.to_vec(), None));
                     }
                     let value = r.map_err(|e| e.to_string())?;
@@ -285,12 +285,13 @@ impl Query for RocksStore {
 }
 
 impl Prune for RocksStore {
-    fn delete_batch<'a>(&'a self, keys: &'a [&'a [u8]]) -> StoreFuture<'a, u64> {
+    fn delete_batch(&self, keys: Vec<Bytes>) -> StoreFuture<u64> {
+        let store = self.clone();
         Box::pin(async move {
-            let next = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
+            let next = store.sequence.fetch_add(1, Ordering::SeqCst) + 1;
             let mut batch = rocksdb::WriteBatch::default();
-            for k in keys {
-                batch.delete(k);
+            for k in &keys {
+                batch.delete(k.as_ref());
             }
             batch.put(SEQ_META_KEY, next.to_le_bytes());
             // delete_batch is a second-class writer with no payload to log; record
@@ -298,28 +299,29 @@ impl Prune for RocksStore {
             // can distinguish "this sequence happened but contained no tracked
             // entries" from "evicted / never existed".
             batch.put_cf(
-                self.batch_log_cf(),
+                store.batch_log_cf(),
                 next.to_be_bytes(),
                 encode_batch_entries(&[]),
             );
-            self.db.write(batch).map_err(|e| e.to_string())?;
-            if let Some(obs) = &self.observer {
+            store.db.write(batch).map_err(|e| e.to_string())?;
+            if let Some(obs) = &store.observer {
                 obs.store(next, Ordering::SeqCst);
             }
             Ok(next)
         })
     }
 
-    fn prune_batch_log<'a>(&'a self, cutoff_exclusive: u64) -> StoreFuture<'a, u64> {
+    fn prune_batch_log(&self, cutoff_exclusive: u64) -> StoreFuture<u64> {
+        let store = self.clone();
         Box::pin(async move {
             // Count before deleting so callers know how much was pruned. For the
             // simulator a simple iterator scan is fine; a production engine would
             // expose delete_range_cf and return the logical count separately.
-            let cf = self.batch_log_cf();
+            let cf = store.batch_log_cf();
             let end_key = cutoff_exclusive.to_be_bytes();
             let mut deleted = 0u64;
             let mut batch = rocksdb::WriteBatch::default();
-            let iter = self.db.iterator_cf(cf, IteratorMode::Start);
+            let iter = store.db.iterator_cf(cf, IteratorMode::Start);
             for item in iter {
                 let (k, _) = item.map_err(|e| e.to_string())?;
                 if k.as_ref() >= &end_key[..] {
@@ -329,7 +331,7 @@ impl Prune for RocksStore {
                 deleted += 1;
             }
             if deleted > 0 {
-                self.db.write(batch).map_err(|e| e.to_string())?;
+                store.db.write(batch).map_err(|e| e.to_string())?;
             }
             Ok(deleted)
         })
@@ -337,13 +339,11 @@ impl Prune for RocksStore {
 }
 
 impl BatchLog for RocksStore {
-    fn get_batch<'a>(
-        &'a self,
-        sequence_number: u64,
-    ) -> StoreFuture<'a, Option<Vec<(Bytes, Bytes)>>> {
+    fn get_batch(&self, sequence_number: u64) -> StoreFuture<Option<Vec<(Bytes, Bytes)>>> {
+        let store = self.clone();
         Box::pin(async move {
-            let cf = self.batch_log_cf();
-            match self
+            let cf = store.batch_log_cf();
+            match store
                 .db
                 .get_cf(cf, sequence_number.to_be_bytes())
                 .map_err(|e| e.to_string())?
@@ -354,10 +354,11 @@ impl BatchLog for RocksStore {
         })
     }
 
-    fn oldest_retained_batch<'a>(&'a self) -> StoreFuture<'a, Option<u64>> {
+    fn oldest_retained_batch(&self) -> StoreFuture<Option<u64>> {
+        let store = self.clone();
         Box::pin(async move {
-            let cf = self.batch_log_cf();
-            let mut it = self.db.iterator_cf(cf, IteratorMode::Start);
+            let cf = store.batch_log_cf();
+            let mut it = store.db.iterator_cf(cf, IteratorMode::Start);
             match it.next() {
                 None => Ok(None),
                 Some(item) => {

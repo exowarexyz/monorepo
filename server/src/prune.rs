@@ -26,6 +26,7 @@ const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
 pub enum PruneError {
     Engine(String),
     Policy(String),
+    Unsupported { capability: &'static str },
 }
 
 impl std::fmt::Display for PruneError {
@@ -33,11 +34,26 @@ impl std::fmt::Display for PruneError {
         match self {
             PruneError::Engine(s) => write!(f, "engine: {s}"),
             PruneError::Policy(s) => write!(f, "policy: {s}"),
+            PruneError::Unsupported { capability } => {
+                write!(f, "{capability} is not supported by this engine")
+            }
         }
     }
 }
 
 impl std::error::Error for PruneError {}
+
+fn prune_capability_error(
+    err: String,
+    unsupported: &'static str,
+    capability: &'static str,
+) -> PruneError {
+    if err == unsupported {
+        PruneError::Unsupported { capability }
+    } else {
+        PruneError::Engine(err)
+    }
+}
 
 fn extract_order_value(payload: &[u8], regex: &Regex, scope: &KeysScope) -> Option<Vec<u8>> {
     let order_by = scope.order_by.as_ref()?;
@@ -211,11 +227,9 @@ async fn execute_user_keys_policy(
     }
 
     if !all_deletes.is_empty() {
-        let refs: Vec<&[u8]> = all_deletes.iter().map(|k| k.as_ref()).collect();
-        prune
-            .delete_batch(&refs)
-            .await
-            .map_err(PruneError::Engine)?;
+        prune.delete_batch(all_deletes).await.map_err(|err| {
+            prune_capability_error(err, crate::engine::DELETE_BATCH_UNSUPPORTED, "delete_batch")
+        })?;
     }
 
     Ok(())
@@ -240,7 +254,13 @@ async fn execute_batch_log_policy(
     prune
         .prune_batch_log(cutoff_exclusive)
         .await
-        .map_err(PruneError::Engine)?;
+        .map_err(|err| {
+            prune_capability_error(
+                err,
+                crate::engine::PRUNE_BATCH_LOG_UNSUPPORTED,
+                "prune_batch_log",
+            )
+        })?;
     Ok(())
 }
 
@@ -254,7 +274,10 @@ mod tests {
     use futures::future::ready;
     use std::sync::Mutex;
 
-    use crate::{QueryExtra, RangeScan, RangeScanBatch, RangeScanCursor, Sequence, StoreFuture};
+    use crate::{
+        QueryExtra, RangeScan, RangeScanBatch, RangeScanCursor, RangeScanFuture, Sequence,
+        StoreFuture,
+    };
 
     fn make_scope() -> KeysScope {
         KeysScope {
@@ -291,7 +314,7 @@ mod tests {
     }
 
     impl RangeScan for FakeRangeScan {
-        fn next_batch<'a>(&'a mut self, max_items: usize) -> StoreFuture<'a, RangeScanBatch> {
+        fn next_batch<'a>(&'a mut self, max_items: usize) -> RangeScanFuture<'a, RangeScanBatch> {
             let rows = self.rows.by_ref().take(max_items).collect();
             Box::pin(ready(Ok(RangeScanBatch {
                 rows,
@@ -307,29 +330,29 @@ mod tests {
     }
 
     impl Query for FakeQuery {
-        fn get<'a>(&'a self, _key: &'a [u8]) -> StoreFuture<'a, (Option<Vec<u8>>, QueryExtra)> {
+        fn get(&self, _key: Bytes) -> StoreFuture<(Option<Vec<u8>>, QueryExtra)> {
             Box::pin(ready(Ok((None, QueryExtra::default()))))
         }
 
-        fn range_scan<'a>(
-            &'a self,
+        fn range_scan(
+            &self,
             _start: Bytes,
             _end: Bytes,
             _limit: usize,
             _forward: bool,
-        ) -> StoreFuture<'a, RangeScanCursor> {
+        ) -> StoreFuture<RangeScanCursor> {
             let cursor: RangeScanCursor = Box::new(FakeRangeScan {
                 rows: self.rows.clone().into_iter(),
             });
             Box::pin(ready(Ok(cursor)))
         }
 
-        fn get_many<'a>(
-            &'a self,
-            keys: &'a [&'a [u8]],
-        ) -> StoreFuture<'a, (Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra)> {
+        fn get_many(
+            &self,
+            keys: Vec<Bytes>,
+        ) -> StoreFuture<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra)> {
             Box::pin(ready(Ok((
-                keys.iter().map(|key| (key.to_vec(), None)).collect(),
+                keys.into_iter().map(|key| (key.to_vec(), None)).collect(),
                 QueryExtra::default(),
             ))))
         }
@@ -358,19 +381,31 @@ mod tests {
     }
 
     impl Prune for FakePrune {
-        fn delete_batch<'a>(&'a self, keys: &'a [&'a [u8]]) -> StoreFuture<'a, u64> {
+        fn delete_batch(&self, keys: Vec<Bytes>) -> StoreFuture<u64> {
             self.deleted
                 .lock()
                 .expect("lock")
-                .extend(keys.iter().map(|key| key.to_vec()));
+                .extend(keys.into_iter().map(|key| key.to_vec()));
             Box::pin(ready(Ok(self.current_sequence + 1)))
         }
 
-        fn prune_batch_log<'a>(&'a self, cutoff_exclusive: u64) -> StoreFuture<'a, u64> {
+        fn prune_batch_log(&self, cutoff_exclusive: u64) -> StoreFuture<u64> {
             self.cutoffs.lock().expect("lock").push(cutoff_exclusive);
             Box::pin(ready(Ok(1)))
         }
     }
+
+    struct UnsupportedPrune {
+        current_sequence: u64,
+    }
+
+    impl Sequence for UnsupportedPrune {
+        fn current_sequence(&self) -> u64 {
+            self.current_sequence
+        }
+    }
+
+    impl Prune for UnsupportedPrune {}
 
     #[test]
     fn keep_latest_retains_newest() {
@@ -472,5 +507,68 @@ mod tests {
 
         assert!(prune.deleted.lock().expect("lock").is_empty());
         assert_eq!(prune.cutoffs.lock().expect("lock").as_slice(), &[8]);
+    }
+
+    #[tokio::test]
+    async fn key_scope_reports_unsupported_delete_batch() {
+        let codec = KeyCodec::new(4, 1);
+        let key = codec.encode(b"row").expect("encode key");
+        let query = FakeQuery {
+            rows: vec![(
+                Bytes::copy_from_slice(key.as_ref()),
+                Bytes::from_static(b"value"),
+            )],
+        };
+        let prune = UnsupportedPrune {
+            current_sequence: 7,
+        };
+        let document = PrunePolicyDocument {
+            version: 1,
+            policies: vec![PrunePolicy {
+                scope: PolicyScope::Keys(KeysScope {
+                    match_key: MatchKey {
+                        reserved_bits: 4,
+                        prefix: 1,
+                        payload_regex: Utf8::from("(?s).*"),
+                    },
+                    group_by: GroupBy::default(),
+                    order_by: None,
+                }),
+                retain: RetainPolicy::DropAll,
+            }],
+        };
+
+        let err = execute_prune(&query, &prune, &document)
+            .await
+            .expect_err("unsupported prune");
+
+        match err {
+            PruneError::Unsupported { capability } => assert_eq!(capability, "delete_batch"),
+            err => panic!("unexpected error: {err}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sequence_scope_reports_unsupported_batch_log_prune() {
+        let query = FakeQuery { rows: Vec::new() };
+        let prune = UnsupportedPrune {
+            current_sequence: 10,
+        };
+        let document = PrunePolicyDocument {
+            version: 1,
+            policies: vec![PrunePolicy {
+                scope: PolicyScope::Sequence,
+                retain: RetainPolicy::KeepLatest { count: 3 },
+            }],
+        };
+
+        let err = execute_prune(&query, &prune, &document)
+            .await
+            .expect_err("unsupported prune");
+
+        match err {
+            PruneError::Unsupported { capability } => assert_eq!(capability, "prune_batch_log"),
+            err => panic!("unexpected error: {err}"),
+        }
     }
 }

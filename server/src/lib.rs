@@ -18,7 +18,7 @@ pub use connect::{
 };
 pub use engine::{
     BatchLog, Ingest, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, RangeScanCursor,
-    Sequence, StoreEngine, StoreFuture,
+    RangeScanFuture, Sequence, StoreEngine, StoreFuture,
 };
 pub use prune::{execute_prune, PruneError};
 pub use reduce::RangeError;

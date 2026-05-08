@@ -296,7 +296,7 @@ impl IngestApi for IngestConnect {
         validate::validate_put_request(&request)?;
 
         let wire = request.bytes();
-        let mut batch = Vec::new();
+        let mut batch = Vec::with_capacity(request.kvs.len());
         for kv in request.kvs.iter() {
             let key: Key = wire.slice_ref(kv.key);
             let value = wire.slice_ref(kv.value);
@@ -306,7 +306,7 @@ impl IngestApi for IngestConnect {
         let seq = self
             .state
             .ingest
-            .put_batch(&batch)
+            .put_batch(batch)
             .await
             .map_err(ConnectError::internal)?;
 
@@ -404,7 +404,7 @@ impl QueryApi for QueryConnect {
         let (value, extra) = self
             .state
             .query
-            .get(key.as_ref())
+            .get(key)
             .await
             .map_err(ConnectError::internal)?;
         let detail = query_detail(token, extra);
@@ -434,11 +434,12 @@ impl QueryApi for QueryConnect {
         validate::validate_get_many_request(&request)?;
         let sequence_number = self.ensure_min_sequence_number(request.min_sequence_number)?;
 
-        let key_refs: Vec<&[u8]> = request.keys.iter().copied().collect();
+        let wire = request.bytes();
+        let keys: Vec<Key> = request.keys.iter().map(|key| wire.slice_ref(key)).collect();
         let (entries, extra) = self
             .state
             .query
-            .get_many(&key_refs)
+            .get_many(keys)
             .await
             .map_err(ConnectError::internal)?;
         let detail = query_detail(sequence_number, extra);
@@ -615,6 +616,16 @@ impl CompactConnect {
     }
 }
 
+fn prune_error_to_connect_error(err: crate::PruneError) -> ConnectError {
+    let message = err.to_string();
+    match err {
+        crate::PruneError::Unsupported { .. } => ConnectError::unimplemented(message),
+        crate::PruneError::Engine(_) | crate::PruneError::Policy(_) => {
+            ConnectError::internal(message)
+        }
+    }
+}
+
 impl CompactApi for CompactConnect {
     async fn prune(
         &self,
@@ -628,7 +639,7 @@ impl CompactApi for CompactConnect {
             .map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
         crate::prune::execute_prune(&*self.state.query, &*self.state.prune, &document)
             .await
-            .map_err(|e| ConnectError::internal(e.to_string()))?;
+            .map_err(prune_error_to_connect_error)?;
         Ok((PruneResponse::default(), ctx))
     }
 }
@@ -1118,11 +1129,20 @@ mod tests {
 
     use crate::{
         BatchLog, Ingest, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, RangeScanCursor,
-        Sequence, StoreFuture, StreamNotification, StreamNotifier,
+        RangeScanFuture, Sequence, StoreFuture, StreamNotification, StreamNotifier,
     };
 
     const TEST_RESERVED_BITS: u8 = 4;
     const TEST_PREFIX: u16 = 1;
+
+    #[test]
+    fn unsupported_prune_maps_to_unimplemented() {
+        let err = prune_error_to_connect_error(crate::PruneError::Unsupported {
+            capability: "delete_batch",
+        });
+
+        assert_eq!(err.code, connectrpc::ErrorCode::Unimplemented);
+    }
 
     #[derive(Clone)]
     struct PublishDuringReplay {
@@ -1152,7 +1172,7 @@ mod tests {
     }
 
     impl RangeScan for IteratorRangeScan {
-        fn next_batch<'a>(&'a mut self, max_items: usize) -> StoreFuture<'a, RangeScanBatch> {
+        fn next_batch<'a>(&'a mut self, max_items: usize) -> RangeScanFuture<'a, RangeScanBatch> {
             let mut rows = Vec::new();
             let result = (|| {
                 for row in self.iter.by_ref().take(max_items) {
@@ -1239,12 +1259,12 @@ mod tests {
     }
 
     impl Ingest for FakeEngine {
-        fn put_batch<'a>(&'a self, kvs: &'a [(Bytes, Bytes)]) -> StoreFuture<'a, u64> {
+        fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> StoreFuture<u64> {
             let result = (|| {
                 let mut state = self.state.lock().map_err(|e| e.to_string())?;
                 state.current_sequence += 1;
                 let seq = state.current_sequence;
-                state.batches.insert(seq, Some(kvs.to_vec()));
+                state.batches.insert(seq, Some(kvs));
                 Ok(seq)
             })();
             Box::pin(ready(result))
@@ -1252,7 +1272,7 @@ mod tests {
     }
 
     impl Query for FakeEngine {
-        fn get<'a>(&'a self, _key: &'a [u8]) -> StoreFuture<'a, (Option<Vec<u8>>, QueryExtra)> {
+        fn get(&self, _key: Bytes) -> StoreFuture<(Option<Vec<u8>>, QueryExtra)> {
             let result = self
                 .state
                 .lock()
@@ -1261,28 +1281,28 @@ mod tests {
             Box::pin(ready(result))
         }
 
-        fn get_many<'a>(
-            &'a self,
-            keys: &'a [&'a [u8]],
-        ) -> StoreFuture<'a, (Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra)> {
+        fn get_many(
+            &self,
+            keys: Vec<Bytes>,
+        ) -> StoreFuture<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra)> {
             let result = self
                 .state
                 .lock()
                 .map(|state| {
-                    let entries = keys.iter().map(|key| (key.to_vec(), None)).collect();
+                    let entries = keys.into_iter().map(|key| (key.to_vec(), None)).collect();
                     (entries, state.query_extra.clone())
                 })
                 .map_err(|e| e.to_string());
             Box::pin(ready(result))
         }
 
-        fn range_scan<'a>(
-            &'a self,
+        fn range_scan(
+            &self,
             _start: Bytes,
             _end: Bytes,
             _limit: usize,
             _forward: bool,
-        ) -> StoreFuture<'a, RangeScanCursor> {
+        ) -> StoreFuture<RangeScanCursor> {
             let result = self
                 .state
                 .lock()
@@ -1300,7 +1320,7 @@ mod tests {
     }
 
     impl Prune for FakeEngine {
-        fn delete_batch<'a>(&'a self, _keys: &'a [&'a [u8]]) -> StoreFuture<'a, u64> {
+        fn delete_batch(&self, _keys: Vec<Bytes>) -> StoreFuture<u64> {
             let result = self
                 .state
                 .lock()
@@ -1312,16 +1332,13 @@ mod tests {
             Box::pin(ready(result))
         }
 
-        fn prune_batch_log<'a>(&'a self, _cutoff_exclusive: u64) -> StoreFuture<'a, u64> {
+        fn prune_batch_log(&self, _cutoff_exclusive: u64) -> StoreFuture<u64> {
             Box::pin(ready(Ok(0)))
         }
     }
 
     impl BatchLog for FakeEngine {
-        fn get_batch<'a>(
-            &'a self,
-            sequence_number: u64,
-        ) -> StoreFuture<'a, Option<Vec<(Bytes, Bytes)>>> {
+        fn get_batch(&self, sequence_number: u64) -> StoreFuture<Option<Vec<(Bytes, Bytes)>>> {
             let result: Result<_, String> = (|| {
                 let mut state = self.state.lock().map_err(|e| e.to_string())?;
                 let publish = state.publish_on_get_batch.clone();
@@ -1350,7 +1367,7 @@ mod tests {
             Box::pin(ready(Ok(batch)))
         }
 
-        fn oldest_retained_batch<'a>(&'a self) -> StoreFuture<'a, Option<u64>> {
+        fn oldest_retained_batch(&self) -> StoreFuture<Option<u64>> {
             let result = self
                 .state
                 .lock()
@@ -1372,26 +1389,26 @@ mod tests {
     }
 
     impl Query for QueryOnlyEngine {
-        fn get<'a>(&'a self, _key: &'a [u8]) -> StoreFuture<'a, (Option<Vec<u8>>, QueryExtra)> {
+        fn get(&self, _key: Bytes) -> StoreFuture<(Option<Vec<u8>>, QueryExtra)> {
             Box::pin(ready(Ok((self.value.clone(), QueryExtra::default()))))
         }
 
-        fn range_scan<'a>(
-            &'a self,
+        fn range_scan(
+            &self,
             _start: Bytes,
             _end: Bytes,
             _limit: usize,
             _forward: bool,
-        ) -> StoreFuture<'a, RangeScanCursor> {
+        ) -> StoreFuture<RangeScanCursor> {
             Box::pin(ready(Ok(range_scan_from_iter(std::iter::empty()))))
         }
 
-        fn get_many<'a>(
-            &'a self,
-            keys: &'a [&'a [u8]],
-        ) -> StoreFuture<'a, (Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra)> {
+        fn get_many(
+            &self,
+            keys: Vec<Bytes>,
+        ) -> StoreFuture<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra)> {
             Box::pin(ready(Ok((
-                keys.iter().map(|key| (key.to_vec(), None)).collect(),
+                keys.into_iter().map(|key| (key.to_vec(), None)).collect(),
                 QueryExtra::default(),
             ))))
         }

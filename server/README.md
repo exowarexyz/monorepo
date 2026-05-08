@@ -21,6 +21,7 @@ Split deployments can instead mount `ingest_service`, `query_stack`,
 stream service accepts a `StreamNotifier`; `StreamHub` is the in-process default.
 
 ```rust
+use bytes::Bytes;
 use exoware_server::{
     AppState, BatchLog, Ingest, Prune, Query, QueryExtra, RangeScanCursor, Sequence,
     StoreEngine, StoreFuture, connect_stack,
@@ -31,18 +32,19 @@ use exoware_server::{
 //   fn current_sequence(&self) -> u64;
 //
 //   Ingest:
-//   fn put_batch<'a>(&'a self, kvs: &'a [(Bytes, Bytes)]) -> StoreFuture<'a, u64>;
+//   fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> StoreFuture<u64>;
 //
 //   Query:
-//   fn get<'a>(&'a self, key: &'a [u8]) -> StoreFuture<'a, (Option<Vec<u8>>, QueryExtra)>;
-//   fn range_scan<'a>(&'a self, start: Bytes, end: Bytes, limit: usize, forward: bool) -> StoreFuture<'a, RangeScanCursor>;
-//   fn get_many<'a>(&'a self, keys: &'a [&'a [u8]]) -> StoreFuture<'a, (Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra)>;
+//   fn get(&self, key: Bytes) -> StoreFuture<(Option<Vec<u8>>, QueryExtra)>;
+//   fn range_scan(&self, start: Bytes, end: Bytes, limit: usize, forward: bool) -> StoreFuture<RangeScanCursor>;
+//   fn get_many(&self, keys: Vec<Bytes>) -> StoreFuture<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra)>;
 //
 //   Prune:
-//   fn delete_batch<'a>(&'a self, keys: &'a [&'a [u8]]) -> StoreFuture<'a, u64>;
-//   fn prune_batch_log<'a>(&'a self, cutoff_exclusive: u64) -> StoreFuture<'a, u64>;
+//   Methods have default unsupported implementations; override the capabilities your backend serves.
+//   fn delete_batch(&self, keys: Vec<Bytes>) -> StoreFuture<u64>;
+//   fn prune_batch_log(&self, cutoff_exclusive: u64) -> StoreFuture<u64>;
 //
 //   BatchLog:
-//   fn get_batch<'a>(&'a self, sequence_number: u64) -> StoreFuture<'a, Option<Vec<(Bytes, Bytes)>>>;
-//   fn oldest_retained_batch<'a>(&'a self) -> StoreFuture<'a, Option<u64>>;
+//   fn get_batch(&self, sequence_number: u64) -> StoreFuture<Option<Vec<(Bytes, Bytes)>>>;
+//   fn oldest_retained_batch(&self) -> StoreFuture<Option<u64>>;
 ```
