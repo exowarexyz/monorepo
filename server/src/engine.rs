@@ -83,7 +83,7 @@ pub trait Query: Sequence {
 
 /// Prune mutation capability.
 pub trait Prune: Send + Sync + 'static {
-    /// Apply prune policies sequentially.
+    /// Apply a validated prune policy document sequentially.
     fn apply_prune_policies(
         &self,
         document: PrunePolicyDocument,
@@ -93,13 +93,16 @@ pub trait Prune: Send + Sync + 'static {
 /// Retained per-sequence batch-log access for stream replay and lookups.
 pub trait BatchLog: Sequence {
     /// Return the (key, value) pairs written by the `put_batch` call that was
-    /// assigned `sequence_number`. `Ok(None)` = the batch has been pruned or
-    /// was never written (the store.stream.v1 service maps `None` to NOT_FOUND
-    /// with a `BATCH_EVICTED` detail).
+    /// assigned `sequence_number`. Return `Ok(None)` when the batch is not
+    /// available from this log.
     ///
     /// Engines that don't retain a batch log return `Ok(None)` unconditionally,
     /// which disables `GetBatch` and since-cursored `Subscribe` for that
     /// deployment.
+    ///
+    /// The stream service maps unavailable batches to `BATCH_NOT_FOUND` when
+    /// they are beyond the visible sequence frontier and `BATCH_EVICTED`
+    /// otherwise.
     fn get_batch(
         &self,
         sequence_number: u64,

@@ -1,5 +1,5 @@
 //! Naive reference storage for local development: user keys and values are written as-is to
-//! RocksDB. A single reserved key holds the monotonically increasing sequence number for RPCs.
+//! RocksDB. A `meta` column family stores the monotonically increasing sequence number for RPCs.
 //! A separate `batch_log` column family keeps per-sequence-number batches so the stream service
 //! can serve replay and point lookups. Batch-log pruning is driven exclusively by the compact
 //! service's `Sequence` scope.
@@ -24,8 +24,8 @@ use rocksdb::{
     ColumnFamily, ColumnFamilyDescriptor, DBIterator, Direction, IteratorMode, Options, DB,
 };
 
-/// One reserved key for the sequence counter (not visible to normal range scans that skip it).
-const SEQ_META_KEY: &[u8] = b"__simulator_seq__";
+const META_CF: &str = "meta";
+const SEQ_META_KEY: &[u8] = b"sequence";
 const BATCH_LOG_CF: &str = "batch_log";
 const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
 type RocksIterItem = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
@@ -99,9 +99,6 @@ impl RocksRangeScanState {
                 }
             };
             let key_ref = key.as_ref();
-            if key_ref == SEQ_META_KEY {
-                continue;
-            }
             if self.forward {
                 if !self.end.is_empty() && key_ref > self.end.as_ref() {
                     self.done = true;
@@ -277,13 +274,17 @@ impl RocksStore {
 
         let cf_default =
             ColumnFamilyDescriptor::new(rocksdb::DEFAULT_COLUMN_FAMILY_NAME, Options::default());
+        let cf_meta = ColumnFamilyDescriptor::new(META_CF, Options::default());
         let cf_batch_log = ColumnFamilyDescriptor::new(BATCH_LOG_CF, Options::default());
         let db = Arc::new(DB::open_cf_descriptors(
             &opts,
             path,
-            vec![cf_default, cf_batch_log],
+            vec![cf_default, cf_meta, cf_batch_log],
         )?);
-        let seq = match db.get(SEQ_META_KEY)? {
+        let meta_cf = db
+            .cf_handle(META_CF)
+            .expect("meta CF must exist (created on open)");
+        let seq = match db.get_cf(meta_cf, SEQ_META_KEY)? {
             Some(bytes) if bytes.len() == 8 => u64::from_le_bytes(bytes.try_into().unwrap()),
             _ => 0,
         };
@@ -300,6 +301,12 @@ impl RocksStore {
             .expect("batch_log CF must exist (created on open)")
     }
 
+    fn meta_cf(&self) -> &ColumnFamily {
+        self.db
+            .cf_handle(META_CF)
+            .expect("meta CF must exist (created on open)")
+    }
+
     fn batch_put_rocksdb(&self, kvs: &[(Bytes, Bytes)]) -> Result<u64, rocksdb::Error> {
         let next = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
         let encoded = encode_batch_entries(kvs);
@@ -307,7 +314,7 @@ impl RocksStore {
         for (k, v) in kvs {
             batch.put(k.as_ref(), v.as_ref());
         }
-        batch.put(SEQ_META_KEY, next.to_le_bytes());
+        batch.put_cf(self.meta_cf(), SEQ_META_KEY, next.to_le_bytes());
         batch.put_cf(self.batch_log_cf(), next.to_be_bytes(), &encoded);
         self.db.write(batch)?;
         if let Some(obs) = &self.observer {
@@ -317,9 +324,6 @@ impl RocksStore {
     }
 
     fn get_rocksdb(&self, key: &[u8]) -> Result<Option<Vec<u8>>, rocksdb::Error> {
-        if key == SEQ_META_KEY {
-            return Ok(None);
-        }
         self.db.get(key)
     }
 
@@ -333,7 +337,7 @@ impl RocksStore {
         for k in keys {
             batch.delete(k.as_ref());
         }
-        batch.put(SEQ_META_KEY, next.to_le_bytes());
+        batch.put_cf(self.meta_cf(), SEQ_META_KEY, next.to_le_bytes());
 
         // Record an empty batch so sequence numbers stay contiguous for stream replay.
         batch.put_cf(
@@ -372,8 +376,6 @@ impl RocksStore {
     }
 
     fn apply_prune_policies_rocksdb(&self, document: PrunePolicyDocument) -> Result<(), String> {
-        exoware_sdk::validate_prune_policy_document(&document)?;
-
         for policy in &document.policies {
             match &policy.scope {
                 PolicyScope::Keys(scope) => {
@@ -505,9 +507,6 @@ impl Query for RocksStore {
             .into_iter()
             .zip(results)
             .map(|(k, r)| {
-                if k.as_ref() == SEQ_META_KEY {
-                    return Ok((k.to_vec(), None));
-                }
                 let value = r.map_err(|e| e.to_string())?;
                 Ok((k.to_vec(), value))
             })

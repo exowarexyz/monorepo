@@ -713,7 +713,7 @@ where
         >,
     ) -> Result<(PruneResponse, Context), ConnectError> {
         validate::validate_prune_request(&request)?;
-        let document = exoware_proto::parse_prune_policy_document_from_prune_request_view(&request)
+        let document = exoware_proto::parse_and_validate_policy_document(&request)
             .map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
 
         self.state
@@ -1746,16 +1746,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_defers_parsed_policy_validation_to_engine() {
+    async fn compact_rejects_invalid_policy_before_engine_prune() {
         let prune = Arc::new(PruneOnlyEngine::default());
         let connect = CompactConnect::new(CompactState::new(prune.clone()));
         let request = prune_request(vec![sequence_keep_latest_policy(0)]);
 
-        CompactApi::prune(&connect, Context::default(), request)
+        let err = CompactApi::prune(&connect, Context::default(), request)
             .await
-            .expect("prune");
+            .expect_err("invalid prune");
 
-        assert_eq!(prune.applied_count(), 1);
+        assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
+        assert_eq!(prune.applied_count(), 0);
     }
 
     #[tokio::test]

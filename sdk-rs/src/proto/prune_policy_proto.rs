@@ -314,6 +314,15 @@ pub fn parse_prune_policy_document_from_prune_request_view(
     })
 }
 
+/// Parses a `Prune` RPC request and validates the resulting domain document.
+pub fn parse_and_validate_policy_document(
+    req: &PruneRequestView<'_>,
+) -> Result<PrunePolicyDocument, String> {
+    let document = parse_prune_policy_document_from_prune_request_view(req)?;
+    validate_prune_policy_document(&document)?;
+    Ok(document)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,5 +357,26 @@ mod tests {
         let actual = parse_prune_policy_from_proto(&proto).expect("from proto");
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn parse_and_validate_rejects_invalid_policy_document() {
+        use buffa::view::MessageView as _;
+        use buffa::Message as _;
+
+        let invalid = PrunePolicy {
+            scope: PolicyScope::Sequence,
+            retain: RetainPolicy::KeepLatest { count: 0 },
+        };
+        let request = crate::store::compact::v1::PruneRequest {
+            policies: prune_policies_to_proto(&[invalid]),
+            ..Default::default()
+        };
+        let bytes = request.encode_to_vec();
+        let view = PruneRequestView::decode_view(&bytes).expect("decode view");
+
+        let err = parse_and_validate_policy_document(&view).expect_err("invalid policy");
+
+        assert!(err.contains("keep_latest count must be > 0"));
     }
 }

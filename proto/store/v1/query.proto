@@ -8,15 +8,15 @@ import "store/v1/common.proto";
 
 // --- Query wire types ---
 
-// Visible store sequence number plus server-defined metadata for query RPCs. On
-// success, carried in the typed response body; also attached as a `google.rpc`
-// error detail when the RPC fails (same message shape in both cases).
+// Visible store sequence number plus server-defined metadata for query RPCs.
+// Successful responses carry this in the typed response body. Some query errors
+// also attach the same message shape as a `google.rpc` error detail.
 message Detail {
   // Store sequence number at which the query was evaluated. Clients can reuse
   // this as `min_sequence_number` on later reads to preserve monotonic
   // read-after-write/session consistency.
   uint64 sequence_number = 1;
-  // Optional backend-defined metadata. The built-in server leaves this empty.
+  // Optional backend-defined metadata forwarded by the server.
   map<string, google.protobuf.Value> extra = 2;
 }
 

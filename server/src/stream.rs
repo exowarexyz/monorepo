@@ -4,6 +4,10 @@
 //! subscribers. Each subscriber then pulls batches from the batch log at its own
 //! pace, so live delivery is naturally paced by client reads instead of an
 //! internal per-subscriber backlog.
+//!
+//! `StreamNotifier` is an in-process coordination primitive. Split deployments
+//! need a separate remote notification path that advances a local notifier after
+//! the query worker can serve the announced batches.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -97,7 +101,8 @@ pub struct StreamNotification {
     pub notify: Arc<Notify>,
 }
 
-/// Notification capability for stream subscribers.
+// TODO: Add a separate remote stream notification abstraction for split deployments.
+/// In-process notification capability for stream subscribers.
 pub trait StreamNotifier: Send + Sync + 'static {
     /// Atomically snapshot the visible batch frontier and return a notifier
     /// that wakes when the frontier may have advanced.

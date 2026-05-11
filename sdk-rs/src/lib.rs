@@ -1026,6 +1026,8 @@ pub enum ClientBuildError {
     MissingQueryUrl,
     #[error("StoreClientBuilder: missing compact URL (set compact_url or url)")]
     MissingCompactUrl,
+    #[error("StoreClientBuilder: missing stream URL (set stream_url or url)")]
+    MissingStreamUrl,
     #[error("StoreClientBuilder: invalid URL \"{url}\": {source}")]
     InvalidUrl {
         url: String,
@@ -1035,8 +1037,8 @@ pub enum ClientBuildError {
 
 /// Configures a [`StoreClient`] with explicit bases for health probes and store services.
 ///
-/// Use [`StoreClient::builder()`] to construct. Call [`Self::url`] to point health, ingest, and
-/// query at the same origin, or set each base separately. Finish with [`Self::build`].
+/// Use [`StoreClient::builder()`] to construct. Call [`Self::url`] to point every
+/// service at the same origin, or set each base separately. Finish with [`Self::build`].
 #[derive(Debug, Default)]
 pub struct StoreClientBuilder {
     health_url: Option<String>,
@@ -1085,8 +1087,7 @@ impl StoreClientBuilder {
         self
     }
 
-    /// Base URL for the stream service (`store.stream.v1.Service`). Defaults
-    /// to the ingest base when not set explicitly.
+    /// Base URL for the stream service (`store.stream.v1.Service`).
     pub fn stream_url(mut self, url: &str) -> Self {
         self.stream_url = Some(trim_connect_base(url));
         self
@@ -1118,9 +1119,7 @@ impl StoreClientBuilder {
         let compact_url = self
             .compact_url
             .ok_or(ClientBuildError::MissingCompactUrl)?;
-        // Stream defaults to ingest when not explicitly configured; they
-        // share the same origin in the reference simulator.
-        let stream_url = self.stream_url.unwrap_or_else(|| ingest_url.clone());
+        let stream_url = self.stream_url.ok_or(ClientBuildError::MissingStreamUrl)?;
         let ingest_uri: http::Uri =
             ingest_url
                 .parse()
@@ -1233,21 +1232,25 @@ impl StoreClient {
             .url(url)
             .retry_config(retry_config)
             .build()
-            .expect("url sets health, ingest, and query URLs")
+            .expect("url sets all service URLs")
     }
 
     /// Split endpoints for deployments where services run on different ports or hosts.
+    ///
+    /// Pass the same URL for services that are colocated.
     pub fn with_split_urls(
         health_base: &str,
         ingest_base: &str,
         query_base: &str,
         compact_base: &str,
+        stream_base: &str,
     ) -> Self {
         Self::with_split_urls_and_retry(
             health_base,
             ingest_base,
             query_base,
             compact_base,
+            stream_base,
             RetryConfig::standard(),
         )
     }
@@ -1257,6 +1260,7 @@ impl StoreClient {
         ingest_base: &str,
         query_base: &str,
         compact_base: &str,
+        stream_base: &str,
         retry_config: RetryConfig,
     ) -> Self {
         Self::builder()
@@ -1264,6 +1268,7 @@ impl StoreClient {
             .ingest_url(ingest_base)
             .query_url(query_base)
             .compact_url(compact_base)
+            .stream_url(stream_base)
             .retry_config(retry_config)
             .build()
             .expect("all service URLs are set")
@@ -2825,6 +2830,7 @@ mod tests {
         assert_eq!(client.health_url, "http://localhost:10000");
         assert_eq!(client.ingest_uri.to_string(), "http://localhost:10000/");
         assert_eq!(client.query_uri.to_string(), "http://localhost:10000/");
+        assert_eq!(client.stream_uri.to_string(), "http://localhost:10000/");
     }
 
     #[test]
@@ -2837,13 +2843,17 @@ mod tests {
         assert_eq!(single.health_url, built.health_url);
         assert_eq!(single.ingest_uri.to_string(), built.ingest_uri.to_string());
         assert_eq!(single.query_uri.to_string(), built.query_uri.to_string());
+        assert_eq!(single.stream_uri.to_string(), built.stream_uri.to_string());
 
-        let split = StoreClient::with_split_urls("http://h", "http://i", "http://q", "http://c");
+        let split = StoreClient::with_split_urls(
+            "http://h", "http://i", "http://q", "http://c", "http://s",
+        );
         let split_b = StoreClient::builder()
             .health_url("http://h")
             .ingest_url("http://i")
             .query_url("http://q")
             .compact_url("http://c")
+            .stream_url("http://s")
             .build()
             .unwrap();
         assert_eq!(split.health_url, split_b.health_url);
@@ -2853,6 +2863,21 @@ mod tests {
             split.compact_uri.to_string(),
             split_b.compact_uri.to_string()
         );
+        assert_eq!(split.stream_uri.to_string(), "http://s/");
+        assert_eq!(split.stream_uri.to_string(), split_b.stream_uri.to_string());
+    }
+
+    #[test]
+    fn split_urls_can_colocate_query_and_stream_explicitly() {
+        let split = StoreClient::with_split_urls(
+            "http://h", "http://i", "http://q", "http://c", "http://q",
+        );
+
+        assert_eq!(split.health_url, "http://h");
+        assert_eq!(split.ingest_uri.to_string(), "http://i/");
+        assert_eq!(split.query_uri.to_string(), "http://q/");
+        assert_eq!(split.compact_uri.to_string(), "http://c/");
+        assert_eq!(split.stream_uri.to_string(), "http://q/");
     }
 
     #[test]
@@ -2875,6 +2900,15 @@ mod tests {
                 .query_url("http://q")
                 .build(),
             Err(ClientBuildError::MissingCompactUrl)
+        ));
+        assert!(matches!(
+            StoreClient::builder()
+                .health_url("http://h")
+                .ingest_url("http://i")
+                .query_url("http://q")
+                .compact_url("http://c")
+                .build(),
+            Err(ClientBuildError::MissingStreamUrl)
         ));
     }
 

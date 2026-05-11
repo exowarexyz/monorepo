@@ -7652,6 +7652,7 @@ mod tests {
                     &self.ingest_url,
                     &self.query_url,
                     &self.ingest_url,
+                    &self.query_url,
                 )
             }
         }

@@ -18,7 +18,8 @@ compact, and stream services. Backends that implement every capability
 automatically implement the `StoreEngine` compatibility facade.
 Split deployments can instead mount `ingest_service`, `query_stack`,
 `compact_service`, or `stream_service` with the narrower component state. The
-stream service accepts a `StreamNotifier`; `StreamHub` is the in-process default.
+stream service accepts an in-process `StreamNotifier`; `StreamHub` is the local
+default.
 
 ```rust
 use bytes::Bytes;

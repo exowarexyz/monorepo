@@ -90,17 +90,6 @@ fn get_returns_value_after_put() {
     assert_eq!(get_value(&store, b"k").as_deref(), Some(b"v".as_slice()));
 }
 
-#[test]
-fn get_hides_internal_seq_meta_key() {
-    let dir = tempdir().expect("tempdir");
-    let store = RocksStore::open(dir.path()).expect("open db");
-    put_batch(
-        &store,
-        vec![(Bytes::from_static(b"x"), Bytes::from_static(b"y"))],
-    );
-    assert!(get_value(&store, b"__simulator_seq__").is_none());
-}
-
 // -- put_batch / sequence --
 
 #[test]
@@ -118,6 +107,29 @@ fn put_batch_returns_monotonic_sequence_numbers() {
     assert_eq!(s1, 1);
     assert_eq!(s2, 2);
     assert_eq!(store.current_sequence(), 2);
+}
+
+#[test]
+fn sequence_persists_across_reopen() {
+    let dir = tempdir().expect("tempdir");
+    let store = RocksStore::open(dir.path()).expect("open db");
+    put_batch(
+        &store,
+        vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))],
+    );
+    put_batch(
+        &store,
+        vec![(Bytes::from_static(b"b"), Bytes::from_static(b"2"))],
+    );
+    drop(store);
+
+    let reopened = RocksStore::open(dir.path()).expect("reopen db");
+    assert_eq!(reopened.current_sequence(), 2);
+    let s3 = put_batch(
+        &reopened,
+        vec![(Bytes::from_static(b"c"), Bytes::from_static(b"3"))],
+    );
+    assert_eq!(s3, 3);
 }
 
 // -- forward range_scan --
@@ -178,24 +190,6 @@ fn range_scan_limit_zero_returns_empty() {
     assert!(rows.is_empty());
 }
 
-#[test]
-fn range_scan_excludes_seq_meta_key() {
-    let dir = tempdir().expect("tempdir");
-    let store = RocksStore::open(dir.path()).expect("open db");
-    put_batch(
-        &store,
-        vec![(
-            Bytes::from_static(b"__simulator_seq_neighbor__"),
-            Bytes::from_static(b"v"),
-        )],
-    );
-
-    let rows = scan(&store, b"", b"", usize::MAX, true);
-    for (k, _) in &rows {
-        assert_ne!(k.as_ref(), b"__simulator_seq__");
-    }
-}
-
 // -- reverse range_scan --
 
 #[test]
@@ -251,16 +245,4 @@ fn get_many_returns_found_and_missing() {
     assert_eq!(results[0], (b"a".to_vec(), Some(b"1".to_vec())));
     assert_eq!(results[1], (b"missing".to_vec(), None));
     assert_eq!(results[2], (b"c".to_vec(), Some(b"3".to_vec())));
-}
-
-#[test]
-fn get_many_returns_none_for_seq_meta_key() {
-    let dir = tempdir().expect("tempdir");
-    let store = RocksStore::open(dir.path()).expect("open db");
-    seed_abc(&store);
-
-    let results = get_many_values(&store, &[b"__simulator_seq__", b"a"]);
-    assert_eq!(results.len(), 2);
-    assert_eq!(results[0].1, None);
-    assert_eq!(results[1], (b"a".to_vec(), Some(b"1".to_vec())));
 }
