@@ -625,6 +625,8 @@ impl RangeStream {
                 sequence_store.fetch_max(detail.sequence_number, Ordering::SeqCst);
             }
             let n = frame.results.len();
+
+            // Hide default/empty wire frames from the SDK's semantic chunk stream.
             if n == 0 && detail.is_none() {
                 continue;
             }
@@ -728,6 +730,8 @@ impl GetManyStream {
                 sequence_store.fetch_max(detail.sequence_number, Ordering::SeqCst);
             }
             let n = frame.results.len();
+
+            // Hide default/empty wire frames from the SDK's semantic chunk stream.
             if n == 0 && detail.is_none() {
                 continue;
             }

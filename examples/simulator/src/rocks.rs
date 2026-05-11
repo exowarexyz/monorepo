@@ -161,6 +161,7 @@ struct KeyEntry {
     order_value: Vec<u8>,
 }
 
+/// Extracts the per-key ordering value used to decide which matching keys a prune policy retains.
 fn extract_order_value(payload: &[u8], regex: &Regex, scope: &KeysScope) -> Option<Vec<u8>> {
     let order_by = scope.order_by.as_ref()?;
     let captures = regex.captures(payload)?;
@@ -178,6 +179,7 @@ fn extract_order_value(payload: &[u8], regex: &Regex, scope: &KeysScope) -> Opti
     }
 }
 
+/// Builds the grouping key that scopes retention independently within a key prune policy.
 fn extract_group_key(payload: &[u8], regex: &Regex, scope: &KeysScope) -> Option<Vec<u8>> {
     if scope.group_by.capture_groups.is_empty() {
         return Some(Vec::new());
@@ -347,6 +349,9 @@ impl RocksStore {
     }
 
     fn prune_batch_log_rocksdb(&self, cutoff_exclusive: u64) -> Result<u64, rocksdb::Error> {
+        // Count before deleting so callers know how much was pruned. For the
+        // simulator a simple iterator scan is fine; a production engine would
+        // expose delete_range_cf and return the logical count separately.
         let cf = self.batch_log_cf();
         let end_key = cutoff_exclusive.to_be_bytes();
         let mut deleted = 0u64;

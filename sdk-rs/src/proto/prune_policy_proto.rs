@@ -201,19 +201,6 @@ pub fn parse_prune_policy_from_proto(p: &ProtoPolicy) -> Result<PrunePolicy, Str
     Ok(PrunePolicy { scope, retain })
 }
 
-pub fn parse_prune_policy_document_from_proto_policies(
-    policies: &[ProtoPolicy],
-) -> Result<PrunePolicyDocument, String> {
-    let mut policies_out = Vec::with_capacity(policies.len());
-    for policy in policies {
-        policies_out.push(parse_prune_policy_from_proto(policy)?);
-    }
-    Ok(PrunePolicyDocument {
-        version: PRUNE_POLICY_DOCUMENT_VERSION,
-        policies: policies_out,
-    })
-}
-
 pub fn validate_prune_policy(policy: &PrunePolicy) -> Result<(), String> {
     crate::prune_policy::validate_policy(policy).map_err(|e| e.to_string())
 }
@@ -314,8 +301,8 @@ fn order_encoding_to_proto(enc: &OrderEncoding) -> PolicyOrderEncoding {
 }
 
 /// Parses a `Prune` RPC request into the shared Rust document model (fixed document version).
-pub fn parse_prune_policy_document_from_prune_request_view<'a>(
-    req: &PruneRequestView<'a>,
+pub fn parse_prune_policy_document_from_prune_request_view(
+    req: &PruneRequestView<'_>,
 ) -> Result<PrunePolicyDocument, String> {
     let mut policies = Vec::with_capacity(req.policies.len());
     for p in req.policies.iter() {
@@ -335,8 +322,9 @@ mod tests {
     use crate::match_key::MatchKey;
     use crate::prune_policy::{GroupBy, KeysScope, OrderBy, PrunePolicy, RetainPolicy};
 
-    fn sample_policy() -> PrunePolicy {
-        PrunePolicy {
+    #[test]
+    fn owned_proto_policy_round_trips_to_domain_policy() {
+        let expected = PrunePolicy {
             scope: PolicyScope::Keys(KeysScope {
                 match_key: MatchKey {
                     reserved_bits: 4,
@@ -352,12 +340,7 @@ mod tests {
                 }),
             }),
             retain: RetainPolicy::KeepLatest { count: 2 },
-        }
-    }
-
-    #[test]
-    fn owned_proto_policy_round_trips_to_domain_policy() {
-        let expected = sample_policy();
+        };
         let proto = prune_policies_to_proto(std::slice::from_ref(&expected))
             .pop()
             .expect("policy");
@@ -365,18 +348,5 @@ mod tests {
         let actual = parse_prune_policy_from_proto(&proto).expect("from proto");
 
         assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn parse_owned_proto_document_keeps_validation_separate() {
-        let mut policy = sample_policy();
-        policy.retain = RetainPolicy::KeepLatest { count: 0 };
-        let proto = prune_policies_to_proto(&[policy]);
-
-        let document =
-            parse_prune_policy_document_from_proto_policies(&proto).expect("parse policy");
-        let err = validate_prune_policy_document(&document).expect_err("invalid policy");
-
-        assert!(err.contains("keep_latest count must be > 0"));
     }
 }

@@ -11,12 +11,11 @@ mod validate;
 
 pub use connect::{
     compact_service, connect_stack, ingest_service, query_service, query_stack, stream_service,
-    AppState, CompactConnect, CompactService, CompactState, ConnectStack, IngestConnect,
-    IngestService, IngestState, QueryConnect, QueryService, QueryStack, QueryState, StreamConnect,
-    StreamService, StreamState,
+    AppState, CompactState, IngestState, QueryState, StreamState,
 };
 pub use engine::{
     BatchLog, Ingest, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence, StoreEngine,
 };
 pub use reduce::RangeError;
 pub use stream::{StreamHub, StreamNotification, StreamNotifier};
+pub use validate::{IngestLimits, DEFAULT_MAX_VALUE_LEN};

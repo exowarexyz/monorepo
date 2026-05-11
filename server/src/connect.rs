@@ -38,7 +38,7 @@ use tokio::sync::Notify;
 
 use crate::reduce::RangeReducer;
 use crate::stream::{StreamHub, StreamNotifier};
-use crate::validate;
+use crate::validate::{self, IngestLimits};
 use crate::{BatchLog, Ingest, Prune, Query, QueryExtra, RangeScan, StoreEngine};
 
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
@@ -124,83 +124,52 @@ where
     )))
 }
 
-/// All-in-one single-process composition. Split deployments construct the narrower capability
-/// states directly, while this state can derive each per-service state for the bundled stack.
-pub struct AppState<I, Q, P, B> {
-    pub ingest: Arc<I>,
-    pub query: Arc<Q>,
-    pub prune: Arc<P>,
-    pub batch_log: Arc<B>,
+/// All-in-one single-process composition for a backend that serves every store capability.
+/// Split deployments construct the narrower capability states directly.
+pub struct AppState<E> {
+    pub engine: Arc<E>,
+    pub ingest_limits: IngestLimits,
     /// Gates ingest (writes) only. Query and compact remain available during drains so that
     /// in-flight reads can complete while the worker sheds write traffic.
     pub ready: Arc<AtomicBool>,
-    /// Shared fan-out hub for `store.stream.v1.Subscribe`. `IngestConnect::put`
-    /// calls `publish` on successful commit so subscribers receive exactly
-    /// the rows that landed in the backend.
+    /// Shared fan-out hub for `store.stream.v1.Subscribe`.
     pub stream: Arc<StreamHub>,
 }
 
-impl<I, Q, P, B> Clone for AppState<I, Q, P, B> {
+impl<E> Clone for AppState<E> {
     fn clone(&self) -> Self {
         Self {
-            ingest: self.ingest.clone(),
-            query: self.query.clone(),
-            prune: self.prune.clone(),
-            batch_log: self.batch_log.clone(),
+            engine: self.engine.clone(),
+            ingest_limits: self.ingest_limits,
             ready: self.ready.clone(),
             stream: self.stream.clone(),
         }
     }
 }
 
-impl<E> AppState<E, E, E, E>
+impl<E> AppState<E>
 where
     E: StoreEngine,
 {
     pub fn new(engine: Arc<E>) -> Self {
         let current_sequence = engine.current_sequence();
-        Self::from_parts_with_sequence(
-            engine.clone(),
-            engine.clone(),
-            engine.clone(),
-            engine,
-            current_sequence,
-        )
-    }
-}
-
-impl<I, Q, P, B> AppState<I, Q, P, B>
-where
-    I: Ingest,
-    Q: Query,
-    P: Prune,
-    B: BatchLog,
-{
-    pub fn from_parts(ingest: Arc<I>, query: Arc<Q>, prune: Arc<P>, batch_log: Arc<B>) -> Self {
-        let current_sequence = batch_log.current_sequence();
-        Self::from_parts_with_sequence(ingest, query, prune, batch_log, current_sequence)
-    }
-
-    fn from_parts_with_sequence(
-        ingest: Arc<I>,
-        query: Arc<Q>,
-        prune: Arc<P>,
-        batch_log: Arc<B>,
-        current_sequence: u64,
-    ) -> Self {
         Self {
-            ingest,
-            query,
-            prune,
-            batch_log,
+            engine,
+            ingest_limits: IngestLimits::default(),
             ready: Arc::new(AtomicBool::new(true)),
             stream: Arc::new(StreamHub::new(current_sequence)),
         }
+    }
+
+    pub fn with_ingest_limits(mut self, limits: IngestLimits) -> Self {
+        self.ingest_limits = limits;
+        self
     }
 }
 
 pub struct IngestState<I> {
     pub ingest: Arc<I>,
+    pub limits: IngestLimits,
     /// Gates ingest writes only.
     pub ready: Arc<AtomicBool>,
     /// Optional live-stream notifier.
@@ -211,6 +180,7 @@ impl<I> Clone for IngestState<I> {
     fn clone(&self) -> Self {
         Self {
             ingest: self.ingest.clone(),
+            limits: self.limits,
             ready: self.ready.clone(),
             notifier: self.notifier.clone(),
         }
@@ -224,6 +194,7 @@ where
     pub fn new(ingest: Arc<I>) -> Self {
         Self {
             ingest,
+            limits: IngestLimits::default(),
             ready: Arc::new(AtomicBool::new(true)),
             notifier: None,
         }
@@ -232,16 +203,23 @@ where
     pub fn with_notifier(ingest: Arc<I>, notifier: Arc<dyn StreamNotifier>) -> Self {
         Self {
             ingest,
+            limits: IngestLimits::default(),
             ready: Arc::new(AtomicBool::new(true)),
             notifier: Some(notifier),
         }
     }
+
+    pub fn with_limits(mut self, limits: IngestLimits) -> Self {
+        self.limits = limits;
+        self
+    }
 }
 
-impl<I, Q, P, B> From<AppState<I, Q, P, B>> for IngestState<I> {
-    fn from(state: AppState<I, Q, P, B>) -> Self {
+impl<E> From<AppState<E>> for IngestState<E> {
+    fn from(state: AppState<E>) -> Self {
         Self {
-            ingest: state.ingest,
+            ingest: state.engine,
+            limits: state.ingest_limits,
             ready: state.ready,
             notifier: Some(state.stream),
         }
@@ -260,9 +238,11 @@ impl<Q> Clone for QueryState<Q> {
     }
 }
 
-impl<I, Q, P, B> From<AppState<I, Q, P, B>> for QueryState<Q> {
-    fn from(state: AppState<I, Q, P, B>) -> Self {
-        Self { query: state.query }
+impl<E> From<AppState<E>> for QueryState<E> {
+    fn from(state: AppState<E>) -> Self {
+        Self {
+            query: state.engine,
+        }
     }
 }
 
@@ -287,9 +267,11 @@ where
     }
 }
 
-impl<I, Q, P, B> From<AppState<I, Q, P, B>> for CompactState<P> {
-    fn from(state: AppState<I, Q, P, B>) -> Self {
-        Self { prune: state.prune }
+impl<E> From<AppState<E>> for CompactState<E> {
+    fn from(state: AppState<E>) -> Self {
+        Self {
+            prune: state.engine,
+        }
     }
 }
 
@@ -319,10 +301,10 @@ where
     }
 }
 
-impl<I, Q, P, B> From<AppState<I, Q, P, B>> for StreamState<B> {
-    fn from(state: AppState<I, Q, P, B>) -> Self {
+impl<E> From<AppState<E>> for StreamState<E> {
+    fn from(state: AppState<E>) -> Self {
         Self {
-            batch_log: state.batch_log,
+            batch_log: state.engine,
             notifier: state.stream,
         }
     }
@@ -371,7 +353,7 @@ where
             ));
         }
 
-        validate::validate_put_request(&request)?;
+        validate::validate_put_request(&request, self.state.limits)?;
 
         let wire = request.bytes();
         let mut batch = Vec::with_capacity(request.kvs.len());
@@ -388,9 +370,7 @@ where
             .await
             .map_err(ConnectError::internal)?;
 
-        // Single-process deployments can fan out the just-committed sequence
-        // immediately. Split deployments let the serving process advance its
-        // own stream notifier after observing durable state.
+        // Advance any attached stream frontier after the write is committed.
         if let Some(notifier) = &self.state.notifier {
             notifier.advance(seq);
         }
@@ -1147,14 +1127,14 @@ fn connect_limits() -> Limits {
         .max_message_size(MAX_CONNECTRPC_BODY_BYTES)
 }
 
-pub type IngestService<I> = ConnectRpcService<IngestServiceServer<IngestConnect<I>>>;
-pub type QueryService<Q> = ConnectRpcService<QueryServiceServer<QueryConnect<Q>>>;
-pub type CompactService<P> = ConnectRpcService<CompactServiceServer<CompactConnect<P>>>;
-pub type StreamService<B> = ConnectRpcService<StreamServiceServer<StreamConnect<B>>>;
-pub type QueryStack<Q, B> = ConnectRpcService<
+pub(crate) type IngestService<I> = ConnectRpcService<IngestServiceServer<IngestConnect<I>>>;
+pub(crate) type QueryService<Q> = ConnectRpcService<QueryServiceServer<QueryConnect<Q>>>;
+pub(crate) type CompactService<P> = ConnectRpcService<CompactServiceServer<CompactConnect<P>>>;
+pub(crate) type StreamService<B> = ConnectRpcService<StreamServiceServer<StreamConnect<B>>>;
+pub(crate) type QueryStack<Q, B> = ConnectRpcService<
     Chain<QueryServiceServer<QueryConnect<Q>>, StreamServiceServer<StreamConnect<B>>>,
 >;
-pub type ConnectStack<I, Q, P, B> = ConnectRpcService<
+pub(crate) type ConnectStack<I, Q, P, B> = ConnectRpcService<
     Chain<
         IngestServiceServer<IngestConnect<I>>,
         Chain<
@@ -1244,12 +1224,9 @@ where
     .with_compression(connect_compression_registry())
 }
 
-pub fn connect_stack<I, Q, P, B>(state: AppState<I, Q, P, B>) -> ConnectStack<I, Q, P, B>
+pub fn connect_stack<E>(state: AppState<E>) -> ConnectStack<E, E, E, E>
 where
-    I: Ingest,
-    Q: Query,
-    P: Prune,
-    B: BatchLog,
+    E: StoreEngine,
 {
     ConnectRpcService::new(Chain(
         ingest_server(state.clone().into()),
@@ -1657,6 +1634,24 @@ mod tests {
         .encode_to_vec()
     }
 
+    fn put_request(
+        value_len: usize,
+    ) -> buffa::view::OwnedView<exoware_proto::store::ingest::v1::PutRequestView<'static>> {
+        let bytes = exoware_proto::ingest::PutRequest {
+            kvs: vec![exoware_proto::common::KvEntry {
+                key: b"k".to_vec(),
+                value: vec![1u8; value_len],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+        .encode_to_vec();
+        buffa::view::OwnedView::<exoware_proto::store::ingest::v1::PutRequestView<'static>>::decode(
+            bytes.into(),
+        )
+        .expect("decode put request")
+    }
+
     fn sequence_drop_all_policy() -> ProtoPolicy {
         ProtoPolicy {
             scope: Some(policy::Scope::Sequence(Box::default())),
@@ -1833,6 +1828,19 @@ mod tests {
         let _compact = compact_service(state.clone().into());
         let _stream = stream_service(state.clone().into());
         let _query_stack = query_stack(state.clone().into(), state.into());
+    }
+
+    #[tokio::test]
+    async fn ingest_uses_configured_value_limit() {
+        let engine = Arc::new(FakeEngine::default());
+        let state = IngestState::new(engine).with_limits(IngestLimits { max_value_len: 4 });
+        let connect = IngestConnect::new(state);
+
+        let err = IngestApi::put(&connect, Context::default(), put_request(5))
+            .await
+            .expect_err("put should reject oversized value");
+
+        assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
     }
 
     #[tokio::test]

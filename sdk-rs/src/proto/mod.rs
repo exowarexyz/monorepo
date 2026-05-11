@@ -1175,7 +1175,6 @@ pub use range_reduce_response::to_domain_reduce_response;
 
 mod prune_policy_proto;
 pub use prune_policy_proto::{
-    parse_prune_policy_document_from_proto_policies,
     parse_prune_policy_document_from_prune_request_view, parse_prune_policy_from_proto,
     prune_policies_to_proto, validate_prune_policy, validate_prune_policy_document,
 };

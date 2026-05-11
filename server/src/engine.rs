@@ -37,9 +37,6 @@ pub trait RangeScan: Send {
 }
 
 /// Local sequence frontier visible to this process.
-///
-/// This is a standalone capability so split deployments can advertise a frontier without serving
-/// full query or batch-log reads.
 pub trait Sequence: Send + Sync + 'static {
     /// Highest sequence number this process can currently serve.
     fn current_sequence(&self) -> u64;
@@ -85,9 +82,6 @@ pub trait Query: Sequence {
 }
 
 /// Prune mutation capability.
-///
-/// Public point deletes are intentionally not exposed as a separate capability; engines may delete
-/// keys as an internal effect of applying prune policies.
 pub trait Prune: Send + Sync + 'static {
     /// Apply prune policies sequentially.
     fn apply_prune_policies(
