@@ -1,7 +1,8 @@
 #![allow(clippy::result_large_err, clippy::type_complexity)]
-//! Store server for ingest/query/compact APIs.
+//! Store server for ingest/query/compact/stream APIs.
 //!
-//! Provide store capability implementations and wrap them in [`AppState`], then call [`connect_stack`].
+//! Use [`AppState`] with [`connect_stack`] for an all-in-one server, or the narrower
+//! state and service constructors when capabilities are served separately.
 
 mod connect;
 mod engine;

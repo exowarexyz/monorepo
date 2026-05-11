@@ -127,7 +127,9 @@ where
 /// All-in-one single-process composition for a backend that serves every store capability.
 /// Split deployments construct the narrower capability states directly.
 pub struct AppState<E> {
+    /// Backend that implements every store capability.
     pub engine: Arc<E>,
+    /// Limits enforced by the ingest service before writing.
     pub ingest_limits: IngestLimits,
     /// Gates ingest (writes) only. Query and compact remain available during drains so that
     /// in-flight reads can complete while the worker sheds write traffic.
@@ -167,8 +169,11 @@ where
     }
 }
 
+/// State for an ingest-only service.
 pub struct IngestState<I> {
+    /// Backend used for writes.
     pub ingest: Arc<I>,
+    /// Limits enforced before writes reach the backend.
     pub limits: IngestLimits,
     /// Gates ingest writes only.
     pub ready: Arc<AtomicBool>,
@@ -226,7 +231,9 @@ impl<E> From<AppState<E>> for IngestState<E> {
     }
 }
 
+/// State for a query-only service.
 pub struct QueryState<Q> {
+    /// Backend used for point and range reads.
     pub query: Arc<Q>,
 }
 
@@ -238,6 +245,15 @@ impl<Q> Clone for QueryState<Q> {
     }
 }
 
+impl<Q> QueryState<Q>
+where
+    Q: Query,
+{
+    pub fn new(query: Arc<Q>) -> Self {
+        Self { query }
+    }
+}
+
 impl<E> From<AppState<E>> for QueryState<E> {
     fn from(state: AppState<E>) -> Self {
         Self {
@@ -246,7 +262,9 @@ impl<E> From<AppState<E>> for QueryState<E> {
     }
 }
 
+/// State for a compact-only service.
 pub struct CompactState<P> {
+    /// Backend used for prune requests.
     pub prune: Arc<P>,
 }
 
@@ -275,8 +293,11 @@ impl<E> From<AppState<E>> for CompactState<E> {
     }
 }
 
+/// State for a stream-only service.
 pub struct StreamState<B> {
+    /// Backend used to load committed batches.
     pub batch_log: Arc<B>,
+    /// In-process notifier used to wake subscribers after new batches commit.
     pub notifier: Arc<dyn StreamNotifier>,
 }
 

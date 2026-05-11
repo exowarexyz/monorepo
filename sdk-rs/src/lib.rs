@@ -1255,6 +1255,9 @@ impl StoreClient {
         )
     }
 
+    /// Split endpoints with an explicit retry policy.
+    ///
+    /// Pass the same URL for services that are colocated.
     pub fn with_split_urls_and_retry(
         health_base: &str,
         ingest_base: &str,

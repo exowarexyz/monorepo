@@ -13,10 +13,13 @@ use exoware_proto::{
 use exoware_sdk as exoware_proto;
 use exoware_sdk::keys::{validate_key_size, MAX_KEY_LEN};
 
+/// Default maximum value size accepted by ingest validation.
 pub const DEFAULT_MAX_VALUE_LEN: usize = 10 * 1024 * 1024;
 
+/// Limits enforced before ingest requests reach the backend.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IngestLimits {
+    /// Maximum accepted size, in bytes, for each value field.
     pub max_value_len: usize,
 }
 
