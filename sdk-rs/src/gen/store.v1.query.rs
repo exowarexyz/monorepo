@@ -469,9 +469,9 @@ impl ::buffa::Enumeration for RangeReduceOp {
 }
 /// --- Query wire types ---
 ///
-/// Visible store sequence number plus server-defined metadata for query RPCs. On
-/// success, carried in the typed response body; also attached as a `google.rpc`
-/// error detail when the RPC fails (same message shape in both cases).
+/// Visible store sequence number plus server-defined metadata for query RPCs.
+/// Successful responses carry this in the typed response body. Some query errors
+/// also attach the same message shape as a `google.rpc` error detail.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
@@ -488,7 +488,7 @@ pub struct Detail {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
     )]
     pub sequence_number: u64,
-    /// Optional backend-defined metadata. The built-in server leaves this empty.
+    /// Optional backend-defined metadata forwarded by the server.
     ///
     /// Field 2: `extra`
     #[serde(
@@ -731,9 +731,9 @@ pub const __DETAIL_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::typ
 };
 /// --- Query wire types ---
 ///
-/// Visible store sequence number plus server-defined metadata for query RPCs. On
-/// success, carried in the typed response body; also attached as a `google.rpc`
-/// error detail when the RPC fails (same message shape in both cases).
+/// Visible store sequence number plus server-defined metadata for query RPCs.
+/// Successful responses carry this in the typed response body. Some query errors
+/// also attach the same message shape as a `google.rpc` error detail.
 #[derive(Clone, Debug, Default)]
 pub struct DetailView<'a> {
     /// Store sequence number at which the query was evaluated. Clients can reuse
@@ -742,7 +742,7 @@ pub struct DetailView<'a> {
     ///
     /// Field 1: `sequence_number`
     pub sequence_number: u64,
-    /// Optional backend-defined metadata. The built-in server leaves this empty.
+    /// Optional backend-defined metadata forwarded by the server.
     ///
     /// Field 2: `extra` (map)
     pub extra: ::buffa::MapView<
