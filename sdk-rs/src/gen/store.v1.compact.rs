@@ -2728,7 +2728,7 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for KeysScopeView<'a> {
 ///   - `keep_latest { count: N }`        -\> keep the last N batches
 ///   - `greater_than { threshold: T }`   -\> keep sequence numbers \> T
 ///   - `greater_than_or_equal { .. T }`  -\> keep sequence numbers \>= T
-///   - `drop_all`                        -\> clear the batch log entirely
+///   - `drop_all`                        -\> clear the log entirely
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
@@ -2841,7 +2841,7 @@ pub const __SEQUENCE_SCOPE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::bu
 ///   - `keep_latest { count: N }`        -\> keep the last N batches
 ///   - `greater_than { threshold: T }`   -\> keep sequence numbers \> T
 ///   - `greater_than_or_equal { .. T }`  -\> keep sequence numbers \>= T
-///   - `drop_all`                        -\> clear the batch log entirely
+///   - `drop_all`                        -\> clear the log entirely
 #[derive(Clone, Debug, Default)]
 pub struct SequenceScopeView<'a> {
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,

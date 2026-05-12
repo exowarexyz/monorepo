@@ -10,7 +10,7 @@ use exoware_sdk::prune_policy::{
     GroupBy, KeysScope, OrderBy, OrderEncoding, PolicyScope, PrunePolicy, PrunePolicyDocument,
     RetainPolicy, PRUNE_POLICY_DOCUMENT_VERSION,
 };
-use exoware_server::{BatchLog, Ingest, Prune, Query, Sequence};
+use exoware_server::{Ingest, Log, Prune, Query, Sequence};
 use exoware_simulator::RocksStore;
 use tempfile::tempdir;
 
@@ -201,7 +201,7 @@ fn keys_threshold_retains_greater_than_or_equal_versions() {
 }
 
 #[test]
-fn sequence_scope_prunes_batch_log_without_advancing_sequence() {
+fn sequence_scope_prunes_log_without_advancing_sequence() {
     let dir = tempdir().expect("tempdir");
     let store = RocksStore::open(dir.path()).expect("open db");
     put_batch(

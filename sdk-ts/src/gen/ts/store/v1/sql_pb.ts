@@ -36,7 +36,7 @@ export type SubscribeRequest = Message<"store.sql.v1.SubscribeRequest"> & {
   whereSql: string;
 
   /**
-   * Resume cursor over the underlying store batch log. Use
+   * Resume cursor over the underlying store log. Use
    * `SubscribeResponse.sequence_number + 1` to resume after a disconnect.
    *
    * @generated from field: optional uint64 since_sequence_number = 3;

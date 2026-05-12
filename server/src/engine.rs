@@ -33,7 +33,7 @@ pub trait RangeScan: Send {
     fn next_batch(
         &mut self,
         max_items: usize,
-    ) -> impl Future<Output = Result<RangeScanBatch, String>> + Send + '_;
+    ) -> impl Future<Output = Result<RangeScanBatch, String>> + Send;
 }
 
 /// Local sequence frontier visible to this process.
@@ -48,7 +48,7 @@ pub trait Ingest: Send + Sync + 'static {
     fn put_batch(
         &self,
         kvs: Vec<(Bytes, Bytes)>,
-    ) -> impl Future<Output = Result<u64, String>> + Send + '_;
+    ) -> impl Future<Output = Result<u64, String>> + Send;
 }
 
 /// Query read capability.
@@ -60,7 +60,7 @@ pub trait Query: Sequence {
     fn get(
         &self,
         key: Bytes,
-    ) -> impl Future<Output = Result<(Option<Vec<u8>>, QueryExtra), String>> + Send + '_;
+    ) -> impl Future<Output = Result<(Option<Vec<u8>>, QueryExtra), String>> + Send;
 
     /// Cursor over keys in `[start, end]` (inclusive) when `end` is non-empty;
     /// empty `end` means unbounded above. Matches `store.query.v1.RangeRequest`
@@ -71,14 +71,14 @@ pub trait Query: Sequence {
         end: Bytes,
         limit: usize,
         forward: bool,
-    ) -> impl Future<Output = Result<Self::RangeScan, String>> + Send + '_;
+    ) -> impl Future<Output = Result<Self::RangeScan, String>> + Send;
 
     /// Batch-get plus backend-specific query metadata. Returns `(key, Option<value>)`
     /// for each input key, preserving order.
     fn get_many(
         &self,
         keys: Vec<Bytes>,
-    ) -> impl Future<Output = Result<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra), String>> + Send + '_;
+    ) -> impl Future<Output = Result<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra), String>> + Send;
 }
 
 /// Prune mutation capability.
@@ -87,16 +87,16 @@ pub trait Prune: Send + Sync + 'static {
     fn apply_prune_policies(
         &self,
         document: PrunePolicyDocument,
-    ) -> impl Future<Output = Result<(), String>> + Send + '_;
+    ) -> impl Future<Output = Result<(), String>> + Send;
 }
 
 /// Retained per-sequence batch-log access for stream replay and lookups.
-pub trait BatchLog: Sequence {
+pub trait Log: Sequence {
     /// Return the (key, value) pairs written by the `put_batch` call that was
     /// assigned `sequence_number`. Return `Ok(None)` when the batch is not
     /// available from this log.
     ///
-    /// Engines that don't retain a batch log return `Ok(None)` unconditionally,
+    /// Engines that don't retain a log return `Ok(None)` unconditionally,
     /// which disables `GetBatch` and since-cursored `Subscribe` for that
     /// deployment.
     ///
@@ -106,17 +106,15 @@ pub trait BatchLog: Sequence {
     fn get_batch(
         &self,
         sequence_number: u64,
-    ) -> impl Future<Output = Result<Option<Vec<(Bytes, Bytes)>>, String>> + Send + '_;
+    ) -> impl Future<Output = Result<Option<Vec<(Bytes, Bytes)>>, String>> + Send;
 
-    /// Lowest retained batch sequence number, or `None` when the batch log is
+    /// Lowest retained batch sequence number, or `None` when the log is
     /// empty. Surfaced in `BATCH_EVICTED` error details so clients know where
     /// to resume from.
-    fn oldest_retained_batch(
-        &self,
-    ) -> impl Future<Output = Result<Option<u64>, String>> + Send + '_;
+    fn oldest_retained_batch(&self) -> impl Future<Output = Result<Option<u64>, String>> + Send;
 }
 
 /// Compatibility facade for backends that serve every store capability.
-pub trait StoreEngine: Ingest + Query + Prune + BatchLog {}
+pub trait StoreEngine: Ingest + Query + Prune + Log {}
 
-impl<T: Ingest + Query + Prune + BatchLog> StoreEngine for T {}
+impl<T: Ingest + Query + Prune + Log> StoreEngine for T {}

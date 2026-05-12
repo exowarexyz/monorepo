@@ -1,6 +1,6 @@
 //! Naive reference storage for local development: user keys and values are written as-is to
 //! RocksDB. A `meta` column family stores the monotonically increasing sequence number for RPCs.
-//! A separate `batch_log` column family keeps per-sequence-number batches so the stream service
+//! A separate `log` column family keeps per-sequence-number batches so the stream service
 //! can serve replay and point lookups. Batch-log pruning is driven exclusively by the compact
 //! service's `Sequence` scope.
 
@@ -16,9 +16,7 @@ use exoware_sdk::match_key::compile_payload_regex;
 use exoware_sdk::prune_policy::{
     KeysScope, OrderEncoding, PolicyScope, PrunePolicyDocument, RetainPolicy,
 };
-use exoware_server::{
-    BatchLog, Ingest, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence,
-};
+use exoware_server::{Ingest, Log, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence};
 use regex::bytes::Regex;
 use rocksdb::{
     ColumnFamily, ColumnFamilyDescriptor, DBIterator, Direction, IteratorMode, Options, DB,
@@ -26,7 +24,7 @@ use rocksdb::{
 
 const META_CF: &str = "meta";
 const SEQ_META_KEY: &[u8] = b"sequence";
-const BATCH_LOG_CF: &str = "batch_log";
+const LOG_CF: &str = "log";
 const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
 type RocksIterItem = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
 
@@ -250,7 +248,7 @@ fn keys_to_delete(
 }
 
 /// Minimal RocksDB-backed store for the simulator: batch writes plus a global sequence u64
-/// plus a per-sequence batch log.
+/// plus a per-sequence log.
 #[derive(Clone)]
 pub struct RocksStore {
     db: Arc<DB>,
@@ -275,11 +273,11 @@ impl RocksStore {
         let cf_default =
             ColumnFamilyDescriptor::new(rocksdb::DEFAULT_COLUMN_FAMILY_NAME, Options::default());
         let cf_meta = ColumnFamilyDescriptor::new(META_CF, Options::default());
-        let cf_batch_log = ColumnFamilyDescriptor::new(BATCH_LOG_CF, Options::default());
+        let cf_log = ColumnFamilyDescriptor::new(LOG_CF, Options::default());
         let db = Arc::new(DB::open_cf_descriptors(
             &opts,
             path,
-            vec![cf_default, cf_meta, cf_batch_log],
+            vec![cf_default, cf_meta, cf_log],
         )?);
         let meta_cf = db
             .cf_handle(META_CF)
@@ -295,10 +293,10 @@ impl RocksStore {
         })
     }
 
-    fn batch_log_cf(&self) -> &ColumnFamily {
+    fn log_cf(&self) -> &ColumnFamily {
         self.db
-            .cf_handle(BATCH_LOG_CF)
-            .expect("batch_log CF must exist (created on open)")
+            .cf_handle(LOG_CF)
+            .expect("log CF must exist (created on open)")
     }
 
     fn meta_cf(&self) -> &ColumnFamily {
@@ -315,7 +313,7 @@ impl RocksStore {
             batch.put(k.as_ref(), v.as_ref());
         }
         batch.put_cf(self.meta_cf(), SEQ_META_KEY, next.to_le_bytes());
-        batch.put_cf(self.batch_log_cf(), next.to_be_bytes(), &encoded);
+        batch.put_cf(self.log_cf(), next.to_be_bytes(), &encoded);
         self.db.write(batch)?;
         if let Some(obs) = &self.observer {
             obs.store(next, Ordering::SeqCst);
@@ -340,11 +338,7 @@ impl RocksStore {
         batch.put_cf(self.meta_cf(), SEQ_META_KEY, next.to_le_bytes());
 
         // Record an empty batch so sequence numbers stay contiguous for stream replay.
-        batch.put_cf(
-            self.batch_log_cf(),
-            next.to_be_bytes(),
-            encode_batch_entries(&[]),
-        );
+        batch.put_cf(self.log_cf(), next.to_be_bytes(), encode_batch_entries(&[]));
         self.db.write(batch)?;
         if let Some(obs) = &self.observer {
             obs.store(next, Ordering::SeqCst);
@@ -352,11 +346,11 @@ impl RocksStore {
         Ok(())
     }
 
-    fn prune_batch_log_rocksdb(&self, cutoff_exclusive: u64) -> Result<u64, rocksdb::Error> {
+    fn prune_log_rocksdb(&self, cutoff_exclusive: u64) -> Result<u64, rocksdb::Error> {
         // Count before deleting so callers know how much was pruned. For the
         // simulator a simple iterator scan is fine; a production engine would
         // expose delete_range_cf and return the logical count separately.
-        let cf = self.batch_log_cf();
+        let cf = self.log_cf();
         let end_key = cutoff_exclusive.to_be_bytes();
         let mut deleted = 0u64;
         let mut batch = rocksdb::WriteBatch::default();
@@ -453,7 +447,7 @@ impl RocksStore {
             RetainPolicy::GreaterThanOrEqual { threshold } => *threshold,
             RetainPolicy::DropAll => current.saturating_add(1),
         };
-        self.prune_batch_log_rocksdb(cutoff_exclusive)
+        self.prune_log_rocksdb(cutoff_exclusive)
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
@@ -522,10 +516,10 @@ impl Prune for RocksStore {
     }
 }
 
-impl BatchLog for RocksStore {
+impl Log for RocksStore {
     async fn get_batch(&self, sequence_number: u64) -> Result<Option<Vec<(Bytes, Bytes)>>, String> {
         let store = self.clone();
-        let cf = store.batch_log_cf();
+        let cf = store.log_cf();
         match store
             .db
             .get_cf(cf, sequence_number.to_be_bytes())
@@ -538,17 +532,14 @@ impl BatchLog for RocksStore {
 
     async fn oldest_retained_batch(&self) -> Result<Option<u64>, String> {
         let store = self.clone();
-        let cf = store.batch_log_cf();
+        let cf = store.log_cf();
         let mut it = store.db.iterator_cf(cf, IteratorMode::Start);
         match it.next() {
             None => Ok(None),
             Some(item) => {
                 let (key, _) = item.map_err(|e| e.to_string())?;
                 if key.len() != 8 {
-                    return Err(format!(
-                        "batch_log CF key has unexpected length {}",
-                        key.len()
-                    ));
+                    return Err(format!("log CF key has unexpected length {}", key.len()));
                 }
                 let mut buf = [0u8; 8];
                 buf.copy_from_slice(key.as_ref());
@@ -558,7 +549,7 @@ impl BatchLog for RocksStore {
     }
 }
 
-// --- batch log codec: `count: u32_be | for each (k,v): klen: u32_be | k | vlen: u32_be | v` ---
+// --- log codec: `count: u32_be | for each (k,v): klen: u32_be | k | vlen: u32_be | v` ---
 
 fn encode_batch_entries(kvs: &[(Bytes, Bytes)]) -> Vec<u8> {
     let mut size = 4;
@@ -579,7 +570,7 @@ fn encode_batch_entries(kvs: &[(Bytes, Bytes)]) -> Vec<u8> {
 fn decode_batch_entries(mut raw: &[u8]) -> Result<Vec<(Bytes, Bytes)>, String> {
     fn take_u32(buf: &mut &[u8]) -> Result<u32, String> {
         if buf.len() < 4 {
-            return Err("batch log truncated at u32 header".to_string());
+            return Err("log truncated at u32 header".to_string());
         }
         let (head, rest) = buf.split_at(4);
         *buf = rest;
@@ -589,7 +580,7 @@ fn decode_batch_entries(mut raw: &[u8]) -> Result<Vec<(Bytes, Bytes)>, String> {
     }
     fn take_n<'a>(buf: &mut &'a [u8], n: usize) -> Result<&'a [u8], String> {
         if buf.len() < n {
-            return Err("batch log truncated at payload".to_string());
+            return Err("log truncated at payload".to_string());
         }
         let (head, rest) = buf.split_at(n);
         *buf = rest;
@@ -605,10 +596,7 @@ fn decode_batch_entries(mut raw: &[u8]) -> Result<Vec<(Bytes, Bytes)>, String> {
         out.push((k, v));
     }
     if !raw.is_empty() {
-        return Err(format!(
-            "batch log had {} trailing bytes after decode",
-            raw.len()
-        ));
+        return Err(format!("log had {} trailing bytes after decode", raw.len()));
     }
     Ok(out)
 }

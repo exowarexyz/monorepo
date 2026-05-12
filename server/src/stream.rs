@@ -1,7 +1,7 @@
 //! Live stream coordination for `store.stream.v1`.
 //!
 //! A [`StreamNotifier`] tracks the highest published batch sequence and wakes
-//! subscribers. Each subscriber then pulls batches from the batch log at its own
+//! subscribers. Each subscriber then pulls batches from the log at its own
 //! pace, so live delivery is naturally paced by client reads instead of an
 //! internal per-subscriber backlog.
 //!
@@ -24,7 +24,7 @@ use tokio::sync::Notify;
 /// `ErrorInfo.domain` used for all stream-service errors.
 pub const STREAM_ERROR_DOMAIN: &str = "store.stream";
 /// `ErrorInfo.reason` when a `since_sequence_number` or `Get(seq)` references a
-/// batch that has been pruned from the batch log.
+/// batch that has been pruned from the log.
 pub const REASON_BATCH_EVICTED: &str = "BATCH_EVICTED";
 /// `ErrorInfo.reason` when a `Get(seq)` references a sequence number greater
 /// than any that has ever been issued.
@@ -101,7 +101,7 @@ pub struct StreamNotification {
     pub notify: Arc<Notify>,
 }
 
-// TODO: Add a separate remote stream notification abstraction for split deployments.
+// TODO (#56): Add a separate remote stream notification abstraction for split deployments.
 /// In-process notification capability for stream subscribers.
 pub trait StreamNotifier: Send + Sync + 'static {
     /// Atomically snapshot the visible batch frontier and return a notifier

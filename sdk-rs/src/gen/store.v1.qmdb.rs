@@ -34,7 +34,7 @@ pub struct SubscribeRequest {
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
     pub value_filters: ::buffa::alloc::vec::Vec<super::super::common::v1::BytesFilter>,
-    /// Resume cursor over the underlying store batch log. Use
+    /// Resume cursor over the underlying store log. Use
     /// `SubscribeResponse.resume_sequence_number + 1` to resume after a
     /// disconnect.
     ///
@@ -251,7 +251,7 @@ pub struct SubscribeRequestView<'a> {
         'a,
         super::super::common::v1::BytesFilterView<'a>,
     >,
-    /// Resume cursor over the underlying store batch log. Use
+    /// Resume cursor over the underlying store log. Use
     /// `SubscribeResponse.resume_sequence_number + 1` to resume after a
     /// disconnect.
     ///

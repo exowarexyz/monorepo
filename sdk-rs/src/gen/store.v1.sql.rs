@@ -157,7 +157,7 @@ pub struct SubscribeRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_str"
     )]
     pub where_sql: ::buffa::alloc::string::String,
-    /// Resume cursor over the underlying store batch log. Use
+    /// Resume cursor over the underlying store log. Use
     /// `SubscribeResponse.sequence_number + 1` to resume after a disconnect.
     ///
     /// Field 3: `since_sequence_number`
@@ -349,7 +349,7 @@ pub struct SubscribeRequestView<'a> {
     ///
     /// Field 2: `where_sql`
     pub where_sql: &'a str,
-    /// Resume cursor over the underlying store batch log. Use
+    /// Resume cursor over the underlying store log. Use
     /// `SubscribeResponse.sequence_number + 1` to resume after a disconnect.
     ///
     /// Field 3: `since_sequence_number`

@@ -514,7 +514,7 @@ function App() {
       </div>
 
       <div className="card fade-in">
-        <h2>Batch Log &amp; Stream</h2>
+        <h2>Log &amp; Stream</h2>
 
         <div className="form-section">
           <h3>Get Batch</h3>
@@ -550,7 +550,7 @@ function App() {
         <div className="form-section">
           <h3>Subscribe</h3>
           <p className="section-note">
-            Subscribe to matching batches from the batch log. Leave the since-sequence blank to
+            Subscribe to matching batches from the log. Leave the since-sequence blank to
             start live from the next write.
           </p>
           <div className="form-row">

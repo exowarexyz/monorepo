@@ -39,7 +39,7 @@ use tokio::sync::Notify;
 use crate::reduce::RangeReducer;
 use crate::stream::{StreamHub, StreamNotifier};
 use crate::validate::{self, IngestLimits};
-use crate::{BatchLog, Ingest, Prune, Query, QueryExtra, RangeScan, StoreEngine};
+use crate::{Ingest, Log, Prune, Query, QueryExtra, RangeScan, StoreEngine};
 
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
 const RANGE_STREAM_MAX_FRAME_ROWS: usize = 4096;
@@ -294,38 +294,35 @@ impl<E> From<AppState<E>> for CompactState<E> {
 }
 
 /// State for a stream-only service.
-pub struct StreamState<B> {
+pub struct StreamState<L> {
     /// Backend used to load committed batches.
-    pub batch_log: Arc<B>,
+    pub log: Arc<L>,
     /// In-process notifier used to wake subscribers after new batches commit.
     pub notifier: Arc<dyn StreamNotifier>,
 }
 
-impl<B> Clone for StreamState<B> {
+impl<L> Clone for StreamState<L> {
     fn clone(&self) -> Self {
         Self {
-            batch_log: self.batch_log.clone(),
+            log: self.log.clone(),
             notifier: self.notifier.clone(),
         }
     }
 }
 
-impl<B> StreamState<B>
+impl<L> StreamState<L>
 where
-    B: BatchLog,
+    L: Log,
 {
-    pub fn new(batch_log: Arc<B>, notifier: Arc<dyn StreamNotifier>) -> Self {
-        Self {
-            batch_log,
-            notifier,
-        }
+    pub fn new(log: Arc<L>, notifier: Arc<dyn StreamNotifier>) -> Self {
+        Self { log, notifier }
     }
 }
 
 impl<E> From<AppState<E>> for StreamState<E> {
     fn from(state: AppState<E>) -> Self {
         Self {
-            batch_log: state.engine,
+            log: state.engine,
             notifier: state.stream,
         }
     }
@@ -760,7 +757,7 @@ impl<B> Clone for StreamConnect<B> {
 
 impl<B> StreamConnect<B>
 where
-    B: BatchLog,
+    B: Log,
 {
     pub fn new(state: impl Into<StreamState<B>>) -> Self {
         Self {
@@ -845,7 +842,7 @@ struct SubscriptionState<B> {
 
 impl<B> SubscriptionState<B>
 where
-    B: BatchLog,
+    B: Log,
 {
     fn new(
         state: StreamState<B>,
@@ -909,7 +906,7 @@ where
             Some(first_batch)
         } else {
             self.state
-                .batch_log
+                .log
                 .get_batch(seq)
                 .await
                 .map_err(ConnectError::internal)?
@@ -921,7 +918,7 @@ where
         let Some(kvs) = kvs else {
             let oldest = self
                 .state
-                .batch_log
+                .log
                 .oldest_retained_batch()
                 .await
                 .map_err(ConnectError::internal)?;
@@ -944,14 +941,14 @@ where
         self.next_live_sequence += 1;
         let kvs = self
             .state
-            .batch_log
+            .log
             .get_batch(seq)
             .await
             .map_err(ConnectError::internal)?;
         let Some(kvs) = kvs else {
             let oldest = self
                 .state
-                .batch_log
+                .log
                 .oldest_retained_batch()
                 .await
                 .map_err(ConnectError::internal)?;
@@ -1023,7 +1020,7 @@ fn domain_filter_from_subscribe_view(
 
 impl<B> StreamApi for StreamConnect<B>
 where
-    B: BatchLog,
+    B: Log,
 {
     async fn subscribe(
         &self,
@@ -1040,7 +1037,7 @@ where
         let since = request.since_sequence_number;
 
         // Snapshot the current published frontier and subscribe for future
-        // wakeups. The stream then walks the batch log by sequence cursor, so
+        // wakeups. The stream then walks the log by sequence cursor, so
         // live delivery is paced by client reads instead of server-side
         // buffering.
         let matchers = crate::stream::compile_matchers(&filter)?;
@@ -1056,14 +1053,14 @@ where
             Some(s) if s <= replay_bound && s > 0 => {
                 let first_batch = self
                     .state
-                    .batch_log
+                    .log
                     .get_batch(s)
                     .await
                     .map_err(ConnectError::internal)?;
                 let Some(first_batch) = first_batch else {
                     let oldest = self
                         .state
-                        .batch_log
+                        .log
                         .oldest_retained_batch()
                         .await
                         .map_err(ConnectError::internal)?;
@@ -1100,7 +1097,7 @@ where
         let seq = request.sequence_number;
         match self
             .state
-            .batch_log
+            .log
             .get_batch(seq)
             .await
             .map_err(ConnectError::internal)?
@@ -1124,14 +1121,14 @@ where
                 ))
             }
             None => {
-                let current = self.state.batch_log.current_sequence();
+                let current = self.state.log.current_sequence();
                 // Distinguish "never existed" (seq > current) vs "evicted".
                 if seq > current {
                     Err(self.batch_not_found_error())
                 } else {
                     let oldest = self
                         .state
-                        .batch_log
+                        .log
                         .oldest_retained_batch()
                         .await
                         .map_err(ConnectError::internal)?;
@@ -1188,7 +1185,7 @@ where
 
 fn stream_server<B>(state: StreamState<B>) -> StreamServiceServer<StreamConnect<B>>
 where
-    B: BatchLog,
+    B: Log,
 {
     StreamServiceServer::new(StreamConnect::new(state))
 }
@@ -1222,7 +1219,7 @@ where
 
 pub fn stream_service<B>(state: StreamState<B>) -> StreamService<B>
 where
-    B: BatchLog,
+    B: Log,
 {
     ConnectRpcService::new(stream_server(state))
         .with_limits(connect_limits())
@@ -1235,7 +1232,7 @@ pub fn query_stack<Q, B>(
 ) -> QueryStack<Q, B>
 where
     Q: Query,
-    B: BatchLog,
+    B: Log,
 {
     ConnectRpcService::new(Chain(
         query_server(query_state),
@@ -1285,7 +1282,7 @@ mod tests {
     use futures::StreamExt;
 
     use crate::{
-        BatchLog, Ingest, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence,
+        Ingest, Log, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence,
         StreamNotification, StreamNotifier,
     };
 
@@ -1490,7 +1487,7 @@ mod tests {
         }
     }
 
-    impl BatchLog for FakeEngine {
+    impl Log for FakeEngine {
         async fn get_batch(
             &self,
             sequence_number: u64,
@@ -1722,7 +1719,7 @@ mod tests {
         ConnectError,
     >
     where
-        B: BatchLog,
+        B: Log,
     {
         let bytes = subscribe_request_bytes(since_sequence_number);
         let request = buffa::view::OwnedView::<SubscribeRequestView<'static>>::decode(bytes.into())
