@@ -6,6 +6,7 @@
 
 mod connect;
 mod engine;
+pub mod in_process;
 mod reduce;
 mod stream;
 mod validate;

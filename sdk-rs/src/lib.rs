@@ -21,7 +21,7 @@ pub use proto::*;
 extern crate self as exoware_proto;
 
 use bytes::Bytes;
-use connectrpc::client::{ClientConfig, ServerStream as ConnectServerStream};
+use connectrpc::client::{ClientConfig, ClientTransport, ServerStream as ConnectServerStream};
 use connectrpc::{ConnectError, ErrorCode};
 use exoware_proto::compact::ServiceClient as CompactServiceClient;
 use exoware_proto::ingest::ServiceClient as IngestServiceClient;
@@ -44,12 +44,12 @@ use exoware_proto::{
 use futures::future::BoxFuture;
 use keys::is_valid_key_size;
 use kv_codec::{KvExpr, KvFieldRef, KvReducedValue};
-use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
 use std::time::Duration;
+use std::{collections::HashMap, fmt::Display};
 
 const DEFAULT_RETRY_MAX_ATTEMPTS: usize = 3;
 const DEFAULT_RETRY_INITIAL_BACKOFF_MS: u64 = 100;
@@ -306,18 +306,28 @@ impl StoreWriteBatch {
         self.entries.clear();
     }
 
-    pub fn push(
+    pub fn push<T>(
         &mut self,
-        client: &StoreClient,
+        client: &StoreClient<T>,
         key: &Key,
         value: &[u8],
-    ) -> Result<&mut Self, ClientError> {
+    ) -> Result<&mut Self, ClientError>
+    where
+        T: ClientTransport + Clone,
+        T::ResponseBody: http_body::Body<Data = Bytes> + Send + Unpin + 'static,
+        <T::ResponseBody as http_body::Body>::Error: Display,
+    {
         self.entries
             .push((client.encode_store_key(key)?, Bytes::copy_from_slice(value)));
         Ok(self)
     }
 
-    pub async fn commit(&self, client: &StoreClient) -> Result<u64, ClientError> {
+    pub async fn commit<T>(&self, client: &StoreClient<T>) -> Result<u64, ClientError>
+    where
+        T: ClientTransport + Clone,
+        T::ResponseBody: http_body::Body<Data = Bytes> + Send + Unpin + 'static,
+        <T::ResponseBody as http_body::Body>::Error: Display,
+    {
         let refs: Vec<(&Key, &[u8])> = self
             .entries
             .iter()
@@ -369,9 +379,9 @@ pub trait StoreBatchUpload {
         Self: Sync + 'a,
         Self::Prepared: 'a;
 
-    fn commit_upload<'a>(
+    fn commit_upload<'a, T>(
         &'a self,
-        client: &'a StoreClient,
+        client: &'a StoreClient<T>,
         prepared: Self::Prepared,
     ) -> BoxFuture<'a, Result<Self::Receipt, Self::Error>>
     where
@@ -379,6 +389,9 @@ pub trait StoreBatchUpload {
         Self::Prepared: 'a,
         Self::Receipt: 'a,
         Self::Error: 'a,
+        T: ClientTransport + Clone + Send + Sync + 'a,
+        T::ResponseBody: http_body::Body<Data = Bytes> + Send + Unpin + 'static,
+        <T::ResponseBody as http_body::Body>::Error: Display,
     {
         Box::pin(async move {
             let mut batch = StoreWriteBatch::new();
@@ -442,9 +455,9 @@ pub trait StoreBatchPublication {
         Box::pin(async {})
     }
 
-    fn commit_publication<'a>(
+    fn commit_publication<'a, T>(
         &'a self,
-        client: &'a StoreClient,
+        client: &'a StoreClient<T>,
         prepared: Self::PreparedPublication,
     ) -> BoxFuture<'a, Result<Self::PublicationReceipt, Self::Error>>
     where
@@ -452,6 +465,9 @@ pub trait StoreBatchPublication {
         Self::PreparedPublication: 'a,
         Self::PublicationReceipt: 'a,
         Self::Error: 'a,
+        T: ClientTransport + Clone + Send + Sync + 'a,
+        T::ResponseBody: http_body::Body<Data = Bytes> + Send + Unpin + 'static,
+        <T::ResponseBody as http_body::Body>::Error: Display,
     {
         Box::pin(async move {
             let mut batch = StoreWriteBatch::new();
@@ -538,9 +554,8 @@ pub struct GetManyChunk {
 }
 
 /// Iterator-like async range stream.
-pub struct RangeStream {
-    stream:
-        ConnectServerStream<hyper::body::Incoming, exoware_proto::query::RangeFrameView<'static>>,
+pub struct RangeStream<B = hyper::body::Incoming> {
+    stream: ConnectServerStream<B, exoware_proto::query::RangeFrameView<'static>>,
     pending_frame: Option<exoware_proto::query::RangeFrame>,
     rows_seen: usize,
     final_count: Option<usize>,
@@ -549,12 +564,13 @@ pub struct RangeStream {
     key_prefix: Option<StoreKeyPrefix>,
 }
 
-impl RangeStream {
+impl<B> RangeStream<B>
+where
+    B: http_body::Body<Data = Bytes> + Send + Unpin + 'static,
+    B::Error: Display,
+{
     fn from_connect_stream(
-        stream: ConnectServerStream<
-            hyper::body::Incoming,
-            exoware_proto::query::RangeFrameView<'static>,
-        >,
+        stream: ConnectServerStream<B, exoware_proto::query::RangeFrameView<'static>>,
         observed_sequence: Option<Arc<AtomicU64>>,
         key_prefix: Option<StoreKeyPrefix>,
     ) -> Self {
@@ -654,21 +670,21 @@ impl RangeStream {
     }
 }
 
-pub struct GetManyStream {
-    stream:
-        ConnectServerStream<hyper::body::Incoming, exoware_proto::query::GetManyFrameView<'static>>,
+pub struct GetManyStream<B = hyper::body::Incoming> {
+    stream: ConnectServerStream<B, exoware_proto::query::GetManyFrameView<'static>>,
     pending_frame: Option<exoware_proto::query::GetManyFrame>,
     finished: bool,
     observed_sequence: Option<Arc<AtomicU64>>,
     key_prefix: Option<StoreKeyPrefix>,
 }
 
-impl GetManyStream {
+impl<B> GetManyStream<B>
+where
+    B: http_body::Body<Data = Bytes> + Send + Unpin + 'static,
+    B::Error: Display,
+{
     fn from_connect_stream(
-        stream: ConnectServerStream<
-            hyper::body::Incoming,
-            exoware_proto::query::GetManyFrameView<'static>,
-        >,
+        stream: ConnectServerStream<B, exoware_proto::query::GetManyFrameView<'static>>,
         observed_sequence: Option<Arc<AtomicU64>>,
         key_prefix: Option<StoreKeyPrefix>,
     ) -> Self {
@@ -820,22 +836,24 @@ pub struct StreamSubscriptionFrame {
 
 /// Async stream of `StreamSubscriptionFrame`. Backed by the generated
 /// connectrpc server stream.
-pub struct StreamSubscription {
-    stream: ConnectServerStream<
-        hyper::body::Incoming,
-        exoware_proto::store::stream::v1::SubscribeResponseView<'static>,
-    >,
+pub struct StreamSubscription<B = hyper::body::Incoming> {
+    stream:
+        ConnectServerStream<B, exoware_proto::store::stream::v1::SubscribeResponseView<'static>>,
     key_prefix: Option<StoreKeyPrefix>,
     logical_filter: Option<ClientStreamFilter>,
 }
 
-impl std::fmt::Debug for StreamSubscription {
+impl<B> std::fmt::Debug for StreamSubscription<B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StreamSubscription").finish_non_exhaustive()
     }
 }
 
-impl StreamSubscription {
+impl<B> StreamSubscription<B>
+where
+    B: http_body::Body<Data = Bytes> + Send + Unpin + 'static,
+    B::Error: Display,
+{
     /// Pull the next frame. `Ok(None)` = server closed the stream cleanly.
     pub async fn next(&mut self) -> Result<Option<StreamSubscriptionFrame>, ClientError> {
         loop {
@@ -1154,7 +1172,7 @@ impl StoreClientBuilder {
             compact_uri,
             stream_uri,
             http: new_http_client(),
-            connect_http: ProtoPreferZstdHttpClient::plaintext(),
+            transport: ProtoPreferZstdHttpClient::plaintext(),
             retry_config: self.retry_config,
             connect_request_compression: self.connect_request_compression,
             key_prefix: self.key_prefix,
@@ -1163,8 +1181,8 @@ impl StoreClientBuilder {
 }
 
 /// Typed Rust client for Store.
-#[derive(Clone, Debug)]
-pub struct StoreClient {
+#[derive(Clone)]
+pub struct StoreClient<T = ProtoPreferZstdHttpClient> {
     /// Base URL for `health()` / `ready()` (typically the query worker).
     pub(crate) health_url: String,
     ingest_uri: http::Uri,
@@ -1172,10 +1190,28 @@ pub struct StoreClient {
     compact_uri: http::Uri,
     stream_uri: http::Uri,
     http: reqwest::Client,
-    connect_http: ProtoPreferZstdHttpClient,
+    transport: T,
     retry_config: RetryConfig,
     connect_request_compression: ConnectRequestCompression,
     key_prefix: Option<StoreKeyPrefix>,
+}
+
+impl<T> std::fmt::Debug for StoreClient<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoreClient")
+            .field("health_url", &self.health_url)
+            .field("ingest_uri", &self.ingest_uri)
+            .field("query_uri", &self.query_uri)
+            .field("compact_uri", &self.compact_uri)
+            .field("stream_uri", &self.stream_uri)
+            .field("retry_config", &self.retry_config)
+            .field(
+                "connect_request_compression",
+                &self.connect_request_compression,
+            )
+            .field("key_prefix", &self.key_prefix)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A session that enforces monotonic read consistency via a fixed `min_sequence_number` floor.
@@ -1192,9 +1228,9 @@ pub struct StoreClient {
 /// Streamed query reads (`get_many`, `range_stream`) expose their sequence in
 /// each returned chunk's detail, so if one of those is the first successful
 /// read, the session is pinned once the first detail-bearing chunk is consumed.
-#[derive(Clone, Debug)]
-pub struct SerializableReadSession {
-    client: StoreClient,
+#[derive(Clone)]
+pub struct SerializableReadSession<T = ProtoPreferZstdHttpClient> {
+    client: StoreClient<T>,
     state: Arc<SessionState>,
 }
 
@@ -1233,6 +1269,71 @@ impl StoreClient {
             .retry_config(retry_config)
             .build()
             .expect("url sets all service URLs")
+    }
+
+    /// Split endpoints for deployments where services run on different ports or hosts.
+    ///
+    /// Pass the same URL for services that are colocated.
+    pub fn with_split_urls(
+        health_base: &str,
+        ingest_base: &str,
+        query_base: &str,
+        compact_base: &str,
+        stream_base: &str,
+    ) -> Self {
+        Self::with_split_urls_and_retry(
+            health_base,
+            ingest_base,
+            query_base,
+            compact_base,
+            stream_base,
+            RetryConfig::standard(),
+        )
+    }
+
+    /// Split endpoints with an explicit retry policy.
+    ///
+    /// Pass the same URL for services that are colocated.
+    pub fn with_split_urls_and_retry(
+        health_base: &str,
+        ingest_base: &str,
+        query_base: &str,
+        compact_base: &str,
+        stream_base: &str,
+        retry_config: RetryConfig,
+    ) -> Self {
+        Self::builder()
+            .health_url(health_base)
+            .ingest_url(ingest_base)
+            .query_url(query_base)
+            .compact_url(compact_base)
+            .stream_url(stream_base)
+            .retry_config(retry_config)
+            .build()
+            .expect("all service URLs are set")
+    }
+}
+
+impl<T> StoreClient<T>
+where
+    T: ClientTransport + Clone,
+    T::ResponseBody: http_body::Body<Data = Bytes> + Send + Unpin + 'static,
+    <T::ResponseBody as http_body::Body>::Error: Display,
+{
+    pub fn with_transport(transport: T, base_uri: http::Uri, retry_config: RetryConfig) -> Self {
+        let health_url = trim_connect_base(&base_uri.to_string());
+        Self {
+            health_url,
+            ingest_uri: base_uri.clone(),
+            query_uri: base_uri.clone(),
+            compact_uri: base_uri.clone(),
+            stream_uri: base_uri,
+            http: new_http_client(),
+            transport,
+            retry_config: retry_config.sanitized(),
+            connect_request_compression: ConnectRequestCompression::default(),
+            key_prefix: None,
+        }
     }
 
     /// Return this client's configured Store key prefix, if any.
@@ -1293,7 +1394,7 @@ impl StoreClient {
     /// The first successful unary read fixes the session's sequence floor from
     /// the server response. Streamed query reads fix that floor once a
     /// detail-bearing chunk is consumed.
-    pub fn create_session(&self) -> SerializableReadSession {
+    pub fn create_session(&self) -> SerializableReadSession<T> {
         self.create_session_with_sequence(0)
     }
 
@@ -1302,7 +1403,7 @@ impl StoreClient {
     /// This is intended for stream-driven read paths that already observed a
     /// concrete store batch sequence and need follow-up query/proof reads to
     /// see at least that sequence.
-    pub fn create_session_with_sequence(&self, sequence: u64) -> SerializableReadSession {
+    pub fn create_session_with_sequence(&self, sequence: u64) -> SerializableReadSession<T> {
         SerializableReadSession {
             client: self.clone(),
             state: Arc::new(SessionState {
@@ -1313,22 +1414,22 @@ impl StoreClient {
     }
 
     /// Typed access to the `store.ingest.v1` service.
-    pub fn ingest(&self) -> Ingest<'_> {
+    pub fn ingest(&self) -> Ingest<'_, T> {
         Ingest { c: self }
     }
 
     /// Typed access to the `store.query.v1` service.
-    pub fn query(&self) -> Query<'_> {
+    pub fn query(&self) -> Query<'_, T> {
         Query { c: self }
     }
 
     /// Typed access to the `store.compact.v1` service.
-    pub fn compact(&self) -> Compact<'_> {
+    pub fn compact(&self) -> Compact<'_, T> {
         Compact { c: self }
     }
 
     /// Typed access to the `store.stream.v1` service.
-    pub fn stream(&self) -> Stream<'_> {
+    pub fn stream(&self) -> Stream<'_, T> {
         Stream { c: self }
     }
 
@@ -1374,7 +1475,7 @@ impl StoreClient {
 
         let config =
             store_connect_client_config(self.ingest_uri.clone(), self.connect_request_compression);
-        let client = IngestServiceClient::new(self.connect_http.clone(), config);
+        let client = IngestServiceClient::new(self.transport.clone(), config);
         let response = client
             .put(ProtoPutRequest {
                 kvs: proto_kvs,
@@ -1412,7 +1513,7 @@ impl StoreClient {
         &self,
         keys: &[&Key],
         batch_size: u32,
-    ) -> Result<GetManyStream, ClientError> {
+    ) -> Result<GetManyStream<T::ResponseBody>, ClientError> {
         self.get_many_internal(keys, batch_size, None, None).await
     }
 
@@ -1421,7 +1522,7 @@ impl StoreClient {
         keys: &[&Key],
         batch_size: u32,
         min_sequence_number: u64,
-    ) -> Result<GetManyStream, ClientError> {
+    ) -> Result<GetManyStream<T::ResponseBody>, ClientError> {
         self.get_many_internal(keys, batch_size, Some(min_sequence_number), None)
             .await
     }
@@ -1432,7 +1533,7 @@ impl StoreClient {
         batch_size: u32,
         min_sequence_number: Option<u64>,
         observed_sequence: Option<Arc<AtomicU64>>,
-    ) -> Result<GetManyStream, ClientError> {
+    ) -> Result<GetManyStream<T::ResponseBody>, ClientError> {
         for key in keys {
             if !is_valid_key_size(key.len()) {
                 return Err(ClientError::WireFormat(format!(
@@ -1446,7 +1547,7 @@ impl StoreClient {
 
         let config =
             store_connect_client_config(self.query_uri.clone(), self.connect_request_compression);
-        let client = QueryServiceClient::new(self.connect_http.clone(), config);
+        let client = QueryServiceClient::new(self.transport.clone(), config);
         let proto_keys: Vec<Vec<u8>> = keys
             .iter()
             .map(|k| self.encode_store_key(k).map(|key| key.to_vec()))
@@ -1552,7 +1653,7 @@ impl StoreClient {
         end: &Key,
         limit: usize,
         batch_size: usize,
-    ) -> Result<RangeStream, ClientError> {
+    ) -> Result<RangeStream<T::ResponseBody>, ClientError> {
         self.range_stream_internal(
             start,
             end,
@@ -1571,7 +1672,7 @@ impl StoreClient {
         limit: usize,
         batch_size: usize,
         mode: RangeMode,
-    ) -> Result<RangeStream, ClientError> {
+    ) -> Result<RangeStream<T::ResponseBody>, ClientError> {
         self.range_stream_internal(start, end, limit, batch_size, mode, Default::default())
             .await
     }
@@ -1583,7 +1684,7 @@ impl StoreClient {
         limit: usize,
         batch_size: usize,
         min_sequence_number: u64,
-    ) -> Result<RangeStream, ClientError> {
+    ) -> Result<RangeStream<T::ResponseBody>, ClientError> {
         self.range_stream_internal(
             start,
             end,
@@ -1606,7 +1707,7 @@ impl StoreClient {
         batch_size: usize,
         mode: RangeMode,
         min_sequence_number: u64,
-    ) -> Result<RangeStream, ClientError> {
+    ) -> Result<RangeStream<T::ResponseBody>, ClientError> {
         self.range_stream_internal(
             start,
             end,
@@ -1697,7 +1798,7 @@ impl StoreClient {
     ) -> Result<(), ClientError> {
         let config =
             store_connect_client_config(self.compact_uri.clone(), self.connect_request_compression);
-        let client = CompactServiceClient::new(self.connect_http.clone(), config);
+        let client = CompactServiceClient::new(self.transport.clone(), config);
         let policies = self.prefix_prune_policies(policies)?;
         client
             .prune(ProtoPruneRequest {
@@ -1707,24 +1808,6 @@ impl StoreClient {
             .await
             .map_err(client_error_from_connect)?;
         Ok(())
-    }
-
-    pub async fn health(&self) -> Result<bool, ClientError> {
-        let resp = self
-            .http
-            .get(format!("{}/health", self.health_url))
-            .send()
-            .await?;
-        Ok(resp.status().is_success())
-    }
-
-    pub async fn ready(&self) -> Result<bool, ClientError> {
-        let resp = self
-            .http
-            .get(format!("{}/ready", self.health_url))
-            .send()
-            .await?;
-        Ok(resp.status().is_success())
     }
 
     fn normalize_min_sequence_number(&self, requested_sequence: Option<u64>) -> Option<u64> {
@@ -1754,7 +1837,7 @@ impl StoreClient {
 
         let config =
             store_connect_client_config(self.query_uri.clone(), self.connect_request_compression);
-        let client = QueryServiceClient::new(self.connect_http.clone(), config);
+        let client = QueryServiceClient::new(self.transport.clone(), config);
         let response = self
             .send_with_retry(|| async {
                 client
@@ -1818,7 +1901,7 @@ impl StoreClient {
         batch_size: usize,
         mode: RangeMode,
         options: RangeStreamReadOptions,
-    ) -> Result<RangeStream, ClientError> {
+    ) -> Result<RangeStream<T::ResponseBody>, ClientError> {
         if !is_valid_key_size(start.len()) || !is_valid_key_size(end.len()) {
             return Err(ClientError::WireFormat(
                 "range start/end key length is outside valid store key range".to_string(),
@@ -1833,7 +1916,7 @@ impl StoreClient {
 
         let config =
             store_connect_client_config(self.query_uri.clone(), self.connect_request_compression);
-        let client = QueryServiceClient::new(self.connect_http.clone(), config);
+        let client = QueryServiceClient::new(self.transport.clone(), config);
         let min_sequence_number = self.normalize_min_sequence_number(options.min_sequence_number);
         let max_attempts = self.retry_config.max_attempts.max(1);
         let mut attempt = 1usize;
@@ -1913,7 +1996,7 @@ impl StoreClient {
     > {
         let config =
             store_connect_client_config(self.query_uri.clone(), self.connect_request_compression);
-        let client = QueryServiceClient::new(self.connect_http.clone(), config);
+        let client = QueryServiceClient::new(self.transport.clone(), config);
         let (start, end) = self.encode_store_range(start, end)?;
         let request = self.prefix_reduce_request(request)?;
         let proto_params = proto_to_proto_reduce_params(request);
@@ -1994,10 +2077,10 @@ impl StoreClient {
         Ok(request)
     }
 
-    async fn send_with_retry<F, Fut, T>(&self, mut make_request: F) -> Result<T, ClientError>
+    async fn send_with_retry<F, Fut, R>(&self, mut make_request: F) -> Result<R, ClientError>
     where
         F: FnMut() -> Fut,
-        Fut: std::future::Future<Output = Result<T, ConnectError>>,
+        Fut: std::future::Future<Output = Result<R, ConnectError>>,
     {
         let max_attempts = self.retry_config.max_attempts.max(1);
         let mut attempt = 1usize;
@@ -2022,6 +2105,26 @@ impl StoreClient {
                 }
             }
         }
+    }
+}
+
+impl StoreClient {
+    pub async fn health(&self) -> Result<bool, ClientError> {
+        let resp = self
+            .http
+            .get(format!("{}/health", self.health_url))
+            .send()
+            .await?;
+        Ok(resp.status().is_success())
+    }
+
+    pub async fn ready(&self) -> Result<bool, ClientError> {
+        let resp = self
+            .http
+            .get(format!("{}/ready", self.health_url))
+            .send()
+            .await?;
+        Ok(resp.status().is_success())
     }
 }
 
@@ -2083,26 +2186,31 @@ fn shift_field_ref_key_offset(
 // --- Service-grouped accessors ---------------------------------------------
 
 #[derive(Clone, Copy, Debug)]
-pub struct Ingest<'a> {
-    c: &'a StoreClient,
+pub struct Ingest<'a, T = ProtoPreferZstdHttpClient> {
+    c: &'a StoreClient<T>,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Query<'a> {
-    c: &'a StoreClient,
+pub struct Query<'a, T = ProtoPreferZstdHttpClient> {
+    c: &'a StoreClient<T>,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Compact<'a> {
-    c: &'a StoreClient,
+pub struct Compact<'a, T = ProtoPreferZstdHttpClient> {
+    c: &'a StoreClient<T>,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Stream<'a> {
-    c: &'a StoreClient,
+pub struct Stream<'a, T = ProtoPreferZstdHttpClient> {
+    c: &'a StoreClient<T>,
 }
 
-impl<'a> Ingest<'a> {
+impl<'a, T> Ingest<'a, T>
+where
+    T: ClientTransport + Clone,
+    T::ResponseBody: http_body::Body<Data = Bytes> + Send + Unpin + 'static,
+    <T::ResponseBody as http_body::Body>::Error: Display,
+{
     pub async fn put(&self, kvs: &[(&Key, &[u8])]) -> Result<u64, ClientError> {
         self.c.put(kvs).await
     }
@@ -2114,7 +2222,12 @@ impl<'a> Ingest<'a> {
     }
 }
 
-impl<'a> Query<'a> {
+impl<'a, T> Query<'a, T>
+where
+    T: ClientTransport + Clone,
+    T::ResponseBody: http_body::Body<Data = Bytes> + Send + Unpin + 'static,
+    <T::ResponseBody as http_body::Body>::Error: Display,
+{
     pub async fn get(&self, key: &Key) -> Result<Option<Bytes>, ClientError> {
         self.c.get(key).await
     }
@@ -2133,7 +2246,7 @@ impl<'a> Query<'a> {
         &self,
         keys: &[&Key],
         batch_size: u32,
-    ) -> Result<GetManyStream, ClientError> {
+    ) -> Result<GetManyStream<T::ResponseBody>, ClientError> {
         self.c.get_many(keys, batch_size).await
     }
 
@@ -2142,7 +2255,7 @@ impl<'a> Query<'a> {
         keys: &[&Key],
         batch_size: u32,
         min_sequence_number: u64,
-    ) -> Result<GetManyStream, ClientError> {
+    ) -> Result<GetManyStream<T::ResponseBody>, ClientError> {
         self.c
             .get_many_with_min_sequence_number(keys, batch_size, min_sequence_number)
             .await
@@ -2199,7 +2312,7 @@ impl<'a> Query<'a> {
         end: &Key,
         limit: usize,
         batch_size: usize,
-    ) -> Result<RangeStream, ClientError> {
+    ) -> Result<RangeStream<T::ResponseBody>, ClientError> {
         self.c.range_stream(start, end, limit, batch_size).await
     }
 
@@ -2210,7 +2323,7 @@ impl<'a> Query<'a> {
         limit: usize,
         batch_size: usize,
         mode: RangeMode,
-    ) -> Result<RangeStream, ClientError> {
+    ) -> Result<RangeStream<T::ResponseBody>, ClientError> {
         self.c
             .range_stream_with_mode(start, end, limit, batch_size, mode)
             .await
@@ -2223,7 +2336,7 @@ impl<'a> Query<'a> {
         limit: usize,
         batch_size: usize,
         min_sequence_number: u64,
-    ) -> Result<RangeStream, ClientError> {
+    ) -> Result<RangeStream<T::ResponseBody>, ClientError> {
         self.c
             .range_stream_with_min_sequence_number(
                 start,
@@ -2243,7 +2356,7 @@ impl<'a> Query<'a> {
         batch_size: usize,
         mode: RangeMode,
         min_sequence_number: u64,
-    ) -> Result<RangeStream, ClientError> {
+    ) -> Result<RangeStream<T::ResponseBody>, ClientError> {
         self.c
             .range_stream_with_mode_and_min_sequence_number(
                 start,
@@ -2304,7 +2417,12 @@ impl<'a> Query<'a> {
     }
 }
 
-impl<'a> Compact<'a> {
+impl<'a, T> Compact<'a, T>
+where
+    T: ClientTransport + Clone,
+    T::ResponseBody: http_body::Body<Data = Bytes> + Send + Unpin + 'static,
+    <T::ResponseBody as http_body::Body>::Error: Display,
+{
     pub async fn prune(
         &self,
         policies: &[crate::prune_policy::PrunePolicy],
@@ -2313,7 +2431,12 @@ impl<'a> Compact<'a> {
     }
 }
 
-impl<'a> Stream<'a> {
+impl<'a, T> Stream<'a, T>
+where
+    T: ClientTransport + Clone,
+    T::ResponseBody: http_body::Body<Data = Bytes> + Send + Unpin + 'static,
+    <T::ResponseBody as http_body::Body>::Error: Display,
+{
     /// `store.stream.v1.Service.Subscribe` — see `StreamSubscription::next`
     /// for consuming delivered frames. `since_sequence_number = None` starts
     /// live from the next Put; `Some(N)` replays retained batches before
@@ -2323,7 +2446,7 @@ impl<'a> Stream<'a> {
         &self,
         filter: crate::stream_filter::StreamFilter,
         since_sequence_number: Option<u64>,
-    ) -> Result<StreamSubscription, ClientError> {
+    ) -> Result<StreamSubscription<T::ResponseBody>, ClientError> {
         let logical_filter = self
             .c
             .key_prefix
@@ -2370,10 +2493,8 @@ impl<'a> Stream<'a> {
             self.c.stream_uri.clone(),
             self.c.connect_request_compression,
         );
-        let client = exoware_proto::store::stream::v1::ServiceClient::new(
-            self.c.connect_http.clone(),
-            config,
-        );
+        let client =
+            exoware_proto::store::stream::v1::ServiceClient::new(self.c.transport.clone(), config);
         let stream = client
             .subscribe(request)
             .await
@@ -2395,10 +2516,8 @@ impl<'a> Stream<'a> {
             self.c.stream_uri.clone(),
             self.c.connect_request_compression,
         );
-        let client = exoware_proto::store::stream::v1::ServiceClient::new(
-            self.c.connect_http.clone(),
-            config,
-        );
+        let client =
+            exoware_proto::store::stream::v1::ServiceClient::new(self.c.transport.clone(), config);
         match client
             .get(exoware_proto::store::stream::v1::GetRequest {
                 sequence_number,
@@ -2432,7 +2551,12 @@ impl<'a> Stream<'a> {
     }
 }
 
-impl SerializableReadSession {
+impl<T> SerializableReadSession<T>
+where
+    T: ClientTransport + Clone,
+    T::ResponseBody: http_body::Body<Data = Bytes> + Send + Unpin + 'static,
+    <T::ResponseBody as http_body::Body>::Error: Display,
+{
     /// Fixed sequence floor for this session, if one has been established yet.
     ///
     /// Fresh sessions start with `None` unless created via
@@ -2469,7 +2593,7 @@ impl SerializableReadSession {
         &self,
         keys: &[&Key],
         batch_size: u32,
-    ) -> Result<GetManyStream, ClientError> {
+    ) -> Result<GetManyStream<T::ResponseBody>, ClientError> {
         let keys_owned: Vec<Key> = keys.iter().map(|k| Bytes::copy_from_slice(k)).collect();
         let seeded_client = self.client.clone();
         let unseeded_client = self.client.clone();
@@ -2557,7 +2681,7 @@ impl SerializableReadSession {
         end: &Key,
         limit: usize,
         batch_size: usize,
-    ) -> Result<RangeStream, ClientError> {
+    ) -> Result<RangeStream<T::ResponseBody>, ClientError> {
         self.range_stream_with_mode(start, end, limit, batch_size, RangeMode::Forward)
             .await
     }
@@ -2569,7 +2693,7 @@ impl SerializableReadSession {
         limit: usize,
         batch_size: usize,
         mode: RangeMode,
-    ) -> Result<RangeStream, ClientError> {
+    ) -> Result<RangeStream<T::ResponseBody>, ClientError> {
         let seeded_client = self.client.clone();
         let unseeded_client = self.client.clone();
         self.run_read(
@@ -2693,16 +2817,16 @@ impl SerializableReadSession {
         .await
     }
 
-    async fn run_read<T, SeededCall, SeededFut, UnseededCall, UnseededFut>(
+    async fn run_read<R, SeededCall, SeededFut, UnseededCall, UnseededFut>(
         &self,
         seeded_call: SeededCall,
         unseeded_call: UnseededCall,
-    ) -> Result<T, ClientError>
+    ) -> Result<R, ClientError>
     where
         SeededCall: Fn(u64) -> SeededFut,
-        SeededFut: std::future::Future<Output = Result<T, ClientError>>,
+        SeededFut: std::future::Future<Output = Result<R, ClientError>>,
         UnseededCall: Fn(Arc<AtomicU64>) -> UnseededFut,
-        UnseededFut: std::future::Future<Output = Result<T, ClientError>>,
+        UnseededFut: std::future::Future<Output = Result<R, ClientError>>,
     {
         if let Some(sequence) = self.fixed_sequence() {
             return seeded_call(sequence).await;

@@ -10,9 +10,15 @@ homepage.workspace = true
 repository = "https://github.com/exowarexyz/monorepo/tree/main/examples/simulator"
 documentation = "https://docs.rs/exoware-simulator"
 
+[features]
+commonware-runtime-backend = ["dep:commonware-runtime", "dep:commonware-utils"]
+
 [dependencies]
 axum = { workspace = true }
 bytes = { workspace = true }
+commonware-codec = { workspace = true }
+commonware-runtime = { workspace = true, optional = true }
+commonware-utils = { workspace = true, optional = true }
 exoware-sdk = { workspace = true }
 exoware-server = { workspace = true }
 reqwest = { workspace = true }
@@ -25,7 +31,6 @@ clap = { workspace = true }
 tower-http = { workspace = true }
 
 [dev-dependencies]
-commonware-codec = { workspace = true }
 connectrpc = { workspace = true }
 http = { workspace = true }
 tempfile = { workspace = true }

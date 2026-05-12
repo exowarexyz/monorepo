@@ -2408,6 +2408,7 @@ dependencies = [
  "exoware-sdk",
  "futures",
  "http",
+ "http-body",
  "regex",
  "tokio",
 ]
@@ -2420,6 +2421,8 @@ dependencies = [
  "bytes",
  "clap",
  "commonware-codec",
+ "commonware-runtime",
+ "commonware-utils",
  "connectrpc",
  "exoware-sdk",
  "exoware-server",
