@@ -7647,13 +7647,14 @@ mod tests {
 
         impl TestServers {
             fn client(&self) -> StoreClient {
-                StoreClient::with_split_urls(
-                    &self.query_url,
-                    &self.ingest_url,
-                    &self.query_url,
-                    &self.ingest_url,
-                    &self.query_url,
-                )
+                StoreClient::builder()
+                    .health_url(&self.query_url)
+                    .ingest_url(&self.ingest_url)
+                    .query_url(&self.query_url)
+                    .compact_url(&self.ingest_url)
+                    .stream_url(&self.query_url)
+                    .build()
+                    .expect("test server URLs are set")
             }
         }
 

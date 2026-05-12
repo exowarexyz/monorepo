@@ -1235,48 +1235,6 @@ impl StoreClient {
             .expect("url sets all service URLs")
     }
 
-    /// Split endpoints for deployments where services run on different ports or hosts.
-    ///
-    /// Pass the same URL for services that are colocated.
-    pub fn with_split_urls(
-        health_base: &str,
-        ingest_base: &str,
-        query_base: &str,
-        compact_base: &str,
-        stream_base: &str,
-    ) -> Self {
-        Self::with_split_urls_and_retry(
-            health_base,
-            ingest_base,
-            query_base,
-            compact_base,
-            stream_base,
-            RetryConfig::standard(),
-        )
-    }
-
-    /// Split endpoints with an explicit retry policy.
-    ///
-    /// Pass the same URL for services that are colocated.
-    pub fn with_split_urls_and_retry(
-        health_base: &str,
-        ingest_base: &str,
-        query_base: &str,
-        compact_base: &str,
-        stream_base: &str,
-        retry_config: RetryConfig,
-    ) -> Self {
-        Self::builder()
-            .health_url(health_base)
-            .ingest_url(ingest_base)
-            .query_url(query_base)
-            .compact_url(compact_base)
-            .stream_url(stream_base)
-            .retry_config(retry_config)
-            .build()
-            .expect("all service URLs are set")
-    }
-
     /// Return this client's configured Store key prefix, if any.
     pub fn key_prefix(&self) -> Option<StoreKeyPrefix> {
         self.key_prefix
@@ -2834,53 +2792,6 @@ mod tests {
         assert_eq!(client.ingest_uri.to_string(), "http://localhost:10000/");
         assert_eq!(client.query_uri.to_string(), "http://localhost:10000/");
         assert_eq!(client.stream_uri.to_string(), "http://localhost:10000/");
-    }
-
-    #[test]
-    fn builder_matches_new_and_split_urls() {
-        let single = StoreClient::new("http://localhost:9/");
-        let built = StoreClient::builder()
-            .url("http://localhost:9/")
-            .build()
-            .unwrap();
-        assert_eq!(single.health_url, built.health_url);
-        assert_eq!(single.ingest_uri.to_string(), built.ingest_uri.to_string());
-        assert_eq!(single.query_uri.to_string(), built.query_uri.to_string());
-        assert_eq!(single.stream_uri.to_string(), built.stream_uri.to_string());
-
-        let split = StoreClient::with_split_urls(
-            "http://h", "http://i", "http://q", "http://c", "http://s",
-        );
-        let split_b = StoreClient::builder()
-            .health_url("http://h")
-            .ingest_url("http://i")
-            .query_url("http://q")
-            .compact_url("http://c")
-            .stream_url("http://s")
-            .build()
-            .unwrap();
-        assert_eq!(split.health_url, split_b.health_url);
-        assert_eq!(split.ingest_uri.to_string(), split_b.ingest_uri.to_string());
-        assert_eq!(split.query_uri.to_string(), split_b.query_uri.to_string());
-        assert_eq!(
-            split.compact_uri.to_string(),
-            split_b.compact_uri.to_string()
-        );
-        assert_eq!(split.stream_uri.to_string(), "http://s/");
-        assert_eq!(split.stream_uri.to_string(), split_b.stream_uri.to_string());
-    }
-
-    #[test]
-    fn split_urls_can_colocate_query_and_stream_explicitly() {
-        let split = StoreClient::with_split_urls(
-            "http://h", "http://i", "http://q", "http://c", "http://q",
-        );
-
-        assert_eq!(split.health_url, "http://h");
-        assert_eq!(split.ingest_uri.to_string(), "http://i/");
-        assert_eq!(split.query_uri.to_string(), "http://q/");
-        assert_eq!(split.compact_uri.to_string(), "http://c/");
-        assert_eq!(split.stream_uri.to_string(), "http://q/");
     }
 
     #[test]
