@@ -573,7 +573,7 @@ The old client-side `stream_batches(since)` API has been removed.
 Live ordered-QMDB keyed proofs now go through the ConnectRPC
 `store.qmdb.v1.OrderedService`:
 
-- `Subscribe` listens to the full ordered batch log server-side and emits a
+- `Subscribe` listens to the full ordered log server-side and emits a
   historical multi-proof when any subscribed logical key is touched.
 - `Get` returns a current proof for one logical key.
 - `SubscribeRequest.match_keys` supports exact bytes, prefixes, and regexes

@@ -44,7 +44,7 @@ export type SubscribeRequest = Message<"store.qmdb.v1.SubscribeRequest"> & {
   valueFilters: BytesFilter[];
 
   /**
-   * Resume cursor over the underlying store batch log. Use
+   * Resume cursor over the underlying store log. Use
    * `SubscribeResponse.resume_sequence_number + 1` to resume after a
    * disconnect.
    *

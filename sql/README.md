@@ -322,7 +322,7 @@ FROM orders;
 Representative physical-plan output:
 
 ```text
- KvScanExec: limit=None, mode=primary_key, predicate=<none>, exact=true, row_recheck=false, ranges=1, full_scan_like=true, query_stats=streamed_range(detail.read_stats: read_bytes=key+value bytes for rows read; ref RocksDB engine)
+ KvScanExec: limit=None, mode=primary_key, predicate=<none>, exact=true, row_recheck=false, ranges=1, full_scan_like=true, query_stats=streamed_range(detail.extra: server-defined metadata)
 ```
 
 Interpretation:
@@ -344,7 +344,7 @@ WHERE status = 'open' AND amount_cents >= 5;
 Representative physical-plan output:
 
 ```text
- KvScanExec: limit=None, mode=secondary_index(status_idx), predicate=status = 'open' AND amount_cents >= 5, exact=false, row_recheck=true, ranges=1, full_scan_like=false, constrained_prefix=1, query_stats=streamed_range(detail.read_stats: read_bytes=key+value bytes for rows read; ref RocksDB engine)
+ KvScanExec: limit=None, mode=secondary_index(status_idx, lexicographic), predicate=status = 'open' AND amount_cents >= 5, exact=false, row_recheck=true, ranges=1, full_scan_like=false, constrained_prefix=1, query_stats=streamed_range(detail.extra: server-defined metadata)
 ```
 
 Interpretation:
@@ -368,7 +368,7 @@ GROUP BY status;
 Representative physical-plan output:
 
 ```text
- KvAggregateExec: grouped=true, seed_job=none, aggregate_jobs=[job0{mode=secondary_index(status_idx), predicate=status = 'open', exact=true, row_recheck=false, ranges=1, full_scan_like=false, constrained_prefix=1}], query_stats=range_reduce(detail.read_stats: read_bytes=key+value bytes for rows read; ref RocksDB engine)
+ KvAggregateExec: grouped=true, seed_job=none, aggregate_jobs=[job0{mode=secondary_index(status_idx, lexicographic), predicate=status = 'open', exact=true, row_recheck=false, ranges=1, full_scan_like=false, constrained_prefix=1}], query_stats=range_reduce(detail.extra: server-defined metadata)
 ```
 
 Interpretation:

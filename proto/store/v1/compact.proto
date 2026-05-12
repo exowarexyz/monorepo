@@ -91,7 +91,7 @@ message KeysScope {
 //   - `keep_latest { count: N }`        -> keep the last N batches
 //   - `greater_than { threshold: T }`   -> keep sequence numbers > T
 //   - `greater_than_or_equal { .. T }`  -> keep sequence numbers >= T
-//   - `drop_all`                        -> clear the batch log entirely
+//   - `drop_all`                        -> clear the log entirely
 message SequenceScope {}
 
 // A single prune policy. `scope` discriminates the keyspace the rule applies

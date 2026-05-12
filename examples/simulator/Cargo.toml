@@ -13,8 +13,10 @@ documentation = "https://docs.rs/exoware-simulator"
 [dependencies]
 axum = { workspace = true }
 bytes = { workspace = true }
+exoware-sdk = { workspace = true }
 exoware-server = { workspace = true }
 reqwest = { workspace = true }
+regex = { workspace = true }
 rocksdb = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
@@ -25,7 +27,6 @@ tower-http = { workspace = true }
 [dev-dependencies]
 commonware-codec = { workspace = true }
 connectrpc = { workspace = true }
-exoware-sdk = { workspace = true }
 http = { workspace = true }
 tempfile = { workspace = true }
 

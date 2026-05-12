@@ -1175,19 +1175,15 @@ pub use range_reduce_response::to_domain_reduce_response;
 
 mod prune_policy_proto;
 pub use prune_policy_proto::{
-    prune_policies_to_proto, prune_policy_document_from_prune_request_view,
+    parse_and_validate_policy_document, parse_prune_policy_document_from_prune_request_view,
+    parse_prune_policy_from_proto, prune_policies_to_proto, validate_prune_policy,
+    validate_prune_policy_document,
 };
 
 mod error_details;
 pub use error_details::{
     decode_connect_error, with_bad_request_detail, with_error_info_detail, with_query_detail,
     with_retry_info_detail, DecodedConnectError,
-};
-
-mod query_detail_header;
-pub use query_detail_header::{
-    decode_query_detail_header_value, encode_query_detail_header_value,
-    with_query_detail_response_header, with_query_detail_trailer, QUERY_DETAIL_RESPONSE_HEADER,
 };
 
 #[cfg(test)]

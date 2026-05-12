@@ -37,7 +37,7 @@ message SubscribeRequest {
   string where_sql = 2
     [(buf.validate.field).string.max_len = 4096];
 
-  // Resume cursor over the underlying store batch log. Use
+  // Resume cursor over the underlying store log. Use
   // `SubscribeResponse.sequence_number + 1` to resume after a disconnect.
   optional uint64 since_sequence_number = 3;
 }

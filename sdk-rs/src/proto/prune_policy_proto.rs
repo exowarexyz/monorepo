@@ -1,4 +1,7 @@
-//! Convert protobuf prune-policy views into `prune_policy` domain types.
+//! Parse protobuf prune-policy messages into `prune_policy` domain types.
+//!
+//! Parsing checks only protobuf shape and numeric width conversions. Call the
+//! validation helpers on the parsed output before applying policy effects.
 
 use crate::kv_codec::Utf8;
 use crate::match_key::MatchKey;
@@ -6,11 +9,12 @@ use crate::prune_policy::{
     GroupBy, KeysScope, OrderBy, OrderEncoding, PolicyScope, PrunePolicy, PrunePolicyDocument,
     RetainPolicy, PRUNE_POLICY_DOCUMENT_VERSION,
 };
-use crate::store::common::v1::{MatchKey as ProtoMatchKey, MatchKeyView};
+use crate::store::common::v1::MatchKey as ProtoMatchKey;
 use crate::store::compact::v1::{
-    policy, policy_retain, KeysScope as ProtoKeysScope, KeysScopeView, PolicyOrderByView,
-    PolicyOrderEncoding, PolicyView, PruneRequestView,
+    policy, policy_retain, KeysScope as ProtoKeysScope, Policy as ProtoPolicy, PolicyOrderBy,
+    PolicyOrderEncoding, PruneRequestView,
 };
+use buffa::MessageView;
 
 fn u8_from_u32(field: &str, v: u32) -> Result<u8, String> {
     u8::try_from(v).map_err(|_| format!("{field} must fit in u8 (got {v})"))
@@ -37,57 +41,59 @@ fn order_encoding_from_proto(
     }
 }
 
-fn retain_from_view(kind: &policy_retain::KindView<'_>) -> Result<RetainPolicy, String> {
+fn retain_from_proto(kind: &policy_retain::Kind) -> Result<RetainPolicy, String> {
     match kind {
-        policy_retain::KindView::KeepLatest(k) => Ok(RetainPolicy::KeepLatest {
+        policy_retain::Kind::KeepLatest(k) => Ok(RetainPolicy::KeepLatest {
             count: usize_from_u64("keep_latest.count", k.count)?,
         }),
-        policy_retain::KindView::GreaterThan(g) => Ok(RetainPolicy::GreaterThan {
+        policy_retain::Kind::GreaterThan(g) => Ok(RetainPolicy::GreaterThan {
             threshold: g.threshold,
         }),
-        policy_retain::KindView::GreaterThanOrEqual(g) => Ok(RetainPolicy::GreaterThanOrEqual {
+        policy_retain::Kind::GreaterThanOrEqual(g) => Ok(RetainPolicy::GreaterThanOrEqual {
             threshold: g.threshold,
         }),
-        policy_retain::KindView::DropAll(_) => Ok(RetainPolicy::DropAll),
+        policy_retain::Kind::DropAll(_) => Ok(RetainPolicy::DropAll),
     }
 }
 
-fn match_key_from_view(mk: &MatchKeyView<'_>) -> Result<MatchKey, String> {
+fn match_key_from_proto(mk: &ProtoMatchKey) -> Result<MatchKey, String> {
     Ok(MatchKey {
         reserved_bits: u8_from_u32("match_key.reserved_bits", mk.reserved_bits)?,
         prefix: u16_from_u32("match_key.prefix", mk.prefix)?,
-        payload_regex: Utf8::from(mk.payload_regex),
+        payload_regex: Utf8::from(mk.payload_regex.clone()),
     })
 }
 
-fn keys_scope_from_view(s: &KeysScopeView<'_>) -> Result<KeysScope, String> {
-    let Some(mk_view) = s.match_key.as_option() else {
+fn order_by_from_proto(o: &PolicyOrderBy) -> Result<OrderBy, String> {
+    Ok(OrderBy {
+        capture_group: Utf8::from(o.capture_group.clone()),
+        encoding: order_encoding_from_proto(&o.encoding)?,
+    })
+}
+
+fn keys_scope_from_proto(s: &ProtoKeysScope) -> Result<KeysScope, String> {
+    let Some(mk) = s.match_key.as_option() else {
         return Err("keys scope match_key is required".to_string());
     };
-    let match_key = match_key_from_view(mk_view)?;
+    let match_key = match_key_from_proto(mk)?;
 
-    let group_by = if s.group_by.is_set() {
+    let group_by = if let Some(group_by) = s.group_by.as_option() {
         GroupBy {
-            capture_groups: s
-                .group_by
+            capture_groups: group_by
                 .capture_groups
                 .iter()
-                .map(|g| Utf8::from(&**g))
+                .map(|g| Utf8::from(g.clone()))
                 .collect(),
         }
     } else {
         GroupBy::default()
     };
 
-    let order_by = if s.order_by.is_set() {
-        let o: &PolicyOrderByView<'_> = &s.order_by;
-        Some(OrderBy {
-            capture_group: Utf8::from(o.capture_group),
-            encoding: order_encoding_from_proto(&o.encoding)?,
-        })
-    } else {
-        None
-    };
+    let order_by = s
+        .order_by
+        .as_option()
+        .map(order_by_from_proto)
+        .transpose()?;
 
     Ok(KeysScope {
         match_key,
@@ -96,25 +102,32 @@ fn keys_scope_from_view(s: &KeysScopeView<'_>) -> Result<KeysScope, String> {
     })
 }
 
-fn prune_policy_from_view(p: &PolicyView<'_>) -> Result<PrunePolicy, String> {
-    let Some(scope_view) = p.scope.as_ref() else {
+pub fn parse_prune_policy_from_proto(p: &ProtoPolicy) -> Result<PrunePolicy, String> {
+    let Some(scope_proto) = p.scope.as_ref() else {
         return Err("prune policy scope is required".to_string());
     };
-    let scope = match scope_view {
-        policy::ScopeView::Keys(uk) => PolicyScope::Keys(keys_scope_from_view(uk)?),
-        policy::ScopeView::Sequence(_) => PolicyScope::Sequence,
+    let scope = match scope_proto {
+        policy::Scope::Keys(keys) => PolicyScope::Keys(keys_scope_from_proto(keys)?),
+        policy::Scope::Sequence(_) => PolicyScope::Sequence,
     };
 
-    if !p.retain.is_set() {
+    let Some(retain_proto) = p.retain.as_option() else {
         return Err("prune policy retain is required".to_string());
-    }
-    let retain_view = &*p.retain;
-    let Some(kind) = retain_view.kind.as_ref() else {
+    };
+    let Some(kind) = retain_proto.kind.as_ref() else {
         return Err("prune policy retain.kind is required".to_string());
     };
-    let retain = retain_from_view(kind)?;
+    let retain = retain_from_proto(kind)?;
 
     Ok(PrunePolicy { scope, retain })
+}
+
+pub fn validate_prune_policy(policy: &PrunePolicy) -> Result<(), String> {
+    crate::prune_policy::validate_policy(policy).map_err(|e| e.to_string())
+}
+
+pub fn validate_prune_policy_document(document: &PrunePolicyDocument) -> Result<(), String> {
+    crate::prune_policy::validate_policy_document(document).map_err(|e| e.to_string())
 }
 
 pub fn prune_policies_to_proto(policies: &[PrunePolicy]) -> Vec<crate::store::compact::v1::Policy> {
@@ -208,18 +221,83 @@ fn order_encoding_to_proto(enc: &OrderEncoding) -> PolicyOrderEncoding {
     }
 }
 
-/// Converts a `Prune` RPC request into the shared Rust document model (fixed document version).
-pub fn prune_policy_document_from_prune_request_view<'a>(
-    req: &PruneRequestView<'a>,
+/// Parses a `Prune` RPC request into the shared Rust document model (fixed document version).
+pub fn parse_prune_policy_document_from_prune_request_view(
+    req: &PruneRequestView<'_>,
 ) -> Result<PrunePolicyDocument, String> {
     let mut policies = Vec::with_capacity(req.policies.len());
     for p in req.policies.iter() {
-        policies.push(prune_policy_from_view(p)?);
+        policies.push(parse_prune_policy_from_proto(&p.to_owned_message())?);
     }
-    let out = PrunePolicyDocument {
+    Ok(PrunePolicyDocument {
         version: PRUNE_POLICY_DOCUMENT_VERSION,
         policies,
-    };
-    crate::prune_policy::validate_policy_document(&out).map_err(|e| e.to_string())?;
-    Ok(out)
+    })
+}
+
+/// Parses a `Prune` RPC request and validates the resulting domain document.
+pub fn parse_and_validate_policy_document(
+    req: &PruneRequestView<'_>,
+) -> Result<PrunePolicyDocument, String> {
+    let document = parse_prune_policy_document_from_prune_request_view(req)?;
+    validate_prune_policy_document(&document)?;
+    Ok(document)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::kv_codec::Utf8;
+    use crate::match_key::MatchKey;
+    use crate::prune_policy::{GroupBy, KeysScope, OrderBy, PrunePolicy, RetainPolicy};
+
+    #[test]
+    fn owned_proto_policy_round_trips_to_domain_policy() {
+        let expected = PrunePolicy {
+            scope: PolicyScope::Keys(KeysScope {
+                match_key: MatchKey {
+                    reserved_bits: 4,
+                    prefix: 1,
+                    payload_regex: Utf8::from("(?s)^(?P<logical>.*)-(?P<version>.{8})$"),
+                },
+                group_by: GroupBy {
+                    capture_groups: vec![Utf8::from("logical")],
+                },
+                order_by: Some(OrderBy {
+                    capture_group: Utf8::from("version"),
+                    encoding: OrderEncoding::U64Be,
+                }),
+            }),
+            retain: RetainPolicy::KeepLatest { count: 2 },
+        };
+        let proto = prune_policies_to_proto(std::slice::from_ref(&expected))
+            .pop()
+            .expect("policy");
+
+        let actual = parse_prune_policy_from_proto(&proto).expect("from proto");
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn parse_and_validate_rejects_invalid_policy_document() {
+        use buffa::view::MessageView as _;
+        use buffa::Message as _;
+
+        let invalid = PrunePolicy {
+            scope: PolicyScope::Sequence,
+            retain: RetainPolicy::KeepLatest { count: 0 },
+        };
+        let request = crate::store::compact::v1::PruneRequest {
+            policies: prune_policies_to_proto(&[invalid]),
+            ..Default::default()
+        };
+        let bytes = request.encode_to_vec();
+        let view = PruneRequestView::decode_view(&bytes).expect("decode view");
+
+        let err = parse_and_validate_policy_document(&view).expect_err("invalid policy");
+
+        assert!(err.contains("keep_latest count must be > 0"));
+    }
 }

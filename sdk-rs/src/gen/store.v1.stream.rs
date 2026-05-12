@@ -37,7 +37,7 @@ pub struct SubscribeRequest {
     /// Set to N -\> the server first replays every retained batch with
     /// `sequence_number >= N` in ascending order, then transitions seamlessly
     /// into the live stream. If `N` references a sequence number that has been
-    /// evicted from the batch log, the server returns OUT_OF_RANGE with an
+    /// evicted from the log, the server returns OUT_OF_RANGE with an
     /// `ErrorInfo { reason: "BATCH_EVICTED", metadata: { "oldest_retained": ... } }`
     /// detail so callers can decide how to proceed.
     ///
@@ -257,7 +257,7 @@ pub struct SubscribeRequestView<'a> {
     /// Set to N -\> the server first replays every retained batch with
     /// `sequence_number >= N` in ascending order, then transitions seamlessly
     /// into the live stream. If `N` references a sequence number that has been
-    /// evicted from the batch log, the server returns OUT_OF_RANGE with an
+    /// evicted from the log, the server returns OUT_OF_RANGE with an
     /// `ErrorInfo { reason: "BATCH_EVICTED", metadata: { "oldest_retained": ... } }`
     /// detail so callers can decide how to proceed.
     ///
@@ -1244,7 +1244,7 @@ unsafe impl<'a> ::buffa::HasDefaultViewInstance for GetResponseView<'a> {
 
 /// Full service name for this service.
 pub const SERVICE_SERVICE_NAME: &str = "store.stream.v1.Service";
-/// Push-based subscription + point-lookup over the store's batch log.
+/// Push-based subscription + point-lookup over the store's log.
 /// `Subscribe` delivers a `SubscribeResponse` per atomic `Put` batch whose
 /// entries match any of the subscriber's `match_keys`. Optional
 /// `since_sequence_number` replays retained batches before transitioning live.

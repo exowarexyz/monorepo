@@ -33,17 +33,17 @@ pub(crate) struct KvAggregateTable {
 }
 
 pub(crate) enum QueryStatsExplainSurface {
-    StreamedRangeTrailer,
-    RangeReduceHeader,
+    StreamedRangeDetail,
+    RangeReduceDetail,
 }
 
 pub(crate) fn format_query_stats_explain(surface: QueryStatsExplainSurface) -> &'static str {
     match surface {
-        QueryStatsExplainSurface::StreamedRangeTrailer => {
-            "streamed_range(detail.read_stats: read_bytes=key+value bytes for rows read; ref RocksDB engine)"
+        QueryStatsExplainSurface::StreamedRangeDetail => {
+            "streamed_range(detail.extra: server-defined metadata)"
         }
-        QueryStatsExplainSurface::RangeReduceHeader => {
-            "range_reduce(detail.read_stats: read_bytes=key+value bytes for rows read; ref RocksDB engine)"
+        QueryStatsExplainSurface::RangeReduceDetail => {
+            "range_reduce(detail.extra: server-defined metadata)"
         }
     }
 }

@@ -1,59 +1,120 @@
 //! Storage callbacks for the store services.
 //!
-//! Implement this trait for your backend. Errors are surfaced to clients as internal RPC failures
-//! (string message only; keep messages safe to expose if you rely on that).
+//! Implement the capability traits your component serves. Errors are surfaced to clients as
+//! internal RPC failures (string message only; keep messages safe to expose if you rely on that).
+
+use std::collections::HashMap;
+use std::future::Future;
 
 use bytes::Bytes;
+use exoware_sdk::prune_policy::PrunePolicyDocument;
 
-/// Implement these operations for your store. All methods must be thread-safe.
-pub trait StoreEngine: Send + Sync + 'static {
+/// Backend-defined query metadata.
+///
+/// Keep this lightweight: streaming query RPCs may emit detail on every frame.
+pub type QueryExtra = HashMap<String, buffa_types::google::protobuf::Value>;
+
+#[derive(Clone, Debug, Default)]
+pub struct RangeScanBatch {
+    /// Rows read by this cursor pull.
+    pub rows: Vec<(Bytes, Bytes)>,
+    /// Backend-specific query metadata after reading these rows.
+    pub extra: QueryExtra,
+}
+
+/// Owned pull-based range cursor for query RPCs.
+///
+/// Implementations own any state needed to produce batches, allowing query
+/// handlers to pull rows lazily without borrowing the engine.
+pub trait RangeScan: Send {
+    /// Pull up to `max_items` rows. Returning an empty `rows` batch marks EOF.
+    /// EOF may carry non-empty `extra` with final query metadata.
+    /// `extra` is emitted with the response frame built from the same batch.
+    fn next_batch(
+        &mut self,
+        max_items: usize,
+    ) -> impl Future<Output = Result<RangeScanBatch, String>> + Send;
+}
+
+/// Local sequence frontier visible to this process.
+pub trait Sequence: Send + Sync + 'static {
+    /// Highest sequence number this process can currently serve.
+    fn current_sequence(&self) -> u64;
+}
+
+/// Ingest write capability.
+pub trait Ingest: Send + Sync + 'static {
     /// Persist key-value pairs atomically and return the new global sequence number for this write.
-    fn put_batch(&self, kvs: &[(Bytes, Bytes)]) -> Result<u64, String>;
+    fn put_batch(
+        &self,
+        kvs: Vec<(Bytes, Bytes)>,
+    ) -> impl Future<Output = Result<u64, String>> + Send;
+}
 
-    /// Fetch the value for a single key. Returns `None` when the key does not exist.
-    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, String>;
+/// Query read capability.
+pub trait Query: Sequence {
+    type RangeScan: RangeScan + 'static;
 
-    /// Keys in `[start, end]` (inclusive) when `end` is non-empty; empty `end` means unbounded
-    /// above. Matches `store.query.v1.RangeRequest` / `ReduceRequest` on the wire. `limit` caps
-    /// rows returned.
+    /// Fetch the value for a single key plus backend-specific query metadata.
+    /// Returns `None` when the key does not exist.
+    fn get(
+        &self,
+        key: Bytes,
+    ) -> impl Future<Output = Result<(Option<Vec<u8>>, QueryExtra), String>> + Send;
+
+    /// Cursor over keys in `[start, end]` (inclusive) when `end` is non-empty;
+    /// empty `end` means unbounded above. Matches `store.query.v1.RangeRequest`
+    /// / `ReduceRequest` on the wire. `limit` caps rows yielded.
     fn range_scan(
         &self,
-        start: &[u8],
-        end: &[u8],
+        start: Bytes,
+        end: Bytes,
         limit: usize,
         forward: bool,
-    ) -> Result<Vec<(Bytes, Bytes)>, String>;
+    ) -> impl Future<Output = Result<Self::RangeScan, String>> + Send;
 
-    /// Batch-get: returns `(key, Option<value>)` for each input key, preserving order.
-    fn get_many(&self, keys: &[&[u8]]) -> Result<Vec<(Vec<u8>, Option<Vec<u8>>)>, String> {
-        keys.iter()
-            .map(|k| Ok((k.to_vec(), self.get(k)?)))
-            .collect()
-    }
+    /// Batch-get plus backend-specific query metadata. Returns `(key, Option<value>)`
+    /// for each input key, preserving order.
+    fn get_many(
+        &self,
+        keys: Vec<Bytes>,
+    ) -> impl Future<Output = Result<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra), String>> + Send;
+}
 
-    /// Delete a batch of keys atomically. Returns the new global sequence number.
-    fn delete_batch(&self, keys: &[&[u8]]) -> Result<u64, String>;
+/// Prune mutation capability.
+pub trait Prune: Send + Sync + 'static {
+    /// Apply a validated prune policy document sequentially.
+    fn apply_prune_policies(
+        &self,
+        document: PrunePolicyDocument,
+    ) -> impl Future<Output = Result<(), String>> + Send;
+}
 
-    /// Current sequence number visible to readers (used for `min_sequence_number` checks).
-    fn current_sequence(&self) -> u64;
-
+/// Retained per-sequence batch-log access for stream replay and lookups.
+pub trait Log: Sequence {
     /// Return the (key, value) pairs written by the `put_batch` call that was
-    /// assigned `sequence_number`. `Ok(None)` = the batch has been pruned or
-    /// was never written (the store.stream.v1 service maps `None` to NOT_FOUND
-    /// with a `BATCH_EVICTED` detail).
+    /// assigned `sequence_number`. Return `Ok(None)` when the batch is not
+    /// available from this log.
     ///
-    /// Engines that don't retain a batch log return `Ok(None)` unconditionally,
+    /// Engines that don't retain a log return `Ok(None)` unconditionally,
     /// which disables `GetBatch` and since-cursored `Subscribe` for that
     /// deployment.
-    fn get_batch(&self, sequence_number: u64) -> Result<Option<Vec<(Bytes, Bytes)>>, String>;
+    ///
+    /// The stream service maps unavailable batches to `BATCH_NOT_FOUND` when
+    /// they are beyond the visible sequence frontier and `BATCH_EVICTED`
+    /// otherwise.
+    fn get_batch(
+        &self,
+        sequence_number: u64,
+    ) -> impl Future<Output = Result<Option<Vec<(Bytes, Bytes)>>, String>> + Send;
 
-    /// Lowest retained batch sequence number, or `None` when the batch log is
+    /// Lowest retained batch sequence number, or `None` when the log is
     /// empty. Surfaced in `BATCH_EVICTED` error details so clients know where
     /// to resume from.
-    fn oldest_retained_batch(&self) -> Result<Option<u64>, String>;
-
-    /// Delete all batch-log entries with `sequence_number < cutoff_exclusive`.
-    /// Returns the number of entries deleted. Invoked only by the compact
-    /// service's batch-log policy scope — never by ingest.
-    fn prune_batch_log(&self, cutoff_exclusive: u64) -> Result<u64, String>;
+    fn oldest_retained_batch(&self) -> impl Future<Output = Result<Option<u64>, String>> + Send;
 }
+
+/// Compatibility facade for backends that serve every store capability.
+pub trait StoreEngine: Ingest + Query + Prune + Log {}
+
+impl<T: Ingest + Query + Prune + Log> StoreEngine for T {}

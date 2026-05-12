@@ -236,7 +236,7 @@ export const KeysScopeSchema: GenMessage<KeysScope> = /*@__PURE__*/
  *   - `keep_latest { count: N }`        -> keep the last N batches
  *   - `greater_than { threshold: T }`   -> keep sequence numbers > T
  *   - `greater_than_or_equal { .. T }`  -> keep sequence numbers >= T
- *   - `drop_all`                        -> clear the batch log entirely
+ *   - `drop_all`                        -> clear the log entirely
  *
  * @generated from message store.compact.v1.SequenceScope
  */

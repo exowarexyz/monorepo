@@ -1,23 +1,264 @@
 //! Naive reference storage for local development: user keys and values are written as-is to
-//! RocksDB. A single reserved key holds the monotonically increasing sequence number for RPCs.
-//! A separate `batch_log` column family keeps per-sequence-number batches so the stream service
+//! RocksDB. A `meta` column family stores the monotonically increasing sequence number for RPCs.
+//! A separate `log` column family keeps per-sequence-number batches so the stream service
 //! can serve replay and point lookups. Batch-log pruning is driven exclusively by the compact
-//! service's `Sequence` scope (see `server::prune::execute_prune`).
+//! service's `Sequence` scope.
 
+use std::cmp::Ordering as CmpOrdering;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use exoware_server::StoreEngine;
-use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, Direction, IteratorMode, Options, DB};
+use exoware_sdk::keys::KeyCodec;
+use exoware_sdk::match_key::compile_payload_regex;
+use exoware_sdk::prune_policy::{
+    KeysScope, OrderEncoding, PolicyScope, PrunePolicyDocument, RetainPolicy,
+};
+use exoware_server::{Ingest, Log, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence};
+use regex::bytes::Regex;
+use rocksdb::{
+    ColumnFamily, ColumnFamilyDescriptor, DBIterator, Direction, IteratorMode, Options, DB,
+};
 
-/// One reserved key for the sequence counter (not visible to normal range scans that skip it).
-const SEQ_META_KEY: &[u8] = b"__simulator_seq__";
-const BATCH_LOG_CF: &str = "batch_log";
+const META_CF: &str = "meta";
+const SEQ_META_KEY: &[u8] = b"sequence";
+const LOG_CF: &str = "log";
+const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
+type RocksIterItem = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
+
+struct OwnedRocksIterator {
+    iter: DBIterator<'static>,
+    _db: Arc<DB>,
+}
+
+impl OwnedRocksIterator {
+    fn new(db: Arc<DB>, mode: IteratorMode<'_>) -> Self {
+        // SAFETY: `iter` is dropped before `db` because fields are dropped in
+        // declaration order. The RocksDB iterator therefore cannot outlive the
+        // Arc-owned DB it borrows.
+        let db_ref: &'static DB = unsafe { &*Arc::as_ptr(&db) };
+        let iter = db_ref.iterator(mode);
+        Self { iter, _db: db }
+    }
+
+    fn next(&mut self) -> Option<RocksIterItem> {
+        self.iter.next()
+    }
+}
+
+struct RocksRangeScanState {
+    iterator: OwnedRocksIterator,
+    start: Bytes,
+    end: Bytes,
+    limit: usize,
+    forward: bool,
+    emitted: usize,
+    done: bool,
+}
+
+impl RocksRangeScanState {
+    fn new(db: Arc<DB>, start: Bytes, end: Bytes, limit: usize, forward: bool) -> Self {
+        let mode = if forward {
+            IteratorMode::From(start.as_ref(), Direction::Forward)
+        } else if end.is_empty() {
+            IteratorMode::End
+        } else {
+            IteratorMode::From(end.as_ref(), Direction::Reverse)
+        };
+        Self {
+            iterator: OwnedRocksIterator::new(db, mode),
+            start,
+            end,
+            limit,
+            forward,
+            emitted: 0,
+            done: limit == 0,
+        }
+    }
+
+    fn next_batch(&mut self, max_items: usize) -> Result<Vec<(Bytes, Bytes)>, String> {
+        if max_items == 0 || self.done {
+            return Ok(Vec::new());
+        }
+
+        let mut batch = Vec::new();
+        while batch.len() < max_items && !self.done {
+            let Some(item) = self.iterator.next() else {
+                self.done = true;
+                break;
+            };
+            let (key, value) = match item {
+                Ok(row) => row,
+                Err(e) => {
+                    self.done = true;
+                    return Err(e.to_string());
+                }
+            };
+            let key_ref = key.as_ref();
+            if self.forward {
+                if !self.end.is_empty() && key_ref > self.end.as_ref() {
+                    self.done = true;
+                    break;
+                }
+            } else if key_ref < self.start.as_ref() {
+                self.done = true;
+                break;
+            }
+
+            self.emitted += 1;
+            if self.emitted >= self.limit {
+                self.done = true;
+            }
+            batch.push((
+                Bytes::copy_from_slice(key_ref),
+                Bytes::copy_from_slice(value.as_ref()),
+            ));
+        }
+        Ok(batch)
+    }
+}
+
+pub struct RocksRangeScanCursor {
+    state: Option<RocksRangeScanState>,
+}
+
+impl RocksRangeScanCursor {
+    fn new(db: Arc<DB>, start: Bytes, end: Bytes, limit: usize, forward: bool) -> Self {
+        Self {
+            state: Some(RocksRangeScanState::new(db, start, end, limit, forward)),
+        }
+    }
+}
+
+impl RangeScan for RocksRangeScanCursor {
+    async fn next_batch(&mut self, max_items: usize) -> Result<RangeScanBatch, String> {
+        let Some(mut state) = self.state.take() else {
+            return Ok(RangeScanBatch::default());
+        };
+        let (state, result) = tokio::task::spawn_blocking(move || {
+            let result = state.next_batch(max_items);
+            (state, result)
+        })
+        .await
+        .map_err(|e| format!("range scan task failed: {e}"))?;
+        self.state = Some(state);
+        result.map(|rows| RangeScanBatch {
+            rows,
+            extra: QueryExtra::default(),
+        })
+    }
+}
+
+struct KeyEntry {
+    key: Bytes,
+    order_value: Vec<u8>,
+}
+
+/// Extracts the per-key ordering value used to decide which matching keys a prune policy retains.
+fn extract_order_value(payload: &[u8], regex: &Regex, scope: &KeysScope) -> Option<Vec<u8>> {
+    let order_by = scope.order_by.as_ref()?;
+    let captures = regex.captures(payload)?;
+    let matched = captures.name(&order_by.capture_group)?;
+    let raw = matched.as_bytes();
+    match order_by.encoding {
+        OrderEncoding::BytesAsc => Some(raw.to_vec()),
+        OrderEncoding::U64Be | OrderEncoding::I64Be => {
+            if raw.len() == 8 {
+                Some(raw.to_vec())
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Builds the grouping key that scopes retention independently within a key prune policy.
+fn extract_group_key(payload: &[u8], regex: &Regex, scope: &KeysScope) -> Option<Vec<u8>> {
+    if scope.group_by.capture_groups.is_empty() {
+        return Some(Vec::new());
+    }
+    let captures = regex.captures(payload)?;
+    let mut group_key = Vec::new();
+    for group_name in &scope.group_by.capture_groups {
+        let matched = captures.name(group_name)?;
+        let bytes = matched.as_bytes();
+        group_key.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        group_key.extend_from_slice(bytes);
+    }
+    Some(group_key)
+}
+
+fn compare_order_values(a: &[u8], b: &[u8], scope: &KeysScope) -> CmpOrdering {
+    match scope.order_by.as_ref().map(|o| &o.encoding) {
+        Some(OrderEncoding::U64Be) => {
+            let a_val = a.try_into().map(u64::from_be_bytes).unwrap_or(0);
+            let b_val = b.try_into().map(u64::from_be_bytes).unwrap_or(0);
+            a_val.cmp(&b_val)
+        }
+        Some(OrderEncoding::I64Be) => {
+            let a_val = a.try_into().map(i64::from_be_bytes).unwrap_or(0);
+            let b_val = b.try_into().map(i64::from_be_bytes).unwrap_or(0);
+            a_val.cmp(&b_val)
+        }
+        Some(OrderEncoding::BytesAsc) | None => a.cmp(b),
+    }
+}
+
+fn threshold_order_value(scope: &KeysScope, threshold: u64) -> Result<[u8; 8], String> {
+    match scope.order_by.as_ref().map(|o| &o.encoding) {
+        Some(OrderEncoding::U64Be) => Ok(threshold.to_be_bytes()),
+        Some(OrderEncoding::I64Be | OrderEncoding::BytesAsc) => Err(
+            "threshold retention requires order_by.encoding = u64_be for key scopes".to_string(),
+        ),
+        None => Err("threshold retention requires order_by for key scopes".to_string()),
+    }
+}
+
+fn keys_to_delete(
+    mut entries: Vec<KeyEntry>,
+    scope: &KeysScope,
+    retain: &RetainPolicy,
+) -> Result<Vec<Bytes>, String> {
+    entries.sort_by(|a, b| compare_order_values(&a.order_value, &b.order_value, scope));
+
+    match retain {
+        RetainPolicy::KeepLatest { count } => {
+            if entries.len() <= *count {
+                return Ok(Vec::new());
+            }
+            Ok(entries[..entries.len() - count]
+                .iter()
+                .map(|e| e.key.clone())
+                .collect())
+        }
+        RetainPolicy::GreaterThan { threshold } => {
+            let threshold = threshold_order_value(scope, *threshold)?;
+            Ok(entries
+                .iter()
+                .filter(|e| {
+                    compare_order_values(&e.order_value, &threshold, scope) != CmpOrdering::Greater
+                })
+                .map(|e| e.key.clone())
+                .collect())
+        }
+        RetainPolicy::GreaterThanOrEqual { threshold } => {
+            let threshold = threshold_order_value(scope, *threshold)?;
+            Ok(entries
+                .iter()
+                .filter(|e| {
+                    compare_order_values(&e.order_value, &threshold, scope) == CmpOrdering::Less
+                })
+                .map(|e| e.key.clone())
+                .collect())
+        }
+        RetainPolicy::DropAll => Ok(entries.iter().map(|e| e.key.clone()).collect()),
+    }
+}
 
 /// Minimal RocksDB-backed store for the simulator: batch writes plus a global sequence u64
-/// plus a per-sequence batch log.
+/// plus a per-sequence log.
 #[derive(Clone)]
 pub struct RocksStore {
     db: Arc<DB>,
@@ -41,13 +282,17 @@ impl RocksStore {
 
         let cf_default =
             ColumnFamilyDescriptor::new(rocksdb::DEFAULT_COLUMN_FAMILY_NAME, Options::default());
-        let cf_batch_log = ColumnFamilyDescriptor::new(BATCH_LOG_CF, Options::default());
+        let cf_meta = ColumnFamilyDescriptor::new(META_CF, Options::default());
+        let cf_log = ColumnFamilyDescriptor::new(LOG_CF, Options::default());
         let db = Arc::new(DB::open_cf_descriptors(
             &opts,
             path,
-            vec![cf_default, cf_batch_log],
+            vec![cf_default, cf_meta, cf_log],
         )?);
-        let seq = match db.get(SEQ_META_KEY)? {
+        let meta_cf = db
+            .cf_handle(META_CF)
+            .expect("meta CF must exist (created on open)");
+        let seq = match db.get_cf(meta_cf, SEQ_META_KEY)? {
             Some(bytes) if bytes.len() == 8 => u64::from_le_bytes(bytes.try_into().unwrap()),
             _ => 0,
         };
@@ -58,10 +303,16 @@ impl RocksStore {
         })
     }
 
-    fn batch_log_cf(&self) -> &ColumnFamily {
+    fn log_cf(&self) -> &ColumnFamily {
         self.db
-            .cf_handle(BATCH_LOG_CF)
-            .expect("batch_log CF must exist (created on open)")
+            .cf_handle(LOG_CF)
+            .expect("log CF must exist (created on open)")
+    }
+
+    fn meta_cf(&self) -> &ColumnFamily {
+        self.db
+            .cf_handle(META_CF)
+            .expect("meta CF must exist (created on open)")
     }
 
     fn batch_put_rocksdb(&self, kvs: &[(Bytes, Bytes)]) -> Result<u64, rocksdb::Error> {
@@ -71,8 +322,8 @@ impl RocksStore {
         for (k, v) in kvs {
             batch.put(k.as_ref(), v.as_ref());
         }
-        batch.put(SEQ_META_KEY, next.to_le_bytes());
-        batch.put_cf(self.batch_log_cf(), next.to_be_bytes(), &encoded);
+        batch.put_cf(self.meta_cf(), SEQ_META_KEY, next.to_le_bytes());
+        batch.put_cf(self.log_cf(), next.to_be_bytes(), &encoded);
         self.db.write(batch)?;
         if let Some(obs) = &self.observer {
             obs.store(next, Ordering::SeqCst);
@@ -81,120 +332,205 @@ impl RocksStore {
     }
 
     fn get_rocksdb(&self, key: &[u8]) -> Result<Option<Vec<u8>>, rocksdb::Error> {
-        if key == SEQ_META_KEY {
-            return Ok(None);
-        }
         self.db.get(key)
     }
 
-    /// Inclusive `end` when non-empty: include keys `k` with `start <= k <= end`.
-    fn range_scan_rocksdb(
-        &self,
-        start: &[u8],
-        end: &[u8],
-        limit: usize,
-        forward: bool,
-    ) -> Result<Vec<(Bytes, Bytes)>, rocksdb::Error> {
-        if limit == 0 {
-            return Ok(Vec::new());
+    fn delete_keys_rocksdb(&self, keys: &[Bytes]) -> Result<(), rocksdb::Error> {
+        if keys.is_empty() {
+            return Ok(());
         }
-        let mode = IteratorMode::From(start, Direction::Forward);
-        let mut tmp = Vec::new();
-        for item in self.db.iterator(mode) {
-            let (k, v) = item?;
-            if k.as_ref() == SEQ_META_KEY {
-                continue;
-            }
-            if k.as_ref() < start {
-                continue;
-            }
-            if !end.is_empty() && k.as_ref() > end {
-                break;
-            }
-            tmp.push((
-                Bytes::copy_from_slice(k.as_ref()),
-                Bytes::copy_from_slice(&v),
-            ));
-        }
-        if tmp.is_empty() {
-            return Ok(tmp);
-        }
-        if forward {
-            tmp.truncate(limit);
-            return Ok(tmp);
-        }
-        if tmp.len() > limit {
-            tmp = tmp.split_off(tmp.len() - limit);
-        }
-        tmp.reverse();
-        Ok(tmp)
-    }
-}
 
-impl StoreEngine for RocksStore {
-    fn put_batch(&self, kvs: &[(Bytes, Bytes)]) -> Result<u64, String> {
-        self.batch_put_rocksdb(kvs).map_err(|e| e.to_string())
-    }
-
-    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, String> {
-        self.get_rocksdb(key).map_err(|e| e.to_string())
-    }
-
-    fn range_scan(
-        &self,
-        start: &[u8],
-        end: &[u8],
-        limit: usize,
-        forward: bool,
-    ) -> Result<Vec<(Bytes, Bytes)>, String> {
-        self.range_scan_rocksdb(start, end, limit, forward)
-            .map_err(|e| e.to_string())
-    }
-
-    fn get_many(&self, keys: &[&[u8]]) -> Result<Vec<(Vec<u8>, Option<Vec<u8>>)>, String> {
-        let results = self.db.multi_get(keys);
-        keys.iter()
-            .zip(results)
-            .map(|(k, r)| {
-                if *k == SEQ_META_KEY {
-                    return Ok((k.to_vec(), None));
-                }
-                let value = r.map_err(|e| e.to_string())?;
-                Ok((k.to_vec(), value))
-            })
-            .collect()
-    }
-
-    fn delete_batch(&self, keys: &[&[u8]]) -> Result<u64, String> {
         let next = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
         let mut batch = rocksdb::WriteBatch::default();
         for k in keys {
-            batch.delete(k);
+            batch.delete(k.as_ref());
         }
-        batch.put(SEQ_META_KEY, next.to_le_bytes());
-        // delete_batch is a second-class writer with no payload to log; record
-        // an empty batch so sequence numbers remain contiguous and GetBatch
-        // can distinguish "this sequence happened but contained no tracked
-        // entries" from "evicted / never existed".
-        batch.put_cf(
-            self.batch_log_cf(),
-            next.to_be_bytes(),
-            encode_batch_entries(&[]),
-        );
-        self.db.write(batch).map_err(|e| e.to_string())?;
+        batch.put_cf(self.meta_cf(), SEQ_META_KEY, next.to_le_bytes());
+
+        // Record an empty batch so sequence numbers stay contiguous for stream replay.
+        batch.put_cf(self.log_cf(), next.to_be_bytes(), encode_batch_entries(&[]));
+        self.db.write(batch)?;
         if let Some(obs) = &self.observer {
             obs.store(next, Ordering::SeqCst);
         }
-        Ok(next)
+        Ok(())
     }
 
+    fn prune_log_rocksdb(&self, cutoff_exclusive: u64) -> Result<u64, rocksdb::Error> {
+        // Count before deleting so callers know how much was pruned. For the
+        // simulator a simple iterator scan is fine; a production engine would
+        // expose delete_range_cf and return the logical count separately.
+        let cf = self.log_cf();
+        let end_key = cutoff_exclusive.to_be_bytes();
+        let mut deleted = 0u64;
+        let mut batch = rocksdb::WriteBatch::default();
+        let iter = self.db.iterator_cf(cf, IteratorMode::Start);
+        for item in iter {
+            let (k, _) = item?;
+            if k.as_ref() >= &end_key[..] {
+                break;
+            }
+            batch.delete_cf(cf, k.as_ref());
+            deleted += 1;
+        }
+        if deleted > 0 {
+            self.db.write(batch)?;
+        }
+        Ok(deleted)
+    }
+
+    fn apply_prune_policies_rocksdb(&self, document: PrunePolicyDocument) -> Result<(), String> {
+        for policy in &document.policies {
+            match &policy.scope {
+                PolicyScope::Keys(scope) => {
+                    self.apply_key_prune_policy_rocksdb(scope, &policy.retain)?;
+                }
+                PolicyScope::Sequence => {
+                    self.apply_sequence_prune_policy_rocksdb(&policy.retain)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_key_prune_policy_rocksdb(
+        &self,
+        scope: &KeysScope,
+        retain: &RetainPolicy,
+    ) -> Result<(), String> {
+        let codec = KeyCodec::new(scope.match_key.reserved_bits, scope.match_key.prefix);
+        let regex = compile_payload_regex(&scope.match_key.payload_regex)
+            .map_err(|e| format!("policy: {e}"))?;
+
+        let (start, end) = codec.prefix_bounds();
+        let mut rows = RocksRangeScanState::new(self.db.clone(), start, end, usize::MAX, true);
+        let mut groups: BTreeMap<Vec<u8>, Vec<KeyEntry>> = BTreeMap::new();
+
+        loop {
+            let batch = rows.next_batch(PRUNE_SCAN_BATCH_SIZE)?;
+            if batch.is_empty() {
+                break;
+            }
+
+            for (key, _value) in batch {
+                if !codec.matches(&key) {
+                    continue;
+                }
+                let payload_len = codec.payload_capacity_bytes_for_key_len(key.len());
+                let payload = match codec.read_payload(&key, 0, payload_len) {
+                    Ok(payload) => payload,
+                    Err(_) => continue,
+                };
+                if !regex.is_match(&payload) {
+                    continue;
+                }
+
+                let group_key = match extract_group_key(&payload, &regex, scope) {
+                    Some(group_key) => group_key,
+                    None => continue,
+                };
+                let order_value = extract_order_value(&payload, &regex, scope).unwrap_or_default();
+
+                groups
+                    .entry(group_key)
+                    .or_default()
+                    .push(KeyEntry { key, order_value });
+            }
+        }
+
+        let mut all_deletes = Vec::new();
+        for (_group_key, entries) in groups {
+            all_deletes.extend(keys_to_delete(entries, scope, retain)?);
+        }
+        self.delete_keys_rocksdb(&all_deletes)
+            .map_err(|e| e.to_string())
+    }
+
+    fn apply_sequence_prune_policy_rocksdb(&self, retain: &RetainPolicy) -> Result<(), String> {
+        let current = self.sequence.load(Ordering::SeqCst);
+        let cutoff_exclusive = match retain {
+            RetainPolicy::KeepLatest { count } => {
+                let count = *count as u64;
+                current.saturating_add(1).saturating_sub(count)
+            }
+            RetainPolicy::GreaterThan { threshold } => threshold.saturating_add(1),
+            RetainPolicy::GreaterThanOrEqual { threshold } => *threshold,
+            RetainPolicy::DropAll => current.saturating_add(1),
+        };
+        self.prune_log_rocksdb(cutoff_exclusive)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+}
+
+impl Sequence for RocksStore {
     fn current_sequence(&self) -> u64 {
         self.sequence.load(Ordering::SeqCst)
     }
+}
 
-    fn get_batch(&self, sequence_number: u64) -> Result<Option<Vec<(Bytes, Bytes)>>, String> {
-        let cf = self.batch_log_cf();
-        match self
+// The simulator keeps short point RocksDB operations as direct calls inside async futures to keep
+// this local reference backend simple. Long-running range cursor pulls already use
+// `spawn_blocking`; production engines should avoid blocking Tokio workers for disk I/O.
+impl Ingest for RocksStore {
+    async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, String> {
+        let store = self.clone();
+        store.batch_put_rocksdb(&kvs).map_err(|e| e.to_string())
+    }
+}
+
+impl Query for RocksStore {
+    type RangeScan = RocksRangeScanCursor;
+
+    async fn get(&self, key: Bytes) -> Result<(Option<Vec<u8>>, QueryExtra), String> {
+        let store = self.clone();
+        store
+            .get_rocksdb(&key)
+            .map(|value| (value, QueryExtra::default()))
+            .map_err(|e| e.to_string())
+    }
+
+    async fn range_scan(
+        &self,
+        start: Bytes,
+        end: Bytes,
+        limit: usize,
+        forward: bool,
+    ) -> Result<Self::RangeScan, String> {
+        let db = self.db.clone();
+        Ok(RocksRangeScanCursor::new(db, start, end, limit, forward))
+    }
+
+    async fn get_many(
+        &self,
+        keys: Vec<Bytes>,
+    ) -> Result<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra), String> {
+        let store = self.clone();
+        let results = store.db.multi_get(keys.iter().map(|key| key.as_ref()));
+        let entries = keys
+            .into_iter()
+            .zip(results)
+            .map(|(k, r)| {
+                let value = r.map_err(|e| e.to_string())?;
+                Ok((k.to_vec(), value))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok((entries, QueryExtra::default()))
+    }
+}
+
+impl Prune for RocksStore {
+    async fn apply_prune_policies(&self, document: PrunePolicyDocument) -> Result<(), String> {
+        let store = self.clone();
+        store.apply_prune_policies_rocksdb(document)
+    }
+}
+
+impl Log for RocksStore {
+    async fn get_batch(&self, sequence_number: u64) -> Result<Option<Vec<(Bytes, Bytes)>>, String> {
+        let store = self.clone();
+        let cf = store.log_cf();
+        match store
             .db
             .get_cf(cf, sequence_number.to_be_bytes())
             .map_err(|e| e.to_string())?
@@ -204,18 +540,16 @@ impl StoreEngine for RocksStore {
         }
     }
 
-    fn oldest_retained_batch(&self) -> Result<Option<u64>, String> {
-        let cf = self.batch_log_cf();
-        let mut it = self.db.iterator_cf(cf, IteratorMode::Start);
+    async fn oldest_retained_batch(&self) -> Result<Option<u64>, String> {
+        let store = self.clone();
+        let cf = store.log_cf();
+        let mut it = store.db.iterator_cf(cf, IteratorMode::Start);
         match it.next() {
             None => Ok(None),
             Some(item) => {
                 let (key, _) = item.map_err(|e| e.to_string())?;
                 if key.len() != 8 {
-                    return Err(format!(
-                        "batch_log CF key has unexpected length {}",
-                        key.len()
-                    ));
+                    return Err(format!("log CF key has unexpected length {}", key.len()));
                 }
                 let mut buf = [0u8; 8];
                 buf.copy_from_slice(key.as_ref());
@@ -223,32 +557,9 @@ impl StoreEngine for RocksStore {
             }
         }
     }
-
-    fn prune_batch_log(&self, cutoff_exclusive: u64) -> Result<u64, String> {
-        // Count before deleting so callers know how much was pruned. For the
-        // simulator a simple iterator scan is fine; a production engine would
-        // expose delete_range_cf and return the logical count separately.
-        let cf = self.batch_log_cf();
-        let end_key = cutoff_exclusive.to_be_bytes();
-        let mut deleted = 0u64;
-        let mut batch = rocksdb::WriteBatch::default();
-        let iter = self.db.iterator_cf(cf, IteratorMode::Start);
-        for item in iter {
-            let (k, _) = item.map_err(|e| e.to_string())?;
-            if k.as_ref() >= &end_key[..] {
-                break;
-            }
-            batch.delete_cf(cf, k.as_ref());
-            deleted += 1;
-        }
-        if deleted > 0 {
-            self.db.write(batch).map_err(|e| e.to_string())?;
-        }
-        Ok(deleted)
-    }
 }
 
-// --- batch log codec: `count: u32_be | for each (k,v): klen: u32_be | k | vlen: u32_be | v` ---
+// --- log codec: `count: u32_be | for each (k,v): klen: u32_be | k | vlen: u32_be | v` ---
 
 fn encode_batch_entries(kvs: &[(Bytes, Bytes)]) -> Vec<u8> {
     let mut size = 4;
@@ -269,7 +580,7 @@ fn encode_batch_entries(kvs: &[(Bytes, Bytes)]) -> Vec<u8> {
 fn decode_batch_entries(mut raw: &[u8]) -> Result<Vec<(Bytes, Bytes)>, String> {
     fn take_u32(buf: &mut &[u8]) -> Result<u32, String> {
         if buf.len() < 4 {
-            return Err("batch log truncated at u32 header".to_string());
+            return Err("log truncated at u32 header".to_string());
         }
         let (head, rest) = buf.split_at(4);
         *buf = rest;
@@ -279,7 +590,7 @@ fn decode_batch_entries(mut raw: &[u8]) -> Result<Vec<(Bytes, Bytes)>, String> {
     }
     fn take_n<'a>(buf: &mut &'a [u8], n: usize) -> Result<&'a [u8], String> {
         if buf.len() < n {
-            return Err("batch log truncated at payload".to_string());
+            return Err("log truncated at payload".to_string());
         }
         let (head, rest) = buf.split_at(n);
         *buf = rest;
@@ -295,10 +606,7 @@ fn decode_batch_entries(mut raw: &[u8]) -> Result<Vec<(Bytes, Bytes)>, String> {
         out.push((k, v));
     }
     if !raw.is_empty() {
-        return Err(format!(
-            "batch log had {} trailing bytes after decode",
-            raw.len()
-        ));
+        return Err(format!("log had {} trailing bytes after decode", raw.len()));
     }
     Ok(out)
 }

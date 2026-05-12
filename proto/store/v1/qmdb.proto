@@ -47,7 +47,7 @@ message SubscribeRequest {
   repeated store.common.v1.BytesFilter value_filters = 2
     [(buf.validate.field).repeated.max_items = 1024];
 
-  // Resume cursor over the underlying store batch log. Use
+  // Resume cursor over the underlying store log. Use
   // `SubscribeResponse.resume_sequence_number + 1` to resume after a
   // disconnect.
   optional uint64 since_sequence_number = 3;
