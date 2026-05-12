@@ -206,44 +206,54 @@ fn compare_order_values(a: &[u8], b: &[u8], scope: &KeysScope) -> CmpOrdering {
     }
 }
 
+fn threshold_order_value(scope: &KeysScope, threshold: u64) -> Result<[u8; 8], String> {
+    match scope.order_by.as_ref().map(|o| &o.encoding) {
+        Some(OrderEncoding::U64Be) => Ok(threshold.to_be_bytes()),
+        Some(OrderEncoding::I64Be | OrderEncoding::BytesAsc) => Err(
+            "threshold retention requires order_by.encoding = u64_be for key scopes".to_string(),
+        ),
+        None => Err("threshold retention requires order_by for key scopes".to_string()),
+    }
+}
+
 fn keys_to_delete(
     mut entries: Vec<KeyEntry>,
     scope: &KeysScope,
     retain: &RetainPolicy,
-) -> Vec<Bytes> {
+) -> Result<Vec<Bytes>, String> {
     entries.sort_by(|a, b| compare_order_values(&a.order_value, &b.order_value, scope));
 
     match retain {
         RetainPolicy::KeepLatest { count } => {
             if entries.len() <= *count {
-                return Vec::new();
+                return Ok(Vec::new());
             }
-            entries[..entries.len() - count]
+            Ok(entries[..entries.len() - count]
                 .iter()
                 .map(|e| e.key.clone())
-                .collect()
+                .collect())
         }
         RetainPolicy::GreaterThan { threshold } => {
-            let threshold = threshold.to_be_bytes();
-            entries
+            let threshold = threshold_order_value(scope, *threshold)?;
+            Ok(entries
                 .iter()
                 .filter(|e| {
                     compare_order_values(&e.order_value, &threshold, scope) != CmpOrdering::Greater
                 })
                 .map(|e| e.key.clone())
-                .collect()
+                .collect())
         }
         RetainPolicy::GreaterThanOrEqual { threshold } => {
-            let threshold = threshold.to_be_bytes();
-            entries
+            let threshold = threshold_order_value(scope, *threshold)?;
+            Ok(entries
                 .iter()
                 .filter(|e| {
                     compare_order_values(&e.order_value, &threshold, scope) == CmpOrdering::Less
                 })
                 .map(|e| e.key.clone())
-                .collect()
+                .collect())
         }
-        RetainPolicy::DropAll => entries.iter().map(|e| e.key.clone()).collect(),
+        RetainPolicy::DropAll => Ok(entries.iter().map(|e| e.key.clone()).collect()),
     }
 }
 
@@ -430,7 +440,7 @@ impl RocksStore {
 
         let mut all_deletes = Vec::new();
         for (_group_key, entries) in groups {
-            all_deletes.extend(keys_to_delete(entries, scope, retain));
+            all_deletes.extend(keys_to_delete(entries, scope, retain)?);
         }
         self.delete_keys_rocksdb(&all_deletes)
             .map_err(|e| e.to_string())

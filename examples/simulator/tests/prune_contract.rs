@@ -52,11 +52,15 @@ fn prune_document(policies: &[PrunePolicy]) -> PrunePolicyDocument {
     }
 }
 
-fn apply_prune(store: &RocksStore, policies: &[PrunePolicy]) {
-    block_on(store.apply_prune_policies(prune_document(policies))).expect("apply prune policies");
+fn try_apply_prune(store: &RocksStore, policies: &[PrunePolicy]) -> Result<(), String> {
+    block_on(store.apply_prune_policies(prune_document(policies)))
 }
 
-fn version_policy(retain: RetainPolicy) -> PrunePolicy {
+fn apply_prune(store: &RocksStore, policies: &[PrunePolicy]) {
+    try_apply_prune(store, policies).expect("apply prune policies");
+}
+
+fn version_policy_with_encoding(retain: RetainPolicy, encoding: OrderEncoding) -> PrunePolicy {
     PrunePolicy {
         scope: PolicyScope::Keys(KeysScope {
             match_key: MatchKey {
@@ -71,11 +75,15 @@ fn version_policy(retain: RetainPolicy) -> PrunePolicy {
             },
             order_by: Some(OrderBy {
                 capture_group: Utf8::from("version"),
-                encoding: OrderEncoding::U64Be,
+                encoding,
             }),
         }),
         retain,
     }
+}
+
+fn version_policy(retain: RetainPolicy) -> PrunePolicy {
+    version_policy_with_encoding(retain, OrderEncoding::U64Be)
 }
 
 fn sequence_policy(retain: RetainPolicy) -> PrunePolicy {
@@ -198,6 +206,26 @@ fn keys_threshold_retains_greater_than_or_equal_versions() {
     assert!(get_value(&store, &v3).is_none());
     assert_eq!(get_value(&store, &v4).as_deref(), Some(b"v4".as_slice()));
     assert_eq!(get_value(&store, &v5).as_deref(), Some(b"v5".as_slice()));
+}
+
+#[test]
+fn keys_threshold_retention_rejects_i64_ordering() {
+    let dir = tempdir().expect("tempdir");
+    let store = RocksStore::open(dir.path()).expect("open db");
+    let v1 = versioned_key(b"row", 1);
+    put_batch(&store, vec![(v1.clone(), Bytes::from_static(b"v1"))]);
+
+    let err = try_apply_prune(
+        &store,
+        &[version_policy_with_encoding(
+            RetainPolicy::GreaterThanOrEqual { threshold: 1 << 63 },
+            OrderEncoding::I64Be,
+        )],
+    )
+    .expect_err("i64 threshold retention should be rejected");
+
+    assert!(err.contains("threshold retention requires order_by.encoding = u64_be"));
+    assert_eq!(get_value(&store, &v1).as_deref(), Some(b"v1".as_slice()));
 }
 
 #[test]

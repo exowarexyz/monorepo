@@ -9,11 +9,12 @@ use crate::prune_policy::{
     GroupBy, KeysScope, OrderBy, OrderEncoding, PolicyScope, PrunePolicy, PrunePolicyDocument,
     RetainPolicy, PRUNE_POLICY_DOCUMENT_VERSION,
 };
-use crate::store::common::v1::{MatchKey as ProtoMatchKey, MatchKeyView};
+use crate::store::common::v1::MatchKey as ProtoMatchKey;
 use crate::store::compact::v1::{
-    policy, policy_retain, KeysScope as ProtoKeysScope, KeysScopeView, Policy as ProtoPolicy,
-    PolicyOrderBy, PolicyOrderByView, PolicyOrderEncoding, PolicyView, PruneRequestView,
+    policy, policy_retain, KeysScope as ProtoKeysScope, Policy as ProtoPolicy, PolicyOrderBy,
+    PolicyOrderEncoding, PruneRequestView,
 };
+use buffa::MessageView;
 
 fn u8_from_u32(field: &str, v: u32) -> Result<u8, String> {
     u8::try_from(v).map_err(|_| format!("{field} must fit in u8 (got {v})"))
@@ -38,86 +39,6 @@ fn order_encoding_from_proto(
         PolicyOrderEncoding::POLICY_ORDER_ENCODING_U64_BE => Ok(OrderEncoding::U64Be),
         PolicyOrderEncoding::POLICY_ORDER_ENCODING_I64_BE => Ok(OrderEncoding::I64Be),
     }
-}
-
-fn retain_from_view(kind: &policy_retain::KindView<'_>) -> Result<RetainPolicy, String> {
-    match kind {
-        policy_retain::KindView::KeepLatest(k) => Ok(RetainPolicy::KeepLatest {
-            count: usize_from_u64("keep_latest.count", k.count)?,
-        }),
-        policy_retain::KindView::GreaterThan(g) => Ok(RetainPolicy::GreaterThan {
-            threshold: g.threshold,
-        }),
-        policy_retain::KindView::GreaterThanOrEqual(g) => Ok(RetainPolicy::GreaterThanOrEqual {
-            threshold: g.threshold,
-        }),
-        policy_retain::KindView::DropAll(_) => Ok(RetainPolicy::DropAll),
-    }
-}
-
-fn match_key_from_view(mk: &MatchKeyView<'_>) -> Result<MatchKey, String> {
-    Ok(MatchKey {
-        reserved_bits: u8_from_u32("match_key.reserved_bits", mk.reserved_bits)?,
-        prefix: u16_from_u32("match_key.prefix", mk.prefix)?,
-        payload_regex: Utf8::from(mk.payload_regex),
-    })
-}
-
-fn keys_scope_from_view(s: &KeysScopeView<'_>) -> Result<KeysScope, String> {
-    let Some(mk_view) = s.match_key.as_option() else {
-        return Err("keys scope match_key is required".to_string());
-    };
-    let match_key = match_key_from_view(mk_view)?;
-
-    let group_by = if s.group_by.is_set() {
-        GroupBy {
-            capture_groups: s
-                .group_by
-                .capture_groups
-                .iter()
-                .map(|g| Utf8::from(&**g))
-                .collect(),
-        }
-    } else {
-        GroupBy::default()
-    };
-
-    let order_by = if s.order_by.is_set() {
-        let o: &PolicyOrderByView<'_> = &s.order_by;
-        Some(OrderBy {
-            capture_group: Utf8::from(o.capture_group),
-            encoding: order_encoding_from_proto(&o.encoding)?,
-        })
-    } else {
-        None
-    };
-
-    Ok(KeysScope {
-        match_key,
-        group_by,
-        order_by,
-    })
-}
-
-fn parse_prune_policy_from_view(p: &PolicyView<'_>) -> Result<PrunePolicy, String> {
-    let Some(scope_view) = p.scope.as_ref() else {
-        return Err("prune policy scope is required".to_string());
-    };
-    let scope = match scope_view {
-        policy::ScopeView::Keys(uk) => PolicyScope::Keys(keys_scope_from_view(uk)?),
-        policy::ScopeView::Sequence(_) => PolicyScope::Sequence,
-    };
-
-    if !p.retain.is_set() {
-        return Err("prune policy retain is required".to_string());
-    }
-    let retain_view = &*p.retain;
-    let Some(kind) = retain_view.kind.as_ref() else {
-        return Err("prune policy retain.kind is required".to_string());
-    };
-    let retain = retain_from_view(kind)?;
-
-    Ok(PrunePolicy { scope, retain })
 }
 
 fn retain_from_proto(kind: &policy_retain::Kind) -> Result<RetainPolicy, String> {
@@ -306,7 +227,7 @@ pub fn parse_prune_policy_document_from_prune_request_view(
 ) -> Result<PrunePolicyDocument, String> {
     let mut policies = Vec::with_capacity(req.policies.len());
     for p in req.policies.iter() {
-        policies.push(parse_prune_policy_from_view(p)?);
+        policies.push(parse_prune_policy_from_proto(&p.to_owned_message())?);
     }
     Ok(PrunePolicyDocument {
         version: PRUNE_POLICY_DOCUMENT_VERSION,
