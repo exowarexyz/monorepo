@@ -41,6 +41,7 @@ use crate::stream::{StreamHub, StreamNotifier};
 use crate::validate::{self, IngestLimits};
 use crate::{Ingest, Log, Prune, Query, QueryExtra, RangeScan, StoreEngine};
 
+// TODO (#57): Make limits configurable.
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
 const RANGE_STREAM_MAX_FRAME_ROWS: usize = 4096;
 const REDUCE_SCAN_BATCH_SIZE: usize = 4096;
