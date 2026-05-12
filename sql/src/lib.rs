@@ -1632,6 +1632,56 @@ mod tests {
     }
 
     #[test]
+    fn non_nullable_null_predicates_simplify() {
+        use datafusion::logical_expr::col;
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", DataType::Int64, false),
+                TableColumnConfig::new("label", DataType::Utf8, true),
+            ],
+            vec!["id".to_string()],
+            vec![],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+
+        let is_null = col("id").is_null();
+        assert!(QueryPredicate::supports_filter(&is_null, &model));
+        assert!(QueryPredicate::from_filters(&[is_null], &model).contradiction);
+
+        let is_not_null = col("id").is_not_null();
+        assert!(QueryPredicate::supports_filter(&is_not_null, &model));
+        let pred = QueryPredicate::from_filters(&[is_not_null], &model);
+        assert!(!pred.contradiction);
+        assert!(pred.constraints.is_empty());
+    }
+
+    #[test]
+    fn null_literal_comparisons_are_contradictions() {
+        use datafusion::logical_expr::col;
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", DataType::Int64, false),
+                TableColumnConfig::new("label", DataType::Utf8, true),
+            ],
+            vec!["id".to_string()],
+            vec![],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+
+        for filter in [
+            col("label").eq(Expr::Literal(ScalarValue::Utf8(None), None)),
+            col("id").gt(Expr::Literal(ScalarValue::Int64(None), None)),
+        ] {
+            assert!(QueryPredicate::supports_filter(&filter, &model));
+            assert!(QueryPredicate::from_filters(&[filter], &model).contradiction);
+        }
+    }
+
+    #[test]
     fn in_predicate_merges_with_comparisons_order_independent() {
         use datafusion::logical_expr::{col, in_list};
         let config = KvTableConfig::new(

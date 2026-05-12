@@ -125,6 +125,9 @@ impl QueryPredicate {
                 let Some(col_idx) = model.columns_by_name.get(&column).copied() else {
                     return false;
                 };
+                if literal.is_null() {
+                    return true;
+                }
                 let range_ops = matches!(
                     op,
                     Operator::Eq | Operator::Lt | Operator::LtEq | Operator::Gt | Operator::GtEq
@@ -163,16 +166,20 @@ impl QueryPredicate {
             Expr::IsNull(inner) => {
                 if let Some(col_name) = extract_column_name(inner) {
                     if let Some(&col_idx) = model.columns_by_name.get(col_name) {
-                        match self.constraints.get(&col_idx) {
-                            Some(PredicateConstraint::IsNotNull) => self.contradiction = true,
-                            Some(PredicateConstraint::IsNull) => {}
-                            None => {
-                                self.constraints
-                                    .insert(col_idx, PredicateConstraint::IsNull);
+                        if !model.column(col_idx).nullable {
+                            self.contradiction = true;
+                        } else {
+                            match self.constraints.get(&col_idx) {
+                                Some(PredicateConstraint::IsNotNull) => self.contradiction = true,
+                                Some(PredicateConstraint::IsNull) => {}
+                                None => {
+                                    self.constraints
+                                        .insert(col_idx, PredicateConstraint::IsNull);
+                                }
+                                // Any value-class constraint (StringEq, IntRange, …)
+                                // asserts a non-null value, so IS NULL contradicts it.
+                                Some(_) => self.contradiction = true,
                             }
-                            // Any value-class constraint (StringEq, IntRange, …)
-                            // asserts a non-null value, so IS NULL contradicts it.
-                            Some(_) => self.contradiction = true,
                         }
                     }
                 }
@@ -180,16 +187,19 @@ impl QueryPredicate {
             Expr::IsNotNull(inner) => {
                 if let Some(col_name) = extract_column_name(inner) {
                     if let Some(&col_idx) = model.columns_by_name.get(col_name) {
-                        match self.constraints.get(&col_idx) {
-                            Some(PredicateConstraint::IsNull) => self.contradiction = true,
-                            None => {
-                                self.constraints
-                                    .insert(col_idx, PredicateConstraint::IsNotNull);
+                        if model.column(col_idx).nullable {
+                            match self.constraints.get(&col_idx) {
+                                Some(PredicateConstraint::IsNull) => self.contradiction = true,
+                                None => {
+                                    self.constraints
+                                        .insert(col_idx, PredicateConstraint::IsNotNull);
+                                }
+                                // Existing value-class constraint already implies
+                                // IS NOT NULL; keep the stronger constraint.
+                                _ => {}
                             }
-                            // Existing value-class constraint already implies
-                            // IS NOT NULL; keep the stronger constraint.
-                            _ => {}
                         }
+                        // Non-nullable columns: IS NOT NULL is a tautology, drop it.
                     }
                 }
             }
@@ -224,6 +234,11 @@ impl QueryPredicate {
         let Some(col_idx) = model.columns_by_name.get(column).copied() else {
             return;
         };
+        if literal.is_null() {
+            // `col <op> NULL` is always NULL: no row can satisfy it.
+            self.contradiction = true;
+            return;
+        }
         match model.columns[col_idx].kind {
             ColumnKind::Utf8 => {
                 if op != Operator::Eq {
