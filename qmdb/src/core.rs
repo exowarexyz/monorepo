@@ -3,14 +3,13 @@ use std::time::Duration;
 
 use commonware_codec::{Codec, Encode, Read as CodecRead};
 use commonware_cryptography::{Digest, Hasher};
+use commonware_storage::merkle::{
+    hasher::Hasher as MerkleHasher, mem::Mem, Family, Graftable, Location, Position,
+};
 use commonware_storage::qmdb::{
     any::{ordered, unordered, value::ValueEncoding},
     current::grafting,
     operation::Key as QmdbKey,
-};
-use commonware_storage::{
-    merkle::hasher::Hasher as MerkleHasher,
-    merkle::{Family, Graftable, Location, Position},
 };
 use exoware_sdk::keys::Key;
 use exoware_sdk::{ClientError, RangeMode, SerializableReadSession, StoreClient};
@@ -465,61 +464,70 @@ pub(crate) fn extend_merkle_from_peaks<F: Family, H: Hasher, Op: AsRef<[u8]>>(
     previous_size: Position<F>,
     encoded_operations: impl IntoIterator<Item = Op>,
 ) -> Result<MerkleExtension<F, H::Digest>, QmdbError> {
+    let previous_leaves = Location::<F>::try_from(previous_size)
+        .map_err(|e| QmdbError::CorruptData(format!("invalid incremental ops size: {e}")))?;
     let mut peak_map: std::collections::BTreeMap<Position<F>, (u32, H::Digest)> = peaks
         .into_iter()
         .map(|(pos, height, digest)| (pos, (height, digest)))
         .collect();
-    let mut current_size = previous_size;
-    let mut new_nodes = Vec::<(Position<F>, H::Digest)>::new();
+    let pinned_nodes = F::peaks(previous_size)
+        .map(|(pos, height)| {
+            let (actual_height, digest) = peak_map.remove(&pos).ok_or_else(|| {
+                QmdbError::CorruptData(format!(
+                    "missing peak {pos} while extending merkle tree"
+                ))
+            })?;
+            if actual_height != height {
+                return Err(QmdbError::CorruptData(format!(
+                    "peak {pos} height mismatch while extending merkle tree: expected {height}, got {actual_height}"
+                )));
+            }
+            Ok(digest)
+        })
+        .collect::<Result<Vec<_>, QmdbError>>()?;
+    if let Some((extra_pos, _)) = peak_map.first_key_value() {
+        return Err(QmdbError::CorruptData(format!(
+            "unexpected peak {extra_pos} while extending merkle tree"
+        )));
+    }
+
     let hasher = commonware_storage::qmdb::hasher::<H>();
+    let mem = Mem::<F, H::Digest>::from_components(Vec::new(), previous_leaves, pinned_nodes)
+        .map_err(|e| QmdbError::CommonwareMerkle(e.to_string()))?;
+    let mut batch = mem.new_batch();
     for encoded in encoded_operations {
         let encoded = encoded.as_ref();
         ensure_encoded_value_size(encoded.len())?;
-        let current_leaves = Location::<F>::try_from(current_size)
-            .map_err(|e| QmdbError::CorruptData(format!("invalid incremental ops size: {e}")))?;
-        let leaf_pos = current_size;
-        let leaf_digest = hasher.leaf_digest(leaf_pos, encoded);
-        peak_map.insert(leaf_pos, (0, leaf_digest));
-        new_nodes.push((leaf_pos, leaf_digest));
-        current_size = current_size
-            .checked_add(1)
-            .ok_or_else(|| QmdbError::CorruptData("merkle size overflow".to_string()))?;
+        batch = batch.add(&hasher, encoded);
+    }
 
-        for parent_height in F::parent_heights(current_leaves) {
-            let parent_pos = current_size;
-            let (left_pos, right_pos) = F::children(parent_pos, parent_height);
-            let (_, left_digest) = peak_map.remove(&left_pos).ok_or_else(|| {
-                QmdbError::CorruptData(format!(
-                    "missing left child {left_pos} while extending merkle tree"
-                ))
+    let batch = batch.merkleize(&mem, &hasher);
+    let size = batch.size();
+    let new_nodes = (*previous_size..*size)
+        .map(|raw_pos| {
+            let pos = Position::new(raw_pos);
+            let digest = batch.get_node(pos).ok_or_else(|| {
+                QmdbError::CorruptData(format!("missing node {pos} after merkle extension"))
             })?;
-            let (_, right_digest) = peak_map.remove(&right_pos).ok_or_else(|| {
-                QmdbError::CorruptData(format!(
-                    "missing right child {right_pos} while extending merkle tree"
-                ))
-            })?;
-            let parent_digest = hasher.node_digest(parent_pos, &left_digest, &right_digest);
-            new_nodes.push((parent_pos, parent_digest));
-            peak_map.insert(parent_pos, (parent_height, parent_digest));
-            current_size = current_size
-                .checked_add(1)
-                .ok_or_else(|| QmdbError::CorruptData("merkle size overflow".to_string()))?;
-        }
-    }
-    let leaves = Location::try_from(current_size)
-        .map_err(|e| QmdbError::CorruptData(format!("invalid incremental ops size: {e}")))?;
-    let mut peaks = Vec::new();
-    for (pos, height) in F::peaks(current_size) {
-        let (_, digest) = peak_map.remove(&pos).ok_or_else(|| {
-            QmdbError::CorruptData(format!("missing peak {pos} after merkle extension"))
-        })?;
-        peaks.push((pos, height, digest));
-    }
-    let root = hasher
-        .root(leaves, 0, peaks.iter().map(|(_, _, digest)| digest))
+            Ok((pos, digest))
+        })
+        .collect::<Result<Vec<_>, QmdbError>>()?;
+    let peaks = F::peaks(size)
+        .map(|(pos, height)| {
+            let digest = batch
+                .get_node(pos)
+                .or_else(|| mem.get_node(pos))
+                .ok_or_else(|| {
+                    QmdbError::CorruptData(format!("missing peak {pos} after merkle extension"))
+                })?;
+            Ok((pos, height, digest))
+        })
+        .collect::<Result<Vec<_>, QmdbError>>()?;
+    let root = batch
+        .root(&mem, &hasher, 0)
         .map_err(|e| QmdbError::CommonwareMerkle(e.to_string()))?;
     Ok(MerkleExtension {
-        size: current_size,
+        size,
         peaks,
         root,
         new_nodes,
