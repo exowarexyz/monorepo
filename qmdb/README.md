@@ -501,6 +501,10 @@ in-memory frontier, in-flight upload queue, and catch-up watermark flush.
 Upload preparation remains an inherent method because each backend's inputs
 differ; ordered QMDB, for example, also needs caller-supplied current boundary
 state.
+Each `prepare_upload` input must be one or more complete finalized local
+batches. Ordered/unordered uploads must end at `CommitFloor`; keyless/immutable
+uploads must end at `Commit`. Splitting a local operation log at arbitrary
+offsets loses the inactivity floor needed to compute the operation-log root.
 
 ```rust,ignore
 use std::sync::Arc;

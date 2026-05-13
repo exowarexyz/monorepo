@@ -15,8 +15,8 @@ use exoware_sdk::{SerializableReadSession, StoreClient};
 
 use crate::auth::AuthenticatedBackendNamespace;
 use crate::auth::{
-    compute_auth_root, decode_auth_immutable_update_location, load_auth_operation_at,
-    load_auth_operation_bytes_range, load_latest_auth_immutable_update_row,
+    auth_inactive_peaks, compute_auth_root, decode_auth_immutable_update_location,
+    load_auth_operation_at, load_auth_operation_bytes_range, load_latest_auth_immutable_update_row,
     read_latest_auth_watermark, require_published_auth_watermark,
 };
 use crate::codec::{merkle_size_for_watermark, UpdateRow};
@@ -132,7 +132,8 @@ where
         let namespace = AuthenticatedBackendNamespace::Immutable;
         let session = self.client.create_session();
         require_published_auth_watermark(&session, namespace, watermark).await?;
-        compute_auth_root::<F, H>(&session, namespace, watermark).await
+        let inactive_peaks = self.inactive_peaks_at(&session, watermark).await?;
+        compute_auth_root::<F, H>(&session, namespace, watermark, inactive_peaks).await
     }
 
     pub async fn get_at(
@@ -214,9 +215,37 @@ where
             size: merkle_size_for_watermark(watermark)?,
             _marker: PhantomData::<H::Digest>,
         };
-        let root = compute_auth_root::<F, H>(&session, namespace, watermark).await?;
-        crate::proof::build_batch_multi_proof::<F, H, _>(&storage, watermark, root, 0, operations)
-            .await
+        let inactive_peaks = self.inactive_peaks_at(&session, watermark).await?;
+        let root =
+            compute_auth_root::<F, H>(&session, namespace, watermark, inactive_peaks).await?;
+        crate::proof::build_batch_multi_proof::<F, H, _>(
+            &storage,
+            watermark,
+            root,
+            inactive_peaks,
+            operations,
+        )
+        .await
+    }
+
+    async fn inactive_peaks_at(
+        &self,
+        session: &SerializableReadSession,
+        watermark: Location<F>,
+    ) -> Result<usize, QmdbError> {
+        let operation = load_auth_operation_at::<F, immutable::Operation<F, K, E>>(
+            session,
+            AuthenticatedBackendNamespace::Immutable,
+            watermark,
+            &self.operation_cfg,
+        )
+        .await?;
+        let immutable::Operation::Commit(_, floor) = operation else {
+            return Err(QmdbError::CorruptData(format!(
+                "immutable watermark {watermark} does not point at a Commit operation"
+            )));
+        };
+        auth_inactive_peaks(watermark, floor)
     }
 
     async fn operation_range_checkpoint_in_session(
@@ -235,7 +264,8 @@ where
             size: merkle_size_for_watermark(watermark)?,
             _marker: PhantomData::<H::Digest>,
         };
-        let root = compute_auth_root::<F, H>(session, namespace, watermark).await?;
+        let inactive_peaks = self.inactive_peaks_at(session, watermark).await?;
+        let root = compute_auth_root::<F, H>(session, namespace, watermark, inactive_peaks).await?;
         let encoded_operations =
             load_auth_operation_bytes_range(session, namespace, start_location, end).await?;
         crate::proof::build_operation_range_checkpoint::<F, H, _>(
@@ -244,7 +274,7 @@ where
             start_location,
             end,
             root,
-            0,
+            inactive_peaks,
             encoded_operations,
         )
         .await

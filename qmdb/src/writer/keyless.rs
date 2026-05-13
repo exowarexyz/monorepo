@@ -20,7 +20,7 @@ use crate::auth::{
     build_auth_upload_rows, encode_auth_node_key, encode_auth_watermark_key,
     AuthenticatedBackendNamespace,
 };
-use crate::core::extend_merkle_from_peaks;
+use crate::core::extend_merkle_from_peaks_with_inactive_peaks;
 use crate::error::QmdbError;
 use crate::writer::core::{Cache, WriterCore};
 use crate::{PublishedCheckpoint, UploadReceipt, WriterState};
@@ -65,7 +65,13 @@ where
     }
     let encoded: Vec<Vec<u8>> = ops.iter().map(|op| op.encode().to_vec()).collect();
     let prepared = build_auth_upload_rows(NAMESPACE, latest_location, encoded)?;
-    let ext = extend_merkle_from_peaks::<F, H, _>(peaks, prev_ops_size, prepared.op_bytes())?;
+    let inactive_peaks = keyless_inactive_peaks(latest_location, ops)?;
+    let ext = extend_merkle_from_peaks_with_inactive_peaks::<F, H, _>(
+        peaks,
+        prev_ops_size,
+        prepared.op_bytes(),
+        inactive_peaks,
+    )?;
     let operation_count = prepared.operation_count;
     let mut rows = prepared.into_all_rows();
     for (pos, digest) in &ext.new_nodes {
@@ -86,6 +92,26 @@ where
         operation_count,
         includes_watermark: watermark_at.is_some(),
     })
+}
+
+fn keyless_inactive_peaks<F, V, E>(
+    latest_location: Location<F>,
+    ops: &[keyless::Operation<F, E>],
+) -> Result<usize, QmdbError>
+where
+    F: Family,
+    V: Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V>,
+{
+    let floor = match ops.last() {
+        Some(keyless::Operation::Commit(_, floor)) => *floor,
+        _ => {
+            return Err(QmdbError::CorruptData(
+                "keyless upload operations must end with Commit".to_string(),
+            ));
+        }
+    };
+    crate::auth::auth_inactive_peaks(latest_location, floor)
 }
 
 /// Sole-writer keyless QMDB helper.
@@ -419,38 +445,42 @@ mod tests {
         keyless::Operation::Append(v.to_vec())
     }
 
+    fn commit(floor: u64) -> TestOp {
+        keyless::Operation::Commit(None, Location::new(floor))
+    }
+
     #[test]
     fn build_from_empty_peaks_includes_all_expected_row_families() {
-        let ops = vec![op(b"one"), op(b"two"), op(b"three")];
+        let ops = vec![op(b"one"), op(b"two"), op(b"three"), commit(0)];
         let built = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>, TestEncoding>(
             Vec::new(),
             Position::new(0),
-            Location::new(2),
+            Location::new(3),
             &ops,
-            Some(Location::new(2)),
+            Some(Location::new(3)),
         )
         .expect("build");
-        assert_eq!(built.operation_count, 3);
-        assert_eq!(built.latest_location, Location::new(2));
+        assert_eq!(built.operation_count, 4);
+        assert_eq!(built.latest_location, Location::new(3));
         assert!(built.includes_watermark);
         assert!(built.rows.len() >= 5);
     }
 
     #[test]
     fn excluding_watermark_row_drops_exactly_one_row() {
-        let ops = vec![op(b"x"), op(b"y")];
+        let ops = vec![op(b"x"), op(b"y"), commit(0)];
         let with_wm = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>, TestEncoding>(
             Vec::new(),
             Position::new(0),
-            Location::new(1),
+            Location::new(2),
             &ops,
-            Some(Location::new(1)),
+            Some(Location::new(2)),
         )
         .expect("with wm");
         let without_wm = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>, TestEncoding>(
             Vec::new(),
             Position::new(0),
-            Location::new(1),
+            Location::new(2),
             &ops,
             None,
         )
@@ -460,21 +490,21 @@ mod tests {
 
     #[test]
     fn build_is_deterministic_on_same_inputs() {
-        let ops = vec![op(b"a"), op(b"b"), op(b"c"), op(b"d")];
+        let ops = vec![op(b"a"), op(b"b"), op(b"c"), op(b"d"), commit(0)];
         let a = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>, TestEncoding>(
             Vec::new(),
             Position::new(0),
-            Location::new(3),
+            Location::new(4),
             &ops,
-            Some(Location::new(3)),
+            Some(Location::new(4)),
         )
         .expect("a");
         let b = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>, TestEncoding>(
             Vec::new(),
             Position::new(0),
-            Location::new(3),
+            Location::new(4),
             &ops,
-            Some(Location::new(3)),
+            Some(Location::new(4)),
         )
         .expect("b");
         assert_eq!(a.rows, b.rows);
@@ -485,11 +515,11 @@ mod tests {
 
     #[test]
     fn incremental_fold_matches_single_fold() {
-        let all = vec![op(b"p"), op(b"q"), op(b"r"), op(b"s")];
+        let all = vec![op(b"p"), commit(0), op(b"q"), op(b"r"), commit(1)];
         let single = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>, TestEncoding>(
             Vec::new(),
             Position::new(0),
-            Location::new(3),
+            Location::new(4),
             &all,
             None,
         )
@@ -506,7 +536,7 @@ mod tests {
         let second = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>, TestEncoding>(
             first.new_peaks.clone(),
             first.new_ops_size,
-            Location::new(3),
+            Location::new(4),
             &all[2..],
             None,
         )
@@ -527,5 +557,18 @@ mod tests {
             Some(Location::new(0)),
         );
         assert!(matches!(res, Err(QmdbError::EmptyBatch)));
+    }
+
+    #[test]
+    fn missing_commit_rejected() {
+        let ops = vec![op(b"x")];
+        let res = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>, TestEncoding>(
+            Vec::new(),
+            Position::new(0),
+            Location::new(0),
+            &ops,
+            Some(Location::new(0)),
+        );
+        assert!(matches!(res, Err(QmdbError::CorruptData(_))));
     }
 }

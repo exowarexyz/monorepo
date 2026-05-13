@@ -103,14 +103,14 @@ where
     V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
 {
-    let floor = ops
-        .iter()
-        .rev()
-        .find_map(|op| match op {
-            unordered::Operation::CommitFloor(_, floor) => Some(*floor),
-            _ => None,
-        })
-        .unwrap_or_else(|| Location::new(0));
+    let floor = match ops.last() {
+        Some(unordered::Operation::CommitFloor(_, floor)) => *floor,
+        _ => {
+            return Err(QmdbError::CorruptData(
+                "unordered upload operations must end with CommitFloor".to_string(),
+            ));
+        }
+    };
     Ok(F::inactive_peaks(
         crate::codec::merkle_size_for_watermark(latest_location)?,
         floor,

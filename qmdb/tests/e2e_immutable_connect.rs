@@ -59,6 +59,7 @@ fn validated_client(
 struct LocalBatch {
     operations: Vec<BatchOperation>,
     root: Digest,
+    inactivity_floor: Location<mmr::Family>,
 }
 
 async fn build_local_batch() -> LocalBatch {
@@ -76,6 +77,7 @@ async fn build_local_batch() -> LocalBatch {
 
             let key_a = FixedBytes::new([0x11; 32]);
             let key_b = FixedBytes::new([0x22; 32]);
+            let key_c = FixedBytes::new([0x33; 32]);
             let finalized = {
                 let batch = db
                     .new_batch()
@@ -84,6 +86,11 @@ async fn build_local_batch() -> LocalBatch {
                 batch.merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
             };
             db.apply_batch(finalized).await.expect("apply");
+            let finalized = {
+                let batch = db.new_batch().set(key_c, b"gamma".to_vec());
+                batch.merkleize(&db, None::<Vec<u8>>, db.bounds().await.end - 1)
+            };
+            db.apply_batch(finalized).await.expect("apply second");
 
             let latest = db.bounds().await.end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -91,17 +98,26 @@ async fn build_local_batch() -> LocalBatch {
                 .historical_proof(latest + 1, Location::new(0), n)
                 .await
                 .expect("proof");
+            let inactivity_floor = latest_inactivity_floor(&ops);
             let root = db.root();
             db.destroy().await.expect("destroy");
 
             LocalBatch {
                 operations: ops,
                 root,
+                inactivity_floor,
             }
         })
     })
     .await
     .expect("join")
+}
+
+fn latest_inactivity_floor(ops: &[BatchOperation]) -> Location<mmr::Family> {
+    match ops.last().expect("non-empty operations") {
+        ImmutableOperation::Commit(_, floor) => *floor,
+        ImmutableOperation::Set(_, _) => panic!("operations must end with Commit"),
+    }
 }
 
 async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
@@ -120,6 +136,10 @@ async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
 async fn immutable_connect_subscribe_emits_verifiable_multi_proof() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
+    assert!(
+        *local.inactivity_floor > 0,
+        "test must not rely on inactivity_floor = 0"
+    );
     let immutable_client = Arc::new(TestImmutableClient::from_client(
         store_client.clone(),
         ((), ((0..=10000).into(), ())),
@@ -161,6 +181,10 @@ async fn immutable_connect_subscribe_emits_verifiable_multi_proof() {
 async fn immutable_connect_get_operation_range_returns_verifiable_proof() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
+    assert!(
+        *local.inactivity_floor > 0,
+        "test must not rely on inactivity_floor = 0"
+    );
     commit_upload(&store_client, &local).await;
 
     let immutable_client = Arc::new(TestImmutableClient::from_client(
@@ -196,6 +220,10 @@ async fn immutable_connect_get_operation_range_returns_verifiable_proof() {
 async fn immutable_connect_client_rejects_invalid_streamed_proof() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
+    assert!(
+        *local.inactivity_floor > 0,
+        "test must not rely on inactivity_floor = 0"
+    );
     commit_upload(&store_client, &local).await;
 
     let immutable_client = Arc::new(TestImmutableClient::from_client(

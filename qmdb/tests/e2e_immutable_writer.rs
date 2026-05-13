@@ -70,7 +70,7 @@ async fn build_local_reference(batches: Vec<Vec<(K, V)>>) -> LocalReference {
                     for (k, v) in batch_writes {
                         batch = batch.set(k.clone(), v.clone());
                     }
-                    batch.merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
+                    batch.merkleize(&db, None::<Vec<u8>>, db.bounds().await.end - 1)
                 };
                 db.apply_batch(finalized).await.expect("apply");
             }
@@ -93,14 +93,55 @@ async fn build_local_reference(batches: Vec<Vec<(K, V)>>) -> LocalReference {
     .expect("join")
 }
 
+fn latest_inactivity_floor(ops: &[ImmutableOperation<mmr::Family, K, V>]) -> Location<mmr::Family> {
+    match ops.last().expect("non-empty operations") {
+        ImmutableOperation::Commit(_, floor) => *floor,
+        ImmutableOperation::Set(_, _) => panic!("operations must end with Commit"),
+    }
+}
+
+fn split_complete_batches(
+    ops: &[ImmutableOperation<mmr::Family, K, V>],
+) -> Vec<Vec<ImmutableOperation<mmr::Family, K, V>>> {
+    let mut batches = Vec::new();
+    let mut start = 0usize;
+    for (index, operation) in ops.iter().enumerate() {
+        if matches!(operation, ImmutableOperation::Commit(_, _)) {
+            batches.push(ops[start..=index].to_vec());
+            start = index + 1;
+        }
+    }
+    assert_eq!(start, ops.len(), "operations must end at a batch boundary");
+    batches
+}
+
+fn split_upload_batches(
+    ops: &[ImmutableOperation<mmr::Family, K, V>],
+) -> Vec<Vec<ImmutableOperation<mmr::Family, K, V>>> {
+    let mut batches = split_complete_batches(ops);
+    if batches.len() > 1
+        && batches[0].len() == 1
+        && matches!(batches[0][0], ImmutableOperation::Commit(_, _))
+    {
+        let mut first = batches.remove(0);
+        first.extend(batches.remove(0));
+        batches.insert(0, first);
+    }
+    batches
+}
+
 #[tokio::test]
 async fn sequential_upload_matches_local_root() {
     let (_dir, _server, client) = common::local_store_client().await;
-    let local = build_local_reference(vec![vec![
-        (FixedBytes::new([0x11; 32]), b"alpha".to_vec()),
-        (FixedBytes::new([0x22; 32]), b"beta".to_vec()),
-    ]])
+    let local = build_local_reference(vec![
+        vec![(FixedBytes::new([0x11; 32]), b"alpha".to_vec())],
+        vec![(FixedBytes::new([0x22; 32]), b"beta".to_vec())],
+    ])
     .await;
+    assert!(
+        *latest_inactivity_floor(&local.operations) > 0,
+        "test must not rely on inactivity_floor = 0"
+    );
 
     let writer = fresh_writer(client.clone());
     let receipt = common::commit_immutable_upload(&client, &writer, &local.operations)
@@ -135,12 +176,15 @@ async fn pipelined_batches_require_flush_to_catch_up_watermark() {
         vec![(FixedBytes::new([0x03; 32]), b"c".to_vec())],
     ])
     .await;
+    assert!(
+        *latest_inactivity_floor(&local.operations) > 0,
+        "test must not rely on inactivity_floor = 0"
+    );
 
-    let n = local.operations.len();
-    let chunk = n / 3;
-    let o1 = local.operations[..chunk].to_vec();
-    let o2 = local.operations[chunk..2 * chunk].to_vec();
-    let o3 = local.operations[2 * chunk..].to_vec();
+    let batches = split_upload_batches(&local.operations);
+    let o1 = batches[0].clone();
+    let o2 = batches[1].clone();
+    let o3 = batches[2].clone();
 
     let writer = Arc::new(fresh_writer(client.clone()));
 

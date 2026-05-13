@@ -10,7 +10,7 @@ use std::time::Duration;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
-use commonware_storage::merkle::{mmr, Location, Proof};
+use commonware_storage::merkle::{mmb, mmr, Location, Proof};
 use commonware_storage::qmdb::any::unordered::variable::Db as LocalUnorderedDb;
 use commonware_storage::qmdb::any::unordered::variable::Operation as UnorderedQmdbOperation;
 use commonware_storage::qmdb::current::unordered::variable::Db as LocalCurrentUnorderedDb;
@@ -37,11 +37,23 @@ const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
 type BatchProof = Proof<mmr::Family, Digest>;
 type BatchOperation = UnorderedQmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>;
+type MmbBatchProof = Proof<mmb::Family, Digest>;
+type MmbBatchOperation = UnorderedQmdbOperation<mmb::Family, Vec<u8>, Vec<u8>>;
 type FixedBatchOperation = UnorderedQmdbOperation<mmr::Family, Digest, Vec<u8>>;
 type TestUnorderedClient = UnorderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>>;
+type MmbTestUnorderedClient = UnorderedClient<mmb::Family, Sha256, Vec<u8>, Vec<u8>>;
 type FixedTestUnorderedClient = UnorderedClient<mmr::Family, Sha256, Digest, Vec<u8>>;
 type LocalDb = LocalUnorderedDb<
     mmr::Family,
+    cw_tokio::Context,
+    Vec<u8>,
+    Vec<u8>,
+    Sha256,
+    TwoCap,
+    commonware_parallel::Sequential,
+>;
+type MmbLocalDb = LocalUnorderedDb<
+    mmb::Family,
     cw_tokio::Context,
     Vec<u8>,
     Vec<u8>,
@@ -66,6 +78,12 @@ async fn spawn_qmdb_range_server(
     common::spawn_operation_log_service(unordered_operation_log_connect_stack(client)).await
 }
 
+async fn spawn_mmb_qmdb_range_server(
+    client: Arc<MmbTestUnorderedClient>,
+) -> (tokio::task::JoinHandle<()>, String) {
+    common::spawn_operation_log_service(unordered_operation_log_connect_stack(client)).await
+}
+
 async fn spawn_qmdb_full_server(
     client: Arc<FixedTestUnorderedClient>,
 ) -> (tokio::task::JoinHandle<()>, String) {
@@ -84,6 +102,12 @@ fn validated_client(
     base: &str,
 ) -> OperationLogClient<PreferZstdHttpClient, mmr::Family, Sha256, BatchOperation> {
     OperationLogClient::plaintext(base, op_cfg())
+}
+
+fn mmb_validated_client(
+    base: &str,
+) -> OperationLogClient<PreferZstdHttpClient, mmb::Family, Sha256, MmbBatchOperation> {
+    OperationLogClient::plaintext(base, mmb_op_cfg())
 }
 
 fn validated_key_client(
@@ -119,6 +143,13 @@ fn op_cfg() -> <BatchOperation as commonware_codec::Read>::Cfg {
     )
 }
 
+fn mmb_op_cfg() -> <MmbBatchOperation as commonware_codec::Read>::Cfg {
+    (
+        ((0..=MAX_OPERATION_SIZE).into(), ()),
+        ((0..=MAX_OPERATION_SIZE).into(), ()),
+    )
+}
+
 fn update_row_cfg() -> (
     <Vec<u8> as commonware_codec::Read>::Cfg,
     <Vec<u8> as commonware_codec::Read>::Cfg,
@@ -143,6 +174,13 @@ fn fixed_update_row_cfg() -> (
 struct LocalBatch {
     operations: Vec<BatchOperation>,
     root: Digest,
+    inactivity_floor: Location<mmr::Family>,
+}
+
+struct MmbLocalBatch {
+    operations: Vec<MmbBatchOperation>,
+    root: Digest,
+    inactivity_floor: Location<mmb::Family>,
 }
 
 struct FixedLocalBatch {
@@ -214,24 +252,40 @@ async fn build_local_batch() -> LocalBatch {
                 .await
                 .expect("init");
 
-            let finalized = {
-                let batch = db
-                    .new_batch()
-                    .write(b"alpha".to_vec(), Some(b"one".to_vec()))
-                    .write(b"beta".to_vec(), Some(b"two".to_vec()));
-                batch
-                    .merkleize(&db, None::<Vec<u8>>)
-                    .await
-                    .expect("merkleize")
-            };
-            db.apply_batch(finalized).await.expect("apply");
+            let mut ops = Vec::new();
+            let mut inactivity_floor = Location::<mmr::Family>::new(0);
+            for batch_index in 0..64 {
+                let finalized = {
+                    let batch = db
+                        .new_batch()
+                        .write(b"alpha".to_vec(), Some(b"one".to_vec()))
+                        .write(
+                            format!("k-{batch_index:08}").into_bytes(),
+                            Some(b"two".to_vec()),
+                        );
+                    batch
+                        .merkleize(&db, None::<Vec<u8>>)
+                        .await
+                        .expect("merkleize")
+                };
+                db.apply_batch(finalized).await.expect("apply");
 
-            let latest = db.bounds().await.end - 1;
-            let n = NonZeroU64::new(*latest + 1).unwrap();
-            let (_proof, ops): (BatchProof, Vec<BatchOperation>) = db
-                .historical_proof(latest + 1, Location::new(0), n)
-                .await
-                .expect("proof");
+                let latest = db.bounds().await.end - 1;
+                let n = NonZeroU64::new(*latest + 1).unwrap();
+                let (_proof, cumulative): (BatchProof, Vec<BatchOperation>) = db
+                    .historical_proof(latest + 1, Location::new(0), n)
+                    .await
+                    .expect("proof");
+                inactivity_floor = latest_inactivity_floor(&cumulative);
+                ops = cumulative;
+                if *inactivity_floor > 0 {
+                    break;
+                }
+            }
+            assert!(
+                *inactivity_floor > 0,
+                "unordered MMR subscribe fixture must exercise nonzero inactivity floor"
+            );
             let root = db.root();
 
             db.sync().await.expect("sync");
@@ -240,11 +294,102 @@ async fn build_local_batch() -> LocalBatch {
             LocalBatch {
                 operations: ops,
                 root,
+                inactivity_floor,
             }
         })
     })
     .await
     .expect("join")
+}
+
+fn latest_inactivity_floor(operations: &[BatchOperation]) -> Location<mmr::Family> {
+    operations
+        .iter()
+        .rev()
+        .find_map(|operation| match operation {
+            BatchOperation::CommitFloor(_, floor) => Some(*floor),
+            _ => None,
+        })
+        .expect("batch has CommitFloor")
+}
+
+async fn build_mmb_local_batch() -> MmbLocalBatch {
+    tokio::task::spawn_blocking(|| {
+        cw_tokio::Runner::default().start(|context| async move {
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = common::unordered_variable_config(
+                "unordered-connect-mmb",
+                page_cache,
+                (
+                    ((0..=MAX_OPERATION_SIZE).into(), ()),
+                    ((0..=MAX_OPERATION_SIZE).into(), ()),
+                ),
+                NZU64!(8),
+            );
+            let mut db: MmbLocalDb = MmbLocalDb::init(context.child("unordered"), cfg)
+                .await
+                .expect("init");
+
+            let mut ops = Vec::new();
+            let mut inactivity_floor = Location::<mmb::Family>::new(0);
+            for batch_index in 0..64 {
+                let finalized = {
+                    let batch = db
+                        .new_batch()
+                        .write(b"alpha".to_vec(), Some(b"one".to_vec()))
+                        .write(
+                            format!("k-{batch_index:08}").into_bytes(),
+                            Some(b"two".to_vec()),
+                        );
+                    batch
+                        .merkleize(&db, None::<Vec<u8>>)
+                        .await
+                        .expect("merkleize")
+                };
+                db.apply_batch(finalized).await.expect("apply");
+
+                let latest = db.bounds().await.end - 1;
+                let n = NonZeroU64::new(*latest + 1).unwrap();
+                let (_proof, cumulative): (MmbBatchProof, Vec<MmbBatchOperation>) = db
+                    .historical_proof(latest + 1, Location::new(0), n)
+                    .await
+                    .expect("proof");
+                inactivity_floor = latest_mmb_inactivity_floor(&cumulative);
+                ops = cumulative;
+                if *inactivity_floor > 0 {
+                    break;
+                }
+            }
+            assert!(
+                *inactivity_floor > 0,
+                "unordered MMB subscribe fixture must exercise nonzero inactivity floor"
+            );
+            let root = db.root();
+
+            db.sync().await.expect("sync");
+            db.destroy().await.expect("destroy");
+
+            MmbLocalBatch {
+                operations: ops,
+                root,
+                inactivity_floor,
+            }
+        })
+    })
+    .await
+    .expect("join")
+}
+
+fn latest_mmb_inactivity_floor(operations: &[MmbBatchOperation]) -> Location<mmb::Family> {
+    operations
+        .iter()
+        .rev()
+        .find_map(|operation| match operation {
+            MmbBatchOperation::CommitFloor(_, floor) => Some(*floor),
+            _ => None,
+        })
+        .expect("batch has CommitFloor")
 }
 
 async fn build_fixed_local_batch() -> FixedLocalBatch {
@@ -303,6 +448,14 @@ async fn build_fixed_local_batch() -> FixedLocalBatch {
 
 async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
     let writer: UnorderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>> =
+        UnorderedWriter::empty(client.clone());
+    common::commit_unordered_upload(client, &writer, &batch.operations)
+        .await
+        .expect("commit upload");
+}
+
+async fn commit_mmb_upload(client: &StoreClient, batch: &MmbLocalBatch) {
+    let writer: UnorderedWriter<mmb::Family, Sha256, Vec<u8>, Vec<u8>> =
         UnorderedWriter::empty(client.clone());
     common::commit_unordered_upload(client, &writer, &batch.operations)
         .await
@@ -575,6 +728,10 @@ async fn unordered_connect_omits_missing_and_rejects_duplicate_range_and_stale_r
 async fn unordered_connect_subscribe_emits_verifiable_range_proof() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
+    assert!(
+        *local.inactivity_floor > 0,
+        "test must not rely on inactivity_floor = 0"
+    );
     let unordered_client = Arc::new(TestUnorderedClient::from_client(
         store_client.clone(),
         op_cfg(),
@@ -607,6 +764,50 @@ async fn unordered_connect_subscribe_emits_verifiable_range_proof() {
         .iter()
         .enumerate()
         .map(|(i, op)| (Location::new(i as u64), op.clone()))
+        .collect();
+    assert_eq!(frame.operations, expected);
+}
+
+#[tokio::test]
+async fn unordered_mmb_connect_subscribe_emits_verifiable_range_proof() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_mmb_local_batch().await;
+    assert!(
+        *local.inactivity_floor > 0,
+        "test must not rely on inactivity_floor = 0"
+    );
+    let unordered_client = Arc::new(MmbTestUnorderedClient::from_client(
+        store_client.clone(),
+        mmb_op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_range_server(unordered_client).await;
+    let client = mmb_validated_client(&qmdb_url);
+
+    let mut stream = client
+        .subscribe(ProtoSubscribeRequest::default())
+        .await
+        .expect("subscribe");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    commit_mmb_upload(&store_client, &local).await;
+
+    let frame: OperationLogSubscribeProof<Digest, MmbBatchOperation, mmb::Family> =
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            stream.message_with_root(common::trusted_root(local.root)),
+        )
+        .await
+        .expect("timeout")
+        .expect("stream result")
+        .expect("stream frame");
+
+    assert!(frame.resume_sequence_number > 0);
+    let expected: Vec<(Location<mmb::Family>, MmbBatchOperation)> = local
+        .operations
+        .iter()
+        .enumerate()
+        .map(|(i, op)| (Location::<mmb::Family>::new(i as u64), op.clone()))
         .collect();
     assert_eq!(frame.operations, expected);
 }

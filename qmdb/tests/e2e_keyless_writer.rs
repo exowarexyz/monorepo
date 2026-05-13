@@ -59,7 +59,7 @@ async fn build_local_reference(
                     for v in batch_values {
                         batch = batch.append(v.clone());
                     }
-                    batch.merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
+                    batch.merkleize(&db, None::<Vec<u8>>, db.bounds().await.end - 1)
                 };
                 db.apply_batch(finalized).await.expect("apply");
             }
@@ -89,6 +89,45 @@ fn flat_to_writer_ops(
     ops.to_vec()
 }
 
+fn latest_inactivity_floor(
+    ops: &[KeylessOperation<mmr::Family, Vec<u8>>],
+) -> Location<mmr::Family> {
+    match ops.last().expect("non-empty operations") {
+        KeylessOperation::Commit(_, floor) => *floor,
+        KeylessOperation::Append(_) => panic!("operations must end with Commit"),
+    }
+}
+
+fn split_complete_batches(
+    ops: &[KeylessOperation<mmr::Family, Vec<u8>>],
+) -> Vec<Vec<KeylessOperation<mmr::Family, Vec<u8>>>> {
+    let mut batches = Vec::new();
+    let mut start = 0usize;
+    for (index, operation) in ops.iter().enumerate() {
+        if matches!(operation, KeylessOperation::Commit(_, _)) {
+            batches.push(ops[start..=index].to_vec());
+            start = index + 1;
+        }
+    }
+    assert_eq!(start, ops.len(), "operations must end at a batch boundary");
+    batches
+}
+
+fn split_upload_batches(
+    ops: &[KeylessOperation<mmr::Family, Vec<u8>>],
+) -> Vec<Vec<KeylessOperation<mmr::Family, Vec<u8>>>> {
+    let mut batches = split_complete_batches(ops);
+    if batches.len() > 1
+        && batches[0].len() == 1
+        && matches!(batches[0][0], KeylessOperation::Commit(_, _))
+    {
+        let mut first = batches.remove(0);
+        first.extend(batches.remove(0));
+        batches.insert(0, first);
+    }
+    batches
+}
+
 // Sequential mode: one batch at a time, each call returns before the next
 // starts. Expect every upload to carry its own watermark in-band. Flush is
 // a no-op.
@@ -102,6 +141,10 @@ async fn sequential_upload_matches_local_root() {
     ];
     let (local_root, _proof, local_ops, latest) = build_local_reference(batches).await;
     let writer_ops = flat_to_writer_ops(&local_ops);
+    assert!(
+        *latest_inactivity_floor(&writer_ops) > 0,
+        "test must not rely on inactivity_floor = 0"
+    );
 
     // Group writer_ops into chunks matching the local batch boundaries. The
     // simplest way: feed the whole flat op sequence in one writer call.
@@ -155,28 +198,31 @@ async fn multiple_sequential_batches_each_publish_watermarks_in_band() {
         vec![b"d".to_vec(), b"e".to_vec()],
     ])
     .await;
+    assert!(
+        *latest_inactivity_floor(&local_ops) > 0,
+        "test must not rely on inactivity_floor = 0"
+    );
+    let batch_ops = split_upload_batches(&local_ops);
 
     let writer = fresh_writer(client.clone());
 
-    // Feed the full op sequence, but in three calls matching the batch sizes.
-    // 2 + 1 + 2 = 5 ops.
-    let r1 = common::commit_keyless_upload(&client, &writer, &local_ops[..2])
+    let r1 = common::commit_keyless_upload(&client, &writer, &batch_ops[0])
         .await
         .expect("b1");
     assert_eq!(
         r1.writer_location_watermark
             .map(|checkpoint| checkpoint.location),
-        Some(Location::<mmr::Family>::new(1))
+        Some(Location::<mmr::Family>::new(3))
     );
-    let r2 = common::commit_keyless_upload(&client, &writer, &local_ops[2..3])
+    let r2 = common::commit_keyless_upload(&client, &writer, &batch_ops[1])
         .await
         .expect("b2");
     assert_eq!(
         r2.writer_location_watermark
             .map(|checkpoint| checkpoint.location),
-        Some(Location::<mmr::Family>::new(2))
+        Some(Location::<mmr::Family>::new(5))
     );
-    let r3 = common::commit_keyless_upload(&client, &writer, &local_ops[3..])
+    let r3 = common::commit_keyless_upload(&client, &writer, &batch_ops[2])
         .await
         .expect("b3");
     assert_eq!(
@@ -212,14 +258,14 @@ async fn pipelined_batches_require_flush_to_catch_up_watermark() {
         vec![b"t".to_vec(), b"u".to_vec()],
     ])
     .await;
-    // Split the local op stream into three roughly-equal chunks. Writer
-    // batches don't have to align with local DB batch boundaries — the MMR is
-    // only sensitive to the flat op sequence — so we just chunk into thirds.
-    let n = local_ops.len();
-    let chunk = n / 3;
-    let o1 = local_ops[..chunk].to_vec();
-    let o2 = local_ops[chunk..2 * chunk].to_vec();
-    let o3 = local_ops[2 * chunk..].to_vec();
+    assert!(
+        *latest_inactivity_floor(&local_ops) > 0,
+        "test must not rely on inactivity_floor = 0"
+    );
+    let batches = split_upload_batches(&local_ops);
+    let o1 = batches[0].clone();
+    let o2 = batches[1].clone();
+    let o3 = batches[2].clone();
 
     let writer = Arc::new(fresh_writer(client.clone()));
 
@@ -287,20 +333,15 @@ async fn bounded_pipeline_advances_watermark_via_contiguous_acks() {
         .map(|i| vec![format!("v{i}").into_bytes()])
         .collect();
     let (local_root, _proof, local_ops, latest) = build_local_reference(batch_values).await;
+    assert!(
+        *latest_inactivity_floor(&local_ops) > 0,
+        "test must not rely on inactivity_floor = 0"
+    );
 
     let writer = Arc::new(fresh_writer(client.clone()));
 
-    let chunk = local_ops.len() / BATCHES;
-    let mut slices = Vec::with_capacity(BATCHES);
-    for i in 0..BATCHES {
-        let start = i * chunk;
-        let end = if i == BATCHES - 1 {
-            local_ops.len()
-        } else {
-            (i + 1) * chunk
-        };
-        slices.push(local_ops[start..end].to_vec());
-    }
+    let slices = split_upload_batches(&local_ops);
+    assert_eq!(slices.len(), BATCHES);
 
     use futures::future::BoxFuture;
     let mut in_flight: FuturesUnordered<

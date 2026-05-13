@@ -153,18 +153,16 @@ async fn sequential_upload_matches_local_root() {
 #[tokio::test]
 async fn pipelined_batches_require_flush_to_catch_up_watermark() {
     let (_dir, _server, client) = common::local_store_client().await;
-    let local = build_local_reference(vec![
-        vec![(b"a".to_vec(), Some(b"1".to_vec()))],
-        vec![(b"b".to_vec(), Some(b"2".to_vec()))],
-        vec![(b"c".to_vec(), Some(b"3".to_vec()))],
-    ])
-    .await;
+    let b1 = vec![(b"a".to_vec(), Some(b"1".to_vec()))];
+    let b2 = vec![(b"b".to_vec(), Some(b"2".to_vec()))];
+    let b3 = vec![(b"c".to_vec(), Some(b"3".to_vec()))];
+    let after1 = build_local_reference(vec![b1.clone()]).await;
+    let after2 = build_local_reference(vec![b1.clone(), b2.clone()]).await;
+    let after3 = build_local_reference(vec![b1, b2, b3]).await;
 
-    let n = local.operations.len();
-    let chunk = n / 3;
-    let o1 = local.operations[..chunk].to_vec();
-    let o2 = local.operations[chunk..2 * chunk].to_vec();
-    let o3 = local.operations[2 * chunk..].to_vec();
+    let o1 = after1.operations.clone();
+    let o2 = after2.operations[after1.operations.len()..].to_vec();
+    let o3 = after3.operations[after2.operations.len()..].to_vec();
 
     let writer = Arc::new(fresh_writer(client.clone()));
 
@@ -187,11 +185,11 @@ async fn pipelined_batches_require_flush_to_catch_up_watermark() {
     let got_root = retry(
         || {
             let r = fresh_reader(client.clone());
-            let latest = local.latest_location;
+            let latest = after3.latest_location;
             async move { r.root_at(latest).await }
         },
         "root_at",
     )
     .await;
-    assert_eq!(got_root, local.root);
+    assert_eq!(got_root, after3.root);
 }

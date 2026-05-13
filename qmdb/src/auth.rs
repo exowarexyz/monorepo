@@ -386,10 +386,21 @@ where
     })
 }
 
+pub(crate) fn auth_inactive_peaks<F: Family>(
+    watermark: Location<F>,
+    inactivity_floor: Location<F>,
+) -> Result<usize, QmdbError> {
+    Ok(F::inactive_peaks(
+        merkle_size_for_watermark(watermark)?,
+        inactivity_floor,
+    ))
+}
+
 pub(crate) async fn compute_auth_root<F: Family, H: Hasher>(
     session: &SerializableReadSession,
     namespace: AuthenticatedBackendNamespace,
     watermark: Location<F>,
+    inactive_peaks: usize,
 ) -> Result<H::Digest, QmdbError> {
     let size = merkle_size_for_watermark(watermark)?;
     let leaves = watermark
@@ -425,7 +436,7 @@ pub(crate) async fn compute_auth_root<F: Family, H: Hasher>(
     }
     let hasher = commonware_storage::qmdb::hasher::<H>();
     hasher
-        .root(leaves, 0, peaks.iter())
+        .root(leaves, inactive_peaks, peaks.iter())
         .map_err(|e| QmdbError::CommonwareMerkle(e.to_string()))
 }
 

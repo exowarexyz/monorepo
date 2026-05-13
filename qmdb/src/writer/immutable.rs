@@ -22,7 +22,7 @@ use crate::auth::{
     build_auth_immutable_upload_rows, encode_auth_node_key, encode_auth_watermark_key,
     AuthenticatedBackendNamespace,
 };
-use crate::core::extend_merkle_from_peaks;
+use crate::core::extend_merkle_from_peaks_with_inactive_peaks;
 use crate::error::QmdbError;
 use crate::writer::core::{Cache, WriterCore};
 use crate::{PublishedCheckpoint, UploadReceipt, WriterState};
@@ -60,7 +60,13 @@ where
         return Err(QmdbError::EmptyBatch);
     }
     let prepared = build_auth_immutable_upload_rows(latest_location, ops)?;
-    let ext = extend_merkle_from_peaks::<F, H, _>(peaks, prev_ops_size, prepared.op_bytes())?;
+    let inactive_peaks = immutable_inactive_peaks(latest_location, ops)?;
+    let ext = extend_merkle_from_peaks_with_inactive_peaks::<F, H, _>(
+        peaks,
+        prev_ops_size,
+        prepared.op_bytes(),
+        inactive_peaks,
+    )?;
     let keyed_operation_count = prepared.keyed_operation_count;
     let mut rows = prepared.into_all_rows();
     for (pos, digest) in &ext.new_nodes {
@@ -82,6 +88,27 @@ where
         keyed_operation_count,
         includes_watermark: watermark_at.is_some(),
     })
+}
+
+fn immutable_inactive_peaks<F, K, V, E>(
+    latest_location: Location<F>,
+    ops: &[immutable::Operation<F, K, E>],
+) -> Result<usize, QmdbError>
+where
+    F: Family,
+    K: Array + Codec + Clone + AsRef<[u8]>,
+    V: Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V>,
+{
+    let floor = match ops.last() {
+        Some(immutable::Operation::Commit(_, floor)) => *floor,
+        _ => {
+            return Err(QmdbError::CorruptData(
+                "immutable upload operations must end with Commit".to_string(),
+            ));
+        }
+    };
+    crate::auth::auth_inactive_peaks(latest_location, floor)
 }
 
 /// Sole-writer immutable QMDB helper. Pipelining, flushing, failure, and
