@@ -2,18 +2,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 
 use commonware_codec::{Codec, Encode};
-use commonware_cryptography::{Digest, Hasher};
-use commonware_parallel::Sequential;
+use commonware_cryptography::Hasher;
 use commonware_storage::merkle::{
-    self,
     hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
-    path,
-    storage::Storage as MerkleStorage,
-    Family, Graftable, Location, Position,
+    path, Family, Graftable, Location, Position,
 };
 use commonware_storage::qmdb::{
     current::{
-        db::compute_grafted_leaves,
         grafting,
         proof::{OpsRootWitness, RangeProof},
     },
@@ -59,7 +54,7 @@ pub async fn recover_boundary_state<M, H, Op, const N: usize, Prove, Fut>(
     previous_operations: Option<&[Op]>,
     operations: &[Op],
     root: H::Digest,
-    ops_root_witness: OpsRootWitness<H::Digest>,
+    ops_root_witness: OpsRootWitness<M, H::Digest>,
     mut prove_at: Prove,
 ) -> Result<CurrentBoundaryState<H::Digest, N, M>, QmdbError>
 where
@@ -85,13 +80,17 @@ where
     validate_recovery_input::<M, Op>(previous_operations, operations)?;
 
     let changed_chunks = changed_chunk_representatives::<M, Op, N>(previous_operations, operations);
-    let complete_chunks = operations.len() / bitmap_chunk_bits::<N>() as usize;
-    let merkle_size = Position::try_from(Location::new(operations.len() as u64))
-        .map_err(|e| QmdbError::CorruptData(format!("invalid current proof leaf count: {e}")))?;
     let grafting_height = grafting::height::<N>();
+    let ops_leaves = u64::try_from(operations.len())
+        .map_err(|_| QmdbError::CorruptData("operation count does not fit in u64".into()))?;
+    let complete_chunks = ops_leaves / bitmap_chunk_bits::<N>();
+    let graftable_chunks =
+        grafting::graftable_chunks::<M>(ops_leaves, grafting_height).min(complete_chunks);
 
     let mut chunks = BTreeMap::<u64, [u8; N]>::new();
+    let mut authenticated_digests = BTreeMap::<Position<M>, H::Digest>::new();
     let mut grafted_digests = BTreeMap::<Position<M>, H::Digest>::new();
+    let mut changed_complete_chunks = Vec::new();
 
     for (chunk_index, location) in changed_chunks {
         let (proof, chunk) = prove_at(location).await?;
@@ -102,35 +101,47 @@ where
                 "missing operation at location {location} in current boundary input"
             ))
         })?;
+        let hasher = commonware_storage::qmdb::hasher::<H>();
         let digest_map = proof
-            .extract_digests::<H, _, N>(
+            .verify_and_extract_digests::<H, _, N>(
+                &hasher,
                 location,
                 std::slice::from_ref(operation),
                 std::slice::from_ref(&chunk),
+                &root,
             )
             .ok_or(QmdbError::ProofVerification {
                 kind: crate::ProofKind::CurrentRange,
             })?;
+        for (position, digest) in digest_map {
+            if let Some(existing) = authenticated_digests.insert(position, digest) {
+                if existing != digest {
+                    return Err(QmdbError::CorruptData(format!(
+                        "current range proofs disagree on digest at position {position}"
+                    )));
+                }
+            }
+        }
 
-        if chunk_index as usize >= complete_chunks {
+        if chunk_index >= graftable_chunks {
             continue;
         }
 
-        let (leaf_grafted_pos, leaf_digest) = changed_grafted_leaf_digest_for_chunk::<M, H, N>(
+        let (leaf_grafted_pos, leaf_digest) = changed_grafted_leaf_digest_for_chunk::<M, H>(
             chunk_index,
-            &chunk,
-            merkle_size,
             grafting_height,
-            &digest_map,
-        )
-        .await?;
+            &authenticated_digests,
+        )?;
         grafted_digests.insert(leaf_grafted_pos, leaf_digest);
+        changed_complete_chunks.push(chunk_index);
+    }
 
+    for chunk_index in changed_complete_chunks {
         for (position, digest) in changed_grafted_ancestor_digests_for_chunk::<M, H>(
             chunk_index,
-            complete_chunks,
+            graftable_chunks,
             grafting_height,
-            &digest_map,
+            &authenticated_digests,
             &mut grafted_digests,
         )? {
             grafted_digests.insert(position, digest);
@@ -260,10 +271,8 @@ where
     changed
 }
 
-async fn changed_grafted_leaf_digest_for_chunk<F, H, const N: usize>(
+fn changed_grafted_leaf_digest_for_chunk<F, H>(
     chunk_index: u64,
-    chunk: &[u8; N],
-    merkle_size: Position<F>,
     grafting_height: u32,
     digest_map: &BTreeMap<Position<F>, H::Digest>,
 ) -> Result<(Position<F>, H::Digest), QmdbError>
@@ -278,30 +287,14 @@ where
         return Ok((grafted_pos, digest));
     }
 
-    let chunk_index_usize = usize::try_from(chunk_index)
-        .map_err(|_| QmdbError::CorruptData("current chunk index does not fit in usize".into()))?;
-    let storage = ProofDigestStorage {
-        size: merkle_size,
-        digests: digest_map,
-    };
-    let hasher = commonware_storage::qmdb::hasher::<H>();
-    let mut leaves = compute_grafted_leaves::<F, H, Sequential, N>(
-        &hasher,
-        &storage,
-        [(chunk_index_usize, *chunk)],
-        &Sequential,
-    )
-    .await
-    .map_err(|e| QmdbError::CommonwareMerkle(e.to_string()))?;
-    let (_chunk_index, digest) = leaves
-        .pop()
-        .ok_or_else(|| QmdbError::CorruptData("missing computed grafted leaf".into()))?;
-    Ok((grafted_pos, digest))
+    Err(QmdbError::CorruptData(format!(
+        "current range proof did not expose grafted leaf digest at ops position {ops_pos}"
+    )))
 }
 
 fn changed_grafted_ancestor_digests_for_chunk<F, H>(
     chunk_index: u64,
-    complete_chunks: usize,
+    graftable_chunks: u64,
     grafting_height: u32,
     digest_map: &BTreeMap<Position<F>, H::Digest>,
     computed: &mut BTreeMap<Position<F>, H::Digest>,
@@ -310,14 +303,11 @@ where
     F: Graftable,
     H: Hasher,
 {
-    let complete_chunks = u64::try_from(complete_chunks).map_err(|_| {
-        QmdbError::CorruptData("complete current chunk count does not fit in u64".into())
-    })?;
-    if chunk_index >= complete_chunks {
+    if chunk_index >= graftable_chunks {
         return Ok(Vec::new());
     }
 
-    let grafted_size = Position::<F>::try_from(Location::new(complete_chunks))
+    let grafted_size = Position::<F>::try_from(Location::new(graftable_chunks))
         .map_err(|e| QmdbError::CorruptData(format!("invalid grafted current size: {e}")))?;
     let grafted_leaf_pos = Position::<F>::try_from(Location::new(chunk_index))
         .expect("chunk index is a valid grafted leaf location");
@@ -339,9 +329,6 @@ where
     .collect::<Vec<_>>();
 
     let hasher = commonware_storage::qmdb::hasher::<H>();
-    let bagging = <StandardHasher<H> as MerkleHasher<F>>::root_bagging(&hasher);
-    let verifier = grafting::Verifier::<F, H>::new(grafting_height, 0, Vec::new(), bagging);
-
     let mut out = Vec::with_capacity(parents.len());
     for parent_grafted_pos in parents.into_iter().rev() {
         if let Some(digest) = computed.get(&parent_grafted_pos).copied() {
@@ -359,7 +346,12 @@ where
                 grafted_digest::<F, H>(left_pos, grafting_height, digest_map, computed)?;
             let right_digest =
                 grafted_digest::<F, H>(right_pos, grafting_height, digest_map, computed)?;
-            verifier.node_digest(parent_ops_pos, &left_digest, &right_digest)
+            <StandardHasher<H> as MerkleHasher<F>>::node_digest(
+                &hasher,
+                parent_ops_pos,
+                &left_digest,
+                &right_digest,
+            )
         };
         computed.insert(parent_grafted_pos, parent_digest);
         out.push((parent_grafted_pos, parent_digest));
@@ -399,23 +391,6 @@ fn containing_peak<F: Graftable>(
         let position_leaf = F::leftmost_leaf(position, F::pos_to_height(position));
         leftmost <= position_leaf && position_leaf <= rightmost
     })
-}
-
-struct ProofDigestStorage<'a, F: Family, D: Digest> {
-    size: Position<F>,
-    digests: &'a BTreeMap<Position<F>, D>,
-}
-
-impl<F: Family, D: Digest> MerkleStorage<F> for ProofDigestStorage<'_, F, D> {
-    type Digest = D;
-
-    async fn size(&self) -> Position<F> {
-        self.size
-    }
-
-    async fn get_node(&self, pos: Position<F>) -> Result<Option<D>, merkle::Error<F>> {
-        Ok(self.digests.get(&pos).copied())
-    }
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use commonware_codec::{Codec, Decode, Encode, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
-    merkle::{Family, Location},
+    merkle::{Family, Graftable, Location},
     qmdb::{
         any::value::{ValueEncoding, VariableEncoding},
         immutable,
@@ -59,7 +59,7 @@ where
 
 impl<F, H, K, V, E> ImmutableClient<F, H, K, V, E>
 where
-    F: Family,
+    F: Graftable,
     H: Hasher,
     K: Array + Codec + Clone + AsRef<[u8]>,
     V: Codec + Clone + Send + Sync,

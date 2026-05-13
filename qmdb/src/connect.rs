@@ -96,7 +96,7 @@ fn qmdb_error_to_connect(err: QmdbError) -> ConnectError {
     }
 }
 
-fn raw_batch_multi_proof_to_proto<D: commonware_cryptography::Digest, F: Family>(
+fn raw_batch_multi_proof_to_proto<D: commonware_cryptography::Digest, F: Graftable>(
     proof: &RawBatchMultiProof<D, F>,
 ) -> ProtoHistoricalMultiProof {
     ProtoHistoricalMultiProof {
@@ -124,7 +124,7 @@ fn raw_batch_multi_proof_to_proto<D: commonware_cryptography::Digest, F: Family>
     }
 }
 
-fn operation_range_checkpoint_to_proto<D: commonware_cryptography::Digest, F: Family>(
+fn operation_range_checkpoint_to_proto<D: commonware_cryptography::Digest, F: Graftable>(
     proof: &OperationRangeCheckpoint<D, F>,
 ) -> ProtoHistoricalOperationRangeProof {
     ProtoHistoricalOperationRangeProof {
@@ -149,7 +149,7 @@ fn current_operation_range_proof_to_proto<
     D: commonware_cryptography::Digest,
     Op: Encode,
     const N: usize,
-    F: Family,
+    F: Graftable,
 >(
     proof: &CurrentOperationRangeProofResult<D, Op, N, F>,
 ) -> ProtoCurrentOperationRangeProof {
@@ -325,7 +325,7 @@ where
 /// `Arc<UnorderedClient<...>>`, etc.) to expose just the surface the generic
 /// `OperationLogService` path needs.
 trait OperationLogBackend: Clone + Send + Sync + 'static {
-    type Family: commonware_storage::merkle::Family;
+    type Family: Graftable;
     type Digest: commonware_cryptography::Digest;
     /// Reject `key_filters` at subscribe time (set true for keyless, whose
     /// ops have no logical key).
@@ -515,7 +515,7 @@ where
 
 impl<F, H, K, V, E> OperationLogBackend for Arc<ImmutableClient<F, H, K, V, E>>
 where
-    F: Family,
+    F: Graftable,
     H: Hasher + Send + Sync + 'static,
     K: commonware_utils::Array
         + commonware_codec::Codec
@@ -576,7 +576,7 @@ where
 
 impl<F, H, V, E> OperationLogBackend for Arc<KeylessClient<F, H, V, E>>
 where
-    F: Family,
+    F: Graftable,
     H: Hasher + Send + Sync + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     V::Cfg: Clone,
@@ -758,7 +758,7 @@ fn matcher_passes(matcher: &Option<CompiledBytesFilters>, bytes: Option<&[u8]>) 
     }
 }
 
-struct BatchSubscribeStream<D: commonware_cryptography::Digest, F: Family> {
+struct BatchSubscribeStream<D: commonware_cryptography::Digest, F: Graftable> {
     key_matcher: Option<CompiledBytesFilters>,
     value_matcher: Option<CompiledBytesFilters>,
     classify: RowClassifier<F>,
@@ -785,9 +785,9 @@ struct BatchSubscribeStream<D: commonware_cryptography::Digest, F: Family> {
     building: Option<BoxFuture<'static, Result<SubscribeResponse, ConnectError>>>,
 }
 
-impl<D: commonware_cryptography::Digest, F: Family> Unpin for BatchSubscribeStream<D, F> {}
+impl<D: commonware_cryptography::Digest, F: Graftable> Unpin for BatchSubscribeStream<D, F> {}
 
-impl<D: commonware_cryptography::Digest, F: Family> BatchSubscribeStream<D, F> {
+impl<D: commonware_cryptography::Digest, F: Graftable> BatchSubscribeStream<D, F> {
     fn new(
         key_matcher: Option<CompiledBytesFilters>,
         value_matcher: Option<CompiledBytesFilters>,
@@ -914,7 +914,7 @@ fn drain_ready<F: Family>(
     }
 }
 
-impl<D: commonware_cryptography::Digest, F: Family> Stream for BatchSubscribeStream<D, F> {
+impl<D: commonware_cryptography::Digest, F: Graftable> Stream for BatchSubscribeStream<D, F> {
     type Item = Result<SubscribeResponse, ConnectError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
@@ -1372,7 +1372,7 @@ where
 }
 
 pub fn immutable_operation_log_connect_stack<
-    F: Family,
+    F: Graftable,
     H: Hasher + Send + Sync + 'static,
     K: commonware_utils::Array + commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
@@ -1391,7 +1391,7 @@ where
 }
 
 pub fn keyless_operation_log_connect_stack<
-    F: Family,
+    F: Graftable,
     H: Hasher + Send + Sync + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     E: ValueEncoding<Value = V> + Send + Sync + 'static,

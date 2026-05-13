@@ -70,7 +70,7 @@ pub fn keyless_config<C>(
     page_cache: CacheRef,
     codec_config: C,
     items_per_section: NonZeroU64,
-) -> keyless::variable::Config<C> {
+) -> keyless::variable::Config<C, Sequential> {
     keyless::Config {
         merkle: merkle_config(prefix, page_cache.clone()),
         log: variable_journal_config(prefix, page_cache, codec_config, items_per_section),
@@ -83,7 +83,7 @@ pub fn unordered_variable_config<C>(
     page_cache: CacheRef,
     codec_config: C,
     items_per_section: NonZeroU64,
-) -> any::VariableConfig<TwoCap, C> {
+) -> any::VariableConfig<TwoCap, C, Sequential> {
     any::Config {
         merkle_config: merkle_config(prefix, page_cache.clone()),
         journal_config: variable_journal_config(
@@ -102,7 +102,7 @@ pub fn ordered_variable_config<C>(
     page_cache: CacheRef,
     codec_config: C,
     items_per_section: NonZeroU64,
-) -> current::VariableConfig<TwoCap, C> {
+) -> current::VariableConfig<TwoCap, C, Sequential> {
     current::Config {
         merkle_config: merkle_config(prefix, page_cache.clone()),
         journal_config: variable_journal_config(
@@ -122,7 +122,7 @@ pub fn immutable_variable_config<C>(
     page_cache: CacheRef,
     codec_config: C,
     items_per_section: NonZeroU64,
-) -> immutable::variable::Config<TwoCap, C> {
+) -> immutable::variable::Config<TwoCap, C, Sequential> {
     immutable::Config {
         merkle_config: merkle_config(prefix, page_cache.clone()),
         log: variable_journal_config(prefix, page_cache, codec_config, items_per_section),
@@ -136,7 +136,7 @@ pub async fn local_store_client() -> (tempfile::TempDir, tokio::task::JoinHandle
     let (jh, url) = exoware_simulator::spawn_for_test(dir.path())
         .await
         .expect("spawn simulator");
-    let client = StoreClient::with_split_urls(&url, &url, &url, &url);
+    let client = StoreClient::new(&url);
     (dir, jh, client)
 }
 

@@ -421,7 +421,7 @@ pub struct OperationLogRangeProof<D: Digest, Op, F: Family> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct CurrentOperationRangeProof<D: Digest, Op, const N: usize, F: Family> {
+pub struct CurrentOperationRangeProof<D: Digest, Op, const N: usize, F: Graftable> {
     pub tip: Location<F>,
     pub root: D,
     pub start_location: Location<F>,
@@ -429,7 +429,7 @@ pub struct CurrentOperationRangeProof<D: Digest, Op, const N: usize, F: Family> 
     pub chunks: Vec<[u8; N]>,
 }
 
-pub struct OperationLogSubscription<B, F: Family, H: Hasher, Op: Decode + Encode + Read> {
+pub struct OperationLogSubscription<B, F: Graftable, H: Hasher, Op: Decode + Encode + Read> {
     stream: ServerStream<B, SubscribeResponseView<'static>>,
     op_cfg: Arc<Op::Cfg>,
     _marker: PhantomData<(F, H, Op)>,
@@ -439,7 +439,7 @@ impl<B, F, H, Op> OperationLogSubscription<B, F, H, Op>
 where
     B: Body<Data = Bytes> + Unpin,
     B::Error: Display,
-    F: Family,
+    F: Graftable,
     H: Hasher,
     H::Digest: DecodeExt<()>,
     Op: Decode + Encode + Read,
@@ -563,7 +563,7 @@ where
 /// Client for `qmdb.v1.OperationLogService`, parameterized on the Merkle
 /// family and backend operation type.
 #[derive(Clone)]
-pub struct OperationLogClient<T, F: Family, H: Hasher, Op: Encode + Read> {
+pub struct OperationLogClient<T, F: Graftable, H: Hasher, Op: Encode + Read> {
     rpc: OperationLogServiceClient<T>,
     op_cfg: Arc<Op::Cfg>,
     _marker: PhantomData<(F, H, Op)>,
@@ -571,7 +571,7 @@ pub struct OperationLogClient<T, F: Family, H: Hasher, Op: Encode + Read> {
 
 impl<F, H, Op> OperationLogClient<PreferZstdHttpClient, F, H, Op>
 where
-    F: Family,
+    F: Graftable,
     H: Hasher,
     H::Digest: DecodeExt<()>,
     Op: Decode + Encode + Read,
@@ -590,7 +590,7 @@ where
     T: ClientTransport,
     T::ResponseBody: Body<Data = Bytes> + Unpin,
     <T::ResponseBody as Body>::Error: Display,
-    F: Family,
+    F: Graftable,
     H: Hasher,
     H::Digest: DecodeExt<()>,
     Op: Decode + Encode + Read,
@@ -662,13 +662,15 @@ fn proof_digest_cap<D: Digest>(encoded_proof: &[u8]) -> usize {
     encoded_proof.len() / D::SIZE + 1
 }
 
-fn historical_target_root<H: Hasher>(
+fn historical_target_root<F, H>(
     ops_root: &[u8],
     ops_root_witness: &[u8],
     expected_root: &H::Digest,
 ) -> Result<H::Digest, QmdbError>
 where
+    F: Graftable,
     H::Digest: DecodeExt<()>,
+    H: Hasher,
 {
     match (ops_root.is_empty(), ops_root_witness.is_empty()) {
         (true, true) => Ok(*expected_root),
@@ -676,8 +678,8 @@ where
             let ops_root = H::Digest::decode_cfg(ops_root, &()).map_err(|err| {
                 QmdbError::CorruptData(format!("failed to decode historical ops root: {err}"))
             })?;
-            let witness =
-                OpsRootWitness::<H::Digest>::decode_cfg(ops_root_witness, &()).map_err(|err| {
+            let witness = OpsRootWitness::<F, H::Digest>::decode_cfg(ops_root_witness, &())
+                .map_err(|err| {
                     QmdbError::CorruptData(format!(
                         "failed to decode historical ops-root witness: {err}"
                     ))
@@ -709,7 +711,7 @@ fn verify_multi_from_proto<F, H, Op, DecodeOp>(
     decode: DecodeOp,
 ) -> Result<(H::Digest, Vec<(Location<F>, Op)>), QmdbError>
 where
-    F: Family,
+    F: Graftable,
     H: Hasher,
     H::Digest: DecodeExt<()>,
     Op: Encode + Read,
@@ -728,7 +730,8 @@ where
             Ok((Location::<F>::new(op.location), decoded))
         })
         .collect::<Result<Vec<_>, QmdbError>>()?;
-    let target_root = historical_target_root::<H>(&proto.ops_root, &proto.ops_root_witness, root)?;
+    let target_root =
+        historical_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
     let proof =
         Proof::<F, H::Digest>::decode_cfg(proto.proof.as_slice(), &max_digests).map_err(|err| {
@@ -748,7 +751,7 @@ fn verify_operation_range_from_proto<F, H, Op, DecodeOp>(
     decode: DecodeOp,
 ) -> Result<(H::Digest, Vec<(Location<F>, Op)>), QmdbError>
 where
-    F: Family,
+    F: Graftable,
     H: Hasher,
     H::Digest: DecodeExt<()>,
     Op: Encode + Read,
@@ -759,7 +762,8 @@ where
             "historical operation range proof has no operations".to_string(),
         ));
     }
-    let target_root = historical_target_root::<H>(&proto.ops_root, &proto.ops_root_witness, root)?;
+    let target_root =
+        historical_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
     let proof =
         Proof::<F, H::Digest>::decode_cfg(proto.proof.as_slice(), &max_digests).map_err(|err| {
@@ -854,8 +858,8 @@ where
             Ok(chunk)
         })
         .collect::<Result<Vec<_>, QmdbError>>()?;
-    let mut hasher = H::default();
-    if !proof.verify(&mut hasher, start, &decoded_operations, &chunks, root) {
+    let hasher = commonware_storage::qmdb::hasher::<H>();
+    if !proof.verify(&hasher, start, &decoded_operations, &chunks, root) {
         return Err(QmdbError::ProofVerification {
             kind: crate::ProofKind::CurrentRange,
         });
@@ -917,8 +921,8 @@ where
             kind: crate::ProofKind::CurrentKeyValue,
         });
     }
-    let mut hasher = H::default();
-    if !proof.proof.verify(&mut hasher, operation.clone(), root) {
+    let hasher = commonware_storage::qmdb::hasher::<H>();
+    if !proof.proof.verify(&hasher, operation.clone(), root) {
         return Err(QmdbError::ProofVerification {
             kind: crate::ProofKind::CurrentKeyValue,
         });
@@ -968,8 +972,8 @@ where
             .map_err(|err| {
                 QmdbError::CorruptData(format!("failed to decode unordered current proof: {err}"))
             })?;
-    let mut hasher = H::default();
-    if !proof.verify(&mut hasher, operation.clone(), root) {
+    let hasher = commonware_storage::qmdb::hasher::<H>();
+    if !proof.verify(&hasher, operation.clone(), root) {
         return Err(QmdbError::ProofVerification {
             kind: crate::ProofKind::CurrentKeyValue,
         });
@@ -1050,8 +1054,8 @@ where
             )
         }
     };
-    let mut hasher = H::default();
-    if !op_proof.verify(&mut hasher, operation, root) {
+    let hasher = commonware_storage::qmdb::hasher::<H>();
+    if !op_proof.verify(&hasher, operation, root) {
         return Err(QmdbError::ProofVerification {
             kind: crate::ProofKind::CurrentKeyExclusion,
         });

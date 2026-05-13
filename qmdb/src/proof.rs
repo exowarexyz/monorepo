@@ -41,16 +41,16 @@ impl EncodeSize for EncodedOperation<'_> {
 /// it. This is suitable for checkpointing and writer-frontier recovery.
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
-pub struct OperationRangeCheckpoint<D: Digest, F: Family> {
+pub struct OperationRangeCheckpoint<D: Digest, F: Graftable> {
     pub watermark: Location<F>,
     pub root: D,
-    pub ops_root_witness: Option<OpsRootWitness<D>>,
+    pub ops_root_witness: Option<OpsRootWitness<F, D>>,
     pub start_location: Location<F>,
     pub proof: Proof<F, D>,
     pub encoded_operations: Vec<Vec<u8>>,
 }
 
-impl<D: Digest, F: Family> OperationRangeCheckpoint<D, F> {
+impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
         let hasher = commonware_storage::qmdb::hasher::<H>();
         let operations = self
@@ -150,15 +150,15 @@ where
 /// ordered, unordered, immutable, and keyless backends.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[must_use]
-pub struct RawBatchMultiProof<D: Digest, F: Family> {
+pub struct RawBatchMultiProof<D: Digest, F: Graftable> {
     pub watermark: Location<F>,
     pub root: D,
-    pub ops_root_witness: Option<OpsRootWitness<D>>,
+    pub ops_root_witness: Option<OpsRootWitness<F, D>>,
     pub proof: Proof<F, D>,
     pub operations: Vec<(Location<F>, Vec<u8>)>,
 }
 
-impl<D: Digest, F: Family> RawBatchMultiProof<D, F> {
+impl<D: Digest, F: Graftable> RawBatchMultiProof<D, F> {
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
         let hasher = commonware_storage::qmdb::hasher::<H>();
         let operations: Vec<_> = self
@@ -204,7 +204,7 @@ pub(crate) async fn build_batch_multi_proof<F, H, S>(
     operations: Vec<(Location<F>, Vec<u8>)>,
 ) -> Result<RawBatchMultiProof<H::Digest, F>, crate::QmdbError>
 where
-    F: Family,
+    F: Graftable,
     H: Hasher,
     S: MerkleStorage<F, Digest = H::Digest>,
 {
@@ -243,7 +243,7 @@ pub(crate) async fn build_operation_range_checkpoint<F, H, S>(
     encoded_operations: Vec<Vec<u8>>,
 ) -> Result<OperationRangeCheckpoint<H::Digest, F>, crate::QmdbError>
 where
-    F: Family,
+    F: Graftable,
     H: Hasher,
     S: MerkleStorage<F, Digest = H::Digest>,
 {
@@ -280,7 +280,7 @@ pub struct RawKeyValueProof<
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
     const N: usize,
-    F: Family,
+    F: Graftable,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > {
     pub watermark: Location<F>,
@@ -307,10 +307,10 @@ where
         if self.proof.next_key != update.next_key {
             return false;
         }
-        let mut hasher = H::default();
+        let hasher = commonware_storage::qmdb::hasher::<H>();
         self.proof
             .proof
-            .verify(&mut hasher, self.operation.clone(), &self.root)
+            .verify(&hasher, self.operation.clone(), &self.root)
     }
 }
 
@@ -367,8 +367,8 @@ where
             ),
         };
 
-        let mut hasher = H::default();
-        op_proof.verify(&mut hasher, operation, &self.root)
+        let hasher = commonware_storage::qmdb::hasher::<H>();
+        op_proof.verify(&hasher, operation, &self.root)
     }
 }
 
@@ -452,9 +452,9 @@ where
         if !matches!(self.operation, unordered::Operation::Update(_)) {
             return false;
         }
-        let mut hasher = H::default();
+        let hasher = commonware_storage::qmdb::hasher::<H>();
         self.proof
-            .verify(&mut hasher, self.operation.clone(), &self.root)
+            .verify(&hasher, self.operation.clone(), &self.root)
     }
 }
 
@@ -639,7 +639,7 @@ impl<
 
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
-pub struct CurrentOperationRangeProofResult<D: Digest, Op, const N: usize, F: Family> {
+pub struct CurrentOperationRangeProofResult<D: Digest, Op, const N: usize, F: Graftable> {
     pub watermark: Location<F>,
     pub root: D,
     pub start_location: Location<F>,
@@ -653,9 +653,9 @@ where
     Op: Codec,
 {
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
-        let mut hasher = H::default();
+        let hasher = commonware_storage::qmdb::hasher::<H>();
         self.proof.verify(
-            &mut hasher,
+            &hasher,
             self.start_location,
             &self.operations,
             &self.chunks,
@@ -671,7 +671,7 @@ pub(crate) struct KeyValueProofResult<
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
     const N: usize,
-    F: Family,
+    F: Graftable,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > {
     pub watermark: Location<F>,
@@ -685,7 +685,7 @@ impl<
         K: QmdbKey + Codec,
         V: Codec + Clone + Send + Sync,
         const N: usize,
-        F: Family,
+        F: Graftable,
         E: ValueEncoding<Value = V>,
     > From<KeyValueProofResult<D, K, V, N, F, E>> for RawKeyValueProof<D, K, V, N, F, E>
 {

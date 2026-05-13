@@ -103,8 +103,13 @@ async fn run_keyless_local(
                 ((0..=MAX_OPERATION_SIZE).into(), ()),
                 NZU64!(7),
             );
-            let mut db: Keyless<mmr::Family, deterministic::Context, Vec<u8>, Sha256> =
-                Keyless::init(context.child("db"), cfg).await.expect("init");
+            let mut db: Keyless<
+                mmr::Family,
+                deterministic::Context,
+                Vec<u8>,
+                Sha256,
+                commonware_parallel::Sequential,
+            > = Keyless::init(context.child("db"), cfg).await.expect("init");
             for batch in batches {
                 let finalized = {
                     let mut b = db.new_batch();
@@ -227,6 +232,7 @@ async fn run_unordered_local(
                 Vec<u8>,
                 Sha256,
                 TwoCap,
+                commonware_parallel::Sequential,
             > = LocalUnorderedDb::init(context.child("db"), cfg)
                 .await
                 .expect("init");
@@ -336,6 +342,7 @@ async fn run_immutable_local(
                 Vec<u8>,
                 Sha256,
                 TwoCap,
+                commonware_parallel::Sequential,
             > = Immutable::init(context.child("db"), cfg)
                 .await
                 .expect("init");
@@ -371,13 +378,22 @@ type OrderedOp =
     commonware_storage::qmdb::any::ordered::variable::Operation<mmr::Family, Vec<u8>, Vec<u8>>;
 
 async fn ordered_boundary_from_local_db(
-    db: &LocalOrderedDb<mmr::Family, cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>,
+    db: &LocalOrderedDb<
+        mmr::Family,
+        cw_tokio::Context,
+        Vec<u8>,
+        Vec<u8>,
+        Sha256,
+        TwoCap,
+        N,
+        commonware_parallel::Sequential,
+    >,
     previous_operations: Option<&[OrderedOp]>,
     operations: &[OrderedOp],
 ) -> CurrentBoundaryState<Digest, N, mmr::Family> {
-    let mut ops_root_hasher = commonware_storage::qmdb::hasher::<Sha256>();
+    let ops_root_hasher = commonware_storage::qmdb::hasher::<Sha256>();
     let ops_root_witness = db
-        .ops_root_witness(&mut ops_root_hasher)
+        .ops_root_witness(&ops_root_hasher)
         .await
         .expect("ops root witness");
     recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
@@ -386,9 +402,9 @@ async fn ordered_boundary_from_local_db(
         db.root(),
         ops_root_witness,
         |location| async move {
-            let mut hasher = Sha256::default();
+            let hasher = commonware_storage::qmdb::hasher::<Sha256>();
             let (proof, mut proof_ops, mut chunks) = db
-                .range_proof(&mut hasher, location, NZU64!(1))
+                .range_proof(&hasher, location, NZU64!(1))
                 .await
                 .map_err(|error| {
                     exoware_qmdb::QmdbError::CorruptData(format!(
@@ -514,6 +530,7 @@ async fn run_ordered_local(
                 Sha256,
                 TwoCap,
                 N,
+                commonware_parallel::Sequential,
             > = LocalOrderedDb::init(context.child("db"), cfg)
                 .await
                 .expect("init");

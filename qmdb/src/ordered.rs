@@ -735,7 +735,7 @@ where
         let mut rows = session.range_stream(&start, &end, usize::MAX, 1024).await?;
         let mut latest = BTreeMap::<Vec<u8>, (Location<F>, UpdateRow<K, V>)>::new();
         while let Some(chunk) = rows.next_chunk().await? {
-            for (row_key, row_value) in chunk {
+            for (row_key, row_value) in chunk.rows {
                 let location = decode_update_location(&row_key)?;
                 if location > watermark {
                     continue;
@@ -1044,13 +1044,13 @@ where
         &self,
         session: &SerializableReadSession,
         location: Location<F>,
-    ) -> Result<OpsRootWitness<H::Digest>, QmdbError> {
+    ) -> Result<OpsRootWitness<F, H::Digest>, QmdbError> {
         let Some(bytes) = session.get(&encode_ops_root_witness_key(location)).await? else {
             return Err(QmdbError::CurrentBoundaryStateMissing {
                 location: location.as_u64(),
             });
         };
-        OpsRootWitness::<H::Digest>::decode_cfg(bytes.as_ref(), &()).map_err(|e| {
+        OpsRootWitness::<F, H::Digest>::decode_cfg(bytes.as_ref(), &()).map_err(|e| {
             QmdbError::CorruptData(format!(
                 "current ops-root witness at {location} decode error: {e}"
             ))
@@ -1136,9 +1136,9 @@ where
             size: merkle_size_for_watermark(watermark)?,
             _marker: PhantomData,
         };
-        let mut hasher = H::default();
+        let hasher = commonware_storage::qmdb::hasher::<H>();
         RangeProof::new(
-            &mut hasher,
+            &hasher,
             &status,
             &storage,
             inactivity_floor,
@@ -1171,9 +1171,9 @@ where
             size: merkle_size_for_watermark(watermark)?,
             _marker: PhantomData,
         };
-        let mut hasher = H::default();
+        let hasher = commonware_storage::qmdb::hasher::<H>();
         OperationProof::new(
-            &mut hasher,
+            &hasher,
             &status,
             &storage,
             inactivity_floor,

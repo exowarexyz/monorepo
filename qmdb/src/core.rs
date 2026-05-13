@@ -544,6 +544,11 @@ mod tests {
             root: digest,
             ops_root_witness: commonware_storage::qmdb::current::proof::OpsRootWitness {
                 grafted_root: digest,
+                pending_chunk_digest:
+                    <mmr::Family as commonware_storage::merkle::Graftable>::PendingChunk::<
+                        commonware_cryptography::sha256::Digest,
+                    >::try_from(None::<commonware_cryptography::sha256::Digest>)
+                    .expect("MMR has no pending chunk"),
                 partial_chunk: None,
             },
             chunks: Vec::new(),

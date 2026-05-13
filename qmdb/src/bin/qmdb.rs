@@ -99,13 +99,22 @@ fn update_row_cfg() -> (
 }
 
 async fn boundary_from_local_db(
-    db: &LocalQmdbDb<mmr::Family, cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>,
+    db: &LocalQmdbDb<
+        mmr::Family,
+        cw_tokio::Context,
+        Vec<u8>,
+        Vec<u8>,
+        Sha256,
+        TwoCap,
+        N,
+        Sequential,
+    >,
     previous_operations: Option<&[QmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>]>,
     operations: &[QmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>],
 ) -> CurrentBoundaryState<commonware_cryptography::sha256::Digest, N, mmr::Family> {
-    let mut ops_root_hasher = commonware_storage::qmdb::hasher::<Sha256>();
+    let ops_root_hasher = commonware_storage::qmdb::hasher::<Sha256>();
     let ops_root_witness = db
-        .ops_root_witness(&mut ops_root_hasher)
+        .ops_root_witness(&ops_root_hasher)
         .await
         .expect("ops root witness");
     recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
@@ -114,9 +123,9 @@ async fn boundary_from_local_db(
         db.root(),
         ops_root_witness,
         |location| async move {
-            let mut hasher = Sha256::default();
+            let hasher = commonware_storage::qmdb::hasher::<Sha256>();
             let (proof, mut proof_ops, mut chunks) = db
-                .range_proof(&mut hasher, location, NZU64!(1))
+                .range_proof(&hasher, location, NZU64!(1))
                 .await
                 .map_err(|error| {
                     exoware_qmdb::QmdbError::CorruptData(format!(
@@ -226,6 +235,7 @@ async fn seed(
                 Sha256,
                 TwoCap,
                 N,
+                Sequential,
             >::init(context.child("qmdb_seed"), cfg)
             .await
             .expect("init local ordered db");

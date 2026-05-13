@@ -78,7 +78,7 @@ pub use connect_client::{
 
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
-use commonware_storage::merkle::{self, Family, Location, Position, Proof};
+use commonware_storage::merkle::{self, Family, Graftable, Location, Position, Proof};
 use commonware_storage::qmdb::current::proof::OpsRootWitness;
 
 /// Maximum encoded operation size for QMDB key and value payloads (u16 length on the wire).
@@ -148,7 +148,10 @@ impl<D: Digest, F: Family> WriterState<D, F> {
 
     pub fn from_checkpoint<H: Hasher<Digest = D>>(
         checkpoint: &OperationRangeCheckpoint<D, F>,
-    ) -> Result<Self, QmdbError> {
+    ) -> Result<Self, QmdbError>
+    where
+        F: Graftable,
+    {
         Ok(Self {
             peaks: checkpoint.reconstruct_peaks::<H>()?,
             ops_size: Position::try_from(checkpoint.proof.leaves).map_err(|e| {
@@ -214,11 +217,11 @@ impl<D: Digest, F: Family> WriterState<D, F> {
 /// Commonware current DB, and then pass it to ordered or unordered writer
 /// APIs that upload current-boundary material.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CurrentBoundaryState<D: Digest, const N: usize, F: Family> {
+pub struct CurrentBoundaryState<D: Digest, const N: usize, F: Graftable> {
     /// Canonical current-state root at this batch boundary.
     pub root: D,
     /// Proof that the raw operation-log root is committed by `root`.
-    pub ops_root_witness: OpsRootWitness<D>,
+    pub ops_root_witness: OpsRootWitness<F, D>,
     /// Changed bitmap chunks keyed by chunk index.
     pub chunks: Vec<(u64, [u8; N])>,
     /// Changed grafted digests keyed by ops-space Merkle position.

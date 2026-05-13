@@ -934,7 +934,7 @@ dependencies = [
 [[package]]
 name = "commonware-codec"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=cae4540e4289611309ffab844cddc599b0718c2d#cae4540e4289611309ffab844cddc599b0718c2d"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=726bd0759a9e927a7c9d63eb26aefebf6852235f#726bd0759a9e927a7c9d63eb26aefebf6852235f"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -948,7 +948,7 @@ dependencies = [
 [[package]]
 name = "commonware-cryptography"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=cae4540e4289611309ffab844cddc599b0718c2d#cae4540e4289611309ffab844cddc599b0718c2d"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=726bd0759a9e927a7c9d63eb26aefebf6852235f#726bd0759a9e927a7c9d63eb26aefebf6852235f"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -983,7 +983,7 @@ dependencies = [
 [[package]]
 name = "commonware-formatting"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=cae4540e4289611309ffab844cddc599b0718c2d#cae4540e4289611309ffab844cddc599b0718c2d"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=726bd0759a9e927a7c9d63eb26aefebf6852235f#726bd0759a9e927a7c9d63eb26aefebf6852235f"
 dependencies = [
  "commonware-macros",
  "const-hex",
@@ -992,7 +992,7 @@ dependencies = [
 [[package]]
 name = "commonware-macros"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=cae4540e4289611309ffab844cddc599b0718c2d#cae4540e4289611309ffab844cddc599b0718c2d"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=726bd0759a9e927a7c9d63eb26aefebf6852235f#726bd0759a9e927a7c9d63eb26aefebf6852235f"
 dependencies = [
  "commonware-macros-impl",
  "tokio",
@@ -1001,7 +1001,7 @@ dependencies = [
 [[package]]
 name = "commonware-macros-impl"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=cae4540e4289611309ffab844cddc599b0718c2d#cae4540e4289611309ffab844cddc599b0718c2d"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=726bd0759a9e927a7c9d63eb26aefebf6852235f#726bd0759a9e927a7c9d63eb26aefebf6852235f"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -1013,7 +1013,7 @@ dependencies = [
 [[package]]
 name = "commonware-math"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=cae4540e4289611309ffab844cddc599b0718c2d#cae4540e4289611309ffab844cddc599b0718c2d"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=726bd0759a9e927a7c9d63eb26aefebf6852235f#726bd0759a9e927a7c9d63eb26aefebf6852235f"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1026,7 +1026,7 @@ dependencies = [
 [[package]]
 name = "commonware-parallel"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=cae4540e4289611309ffab844cddc599b0718c2d#cae4540e4289611309ffab844cddc599b0718c2d"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=726bd0759a9e927a7c9d63eb26aefebf6852235f#726bd0759a9e927a7c9d63eb26aefebf6852235f"
 dependencies = [
  "cfg-if",
  "commonware-macros",
@@ -1036,7 +1036,7 @@ dependencies = [
 [[package]]
 name = "commonware-runtime"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=cae4540e4289611309ffab844cddc599b0718c2d#cae4540e4289611309ffab844cddc599b0718c2d"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=726bd0759a9e927a7c9d63eb26aefebf6852235f#726bd0759a9e927a7c9d63eb26aefebf6852235f"
 dependencies = [
  "axum",
  "bytes",
@@ -1073,7 +1073,7 @@ dependencies = [
 [[package]]
 name = "commonware-runtime-macros"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=cae4540e4289611309ffab844cddc599b0718c2d#cae4540e4289611309ffab844cddc599b0718c2d"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=726bd0759a9e927a7c9d63eb26aefebf6852235f#726bd0759a9e927a7c9d63eb26aefebf6852235f"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -1084,7 +1084,7 @@ dependencies = [
 [[package]]
 name = "commonware-storage"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=cae4540e4289611309ffab844cddc599b0718c2d#cae4540e4289611309ffab844cddc599b0718c2d"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=726bd0759a9e927a7c9d63eb26aefebf6852235f#726bd0759a9e927a7c9d63eb26aefebf6852235f"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1107,7 +1107,7 @@ dependencies = [
 [[package]]
 name = "commonware-utils"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=cae4540e4289611309ffab844cddc599b0718c2d#cae4540e4289611309ffab844cddc599b0718c2d"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=726bd0759a9e927a7c9d63eb26aefebf6852235f#726bd0759a9e927a7c9d63eb26aefebf6852235f"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -2398,6 +2398,7 @@ dependencies = [
  "exoware-sdk",
  "exoware-server",
  "http",
+ "regex",
  "reqwest",
  "rocksdb",
  "tempfile",

@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use commonware_codec::{Codec, Decode, Encode, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
-    merkle::{Family, Location},
+    merkle::{Family, Graftable, Location},
     qmdb::{
         any::value::{ValueEncoding, VariableEncoding},
         keyless,
@@ -52,7 +52,7 @@ where
 
 impl<F, H, V, E> KeylessClient<F, H, V, E>
 where
-    F: Family,
+    F: Graftable,
     H: Hasher,
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,

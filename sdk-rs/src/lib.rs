@@ -37,14 +37,11 @@ use exoware_proto::RangeReduceRequest as DomainRangeReduceRequest;
 use exoware_proto::{
     connect_compression_registry as proto_connect_compression_registry,
     decode_connect_error as proto_decode_connect_error,
-    decode_query_detail_header_value as proto_decode_query_detail_header_value,
     to_domain_reduce_response as proto_to_domain_reduce_response,
     to_proto_reduce_params as proto_to_proto_reduce_params,
     PreferZstdHttpClient as ProtoPreferZstdHttpClient,
-    QUERY_DETAIL_RESPONSE_HEADER as PROTO_QUERY_DETAIL_RESPONSE_HEADER,
 };
 use futures::future::BoxFuture;
-use http::HeaderMap;
 use keys::is_valid_key_size;
 use kv_codec::{KvExpr, KvFieldRef, KvReducedValue};
 use std::collections::HashMap;
@@ -524,6 +521,22 @@ pub enum RangeMode {
     Reverse,
 }
 
+#[derive(Clone, Debug)]
+pub struct RangeChunk {
+    /// Rows returned in this stream frame.
+    pub rows: Vec<(Key, Bytes)>,
+    /// Query detail reported after reading this chunk.
+    pub detail: Option<proto_query::Detail>,
+}
+
+#[derive(Clone, Debug)]
+pub struct GetManyChunk {
+    /// Lookup entries returned in this stream frame.
+    pub entries: Vec<(Key, Option<Bytes>)>,
+    /// Query detail reported after reading this chunk.
+    pub detail: Option<proto_query::Detail>,
+}
+
 /// Iterator-like async range stream.
 pub struct RangeStream {
     stream:
@@ -531,7 +544,6 @@ pub struct RangeStream {
     pending_frame: Option<exoware_proto::query::RangeFrame>,
     rows_seen: usize,
     final_count: Option<usize>,
-    final_detail: Option<proto_query::Detail>,
     finished: bool,
     observed_sequence: Option<Arc<AtomicU64>>,
     key_prefix: Option<StoreKeyPrefix>,
@@ -551,7 +563,6 @@ impl RangeStream {
             pending_frame: None,
             rows_seen: 0,
             final_count: None,
-            final_detail: None,
             finished: false,
             observed_sequence,
             key_prefix,
@@ -560,22 +571,6 @@ impl RangeStream {
 
     pub fn final_count(&self) -> Option<usize> {
         self.final_count
-    }
-
-    pub fn final_detail(&self) -> Option<proto_query::Detail> {
-        self.final_detail.clone()
-    }
-
-    fn observe_detail_from_stream_trailers(&mut self) {
-        self.final_detail = self
-            .stream
-            .trailers()
-            .and_then(query_detail_from_header_map);
-        if let (Some(sequence_store), Some(d)) =
-            (&self.observed_sequence, self.final_detail.as_ref())
-        {
-            sequence_store.fetch_max(d.sequence_number, Ordering::SeqCst);
-        }
     }
 
     async fn prefetch_first_frame(&mut self) -> Result<(), ConnectError> {
@@ -593,56 +588,67 @@ impl RangeStream {
                     Err(err.clone())
                 } else {
                     self.final_count = Some(self.rows_seen);
-                    self.observe_detail_from_stream_trailers();
                     Ok(())
                 }
             }
         }
     }
 
-    pub async fn next_chunk(&mut self) -> Result<Option<Vec<(Key, Bytes)>>, ClientError> {
-        if self.finished {
-            return Ok(None);
-        }
-
-        let frame = if let Some(frame) = self.pending_frame.take() {
-            frame
-        } else {
-            let Some(frame) = self
-                .stream
-                .message()
-                .await
-                .map_err(client_error_from_connect)?
-            else {
-                self.finished = true;
-                if let Some(err) = self.stream.error() {
-                    return Err(client_error_from_connect(err.clone()));
-                }
-                self.final_count = Some(self.rows_seen);
-                self.observe_detail_from_stream_trailers();
+    pub async fn next_chunk(&mut self) -> Result<Option<RangeChunk>, ClientError> {
+        loop {
+            if self.finished {
                 return Ok(None);
-            };
-            frame.to_owned_message()
-        };
+            }
 
-        let n = frame.results.len();
-        self.rows_seen += n;
-        let mut out = Vec::with_capacity(n);
-        for entry in &frame.results {
-            let key = Bytes::copy_from_slice(&entry.key);
-            let key = match self.key_prefix {
-                Some(prefix) => prefix.decode_key(&key)?,
-                None => key,
+            let frame = if let Some(frame) = self.pending_frame.take() {
+                frame
+            } else {
+                let Some(frame) = self
+                    .stream
+                    .message()
+                    .await
+                    .map_err(client_error_from_connect)?
+                else {
+                    self.finished = true;
+                    if let Some(err) = self.stream.error() {
+                        return Err(client_error_from_connect(err.clone()));
+                    }
+                    self.final_count = Some(self.rows_seen);
+                    return Ok(None);
+                };
+                frame.to_owned_message()
             };
-            out.push((key, Bytes::copy_from_slice(&entry.value)));
+
+            let detail = frame.detail.as_option().cloned();
+            if let (Some(sequence_store), Some(detail)) = (&self.observed_sequence, detail.as_ref())
+            {
+                sequence_store.fetch_max(detail.sequence_number, Ordering::SeqCst);
+            }
+            let n = frame.results.len();
+
+            // Hide default/empty wire frames from the SDK's semantic chunk stream.
+            if n == 0 && detail.is_none() {
+                continue;
+            }
+
+            let mut out = Vec::with_capacity(n);
+            for entry in &frame.results {
+                let key = Bytes::copy_from_slice(&entry.key);
+                let key = match self.key_prefix {
+                    Some(prefix) => prefix.decode_key(&key)?,
+                    None => key,
+                };
+                out.push((key, Bytes::copy_from_slice(&entry.value)));
+            }
+            self.rows_seen += n;
+            return Ok(Some(RangeChunk { rows: out, detail }));
         }
-        Ok(Some(out))
     }
 
     pub async fn collect(mut self) -> Result<Vec<(Key, Bytes)>, ClientError> {
         let mut entries = Vec::new();
         while let Some(chunk) = self.next_chunk().await? {
-            entries.extend(chunk);
+            entries.extend(chunk.rows);
         }
         Ok(entries)
     }
@@ -652,18 +658,12 @@ pub struct GetManyStream {
     stream:
         ConnectServerStream<hyper::body::Incoming, exoware_proto::query::GetManyFrameView<'static>>,
     pending_frame: Option<exoware_proto::query::GetManyFrame>,
-    entries_seen: usize,
-    final_detail: Option<proto_query::Detail>,
     finished: bool,
     observed_sequence: Option<Arc<AtomicU64>>,
     key_prefix: Option<StoreKeyPrefix>,
 }
 
 impl GetManyStream {
-    pub fn final_detail(&self) -> Option<proto_query::Detail> {
-        self.final_detail.clone()
-    }
-
     fn from_connect_stream(
         stream: ConnectServerStream<
             hyper::body::Incoming,
@@ -675,23 +675,9 @@ impl GetManyStream {
         Self {
             stream,
             pending_frame: None,
-            entries_seen: 0,
-            final_detail: None,
             finished: false,
             observed_sequence,
             key_prefix,
-        }
-    }
-
-    fn observe_detail_from_stream_trailers(&mut self) {
-        self.final_detail = self
-            .stream
-            .trailers()
-            .and_then(query_detail_from_header_map);
-        if let (Some(sequence_store), Some(d)) =
-            (&self.observed_sequence, self.final_detail.as_ref())
-        {
-            sequence_store.fetch_max(d.sequence_number, Ordering::SeqCst);
         }
     }
 
@@ -709,54 +695,68 @@ impl GetManyStream {
                 if let Some(err) = self.stream.error() {
                     Err(err.clone())
                 } else {
-                    self.observe_detail_from_stream_trailers();
                     Ok(())
                 }
             }
         }
     }
 
-    pub async fn next_chunk(&mut self) -> Result<Option<Vec<(Key, Option<Bytes>)>>, ClientError> {
-        if self.finished {
-            return Ok(None);
-        }
-        let frame = if let Some(frame) = self.pending_frame.take() {
-            frame
-        } else {
-            let Some(frame) = self
-                .stream
-                .message()
-                .await
-                .map_err(client_error_from_connect)?
-            else {
-                self.finished = true;
-                if let Some(err) = self.stream.error() {
-                    return Err(client_error_from_connect(err.clone()));
-                }
-                self.observe_detail_from_stream_trailers();
+    pub async fn next_chunk(&mut self) -> Result<Option<GetManyChunk>, ClientError> {
+        loop {
+            if self.finished {
                 return Ok(None);
+            }
+            let frame = if let Some(frame) = self.pending_frame.take() {
+                frame
+            } else {
+                let Some(frame) = self
+                    .stream
+                    .message()
+                    .await
+                    .map_err(client_error_from_connect)?
+                else {
+                    self.finished = true;
+                    if let Some(err) = self.stream.error() {
+                        return Err(client_error_from_connect(err.clone()));
+                    }
+                    return Ok(None);
+                };
+                frame.to_owned_message()
             };
-            frame.to_owned_message()
-        };
 
-        self.entries_seen += frame.results.len();
-        let mut out = Vec::with_capacity(frame.results.len());
-        for entry in &frame.results {
-            let key = Bytes::copy_from_slice(&entry.key);
-            let key = match self.key_prefix {
-                Some(prefix) => prefix.decode_key(&key)?,
-                None => key,
-            };
-            let value = entry.value.as_ref().map(|v| Bytes::copy_from_slice(v));
-            out.push((key, value));
+            let detail = frame.detail.as_option().cloned();
+            if let (Some(sequence_store), Some(detail)) = (&self.observed_sequence, detail.as_ref())
+            {
+                sequence_store.fetch_max(detail.sequence_number, Ordering::SeqCst);
+            }
+            let n = frame.results.len();
+
+            // Hide default/empty wire frames from the SDK's semantic chunk stream.
+            if n == 0 && detail.is_none() {
+                continue;
+            }
+
+            let mut out = Vec::with_capacity(n);
+            for entry in &frame.results {
+                let key = Bytes::copy_from_slice(&entry.key);
+                let key = match self.key_prefix {
+                    Some(prefix) => prefix.decode_key(&key)?,
+                    None => key,
+                };
+                let value = entry.value.as_ref().map(|v| Bytes::copy_from_slice(v));
+                out.push((key, value));
+            }
+            return Ok(Some(GetManyChunk {
+                entries: out,
+                detail,
+            }));
         }
-        Ok(Some(out))
     }
 
     pub async fn collect(mut self) -> Result<HashMap<Key, Bytes>, ClientError> {
         let mut map = HashMap::new();
         while let Some(chunk) = self.next_chunk().await? {
-            for (key, value) in chunk {
+            for (key, value) in chunk.entries {
                 if let Some(v) = value {
                     map.insert(key, v);
                 }
@@ -1007,19 +1007,6 @@ fn trim_connect_base(url: &str) -> String {
     url.trim_end_matches('/').to_string()
 }
 
-fn query_detail_from_header_map(map: &HeaderMap) -> Option<proto_query::Detail> {
-    let v = map.get(PROTO_QUERY_DETAIL_RESPONSE_HEADER)?;
-    let s = v.to_str().ok()?;
-    proto_decode_query_detail_header_value(s).ok()
-}
-
-fn query_detail_from_unary_metadata(
-    headers: &HeaderMap,
-    trailers: &HeaderMap,
-) -> Option<proto_query::Detail> {
-    query_detail_from_header_map(headers).or_else(|| query_detail_from_header_map(trailers))
-}
-
 fn new_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .pool_max_idle_per_host(32)
@@ -1039,6 +1026,8 @@ pub enum ClientBuildError {
     MissingQueryUrl,
     #[error("StoreClientBuilder: missing compact URL (set compact_url or url)")]
     MissingCompactUrl,
+    #[error("StoreClientBuilder: missing stream URL (set stream_url or url)")]
+    MissingStreamUrl,
     #[error("StoreClientBuilder: invalid URL \"{url}\": {source}")]
     InvalidUrl {
         url: String,
@@ -1048,8 +1037,8 @@ pub enum ClientBuildError {
 
 /// Configures a [`StoreClient`] with explicit bases for health probes and store services.
 ///
-/// Use [`StoreClient::builder()`] to construct. Call [`Self::url`] to point health, ingest, and
-/// query at the same origin, or set each base separately. Finish with [`Self::build`].
+/// Use [`StoreClient::builder()`] to construct. Call [`Self::url`] to point every
+/// service at the same origin, or set each base separately. Finish with [`Self::build`].
 #[derive(Debug, Default)]
 pub struct StoreClientBuilder {
     health_url: Option<String>,
@@ -1098,8 +1087,7 @@ impl StoreClientBuilder {
         self
     }
 
-    /// Base URL for the stream service (`store.stream.v1.Service`). Defaults
-    /// to the ingest base when not set explicitly.
+    /// Base URL for the stream service (`store.stream.v1.Service`).
     pub fn stream_url(mut self, url: &str) -> Self {
         self.stream_url = Some(trim_connect_base(url));
         self
@@ -1131,9 +1119,7 @@ impl StoreClientBuilder {
         let compact_url = self
             .compact_url
             .ok_or(ClientBuildError::MissingCompactUrl)?;
-        // Stream defaults to ingest when not explicitly configured; they
-        // share the same origin in the reference simulator.
-        let stream_url = self.stream_url.unwrap_or_else(|| ingest_url.clone());
+        let stream_url = self.stream_url.ok_or(ClientBuildError::MissingStreamUrl)?;
         let ingest_uri: http::Uri =
             ingest_url
                 .parse()
@@ -1203,9 +1189,9 @@ pub struct StoreClient {
 /// and every later read passes that fixed floor so the server guarantees all
 /// responses reflect at least that point in the write log.
 ///
-/// Streamed query reads (`get_many`, `range_stream`) only expose their final
-/// sequence in stream trailers, so if one of those is the first successful
-/// read, the session is not pinned until that stream is fully drained.
+/// Streamed query reads (`get_many`, `range_stream`) expose their sequence in
+/// each returned chunk's detail, so if one of those is the first successful
+/// read, the session is pinned once the first detail-bearing chunk is consumed.
 #[derive(Clone, Debug)]
 pub struct SerializableReadSession {
     client: StoreClient,
@@ -1246,40 +1232,7 @@ impl StoreClient {
             .url(url)
             .retry_config(retry_config)
             .build()
-            .expect("url sets health, ingest, and query URLs")
-    }
-
-    /// Split endpoints for deployments where services run on different ports or hosts.
-    pub fn with_split_urls(
-        health_base: &str,
-        ingest_base: &str,
-        query_base: &str,
-        compact_base: &str,
-    ) -> Self {
-        Self::with_split_urls_and_retry(
-            health_base,
-            ingest_base,
-            query_base,
-            compact_base,
-            RetryConfig::standard(),
-        )
-    }
-
-    pub fn with_split_urls_and_retry(
-        health_base: &str,
-        ingest_base: &str,
-        query_base: &str,
-        compact_base: &str,
-        retry_config: RetryConfig,
-    ) -> Self {
-        Self::builder()
-            .health_url(health_base)
-            .ingest_url(ingest_base)
-            .query_url(query_base)
-            .compact_url(compact_base)
-            .retry_config(retry_config)
-            .build()
-            .expect("all service URLs are set")
+            .expect("url sets all service URLs")
     }
 
     /// Return this client's configured Store key prefix, if any.
@@ -1338,8 +1291,8 @@ impl StoreClient {
     /// Create an unseeded serializable read session.
     ///
     /// The first successful unary read fixes the session's sequence floor from
-    /// the server response. Streamed query reads fix that floor only once their
-    /// trailers arrive.
+    /// the server response. Streamed query reads fix that floor once a
+    /// detail-bearing chunk is consumed.
     pub fn create_session(&self) -> SerializableReadSession {
         self.create_session_with_sequence(0)
     }
@@ -1449,10 +1402,9 @@ impl StoreClient {
         key: &Key,
         min_sequence_number: Option<u64>,
     ) -> Result<Option<Bytes>, ClientError> {
-        let (response, detail) = self
+        let (response, _detail) = self
             .send_get(key, self.normalize_min_sequence_number(min_sequence_number))
             .await?;
-        let _ = detail;
         Ok(response.value.map(Bytes::from))
     }
 
@@ -1814,8 +1766,8 @@ impl StoreClient {
                     .await
             })
             .await?;
-        let detail = query_detail_from_unary_metadata(response.headers(), response.trailers());
         let owned = response.into_owned();
+        let detail = owned.detail.as_option().cloned();
         Ok((owned, detail))
     }
 
@@ -1979,8 +1931,8 @@ impl StoreClient {
                     .await
             })
             .await?;
-        let detail = query_detail_from_unary_metadata(response.headers(), response.trailers());
         let owned = response.into_owned();
+        let detail = owned.detail.as_option().cloned();
         Ok((owned, detail))
     }
 
@@ -2485,8 +2437,8 @@ impl SerializableReadSession {
     ///
     /// Fresh sessions start with `None` unless created via
     /// [`StoreClient::create_session_with_sequence`]. A first streamed query
-    /// read (`get_many`, `range_stream`) only sets this once the stream is
-    /// fully drained and trailers are available.
+    /// read (`get_many`, `range_stream`) sets this once a detail-bearing chunk
+    /// is consumed.
     pub fn fixed_sequence(&self) -> Option<u64> {
         self.state.fixed_sequence()
     }
@@ -2839,34 +2791,7 @@ mod tests {
         assert_eq!(client.health_url, "http://localhost:10000");
         assert_eq!(client.ingest_uri.to_string(), "http://localhost:10000/");
         assert_eq!(client.query_uri.to_string(), "http://localhost:10000/");
-    }
-
-    #[test]
-    fn builder_matches_new_and_split_urls() {
-        let single = StoreClient::new("http://localhost:9/");
-        let built = StoreClient::builder()
-            .url("http://localhost:9/")
-            .build()
-            .unwrap();
-        assert_eq!(single.health_url, built.health_url);
-        assert_eq!(single.ingest_uri.to_string(), built.ingest_uri.to_string());
-        assert_eq!(single.query_uri.to_string(), built.query_uri.to_string());
-
-        let split = StoreClient::with_split_urls("http://h", "http://i", "http://q", "http://c");
-        let split_b = StoreClient::builder()
-            .health_url("http://h")
-            .ingest_url("http://i")
-            .query_url("http://q")
-            .compact_url("http://c")
-            .build()
-            .unwrap();
-        assert_eq!(split.health_url, split_b.health_url);
-        assert_eq!(split.ingest_uri.to_string(), split_b.ingest_uri.to_string());
-        assert_eq!(split.query_uri.to_string(), split_b.query_uri.to_string());
-        assert_eq!(
-            split.compact_uri.to_string(),
-            split_b.compact_uri.to_string()
-        );
+        assert_eq!(client.stream_uri.to_string(), "http://localhost:10000/");
     }
 
     #[test]
@@ -2889,6 +2814,15 @@ mod tests {
                 .query_url("http://q")
                 .build(),
             Err(ClientBuildError::MissingCompactUrl)
+        ));
+        assert!(matches!(
+            StoreClient::builder()
+                .health_url("http://h")
+                .ingest_url("http://i")
+                .query_url("http://q")
+                .compact_url("http://c")
+                .build(),
+            Err(ClientBuildError::MissingStreamUrl)
         ));
     }
 

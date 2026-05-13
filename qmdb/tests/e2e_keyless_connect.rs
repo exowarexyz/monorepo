@@ -26,8 +26,13 @@ use exoware_sdk::store::common::v1::{
 use exoware_sdk::StoreClient;
 
 type Digest = commonware_cryptography::sha256::Digest;
-type LocalDb =
-    Keyless<mmr::Family, deterministic::Context, Vec<u8>, commonware_cryptography::Sha256>;
+type LocalDb = Keyless<
+    mmr::Family,
+    deterministic::Context,
+    Vec<u8>,
+    commonware_cryptography::Sha256,
+    commonware_parallel::Sequential,
+>;
 type TestKeylessClient = KeylessClient<mmr::Family, commonware_cryptography::Sha256, Vec<u8>>;
 type BatchOperation = KeylessOperation<mmr::Family, Vec<u8>>;
 

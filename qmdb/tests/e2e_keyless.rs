@@ -7,7 +7,7 @@ use std::num::NonZeroU64;
 
 use commonware_runtime::{deterministic, Runner as _};
 use commonware_storage::journal::contiguous::fixed::Config as FixedJournalConfig;
-use commonware_storage::merkle::{mmb, mmr, Family, Location};
+use commonware_storage::merkle::{mmb, mmr, Family, Graftable, Location};
 use commonware_storage::qmdb::any::value::FixedEncoding;
 use commonware_storage::qmdb::keyless::fixed::{
     Db as FixedKeyless, Operation as FixedKeylessOperation,
@@ -20,9 +20,20 @@ use exoware_sdk::StoreClient;
 use common::retry;
 
 type Digest = commonware_cryptography::sha256::Digest;
-type LocalDb<F> = Keyless<F, deterministic::Context, Vec<u8>, commonware_cryptography::Sha256>;
-type FixedLocalDb<F> =
-    FixedKeyless<F, deterministic::Context, Digest, commonware_cryptography::Sha256>;
+type LocalDb<F> = Keyless<
+    F,
+    deterministic::Context,
+    Vec<u8>,
+    commonware_cryptography::Sha256,
+    commonware_parallel::Sequential,
+>;
+type FixedLocalDb<F> = FixedKeyless<
+    F,
+    deterministic::Context,
+    Digest,
+    commonware_cryptography::Sha256,
+    commonware_parallel::Sequential,
+>;
 
 type TestKeylessClient<F> = KeylessClient<F, commonware_cryptography::Sha256, Vec<u8>>;
 type TestKeylessWriter<F> = KeylessWriter<F, commonware_cryptography::Sha256, Vec<u8>>;
@@ -31,7 +42,7 @@ type FixedTestKeylessClient<F> =
 type FixedTestKeylessWriter<F> =
     KeylessWriter<F, commonware_cryptography::Sha256, Digest, FixedEncoding<Digest>>;
 
-fn fresh_keyless<F: Family>(c: StoreClient) -> TestKeylessClient<F> {
+fn fresh_keyless<F: Graftable>(c: StoreClient) -> TestKeylessClient<F> {
     TestKeylessClient::from_client(c, ((0..=10000).into(), ()))
 }
 
@@ -39,7 +50,7 @@ fn fresh_writer<F: Family>(c: StoreClient) -> TestKeylessWriter<F> {
     TestKeylessWriter::empty(c)
 }
 
-fn fresh_fixed_keyless<F: Family>(c: StoreClient) -> FixedTestKeylessClient<F>
+fn fresh_fixed_keyless<F: Graftable>(c: StoreClient) -> FixedTestKeylessClient<F>
 where
     FixedKeylessOperation<F, Digest>: commonware_codec::Read<Cfg = ()>,
 {
@@ -176,7 +187,7 @@ where
     .expect("join")
 }
 
-async fn keyless_round_trip_for_family<F: Family>()
+async fn keyless_round_trip_for_family<F: Graftable>()
 where
     KeylessOperation<F, Vec<u8>>:
         commonware_codec::Codec<Cfg = <Vec<u8> as commonware_codec::Read>::Cfg> + Clone + PartialEq,

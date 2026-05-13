@@ -30,8 +30,26 @@ type TestOrderedClient<F> = OrderedClient<F, Sha256, Vec<u8>, Vec<u8>, N>;
 type TestOrderedWriter<F> = OrderedWriter<F, Sha256, Vec<u8>, Vec<u8>, N>;
 type FixedTestOrderedClient<F> = OrderedClient<F, Sha256, Digest, Digest, N, FixedEncoding<Digest>>;
 type FixedTestOrderedWriter<F> = OrderedWriter<F, Sha256, Digest, Digest, N, FixedEncoding<Digest>>;
-type LocalDb<F> = LocalQmdbDb<F, cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N>;
-type FixedLocalDb<F> = LocalFixedQmdbDb<F, cw_tokio::Context, Digest, Digest, Sha256, TwoCap, N>;
+type LocalDb<F> = LocalQmdbDb<
+    F,
+    cw_tokio::Context,
+    Vec<u8>,
+    Vec<u8>,
+    Sha256,
+    TwoCap,
+    N,
+    commonware_parallel::Sequential,
+>;
+type FixedLocalDb<F> = LocalFixedQmdbDb<
+    F,
+    cw_tokio::Context,
+    Digest,
+    Digest,
+    Sha256,
+    TwoCap,
+    N,
+    commonware_parallel::Sequential,
+>;
 
 async fn boundary_from_local_db<F>(
     db: &LocalDb<F>,
@@ -42,9 +60,9 @@ where
     F: Graftable,
     BatchOperation<F>: commonware_codec::Codec,
 {
-    let mut ops_root_hasher = commonware_storage::qmdb::hasher::<Sha256>();
+    let ops_root_hasher = commonware_storage::qmdb::hasher::<Sha256>();
     let ops_root_witness = db
-        .ops_root_witness(&mut ops_root_hasher)
+        .ops_root_witness(&ops_root_hasher)
         .await
         .expect("ops root witness");
     recover_boundary_state::<F, Sha256, _, N, _, _>(
@@ -53,9 +71,9 @@ where
         db.root(),
         ops_root_witness,
         |location| async move {
-            let mut hasher = Sha256::default();
+            let hasher = commonware_storage::qmdb::hasher::<Sha256>();
             let (proof, mut proof_ops, mut chunks) = db
-                .range_proof(&mut hasher, location, NZU64!(1))
+                .range_proof(&hasher, location, NZU64!(1))
                 .await
                 .map_err(|error| {
                     exoware_qmdb::QmdbError::CorruptData(format!(
@@ -100,9 +118,9 @@ where
     F: Graftable,
     FixedBatchOperation<F>: commonware_codec::CodecFixed<Cfg = ()> + Send + Sync,
 {
-    let mut ops_root_hasher = commonware_storage::qmdb::hasher::<Sha256>();
+    let ops_root_hasher = commonware_storage::qmdb::hasher::<Sha256>();
     let ops_root_witness = db
-        .ops_root_witness(&mut ops_root_hasher)
+        .ops_root_witness(&ops_root_hasher)
         .await
         .expect("fixed ops root witness");
     recover_boundary_state::<F, Sha256, _, N, _, _>(
@@ -111,9 +129,9 @@ where
         db.root(),
         ops_root_witness,
         |location| async move {
-            let mut hasher = Sha256::default();
+            let hasher = commonware_storage::qmdb::hasher::<Sha256>();
             let (proof, mut proof_ops, mut chunks) = db
-                .range_proof(&mut hasher, location, NZU64!(1))
+                .range_proof(&hasher, location, NZU64!(1))
                 .await
                 .map_err(|error| {
                     exoware_qmdb::QmdbError::CorruptData(format!(
@@ -161,20 +179,20 @@ fn fixed_update_row_cfg() -> (
     ((), ())
 }
 
-struct LocalReference<F: Family> {
+struct LocalReference<F: Graftable> {
     latest_location: Location<F>,
     operations: Vec<BatchOperation<F>>,
     current_boundary: CurrentBoundaryState<Digest, N, F>,
     values: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 }
 
-struct ChunkSizedLocalReference<F: Family, const M: usize> {
+struct ChunkSizedLocalReference<F: Graftable, const M: usize> {
     latest_location: Location<F>,
     operations: Vec<BatchOperation<F>>,
     current_boundary: CurrentBoundaryState<Digest, M, F>,
 }
 
-struct FixedLocalReference<F: Family> {
+struct FixedLocalReference<F: Graftable> {
     latest_location: Location<F>,
     operations: Vec<FixedBatchOperation<F>>,
     current_boundary: CurrentBoundaryState<Digest, N, F>,
@@ -243,7 +261,16 @@ where
 }
 
 async fn boundary_from_local_db_with_chunk_size<F, const M: usize>(
-    db: &LocalQmdbDb<F, cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, M>,
+    db: &LocalQmdbDb<
+        F,
+        cw_tokio::Context,
+        Vec<u8>,
+        Vec<u8>,
+        Sha256,
+        TwoCap,
+        M,
+        commonware_parallel::Sequential,
+    >,
     previous_operations: Option<&[BatchOperation<F>]>,
     operations: &[BatchOperation<F>],
 ) -> CurrentBoundaryState<Digest, M, F>
@@ -251,9 +278,9 @@ where
     F: Graftable,
     BatchOperation<F>: commonware_codec::Codec,
 {
-    let mut ops_root_hasher = commonware_storage::qmdb::hasher::<Sha256>();
+    let ops_root_hasher = commonware_storage::qmdb::hasher::<Sha256>();
     let ops_root_witness = db
-        .ops_root_witness(&mut ops_root_hasher)
+        .ops_root_witness(&ops_root_hasher)
         .await
         .expect("ops root witness");
     recover_boundary_state::<F, Sha256, _, M, _, _>(
@@ -262,9 +289,9 @@ where
         db.root(),
         ops_root_witness,
         |location| async move {
-            let mut hasher = Sha256::default();
+            let hasher = commonware_storage::qmdb::hasher::<Sha256>();
             let (proof, mut proof_ops, mut chunks) = db
-                .range_proof(&mut hasher, location, NZU64!(1))
+                .range_proof(&hasher, location, NZU64!(1))
                 .await
                 .map_err(|error| {
                     exoware_qmdb::QmdbError::CorruptData(format!(
@@ -301,10 +328,18 @@ where
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
             let cfg = common::ordered_variable_config(prefix, page_cache, op_cfg::<F>(), NZU64!(8));
-            let mut db: LocalQmdbDb<F, cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, M> =
-                LocalQmdbDb::init(context.child(prefix), cfg)
-                    .await
-                    .expect("init");
+            let mut db: LocalQmdbDb<
+                F,
+                cw_tokio::Context,
+                Vec<u8>,
+                Vec<u8>,
+                Sha256,
+                TwoCap,
+                M,
+                commonware_parallel::Sequential,
+            > = LocalQmdbDb::init(context.child(prefix), cfg)
+                .await
+                .expect("init");
 
             let finalized = {
                 let mut batch = db.new_batch();
@@ -511,7 +546,7 @@ async fn ordered_mmb_round_trip() {
 #[tokio::test]
 async fn ordered_mmb_multi_peak_grafted_chunk_round_trip() {
     let (_dir, _server, client) = common::local_store_client().await;
-    let local = build_local_db_with_write_count::<mmb::Family, N>("ordered_mmb_grafted", 511).await;
+    let local = build_local_db_with_write_count::<mmb::Family, N>("ordered_mmb_grafted", 767).await;
     assert!(
         local.current_boundary.grafted_nodes.len() >= 2,
         "test must cross a grafted chunk boundary"

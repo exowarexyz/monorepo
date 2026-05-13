@@ -47,7 +47,7 @@ pub fn keep_positions_gte(min_location: u64) -> PrunePolicy {
     }
 }
 
-/// Prune the store's batch log to the last `count` batches. Use with the
+/// Prune the store's log to the last `count` batches. Use with the
 /// store's `stream.v1` service when you want to bound replay history.
 pub fn keep_latest_batches(count: usize) -> PrunePolicy {
     PrunePolicy {
@@ -107,14 +107,14 @@ mod tests {
     }
 
     #[test]
-    fn keep_latest_batches_uses_batch_log_scope() {
+    fn keep_latest_batches_uses_log_scope() {
         let policy = keep_latest_batches(10);
         assert!(matches!(policy.scope, PolicyScope::Sequence));
         assert_eq!(policy.retain, RetainPolicy::KeepLatest { count: 10 });
     }
 
     #[test]
-    fn drop_all_batches_uses_batch_log_scope() {
+    fn drop_all_batches_uses_log_scope() {
         let policy = drop_all_batches();
         assert!(matches!(policy.scope, PolicyScope::Sequence));
         assert_eq!(policy.retain, RetainPolicy::DropAll);

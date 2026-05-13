@@ -22,8 +22,15 @@ use common::retry;
 type Digest = commonware_cryptography::sha256::Digest;
 type K = FixedBytes<32>;
 type V = Vec<u8>;
-type LocalDb =
-    Immutable<mmr::Family, deterministic::Context, K, V, commonware_cryptography::Sha256, TwoCap>;
+type LocalDb = Immutable<
+    mmr::Family,
+    deterministic::Context,
+    K,
+    V,
+    commonware_cryptography::Sha256,
+    TwoCap,
+    commonware_parallel::Sequential,
+>;
 type TestReader = ImmutableClient<mmr::Family, commonware_cryptography::Sha256, K, V>;
 type TestWriter = ImmutableWriter<mmr::Family, commonware_cryptography::Sha256, K, V>;
 

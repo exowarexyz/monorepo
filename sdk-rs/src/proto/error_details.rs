@@ -107,7 +107,7 @@ mod tests {
     use crate::query::Detail;
 
     #[test]
-    fn round_trips_read_stats_detail() {
+    fn round_trips_query_detail() {
         let err = with_query_detail(
             ConnectError::invalid_argument("bad"),
             Detail {

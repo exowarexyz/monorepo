@@ -548,11 +548,11 @@ where
         &self,
         session: &SerializableReadSession,
         location: Location<F>,
-    ) -> Result<Option<OpsRootWitness<H::Digest>>, QmdbError> {
+    ) -> Result<Option<OpsRootWitness<F, H::Digest>>, QmdbError> {
         let Some(bytes) = session.get(&encode_ops_root_witness_key(location)).await? else {
             return Ok(None);
         };
-        OpsRootWitness::<H::Digest>::decode_cfg(bytes.as_ref(), &())
+        OpsRootWitness::<F, H::Digest>::decode_cfg(bytes.as_ref(), &())
             .map(Some)
             .map_err(|e| {
                 QmdbError::CorruptData(format!(
@@ -637,9 +637,9 @@ where
             size: merkle_size_for_watermark(watermark)?,
             _marker: PhantomData,
         };
-        let mut hasher = H::default();
+        let hasher = commonware_storage::qmdb::hasher::<H>();
         OperationProof::new(
-            &mut hasher,
+            &hasher,
             &status,
             &storage,
             inactivity_floor,
@@ -669,9 +669,9 @@ where
             size: merkle_size_for_watermark(watermark)?,
             _marker: PhantomData,
         };
-        let mut hasher = H::default();
+        let hasher = commonware_storage::qmdb::hasher::<H>();
         RangeProof::new(
-            &mut hasher,
+            &hasher,
             &status,
             &storage,
             inactivity_floor,

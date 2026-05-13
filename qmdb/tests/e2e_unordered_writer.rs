@@ -25,7 +25,15 @@ type BatchProof = Proof<mmr::Family, Digest>;
 type UnorderedBatchOperation = UnorderedQmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>;
 type TestReader = UnorderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>>;
 type TestWriter = UnorderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>>;
-type LocalDb = LocalUnorderedDb<mmr::Family, cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap>;
+type LocalDb = LocalUnorderedDb<
+    mmr::Family,
+    cw_tokio::Context,
+    Vec<u8>,
+    Vec<u8>,
+    Sha256,
+    TwoCap,
+    commonware_parallel::Sequential,
+>;
 
 fn op_cfg() -> <UnorderedBatchOperation as commonware_codec::Read>::Cfg {
     (

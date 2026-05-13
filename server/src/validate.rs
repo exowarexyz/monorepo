@@ -13,7 +13,23 @@ use exoware_proto::{
 use exoware_sdk as exoware_proto;
 use exoware_sdk::keys::{validate_key_size, MAX_KEY_LEN};
 
-pub const MAX_VALUE_LEN: usize = 10 * 1024 * 1024;
+/// Default maximum value size accepted by ingest validation.
+pub const DEFAULT_MAX_VALUE_LEN: usize = 10 * 1024 * 1024;
+
+/// Limits enforced before ingest requests reach the backend.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IngestLimits {
+    /// Maximum accepted size, in bytes, for each value field.
+    pub max_value_len: usize,
+}
+
+impl Default for IngestLimits {
+    fn default() -> Self {
+        Self {
+            max_value_len: DEFAULT_MAX_VALUE_LEN,
+        }
+    }
+}
 
 fn field_error(
     domain: &str,
@@ -62,19 +78,27 @@ fn validate_key_field(domain: &str, field: &str, key: &[u8]) -> Result<(), Conne
     })
 }
 
-fn validate_value_field(domain: &str, field: &str, value: &[u8]) -> Result<(), ConnectError> {
-    if value.len() > MAX_VALUE_LEN {
+fn validate_value_field(
+    domain: &str,
+    field: &str,
+    value: &[u8],
+    limits: IngestLimits,
+) -> Result<(), ConnectError> {
+    if value.len() > limits.max_value_len {
         return Err(field_error(
             domain,
             field,
             format!(
                 "value length {} exceeds maximum {}",
                 value.len(),
-                MAX_VALUE_LEN
+                limits.max_value_len
             ),
             "INVALID_VALUE_LENGTH",
             format!("{field} value length is outside store limits"),
-            [("max_value_len".to_string(), MAX_VALUE_LEN.to_string())],
+            [(
+                "max_value_len".to_string(),
+                limits.max_value_len.to_string(),
+            )],
         ));
     }
     Ok(())
@@ -84,6 +108,7 @@ fn validate_value_field(domain: &str, field: &str, value: &[u8]) -> Result<(), C
 
 pub fn validate_put_request(
     request: &exoware_proto::store::ingest::v1::PutRequestView<'_>,
+    limits: IngestLimits,
 ) -> Result<(), ConnectError> {
     // buf.validate: repeated.min_items = 1
     if request.kvs.is_empty() {
@@ -99,7 +124,12 @@ pub fn validate_put_request(
     // buf.validate: KvEntry.key bytes.max_len = 254
     for (index, kv) in request.kvs.iter().enumerate() {
         validate_key_field("store.ingest", &format!("kvs[{index}].key"), kv.key)?;
-        validate_value_field("store.ingest", &format!("kvs[{index}].value"), kv.value)?;
+        validate_value_field(
+            "store.ingest",
+            &format!("kvs[{index}].value"),
+            kv.value,
+            limits,
+        )?;
     }
     Ok(())
 }
@@ -220,22 +250,6 @@ pub fn validate_prune_request(
             [],
         ));
     }
-    for (i, policy) in request.policies.iter().enumerate() {
-        if let Some(exoware_proto::compact::policy_retain::KindView::KeepLatest(kl)) =
-            &policy.retain.kind
-        {
-            if kl.count == 0 {
-                return Err(field_error(
-                    "store.compact",
-                    format!("policies[{i}].retain.keep_latest.count"),
-                    "count must be greater than 0",
-                    "INVALID_PRUNE_REQUEST",
-                    "keep_latest count must be positive",
-                    [],
-                ));
-            }
-        }
-    }
     Ok(())
 }
 
@@ -266,7 +280,7 @@ mod tests {
         let req = exoware_proto::ingest::PutRequest {
             kvs: vec![exoware_proto::common::KvEntry {
                 key: vec![0u8; 10],
-                value: vec![1u8; MAX_VALUE_LEN + 1],
+                value: vec![1u8; DEFAULT_MAX_VALUE_LEN + 1],
                 ..Default::default()
             }],
             ..Default::default()
@@ -274,12 +288,12 @@ mod tests {
         req.encode_to_vec()
     }
 
-    fn valid_put_request() -> Vec<u8> {
+    fn valid_put_request_with_value_len(value_len: usize) -> Vec<u8> {
         use buffa::Message;
         let req = exoware_proto::ingest::PutRequest {
             kvs: vec![exoware_proto::common::KvEntry {
                 key: vec![0u8; 10],
-                value: vec![1],
+                value: vec![1u8; value_len],
                 ..Default::default()
             }],
             ..Default::default()
@@ -292,7 +306,7 @@ mod tests {
         let bytes = empty_put_request_bytes();
         let view =
             exoware_proto::store::ingest::v1::PutRequestView::decode_view(&bytes).expect("parse");
-        let err = validate_put_request(&view).unwrap_err();
+        let err = validate_put_request(&view, IngestLimits::default()).unwrap_err();
         assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
     }
 
@@ -301,7 +315,7 @@ mod tests {
         let bytes = put_request_with_oversized_key();
         let view =
             exoware_proto::store::ingest::v1::PutRequestView::decode_view(&bytes).expect("parse");
-        let err = validate_put_request(&view).unwrap_err();
+        let err = validate_put_request(&view, IngestLimits::default()).unwrap_err();
         assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
     }
 
@@ -310,16 +324,27 @@ mod tests {
         let bytes = put_request_with_oversized_value();
         let view =
             exoware_proto::store::ingest::v1::PutRequestView::decode_view(&bytes).expect("parse");
-        let err = validate_put_request(&view).unwrap_err();
+        let err = validate_put_request(&view, IngestLimits::default()).unwrap_err();
+        assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn put_rejects_value_over_custom_limit() {
+        let bytes = valid_put_request_with_value_len(5);
+        let view =
+            exoware_proto::store::ingest::v1::PutRequestView::decode_view(&bytes).expect("parse");
+        let limits = IngestLimits { max_value_len: 4 };
+        let err = validate_put_request(&view, limits).unwrap_err();
+
         assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
     }
 
     #[test]
     fn put_accepts_valid_request() {
-        let bytes = valid_put_request();
+        let bytes = valid_put_request_with_value_len(1);
         let view =
             exoware_proto::store::ingest::v1::PutRequestView::decode_view(&bytes).expect("parse");
-        validate_put_request(&view).expect("should be valid");
+        validate_put_request(&view, IngestLimits::default()).expect("should be valid");
     }
 
     fn get_request_bytes(key: &[u8]) -> Vec<u8> {
@@ -420,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn prune_rejects_keep_latest_count_zero() {
+    fn prune_shape_accepts_keep_latest_count_zero() {
         use buffa::Message;
         let bytes = exoware_proto::compact::PruneRequest {
             policies: vec![exoware_proto::compact::Policy {
@@ -441,8 +466,7 @@ mod tests {
         .encode_to_vec();
         let view = exoware_proto::store::compact::v1::PruneRequestView::decode_view(&bytes)
             .expect("parse");
-        let err = validate_prune_request(&view).unwrap_err();
-        assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
+        validate_prune_request(&view).expect("shape should be valid");
     }
 
     // -- get_many --

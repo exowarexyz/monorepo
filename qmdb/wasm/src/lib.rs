@@ -65,7 +65,7 @@ enum ExclusionBoundary {
 
 fn op_cfg<F>() -> <OrderedOperation<F, Vec<u8>, Vec<u8>> as Read>::Cfg
 where
-    F: merkle::Family,
+    F: merkle::Graftable,
     OrderedOperation<F, Vec<u8>, Vec<u8>>:
         Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
 {
@@ -95,7 +95,7 @@ fn normalize_family<'a>(family: &'a str, label: &str) -> Result<&'a str, String>
     }
 }
 
-fn historical_target_root(
+fn historical_target_root<F: merkle::Graftable>(
     ops_root: &[u8],
     ops_root_witness: &[u8],
     expected_root: &commonware_cryptography::sha256::Digest,
@@ -104,7 +104,7 @@ fn historical_target_root(
         (true, true) => Ok(*expected_root),
         (false, false) => {
             let ops_root = decode_digest(ops_root, "historical ops root")?;
-            let witness = OpsRootWitness::<commonware_cryptography::sha256::Digest>::decode_cfg(
+            let witness = OpsRootWitness::<F, commonware_cryptography::sha256::Digest>::decode_cfg(
                 ops_root_witness,
                 &(),
             )
@@ -126,12 +126,12 @@ fn verify_multi_from_proto<F>(
     root: &commonware_cryptography::sha256::Digest,
 ) -> Result<Vec<(Location<F>, OrderedOperation<F, Vec<u8>, Vec<u8>>)>, String>
 where
-    F: merkle::Family,
+    F: merkle::Graftable,
     OrderedOperation<F, Vec<u8>, Vec<u8>>:
         Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
 {
     let operations = decode_multi_operations_from_proto::<F>(proto)?;
-    let target_root = historical_target_root(&proto.ops_root, &proto.ops_root_witness, root)?;
+    let target_root = historical_target_root::<F>(&proto.ops_root, &proto.ops_root_witness, root)?;
     let max_digests = proof_digest_cap(&proto.proof);
     let proof = merkle::Proof::<F, commonware_cryptography::sha256::Digest>::decode_cfg(
         proto.proof.as_slice(),
@@ -149,7 +149,7 @@ fn decode_multi_operations_from_proto<F>(
     proto: &HistoricalMultiProof,
 ) -> Result<Vec<(Location<F>, OrderedOperation<F, Vec<u8>, Vec<u8>>)>, String>
 where
-    F: merkle::Family,
+    F: merkle::Graftable,
     OrderedOperation<F, Vec<u8>, Vec<u8>>:
         Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
 {
@@ -179,14 +179,14 @@ fn verify_operation_range_from_proto<F>(
     root: &commonware_cryptography::sha256::Digest,
 ) -> Result<Vec<(Location<F>, OrderedOperation<F, Vec<u8>, Vec<u8>>)>, String>
 where
-    F: merkle::Family,
+    F: merkle::Graftable,
     OrderedOperation<F, Vec<u8>, Vec<u8>>:
         Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
 {
     if proto.encoded_operations.is_empty() {
         return Err("historical operation range proof has no operations".to_string());
     }
-    let target_root = historical_target_root(&proto.ops_root, &proto.ops_root_witness, root)?;
+    let target_root = historical_target_root::<F>(&proto.ops_root, &proto.ops_root_witness, root)?;
     let max_digests = proof_digest_cap(&proto.proof);
     let proof = merkle::Proof::<F, commonware_cryptography::sha256::Digest>::decode_cfg(
         proto.proof.as_slice(),
@@ -299,8 +299,8 @@ where
             Ok(chunk)
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let mut hasher = Sha256::default();
-    if !proof.verify(&mut hasher, start, &ordered_operations, &chunks, root) {
+    let hasher = commonware_storage::qmdb::hasher::<Sha256>();
+    if !proof.verify(&hasher, start, &ordered_operations, &chunks, root) {
         return Err("current operation range proof failed verification".to_string());
     }
     Ok(operations)
@@ -333,8 +333,8 @@ where
     if proof.next_key != update.next_key {
         return Err("current key-value proof next_key mismatch".to_string());
     }
-    let mut hasher = Sha256::default();
-    if !proof.proof.verify(&mut hasher, operation.clone(), root) {
+    let hasher = commonware_storage::qmdb::hasher::<Sha256>();
+    if !proof.proof.verify(&hasher, operation.clone(), root) {
         return Err("current key-value proof failed verification".to_string());
     }
     Ok((proof.proof.loc, operation))
@@ -396,8 +396,8 @@ where
             )
         }
     };
-    let mut hasher = Sha256::default();
-    if !op_proof.verify(&mut hasher, operation, current_root) {
+    let hasher = commonware_storage::qmdb::hasher::<Sha256>();
+    if !op_proof.verify(&hasher, operation, current_root) {
         return Err("current key-exclusion proof failed verification".to_string());
     }
     Ok(boundary)
@@ -807,5 +807,115 @@ pub fn verify_get_range_response(
             verify_get_range_from_proto::<mmb::Family>(&proto, &current_root, start_key, end_key)
         }
         _ => unreachable!("normalize_family only returns supported values"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::sha256::Digest as Sha256Digest;
+    use commonware_storage::merkle::mem::Mem;
+
+    type TestOperation<F> = OrderedOperation<F, Vec<u8>, Vec<u8>>;
+
+    fn sample_operations<F>() -> Vec<TestOperation<F>>
+    where
+        F: merkle::Graftable,
+    {
+        [
+            (b"a".as_slice(), b"one".as_slice(), b"b".as_slice()),
+            (b"b".as_slice(), b"two".as_slice(), b"c".as_slice()),
+            (b"c".as_slice(), b"three".as_slice(), b"d".as_slice()),
+            (b"d".as_slice(), b"four".as_slice(), b"e".as_slice()),
+            (b"e".as_slice(), b"five".as_slice(), b"a".as_slice()),
+        ]
+        .into_iter()
+        .map(|(key, value, next_key)| {
+            OrderedOperation::Update(Update {
+                key: key.to_vec(),
+                value: value.to_vec(),
+                next_key: next_key.to_vec(),
+            })
+        })
+        .collect()
+    }
+
+    fn historical_range_fixture<F>() -> (
+        HistoricalOperationRangeProof,
+        Sha256Digest,
+        Vec<(Location<F>, TestOperation<F>)>,
+    )
+    where
+        F: merkle::Graftable,
+        TestOperation<F>:
+            Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
+    {
+        let hasher = commonware_storage::qmdb::hasher::<Sha256>();
+        let mut merkle = Mem::<F, Sha256Digest>::new();
+        let operations = sample_operations::<F>();
+
+        let mut batch = merkle.new_batch();
+        for operation in &operations {
+            let encoded = operation.encode();
+            batch = batch.add(&hasher, &encoded);
+        }
+        let batch = batch.merkleize(&merkle, &hasher);
+        merkle.apply_batch(&batch).unwrap();
+
+        let root = merkle.root(&hasher, 0).unwrap();
+        let start = Location::<F>::new(1);
+        let end = Location::<F>::new(4);
+        let proof = merkle.range_proof(&hasher, start..end, 0).unwrap();
+        let proven_operations = operations[1..4].to_vec();
+        let expected = proven_operations
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(offset, operation)| (Location::new(1 + offset as u64), operation))
+            .collect();
+
+        (
+            HistoricalOperationRangeProof {
+                proof: proof.encode().to_vec(),
+                start_location: 1,
+                encoded_operations: proven_operations
+                    .iter()
+                    .map(|operation| operation.encode().to_vec())
+                    .collect(),
+                ..Default::default()
+            },
+            root,
+            expected,
+        )
+    }
+
+    #[test]
+    fn verifies_historical_operation_range_mmr() {
+        let (proto, root, expected) = historical_range_fixture::<mmr::Family>();
+
+        let verified = verify_operation_range_from_proto::<mmr::Family>(&proto, &root).unwrap();
+
+        assert_eq!(verified, expected);
+    }
+
+    #[test]
+    fn verifies_historical_operation_range_mmb() {
+        let (proto, root, expected) = historical_range_fixture::<mmb::Family>();
+
+        let verified = verify_operation_range_from_proto::<mmb::Family>(&proto, &root).unwrap();
+
+        assert_eq!(verified, expected);
+    }
+
+    #[test]
+    fn rejects_historical_operation_range_root_mismatch() {
+        let (proto, root, _) = historical_range_fixture::<mmb::Family>();
+        let wrong_root = Sha256::fill(0x42);
+        assert_ne!(wrong_root, root);
+
+        let err =
+            verify_operation_range_from_proto::<mmb::Family>(&proto, &wrong_root).unwrap_err();
+
+        assert_eq!(err, "historical operation range proof failed verification");
     }
 }

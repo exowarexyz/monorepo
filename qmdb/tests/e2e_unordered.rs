@@ -27,9 +27,24 @@ type FixedUnorderedBatchOperation = FixedUnorderedOperation<mmr::Family, Digest,
 type TestUnorderedClient = UnorderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>>;
 type FixedTestUnorderedClient =
     UnorderedClient<mmr::Family, Sha256, Digest, Digest, FixedEncoding<Digest>>;
-type LocalDb = LocalUnorderedDb<mmr::Family, cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap>;
-type FixedLocalDb =
-    LocalFixedUnorderedDb<mmr::Family, cw_tokio::Context, Digest, Digest, Sha256, TwoCap>;
+type LocalDb = LocalUnorderedDb<
+    mmr::Family,
+    cw_tokio::Context,
+    Vec<u8>,
+    Vec<u8>,
+    Sha256,
+    TwoCap,
+    commonware_parallel::Sequential,
+>;
+type FixedLocalDb = LocalFixedUnorderedDb<
+    mmr::Family,
+    cw_tokio::Context,
+    Digest,
+    Digest,
+    Sha256,
+    TwoCap,
+    commonware_parallel::Sequential,
+>;
 
 fn op_cfg() -> <UnorderedBatchOperation as commonware_codec::Read>::Cfg {
     (

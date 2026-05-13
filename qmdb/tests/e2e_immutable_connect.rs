@@ -33,6 +33,7 @@ type LocalDb = Immutable<
     Vec<u8>,
     commonware_cryptography::Sha256,
     TwoCap,
+    commonware_parallel::Sequential,
 >;
 type TestImmutableClient =
     ImmutableClient<mmr::Family, commonware_cryptography::Sha256, FixedBytes<32>, Vec<u8>>;
