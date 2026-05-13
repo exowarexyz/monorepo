@@ -856,3 +856,60 @@ async fn ordered_connect_client_rejects_invalid_get_many_proof() {
         }
     ));
 }
+
+#[tokio::test]
+async fn ordered_connect_client_rejects_get_many_proof_for_different_key() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_local_batch().await;
+    commit_upload(&store_client, &local).await;
+
+    let ordered_client = Arc::new(TestOrderedClient::from_client(
+        store_client.clone(),
+        op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client.clone()).await;
+    let rpc = rpc_client(&qmdb_url);
+
+    let mut raw_get_many_response = rpc
+        .get_many(ProtoGetManyRequest {
+            keys: vec![b"beta".to_vec()],
+            tip: local.latest_location.as_u64(),
+            ..Default::default()
+        })
+        .await
+        .expect("get_many")
+        .into_view()
+        .to_owned_message();
+    raw_get_many_response
+        .results
+        .first_mut()
+        .expect("get_many result")
+        .key = b"alpha".to_vec();
+
+    let (_static_server, static_url) = spawn_static_server(StaticQmdbService {
+        get_response: ProtoGetResponse::default(),
+        get_many_response: raw_get_many_response,
+        get_range_response: ProtoGetRangeResponse::default(),
+    })
+    .await;
+    let client = validated_client(&static_url);
+
+    let err = client
+        .get_many(
+            ProtoGetManyRequest {
+                keys: vec![b"alpha".to_vec()],
+                tip: local.latest_location.as_u64(),
+                ..Default::default()
+            },
+            &local.current_boundary.root,
+        )
+        .await
+        .expect_err("get_many proof for a different key should fail");
+    assert!(matches!(
+        err,
+        QmdbError::ProofVerification {
+            kind: exoware_qmdb::ProofKind::CurrentKeyValue
+        }
+    ));
+}

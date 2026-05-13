@@ -157,6 +157,7 @@ where
         request: GetRequest,
         expected_root: &H::Digest,
     ) -> Result<VerifiedKeyValue<H::Digest, K, V, F, E>, QmdbError> {
+        let requested_key = request.key.clone();
         let response = self
             .rpc
             .get(request)
@@ -168,12 +169,23 @@ where
             .proof
             .as_option()
             .ok_or_else(|| QmdbError::CorruptData("qmdb get response missing proof".to_string()))?;
-        verify_key_value_from_proto::<F, H, K, V, N, E>(
+        let verified = verify_key_value_from_proto::<F, H, K, V, N, E>(
             proof,
             expected_root,
             self.op_cfg.as_ref(),
             self.key_cfg.as_ref(),
-        )
+        )?;
+        let ordered::Operation::Update(update) = &verified.operation else {
+            return Err(QmdbError::CorruptData(
+                "qmdb get proof did not verify an update".to_string(),
+            ));
+        };
+        if <K as AsRef<[u8]>>::as_ref(&update.key) != requested_key.as_slice() {
+            return Err(QmdbError::ProofVerification {
+                kind: crate::ProofKind::CurrentKeyValue,
+            });
+        }
+        Ok(verified)
     }
 
     pub async fn get_many(
@@ -181,6 +193,13 @@ where
         request: GetManyRequest,
         expected_root: &H::Digest,
     ) -> Result<Vec<VerifiedKeyLookup<H::Digest, K, V, F, E>>, QmdbError> {
+        let requested_keys = request.keys.clone();
+        let mut requested = BTreeSet::<&[u8]>::new();
+        for key in &requested_keys {
+            if !requested.insert(key.as_slice()) {
+                return Err(QmdbError::DuplicateRequestedKey { key: key.clone() });
+            }
+        }
         let response = self
             .rpc
             .get_many(request)
@@ -188,34 +207,57 @@ where
             .map_err(connect_error_to_qmdb)?
             .into_view()
             .to_owned_message();
+        if response.results.len() != requested_keys.len() {
+            return Err(QmdbError::ProofVerification {
+                kind: crate::ProofKind::CurrentKeyValue,
+            });
+        }
         response
             .results
             .iter()
-            .map(|result| match result.result.as_ref() {
-                Some(current_key_lookup_result::Result::Hit(proof)) => {
-                    verify_key_value_from_proto::<F, H, K, V, N, E>(
-                        proof,
-                        expected_root,
-                        self.op_cfg.as_ref(),
-                        self.key_cfg.as_ref(),
-                    )
-                    .map(VerifiedKeyLookup::Hit)
+            .zip(requested_keys.iter())
+            .map(|(result, requested_key)| {
+                if result.key.as_slice() != requested_key.as_slice() {
+                    return Err(QmdbError::ProofVerification {
+                        kind: crate::ProofKind::CurrentKeyValue,
+                    });
                 }
-                Some(current_key_lookup_result::Result::Miss(proof)) => {
-                    verify_key_exclusion_from_proto::<F, H, K, V, N, E>(
-                        proof,
-                        result.key.as_slice(),
-                        expected_root,
-                        self.update_cfg.as_ref(),
-                        self.value_cfg.as_ref(),
-                    )?;
-                    Ok(VerifiedKeyLookup::Miss {
-                        key: result.key.clone(),
-                    })
+                match result.result.as_ref() {
+                    Some(current_key_lookup_result::Result::Hit(proof)) => {
+                        let verified = verify_key_value_from_proto::<F, H, K, V, N, E>(
+                            proof,
+                            expected_root,
+                            self.op_cfg.as_ref(),
+                            self.key_cfg.as_ref(),
+                        )?;
+                        let ordered::Operation::Update(update) = &verified.operation else {
+                            return Err(QmdbError::CorruptData(
+                                "qmdb get_many hit proof did not verify an update".to_string(),
+                            ));
+                        };
+                        if <K as AsRef<[u8]>>::as_ref(&update.key) != requested_key.as_slice() {
+                            return Err(QmdbError::ProofVerification {
+                                kind: crate::ProofKind::CurrentKeyValue,
+                            });
+                        }
+                        Ok(VerifiedKeyLookup::Hit(verified))
+                    }
+                    Some(current_key_lookup_result::Result::Miss(proof)) => {
+                        verify_key_exclusion_from_proto::<F, H, K, V, N, E>(
+                            proof,
+                            requested_key.as_slice(),
+                            expected_root,
+                            self.update_cfg.as_ref(),
+                            self.value_cfg.as_ref(),
+                        )?;
+                        Ok(VerifiedKeyLookup::Miss {
+                            key: requested_key.clone(),
+                        })
+                    }
+                    None => Err(QmdbError::CorruptData(
+                        "qmdb get_many result missing hit/miss proof".to_string(),
+                    )),
                 }
-                None => Err(QmdbError::CorruptData(
-                    "qmdb get_many result missing hit/miss proof".to_string(),
-                )),
             })
             .collect()
     }
