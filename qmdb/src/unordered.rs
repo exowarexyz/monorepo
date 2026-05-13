@@ -736,7 +736,7 @@ where
                     "no CommitFloor found at or before watermark {watermark}"
                 )));
             }
-            location = location - 1;
+            location -= 1;
         }
     }
 
