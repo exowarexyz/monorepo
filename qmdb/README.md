@@ -117,6 +117,14 @@ The crate stores several store key families using `KeyCodec` prefixes:
 - current grafted-node delta rows
 - current operation-root witness rows
 
+These family IDs are scoped by the SDK `StoreKeyPrefix` / Store namespace. They
+are not globally unique across every QMDB backend or instance; for example, the
+current operation-root witness family and authenticated operation family use the
+same numeric family prefix. That is valid only when different QMDB backends or
+instances are placed under distinct outer Store prefixes. Do not share one raw
+Store keyspace across multiple QMDB backends or instances without that SDK
+prefix/namespace.
+
 The update-row family is keyed by:
 
 - ordered, prefix-free raw key bytes
