@@ -283,7 +283,11 @@ where
             size: merkle_size_for_watermark(watermark)?,
             _marker: PhantomData,
         };
-        let root = self.compute_ops_root(session, watermark).await?;
+        let inactive_peaks = self.ops_inactive_peaks_at(session, watermark).await?;
+        let root = self
+            .core()
+            .compute_ops_root_with_inactive_peaks::<H>(session, watermark, inactive_peaks)
+            .await?;
 
         let mut seen = BTreeSet::<Vec<u8>>::new();
         let mut operation_bytes = Vec::<(Location<F>, Vec<u8>)>::with_capacity(keys.len());
@@ -327,6 +331,7 @@ where
             &storage,
             watermark,
             root,
+            inactive_peaks,
             operation_bytes,
         )
         .await
@@ -371,10 +376,19 @@ where
             size: merkle_size_for_watermark(watermark)?,
             _marker: PhantomData,
         };
-        let root = self.compute_ops_root(&session, watermark).await?;
-        let mut proof =
-            crate::proof::build_batch_multi_proof::<F, H, _>(&storage, watermark, root, operations)
-                .await?;
+        let inactive_peaks = self.ops_inactive_peaks_at(&session, watermark).await?;
+        let root = self
+            .core()
+            .compute_ops_root_with_inactive_peaks::<H>(&session, watermark, inactive_peaks)
+            .await?;
+        let mut proof = crate::proof::build_batch_multi_proof::<F, H, _>(
+            &storage,
+            watermark,
+            root,
+            inactive_peaks,
+            operations,
+        )
+        .await?;
         proof.ops_root_witness = Some(self.load_ops_root_witness(&session, watermark).await?);
         Ok(proof)
     }
@@ -458,7 +472,11 @@ where
             size: merkle_size_for_watermark(watermark)?,
             _marker: PhantomData,
         };
-        let root = self.compute_ops_root(session, watermark).await?;
+        let inactive_peaks = self.ops_inactive_peaks_at(session, watermark).await?;
+        let root = self
+            .core()
+            .compute_ops_root_with_inactive_peaks::<H>(session, watermark, inactive_peaks)
+            .await?;
         let encoded_operations = self
             .core()
             .load_operation_bytes_range(session, start_location, end)
@@ -469,6 +487,7 @@ where
             start_location,
             end,
             root,
+            inactive_peaks,
             encoded_operations,
         )
         .await?;
@@ -1082,7 +1101,10 @@ where
         session: &SerializableReadSession,
         watermark: Location<F>,
     ) -> Result<H::Digest, QmdbError> {
-        self.core().compute_ops_root::<H>(session, watermark).await
+        let inactive_peaks = self.ops_inactive_peaks_at(session, watermark).await?;
+        self.core()
+            .compute_ops_root_with_inactive_peaks::<H>(session, watermark, inactive_peaks)
+            .await
     }
 
     async fn materialize_bitmap_status(
@@ -1221,6 +1243,41 @@ where
                 "expected CommitFloor at watermark {watermark}"
             ))),
         }
+    }
+
+    async fn load_ops_inactivity_floor_at(
+        &self,
+        session: &SerializableReadSession,
+        watermark: Location<F>,
+    ) -> Result<Location<F>, QmdbError> {
+        let mut location = watermark;
+        loop {
+            if let ordered::Operation::CommitFloor(_, floor) =
+                self.load_operation_at(session, location).await?
+            {
+                return Ok(floor);
+            }
+            if *location == 0 {
+                return Err(QmdbError::CorruptData(format!(
+                    "no CommitFloor found at or before watermark {watermark}"
+                )));
+            }
+            location = location - 1;
+        }
+    }
+
+    async fn ops_inactive_peaks_at(
+        &self,
+        session: &SerializableReadSession,
+        watermark: Location<F>,
+    ) -> Result<usize, QmdbError> {
+        let inactivity_floor = self
+            .load_ops_inactivity_floor_at(session, watermark)
+            .await?;
+        Ok(F::inactive_peaks(
+            merkle_size_for_watermark(watermark)?,
+            inactivity_floor,
+        ))
     }
 
     async fn load_bitmap_chunk_with_floor(

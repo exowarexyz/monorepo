@@ -160,10 +160,11 @@ impl<'a, F: Family, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, F
             .map(|(key, value)| (key, value.to_vec())))
     }
 
-    pub(crate) async fn compute_ops_root<H: Hasher<Digest = D>>(
+    pub(crate) async fn compute_ops_root_with_inactive_peaks<H: Hasher<Digest = D>>(
         &self,
         session: &SerializableReadSession,
         watermark: Location<F>,
+        inactive_peaks: usize,
     ) -> Result<D, QmdbError> {
         let size = merkle_size_for_watermark(watermark)?;
         let leaves = watermark
@@ -198,7 +199,7 @@ impl<'a, F: Family, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, F
         }
         let hasher = commonware_storage::qmdb::hasher::<H>();
         hasher
-            .root(leaves, 0, peaks.iter())
+            .root(leaves, inactive_peaks, peaks.iter())
             .map_err(|e| QmdbError::CommonwareMerkle(e.to_string()))
     }
 
@@ -468,6 +469,24 @@ pub(crate) fn extend_merkle_from_peaks<F: Family, H: Hasher, Op: AsRef<[u8]>>(
     previous_size: Position<F>,
     encoded_operations: impl IntoIterator<Item = Op>,
 ) -> Result<MerkleExtension<F, H::Digest>, QmdbError> {
+    extend_merkle_from_peaks_with_inactive_peaks::<F, H, _>(
+        peaks,
+        previous_size,
+        encoded_operations,
+        0,
+    )
+}
+
+pub(crate) fn extend_merkle_from_peaks_with_inactive_peaks<
+    F: Family,
+    H: Hasher,
+    Op: AsRef<[u8]>,
+>(
+    peaks: Vec<(Position<F>, u32, H::Digest)>,
+    previous_size: Position<F>,
+    encoded_operations: impl IntoIterator<Item = Op>,
+    inactive_peaks: usize,
+) -> Result<MerkleExtension<F, H::Digest>, QmdbError> {
     let previous_leaves = Location::<F>::try_from(previous_size)
         .map_err(|e| QmdbError::CorruptData(format!("invalid incremental ops size: {e}")))?;
     let mut peak_map: std::collections::BTreeMap<Position<F>, (u32, H::Digest)> = peaks
@@ -528,7 +547,7 @@ pub(crate) fn extend_merkle_from_peaks<F: Family, H: Hasher, Op: AsRef<[u8]>>(
         })
         .collect::<Result<Vec<_>, QmdbError>>()?;
     let root = batch
-        .root(&mem, &hasher, 0)
+        .root(&mem, &hasher, inactive_peaks)
         .map_err(|e| QmdbError::CommonwareMerkle(e.to_string()))?;
     Ok(MerkleExtension {
         size,

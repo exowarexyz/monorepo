@@ -752,6 +752,115 @@ async fn ordered_mmb_incremental_seed_batches_keep_current_proofs_verifiable() {
 }
 
 #[tokio::test]
+async fn ordered_mmb_persistent_interleaved_seed_batches_keep_current_proofs_verifiable() {
+    let (_dir, _server, client) = common::local_store_client().await;
+    let storage_dir = tempfile::tempdir().expect("tempdir");
+    let storage_path = storage_dir.path().to_owned();
+    let store = client.clone();
+
+    let (latest_location, expected_root, expected_ops_root) =
+        tokio::task::spawn_blocking(move || {
+            cw_tokio::Runner::new(cw_tokio::Config::new().with_storage_directory(storage_path))
+                .start(|context| async move {
+                    use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
+                    let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+                    let cfg = common::ordered_variable_config(
+                        "ordered_mmb_persistent_interleaved_seed",
+                        page_cache,
+                        op_cfg::<mmb::Family>(),
+                        NZU64!(8),
+                    );
+                    let mut db: LocalDb<mmb::Family> = LocalQmdbDb::init(context.child("db"), cfg)
+                        .await
+                        .expect("init");
+                    let writer = TestOrderedWriter::<mmb::Family>::empty(store.clone());
+                    let mut previous_ops = Vec::<BatchOperation<mmb::Family>>::new();
+                    let mut counter = 0u64;
+
+                    for _ in 0..2 {
+                        let finalized = {
+                            let mut batch = db.new_batch();
+                            for offset in 0..3u64 {
+                                let key = format!("k-{:08x}", counter + offset).into_bytes();
+                                let value = format!("v-{:08x}", counter + offset).into_bytes();
+                                batch = batch.write(key, Some(value));
+                            }
+                            if counter >= 3 {
+                                let rewrite_key = format!("k-{:08x}", counter - 3).into_bytes();
+                                let rewrite_value = format!("v-{:08x}-r", counter).into_bytes();
+                                batch = batch.write(rewrite_key, Some(rewrite_value));
+                            }
+                            counter += 3;
+                            batch
+                                .merkleize(&db, None::<Vec<u8>>)
+                                .await
+                                .expect("merkleize")
+                        };
+                        db.apply_batch(finalized).await.expect("apply");
+                        db.sync().await.expect("sync");
+
+                        let latest = db.bounds().await.end - 1;
+                        let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");
+                        let (proof, cumulative_ops) = db
+                            .ops_historical_proof(
+                                latest + 1,
+                                Location::<mmb::Family>::new(0),
+                                count,
+                            )
+                            .await
+                            .expect("historical proof");
+                        let hasher = commonware_storage::qmdb::hasher::<Sha256>();
+                        assert!(commonware_storage::qmdb::verify_proof(
+                            &hasher,
+                            &proof,
+                            Location::<mmb::Family>::new(0),
+                            &cumulative_ops,
+                            &db.ops_root()
+                        ));
+                        let previous_slice = if previous_ops.is_empty() {
+                            None
+                        } else {
+                            Some(previous_ops.as_slice())
+                        };
+                        let boundary =
+                            boundary_from_local_db(&db, previous_slice, &cumulative_ops).await;
+                        let delta = cumulative_ops[previous_ops.len()..].to_vec();
+                        common::commit_ordered_upload(&store, &writer, &delta, &boundary)
+                            .await
+                            .expect("commit upload");
+                        previous_ops = cumulative_ops;
+                    }
+
+                    let latest_location = db.bounds().await.end - 1;
+                    let expected_root = db.root();
+                    let expected_ops_root = db.ops_root();
+                    db.sync().await.expect("sync");
+                    (latest_location, expected_root, expected_ops_root)
+                })
+        })
+        .await
+        .expect("join");
+
+    let c: TestOrderedClient<mmb::Family> =
+        OrderedClient::from_client(client.clone(), op_cfg::<mmb::Family>(), update_row_cfg());
+    assert_eq!(
+        c.current_root_at(latest_location)
+            .await
+            .expect("current root"),
+        expected_root
+    );
+    assert_eq!(
+        c.root_at(latest_location).await.expect("ops root"),
+        expected_ops_root
+    );
+    let proof = c
+        .key_value_proof_at(latest_location, b"k-00000005".as_slice())
+        .await
+        .expect("key proof");
+    assert_eq!(proof.root, expected_root);
+}
+
+#[tokio::test]
 async fn ordered_mmr_incremental_seed_batches_keep_current_proofs_verifiable() {
     assert_incremental_seed_batches_keep_current_proofs_verifiable::<mmr::Family>(
         "ordered_mmr_incremental_seed",

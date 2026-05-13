@@ -243,7 +243,10 @@ async fn seed(
             .expect("init local ordered db");
 
             let bounds = db.bounds().await;
-            let (mut previous_ops, mut counter, writer) = if *bounds.end == 0 {
+            // A newly initialized Commonware current DB contains the genesis
+            // commit-floor operation at location 0. Treat that as empty for
+            // remote upload purposes so the first Store upload includes it.
+            let (mut previous_ops, mut counter, writer) = if *bounds.end <= 1 {
                 info!("starting from empty local DB");
                 let writer =
                     OrderedWriter::<DemoFamily, Sha256, Vec<u8>, Vec<u8>, N>::empty(store.clone());
@@ -323,6 +326,7 @@ async fn seed(
                         .expect("merkleize")
                 };
                 db.apply_batch(finalized).await.expect("apply batch");
+                db.sync().await.expect("sync local ordered db");
 
                 let latest = db.bounds().await.end - 1;
                 let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");

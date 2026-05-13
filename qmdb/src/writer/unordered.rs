@@ -22,7 +22,8 @@ use futures::future::BoxFuture;
 
 use crate::codec::{encode_node_key, encode_watermark_key};
 use crate::core::{
-    extend_merkle_from_peaks, PreparedCurrentBoundaryUpload, PreparedUpload as CorePreparedUpload,
+    extend_merkle_from_peaks_with_inactive_peaks, PreparedCurrentBoundaryUpload,
+    PreparedUpload as CorePreparedUpload,
 };
 use crate::error::QmdbError;
 use crate::writer::core::{Cache, WriterCore};
@@ -63,7 +64,13 @@ where
         return Err(QmdbError::EmptyBatch);
     }
     let prepared = CorePreparedUpload::build_unordered(latest_location, ops)?;
-    let ext = extend_merkle_from_peaks::<F, H, _>(peaks, prev_ops_size, prepared.op_bytes())?;
+    let inactive_peaks = unordered_inactive_peaks(latest_location, ops)?;
+    let ext = extend_merkle_from_peaks_with_inactive_peaks::<F, H, _>(
+        peaks,
+        prev_ops_size,
+        prepared.op_bytes(),
+        inactive_peaks,
+    )?;
     let operation_count = prepared.operation_count;
     let keyed_operation_count = prepared.keyed_operation_count;
 
@@ -84,6 +91,30 @@ where
         keyed_operation_count,
         includes_watermark: watermark_at.is_some(),
     })
+}
+
+fn unordered_inactive_peaks<F, K, V, E>(
+    latest_location: Location<F>,
+    ops: &[unordered::Operation<F, K, E>],
+) -> Result<usize, QmdbError>
+where
+    F: Graftable,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V>,
+{
+    let floor = ops
+        .iter()
+        .rev()
+        .find_map(|op| match op {
+            unordered::Operation::CommitFloor(_, floor) => Some(*floor),
+            _ => None,
+        })
+        .unwrap_or_else(|| Location::new(0));
+    Ok(F::inactive_peaks(
+        crate::codec::merkle_size_for_watermark(latest_location)?,
+        floor,
+    ))
 }
 
 pub fn build_unordered_current_upload<F, H, K, V, const N: usize, E>(

@@ -49,7 +49,8 @@ use futures::future::BoxFuture;
 
 use crate::codec::{encode_node_key, encode_watermark_key};
 use crate::core::{
-    extend_merkle_from_peaks, PreparedCurrentBoundaryUpload, PreparedUpload as CorePreparedUpload,
+    extend_merkle_from_peaks_with_inactive_peaks, PreparedCurrentBoundaryUpload,
+    PreparedUpload as CorePreparedUpload,
 };
 use crate::error::QmdbError;
 use crate::writer::core::{Cache, WriterCore};
@@ -92,7 +93,13 @@ where
     }
     let prepared_ops = CorePreparedUpload::build(latest_location, ops)?;
     let prepared_current = PreparedCurrentBoundaryUpload::build(latest_location, current_boundary)?;
-    let ext = extend_merkle_from_peaks::<F, H, _>(peaks, prev_ops_size, prepared_ops.op_bytes())?;
+    let inactive_peaks = ordered_inactive_peaks(latest_location, ops)?;
+    let ext = extend_merkle_from_peaks_with_inactive_peaks::<F, H, _>(
+        peaks,
+        prev_ops_size,
+        prepared_ops.op_bytes(),
+        inactive_peaks,
+    )?;
     let operation_count = prepared_ops.operation_count;
     let keyed_operation_count = prepared_ops.keyed_operation_count;
 
@@ -115,6 +122,30 @@ where
         keyed_operation_count,
         includes_watermark: watermark_at.is_some(),
     })
+}
+
+fn ordered_inactive_peaks<F, K, V, E>(
+    latest_location: Location<F>,
+    ops: &[ordered::Operation<F, K, E>],
+) -> Result<usize, QmdbError>
+where
+    F: Graftable,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V>,
+{
+    let floor = ops
+        .iter()
+        .rev()
+        .find_map(|op| match op {
+            ordered::Operation::CommitFloor(_, floor) => Some(*floor),
+            _ => None,
+        })
+        .unwrap_or_else(|| Location::new(0));
+    Ok(F::inactive_peaks(
+        crate::codec::merkle_size_for_watermark(latest_location)?,
+        floor,
+    ))
 }
 
 /// Sole-writer ordered QMDB helper. Pipelining, flushing, failure, and

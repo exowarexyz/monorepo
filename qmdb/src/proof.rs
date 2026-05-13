@@ -201,6 +201,7 @@ pub(crate) async fn build_batch_multi_proof<F, H, S>(
     storage: &S,
     watermark: Location<F>,
     root: H::Digest,
+    inactive_peaks: usize,
     operations: Vec<(Location<F>, Vec<u8>)>,
 ) -> Result<RawBatchMultiProof<H::Digest, F>, crate::QmdbError>
 where
@@ -213,9 +214,14 @@ where
     }
     let locations: Vec<Location<F>> = operations.iter().map(|(loc, _)| *loc).collect();
     let hasher = commonware_storage::qmdb::hasher::<H>();
-    let proof = merkle::verification::multi_proof(storage, 0, hasher.root_bagging(), &locations)
-        .await
-        .map_err(|e| crate::QmdbError::CommonwareMerkle(e.to_string()))?;
+    let proof = merkle::verification::multi_proof(
+        storage,
+        inactive_peaks,
+        hasher.root_bagging(),
+        &locations,
+    )
+    .await
+    .map_err(|e| crate::QmdbError::CommonwareMerkle(e.to_string()))?;
     let raw = RawBatchMultiProof {
         watermark,
         root,
@@ -240,6 +246,7 @@ pub(crate) async fn build_operation_range_checkpoint<F, H, S>(
     start_location: Location<F>,
     end_location_exclusive: Location<F>,
     root: H::Digest,
+    inactive_peaks: usize,
     encoded_operations: Vec<Vec<u8>>,
 ) -> Result<OperationRangeCheckpoint<H::Digest, F>, crate::QmdbError>
 where
@@ -252,7 +259,7 @@ where
         &hasher,
         storage,
         start_location..end_location_exclusive,
-        0,
+        inactive_peaks,
     )
     .await
     .map_err(|e| crate::QmdbError::CommonwareMerkle(e.to_string()))?;

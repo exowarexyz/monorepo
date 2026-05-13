@@ -192,7 +192,7 @@ where
         self.core()
             .require_published_watermark(&session, watermark)
             .await?;
-        self.core().compute_ops_root::<H>(&session, watermark).await
+        self.compute_ops_root(&session, watermark).await
     }
 
     pub async fn current_root_at(&self, watermark: Location<F>) -> Result<H::Digest, QmdbError> {
@@ -239,13 +239,19 @@ where
             size: merkle_size_for_watermark(watermark)?,
             _marker: PhantomData,
         };
+        let inactive_peaks = self.ops_inactive_peaks_at(&session, watermark).await?;
         let root = self
             .core()
-            .compute_ops_root::<H>(&session, watermark)
+            .compute_ops_root_with_inactive_peaks::<H>(&session, watermark, inactive_peaks)
             .await?;
-        let mut proof =
-            crate::proof::build_batch_multi_proof::<F, H, _>(&storage, watermark, root, operations)
-                .await?;
+        let mut proof = crate::proof::build_batch_multi_proof::<F, H, _>(
+            &storage,
+            watermark,
+            root,
+            inactive_peaks,
+            operations,
+        )
+        .await?;
         proof.ops_root_witness = self.load_ops_root_witness(&session, watermark).await?;
         Ok(proof)
     }
@@ -266,9 +272,10 @@ where
             size: merkle_size_for_watermark(watermark)?,
             _marker: PhantomData,
         };
+        let inactive_peaks = self.ops_inactive_peaks_at(session, watermark).await?;
         let root = self
             .core()
-            .compute_ops_root::<H>(session, watermark)
+            .compute_ops_root_with_inactive_peaks::<H>(session, watermark, inactive_peaks)
             .await?;
         let encoded_operations = self
             .core()
@@ -280,6 +287,7 @@ where
             start_location,
             end,
             root,
+            inactive_peaks,
             encoded_operations,
         )
         .await?;
@@ -660,9 +668,7 @@ where
             &storage,
             inactivity_floor,
             location,
-            self.core()
-                .compute_ops_root::<H>(session, watermark)
-                .await?,
+            self.compute_ops_root(session, watermark).await?,
         )
         .await
         .map_err(|e| QmdbError::CommonwareMerkle(e.to_string()))
@@ -693,9 +699,7 @@ where
             &storage,
             inactivity_floor,
             start_location..end_location_exclusive,
-            self.core()
-                .compute_ops_root::<H>(session, watermark)
-                .await?,
+            self.compute_ops_root(session, watermark).await?,
         )
         .await
         .map_err(|e| QmdbError::CommonwareMerkle(e.to_string()))
@@ -713,6 +717,52 @@ where
                 "expected CommitFloor at watermark {watermark}"
             ))),
         }
+    }
+
+    async fn load_ops_inactivity_floor_at(
+        &self,
+        session: &SerializableReadSession,
+        watermark: Location<F>,
+    ) -> Result<Location<F>, QmdbError> {
+        let mut location = watermark;
+        loop {
+            if let unordered::Operation::CommitFloor(_, floor) =
+                self.load_operation_at(session, location).await?
+            {
+                return Ok(floor);
+            }
+            if *location == 0 {
+                return Err(QmdbError::CorruptData(format!(
+                    "no CommitFloor found at or before watermark {watermark}"
+                )));
+            }
+            location = location - 1;
+        }
+    }
+
+    async fn compute_ops_root(
+        &self,
+        session: &SerializableReadSession,
+        watermark: Location<F>,
+    ) -> Result<H::Digest, QmdbError> {
+        let inactive_peaks = self.ops_inactive_peaks_at(session, watermark).await?;
+        self.core()
+            .compute_ops_root_with_inactive_peaks::<H>(session, watermark, inactive_peaks)
+            .await
+    }
+
+    async fn ops_inactive_peaks_at(
+        &self,
+        session: &SerializableReadSession,
+        watermark: Location<F>,
+    ) -> Result<usize, QmdbError> {
+        let inactivity_floor = self
+            .load_ops_inactivity_floor_at(session, watermark)
+            .await?;
+        Ok(F::inactive_peaks(
+            merkle_size_for_watermark(watermark)?,
+            inactivity_floor,
+        ))
     }
 
     async fn load_bitmap_chunk_with_floor<const N: usize>(

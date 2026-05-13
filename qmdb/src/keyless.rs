@@ -178,7 +178,7 @@ where
             _marker: PhantomData::<H::Digest>,
         };
         let root = compute_auth_root::<F, H>(&session, namespace, watermark).await?;
-        crate::proof::build_batch_multi_proof::<F, H, _>(&storage, watermark, root, operations)
+        crate::proof::build_batch_multi_proof::<F, H, _>(&storage, watermark, root, 0, operations)
             .await
     }
 
@@ -207,6 +207,7 @@ where
             start_location,
             end,
             root,
+            0,
             encoded_operations,
         )
         .await
