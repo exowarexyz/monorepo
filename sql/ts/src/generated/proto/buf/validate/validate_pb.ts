@@ -5025,4 +5025,3 @@ export const field: GenExtension<FieldOptions, FieldRules> = /*@__PURE__*/
  */
 export const predefined: GenExtension<FieldOptions, PredefinedRules> = /*@__PURE__*/
   extDesc(file_buf_validate_validate, 3);
-

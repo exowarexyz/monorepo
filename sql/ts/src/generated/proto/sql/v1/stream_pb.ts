@@ -89,4 +89,3 @@ export type SubscribeResponse = Message<"sql.v1.SubscribeResponse"> & {
  */
 export const SubscribeResponseSchema: GenMessage<SubscribeResponse> = /*@__PURE__*/
   messageDesc(file_sql_v1_stream, 1);
-

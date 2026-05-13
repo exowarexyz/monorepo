@@ -187,4 +187,3 @@ export enum IndexLayout {
  */
 export const IndexLayoutSchema: GenEnum<IndexLayout> = /*@__PURE__*/
   enumDesc(file_sql_v1_schema, 0);
-

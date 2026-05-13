@@ -178,4 +178,3 @@ export const OperationLogService: GenService<{
   },
 }> = /*@__PURE__*/
   serviceDesc(file_qmdb_v1_operation_log, 0);
-

@@ -195,4 +195,3 @@ export type Cell = Message<"sql.v1.Cell"> & {
  */
 export const CellSchema: GenMessage<Cell> = /*@__PURE__*/
   messageDesc(file_sql_v1_common, 3);
-

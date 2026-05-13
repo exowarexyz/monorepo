@@ -123,4 +123,3 @@ export type BytesFilter = Message<"store.common.v1.BytesFilter"> & {
  */
 export const BytesFilterSchema: GenMessage<BytesFilter> = /*@__PURE__*/
   messageDesc(file_store_v1_common, 2);
-
