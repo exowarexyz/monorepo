@@ -128,39 +128,6 @@ fn historical_target_root<F: merkle::Graftable>(
     }
 }
 
-fn current_root_from_ops_root_witness<F: merkle::Graftable>(
-    ops_root: &commonware_cryptography::sha256::Digest,
-    witness: &OpsRootWitness<F, commonware_cryptography::sha256::Digest>,
-) -> commonware_cryptography::sha256::Digest {
-    let hasher = commonware_storage::qmdb::hasher::<Sha256>();
-    let pending = merkle::PendingChunk::as_ref(&witness.pending_chunk_digest);
-    let partial = witness.partial_chunk.as_ref().map(|(next_bit, digest)| {
-        let next_bit = next_bit.to_be_bytes();
-        (next_bit, digest)
-    });
-    match (pending, partial) {
-        (None, None) => hasher.hash([ops_root.as_ref(), witness.grafted_root.as_ref()]),
-        (Some(pending), None) => hasher.hash([
-            ops_root.as_ref(),
-            witness.grafted_root.as_ref(),
-            pending.as_ref(),
-        ]),
-        (None, Some((next_bit, partial))) => hasher.hash([
-            ops_root.as_ref(),
-            witness.grafted_root.as_ref(),
-            next_bit.as_slice(),
-            partial.as_ref(),
-        ]),
-        (Some(pending), Some((next_bit, partial))) => hasher.hash([
-            ops_root.as_ref(),
-            witness.grafted_root.as_ref(),
-            pending.as_ref(),
-            next_bit.as_slice(),
-            partial.as_ref(),
-        ]),
-    }
-}
-
 fn verify_multi_from_proto<F>(
     proto: &HistoricalMultiProof,
     root: &commonware_cryptography::sha256::Digest,
@@ -228,10 +195,8 @@ where
         &(),
     )
     .map_err(|err| format!("failed to decode historical multi proof ops-root witness: {err}"))?;
-    Ok((
-        current_root_from_ops_root_witness::<F>(&ops_root, &witness),
-        operations,
-    ))
+    let hasher = commonware_storage::qmdb::hasher::<Sha256>();
+    Ok((witness.canonical_root(&hasher, &ops_root), operations))
 }
 
 fn decode_multi_operations_from_proto<F>(
@@ -1179,7 +1144,8 @@ mod tests {
             pending_chunk_digest: Some(Sha256::fill(0x22)),
             partial_chunk: Some((13, Sha256::fill(0x33))),
         };
-        let current_root = current_root_from_ops_root_witness::<mmb::Family>(&ops_root, &witness);
+        let hasher = commonware_storage::qmdb::hasher::<Sha256>();
+        let current_root = witness.canonical_root(&hasher, &ops_root);
         proto.ops_root_witness = witness.encode().to_vec();
 
         let (root, verified) =
