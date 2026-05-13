@@ -10,7 +10,7 @@ use std::time::Duration;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
-use commonware_storage::merkle::{mmr, Location, Proof};
+use commonware_storage::merkle::{mmb, mmr, Location, Proof};
 use commonware_storage::qmdb::any::ordered::variable::Operation as QmdbOperation;
 use commonware_storage::qmdb::{
     any::ordered::Update, current::ordered::variable::Db as LocalQmdbDb,
@@ -48,6 +48,19 @@ type LocalDb = LocalQmdbDb<
     N,
     commonware_parallel::Sequential,
 >;
+type MmbBatchProof = Proof<mmb::Family, Digest>;
+type MmbBatchOperation = QmdbOperation<mmb::Family, Vec<u8>, Vec<u8>>;
+type MmbTestOrderedClient = OrderedClient<mmb::Family, Sha256, Vec<u8>, Vec<u8>, N>;
+type MmbLocalDb = LocalQmdbDb<
+    mmb::Family,
+    cw_tokio::Context,
+    Vec<u8>,
+    Vec<u8>,
+    Sha256,
+    TwoCap,
+    N,
+    commonware_parallel::Sequential,
+>;
 
 async fn spawn_qmdb_server(
     client: Arc<TestOrderedClient>,
@@ -65,6 +78,18 @@ fn current_operation_client(
     base: &str,
 ) -> CurrentOperationClient<PreferZstdHttpClient, mmr::Family, Sha256, BatchOperation, N> {
     CurrentOperationClient::plaintext(base, op_cfg())
+}
+
+async fn spawn_mmb_qmdb_server(
+    client: Arc<MmbTestOrderedClient>,
+) -> (tokio::task::JoinHandle<()>, String) {
+    common::spawn_operation_log_service(ordered_connect_stack(client)).await
+}
+
+fn mmb_validated_client(
+    base: &str,
+) -> OperationLogClient<PreferZstdHttpClient, mmb::Family, Sha256, MmbBatchOperation> {
+    OperationLogClient::plaintext(base, mmb_op_cfg())
 }
 
 async fn boundary_from_local_db(
@@ -117,6 +142,13 @@ fn op_cfg() -> <BatchOperation as commonware_codec::Read>::Cfg {
     )
 }
 
+fn mmb_op_cfg() -> <MmbBatchOperation as commonware_codec::Read>::Cfg {
+    (
+        ((0..=MAX_OPERATION_SIZE).into(), ()),
+        ((0..=MAX_OPERATION_SIZE).into(), ()),
+    )
+}
+
 fn update_row_cfg() -> (
     <Vec<u8> as commonware_codec::Read>::Cfg,
     <Vec<u8> as commonware_codec::Read>::Cfg,
@@ -130,6 +162,24 @@ fn update_row_cfg() -> (
 struct LocalBatch {
     operations: Vec<BatchOperation>,
     current_boundary: CurrentBoundaryState<Digest, N, mmr::Family>,
+    inactivity_floor: Location<mmr::Family>,
+}
+
+struct MmbLocalBatch {
+    operations: Vec<MmbBatchOperation>,
+    current_boundary: CurrentBoundaryState<Digest, N, mmb::Family>,
+    inactivity_floor: Location<mmb::Family>,
+}
+
+fn latest_inactivity_floor(operations: &[BatchOperation]) -> Location<mmr::Family> {
+    operations
+        .iter()
+        .rev()
+        .find_map(|operation| match operation {
+            BatchOperation::CommitFloor(_, floor) => Some(*floor),
+            _ => None,
+        })
+        .expect("batch has CommitFloor")
 }
 
 async fn build_local_batch() -> LocalBatch {
@@ -150,24 +200,37 @@ async fn build_local_batch() -> LocalBatch {
                 .await
                 .expect("init");
 
-            let finalized = {
-                let batch = db
-                    .new_batch()
-                    .write(b"alpha".to_vec(), Some(b"one".to_vec()))
-                    .write(b"beta".to_vec(), Some(b"two".to_vec()));
-                batch
-                    .merkleize(&db, None::<Vec<u8>>)
-                    .await
-                    .expect("merkleize")
-            };
-            db.apply_batch(finalized).await.expect("apply");
+            let mut ops = Vec::new();
+            let mut inactivity_floor = Location::<mmr::Family>::new(0);
+            for _ in 0..64u64 {
+                let finalized = {
+                    let batch = db
+                        .new_batch()
+                        .write(b"alpha".to_vec(), Some(b"one".to_vec()))
+                        .write(b"beta".to_vec(), Some(b"two".to_vec()));
+                    batch
+                        .merkleize(&db, None::<Vec<u8>>)
+                        .await
+                        .expect("merkleize")
+                };
+                db.apply_batch(finalized).await.expect("apply");
 
-            let latest = db.bounds().await.end - 1;
-            let n = NonZeroU64::new(*latest + 1).unwrap();
-            let (_proof, ops): (BatchProof, Vec<BatchOperation>) = db
-                .ops_historical_proof(latest + 1, Location::new(0), n)
-                .await
-                .expect("proof");
+                let latest = db.bounds().await.end - 1;
+                let n = NonZeroU64::new(*latest + 1).unwrap();
+                let (_proof, cumulative): (BatchProof, Vec<BatchOperation>) = db
+                    .ops_historical_proof(latest + 1, Location::new(0), n)
+                    .await
+                    .expect("proof");
+                inactivity_floor = latest_inactivity_floor(&cumulative);
+                ops = cumulative;
+                if *inactivity_floor > 0 {
+                    break;
+                }
+            }
+            assert!(
+                *inactivity_floor > 0,
+                "MMR subscribe fixture must exercise nonzero inactivity floor"
+            );
             let boundary = boundary_from_local_db(&db, None, &ops).await;
             db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
@@ -175,6 +238,127 @@ async fn build_local_batch() -> LocalBatch {
             LocalBatch {
                 operations: ops,
                 current_boundary: boundary,
+                inactivity_floor,
+            }
+        })
+    })
+    .await
+    .expect("join")
+}
+
+async fn boundary_from_mmb_local_db(
+    db: &MmbLocalDb,
+    operations: &[MmbBatchOperation],
+) -> CurrentBoundaryState<Digest, N, mmb::Family> {
+    let ops_root_hasher = commonware_storage::qmdb::hasher::<Sha256>();
+    let ops_root_witness = db
+        .ops_root_witness(&ops_root_hasher)
+        .await
+        .expect("ops root witness");
+    recover_boundary_state::<mmb::Family, Sha256, _, N, _, _>(
+        None,
+        operations,
+        db.root(),
+        0,
+        ops_root_witness,
+        |location| async move {
+            let hasher = commonware_storage::qmdb::hasher::<Sha256>();
+            let (proof, mut proof_ops, mut chunks) = db
+                .range_proof(&hasher, location, NZU64!(1))
+                .await
+                .map_err(|error| {
+                    exoware_qmdb::QmdbError::CorruptData(format!(
+                        "local current range proof at {location}: {error}"
+                    ))
+                })?;
+            proof_ops.pop().ok_or_else(|| {
+                exoware_qmdb::QmdbError::CorruptData(format!(
+                    "local current range proof at {location} returned no operations"
+                ))
+            })?;
+            let chunk = chunks.pop().ok_or_else(|| {
+                exoware_qmdb::QmdbError::CorruptData(format!(
+                    "local current range proof at {location} returned no chunks"
+                ))
+            })?;
+            Ok((proof, chunk))
+        },
+    )
+    .await
+    .expect("recover_boundary_state")
+}
+
+fn latest_mmb_inactivity_floor(operations: &[MmbBatchOperation]) -> Location<mmb::Family> {
+    operations
+        .iter()
+        .rev()
+        .find_map(|operation| match operation {
+            MmbBatchOperation::CommitFloor(_, floor) => Some(*floor),
+            _ => None,
+        })
+        .expect("batch has CommitFloor")
+}
+
+async fn build_mmb_local_batch() -> MmbLocalBatch {
+    tokio::task::spawn_blocking(|| {
+        cw_tokio::Runner::default().start(|context| async move {
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = common::ordered_variable_config(
+                "ordered-range-connect-mmb",
+                page_cache,
+                (
+                    ((0..=MAX_OPERATION_SIZE).into(), ()),
+                    ((0..=MAX_OPERATION_SIZE).into(), ()),
+                ),
+                NZU64!(8),
+            );
+            let mut db: MmbLocalDb = MmbLocalDb::init(context.child("qmdb"), cfg)
+                .await
+                .expect("init");
+
+            let mut ops = Vec::new();
+            let mut inactivity_floor = Location::<mmb::Family>::new(0);
+            for batch_index in 0..64u64 {
+                let finalized = {
+                    let alpha_value = format!("one-{batch_index}").into_bytes();
+                    let key = format!("k-{batch_index:08x}").into_bytes();
+                    let value = format!("v-{batch_index:08x}").into_bytes();
+                    let batch = db
+                        .new_batch()
+                        .write(b"alpha".to_vec(), Some(alpha_value))
+                        .write(key, Some(value));
+                    batch
+                        .merkleize(&db, None::<Vec<u8>>)
+                        .await
+                        .expect("merkleize")
+                };
+                db.apply_batch(finalized).await.expect("apply");
+
+                let latest = db.bounds().await.end - 1;
+                let n = NonZeroU64::new(*latest + 1).unwrap();
+                let (_proof, cumulative): (MmbBatchProof, Vec<MmbBatchOperation>) = db
+                    .ops_historical_proof(latest + 1, Location::new(0), n)
+                    .await
+                    .expect("proof");
+                inactivity_floor = latest_mmb_inactivity_floor(&cumulative);
+                ops = cumulative;
+                if *inactivity_floor > 0 {
+                    break;
+                }
+            }
+            assert!(
+                *inactivity_floor > 0,
+                "MMB subscribe regression must exercise nonzero inactivity floor"
+            );
+            let boundary = boundary_from_mmb_local_db(&db, &ops).await;
+            db.sync().await.expect("sync");
+            db.destroy().await.expect("destroy");
+
+            MmbLocalBatch {
+                operations: ops,
+                current_boundary: boundary,
+                inactivity_floor,
             }
         })
     })
@@ -184,6 +368,14 @@ async fn build_local_batch() -> LocalBatch {
 
 async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
     let writer: OrderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
+        OrderedWriter::empty(client.clone());
+    common::commit_ordered_upload(client, &writer, &batch.operations, &batch.current_boundary)
+        .await
+        .expect("commit upload");
+}
+
+async fn commit_mmb_upload(client: &StoreClient, batch: &MmbLocalBatch) {
+    let writer: OrderedWriter<mmb::Family, Sha256, Vec<u8>, Vec<u8>, N> =
         OrderedWriter::empty(client.clone());
     common::commit_ordered_upload(client, &writer, &batch.operations, &batch.current_boundary)
         .await
@@ -318,10 +510,37 @@ fn all_operations_for_key(
         .collect()
 }
 
+fn all_mmb_operations_for_key(
+    operations: &[MmbBatchOperation],
+    key: &[u8],
+) -> Vec<(Location<mmb::Family>, MmbBatchOperation)> {
+    operations
+        .iter()
+        .enumerate()
+        .filter_map(|(index, operation)| match operation {
+            MmbBatchOperation::Delete(found) if found.as_slice() == key => Some((
+                Location::<mmb::Family>::new(index as u64),
+                operation.clone(),
+            )),
+            MmbBatchOperation::Update(Update { key: found, .. }) if found.as_slice() == key => {
+                Some((
+                    Location::<mmb::Family>::new(index as u64),
+                    operation.clone(),
+                ))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn ordered_range_connect_subscribe_emits_verifiable_range_proof() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
+    assert!(
+        *local.inactivity_floor > 0,
+        "test must not rely on inactivity_floor = 0"
+    );
     let ordered_client = Arc::new(TestOrderedClient::from_client(
         store_client.clone(),
         op_cfg(),
@@ -445,6 +664,72 @@ async fn ordered_range_connect_subscribe_emits_multi_proof_for_matching_keys() {
     assert!(!expected.is_empty());
     assert!(frame.resume_sequence_number > 0);
     assert_eq!(frame.operations, expected);
+}
+
+#[tokio::test]
+async fn ordered_mmb_range_connect_subscribe_verifies_range_and_multi_proofs() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_mmb_local_batch().await;
+    assert!(
+        *local.inactivity_floor > 0,
+        "test must not rely on inactivity_floor = 0"
+    );
+    let ordered_client = Arc::new(MmbTestOrderedClient::from_client(
+        store_client.clone(),
+        mmb_op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
+    let client = mmb_validated_client(&qmdb_url);
+
+    let mut range_stream = client
+        .subscribe(ProtoSubscribeRequest::default())
+        .await
+        .expect("range subscribe");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    commit_mmb_upload(&store_client, &local).await;
+
+    let range_frame: OperationLogSubscribeProof<Digest, MmbBatchOperation, mmb::Family> =
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            range_stream.message_with_root(common::trusted_root(local.current_boundary.root)),
+        )
+        .await
+        .expect("range timeout")
+        .expect("range stream result")
+        .expect("range stream frame");
+
+    let expected_all: Vec<(Location<mmb::Family>, MmbBatchOperation)> = local
+        .operations
+        .iter()
+        .enumerate()
+        .map(|(i, op)| (Location::<mmb::Family>::new(i as u64), op.clone()))
+        .collect();
+    assert_eq!(range_frame.operations, expected_all);
+
+    let mut multi_stream = client
+        .subscribe(ProtoSubscribeRequest {
+            key_filters: vec![match_exact(b"alpha")],
+            since_sequence_number: Some(1),
+            ..Default::default()
+        })
+        .await
+        .expect("multi subscribe");
+
+    let multi_frame: OperationLogSubscribeProof<Digest, MmbBatchOperation, mmb::Family> =
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            multi_stream.message_with_root(common::trusted_root(local.current_boundary.root)),
+        )
+        .await
+        .expect("multi timeout")
+        .expect("multi stream result")
+        .expect("multi stream frame");
+
+    let expected_filtered = all_mmb_operations_for_key(&local.operations, b"alpha");
+    assert!(!expected_filtered.is_empty());
+    assert_eq!(multi_frame.operations, expected_filtered);
 }
 
 #[tokio::test]
