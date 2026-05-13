@@ -26,7 +26,7 @@ jobs:
       env:
         BUF_TOKEN: ${{ secrets.BUF_TOKEN }}
     - name: Publish exoware-sdk
-      run: cargo publish --manifest-path sdk-rs/Cargo.toml
+      run: cargo publish --manifest-path sdk/rs/Cargo.toml
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -41,12 +41,12 @@ jobs:
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     - name: Publish exoware-qmdb
-      run: cargo publish --manifest-path qmdb/Cargo.toml
+      run: cargo publish --manifest-path qmdb/rs/Cargo.toml
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     - name: Publish exoware-sql
-      run: cargo publish --manifest-path sql/Cargo.toml
+      run: cargo publish --manifest-path sql/rs/Cargo.toml
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -58,7 +58,7 @@ jobs:
         tool: wasm-pack@0.13.1,wasm-bindgen-cli@0.2.117
     - name: Publish @exowarexyz/sdk
       run: |
-        cd sdk-ts
+        cd sdk/ts
         npm ci
         npm run build
         npm publish --access public --ignore-scripts

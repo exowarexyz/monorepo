@@ -27,6 +27,6 @@ const sequence = await batch.commit(base);
 
 ## Generated TypeScript (`gen/ts`)
 
-Protobuf-ES output lives under **`src/gen/ts/`** (mirrors the repo [`proto/`](../proto/) tree, e.g. `proto/store/v1/query.proto` → `src/gen/ts/store/v1/query_pb.ts`). To regenerate after proto changes, run `../gen.sh` from the repo root.
+Protobuf-ES output lives under **`src/gen/ts/`** (mirrors the repo [`proto/`](../../proto/) tree, e.g. `proto/store/v1/query.proto` → `src/gen/ts/store/v1/query_pb.ts`). To regenerate after proto changes, run `../../gen.sh` from the repo root.
 
 Integration tests spawn the Rust simulator via `jest.globalSetup.ts` (`cargo build --package exoware-simulator`).

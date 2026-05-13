@@ -6,21 +6,29 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 
-rm -rf "$ROOT/sdk-rs/src/gen/"*.rs
-rm -rf "$ROOT/qmdb/src/gen/"*.rs
-rm -rf "$ROOT/sql/src/gen/"*.rs
-rm -rf "$ROOT/sdk-ts/src/gen/ts/"
+rm -rf "$ROOT/sdk/rs/src/gen/"*.rs
+rm -rf "$ROOT/qmdb/rs/src/gen/"*.rs
+rm -rf "$ROOT/sql/rs/src/gen/"*.rs
+rm -rf "$ROOT/sdk/ts/src/gen/ts/"
+rm -rf "$ROOT/qmdb/ts/src/generated/proto/"
+rm -rf "$ROOT/sql/ts/src/generated/proto/"
 
-echo "==> Rust (sdk-rs)"
+echo "==> Rust (sdk/rs)"
 PROTO_GEN=1 cargo build -p exoware-sdk 2>&1
 
-echo "==> Rust (qmdb)"
+echo "==> Rust (qmdb/rs)"
 PROTO_GEN=1 cargo build -p exoware-qmdb 2>&1
 
-echo "==> Rust (sql)"
+echo "==> Rust (sql/rs)"
 PROTO_GEN=1 cargo build -p exoware-sql 2>&1
 
-echo "==> TypeScript (sdk-ts)"
-(cd "$ROOT/sdk-ts" && buf generate --template buf.gen.yaml)
+echo "==> TypeScript (sdk/ts)"
+(cd "$ROOT/sdk/ts" && buf generate --template buf.gen.yaml)
+
+echo "==> TypeScript (qmdb/ts)"
+(cd "$ROOT/qmdb/ts" && buf generate --template buf.gen.yaml)
+
+echo "==> TypeScript (sql/ts)"
+(cd "$ROOT/sql/ts" && buf generate --template buf.gen.yaml)
 
 echo "Done."

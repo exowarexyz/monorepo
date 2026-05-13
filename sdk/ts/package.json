@@ -8,7 +8,7 @@
     "repository": {
         "type": "git",
         "url": "git+https://github.com/exowarexyz/monorepo.git",
-        "directory": "sdk-ts"
+        "directory": "sdk/ts"
     },
     "publishConfig": {
         "access": "public"

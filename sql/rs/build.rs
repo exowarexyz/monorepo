@@ -1,17 +1,17 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const QMDB_PROTO_FILES: &[&str] = &[
-    "qmdb/v1/proof.proto",
-    "qmdb/v1/key_lookup.proto",
-    "qmdb/v1/key_range.proto",
-    "qmdb/v1/operation_log.proto",
-    "qmdb/v1/current_operation.proto",
+const SQL_PROTO_FILES: &[&str] = &[
+    "sql/v1/common.proto",
+    "sql/v1/schema.proto",
+    "sql/v1/query.proto",
+    "sql/v1/stream.proto",
+    "sql/v1/service.proto",
 ];
 
 fn main() {
     println!("cargo:rerun-if-env-changed=PROTO_GEN");
-    println!("cargo:rerun-if-changed=../proto");
+    println!("cargo:rerun-if-changed=../../proto");
 
     if std::env::var("PROTO_GEN").is_err() {
         return;
@@ -22,21 +22,22 @@ fn main() {
     let gen_dir = manifest_dir.join("src/gen");
     let workspace_root = manifest_dir
         .parent()
-        .expect("qmdb should be one level below workspace root")
+        .and_then(|path| path.parent())
+        .expect("sql/rs should be two levels below workspace root")
         .to_path_buf();
 
     let descriptor = gen_dir.join("descriptor.bin");
     buf_build(&workspace_root, &descriptor);
 
     connectrpc_build::Config::new()
-        .files(QMDB_PROTO_FILES)
+        .files(SQL_PROTO_FILES)
         .descriptor_set(&descriptor)
         .emit_register_fn(false)
         .out_dir(&gen_dir)
         .compile()
         .expect("connectrpc codegen");
 
-    combine_generated_protos(&gen_dir, QMDB_PROTO_FILES, "qmdb.v1.rs");
+    combine_generated_protos(&gen_dir, SQL_PROTO_FILES, "sql.v1.rs");
 
     std::fs::remove_file(&descriptor).expect("cleanup descriptor");
 }

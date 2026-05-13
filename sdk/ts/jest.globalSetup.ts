@@ -29,7 +29,7 @@ const setup = async () => {
         fs.mkdirSync(tempDir, { recursive: true });
     }
 
-    const repoRoot = path.join(__dirname, '..');
+    const repoRoot = path.join(__dirname, '..', '..');
     console.log('Building simulator...');
     execSync('cargo build --package exoware-simulator', { stdio: 'inherit', cwd: repoRoot });
 

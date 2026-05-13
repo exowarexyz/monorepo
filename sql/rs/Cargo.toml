@@ -6,7 +6,7 @@ license.workspace = true
 description = "SQL engine backed by the Exoware API."
 readme = "README.md"
 homepage.workspace = true
-repository = "https://github.com/exowarexyz/monorepo/tree/main/sql"
+repository = "https://github.com/exowarexyz/monorepo/tree/main/sql/rs"
 documentation = "https://docs.rs/exoware-sql"
 
 [[bin]]
@@ -40,7 +40,7 @@ connectrpc-build = "0.3.1"
 
 [dev-dependencies]
 criterion = { workspace = true }
-exoware-simulator = { path = "../examples/simulator" }
+exoware-simulator = { path = "../../examples/simulator" }
 exoware-server = { workspace = true }
 futures = { workspace = true }
 reqwest = { workspace = true }

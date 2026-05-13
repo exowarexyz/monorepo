@@ -27,7 +27,7 @@
   ],
   "scripts": {
     "build:proto": "buf generate --template buf.gen.yaml",
-    "build:wasm": "wasm-pack build ../wasm --target web --mode no-install --no-opt --out-dir ../ts/src/generated/wasm --out-name exoware_qmdb_wasm",
+    "build:wasm": "wasm-pack build ../rs/wasm --target web --mode no-install --no-opt --out-dir ../../ts/src/generated/wasm --out-name exoware_qmdb_wasm",
     "build": "npm run build:proto && npm run build:wasm && rm -rf dist && tsc && mkdir -p dist/generated && cp -R src/generated/wasm dist/generated/wasm && rm -f dist/generated/wasm/.gitignore",
     "lint": "tsc --noEmit",
     "test": "npm run test:wasm",
@@ -37,7 +37,7 @@
   "dependencies": {
     "@bufbuild/protobuf": "^2.11.0",
     "@connectrpc/connect": "^2.1.1",
-    "@exowarexyz/sdk": "file:../../sdk-ts"
+    "@exowarexyz/sdk": "file:../../sdk/ts"
   },
   "devDependencies": {
     "@bufbuild/buf": "^1.67.0",

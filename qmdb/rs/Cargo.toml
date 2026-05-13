@@ -6,7 +6,7 @@ license.workspace = true
 description = "QMDB instance backed by the Exoware API."
 readme = "README.md"
 homepage.workspace = true
-repository = "https://github.com/exowarexyz/monorepo/tree/main/qmdb"
+repository = "https://github.com/exowarexyz/monorepo/tree/main/qmdb/rs"
 documentation = "https://docs.rs/exoware-qmdb"
 
 [features]
@@ -44,7 +44,7 @@ exoware-qmdb = { path = ".", features = ["test-utils"] }
 axum = { workspace = true }
 bytes = { workspace = true }
 commonware-runtime = { workspace = true }
-exoware-simulator = { path = "../examples/simulator" }
+exoware-simulator = { path = "../../examples/simulator" }
 exoware-server = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }

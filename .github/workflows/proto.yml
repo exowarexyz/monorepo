@@ -31,5 +31,5 @@ jobs:
       - name: Verify generated code is up to date
         run: |
           ./gen.sh
-          git diff --exit-code sdk-rs/src/gen/ sdk-ts/src/gen/ || \
+          git diff --exit-code sdk/rs/src/gen/ sdk/ts/src/gen/ qmdb/rs/src/gen/ qmdb/ts/src/generated/proto/ sql/rs/src/gen/ sql/ts/src/generated/proto/ || \
             (echo "Generated code is stale. Run ./gen.sh and commit." && exit 1)

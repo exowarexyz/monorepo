@@ -3,7 +3,7 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=PROTO_GEN");
-    println!("cargo:rerun-if-changed=../proto");
+    println!("cargo:rerun-if-changed=../../proto");
 
     if std::env::var("PROTO_GEN").is_err() {
         return;
@@ -14,7 +14,8 @@ fn main() {
     let gen_dir = manifest_dir.join("src/gen");
     let workspace_root = manifest_dir
         .parent()
-        .expect("sdk-rs should be one level below workspace root")
+        .and_then(|path| path.parent())
+        .expect("sdk/rs should be two levels below workspace root")
         .to_path_buf();
 
     let descriptor = gen_dir.join("descriptor.bin");
