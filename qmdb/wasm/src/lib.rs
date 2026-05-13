@@ -196,7 +196,7 @@ where
     )
     .map_err(|err| format!("failed to decode historical multi proof ops-root witness: {err}"))?;
     let hasher = commonware_storage::qmdb::hasher::<Sha256>();
-    Ok((witness.canonical_root(&hasher, &ops_root), operations))
+    Ok((witness.root(&hasher, &ops_root), operations))
 }
 
 fn decode_multi_operations_from_proto<F>(
@@ -1145,7 +1145,7 @@ mod tests {
             partial_chunk: Some((13, Sha256::fill(0x33))),
         };
         let hasher = commonware_storage::qmdb::hasher::<Sha256>();
-        let current_root = witness.canonical_root(&hasher, &ops_root);
+        let current_root = witness.root(&hasher, &ops_root);
         proto.ops_root_witness = witness.encode().to_vec();
 
         let (root, verified) =

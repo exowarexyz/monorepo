@@ -29,12 +29,12 @@ axum = "0.8.1"
 base64 = "0.22.1"
 hex = "0.4"
 regex = "1"
-commonware-codec = { git = "https://github.com/commonwarexyz/monorepo", rev = "983fd053ca0bca97c3a592bebb255fc9e3574821", package = "commonware-codec" }
-commonware-cryptography = { git = "https://github.com/commonwarexyz/monorepo", rev = "983fd053ca0bca97c3a592bebb255fc9e3574821", package = "commonware-cryptography" }
-commonware-parallel = { git = "https://github.com/commonwarexyz/monorepo", rev = "983fd053ca0bca97c3a592bebb255fc9e3574821", package = "commonware-parallel" }
-commonware-runtime = { git = "https://github.com/commonwarexyz/monorepo", rev = "983fd053ca0bca97c3a592bebb255fc9e3574821", package = "commonware-runtime" }
-commonware-storage = { git = "https://github.com/commonwarexyz/monorepo", rev = "983fd053ca0bca97c3a592bebb255fc9e3574821", package = "commonware-storage" }
-commonware-utils = { git = "https://github.com/commonwarexyz/monorepo", rev = "983fd053ca0bca97c3a592bebb255fc9e3574821", package = "commonware-utils" }
+commonware-codec = { git = "https://github.com/commonwarexyz/monorepo", rev = "2cc941653cb936952c00587f8cb037c8021241a5", package = "commonware-codec" }
+commonware-cryptography = { git = "https://github.com/commonwarexyz/monorepo", rev = "2cc941653cb936952c00587f8cb037c8021241a5", package = "commonware-cryptography" }
+commonware-parallel = { git = "https://github.com/commonwarexyz/monorepo", rev = "2cc941653cb936952c00587f8cb037c8021241a5", package = "commonware-parallel" }
+commonware-runtime = { git = "https://github.com/commonwarexyz/monorepo", rev = "2cc941653cb936952c00587f8cb037c8021241a5", package = "commonware-runtime" }
+commonware-storage = { git = "https://github.com/commonwarexyz/monorepo", rev = "2cc941653cb936952c00587f8cb037c8021241a5", package = "commonware-storage" }
+commonware-utils = { git = "https://github.com/commonwarexyz/monorepo", rev = "2cc941653cb936952c00587f8cb037c8021241a5", package = "commonware-utils" }
 rocksdb = "0.22.0"
 rand = "0.8.5"
 bincode = "1.3.3"
