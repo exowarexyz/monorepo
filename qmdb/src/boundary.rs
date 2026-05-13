@@ -10,7 +10,7 @@ use commonware_storage::merkle::{
 use commonware_storage::qmdb::{
     current::{
         grafting,
-        proof::{OpsRootWitness, RangeProof},
+        proof::{verify_proof_and_extract_digests, OpsRootWitness, RangeProof},
     },
     operation::Operation as QmdbOperation,
 };
@@ -55,18 +55,18 @@ where
         ))
     })?;
     let hasher = commonware_storage::qmdb::hasher::<H>();
-    let digest_map = proof
-        .verify_and_extract_digests::<H, _, N>(
-            &hasher,
-            location,
-            std::slice::from_ref(operation),
-            std::slice::from_ref(&chunk),
-            &root,
-        )
-        .ok_or(QmdbError::ProofVerification {
-            kind: crate::ProofKind::CurrentRange,
-        })?;
-    for (position, digest) in digest_map {
+    let digests = verify_proof_and_extract_digests(
+        &hasher,
+        &proof,
+        location,
+        std::slice::from_ref(operation),
+        std::slice::from_ref(&chunk),
+        &root,
+    )
+    .map_err(|_| QmdbError::ProofVerification {
+        kind: crate::ProofKind::CurrentRange,
+    })?;
+    for (position, digest) in digests {
         merge_authenticated_digest(authenticated_digests, position, digest)?;
     }
     Ok((chunk_index_for_location::<M, N>(location), chunk))
