@@ -28,7 +28,7 @@
   "scripts": {
     "build:proto": "buf generate --template buf.gen.yaml",
     "build:wasm": "wasm-pack build ../wasm --target web --mode no-install --no-opt --out-dir ../ts/src/generated/wasm --out-name exoware_qmdb_wasm",
-    "build": "npm run build:proto && npm run build:wasm && tsc && rm -rf dist/generated && mkdir -p dist/generated && cp -R src/generated/wasm dist/generated/wasm && rm -f dist/generated/wasm/.gitignore",
+    "build": "npm run build:proto && npm run build:wasm && rm -rf dist && tsc && mkdir -p dist/generated && cp -R src/generated/wasm dist/generated/wasm && rm -f dist/generated/wasm/.gitignore",
     "lint": "tsc --noEmit",
     "test": "npm run test:wasm",
     "test:wasm": "cargo test -p exoware-qmdb-wasm --lib",
