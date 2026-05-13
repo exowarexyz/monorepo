@@ -27,7 +27,7 @@
   ],
   "scripts": {
     "build:proto": "buf generate --template buf.gen.yaml",
-    "build": "npm run build:proto && tsc",
+    "build": "npm run build:proto && rm -rf dist && tsc",
     "lint": "tsc --noEmit",
     "prepublishOnly": "npm run build"
   },

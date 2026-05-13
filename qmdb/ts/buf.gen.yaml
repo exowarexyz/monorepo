@@ -4,6 +4,7 @@ plugins:
     out: src/generated/proto
     opt:
       - target=ts
+      - import_extension=js
 inputs:
   - directory: ../../proto
     paths:
