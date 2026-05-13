@@ -53,8 +53,9 @@ export type HistoricalMultiProof = Message<"qmdb.v1.HistoricalMultiProof"> & {
   operations: MultiProofOperation[];
 
   /**
-   * Operation-log root committed by the trusted current/global root for
-   * current-boundary-backed endpoints.
+   * Operation-log root used to verify the historical proof. Current-boundary
+   * endpoints authenticate this with `ops_root_witness`; operation-log-only
+   * endpoints omit the witness and clients authenticate this root out-of-band.
    *
    * @generated from field: bytes ops_root = 3;
    */
@@ -62,8 +63,8 @@ export type HistoricalMultiProof = Message<"qmdb.v1.HistoricalMultiProof"> & {
 
   /**
    * Opaque Commonware `current::proof::OpsRootWitness` bytes encoded with
-   * `commonware-codec`. Ordered/unordered full stacks must populate this, so
-   * clients authenticate `ops_root` from their trusted current/global root.
+   * `commonware-codec`. When present, clients authenticate `ops_root` from
+   * their trusted current/global root.
    *
    * @generated from field: bytes ops_root_witness = 4;
    */
@@ -99,8 +100,9 @@ export type HistoricalOperationRangeProof = Message<"qmdb.v1.HistoricalOperation
   encodedOperations: Uint8Array[];
 
   /**
-   * Operation-log root committed by the trusted current/global root for
-   * current-boundary-backed endpoints.
+   * Operation-log root used to verify the historical proof. Current-boundary
+   * endpoints authenticate this with `ops_root_witness`; operation-log-only
+   * endpoints omit the witness and clients authenticate this root out-of-band.
    *
    * @generated from field: bytes ops_root = 4;
    */
@@ -108,8 +110,8 @@ export type HistoricalOperationRangeProof = Message<"qmdb.v1.HistoricalOperation
 
   /**
    * Opaque Commonware `current::proof::OpsRootWitness` bytes encoded with
-   * `commonware-codec`. Ordered/unordered full stacks must populate this, so
-   * clients authenticate `ops_root` from their trusted current/global root.
+   * `commonware-codec`. When present, clients authenticate `ops_root` from
+   * their trusted current/global root.
    *
    * @generated from field: bytes ops_root_witness = 5;
    */

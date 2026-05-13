@@ -81,9 +81,11 @@ export type SubscribeResponse = Message<"qmdb.v1.SubscribeResponse"> & {
   proof?: HistoricalMultiProof;
 
   /**
-   * Published backend tip. For current-boundary-backed endpoints, clients use
-   * their trusted current/global root for this tip and the proof's embedded
-   * ops-root witness to authenticate the historical operation-log root.
+   * Published backend tip. Current-boundary-backed endpoints include an
+   * ops-root witness so clients can authenticate the historical operation-log
+   * root from their trusted current/global root for this tip. Operation-log-only
+   * endpoints omit the witness; clients authenticate the embedded ops root
+   * out-of-band for this tip.
    *
    * @generated from field: uint64 tip = 3;
    */

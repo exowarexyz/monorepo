@@ -299,8 +299,9 @@ pub struct HistoricalMultiProof {
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
     pub operations: ::buffa::alloc::vec::Vec<MultiProofOperation>,
-    /// Operation-log root committed by the trusted current/global root for
-    /// current-boundary-backed endpoints.
+    /// Operation-log root used to verify the historical proof. Current-boundary
+    /// endpoints authenticate this with `ops_root_witness`; operation-log-only
+    /// endpoints omit the witness and clients authenticate this root out-of-band.
     ///
     /// Field 3: `ops_root`
     #[serde(
@@ -311,8 +312,8 @@ pub struct HistoricalMultiProof {
     )]
     pub ops_root: ::buffa::alloc::vec::Vec<u8>,
     /// Opaque Commonware `current::proof::OpsRootWitness` bytes encoded with
-    /// `commonware-codec`. Ordered/unordered full stacks must populate this, so
-    /// clients authenticate `ops_root` from their trusted current/global root.
+    /// `commonware-codec`. When present, clients authenticate `ops_root` from
+    /// their trusted current/global root.
     ///
     /// Field 4: `ops_root_witness`
     #[serde(
@@ -529,14 +530,15 @@ pub struct HistoricalMultiProofView<'a> {
     pub proof: &'a [u8],
     /// Field 2: `operations`
     pub operations: ::buffa::RepeatedView<'a, MultiProofOperationView<'a>>,
-    /// Operation-log root committed by the trusted current/global root for
-    /// current-boundary-backed endpoints.
+    /// Operation-log root used to verify the historical proof. Current-boundary
+    /// endpoints authenticate this with `ops_root_witness`; operation-log-only
+    /// endpoints omit the witness and clients authenticate this root out-of-band.
     ///
     /// Field 3: `ops_root`
     pub ops_root: &'a [u8],
     /// Opaque Commonware `current::proof::OpsRootWitness` bytes encoded with
-    /// `commonware-codec`. Ordered/unordered full stacks must populate this, so
-    /// clients authenticate `ops_root` from their trusted current/global root.
+    /// `commonware-codec`. When present, clients authenticate `ops_root` from
+    /// their trusted current/global root.
     ///
     /// Field 4: `ops_root_witness`
     pub ops_root_witness: &'a [u8],
@@ -702,8 +704,9 @@ pub struct HistoricalOperationRangeProof {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec"
     )]
     pub encoded_operations: ::buffa::alloc::vec::Vec<::buffa::alloc::vec::Vec<u8>>,
-    /// Operation-log root committed by the trusted current/global root for
-    /// current-boundary-backed endpoints.
+    /// Operation-log root used to verify the historical proof. Current-boundary
+    /// endpoints authenticate this with `ops_root_witness`; operation-log-only
+    /// endpoints omit the witness and clients authenticate this root out-of-band.
     ///
     /// Field 4: `ops_root`
     #[serde(
@@ -714,8 +717,8 @@ pub struct HistoricalOperationRangeProof {
     )]
     pub ops_root: ::buffa::alloc::vec::Vec<u8>,
     /// Opaque Commonware `current::proof::OpsRootWitness` bytes encoded with
-    /// `commonware-codec`. Ordered/unordered full stacks must populate this, so
-    /// clients authenticate `ops_root` from their trusted current/global root.
+    /// `commonware-codec`. When present, clients authenticate `ops_root` from
+    /// their trusted current/global root.
     ///
     /// Field 5: `ops_root_witness`
     #[serde(
@@ -949,14 +952,15 @@ pub struct HistoricalOperationRangeProofView<'a> {
     pub start_location: u64,
     /// Field 3: `encoded_operations`
     pub encoded_operations: ::buffa::RepeatedView<'a, &'a [u8]>,
-    /// Operation-log root committed by the trusted current/global root for
-    /// current-boundary-backed endpoints.
+    /// Operation-log root used to verify the historical proof. Current-boundary
+    /// endpoints authenticate this with `ops_root_witness`; operation-log-only
+    /// endpoints omit the witness and clients authenticate this root out-of-band.
     ///
     /// Field 4: `ops_root`
     pub ops_root: &'a [u8],
     /// Opaque Commonware `current::proof::OpsRootWitness` bytes encoded with
-    /// `commonware-codec`. Ordered/unordered full stacks must populate this, so
-    /// clients authenticate `ops_root` from their trusted current/global root.
+    /// `commonware-codec`. When present, clients authenticate `ops_root` from
+    /// their trusted current/global root.
     ///
     /// Field 5: `ops_root_witness`
     pub ops_root_witness: &'a [u8],
@@ -5906,9 +5910,11 @@ pub struct SubscribeResponse {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
     )]
     pub proof: ::buffa::MessageField<HistoricalMultiProof>,
-    /// Published backend tip. For current-boundary-backed endpoints, clients use
-    /// their trusted current/global root for this tip and the proof's embedded
-    /// ops-root witness to authenticate the historical operation-log root.
+    /// Published backend tip. Current-boundary-backed endpoints include an
+    /// ops-root witness so clients can authenticate the historical operation-log
+    /// root from their trusted current/global root for this tip. Operation-log-only
+    /// endpoints omit the witness; clients authenticate the embedded ops root
+    /// out-of-band for this tip.
     ///
     /// Field 3: `tip`
     #[serde(
@@ -6100,9 +6106,11 @@ pub struct SubscribeResponseView<'a> {
     pub resume_sequence_number: u64,
     /// Field 2: `proof`
     pub proof: ::buffa::MessageFieldView<HistoricalMultiProofView<'a>>,
-    /// Published backend tip. For current-boundary-backed endpoints, clients use
-    /// their trusted current/global root for this tip and the proof's embedded
-    /// ops-root witness to authenticate the historical operation-log root.
+    /// Published backend tip. Current-boundary-backed endpoints include an
+    /// ops-root witness so clients can authenticate the historical operation-log
+    /// root from their trusted current/global root for this tip. Operation-log-only
+    /// endpoints omit the witness; clients authenticate the embedded ops root
+    /// out-of-band for this tip.
     ///
     /// Field 3: `tip`
     pub tip: u64,

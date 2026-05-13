@@ -110,11 +110,7 @@ fn raw_batch_multi_proof_to_proto<D: commonware_cryptography::Digest, F: Graftab
                 ..Default::default()
             })
             .collect(),
-        ops_root: proof
-            .ops_root_witness
-            .as_ref()
-            .map(|_| proof.root.encode().to_vec())
-            .unwrap_or_default(),
+        ops_root: proof.root.encode().to_vec(),
         ops_root_witness: proof
             .ops_root_witness
             .as_ref()
@@ -131,11 +127,7 @@ fn operation_range_checkpoint_to_proto<D: commonware_cryptography::Digest, F: Gr
         proof: proof.proof.encode().to_vec(),
         start_location: proof.start_location.as_u64(),
         encoded_operations: proof.encoded_operations.clone(),
-        ops_root: proof
-            .ops_root_witness
-            .as_ref()
-            .map(|_| proof.root.encode().to_vec())
-            .unwrap_or_default(),
+        ops_root: proof.root.encode().to_vec(),
         ops_root_witness: proof
             .ops_root_witness
             .as_ref()
@@ -1423,6 +1415,30 @@ mod tests {
                 vec![sequence_number as u8],
             )],
         }
+    }
+
+    #[test]
+    fn subscribe_multi_proof_proto_includes_ops_root_without_witness() {
+        use commonware_cryptography::{sha256::Digest as Sha256Digest, Sha256};
+        use commonware_storage::merkle::{mmr, Proof};
+
+        let root = Sha256::fill(0x42);
+        let raw = RawBatchMultiProof::<Sha256Digest, mmr::Family> {
+            watermark: Location::new(0),
+            root,
+            ops_root_witness: None,
+            proof: Proof {
+                leaves: Location::new(1),
+                inactive_peaks: 0,
+                digests: Vec::new(),
+            },
+            operations: vec![(Location::new(0), vec![0xAA])],
+        };
+
+        let proto = raw_batch_multi_proof_to_proto(&raw);
+
+        assert_eq!(proto.ops_root, root.encode().to_vec());
+        assert!(proto.ops_root_witness.is_empty());
     }
 
     #[test]

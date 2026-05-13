@@ -73,11 +73,24 @@ export interface LocatedOrderedOperation {
 }
 
 export interface VerifiedHistoricalMultiProof {
+  /**
+   * The trusted root supplied to verification. For current-boundary-backed
+   * proofs this is the current/global root; for operation-log-only proofs this
+   * is the operation-log root.
+   */
+  root: Uint8Array;
   operations: LocatedOrderedOperation[];
   proofSizeBytes: number;
 }
 
 export interface DecodedHistoricalMultiProof {
+  /**
+   * The root decoded from a subscribe proof. When the proof includes an
+   * ops-root witness this is the current/global root reconstructed from that
+   * witness; otherwise it is the embedded operation-log root. Callers must
+   * compare this value against their trusted root for the frame tip.
+   */
+  root: Uint8Array;
   operations: LocatedOrderedOperation[];
   proofSizeBytes: number;
 }
@@ -144,6 +157,25 @@ function toBytes(value: BytesLike): Uint8Array {
   return typeof value === 'string' ? new TextEncoder().encode(value) : value;
 }
 
+function copyBytes(value: BytesLike): Uint8Array {
+  return new Uint8Array(toBytes(value));
+}
+
+function keyId(key: Uint8Array): string {
+  return Array.from(key).join(',');
+}
+
+function assertDistinctKeys(keys: readonly Uint8Array[]): void {
+  const seen = new Set<string>();
+  for (const key of keys) {
+    const id = keyId(key);
+    if (seen.has(id)) {
+      throw new Error('qmdb getMany duplicate key');
+    }
+    seen.add(id);
+  }
+}
+
 function assertMerkleFamily(value: MerkleFamily, label: string): void {
   if (value !== 'mmr' && value !== 'mmb') {
     throw new Error(`${label} unsupported Merkle family ${String(value)}`);
@@ -202,9 +234,10 @@ export class OrderedQmdbClient {
     options?: CallOptions,
   ): Promise<VerifiedCurrentKeyValueProof> {
     await ensureWasm();
+    const requestedKey = copyBytes(key);
     const response = await this.lookup.get(
       create(GetRequestSchema, {
-        key: toBytes(key),
+        key: requestedKey,
         tip,
       }),
       options,
@@ -217,6 +250,7 @@ export class OrderedQmdbClient {
       proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,
+      requestedKey,
     ) as Omit<VerifiedCurrentKeyValueProof, 'proofSizeBytes'>;
     return { ...verified, proofSizeBytes: proofBytes.length };
   }
@@ -228,9 +262,11 @@ export class OrderedQmdbClient {
     options?: CallOptions,
   ): Promise<VerifiedCurrentKeyLookupProof> {
     await ensureWasm();
+    const requestedKeys = keys.map((key) => copyBytes(key));
+    assertDistinctKeys(requestedKeys);
     const response = await this.lookup.getMany(
       create(GetManyRequestSchema, {
-        keys: keys.map((key) => toBytes(key)),
+        keys: requestedKeys,
         tip,
       }),
       options,
@@ -240,6 +276,7 @@ export class OrderedQmdbClient {
       proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,
+      requestedKeys,
     ) as Omit<VerifiedCurrentKeyLookupProof, 'proofSizeBytes'>;
     return { ...verified, proofSizeBytes: proofBytes.length };
   }

@@ -716,6 +716,17 @@ where
 {
     match (ops_root.is_empty(), ops_root_witness.is_empty()) {
         (true, true) => Ok(*expected_root),
+        (false, true) => {
+            let ops_root = H::Digest::decode_cfg(ops_root, &()).map_err(|err| {
+                QmdbError::CorruptData(format!("failed to decode historical ops root: {err}"))
+            })?;
+            if ops_root != *expected_root {
+                return Err(QmdbError::ProofVerification {
+                    kind: crate::ProofKind::BatchMulti,
+                });
+            }
+            Ok(ops_root)
+        }
         (false, false) => {
             let ops_root = H::Digest::decode_cfg(ops_root, &()).map_err(|err| {
                 QmdbError::CorruptData(format!("failed to decode historical ops root: {err}"))
@@ -735,7 +746,7 @@ where
             Ok(ops_root)
         }
         _ => Err(QmdbError::CorruptData(
-            "historical proof must include ops_root and ops_root_witness together".to_string(),
+            "historical proof missing ops_root for ops_root_witness".to_string(),
         )),
     }
 }
