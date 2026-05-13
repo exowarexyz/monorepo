@@ -77,6 +77,9 @@ impl QueryPredicate {
     }
 
     pub(crate) fn in_list_literal_supported(kind: ColumnKind, literal: &ScalarValue) -> bool {
+        if literal.is_null() {
+            return true;
+        }
         match kind {
             ColumnKind::Utf8 => scalar_to_string(literal).is_some(),
             ColumnKind::Int64 => scalar_to_i64(literal).is_some(),
@@ -122,6 +125,9 @@ impl QueryPredicate {
                 let Some(col_idx) = model.columns_by_name.get(&column).copied() else {
                     return false;
                 };
+                if literal.is_null() {
+                    return true;
+                }
                 let range_ops = matches!(
                     op,
                     Operator::Eq | Operator::Lt | Operator::LtEq | Operator::Gt | Operator::GtEq
@@ -160,13 +166,20 @@ impl QueryPredicate {
             Expr::IsNull(inner) => {
                 if let Some(col_name) = extract_column_name(inner) {
                     if let Some(&col_idx) = model.columns_by_name.get(col_name) {
-                        match self.constraints.get(&col_idx) {
-                            Some(PredicateConstraint::IsNotNull) => self.contradiction = true,
-                            None => {
-                                self.constraints
-                                    .insert(col_idx, PredicateConstraint::IsNull);
+                        if !model.column(col_idx).nullable {
+                            self.contradiction = true;
+                        } else {
+                            match self.constraints.get(&col_idx) {
+                                Some(PredicateConstraint::IsNotNull) => self.contradiction = true,
+                                Some(PredicateConstraint::IsNull) => {}
+                                None => {
+                                    self.constraints
+                                        .insert(col_idx, PredicateConstraint::IsNull);
+                                }
+                                // Any value-class constraint (StringEq, IntRange, …)
+                                // asserts a non-null value, so IS NULL contradicts it.
+                                Some(_) => self.contradiction = true,
                             }
-                            _ => {}
                         }
                     }
                 }
@@ -174,14 +187,19 @@ impl QueryPredicate {
             Expr::IsNotNull(inner) => {
                 if let Some(col_name) = extract_column_name(inner) {
                     if let Some(&col_idx) = model.columns_by_name.get(col_name) {
-                        match self.constraints.get(&col_idx) {
-                            Some(PredicateConstraint::IsNull) => self.contradiction = true,
-                            None => {
-                                self.constraints
-                                    .insert(col_idx, PredicateConstraint::IsNotNull);
+                        if model.column(col_idx).nullable {
+                            match self.constraints.get(&col_idx) {
+                                Some(PredicateConstraint::IsNull) => self.contradiction = true,
+                                None => {
+                                    self.constraints
+                                        .insert(col_idx, PredicateConstraint::IsNotNull);
+                                }
+                                // Existing value-class constraint already implies
+                                // IS NOT NULL; keep the stronger constraint.
+                                _ => {}
                             }
-                            _ => {}
                         }
+                        // Non-nullable columns: IS NOT NULL is a tautology, drop it.
                     }
                 }
             }
@@ -216,6 +234,11 @@ impl QueryPredicate {
         let Some(col_idx) = model.columns_by_name.get(column).copied() else {
             return;
         };
+        if literal.is_null() {
+            // `col <op> NULL` is always NULL: no row can satisfy it.
+            self.contradiction = true;
+            return;
+        }
         match model.columns[col_idx].kind {
             ColumnKind::Utf8 => {
                 if op != Operator::Eq {
@@ -229,7 +252,17 @@ impl QueryPredicate {
                     Some(PredicateConstraint::StringEq(existing)) if existing != &value => {
                         self.contradiction = true;
                     }
-                    Some(PredicateConstraint::StringEq(_)) | None => {
+                    Some(PredicateConstraint::StringIn(existing)) => {
+                        if existing.contains(&value) {
+                            self.constraints
+                                .insert(col_idx, PredicateConstraint::StringEq(value));
+                        } else {
+                            self.contradiction = true;
+                        }
+                    }
+                    Some(PredicateConstraint::StringEq(_))
+                    | Some(PredicateConstraint::IsNotNull)
+                    | None => {
                         self.constraints
                             .insert(col_idx, PredicateConstraint::StringEq(value));
                     }
@@ -250,7 +283,9 @@ impl QueryPredicate {
                     Some(PredicateConstraint::BoolEq(existing)) if *existing != value => {
                         self.contradiction = true;
                     }
-                    Some(PredicateConstraint::BoolEq(_)) | None => {
+                    Some(PredicateConstraint::BoolEq(_))
+                    | Some(PredicateConstraint::IsNotNull)
+                    | None => {
                         self.constraints
                             .insert(col_idx, PredicateConstraint::BoolEq(value));
                     }
@@ -266,11 +301,20 @@ impl QueryPredicate {
                 };
                 let (mut min, mut max) = match self.constraints.get(&col_idx) {
                     Some(PredicateConstraint::IntRange { min, max }) => (*min, *max),
+                    Some(PredicateConstraint::IntIn(existing)) => {
+                        let filtered = existing
+                            .iter()
+                            .copied()
+                            .filter(|v| ord_satisfies_op(*v, op, value))
+                            .collect();
+                        self.set_int_values_constraint(col_idx, filtered);
+                        return;
+                    }
+                    Some(PredicateConstraint::IsNotNull) | None => (None, None),
                     Some(_) => {
                         self.contradiction = true;
                         return;
                     }
-                    None => (None, None),
                 };
                 apply_int_constraint(&mut min, &mut max, op, value, &mut self.contradiction);
                 self.constraints
@@ -283,11 +327,11 @@ impl QueryPredicate {
                 };
                 let (mut lo, mut hi) = match self.constraints.get(&col_idx) {
                     Some(PredicateConstraint::FloatRange { min, max }) => (*min, *max),
+                    Some(PredicateConstraint::IsNotNull) | None => (None, None),
                     Some(_) => {
                         self.contradiction = true;
                         return;
                     }
-                    None => (None, None),
                 };
                 apply_float_constraint(&mut lo, &mut hi, op, value, &mut self.contradiction);
                 self.constraints.insert(
@@ -302,11 +346,11 @@ impl QueryPredicate {
                 };
                 let (mut min, mut max) = match self.constraints.get(&col_idx) {
                     Some(PredicateConstraint::IntRange { min, max }) => (*min, *max),
+                    Some(PredicateConstraint::IsNotNull) | None => (None, None),
                     Some(_) => {
                         self.contradiction = true;
                         return;
                     }
-                    None => (None, None),
                 };
                 apply_int_constraint(&mut min, &mut max, op, value, &mut self.contradiction);
                 self.constraints
@@ -319,11 +363,11 @@ impl QueryPredicate {
                 };
                 let (mut min, mut max) = match self.constraints.get(&col_idx) {
                     Some(PredicateConstraint::IntRange { min, max }) => (*min, *max),
+                    Some(PredicateConstraint::IsNotNull) | None => (None, None),
                     Some(_) => {
                         self.contradiction = true;
                         return;
                     }
-                    None => (None, None),
                 };
                 apply_int_constraint(&mut min, &mut max, op, value, &mut self.contradiction);
                 self.constraints
@@ -336,11 +380,11 @@ impl QueryPredicate {
                 };
                 let (mut min, mut max) = match self.constraints.get(&col_idx) {
                     Some(PredicateConstraint::IntRange { min, max }) => (*min, *max),
+                    Some(PredicateConstraint::IsNotNull) | None => (None, None),
                     Some(_) => {
                         self.contradiction = true;
                         return;
                     }
-                    None => (None, None),
                 };
                 apply_int_constraint(&mut min, &mut max, op, value, &mut self.contradiction);
                 self.constraints
@@ -353,11 +397,11 @@ impl QueryPredicate {
                 };
                 let (mut min, mut max) = match self.constraints.get(&col_idx) {
                     Some(PredicateConstraint::Decimal128Range { min, max }) => (*min, *max),
+                    Some(PredicateConstraint::IsNotNull) | None => (None, None),
                     Some(_) => {
                         self.contradiction = true;
                         return;
                     }
-                    None => (None, None),
                 };
                 apply_decimal128_constraint(&mut min, &mut max, op, value, &mut self.contradiction);
                 self.constraints
@@ -370,11 +414,20 @@ impl QueryPredicate {
                 };
                 let (mut min, mut max) = match self.constraints.get(&col_idx) {
                     Some(PredicateConstraint::UInt64Range { min, max }) => (*min, *max),
+                    Some(PredicateConstraint::UInt64In(existing)) => {
+                        let filtered = existing
+                            .iter()
+                            .copied()
+                            .filter(|v| ord_satisfies_op(*v, op, value))
+                            .collect();
+                        self.set_u64_values_constraint(col_idx, filtered);
+                        return;
+                    }
+                    Some(PredicateConstraint::IsNotNull) | None => (None, None),
                     Some(_) => {
                         self.contradiction = true;
                         return;
                     }
-                    None => (None, None),
                 };
                 apply_u64_constraint(&mut min, &mut max, op, value, &mut self.contradiction);
                 self.constraints
@@ -392,7 +445,17 @@ impl QueryPredicate {
                     Some(PredicateConstraint::FixedBinaryEq(existing)) if *existing != value => {
                         self.contradiction = true;
                     }
-                    Some(PredicateConstraint::FixedBinaryEq(_)) | None => {
+                    Some(PredicateConstraint::FixedBinaryIn(existing)) => {
+                        if existing.contains(&value) {
+                            self.constraints
+                                .insert(col_idx, PredicateConstraint::FixedBinaryEq(value));
+                        } else {
+                            self.contradiction = true;
+                        }
+                    }
+                    Some(PredicateConstraint::FixedBinaryEq(_))
+                    | Some(PredicateConstraint::IsNotNull)
+                    | None => {
                         self.constraints
                             .insert(col_idx, PredicateConstraint::FixedBinaryEq(value));
                     }
@@ -408,11 +471,11 @@ impl QueryPredicate {
                 };
                 let (mut min, mut max) = match self.constraints.get(&col_idx) {
                     Some(PredicateConstraint::Decimal256Range { min, max }) => (*min, *max),
+                    Some(PredicateConstraint::IsNotNull) | None => (None, None),
                     Some(_) => {
                         self.contradiction = true;
                         return;
                     }
-                    None => (None, None),
                 };
                 apply_i256_constraint(&mut min, &mut max, op, value, &mut self.contradiction);
                 self.constraints
@@ -429,15 +492,20 @@ impl QueryPredicate {
         let Some(&col_idx) = model.columns_by_name.get(column) else {
             return;
         };
+        // `IN ()` and `IN (NULL) match no rows.
+        if list
+            .iter()
+            .all(|expr| extract_literal(expr).is_some_and(ScalarValue::is_null))
+        {
+            self.contradiction = true;
+            return;
+        }
         match model.columns[col_idx].kind {
             ColumnKind::Utf8 => {
-                let mut vals: Vec<String> = list
+                let vals: Vec<String> = list
                     .iter()
                     .filter_map(|e| extract_literal(e).and_then(scalar_to_string))
                     .collect();
-                if vals.is_empty() {
-                    return;
-                }
                 match self.constraints.get(&col_idx) {
                     Some(PredicateConstraint::StringEq(existing)) => {
                         if !vals.contains(existing) {
@@ -450,60 +518,26 @@ impl QueryPredicate {
                             .filter(|v| vals.contains(v))
                             .cloned()
                             .collect();
-                        if intersection.is_empty() {
-                            self.contradiction = true;
-                        } else {
-                            self.constraints
-                                .insert(col_idx, PredicateConstraint::StringIn(intersection));
-                        }
+                        self.set_string_values_constraint(col_idx, intersection);
                     }
-                    None => {
-                        vals.sort_unstable();
-                        vals.dedup();
-                        if vals.len() == 1 {
-                            self.constraints.insert(
-                                col_idx,
-                                PredicateConstraint::StringEq(vals.into_iter().next().unwrap()),
-                            );
-                        } else {
-                            self.constraints
-                                .insert(col_idx, PredicateConstraint::StringIn(vals));
-                        }
+                    Some(PredicateConstraint::IsNotNull) | None => {
+                        self.set_string_values_constraint(col_idx, vals);
                     }
                     _ => self.contradiction = true,
                 }
             }
             ColumnKind::Int64 => {
-                let mut vals: Vec<i64> = list
+                let vals: Vec<i64> = list
                     .iter()
                     .filter_map(|e| extract_literal(e).and_then(scalar_to_i64))
                     .collect();
-                if vals.is_empty() {
-                    return;
-                }
                 match self.constraints.get(&col_idx) {
                     Some(PredicateConstraint::IntRange { min, max }) => {
-                        let mut filtered: Vec<i64> = vals
+                        let filtered = vals
                             .into_iter()
                             .filter(|v| in_i64_bounds(*v, *min, *max))
                             .collect();
-                        filtered.sort_unstable();
-                        filtered.dedup();
-                        if filtered.is_empty() {
-                            self.contradiction = true;
-                        } else if filtered.len() == 1 {
-                            let v = filtered[0];
-                            self.constraints.insert(
-                                col_idx,
-                                PredicateConstraint::IntRange {
-                                    min: Some(v),
-                                    max: Some(v),
-                                },
-                            );
-                        } else {
-                            self.constraints
-                                .insert(col_idx, PredicateConstraint::IntIn(filtered));
-                        }
+                        self.set_int_values_constraint(col_idx, filtered);
                     }
                     Some(PredicateConstraint::IntIn(existing)) => {
                         let intersection: Vec<i64> = existing
@@ -511,65 +545,26 @@ impl QueryPredicate {
                             .filter(|v| vals.contains(v))
                             .copied()
                             .collect();
-                        if intersection.is_empty() {
-                            self.contradiction = true;
-                        } else {
-                            self.constraints
-                                .insert(col_idx, PredicateConstraint::IntIn(intersection));
-                        }
+                        self.set_int_values_constraint(col_idx, intersection);
                     }
-                    None => {
-                        vals.sort_unstable();
-                        vals.dedup();
-                        if vals.len() == 1 {
-                            let v = vals[0];
-                            self.constraints.insert(
-                                col_idx,
-                                PredicateConstraint::IntRange {
-                                    min: Some(v),
-                                    max: Some(v),
-                                },
-                            );
-                        } else {
-                            self.constraints
-                                .insert(col_idx, PredicateConstraint::IntIn(vals));
-                        }
+                    Some(PredicateConstraint::IsNotNull) | None => {
+                        self.set_int_values_constraint(col_idx, vals);
                     }
                     _ => self.contradiction = true,
                 }
             }
             ColumnKind::UInt64 => {
-                let mut vals: Vec<u64> = list
+                let vals: Vec<u64> = list
                     .iter()
                     .filter_map(|e| extract_literal(e).and_then(scalar_to_u64))
                     .collect();
-                if vals.is_empty() {
-                    self.contradiction = true;
-                    return;
-                }
                 match self.constraints.get(&col_idx) {
                     Some(PredicateConstraint::UInt64Range { min, max }) => {
-                        let mut filtered: Vec<u64> = vals
+                        let filtered = vals
                             .into_iter()
                             .filter(|v| in_u64_bounds(*v, *min, *max))
                             .collect();
-                        filtered.sort_unstable();
-                        filtered.dedup();
-                        if filtered.is_empty() {
-                            self.contradiction = true;
-                        } else if filtered.len() == 1 {
-                            let v = filtered[0];
-                            self.constraints.insert(
-                                col_idx,
-                                PredicateConstraint::UInt64Range {
-                                    min: Some(v),
-                                    max: Some(v),
-                                },
-                            );
-                        } else {
-                            self.constraints
-                                .insert(col_idx, PredicateConstraint::UInt64In(filtered));
-                        }
+                        self.set_u64_values_constraint(col_idx, filtered);
                     }
                     Some(PredicateConstraint::UInt64In(existing)) => {
                         let intersection: Vec<u64> = existing
@@ -577,41 +572,19 @@ impl QueryPredicate {
                             .filter(|v| vals.contains(v))
                             .copied()
                             .collect();
-                        if intersection.is_empty() {
-                            self.contradiction = true;
-                        } else {
-                            self.constraints
-                                .insert(col_idx, PredicateConstraint::UInt64In(intersection));
-                        }
+                        self.set_u64_values_constraint(col_idx, intersection);
                     }
-                    None => {
-                        vals.sort_unstable();
-                        vals.dedup();
-                        if vals.len() == 1 {
-                            let v = vals[0];
-                            self.constraints.insert(
-                                col_idx,
-                                PredicateConstraint::UInt64Range {
-                                    min: Some(v),
-                                    max: Some(v),
-                                },
-                            );
-                        } else {
-                            self.constraints
-                                .insert(col_idx, PredicateConstraint::UInt64In(vals));
-                        }
+                    Some(PredicateConstraint::IsNotNull) | None => {
+                        self.set_u64_values_constraint(col_idx, vals);
                     }
                     _ => self.contradiction = true,
                 }
             }
             ColumnKind::FixedSizeBinary(_) => {
-                let mut vals: Vec<Vec<u8>> = list
+                let vals: Vec<Vec<u8>> = list
                     .iter()
                     .filter_map(|e| extract_literal(e).and_then(scalar_to_fixed_binary))
                     .collect();
-                if vals.is_empty() {
-                    return;
-                }
                 match self.constraints.get(&col_idx) {
                     Some(PredicateConstraint::FixedBinaryEq(existing)) => {
                         if !vals.contains(existing) {
@@ -624,32 +597,95 @@ impl QueryPredicate {
                             .filter(|v| vals.contains(v))
                             .cloned()
                             .collect();
-                        if intersection.is_empty() {
-                            self.contradiction = true;
-                        } else {
-                            self.constraints
-                                .insert(col_idx, PredicateConstraint::FixedBinaryIn(intersection));
-                        }
+                        self.set_fixed_binary_values_constraint(col_idx, intersection);
                     }
-                    None => {
-                        vals.sort();
-                        vals.dedup();
-                        if vals.len() == 1 {
-                            self.constraints.insert(
-                                col_idx,
-                                PredicateConstraint::FixedBinaryEq(
-                                    vals.into_iter().next().unwrap(),
-                                ),
-                            );
-                        } else {
-                            self.constraints
-                                .insert(col_idx, PredicateConstraint::FixedBinaryIn(vals));
-                        }
+                    Some(PredicateConstraint::IsNotNull) | None => {
+                        self.set_fixed_binary_values_constraint(col_idx, vals);
                     }
                     _ => self.contradiction = true,
                 }
             }
             _ => {}
+        }
+    }
+
+    fn set_string_values_constraint(&mut self, col_idx: usize, mut vals: Vec<String>) {
+        vals.sort_unstable();
+        vals.dedup();
+        match vals.len() {
+            0 => self.contradiction = true,
+            1 => {
+                self.constraints.insert(
+                    col_idx,
+                    PredicateConstraint::StringEq(vals.into_iter().next().unwrap()),
+                );
+            }
+            _ => {
+                self.constraints
+                    .insert(col_idx, PredicateConstraint::StringIn(vals));
+            }
+        }
+    }
+
+    fn set_int_values_constraint(&mut self, col_idx: usize, mut vals: Vec<i64>) {
+        vals.sort_unstable();
+        vals.dedup();
+        match vals.len() {
+            0 => self.contradiction = true,
+            1 => {
+                let v = vals[0];
+                self.constraints.insert(
+                    col_idx,
+                    PredicateConstraint::IntRange {
+                        min: Some(v),
+                        max: Some(v),
+                    },
+                );
+            }
+            _ => {
+                self.constraints
+                    .insert(col_idx, PredicateConstraint::IntIn(vals));
+            }
+        }
+    }
+
+    fn set_u64_values_constraint(&mut self, col_idx: usize, mut vals: Vec<u64>) {
+        vals.sort_unstable();
+        vals.dedup();
+        match vals.len() {
+            0 => self.contradiction = true,
+            1 => {
+                let v = vals[0];
+                self.constraints.insert(
+                    col_idx,
+                    PredicateConstraint::UInt64Range {
+                        min: Some(v),
+                        max: Some(v),
+                    },
+                );
+            }
+            _ => {
+                self.constraints
+                    .insert(col_idx, PredicateConstraint::UInt64In(vals));
+            }
+        }
+    }
+
+    fn set_fixed_binary_values_constraint(&mut self, col_idx: usize, mut vals: Vec<Vec<u8>>) {
+        vals.sort();
+        vals.dedup();
+        match vals.len() {
+            0 => self.contradiction = true,
+            1 => {
+                self.constraints.insert(
+                    col_idx,
+                    PredicateConstraint::FixedBinaryEq(vals.into_iter().next().unwrap()),
+                );
+            }
+            _ => {
+                self.constraints
+                    .insert(col_idx, PredicateConstraint::FixedBinaryIn(vals));
+            }
         }
     }
 
@@ -2191,6 +2227,17 @@ pub(crate) fn in_f64_bounds(
         }
     }
     true
+}
+
+fn ord_satisfies_op<T: Ord>(value: T, op: Operator, literal: T) -> bool {
+    match op {
+        Operator::Eq => value == literal,
+        Operator::Gt => value > literal,
+        Operator::GtEq => value >= literal,
+        Operator::Lt => value < literal,
+        Operator::LtEq => value <= literal,
+        _ => true,
+    }
 }
 
 pub(crate) fn apply_int_constraint(
