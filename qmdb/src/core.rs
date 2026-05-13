@@ -16,10 +16,11 @@ use exoware_sdk::{ClientError, RangeMode, SerializableReadSession, StoreClient};
 
 use crate::codec::{
     decode_digest, decode_operation_location_key, decode_update_location,
-    decode_watermark_location, encode_chunk_key, encode_current_meta_key, encode_grafted_node_key,
-    encode_node_key, encode_operation_key, encode_ops_root_witness_key, encode_presence_key,
-    encode_update_key, encode_watermark_key, ensure_encoded_value_size, merkle_size_for_watermark,
-    CurrentBoundaryMetadata, UpdateRow, WATERMARK_CODEC,
+    decode_watermark_location, encode_chunk_key, encode_current_boundary_metadata,
+    encode_current_meta_key, encode_grafted_node_key, encode_node_key, encode_operation_key,
+    encode_ops_root_witness_key, encode_presence_key, encode_update_key, encode_watermark_key,
+    ensure_encoded_value_size, merkle_size_for_watermark, CurrentBoundaryMetadata, UpdateRow,
+    WATERMARK_CODEC,
 };
 use crate::error::QmdbError;
 use crate::VersionedValue;
@@ -425,12 +426,10 @@ impl PreparedCurrentBoundaryUpload {
         );
         rows.push((
             encode_current_meta_key(latest_location),
-            CurrentBoundaryMetadata {
+            encode_current_boundary_metadata(CurrentBoundaryMetadata {
                 root: current_boundary.root,
                 pruned_chunks: current_boundary.pruned_chunks,
-            }
-            .encode()
-            .to_vec(),
+            }),
         ));
         rows.push((
             encode_ops_root_witness_key(latest_location),

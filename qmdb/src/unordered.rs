@@ -17,9 +17,10 @@ use exoware_sdk::keys::Key;
 use exoware_sdk::{RangeMode, SerializableReadSession, StoreClient};
 
 use crate::codec::{
-    bitmap_chunk_bits, chunk_index_for_location, clear_below_floor, decode_update_location,
-    encode_chunk_key, encode_current_meta_key, encode_ops_root_witness_key,
-    merkle_size_for_watermark, CurrentBoundaryMetadata, UpdateRow,
+    bitmap_chunk_bits, chunk_index_for_location, clear_below_floor,
+    decode_current_boundary_metadata, decode_update_location, encode_chunk_key,
+    encode_current_meta_key, encode_ops_root_witness_key, merkle_size_for_watermark,
+    CurrentBoundaryMetadata, UpdateRow,
 };
 use crate::connect::OperationKv;
 use crate::core::HistoricalOpsClientCore;
@@ -538,11 +539,10 @@ where
                 location: location.as_u64(),
             });
         };
-        CurrentBoundaryMetadata::<H::Digest>::decode_cfg(bytes.as_ref(), &()).map_err(|e| {
-            QmdbError::CorruptData(format!(
-                "current boundary metadata at {location} decode error: {e}"
-            ))
-        })
+        decode_current_boundary_metadata::<H::Digest>(
+            bytes.as_ref(),
+            format!("current boundary metadata at {location}"),
+        )
     }
 
     async fn load_current_boundary_root(
