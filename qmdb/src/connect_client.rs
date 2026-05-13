@@ -684,8 +684,8 @@ where
                         "failed to decode historical ops-root witness: {err}"
                     ))
                 })?;
-            let mut hasher = commonware_storage::qmdb::hasher::<H>();
-            if !witness.verify(&mut hasher, &ops_root, expected_root) {
+            let hasher = commonware_storage::qmdb::hasher::<H>();
+            if !witness.verify(&hasher, &ops_root, expected_root) {
                 return Err(QmdbError::ProofVerification {
                     kind: crate::ProofKind::BatchMulti,
                 });

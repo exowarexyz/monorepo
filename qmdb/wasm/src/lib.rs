@@ -109,8 +109,8 @@ fn historical_target_root<F: merkle::Graftable>(
                 &(),
             )
             .map_err(|err| format!("failed to decode historical ops-root witness: {err}"))?;
-            let mut hasher = commonware_storage::qmdb::hasher::<Sha256>();
-            if !witness.verify(&mut hasher, &ops_root, expected_root) {
+            let hasher = commonware_storage::qmdb::hasher::<Sha256>();
+            if !witness.verify(&hasher, &ops_root, expected_root) {
                 return Err("historical ops-root witness failed verification".to_string());
             }
             Ok(ops_root)
