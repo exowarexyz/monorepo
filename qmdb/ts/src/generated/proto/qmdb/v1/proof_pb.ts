@@ -266,3 +266,4 @@ export type CurrentKeyRangeEntry = Message<"qmdb.v1.CurrentKeyRangeEntry"> & {
  */
 export const CurrentKeyRangeEntrySchema: GenMessage<CurrentKeyRangeEntry> = /*@__PURE__*/
   messageDesc(file_qmdb_v1_proof, 7);
+

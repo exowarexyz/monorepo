@@ -100,3 +100,4 @@ export type BadRequest_FieldViolation = Message<"google.rpc.BadRequest.FieldViol
  */
 export const BadRequest_FieldViolationSchema: GenMessage<BadRequest_FieldViolation> = /*@__PURE__*/
   messageDesc(file_google_rpc_error_details, 2, 0);
+

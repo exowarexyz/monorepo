@@ -57,3 +57,4 @@ export type QueryResponse = Message<"sql.v1.QueryResponse"> & {
  */
 export const QueryResponseSchema: GenMessage<QueryResponse> = /*@__PURE__*/
   messageDesc(file_sql_v1_query, 1);
+
