@@ -253,4 +253,20 @@ async fn mirror_ordered_prune_past_chunk_zero() {
         remote_root_old, first.root,
         "remote current_root at first watermark disagrees with local root"
     );
+
+    let old_range = reader
+        .key_range_proof_raw_at(
+            first.watermark,
+            b"k-00000000".as_slice(),
+            Some(b"k-00000001".as_slice()),
+            10,
+        )
+        .await
+        .expect("old watermark range proof");
+    assert_eq!(old_range.watermark, first.watermark);
+    assert_eq!(old_range.entries.len(), 1);
+    let entry = &old_range.entries[0];
+    assert_eq!(entry.key, b"k-00000000".to_vec());
+    assert_eq!(entry.proof.root, first.root);
+    assert!(entry.proof.verify::<Sha256>());
 }
