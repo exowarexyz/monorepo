@@ -847,15 +847,11 @@ where
         .iter()
         .enumerate()
         .map(|(index, bytes)| {
-            if bytes.len() != N {
-                return Err(QmdbError::CorruptData(format!(
-                    "current operation range chunk {index} has invalid length {}",
-                    bytes.len()
-                )));
-            }
-            let mut chunk = [0u8; N];
-            chunk.copy_from_slice(bytes);
-            Ok(chunk)
+            <[u8; N]>::decode(bytes.as_ref()).map_err(|e| {
+                QmdbError::CorruptData(format!(
+                    "current operation range chunk {index} decode error: {e}"
+                ))
+            })
         })
         .collect::<Result<Vec<_>, QmdbError>>()?;
     let hasher = commonware_storage::qmdb::hasher::<H>();

@@ -19,7 +19,7 @@ use crate::codec::{
     decode_watermark_location, encode_chunk_key, encode_current_meta_key, encode_grafted_node_key,
     encode_node_key, encode_operation_key, encode_ops_root_witness_key, encode_presence_key,
     encode_update_key, encode_watermark_key, ensure_encoded_value_size, merkle_size_for_watermark,
-    UpdateRow, WATERMARK_CODEC,
+    CurrentBoundaryMetadata, UpdateRow, WATERMARK_CODEC,
 };
 use crate::error::QmdbError;
 use crate::VersionedValue;
@@ -425,7 +425,12 @@ impl PreparedCurrentBoundaryUpload {
         );
         rows.push((
             encode_current_meta_key(latest_location),
-            current_boundary.root.as_ref().to_vec(),
+            CurrentBoundaryMetadata {
+                root: current_boundary.root,
+                pruned_chunks: current_boundary.pruned_chunks,
+            }
+            .encode()
+            .to_vec(),
         ));
         rows.push((
             encode_ops_root_witness_key(latest_location),
@@ -434,7 +439,7 @@ impl PreparedCurrentBoundaryUpload {
         for &(chunk_index, chunk) in &current_boundary.chunks {
             rows.push((
                 encode_chunk_key(chunk_index, latest_location),
-                chunk.to_vec(),
+                chunk.encode().to_vec(),
             ));
         }
         for &(ops_position, digest) in &current_boundary.grafted_nodes {
@@ -442,7 +447,7 @@ impl PreparedCurrentBoundaryUpload {
                 grafting::ops_to_grafted_pos::<F>(ops_position, grafting::height::<N>());
             rows.push((
                 encode_grafted_node_key(grafted_position, latest_location),
-                digest.as_ref().to_vec(),
+                digest.encode().to_vec(),
             ));
         }
         Ok(Self { rows })
@@ -550,6 +555,7 @@ mod tests {
         let latest_location = Location::new(1024);
         let boundary = crate::CurrentBoundaryState::<_, 32, mmr::Family> {
             root: digest,
+            pruned_chunks: 0,
             ops_root_witness: commonware_storage::qmdb::current::proof::OpsRootWitness {
                 grafted_root: digest,
                 pending_chunk_digest:

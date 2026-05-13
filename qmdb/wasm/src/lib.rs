@@ -288,15 +288,8 @@ where
         .iter()
         .enumerate()
         .map(|(index, bytes)| {
-            if bytes.len() != 32 {
-                return Err(format!(
-                    "current operation range chunk {index} has invalid length {}",
-                    bytes.len()
-                ));
-            }
-            let mut chunk = [0u8; 32];
-            chunk.copy_from_slice(bytes);
-            Ok(chunk)
+            <[u8; 32]>::decode(bytes.as_slice())
+                .map_err(|err| format!("current operation range chunk {index} decode error: {err}"))
         })
         .collect::<Result<Vec<_>, String>>()?;
     let hasher = commonware_storage::qmdb::hasher::<Sha256>();

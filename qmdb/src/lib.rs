@@ -220,6 +220,8 @@ impl<D: Digest, F: Family> WriterState<D, F> {
 pub struct CurrentBoundaryState<D: Digest, const N: usize, F: Graftable> {
     /// Canonical current-state root at this batch boundary.
     pub root: D,
+    /// Number of complete bitmap chunks pruned from the local current DB.
+    pub pruned_chunks: u64,
     /// Proof that the raw operation-log root is committed by `root`.
     pub ops_root_witness: OpsRootWitness<F, D>,
     /// Changed bitmap chunks keyed by chunk index.

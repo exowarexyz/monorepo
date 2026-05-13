@@ -74,26 +74,33 @@ export interface LocatedOrderedOperation {
 
 export interface VerifiedHistoricalMultiProof {
   operations: LocatedOrderedOperation[];
+  proofSizeBytes: number;
 }
 
 export interface DecodedHistoricalMultiProof {
   operations: LocatedOrderedOperation[];
+  proofSizeBytes: number;
 }
 
 export interface VerifiedCurrentOperationRangeProof {
   operations: LocatedOrderedOperation[];
+  proofSizeBytes: number;
 }
 
-export interface VerifiedCurrentKeyValueProof {
+export interface VerifiedCurrentKeyValue {
   location: bigint;
   operation: OrderedOperation;
+}
+
+export interface VerifiedCurrentKeyValueProof extends VerifiedCurrentKeyValue {
+  proofSizeBytes: number;
 }
 
 export type VerifiedCurrentKeyLookupResult =
   | ({
       type: 'hit';
       key: Uint8Array;
-    } & VerifiedCurrentKeyValueProof)
+    } & VerifiedCurrentKeyValue)
   | {
       type: 'miss';
       key: Uint8Array;
@@ -101,6 +108,7 @@ export type VerifiedCurrentKeyLookupResult =
 
 export interface VerifiedCurrentKeyLookupProof {
   results: VerifiedCurrentKeyLookupResult[];
+  proofSizeBytes: number;
 }
 
 export interface VerifiedCurrentKeyRangeEntry {
@@ -113,6 +121,7 @@ export interface VerifiedCurrentKeyRangeProof {
   entries: VerifiedCurrentKeyRangeEntry[];
   hasMore: boolean;
   nextStartKey: Uint8Array;
+  proofSizeBytes: number;
 }
 
 export interface OrderedSubscribeProof {
@@ -203,12 +212,13 @@ export class OrderedQmdbClient {
     if (!response.proof) {
       throw new Error('qmdb get response missing proof');
     }
+    const proofBytes = toBinary(CurrentKeyValueProofSchema, response.proof);
     const verified = verify_current_key_value_proof(
-      toBinary(CurrentKeyValueProofSchema, response.proof),
+      proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,
-    ) as VerifiedCurrentKeyValueProof;
-    return verified;
+    ) as Omit<VerifiedCurrentKeyValueProof, 'proofSizeBytes'>;
+    return { ...verified, proofSizeBytes: proofBytes.length };
   }
 
   async getMany(
@@ -225,12 +235,13 @@ export class OrderedQmdbClient {
       }),
       options,
     );
+    const proofBytes = toBinary(GetManyResponseSchema, response);
     const verified = verify_get_many_response(
-      toBinary(GetManyResponseSchema, response),
+      proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,
-    ) as VerifiedCurrentKeyLookupProof;
-    return verified;
+    ) as Omit<VerifiedCurrentKeyLookupProof, 'proofSizeBytes'>;
+    return { ...verified, proofSizeBytes: proofBytes.length };
   }
 
   async getRange(
@@ -256,15 +267,16 @@ export class OrderedQmdbClient {
       }),
       options,
     );
+    const proofBytes = toBinary(GetRangeResponseSchema, response);
     const verified = verify_get_range_response(
-      toBinary(GetRangeResponseSchema, response),
+      proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,
       startKey,
       endKey ?? new Uint8Array(),
       endKey !== undefined,
-    ) as VerifiedCurrentKeyRangeProof;
-    return verified;
+    ) as Omit<VerifiedCurrentKeyRangeProof, 'proofSizeBytes'>;
+    return { ...verified, proofSizeBytes: proofBytes.length };
   }
 
   async *subscribe(
@@ -290,14 +302,15 @@ export class OrderedQmdbClient {
       if (!frame.proof) {
         throw new Error('qmdb subscribe response missing proof');
       }
+      const proofBytes = toBinary(HistoricalMultiProofSchema, frame.proof);
       const proof = decode_historical_multi_proof_operations(
-        toBinary(HistoricalMultiProofSchema, frame.proof),
+        proofBytes,
         this.merkleFamily,
-      ) as DecodedHistoricalMultiProof;
+      ) as Omit<DecodedHistoricalMultiProof, 'proofSizeBytes'>;
       yield {
         resumeSequenceNumber: frame.resumeSequenceNumber,
         tip: frame.tip,
-        proof,
+        proof: { ...proof, proofSizeBytes: proofBytes.length },
       };
     }
   }
@@ -319,11 +332,13 @@ export class OrderedQmdbClient {
     if (!response.proof) {
       throw new Error('qmdb getOperationRange response missing proof');
     }
-    return verify_historical_operation_range_proof(
-      toBinary(HistoricalOperationRangeProofSchema, response.proof),
+    const proofBytes = toBinary(HistoricalOperationRangeProofSchema, response.proof);
+    const verified = verify_historical_operation_range_proof(
+      proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,
-    ) as VerifiedHistoricalMultiProof;
+    ) as Omit<VerifiedHistoricalMultiProof, 'proofSizeBytes'>;
+    return { ...verified, proofSizeBytes: proofBytes.length };
   }
 
   async getCurrentOperationRange(
@@ -343,10 +358,12 @@ export class OrderedQmdbClient {
     if (!response.proof) {
       throw new Error('qmdb getCurrentOperationRange response missing proof');
     }
-    return verify_current_operation_range_proof(
-      toBinary(CurrentOperationRangeProofSchema, response.proof),
+    const proofBytes = toBinary(CurrentOperationRangeProofSchema, response.proof);
+    const verified = verify_current_operation_range_proof(
+      proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,
-    ) as VerifiedCurrentOperationRangeProof;
+    ) as Omit<VerifiedCurrentOperationRangeProof, 'proofSizeBytes'>;
+    return { ...verified, proofSizeBytes: proofBytes.length };
   }
 }

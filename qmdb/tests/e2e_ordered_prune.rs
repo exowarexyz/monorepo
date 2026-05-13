@@ -70,6 +70,7 @@ async fn boundary_from_db(
         previous_ops,
         operations,
         db.root(),
+        *db.sync_boundary() / ((N as u64) * 8),
         ops_root_witness,
         |location| async move {
             let hasher = commonware_storage::qmdb::hasher::<Sha256>();

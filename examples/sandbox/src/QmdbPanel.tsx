@@ -51,6 +51,11 @@ function formatBytes(bytes: Uint8Array): string {
     .join('')}`;
 }
 
+function formatProofSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  return `${(bytes / 1024).toFixed(1)} KiB`;
+}
+
 function parseTip(value: string): bigint {
   const trimmed = value.trim();
   if (!trimmed) {
@@ -103,7 +108,10 @@ export function QmdbPanel({
   qmdbUrl: string;
   showNotification: NotificationFn;
 }) {
-  const client = useMemo(() => new OrderedQmdbClient(qmdbUrl), [qmdbUrl]);
+  const client = useMemo(
+    () => new OrderedQmdbClient(qmdbUrl, { merkleFamily: 'mmb' }),
+    [qmdbUrl],
+  );
   const subscribeAbortRef = useRef<AbortController | null>(null);
 
   const [isConnected, setIsConnected] = useState(false);
@@ -165,7 +173,11 @@ export function QmdbPanel({
         parseHexRoot(expectedCurrentRoot),
       );
       setGetProof(proof);
-      showNotification('success', 'QMDB Get', `Verified proof for "${getKey}" against expected root`);
+      showNotification(
+        'success',
+        'QMDB Get',
+        `Verified proof for "${getKey}" against expected root (${formatProofSize(proof.proofSizeBytes)})`,
+      );
     } catch (error) {
       showNotification('error', 'QMDB Get Failed', String(error));
     } finally {
@@ -193,7 +205,7 @@ export function QmdbPanel({
       showNotification(
         'success',
         'QMDB GetMany',
-        `Verified ${proof.results.length} key results against expected root`,
+        `Verified ${proof.results.length} key results against expected root (${formatProofSize(proof.proofSizeBytes)})`,
       );
     } catch (error) {
       showNotification('error', 'QMDB GetMany Failed', String(error));
@@ -224,7 +236,7 @@ export function QmdbPanel({
       showNotification(
         'success',
         'QMDB GetRange',
-        `Verified ${proof.entries.length} ordered entries against expected root`,
+        `Verified ${proof.entries.length} ordered entries against expected root (${formatProofSize(proof.proofSizeBytes)})`,
       );
     } catch (error) {
       showNotification('error', 'QMDB GetRange Failed', String(error));
@@ -303,6 +315,7 @@ export function QmdbPanel({
           and included operations.
         </p>
         <p><strong>Server:</strong> {qmdbUrl}</p>
+        <p><strong>Merkle Family:</strong> MMB</p>
         <p><strong>Status:</strong> {isConnected ? 'Connected' : 'Disconnected'}</p>
         <div className="form-row">
           <div className="form-group">
@@ -354,6 +367,7 @@ export function QmdbPanel({
         {getProof && (
           <div className="result fade-in">
             <h4>Verified Current Proof</h4>
+            <p><strong>Proof Size:</strong> {formatProofSize(getProof.proofSizeBytes)}</p>
             <p><strong>Location:</strong> {getProof.location.toString()}</p>
             {renderOperation(getProof.operation)}
           </div>
@@ -385,6 +399,7 @@ export function QmdbPanel({
         {manyProof && (
           <div className="result fade-in">
             <h4>Verified Current Key Results</h4>
+            <p><strong>Proof Size:</strong> {formatProofSize(manyProof.proofSizeBytes)}</p>
             <div className="result-list">
               {manyProof.results.map((result, index) => (
                 <div key={`${formatBytes(result.key)}-${index}`} className="result-row-block">
@@ -451,6 +466,7 @@ export function QmdbPanel({
         {rangeProof && (
           <div className="result fade-in">
             <h4>Verified Ordered Range</h4>
+            <p><strong>Proof Size:</strong> {formatProofSize(rangeProof.proofSizeBytes)}</p>
             <p><strong>Has More:</strong> {rangeProof.hasMore ? 'yes' : 'no'}</p>
             {rangeProof.nextStartKey.length > 0 && (
               <p><strong>Next Start Key:</strong> {formatBytes(rangeProof.nextStartKey)}</p>
@@ -605,6 +621,9 @@ export function QmdbPanel({
                       <strong>Commits:</strong> {counts.commits}
                       {' · '}
                       <strong>Locations:</strong> {locationRange}
+                      {' · '}
+                      <strong>Proof Size:</strong>{' '}
+                      {formatProofSize(event.proof.proofSizeBytes)}
                     </p>
                     {ops.length > 0 && (
                       <div className="result-list">

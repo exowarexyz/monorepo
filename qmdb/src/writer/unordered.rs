@@ -69,7 +69,7 @@ where
 
     let mut rows = prepared.into_all_rows();
     for (pos, digest) in &ext.new_nodes {
-        rows.push((encode_node_key(*pos), digest.as_ref().to_vec()));
+        rows.push((encode_node_key(*pos), digest.encode().to_vec()));
     }
     if let Some(loc) = watermark_at {
         rows.push((encode_watermark_key(loc), Vec::new()));

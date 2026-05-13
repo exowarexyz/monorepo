@@ -49,6 +49,7 @@ impl<F: Family, D: Digest> MerkleStorage<F> for KvMerkleStorage<'_, F, D> {
 pub(crate) struct KvCurrentStorage<'a, F: Graftable, D: Digest, const N: usize> {
     pub(crate) session: &'a SerializableReadSession,
     pub(crate) watermark: Location<F>,
+    pub(crate) pruned_chunks: u64,
     pub(crate) size: Position<F>,
     pub(crate) _marker: PhantomData<D>,
 }
@@ -81,6 +82,29 @@ impl<F: Graftable, D: Digest, const N: usize> MerkleStorage<F> for KvCurrentStor
         }
 
         let grafted_position = grafting::ops_to_grafted_pos::<F>(position, grafting_height);
+        let grafted_height = F::pos_to_height(grafted_position);
+        let leftmost = F::leftmost_leaf(grafted_position, grafted_height);
+        let covered_chunks = 1u64.checked_shl(grafted_height).ok_or_else(|| {
+            merkle::Error::DataCorrupted("exoware-qmdb current grafted height overflow")
+        })?;
+        if (*leftmost).saturating_add(covered_chunks) <= self.pruned_chunks {
+            let key = encode_node_key(position);
+            let bytes = self.session.get(&key).await.map_err(|_| {
+                merkle::Error::DataCorrupted("exoware-qmdb current pruned ops node fetch failed")
+            })?;
+            let Some(bytes) = bytes else {
+                return Ok(None);
+            };
+            if bytes.len() != D::SIZE {
+                return Err(merkle::Error::DataCorrupted(
+                    "exoware-qmdb current pruned ops node has invalid length",
+                ));
+            }
+            return D::decode(bytes.as_ref()).map(Some).map_err(|_| {
+                merkle::Error::DataCorrupted("exoware-qmdb current pruned ops node decode failed")
+            });
+        }
+
         let start = encode_grafted_node_key(grafted_position, Location::new(0));
         let end = encode_grafted_node_key(grafted_position, self.watermark);
         let rows = self

@@ -4,6 +4,7 @@
 
 mod common;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 
 use commonware_cryptography::Sha256;
@@ -69,6 +70,7 @@ where
         previous_operations,
         operations,
         db.root(),
+        0,
         ops_root_witness,
         |location| async move {
             let hasher = commonware_storage::qmdb::hasher::<Sha256>();
@@ -127,6 +129,7 @@ where
         previous_operations,
         operations,
         db.root(),
+        0,
         ops_root_witness,
         |location| async move {
             let hasher = commonware_storage::qmdb::hasher::<Sha256>();
@@ -287,6 +290,7 @@ where
         previous_operations,
         operations,
         db.root(),
+        0,
         ops_root_witness,
         |location| async move {
             let hasher = commonware_storage::qmdb::hasher::<Sha256>();
@@ -583,6 +587,176 @@ async fn ordered_mmb_multi_peak_grafted_chunk_round_trip() {
         }
         _ => panic!("expected Update operation"),
     }
+}
+
+async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
+    partition_prefix: &'static str,
+) where
+    F: Graftable + Send + Sync + 'static,
+    BatchOperation<F>:
+        commonware_codec::Codec + commonware_codec::Encode + commonware_codec::Decode + Clone,
+{
+    let (_dir, _server, client) = common::local_store_client().await;
+    let (uploads, latest_location, latest_key, expected_root, expected_active) =
+        tokio::task::spawn_blocking(move || {
+            cw_tokio::Runner::default().start(|context| async move {
+                use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
+                let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+                let cfg = common::ordered_variable_config(
+                    partition_prefix,
+                    page_cache,
+                    op_cfg::<F>(),
+                    NZU64!(8),
+                );
+                let mut db: LocalDb<F> = LocalQmdbDb::init(context.child(partition_prefix), cfg)
+                    .await
+                    .expect("init");
+
+                let mut previous_ops = Vec::<BatchOperation<F>>::new();
+                let mut uploads =
+                    Vec::<(Vec<BatchOperation<F>>, CurrentBoundaryState<Digest, N, F>)>::new();
+                let mut expected_active = BTreeMap::<Vec<u8>, Vec<u8>>::new();
+                let mut counter = 0u64;
+
+                for _ in 0..80 {
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for offset in 0..3u64 {
+                            let key = format!("k-{:08x}", counter + offset).into_bytes();
+                            let value = format!("v-{:08x}", counter + offset).into_bytes();
+                            expected_active.insert(key.clone(), value.clone());
+                            batch = batch.write(key, Some(value));
+                        }
+                        if counter >= 3 {
+                            let rewrite_key = format!("k-{:08x}", counter - 3).into_bytes();
+                            let rewrite_value = format!("v-{:08x}-r", counter).into_bytes();
+                            expected_active.insert(rewrite_key.clone(), rewrite_value.clone());
+                            batch = batch.write(rewrite_key, Some(rewrite_value));
+                        }
+                        if counter >= 6 && counter.is_multiple_of(12) {
+                            let delete_key = format!("k-{:08x}", counter - 6).into_bytes();
+                            expected_active.remove(&delete_key);
+                            batch = batch.write(delete_key, None);
+                        }
+                        counter += 3;
+                        batch
+                            .merkleize(&db, None::<Vec<u8>>)
+                            .await
+                            .expect("merkleize")
+                    };
+                    db.apply_batch(finalized).await.expect("apply");
+
+                    let latest = db.bounds().await.end - 1;
+                    let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");
+                    let (_proof, cumulative_ops) = db
+                        .ops_historical_proof(latest + 1, Location::<F>::new(0), count)
+                        .await
+                        .expect("historical proof");
+                    let previous_slice = if previous_ops.is_empty() {
+                        None
+                    } else {
+                        Some(previous_ops.as_slice())
+                    };
+                    let boundary =
+                        boundary_from_local_db(&db, previous_slice, &cumulative_ops).await;
+                    let delta = cumulative_ops[previous_ops.len()..].to_vec();
+                    uploads.push((delta, boundary));
+                    previous_ops = cumulative_ops;
+                }
+
+                let latest_location = db.bounds().await.end - 1;
+                let latest_key = format!("k-{:08x}", counter - 3).into_bytes();
+                let expected_root = db.root();
+                db.destroy().await.expect("destroy");
+                (
+                    uploads,
+                    latest_location,
+                    latest_key,
+                    expected_root,
+                    expected_active,
+                )
+            })
+        })
+        .await
+        .expect("join");
+
+    let writer: TestOrderedWriter<F> = TestOrderedWriter::empty(client.clone());
+    for (delta, boundary) in &uploads {
+        common::commit_ordered_upload(&client, &writer, delta, boundary)
+            .await
+            .expect("commit upload");
+    }
+
+    let c: TestOrderedClient<F> =
+        OrderedClient::from_client(client.clone(), op_cfg::<F>(), update_row_cfg());
+    let key_proof = c
+        .key_value_proof_at(latest_location, latest_key.as_slice())
+        .await
+        .expect("latest key proof");
+    assert_eq!(key_proof.root, expected_root);
+    match &key_proof.operation {
+        QmdbOperation::Update(update) => {
+            assert_eq!(update.key, latest_key);
+        }
+        _ => panic!("expected Update operation"),
+    }
+
+    let mut sample_keys = BTreeSet::new();
+    sample_keys.extend(expected_active.keys().take(24).cloned());
+    sample_keys.extend(expected_active.keys().rev().take(8).cloned());
+    for key in sample_keys {
+        let expected_value = expected_active
+            .get(&key)
+            .expect("sample key must be active");
+        let proof = c
+            .key_value_proof_at(latest_location, key.as_slice())
+            .await
+            .unwrap_or_else(|error| panic!("active key proof for {key:?}: {error:?}"));
+        assert_eq!(proof.root, expected_root);
+        match &proof.operation {
+            QmdbOperation::Update(update) => {
+                assert_eq!(update.key, key);
+                assert_eq!(update.value, *expected_value);
+            }
+            _ => panic!("expected Update operation"),
+        }
+    }
+
+    let raw_range = c
+        .key_range_proof_raw_at(
+            latest_location,
+            b"k-00000000".as_slice(),
+            Some(b"k-00000020".as_slice()),
+            10,
+        )
+        .await
+        .expect("old-key range proof");
+    let expected_range_keys = expected_active
+        .range(b"k-00000000".to_vec()..b"k-00000020".to_vec())
+        .take(10)
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(raw_range.entries.len(), expected_range_keys.len());
+    for (entry, expected_key) in raw_range.entries.iter().zip(expected_range_keys) {
+        assert_eq!(entry.key, expected_key);
+        assert!(entry.proof.verify::<Sha256>());
+    }
+}
+
+#[tokio::test]
+async fn ordered_mmb_incremental_seed_batches_keep_current_proofs_verifiable() {
+    assert_incremental_seed_batches_keep_current_proofs_verifiable::<mmb::Family>(
+        "ordered_mmb_incremental_seed",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn ordered_mmr_incremental_seed_batches_keep_current_proofs_verifiable() {
+    assert_incremental_seed_batches_keep_current_proofs_verifiable::<mmr::Family>(
+        "ordered_mmr_incremental_seed",
+    )
+    .await;
 }
 
 #[tokio::test]

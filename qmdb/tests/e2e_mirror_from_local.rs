@@ -400,6 +400,7 @@ async fn ordered_boundary_from_local_db(
         previous_operations,
         operations,
         db.root(),
+        0,
         ops_root_witness,
         |location| async move {
             let hasher = commonware_storage::qmdb::hasher::<Sha256>();

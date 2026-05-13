@@ -19,6 +19,59 @@ use crate::codec::{bitmap_chunk_bits, chunk_index_for_location};
 use crate::error::QmdbError;
 use crate::CurrentBoundaryState;
 
+fn merge_authenticated_digest<F: Family, D: Copy + PartialEq>(
+    authenticated_digests: &mut BTreeMap<Position<F>, D>,
+    position: Position<F>,
+    digest: D,
+) -> Result<(), QmdbError> {
+    if let Some(existing) = authenticated_digests.insert(position, digest) {
+        if existing != digest {
+            return Err(QmdbError::CorruptData(format!(
+                "current range proofs disagree on digest at position {position}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn authenticate_location<M, H, Op, const N: usize, Prove, Fut>(
+    location: Location<M>,
+    operations: &[Op],
+    root: H::Digest,
+    prove_at: &mut Prove,
+    authenticated_digests: &mut BTreeMap<Position<M>, H::Digest>,
+) -> Result<(u64, [u8; N]), QmdbError>
+where
+    M: Graftable,
+    H: Hasher,
+    Op: QmdbOperation<M> + Codec,
+    Prove: FnMut(Location<M>) -> Fut,
+    Fut: Future<Output = Result<(RangeProof<M, H::Digest>, [u8; N]), QmdbError>>,
+{
+    let (proof, chunk) = prove_at(location).await?;
+    let operation = operations.get(*location as usize).ok_or_else(|| {
+        QmdbError::CorruptData(format!(
+            "missing operation at location {location} in current boundary input"
+        ))
+    })?;
+    let hasher = commonware_storage::qmdb::hasher::<H>();
+    let digest_map = proof
+        .verify_and_extract_digests::<H, _, N>(
+            &hasher,
+            location,
+            std::slice::from_ref(operation),
+            std::slice::from_ref(&chunk),
+            &root,
+        )
+        .ok_or(QmdbError::ProofVerification {
+            kind: crate::ProofKind::CurrentRange,
+        })?;
+    for (position, digest) in digest_map {
+        merge_authenticated_digest(authenticated_digests, position, digest)?;
+    }
+    Ok((chunk_index_for_location::<M, N>(location), chunk))
+}
+
 /// Recover the current-boundary delta for one batch from local proof material
 /// emitted by a Commonware `current` QMDB.
 ///
@@ -28,6 +81,7 @@ use crate::CurrentBoundaryState;
 /// that must be uploaded for that batch boundary:
 ///
 /// - `root`: the local current DB root after applying `operations`
+/// - `pruned_chunks`: the local current bitmap's pruned complete-chunk count
 /// - `ops_root_witness`: the local proof that the operation-log root is
 ///   committed by `root`
 /// - `chunks`: only the bitmap chunks whose contents changed at this boundary
@@ -54,6 +108,7 @@ pub async fn recover_boundary_state<M, H, Op, const N: usize, Prove, Fut>(
     previous_operations: Option<&[Op]>,
     operations: &[Op],
     root: H::Digest,
+    pruned_chunks: u64,
     ops_root_witness: OpsRootWitness<M, H::Digest>,
     mut prove_at: Prove,
 ) -> Result<CurrentBoundaryState<H::Digest, N, M>, QmdbError>
@@ -79,49 +134,40 @@ where
     }
     validate_recovery_input::<M, Op>(previous_operations, operations)?;
 
-    let changed_chunks = changed_chunk_representatives::<M, Op, N>(previous_operations, operations);
     let grafting_height = grafting::height::<N>();
     let ops_leaves = u64::try_from(operations.len())
         .map_err(|_| QmdbError::CorruptData("operation count does not fit in u64".into()))?;
+    let previous_ops_leaves = previous_operations.map_or(0u64, |ops| ops.len() as u64);
     let complete_chunks = ops_leaves / bitmap_chunk_bits::<N>();
     let graftable_chunks =
         grafting::graftable_chunks::<M>(ops_leaves, grafting_height).min(complete_chunks);
+    if pruned_chunks > graftable_chunks {
+        return Err(QmdbError::CorruptData(format!(
+            "current pruned chunks {pruned_chunks} exceeds graftable chunks {graftable_chunks}"
+        )));
+    }
+    let changed_chunks =
+        changed_chunk_representatives::<M, Op, N>(previous_operations, operations, pruned_chunks);
+    let previous_complete_chunks = previous_ops_leaves / bitmap_chunk_bits::<N>();
+    let previous_graftable_chunks =
+        grafting::graftable_chunks::<M>(previous_ops_leaves, grafting_height)
+            .min(previous_complete_chunks);
 
     let mut chunks = BTreeMap::<u64, [u8; N]>::new();
     let mut authenticated_digests = BTreeMap::<Position<M>, H::Digest>::new();
     let mut grafted_digests = BTreeMap::<Position<M>, H::Digest>::new();
     let mut changed_complete_chunks = Vec::new();
 
-    for (chunk_index, location) in changed_chunks {
-        let (proof, chunk) = prove_at(location).await?;
+    for (_chunk_index, location) in changed_chunks {
+        let (chunk_index, chunk) = authenticate_location::<M, H, Op, N, _, _>(
+            location,
+            operations,
+            root,
+            &mut prove_at,
+            &mut authenticated_digests,
+        )
+        .await?;
         chunks.entry(chunk_index).or_insert(chunk);
-
-        let operation = operations.get(*location as usize).ok_or_else(|| {
-            QmdbError::CorruptData(format!(
-                "missing operation at location {location} in current boundary input"
-            ))
-        })?;
-        let hasher = commonware_storage::qmdb::hasher::<H>();
-        let digest_map = proof
-            .verify_and_extract_digests::<H, _, N>(
-                &hasher,
-                location,
-                std::slice::from_ref(operation),
-                std::slice::from_ref(&chunk),
-                &root,
-            )
-            .ok_or(QmdbError::ProofVerification {
-                kind: crate::ProofKind::CurrentRange,
-            })?;
-        for (position, digest) in digest_map {
-            if let Some(existing) = authenticated_digests.insert(position, digest) {
-                if existing != digest {
-                    return Err(QmdbError::CorruptData(format!(
-                        "current range proofs disagree on digest at position {position}"
-                    )));
-                }
-            }
-        }
 
         if chunk_index >= graftable_chunks {
             continue;
@@ -136,20 +182,56 @@ where
         changed_complete_chunks.push(chunk_index);
     }
 
-    for chunk_index in changed_complete_chunks {
-        for (position, digest) in changed_grafted_ancestor_digests_for_chunk::<M, H>(
+    for chunk_index in previous_graftable_chunks.max(pruned_chunks)..graftable_chunks {
+        let location = Location::new(chunk_index * bitmap_chunk_bits::<N>());
+        if chunks.contains_key(&chunk_index) {
+            continue;
+        }
+        let (chunk_index, chunk) = authenticate_location::<M, H, Op, N, _, _>(
+            location,
+            operations,
+            root,
+            &mut prove_at,
+            &mut authenticated_digests,
+        )
+        .await?;
+        chunks.entry(chunk_index).or_insert(chunk);
+
+        let (leaf_grafted_pos, leaf_digest) = changed_grafted_leaf_digest_for_chunk::<M, H>(
             chunk_index,
-            graftable_chunks,
             grafting_height,
             &authenticated_digests,
-            &mut grafted_digests,
-        )? {
+        )?;
+        grafted_digests.insert(leaf_grafted_pos, leaf_digest);
+        changed_complete_chunks.push(chunk_index);
+    }
+
+    for chunk_index in changed_complete_chunks {
+        let ancestors = {
+            let mut ctx = GraftedDigestContext {
+                grafting_height,
+                pruned_chunks,
+                digest_map: &mut authenticated_digests,
+                computed: &mut grafted_digests,
+                operations,
+                root,
+                prove_at: &mut prove_at,
+            };
+            changed_grafted_ancestor_digests_for_chunk::<M, H, Op, N, _, _>(
+                chunk_index,
+                graftable_chunks,
+                &mut ctx,
+            )
+            .await?
+        };
+        for (position, digest) in ancestors {
             grafted_digests.insert(position, digest);
         }
     }
 
     Ok(CurrentBoundaryState {
         root,
+        pruned_chunks,
         ops_root_witness,
         chunks: chunks.into_iter().collect(),
         grafted_nodes: grafted_digests
@@ -213,33 +295,40 @@ where
 fn changed_chunk_representatives<F: Family, Op, const N: usize>(
     previous_operations: Option<&[Op]>,
     operations: &[Op],
+    pruned_chunks: u64,
 ) -> BTreeMap<u64, Location<F>>
 where
     Op: QmdbOperation<F>,
     Op::Key: AsRef<[u8]>,
 {
-    // The inactivity floor of the batch being recovered lives in the trailing
-    // CommitFloor op. Chunks whose entire bit range is below this floor are
-    // fully pruned by `current::Db` after `apply_batch`; we cannot serve a
-    // proof for them and we do not need to. `load_bitmap_chunk` folds all
-    // below-floor bits to 0 deterministically at read time.
+    let previous_floor = previous_operations
+        .and_then(|ops| ops.last())
+        .and_then(QmdbOperation::has_floor)
+        .unwrap_or(Location::new(0));
     let floor = operations
         .last()
         .and_then(QmdbOperation::has_floor)
         .unwrap_or(Location::new(0));
     let chunk_bits = bitmap_chunk_bits::<N>();
-    let floor_chunk = *floor / chunk_bits;
-    let first_alive_location = floor_chunk.saturating_mul(chunk_bits);
 
     let previous_len = previous_operations.map_or(0usize, |ops| ops.len());
     let mut changed = BTreeMap::<u64, Location<F>>::new();
 
     for raw_location in previous_len..operations.len() {
         let location = Location::new(raw_location as u64);
-        if raw_location as u64 >= first_alive_location {
+        let chunk_index = chunk_index_for_location::<F, N>(location);
+        if chunk_index >= pruned_chunks {
+            changed.entry(chunk_index).or_insert(location);
+        }
+    }
+
+    if floor > previous_floor {
+        let start_chunk = (*previous_floor / chunk_bits).max(pruned_chunks);
+        let end_chunk = (*floor - 1) / chunk_bits;
+        for chunk_index in start_chunk..=end_chunk {
             changed
-                .entry(chunk_index_for_location::<F, N>(location))
-                .or_insert(location);
+                .entry(chunk_index)
+                .or_insert(Location::new(chunk_index * chunk_bits));
         }
     }
 
@@ -252,18 +341,17 @@ where
         .filter_map(|operation| operation.key().map(|key| key.as_ref().to_vec()))
         .collect::<BTreeSet<_>>();
 
-    // Walk backwards only as far as the first alive chunk. Anything below
-    // that is fully pruned locally and contributes nothing to the boundary.
     for index in (0..previous.len()).rev() {
-        if touched_keys.is_empty() || (index as u64) < first_alive_location {
+        if touched_keys.is_empty() {
             break;
         }
         let location = Location::new(index as u64);
         if let Some(key) = previous[index].key() {
             if touched_keys.remove(key.as_ref()) && previous[index].is_update() {
-                changed
-                    .entry(chunk_index_for_location::<F, N>(location))
-                    .or_insert(location);
+                let chunk_index = chunk_index_for_location::<F, N>(location);
+                if chunk_index >= pruned_chunks {
+                    changed.entry(chunk_index).or_insert(location);
+                }
             }
         }
     }
@@ -292,21 +380,130 @@ where
     )))
 }
 
-fn changed_grafted_ancestor_digests_for_chunk<F, H>(
+fn grafted_subtree_is_pruned<F: Graftable>(
+    grafted_pos: Position<F>,
+    pruned_chunks: u64,
+) -> Result<bool, QmdbError> {
+    if pruned_chunks == 0 {
+        return Ok(false);
+    }
+    let height = F::pos_to_height(grafted_pos);
+    let leftmost = F::leftmost_leaf(grafted_pos, height);
+    let covered_chunks = 1u64
+        .checked_shl(height)
+        .ok_or_else(|| QmdbError::CorruptData("grafted subtree height overflow".into()))?;
+    Ok((*leftmost).saturating_add(covered_chunks) <= pruned_chunks)
+}
+
+fn ops_subtree_digest<F, H, Op>(
+    position: Position<F>,
+    operations: &[Op],
+) -> Result<H::Digest, QmdbError>
+where
+    F: Graftable,
+    H: Hasher,
+    Op: Encode,
+{
+    let hasher = commonware_storage::qmdb::hasher::<H>();
+    let height = F::pos_to_height(position);
+    if height == 0 {
+        let location = F::leftmost_leaf(position, height);
+        let operation = operations.get(*location as usize).ok_or_else(|| {
+            QmdbError::CorruptData(format!(
+                "missing operation at location {location} for pruned grafted digest"
+            ))
+        })?;
+        return Ok(<StandardHasher<H> as MerkleHasher<F>>::leaf_digest(
+            &hasher,
+            position,
+            operation.encode().as_ref(),
+        ));
+    }
+
+    let (left_pos, right_pos) = F::children(position, height);
+    let left = ops_subtree_digest::<F, H, Op>(left_pos, operations)?;
+    let right = ops_subtree_digest::<F, H, Op>(right_pos, operations)?;
+    Ok(<StandardHasher<H> as MerkleHasher<F>>::node_digest(
+        &hasher, position, &left, &right,
+    ))
+}
+
+struct GraftedDigestContext<'a, F, H, Op, const N: usize, Prove>
+where
+    F: Graftable,
+    H: Hasher,
+{
+    grafting_height: u32,
+    pruned_chunks: u64,
+    digest_map: &'a mut BTreeMap<Position<F>, H::Digest>,
+    computed: &'a mut BTreeMap<Position<F>, H::Digest>,
+    operations: &'a [Op],
+    root: H::Digest,
+    prove_at: &'a mut Prove,
+}
+
+async fn ensure_authenticated_grafted_digest<F, H, Op, const N: usize, Prove, Fut>(
+    grafted_pos: Position<F>,
+    ctx: &mut GraftedDigestContext<'_, F, H, Op, N, Prove>,
+) -> Result<H::Digest, QmdbError>
+where
+    F: Graftable,
+    H: Hasher,
+    Op: QmdbOperation<F> + Codec,
+    Prove: FnMut(Location<F>) -> Fut,
+    Fut: Future<Output = Result<(RangeProof<F, H::Digest>, [u8; N]), QmdbError>>,
+{
+    if let Some(digest) = ctx.computed.get(&grafted_pos).copied() {
+        return Ok(digest);
+    }
+
+    let ops_pos = grafting::grafted_to_ops_pos::<F>(grafted_pos, ctx.grafting_height);
+    if let Some(digest) = ctx.digest_map.get(&ops_pos).copied() {
+        return Ok(digest);
+    }
+
+    if grafted_subtree_is_pruned::<F>(grafted_pos, ctx.pruned_chunks)? {
+        return ops_subtree_digest::<F, H, Op>(ops_pos, ctx.operations);
+    }
+
+    let chunk = F::leftmost_leaf(grafted_pos, F::pos_to_height(grafted_pos));
+    let location = Location::new(
+        (*chunk)
+            .checked_mul(bitmap_chunk_bits::<N>())
+            .ok_or_else(|| QmdbError::CorruptData("grafted chunk location overflow".into()))?,
+    );
+    authenticate_location::<F, H, Op, N, _, _>(
+        location,
+        ctx.operations,
+        ctx.root,
+        ctx.prove_at,
+        ctx.digest_map,
+    )
+    .await?;
+    ctx.digest_map.get(&ops_pos).copied().ok_or_else(|| {
+        QmdbError::CorruptData(format!(
+            "current range proof did not expose grafted digest at ops position {ops_pos}"
+        ))
+    })
+}
+
+async fn changed_grafted_ancestor_digests_for_chunk<F, H, Op, const N: usize, Prove, Fut>(
     chunk_index: u64,
     graftable_chunks: u64,
-    grafting_height: u32,
-    digest_map: &BTreeMap<Position<F>, H::Digest>,
-    computed: &mut BTreeMap<Position<F>, H::Digest>,
+    ctx: &mut GraftedDigestContext<'_, F, H, Op, N, Prove>,
 ) -> Result<Vec<(Position<F>, H::Digest)>, QmdbError>
 where
     F: Graftable,
     H: Hasher,
+    Op: QmdbOperation<F> + Codec,
+    Prove: FnMut(Location<F>) -> Fut,
+    Fut: Future<Output = Result<(RangeProof<F, H::Digest>, [u8; N]), QmdbError>>,
 {
     if chunk_index >= graftable_chunks {
         return Ok(Vec::new());
     }
 
+    let grafting_height = ctx.grafting_height;
     let grafted_size = Position::<F>::try_from(Location::new(graftable_chunks))
         .map_err(|e| QmdbError::CorruptData(format!("invalid grafted current size: {e}")))?;
     let grafted_leaf_pos = Position::<F>::try_from(Location::new(chunk_index))
@@ -331,21 +528,21 @@ where
     let hasher = commonware_storage::qmdb::hasher::<H>();
     let mut out = Vec::with_capacity(parents.len());
     for parent_grafted_pos in parents.into_iter().rev() {
-        if let Some(digest) = computed.get(&parent_grafted_pos).copied() {
+        if let Some(digest) = ctx.computed.get(&parent_grafted_pos).copied() {
             out.push((parent_grafted_pos, digest));
             continue;
         }
 
         let parent_ops_pos = grafting::grafted_to_ops_pos::<F>(parent_grafted_pos, grafting_height);
-        let parent_digest = if let Some(digest) = digest_map.get(&parent_ops_pos).copied() {
+        let parent_digest = if let Some(digest) = ctx.digest_map.get(&parent_ops_pos).copied() {
             digest
         } else {
             let parent_height = F::pos_to_height(parent_grafted_pos);
             let (left_pos, right_pos) = F::children(parent_grafted_pos, parent_height);
             let left_digest =
-                grafted_digest::<F, H>(left_pos, grafting_height, digest_map, computed)?;
+                ensure_authenticated_grafted_digest::<F, H, Op, N, _, _>(left_pos, ctx).await?;
             let right_digest =
-                grafted_digest::<F, H>(right_pos, grafting_height, digest_map, computed)?;
+                ensure_authenticated_grafted_digest::<F, H, Op, N, _, _>(right_pos, ctx).await?;
             <StandardHasher<H> as MerkleHasher<F>>::node_digest(
                 &hasher,
                 parent_ops_pos,
@@ -353,32 +550,10 @@ where
                 &right_digest,
             )
         };
-        computed.insert(parent_grafted_pos, parent_digest);
+        ctx.computed.insert(parent_grafted_pos, parent_digest);
         out.push((parent_grafted_pos, parent_digest));
     }
     Ok(out)
-}
-
-fn grafted_digest<F, H>(
-    grafted_pos: Position<F>,
-    grafting_height: u32,
-    digest_map: &BTreeMap<Position<F>, H::Digest>,
-    computed: &BTreeMap<Position<F>, H::Digest>,
-) -> Result<H::Digest, QmdbError>
-where
-    F: Graftable,
-    H: Hasher,
-{
-    if let Some(digest) = computed.get(&grafted_pos).copied() {
-        return Ok(digest);
-    }
-
-    let ops_pos = grafting::grafted_to_ops_pos::<F>(grafted_pos, grafting_height);
-    digest_map.get(&ops_pos).copied().ok_or_else(|| {
-        QmdbError::CorruptData(format!(
-            "missing grafted sibling digest at ops position {ops_pos}"
-        ))
-    })
 }
 
 fn containing_peak<F: Graftable>(
@@ -443,6 +618,7 @@ mod tests {
         let changed = changed_chunk_representatives::<mmr::Family, TestOperation<_, _, _>, 1>(
             Some(&previous),
             &operations,
+            0,
         );
 
         assert_eq!(
@@ -452,13 +628,11 @@ mod tests {
     }
 
     #[test]
-    fn chunks_fully_below_new_floor_are_skipped() {
+    fn floor_crossed_chunks_are_published() {
         // Trailing CommitFloor(floor=16) means chunks 0 and 1 (covering
-        // locations 0..15) are fully below the floor and handled by read-time
-        // masking; they must not appear in the changed-chunks map. Only chunk
-        // 2 (straddling / above the floor) is tracked, and crucially the
-        // representative for that chunk is an above-floor location so the
-        // local DB can still serve a proof for it.
+        // locations 0..15) become logically zeroed. They still need to be
+        // published so remote proof builders can materialize the same bitmap
+        // view as the local current DB.
         let previous = previous_ops();
         let mut operations = previous.clone();
         operations.push(update(b"target", b"new"));
@@ -467,19 +641,25 @@ mod tests {
         let changed = changed_chunk_representatives::<mmr::Family, TestOperation<_, _, _>, 1>(
             Some(&previous),
             &operations,
+            0,
         );
 
-        assert_eq!(changed, BTreeMap::from([(2u64, Location::new(16))]));
+        assert_eq!(
+            changed,
+            BTreeMap::from([
+                (0u64, Location::new(0)),
+                (1u64, Location::new(8)),
+                (2u64, Location::new(16)),
+            ])
+        );
     }
 
     #[test]
     fn straddling_chunk_keeps_first_new_representative() {
-        // With floor=18, chunks 0 and 1 (locations 0..15) are fully below and
-        // skipped; chunk 2 (locations 16..23) straddles -- locations 16-17 are
-        // below the floor, locations 18-23 are at/above. The local DB still
-        // has chunk 2 intact (it is not fully pruned), so the filter operates
-        // at chunk granularity and keeps chunk 2 with the first new-location
-        // representative.
+        // With floor=18, chunks 0 and 1 (locations 0..15) become logically
+        // zeroed and chunk 2 (locations 16..23) straddles the new floor. The
+        // first appended operation also lands in chunk 2, so that newer
+        // representative is retained.
         let previous = previous_ops();
         let mut operations = previous.clone();
         operations.push(update(b"neighbor1", b"v"));
@@ -490,6 +670,30 @@ mod tests {
         let changed = changed_chunk_representatives::<mmr::Family, TestOperation<_, _, _>, 1>(
             Some(&previous),
             &operations,
+            0,
+        );
+
+        assert_eq!(
+            changed,
+            BTreeMap::from([
+                (0u64, Location::new(0)),
+                (1u64, Location::new(8)),
+                (2u64, Location::new(16)),
+            ])
+        );
+    }
+
+    #[test]
+    fn pruned_chunks_are_not_represented() {
+        let previous = previous_ops();
+        let mut operations = previous.clone();
+        operations.push(update(b"target", b"new"));
+        operations.push(commit(16));
+
+        let changed = changed_chunk_representatives::<mmr::Family, TestOperation<_, _, _>, 1>(
+            Some(&previous),
+            &operations,
+            2,
         );
 
         assert_eq!(changed, BTreeMap::from([(2u64, Location::new(16))]));

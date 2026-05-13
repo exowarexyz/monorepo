@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::marker::PhantomData;
 
-use commonware_codec::{Codec, Decode, Encode, Read as CodecRead};
+use commonware_codec::{Codec, Decode, DecodeExt, Encode, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_storage::merkle::{Graftable, Location};
 use commonware_storage::qmdb::{
@@ -17,9 +17,9 @@ use exoware_sdk::keys::Key;
 use exoware_sdk::{RangeMode, SerializableReadSession, StoreClient};
 
 use crate::codec::{
-    bitmap_chunk_bits, chunk_index_for_location, clear_below_floor, decode_digest,
-    decode_update_location, encode_chunk_key, encode_current_meta_key, encode_ops_root_witness_key,
-    merkle_size_for_watermark, UpdateRow,
+    bitmap_chunk_bits, chunk_index_for_location, clear_below_floor, decode_update_location,
+    encode_chunk_key, encode_current_meta_key, encode_ops_root_witness_key,
+    merkle_size_for_watermark, CurrentBoundaryMetadata, UpdateRow,
 };
 use crate::connect::OperationKv;
 use crate::core::HistoricalOpsClientCore;
@@ -528,20 +528,32 @@ where
         Ok(proofs)
     }
 
-    async fn load_current_boundary_root(
+    async fn load_current_boundary_metadata(
         &self,
         session: &SerializableReadSession,
         location: Location<F>,
-    ) -> Result<H::Digest, QmdbError> {
+    ) -> Result<CurrentBoundaryMetadata<H::Digest>, QmdbError> {
         let Some(bytes) = session.get(&encode_current_meta_key(location)).await? else {
             return Err(QmdbError::CurrentBoundaryStateMissing {
                 location: location.as_u64(),
             });
         };
-        decode_digest(
-            bytes.as_ref(),
-            format!("current boundary root at {location}"),
-        )
+        CurrentBoundaryMetadata::<H::Digest>::decode_cfg(bytes.as_ref(), &()).map_err(|e| {
+            QmdbError::CorruptData(format!(
+                "current boundary metadata at {location} decode error: {e}"
+            ))
+        })
+    }
+
+    async fn load_current_boundary_root(
+        &self,
+        session: &SerializableReadSession,
+        location: Location<F>,
+    ) -> Result<H::Digest, QmdbError> {
+        Ok(self
+            .load_current_boundary_metadata(session, location)
+            .await?
+            .root)
     }
 
     async fn load_ops_root_witness(
@@ -572,7 +584,10 @@ where
             .ok_or_else(|| QmdbError::CorruptData("watermark overflow".to_string()))?;
         let len = *leaves;
         let chunk_bits = bitmap_chunk_bits::<N>();
-        let pruned_chunks_u64 = *inactivity_floor / chunk_bits;
+        let metadata = self
+            .load_current_boundary_metadata(session, watermark)
+            .await?;
+        let pruned_chunks_u64 = metadata.pruned_chunks;
         let pruned_chunks = usize::try_from(pruned_chunks_u64).map_err(|_| {
             QmdbError::CorruptData("current bitmap pruned chunk count overflows usize".to_string())
         })?;
@@ -634,6 +649,7 @@ where
         let storage = KvCurrentStorage::<F, H::Digest, N> {
             session,
             watermark,
+            pruned_chunks: status.pruned_chunks as u64,
             size: merkle_size_for_watermark(watermark)?,
             _marker: PhantomData,
         };
@@ -666,6 +682,7 @@ where
         let storage = KvCurrentStorage::<F, H::Digest, N> {
             session,
             watermark,
+            pruned_chunks: status.pruned_chunks as u64,
             size: merkle_size_for_watermark(watermark)?,
             _marker: PhantomData,
         };
@@ -711,27 +728,13 @@ where
             .range_with_mode(&start, &end, 1, RangeMode::Reverse)
             .await?;
         let mut chunk = match rows.into_iter().next() {
-            Some((_, bytes)) => {
-                if bytes.len() != N {
-                    return Err(QmdbError::CorruptData(format!(
-                        "bitmap chunk {chunk_index} has invalid length {}",
-                        bytes.len()
-                    )));
-                }
-                let mut buf = [0u8; N];
-                buf.copy_from_slice(bytes.as_ref());
-                buf
-            }
+            Some((_, bytes)) => <[u8; N]>::decode(bytes.as_ref()).map_err(|e| {
+                QmdbError::CorruptData(format!("bitmap chunk {chunk_index} decode error: {e}"))
+            })?,
             None => {
-                let chunk_end_exclusive = chunk_index
-                    .saturating_add(1)
-                    .saturating_mul(bitmap_chunk_bits::<N>());
-                if chunk_end_exclusive > *inactivity_floor {
-                    return Err(QmdbError::CorruptData(format!(
-                        "missing bitmap chunk {chunk_index} at watermark {watermark}"
-                    )));
-                }
-                [0u8; N]
+                return Err(QmdbError::CorruptData(format!(
+                    "missing bitmap chunk {chunk_index} at watermark {watermark}"
+                )));
             }
         };
         clear_below_floor::<F, N>(&mut chunk, chunk_index, inactivity_floor);

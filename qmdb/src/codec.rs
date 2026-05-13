@@ -1,4 +1,4 @@
-use commonware_codec::DecodeExt;
+use commonware_codec::{DecodeExt, EncodeSize, Read, Write};
 use commonware_cryptography::Digest;
 use commonware_storage::merkle::{Family, Location, Position};
 use exoware_sdk::keys::{Key, KeyCodec};
@@ -86,6 +86,41 @@ pub(crate) fn decode_digest<D: Digest>(bytes: &[u8], label: String) -> Result<D,
         )));
     }
     D::decode(bytes).map_err(|e| QmdbError::CorruptData(format!("{label} decode error: {e}")))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CurrentBoundaryMetadata<D: Digest> {
+    pub(crate) root: D,
+    pub(crate) pruned_chunks: u64,
+}
+
+impl<D: Digest> Write for CurrentBoundaryMetadata<D> {
+    fn write(&self, buf: &mut impl ::bytes::BufMut) {
+        self.root.write(buf);
+        self.pruned_chunks.write(buf);
+    }
+}
+
+impl<D: Digest> EncodeSize for CurrentBoundaryMetadata<D> {
+    fn encode_size(&self) -> usize {
+        self.root.encode_size() + self.pruned_chunks.encode_size()
+    }
+}
+
+impl<D: Digest> Read for CurrentBoundaryMetadata<D> {
+    type Cfg = ();
+
+    fn read_cfg(
+        buf: &mut impl ::bytes::Buf,
+        _: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let root = D::read_cfg(buf, &())?;
+        let pruned_chunks = u64::read_cfg(buf, &())?;
+        Ok(Self {
+            root,
+            pruned_chunks,
+        })
+    }
 }
 
 pub(crate) fn merkle_size_for_watermark<F: Family>(

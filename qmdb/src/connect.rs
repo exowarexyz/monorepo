@@ -113,7 +113,7 @@ fn raw_batch_multi_proof_to_proto<D: commonware_cryptography::Digest, F: Graftab
         ops_root: proof
             .ops_root_witness
             .as_ref()
-            .map(|_| proof.root.as_ref().to_vec())
+            .map(|_| proof.root.encode().to_vec())
             .unwrap_or_default(),
         ops_root_witness: proof
             .ops_root_witness
@@ -134,7 +134,7 @@ fn operation_range_checkpoint_to_proto<D: commonware_cryptography::Digest, F: Gr
         ops_root: proof
             .ops_root_witness
             .as_ref()
-            .map(|_| proof.root.as_ref().to_vec())
+            .map(|_| proof.root.encode().to_vec())
             .unwrap_or_default(),
         ops_root_witness: proof
             .ops_root_witness
@@ -161,7 +161,11 @@ fn current_operation_range_proof_to_proto<
             .iter()
             .map(|operation| operation.encode().to_vec())
             .collect(),
-        chunks: proof.chunks.iter().map(|chunk| chunk.to_vec()).collect(),
+        chunks: proof
+            .chunks
+            .iter()
+            .map(|chunk| chunk.encode().to_vec())
+            .collect(),
         ..Default::default()
     }
 }
