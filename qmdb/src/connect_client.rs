@@ -3,6 +3,15 @@ use std::fmt::Display;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use crate::proto::qmdb::v1::{
+    current_key_lookup_result, CurrentKeyExclusionProof as ProtoCurrentKeyExclusionProof,
+    CurrentKeyValueProof as ProtoCurrentKeyValueProof,
+    CurrentOperationRangeProof as ProtoCurrentOperationRangeProof, CurrentOperationServiceClient,
+    GetCurrentOperationRangeRequest, GetManyRequest, GetOperationRangeRequest, GetRangeRequest,
+    GetRangeResponse, GetRequest, HistoricalMultiProof, HistoricalOperationRangeProof,
+    KeyLookupServiceClient, OperationLogServiceClient, OrderedKeyRangeServiceClient,
+    SubscribeRequest, SubscribeResponseView,
+};
 use bytes::Bytes;
 use commonware_codec::{Decode, DecodeExt, Encode, Read};
 use commonware_cryptography::{Digest, Hasher};
@@ -23,15 +32,6 @@ use commonware_storage::{
 use connectrpc::client::{ClientConfig, ClientTransport, ServerStream};
 use connectrpc::ConnectError;
 use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::qmdb::v1::{
-    current_key_lookup_result, CurrentKeyExclusionProof as ProtoCurrentKeyExclusionProof,
-    CurrentKeyValueProof as ProtoCurrentKeyValueProof,
-    CurrentOperationRangeProof as ProtoCurrentOperationRangeProof, CurrentOperationServiceClient,
-    GetCurrentOperationRangeRequest, GetManyRequest, GetOperationRangeRequest, GetRangeRequest,
-    GetRangeResponse, GetRequest, HistoricalMultiProof, HistoricalOperationRangeProof,
-    KeyLookupServiceClient, OperationLogServiceClient, OrderedKeyRangeServiceClient,
-    SubscribeRequest, SubscribeResponseView,
-};
 use exoware_sdk::ClientError;
 use http_body::Body;
 

@@ -11,15 +11,15 @@ use commonware_runtime::{deterministic, Runner as _};
 use commonware_storage::merkle::{mmr, Location};
 use commonware_storage::qmdb::keyless::variable::{Db as Keyless, Operation as KeylessOperation};
 use commonware_utils::{NZUsize, NZU16, NZU64};
+use exoware_qmdb::proto::qmdb::v1::{
+    GetOperationRangeRequest as ProtoGetOperationRangeRequest,
+    SubscribeRequest as ProtoSubscribeRequest,
+};
 use exoware_qmdb::{
     keyless_operation_log_connect_stack, KeylessClient, KeylessWriter, OperationLogClient,
     OperationLogSubscribeProof, QmdbError,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::qmdb::v1::{
-    GetOperationRangeRequest as ProtoGetOperationRangeRequest,
-    SubscribeRequest as ProtoSubscribeRequest,
-};
 use exoware_sdk::store::common::v1::{
     bytes_filter as proto_bytes_filter, BytesFilter as ProtoBytesFilter,
 };

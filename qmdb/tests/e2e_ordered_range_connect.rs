@@ -17,17 +17,17 @@ use commonware_storage::qmdb::{
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
+use exoware_qmdb::proto::qmdb::v1::{
+    GetCurrentOperationRangeRequest as ProtoGetCurrentOperationRangeRequest,
+    GetOperationRangeRequest as ProtoGetOperationRangeRequest,
+    SubscribeRequest as ProtoSubscribeRequest,
+};
 use exoware_qmdb::{
     ordered_connect_stack, recover_boundary_state, CurrentBoundaryState, CurrentOperationClient,
     OperationLogClient, OperationLogSubscribeProof, OrderedClient, OrderedWriter, QmdbError,
     MAX_OPERATION_SIZE,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::qmdb::v1::{
-    GetCurrentOperationRangeRequest as ProtoGetCurrentOperationRangeRequest,
-    GetOperationRangeRequest as ProtoGetOperationRangeRequest,
-    SubscribeRequest as ProtoSubscribeRequest,
-};
 use exoware_sdk::store::common::v1::{
     bytes_filter as proto_bytes_filter, BytesFilter as ProtoBytesFilter,
 };

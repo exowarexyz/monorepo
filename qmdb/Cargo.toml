@@ -29,11 +29,15 @@ exoware-sdk = { workspace = true }
 hex = { workspace = true }
 http-body = "1"
 regex = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tower-http = { workspace = true, features = ["cors"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[build-dependencies]
+connectrpc-build = "0.3.1"
 
 [dev-dependencies]
 exoware-qmdb = { path = ".", features = ["test-utils"] }
@@ -45,6 +49,5 @@ exoware-server = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

@@ -17,8 +17,7 @@ use commonware_storage::{
     },
 };
 
-use connectrpc::{Chain, ConnectError, ConnectRpcService, Context, ErrorCode, Limits};
-use exoware_sdk::qmdb::v1::{
+use crate::proto::qmdb::v1::{
     current_key_lookup_result, CurrentKeyExclusionProof as ProtoCurrentKeyExclusionProof,
     CurrentKeyLookupResult as ProtoCurrentKeyLookupResult,
     CurrentKeyRangeEntry as ProtoCurrentKeyRangeEntry,
@@ -33,6 +32,7 @@ use exoware_sdk::qmdb::v1::{
     OperationLogServiceServer, OrderedKeyRangeService, OrderedKeyRangeServiceServer,
     SubscribeRequestView, SubscribeResponse,
 };
+use connectrpc::{Chain, ConnectError, ConnectRpcService, Context, ErrorCode, Limits};
 use exoware_sdk::store::common::v1::bytes_filter::KindView as ProtoBytesFilterKindView;
 use exoware_sdk::stream_filter::{BytesFilter, CompiledBytesFilters};
 use futures::future::BoxFuture;

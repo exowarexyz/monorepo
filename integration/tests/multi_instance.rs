@@ -10,6 +10,7 @@ use connectrpc::client::ClientConfig;
 use datafusion::arrow::array::Int64Array;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::prelude::SessionContext;
+use exoware_qmdb::proto::qmdb::v1::SubscribeRequest as QmdbSubscribeRequest;
 use exoware_qmdb::{
     keyless_operation_log_connect_stack, KeylessClient, KeylessWriter, OperationLogClient,
     OperationLogSubscribeProof, QmdbError,
@@ -18,14 +19,13 @@ use exoware_sdk::keys::Key;
 use exoware_sdk::kv_codec::Utf8;
 use exoware_sdk::match_key::MatchKey;
 use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::qmdb::v1::SubscribeRequest as QmdbSubscribeRequest;
-use exoware_sdk::sql::v1::{
-    cell, ServiceClient as SqlServiceClient, SubscribeRequest as SqlSubscribeRequest,
-};
 use exoware_sdk::stream_filter::StreamFilter;
 use exoware_sdk::{
     RetryConfig, StoreBatchPublication, StoreBatchUpload, StoreClient, StoreKeyPrefix,
     StorePublicationFrontierWriter, StoreWriteBatch, StreamSubscription, StreamSubscriptionFrame,
+};
+use exoware_sql::proto::sql::v1::{
+    cell, ServiceClient as SqlServiceClient, SubscribeRequest as SqlSubscribeRequest,
 };
 use exoware_sql::{sql_connect_stack, CellValue, KvSchema, SqlServer, TableColumnConfig};
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -223,7 +223,7 @@ fn sorted_ops(mut ops: Vec<QmdbOp>) -> Vec<QmdbOp> {
     ops
 }
 
-fn row_int64(row: &exoware_sdk::sql::v1::Row, index: usize) -> i64 {
+fn row_int64(row: &exoware_sql::proto::sql::v1::Row, index: usize) -> i64 {
     match row.cells.get(index).and_then(|cell| cell.kind.as_ref()) {
         Some(cell::Kind::Int64Value(value)) => *value,
         other => panic!("expected int64 cell at {index}, got {other:?}"),

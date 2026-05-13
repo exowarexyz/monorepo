@@ -18,19 +18,19 @@ use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use connectrpc::client::ClientConfig;
 use connectrpc::ErrorCode;
-use exoware_qmdb::{
-    recover_boundary_state, unordered_connect_stack, unordered_operation_log_connect_stack,
-    CurrentBoundaryState, CurrentOperationClient, OperationLogClient, OperationLogSubscribeProof,
-    QmdbError, UnorderedClient, UnorderedConnectClient, UnorderedWriter, MAX_OPERATION_SIZE,
-};
-use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::qmdb::v1::{
+use exoware_qmdb::proto::qmdb::v1::{
     GetCurrentOperationRangeRequest as ProtoGetCurrentOperationRangeRequest,
     GetManyRequest as ProtoGetManyRequest,
     GetOperationRangeRequest as ProtoGetOperationRangeRequest,
     GetRangeRequest as ProtoGetRangeRequest, GetRequest as ProtoGetRequest, KeyLookupServiceClient,
     OrderedKeyRangeServiceClient, SubscribeRequest as ProtoSubscribeRequest,
 };
+use exoware_qmdb::{
+    recover_boundary_state, unordered_connect_stack, unordered_operation_log_connect_stack,
+    CurrentBoundaryState, CurrentOperationClient, OperationLogClient, OperationLogSubscribeProof,
+    QmdbError, UnorderedClient, UnorderedConnectClient, UnorderedWriter, MAX_OPERATION_SIZE,
+};
+use exoware_sdk::proto::PreferZstdHttpClient;
 use exoware_sdk::StoreClient;
 
 const N: usize = 32;

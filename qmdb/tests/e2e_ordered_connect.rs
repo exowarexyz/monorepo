@@ -19,12 +19,7 @@ use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use connectrpc::client::ClientConfig;
 use connectrpc::{Chain, ConnectError, ConnectRpcService, Context};
-use exoware_qmdb::{
-    ordered_connect_stack, recover_boundary_state, CurrentBoundaryState, OrderedClient,
-    OrderedConnectClient, OrderedWriter, QmdbError, VerifiedKeyLookup, MAX_OPERATION_SIZE,
-};
-use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::qmdb::v1::{
+use exoware_qmdb::proto::qmdb::v1::{
     current_key_lookup_result, GetManyRequest as ProtoGetManyRequest,
     GetManyResponse as ProtoGetManyResponse, GetRangeRequest as ProtoGetRangeRequest,
     GetRangeResponse as ProtoGetRangeResponse, GetRequest as ProtoGetRequest,
@@ -32,6 +27,11 @@ use exoware_sdk::qmdb::v1::{
     KeyLookupServiceServer, OrderedKeyRangeService, OrderedKeyRangeServiceClient,
     OrderedKeyRangeServiceServer,
 };
+use exoware_qmdb::{
+    ordered_connect_stack, recover_boundary_state, CurrentBoundaryState, OrderedClient,
+    OrderedConnectClient, OrderedWriter, QmdbError, VerifiedKeyLookup, MAX_OPERATION_SIZE,
+};
+use exoware_sdk::proto::PreferZstdHttpClient;
 use exoware_sdk::StoreClient;
 
 const N: usize = 32;
@@ -294,7 +294,7 @@ impl KeyLookupService for StaticQmdbService {
     fn get(
         &self,
         ctx: Context,
-        _request: buffa::view::OwnedView<exoware_sdk::qmdb::v1::GetRequestView<'static>>,
+        _request: buffa::view::OwnedView<exoware_qmdb::proto::qmdb::v1::GetRequestView<'static>>,
     ) -> impl std::future::Future<Output = Result<(ProtoGetResponse, Context), ConnectError>> + Send
     {
         let response = self.get_response.clone();
@@ -304,7 +304,9 @@ impl KeyLookupService for StaticQmdbService {
     fn get_many(
         &self,
         ctx: Context,
-        _request: buffa::view::OwnedView<exoware_sdk::qmdb::v1::GetManyRequestView<'static>>,
+        _request: buffa::view::OwnedView<
+            exoware_qmdb::proto::qmdb::v1::GetManyRequestView<'static>,
+        >,
     ) -> impl std::future::Future<Output = Result<(ProtoGetManyResponse, Context), ConnectError>> + Send
     {
         let response = self.get_many_response.clone();
@@ -316,7 +318,9 @@ impl OrderedKeyRangeService for StaticQmdbService {
     fn get_range(
         &self,
         ctx: Context,
-        _request: buffa::view::OwnedView<exoware_sdk::qmdb::v1::GetRangeRequestView<'static>>,
+        _request: buffa::view::OwnedView<
+            exoware_qmdb::proto::qmdb::v1::GetRangeRequestView<'static>,
+        >,
     ) -> impl std::future::Future<Output = Result<(ProtoGetRangeResponse, Context), ConnectError>> + Send
     {
         let response = self.get_range_response.clone();

@@ -1,22 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const QMDB_PROTO_FILES: &[&str] = &[
-    "qmdb/v1/proof.proto",
-    "qmdb/v1/key_lookup.proto",
-    "qmdb/v1/key_range.proto",
-    "qmdb/v1/operation_log.proto",
-    "qmdb/v1/current_operation.proto",
-];
-
-const SQL_PROTO_FILES: &[&str] = &[
-    "sql/v1/common.proto",
-    "sql/v1/schema.proto",
-    "sql/v1/query.proto",
-    "sql/v1/stream.proto",
-    "sql/v1/service.proto",
-];
-
 fn main() {
     println!("cargo:rerun-if-env-changed=PROTO_GEN");
     println!("cargo:rerun-if-changed=../proto");
@@ -36,7 +20,7 @@ fn main() {
     let descriptor = gen_dir.join("descriptor.bin");
     buf_build(&workspace_root, &descriptor);
 
-    let mut files = vec![
+    let files = [
         "google/rpc/error_details.proto",
         "store/v1/common.proto",
         "store/v1/compact.proto",
@@ -44,8 +28,6 @@ fn main() {
         "store/v1/query.proto",
         "store/v1/stream.proto",
     ];
-    files.extend_from_slice(QMDB_PROTO_FILES);
-    files.extend_from_slice(SQL_PROTO_FILES);
 
     connectrpc_build::Config::new()
         .files(&files)
@@ -55,38 +37,7 @@ fn main() {
         .compile()
         .expect("connectrpc codegen");
 
-    combine_generated_protos(&gen_dir, QMDB_PROTO_FILES, "qmdb.v1.rs");
-    combine_generated_protos(&gen_dir, SQL_PROTO_FILES, "sql.v1.rs");
-
     std::fs::remove_file(&descriptor).expect("cleanup descriptor");
-}
-
-fn combine_generated_protos(gen_dir: &Path, proto_paths: &[&str], to: &str) {
-    let to_path = gen_dir.join(to);
-    if to_path.exists() {
-        std::fs::remove_file(&to_path).expect("remove stale generated proto file");
-    }
-    let mut combined = String::new();
-    for (index, proto_path) in proto_paths.iter().enumerate() {
-        if index > 0 {
-            combined.push('\n');
-        }
-        let from_path = gen_dir.join(generated_rust_filename(proto_path));
-        let content = std::fs::read_to_string(&from_path).unwrap_or_else(|err| {
-            panic!("read generated proto file {}: {}", from_path.display(), err)
-        });
-        combined.push_str(&content);
-        if !combined.ends_with('\n') {
-            combined.push('\n');
-        }
-        std::fs::remove_file(&from_path).expect("remove split generated proto file");
-    }
-    std::fs::write(&to_path, combined).expect("write combined generated proto file");
-}
-
-fn generated_rust_filename(proto_path: &str) -> String {
-    let stem = proto_path.strip_suffix(".proto").unwrap_or(proto_path);
-    format!("{}.rs", stem.replace('/', "."))
 }
 
 fn buf_build(workspace_root: &Path, descriptor_out: &Path) {

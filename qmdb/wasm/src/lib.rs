@@ -37,7 +37,7 @@ pub mod proto {
             #![allow(clippy::match_single_binding)]
             include!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../sdk-rs/src/gen/qmdb.v1.rs"
+                "/../src/gen/qmdb.v1.rs"
             ));
         }
     }

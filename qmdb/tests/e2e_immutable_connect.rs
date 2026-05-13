@@ -14,15 +14,15 @@ use commonware_storage::qmdb::immutable::variable::{
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use exoware_qmdb::proto::qmdb::v1::{
+    GetOperationRangeRequest as ProtoGetOperationRangeRequest,
+    SubscribeRequest as ProtoSubscribeRequest,
+};
 use exoware_qmdb::{
     immutable_operation_log_connect_stack, ImmutableClient, ImmutableWriter, OperationLogClient,
     OperationLogSubscribeProof, QmdbError,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::qmdb::v1::{
-    GetOperationRangeRequest as ProtoGetOperationRangeRequest,
-    SubscribeRequest as ProtoSubscribeRequest,
-};
 use exoware_sdk::StoreClient;
 
 type Digest = commonware_cryptography::sha256::Digest;

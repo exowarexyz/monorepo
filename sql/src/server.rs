@@ -18,6 +18,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::proto::sql::v1::{
+    cell::Kind as ProtoCellKind, Cell as ProtoCell, Column as ProtoColumn, Index as ProtoIndex,
+    IndexLayout as ProtoIndexLayout, ListValue as ProtoListValue, Null as ProtoNull,
+    QueryRequestView, QueryResponse, Row as ProtoRow, Service, ServiceServer, SubscribeRequestView,
+    SubscribeResponse, Table as ProtoTable, TablesRequestView, TablesResponse,
+};
 use bytes::Bytes;
 use connectrpc::{ConnectError, ConnectRpcService, Context};
 use datafusion::arrow::array::{
@@ -35,12 +41,6 @@ use datafusion::prelude::SessionContext;
 use exoware_sdk::keys::Key;
 use exoware_sdk::kv_codec::{decode_stored_row, Utf8};
 use exoware_sdk::match_key::MatchKey;
-use exoware_sdk::sql::v1::{
-    cell::Kind as ProtoCellKind, Cell as ProtoCell, Column as ProtoColumn, Index as ProtoIndex,
-    IndexLayout as ProtoIndexLayout, ListValue as ProtoListValue, Null as ProtoNull,
-    QueryRequestView, QueryResponse, Row as ProtoRow, Service, ServiceServer, SubscribeRequestView,
-    SubscribeResponse, Table as ProtoTable, TablesRequestView, TablesResponse,
-};
 use exoware_sdk::stream_filter::StreamFilter;
 use exoware_sdk::{StoreClient, StreamSubscription};
 use futures::future::BoxFuture;
