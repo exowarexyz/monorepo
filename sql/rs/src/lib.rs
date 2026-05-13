@@ -1604,6 +1604,294 @@ mod tests {
     }
 
     #[test]
+    fn null_predicate_merges_are_order_independent() {
+        use datafusion::logical_expr::col;
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", DataType::Int64, false),
+                TableColumnConfig::new("label", DataType::Utf8, true),
+            ],
+            vec!["id".to_string()],
+            vec![],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let label_idx = *model.columns_by_name.get("label").unwrap();
+        let eq_foo = col("label").eq(Expr::Literal(
+            ScalarValue::Utf8(Some("foo".to_string())),
+            None,
+        ));
+        let is_null = col("label").is_null();
+        let is_not_null = col("label").is_not_null();
+        let row_foo = KvRow {
+            values: vec![CellValue::Int64(1), CellValue::Utf8("foo".to_string())],
+        };
+
+        // (label = 'foo') AND (label IS NOT NULL) — IS NOT NULL is implied;
+        // predicate must reduce to StringEq('foo') in either order.
+        for filters in [[&eq_foo, &is_not_null], [&is_not_null, &eq_foo]] {
+            let owned: Vec<Expr> = filters.iter().map(|e| (*e).clone()).collect();
+            let pred = QueryPredicate::from_filters(&owned, &model);
+            assert!(!pred.contradiction);
+            assert!(matches!(
+                pred.constraints.get(&label_idx),
+                Some(PredicateConstraint::StringEq(s)) if s == "foo"
+            ));
+            assert!(pred.matches_row(&row_foo));
+        }
+
+        // (label = 'foo') AND (label IS NULL) — must contradict in either order.
+        for filters in [[&eq_foo, &is_null], [&is_null, &eq_foo]] {
+            let owned: Vec<Expr> = filters.iter().map(|e| (*e).clone()).collect();
+            assert!(QueryPredicate::from_filters(&owned, &model).contradiction);
+        }
+    }
+
+    #[test]
+    fn non_nullable_null_predicates_simplify() {
+        use datafusion::logical_expr::col;
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", DataType::Int64, false),
+                TableColumnConfig::new("label", DataType::Utf8, true),
+            ],
+            vec!["id".to_string()],
+            vec![],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+
+        let is_null = col("id").is_null();
+        assert!(QueryPredicate::supports_filter(&is_null, &model));
+        assert!(QueryPredicate::from_filters(&[is_null], &model).contradiction);
+
+        let is_not_null = col("id").is_not_null();
+        assert!(QueryPredicate::supports_filter(&is_not_null, &model));
+        let pred = QueryPredicate::from_filters(&[is_not_null], &model);
+        assert!(!pred.contradiction);
+        assert!(pred.constraints.is_empty());
+    }
+
+    #[test]
+    fn null_literal_comparisons_are_contradictions() {
+        use datafusion::logical_expr::col;
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", DataType::Int64, false),
+                TableColumnConfig::new("label", DataType::Utf8, true),
+            ],
+            vec!["id".to_string()],
+            vec![],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+
+        for filter in [
+            col("label").eq(Expr::Literal(ScalarValue::Utf8(None), None)),
+            col("id").gt(Expr::Literal(ScalarValue::Int64(None), None)),
+        ] {
+            assert!(QueryPredicate::supports_filter(&filter, &model));
+            assert!(QueryPredicate::from_filters(&[filter], &model).contradiction);
+        }
+    }
+
+    #[test]
+    fn in_predicate_merges_with_comparisons_order_independent() {
+        use datafusion::logical_expr::{col, in_list};
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", DataType::Int64, false),
+                TableColumnConfig::new("label", DataType::Utf8, true),
+                TableColumnConfig::new("score", DataType::Int64, true),
+                TableColumnConfig::new("version", DataType::UInt64, true),
+                TableColumnConfig::new("hash", DataType::FixedSizeBinary(2), true),
+            ],
+            vec!["id".to_string()],
+            vec![],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let label_idx = *model.columns_by_name.get("label").unwrap();
+        let score_idx = *model.columns_by_name.get("score").unwrap();
+        let version_idx = *model.columns_by_name.get("version").unwrap();
+        let hash_idx = *model.columns_by_name.get("hash").unwrap();
+
+        let label_in = in_list(
+            col("label"),
+            vec![
+                Expr::Literal(ScalarValue::Utf8(Some("foo".to_string())), None),
+                Expr::Literal(ScalarValue::Utf8(Some("bar".to_string())), None),
+            ],
+            false,
+        );
+        let label_eq = col("label").eq(Expr::Literal(
+            ScalarValue::Utf8(Some("foo".to_string())),
+            None,
+        ));
+        for filters in [[&label_in, &label_eq], [&label_eq, &label_in]] {
+            let owned: Vec<Expr> = filters.iter().map(|e| (*e).clone()).collect();
+            let pred = QueryPredicate::from_filters(&owned, &model);
+            assert!(!pred.contradiction);
+            assert!(matches!(
+                pred.constraints.get(&label_idx),
+                Some(PredicateConstraint::StringEq(v)) if v == "foo"
+            ));
+        }
+
+        let label_miss = col("label").eq(Expr::Literal(
+            ScalarValue::Utf8(Some("baz".to_string())),
+            None,
+        ));
+        for filters in [[&label_in, &label_miss], [&label_miss, &label_in]] {
+            let owned: Vec<Expr> = filters.iter().map(|e| (*e).clone()).collect();
+            assert!(QueryPredicate::from_filters(&owned, &model).contradiction);
+        }
+
+        let score_in = in_list(
+            col("score"),
+            vec![
+                Expr::Literal(ScalarValue::Int64(Some(1)), None),
+                Expr::Literal(ScalarValue::Int64(Some(2)), None),
+                Expr::Literal(ScalarValue::Int64(Some(3)), None),
+            ],
+            false,
+        );
+        let score_gt = col("score").gt(Expr::Literal(ScalarValue::Int64(Some(1)), None));
+        for filters in [[&score_in, &score_gt], [&score_gt, &score_in]] {
+            let owned: Vec<Expr> = filters.iter().map(|e| (*e).clone()).collect();
+            let pred = QueryPredicate::from_filters(&owned, &model);
+            assert!(!pred.contradiction);
+            assert!(matches!(
+                pred.constraints.get(&score_idx),
+                Some(PredicateConstraint::IntIn(v)) if v == &vec![2, 3]
+            ));
+        }
+
+        let version_in = in_list(
+            col("version"),
+            vec![
+                Expr::Literal(ScalarValue::UInt64(Some(1)), None),
+                Expr::Literal(ScalarValue::UInt64(Some(2)), None),
+                Expr::Literal(ScalarValue::UInt64(Some(3)), None),
+            ],
+            false,
+        );
+        let version_lt = col("version").lt(Expr::Literal(ScalarValue::UInt64(Some(3)), None));
+        for filters in [[&version_in, &version_lt], [&version_lt, &version_in]] {
+            let owned: Vec<Expr> = filters.iter().map(|e| (*e).clone()).collect();
+            let pred = QueryPredicate::from_filters(&owned, &model);
+            assert!(!pred.contradiction);
+            assert!(matches!(
+                pred.constraints.get(&version_idx),
+                Some(PredicateConstraint::UInt64In(v)) if v == &vec![1, 2]
+            ));
+        }
+
+        let hash_in = in_list(
+            col("hash"),
+            vec![
+                Expr::Literal(
+                    ScalarValue::FixedSizeBinary(2, Some(vec![0xAA, 0xAA])),
+                    None,
+                ),
+                Expr::Literal(
+                    ScalarValue::FixedSizeBinary(2, Some(vec![0xBB, 0xBB])),
+                    None,
+                ),
+            ],
+            false,
+        );
+        let hash_eq = col("hash").eq(Expr::Literal(
+            ScalarValue::FixedSizeBinary(2, Some(vec![0xAA, 0xAA])),
+            None,
+        ));
+        for filters in [[&hash_in, &hash_eq], [&hash_eq, &hash_in]] {
+            let owned: Vec<Expr> = filters.iter().map(|e| (*e).clone()).collect();
+            let pred = QueryPredicate::from_filters(&owned, &model);
+            assert!(!pred.contradiction);
+            assert!(matches!(
+                pred.constraints.get(&hash_idx),
+                Some(PredicateConstraint::FixedBinaryEq(v)) if v == &vec![0xAA, 0xAA]
+            ));
+        }
+    }
+
+    #[test]
+    fn empty_and_null_in_lists_are_exact() {
+        use datafusion::logical_expr::{col, in_list};
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", DataType::Int64, false),
+                TableColumnConfig::new("label", DataType::Utf8, true),
+                TableColumnConfig::new("score", DataType::Float64, true),
+                TableColumnConfig::new("version", DataType::UInt64, true),
+                TableColumnConfig::new("hash", DataType::FixedSizeBinary(2), true),
+            ],
+            vec!["id".to_string()],
+            vec![],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let id_idx = *model.columns_by_name.get("id").unwrap();
+
+        for filter in [
+            in_list(col("id"), vec![], false),
+            in_list(
+                col("id"),
+                vec![Expr::Literal(ScalarValue::Int64(None), None)],
+                false,
+            ),
+            in_list(
+                col("label"),
+                vec![Expr::Literal(ScalarValue::Utf8(None), None)],
+                false,
+            ),
+            in_list(
+                col("score"),
+                vec![Expr::Literal(ScalarValue::Float64(None), None)],
+                false,
+            ),
+            in_list(
+                col("version"),
+                vec![Expr::Literal(ScalarValue::UInt64(None), None)],
+                false,
+            ),
+            in_list(
+                col("hash"),
+                vec![Expr::Literal(ScalarValue::FixedSizeBinary(2, None), None)],
+                false,
+            ),
+        ] {
+            assert!(QueryPredicate::supports_filter(&filter, &model));
+            assert!(QueryPredicate::from_filters(&[filter], &model).contradiction);
+        }
+
+        let filter = in_list(
+            col("id"),
+            vec![
+                Expr::Literal(ScalarValue::Int64(Some(7)), None),
+                Expr::Literal(ScalarValue::Int64(None), None),
+            ],
+            false,
+        );
+        assert!(QueryPredicate::supports_filter(&filter, &model));
+        let pred = QueryPredicate::from_filters(&[filter], &model);
+        assert!(!pred.contradiction);
+        assert!(matches!(
+            pred.constraints.get(&id_idx),
+            Some(PredicateConstraint::IntRange {
+                min: Some(7),
+                max: Some(7)
+            })
+        ));
+    }
+
+    #[test]
     fn table_config_accepts_date32_column() {
         let config = KvTableConfig::new(
             0,
