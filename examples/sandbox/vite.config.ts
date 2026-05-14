@@ -6,12 +6,24 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   resolve: {
-    alias: {
-      '@qmdb-ts': fileURLToPath(new URL('../../qmdb/ts/src/index.ts', import.meta.url)),
-      '@simplex-ts': fileURLToPath(new URL('../../simplex/ts/src/index.ts', import.meta.url)),
-      '@simplex-ts/wasm': fileURLToPath(new URL('../../simplex/ts/src/wasm.ts', import.meta.url)),
-      '@sql-ts': fileURLToPath(new URL('../../sql/ts/src/index.ts', import.meta.url)),
-    },
+    alias: [
+      {
+        find: '@simplex-ts/wasm',
+        replacement: fileURLToPath(new URL('../../simplex/ts/src/wasm.ts', import.meta.url)),
+      },
+      {
+        find: /^@qmdb-ts$/,
+        replacement: fileURLToPath(new URL('../../qmdb/ts/src/index.ts', import.meta.url)),
+      },
+      {
+        find: /^@simplex-ts$/,
+        replacement: fileURLToPath(new URL('../../simplex/ts/src/index.ts', import.meta.url)),
+      },
+      {
+        find: /^@sql-ts$/,
+        replacement: fileURLToPath(new URL('../../sql/ts/src/index.ts', import.meta.url)),
+      },
+    ],
   },
   server: {
     fs: {

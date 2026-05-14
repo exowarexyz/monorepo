@@ -4,6 +4,7 @@ import {
   StoreWriteBatch,
   TraversalMode,
   type ClientOptions as SdkClientOptions,
+  type StoreBatchEntry,
 } from '@exowarexyz/sdk';
 
 export type BytesLike = Uint8Array | string;
@@ -730,7 +731,9 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
     for await (const batch of stream) {
       yield {
         sequenceNumber: batch.sequenceNumber,
-        entries: batch.entries.map((entry) => decodeRawStreamEntry(entry.key, entry.value)),
+        entries: batch.entries.map((entry: StoreBatchEntry) =>
+          decodeRawStreamEntry(entry.key, entry.value),
+        ),
       };
     }
   }
