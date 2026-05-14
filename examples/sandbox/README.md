@@ -116,23 +116,39 @@ match the pasted anchor.
 The Simplex panel is only rendered when `VITE_SIMPLEX_URL` is set. It writes
 encoded Commonware Simplex artifacts directly to Exoware Store using the same
 key layout as the Rust `exoware-simplex` crate. The panel configures the
-Simplex WASM verifier with a local deterministic threshold-VRF MinSig demo
-identity; the WASM module itself only verifies caller-supplied scheme,
-namespace, key material, and artifact bytes.
+Simplex WASM verifier from caller-supplied scheme, namespace, key material, and
+artifact bytes.
 
-With the simulator running above, point the web app at the simulator:
+With the simulator running above:
 
-```bash
-VITE_SIMPLEX_URL=http://127.0.0.1:8080 npm run dev
-```
+1. **Seed finalized Simplex blocks** (keeps running; every `--interval-secs` it
+   uploads a dummy block, notarization, finalization-by-view, and
+   finalization-by-height). The first lines print the threshold verifier
+   material to paste into the Simplex panel. The default start height is
+   time-based so restarts still advance the latest finalized height index.
 
-In the UI:
-- **Upload Block** stores encoded block bytes by digest.
-- **Upload Certificate** stores encoded notarization or finalization records by
-  view. Finalizations are also indexed by block height. Optional block bytes and
-  digest can be supplied to store the block in the same batch.
-- **Read** fetches a block by digest or the latest finalized height index.
-  Latest finalization uses verified reads, while block reads remain raw.
+   ```bash
+   cargo run --package exoware-simplex --bin simplex -- \
+     seed --store-url http://127.0.0.1:8080 --interval-secs 2
+   ```
+
+2. **Point the web app at the simulator**:
+
+   ```bash
+   VITE_SIMPLEX_URL=http://127.0.0.1:8080 npm run dev
+   ```
+
+3. **In the UI**:
+   - **Connection** accepts the scheme, namespace, and verifier material printed
+     by `simplex seed`.
+   - **Upload Block** stores encoded block bytes by digest.
+   - **Upload Certificate** stores encoded notarization or finalization records
+     by view. Finalizations are also indexed by block height. Optional block
+     bytes and digest can be supplied to store the block in the same batch.
+   - **Read** fetches a block by digest or the latest finalized height index.
+     Latest finalization uses verified reads, while block reads remain raw.
+   - **Subscribe** streams notarizations and finalizations, verifying each
+     certificate before display.
 
 ## SQL panel
 

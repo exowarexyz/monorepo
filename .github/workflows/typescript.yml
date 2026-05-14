@@ -88,3 +88,27 @@ jobs:
         run: cd examples/sandbox && npm ci --ignore-scripts
       - name: Build examples/sandbox
         run: cd examples/sandbox && npm run build
+
+  simplex-web:
+    name: Simplex Web
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run setup
+        uses: ./.github/actions/setup
+      - name: Install wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Install wasm-pack + wasm-bindgen-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.13.1,wasm-bindgen-cli@0.2.117
+      - name: Install sdk/ts dependencies
+        run: cd sdk/ts && npm ci
+      - name: Build sdk/ts
+        run: cd sdk/ts && npm run build
+      - name: Install simplex/ts dependencies
+        run: cd simplex/ts && npm ci
+      - name: Build simplex/ts
+        run: cd simplex/ts && npm run build

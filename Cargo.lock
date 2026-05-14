@@ -2522,17 +2522,23 @@ name = "exoware-simplex"
 version = "2026.4.1"
 dependencies = [
  "bytes",
+ "clap",
  "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
+ "commonware-math",
  "commonware-parallel",
+ "commonware-utils",
  "exoware-sdk",
  "exoware-simulator",
  "futures",
+ "hex",
  "rand 0.8.5",
  "tempfile",
  "thiserror",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -1,21 +1,51 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   bytesToHex,
   hexToBytes,
+  type CommonwareSimplexScheme,
   SimplexClient,
   type CommonwareVerifiedSimplexCertificate,
   type SimplexCertificateVerifier,
   type SimplexUploadReceipt,
+  type VerifiedSimplexCertificateStreamEntry,
 } from '@simplex-ts';
 import { createCommonwareWasmSimplexVerifier } from '@simplex-ts/wasm';
 
 export const SIMPLEX_URL = import.meta.env.VITE_SIMPLEX_URL as string | undefined;
-const SIMPLEX_DEMO_NAMESPACE = new TextEncoder().encode('_EXOWARE_SIMPLEX_DEMO');
+const MAX_EVENTS = 10;
+const SIMPLEX_DEMO_SCHEME: CommonwareSimplexScheme = 'bls12381-threshold-vrf-min-sig';
+const SIMPLEX_DEMO_NAMESPACE = '_EXOWARE_SIMPLEX_DEMO';
 const SIMPLEX_DEMO_VERIFICATION_MATERIAL =
   'a1195547a176e10913080f5f367fe413698890f3b9809e24c2bc4e7928d41d74ef29d81e49fa2ec3c129be87479f666811d200bb29e70093c9cc86946c47d7156b9a0440c08894e00e3702c06642f45dbdfabcbab0763d225a0c66cd3e30bffe';
+const SIMPLEX_SCHEMES: CommonwareSimplexScheme[] = [
+  'ed25519',
+  'secp256r1',
+  'bls12381-multisig-min-pk',
+  'bls12381-multisig-min-sig',
+  'bls12381-threshold-standard-min-pk',
+  'bls12381-threshold-standard-min-sig',
+  'bls12381-threshold-vrf-min-pk',
+  'bls12381-threshold-vrf-min-sig',
+];
 
 interface NotificationFn {
   (type: 'success' | 'error', title: string, message: string): void;
+}
+
+type VerifiedSimplexEntry = VerifiedSimplexCertificateStreamEntry<
+  CommonwareVerifiedSimplexCertificate,
+  CommonwareVerifiedSimplexCertificate
+>;
+
+interface VerifiedSimplexEvent {
+  sequenceNumber: bigint;
+  entry: VerifiedSimplexEntry;
+}
+
+interface VerifierConfig {
+  scheme: CommonwareSimplexScheme;
+  namespace: string;
+  verificationMaterialHex: string;
 }
 
 function formatSequence(receipt: SimplexUploadReceipt): string {
@@ -50,6 +80,18 @@ export function SimplexPanel({
   simplexUrl: string;
   showNotification: NotificationFn;
 }) {
+  const subscribeAbortRef = useRef<AbortController | null>(null);
+  const showNotificationRef = useRef(showNotification);
+  const [scheme, setScheme] = useState<CommonwareSimplexScheme>(SIMPLEX_DEMO_SCHEME);
+  const [namespace, setNamespace] = useState(SIMPLEX_DEMO_NAMESPACE);
+  const [verificationMaterialHex, setVerificationMaterialHex] = useState(
+    SIMPLEX_DEMO_VERIFICATION_MATERIAL,
+  );
+  const [appliedVerifierConfig, setAppliedVerifierConfig] = useState<VerifierConfig>({
+    scheme: SIMPLEX_DEMO_SCHEME,
+    namespace: SIMPLEX_DEMO_NAMESPACE,
+    verificationMaterialHex: SIMPLEX_DEMO_VERIFICATION_MATERIAL,
+  });
   const [verifier, setVerifier] = useState<
     SimplexCertificateVerifier<
       CommonwareVerifiedSimplexCertificate,
@@ -71,6 +113,9 @@ export function SimplexPanel({
   const [isUploadingCertificate, setIsUploadingCertificate] = useState(false);
   const [isReadingBlock, setIsReadingBlock] = useState(false);
   const [isReadingLatest, setIsReadingLatest] = useState(false);
+  const [isSubscribing, setIsSubscribing] = useState(false);
+  const [sinceSequenceNumber, setSinceSequenceNumber] = useState('');
+  const [streamEvents, setStreamEvents] = useState<VerifiedSimplexEvent[]>([]);
 
   const [blockDigestHex, setBlockDigestHex] = useState('');
   const [blockHex, setBlockHex] = useState('');
@@ -90,14 +135,18 @@ export function SimplexPanel({
   const [latestFinalizationMissing, setLatestFinalizationMissing] = useState(false);
 
   useEffect(() => {
+    showNotificationRef.current = showNotification;
+  }, [showNotification]);
+
+  useEffect(() => {
     let active = true;
     setVerifierStatus('loading');
     void (async () => {
       try {
         const nextVerifier = await createCommonwareWasmSimplexVerifier({
-          scheme: 'bls12381-threshold-vrf-min-sig',
-          namespace: SIMPLEX_DEMO_NAMESPACE,
-          verificationMaterial: hexToBytes(SIMPLEX_DEMO_VERIFICATION_MATERIAL),
+          scheme: appliedVerifierConfig.scheme,
+          namespace: new TextEncoder().encode(appliedVerifierConfig.namespace),
+          verificationMaterial: hexToBytes(appliedVerifierConfig.verificationMaterialHex),
         });
         if (active) {
           setVerifier(nextVerifier);
@@ -107,14 +156,14 @@ export function SimplexPanel({
         if (active) {
           setVerifier(undefined);
           setVerifierStatus('error');
-          showNotification('error', 'Simplex Verifier Failed', String(error));
+          showNotificationRef.current('error', 'Simplex Verifier Failed', String(error));
         }
       }
     })();
     return () => {
       active = false;
     };
-  }, [showNotification]);
+  }, [appliedVerifierConfig]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -128,8 +177,31 @@ export function SimplexPanel({
         setIsConnected(false);
       }
     })();
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      subscribeAbortRef.current?.abort();
+    };
   }, [simplexUrl]);
+
+  const applyVerifier = () => {
+    try {
+      hexToBytes(verificationMaterialHex);
+      subscribeAbortRef.current?.abort();
+      subscribeAbortRef.current = null;
+      setIsSubscribing(false);
+      setLatestFinalization(null);
+      setLatestFinalizationMissing(false);
+      setStreamEvents([]);
+      setAppliedVerifierConfig({
+        scheme,
+        namespace,
+        verificationMaterialHex,
+      });
+      showNotification('success', 'Simplex Verifier', `Using ${scheme}`);
+    } catch (error) {
+      showNotification('error', 'Simplex Verifier Failed', String(error));
+    }
+  };
 
   const uploadBlock = async () => {
     setIsUploadingBlock(true);
@@ -221,15 +293,102 @@ export function SimplexPanel({
     }
   };
 
+  const startSubscribe = () => {
+    subscribeAbortRef.current?.abort();
+    setStreamEvents([]);
+    setIsSubscribing(true);
+
+    const controller = new AbortController();
+    subscribeAbortRef.current = controller;
+
+    void (async () => {
+      try {
+        const since = sinceSequenceNumber.trim()
+          ? BigInt(sinceSequenceNumber.trim())
+          : undefined;
+        for await (const batch of client.subscribeCertificates(
+          {
+            includeFinalizedByHeight: true,
+            sinceSequenceNumber: since,
+          },
+          { signal: controller.signal },
+        )) {
+          const events = batch.entries.map((entry) => ({
+            sequenceNumber: batch.sequenceNumber,
+            entry,
+          }));
+          setStreamEvents((previous) => [...events, ...previous].slice(0, MAX_EVENTS));
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          showNotification('error', 'Simplex Subscribe Failed', String(error));
+        }
+      } finally {
+        if (subscribeAbortRef.current === controller) {
+          subscribeAbortRef.current = null;
+        }
+        setIsSubscribing(false);
+      }
+    })();
+
+    showNotification('success', 'Simplex Subscribe', 'Listening for verified certificates');
+  };
+
+  const stopSubscribe = () => {
+    subscribeAbortRef.current?.abort();
+    subscribeAbortRef.current = null;
+    setIsSubscribing(false);
+  };
+
   return (
     <div className="card fade-in">
       <h2>Simplex</h2>
 
       <div className="form-section">
         <h3>Connection</h3>
+        <p className="section-note">
+          Run `simplex seed` and paste its verifier material here. Fetched and
+          streamed certificates are verified before display.
+        </p>
         <p><strong>Store:</strong> {simplexUrl}</p>
         <p><strong>Status:</strong> {isConnected ? 'Connected' : 'Disconnected'}</p>
         <p><strong>Verifier:</strong> {verifierStatus}</p>
+        <div className="form-row">
+          <div className="form-group">
+            <label htmlFor="simplex-verifier-scheme">Scheme</label>
+            <select
+              id="simplex-verifier-scheme"
+              value={scheme}
+              onChange={(event) => setScheme(event.target.value as CommonwareSimplexScheme)}
+            >
+              {SIMPLEX_SCHEMES.map((item) => (
+                <option key={item} value={item}>{item}</option>
+              ))}
+            </select>
+          </div>
+          <div className="form-group">
+            <label htmlFor="simplex-verifier-namespace">Namespace</label>
+            <input
+              id="simplex-verifier-namespace"
+              type="text"
+              value={namespace}
+              onChange={(event) => setNamespace(event.target.value)}
+            />
+          </div>
+        </div>
+        <div className="form-row">
+          <div className="form-group form-group-wide">
+            <label htmlFor="simplex-verifier-material">Verification Material Hex</label>
+            <textarea
+              id="simplex-verifier-material"
+              value={verificationMaterialHex}
+              onChange={(event) => setVerificationMaterialHex(event.target.value)}
+            />
+          </div>
+        </div>
+        <button className="btn-secondary" onClick={applyVerifier}>
+          Apply Verifier
+        </button>
       </div>
 
       <div className="form-section">
@@ -392,6 +551,74 @@ export function SimplexPanel({
             <p>No finalized height index is stored.</p>
           </div>
         )}
+      </div>
+
+      <div className="form-section">
+        <h3>Subscribe</h3>
+        <div className="form-row">
+          <div className="form-group">
+            <label htmlFor="simplex-since-sequence">Since Sequence</label>
+            <input
+              id="simplex-since-sequence"
+              type="number"
+              min="0"
+              value={sinceSequenceNumber}
+              onChange={(event) => setSinceSequenceNumber(event.target.value)}
+            />
+          </div>
+        </div>
+        <div className="button-row">
+          <button
+            className={`btn-primary ${isSubscribing ? 'loading' : ''}`}
+            onClick={startSubscribe}
+            disabled={isSubscribing || verifierStatus !== 'ready'}
+          >
+            {isSubscribing ? 'Listening...' : 'Start Subscribe'}
+          </button>
+          <button
+            className="btn-secondary"
+            onClick={stopSubscribe}
+            disabled={!isSubscribing}
+          >
+            Stop Subscribe
+          </button>
+          <button
+            className="btn-secondary"
+            onClick={() => setStreamEvents([])}
+            disabled={streamEvents.length === 0}
+          >
+            Clear
+          </button>
+        </div>
+        <div className="result fade-in">
+          <h4>Verified Certificates ({streamEvents.length})</h4>
+          {streamEvents.length === 0 ? (
+            <p>No certificate events yet</p>
+          ) : (
+            <div className="result-list">
+              {streamEvents.map(({ sequenceNumber, entry }, index) => {
+                const title =
+                  entry.type === 'notarization'
+                    ? `notarization view ${entry.view.toString()}`
+                    : `finalization ${entry.index} ${
+                        entry.index === 'view'
+                          ? entry.view.toString()
+                          : entry.height.toString()
+                      }`;
+                return (
+                  <div
+                    key={`${sequenceNumber.toString()}-${index}`}
+                    className="result-row-block"
+                  >
+                    <p><strong>Sequence:</strong> {sequenceNumber.toString()}</p>
+                    <p><strong>Entry:</strong> {title}</p>
+                    <pre>{renderCertificate(entry.certificate)}</pre>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

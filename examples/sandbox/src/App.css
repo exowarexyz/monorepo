@@ -335,6 +335,12 @@ button {
   line-height: 1.5;
 }
 
+.result pre {
+  margin: 0.5rem 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .result strong {
   color: #0f172a;
   font-weight: 600;
@@ -374,6 +380,14 @@ button {
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
+  padding: 0.75rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #fff;
+  word-break: break-word;
+}
+
+.result-row-block {
   padding: 0.75rem;
   border: 1px solid #e2e8f0;
   border-radius: 6px;
