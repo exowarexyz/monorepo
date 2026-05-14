@@ -92,11 +92,27 @@ function renderCertificate(value: CommonwareVerifiedSimplexCertificate): string 
   ].join('\n');
 }
 
-function keepLatestVerifiedFullBlock(
+function keepReadVerifiedFullBlocks(
   previous: Record<string, VerifiedFullBlock>,
 ): Record<string, VerifiedFullBlock> {
+  const next: Record<string, VerifiedFullBlock> = {};
   const latest = previous.latest;
-  return latest ? { latest } : {};
+  const height = previous.height;
+  const view = previous.view;
+  const notarization = previous.notarization;
+  if (latest) {
+    next.latest = latest;
+  }
+  if (height) {
+    next.height = height;
+  }
+  if (view) {
+    next.view = view;
+  }
+  if (notarization) {
+    next.notarization = notarization;
+  }
+  return next;
 }
 
 export function SimplexPanel({
@@ -136,9 +152,14 @@ export function SimplexPanel({
 
   const [isConnected, setIsConnected] = useState(false);
   const [isReadingBlock, setIsReadingBlock] = useState(false);
+  const [isReadingNotarization, setIsReadingNotarization] = useState(false);
   const [isReadingLatest, setIsReadingLatest] = useState(false);
+  const [isReadingViewFinalization, setIsReadingViewFinalization] = useState(false);
+  const [isReadingHeightFinalization, setIsReadingHeightFinalization] = useState(false);
   const [isSubscribing, setIsSubscribing] = useState(false);
   const [verifyingFullBlockId, setVerifyingFullBlockId] = useState<string | null>(null);
+  const [notarizationView, setNotarizationView] = useState('');
+  const [finalizationIndex, setFinalizationIndex] = useState('');
   const [sinceSequenceNumber, setSinceSequenceNumber] = useState('');
   const [streamEvents, setStreamEvents] = useState<VerifiedSimplexEvent[]>([]);
   const [verifiedFullBlocks, setVerifiedFullBlocks] = useState<Record<string, VerifiedFullBlock>>(
@@ -149,9 +170,18 @@ export function SimplexPanel({
   const [headerReadResult, setHeaderReadResult] = useState<Uint8Array | null>(null);
   const [blockReadResult, setBlockReadResult] = useState<SimplexBlockData | null>(null);
 
+  const [notarization, setNotarization] =
+    useState<CommonwareVerifiedSimplexCertificate | null>(null);
+  const [notarizationMissing, setNotarizationMissing] = useState(false);
   const [latestFinalization, setLatestFinalization] =
     useState<CommonwareVerifiedSimplexCertificate | null>(null);
   const [latestFinalizationMissing, setLatestFinalizationMissing] = useState(false);
+  const [viewFinalization, setViewFinalization] =
+    useState<CommonwareVerifiedSimplexCertificate | null>(null);
+  const [viewFinalizationMissing, setViewFinalizationMissing] = useState(false);
+  const [heightFinalization, setHeightFinalization] =
+    useState<CommonwareVerifiedSimplexCertificate | null>(null);
+  const [heightFinalizationMissing, setHeightFinalizationMissing] = useState(false);
 
   useEffect(() => {
     showNotificationRef.current = showNotification;
@@ -209,8 +239,14 @@ export function SimplexPanel({
       subscribeAbortRef.current?.abort();
       subscribeAbortRef.current = null;
       setIsSubscribing(false);
+      setNotarization(null);
+      setNotarizationMissing(false);
       setLatestFinalization(null);
       setLatestFinalizationMissing(false);
+      setViewFinalization(null);
+      setViewFinalizationMissing(false);
+      setHeightFinalization(null);
+      setHeightFinalizationMissing(false);
       setStreamEvents([]);
       setVerifiedFullBlocks({});
       setAppliedVerifierConfig({
@@ -264,6 +300,37 @@ export function SimplexPanel({
     }
   };
 
+  const readNotarizationByView = async () => {
+    setIsReadingNotarization(true);
+    setNotarization(null);
+    setNotarizationMissing(false);
+    setVerifiedFullBlocks((previous) => {
+      const next = { ...previous };
+      delete next.notarization;
+      return next;
+    });
+    try {
+      const view = notarizationView.trim();
+      if (!/^\d+$/.test(view)) {
+        throw new Error('Notarization view must be a non-negative integer');
+      }
+      const nextNotarization = await client.getNotarization(view);
+      setNotarization(nextNotarization);
+      setNotarizationMissing(nextNotarization === null);
+      showNotification(
+        'success',
+        nextNotarization ? 'Simplex Notarization Loaded' : 'Simplex Notarization Missing',
+        nextNotarization
+          ? `view ${nextNotarization.view.toString()}`
+          : `No notarized certificate at view ${view}`,
+      );
+    } catch (error) {
+      showNotification('error', 'Simplex Notarization Read Failed', String(error));
+    } finally {
+      setIsReadingNotarization(false);
+    }
+  };
+
   const readLatestFinalization = async () => {
     setIsReadingLatest(true);
     setLatestFinalization(null);
@@ -286,6 +353,70 @@ export function SimplexPanel({
       showNotification('error', 'Simplex Finalization Read Failed', String(error));
     } finally {
       setIsReadingLatest(false);
+    }
+  };
+
+  const readFinalizationIndex = (label: 'view' | 'height') => {
+    const value = finalizationIndex.trim();
+    if (!/^\d+$/.test(value)) {
+      throw new Error(`Finalization ${label} must be a non-negative integer`);
+    }
+    return value;
+  };
+
+  const readViewFinalization = async () => {
+    setIsReadingViewFinalization(true);
+    setViewFinalization(null);
+    setViewFinalizationMissing(false);
+    setVerifiedFullBlocks((previous) => {
+      const next = { ...previous };
+      delete next.view;
+      return next;
+    });
+    try {
+      const view = readFinalizationIndex('view');
+      const finalization = await client.getFinalizationByView(view);
+      setViewFinalization(finalization);
+      setViewFinalizationMissing(finalization === null);
+      showNotification(
+        'success',
+        finalization ? 'Simplex Finalization Loaded' : 'Simplex Finalization Missing',
+        finalization
+          ? `view ${finalization.view.toString()}`
+          : `No finalized certificate at view ${view}`,
+      );
+    } catch (error) {
+      showNotification('error', 'Simplex Finalization Read Failed', String(error));
+    } finally {
+      setIsReadingViewFinalization(false);
+    }
+  };
+
+  const readHeightFinalization = async () => {
+    setIsReadingHeightFinalization(true);
+    setHeightFinalization(null);
+    setHeightFinalizationMissing(false);
+    setVerifiedFullBlocks((previous) => {
+      const next = { ...previous };
+      delete next.height;
+      return next;
+    });
+    try {
+      const height = readFinalizationIndex('height');
+      const finalization = await client.getFinalizationByHeight(height);
+      setHeightFinalization(finalization);
+      setHeightFinalizationMissing(finalization === null);
+      showNotification(
+        'success',
+        finalization ? 'Simplex Finalization Loaded' : 'Simplex Finalization Missing',
+        finalization
+          ? `height ${height}, view ${finalization.view.toString()}`
+          : `No finalized certificate at height ${height}`,
+      );
+    } catch (error) {
+      showNotification('error', 'Simplex Finalization Read Failed', String(error));
+    } finally {
+      setIsReadingHeightFinalization(false);
     }
   };
 
@@ -332,7 +463,7 @@ export function SimplexPanel({
   const startSubscribe = () => {
     subscribeAbortRef.current?.abort();
     setStreamEvents([]);
-    setVerifiedFullBlocks(keepLatestVerifiedFullBlock);
+    setVerifiedFullBlocks(keepReadVerifiedFullBlocks);
     setIsSubscribing(true);
 
     const controller = new AbortController();
@@ -456,12 +587,73 @@ export function SimplexPanel({
           >
             {isReadingBlock ? 'Loading...' : 'Get Full Block'}
           </button>
+        </div>
+        <div className="form-row">
+          <div className="form-group form-group-wide">
+            <label htmlFor="simplex-notarization-view">Notarization View</label>
+            <input
+              id="simplex-notarization-view"
+              type="number"
+              min="0"
+              value={notarizationView}
+              onChange={(event) => setNotarizationView(event.target.value)}
+            />
+          </div>
+        </div>
+        <div className="button-row">
+          <button
+            className={`btn-primary ${isReadingNotarization ? 'loading' : ''}`}
+            onClick={readNotarizationByView}
+            disabled={
+              isReadingNotarization
+              || verifierStatus !== 'ready'
+              || !notarizationView.trim()
+            }
+          >
+            {isReadingNotarization ? 'Loading...' : 'By View'}
+          </button>
+        </div>
+        <div className="form-row">
+          <div className="form-group form-group-wide">
+            <label htmlFor="simplex-finalization-index">Finalization View or Height</label>
+            <input
+              id="simplex-finalization-index"
+              type="number"
+              min="0"
+              value={finalizationIndex}
+              onChange={(event) => setFinalizationIndex(event.target.value)}
+            />
+          </div>
+        </div>
+        <div className="button-row">
+          <button
+            className={`btn-primary ${isReadingViewFinalization ? 'loading' : ''}`}
+            onClick={readViewFinalization}
+            disabled={
+              isReadingViewFinalization
+              || verifierStatus !== 'ready'
+              || !finalizationIndex.trim()
+            }
+          >
+            {isReadingViewFinalization ? 'Loading...' : 'By View'}
+          </button>
+          <button
+            className={`btn-primary ${isReadingHeightFinalization ? 'loading' : ''}`}
+            onClick={readHeightFinalization}
+            disabled={
+              isReadingHeightFinalization
+              || verifierStatus !== 'ready'
+              || !finalizationIndex.trim()
+            }
+          >
+            {isReadingHeightFinalization ? 'Loading...' : 'By Height'}
+          </button>
           <button
             className={`btn-secondary ${isReadingLatest ? 'loading' : ''}`}
             onClick={readLatestFinalization}
             disabled={isReadingLatest || verifierStatus !== 'ready'}
           >
-            {isReadingLatest ? 'Loading...' : 'Latest Finalization'}
+            {isReadingLatest ? 'Loading...' : 'Latest'}
           </button>
         </div>
         {headerReadResult && (
@@ -479,21 +671,57 @@ export function SimplexPanel({
             ].join('\n')}</pre>
           </div>
         )}
+        {notarization && (
+          <div className="result fade-in">
+            <div className="result-title-row">
+              <h4>Notarization By View</h4>
+              <button
+                className={`btn-secondary btn-compact ${
+                  verifyingFullBlockId === 'notarization' ? 'loading' : ''
+                }`}
+                onClick={() => void verifyFullBlock('notarization', notarization)}
+                disabled={verifyingFullBlockId !== null}
+              >
+                {verifyingFullBlockId === 'notarization'
+                  ? 'Verifying...'
+                  : 'Verify Full Block'}
+              </button>
+            </div>
+            <pre>{renderCertificate(notarization)}</pre>
+            {verifiedFullBlocks.notarization && (
+              <div className="result-detail">
+                <p><strong>Digest:</strong> {verifiedFullBlocks.notarization.digestHex}</p>
+                <pre>{[
+                  `header ${renderBytes(verifiedFullBlocks.notarization.block.header)}`,
+                  `body ${renderBytes(verifiedFullBlocks.notarization.block.body)}`,
+                ].join('\n')}</pre>
+              </div>
+            )}
+          </div>
+        )}
+        {notarizationMissing && (
+          <div className="result fade-in">
+            <h4>No Notarization</h4>
+            <p>No notarized certificate is stored at view {notarizationView.trim()}.</p>
+          </div>
+        )}
         {latestFinalization && (
           <div className="result fade-in">
-            <h4>Latest Finalization</h4>
-            <pre>{renderCertificate(latestFinalization)}</pre>
-            <div className="button-row">
+            <div className="result-title-row">
+              <h4>Latest Finalization</h4>
               <button
-                className={`btn-secondary ${verifyingFullBlockId === 'latest' ? 'loading' : ''}`}
+                className={`btn-secondary btn-compact ${
+                  verifyingFullBlockId === 'latest' ? 'loading' : ''
+                }`}
                 onClick={() => void verifyFullBlock('latest', latestFinalization)}
                 disabled={verifyingFullBlockId !== null}
               >
                 {verifyingFullBlockId === 'latest' ? 'Verifying...' : 'Verify Full Block'}
               </button>
             </div>
+            <pre>{renderCertificate(latestFinalization)}</pre>
             {verifiedFullBlocks.latest && (
-              <div className="result-row-block">
+              <div className="result-detail">
                 <p><strong>Digest:</strong> {verifiedFullBlocks.latest.digestHex}</p>
                 <pre>{[
                   `header ${renderBytes(verifiedFullBlocks.latest.block.header)}`,
@@ -507,6 +735,70 @@ export function SimplexPanel({
           <div className="result fade-in">
             <h4>No Finalization</h4>
             <p>No finalized height index is stored.</p>
+          </div>
+        )}
+        {viewFinalization && (
+          <div className="result fade-in">
+            <div className="result-title-row">
+              <h4>Finalization By View</h4>
+              <button
+                className={`btn-secondary btn-compact ${
+                  verifyingFullBlockId === 'view' ? 'loading' : ''
+                }`}
+                onClick={() => void verifyFullBlock('view', viewFinalization)}
+                disabled={verifyingFullBlockId !== null}
+              >
+                {verifyingFullBlockId === 'view' ? 'Verifying...' : 'Verify Full Block'}
+              </button>
+            </div>
+            <pre>{renderCertificate(viewFinalization)}</pre>
+            {verifiedFullBlocks.view && (
+              <div className="result-detail">
+                <p><strong>Digest:</strong> {verifiedFullBlocks.view.digestHex}</p>
+                <pre>{[
+                  `header ${renderBytes(verifiedFullBlocks.view.block.header)}`,
+                  `body ${renderBytes(verifiedFullBlocks.view.block.body)}`,
+                ].join('\n')}</pre>
+              </div>
+            )}
+          </div>
+        )}
+        {viewFinalizationMissing && (
+          <div className="result fade-in">
+            <h4>No Finalization</h4>
+            <p>No finalized certificate is stored at view {finalizationIndex.trim()}.</p>
+          </div>
+        )}
+        {heightFinalization && (
+          <div className="result fade-in">
+            <div className="result-title-row">
+              <h4>Finalization By Height</h4>
+              <button
+                className={`btn-secondary btn-compact ${
+                  verifyingFullBlockId === 'height' ? 'loading' : ''
+                }`}
+                onClick={() => void verifyFullBlock('height', heightFinalization)}
+                disabled={verifyingFullBlockId !== null}
+              >
+                {verifyingFullBlockId === 'height' ? 'Verifying...' : 'Verify Full Block'}
+              </button>
+            </div>
+            <pre>{renderCertificate(heightFinalization)}</pre>
+            {verifiedFullBlocks.height && (
+              <div className="result-detail">
+                <p><strong>Digest:</strong> {verifiedFullBlocks.height.digestHex}</p>
+                <pre>{[
+                  `header ${renderBytes(verifiedFullBlocks.height.block.header)}`,
+                  `body ${renderBytes(verifiedFullBlocks.height.block.body)}`,
+                ].join('\n')}</pre>
+              </div>
+            )}
+          </div>
+        )}
+        {heightFinalizationMissing && (
+          <div className="result fade-in">
+            <h4>No Finalization</h4>
+            <p>No finalized certificate is stored at height {finalizationIndex.trim()}.</p>
           </div>
         )}
       </div>
@@ -544,7 +836,7 @@ export function SimplexPanel({
             className="btn-secondary"
             onClick={() => {
               setStreamEvents([]);
-              setVerifiedFullBlocks(keepLatestVerifiedFullBlock);
+              setVerifiedFullBlocks(keepReadVerifiedFullBlocks);
             }}
             disabled={streamEvents.length === 0}
           >
@@ -572,12 +864,13 @@ export function SimplexPanel({
                     key={eventId}
                     className="result-row-block"
                   >
-                    <p><strong>Sequence:</strong> {sequenceNumber.toString()}</p>
-                    <p><strong>Entry:</strong> {title}</p>
-                    <pre>{renderCertificate(entry.certificate)}</pre>
-                    <div className="button-row">
+                    <div className="result-title-row">
+                      <div className="result-meta">
+                        <p><strong>Sequence:</strong> {sequenceNumber.toString()}</p>
+                        <p><strong>Entry:</strong> {title}</p>
+                      </div>
                       <button
-                        className={`btn-secondary ${
+                        className={`btn-secondary btn-compact ${
                           verifyingFullBlockId === eventId ? 'loading' : ''
                         }`}
                         onClick={() => void verifyFullBlock(eventId, entry.certificate)}
@@ -588,8 +881,9 @@ export function SimplexPanel({
                           : 'Verify Full Block'}
                       </button>
                     </div>
+                    <pre>{renderCertificate(entry.certificate)}</pre>
                     {verifiedFullBlocks[eventId] && (
-                      <div className="result-row-block">
+                      <div className="result-detail">
                         <p><strong>Digest:</strong> {verifiedFullBlocks[eventId].digestHex}</p>
                         <pre>{[
                           `header ${renderBytes(verifiedFullBlocks[eventId].block.header)}`,

@@ -141,10 +141,11 @@ With the simulator running above:
 3. **In the UI**:
    - **Connection** accepts the scheme, namespace, and verifier material printed
      by `simplex seed`.
-   - **Read** fetches a block by digest or the latest finalized height index.
-     Latest finalization uses verified reads. From a verified finalization, use
-     **Verify Full Block** to fetch the digest-indexed block, compare its header
-     to the certified header, and verify the demo body commitment.
+   - **Read** fetches a block by digest, a notarization by view, a finalization
+     by view or height, or the latest finalized height index. Certificate reads
+     are verified before display. From a verified certificate, use **Verify Full
+     Block** to fetch the digest-indexed block, compare its header to the
+     certified header, and verify the demo body commitment.
    - **Subscribe** streams notarizations and finalizations with their headers,
      verifying each certificate before display. Each streamed certificate can
      also fetch and verify its full block on demand.
