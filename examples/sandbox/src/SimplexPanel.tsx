@@ -49,6 +49,11 @@ interface VerifierConfig {
   verificationMaterialHex: string;
 }
 
+interface VerifiedFullBlock {
+  digestHex: string;
+  block: SimplexBlockData;
+}
+
 function renderBytes(value: Uint8Array): string {
   const hex = bytesToHex(value);
   return hex.length > 160 ? `${hex.slice(0, 160)}...` : hex;
@@ -69,6 +74,13 @@ async function verifyDemoHeader({
   return bytesEqual(payload, await sha256(header));
 }
 
+async function verifyDemoBlock(header: Uint8Array, body: Uint8Array): Promise<boolean> {
+  if (header.byteLength < 32) {
+    return false;
+  }
+  return bytesEqual(header.slice(header.byteLength - 32), await sha256(body));
+}
+
 function renderCertificate(value: CommonwareVerifiedSimplexCertificate): string {
   return [
     `scheme ${value.scheme}`,
@@ -78,6 +90,13 @@ function renderCertificate(value: CommonwareVerifiedSimplexCertificate): string 
     `certificate ${renderBytes(value.certificate)}`,
     `header ${renderBytes(value.header)}`,
   ].join('\n');
+}
+
+function keepLatestVerifiedFullBlock(
+  previous: Record<string, VerifiedFullBlock>,
+): Record<string, VerifiedFullBlock> {
+  const latest = previous.latest;
+  return latest ? { latest } : {};
 }
 
 export function SimplexPanel({
@@ -119,8 +138,12 @@ export function SimplexPanel({
   const [isReadingBlock, setIsReadingBlock] = useState(false);
   const [isReadingLatest, setIsReadingLatest] = useState(false);
   const [isSubscribing, setIsSubscribing] = useState(false);
+  const [verifyingFullBlockId, setVerifyingFullBlockId] = useState<string | null>(null);
   const [sinceSequenceNumber, setSinceSequenceNumber] = useState('');
   const [streamEvents, setStreamEvents] = useState<VerifiedSimplexEvent[]>([]);
+  const [verifiedFullBlocks, setVerifiedFullBlocks] = useState<Record<string, VerifiedFullBlock>>(
+    {},
+  );
 
   const [blockReadDigestHex, setBlockReadDigestHex] = useState('');
   const [headerReadResult, setHeaderReadResult] = useState<Uint8Array | null>(null);
@@ -189,6 +212,7 @@ export function SimplexPanel({
       setLatestFinalization(null);
       setLatestFinalizationMissing(false);
       setStreamEvents([]);
+      setVerifiedFullBlocks({});
       setAppliedVerifierConfig({
         scheme,
         namespace,
@@ -244,6 +268,11 @@ export function SimplexPanel({
     setIsReadingLatest(true);
     setLatestFinalization(null);
     setLatestFinalizationMissing(false);
+    setVerifiedFullBlocks((previous) => {
+      const next = { ...previous };
+      delete next.latest;
+      return next;
+    });
     try {
       const finalization = await client.latestFinalization();
       setLatestFinalization(finalization);
@@ -260,9 +289,50 @@ export function SimplexPanel({
     }
   };
 
+  const verifyFullBlock = async (
+    id: string,
+    certificate: CommonwareVerifiedSimplexCertificate,
+  ) => {
+    setVerifyingFullBlockId(id);
+    setVerifiedFullBlocks((previous) => {
+      const next = { ...previous };
+      delete next[id];
+      return next;
+    });
+    try {
+      const block = await client.getBlock(certificate.payload);
+      if (!block) {
+        throw new Error(`No full block for digest ${bytesToHex(certificate.payload)}`);
+      }
+      if (!bytesEqual(block.header, certificate.header)) {
+        throw new Error('Fetched block header does not match the certified header');
+      }
+      if (!(await verifyDemoBlock(block.header, block.body))) {
+        throw new Error('Fetched block body does not match the demo header commitment');
+      }
+      setVerifiedFullBlocks((previous) => ({
+        ...previous,
+        [id]: {
+          digestHex: bytesToHex(certificate.payload),
+          block,
+        },
+      }));
+      showNotification(
+        'success',
+        'Simplex Full Block Verified',
+        `${block.header.byteLength} header bytes, ${block.body.byteLength} body bytes`,
+      );
+    } catch (error) {
+      showNotification('error', 'Simplex Full Block Verify Failed', String(error));
+    } finally {
+      setVerifyingFullBlockId(null);
+    }
+  };
+
   const startSubscribe = () => {
     subscribeAbortRef.current?.abort();
     setStreamEvents([]);
+    setVerifiedFullBlocks(keepLatestVerifiedFullBlock);
     setIsSubscribing(true);
 
     const controller = new AbortController();
@@ -413,6 +483,24 @@ export function SimplexPanel({
           <div className="result fade-in">
             <h4>Latest Finalization</h4>
             <pre>{renderCertificate(latestFinalization)}</pre>
+            <div className="button-row">
+              <button
+                className={`btn-secondary ${verifyingFullBlockId === 'latest' ? 'loading' : ''}`}
+                onClick={() => void verifyFullBlock('latest', latestFinalization)}
+                disabled={verifyingFullBlockId !== null}
+              >
+                {verifyingFullBlockId === 'latest' ? 'Verifying...' : 'Verify Full Block'}
+              </button>
+            </div>
+            {verifiedFullBlocks.latest && (
+              <div className="result-row-block">
+                <p><strong>Digest:</strong> {verifiedFullBlocks.latest.digestHex}</p>
+                <pre>{[
+                  `header ${renderBytes(verifiedFullBlocks.latest.block.header)}`,
+                  `body ${renderBytes(verifiedFullBlocks.latest.block.body)}`,
+                ].join('\n')}</pre>
+              </div>
+            )}
           </div>
         )}
         {latestFinalizationMissing && (
@@ -454,7 +542,10 @@ export function SimplexPanel({
           </button>
           <button
             className="btn-secondary"
-            onClick={() => setStreamEvents([])}
+            onClick={() => {
+              setStreamEvents([]);
+              setVerifiedFullBlocks(keepLatestVerifiedFullBlock);
+            }}
             disabled={streamEvents.length === 0}
           >
             Clear
@@ -466,7 +557,8 @@ export function SimplexPanel({
             <p>No certificate events yet</p>
           ) : (
             <div className="result-list">
-              {streamEvents.map(({ sequenceNumber, entry }, index) => {
+              {streamEvents.map(({ sequenceNumber, entry }) => {
+                const eventId = `${sequenceNumber.toString()}-${bytesToHex(entry.key)}`;
                 const title =
                   entry.type === 'notarization'
                     ? `notarization view ${entry.view.toString()}`
@@ -477,12 +569,34 @@ export function SimplexPanel({
                       }`;
                 return (
                   <div
-                    key={`${sequenceNumber.toString()}-${index}`}
+                    key={eventId}
                     className="result-row-block"
                   >
                     <p><strong>Sequence:</strong> {sequenceNumber.toString()}</p>
                     <p><strong>Entry:</strong> {title}</p>
                     <pre>{renderCertificate(entry.certificate)}</pre>
+                    <div className="button-row">
+                      <button
+                        className={`btn-secondary ${
+                          verifyingFullBlockId === eventId ? 'loading' : ''
+                        }`}
+                        onClick={() => void verifyFullBlock(eventId, entry.certificate)}
+                        disabled={verifyingFullBlockId !== null}
+                      >
+                        {verifyingFullBlockId === eventId
+                          ? 'Verifying...'
+                          : 'Verify Full Block'}
+                      </button>
+                    </div>
+                    {verifiedFullBlocks[eventId] && (
+                      <div className="result-row-block">
+                        <p><strong>Digest:</strong> {verifiedFullBlocks[eventId].digestHex}</p>
+                        <pre>{[
+                          `header ${renderBytes(verifiedFullBlocks[eventId].block.header)}`,
+                          `body ${renderBytes(verifiedFullBlocks[eventId].block.body)}`,
+                        ].join('\n')}</pre>
+                      </div>
+                    )}
                   </div>
                 );
               })}
