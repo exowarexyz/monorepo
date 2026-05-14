@@ -148,14 +148,6 @@ fn proposal(block: &TestBlock) -> Proposal<Sha256Digest> {
 }
 
 fn notarized(block: TestBlock, schemes: &[Scheme]) -> Notarized<TestBlock, Scheme, Sha256Digest> {
-    notarized_with_body(block, Bytes::new(), schemes)
-}
-
-fn notarized_with_body(
-    block: TestBlock,
-    body: Bytes,
-    schemes: &[Scheme],
-) -> Notarized<TestBlock, Scheme, Sha256Digest> {
     let proposal = proposal(&block);
     let votes: Vec<_> = schemes
         .iter()
@@ -163,11 +155,18 @@ fn notarized_with_body(
         .collect();
     let proof =
         Notarization::from_notarizes(&schemes[0], &votes, &Sequential).expect("notarization");
-    Notarized::with_body(proof, block, body).expect("notarized")
+    Notarized::new(proof, block).expect("notarized")
 }
 
 fn finalized(block: TestBlock, schemes: &[Scheme]) -> Finalized<TestBlock, Scheme, Sha256Digest> {
-    finalized_with_body(block, Bytes::new(), schemes)
+    let proposal = proposal(&block);
+    let votes: Vec<_> = schemes
+        .iter()
+        .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("finalize"))
+        .collect();
+    let proof =
+        Finalization::from_finalizes(&schemes[0], &votes, &Sequential).expect("finalization");
+    Finalized::new(proof, block).expect("finalized")
 }
 
 fn finalized_with_body(

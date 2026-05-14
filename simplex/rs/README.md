@@ -40,7 +40,9 @@ Finalized records can be read back by view, by height, or as the latest
 finalized height index. Header bytes can be read independently with
 `get_header`; the full `{ header, body }` envelope can be read with
 `get_block`. The certificate wrappers validate that the certificate payload
-digest matches the paired header bytes during construction and decoding.
+digest matches the paired header's `Block::digest()` during construction and
+decoding. If the body must be authenticated, make that commitment part of the
+header format.
 
 For the sandbox, the `simplex` binary can seed deterministic threshold-VRF
 MinSig finalizations into a running simulator:

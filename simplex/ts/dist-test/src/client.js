@@ -124,13 +124,57 @@ export function createWasmSimplexVerifier(module, verificationKey) {
         verifyFinalization: (bytes) => verifyFinalized(copyBytes(key), copyBytes(bytes)),
     };
 }
+export function createWasmSimplexHeaderVerifier(module) {
+    if (!module.verify_header) {
+        throw new Error('simplex WASM header verifier missing verify_header');
+    }
+    return ({ payload, header }) => module.verify_header(copyBytes(payload), copyBytes(header)) === true;
+}
+export function createWasmSimplexBlockVerifier(module) {
+    if (!module.verify_block) {
+        throw new Error('simplex WASM block verifier missing verify_block');
+    }
+    return ({ payload, header, body }) => module.verify_block(copyBytes(payload), copyBytes(header), copyBytes(body)) === true;
+}
 export function createCommonwareSimplexVerifier(module, options) {
     const namespace = toSimplexBytes(options.namespace);
     const verificationMaterial = toSimplexBytes(options.verificationMaterial);
     return {
-        verifyNotarization: (bytes) => normalizeCommonwareVerifiedCertificate(module.verify_notarized_commonware(options.scheme, copyBytes(namespace), copyBytes(verificationMaterial), copyBytes(bytes))),
-        verifyFinalization: (bytes) => normalizeCommonwareVerifiedCertificate(module.verify_finalized_commonware(options.scheme, copyBytes(namespace), copyBytes(verificationMaterial), copyBytes(bytes))),
+        verifyNotarization: (bytes, context) => normalizeAndVerifyCommonwareCertificate(module.verify_notarized_commonware(options.scheme, copyBytes(namespace), copyBytes(verificationMaterial), copyBytes(bytes)), bytes, context, options.verifyHeader, options.verifyBlock),
+        verifyFinalization: (bytes, context) => normalizeAndVerifyCommonwareCertificate(module.verify_finalized_commonware(options.scheme, copyBytes(namespace), copyBytes(verificationMaterial), copyBytes(bytes)), bytes, context, options.verifyHeader, options.verifyBlock),
     };
+}
+async function normalizeAndVerifyCommonwareCertificate(value, raw, context, verifyHeader, verifyBlock) {
+    const certificate = normalizeCommonwareVerifiedCertificate(value);
+    if (!certificate) {
+        return null;
+    }
+    if (verifyHeader) {
+        const verified = await verifyHeader({
+            certificate,
+            context,
+            raw: copyBytes(raw),
+            payload: copyBytes(certificate.payload),
+            header: copyBytes(certificate.header),
+        });
+        if (!verified) {
+            return null;
+        }
+    }
+    if (verifyBlock) {
+        const verified = await verifyBlock({
+            certificate,
+            context,
+            raw: copyBytes(raw),
+            payload: copyBytes(certificate.payload),
+            header: copyBytes(certificate.header),
+            body: copyBytes(certificate.body),
+        });
+        if (!verified) {
+            return null;
+        }
+    }
+    return certificate;
 }
 function normalizeCommonwareVerifiedCertificate(value) {
     if (!value) {

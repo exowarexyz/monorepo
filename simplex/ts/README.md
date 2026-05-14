@@ -32,8 +32,8 @@ Use `prepareHeader`, `prepareBlock`, `prepareNotarization`, and
 `StoreWriteBatch`. Finalizations are stored by view and by height so callers can
 fetch a specific view or the latest finalized height index.
 
-Use `getHeader` or `subscribeHeaders` when only the certified bytes are
-needed. Use `getBlock` or `subscribeBlocks` when the caller needs the full
+Use `getHeader` or `subscribeHeaders` when only header bytes are needed. Use
+`getBlock` or `subscribeBlocks` when the caller needs the full
 `{ header, body }` block data.
 
 ## Verification
@@ -73,6 +73,8 @@ const verifier = await createCommonwareWasmSimplexVerifier({
   scheme: 'bls12381-threshold-vrf-min-sig',
   namespace: new TextEncoder().encode('_MY_SIMPLEX_NAMESPACE'),
   verificationMaterial: hexToBytes('...'),
+  verifyHeader: ({ payload, header }) => verifyHeaderPayload(payload, header),
+  verifyBlock: ({ payload, header, body }) => verifyBlockPayload(payload, header, body),
 });
 
 const simplex = new SimplexClient('http://localhost:10000', { verifier });
@@ -86,5 +88,42 @@ Supported Commonware schemes are `ed25519`, `secp256r1`,
 key material: an Ed25519 participant set, a Secp256r1/BLS multisig
 identity-to-signing-key map, or a threshold identity depending on the scheme.
 The Commonware WASM verifier treats certificates as opaque proof-plus-block
-records, verifies the configured certificate key material, and rejects records
-whose payload digest does not match the header bytes.
+records and verifies the configured certificate key material. Pass
+`verifyHeader` to validate the application-specific relationship between the
+certificate payload and header. Configure `verifyBlock` on clients that consume
+full blocks and must also validate the body. The client does not hardcode SHA or
+trust a server body-presence flag; the caller-selected verifier defines the
+required payload/header/body relationship before the TS client returns a fetched
+or streamed certificate.
+
+Header and block integrity can also live in caller-owned WASM. Implement the
+ABI you need:
+
+```rust
+#[wasm_bindgen]
+pub fn verify_header(payload: Vec<u8>, header: Vec<u8>) -> bool {
+    // Verify payload/header according to the application's header format.
+}
+
+#[wasm_bindgen]
+pub fn verify_block(payload: Vec<u8>, header: Vec<u8>, body: Vec<u8>) -> bool {
+    // Verify payload/header/body according to the application's header format.
+}
+```
+
+Then adapt the module in TS:
+
+```ts
+import {
+  createWasmSimplexBlockVerifier,
+  createWasmSimplexHeaderVerifier,
+} from '@exowarexyz/simplex';
+
+const verifier = await createCommonwareWasmSimplexVerifier({
+  scheme,
+  namespace,
+  verificationMaterial,
+  verifyHeader: createWasmSimplexHeaderVerifier(myBlockVerifierWasm),
+  verifyBlock: createWasmSimplexBlockVerifier(myBlockVerifierWasm),
+});
+```

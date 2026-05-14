@@ -135,7 +135,7 @@ impl SimplexClient {
             return Err(SimplexError::ProofBlockMismatch);
         }
 
-        let mut prepared = self.prepare_block(&notarized.header, notarized.body.clone());
+        let mut prepared = self.prepare_block_data(&notarized.block_data());
         prepared.summary.notarizations = 1;
         prepared.push(
             keys::notarization_by_view(notarized.proof.view()),
@@ -157,7 +157,7 @@ impl SimplexClient {
             return Err(SimplexError::ProofBlockMismatch);
         }
 
-        let mut prepared = self.prepare_block(&finalized.header, finalized.body.clone());
+        let mut prepared = self.prepare_block_data(&finalized.block_data());
         let encoded = finalized.encode();
         prepared.summary.finalizations = 1;
         prepared.summary.finalized_height_indexes = 1;

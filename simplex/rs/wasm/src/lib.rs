@@ -12,7 +12,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinPk, MinSig, Variant},
-    ed25519, secp256r1, sha256, Hasher, Sha256,
+    ed25519, secp256r1, sha256,
 };
 use commonware_parallel::Sequential;
 use commonware_utils::ordered::{BiMap, Set};
@@ -50,12 +50,6 @@ fn js_null() -> JsValue {
 
 fn to_value(value: VerifiedCertificate) -> JsValue {
     serde_wasm_bindgen::to_value(&value).unwrap_or(JsValue::NULL)
-}
-
-fn digest_header(header: &[u8]) -> Sha256Digest {
-    let mut hasher = Sha256::new();
-    hasher.update(header);
-    hasher.finalize()
 }
 
 fn read_block_data(bytes: &[u8], artifact: &str) -> Result<VerifiedBlockData, String> {
@@ -121,9 +115,6 @@ where
         return Err("notarization certificate verification failed".to_string());
     }
     let block = read_block_data(reader, "notarized artifact")?;
-    if digest_header(&block.header) != proof.proposal.payload {
-        return Err("notarization certificate payload does not match header digest".to_string());
-    }
     Ok(VerifiedCertificate {
         scheme: scheme_name.to_string(),
         view: proof.view().get(),
@@ -152,9 +143,6 @@ where
         return Err("finalization certificate verification failed".to_string());
     }
     let block = read_block_data(reader, "finalized artifact")?;
-    if digest_header(&block.header) != proof.proposal.payload {
-        return Err("finalization certificate payload does not match header digest".to_string());
-    }
     Ok(VerifiedCertificate {
         scheme: scheme_name.to_string(),
         view: proof.view().get(),
@@ -394,13 +382,19 @@ mod tests {
     use commonware_cryptography::{
         bls12381::primitives::{group::Private, ops::compute_public},
         certificate::mocks::Fixture,
-        Signer as _,
+        Hasher, Sha256, Signer as _,
     };
     use commonware_math::algebra::Random;
     use commonware_utils::TryCollect;
     use rand::{rngs::StdRng, SeedableRng};
 
     const DEMO_NAMESPACE: &[u8] = b"_EXOWARE_SIMPLEX_DEMO";
+
+    fn digest_header(header: &[u8]) -> Sha256Digest {
+        let mut hasher = Sha256::new();
+        hasher.update(header);
+        hasher.finalize()
+    }
 
     fn proposal(header: &[u8]) -> Proposal<Sha256Digest> {
         Proposal::new(

@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   bytesToHex,
   hexToBytes,
+  type CommonwareSimplexBlockVerification,
+  type CommonwareSimplexHeaderVerification,
   type CommonwareSimplexScheme,
   SimplexClient,
   type CommonwareVerifiedSimplexCertificate,
@@ -61,6 +63,31 @@ function parseOptionalHex(value: string): Uint8Array | undefined {
 function renderBytes(value: Uint8Array): string {
   const hex = bytesToHex(value);
   return hex.length > 160 ? `${hex.slice(0, 160)}...` : hex;
+}
+
+function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+  return left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index]);
+}
+
+async function sha256(bytes: Uint8Array): Promise<Uint8Array> {
+  return new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+}
+
+async function verifyDemoBlock({
+  header,
+  body,
+}: CommonwareSimplexBlockVerification): Promise<boolean> {
+  if (header.byteLength < 32) {
+    return false;
+  }
+  return bytesEqual(header.slice(header.byteLength - 32), await sha256(body));
+}
+
+async function verifyDemoHeader({
+  payload,
+  header,
+}: CommonwareSimplexHeaderVerification): Promise<boolean> {
+  return bytesEqual(payload, await sha256(header));
 }
 
 function renderCertificate(value: CommonwareVerifiedSimplexCertificate): string {
@@ -152,6 +179,8 @@ export function SimplexPanel({
           scheme: appliedVerifierConfig.scheme,
           namespace: new TextEncoder().encode(appliedVerifierConfig.namespace),
           verificationMaterial: hexToBytes(appliedVerifierConfig.verificationMaterialHex),
+          verifyHeader: verifyDemoHeader,
+          verifyBlock: verifyDemoBlock,
         });
         if (active) {
           setVerifier(nextVerifier);

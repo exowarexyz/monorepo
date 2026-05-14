@@ -6,6 +6,8 @@ import {
   SimplexRecordKind,
   headerByDigestKey,
   createCommonwareSimplexVerifier,
+  createWasmSimplexBlockVerifier,
+  createWasmSimplexHeaderVerifier,
   createWasmSimplexVerifier,
   blockByDigestKey,
   bytesToHex,
@@ -177,7 +179,84 @@ test('WASM verifier adapter passes opaque bytes and configured key', () => {
   );
 });
 
+test('WASM header verifier adapter passes payload and header', () => {
+  const calls: string[] = [];
+  const verifyHeader = createWasmSimplexHeaderVerifier({
+    verify_header: (payload, header) => {
+      calls.push([bytesToHex(payload), bytesToHex(header)].join(':'));
+      return bytesToHex(payload) === 'aa' && bytesToHex(header) === 'bb';
+    },
+  });
+
+  assert.equal(
+    verifyHeader({
+      certificate: {
+        scheme: 'ed25519',
+        view: 1n,
+        parent: 0n,
+        payload: new Uint8Array([0xaa]),
+        certificate: new Uint8Array([0xcc]),
+        header: new Uint8Array([0xbb]),
+        body: new Uint8Array([0xdd]),
+      },
+      context: {
+        kind: 'notarization',
+        source: 'get',
+        key: notarizationByViewKey(1),
+        value: new Uint8Array([0xee]),
+        view: 1n,
+      },
+      raw: new Uint8Array([0xee]),
+      payload: new Uint8Array([0xaa]),
+      header: new Uint8Array([0xbb]),
+    }),
+    true,
+  );
+  assert.deepEqual(calls, ['aa:bb']);
+  assert.throws(() => createWasmSimplexHeaderVerifier({} as never), /missing verify_header/);
+});
+
+test('WASM block verifier adapter passes payload, header, and body', () => {
+  const calls: string[] = [];
+  const verifyBlock = createWasmSimplexBlockVerifier({
+    verify_block: (payload, header, body) => {
+      calls.push([bytesToHex(payload), bytesToHex(header), bytesToHex(body)].join(':'));
+      return bytesToHex(payload) === 'aa' && bytesToHex(header) === 'bb';
+    },
+  });
+
+  assert.equal(
+    verifyBlock({
+      certificate: {
+        scheme: 'ed25519',
+        view: 1n,
+        parent: 0n,
+        payload: new Uint8Array([0xaa]),
+        certificate: new Uint8Array([0xcc]),
+        header: new Uint8Array([0xbb]),
+        body: new Uint8Array([0xdd]),
+      },
+      context: {
+        kind: 'notarization',
+        source: 'get',
+        key: notarizationByViewKey(1),
+        value: new Uint8Array([0xee]),
+        view: 1n,
+      },
+      raw: new Uint8Array([0xee]),
+      payload: new Uint8Array([0xaa]),
+      header: new Uint8Array([0xbb]),
+      body: new Uint8Array([0xdd]),
+    }),
+    true,
+  );
+  assert.deepEqual(calls, ['aa:bb:dd']);
+  assert.throws(() => createWasmSimplexBlockVerifier({} as never), /missing verify_block/);
+});
+
 test('Commonware WASM verifier adapter is scheme-parameterized', async () => {
+  const headerVerifications: string[] = [];
+  const blockVerifications: string[] = [];
   const verifier = createCommonwareSimplexVerifier(
     {
       verify_notarized_commonware: (scheme, namespace, material, bytes) => ({
@@ -203,6 +282,29 @@ test('Commonware WASM verifier adapter is scheme-parameterized', async () => {
       scheme: 'bls12381-threshold-vrf-min-sig',
       namespace: '0a',
       verificationMaterial: '0b',
+      verifyHeader: ({ payload, header, raw, context }) => {
+        headerVerifications.push(
+          [
+            context.kind,
+            bytesToHex(payload),
+            bytesToHex(header),
+            bytesToHex(raw),
+          ].join(':'),
+        );
+        return true;
+      },
+      verifyBlock: ({ payload, header, body, raw, context }) => {
+        blockVerifications.push(
+          [
+            context.kind,
+            bytesToHex(payload),
+            bytesToHex(header),
+            bytesToHex(body),
+            bytesToHex(raw),
+          ].join(':'),
+        );
+        return true;
+      },
     },
   );
 
@@ -243,6 +345,82 @@ test('Commonware WASM verifier adapter is scheme-parameterized', async () => {
       header: new Uint8Array([0xd0]),
       body: new Uint8Array([0xe1]),
     },
+  );
+  assert.deepEqual(blockVerifications, [
+    'notarization:0a:c0:e0:c0',
+    'finalization:0a:d0:e1:d0',
+  ]);
+  assert.deepEqual(headerVerifications, [
+    'notarization:0a:c0:c0',
+    'finalization:0a:d0:d0',
+  ]);
+});
+
+test('Commonware WASM verifier adapter rejects failed header verification', async () => {
+  const verifier = createCommonwareSimplexVerifier(
+    {
+      verify_notarized_commonware: () => ({
+        scheme: 'ed25519',
+        view: 1n,
+        parent: 0n,
+        payload: [0x01],
+        certificate: [0x02],
+        header: [0x03],
+        body: [],
+      }),
+      verify_finalized_commonware: () => null,
+    },
+    {
+      scheme: 'ed25519',
+      namespace: '',
+      verificationMaterial: '',
+      verifyHeader: () => false,
+    },
+  );
+
+  assert.equal(
+    await verifier.verifyNotarization(new Uint8Array([0xc0]), {
+      kind: 'notarization',
+      source: 'get',
+      key: notarizationByViewKey(1),
+      value: new Uint8Array([0xc0]),
+      view: 1n,
+    }),
+    null,
+  );
+});
+
+test('Commonware WASM verifier adapter rejects failed block verification', async () => {
+  const verifier = createCommonwareSimplexVerifier(
+    {
+      verify_notarized_commonware: () => ({
+        scheme: 'ed25519',
+        view: 1n,
+        parent: 0n,
+        payload: [0x01],
+        certificate: [0x02],
+        header: [0x03],
+        body: [0x04],
+      }),
+      verify_finalized_commonware: () => null,
+    },
+    {
+      scheme: 'ed25519',
+      namespace: '',
+      verificationMaterial: '',
+      verifyBlock: () => false,
+    },
+  );
+
+  assert.equal(
+    await verifier.verifyNotarization(new Uint8Array([0xc0]), {
+      kind: 'notarization',
+      source: 'get',
+      key: notarizationByViewKey(1),
+      value: new Uint8Array([0xc0]),
+      view: 1n,
+    }),
+    null,
   );
 });
 

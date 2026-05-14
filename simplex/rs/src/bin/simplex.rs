@@ -66,6 +66,7 @@ impl DemoBlock {
         height: u64,
         parent_view: View,
         parent_digest: Sha256Digest,
+        body_digest: Sha256Digest,
         leader: ed25519::PublicKey,
     ) -> Self {
         let context = Context {
@@ -77,7 +78,7 @@ impl DemoBlock {
             context,
             parent: parent_digest,
             height: Height::new(height),
-            payload: format!("simplex-demo-block-{height}").into_bytes(),
+            payload: body_digest.as_ref().to_vec(),
             digest: Sha256Digest::EMPTY,
         };
         block.digest = block.compute_digest();
@@ -91,6 +92,12 @@ impl DemoBlock {
         hasher.update(&header);
         hasher.finalize()
     }
+}
+
+fn digest_bytes(bytes: &[u8]) -> Sha256Digest {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher.finalize()
 }
 
 impl Write for DemoBlock {
@@ -308,8 +315,15 @@ async fn seed(
             _ = ticker.tick() => {}
         }
 
-        let block = DemoBlock::new(height, parent_view, parent_digest, leader.clone());
         let body = Bytes::from(format!("simplex-demo-block-body-{height}").into_bytes());
+        let body_digest = digest_bytes(&body);
+        let block = DemoBlock::new(
+            height,
+            parent_view,
+            parent_digest,
+            body_digest,
+            leader.clone(),
+        );
         let notarized = notarized(block.clone(), body.clone(), &schemes);
         let finalized = finalized(block.clone(), body, &schemes);
         let sequence = upload_certificates(&client, &notarized, &finalized).await?;
