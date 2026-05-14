@@ -559,7 +559,7 @@ dependencies = [
  "bitflags",
  "cexpr",
  "clang-sys",
- "itertools 0.10.5",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "regex",
@@ -932,6 +932,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-broadcast"
+version = "2026.4.0"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=2cc941653cb936952c00587f8cb037c8021241a5#2cc941653cb936952c00587f8cb037c8021241a5"
+dependencies = [
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-utils",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "commonware-codec"
 version = "2026.4.0"
 source = "git+https://github.com/commonwarexyz/monorepo?rev=2cc941653cb936952c00587f8cb037c8021241a5#2cc941653cb936952c00587f8cb037c8021241a5"
@@ -943,6 +958,57 @@ dependencies = [
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "thiserror",
+]
+
+[[package]]
+name = "commonware-coding"
+version = "2026.4.0"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=2cc941653cb936952c00587f8cb037c8021241a5#2cc941653cb936952c00587f8cb037c8021241a5"
+dependencies = [
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-math",
+ "commonware-parallel",
+ "commonware-storage",
+ "commonware-utils",
+ "num-rational",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "rayon",
+ "reed-solomon-simd",
+ "thiserror",
+]
+
+[[package]]
+name = "commonware-consensus"
+version = "2026.4.0"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=2cc941653cb936952c00587f8cb037c8021241a5#2cc941653cb936952c00587f8cb037c8021241a5"
+dependencies = [
+ "bytes",
+ "cfg-if",
+ "commonware-broadcast",
+ "commonware-codec",
+ "commonware-coding",
+ "commonware-cryptography",
+ "commonware-formatting",
+ "commonware-macros",
+ "commonware-math",
+ "commonware-p2p",
+ "commonware-parallel",
+ "commonware-resolver",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-utils",
+ "futures",
+ "pin-project",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "rand_distr",
+ "rayon",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -1024,6 +1090,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-p2p"
+version = "2026.4.0"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=2cc941653cb936952c00587f8cb037c8021241a5#2cc941653cb936952c00587f8cb037c8021241a5"
+dependencies = [
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-parallel",
+ "commonware-runtime",
+ "commonware-stream",
+ "commonware-utils",
+ "either",
+ "futures",
+ "num-bigint",
+ "num-integer",
+ "num-rational",
+ "num-traits",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "rand_distr",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "commonware-parallel"
 version = "2026.4.0"
 source = "git+https://github.com/commonwarexyz/monorepo?rev=2cc941653cb936952c00587f8cb037c8021241a5#2cc941653cb936952c00587f8cb037c8021241a5"
@@ -1031,6 +1122,25 @@ dependencies = [
  "cfg-if",
  "commonware-macros",
  "rayon",
+]
+
+[[package]]
+name = "commonware-resolver"
+version = "2026.4.0"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=2cc941653cb936952c00587f8cb037c8021241a5#2cc941653cb936952c00587f8cb037c8021241a5"
+dependencies = [
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-stream",
+ "commonware-utils",
+ "futures",
+ "rand 0.8.5",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -1102,6 +1212,26 @@ dependencies = [
  "thiserror",
  "tracing",
  "zstd",
+]
+
+[[package]]
+name = "commonware-stream"
+version = "2026.4.0"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=2cc941653cb936952c00587f8cb037c8021241a5#2cc941653cb936952c00587f8cb037c8021241a5"
+dependencies = [
+ "chacha20poly1305",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-formatting",
+ "commonware-macros",
+ "commonware-runtime",
+ "commonware-utils",
+ "futures",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "thiserror",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
@@ -2269,7 +2399,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2385,6 +2515,41 @@ dependencies = [
  "http",
  "regex",
  "tokio",
+]
+
+[[package]]
+name = "exoware-simplex"
+version = "2026.4.1"
+dependencies = [
+ "bytes",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-parallel",
+ "exoware-sdk",
+ "exoware-simulator",
+ "futures",
+ "rand 0.8.5",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "exoware-simplex-wasm"
+version = "2026.4.1"
+dependencies = [
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-math",
+ "commonware-parallel",
+ "commonware-utils",
+ "getrandom 0.3.4",
+ "rand 0.8.5",
+ "serde",
+ "serde-wasm-bindgen",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -3128,7 +3293,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3509,7 +3674,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4085,7 +4250,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -4197,6 +4362,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rand_distr"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32cb0b9bc82b0a0876c2dd994a7e7a2683d3e7390ca40e6886785ef0c7e3ee31"
+dependencies = [
+ "num-traits",
+ "rand 0.8.5",
+]
+
+[[package]]
 name = "rand_xorshift"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4235,6 +4410,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "readme-rustdocifier"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08ad765b21a08b1a8e5cdce052719188a23772bcbefb3c439f0baaf62c56ceac"
+
+[[package]]
 name = "recursive"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4261,6 +4442,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
  "bitflags",
+]
+
+[[package]]
+name = "reed-solomon-simd"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cffef0520d30fbd4151fb20e262947ae47fb0ab276a744a19b6398438105a072"
+dependencies = [
+ "cpufeatures 0.2.17",
+ "fixedbitset",
+ "once_cell",
+ "readme-rustdocifier",
 ]
 
 [[package]]
@@ -4399,7 +4592,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4528,6 +4721,17 @@ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
  "serde_derive",
+]
+
+[[package]]
+name = "serde-wasm-bindgen"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8302e169f0eddcc139c70f139d19d6467353af16f9fce27e8c30158036a1e16b"
+dependencies = [
+ "js-sys",
+ "serde",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -4841,7 +5045,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5537,7 +5741,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

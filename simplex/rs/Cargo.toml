@@ -1,0 +1,28 @@
+[package]
+name = "exoware-simplex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Store-backed upload client for Commonware Simplex certificates and blocks."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/exowarexyz/monorepo/tree/main/simplex/rs"
+documentation = "https://docs.rs/exoware-simplex"
+
+[dependencies]
+bytes = { workspace = true }
+commonware-codec = { workspace = true }
+commonware-consensus = { workspace = true }
+commonware-cryptography = { workspace = true }
+exoware-sdk = { workspace = true }
+futures = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+commonware-consensus = { workspace = true, features = ["mocks"] }
+commonware-cryptography = { workspace = true, features = ["mocks"] }
+commonware-parallel = { workspace = true }
+exoware-simulator = { path = "../../examples/simulator" }
+rand = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

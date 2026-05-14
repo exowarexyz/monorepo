@@ -1,0 +1,47 @@
+{
+  "name": "@exowarexyz/simplex",
+  "version": "2026.4.1",
+  "description": "Browser client helpers for Store-backed Commonware Simplex artifacts.",
+  "type": "module",
+  "license": "(MIT OR Apache-2.0)",
+  "homepage": "https://exoware.xyz",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/exowarexyz/monorepo.git",
+    "directory": "simplex/ts"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./wasm": {
+      "types": "./dist/wasm.d.ts",
+      "import": "./dist/wasm.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build:wasm": "wasm-pack build ../rs/wasm --target web --mode no-install --no-opt --out-dir ../../ts/src/generated/wasm --out-name exoware_simplex_wasm",
+    "build": "npm run build:wasm && rm -rf dist && tsc -p tsconfig.json && mkdir -p dist/generated && cp -R src/generated/wasm dist/generated/wasm && rm -f dist/generated/wasm/.gitignore",
+    "lint": "tsc --noEmit -p tsconfig.json",
+    "test": "rm -rf dist-test && tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js",
+    "test:wasm": "cargo test -p exoware-simplex-wasm --lib",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@exowarexyz/sdk": "file:../../sdk/ts"
+  },
+  "devDependencies": {
+    "@types/node": "^25.7.0",
+    "typescript": "^5.5.3"
+  }
+}

@@ -41,17 +41,20 @@ Explore the Exoware API.
 - **Store:** set and get key-value pairs, and run range queries.
 - **Ordered QMDB** (optional, requires `VITE_QMDB_URL`): current/historical
   proofs and live subscribe streaming.
+- **Simplex** (optional, requires `VITE_SIMPLEX_URL`): upload encoded
+  Commonware Simplex blocks, notarizations, and finalizations to Store, with
+  latest-finalization verification through the Simplex WASM verifier.
 - **SQL** (optional, requires `VITE_SQL_URL`): run ad-hoc SQL queries and
   subscribe to a SQL WHERE predicate evaluated per ingested batch.
 
 ## Store namespace
 
-The sandbox currently runs raw Store KV, Ordered QMDB, and SQL against the same
-unpartitioned simulator Store. QMDB and SQL each use their own internal key
-families, but the demo binaries do not assign distinct SDK `StoreKeyPrefix`
-values, and raw KV can write arbitrary Store keys. This means the sandbox is
-useful for exercising the individual panels, but it should not be treated as an
-example of isolated multi-instance Store partitioning.
+The sandbox currently runs raw Store KV, Ordered QMDB, Simplex, and SQL against
+the same unpartitioned simulator Store. QMDB, Simplex, and SQL each use their
+own internal key families, but the demo binaries do not assign distinct SDK
+`StoreKeyPrefix` values, and raw KV can write arbitrary Store keys. This means
+the sandbox is useful for exercising the individual panels, but it should not be
+treated as an example of isolated multi-instance Store partitioning.
 
 ## Ordered QMDB panel
 
@@ -105,8 +108,31 @@ In addition to the simulator running above:
      current root for that emitted tip and reports proof size. Paste seed
      output lines into Trusted Roots when replaying or following multiple tips.
 
-   The client-side verifier rejects any proof whose recomputed root doesn't
-   match the pasted anchor.
+The client-side verifier rejects any proof whose recomputed root doesn't
+match the pasted anchor.
+
+## Simplex panel
+
+The Simplex panel is only rendered when `VITE_SIMPLEX_URL` is set. It writes
+encoded Commonware Simplex artifacts directly to Exoware Store using the same
+key layout as the Rust `exoware-simplex` crate. The panel configures the
+Simplex WASM verifier with a local deterministic threshold-VRF MinSig demo
+identity; the WASM module itself only verifies caller-supplied scheme,
+namespace, key material, and artifact bytes.
+
+With the simulator running above, point the web app at the simulator:
+
+```bash
+VITE_SIMPLEX_URL=http://127.0.0.1:8080 npm run dev
+```
+
+In the UI:
+- **Upload Block** stores encoded block bytes by digest.
+- **Upload Certificate** stores encoded notarization or finalization records by
+  view. Finalizations are also indexed by block height. Optional block bytes and
+  digest can be supplied to store the block in the same batch.
+- **Read** fetches a block by digest or the latest finalized height index.
+  Latest finalization uses verified reads, while block reads remain raw.
 
 ## SQL panel
 
