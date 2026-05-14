@@ -203,7 +203,6 @@ test('WASM header verifier adapter passes payload and header', () => {
         payload: new Uint8Array([0xaa]),
         certificate: new Uint8Array([0xcc]),
         header: new Uint8Array([0xbb]),
-        body: new Uint8Array([0xdd]),
       },
       context: {
         kind: 'notarization',
@@ -240,7 +239,6 @@ test('WASM block verifier adapter passes payload, header, and body', () => {
         payload: new Uint8Array([0xaa]),
         certificate: new Uint8Array([0xcc]),
         header: new Uint8Array([0xbb]),
-        body: new Uint8Array([0xdd]),
       },
       context: {
         kind: 'notarization',
@@ -262,7 +260,6 @@ test('WASM block verifier adapter passes payload, header, and body', () => {
 
 test('Commonware WASM verifier adapter is scheme-parameterized', async () => {
   const headerVerifications: string[] = [];
-  const blockVerifications: string[] = [];
   const verifier = createCommonwareSimplexVerifier(
     {
       verify_notarized_commonware: (scheme, namespace, material, bytes) => ({
@@ -272,7 +269,6 @@ test('Commonware WASM verifier adapter is scheme-parameterized', async () => {
         payload: namespace,
         certificate: material,
         header: bytes,
-        body: new Uint8Array([0xe0]),
       }),
       verify_finalized_commonware: (scheme, namespace, material, bytes) => ({
         scheme,
@@ -281,7 +277,6 @@ test('Commonware WASM verifier adapter is scheme-parameterized', async () => {
         payload: Array.from(namespace),
         certificate: Array.from(material),
         header: Array.from(bytes),
-        body: [0xe1],
       }),
     },
     {
@@ -294,18 +289,6 @@ test('Commonware WASM verifier adapter is scheme-parameterized', async () => {
             context.kind,
             bytesToHex(payload),
             bytesToHex(header),
-            bytesToHex(raw),
-          ].join(':'),
-        );
-        return true;
-      },
-      verifyBlock: ({ payload, header, body, raw, context }) => {
-        blockVerifications.push(
-          [
-            context.kind,
-            bytesToHex(payload),
-            bytesToHex(header),
-            bytesToHex(body),
             bytesToHex(raw),
           ].join(':'),
         );
@@ -329,7 +312,6 @@ test('Commonware WASM verifier adapter is scheme-parameterized', async () => {
       payload: new Uint8Array([0x0a]),
       certificate: new Uint8Array([0x0b]),
       header: new Uint8Array([0xc0]),
-      body: new Uint8Array([0xe0]),
     },
   );
 
@@ -349,13 +331,8 @@ test('Commonware WASM verifier adapter is scheme-parameterized', async () => {
       payload: new Uint8Array([0x0a]),
       certificate: new Uint8Array([0x0b]),
       header: new Uint8Array([0xd0]),
-      body: new Uint8Array([0xe1]),
     },
   );
-  assert.deepEqual(blockVerifications, [
-    'notarization:0a:c0:e0:c0',
-    'finalization:0a:d0:e1:d0',
-  ]);
   assert.deepEqual(headerVerifications, [
     'notarization:0a:c0:c0',
     'finalization:0a:d0:d0',
@@ -372,7 +349,6 @@ test('Commonware WASM verifier adapter rejects failed header verification', asyn
         payload: [0x01],
         certificate: [0x02],
         header: [0x03],
-        body: [],
       }),
       verify_finalized_commonware: () => null,
     },
@@ -381,40 +357,6 @@ test('Commonware WASM verifier adapter rejects failed header verification', asyn
       namespace: '',
       verificationMaterial: '',
       verifyHeader: () => false,
-    },
-  );
-
-  assert.equal(
-    await verifier.verifyNotarization(new Uint8Array([0xc0]), {
-      kind: 'notarization',
-      source: 'get',
-      key: notarizationByViewKey(1),
-      value: new Uint8Array([0xc0]),
-      view: 1n,
-    }),
-    null,
-  );
-});
-
-test('Commonware WASM verifier adapter rejects failed block verification', async () => {
-  const verifier = createCommonwareSimplexVerifier(
-    {
-      verify_notarized_commonware: () => ({
-        scheme: 'ed25519',
-        view: 1n,
-        parent: 0n,
-        payload: [0x01],
-        certificate: [0x02],
-        header: [0x03],
-        body: [0x04],
-      }),
-      verify_finalized_commonware: () => null,
-    },
-    {
-      scheme: 'ed25519',
-      namespace: '',
-      verificationMaterial: '',
-      verifyBlock: () => false,
     },
   );
 

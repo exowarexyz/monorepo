@@ -105,12 +105,11 @@ where
     }
 }
 
-/// A Simplex notarization plus header bytes and body bytes for the digest.
+/// A Simplex notarization plus the header bytes for its payload digest.
 #[derive(Clone, Debug)]
 pub struct Notarized<B, S: certificate::Scheme, D: Digest> {
     pub proof: types::Notarization<S, D>,
     pub header: B,
-    pub body: Bytes,
 }
 
 impl<B, S, D> PartialEq for Notarized<B, S, D>
@@ -120,7 +119,7 @@ where
     D: Digest,
 {
     fn eq(&self, other: &Self) -> bool {
-        self.proof == other.proof && self.header == other.header && self.body == other.body
+        self.proof == other.proof && self.header == other.header
     }
 }
 
@@ -139,32 +138,13 @@ where
     D: Digest,
 {
     pub fn new(proof: types::Notarization<S, D>, header: B) -> Result<Self, Error> {
-        Self::with_body(proof, header, Bytes::new())
-    }
-
-    pub fn with_body(
-        proof: types::Notarization<S, D>,
-        header: B,
-        body: impl Into<Bytes>,
-    ) -> Result<Self, Error> {
         if proof.proposal.payload != header.digest() {
             return Err(Error::Invalid(
                 "exoware_simplex::Notarized",
                 "proof payload does not match header digest",
             ));
         }
-        Ok(Self {
-            proof,
-            header,
-            body: body.into(),
-        })
-    }
-
-    pub fn block_data(&self) -> BlockData<B>
-    where
-        B: Clone,
-    {
-        BlockData::with_body(self.header.clone(), self.body.clone())
+        Ok(Self { proof, header })
     }
 }
 
@@ -176,7 +156,7 @@ where
 {
     fn write(&self, buf: &mut impl BufMut) {
         self.proof.write(buf);
-        write_block_data(&self.header, &self.body, buf);
+        self.header.write(buf);
     }
 }
 
@@ -191,8 +171,14 @@ where
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let proof = types::Notarization::<S, D>::read_cfg(buf, &cfg.0)?;
-        let data = BlockData::<B>::read_cfg(buf, &cfg.1)?;
-        Self::with_body(proof, data.header, data.body)
+        let header = B::read_cfg(buf, &cfg.1)?;
+        if buf.has_remaining() {
+            return Err(Error::Invalid(
+                "exoware_simplex::Notarized",
+                "header bytes contain trailing data",
+            ));
+        }
+        Self::new(proof, header)
     }
 }
 
@@ -203,16 +189,15 @@ where
     D: Digest,
 {
     fn encode_size(&self) -> usize {
-        self.proof.encode_size() + HEADER_LENGTH_BYTES + self.header.encode_size() + self.body.len()
+        self.proof.encode_size() + self.header.encode_size()
     }
 }
 
-/// A Simplex finalization plus header bytes and body bytes for the digest.
+/// A Simplex finalization plus the header bytes for its payload digest.
 #[derive(Clone, Debug)]
 pub struct Finalized<B, S: certificate::Scheme, D: Digest> {
     pub proof: types::Finalization<S, D>,
     pub header: B,
-    pub body: Bytes,
 }
 
 impl<B, S, D> PartialEq for Finalized<B, S, D>
@@ -222,7 +207,7 @@ where
     D: Digest,
 {
     fn eq(&self, other: &Self) -> bool {
-        self.proof == other.proof && self.header == other.header && self.body == other.body
+        self.proof == other.proof && self.header == other.header
     }
 }
 
@@ -241,32 +226,13 @@ where
     D: Digest,
 {
     pub fn new(proof: types::Finalization<S, D>, header: B) -> Result<Self, Error> {
-        Self::with_body(proof, header, Bytes::new())
-    }
-
-    pub fn with_body(
-        proof: types::Finalization<S, D>,
-        header: B,
-        body: impl Into<Bytes>,
-    ) -> Result<Self, Error> {
         if proof.proposal.payload != header.digest() {
             return Err(Error::Invalid(
                 "exoware_simplex::Finalized",
                 "proof payload does not match header digest",
             ));
         }
-        Ok(Self {
-            proof,
-            header,
-            body: body.into(),
-        })
-    }
-
-    pub fn block_data(&self) -> BlockData<B>
-    where
-        B: Clone,
-    {
-        BlockData::with_body(self.header.clone(), self.body.clone())
+        Ok(Self { proof, header })
     }
 }
 
@@ -278,7 +244,7 @@ where
 {
     fn write(&self, buf: &mut impl BufMut) {
         self.proof.write(buf);
-        write_block_data(&self.header, &self.body, buf);
+        self.header.write(buf);
     }
 }
 
@@ -293,8 +259,14 @@ where
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let proof = types::Finalization::<S, D>::read_cfg(buf, &cfg.0)?;
-        let data = BlockData::<B>::read_cfg(buf, &cfg.1)?;
-        Self::with_body(proof, data.header, data.body)
+        let header = B::read_cfg(buf, &cfg.1)?;
+        if buf.has_remaining() {
+            return Err(Error::Invalid(
+                "exoware_simplex::Finalized",
+                "header bytes contain trailing data",
+            ));
+        }
+        Self::new(proof, header)
     }
 }
 
@@ -305,7 +277,7 @@ where
     D: Digest,
 {
     fn encode_size(&self) -> usize {
-        self.proof.encode_size() + HEADER_LENGTH_BYTES + self.header.encode_size() + self.body.len()
+        self.proof.encode_size() + self.header.encode_size()
     }
 }
 

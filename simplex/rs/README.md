@@ -7,9 +7,9 @@ The crate uses the Commonware Library revision pinned by the workspace
 
 - header bytes by digest
 - full `{ header, body }` block data by digest
-- notarized `{ proof, header, body }` by Simplex view
-- finalized `{ proof, header, body }` by Simplex view
-- finalized `{ proof, header, body }` by block height
+- notarized `{ proof, header }` by Simplex view
+- finalized `{ proof, header }` by Simplex view
+- finalized `{ proof, header }` by block height
 
 ```rust
 use exoware_simplex::{Finalized, SimplexClient};
@@ -25,7 +25,7 @@ use exoware_simplex::{Finalized, SimplexClient};
 #   D: commonware_cryptography::Digest,
 # {
 let client = SimplexClient::new(store_url);
-let finalized = Finalized::with_body(proof, header, bytes::Bytes::from_static(b"body"))?;
+let finalized = Finalized::new(proof, header)?;
 let receipt = client.upload_finalized(&finalized).await?;
 println!("stored at sequence {}", receipt.store_sequence_number);
 # Ok(())
@@ -42,7 +42,8 @@ finalized height index. Header bytes can be read independently with
 `get_block`. The certificate wrappers validate that the certificate payload
 digest matches the paired header's `Block::digest()` during construction and
 decoding. If the body must be authenticated, make that commitment part of the
-header format.
+header format and store the full block separately with `upload_block` or
+`prepare_block`.
 
 For the sandbox, the `simplex` binary can seed deterministic threshold-VRF
 MinSig finalizations into a running simulator:

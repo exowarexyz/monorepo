@@ -122,8 +122,8 @@ artifact bytes.
 With the simulator running above:
 
 1. **Seed finalized Simplex blocks** (keeps running; every `--interval-secs` it
-   uploads a dummy block, notarization, finalization-by-view, and
-   finalization-by-height). The first lines print the threshold verifier
+   uploads a dummy block plus notarization/finalization records that include
+   only the certified header). The first lines print the threshold verifier
    material to paste into the Simplex panel. The default start height is
    time-based so restarts still advance the latest finalized height index.
 
@@ -143,8 +143,8 @@ With the simulator running above:
      by `simplex seed`.
    - **Read** fetches a block by digest or the latest finalized height index.
      Latest finalization uses verified reads, while block reads remain raw.
-   - **Subscribe** streams notarizations and finalizations, verifying each
-     certificate before display.
+   - **Subscribe** streams notarizations and finalizations with their headers,
+     verifying each certificate before display.
 
 ## SQL panel
 

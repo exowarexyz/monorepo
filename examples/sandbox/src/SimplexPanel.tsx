@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   bytesToHex,
   hexToBytes,
-  type CommonwareSimplexBlockVerification,
   type CommonwareSimplexHeaderVerification,
   type CommonwareSimplexScheme,
   SimplexClient,
@@ -63,16 +62,6 @@ async function sha256(bytes: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
 }
 
-async function verifyDemoBlock({
-  header,
-  body,
-}: CommonwareSimplexBlockVerification): Promise<boolean> {
-  if (header.byteLength < 32) {
-    return false;
-  }
-  return bytesEqual(header.slice(header.byteLength - 32), await sha256(body));
-}
-
 async function verifyDemoHeader({
   payload,
   header,
@@ -88,7 +77,6 @@ function renderCertificate(value: CommonwareVerifiedSimplexCertificate): string 
     `payload ${renderBytes(value.payload)}`,
     `certificate ${renderBytes(value.certificate)}`,
     `header ${renderBytes(value.header)}`,
-    `body ${renderBytes(value.body)}`,
   ].join('\n');
 }
 
@@ -156,7 +144,6 @@ export function SimplexPanel({
           namespace: new TextEncoder().encode(appliedVerifierConfig.namespace),
           verificationMaterial: hexToBytes(appliedVerifierConfig.verificationMaterialHex),
           verifyHeader: verifyDemoHeader,
-          verifyBlock: verifyDemoBlock,
         });
         if (active) {
           setVerifier(nextVerifier);

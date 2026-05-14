@@ -10,7 +10,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Sequential;
 use exoware_sdk::{RetryConfig, StoreBatchUpload, StoreClient};
-use exoware_simplex::{BlockData, Finalized, Notarized, SimplexClient};
+use exoware_simplex::{Finalized, Notarized, SimplexClient};
 use rand::{rngs::StdRng, SeedableRng};
 
 const NAMESPACE: &[u8] = b"_EXOWARE_SIMPLEX_TEST";
@@ -169,21 +169,6 @@ fn finalized(block: TestBlock, schemes: &[Scheme]) -> Finalized<TestBlock, Schem
     Finalized::new(proof, block).expect("finalized")
 }
 
-fn finalized_with_body(
-    block: TestBlock,
-    body: Bytes,
-    schemes: &[Scheme],
-) -> Finalized<TestBlock, Scheme, Sha256Digest> {
-    let proposal = proposal(&block);
-    let votes: Vec<_> = schemes
-        .iter()
-        .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("finalize"))
-        .collect();
-    let proof =
-        Finalization::from_finalizes(&schemes[0], &votes, &Sequential).expect("finalization");
-    Finalized::with_body(proof, block, body).expect("finalized")
-}
-
 #[tokio::test]
 async fn uploads_and_reads_notarized_and_finalized_blocks() {
     let (_dir, _handle, store) = local_store_client().await;
@@ -197,7 +182,7 @@ async fn uploads_and_reads_notarized_and_finalized_blocks() {
         .await
         .expect("upload notarized");
     assert_eq!(receipt.summary.headers, 1);
-    assert_eq!(receipt.summary.blocks, 1);
+    assert_eq!(receipt.summary.blocks, 0);
     assert_eq!(receipt.summary.notarizations, 1);
 
     let got_header = simplex
@@ -207,13 +192,6 @@ async fn uploads_and_reads_notarized_and_finalized_blocks() {
         .expect("header exists");
     assert_eq!(got_header, block1);
 
-    let got_block = simplex
-        .get_block::<TestBlock, Sha256Digest>(&block1.digest(), &1024)
-        .await
-        .expect("get full block")
-        .expect("full block exists");
-    assert_eq!(got_block, BlockData::new(block1.clone()));
-
     let got_notarized = simplex
         .get_notarized::<TestBlock, Scheme, Sha256Digest>(View::new(1), &(10, 1024))
         .await
@@ -222,17 +200,18 @@ async fn uploads_and_reads_notarized_and_finalized_blocks() {
     assert_eq!(got_notarized, notarized);
 
     let block2 = TestBlock::new(2, b"finalized");
-    let finalized = finalized_with_body(
-        block2.clone(),
-        Bytes::from_static(b"finalized transaction body"),
-        &schemes,
-    );
+    let body = Bytes::from_static(b"finalized transaction body");
+    simplex
+        .upload_block(&block2, body.clone())
+        .await
+        .expect("upload block");
+    let finalized = finalized(block2.clone(), &schemes);
     let receipt = simplex
         .upload_finalized(&finalized)
         .await
         .expect("upload finalized");
     assert_eq!(receipt.summary.headers, 1);
-    assert_eq!(receipt.summary.blocks, 1);
+    assert_eq!(receipt.summary.blocks, 0);
     assert_eq!(receipt.summary.finalizations, 1);
     assert_eq!(receipt.summary.finalized_height_indexes, 1);
 
@@ -242,10 +221,7 @@ async fn uploads_and_reads_notarized_and_finalized_blocks() {
         .expect("get full block")
         .expect("full block exists");
     assert_eq!(got_block.header, block2);
-    assert_eq!(
-        got_block.body,
-        Bytes::from_static(b"finalized transaction body")
-    );
+    assert_eq!(got_block.body, body);
 
     let got_finalized = simplex
         .get_finalized_by_height::<TestBlock, Scheme, Sha256Digest>(Height::new(2), &(10, 1024))
@@ -286,7 +262,7 @@ async fn prepared_uploads_can_share_one_store_batch() {
         .await
         .expect("commit combined");
     assert_eq!(receipt.summary.headers, 2);
-    assert_eq!(receipt.summary.blocks, 2);
+    assert_eq!(receipt.summary.blocks, 0);
     assert_eq!(receipt.summary.finalizations, 2);
 
     let latest = simplex

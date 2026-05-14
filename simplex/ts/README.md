@@ -5,9 +5,9 @@ Store. The package mirrors the Rust `exoware-simplex` key layout:
 
 - header bytes by digest
 - full `{ header, body }` block data by digest
-- notarized bytes by Simplex view
-- finalized bytes by Simplex view
-- finalized bytes by block height
+- notarized `{ proof, header }` bytes by Simplex view
+- finalized `{ proof, header }` bytes by Simplex view
+- finalized `{ proof, header }` bytes by block height
 
 The TypeScript client uploads raw encoded bytes. Certificate reads verify bytes
 before returning when the client is constructed with a verifier. Use the `*Raw`
@@ -74,7 +74,6 @@ const verifier = await createCommonwareWasmSimplexVerifier({
   namespace: new TextEncoder().encode('_MY_SIMPLEX_NAMESPACE'),
   verificationMaterial: hexToBytes('...'),
   verifyHeader: ({ payload, header }) => verifyHeaderPayload(payload, header),
-  verifyBlock: ({ payload, header, body }) => verifyBlockPayload(payload, header, body),
 });
 
 const simplex = new SimplexClient('http://localhost:10000', { verifier });
@@ -87,14 +86,15 @@ Supported Commonware schemes are `ed25519`, `secp256r1`,
 `bls12381-threshold-vrf-min-sig`. Verification material is encoded Commonware
 key material: an Ed25519 participant set, a Secp256r1/BLS multisig
 identity-to-signing-key map, or a threshold identity depending on the scheme.
-The Commonware WASM verifier treats certificates as opaque proof-plus-block
+The Commonware WASM verifier treats certificates as opaque proof-plus-header
 records and verifies the configured certificate key material. Pass
 `verifyHeader` to validate the application-specific relationship between the
-certificate payload and header. Configure `verifyBlock` on clients that consume
-full blocks and must also validate the body. The client does not hardcode SHA or
-trust a server body-presence flag; the caller-selected verifier defines the
-required payload/header/body relationship before the TS client returns a fetched
-or streamed certificate.
+certificate payload and header. Bodies are not embedded in streamed certificate
+records; fetch full `{ header, body }` block data separately with `getBlock` or
+`subscribeBlocks` when needed. The client does not hardcode SHA or trust a
+server body-presence flag; the caller-selected verifier defines the required
+payload/header relationship before the TS client returns a fetched or streamed
+certificate.
 
 Header and block integrity can also live in caller-owned WASM. Implement the
 ABI you need:
@@ -115,7 +115,6 @@ Then adapt the module in TS:
 
 ```ts
 import {
-  createWasmSimplexBlockVerifier,
   createWasmSimplexHeaderVerifier,
 } from '@exowarexyz/simplex';
 
@@ -124,6 +123,5 @@ const verifier = await createCommonwareWasmSimplexVerifier({
   namespace,
   verificationMaterial,
   verifyHeader: createWasmSimplexHeaderVerifier(myBlockVerifierWasm),
-  verifyBlock: createWasmSimplexBlockVerifier(myBlockVerifierWasm),
 });
 ```

@@ -22,8 +22,7 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 const MAX_PARTICIPANTS: usize = 10_000;
-const MAX_BLOCK_BYTES: usize = 16 * 1024 * 1024;
-const HEADER_LENGTH_BYTES: usize = 4;
+const MAX_HEADER_BYTES: usize = 16 * 1024 * 1024;
 type Sha256Digest = sha256::Digest;
 type Identity = ed25519::PublicKey;
 type Secp256r1PublicKey = secp256r1::standard::PublicKey;
@@ -36,12 +35,6 @@ struct VerifiedCertificate {
     payload: Vec<u8>,
     certificate: Vec<u8>,
     header: Vec<u8>,
-    body: Vec<u8>,
-}
-
-struct VerifiedBlockData {
-    header: Vec<u8>,
-    body: Vec<u8>,
 }
 
 fn js_null() -> JsValue {
@@ -52,28 +45,11 @@ fn to_value(value: VerifiedCertificate) -> JsValue {
     serde_wasm_bindgen::to_value(&value).unwrap_or(JsValue::NULL)
 }
 
-fn read_block_data(bytes: &[u8], artifact: &str) -> Result<VerifiedBlockData, String> {
-    if bytes.len() > MAX_BLOCK_BYTES {
-        return Err(format!("{artifact} block exceeds maximum size"));
+fn read_header(bytes: &[u8], artifact: &str) -> Result<Vec<u8>, String> {
+    if bytes.len() > MAX_HEADER_BYTES {
+        return Err(format!("{artifact} header exceeds maximum size"));
     }
-    if bytes.len() < HEADER_LENGTH_BYTES {
-        return Err(format!("{artifact} block is missing header length"));
-    }
-    let header_len = u32::from_be_bytes(
-        bytes[..HEADER_LENGTH_BYTES]
-            .try_into()
-            .expect("slice length"),
-    ) as usize;
-    let remaining = bytes.len() - HEADER_LENGTH_BYTES;
-    if header_len > remaining {
-        return Err(format!("{artifact} header length exceeds block size"));
-    }
-    let header_start = HEADER_LENGTH_BYTES;
-    let body_start = header_start + header_len;
-    Ok(VerifiedBlockData {
-        header: bytes[header_start..body_start].to_vec(),
-        body: bytes[body_start..].to_vec(),
-    })
+    Ok(bytes.to_vec())
 }
 
 fn participant_set<T>(bytes: &[u8]) -> Result<Set<T>, commonware_codec::Error>
@@ -114,15 +90,14 @@ where
     if !proof.verify(&mut OsRng, &scheme, &Sequential) {
         return Err("notarization certificate verification failed".to_string());
     }
-    let block = read_block_data(reader, "notarized artifact")?;
+    let header = read_header(reader, "notarized artifact")?;
     Ok(VerifiedCertificate {
         scheme: scheme_name.to_string(),
         view: proof.view().get(),
         parent: proof.proposal.parent.get(),
         payload: proof.proposal.payload.as_ref().to_vec(),
         certificate: proof.certificate.encode().to_vec(),
-        header: block.header,
-        body: block.body,
+        header,
     })
 }
 
@@ -142,15 +117,14 @@ where
     if !proof.verify(&mut OsRng, &scheme, &Sequential) {
         return Err("finalization certificate verification failed".to_string());
     }
-    let block = read_block_data(reader, "finalized artifact")?;
+    let header = read_header(reader, "finalized artifact")?;
     Ok(VerifiedCertificate {
         scheme: scheme_name.to_string(),
         view: proof.view().get(),
         parent: proof.proposal.parent.get(),
         payload: proof.proposal.payload.as_ref().to_vec(),
         certificate: proof.certificate.encode().to_vec(),
-        header: block.header,
-        body: block.body,
+        header,
     })
 }
 
@@ -338,7 +312,7 @@ fn verify_finalized_for_scheme(
     }
 }
 
-/// Verify an opaque `{ notarization proof, header, body }` artifact.
+/// Verify an opaque `{ notarization proof, header }` artifact.
 ///
 /// `scheme` selects one of the Commonware Simplex certificate schemes. The
 /// verification material is an encoded participant set for Ed25519, an encoded
@@ -356,7 +330,7 @@ pub fn verify_notarized_commonware(
         .unwrap_or_else(|_| js_null())
 }
 
-/// Verify an opaque `{ finalization proof, header, body }` artifact.
+/// Verify an opaque `{ finalization proof, header }` artifact.
 #[wasm_bindgen]
 pub fn verify_finalized_commonware(
     scheme: String,
@@ -404,21 +378,12 @@ mod tests {
         )
     }
 
-    fn block_data(header: &[u8], body: &[u8]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(HEADER_LENGTH_BYTES + header.len() + body.len());
-        out.extend_from_slice(&(header.len() as u32).to_be_bytes());
-        out.extend_from_slice(header);
-        out.extend_from_slice(body);
-        out
-    }
-
     fn verify_round_trip<S>(scheme_name: &str, schemes: &[S], verification_material: Vec<u8>)
     where
         S: Scheme<Sha256Digest>,
         <S::Certificate as Read>::Cfg: Clone,
     {
         let notarized_header = b"notarized-header";
-        let notarized_body = b"notarized-body";
         let proposal_value = proposal(notarized_header);
         let notarizes: Vec<_> = schemes
             .iter()
@@ -427,7 +392,7 @@ mod tests {
         let notarization =
             Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap();
         let mut artifact = notarization.encode().to_vec();
-        artifact.extend_from_slice(&block_data(notarized_header, notarized_body));
+        artifact.extend_from_slice(notarized_header);
 
         let verified = verify_notarized_for_scheme(
             scheme_name,
@@ -441,10 +406,8 @@ mod tests {
         assert_eq!(verified.view, 2);
         assert_eq!(verified.parent, 1);
         assert_eq!(verified.header, notarized_header);
-        assert_eq!(verified.body, notarized_body);
 
         let finalized_header = b"finalized-header";
-        let finalized_body = b"finalized-body";
         let proposal_value = proposal(finalized_header);
         let finalizes: Vec<_> = schemes
             .iter()
@@ -453,7 +416,7 @@ mod tests {
         let finalization =
             Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).unwrap();
         let mut artifact = finalization.encode().to_vec();
-        artifact.extend_from_slice(&block_data(finalized_header, finalized_body));
+        artifact.extend_from_slice(finalized_header);
 
         let verified = verify_finalized_for_scheme(
             scheme_name,
@@ -467,7 +430,6 @@ mod tests {
         assert_eq!(verified.view, 2);
         assert_eq!(verified.parent, 1);
         assert_eq!(verified.header, finalized_header);
-        assert_eq!(verified.body, finalized_body);
     }
 
     fn identities<R>(rng: &mut R) -> (Vec<ed25519::PrivateKey>, Set<Identity>)

@@ -124,7 +124,6 @@ export interface CommonwareVerifiedSimplexCertificate {
   payload: Uint8Array;
   certificate: Uint8Array;
   header: Uint8Array;
-  body: Uint8Array;
 }
 
 export type CommonwareSimplexCertificateVerificationContext =
@@ -176,7 +175,6 @@ export interface CommonwareSimplexVerifierOptions {
   namespace: BytesLike;
   verificationMaterial: BytesLike;
   verifyHeader?: CommonwareSimplexHeaderVerifier;
-  verifyBlock?: CommonwareSimplexBlockVerifier;
 }
 
 export interface CommonwareSimplexWasmVerifierModule {
@@ -483,7 +481,6 @@ export function createCommonwareSimplexVerifier(
         bytes,
         context,
         options.verifyHeader,
-        options.verifyBlock,
       ),
     verifyFinalization: (bytes, context) =>
       normalizeAndVerifyCommonwareCertificate(
@@ -496,7 +493,6 @@ export function createCommonwareSimplexVerifier(
         bytes,
         context,
         options.verifyHeader,
-        options.verifyBlock,
       ),
   };
 }
@@ -506,7 +502,6 @@ async function normalizeAndVerifyCommonwareCertificate(
   raw: Uint8Array,
   context: CommonwareSimplexCertificateVerificationContext,
   verifyHeader?: CommonwareSimplexHeaderVerifier,
-  verifyBlock?: CommonwareSimplexBlockVerifier,
 ): Promise<CommonwareVerifiedSimplexCertificate | null> {
   const certificate = normalizeCommonwareVerifiedCertificate(value);
   if (!certificate) {
@@ -519,19 +514,6 @@ async function normalizeAndVerifyCommonwareCertificate(
       raw: copyBytes(raw),
       payload: copyBytes(certificate.payload),
       header: copyBytes(certificate.header),
-    });
-    if (!verified) {
-      return null;
-    }
-  }
-  if (verifyBlock) {
-    const verified = await verifyBlock({
-      certificate,
-      context,
-      raw: copyBytes(raw),
-      payload: copyBytes(certificate.payload),
-      header: copyBytes(certificate.header),
-      body: copyBytes(certificate.body),
     });
     if (!verified) {
       return null;
@@ -557,7 +539,6 @@ function normalizeCommonwareVerifiedCertificate(
     payload: bytesFromUnknown(record.payload, 'payload'),
     certificate: bytesFromUnknown(record.certificate, 'certificate'),
     header: bytesFromUnknown(record.header, 'header'),
-    body: bytesFromUnknown(record.body, 'body'),
   };
 }
 

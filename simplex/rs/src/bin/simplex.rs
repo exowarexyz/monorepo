@@ -191,11 +191,7 @@ fn proposal(block: &DemoBlock) -> Proposal<Sha256Digest> {
     Proposal::new(block.context.round, block.context.parent.0, block.digest())
 }
 
-fn notarized(
-    block: DemoBlock,
-    body: Bytes,
-    schemes: &[Scheme],
-) -> Notarized<DemoBlock, Scheme, Sha256Digest> {
+fn notarized(block: DemoBlock, schemes: &[Scheme]) -> Notarized<DemoBlock, Scheme, Sha256Digest> {
     let proposal = proposal(&block);
     let votes: Vec<_> = schemes
         .iter()
@@ -203,14 +199,10 @@ fn notarized(
         .collect();
     let proof =
         Notarization::from_notarizes(&schemes[0], &votes, &Sequential).expect("notarization");
-    Notarized::with_body(proof, block, body).expect("notarized")
+    Notarized::new(proof, block).expect("notarized")
 }
 
-fn finalized(
-    block: DemoBlock,
-    body: Bytes,
-    schemes: &[Scheme],
-) -> Finalized<DemoBlock, Scheme, Sha256Digest> {
+fn finalized(block: DemoBlock, schemes: &[Scheme]) -> Finalized<DemoBlock, Scheme, Sha256Digest> {
     let proposal = proposal(&block);
     let votes: Vec<_> = schemes
         .iter()
@@ -218,16 +210,17 @@ fn finalized(
         .collect();
     let proof =
         Finalization::from_finalizes(&schemes[0], &votes, &Sequential).expect("finalization");
-    Finalized::with_body(proof, block, body).expect("finalized")
+    Finalized::new(proof, block).expect("finalized")
 }
 
 async fn upload_certificates(
     client: &SimplexClient,
     notarized: &Notarized<DemoBlock, Scheme, Sha256Digest>,
     finalized: &Finalized<DemoBlock, Scheme, Sha256Digest>,
+    body: &[u8],
 ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
     let header = finalized.header.encode();
-    let block = encode_block_data(&finalized.header, &finalized.body);
+    let block = encode_block_data(&finalized.header, body);
     let notarized_bytes = notarized.encode();
     let finalized_bytes = finalized.encode();
     let mut batch = StoreWriteBatch::new();
@@ -318,9 +311,9 @@ async fn seed(
             body_digest,
             leader.clone(),
         );
-        let notarized = notarized(block.clone(), body.clone(), &schemes);
-        let finalized = finalized(block.clone(), body, &schemes);
-        let sequence = upload_certificates(&client, &notarized, &finalized).await?;
+        let notarized = notarized(block.clone(), &schemes);
+        let finalized = finalized(block.clone(), &schemes);
+        let sequence = upload_certificates(&client, &notarized, &finalized, &body).await?;
 
         println!(
             "sequence={} view={} height={} digest=0x{}",
