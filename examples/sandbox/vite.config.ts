@@ -12,6 +12,10 @@ export default defineConfig({
         replacement: fileURLToPath(new URL('../../simplex/ts/src/wasm.ts', import.meta.url)),
       },
       {
+        find: /^@exowarexyz\/sdk$/,
+        replacement: fileURLToPath(new URL('../../sdk/ts/dist/index.js', import.meta.url)),
+      },
+      {
         find: /^@qmdb-ts$/,
         replacement: fileURLToPath(new URL('../../qmdb/ts/src/index.ts', import.meta.url)),
       },
