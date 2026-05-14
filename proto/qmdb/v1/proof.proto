@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package qmdb.v1;
+
+// One historical operation proven by a multi-proof.
+message MultiProofOperation {
+  uint64 location = 1;
+  bytes encoded_operation = 2;
+}
+
+// Historical QMDB multi-proof over a set of operation locations.
+message HistoricalMultiProof {
+  bytes proof = 1;
+  repeated MultiProofOperation operations = 2;
+  // Operation-log root used to verify the historical proof. Current-boundary
+  // endpoints authenticate this with `ops_root_witness`; operation-log-only
+  // endpoints omit the witness and clients authenticate this root out-of-band.
+  bytes ops_root = 3;
+  // Opaque Commonware `current::proof::OpsRootWitness` bytes encoded with
+  // `commonware-codec`. When present, clients authenticate `ops_root` from
+  // their trusted current/global root.
+  bytes ops_root_witness = 4;
+}
+
+// Historical QMDB range proof over a contiguous operation interval.
+message HistoricalOperationRangeProof {
+  bytes proof = 1;
+  uint64 start_location = 2;
+  repeated bytes encoded_operations = 3;
+  // Operation-log root used to verify the historical proof. Current-boundary
+  // endpoints authenticate this with `ops_root_witness`; operation-log-only
+  // endpoints omit the witness and clients authenticate this root out-of-band.
+  bytes ops_root = 4;
+  // Opaque Commonware `current::proof::OpsRootWitness` bytes encoded with
+  // `commonware-codec`. When present, clients authenticate `ops_root` from
+  // their trusted current/global root.
+  bytes ops_root_witness = 5;
+}
+
+// Current QMDB operation range proof. `proof` is opaque Commonware
+// `current::proof::RangeProof` bytes encoded with `commonware-codec`.
+// `encoded_operations` are the contiguous operations starting at
+// `start_location`; `chunks` are the raw bitmap chunks required by Commonware
+// verification.
+message CurrentOperationRangeProof {
+  bytes proof = 1;
+  uint64 start_location = 2;
+  repeated bytes encoded_operations = 3;
+  repeated bytes chunks = 4;
+}
+
+// Current proof for one active key. `proof` is opaque Commonware proof bytes
+// encoded with `commonware-codec`: ordered endpoints use
+// `current::ordered::db::KeyValueProof`; unordered endpoints use
+// `current::proof::OperationProof`.
+message CurrentKeyValueProof {
+  bytes proof = 1;
+  bytes encoded_operation = 2;
+}
+
+// Current ordered proof that one logical key is inactive. `proof` is opaque
+// Commonware `current::ordered::ExclusionProof` encoded with
+// `commonware-codec`.
+message CurrentKeyExclusionProof {
+  bytes proof = 1;
+}
+
+message CurrentKeyLookupResult {
+  bytes key = 1;
+  oneof result {
+    CurrentKeyValueProof hit = 2;
+    CurrentKeyExclusionProof miss = 3;
+  }
+}
+
+message CurrentKeyRangeEntry {
+  bytes key = 1;
+  CurrentKeyValueProof proof = 2;
+}

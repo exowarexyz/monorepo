@@ -2,20 +2,28 @@ import { create } from '@bufbuild/protobuf';
 import { createClient, type CallOptions, type Client as ConnectClient } from '@connectrpc/connect';
 import {
   createTransport,
-  SqlIndexLayout,
-  SqlService,
-  SqlQueryRequestSchema,
-  SqlSubscribeRequestSchema,
-  SqlTablesRequestSchema,
   type ClientOptions as SdkClientOptions,
-  type SqlCell,
-  type SqlColumn,
-  type SqlIndex,
-  type SqlQueryResponse,
-  type SqlRow,
-  type SqlSubscribeResponse,
-  type SqlTable,
 } from '@exowarexyz/sdk';
+import {
+  QueryRequestSchema as SqlQueryRequestSchema,
+  type QueryResponse as SqlQueryResponse,
+} from './generated/proto/sql/v1/query_pb.js';
+import {
+  IndexLayout as SqlIndexLayout,
+  TablesRequestSchema as SqlTablesRequestSchema,
+  type Column as SqlColumn,
+  type Index as SqlIndex,
+  type Table as SqlTable,
+} from './generated/proto/sql/v1/schema_pb.js';
+import { Service as SqlService } from './generated/proto/sql/v1/service_pb.js';
+import {
+  SubscribeRequestSchema as SqlSubscribeRequestSchema,
+  type SubscribeResponse as SqlSubscribeResponse,
+} from './generated/proto/sql/v1/stream_pb.js';
+import {
+  type Cell as SqlCell,
+  type Row as SqlRow,
+} from './generated/proto/sql/v1/common_pb.js';
 
 export type SqlClientOptions = SdkClientOptions;
 
@@ -174,7 +182,7 @@ function decodeTable(table: SqlTable): DecodedTable {
 }
 
 /**
- * Thin wrapper around the `store.sql.v1.Service` Connect client.
+ * Thin wrapper around the `sql.v1.Service` Connect client.
  *
  * `subscribe` re-runs the server-side predicate on every ingest batch that
  * touches the named table and yields one frame per batch of matching rows.

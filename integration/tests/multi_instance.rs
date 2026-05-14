@@ -4,37 +4,39 @@ use std::time::Duration;
 use axum::{routing::get, Router};
 use bytes::Bytes;
 use commonware_cryptography::Sha256;
-use commonware_storage::mmr::Location;
-use commonware_storage::qmdb::keyless::Operation as KeylessOperation;
+use commonware_storage::merkle::{mmr, Location};
+use commonware_storage::qmdb::keyless::variable::Operation as KeylessOperation;
 use connectrpc::client::ClientConfig;
 use datafusion::arrow::array::Int64Array;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::prelude::SessionContext;
+use exoware_qmdb::proto::qmdb::v1::SubscribeRequest as QmdbSubscribeRequest;
 use exoware_qmdb::{
-    keyless_range_connect_stack, KeylessClient, KeylessRangeConnectClient, KeylessWriter,
-    QmdbError, RangeSubscribeProof,
+    keyless_operation_log_connect_stack, KeylessClient, KeylessWriter, OperationLogClient,
+    OperationLogSubscribeProof, QmdbError,
 };
 use exoware_sdk::keys::Key;
 use exoware_sdk::kv_codec::Utf8;
 use exoware_sdk::match_key::MatchKey;
 use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::store::qmdb::v1::SubscribeRequest as QmdbSubscribeRequest;
-use exoware_sdk::store::sql::v1::{
-    cell, ServiceClient as SqlServiceClient, SubscribeRequest as SqlSubscribeRequest,
-};
 use exoware_sdk::stream_filter::StreamFilter;
 use exoware_sdk::{
     RetryConfig, StoreBatchPublication, StoreBatchUpload, StoreClient, StoreKeyPrefix,
     StorePublicationFrontierWriter, StoreWriteBatch, StreamSubscription, StreamSubscriptionFrame,
 };
+use exoware_sql::proto::sql::v1::{
+    cell, ServiceClient as SqlServiceClient, SubscribeRequest as SqlSubscribeRequest,
+};
 use exoware_sql::{sql_connect_stack, CellValue, KvSchema, SqlServer, TableColumnConfig};
 use futures::stream::{FuturesUnordered, StreamExt};
 
 type Digest = commonware_cryptography::sha256::Digest;
-type QmdbOp = KeylessOperation<Vec<u8>>;
-type QmdbReader = KeylessClient<Sha256, Vec<u8>>;
-type QmdbWriter = KeylessWriter<Sha256, Vec<u8>>;
-type QmdbConnectClient = KeylessRangeConnectClient<PreferZstdHttpClient, Sha256, Vec<u8>>;
+type QmdbFamily = mmr::Family;
+type QmdbLocation = Location<QmdbFamily>;
+type QmdbOp = KeylessOperation<QmdbFamily, Vec<u8>>;
+type QmdbReader = KeylessClient<QmdbFamily, Sha256, Vec<u8>>;
+type QmdbWriter = KeylessWriter<QmdbFamily, Sha256, Vec<u8>>;
+type QmdbConnectClient = OperationLogClient<PreferZstdHttpClient, QmdbFamily, Sha256, QmdbOp>;
 
 async fn local_store_client() -> (tempfile::TempDir, tokio::task::JoinHandle<()>, StoreClient) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -92,7 +94,7 @@ async fn spawn_qmdb_service(client: StoreClient) -> (tokio::task::JoinHandle<()>
     let reader = Arc::new(keyless_reader(client));
     let app = Router::new()
         .route("/health", get(health))
-        .fallback_service(keyless_range_connect_stack(reader));
+        .fallback_service(keyless_operation_log_connect_stack(reader));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind qmdb service");
@@ -153,7 +155,7 @@ async fn commit_qmdb_upload(
     commit_client: &StoreClient,
     writer: &QmdbWriter,
     ops: &[QmdbOp],
-) -> Result<exoware_qmdb::UploadReceipt, QmdbError> {
+) -> Result<exoware_qmdb::UploadReceipt<QmdbFamily>, QmdbError> {
     let prepared = writer.prepare_upload(ops).await?;
     writer.commit_upload(commit_client, prepared).await
 }
@@ -162,7 +164,10 @@ fn qops(label: &str, batch: usize) -> Vec<QmdbOp> {
     vec![
         QmdbOp::Append(format!("{label}-append-{batch}-0").into_bytes()),
         QmdbOp::Append(format!("{label}-append-{batch}-1").into_bytes()),
-        QmdbOp::Commit(Some(format!("{label}-commit-{batch}").into_bytes())),
+        QmdbOp::Commit(
+            Some(format!("{label}-commit-{batch}").into_bytes()),
+            QmdbLocation::new(0),
+        ),
     ]
 }
 
@@ -188,7 +193,7 @@ async fn drive_qmdb_writer(
     writer_client: StoreClient,
     writer: Arc<QmdbWriter>,
     batches: Vec<Vec<QmdbOp>>,
-) -> (Vec<QmdbOp>, Vec<exoware_qmdb::UploadReceipt>) {
+) -> (Vec<QmdbOp>, Vec<exoware_qmdb::UploadReceipt<QmdbFamily>>) {
     let expected: Vec<QmdbOp> = batches.iter().flatten().cloned().collect();
     let mut in_flight = FuturesUnordered::new();
     for batch in batches {
@@ -206,22 +211,29 @@ async fn drive_qmdb_writer(
     (expected, receipts)
 }
 
+fn qop_sort_key(op: &QmdbOp) -> (u8, Option<&[u8]>, u64) {
+    match op {
+        QmdbOp::Append(value) => (0, Some(value.as_slice()), 0),
+        QmdbOp::Commit(value, floor) => (1, value.as_deref(), **floor),
+    }
+}
+
 fn sorted_ops(mut ops: Vec<QmdbOp>) -> Vec<QmdbOp> {
-    ops.sort();
+    ops.sort_by(|left, right| qop_sort_key(left).cmp(&qop_sort_key(right)));
     ops
 }
 
-fn row_int64(row: &exoware_sdk::store::sql::v1::Row, index: usize) -> i64 {
+fn row_int64(row: &exoware_sql::proto::sql::v1::Row, index: usize) -> i64 {
     match row.cells.get(index).and_then(|cell| cell.kind.as_ref()) {
         Some(cell::Kind::Int64Value(value)) => *value,
         other => panic!("expected int64 cell at {index}, got {other:?}"),
     }
 }
 
-fn expected_qmdb_frame(ops: &[QmdbOp]) -> Vec<(Location, QmdbOp)> {
+fn expected_qmdb_frame(ops: &[QmdbOp]) -> Vec<(QmdbLocation, QmdbOp)> {
     ops.iter()
         .enumerate()
-        .map(|(idx, op)| (Location::new(idx as u64), op.clone()))
+        .map(|(idx, op)| (QmdbLocation::new(idx as u64), op.clone()))
         .collect()
 }
 
@@ -485,8 +497,8 @@ async fn prefixed_qmdb_writers_handle_concurrent_inflight_batches_per_instance()
         "writer b should exercise a pipelined upload without an inline watermark"
     );
 
-    let latest_a = Location::new((total_a - 1) as u64);
-    let latest_b = Location::new((total_b - 1) as u64);
+    let latest_a = QmdbLocation::new((total_a - 1) as u64);
+    let latest_b = QmdbLocation::new((total_b - 1) as u64);
     let reader_a = keyless_reader(client_a);
     let reader_b = keyless_reader(client_b);
 
@@ -495,7 +507,7 @@ async fn prefixed_qmdb_writers_handle_concurrent_inflight_batches_per_instance()
             let reader = reader_a.clone();
             async move {
                 reader
-                    .operation_range_proof(latest_a, Location::new(0), total_a as u32)
+                    .operation_range_proof(latest_a, QmdbLocation::new(0), total_a as u32)
                     .await
             }
         },
@@ -507,7 +519,7 @@ async fn prefixed_qmdb_writers_handle_concurrent_inflight_batches_per_instance()
             let reader = reader_b.clone();
             async move {
                 reader
-                    .operation_range_proof(latest_b, Location::new(0), total_b as u32)
+                    .operation_range_proof(latest_b, QmdbLocation::new(0), total_b as u32)
                     .await
             }
         },
@@ -615,10 +627,10 @@ async fn prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_receipts(
         receipt_qmdb_1
             .writer_location_watermark
             .map(|checkpoint| checkpoint.location),
-        Some(Location::new(2))
+        Some(QmdbLocation::new(2))
     );
     assert!(receipt_qmdb_2.writer_location_watermark.is_none());
-    assert_eq!(checkpoint.location, Location::new(5));
+    assert_eq!(checkpoint.location, QmdbLocation::new(5));
     assert_eq!(
         StorePublicationFrontierWriter::latest_publication_receipt(&qmdb_writer).await,
         Some(checkpoint)
@@ -633,7 +645,7 @@ async fn prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_receipts(
             let expected_len = expected_qmdb.len() as u32;
             async move {
                 reader
-                    .operation_range_proof(Location::new(5), Location::new(0), expected_len)
+                    .operation_range_proof(QmdbLocation::new(5), QmdbLocation::new(0), expected_len)
                     .await
             }
         },
@@ -668,19 +680,32 @@ async fn qmdb_streaming_is_isolated_by_store_prefix() {
     commit_qmdb_upload(&client_b, &writer_b, &ops_b)
         .await
         .expect("upload b stream");
+    let root_b = keyless_reader(client_b.clone())
+        .root_at(QmdbLocation::new((ops_b.len() - 1) as u64))
+        .await
+        .expect("root b");
 
     assert!(
-        tokio::time::timeout(Duration::from_millis(200), sub_a.message())
-            .await
-            .is_err(),
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            sub_a.message_with_root(|_| {
+                Err(QmdbError::CorruptData(
+                    "prefix A unexpectedly received prefix B proof".to_string(),
+                ))
+            })
+        )
+        .await
+        .is_err(),
         "qmdb prefix A subscriber must not receive prefix B operations"
     );
-    let frame_b: RangeSubscribeProof<Digest, QmdbOp> =
-        tokio::time::timeout(Duration::from_secs(5), sub_b.message())
-            .await
-            .expect("qmdb b timeout")
-            .expect("qmdb b stream")
-            .expect("qmdb b frame");
+    let frame_b: OperationLogSubscribeProof<Digest, QmdbOp, QmdbFamily> = tokio::time::timeout(
+        Duration::from_secs(5),
+        sub_b.message_with_root(|_| Ok(root_b)),
+    )
+    .await
+    .expect("qmdb b timeout")
+    .expect("qmdb b stream")
+    .expect("qmdb b frame");
     assert!(frame_b.resume_sequence_number > 0);
     assert_eq!(frame_b.operations, expected_qmdb_frame(&ops_b));
 
@@ -689,13 +714,19 @@ async fn qmdb_streaming_is_isolated_by_store_prefix() {
     commit_qmdb_upload(&client_a, &writer_a, &ops_a)
         .await
         .expect("upload a stream");
+    let root_a = keyless_reader(client_a.clone())
+        .root_at(QmdbLocation::new((ops_a.len() - 1) as u64))
+        .await
+        .expect("root a");
 
-    let frame_a: RangeSubscribeProof<Digest, QmdbOp> =
-        tokio::time::timeout(Duration::from_secs(5), sub_a.message())
-            .await
-            .expect("qmdb a timeout")
-            .expect("qmdb a stream")
-            .expect("qmdb a frame");
+    let frame_a: OperationLogSubscribeProof<Digest, QmdbOp, QmdbFamily> = tokio::time::timeout(
+        Duration::from_secs(5),
+        sub_a.message_with_root(|_| Ok(root_a)),
+    )
+    .await
+    .expect("qmdb a timeout")
+    .expect("qmdb a stream")
+    .expect("qmdb a frame");
     assert!(frame_a.resume_sequence_number > 0);
     assert_eq!(frame_a.operations, expected_qmdb_frame(&ops_a));
     assert_ne!(frame_a.root, frame_b.root);

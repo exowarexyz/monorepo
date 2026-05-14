@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package sql.v1;
+
+// Describes every table registered in the server-side `KvSchema`.
+message TablesResponse {
+  repeated Table tables = 1;
+}
+
+// Discovery request; currently has no parameters.
+message TablesRequest {}
+
+// Server-registered table.
+message Table {
+  // Name clients pass to `Subscribe.table` / reference in `Query.sql`.
+  string name = 1;
+  // Columns in declaration order. `Subscribe` emits rows in this order.
+  repeated Column columns = 2;
+  // Indices into `columns` that form the primary key, in key-sort order.
+  repeated uint32 primary_key_columns = 3;
+  // Secondary indexes declared on this table, in registration order.
+  repeated Index indexes = 4;
+}
+
+// One column of a registered `Table`.
+message Column {
+  string name = 1;
+  // Arrow DataType rendered as its stable debug string (e.g., `Int64`,
+  // `Utf8`, `Timestamp(Microsecond, None)`, `Decimal128(38, 10)`). Clients
+  // that need typed handling should match against these exact strings.
+  string data_type = 2;
+  bool nullable = 3;
+}
+
+// Key layout of a secondary index.
+enum IndexLayout {
+  // Standard lexicographic concatenation of key columns.
+  INDEX_LAYOUT_LEXICOGRAPHIC = 0;
+  // Z-order (Morton) interleaving of the key columns' bits, for
+  // multi-dimensional range scans.
+  INDEX_LAYOUT_Z_ORDER = 1;
+}
+
+// Secondary index declared on a `Table`.
+message Index {
+  string name = 1;
+  IndexLayout layout = 2;
+  // Indices into `Table.columns` that make up the index key, in sort order.
+  repeated uint32 key_columns = 3;
+  // Additional column indices stored in the index payload so point lookups
+  // through this index don't need a base-row fetch ("covered" columns).
+  repeated uint32 cover_columns = 4;
+}

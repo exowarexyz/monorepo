@@ -10,14 +10,14 @@ description = "Unpublished cross-crate integration tests for Exoware."
 axum = { workspace = true }
 buffa = { workspace = true }
 bytes = { workspace = true }
-commonware-cryptography = "2026.3.0"
-commonware-storage = "2026.3.0"
+commonware-cryptography = { workspace = true }
+commonware-storage = { workspace = true }
 connectrpc = { workspace = true }
 datafusion = "52.2.0"
 exoware-qmdb = { workspace = true }
 exoware-sdk = { workspace = true }
 exoware-simulator = { path = "../examples/simulator" }
-exoware-sql = { path = "../sql" }
+exoware-sql = { workspace = true }
 futures = { workspace = true }
 reqwest = { workspace = true }
 tempfile = { workspace = true }

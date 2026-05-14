@@ -18,10 +18,10 @@ jobs:
         uses: actions/checkout@v4
       - name: Run setup
         uses: ./.github/actions/setup
-      - name: Install sdk-ts dependencies
-        run: cd sdk-ts && npm ci
-      - name: Lint sdk-ts
-        run: cd sdk-ts && npm run lint
+      - name: Install sdk/ts dependencies
+        run: cd sdk/ts && npm ci
+      - name: Lint sdk/ts
+        run: cd sdk/ts && npm run lint
       - name: Install examples/sandbox dependencies
         run: cd examples/sandbox && npm install --ignore-scripts
       - name: Lint examples/sandbox
@@ -36,10 +36,10 @@ jobs:
         uses: actions/checkout@v4
       - name: Run setup
         uses: ./.github/actions/setup
-      - name: Install sdk-ts dependencies
-        run: cd sdk-ts && npm ci
-      - name: Test sdk-ts
-        run: cd sdk-ts && npm test
+      - name: Install sdk/ts dependencies
+        run: cd sdk/ts && npm ci
+      - name: Test sdk/ts
+        run: cd sdk/ts && npm test
 
   build:
     name: Build
@@ -50,15 +50,17 @@ jobs:
         uses: actions/checkout@v4
       - name: Run setup
         uses: ./.github/actions/setup
-      - name: Install sdk-ts dependencies
-        run: cd sdk-ts && npm ci
-      - name: Build sdk-ts
-        run: cd sdk-ts && npm run build
+      - name: Install sdk/ts dependencies
+        run: cd sdk/ts && npm ci
+      - name: Build sdk/ts
+        run: cd sdk/ts && npm run build
 
   qmdb-web:
     name: QMDB Web
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      BUF_TOKEN: ${{ secrets.BUF_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -70,10 +72,10 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: wasm-pack@0.13.1,wasm-bindgen-cli@0.2.117
-      - name: Install sdk-ts dependencies
-        run: cd sdk-ts && npm ci
-      - name: Build sdk-ts
-        run: cd sdk-ts && npm run build
+      - name: Install sdk/ts dependencies
+        run: cd sdk/ts && npm ci
+      - name: Build sdk/ts
+        run: cd sdk/ts && npm run build
       - name: Install qmdb/ts dependencies
         run: cd qmdb/ts && npm ci
       - name: Build qmdb/ts

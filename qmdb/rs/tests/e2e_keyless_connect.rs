@@ -1,0 +1,362 @@
+//! Keyless QMDB ConnectRPC e2e: streamed range checkpoints plus client-side
+//! validation of tampered proofs.
+
+mod common;
+
+use std::num::NonZeroU64;
+use std::sync::Arc;
+use std::time::Duration;
+
+use commonware_runtime::{deterministic, Runner as _};
+use commonware_storage::merkle::{mmr, Location};
+use commonware_storage::qmdb::keyless::variable::{Db as Keyless, Operation as KeylessOperation};
+use commonware_utils::{NZUsize, NZU16, NZU64};
+use exoware_qmdb::proto::qmdb::v1::{
+    GetOperationRangeRequest as ProtoGetOperationRangeRequest,
+    SubscribeRequest as ProtoSubscribeRequest,
+};
+use exoware_qmdb::{
+    keyless_operation_log_connect_stack, KeylessClient, KeylessWriter, OperationLogClient,
+    OperationLogSubscribeProof, QmdbError,
+};
+use exoware_sdk::proto::PreferZstdHttpClient;
+use exoware_sdk::store::common::v1::{
+    bytes_filter as proto_bytes_filter, BytesFilter as ProtoBytesFilter,
+};
+use exoware_sdk::StoreClient;
+
+type Digest = commonware_cryptography::sha256::Digest;
+type LocalDb = Keyless<
+    mmr::Family,
+    deterministic::Context,
+    Vec<u8>,
+    commonware_cryptography::Sha256,
+    commonware_parallel::Sequential,
+>;
+type TestKeylessClient = KeylessClient<mmr::Family, commonware_cryptography::Sha256, Vec<u8>>;
+type BatchOperation = KeylessOperation<mmr::Family, Vec<u8>>;
+
+async fn spawn_qmdb_server(
+    client: Arc<TestKeylessClient>,
+) -> (tokio::task::JoinHandle<()>, String) {
+    common::spawn_operation_log_service(keyless_operation_log_connect_stack(client)).await
+}
+
+fn validated_client(
+    base: &str,
+) -> OperationLogClient<
+    PreferZstdHttpClient,
+    mmr::Family,
+    commonware_cryptography::Sha256,
+    BatchOperation,
+> {
+    OperationLogClient::plaintext(base, ((0..=10000).into(), ()))
+}
+
+struct LocalBatch {
+    operations: Vec<BatchOperation>,
+    root: Digest,
+    inactivity_floor: Location<mmr::Family>,
+}
+
+async fn build_local_batch() -> LocalBatch {
+    tokio::task::spawn_blocking(|| {
+        deterministic::Runner::default().start(|context| async move {
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg =
+                common::keyless_config("keyless", page_cache, ((0..=10000).into(), ()), NZU64!(7));
+            let mut db: LocalDb = LocalDb::init(context.child("db"), cfg).await.expect("init");
+
+            let finalized = {
+                let batch = db
+                    .new_batch()
+                    .append(b"first-value".to_vec())
+                    .append(b"second-value".to_vec());
+                batch.merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
+            };
+            db.apply_batch(finalized).await.expect("apply");
+            let finalized = {
+                let batch = db.new_batch().append(b"third-value".to_vec());
+                batch.merkleize(&db, None::<Vec<u8>>, db.bounds().await.end - 1)
+            };
+            db.apply_batch(finalized).await.expect("apply second");
+
+            let latest = db.bounds().await.end - 1;
+            let n = NonZeroU64::new(*latest + 1).unwrap();
+            let (_proof, ops) = db
+                .historical_proof(latest + 1, Location::new(0), n)
+                .await
+                .expect("proof");
+            let inactivity_floor = latest_inactivity_floor(&ops);
+            let root = db.root();
+            db.destroy().await.expect("destroy");
+
+            LocalBatch {
+                operations: ops,
+                root,
+                inactivity_floor,
+            }
+        })
+    })
+    .await
+    .expect("join")
+}
+
+fn latest_inactivity_floor(ops: &[BatchOperation]) -> Location<mmr::Family> {
+    match ops.last().expect("non-empty operations") {
+        KeylessOperation::Commit(_, floor) => *floor,
+        KeylessOperation::Append(_) => panic!("operations must end with Commit"),
+    }
+}
+
+async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
+    let writer: KeylessWriter<mmr::Family, commonware_cryptography::Sha256, Vec<u8>> =
+        KeylessWriter::empty(client.clone());
+    common::commit_keyless_upload(client, &writer, &batch.operations)
+        .await
+        .expect("commit upload");
+}
+
+#[tokio::test]
+async fn keyless_connect_subscribe_emits_verifiable_multi_proof() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_local_batch().await;
+    assert!(
+        *local.inactivity_floor > 0,
+        "test must not rely on inactivity_floor = 0"
+    );
+    let keyless_client = Arc::new(TestKeylessClient::from_client(
+        store_client.clone(),
+        ((0..=10000).into(), ()),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
+    let client = validated_client(&qmdb_url);
+
+    let mut stream = client
+        .subscribe(ProtoSubscribeRequest::default())
+        .await
+        .expect("subscribe");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    commit_upload(&store_client, &local).await;
+
+    let frame: OperationLogSubscribeProof<Digest, BatchOperation, mmr::Family> =
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            stream.message_with_root(common::trusted_root(local.root)),
+        )
+        .await
+        .expect("timeout")
+        .expect("stream result")
+        .expect("stream frame");
+
+    assert!(frame.resume_sequence_number > 0);
+    assert_eq!(frame.root, local.root);
+    let expected: Vec<(Location<mmr::Family>, BatchOperation)> = local
+        .operations
+        .iter()
+        .enumerate()
+        .map(|(i, op)| (Location::new(i as u64), op.clone()))
+        .collect();
+    assert_eq!(frame.operations, expected);
+}
+
+#[tokio::test]
+async fn keyless_connect_get_operation_range_returns_verifiable_proof() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_local_batch().await;
+    assert!(
+        *local.inactivity_floor > 0,
+        "test must not rely on inactivity_floor = 0"
+    );
+    commit_upload(&store_client, &local).await;
+
+    let keyless_client = Arc::new(TestKeylessClient::from_client(
+        store_client.clone(),
+        ((0..=10000).into(), ()),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
+    let client = validated_client(&qmdb_url);
+
+    let proof = client
+        .get_operation_range(
+            ProtoGetOperationRangeRequest {
+                tip: u64::try_from(local.operations.len() - 1).expect("tip fits"),
+                start_location: 1,
+                max_locations: 1,
+                ..Default::default()
+            },
+            &local.root,
+        )
+        .await
+        .expect("get operation range");
+
+    assert_eq!(proof.root, local.root);
+    assert_eq!(proof.start_location, Location::new(1));
+    assert_eq!(
+        proof.operations,
+        vec![(Location::new(1), local.operations[1].clone())]
+    );
+}
+
+#[tokio::test]
+async fn keyless_connect_client_rejects_invalid_streamed_proof() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_local_batch().await;
+    assert!(
+        *local.inactivity_floor > 0,
+        "test must not rely on inactivity_floor = 0"
+    );
+    commit_upload(&store_client, &local).await;
+
+    let keyless_client = Arc::new(TestKeylessClient::from_client(
+        store_client.clone(),
+        ((0..=10000).into(), ()),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
+    let rpc = common::operation_log_rpc_client(&qmdb_url);
+    let mut raw_stream = rpc
+        .subscribe(ProtoSubscribeRequest {
+            since_sequence_number: Some(1),
+            ..Default::default()
+        })
+        .await
+        .expect("subscribe");
+    let raw_response = raw_stream
+        .message()
+        .await
+        .expect("stream result")
+        .expect("stream frame")
+        .to_owned_message();
+
+    let (_static_server, static_url) =
+        common::spawn_static_operation_log_service(common::StaticOperationLogService {
+            subscribe_response: common::tamper_subscribe_response(raw_response),
+        })
+        .await;
+    let client = validated_client(&static_url);
+    let mut stream = client
+        .subscribe(ProtoSubscribeRequest::default())
+        .await
+        .expect("subscribe");
+
+    let err = stream
+        .message_with_root(common::trusted_root(local.root))
+        .await
+        .expect_err("tampered streamed proof should fail");
+    assert!(matches!(
+        err,
+        QmdbError::ProofVerification {
+            kind: exoware_qmdb::ProofKind::BatchMulti
+        }
+    ));
+}
+
+fn match_exact(bytes: &[u8]) -> ProtoBytesFilter {
+    ProtoBytesFilter {
+        kind: Some(proto_bytes_filter::Kind::Exact(bytes.to_vec())),
+        ..Default::default()
+    }
+}
+
+fn match_regex(regex: &str) -> ProtoBytesFilter {
+    ProtoBytesFilter {
+        kind: Some(proto_bytes_filter::Kind::Regex(regex.to_string())),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn keyless_connect_subscribe_filters_by_value_regex() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_local_batch().await;
+    assert!(
+        *local.inactivity_floor > 0,
+        "test must not rely on inactivity_floor = 0"
+    );
+    let keyless_client = Arc::new(TestKeylessClient::from_client(
+        store_client.clone(),
+        ((0..=10000).into(), ()),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
+    let client = validated_client(&qmdb_url);
+
+    // Only include ops whose value begins with "second".
+    let mut stream = client
+        .subscribe(ProtoSubscribeRequest {
+            value_filters: vec![match_regex("^second.*$")],
+            ..Default::default()
+        })
+        .await
+        .expect("subscribe");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    commit_upload(&store_client, &local).await;
+
+    let frame: OperationLogSubscribeProof<Digest, BatchOperation, mmr::Family> =
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            stream.message_with_root(common::trusted_root(local.root)),
+        )
+        .await
+        .expect("timeout")
+        .expect("stream result")
+        .expect("stream frame");
+
+    assert_eq!(frame.root, local.root);
+    let expected: Vec<(Location<mmr::Family>, BatchOperation)> = local
+        .operations
+        .iter()
+        .enumerate()
+        .filter_map(|(i, op)| match op {
+            KeylessOperation::Append(value) if value.starts_with(b"second") => {
+                Some((Location::new(i as u64), op.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(!expected.is_empty());
+    assert_eq!(frame.operations, expected);
+}
+
+#[tokio::test]
+async fn keyless_connect_subscribe_rejects_key_filters() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_local_batch().await;
+    assert!(
+        *local.inactivity_floor > 0,
+        "test must not rely on inactivity_floor = 0"
+    );
+    let keyless_client = Arc::new(TestKeylessClient::from_client(
+        store_client.clone(),
+        ((0..=10000).into(), ()),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
+
+    let rpc = common::operation_log_rpc_client(&qmdb_url);
+    let mut stream = rpc
+        .subscribe(ProtoSubscribeRequest {
+            key_filters: vec![match_exact(b"anything")],
+            ..Default::default()
+        })
+        .await
+        .expect("subscribe opens");
+
+    // Even if we upload a batch that would otherwise match, the stream must
+    // not emit a proof — keyless rejects key_filters server-side before it
+    // opens the store subscription.
+    commit_upload(&store_client, &local).await;
+
+    match tokio::time::timeout(Duration::from_millis(500), stream.message()).await {
+        Ok(Ok(Some(_))) => {
+            panic!("keyless stream must not emit a proof when key_filters is set")
+        }
+        Ok(Ok(None)) => {}
+        Ok(Err(err)) => {
+            let msg = err.to_string();
+            assert!(msg.contains("key_filters"), "unexpected error: {msg}");
+        }
+        Err(_) => panic!("stream hung instead of rejecting key_filters"),
+    }
+}

@@ -26,16 +26,18 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc",
+    "build:proto": "buf generate --template buf.gen.yaml",
+    "build": "npm run build:proto && rm -rf dist && tsc",
     "lint": "tsc --noEmit",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@bufbuild/protobuf": "2.11.0",
     "@connectrpc/connect": "2.1.1",
-    "@exowarexyz/sdk": "file:../../sdk-ts"
+    "@exowarexyz/sdk": "file:../../sdk/ts"
   },
   "devDependencies": {
+    "@bufbuild/buf": "^1.67.0",
     "typescript": "^5.5.3"
   }
 }

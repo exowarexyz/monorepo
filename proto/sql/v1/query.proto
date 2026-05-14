@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package sql.v1;
+
+import "buf/validate/validate.proto";
+import "sql/v1/common.proto";
+
+// Ad-hoc SQL statement.
+message QueryRequest {
+  string sql = 1 [
+    (buf.validate.field).string.min_len = 1,
+    (buf.validate.field).string.max_len = 65535
+  ];
+}
+
+// Result set from `Query`.
+message QueryResponse {
+  repeated string column = 1;
+  repeated Row rows = 2;
+}

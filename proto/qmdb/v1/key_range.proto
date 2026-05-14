@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package qmdb.v1;
+
+import "buf/validate/validate.proto";
+import "qmdb/v1/proof.proto";
+
+// Ordered current key-range service. Only ordered QMDB backends can prove a
+// contiguous logical-key interval because they maintain adjacent `next_key`
+// links and exclusion proofs.
+service OrderedKeyRangeService {
+  rpc GetRange(GetRangeRequest) returns (GetRangeResponse);
+}
+
+// Current ordered key range proof request. The range is half-open:
+// `start_key <= key < end_key` when `end_key` is set; otherwise it scans to the
+// end of the ordered keyspace. `limit` must be non-zero.
+message GetRangeRequest {
+  bytes start_key = 1;
+  optional bytes end_key = 2;
+  uint32 limit = 3 [(buf.validate.field).uint32.gt = 0];
+  uint64 tip = 4;
+}
+
+// Ordered current key-range proof response. `start_proof`, when present,
+// authenticates the boundary before the first returned key (or the entire empty
+// range). `end_proof`, when present, authenticates the exclusive end boundary.
+message GetRangeResponse {
+  repeated CurrentKeyRangeEntry entries = 1;
+  optional CurrentKeyExclusionProof start_proof = 2;
+  optional CurrentKeyExclusionProof end_proof = 3;
+  bool has_more = 4;
+  bytes next_start_key = 5;
+}

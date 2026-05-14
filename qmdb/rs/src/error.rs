@@ -1,0 +1,92 @@
+use exoware_sdk::ClientError;
+
+/// Which proof shape failed verification. Carried on
+/// [`QmdbError::ProofVerification`] so callers and tests can discriminate
+/// without string matching on the error message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProofKind {
+    /// Single-key current-state proof (`KeyLookupService.Get`).
+    CurrentKeyValue,
+    /// Current ordered proof that a key is inactive.
+    CurrentKeyExclusion,
+    /// Historical multi-proof over subscribed operations.
+    HistoricalMultiKey,
+    /// Subscribe-time multi-proof covering matched operations in one batch
+    /// (`OperationLogService.Subscribe`).
+    BatchMulti,
+    /// Contiguous historical range proof (sync checkpoint).
+    RangeCheckpoint,
+    /// Contiguous current-state range proof.
+    CurrentRange,
+}
+
+impl std::fmt::Display for ProofKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::CurrentKeyValue => "current key-value",
+            Self::CurrentKeyExclusion => "current key-exclusion",
+            Self::HistoricalMultiKey => "historical many-key",
+            Self::BatchMulti => "batch multi",
+            Self::RangeCheckpoint => "range checkpoint",
+            Self::CurrentRange => "current range",
+        };
+        f.write_str(s)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum QmdbError {
+    #[error(transparent)]
+    Client(#[from] ClientError),
+    #[error("uploaded location range [{start_location}, {latest_location}] is invalid for {count} operations")]
+    InvalidLocationRange {
+        start_location: u64,
+        latest_location: u64,
+        count: usize,
+    },
+    #[error("batch must contain at least one operation")]
+    EmptyBatch,
+    #[error("proof request must contain at least one key")]
+    EmptyProofRequest,
+    #[error("range proof max_locations must be > 0")]
+    InvalidRangeLength,
+    #[error("invalid key range: start_key {start_key:?} must be less than end_key {end_key:?}")]
+    InvalidKeyRange {
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+    },
+    #[error("duplicate key in proof request: {key:?}")]
+    DuplicateRequestedKey { key: Vec<u8> },
+    #[error("requested location {requested} is above published writer watermark {available}")]
+    WatermarkTooLow { requested: u64, available: u64 },
+    #[error("proof key not found at watermark {watermark}: {key:?}")]
+    ProofKeyNotFound { watermark: u64, key: Vec<u8> },
+    #[error("requested key is not active at watermark {watermark}: {key:?}")]
+    KeyNotActive { watermark: u64, key: Vec<u8> },
+    #[error("current proofs are only available at uploaded batch locations; no batch ends at {location}")]
+    CurrentProofRequiresBatchBoundary { location: u64 },
+    #[error("current boundary state has not been uploaded for batch location {location}")]
+    CurrentBoundaryStateMissing { location: u64 },
+    #[error("range proof start {start} is out of bounds for watermark with {count} leaves")]
+    RangeStartOutOfBounds { start: u64, count: u64 },
+    #[error("encoded value exceeds store value limit ({len} > {max})")]
+    EncodedValueTooLarge { len: usize, max: usize },
+    #[error(
+        "sortable key encoding for raw key length {raw_len} expands to {encoded_len} bytes, exceeding max {max}"
+    )]
+    SortableKeyTooLarge {
+        raw_len: usize,
+        encoded_len: usize,
+        max: usize,
+    },
+    #[error("{kind} proof failed verification")]
+    ProofVerification { kind: ProofKind },
+    #[error("corrupt qmdb data: {0}")]
+    CorruptData(String),
+    #[error("commonware merkle error: {0}")]
+    CommonwareMerkle(String),
+    #[error("qmdb stream transport error: {0}")]
+    Stream(String),
+    #[error("writer is poisoned after an earlier upload failure: {0}")]
+    WriterPoisoned(String),
+}

@@ -5,8 +5,9 @@ import {
   matchRegex,
   OrderedQmdbClient,
   type OrderedSubscribeProof,
+  type VerifiedCurrentKeyLookupProof,
+  type VerifiedCurrentKeyRangeProof,
   type VerifiedCurrentKeyValueProof,
-  type VerifiedHistoricalMultiProof,
 } from '@qmdb-ts';
 
 export const QMDB_URL = import.meta.env.VITE_QMDB_URL as string | undefined;
@@ -50,6 +51,11 @@ function formatBytes(bytes: Uint8Array): string {
     .join('')}`;
 }
 
+function formatProofSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  return `${(bytes / 1024).toFixed(1)} KiB`;
+}
+
 function parseTip(value: string): bigint {
   const trimmed = value.trim();
   if (!trimmed) {
@@ -85,7 +91,7 @@ function renderOperation(
     case 'commit_floor':
       return (
         <>
-          <p><strong>Type:</strong> commit_floor</p>
+          <p><strong>Type:</strong> commit</p>
           {proofOperation.value && (
             <p><strong>Value:</strong> {formatBytes(proofOperation.value)}</p>
           )}
@@ -102,26 +108,34 @@ export function QmdbPanel({
   qmdbUrl: string;
   showNotification: NotificationFn;
 }) {
-  const client = useMemo(() => new OrderedQmdbClient(qmdbUrl), [qmdbUrl]);
+  const client = useMemo(
+    () => new OrderedQmdbClient(qmdbUrl, { merkleFamily: 'mmb' }),
+    [qmdbUrl],
+  );
   const subscribeAbortRef = useRef<AbortController | null>(null);
 
   const [isConnected, setIsConnected] = useState(false);
   const [tip, setTip] = useState('');
   const [expectedCurrentRoot, setExpectedCurrentRoot] = useState('');
-  const [expectedHistoricalRoot, setExpectedHistoricalRoot] = useState('');
 
   const [getKey, setGetKey] = useState('k-00000000');
   const [getProof, setGetProof] = useState<VerifiedCurrentKeyValueProof | null>(null);
   const [isGetting, setIsGetting] = useState(false);
 
   const [manyKeys, setManyKeys] = useState('k-00000000,k-00000001');
-  const [manyProof, setManyProof] = useState<VerifiedHistoricalMultiProof | null>(null);
+  const [manyProof, setManyProof] = useState<VerifiedCurrentKeyLookupProof | null>(null);
   const [isGettingMany, setIsGettingMany] = useState(false);
 
+  const [rangeStartKey, setRangeStartKey] = useState('k-00000000');
+  const [rangeEndKey, setRangeEndKey] = useState('k-00000010');
+  const [rangeLimit, setRangeLimit] = useState('5');
+  const [rangeProof, setRangeProof] = useState<VerifiedCurrentKeyRangeProof | null>(null);
+  const [isGettingRange, setIsGettingRange] = useState(false);
+
   const [keyMatcherKind, setKeyMatcherKind] = useState<'exact' | 'prefix' | 'regex' | 'none'>(
-    'prefix',
+    'none',
   );
-  const [keyMatcherValue, setKeyMatcherValue] = useState('k-');
+  const [keyMatcherValue, setKeyMatcherValue] = useState('');
   const [valueMatcherKind, setValueMatcherKind] = useState<'exact' | 'prefix' | 'regex' | 'none'>(
     'none',
   );
@@ -147,7 +161,7 @@ export function QmdbPanel({
       controller.abort();
       subscribeAbortRef.current?.abort();
     };
-  }, []);
+  }, [qmdbUrl]);
 
   const handleGet = async () => {
     setIsGetting(true);
@@ -159,7 +173,11 @@ export function QmdbPanel({
         parseHexRoot(expectedCurrentRoot),
       );
       setGetProof(proof);
-      showNotification('success', 'QMDB Get', `Verified proof for "${getKey}" against expected root`);
+      showNotification(
+        'success',
+        'QMDB Get',
+        `Verified proof for "${getKey}" against expected root (${formatProofSize(proof.proofSizeBytes)})`,
+      );
     } catch (error) {
       showNotification('error', 'QMDB Get Failed', String(error));
     } finally {
@@ -181,18 +199,49 @@ export function QmdbPanel({
       const proof = await client.getMany(
         keys,
         parseTip(tip),
-        parseHexRoot(expectedHistoricalRoot),
+        parseHexRoot(expectedCurrentRoot),
       );
       setManyProof(proof);
       showNotification(
         'success',
         'QMDB GetMany',
-        `Verified ${proof.operations.length} operations against expected root`,
+        `Verified ${proof.results.length} key results against expected root (${formatProofSize(proof.proofSizeBytes)})`,
       );
     } catch (error) {
       showNotification('error', 'QMDB GetMany Failed', String(error));
     } finally {
       setIsGettingMany(false);
+    }
+  };
+
+  const handleGetRange = async () => {
+    setIsGettingRange(true);
+    setRangeProof(null);
+    try {
+      const limit = Number(rangeLimit);
+      if (!Number.isInteger(limit) || limit <= 0) {
+        throw new Error('Limit must be a positive integer');
+      }
+      const endKey = rangeEndKey.trim();
+      const proof = await client.getRange(
+        {
+          startKey: rangeStartKey,
+          ...(endKey ? { endKey } : {}),
+          limit,
+          tip: parseTip(tip),
+        },
+        parseHexRoot(expectedCurrentRoot),
+      );
+      setRangeProof(proof);
+      showNotification(
+        'success',
+        'QMDB GetRange',
+        `Verified ${proof.entries.length} ordered entries against expected root (${formatProofSize(proof.proofSizeBytes)})`,
+      );
+    } catch (error) {
+      showNotification('error', 'QMDB GetRange Failed', String(error));
+    } finally {
+      setIsGettingRange(false);
     }
   };
 
@@ -243,7 +292,7 @@ export function QmdbPanel({
       }
     })();
 
-    showNotification('success', 'QMDB Subscribe', 'Listening for verified multi-proofs');
+    showNotification('success', 'QMDB Subscribe', 'Listening for streamed proofs');
   };
 
   const handleStopSubscribe = () => {
@@ -261,11 +310,12 @@ export function QmdbPanel({
         <p className="section-note">
           Proofs are anchored to roots the writer emits per batch. Run `qmdb run`
           locally and `qmdb seed` to stream fresh tips; each line prints
-          `tip=N current_root=0x.. historical_root=0x..`. Get Proof verifies
-          against the current root; Get Multi-Proof verifies against the
-          historical root.
+          `tip=N root=0x..`. Get Proof, Get Many, and Get Range verify
+          against that current root. Subscribe streams each proof with its tip
+          and included operations.
         </p>
         <p><strong>Server:</strong> {qmdbUrl}</p>
+        <p><strong>Merkle Family:</strong> MMB</p>
         <p><strong>Status:</strong> {isConnected ? 'Connected' : 'Disconnected'}</p>
         <div className="form-row">
           <div className="form-group">
@@ -280,23 +330,13 @@ export function QmdbPanel({
             />
           </div>
           <div className="form-group form-group-wide">
-            <label htmlFor="qmdb-current-root">Expected Current Root (hex)</label>
+            <label htmlFor="qmdb-current-root">Expected Root (hex)</label>
             <input
               id="qmdb-current-root"
               type="text"
               placeholder="0x..."
               value={expectedCurrentRoot}
               onChange={(event) => setExpectedCurrentRoot(event.target.value)}
-            />
-          </div>
-          <div className="form-group form-group-wide">
-            <label htmlFor="qmdb-historical-root">Expected Historical Root (hex)</label>
-            <input
-              id="qmdb-historical-root"
-              type="text"
-              placeholder="0x..."
-              value={expectedHistoricalRoot}
-              onChange={(event) => setExpectedHistoricalRoot(event.target.value)}
             />
           </div>
         </div>
@@ -327,15 +367,15 @@ export function QmdbPanel({
         {getProof && (
           <div className="result fade-in">
             <h4>Verified Current Proof</h4>
+            <p><strong>Proof Size:</strong> {formatProofSize(getProof.proofSizeBytes)}</p>
             <p><strong>Location:</strong> {getProof.location.toString()}</p>
-            <p><strong>Root:</strong> {formatBytes(getProof.root)}</p>
             {renderOperation(getProof.operation)}
           </div>
         )}
       </div>
 
       <div className="form-section">
-        <h3>Get Historical Multi-Proof</h3>
+        <h3>Get Many Current Proofs</h3>
         <div className="form-row">
           <div className="form-group">
             <label htmlFor="qmdb-many-keys">Keys (comma-separated)</label>
@@ -351,20 +391,92 @@ export function QmdbPanel({
           className={`btn-primary ${isGettingMany ? 'loading' : ''}`}
           onClick={handleGetMany}
           disabled={
-            isGettingMany || !manyKeys.trim() || !tip.trim() || !expectedHistoricalRoot.trim()
+            isGettingMany || !manyKeys.trim() || !tip.trim() || !expectedCurrentRoot.trim()
           }
         >
-          {isGettingMany ? 'Verifying...' : 'Get Multi-Proof'}
+          {isGettingMany ? 'Verifying...' : 'Get Many'}
         </button>
         {manyProof && (
           <div className="result fade-in">
-            <h4>Verified Historical Multi-Proof</h4>
-            <p><strong>Root:</strong> {formatBytes(manyProof.root)}</p>
+            <h4>Verified Current Key Results</h4>
+            <p><strong>Proof Size:</strong> {formatProofSize(manyProof.proofSizeBytes)}</p>
             <div className="result-list">
-              {manyProof.operations.map((operation, index) => (
-                <div key={`${operation.location.toString()}-${index}`} className="result-row-block">
-                  <p><strong>Location:</strong> {operation.location.toString()}</p>
-                  {renderOperation(operation.operation)}
+              {manyProof.results.map((result, index) => (
+                <div key={`${formatBytes(result.key)}-${index}`} className="result-row-block">
+                  <p><strong>Key:</strong> {formatBytes(result.key)}</p>
+                  <p><strong>Result:</strong> {result.type}</p>
+                  {result.type === 'hit' && (
+                    <>
+                      <p><strong>Location:</strong> {result.location.toString()}</p>
+                      {renderOperation(result.operation)}
+                    </>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="form-section">
+        <h3>Get Ordered Range</h3>
+        <div className="form-row">
+          <div className="form-group">
+            <label htmlFor="qmdb-range-start-key">Start Key</label>
+            <input
+              id="qmdb-range-start-key"
+              type="text"
+              value={rangeStartKey}
+              onChange={(event) => setRangeStartKey(event.target.value)}
+            />
+          </div>
+          <div className="form-group">
+            <label htmlFor="qmdb-range-end-key">End Key (optional)</label>
+            <input
+              id="qmdb-range-end-key"
+              type="text"
+              value={rangeEndKey}
+              onChange={(event) => setRangeEndKey(event.target.value)}
+            />
+          </div>
+          <div className="form-group">
+            <label htmlFor="qmdb-range-limit">Limit</label>
+            <input
+              id="qmdb-range-limit"
+              type="number"
+              min="1"
+              value={rangeLimit}
+              onChange={(event) => setRangeLimit(event.target.value)}
+            />
+          </div>
+        </div>
+        <button
+          className={`btn-primary ${isGettingRange ? 'loading' : ''}`}
+          onClick={handleGetRange}
+          disabled={
+            isGettingRange ||
+            !rangeStartKey.trim() ||
+            !rangeLimit.trim() ||
+            !tip.trim() ||
+            !expectedCurrentRoot.trim()
+          }
+        >
+          {isGettingRange ? 'Verifying...' : 'Get Range'}
+        </button>
+        {rangeProof && (
+          <div className="result fade-in">
+            <h4>Verified Ordered Range</h4>
+            <p><strong>Proof Size:</strong> {formatProofSize(rangeProof.proofSizeBytes)}</p>
+            <p><strong>Has More:</strong> {rangeProof.hasMore ? 'yes' : 'no'}</p>
+            {rangeProof.nextStartKey.length > 0 && (
+              <p><strong>Next Start Key:</strong> {formatBytes(rangeProof.nextStartKey)}</p>
+            )}
+            <div className="result-list">
+              {rangeProof.entries.map((entry, index) => (
+                <div key={`${formatBytes(entry.key)}-${index}`} className="result-row-block">
+                  <p><strong>Key:</strong> {formatBytes(entry.key)}</p>
+                  <p><strong>Location:</strong> {entry.location.toString()}</p>
+                  {renderOperation(entry.operation)}
                 </div>
               ))}
             </div>
@@ -461,13 +573,22 @@ export function QmdbPanel({
           </button>
         </div>
         <div className="result fade-in">
-          <h4>Verified Events ({events.length})</h4>
+          <h4>Streamed Events ({events.length})</h4>
           {events.length === 0 ? (
             <p>No proof events yet</p>
           ) : (
             <div className="result-list">
               {events.map((event, index) => {
                 const ops = event.proof.operations;
+                const counts = ops.reduce(
+                  (acc, op) => {
+                    if (op.operation.type === 'update') acc.updates += 1;
+                    if (op.operation.type === 'delete') acc.deletes += 1;
+                    if (op.operation.type === 'commit_floor') acc.commits += 1;
+                    return acc;
+                  },
+                  { updates: 0, deletes: 0, commits: 0 },
+                );
                 let locationRange = '(none)';
                 if (ops.length > 0) {
                   let minLoc = ops[0].location;
@@ -489,11 +610,21 @@ export function QmdbPanel({
                     <p>
                       <strong>Resume Sequence:</strong> {event.resumeSequenceNumber.toString()}
                       {' · '}
+                      <strong>Tip:</strong> {event.tip.toString()}
+                      {' · '}
                       <strong>Matched:</strong> {ops.length}
                       {' · '}
+                      <strong>Updates:</strong> {counts.updates}
+                      {' · '}
+                      <strong>Deletes:</strong> {counts.deletes}
+                      {' · '}
+                      <strong>Commits:</strong> {counts.commits}
+                      {' · '}
                       <strong>Locations:</strong> {locationRange}
+                      {' · '}
+                      <strong>Proof Size:</strong>{' '}
+                      {formatProofSize(event.proof.proofSizeBytes)}
                     </p>
-                    <p><strong>Historical Root:</strong> {formatBytes(event.proof.root)}</p>
                     {ops.length > 0 && (
                       <div className="result-list">
                         {ops.map((op, opIndex) => (

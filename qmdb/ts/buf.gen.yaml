@@ -1,0 +1,19 @@
+version: v2
+plugins:
+  - remote: buf.build/bufbuild/es:v2.2.3
+    out: src/generated/proto
+    opt:
+      - target=ts
+      - import_extension=js
+inputs:
+  - directory: ../../proto
+    paths:
+      - ../../proto/qmdb/v1/proof.proto
+      - ../../proto/qmdb/v1/key_lookup.proto
+      - ../../proto/qmdb/v1/key_range.proto
+      - ../../proto/qmdb/v1/operation_log.proto
+      - ../../proto/qmdb/v1/current_operation.proto
+      - ../../proto/store/v1/common.proto
+  - module: buf.build/bufbuild/protovalidate
+    paths:
+      - buf/validate/validate.proto

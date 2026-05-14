@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package qmdb.v1;
+
+import "buf/validate/validate.proto";
+import "qmdb/v1/proof.proto";
+
+// Current operation proof service for QMDB backends that upload current-state
+// boundary material. Ordered and unordered backends can expose this when the
+// requested tip is an uploaded batch boundary.
+service CurrentOperationService {
+  rpc GetCurrentOperationRange(GetCurrentOperationRangeRequest)
+      returns (GetCurrentOperationRangeResponse);
+}
+
+// Unary current operation-range proof request. The proof covers
+// `[start_location, min(start_location + max_locations, tip + 1))` in the
+// current-state tree at `tip`.
+message GetCurrentOperationRangeRequest {
+  uint64 tip = 1;
+  uint64 start_location = 2;
+  uint32 max_locations = 3 [(buf.validate.field).uint32.gt = 0];
+}
+
+message GetCurrentOperationRangeResponse {
+  CurrentOperationRangeProof proof = 1;
+}

@@ -1,12 +1,17 @@
 # @exowarexyz/qmdb
 
-Browser client for the ordered QMDB ConnectRPC proof API.
+Browser client for the QMDB ConnectRPC proof API.
 
 This package:
 
-- calls `store.qmdb.v1.OrderedService` over Connect-Web
-- verifies `get`, `getMany`, and `subscribe` proofs through a small WASM module
+- calls `qmdb.v1.KeyLookupService`, `qmdb.v1.OrderedKeyRangeService`,
+  `qmdb.v1.OperationLogService`, and `qmdb.v1.CurrentOperationService` over Connect-Web
+- verifies `get`, `getMany`, `getRange`, `getOperationRange`,
+  `getCurrentOperationRange`, and `subscribe` proofs for MMR or MMB through a small WASM module
 - supports `exact`, `prefix`, and `regex` subscription matchers
 
-`get` and `getMany` remain root-driven: callers must supply the ordered current
-or historical root they want the server to prove against.
+Proof verification is root-driven: callers supply the current/global root for
+current-boundary-backed services. Operation-log-only backends are a separate
+contract and use a trusted operation-log root. The client is configured with a
+Merkle family (`mmr` by default) and uses that for all proof decoding and
+verification.

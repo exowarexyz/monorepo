@@ -1,0 +1,53 @@
+[package]
+name = "exoware-qmdb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "QMDB instance backed by the Exoware API."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/exowarexyz/monorepo/tree/main/qmdb/rs"
+documentation = "https://docs.rs/exoware-qmdb"
+
+[features]
+test-utils = []
+
+[dependencies]
+axum = { workspace = true }
+bytes = { workspace = true }
+buffa = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+commonware-codec = { workspace = true }
+commonware-parallel = { workspace = true }
+commonware-runtime = { workspace = true }
+futures = { workspace = true }
+commonware-cryptography = { workspace = true }
+commonware-storage = { workspace = true }
+commonware-utils = { workspace = true }
+connectrpc = { workspace = true }
+exoware-sdk = { workspace = true }
+hex = { workspace = true }
+http-body = "1"
+regex = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tower-http = { workspace = true, features = ["cors"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[build-dependencies]
+connectrpc-build = "0.3.1"
+
+[dev-dependencies]
+exoware-qmdb = { path = ".", features = ["test-utils"] }
+axum = { workspace = true }
+bytes = { workspace = true }
+commonware-runtime = { workspace = true }
+exoware-simulator = { path = "../../examples/simulator" }
+exoware-server = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
