@@ -62,7 +62,7 @@ impl PreparedUpload {
 
 /// Store-backed writer for Commonware Simplex blocks and certificates.
 ///
-/// The writer stores four logical indexes:
+/// The writer stores five logical indexes:
 ///
 /// - header bytes by header digest
 /// - full `{ header, body }` bytes by header digest

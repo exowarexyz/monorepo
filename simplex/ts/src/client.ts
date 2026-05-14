@@ -363,11 +363,22 @@ export function decodeSimplexBlockData(value: BytesLike): SimplexBlockData {
 }
 
 export function normalizeU64(value: U64Like): bigint {
-  const bigintValue = typeof value === 'bigint' ? value : BigInt(value);
+  const bigintValue = typeof value === 'number'
+    ? safeIntegerToBigInt(value)
+    : typeof value === 'bigint'
+      ? value
+      : BigInt(value);
   if (bigintValue < 0n || bigintValue > 0xffff_ffff_ffff_ffffn) {
     throw new RangeError(`u64 out of range: ${value}`);
   }
   return bigintValue;
+}
+
+function safeIntegerToBigInt(value: number): bigint {
+  if (!Number.isSafeInteger(value)) {
+    throw new RangeError(`u64 number must be a safe integer: ${value}`);
+  }
+  return BigInt(value);
 }
 
 function u64Bytes(value: U64Like): Uint8Array {

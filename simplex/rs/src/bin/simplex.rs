@@ -94,12 +94,6 @@ impl DemoBlock {
     }
 }
 
-fn digest_bytes(bytes: &[u8]) -> Sha256Digest {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hasher.finalize()
-}
-
 impl Write for DemoBlock {
     fn write(&self, buf: &mut impl BufMut) {
         self.context.write(buf);
@@ -316,7 +310,7 @@ async fn seed(
         }
 
         let body = Bytes::from(format!("simplex-demo-block-body-{height}").into_bytes());
-        let body_digest = digest_bytes(&body);
+        let body_digest = Sha256::hash(&body);
         let block = DemoBlock::new(
             height,
             parent_view,

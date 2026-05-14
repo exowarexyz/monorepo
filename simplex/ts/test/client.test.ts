@@ -16,6 +16,7 @@ import {
   finalizationByViewKey,
   finalizedByHeightKey,
   hexToBytes,
+  normalizeU64,
   notarizationByViewKey,
   rangeForKind,
   type SimplexCertificateVerifier,
@@ -34,6 +35,11 @@ test('simplex keys match the Rust key layout', () => {
   const range = rangeForKind(SimplexRecordKind.FinalizedByHeight);
   assert.equal(bytesToHex(range.start), '0031');
   assert.equal(bytesToHex(range.end), '0032');
+});
+
+test('u64 helper rejects unsafe JavaScript numbers', () => {
+  assert.equal(normalizeU64(Number.MAX_SAFE_INTEGER).toString(), '9007199254740991');
+  assert.throws(() => normalizeU64(Number.MAX_SAFE_INTEGER + 1), /safe integer/);
 });
 
 test('stages block and finalization rows into one StoreWriteBatch', () => {
