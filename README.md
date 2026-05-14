@@ -12,6 +12,7 @@ _Primitives are designed for production use. If you find an exploit, please refe
 * [sdk/ts](./sdk/ts/README.md): Interact with the Exoware API in TypeScript.
 * [server](./server/README.md): Serve the Exoware API.
 * [qmdb](./qmdb/README.md): QMDB instance backed by the Exoware API.
+* [simplex](./simplex/README.md): Commonware Simplex artifact upload helpers backed by the Exoware API.
 * [sql](./sql/README.md): SQL engine backed by the Exoware API.
 
 ## Components

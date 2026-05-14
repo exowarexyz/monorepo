@@ -256,6 +256,7 @@ button {
   border: 1px solid transparent;
   font-size: 0.875rem;
   font-weight: 500;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Helvetica Neue', sans-serif;
   cursor: pointer;
   transition: all 0.2s ease;
   display: inline-flex;
@@ -293,6 +294,14 @@ button {
   border-color: #9ca3af;
 }
 
+.btn-compact {
+  height: 34px;
+  min-width: auto;
+  padding: 0 0.75rem;
+  font-size: 0.8125rem;
+  white-space: nowrap;
+}
+
 .btn-danger {
   background: #dc2626;
   color: #fff;
@@ -310,6 +319,10 @@ button {
   flex-wrap: wrap;
 }
 
+.form-section > .button-row:not(:last-child) {
+  margin-bottom: 1rem;
+}
+
 /* Results */
 .result {
   background: #f8fafc;
@@ -320,6 +333,9 @@ button {
   color: #1e293b;
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
   font-size: 0.875rem;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .result h4 {
@@ -333,6 +349,18 @@ button {
 .result p {
   margin: 0.25rem 0;
   line-height: 1.5;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.result pre {
+  margin: 0.5rem 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+  overflow-x: auto;
 }
 
 .result strong {
@@ -368,6 +396,7 @@ button {
   flex-direction: column;
   gap: 0.75rem;
   margin-top: 1rem;
+  min-width: 0;
 }
 
 .result-row {
@@ -379,6 +408,48 @@ button {
   border-radius: 6px;
   background: #fff;
   word-break: break-word;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.result-row-block {
+  padding: 0.75rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #fff;
+  word-break: break-word;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.result-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+
+.result-title-row h4 {
+  margin: 0;
+}
+
+.result-meta {
+  min-width: 0;
+  flex: 1;
+}
+
+.result-detail {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #fff;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .stream-events {
@@ -506,6 +577,10 @@ button {
 
   .button-row {
     flex-direction: column;
+  }
+
+  .btn-compact {
+    width: 100%;
   }
 
   .form-group {

@@ -5,6 +5,8 @@ members = [
     "examples/simulator",
     "qmdb/rs",
     "qmdb/rs/wasm",
+    "simplex/rs",
+    "simplex/rs/wasm",
     "sql/rs",
     "integration",
 ]
@@ -20,6 +22,7 @@ homepage = "https://exoware.xyz"
 exoware-qmdb = { version = "2026.4.1", path = "qmdb/rs" }
 exoware-sdk = { version = "2026.4.1", path = "sdk/rs" }
 exoware-server = { version = "2026.4.1", path = "server" }
+exoware-simplex = { version = "2026.4.1", path = "simplex/rs" }
 exoware-sql = { version = "2026.4.1", path = "sql/rs" }
 tokio = "1.43.0"
 clap = "4.5.18"
@@ -31,7 +34,9 @@ base64 = "0.22.1"
 hex = "0.4"
 regex = "1"
 commonware-codec = { git = "https://github.com/commonwarexyz/monorepo", rev = "2cc941653cb936952c00587f8cb037c8021241a5", package = "commonware-codec" }
+commonware-consensus = { git = "https://github.com/commonwarexyz/monorepo", rev = "2cc941653cb936952c00587f8cb037c8021241a5", package = "commonware-consensus" }
 commonware-cryptography = { git = "https://github.com/commonwarexyz/monorepo", rev = "2cc941653cb936952c00587f8cb037c8021241a5", package = "commonware-cryptography" }
+commonware-math = { git = "https://github.com/commonwarexyz/monorepo", rev = "2cc941653cb936952c00587f8cb037c8021241a5", package = "commonware-math" }
 commonware-parallel = { git = "https://github.com/commonwarexyz/monorepo", rev = "2cc941653cb936952c00587f8cb037c8021241a5", package = "commonware-parallel" }
 commonware-runtime = { git = "https://github.com/commonwarexyz/monorepo", rev = "2cc941653cb936952c00587f8cb037c8021241a5", package = "commonware-runtime" }
 commonware-storage = { git = "https://github.com/commonwarexyz/monorepo", rev = "2cc941653cb936952c00587f8cb037c8021241a5", package = "commonware-storage" }

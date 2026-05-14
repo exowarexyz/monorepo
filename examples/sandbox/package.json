@@ -5,9 +5,10 @@
   "type": "module",
   "scripts": {
     "build:qmdb-wasm": "npm --prefix ../../qmdb/ts run build:wasm",
-    "predev": "npm run build:qmdb-wasm",
-    "prebuild": "npm run build:qmdb-wasm",
-    "postinstall": "npm --prefix ../../sdk/ts install --include=dev && npm --prefix ../../sdk/ts run build && npm --prefix ../../qmdb/ts install --include=dev && npm --prefix ../../qmdb/ts run build:wasm && npm --prefix ../../sql/ts install --include=dev && npm --prefix ../../sql/ts run build",
+    "build:simplex-wasm": "npm --prefix ../../simplex/ts run build:wasm",
+    "predev": "npm run build:qmdb-wasm && npm run build:simplex-wasm",
+    "prebuild": "npm run build:qmdb-wasm && npm run build:simplex-wasm",
+    "postinstall": "npm --prefix ../../sdk/ts install --include=dev && npm --prefix ../../sdk/ts run build && npm --prefix ../../qmdb/ts install --include=dev && npm --prefix ../../qmdb/ts run build:wasm && npm --prefix ../../simplex/ts install --include=dev && npm --prefix ../../simplex/ts run build && npm --prefix ../../sql/ts install --include=dev && npm --prefix ../../sql/ts run build",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
@@ -17,6 +18,7 @@
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "@exowarexyz/sdk": "file:../../sdk/ts",
+    "@exowarexyz/simplex": "file:../../simplex/ts",
     "buffer": "^6.0.3"
   },
   "devDependencies": {

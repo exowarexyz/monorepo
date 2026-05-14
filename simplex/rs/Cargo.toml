@@ -1,0 +1,38 @@
+[package]
+name = "exoware-simplex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Index artifacts emitted by Simplex."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/exowarexyz/monorepo/tree/main/simplex/rs"
+documentation = "https://docs.rs/exoware-simplex"
+
+[[bin]]
+name = "simplex"
+path = "src/bin/simplex.rs"
+
+[dependencies]
+bytes = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+commonware-codec = { workspace = true }
+commonware-consensus = { workspace = true }
+commonware-cryptography = { workspace = true }
+commonware-math = { workspace = true }
+commonware-parallel = { workspace = true }
+commonware-utils = { workspace = true }
+exoware-sdk = { workspace = true }
+futures = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[dev-dependencies]
+commonware-consensus = { workspace = true, features = ["mocks"] }
+commonware-cryptography = { workspace = true, features = ["mocks"] }
+exoware-simulator = { path = "../../examples/simulator" }
+tempfile = { workspace = true }

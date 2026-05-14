@@ -41,17 +41,20 @@ Explore the Exoware API.
 - **Store:** set and get key-value pairs, and run range queries.
 - **Ordered QMDB** (optional, requires `VITE_QMDB_URL`): current/historical
   proofs and live subscribe streaming.
+- **Simplex** (optional, requires `VITE_SIMPLEX_URL`): read and subscribe to
+  seeded Commonware Simplex blocks, notarizations, and finalizations, with
+  latest-finalization verification through the Simplex WASM verifier.
 - **SQL** (optional, requires `VITE_SQL_URL`): run ad-hoc SQL queries and
   subscribe to a SQL WHERE predicate evaluated per ingested batch.
 
 ## Store namespace
 
-The sandbox currently runs raw Store KV, Ordered QMDB, and SQL against the same
-unpartitioned simulator Store. QMDB and SQL each use their own internal key
-families, but the demo binaries do not assign distinct SDK `StoreKeyPrefix`
-values, and raw KV can write arbitrary Store keys. This means the sandbox is
-useful for exercising the individual panels, but it should not be treated as an
-example of isolated multi-instance Store partitioning.
+The sandbox currently runs raw Store KV, Ordered QMDB, Simplex, and SQL against
+the same unpartitioned simulator Store. QMDB, Simplex, and SQL each use their
+own internal key families, but the demo binaries do not assign distinct SDK
+`StoreKeyPrefix` values, and raw KV can write arbitrary Store keys. This means
+the sandbox is useful for exercising the individual panels, but it should not be
+treated as an example of isolated multi-instance Store partitioning.
 
 ## Ordered QMDB panel
 
@@ -105,8 +108,47 @@ In addition to the simulator running above:
      current root for that emitted tip and reports proof size. Paste seed
      output lines into Trusted Roots when replaying or following multiple tips.
 
-   The client-side verifier rejects any proof whose recomputed root doesn't
-   match the pasted anchor.
+The client-side verifier rejects any proof whose recomputed root doesn't
+match the pasted anchor.
+
+## Simplex panel
+
+The Simplex panel is only rendered when `VITE_SIMPLEX_URL` is set. It reads
+Commonware Simplex artifacts written by the `simplex seed` process using the
+same key layout as the Rust `exoware-simplex` crate. The panel configures the
+Simplex WASM verifier from caller-supplied scheme, namespace, key material, and
+artifact bytes.
+
+With the simulator running above:
+
+1. **Seed finalized Simplex blocks** (keeps running; every `--interval-secs` it
+   uploads a dummy block plus notarization/finalization records that include
+   only the certified header). The first lines print the threshold verifier
+   material to paste into the Simplex panel. The default start height is
+   time-based so restarts still advance the latest finalized height index.
+
+   ```bash
+   cargo run --package exoware-simplex --bin simplex -- \
+     seed --store-url http://127.0.0.1:8080 --interval-secs 2
+   ```
+
+2. **Point the web app at the simulator**:
+
+   ```bash
+   VITE_SIMPLEX_URL=http://127.0.0.1:8080 npm run dev
+   ```
+
+3. **In the UI**:
+   - **Connection** accepts the scheme, namespace, and verifier material printed
+     by `simplex seed`.
+   - **Read** fetches a block by digest, a notarization by view, a finalization
+     by view or height, or the latest finalized height index. Certificate reads
+     are verified before display. From a verified certificate, use **Verify Full
+     Block** to fetch the digest-indexed block, compare its header to the
+     certified header, and verify the demo body commitment.
+   - **Subscribe** streams notarizations and finalizations with their headers,
+     verifying each certificate before display. Each streamed certificate can
+     also fetch and verify its full block on demand.
 
 ## SQL panel
 

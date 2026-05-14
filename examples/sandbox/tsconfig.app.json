@@ -15,8 +15,17 @@
       "@qmdb-ts": [
         "../../qmdb/ts/src/index.ts"
       ],
+      "@simplex-ts": [
+        "../../simplex/ts/src/index.ts"
+      ],
+      "@simplex-ts/wasm": [
+        "../../simplex/ts/src/wasm.ts"
+      ],
       "@sql-ts": [
         "../../sql/ts/src/index.ts"
+      ],
+      "@exowarexyz/sdk": [
+        "../../sdk/ts/dist/index.d.ts"
       ]
     },
     /* Bundler mode */
