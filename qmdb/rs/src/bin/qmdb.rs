@@ -242,10 +242,9 @@ async fn seed(
             .await
             .expect("init local ordered db");
 
+            // `LocalQmdbDb::init` seeds location 0 with a genesis CommitFloor,
+            // so `bounds.end == 1` means no seed batches have run yet.
             let bounds = db.bounds().await;
-            // A newly initialized Commonware current DB contains the genesis
-            // commit-floor operation at location 0. Treat that as empty for
-            // remote upload purposes so the first Store upload includes it.
             let (mut previous_ops, mut counter, writer) = if *bounds.end <= 1 {
                 info!("starting from empty local DB");
                 let writer =
@@ -265,11 +264,12 @@ async fn seed(
                         "resume: failed to load cumulative ops from local DB; \
                              delete the directory to reset",
                     );
-                let batches_so_far = cumulative
+                let committed_batches = cumulative
                     .iter()
                     .filter(|op| matches!(op, QmdbOperation::CommitFloor(_, _)))
-                    .count() as u64;
-                let counter = batches_so_far * 3;
+                    .count()
+                    .saturating_sub(1) as u64; // account for the genesis CommitFloor
+                let counter = committed_batches * 3;
                 let writer_state = exoware_qmdb::WriterState::from_proof::<Sha256, _>(
                     latest,
                     Location::<DemoFamily>::new(0),
@@ -279,7 +279,7 @@ async fn seed(
                 .expect("resume: reconstruct writer state");
                 info!(
                     tip = *latest,
-                    batches = batches_so_far,
+                    batches = committed_batches,
                     next_key_index = counter,
                     "resuming from persisted local DB",
                 );
