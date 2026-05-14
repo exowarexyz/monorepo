@@ -38,7 +38,9 @@ struct VerifiedCertificate {
 }
 
 fn to_value(value: VerifiedCertificate) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&value).map_err(|err| {
+    let serializer =
+        serde_wasm_bindgen::Serializer::new().serialize_large_number_types_as_bigints(true);
+    value.serialize(&serializer).map_err(|err| {
         JsValue::from_str(&format!("failed to serialize verified certificate: {err}"))
     })
 }
@@ -126,17 +128,41 @@ where
     })
 }
 
-fn verify_notarized_for_scheme(
+#[derive(Clone, Copy)]
+enum ArtifactKind {
+    Notarized,
+    Finalized,
+}
+
+fn verify_artifact<S>(
+    artifact: ArtifactKind,
+    scheme_name: &str,
+    scheme: S,
+    bytes: &[u8],
+) -> Result<VerifiedCertificate, String>
+where
+    S: commonware_consensus::simplex::scheme::Scheme<Sha256Digest>,
+    <S::Certificate as Read>::Cfg: Clone,
+{
+    match artifact {
+        ArtifactKind::Notarized => verify_notarized(scheme_name, scheme, bytes),
+        ArtifactKind::Finalized => verify_finalized(scheme_name, scheme, bytes),
+    }
+}
+
+fn verify_for_scheme(
     scheme_name: &str,
     namespace: &[u8],
     verification_material: &[u8],
     bytes: &[u8],
+    artifact: ArtifactKind,
 ) -> Result<VerifiedCertificate, String> {
     match scheme_name {
         "ed25519" => {
             let participants = participant_set::<ed25519::PublicKey>(verification_material)
                 .map_err(|err| format!("failed to decode ed25519 participants: {err}"))?;
-            verify_notarized(
+            verify_artifact(
+                artifact,
                 scheme_name,
                 simplex_ed25519::Scheme::verifier(namespace, participants),
                 bytes,
@@ -146,7 +172,8 @@ fn verify_notarized_for_scheme(
             let participants =
                 participant_map::<Identity, Secp256r1PublicKey>(verification_material)
                     .map_err(|err| format!("failed to decode secp256r1 participants: {err}"))?;
-            verify_notarized(
+            verify_artifact(
+                artifact,
                 scheme_name,
                 simplex_secp256r1::Scheme::<Identity>::verifier(namespace, participants),
                 bytes,
@@ -156,7 +183,8 @@ fn verify_notarized_for_scheme(
             let participants =
                 participant_map::<Identity, <MinPk as Variant>::Public>(verification_material)
                     .map_err(|err| format!("failed to decode multisig participants: {err}"))?;
-            verify_notarized(
+            verify_artifact(
+                artifact,
                 scheme_name,
                 bls12381_multisig::Scheme::<Identity, MinPk>::verifier(namespace, participants),
                 bytes,
@@ -166,7 +194,8 @@ fn verify_notarized_for_scheme(
             let participants =
                 participant_map::<Identity, <MinSig as Variant>::Public>(verification_material)
                     .map_err(|err| format!("failed to decode multisig participants: {err}"))?;
-            verify_notarized(
+            verify_artifact(
+                artifact,
                 scheme_name,
                 bls12381_multisig::Scheme::<Identity, MinSig>::verifier(namespace, participants),
                 bytes,
@@ -175,7 +204,8 @@ fn verify_notarized_for_scheme(
         "bls12381-threshold-standard-min-pk" => {
             let identity = read_identity::<MinPk>(verification_material)
                 .map_err(|err| format!("failed to decode threshold identity: {err}"))?;
-            verify_notarized(
+            verify_artifact(
+                artifact,
                 scheme_name,
                 threshold_standard::Scheme::<Identity, MinPk>::certificate_verifier(
                     namespace, identity,
@@ -186,7 +216,8 @@ fn verify_notarized_for_scheme(
         "bls12381-threshold-standard-min-sig" => {
             let identity = read_identity::<MinSig>(verification_material)
                 .map_err(|err| format!("failed to decode threshold identity: {err}"))?;
-            verify_notarized(
+            verify_artifact(
+                artifact,
                 scheme_name,
                 threshold_standard::Scheme::<Identity, MinSig>::certificate_verifier(
                     namespace, identity,
@@ -197,7 +228,8 @@ fn verify_notarized_for_scheme(
         "bls12381-threshold-vrf-min-pk" => {
             let identity = read_identity::<MinPk>(verification_material)
                 .map_err(|err| format!("failed to decode threshold VRF identity: {err}"))?;
-            verify_notarized(
+            verify_artifact(
+                artifact,
                 scheme_name,
                 threshold_vrf::Scheme::<Identity, MinPk>::certificate_verifier(namespace, identity),
                 bytes,
@@ -206,7 +238,8 @@ fn verify_notarized_for_scheme(
         "bls12381-threshold-vrf-min-sig" => {
             let identity = read_identity::<MinSig>(verification_material)
                 .map_err(|err| format!("failed to decode threshold VRF identity: {err}"))?;
-            verify_notarized(
+            verify_artifact(
+                artifact,
                 scheme_name,
                 threshold_vrf::Scheme::<Identity, MinSig>::certificate_verifier(
                     namespace, identity,
@@ -218,96 +251,34 @@ fn verify_notarized_for_scheme(
     }
 }
 
+fn verify_notarized_for_scheme(
+    scheme_name: &str,
+    namespace: &[u8],
+    verification_material: &[u8],
+    bytes: &[u8],
+) -> Result<VerifiedCertificate, String> {
+    verify_for_scheme(
+        scheme_name,
+        namespace,
+        verification_material,
+        bytes,
+        ArtifactKind::Notarized,
+    )
+}
+
 fn verify_finalized_for_scheme(
     scheme_name: &str,
     namespace: &[u8],
     verification_material: &[u8],
     bytes: &[u8],
 ) -> Result<VerifiedCertificate, String> {
-    match scheme_name {
-        "ed25519" => {
-            let participants = participant_set::<ed25519::PublicKey>(verification_material)
-                .map_err(|err| format!("failed to decode ed25519 participants: {err}"))?;
-            verify_finalized(
-                scheme_name,
-                simplex_ed25519::Scheme::verifier(namespace, participants),
-                bytes,
-            )
-        }
-        "secp256r1" => {
-            let participants =
-                participant_map::<Identity, Secp256r1PublicKey>(verification_material)
-                    .map_err(|err| format!("failed to decode secp256r1 participants: {err}"))?;
-            verify_finalized(
-                scheme_name,
-                simplex_secp256r1::Scheme::<Identity>::verifier(namespace, participants),
-                bytes,
-            )
-        }
-        "bls12381-multisig-min-pk" => {
-            let participants =
-                participant_map::<Identity, <MinPk as Variant>::Public>(verification_material)
-                    .map_err(|err| format!("failed to decode multisig participants: {err}"))?;
-            verify_finalized(
-                scheme_name,
-                bls12381_multisig::Scheme::<Identity, MinPk>::verifier(namespace, participants),
-                bytes,
-            )
-        }
-        "bls12381-multisig-min-sig" => {
-            let participants =
-                participant_map::<Identity, <MinSig as Variant>::Public>(verification_material)
-                    .map_err(|err| format!("failed to decode multisig participants: {err}"))?;
-            verify_finalized(
-                scheme_name,
-                bls12381_multisig::Scheme::<Identity, MinSig>::verifier(namespace, participants),
-                bytes,
-            )
-        }
-        "bls12381-threshold-standard-min-pk" => {
-            let identity = read_identity::<MinPk>(verification_material)
-                .map_err(|err| format!("failed to decode threshold identity: {err}"))?;
-            verify_finalized(
-                scheme_name,
-                threshold_standard::Scheme::<Identity, MinPk>::certificate_verifier(
-                    namespace, identity,
-                ),
-                bytes,
-            )
-        }
-        "bls12381-threshold-standard-min-sig" => {
-            let identity = read_identity::<MinSig>(verification_material)
-                .map_err(|err| format!("failed to decode threshold identity: {err}"))?;
-            verify_finalized(
-                scheme_name,
-                threshold_standard::Scheme::<Identity, MinSig>::certificate_verifier(
-                    namespace, identity,
-                ),
-                bytes,
-            )
-        }
-        "bls12381-threshold-vrf-min-pk" => {
-            let identity = read_identity::<MinPk>(verification_material)
-                .map_err(|err| format!("failed to decode threshold VRF identity: {err}"))?;
-            verify_finalized(
-                scheme_name,
-                threshold_vrf::Scheme::<Identity, MinPk>::certificate_verifier(namespace, identity),
-                bytes,
-            )
-        }
-        "bls12381-threshold-vrf-min-sig" => {
-            let identity = read_identity::<MinSig>(verification_material)
-                .map_err(|err| format!("failed to decode threshold VRF identity: {err}"))?;
-            verify_finalized(
-                scheme_name,
-                threshold_vrf::Scheme::<Identity, MinSig>::certificate_verifier(
-                    namespace, identity,
-                ),
-                bytes,
-            )
-        }
-        other => Err(format!("unsupported Commonware Simplex scheme: {other}")),
-    }
+    verify_for_scheme(
+        scheme_name,
+        namespace,
+        verification_material,
+        bytes,
+        ArtifactKind::Finalized,
+    )
 }
 
 /// Verify an opaque `{ notarization proof, header }` artifact.
