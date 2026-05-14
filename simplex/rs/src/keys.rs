@@ -8,7 +8,8 @@ pub const FORMAT_VERSION: u8 = 0;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum RecordKind {
-    BlockByDigest = 0x10,
+    HeaderByDigest = 0x10,
+    BlockByDigest = 0x11,
     NotarizationByView = 0x20,
     FinalizationByView = 0x30,
     FinalizedByHeight = 0x31,
@@ -34,6 +35,10 @@ fn key_from_parts(kind: RecordKind, suffix: &[u8]) -> Key {
 
 fn u64_suffix(value: u64) -> [u8; 8] {
     value.to_be_bytes()
+}
+
+pub fn header_by_digest<D: Digest>(digest: &D) -> Key {
+    key_from_parts(RecordKind::HeaderByDigest, digest.as_ref())
 }
 
 pub fn block_by_digest<D: Digest>(digest: &D) -> Key {

@@ -8,7 +8,9 @@ use futures::future::BoxFuture;
 
 use crate::error::SimplexError;
 use crate::keys::{self, RecordKind};
-use crate::types::{Finalized, Notarized, UploadReceipt, UploadSummary};
+use crate::types::{
+    encode_block_data, BlockData, Finalized, Notarized, UploadReceipt, UploadSummary,
+};
 
 #[derive(Clone, Debug)]
 pub struct PreparedEntry {
@@ -45,6 +47,7 @@ impl PreparedUpload {
     }
 
     pub fn extend(&mut self, other: PreparedUpload) {
+        self.summary.headers += other.summary.headers;
         self.summary.blocks += other.summary.blocks;
         self.summary.notarizations += other.summary.notarizations;
         self.summary.finalizations += other.summary.finalizations;
@@ -61,10 +64,11 @@ impl PreparedUpload {
 ///
 /// The writer stores four logical indexes:
 ///
-/// - block bytes by block digest
-/// - notarized `{ proof, block }` bytes by Simplex view
-/// - finalized `{ proof, block }` bytes by Simplex view
-/// - finalized `{ proof, block }` bytes by block height
+/// - header bytes by header digest
+/// - full `{ header, body }` bytes by header digest
+/// - notarized `{ proof, header, body }` bytes by Simplex view
+/// - finalized `{ proof, header, body }` bytes by Simplex view
+/// - finalized `{ proof, header, body }` bytes by header height
 #[derive(Clone, Debug)]
 pub struct SimplexClient {
     client: StoreClient,
@@ -87,14 +91,35 @@ impl SimplexClient {
         self.client
     }
 
-    pub fn prepare_block<B>(&self, block: &B) -> PreparedUpload
+    pub fn prepare_header<B>(&self, header: &B) -> PreparedUpload
     where
         B: Block,
     {
         let mut prepared = PreparedUpload::new();
-        prepared.summary.blocks = 1;
-        prepared.push(keys::block_by_digest(&block.digest()), block.encode());
+        prepared.summary.headers = 1;
+        prepared.push(keys::header_by_digest(&header.digest()), header.encode());
         prepared
+    }
+
+    pub fn prepare_block<B>(&self, header: &B, body: impl Into<Bytes>) -> PreparedUpload
+    where
+        B: Block,
+    {
+        let body = body.into();
+        let mut prepared = self.prepare_header(header);
+        prepared.summary.blocks = 1;
+        prepared.push(
+            keys::block_by_digest(&header.digest()),
+            encode_block_data(header, &body),
+        );
+        prepared
+    }
+
+    pub fn prepare_block_data<B>(&self, data: &BlockData<B>) -> PreparedUpload
+    where
+        B: Block,
+    {
+        self.prepare_block(&data.header, data.body.clone())
     }
 
     pub fn prepare_notarized<B, S, D>(
@@ -106,11 +131,11 @@ impl SimplexClient {
         S: certificate::Scheme,
         D: Digest,
     {
-        if notarized.proof.proposal.payload != notarized.block.digest() {
+        if notarized.proof.proposal.payload != notarized.header.digest() {
             return Err(SimplexError::ProofBlockMismatch);
         }
 
-        let mut prepared = self.prepare_block(&notarized.block);
+        let mut prepared = self.prepare_block(&notarized.header, notarized.body.clone());
         prepared.summary.notarizations = 1;
         prepared.push(
             keys::notarization_by_view(notarized.proof.view()),
@@ -128,11 +153,11 @@ impl SimplexClient {
         S: certificate::Scheme,
         D: Digest,
     {
-        if finalized.proof.proposal.payload != finalized.block.digest() {
+        if finalized.proof.proposal.payload != finalized.header.digest() {
             return Err(SimplexError::ProofBlockMismatch);
         }
 
-        let mut prepared = self.prepare_block(&finalized.block);
+        let mut prepared = self.prepare_block(&finalized.header, finalized.body.clone());
         let encoded = finalized.encode();
         prepared.summary.finalizations = 1;
         prepared.summary.finalized_height_indexes = 1;
@@ -140,7 +165,10 @@ impl SimplexClient {
             keys::finalization_by_view(finalized.proof.view()),
             encoded.clone(),
         );
-        prepared.push(keys::finalized_by_height(finalized.block.height()), encoded);
+        prepared.push(
+            keys::finalized_by_height(finalized.header.height()),
+            encoded,
+        );
         Ok(prepared)
     }
 
@@ -171,11 +199,23 @@ impl SimplexClient {
 
     pub async fn mark_upload_failed(&self, _prepared: PreparedUpload, _err: impl ToString) {}
 
-    pub async fn upload_block<B>(&self, block: &B) -> Result<UploadReceipt, SimplexError>
+    pub async fn upload_header<B>(&self, header: &B) -> Result<UploadReceipt, SimplexError>
     where
         B: Block,
     {
-        let prepared = self.prepare_block(block);
+        let prepared = self.prepare_header(header);
+        self.commit_upload(&self.client, prepared).await
+    }
+
+    pub async fn upload_block<B>(
+        &self,
+        header: &B,
+        body: impl Into<Bytes>,
+    ) -> Result<UploadReceipt, SimplexError>
+    where
+        B: Block,
+    {
+        let prepared = self.prepare_block(header, body);
         self.commit_upload(&self.client, prepared).await
     }
 
@@ -203,6 +243,13 @@ impl SimplexClient {
     {
         let prepared = self.prepare_finalized(finalized)?;
         self.commit_upload(&self.client, prepared).await
+    }
+
+    pub async fn get_header_raw<D: Digest>(
+        &self,
+        digest: &D,
+    ) -> Result<Option<Bytes>, SimplexError> {
+        self.get_raw(keys::header_by_digest(digest)).await
     }
 
     pub async fn get_block_raw<D: Digest>(
@@ -237,11 +284,23 @@ impl SimplexClient {
         self.latest_raw(RecordKind::FinalizedByHeight).await
     }
 
-    pub async fn get_block<B, D>(
+    pub async fn get_header<B, D>(
         &self,
         digest: &D,
         cfg: &<B as commonware_codec::Read>::Cfg,
     ) -> Result<Option<B>, SimplexError>
+    where
+        B: Block<Digest = D>,
+        D: Digest,
+    {
+        self.decode_optional(self.get_header_raw(digest).await?, cfg)
+    }
+
+    pub async fn get_block<B, D>(
+        &self,
+        digest: &D,
+        cfg: &<BlockData<B> as commonware_codec::Read>::Cfg,
+    ) -> Result<Option<BlockData<B>>, SimplexError>
     where
         B: Block<Digest = D>,
         D: Digest,

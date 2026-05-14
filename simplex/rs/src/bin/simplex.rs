@@ -1,4 +1,4 @@
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use clap::{Parser, Subcommand};
 use commonware_codec::{Encode, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::{
@@ -20,7 +20,7 @@ use commonware_math::algebra::Random;
 use commonware_parallel::Sequential;
 use commonware_utils::{ordered::Set, N3f1};
 use exoware_sdk::StoreWriteBatch;
-use exoware_simplex::{keys, Finalized, Notarized, SimplexClient};
+use exoware_simplex::{encode_block_data, keys, Finalized, Notarized, SimplexClient};
 use rand::{rngs::StdRng, SeedableRng};
 use tracing::info;
 
@@ -85,11 +85,10 @@ impl DemoBlock {
     }
 
     fn compute_digest(&self) -> Sha256Digest {
+        let mut header = BytesMut::with_capacity(self.encode_size());
+        self.write(&mut header);
         let mut hasher = Sha256::new();
-        hasher.update(&self.context.encode());
-        hasher.update(self.parent.as_ref());
-        hasher.update(&self.height.get().to_be_bytes());
-        hasher.update(&self.payload);
+        hasher.update(&header);
         hasher.finalize()
     }
 }
@@ -191,7 +190,11 @@ fn proposal(block: &DemoBlock) -> Proposal<Sha256Digest> {
     Proposal::new(block.context.round, block.context.parent.0, block.digest())
 }
 
-fn notarized(block: DemoBlock, schemes: &[Scheme]) -> Notarized<DemoBlock, Scheme, Sha256Digest> {
+fn notarized(
+    block: DemoBlock,
+    body: Bytes,
+    schemes: &[Scheme],
+) -> Notarized<DemoBlock, Scheme, Sha256Digest> {
     let proposal = proposal(&block);
     let votes: Vec<_> = schemes
         .iter()
@@ -199,10 +202,14 @@ fn notarized(block: DemoBlock, schemes: &[Scheme]) -> Notarized<DemoBlock, Schem
         .collect();
     let proof =
         Notarization::from_notarizes(&schemes[0], &votes, &Sequential).expect("notarization");
-    Notarized::new(proof, block).expect("notarized")
+    Notarized::with_body(proof, block, body).expect("notarized")
 }
 
-fn finalized(block: DemoBlock, schemes: &[Scheme]) -> Finalized<DemoBlock, Scheme, Sha256Digest> {
+fn finalized(
+    block: DemoBlock,
+    body: Bytes,
+    schemes: &[Scheme],
+) -> Finalized<DemoBlock, Scheme, Sha256Digest> {
     let proposal = proposal(&block);
     let votes: Vec<_> = schemes
         .iter()
@@ -210,7 +217,7 @@ fn finalized(block: DemoBlock, schemes: &[Scheme]) -> Finalized<DemoBlock, Schem
         .collect();
     let proof =
         Finalization::from_finalizes(&schemes[0], &votes, &Sequential).expect("finalization");
-    Finalized::new(proof, block).expect("finalized")
+    Finalized::with_body(proof, block, body).expect("finalized")
 }
 
 async fn upload_certificates(
@@ -218,19 +225,25 @@ async fn upload_certificates(
     notarized: &Notarized<DemoBlock, Scheme, Sha256Digest>,
     finalized: &Finalized<DemoBlock, Scheme, Sha256Digest>,
 ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
-    let block = finalized.block.encode();
-    let notarized = notarized.encode();
+    let header = finalized.header.encode();
+    let block = encode_block_data(&finalized.header, &finalized.body);
+    let notarized_bytes = notarized.encode();
     let finalized_bytes = finalized.encode();
     let mut batch = StoreWriteBatch::new();
     batch.push(
         client.store_client(),
-        &keys::block_by_digest(&finalized.block.digest()),
+        &keys::header_by_digest(&finalized.header.digest()),
+        &header,
+    )?;
+    batch.push(
+        client.store_client(),
+        &keys::block_by_digest(&finalized.header.digest()),
         &block,
     )?;
     batch.push(
         client.store_client(),
-        &keys::notarization_by_view(finalized.proof.view()),
-        &notarized,
+        &keys::notarization_by_view(notarized.proof.view()),
+        &notarized_bytes,
     )?;
     batch.push(
         client.store_client(),
@@ -239,7 +252,7 @@ async fn upload_certificates(
     )?;
     batch.push(
         client.store_client(),
-        &keys::finalized_by_height(finalized.block.height()),
+        &keys::finalized_by_height(finalized.header.height()),
         &finalized_bytes,
     )?;
     Ok(batch.commit(client.store_client()).await?)
@@ -296,20 +309,21 @@ async fn seed(
         }
 
         let block = DemoBlock::new(height, parent_view, parent_digest, leader.clone());
-        let notarized = notarized(block.clone(), &schemes);
-        let finalized = finalized(block.clone(), &schemes);
+        let body = Bytes::from(format!("simplex-demo-block-body-{height}").into_bytes());
+        let notarized = notarized(block.clone(), body.clone(), &schemes);
+        let finalized = finalized(block.clone(), body, &schemes);
         let sequence = upload_certificates(&client, &notarized, &finalized).await?;
 
         println!(
             "sequence={} view={} height={} digest=0x{}",
             sequence,
             finalized.proof.view().get(),
-            finalized.block.height().get(),
-            hex::encode(finalized.block.digest().encode()),
+            finalized.header.height().get(),
+            hex::encode(finalized.header.digest().encode()),
         );
 
         parent_view = finalized.proof.view();
-        parent_digest = finalized.block.digest();
+        parent_digest = finalized.header.digest();
         height = height.saturating_add(1);
     }
 

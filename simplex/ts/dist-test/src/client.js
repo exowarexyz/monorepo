@@ -2,12 +2,14 @@ import { Client, StoreWriteBatch, TraversalMode, } from '@exowarexyz/sdk';
 export const FORMAT_VERSION = 0;
 export var SimplexRecordKind;
 (function (SimplexRecordKind) {
-    SimplexRecordKind[SimplexRecordKind["BlockByDigest"] = 16] = "BlockByDigest";
+    SimplexRecordKind[SimplexRecordKind["HeaderByDigest"] = 16] = "HeaderByDigest";
+    SimplexRecordKind[SimplexRecordKind["BlockByDigest"] = 17] = "BlockByDigest";
     SimplexRecordKind[SimplexRecordKind["NotarizationByView"] = 32] = "NotarizationByView";
     SimplexRecordKind[SimplexRecordKind["FinalizationByView"] = 48] = "FinalizationByView";
     SimplexRecordKind[SimplexRecordKind["FinalizedByHeight"] = 49] = "FinalizedByHeight";
 })(SimplexRecordKind || (SimplexRecordKind = {}));
 const STREAM_PAYLOAD_REGEX = '(?s-u).*';
+const HEADER_LENGTH_BYTES = 4;
 function copyBytes(bytes) {
     return new Uint8Array(bytes);
 }
@@ -34,6 +36,35 @@ export function bytesToHex(value) {
 export function toSimplexBytes(value) {
     return typeof value === 'string' ? hexToBytes(value) : copyBytes(value);
 }
+export function encodeSimplexBlockData(header, body = new Uint8Array()) {
+    const headerBytes = toSimplexBytes(header);
+    const bodyBytes = toSimplexBytes(body);
+    if (headerBytes.byteLength > 0xffff_ffff) {
+        throw new RangeError('header simplex block exceeds u32 length');
+    }
+    const out = new Uint8Array(HEADER_LENGTH_BYTES + headerBytes.byteLength + bodyBytes.byteLength);
+    new DataView(out.buffer, out.byteOffset, out.byteLength).setUint32(0, headerBytes.byteLength, false);
+    out.set(headerBytes, HEADER_LENGTH_BYTES);
+    out.set(bodyBytes, HEADER_LENGTH_BYTES + headerBytes.byteLength);
+    return out;
+}
+export function decodeSimplexBlockData(value) {
+    const bytes = toSimplexBytes(value);
+    if (bytes.byteLength < HEADER_LENGTH_BYTES) {
+        throw new Error('simplex block data is missing header length');
+    }
+    const headerLength = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, false);
+    const remaining = bytes.byteLength - HEADER_LENGTH_BYTES;
+    if (headerLength > remaining) {
+        throw new Error('simplex block header length exceeds block data length');
+    }
+    const headerStart = HEADER_LENGTH_BYTES;
+    const bodyStart = headerStart + headerLength;
+    return {
+        header: bytes.slice(headerStart, bodyStart),
+        body: bytes.slice(bodyStart),
+    };
+}
 export function normalizeU64(value) {
     const bigintValue = typeof value === 'bigint' ? value : BigInt(value);
     if (bigintValue < 0n || bigintValue > 0xffffffffffffffffn) {
@@ -56,6 +87,9 @@ function keyFromParts(kind, suffix) {
     out[1] = kind;
     out.set(suffix, 2);
     return out;
+}
+export function headerByDigestKey(digest) {
+    return keyFromParts(SimplexRecordKind.HeaderByDigest, toSimplexBytes(digest));
 }
 export function blockByDigestKey(digest) {
     return keyFromParts(SimplexRecordKind.BlockByDigest, toSimplexBytes(digest));
@@ -112,7 +146,8 @@ function normalizeCommonwareVerifiedCertificate(value) {
         parent: u64FromUnknown(record.parent, 'parent'),
         payload: bytesFromUnknown(record.payload, 'payload'),
         certificate: bytesFromUnknown(record.certificate, 'certificate'),
-        block: bytesFromUnknown(record.block, 'block'),
+        header: bytesFromUnknown(record.header, 'header'),
+        body: bytesFromUnknown(record.body, 'body'),
     };
 }
 function commonwareSchemeFromUnknown(value) {
@@ -154,6 +189,7 @@ function bytesFromUnknown(value, field) {
 }
 function emptySummary() {
     return {
+        headers: 0,
         blocks: 0,
         notarizations: 0,
         finalizations: 0,
@@ -167,6 +203,7 @@ function mergePrepared(items) {
     const summary = emptySummary();
     const entries = [];
     for (const item of items) {
+        summary.headers += item.summary.headers;
         summary.blocks += item.summary.blocks;
         summary.notarizations += item.summary.notarizations;
         summary.finalizations += item.summary.finalizations;
@@ -201,14 +238,26 @@ function decodeRawStreamEntry(key, value) {
     }
     const kind = key[1];
     switch (kind) {
-        case SimplexRecordKind.BlockByDigest:
+        case SimplexRecordKind.HeaderByDigest:
+            return {
+                type: 'header',
+                kind,
+                key,
+                digest: key.slice(2),
+                header: value,
+            };
+        case SimplexRecordKind.BlockByDigest: {
+            const block = decodeSimplexBlockData(value);
             return {
                 type: 'block',
                 kind,
                 key,
                 digest: key.slice(2),
-                block: value,
+                raw: value,
+                header: block.header,
+                body: block.body,
             };
+        }
         case SimplexRecordKind.NotarizationByView:
             return {
                 type: 'notarization',
@@ -250,21 +299,42 @@ export class SimplexClient {
                 ? new Client(baseUrlOrStore, clientOptions).store()
                 : baseUrlOrStore;
     }
-    prepareBlock(input) {
+    prepareHeader(input) {
+        const header = toSimplexBytes(input.header);
         return prepared([
             {
-                key: blockByDigestKey(input.digest),
-                value: toSimplexBytes(input.block),
+                key: headerByDigestKey(input.digest),
+                value: header,
             },
-        ], { ...emptySummary(), blocks: 1 });
+        ], { ...emptySummary(), headers: 1 });
+    }
+    prepareBlock(input) {
+        const header = toSimplexBytes(input.header);
+        const body = input.body === undefined ? new Uint8Array() : toSimplexBytes(input.body);
+        return prepared([
+            {
+                key: headerByDigestKey(input.digest),
+                value: header,
+            },
+            {
+                key: blockByDigestKey(input.digest),
+                value: encodeSimplexBlockData(header, body),
+            },
+        ], { ...emptySummary(), headers: 1, blocks: 1 });
     }
     prepareNotarization(input) {
         const entries = [];
-        if (input.block !== undefined || input.digest !== undefined) {
-            if (input.block === undefined || input.digest === undefined) {
-                throw new Error('block and digest must be provided together');
+        if (input.header !== undefined ||
+            input.digest !== undefined ||
+            input.body !== undefined) {
+            if (input.header === undefined || input.digest === undefined) {
+                throw new Error('header and digest must be provided together');
             }
-            entries.push(this.prepareBlock({ block: input.block, digest: input.digest }));
+            entries.push(this.prepareBlock({
+                header: input.header,
+                digest: input.digest,
+                body: input.body,
+            }));
         }
         entries.push(prepared([
             {
@@ -276,11 +346,17 @@ export class SimplexClient {
     }
     prepareFinalization(input) {
         const entries = [];
-        if (input.block !== undefined || input.digest !== undefined) {
-            if (input.block === undefined || input.digest === undefined) {
-                throw new Error('block and digest must be provided together');
+        if (input.header !== undefined ||
+            input.digest !== undefined ||
+            input.body !== undefined) {
+            if (input.header === undefined || input.digest === undefined) {
+                throw new Error('header and digest must be provided together');
             }
-            entries.push(this.prepareBlock({ block: input.block, digest: input.digest }));
+            entries.push(this.prepareBlock({
+                header: input.header,
+                digest: input.digest,
+                body: input.body,
+            }));
         }
         const finalized = toSimplexBytes(input.finalized);
         entries.push(prepared([
@@ -311,6 +387,9 @@ export class SimplexClient {
             summary: upload.summary,
         };
     }
+    async uploadHeader(input) {
+        return this.uploadPrepared(this.prepareHeader(input));
+    }
     async uploadBlock(input) {
         return this.uploadPrepared(this.prepareBlock(input));
     }
@@ -320,8 +399,15 @@ export class SimplexClient {
     async uploadFinalization(input) {
         return this.uploadPrepared(this.prepareFinalization(input));
     }
+    async getHeader(digest) {
+        return this.getHeaderRaw(digest);
+    }
+    async getHeaderRaw(digest) {
+        return this.getRaw(headerByDigestKey(digest));
+    }
     async getBlock(digest) {
-        return this.getBlockRaw(digest);
+        const raw = await this.getBlockRaw(digest);
+        return raw === null ? null : decodeSimplexBlockData(raw);
     }
     async getBlockRaw(digest) {
         return this.getRaw(blockByDigestKey(digest));
@@ -422,6 +508,14 @@ export class SimplexClient {
             };
         }
     }
+    async *subscribeHeaders(options = {}, callOptions) {
+        for await (const batch of this.subscribeRaw(SimplexRecordKind.HeaderByDigest, options, callOptions)) {
+            yield {
+                sequenceNumber: batch.sequenceNumber,
+                entries: batch.entries.flatMap((entry) => (entry.type === 'header' ? [entry] : [])),
+            };
+        }
+    }
     async *subscribeCertificatesRaw(options = {}, callOptions) {
         const kinds = [
             SimplexRecordKind.NotarizationByView,
@@ -431,7 +525,7 @@ export class SimplexClient {
         for await (const batch of this.subscribeRaw(kinds, options, callOptions)) {
             yield {
                 sequenceNumber: batch.sequenceNumber,
-                entries: batch.entries.flatMap((entry) => (entry.type === 'block' ? [] : [entry])),
+                entries: batch.entries.flatMap((entry) => entry.type === 'header' || entry.type === 'block' ? [] : [entry]),
             };
         }
     }

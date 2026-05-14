@@ -13,7 +13,8 @@ export type U64Like = bigint | number | string;
 export const FORMAT_VERSION = 0;
 
 export enum SimplexRecordKind {
-  BlockByDigest = 0x10,
+  HeaderByDigest = 0x10,
+  BlockByDigest = 0x11,
   NotarizationByView = 0x20,
   FinalizationByView = 0x30,
   FinalizedByHeight = 0x31,
@@ -25,6 +26,7 @@ export interface PreparedSimplexEntry {
 }
 
 export interface SimplexUploadSummary {
+  headers: number;
   blocks: number;
   notarizations: number;
   finalizations: number;
@@ -41,24 +43,30 @@ export interface PreparedSimplexUpload {
   summary: SimplexUploadSummary;
 }
 
-export interface BlockUpload {
+export interface HeaderUpload {
   digest: BytesLike;
-  block: BytesLike;
+  header: BytesLike;
+}
+
+export interface BlockUpload extends HeaderUpload {
+  body?: BytesLike;
 }
 
 export interface NotarizationUpload {
   view: U64Like;
   notarized: BytesLike;
-  block?: BytesLike;
+  header?: BytesLike;
   digest?: BytesLike;
+  body?: BytesLike;
 }
 
 export interface FinalizationUpload {
   view: U64Like;
   height: U64Like;
   finalized: BytesLike;
-  block?: BytesLike;
+  header?: BytesLike;
   digest?: BytesLike;
+  body?: BytesLike;
 }
 
 export type MaybePromise<T> = T | Promise<T>;
@@ -115,7 +123,8 @@ export interface CommonwareVerifiedSimplexCertificate {
   parent: bigint;
   payload: Uint8Array;
   certificate: Uint8Array;
-  block: Uint8Array;
+  header: Uint8Array;
+  body: Uint8Array;
 }
 
 export interface CommonwareSimplexVerifierOptions {
@@ -144,12 +153,25 @@ export type SimplexClientOptions<TNotarization = unknown, TFinalization = unknow
     verifier?: SimplexCertificateVerifier<TNotarization, TFinalization>;
   };
 
-export interface RawSimplexBlockEntry {
+export interface SimplexBlockData {
+  header: Uint8Array;
+  body: Uint8Array;
+}
+
+export interface RawSimplexHeaderEntry {
+  type: 'header';
+  kind: SimplexRecordKind.HeaderByDigest;
+  key: Uint8Array;
+  digest: Uint8Array;
+  header: Uint8Array;
+}
+
+export interface RawSimplexBlockEntry extends SimplexBlockData {
   type: 'block';
   kind: SimplexRecordKind.BlockByDigest;
   key: Uint8Array;
   digest: Uint8Array;
-  block: Uint8Array;
+  raw: Uint8Array;
 }
 
 export interface RawSimplexNotarizationEntry {
@@ -179,6 +201,7 @@ export interface RawSimplexFinalizationByHeightEntry {
 }
 
 export type RawSimplexStreamEntry =
+  | RawSimplexHeaderEntry
   | RawSimplexBlockEntry
   | RawSimplexNotarizationEntry
   | RawSimplexFinalizationByViewEntry
@@ -217,6 +240,7 @@ export interface SimplexCertificateStreamOptions extends SimplexStreamOptions {
 }
 
 const STREAM_PAYLOAD_REGEX = '(?s-u).*';
+const HEADER_LENGTH_BYTES = 4;
 
 function copyBytes(bytes: Uint8Array): Uint8Array {
   return new Uint8Array(bytes);
@@ -248,6 +272,50 @@ export function toSimplexBytes(value: BytesLike): Uint8Array {
   return typeof value === 'string' ? hexToBytes(value) : copyBytes(value);
 }
 
+export function encodeSimplexBlockData(
+  header: BytesLike,
+  body: BytesLike = new Uint8Array(),
+): Uint8Array {
+  const headerBytes = toSimplexBytes(header);
+  const bodyBytes = toSimplexBytes(body);
+  if (headerBytes.byteLength > 0xffff_ffff) {
+    throw new RangeError('header simplex block exceeds u32 length');
+  }
+  const out = new Uint8Array(
+    HEADER_LENGTH_BYTES + headerBytes.byteLength + bodyBytes.byteLength,
+  );
+  new DataView(out.buffer, out.byteOffset, out.byteLength).setUint32(
+    0,
+    headerBytes.byteLength,
+    false,
+  );
+  out.set(headerBytes, HEADER_LENGTH_BYTES);
+  out.set(bodyBytes, HEADER_LENGTH_BYTES + headerBytes.byteLength);
+  return out;
+}
+
+export function decodeSimplexBlockData(value: BytesLike): SimplexBlockData {
+  const bytes = toSimplexBytes(value);
+  if (bytes.byteLength < HEADER_LENGTH_BYTES) {
+    throw new Error('simplex block data is missing header length');
+  }
+  const headerLength = new DataView(
+    bytes.buffer,
+    bytes.byteOffset,
+    bytes.byteLength,
+  ).getUint32(0, false);
+  const remaining = bytes.byteLength - HEADER_LENGTH_BYTES;
+  if (headerLength > remaining) {
+    throw new Error('simplex block header length exceeds block data length');
+  }
+  const headerStart = HEADER_LENGTH_BYTES;
+  const bodyStart = headerStart + headerLength;
+  return {
+    header: bytes.slice(headerStart, bodyStart),
+    body: bytes.slice(bodyStart),
+  };
+}
+
 export function normalizeU64(value: U64Like): bigint {
   const bigintValue = typeof value === 'bigint' ? value : BigInt(value);
   if (bigintValue < 0n || bigintValue > 0xffff_ffff_ffff_ffffn) {
@@ -272,6 +340,10 @@ function keyFromParts(kind: SimplexRecordKind, suffix: Uint8Array): Uint8Array {
   out[1] = kind;
   out.set(suffix, 2);
   return out;
+}
+
+export function headerByDigestKey(digest: BytesLike): Uint8Array {
+  return keyFromParts(SimplexRecordKind.HeaderByDigest, toSimplexBytes(digest));
 }
 
 export function blockByDigestKey(digest: BytesLike): Uint8Array {
@@ -360,7 +432,8 @@ function normalizeCommonwareVerifiedCertificate(
     parent: u64FromUnknown(record.parent, 'parent'),
     payload: bytesFromUnknown(record.payload, 'payload'),
     certificate: bytesFromUnknown(record.certificate, 'certificate'),
-    block: bytesFromUnknown(record.block, 'block'),
+    header: bytesFromUnknown(record.header, 'header'),
+    body: bytesFromUnknown(record.body, 'body'),
   };
 }
 
@@ -408,6 +481,7 @@ function bytesFromUnknown(value: unknown, field: string): Uint8Array {
 
 function emptySummary(): SimplexUploadSummary {
   return {
+    headers: 0,
     blocks: 0,
     notarizations: 0,
     finalizations: 0,
@@ -423,6 +497,7 @@ function mergePrepared(items: PreparedSimplexUpload[]): PreparedSimplexUpload {
   const summary = emptySummary();
   const entries: PreparedSimplexEntry[] = [];
   for (const item of items) {
+    summary.headers += item.summary.headers;
     summary.blocks += item.summary.blocks;
     summary.notarizations += item.summary.notarizations;
     summary.finalizations += item.summary.finalizations;
@@ -461,14 +536,26 @@ function decodeRawStreamEntry(key: Uint8Array, value: Uint8Array): RawSimplexStr
   }
   const kind = key[1] as SimplexRecordKind;
   switch (kind) {
-    case SimplexRecordKind.BlockByDigest:
+    case SimplexRecordKind.HeaderByDigest:
+      return {
+        type: 'header',
+        kind,
+        key,
+        digest: key.slice(2),
+        header: value,
+      };
+    case SimplexRecordKind.BlockByDigest: {
+      const block = decodeSimplexBlockData(value);
       return {
         type: 'block',
         kind,
         key,
         digest: key.slice(2),
-        block: value,
+        raw: value,
+        header: block.header,
+        body: block.body,
       };
+    }
     case SimplexRecordKind.NotarizationByView:
       return {
         type: 'notarization',
@@ -521,25 +608,54 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
         : baseUrlOrStore;
   }
 
-  prepareBlock(input: BlockUpload): PreparedSimplexUpload {
+  prepareHeader(input: HeaderUpload): PreparedSimplexUpload {
+    const header = toSimplexBytes(input.header);
     return prepared(
       [
         {
-          key: blockByDigestKey(input.digest),
-          value: toSimplexBytes(input.block),
+          key: headerByDigestKey(input.digest),
+          value: header,
         },
       ],
-      { ...emptySummary(), blocks: 1 },
+      { ...emptySummary(), headers: 1 },
+    );
+  }
+
+  prepareBlock(input: BlockUpload): PreparedSimplexUpload {
+    const header = toSimplexBytes(input.header);
+    const body = input.body === undefined ? new Uint8Array() : toSimplexBytes(input.body);
+    return prepared(
+      [
+        {
+          key: headerByDigestKey(input.digest),
+          value: header,
+        },
+        {
+          key: blockByDigestKey(input.digest),
+          value: encodeSimplexBlockData(header, body),
+        },
+      ],
+      { ...emptySummary(), headers: 1, blocks: 1 },
     );
   }
 
   prepareNotarization(input: NotarizationUpload): PreparedSimplexUpload {
     const entries: PreparedSimplexUpload[] = [];
-    if (input.block !== undefined || input.digest !== undefined) {
-      if (input.block === undefined || input.digest === undefined) {
-        throw new Error('block and digest must be provided together');
+    if (
+      input.header !== undefined ||
+      input.digest !== undefined ||
+      input.body !== undefined
+    ) {
+      if (input.header === undefined || input.digest === undefined) {
+        throw new Error('header and digest must be provided together');
       }
-      entries.push(this.prepareBlock({ block: input.block, digest: input.digest }));
+      entries.push(
+        this.prepareBlock({
+          header: input.header,
+          digest: input.digest,
+          body: input.body,
+        }),
+      );
     }
     entries.push(
       prepared(
@@ -557,11 +673,21 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
 
   prepareFinalization(input: FinalizationUpload): PreparedSimplexUpload {
     const entries: PreparedSimplexUpload[] = [];
-    if (input.block !== undefined || input.digest !== undefined) {
-      if (input.block === undefined || input.digest === undefined) {
-        throw new Error('block and digest must be provided together');
+    if (
+      input.header !== undefined ||
+      input.digest !== undefined ||
+      input.body !== undefined
+    ) {
+      if (input.header === undefined || input.digest === undefined) {
+        throw new Error('header and digest must be provided together');
       }
-      entries.push(this.prepareBlock({ block: input.block, digest: input.digest }));
+      entries.push(
+        this.prepareBlock({
+          header: input.header,
+          digest: input.digest,
+          body: input.body,
+        }),
+      );
     }
     const finalized = toSimplexBytes(input.finalized);
     entries.push(
@@ -600,6 +726,10 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
     };
   }
 
+  async uploadHeader(input: HeaderUpload): Promise<SimplexUploadReceipt> {
+    return this.uploadPrepared(this.prepareHeader(input));
+  }
+
   async uploadBlock(input: BlockUpload): Promise<SimplexUploadReceipt> {
     return this.uploadPrepared(this.prepareBlock(input));
   }
@@ -612,8 +742,17 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
     return this.uploadPrepared(this.prepareFinalization(input));
   }
 
-  async getBlock(digest: BytesLike): Promise<Uint8Array | null> {
-    return this.getBlockRaw(digest);
+  async getHeader(digest: BytesLike): Promise<Uint8Array | null> {
+    return this.getHeaderRaw(digest);
+  }
+
+  async getHeaderRaw(digest: BytesLike): Promise<Uint8Array | null> {
+    return this.getRaw(headerByDigestKey(digest));
+  }
+
+  async getBlock(digest: BytesLike): Promise<SimplexBlockData | null> {
+    const raw = await this.getBlockRaw(digest);
+    return raw === null ? null : decodeSimplexBlockData(raw);
   }
 
   async getBlockRaw(digest: BytesLike): Promise<Uint8Array | null> {
@@ -750,6 +889,18 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
     }
   }
 
+  async *subscribeHeaders(
+    options: SimplexStreamOptions = {},
+    callOptions?: Parameters<StoreClient['subscribe']>[1],
+  ): AsyncIterable<SimplexStreamBatch<RawSimplexHeaderEntry>> {
+    for await (const batch of this.subscribeRaw(SimplexRecordKind.HeaderByDigest, options, callOptions)) {
+      yield {
+        sequenceNumber: batch.sequenceNumber,
+        entries: batch.entries.flatMap((entry) => (entry.type === 'header' ? [entry] : [])),
+      };
+    }
+  }
+
   async *subscribeCertificatesRaw(
     options: SimplexCertificateStreamOptions = {},
     callOptions?: Parameters<StoreClient['subscribe']>[1],
@@ -762,7 +913,9 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
     for await (const batch of this.subscribeRaw(kinds, options, callOptions)) {
       yield {
         sequenceNumber: batch.sequenceNumber,
-        entries: batch.entries.flatMap((entry) => (entry.type === 'block' ? [] : [entry])),
+        entries: batch.entries.flatMap((entry) =>
+          entry.type === 'header' || entry.type === 'block' ? [] : [entry],
+        ),
       };
     }
   }

@@ -5,6 +5,7 @@ import {
   type CommonwareSimplexScheme,
   SimplexClient,
   type CommonwareVerifiedSimplexCertificate,
+  type SimplexBlockData,
   type SimplexCertificateVerifier,
   type SimplexUploadReceipt,
   type VerifiedSimplexCertificateStreamEntry,
@@ -69,7 +70,8 @@ function renderCertificate(value: CommonwareVerifiedSimplexCertificate): string 
     `parent ${value.parent.toString()}`,
     `payload ${renderBytes(value.payload)}`,
     `certificate ${renderBytes(value.certificate)}`,
-    `block ${renderBytes(value.block)}`,
+    `header ${renderBytes(value.header)}`,
+    `body ${renderBytes(value.body)}`,
   ].join('\n');
 }
 
@@ -118,9 +120,11 @@ export function SimplexPanel({
   const [streamEvents, setStreamEvents] = useState<VerifiedSimplexEvent[]>([]);
 
   const [blockDigestHex, setBlockDigestHex] = useState('');
-  const [blockHex, setBlockHex] = useState('');
+  const [blockHeaderHex, setBlockHeaderHex] = useState('');
+  const [blockBodyHex, setBlockBodyHex] = useState('');
   const [blockReadDigestHex, setBlockReadDigestHex] = useState('');
-  const [blockReadResult, setBlockReadResult] = useState<Uint8Array | null>(null);
+  const [headerReadResult, setHeaderReadResult] = useState<Uint8Array | null>(null);
+  const [blockReadResult, setBlockReadResult] = useState<SimplexBlockData | null>(null);
 
   const [certificateKind, setCertificateKind] = useState<'notarization' | 'finalization'>(
     'finalization',
@@ -129,7 +133,8 @@ export function SimplexPanel({
   const [certificateHeight, setCertificateHeight] = useState('');
   const [certificateHex, setCertificateHex] = useState('');
   const [certificateBlockDigestHex, setCertificateBlockDigestHex] = useState('');
-  const [certificateBlockHex, setCertificateBlockHex] = useState('');
+  const [certificateHeaderHex, setCertificateHeaderHex] = useState('');
+  const [certificateBodyHex, setCertificateBodyHex] = useState('');
   const [latestFinalization, setLatestFinalization] =
     useState<CommonwareVerifiedSimplexCertificate | null>(null);
   const [latestFinalizationMissing, setLatestFinalizationMissing] = useState(false);
@@ -208,10 +213,12 @@ export function SimplexPanel({
     try {
       const receipt = await client.uploadBlock({
         digest: hexToBytes(blockDigestHex),
-        block: hexToBytes(blockHex),
+        header: hexToBytes(blockHeaderHex),
+        body: parseOptionalHex(blockBodyHex),
       });
       showNotification('success', 'Simplex Block', `Stored at sequence ${formatSequence(receipt)}`);
-      setBlockHex('');
+      setBlockHeaderHex('');
+      setBlockBodyHex('');
     } catch (error) {
       showNotification('error', 'Simplex Block Failed', String(error));
     } finally {
@@ -222,24 +229,25 @@ export function SimplexPanel({
   const uploadCertificate = async () => {
     setIsUploadingCertificate(true);
     try {
-      const block = parseOptionalHex(certificateBlockHex);
+      const header = parseOptionalHex(certificateHeaderHex);
+      const body = parseOptionalHex(certificateBodyHex);
       const digest = parseOptionalHex(certificateBlockDigestHex);
-      if ((block && !digest) || (!block && digest)) {
-        throw new Error('Block bytes and digest must be provided together');
+      if ((header && !digest) || (!header && digest) || (body && (!header || !digest))) {
+        throw new Error('Header bytes and digest must be provided together');
       }
       let receipt: SimplexUploadReceipt;
       if (certificateKind === 'notarization') {
         receipt = await client.uploadNotarization({
           view: certificateView,
           notarized: hexToBytes(certificateHex),
-          ...(block && digest ? { block, digest } : {}),
+          ...(header && digest ? { header, digest, body } : {}),
         });
       } else {
         receipt = await client.uploadFinalization({
           view: certificateView,
           height: certificateHeight,
           finalized: hexToBytes(certificateHex),
-          ...(block && digest ? { block, digest } : {}),
+          ...(header && digest ? { header, digest, body } : {}),
         });
       }
       showNotification(
@@ -257,6 +265,7 @@ export function SimplexPanel({
 
   const readBlock = async () => {
     setIsReadingBlock(true);
+    setHeaderReadResult(null);
     setBlockReadResult(null);
     try {
       const block = await client.getBlock(hexToBytes(blockReadDigestHex));
@@ -264,10 +273,31 @@ export function SimplexPanel({
       showNotification(
         'success',
         block ? 'Simplex Block Loaded' : 'Simplex Block Missing',
-        block ? `${block.byteLength} bytes` : 'No block for that digest',
+        block
+          ? `${block.header.byteLength} header bytes, ${block.body.byteLength} body bytes`
+          : 'No block for that digest',
       );
     } catch (error) {
       showNotification('error', 'Simplex Block Read Failed', String(error));
+    } finally {
+      setIsReadingBlock(false);
+    }
+  };
+
+  const readHeader = async () => {
+    setIsReadingBlock(true);
+    setHeaderReadResult(null);
+    setBlockReadResult(null);
+    try {
+      const header = await client.getHeader(hexToBytes(blockReadDigestHex));
+      setHeaderReadResult(header);
+      showNotification(
+        'success',
+        header ? 'Simplex Header Loaded' : 'Simplex Header Missing',
+        header ? `${header.byteLength} bytes` : 'No header bytes for that digest',
+      );
+    } catch (error) {
+      showNotification('error', 'Simplex Header Read Failed', String(error));
     } finally {
       setIsReadingBlock(false);
     }
@@ -406,18 +436,28 @@ export function SimplexPanel({
         </div>
         <div className="form-row">
           <div className="form-group form-group-wide">
-            <label htmlFor="simplex-block-bytes">Block Hex</label>
+            <label htmlFor="simplex-block-bytes">Header Hex</label>
             <textarea
               id="simplex-block-bytes"
-              value={blockHex}
-              onChange={(event) => setBlockHex(event.target.value)}
+              value={blockHeaderHex}
+              onChange={(event) => setBlockHeaderHex(event.target.value)}
+            />
+          </div>
+        </div>
+        <div className="form-row">
+          <div className="form-group form-group-wide">
+            <label htmlFor="simplex-block-body">Body Hex</label>
+            <textarea
+              id="simplex-block-body"
+              value={blockBodyHex}
+              onChange={(event) => setBlockBodyHex(event.target.value)}
             />
           </div>
         </div>
         <button
           className={`btn-primary ${isUploadingBlock ? 'loading' : ''}`}
           onClick={uploadBlock}
-          disabled={isUploadingBlock || !blockDigestHex.trim() || !blockHex.trim()}
+          disabled={isUploadingBlock || !blockDigestHex.trim() || !blockHeaderHex.trim()}
         >
           {isUploadingBlock ? 'Uploading...' : 'Upload Block'}
         </button>
@@ -482,11 +522,19 @@ export function SimplexPanel({
             />
           </div>
           <div className="form-group form-group-wide">
-            <label htmlFor="simplex-certificate-block">Block Hex</label>
+            <label htmlFor="simplex-certificate-block">Header Hex</label>
             <textarea
               id="simplex-certificate-block"
-              value={certificateBlockHex}
-              onChange={(event) => setCertificateBlockHex(event.target.value)}
+              value={certificateHeaderHex}
+              onChange={(event) => setCertificateHeaderHex(event.target.value)}
+            />
+          </div>
+          <div className="form-group form-group-wide">
+            <label htmlFor="simplex-certificate-body">Body Hex</label>
+            <textarea
+              id="simplex-certificate-body"
+              value={certificateBodyHex}
+              onChange={(event) => setCertificateBodyHex(event.target.value)}
             />
           </div>
         </div>
@@ -520,10 +568,17 @@ export function SimplexPanel({
         <div className="button-row">
           <button
             className={`btn-primary ${isReadingBlock ? 'loading' : ''}`}
+            onClick={readHeader}
+            disabled={isReadingBlock || !blockReadDigestHex.trim()}
+          >
+            {isReadingBlock ? 'Loading...' : 'Get Header'}
+          </button>
+          <button
+            className={`btn-primary ${isReadingBlock ? 'loading' : ''}`}
             onClick={readBlock}
             disabled={isReadingBlock || !blockReadDigestHex.trim()}
           >
-            {isReadingBlock ? 'Loading...' : 'Get Block'}
+            {isReadingBlock ? 'Loading...' : 'Get Full Block'}
           </button>
           <button
             className={`btn-secondary ${isReadingLatest ? 'loading' : ''}`}
@@ -533,10 +588,19 @@ export function SimplexPanel({
             {isReadingLatest ? 'Loading...' : 'Latest Finalization'}
           </button>
         </div>
+        {headerReadResult && (
+          <div className="result fade-in">
+            <h4>Header</h4>
+            <p>{renderBytes(headerReadResult)}</p>
+          </div>
+        )}
         {blockReadResult && (
           <div className="result fade-in">
             <h4>Block</h4>
-            <p>{renderBytes(blockReadResult)}</p>
+            <pre>{[
+              `header ${renderBytes(blockReadResult.header)}`,
+              `body ${renderBytes(blockReadResult.body)}`,
+            ].join('\n')}</pre>
           </div>
         )}
         {latestFinalization && (

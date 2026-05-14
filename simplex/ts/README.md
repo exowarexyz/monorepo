@@ -3,7 +3,8 @@
 TypeScript helpers for uploading Commonware Simplex artifacts into Exoware
 Store. The package mirrors the Rust `exoware-simplex` key layout:
 
-- block by digest
+- header bytes by digest
+- full `{ header, body }` block data by digest
 - notarized bytes by Simplex view
 - finalized bytes by Simplex view
 - finalized bytes by block height
@@ -20,15 +21,20 @@ await simplex.uploadFinalization({
   view: 42n,
   height: 42n,
   digest: '0x...',
-  block: '0x...',
+  header: '0x...',
+  body: '0x...',
   finalized: '0x...',
 });
 ```
 
-Use `prepareBlock`, `prepareNotarization`, and `prepareFinalization` to stage
-multiple Simplex rows into one `StoreWriteBatch`. Finalizations are stored by
-view and by height so callers can fetch a specific view or the latest finalized
-height index.
+Use `prepareHeader`, `prepareBlock`, `prepareNotarization`, and
+`prepareFinalization` to stage multiple Simplex rows into one
+`StoreWriteBatch`. Finalizations are stored by view and by height so callers can
+fetch a specific view or the latest finalized height index.
+
+Use `getHeader` or `subscribeHeaders` when only the certified bytes are
+needed. Use `getBlock` or `subscribeBlocks` when the caller needs the full
+`{ header, body }` block data.
 
 ## Verification
 
@@ -79,3 +85,6 @@ Supported Commonware schemes are `ed25519`, `secp256r1`,
 `bls12381-threshold-vrf-min-sig`. Verification material is encoded Commonware
 key material: an Ed25519 participant set, a Secp256r1/BLS multisig
 identity-to-signing-key map, or a threshold identity depending on the scheme.
+The Commonware WASM verifier treats certificates as opaque proof-plus-block
+records, verifies the configured certificate key material, and rejects records
+whose payload digest does not match the header bytes.
