@@ -1,7 +1,7 @@
 {
   "name": "@exowarexyz/simplex",
   "version": "2026.4.1",
-  "description": "Browser client helpers for Store-backed Commonware Simplex artifacts.",
+  "description": "Index artifacts emitted by Simplex.",
   "type": "module",
   "license": "(MIT OR Apache-2.0)",
   "homepage": "https://exoware.xyz",
