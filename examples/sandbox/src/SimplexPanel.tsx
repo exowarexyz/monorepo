@@ -54,6 +54,10 @@ interface VerifiedFullBlock {
   block: SimplexBlockData;
 }
 
+const READ_CERTIFICATE_IDS = ['notarization', 'latest', 'view', 'height'] as const;
+type ReadCertificateId = typeof READ_CERTIFICATE_IDS[number];
+type ReadCertificates = Record<ReadCertificateId, CommonwareVerifiedSimplexCertificate | null>;
+
 function renderBytes(value: Uint8Array): string {
   const hex = bytesToHex(value);
   return hex.length > 160 ? `${hex.slice(0, 160)}...` : hex;
@@ -92,27 +96,30 @@ function renderCertificate(value: CommonwareVerifiedSimplexCertificate): string 
   ].join('\n');
 }
 
+function emptyReadCertificates(): ReadCertificates {
+  return {
+    notarization: null,
+    latest: null,
+    view: null,
+    height: null,
+  };
+}
+
 function keepReadVerifiedFullBlocks(
   previous: Record<string, VerifiedFullBlock>,
 ): Record<string, VerifiedFullBlock> {
   const next: Record<string, VerifiedFullBlock> = {};
-  const latest = previous.latest;
-  const height = previous.height;
-  const view = previous.view;
-  const notarization = previous.notarization;
-  if (latest) {
-    next.latest = latest;
-  }
-  if (height) {
-    next.height = height;
-  }
-  if (view) {
-    next.view = view;
-  }
-  if (notarization) {
-    next.notarization = notarization;
+  for (const id of READ_CERTIFICATE_IDS) {
+    const block = previous[id];
+    if (block) {
+      next[id] = block;
+    }
   }
   return next;
+}
+
+function streamEventId({ sequenceNumber, entry }: VerifiedSimplexEvent): string {
+  return `${sequenceNumber.toString()}-${bytesToHex(entry.key)}`;
 }
 
 export function SimplexPanel({
@@ -124,6 +131,8 @@ export function SimplexPanel({
 }) {
   const subscribeAbortRef = useRef<AbortController | null>(null);
   const showNotificationRef = useRef(showNotification);
+  const readCertificatesRef = useRef<ReadCertificates>(emptyReadCertificates());
+  const streamCertificatesRef = useRef<Record<string, CommonwareVerifiedSimplexCertificate>>({});
   const [scheme, setScheme] = useState<CommonwareSimplexScheme>(SIMPLEX_DEMO_SCHEME);
   const [namespace, setNamespace] = useState(SIMPLEX_DEMO_NAMESPACE);
   const [verificationMaterialHex, setVerificationMaterialHex] = useState(
@@ -183,9 +192,25 @@ export function SimplexPanel({
     useState<CommonwareVerifiedSimplexCertificate | null>(null);
   const [heightFinalizationMissing, setHeightFinalizationMissing] = useState(false);
 
+  const setReadCertificateRef = (
+    id: ReadCertificateId,
+    certificate: CommonwareVerifiedSimplexCertificate | null,
+  ) => {
+    readCertificatesRef.current = {
+      ...readCertificatesRef.current,
+      [id]: certificate,
+    };
+  };
+
   useEffect(() => {
     showNotificationRef.current = showNotification;
   }, [showNotification]);
+
+  useEffect(() => {
+    streamCertificatesRef.current = Object.fromEntries(
+      streamEvents.map((event) => [streamEventId(event), event.entry.certificate]),
+    );
+  }, [streamEvents]);
 
   useEffect(() => {
     let active = true;
@@ -238,6 +263,8 @@ export function SimplexPanel({
       hexToBytes(verificationMaterialHex);
       subscribeAbortRef.current?.abort();
       subscribeAbortRef.current = null;
+      readCertificatesRef.current = emptyReadCertificates();
+      streamCertificatesRef.current = {};
       setIsSubscribing(false);
       setNotarization(null);
       setNotarizationMissing(false);
@@ -302,6 +329,7 @@ export function SimplexPanel({
 
   const readNotarizationByView = async () => {
     setIsReadingNotarization(true);
+    setReadCertificateRef('notarization', null);
     setNotarization(null);
     setNotarizationMissing(false);
     setVerifiedFullBlocks((previous) => {
@@ -315,6 +343,7 @@ export function SimplexPanel({
         throw new Error('Notarization view must be a non-negative integer');
       }
       const nextNotarization = await client.getNotarization(view);
+      setReadCertificateRef('notarization', nextNotarization);
       setNotarization(nextNotarization);
       setNotarizationMissing(nextNotarization === null);
       showNotification(
@@ -333,6 +362,7 @@ export function SimplexPanel({
 
   const readLatestFinalization = async () => {
     setIsReadingLatest(true);
+    setReadCertificateRef('latest', null);
     setLatestFinalization(null);
     setLatestFinalizationMissing(false);
     setVerifiedFullBlocks((previous) => {
@@ -342,6 +372,7 @@ export function SimplexPanel({
     });
     try {
       const finalization = await client.latestFinalization();
+      setReadCertificateRef('latest', finalization);
       setLatestFinalization(finalization);
       setLatestFinalizationMissing(finalization === null);
       showNotification(
@@ -366,6 +397,7 @@ export function SimplexPanel({
 
   const readViewFinalization = async () => {
     setIsReadingViewFinalization(true);
+    setReadCertificateRef('view', null);
     setViewFinalization(null);
     setViewFinalizationMissing(false);
     setVerifiedFullBlocks((previous) => {
@@ -376,6 +408,7 @@ export function SimplexPanel({
     try {
       const view = readFinalizationIndex('view');
       const finalization = await client.getFinalizationByView(view);
+      setReadCertificateRef('view', finalization);
       setViewFinalization(finalization);
       setViewFinalizationMissing(finalization === null);
       showNotification(
@@ -394,6 +427,7 @@ export function SimplexPanel({
 
   const readHeightFinalization = async () => {
     setIsReadingHeightFinalization(true);
+    setReadCertificateRef('height', null);
     setHeightFinalization(null);
     setHeightFinalizationMissing(false);
     setVerifiedFullBlocks((previous) => {
@@ -404,6 +438,7 @@ export function SimplexPanel({
     try {
       const height = readFinalizationIndex('height');
       const finalization = await client.getFinalizationByHeight(height);
+      setReadCertificateRef('height', finalization);
       setHeightFinalization(finalization);
       setHeightFinalizationMissing(finalization === null);
       showNotification(
@@ -460,8 +495,27 @@ export function SimplexPanel({
     }
   };
 
+  const verifyReadFullBlock = async (id: ReadCertificateId) => {
+    const certificate = readCertificatesRef.current[id];
+    if (!certificate) {
+      showNotification('error', 'Simplex Full Block Verify Failed', 'No verified certificate loaded');
+      return;
+    }
+    await verifyFullBlock(id, certificate);
+  };
+
+  const verifyStreamFullBlock = async (id: string) => {
+    const certificate = streamCertificatesRef.current[id];
+    if (!certificate) {
+      showNotification('error', 'Simplex Full Block Verify Failed', 'No streamed certificate loaded');
+      return;
+    }
+    await verifyFullBlock(id, certificate);
+  };
+
   const startSubscribe = () => {
     subscribeAbortRef.current?.abort();
+    streamCertificatesRef.current = {};
     setStreamEvents([]);
     setVerifiedFullBlocks(keepReadVerifiedFullBlocks);
     setIsSubscribing(true);
@@ -679,7 +733,7 @@ export function SimplexPanel({
                 className={`btn-secondary btn-compact ${
                   verifyingFullBlockId === 'notarization' ? 'loading' : ''
                 }`}
-                onClick={() => void verifyFullBlock('notarization', notarization)}
+                onClick={() => void verifyReadFullBlock('notarization')}
                 disabled={verifyingFullBlockId !== null}
               >
                 {verifyingFullBlockId === 'notarization'
@@ -713,7 +767,7 @@ export function SimplexPanel({
                 className={`btn-secondary btn-compact ${
                   verifyingFullBlockId === 'latest' ? 'loading' : ''
                 }`}
-                onClick={() => void verifyFullBlock('latest', latestFinalization)}
+                onClick={() => void verifyReadFullBlock('latest')}
                 disabled={verifyingFullBlockId !== null}
               >
                 {verifyingFullBlockId === 'latest' ? 'Verifying...' : 'Verify Full Block'}
@@ -745,7 +799,7 @@ export function SimplexPanel({
                 className={`btn-secondary btn-compact ${
                   verifyingFullBlockId === 'view' ? 'loading' : ''
                 }`}
-                onClick={() => void verifyFullBlock('view', viewFinalization)}
+                onClick={() => void verifyReadFullBlock('view')}
                 disabled={verifyingFullBlockId !== null}
               >
                 {verifyingFullBlockId === 'view' ? 'Verifying...' : 'Verify Full Block'}
@@ -777,7 +831,7 @@ export function SimplexPanel({
                 className={`btn-secondary btn-compact ${
                   verifyingFullBlockId === 'height' ? 'loading' : ''
                 }`}
-                onClick={() => void verifyFullBlock('height', heightFinalization)}
+                onClick={() => void verifyReadFullBlock('height')}
                 disabled={verifyingFullBlockId !== null}
               >
                 {verifyingFullBlockId === 'height' ? 'Verifying...' : 'Verify Full Block'}
@@ -835,6 +889,7 @@ export function SimplexPanel({
           <button
             className="btn-secondary"
             onClick={() => {
+              streamCertificatesRef.current = {};
               setStreamEvents([]);
               setVerifiedFullBlocks(keepReadVerifiedFullBlocks);
             }}
@@ -850,7 +905,7 @@ export function SimplexPanel({
           ) : (
             <div className="result-list">
               {streamEvents.map(({ sequenceNumber, entry }) => {
-                const eventId = `${sequenceNumber.toString()}-${bytesToHex(entry.key)}`;
+                const eventId = streamEventId({ sequenceNumber, entry });
                 const title =
                   entry.type === 'notarization'
                     ? `notarization view ${entry.view.toString()}`
@@ -873,7 +928,7 @@ export function SimplexPanel({
                         className={`btn-secondary btn-compact ${
                           verifyingFullBlockId === eventId ? 'loading' : ''
                         }`}
-                        onClick={() => void verifyFullBlock(eventId, entry.certificate)}
+                        onClick={() => void verifyStreamFullBlock(eventId)}
                         disabled={verifyingFullBlockId !== null}
                       >
                         {verifyingFullBlockId === eventId

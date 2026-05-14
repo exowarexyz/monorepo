@@ -37,12 +37,10 @@ struct VerifiedCertificate {
     header: Vec<u8>,
 }
 
-fn js_null() -> JsValue {
-    JsValue::NULL
-}
-
-fn to_value(value: VerifiedCertificate) -> JsValue {
-    serde_wasm_bindgen::to_value(&value).unwrap_or(JsValue::NULL)
+fn to_value(value: VerifiedCertificate) -> Result<JsValue, JsValue> {
+    serde_wasm_bindgen::to_value(&value).map_err(|err| {
+        JsValue::from_str(&format!("failed to serialize verified certificate: {err}"))
+    })
 }
 
 fn read_header(bytes: &[u8], artifact: &str) -> Result<Vec<u8>, String> {
@@ -324,10 +322,10 @@ pub fn verify_notarized_commonware(
     namespace: Vec<u8>,
     verification_material: Vec<u8>,
     bytes: Vec<u8>,
-) -> JsValue {
+) -> Result<JsValue, JsValue> {
     verify_notarized_for_scheme(&scheme, &namespace, &verification_material, &bytes)
-        .map(to_value)
-        .unwrap_or_else(|_| js_null())
+        .map_err(|err| JsValue::from_str(&err))
+        .and_then(to_value)
 }
 
 /// Verify an opaque `{ finalization proof, header }` artifact.
@@ -337,10 +335,10 @@ pub fn verify_finalized_commonware(
     namespace: Vec<u8>,
     verification_material: Vec<u8>,
     bytes: Vec<u8>,
-) -> JsValue {
+) -> Result<JsValue, JsValue> {
     verify_finalized_for_scheme(&scheme, &namespace, &verification_material, &bytes)
-        .map(to_value)
-        .unwrap_or_else(|_| js_null())
+        .map_err(|err| JsValue::from_str(&err))
+        .and_then(to_value)
 }
 
 #[cfg(test)]

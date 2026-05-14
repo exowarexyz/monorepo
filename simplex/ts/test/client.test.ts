@@ -372,6 +372,47 @@ test('Commonware WASM verifier adapter rejects failed header verification', asyn
   );
 });
 
+test('Commonware WASM verifier adapter propagates verifier errors', async () => {
+  const verifier = createCommonwareSimplexVerifier(
+    {
+      verify_notarized_commonware: () => {
+        throw new Error('failed to decode notarized artifact: bad bytes');
+      },
+      verify_finalized_commonware: () => {
+        throw new Error('finalization certificate verification failed');
+      },
+    },
+    {
+      scheme: 'ed25519',
+      namespace: '',
+      verificationMaterial: '',
+    },
+  );
+
+  await assert.rejects(
+    async () => verifier.verifyNotarization(new Uint8Array([0xc0]), {
+      kind: 'notarization',
+      source: 'get',
+      key: notarizationByViewKey(1),
+      value: new Uint8Array([0xc0]),
+      view: 1n,
+    }),
+    /failed to decode notarized artifact: bad bytes/,
+  );
+
+  await assert.rejects(
+    async () => verifier.verifyFinalization(new Uint8Array([0xd0]), {
+      kind: 'finalization',
+      index: 'view',
+      source: 'get',
+      key: finalizationByViewKey(2),
+      value: new Uint8Array([0xd0]),
+      view: 2n,
+    }),
+    /finalization certificate verification failed/,
+  );
+});
+
 test('streams and verifies certificate entries', async () => {
   const store = new Client('http://127.0.0.1:1').store();
   let capturedFilters: unknown;
