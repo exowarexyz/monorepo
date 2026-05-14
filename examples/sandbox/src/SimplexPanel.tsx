@@ -9,7 +9,6 @@ import {
   type CommonwareVerifiedSimplexCertificate,
   type SimplexBlockData,
   type SimplexCertificateVerifier,
-  type SimplexUploadReceipt,
   type VerifiedSimplexCertificateStreamEntry,
 } from '@simplex-ts';
 import { createCommonwareWasmSimplexVerifier } from '@simplex-ts/wasm';
@@ -49,15 +48,6 @@ interface VerifierConfig {
   scheme: CommonwareSimplexScheme;
   namespace: string;
   verificationMaterialHex: string;
-}
-
-function formatSequence(receipt: SimplexUploadReceipt): string {
-  return receipt.storeSequenceNumber.toString();
-}
-
-function parseOptionalHex(value: string): Uint8Array | undefined {
-  const trimmed = value.trim();
-  return trimmed ? hexToBytes(trimmed) : undefined;
 }
 
 function renderBytes(value: Uint8Array): string {
@@ -138,30 +128,16 @@ export function SimplexPanel({
   );
 
   const [isConnected, setIsConnected] = useState(false);
-  const [isUploadingBlock, setIsUploadingBlock] = useState(false);
-  const [isUploadingCertificate, setIsUploadingCertificate] = useState(false);
   const [isReadingBlock, setIsReadingBlock] = useState(false);
   const [isReadingLatest, setIsReadingLatest] = useState(false);
   const [isSubscribing, setIsSubscribing] = useState(false);
   const [sinceSequenceNumber, setSinceSequenceNumber] = useState('');
   const [streamEvents, setStreamEvents] = useState<VerifiedSimplexEvent[]>([]);
 
-  const [blockDigestHex, setBlockDigestHex] = useState('');
-  const [blockHeaderHex, setBlockHeaderHex] = useState('');
-  const [blockBodyHex, setBlockBodyHex] = useState('');
   const [blockReadDigestHex, setBlockReadDigestHex] = useState('');
   const [headerReadResult, setHeaderReadResult] = useState<Uint8Array | null>(null);
   const [blockReadResult, setBlockReadResult] = useState<SimplexBlockData | null>(null);
 
-  const [certificateKind, setCertificateKind] = useState<'notarization' | 'finalization'>(
-    'finalization',
-  );
-  const [certificateView, setCertificateView] = useState('');
-  const [certificateHeight, setCertificateHeight] = useState('');
-  const [certificateHex, setCertificateHex] = useState('');
-  const [certificateBlockDigestHex, setCertificateBlockDigestHex] = useState('');
-  const [certificateHeaderHex, setCertificateHeaderHex] = useState('');
-  const [certificateBodyHex, setCertificateBodyHex] = useState('');
   const [latestFinalization, setLatestFinalization] =
     useState<CommonwareVerifiedSimplexCertificate | null>(null);
   const [latestFinalizationMissing, setLatestFinalizationMissing] = useState(false);
@@ -234,61 +210,6 @@ export function SimplexPanel({
       showNotification('success', 'Simplex Verifier', `Using ${scheme}`);
     } catch (error) {
       showNotification('error', 'Simplex Verifier Failed', String(error));
-    }
-  };
-
-  const uploadBlock = async () => {
-    setIsUploadingBlock(true);
-    try {
-      const receipt = await client.uploadBlock({
-        digest: hexToBytes(blockDigestHex),
-        header: hexToBytes(blockHeaderHex),
-        body: parseOptionalHex(blockBodyHex),
-      });
-      showNotification('success', 'Simplex Block', `Stored at sequence ${formatSequence(receipt)}`);
-      setBlockHeaderHex('');
-      setBlockBodyHex('');
-    } catch (error) {
-      showNotification('error', 'Simplex Block Failed', String(error));
-    } finally {
-      setIsUploadingBlock(false);
-    }
-  };
-
-  const uploadCertificate = async () => {
-    setIsUploadingCertificate(true);
-    try {
-      const header = parseOptionalHex(certificateHeaderHex);
-      const body = parseOptionalHex(certificateBodyHex);
-      const digest = parseOptionalHex(certificateBlockDigestHex);
-      if ((header && !digest) || (!header && digest) || (body && (!header || !digest))) {
-        throw new Error('Header bytes and digest must be provided together');
-      }
-      let receipt: SimplexUploadReceipt;
-      if (certificateKind === 'notarization') {
-        receipt = await client.uploadNotarization({
-          view: certificateView,
-          notarized: hexToBytes(certificateHex),
-          ...(header && digest ? { header, digest, body } : {}),
-        });
-      } else {
-        receipt = await client.uploadFinalization({
-          view: certificateView,
-          height: certificateHeight,
-          finalized: hexToBytes(certificateHex),
-          ...(header && digest ? { header, digest, body } : {}),
-        });
-      }
-      showNotification(
-        'success',
-        'Simplex Certificate',
-        `Stored at sequence ${formatSequence(receipt)}`,
-      );
-      setCertificateHex('');
-    } catch (error) {
-      showNotification('error', 'Simplex Certificate Failed', String(error));
-    } finally {
-      setIsUploadingCertificate(false);
     }
   };
 
@@ -447,137 +368,6 @@ export function SimplexPanel({
         </div>
         <button className="btn-secondary" onClick={applyVerifier}>
           Apply Verifier
-        </button>
-      </div>
-
-      <div className="form-section">
-        <h3>Upload Block</h3>
-        <div className="form-row">
-          <div className="form-group form-group-wide">
-            <label htmlFor="simplex-block-digest">Digest Hex</label>
-            <input
-              id="simplex-block-digest"
-              type="text"
-              value={blockDigestHex}
-              onChange={(event) => setBlockDigestHex(event.target.value)}
-            />
-          </div>
-        </div>
-        <div className="form-row">
-          <div className="form-group form-group-wide">
-            <label htmlFor="simplex-block-bytes">Header Hex</label>
-            <textarea
-              id="simplex-block-bytes"
-              value={blockHeaderHex}
-              onChange={(event) => setBlockHeaderHex(event.target.value)}
-            />
-          </div>
-        </div>
-        <div className="form-row">
-          <div className="form-group form-group-wide">
-            <label htmlFor="simplex-block-body">Body Hex</label>
-            <textarea
-              id="simplex-block-body"
-              value={blockBodyHex}
-              onChange={(event) => setBlockBodyHex(event.target.value)}
-            />
-          </div>
-        </div>
-        <button
-          className={`btn-primary ${isUploadingBlock ? 'loading' : ''}`}
-          onClick={uploadBlock}
-          disabled={isUploadingBlock || !blockDigestHex.trim() || !blockHeaderHex.trim()}
-        >
-          {isUploadingBlock ? 'Uploading...' : 'Upload Block'}
-        </button>
-      </div>
-
-      <div className="form-section">
-        <h3>Upload Certificate</h3>
-        <div className="form-row">
-          <div className="form-group">
-            <label htmlFor="simplex-certificate-kind">Kind</label>
-            <select
-              id="simplex-certificate-kind"
-              value={certificateKind}
-              onChange={(event) =>
-                setCertificateKind(event.target.value as 'notarization' | 'finalization')
-              }
-            >
-              <option value="notarization">notarization</option>
-              <option value="finalization">finalization</option>
-            </select>
-          </div>
-          <div className="form-group">
-            <label htmlFor="simplex-certificate-view">View</label>
-            <input
-              id="simplex-certificate-view"
-              type="number"
-              min="0"
-              value={certificateView}
-              onChange={(event) => setCertificateView(event.target.value)}
-            />
-          </div>
-          <div className="form-group">
-            <label htmlFor="simplex-certificate-height">Height</label>
-            <input
-              id="simplex-certificate-height"
-              type="number"
-              min="0"
-              value={certificateHeight}
-              onChange={(event) => setCertificateHeight(event.target.value)}
-              disabled={certificateKind !== 'finalization'}
-            />
-          </div>
-        </div>
-        <div className="form-row">
-          <div className="form-group form-group-wide">
-            <label htmlFor="simplex-certificate-bytes">Certificate Record Hex</label>
-            <textarea
-              id="simplex-certificate-bytes"
-              value={certificateHex}
-              onChange={(event) => setCertificateHex(event.target.value)}
-            />
-          </div>
-        </div>
-        <div className="form-row">
-          <div className="form-group">
-            <label htmlFor="simplex-certificate-block-digest">Block Digest Hex</label>
-            <input
-              id="simplex-certificate-block-digest"
-              type="text"
-              value={certificateBlockDigestHex}
-              onChange={(event) => setCertificateBlockDigestHex(event.target.value)}
-            />
-          </div>
-          <div className="form-group form-group-wide">
-            <label htmlFor="simplex-certificate-block">Header Hex</label>
-            <textarea
-              id="simplex-certificate-block"
-              value={certificateHeaderHex}
-              onChange={(event) => setCertificateHeaderHex(event.target.value)}
-            />
-          </div>
-          <div className="form-group form-group-wide">
-            <label htmlFor="simplex-certificate-body">Body Hex</label>
-            <textarea
-              id="simplex-certificate-body"
-              value={certificateBodyHex}
-              onChange={(event) => setCertificateBodyHex(event.target.value)}
-            />
-          </div>
-        </div>
-        <button
-          className={`btn-primary ${isUploadingCertificate ? 'loading' : ''}`}
-          onClick={uploadCertificate}
-          disabled={
-            isUploadingCertificate ||
-            !certificateView.trim() ||
-            !certificateHex.trim() ||
-            (certificateKind === 'finalization' && !certificateHeight.trim())
-          }
-        >
-          {isUploadingCertificate ? 'Uploading...' : 'Upload Certificate'}
         </button>
       </div>
 

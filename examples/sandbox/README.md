@@ -41,8 +41,8 @@ Explore the Exoware API.
 - **Store:** set and get key-value pairs, and run range queries.
 - **Ordered QMDB** (optional, requires `VITE_QMDB_URL`): current/historical
   proofs and live subscribe streaming.
-- **Simplex** (optional, requires `VITE_SIMPLEX_URL`): upload encoded
-  Commonware Simplex blocks, notarizations, and finalizations to Store, with
+- **Simplex** (optional, requires `VITE_SIMPLEX_URL`): read and subscribe to
+  seeded Commonware Simplex blocks, notarizations, and finalizations, with
   latest-finalization verification through the Simplex WASM verifier.
 - **SQL** (optional, requires `VITE_SQL_URL`): run ad-hoc SQL queries and
   subscribe to a SQL WHERE predicate evaluated per ingested batch.
@@ -113,9 +113,9 @@ match the pasted anchor.
 
 ## Simplex panel
 
-The Simplex panel is only rendered when `VITE_SIMPLEX_URL` is set. It writes
-encoded Commonware Simplex artifacts directly to Exoware Store using the same
-key layout as the Rust `exoware-simplex` crate. The panel configures the
+The Simplex panel is only rendered when `VITE_SIMPLEX_URL` is set. It reads
+Commonware Simplex artifacts written by the `simplex seed` process using the
+same key layout as the Rust `exoware-simplex` crate. The panel configures the
 Simplex WASM verifier from caller-supplied scheme, namespace, key material, and
 artifact bytes.
 
@@ -141,10 +141,6 @@ With the simulator running above:
 3. **In the UI**:
    - **Connection** accepts the scheme, namespace, and verifier material printed
      by `simplex seed`.
-   - **Upload Block** stores encoded block bytes by digest.
-   - **Upload Certificate** stores encoded notarization or finalization records
-     by view. Finalizations are also indexed by block height. Optional block
-     bytes and digest can be supplied to store the block in the same batch.
    - **Read** fetches a block by digest or the latest finalized height index.
      Latest finalization uses verified reads, while block reads remain raw.
    - **Subscribe** streams notarizations and finalizations, verifying each
