@@ -85,6 +85,7 @@ export function createTransport(baseUrl: string, tokenOrOptions?: string | Clien
 
 export class Client {
     public readonly baseUrl: string;
+    public readonly token?: string;
     public readonly compact: ConnectClient<typeof CompactService>;
     public readonly ingest: ConnectClient<typeof IngestService>;
     public readonly query: ConnectClient<typeof QueryService>;
@@ -94,6 +95,7 @@ export class Client {
     constructor(baseUrl: string, tokenOrOptions?: string | ClientOptions) {
         const opts = normalizeClientOptions(tokenOrOptions);
         this.baseUrl = baseUrl.replace(/\/$/, '');
+        this.token = opts.token;
         this.retryConfig = opts.retry ?? DEFAULT_RETRY_CONFIG;
         const transport = createTransport(this.baseUrl, opts);
         this.compact = createClient(CompactService, transport);

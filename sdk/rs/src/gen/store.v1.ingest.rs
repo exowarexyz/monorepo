@@ -527,6 +527,25 @@ pub trait Service: Send + Sync + 'static {
     ) -> impl ::std::future::Future<
         Output = Result<(PutResponse, ::connectrpc::Context), ::connectrpc::ConnectError>,
     > + Send;
+    /// Atomically write a streamed batch of key-value pairs. Each request chunk
+    /// carries one or more pairs, and the server persists the combined stream as
+    /// a single Store batch after the client closes the stream.
+    fn put_many(
+        &self,
+        ctx: ::connectrpc::Context,
+        requests: ::std::pin::Pin<
+            Box<
+                dyn ::futures::Stream<
+                    Item = Result<
+                        ::buffa::view::OwnedView<PutRequestView<'static>>,
+                        ::connectrpc::ConnectError,
+                    >,
+                > + Send,
+            >,
+        >,
+    ) -> impl ::std::future::Future<
+        Output = Result<(PutResponse, ::connectrpc::Context), ::connectrpc::ConnectError>,
+    > + Send;
 }
 /// Extension trait for registering a service implementation with a Router.
 ///
@@ -566,6 +585,17 @@ impl<S: Service> ServiceExt for S {
                         async move { svc.put(ctx, req).await }
                     })
                 },
+            )
+            .route_view_client_stream(
+                SERVICE_SERVICE_NAME,
+                "PutMany",
+                ::connectrpc::view_client_streaming_handler_fn({
+                    let svc = ::std::sync::Arc::clone(&self);
+                    move |ctx, req| {
+                        let svc = ::std::sync::Arc::clone(&svc);
+                        async move { svc.put_many(ctx, req).await }
+                    }
+                }),
             )
     }
 }
@@ -614,6 +644,11 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
         match method {
             "Put" => {
                 Some(::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false))
+            }
+            "PutMany" => {
+                Some(
+                    ::connectrpc::dispatcher::codegen::MethodDescriptor::client_streaming(),
+                )
             }
             _ => None,
         }
@@ -674,6 +709,20 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
         };
         let _ = (&ctx, &requests, &format);
         match method {
+            "PutMany" => {
+                let svc = ::std::sync::Arc::clone(&self.inner);
+                Box::pin(async move {
+                    let req_stream = ::connectrpc::dispatcher::codegen::decode_view_request_stream::<
+                        PutRequestView,
+                    >(requests, format);
+                    let (res, ctx) = svc.put_many(ctx, req_stream).await?;
+                    let bytes = ::connectrpc::dispatcher::codegen::encode_response(
+                        &res,
+                        format,
+                    )?;
+                    Ok((bytes, ctx))
+                })
+            }
             _ => ::connectrpc::dispatcher::codegen::unimplemented_unary(path),
         }
     }
@@ -794,6 +843,43 @@ where
                 SERVICE_SERVICE_NAME,
                 "Put",
                 request,
+                options,
+            )
+            .await
+    }
+    /// Call the PutMany RPC. Sends a request to /store.ingest.v1.Service/PutMany.
+    pub async fn put_many(
+        &self,
+        requests: impl IntoIterator<Item = PutRequest>,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<PutResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        self.put_many_with_options(
+                requests,
+                ::connectrpc::client::CallOptions::default(),
+            )
+            .await
+    }
+    /// Call the PutMany RPC with explicit per-call options. Options override [`connectrpc::client::ClientConfig`] defaults.
+    pub async fn put_many_with_options(
+        &self,
+        requests: impl IntoIterator<Item = PutRequest>,
+        options: ::connectrpc::client::CallOptions,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<PutResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        ::connectrpc::client::call_client_stream(
+                &self.transport,
+                &self.config,
+                SERVICE_SERVICE_NAME,
+                "PutMany",
+                requests,
                 options,
             )
             .await

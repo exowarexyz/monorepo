@@ -54,6 +54,7 @@ use std::time::Duration;
 const DEFAULT_RETRY_MAX_ATTEMPTS: usize = 3;
 const DEFAULT_RETRY_INITIAL_BACKOFF_MS: u64 = 100;
 const DEFAULT_RETRY_MAX_BACKOFF_MS: u64 = 2_000;
+const PUT_MANY_CHUNK_ENTRIES: usize = 4096;
 
 /// Codec used to compress **outgoing** RPC request bodies when compression applies.
 ///
@@ -282,11 +283,11 @@ impl StoreKeyPrefix {
 /// A physical Store write batch assembled from one or more logical clients.
 ///
 /// Use [`Self::push`] with the specific prefixed client that produced each
-/// logical key, then [`Self::commit`] once to submit all rows in one atomic
-/// Store `Put`.
+/// logical key, then [`Self::finish`] once to submit all rows in one atomic
+/// streaming Store `PutMany`.
 #[derive(Clone, Debug, Default)]
 pub struct StoreWriteBatch {
-    entries: Vec<(Key, Bytes)>,
+    kvs: Vec<exoware_proto::common::KvEntry>,
 }
 
 impl StoreWriteBatch {
@@ -294,16 +295,28 @@ impl StoreWriteBatch {
         Self::default()
     }
 
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            kvs: Vec::with_capacity(capacity),
+        }
+    }
+
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.kvs.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.kvs.is_empty()
     }
 
     pub fn clear(&mut self) {
-        self.entries.clear();
+        self.kvs.clear();
+    }
+
+    pub fn entries(&self) -> impl ExactSizeIterator<Item = (&[u8], &[u8])> {
+        self.kvs
+            .iter()
+            .map(|entry| (entry.key.as_slice(), entry.value.as_slice()))
     }
 
     pub fn push(
@@ -312,18 +325,25 @@ impl StoreWriteBatch {
         key: &Key,
         value: &[u8],
     ) -> Result<&mut Self, ClientError> {
-        self.entries
-            .push((client.encode_store_key(key)?, Bytes::copy_from_slice(value)));
+        self.push_physical(&client.encode_store_key(key)?, value);
         Ok(self)
     }
 
+    fn push_physical(&mut self, key: &Key, value: &[u8]) -> &mut Self {
+        self.kvs.push(exoware_proto::common::KvEntry {
+            key: key.to_vec(),
+            value: value.to_vec(),
+            ..Default::default()
+        });
+        self
+    }
+
+    pub async fn finish(self, client: &StoreClient) -> Result<u64, ClientError> {
+        client.put_many(self).await
+    }
+
     pub async fn commit(&self, client: &StoreClient) -> Result<u64, ClientError> {
-        let refs: Vec<(&Key, &[u8])> = self
-            .entries
-            .iter()
-            .map(|(key, value)| (key, value.as_ref()))
-            .collect();
-        client.put_physical(&refs).await
+        client.put_many(self.clone()).await
     }
 }
 
@@ -335,7 +355,7 @@ impl StoreWriteBatch {
 /// this trait provides the common lifecycle:
 ///
 /// 1. stage rows into a [`StoreWriteBatch`]
-/// 2. commit that batch
+/// 2. finish that batch
 /// 3. mark the prepared handle persisted with the returned Store sequence
 ///    number, or failed if staging/commit does not complete
 pub trait StoreBatchUpload {
@@ -1332,6 +1352,11 @@ impl StoreClient {
         Stream { c: self }
     }
 
+    /// Start assembling an atomic Store write batch incrementally.
+    pub fn write_batch(&self) -> StoreWriteBatch {
+        StoreWriteBatch::new()
+    }
+
     /// Submit a KV batch via Connect `Put`.
     ///
     /// On success returns the **store sequence number** from the response. Use it for immediate
@@ -1339,24 +1364,9 @@ impl StoreClient {
     /// [`Self::create_session_with_sequence`].
     /// If the request succeeds, the server accepts the full batch (count is `kvs.len()`).
     pub(crate) async fn put(&self, kvs: &[(&Key, &[u8])]) -> Result<u64, ClientError> {
-        if self.key_prefix.is_none() {
-            return self.put_physical(kvs).await;
-        }
-        let mut keys = Vec::with_capacity(kvs.len());
-        for (key, _) in kvs {
-            keys.push(self.encode_store_key(key)?);
-        }
-        let prefixed: Vec<(&Key, &[u8])> = keys
-            .iter()
-            .zip(kvs.iter())
-            .map(|(key, (_, value))| (key, *value))
-            .collect();
-        self.put_physical(&prefixed).await
-    }
-
-    async fn put_physical(&self, kvs: &[(&Key, &[u8])]) -> Result<u64, ClientError> {
         let mut proto_kvs = Vec::with_capacity(kvs.len());
         for (key, value) in kvs {
+            let key = self.encode_store_key(key)?;
             if !is_valid_key_size(key.len()) {
                 return Err(ClientError::WireFormat(format!(
                     "key length {} is outside valid store key range ({}..={})",
@@ -1366,12 +1376,11 @@ impl StoreClient {
                 )));
             }
             proto_kvs.push(exoware_proto::common::KvEntry {
-                key: (*key).to_vec(),
+                key: key.to_vec(),
                 value: value.to_vec(),
                 ..Default::default()
             });
         }
-
         let config =
             store_connect_client_config(self.ingest_uri.clone(), self.connect_request_compression);
         let client = IngestServiceClient::new(self.connect_http.clone(), config);
@@ -1380,6 +1389,40 @@ impl StoreClient {
                 kvs: proto_kvs,
                 ..Default::default()
             })
+            .await
+            .map_err(client_error_from_connect)?;
+        Ok(response.into_owned().sequence_number)
+    }
+
+    async fn put_many(&self, batch: StoreWriteBatch) -> Result<u64, ClientError> {
+        for entry in &batch.kvs {
+            if !is_valid_key_size(entry.key.len()) {
+                return Err(ClientError::WireFormat(format!(
+                    "key length {} is outside valid store key range ({}..={})",
+                    entry.key.len(),
+                    keys::MIN_KEY_LEN,
+                    MAX_KEY_LEN
+                )));
+            }
+        }
+
+        let config =
+            store_connect_client_config(self.ingest_uri.clone(), self.connect_request_compression);
+        let client = IngestServiceClient::new(self.connect_http.clone(), config);
+        let mut kvs = batch.kvs.into_iter();
+        let requests = std::iter::from_fn(move || {
+            let chunk: Vec<_> = kvs.by_ref().take(PUT_MANY_CHUNK_ENTRIES).collect();
+            if chunk.is_empty() {
+                None
+            } else {
+                Some(ProtoPutRequest {
+                    kvs: chunk,
+                    ..Default::default()
+                })
+            }
+        });
+        let response = client
+            .put_many(requests)
             .await
             .map_err(client_error_from_connect)?;
         Ok(response.into_owned().sequence_number)
@@ -2103,6 +2146,10 @@ pub struct Stream<'a> {
 }
 
 impl<'a> Ingest<'a> {
+    pub fn write_batch(&self) -> StoreWriteBatch {
+        self.c.write_batch()
+    }
+
     pub async fn put(&self, kvs: &[(&Key, &[u8])]) -> Result<u64, ClientError> {
         self.c.put(kvs).await
     }
@@ -2111,6 +2158,10 @@ impl<'a> Ingest<'a> {
     /// physical Store keyspace.
     pub async fn put_prepared(&self, batch: &StoreWriteBatch) -> Result<u64, ClientError> {
         batch.commit(self.c).await
+    }
+
+    pub async fn put_many(&self, batch: StoreWriteBatch) -> Result<u64, ClientError> {
+        batch.finish(self.c).await
     }
 }
 
@@ -3017,12 +3068,12 @@ mod tests {
         batch.push(&b, &key_b, b"vb").unwrap();
 
         assert_eq!(
-            batch.entries[0].0,
-            a.key_prefix().unwrap().encode_key(&key_a).unwrap()
+            batch.kvs[0].key,
+            a.key_prefix().unwrap().encode_key(&key_a).unwrap().to_vec()
         );
         assert_eq!(
-            batch.entries[1].0,
-            b.key_prefix().unwrap().encode_key(&key_b).unwrap()
+            batch.kvs[1].key,
+            b.key_prefix().unwrap().encode_key(&key_b).unwrap().to_vec()
         );
     }
 
