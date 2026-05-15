@@ -12,6 +12,11 @@ service Service {
   // covers this write. Clients can pass that sequence number to query RPCs
   // (via `min_sequence_number`) for read-after-write consistency.
   rpc Put(PutRequest) returns (PutResponse);
+
+  // Atomically write a streamed batch of key-value pairs. Each request chunk
+  // carries one or more pairs, and the server persists the combined stream as
+  // a single Store batch after the client closes the stream.
+  rpc PutMany(stream PutRequest) returns (PutResponse);
 }
 
 // Batch write request. All pairs are applied atomically.

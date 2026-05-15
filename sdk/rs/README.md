@@ -29,5 +29,5 @@ use exoware_sdk::StoreWriteBatch;
 let mut batch = StoreWriteBatch::new();
 batch.push(&orders, &order_key, order_value)?;
 batch.push(&accounts, &account_key, account_value)?;
-let sequence = batch.commit(&base).await?;
+let sequence = batch.finish(&base).await?;
 ```

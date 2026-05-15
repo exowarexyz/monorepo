@@ -22,7 +22,7 @@ const accounts = base.withKeyPrefix(new StoreKeyPrefix(4, 2));
 const batch = new StoreWriteBatch()
     .push(orders, orderKey, orderValue)
     .push(accounts, accountKey, accountValue);
-const sequence = await batch.commit(base);
+const sequence = await batch.finish(base);
 ```
 
 ## Generated TypeScript (`gen/ts`)

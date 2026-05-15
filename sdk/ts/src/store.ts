@@ -1,4 +1,4 @@
-import { create, type MessageInitShape } from '@bufbuild/protobuf';
+import { create, fromBinary, toBinary, type MessageInitShape } from '@bufbuild/protobuf';
 import { Code, ConnectError } from '@connectrpc/connect';
 import type { CallOptions } from '@connectrpc/connect';
 import type { Client } from './client.js';
@@ -10,9 +10,10 @@ import {
     KvEntrySchema,
     MatchKeySchema,
 } from './gen/ts/store/v1/common_pb.js';
-import type { MatchKey } from './gen/ts/store/v1/common_pb.js';
+import type { KvEntry, MatchKey } from './gen/ts/store/v1/common_pb.js';
 import { ErrorInfoSchema } from './gen/ts/google/rpc/error_details_pb.js';
-import { PutRequestSchema } from './gen/ts/store/v1/ingest_pb.js';
+import { PutRequestSchema, PutResponseSchema } from './gen/ts/store/v1/ingest_pb.js';
+import type { PutRequest } from './gen/ts/store/v1/ingest_pb.js';
 import {
     GetManyRequestSchema,
     GetRequestSchema as QueryGetRequestSchema,
@@ -35,6 +36,9 @@ import {
 } from './gen/ts/store/v1/stream_pb.js';
 
 const STREAM_SERVER_PAYLOAD_REGEX = '(?s-u).*';
+const CONNECT_STREAM_CONTENT_TYPE = 'application/connect+proto';
+const CONNECT_END_STREAM_FLAG = 2;
+const PUT_MANY_CHUNK_ENTRIES = 4096;
 
 type DetailObserver = (detail: Detail) => void;
 
@@ -257,6 +261,75 @@ function copyBytes(value: Uint8Array | Buffer): Uint8Array {
     return new Uint8Array(toUint8Array(value));
 }
 
+function encodeConnectEnvelope(message: Uint8Array): Uint8Array {
+    const envelope = new Uint8Array(5 + message.length);
+    envelope[0] = 0;
+    new DataView(envelope.buffer, envelope.byteOffset + 1, 4).setUint32(0, message.length);
+    envelope.set(message, 5);
+    return envelope;
+}
+
+function putManyBody(requests: AsyncIterable<PutRequest>): ReadableStream<Uint8Array> {
+    const iterator = requests[Symbol.asyncIterator]();
+    return new ReadableStream<Uint8Array>({
+        async pull(controller) {
+            const next = await iterator.next();
+            if (next.done === true) {
+                controller.close();
+                return;
+            }
+            controller.enqueue(encodeConnectEnvelope(toBinary(PutRequestSchema, next.value)));
+        },
+        async cancel(reason) {
+            if (iterator.throw) {
+                try {
+                    await iterator.throw(reason);
+                } catch {
+                    // Iterator cancellation is best-effort.
+                }
+            }
+        },
+    });
+}
+
+async function readPutManyResponse(response: Response): Promise<bigint> {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    let offset = 0;
+    let sequenceNumber: bigint | undefined;
+    while (offset < bytes.length) {
+        if (offset + 5 > bytes.length) {
+            throw new Error('malformed PutMany response envelope');
+        }
+        const flags = bytes[offset];
+        const len = new DataView(bytes.buffer, bytes.byteOffset + offset + 1, 4).getUint32(0);
+        offset += 5;
+        if (offset + len > bytes.length) {
+            throw new Error('truncated PutMany response envelope');
+        }
+        const data = bytes.subarray(offset, offset + len);
+        offset += len;
+        if ((flags & CONNECT_END_STREAM_FLAG) === CONNECT_END_STREAM_FLAG) {
+            if (data.length > 0) {
+                const end = JSON.parse(new TextDecoder().decode(data)) as {
+                    error?: { message?: string };
+                };
+                if (end.error) {
+                    throw new Error(end.error.message ?? 'PutMany stream failed');
+                }
+            }
+            continue;
+        }
+        if (sequenceNumber !== undefined) {
+            throw new Error('PutMany response contained multiple messages');
+        }
+        sequenceNumber = fromBinary(PutResponseSchema, data).sequenceNumber;
+    }
+    if (sequenceNumber === undefined) {
+        throw new Error('PutMany response contained no message');
+    }
+    return sequenceNumber;
+}
+
 function encodeStoreKey(prefix: StoreKeyPrefix | undefined, key: Uint8Array): Uint8Array {
     return prefix ? prefix.encodeKey(key) : key;
 }
@@ -280,13 +353,15 @@ function encodeStoreRange(
 }
 
 export class StoreWriteBatch {
-    private readonly kvs: StoreBatchEntry[] = [];
+    private readonly kvs: KvEntry[] = [];
 
     push(client: StoreClient, key: Uint8Array, value: Uint8Array | Buffer): this {
-        this.kvs.push({
-            key: client.encodeStoreKey(key),
-            value: copyBytes(value),
-        });
+        this.kvs.push(
+            create(KvEntrySchema, {
+                key: copyBytes(client.encodeStoreKey(key)),
+                value: copyBytes(value),
+            }),
+        );
         return this;
     }
 
@@ -303,7 +378,11 @@ export class StoreWriteBatch {
     }
 
     async commit(client: StoreClient): Promise<bigint> {
-        return client.putPrepared(this);
+        return this.finish(client);
+    }
+
+    async finish(client: StoreClient): Promise<bigint> {
+        return client.putMany(this);
     }
 }
 
@@ -988,6 +1067,10 @@ export class StoreClient {
         return new SerializableReadSession(this.client, this.keyPrefix, sequence);
     }
 
+    writeBatch(): StoreWriteBatch {
+        return new StoreWriteBatch();
+    }
+
     async set(key: Uint8Array, value: Uint8Array | Buffer): Promise<bigint> {
         const req = create(PutRequestSchema, {
             kvs: [
@@ -1023,17 +1106,45 @@ export class StoreClient {
     }
 
     async putPrepared(batch: StoreWriteBatch): Promise<bigint> {
-        const req = create(PutRequestSchema, {
-            kvs: batch.entries().map((kv) =>
-                create(KvEntrySchema, {
-                    key: kv.key,
-                    value: kv.value,
-                }),
-            ),
-        });
+        return this.putMany(batch);
+    }
+
+    async putMany(batch: StoreWriteBatch): Promise<bigint> {
+        async function* requests() {
+            const entries = batch.entries();
+            for (let start = 0; start < entries.length; start += PUT_MANY_CHUNK_ENTRIES) {
+                yield create(PutRequestSchema, {
+                    kvs: entries.slice(start, start + PUT_MANY_CHUNK_ENTRIES).map((kv) =>
+                        create(KvEntrySchema, {
+                            key: kv.key,
+                            value: kv.value,
+                        }),
+                    ),
+                });
+            }
+        }
         try {
-            const res = await this.client.ingest.put(req);
-            return res.sequenceNumber;
+            const headers = new Headers({
+                'Content-Type': CONNECT_STREAM_CONTENT_TYPE,
+                'Connect-Protocol-Version': '1',
+            });
+            if (this.client.token !== undefined) {
+                headers.set('Authorization', `Bearer ${this.client.token}`);
+            }
+            const init: RequestInit & { duplex: 'half' } = {
+                method: 'POST',
+                headers,
+                body: putManyBody(requests()),
+                duplex: 'half',
+            };
+            const res = await fetch(
+                `${this.client.baseUrl}/store.ingest.v1.Service/PutMany`,
+                init,
+            );
+            if (!res.ok) {
+                throw new Error(`PutMany failed with HTTP ${res.status}: ${await res.text()}`);
+            }
+            return await readPutManyResponse(res);
         } catch (e) {
             mapConnectToHttpError(e);
         }

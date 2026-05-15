@@ -203,7 +203,7 @@ describe('Exoware TS SDK', () => {
             const batch = new StoreWriteBatch();
             batch.push(a, key, Buffer.from('value-a'));
             batch.push(b, key, Buffer.from('value-b'));
-            const sequenceNumber = await batch.commit(base);
+            const sequenceNumber = await batch.finish(base);
 
             const resultA = await a.get(key);
             const resultB = await b.get(key);

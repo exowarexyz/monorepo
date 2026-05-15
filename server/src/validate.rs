@@ -134,6 +134,20 @@ pub fn validate_put_request(
     Ok(())
 }
 
+pub fn validate_put_many_entries(len: usize) -> Result<(), ConnectError> {
+    if len == 0 {
+        return Err(field_error(
+            "store.ingest",
+            "kvs",
+            "at least one key-value pair is required",
+            "INVALID_BATCH",
+            "put many stream must contain at least one key-value pair",
+            [],
+        ));
+    }
+    Ok(())
+}
+
 // -- query --
 
 pub fn validate_get_request(

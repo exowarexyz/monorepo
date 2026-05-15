@@ -33,7 +33,7 @@ use exoware_sdk as exoware_proto;
 use exoware_sdk::keys::Key;
 use exoware_sdk::match_key::MatchKey;
 use exoware_sdk::store::common::v1::bytes_filter::KindView as ProtoBytesFilterKindView;
-use futures::{stream as stream_util, Stream};
+use futures::{stream as stream_util, Stream, StreamExt};
 use tokio::sync::Notify;
 
 use crate::reduce::RangeReducer;
@@ -350,6 +350,35 @@ where
             state: state.into(),
         }
     }
+
+    fn ensure_ready(&self) -> Result<(), ConnectError> {
+        if !self.state.ready.load(Ordering::SeqCst) {
+            return Err(with_error_info_detail(
+                ConnectError::unavailable("ingest is not ready"),
+                ErrorInfo {
+                    reason: "WORKER_NOT_READY".to_string(),
+                    domain: "store.ingest".to_string(),
+                    ..Default::default()
+                },
+            ));
+        }
+        Ok(())
+    }
+
+    async fn commit_ingest_batch(&self, batch: Vec<(Bytes, Bytes)>) -> Result<u64, ConnectError> {
+        let seq = self
+            .state
+            .ingest
+            .put_batch(batch)
+            .await
+            .map_err(ConnectError::internal)?;
+
+        if let Some(notifier) = &self.state.notifier {
+            notifier.advance(seq);
+        }
+
+        Ok(seq)
+    }
 }
 
 impl<I> IngestApi for IngestConnect<I>
@@ -361,17 +390,7 @@ where
         _ctx: Context,
         request: buffa::view::OwnedView<exoware_proto::store::ingest::v1::PutRequestView<'static>>,
     ) -> Result<(ProtoPutResponse, Context), ConnectError> {
-        if !self.state.ready.load(Ordering::SeqCst) {
-            return Err(with_error_info_detail(
-                ConnectError::unavailable("ingest is not ready"),
-                ErrorInfo {
-                    reason: "WORKER_NOT_READY".to_string(),
-                    domain: "store.ingest".to_string(),
-                    ..Default::default()
-                },
-            ));
-        }
-
+        self.ensure_ready()?;
         validate::validate_put_request(&request, self.state.limits)?;
 
         let wire = request.bytes();
@@ -382,17 +401,51 @@ where
             batch.push((key, value));
         }
 
-        let seq = self
-            .state
-            .ingest
-            .put_batch(batch)
-            .await
-            .map_err(ConnectError::internal)?;
+        let seq = self.commit_ingest_batch(batch).await?;
 
-        // Advance any attached stream frontier after the write is committed.
-        if let Some(notifier) = &self.state.notifier {
-            notifier.advance(seq);
+        Ok((
+            ProtoPutResponse {
+                sequence_number: seq,
+                ..Default::default()
+            },
+            Context::default(),
+        ))
+    }
+
+    async fn put_many(
+        &self,
+        _ctx: Context,
+        mut requests: Pin<
+            Box<
+                dyn Stream<
+                        Item = Result<
+                            buffa::view::OwnedView<
+                                exoware_proto::store::ingest::v1::PutRequestView<'static>,
+                            >,
+                            ConnectError,
+                        >,
+                    > + Send,
+            >,
+        >,
+    ) -> Result<(ProtoPutResponse, Context), ConnectError> {
+        self.ensure_ready()?;
+
+        let mut batch = Vec::new();
+        while let Some(request) = requests.next().await {
+            let request = request?;
+            validate::validate_put_request(&request, self.state.limits)?;
+
+            let wire = request.bytes();
+            batch.reserve(request.kvs.len());
+            for kv in request.kvs.iter() {
+                let key: Key = wire.slice_ref(kv.key);
+                let value = wire.slice_ref(kv.value);
+                batch.push((key, value));
+            }
         }
+
+        validate::validate_put_many_entries(batch.len())?;
+        let seq = self.commit_ingest_batch(batch).await?;
 
         Ok((
             ProtoPutResponse {
