@@ -7,20 +7,25 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
 
+use commonware_codec::{Decode, FixedSize};
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
 use commonware_storage::merkle::{mmb, mmr, Location, Proof};
 use commonware_storage::qmdb::any::ordered::variable::Operation as QmdbOperation;
 use commonware_storage::qmdb::{
-    any::ordered::Update, current::ordered::variable::Db as LocalQmdbDb,
+    any::ordered::Update,
+    current::ordered::variable::Db as LocalQmdbDb,
+    current::proof::OpsRootWitness,
+    current::sync as current_sync,
+    sync::resolver::{FetchResult, Resolver},
 };
 use commonware_storage::translator::TwoCap;
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{channel::oneshot, NZUsize, NZU16, NZU64};
 use exoware_qmdb::proto::qmdb::v1::{
     GetCurrentOperationRangeRequest as ProtoGetCurrentOperationRangeRequest,
-    GetOperationRangeRequest as ProtoGetOperationRangeRequest,
-    SubscribeRequest as ProtoSubscribeRequest,
+    GetOperationRangeRequest as ProtoGetOperationRangeRequest, HistoricalOperationRangeProof,
+    OperationLogServiceClient, SubscribeRequest as ProtoSubscribeRequest,
 };
 use exoware_qmdb::{
     ordered_connect_stack, recover_boundary_state, CurrentBoundaryState, CurrentOperationClient,
@@ -48,6 +53,7 @@ type LocalDb = LocalQmdbDb<
     N,
     commonware_parallel::Sequential,
 >;
+type SyncTarget = current_sync::Target<mmr::Family, Digest>;
 type MmbBatchProof = Proof<mmb::Family, Digest>;
 type MmbBatchOperation = QmdbOperation<mmb::Family, Vec<u8>, Vec<u8>>;
 type MmbTestOrderedClient = OrderedClient<mmb::Family, Sha256, Vec<u8>, Vec<u8>, N>;
@@ -78,6 +84,129 @@ fn current_operation_client(
     base: &str,
 ) -> CurrentOperationClient<PreferZstdHttpClient, mmr::Family, Sha256, BatchOperation, N> {
     CurrentOperationClient::plaintext(base, op_cfg())
+}
+
+#[derive(Clone)]
+struct ConnectSyncResolver {
+    rpc: OperationLogServiceClient<PreferZstdHttpClient>,
+    current_root: Digest,
+    op_cfg: <BatchOperation as commonware_codec::Read>::Cfg,
+}
+
+impl ConnectSyncResolver {
+    fn new(base: &str, current_root: Digest) -> Self {
+        Self {
+            rpc: common::operation_log_rpc_client(base),
+            current_root,
+            op_cfg: op_cfg(),
+        }
+    }
+
+    async fn target(&self, op_count: Location<mmr::Family>) -> Result<SyncTarget, QmdbError> {
+        let proto = self
+            .operation_range_proto(op_count, Location::new(0), NZU64!(1))
+            .await?;
+        let ops_root = decode_digest(proto.ops_root.as_slice(), "ops root")?;
+        let witness = decode_ops_root_witness(proto.ops_root_witness.as_slice())?;
+        Ok(SyncTarget::new(
+            self.current_root,
+            ops_root,
+            witness,
+            commonware_utils::non_empty_range!(Location::new(0), op_count),
+        ))
+    }
+
+    async fn operation_range_proto(
+        &self,
+        op_count: Location<mmr::Family>,
+        start_loc: Location<mmr::Family>,
+        max_ops: NonZeroU64,
+    ) -> Result<HistoricalOperationRangeProof, QmdbError> {
+        let count = op_count.as_u64();
+        let Some(tip) = count.checked_sub(1) else {
+            return Err(QmdbError::CorruptData(
+                "cannot fetch sync operations for an empty target".to_string(),
+            ));
+        };
+        let max_locations = u32::try_from(max_ops.get()).map_err(|err| {
+            QmdbError::CorruptData(format!("sync fetch batch size exceeds API limit: {err}"))
+        })?;
+        let response = self
+            .rpc
+            .get_operation_range(ProtoGetOperationRangeRequest {
+                tip,
+                start_location: start_loc.as_u64(),
+                max_locations,
+                ..Default::default()
+            })
+            .await
+            .map_err(|err| QmdbError::Client(exoware_sdk::ClientError::Rpc(Box::new(err))))?
+            .into_view()
+            .to_owned_message();
+        response.proof.as_option().cloned().ok_or_else(|| {
+            QmdbError::CorruptData("sync operation range response missing proof".to_string())
+        })
+    }
+
+    fn fetch_result(
+        &self,
+        proto: HistoricalOperationRangeProof,
+    ) -> Result<FetchResult<mmr::Family, BatchOperation, Digest>, QmdbError> {
+        let max_digests = proto.proof.len() / Digest::SIZE + 1;
+        let proof =
+            BatchProof::decode_cfg(proto.proof.as_slice(), &max_digests).map_err(|err| {
+                QmdbError::CorruptData(format!(
+                    "failed to decode sync operation range proof: {err}"
+                ))
+            })?;
+        let operations = proto
+            .encoded_operations
+            .iter()
+            .map(|bytes| {
+                BatchOperation::decode_cfg(bytes.as_slice(), &self.op_cfg).map_err(|err| {
+                    QmdbError::CorruptData(format!("failed to decode sync operation: {err}"))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(FetchResult {
+            proof,
+            operations,
+            success_tx: oneshot::channel().0,
+            pinned_nodes: None,
+        })
+    }
+}
+
+impl Resolver for ConnectSyncResolver {
+    type Family = mmr::Family;
+    type Digest = Digest;
+    type Op = BatchOperation;
+    type Error = QmdbError;
+
+    async fn get_operations(
+        &self,
+        op_count: Location<Self::Family>,
+        start_loc: Location<Self::Family>,
+        max_ops: NonZeroU64,
+        _include_pinned_nodes: bool,
+        _cancel_rx: oneshot::Receiver<()>,
+    ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+        let proto = self
+            .operation_range_proto(op_count, start_loc, max_ops)
+            .await?;
+        self.fetch_result(proto)
+    }
+}
+
+fn decode_digest(bytes: &[u8], label: &'static str) -> Result<Digest, QmdbError> {
+    Digest::decode_cfg(bytes, &())
+        .map_err(|err| QmdbError::CorruptData(format!("failed to decode {label}: {err}")))
+}
+
+fn decode_ops_root_witness(bytes: &[u8]) -> Result<OpsRootWitness<mmr::Family, Digest>, QmdbError> {
+    OpsRootWitness::<mmr::Family, Digest>::decode_cfg(bytes, &()).map_err(|err| {
+        QmdbError::CorruptData(format!("failed to decode sync ops-root witness: {err}"))
+    })
 }
 
 async fn spawn_mmb_qmdb_server(
@@ -418,6 +547,66 @@ async fn ordered_current_operation_range_connect_emits_verifiable_proof() {
             .collect::<Vec<_>>(),
         local.operations
     );
+}
+
+#[tokio::test]
+async fn ordered_current_state_sync_from_connect_api_reconstructs_current_db() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_local_batch().await;
+    commit_upload(&store_client, &local).await;
+
+    let ordered_client = Arc::new(TestOrderedClient::from_client(
+        store_client.clone(),
+        op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client).await;
+    let resolver = ConnectSyncResolver::new(&qmdb_url, local.current_boundary.root);
+    let op_count = Location::new(local.operations.len() as u64);
+    let target = resolver.target(op_count).await.expect("api sync target");
+    assert_eq!(target.root, local.current_boundary.root);
+
+    tokio::task::spawn_blocking(move || {
+        cw_tokio::Runner::default().start(|context| async move {
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
+
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = common::ordered_variable_config(
+                "ordered-current-sync-connect",
+                page_cache,
+                op_cfg(),
+                NZU64!(8),
+            );
+            let db: LocalDb = current_sync::sync(current_sync::Config {
+                context: context.child("sync"),
+                resolver,
+                target,
+                max_outstanding_requests: 4,
+                fetch_batch_size: NZU64!(7),
+                apply_batch_size: 32,
+                db_config: cfg,
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 4,
+            })
+            .await
+            .expect("sync current db from API");
+
+            assert_eq!(db.root(), local.current_boundary.root);
+            assert_eq!(
+                db.get(&b"alpha".to_vec()).await.expect("get alpha"),
+                Some(b"one".to_vec())
+            );
+            assert_eq!(
+                db.get(&b"beta".to_vec()).await.expect("get beta"),
+                Some(b"two".to_vec())
+            );
+            db.destroy().await.expect("destroy synced db");
+        });
+    })
+    .await
+    .expect("join sync runner");
 }
 
 #[tokio::test]

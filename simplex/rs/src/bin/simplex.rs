@@ -11,7 +11,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     bls12381::{
-        dkg::deal,
+        dkg::feldman_desmedt::deal,
         primitives::{sharing::Mode, variant::MinSig},
     },
     ed25519, sha256, Digest as _, Digestible, Hasher, Sha256, Signer,
