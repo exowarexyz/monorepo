@@ -516,6 +516,7 @@ async fn marshal_resolver_sinks_finalized_chain_from_simplex_api() {
                     .expect("marshal delivery timeout")
                     .expect("marshal delivered blocks");
                 actor_handle.abort();
+                let _ = actor_handle.await;
                 delivered
             })
         }
