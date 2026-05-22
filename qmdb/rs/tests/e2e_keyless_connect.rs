@@ -7,9 +7,12 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
 
+use commonware_codec::Encode;
 use commonware_runtime::{deterministic, Runner as _};
 use commonware_storage::merkle::{mmr, Location};
 use commonware_storage::qmdb::keyless::variable::{Db as Keyless, Operation as KeylessOperation};
+use commonware_storage::qmdb::sync::resolver::Resolver as _;
+use commonware_utils::channel::oneshot;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::proto::qmdb::v1::{
     GetOperationRangeRequest as ProtoGetOperationRangeRequest,
@@ -17,7 +20,7 @@ use exoware_qmdb::proto::qmdb::v1::{
 };
 use exoware_qmdb::{
     keyless_operation_log_connect_stack, KeylessClient, KeylessWriter, OperationLogClient,
-    OperationLogSubscribeProof, QmdbError,
+    OperationLogSubscribeProof, OperationLogSyncResolver, QmdbError,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
 use exoware_sdk::store::common::v1::{
@@ -198,6 +201,48 @@ async fn keyless_connect_get_operation_range_returns_verifiable_proof() {
         proof.operations,
         vec![(Location::new(1), local.operations[1].clone())]
     );
+}
+
+#[tokio::test]
+async fn keyless_operation_log_sync_resolver_fetches_api_batches() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_local_batch().await;
+    commit_upload(&store_client, &local).await;
+
+    let keyless_client = Arc::new(TestKeylessClient::from_client(
+        store_client.clone(),
+        ((0..=10000).into(), ()),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
+    let resolver = OperationLogSyncResolver::<
+        _,
+        mmr::Family,
+        commonware_cryptography::Sha256,
+        BatchOperation,
+    >::plaintext(&qmdb_url, ((0..=10000).into(), ()));
+    let op_count = Location::new(local.operations.len() as u64);
+    let target = resolver.target(op_count).await.expect("sync target");
+    assert_eq!(target.root, local.root);
+
+    let (_cancel_tx, cancel_rx) = oneshot::channel();
+    let fetched = resolver
+        .get_operations(op_count, Location::new(0), NZU64!(2), false, cancel_rx)
+        .await
+        .expect("fetch sync operations");
+    assert_eq!(fetched.operations.as_slice(), &local.operations[..2]);
+
+    let hasher = commonware_storage::qmdb::hasher::<commonware_cryptography::Sha256>();
+    let elements = fetched
+        .operations
+        .iter()
+        .map(|operation| operation.encode())
+        .collect::<Vec<_>>();
+    assert!(fetched.proof.verify_range_inclusion(
+        &hasher,
+        &elements,
+        Location::new(0),
+        &target.root
+    ));
 }
 
 #[tokio::test]

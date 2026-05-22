@@ -8,8 +8,10 @@
 mod client;
 mod error;
 pub mod keys;
+mod resolver;
 mod types;
 
 pub use client::{PreparedEntry, PreparedUpload, SimplexClient};
 pub use error::SimplexError;
+pub use resolver::MarshalResolver;
 pub use types::{encode_block_data, BlockData, Finalized, Notarized, UploadReceipt, UploadSummary};

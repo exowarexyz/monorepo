@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
 use std::marker::PhantomData;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use crate::proto::qmdb::v1::{
@@ -19,16 +20,19 @@ use commonware_storage::{
     merkle::{Family, Graftable, Location, Proof},
     qmdb::{
         any::{
-            ordered, unordered,
+            ordered, sync as any_sync, unordered,
             value::{ValueEncoding, VariableEncoding},
         },
         current::ordered::{db::KeyValueProof, ExclusionProof},
         current::proof::{OpsRootWitness, RangeProof},
+        current::sync as current_sync,
         current::unordered::db::KeyValueProof as UnorderedKeyValueProof,
         operation::Key as QmdbKey,
+        sync::resolver::{FetchResult, Resolver},
         verify::{verify_multi_proof, verify_proof},
     },
 };
+use commonware_utils::channel::oneshot;
 use connectrpc::client::{ClientConfig, ClientTransport, ServerStream};
 use connectrpc::ConnectError;
 use exoware_sdk::proto::PreferZstdHttpClient;
@@ -471,6 +475,318 @@ pub struct CurrentOperationRangeProof<D: Digest, Op, const N: usize, F: Graftabl
     pub chunks: Vec<[u8; N]>,
 }
 
+/// Store-backed resolver for Commonware QMDB sync over Exoware QMDB's
+/// operation-log API.
+///
+/// This resolver covers the operation-log portion shared by ordered,
+/// unordered, immutable, and keyless QMDBs. It syncs from operation zero.
+/// Exoware's operation-range endpoint
+/// does not expose lower-bound pinned nodes, so pruned lower-bound sync targets
+/// are intentionally rejected instead of retrying forever.
+pub struct OperationLogSyncResolver<T, F: Graftable, H: Hasher, Op: Encode + Read> {
+    rpc: OperationLogServiceClient<T>,
+    op_cfg: Arc<Op::Cfg>,
+    _marker: PhantomData<(F, H, Op)>,
+}
+
+impl<T, F, H, Op> Clone for OperationLogSyncResolver<T, F, H, Op>
+where
+    F: Graftable,
+    H: Hasher,
+    Op: Encode + Read,
+    OperationLogServiceClient<T>: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            rpc: self.rpc.clone(),
+            op_cfg: Arc::clone(&self.op_cfg),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<F, H, Op> OperationLogSyncResolver<PreferZstdHttpClient, F, H, Op>
+where
+    F: Graftable + Send + Sync + 'static,
+    H: Hasher + Send + Sync + 'static,
+    H::Digest: DecodeExt<()>,
+    Op: Decode + Encode + Read + Send + Sync + 'static,
+{
+    pub fn plaintext(base: &str, op_cfg: Op::Cfg) -> Self {
+        Self::new(
+            PreferZstdHttpClient::plaintext(),
+            ClientConfig::new(base.parse().expect("qmdb uri")),
+            op_cfg,
+        )
+    }
+}
+
+impl<T, F, H, Op> OperationLogSyncResolver<T, F, H, Op>
+where
+    T: ClientTransport + Clone + Send + Sync + 'static,
+    T::ResponseBody: Body<Data = Bytes> + Unpin,
+    <T::ResponseBody as Body>::Error: Display,
+    F: Graftable + Send + Sync + 'static,
+    H: Hasher + Send + Sync + 'static,
+    H::Digest: DecodeExt<()>,
+    Op: Decode + Encode + Read + Send + Sync + 'static,
+{
+    pub fn new(transport: T, config: ClientConfig, op_cfg: Op::Cfg) -> Self {
+        Self::from_service_client(OperationLogServiceClient::new(transport, config), op_cfg)
+    }
+
+    pub fn from_service_client(rpc: OperationLogServiceClient<T>, op_cfg: Op::Cfg) -> Self {
+        Self {
+            rpc,
+            op_cfg: Arc::new(op_cfg),
+            _marker: PhantomData,
+        }
+    }
+
+    pub async fn target(
+        &self,
+        op_count: Location<F>,
+    ) -> Result<any_sync::Target<F, H::Digest>, QmdbError> {
+        let proto = self
+            .operation_range_proto(op_count, Location::new(0), NonZeroU64::MIN)
+            .await?;
+        let root = decode_digest::<H>(proto.ops_root.as_slice(), "operation sync root")?;
+        Ok(any_sync::Target::new(
+            root,
+            commonware_utils::non_empty_range!(Location::new(0), op_count),
+        ))
+    }
+
+    async fn operation_range_proto(
+        &self,
+        op_count: Location<F>,
+        start_loc: Location<F>,
+        max_ops: NonZeroU64,
+    ) -> Result<HistoricalOperationRangeProof, QmdbError> {
+        let count = op_count.as_u64();
+        let Some(tip) = count.checked_sub(1) else {
+            return Err(QmdbError::CorruptData(
+                "cannot fetch sync operations for an empty target".to_string(),
+            ));
+        };
+        let max_locations = u32::try_from(max_ops.get()).map_err(|err| {
+            QmdbError::CorruptData(format!("sync fetch batch size exceeds API limit: {err}"))
+        })?;
+        let response = self
+            .rpc
+            .get_operation_range(GetOperationRangeRequest {
+                tip,
+                start_location: start_loc.as_u64(),
+                max_locations,
+                ..Default::default()
+            })
+            .await
+            .map_err(connect_error_to_qmdb)?
+            .into_view()
+            .to_owned_message();
+        response.proof.as_option().cloned().ok_or_else(|| {
+            QmdbError::CorruptData("sync operation range response missing proof".to_string())
+        })
+    }
+
+    fn fetch_result(
+        &self,
+        proto: HistoricalOperationRangeProof,
+    ) -> Result<FetchResult<F, Op, H::Digest>, QmdbError> {
+        let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
+        let proof = Proof::<F, H::Digest>::decode_cfg(proto.proof.as_slice(), &max_digests)
+            .map_err(|err| {
+                QmdbError::CorruptData(format!(
+                    "failed to decode sync operation range proof: {err}"
+                ))
+            })?;
+        let operations = proto
+            .encoded_operations
+            .iter()
+            .map(|bytes| {
+                Op::decode_cfg(bytes.as_slice(), self.op_cfg.as_ref()).map_err(|err| {
+                    QmdbError::CorruptData(format!("failed to decode sync operation: {err}"))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(FetchResult {
+            proof,
+            operations,
+            success_tx: oneshot::channel().0,
+            pinned_nodes: None,
+        })
+    }
+}
+
+impl<T, F, H, Op> Resolver for OperationLogSyncResolver<T, F, H, Op>
+where
+    T: ClientTransport + Clone + Send + Sync + 'static,
+    T::ResponseBody: Body<Data = Bytes> + Unpin,
+    <T::ResponseBody as Body>::Error: Display,
+    F: Graftable + Send + Sync + 'static,
+    H: Hasher + Send + Sync + 'static,
+    H::Digest: DecodeExt<()>,
+    Op: Decode + Encode + Read + Send + Sync + 'static,
+{
+    type Family = F;
+    type Digest = H::Digest;
+    type Op = Op;
+    type Error = QmdbError;
+
+    async fn get_operations(
+        &self,
+        op_count: Location<Self::Family>,
+        start_loc: Location<Self::Family>,
+        max_ops: NonZeroU64,
+        include_pinned_nodes: bool,
+        _cancel_rx: oneshot::Receiver<()>,
+    ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+        if include_pinned_nodes && start_loc > Location::new(0) {
+            return Err(QmdbError::CorruptData(
+                "sync from Exoware QMDB API does not support pruned lower bounds".to_string(),
+            ));
+        }
+        let proto = self
+            .operation_range_proto(op_count, start_loc, max_ops)
+            .await?;
+        self.fetch_result(proto)
+    }
+}
+
+/// Store-backed resolver for Commonware `current::sync` over Exoware QMDB's
+/// operation-log API.
+///
+/// The resolver fetches operation-log batches using [`OperationLogSyncResolver`]
+/// and builds `current::sync` targets by authenticating the operation root with
+/// the current-root witness returned by Exoware's current operation-log API.
+pub struct CurrentSyncResolver<T, F: Graftable, H: Hasher, Op: Encode + Read> {
+    operation_log: OperationLogSyncResolver<T, F, H, Op>,
+    current_root: H::Digest,
+}
+
+impl<T, F, H, Op> Clone for CurrentSyncResolver<T, F, H, Op>
+where
+    F: Graftable,
+    H: Hasher,
+    H::Digest: Clone,
+    Op: Encode + Read,
+    OperationLogSyncResolver<T, F, H, Op>: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            operation_log: self.operation_log.clone(),
+            current_root: self.current_root.clone(),
+        }
+    }
+}
+
+impl<F, H, Op> CurrentSyncResolver<PreferZstdHttpClient, F, H, Op>
+where
+    F: Graftable + Send + Sync + 'static,
+    H: Hasher + Send + Sync + 'static,
+    H::Digest: DecodeExt<()>,
+    Op: Decode + Encode + Read + Send + Sync + 'static,
+{
+    pub fn plaintext(base: &str, current_root: H::Digest, op_cfg: Op::Cfg) -> Self {
+        Self::new(
+            PreferZstdHttpClient::plaintext(),
+            ClientConfig::new(base.parse().expect("qmdb uri")),
+            current_root,
+            op_cfg,
+        )
+    }
+}
+
+impl<T, F, H, Op> CurrentSyncResolver<T, F, H, Op>
+where
+    T: ClientTransport + Clone + Send + Sync + 'static,
+    T::ResponseBody: Body<Data = Bytes> + Unpin,
+    <T::ResponseBody as Body>::Error: Display,
+    F: Graftable + Send + Sync + 'static,
+    H: Hasher + Send + Sync + 'static,
+    H::Digest: DecodeExt<()>,
+    Op: Decode + Encode + Read + Send + Sync + 'static,
+{
+    pub fn new(
+        transport: T,
+        config: ClientConfig,
+        current_root: H::Digest,
+        op_cfg: Op::Cfg,
+    ) -> Self {
+        Self {
+            operation_log: OperationLogSyncResolver::new(transport, config, op_cfg),
+            current_root,
+        }
+    }
+
+    pub fn from_operation_log(
+        operation_log: OperationLogSyncResolver<T, F, H, Op>,
+        current_root: H::Digest,
+    ) -> Self {
+        Self {
+            operation_log,
+            current_root,
+        }
+    }
+
+    pub fn operation_log(&self) -> &OperationLogSyncResolver<T, F, H, Op> {
+        &self.operation_log
+    }
+
+    pub async fn target(
+        &self,
+        op_count: Location<F>,
+    ) -> Result<current_sync::Target<F, H::Digest>, QmdbError> {
+        let proto = self
+            .operation_log
+            .operation_range_proto(op_count, Location::new(0), NonZeroU64::MIN)
+            .await?;
+        let ops_root = decode_digest::<H>(proto.ops_root.as_slice(), "current sync ops root")?;
+        let witness = decode_ops_root_witness::<F, H>(proto.ops_root_witness.as_slice())?;
+        Ok(current_sync::Target::new(
+            self.current_root,
+            ops_root,
+            witness,
+            commonware_utils::non_empty_range!(Location::new(0), op_count),
+        ))
+    }
+}
+
+impl<T, F, H, Op> Resolver for CurrentSyncResolver<T, F, H, Op>
+where
+    T: ClientTransport + Clone + Send + Sync + 'static,
+    T::ResponseBody: Body<Data = Bytes> + Unpin,
+    <T::ResponseBody as Body>::Error: Display,
+    F: Graftable + Send + Sync + 'static,
+    H: Hasher + Send + Sync + 'static,
+    H::Digest: DecodeExt<()>,
+    Op: Decode + Encode + Read + Send + Sync + 'static,
+{
+    type Family = F;
+    type Digest = H::Digest;
+    type Op = Op;
+    type Error = QmdbError;
+
+    async fn get_operations(
+        &self,
+        op_count: Location<Self::Family>,
+        start_loc: Location<Self::Family>,
+        max_ops: NonZeroU64,
+        include_pinned_nodes: bool,
+        cancel_rx: oneshot::Receiver<()>,
+    ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+        self.operation_log
+            .get_operations(
+                op_count,
+                start_loc,
+                max_ops,
+                include_pinned_nodes,
+                cancel_rx,
+            )
+            .await
+    }
+}
+
 pub struct OperationLogSubscription<B, F: Graftable, H: Hasher, Op: Decode + Encode + Read> {
     stream: ServerStream<B, SubscribeResponseView<'static>>,
     op_cfg: Arc<Op::Cfg>,
@@ -702,6 +1018,28 @@ fn connect_error_to_qmdb(err: ConnectError) -> QmdbError {
 
 fn proof_digest_cap<D: Digest>(encoded_proof: &[u8]) -> usize {
     encoded_proof.len() / D::SIZE + 1
+}
+
+fn decode_digest<H>(bytes: &[u8], label: &'static str) -> Result<H::Digest, QmdbError>
+where
+    H: Hasher,
+    H::Digest: DecodeExt<()>,
+{
+    H::Digest::decode_cfg(bytes, &())
+        .map_err(|err| QmdbError::CorruptData(format!("failed to decode {label}: {err}")))
+}
+
+fn decode_ops_root_witness<F, H>(bytes: &[u8]) -> Result<OpsRootWitness<F, H::Digest>, QmdbError>
+where
+    F: Graftable,
+    H: Hasher,
+    H::Digest: DecodeExt<()>,
+{
+    OpsRootWitness::<F, H::Digest>::decode_cfg(bytes, &()).map_err(|err| {
+        QmdbError::CorruptData(format!(
+            "failed to decode current sync ops-root witness: {err}"
+        ))
+    })
 }
 
 fn historical_target_root<F, H>(
