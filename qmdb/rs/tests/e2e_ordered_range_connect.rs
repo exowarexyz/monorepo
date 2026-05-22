@@ -13,8 +13,10 @@ use commonware_runtime::Runner as _;
 use commonware_storage::merkle::{mmb, mmr, Location, Proof};
 use commonware_storage::qmdb::any::ordered::variable::Operation as QmdbOperation;
 use commonware_storage::qmdb::{
-    any::ordered::Update, current::ordered::variable::Db as LocalQmdbDb,
+    any::ordered::{variable::Db as AnyOrderedQmdbDb, Update},
+    current::ordered::variable::Db as LocalQmdbDb,
     current::sync as current_sync,
+    sync as qmdb_sync,
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -25,8 +27,8 @@ use exoware_qmdb::proto::qmdb::v1::{
 };
 use exoware_qmdb::{
     ordered_connect_stack, recover_boundary_state, CurrentBoundaryState, CurrentOperationClient,
-    CurrentSyncResolver, OperationLogClient, OperationLogSubscribeProof, OrderedClient,
-    OrderedWriter, QmdbError, MAX_OPERATION_SIZE,
+    CurrentSyncResolver, OperationLogClient, OperationLogSubscribeProof, OperationLogSyncResolver,
+    OrderedClient, OrderedWriter, QmdbError, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
 use exoware_sdk::store::common::v1::{
@@ -35,6 +37,7 @@ use exoware_sdk::store::common::v1::{
 use exoware_sdk::StoreClient;
 
 const N: usize = 32;
+const MIN_MMB_OPERATIONS: usize = 10;
 type Digest = commonware_cryptography::sha256::Digest;
 type BatchProof = Proof<mmr::Family, Digest>;
 type BatchOperation = QmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>;
@@ -60,6 +63,15 @@ type MmbLocalDb = LocalQmdbDb<
     Sha256,
     TwoCap,
     N,
+    commonware_parallel::Sequential,
+>;
+type MmbAnyLocalDb = AnyOrderedQmdbDb<
+    mmb::Family,
+    cw_tokio::Context,
+    Vec<u8>,
+    Vec<u8>,
+    Sha256,
+    TwoCap,
     commonware_parallel::Sequential,
 >;
 
@@ -344,13 +356,13 @@ async fn build_mmb_local_batch() -> MmbLocalBatch {
                     .expect("proof");
                 inactivity_floor = latest_mmb_inactivity_floor(&cumulative);
                 ops = cumulative;
-                if *inactivity_floor > 0 {
+                if *inactivity_floor > 0 && ops.len() >= MIN_MMB_OPERATIONS {
                     break;
                 }
             }
             assert!(
-                *inactivity_floor > 0,
-                "MMB subscribe regression must exercise nonzero inactivity floor"
+                *inactivity_floor > 0 && ops.len() >= MIN_MMB_OPERATIONS,
+                "MMB fixture must exercise nonzero inactivity floor and multiple sync batches"
             );
             let boundary = boundary_from_mmb_local_db(&db, &ops).await;
             db.sync().await.expect("sync");
@@ -598,6 +610,20 @@ fn all_mmb_operations_for_key(
         .collect()
 }
 
+fn latest_mmb_value_for_key(operations: &[MmbBatchOperation], key: &[u8]) -> Option<Vec<u8>> {
+    operations
+        .iter()
+        .rev()
+        .find_map(|operation| match operation {
+            MmbBatchOperation::Delete(found) if found.as_slice() == key => Some(None),
+            MmbBatchOperation::Update(Update {
+                key: found, value, ..
+            }) if found.as_slice() == key => Some(Some(value.clone())),
+            _ => None,
+        })
+        .expect("key appears in operation log")
+}
+
 #[tokio::test]
 async fn ordered_range_connect_subscribe_emits_verifiable_range_proof() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
@@ -795,6 +821,72 @@ async fn ordered_mmb_range_connect_subscribe_verifies_range_and_multi_proofs() {
     let expected_filtered = all_mmb_operations_for_key(&local.operations, b"alpha");
     assert!(!expected_filtered.is_empty());
     assert_eq!(multi_frame.operations, expected_filtered);
+}
+
+#[tokio::test]
+async fn ordered_mmb_operation_log_any_sync_from_connect_api_reconstructs_any_db() {
+    const FETCH_BATCH_SIZE: u64 = 3;
+
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_mmb_local_batch().await;
+    assert!(
+        local.operations.len() as u64 > FETCH_BATCH_SIZE * 2,
+        "MMB any-sync fixture must require at least three fetches"
+    );
+    let expected_alpha = latest_mmb_value_for_key(&local.operations, b"alpha");
+    commit_mmb_upload(&store_client, &local).await;
+
+    let ordered_client = Arc::new(MmbTestOrderedClient::from_client(
+        store_client.clone(),
+        mmb_op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
+    let resolver = OperationLogSyncResolver::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
+        &qmdb_url,
+        mmb_op_cfg(),
+    );
+    let op_count = Location::new(local.operations.len() as u64);
+    let target = resolver.target(op_count).await.expect("any sync target");
+    let target_root = target.root;
+
+    tokio::task::spawn_blocking(move || {
+        cw_tokio::Runner::default().start(|context| async move {
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
+
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = common::any_variable_config(
+                "ordered-mmb-any-sync-connect",
+                page_cache,
+                mmb_op_cfg(),
+                NZU64!(8),
+            );
+            let db: MmbAnyLocalDb = qmdb_sync::sync(qmdb_sync::engine::Config {
+                context: context.child("sync"),
+                resolver,
+                target,
+                max_outstanding_requests: 4,
+                fetch_batch_size: NZU64!(3),
+                apply_batch_size: 32,
+                db_config: cfg,
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 4,
+            })
+            .await
+            .expect("sync any db from MMB API");
+
+            assert_eq!(db.root(), target_root);
+            assert_eq!(
+                db.get(&b"alpha".to_vec()).await.expect("get alpha"),
+                expected_alpha
+            );
+            db.destroy().await.expect("destroy synced db");
+        });
+    })
+    .await
+    .expect("join any sync runner");
 }
 
 #[tokio::test]

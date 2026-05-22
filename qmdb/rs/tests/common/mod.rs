@@ -78,7 +78,7 @@ pub fn keyless_config<C>(
 }
 
 #[allow(dead_code)]
-pub fn unordered_variable_config<C>(
+pub fn any_variable_config<C>(
     prefix: &str,
     page_cache: CacheRef,
     codec_config: C,
@@ -94,6 +94,16 @@ pub fn unordered_variable_config<C>(
         ),
         translator: TwoCap,
     }
+}
+
+#[allow(dead_code)]
+pub fn unordered_variable_config<C>(
+    prefix: &str,
+    page_cache: CacheRef,
+    codec_config: C,
+    items_per_section: NonZeroU64,
+) -> any::VariableConfig<TwoCap, C, Sequential> {
+    any_variable_config(prefix, page_cache, codec_config, items_per_section)
 }
 
 #[allow(dead_code)]

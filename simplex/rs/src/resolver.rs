@@ -221,3 +221,138 @@ where
         self.retain_subscribers(predicate)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_actor::Feedback;
+    use commonware_consensus::{
+        marshal::resolver::handler::{Finalized as FinalizedAnnotation, Request},
+        types::Height,
+    };
+    use commonware_cryptography::{
+        ed25519,
+        sha256::{Digest as Sha256Digest, Sha256},
+    };
+    use commonware_runtime::{
+        telemetry::metrics::{Metric, Registered, Registration},
+        Metrics, Name, Supervisor,
+    };
+    use commonware_utils::NZUsize;
+    use exoware_sdk::{RetryConfig, StoreClient};
+    use std::fmt;
+
+    type PublicKey = ed25519::PublicKey;
+
+    #[derive(Clone, Copy, Debug, Default)]
+    struct TestMetrics;
+
+    impl Supervisor for TestMetrics {
+        fn name(&self) -> Name {
+            Name::default()
+        }
+
+        fn child(&self, _label: &'static str) -> Self {
+            Self
+        }
+
+        fn with_attribute(self, _key: &'static str, _value: impl fmt::Display) -> Self {
+            self
+        }
+    }
+
+    impl Metrics for TestMetrics {
+        fn register<N: Into<String>, H: Into<String>, M: Metric>(
+            &self,
+            _name: N,
+            _help: H,
+            metric: M,
+        ) -> Registered<M> {
+            Registered::with_registration(metric, Registration::from(()))
+        }
+
+        fn encode(&self) -> String {
+            String::new()
+        }
+    }
+
+    fn unavailable_client() -> SimplexClient {
+        let store = StoreClient::builder()
+            .url("http://127.0.0.1:9")
+            .retry_config(RetryConfig::disabled())
+            .build()
+            .expect("store client");
+        SimplexClient::from_client(store)
+    }
+
+    #[tokio::test]
+    async fn duplicate_same_key_fetches_share_pending_request_and_retain_cancels() {
+        let (_receiver, mut resolver) = MarshalResolver::<Sha256Digest, PublicKey>::init(
+            TestMetrics,
+            NZUsize!(10),
+            unavailable_client(),
+        );
+        let commitment = Sha256::fill(0x42);
+        let finalized_height = Height::new(7);
+        let certified_height = Height::new(8);
+        let key = MarshalKey::Block(commitment);
+        let finalized = Annotation::Finalized(FinalizedAnnotation::ByHeight {
+            height: finalized_height,
+        });
+        let certified = Annotation::Certified {
+            height: certified_height,
+        };
+
+        assert_eq!(
+            resolver.fetch(Request::finalized_block_by_height(
+                commitment,
+                finalized_height
+            )),
+            Feedback::Ok
+        );
+        assert_eq!(
+            resolver.fetch(Request::finalized_block_by_height(
+                commitment,
+                finalized_height
+            )),
+            Feedback::Ok
+        );
+        assert_eq!(
+            resolver.fetch(Request::certified_block(commitment, certified_height)),
+            Feedback::Ok
+        );
+
+        {
+            let pending = resolver
+                .pending
+                .lock()
+                .expect("marshal resolver pending lock");
+            assert_eq!(pending.len(), 1);
+            assert_eq!(
+                pending.get(&key).expect("pending key"),
+                &vec![finalized, certified]
+            );
+        }
+
+        assert_eq!(
+            resolver
+                .retain(move |request, subscriber| { *request == key && *subscriber == certified }),
+            Feedback::Ok
+        );
+        {
+            let pending = resolver
+                .pending
+                .lock()
+                .expect("marshal resolver pending lock");
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending.get(&key).expect("pending key"), &vec![certified]);
+        }
+
+        assert_eq!(resolver.retain(|_, _| false), Feedback::Ok);
+        assert!(resolver
+            .pending
+            .lock()
+            .expect("marshal resolver pending lock")
+            .is_empty());
+    }
+}
