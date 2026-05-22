@@ -1,14 +1,10 @@
-use std::{marker::PhantomData, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_actor::Feedback;
 use commonware_codec::{Decode, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::{
-    marshal::{
-        core::{Actor, Buffer},
-        standard::Standard,
-        Config as MarshalConfig, Start, Update,
-    },
+    marshal::{core::Actor, standard::Standard, Config as MarshalConfig, Start, Update},
     simplex::types::{Finalization, Finalize, Notarization, Notarize, Proposal},
     types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
     Block as ConsensusBlock, CertifiableBlock, Heightable, Reporter,
@@ -17,7 +13,6 @@ use commonware_cryptography::{
     certificate::{mocks::Fixture, ConstantProvider},
     ed25519, sha256, Digest as _, Digestible, Hasher, Sha256, Signer,
 };
-use commonware_p2p::Recipients;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     buffer::paged::CacheRef, tokio as cw_tokio, Runner as _, Supervisor as _,
@@ -78,42 +73,6 @@ impl TestBlock {
         hasher.update(&header);
         hasher.finalize()
     }
-}
-
-#[derive(Clone)]
-struct NoBuffer<P>(PhantomData<P>);
-
-impl<P> Default for NoBuffer<P> {
-    fn default() -> Self {
-        Self(PhantomData)
-    }
-}
-
-impl<P> Buffer<Standard<TestBlock>> for NoBuffer<P>
-where
-    P: commonware_cryptography::PublicKey + Send + Sync + 'static,
-{
-    type PublicKey = P;
-
-    async fn find_by_digest(&self, _digest: Sha256Digest) -> Option<TestBlock> {
-        None
-    }
-
-    async fn find_by_commitment(&self, _commitment: Sha256Digest) -> Option<TestBlock> {
-        None
-    }
-
-    fn subscribe_by_digest(&self, _digest: Sha256Digest) -> oneshot::Receiver<TestBlock> {
-        oneshot::channel().1
-    }
-
-    fn subscribe_by_commitment(&self, _commitment: Sha256Digest) -> oneshot::Receiver<TestBlock> {
-        oneshot::channel().1
-    }
-
-    fn finalized(&self, _commitment: Sha256Digest) {}
-
-    fn send(&self, _round: Round, _block: TestBlock, _recipients: Recipients<P>) {}
 }
 
 #[derive(Clone)]
@@ -383,6 +342,7 @@ async fn marshal_resolver_sinks_finalized_chain_from_simplex_api() {
 
     let genesis = TestBlock::new(0, b"genesis");
     let mut expected_blocks = Vec::new();
+    expected_blocks.push(genesis.clone());
     let mut parent = genesis.digest();
     for height in 1..=BLOCKS_TO_PROCESS {
         let block =
@@ -403,7 +363,7 @@ async fn marshal_resolver_sinks_finalized_chain_from_simplex_api() {
             cw_tokio::Runner::default().start(|context| async move {
                 let partition_prefix = "simplex-marshal-resolver-sink";
                 let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
-                let config = MarshalConfig {
+                let config: MarshalConfig<_, _, _, TestBlock, TestBlock> = MarshalConfig {
                     provider: ConstantProvider::new(schemes[0].clone()),
                     epocher: FixedEpocher::new(NZU64!(100)),
                     start: Start::Genesis(genesis),
@@ -421,7 +381,11 @@ async fn marshal_resolver_sinks_finalized_chain_from_simplex_api() {
                     strategy: Sequential,
                 };
 
-                let finalizations_by_height = immutable::Archive::init(
+                let finalizations_by_height: immutable::Archive<
+                    _,
+                    Sha256Digest,
+                    Finalization<Scheme, Sha256Digest>,
+                > = immutable::Archive::init(
                     context.child("finalizations_by_height"),
                     immutable::Config {
                         metadata_partition: format!(
@@ -456,7 +420,8 @@ async fn marshal_resolver_sinks_finalized_chain_from_simplex_api() {
                 .await
                 .expect("init finalizations archive");
 
-                let finalized_blocks = immutable::Archive::init(
+                let finalized_blocks: immutable::Archive<_, Sha256Digest, TestBlock> =
+                    immutable::Archive::init(
                     context.child("finalized_blocks"),
                     immutable::Config {
                         metadata_partition: format!("{partition_prefix}-finalized-blocks-metadata"),
@@ -487,25 +452,24 @@ async fn marshal_resolver_sinks_finalized_chain_from_simplex_api() {
                 .await
                 .expect("init finalized blocks archive");
 
-                let (actor, mailbox, _) = Actor::init(
+                let (actor, mailbox, _) = Actor::<_, Standard<TestBlock>, _, _, _, _, _>::init(
                     context.child("actor"),
                     finalizations_by_height,
                     finalized_blocks,
                     config,
                 )
                 .await;
-                let (application, delivered_rx) =
-                    SinkReporter::new(BLOCKS_TO_PROCESS.try_into().expect("block count"));
+                let (application, delivered_rx) = SinkReporter::new(
+                    (BLOCKS_TO_PROCESS + 1)
+                        .try_into()
+                        .expect("block count with genesis"),
+                );
                 let (resolver_rx, resolver) = MarshalResolver::<Sha256Digest, PublicKey>::init(
                     context.child("resolver"),
                     NZUsize!(100),
                     simplex,
                 );
-                let actor_handle = actor.start(
-                    application,
-                    Some(NoBuffer::<PublicKey>::default()),
-                    (resolver_rx, resolver),
-                );
+                let actor_handle = actor.start_unbuffered(application, (resolver_rx, resolver));
 
                 mailbox.hint_finalized(
                     Height::new(BLOCKS_TO_PROCESS),
