@@ -592,6 +592,91 @@ async fn ordered_current_state_sync_from_connect_api_reconstructs_current_db() {
 }
 
 #[tokio::test]
+async fn ordered_mmb_current_state_sync_from_nonzero_connect_api_reconstructs_current_db() {
+    const FETCH_BATCH_SIZE: u64 = 3;
+
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_mmb_local_batch().await;
+    let start = Location::<mmb::Family>::new(1);
+    let start_index = usize::try_from(*start).expect("start fits usize");
+    let remaining_ops = local
+        .operations
+        .len()
+        .checked_sub(start_index)
+        .expect("sync start is inside operation log");
+    assert!(*start > 0, "MMB current-sync fixture must start after zero");
+    assert!(
+        start <= local.inactivity_floor,
+        "MMB current-sync start must be within the safe sync boundary"
+    );
+    assert!(
+        remaining_ops as u64 > FETCH_BATCH_SIZE * 2,
+        "MMB current-sync fixture must require at least three nonzero-start fetches"
+    );
+    let expected_alpha = latest_mmb_value_for_key(&local.operations[start_index..], b"alpha");
+    commit_mmb_upload(&store_client, &local).await;
+
+    let ordered_client = Arc::new(MmbTestOrderedClient::from_client(
+        store_client.clone(),
+        mmb_op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
+    let resolver = CurrentSyncResolver::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
+        &qmdb_url,
+        local.current_boundary.root,
+        mmb_op_cfg(),
+    );
+    let op_count = Location::new(local.operations.len() as u64);
+    let target = resolver
+        .target_range(start, op_count)
+        .await
+        .expect("api nonzero current sync target");
+    let target_root = target.root;
+
+    tokio::task::spawn_blocking(move || {
+        cw_tokio::Runner::default().start(|context| async move {
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
+
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = common::ordered_variable_config(
+                "ordered-mmb-current-sync-nonzero-connect",
+                page_cache,
+                mmb_op_cfg(),
+                NZU64!(8),
+            );
+            let db: MmbLocalDb = current_sync::sync(current_sync::Config {
+                context: context.child("sync"),
+                resolver,
+                target,
+                max_outstanding_requests: 4,
+                fetch_batch_size: NZU64!(3),
+                apply_batch_size: 32,
+                db_config: cfg,
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 4,
+            })
+            .await
+            .expect("sync current db from nonzero MMB API");
+
+            assert_eq!(db.root(), target_root);
+            let bounds = db.bounds().await;
+            assert_eq!(bounds.start, start);
+            assert_eq!(bounds.end, op_count);
+            assert_eq!(
+                db.get(&b"alpha".to_vec()).await.expect("get alpha"),
+                expected_alpha
+            );
+            db.destroy().await.expect("destroy synced db");
+        });
+    })
+    .await
+    .expect("join nonzero current sync runner");
+}
+
+#[tokio::test]
 async fn ordered_operation_range_connect_uses_current_root_witness() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
@@ -981,6 +1066,85 @@ async fn ordered_mmb_operation_log_any_sync_from_connect_api_reconstructs_any_db
     })
     .await
     .expect("join any sync runner");
+}
+
+#[tokio::test]
+async fn ordered_mmb_operation_log_any_sync_from_nonzero_connect_api_reconstructs_any_db() {
+    const FETCH_BATCH_SIZE: u64 = 3;
+
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_mmb_local_batch().await;
+    let start = Location::<mmb::Family>::new(3);
+    let start_index = usize::try_from(*start).expect("start fits usize");
+    let remaining_ops = local
+        .operations
+        .len()
+        .checked_sub(start_index)
+        .expect("sync start is inside operation log");
+    assert!(
+        remaining_ops as u64 > FETCH_BATCH_SIZE * 2,
+        "MMB any-sync fixture must require at least three nonzero-start fetches"
+    );
+    let expected_alpha = latest_mmb_value_for_key(&local.operations[start_index..], b"alpha");
+    commit_mmb_upload(&store_client, &local).await;
+
+    let ordered_client = Arc::new(MmbTestOrderedClient::from_client(
+        store_client.clone(),
+        mmb_op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
+    let resolver = OperationLogSyncResolver::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
+        &qmdb_url,
+        mmb_op_cfg(),
+    );
+    let op_count = Location::new(local.operations.len() as u64);
+    let target = resolver
+        .target_range(start, op_count)
+        .await
+        .expect("any nonzero sync target");
+    let target_root = target.root;
+
+    tokio::task::spawn_blocking(move || {
+        cw_tokio::Runner::default().start(|context| async move {
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
+
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = common::any_variable_config(
+                "ordered-mmb-any-sync-nonzero-connect",
+                page_cache,
+                mmb_op_cfg(),
+                NZU64!(8),
+            );
+            let db: MmbAnyLocalDb = qmdb_sync::sync(qmdb_sync::engine::Config {
+                context: context.child("sync"),
+                resolver,
+                target,
+                max_outstanding_requests: 4,
+                fetch_batch_size: NZU64!(3),
+                apply_batch_size: 32,
+                db_config: cfg,
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 4,
+            })
+            .await
+            .expect("sync any db from nonzero MMB API");
+
+            assert_eq!(db.root(), target_root);
+            let bounds = db.bounds().await;
+            assert_eq!(bounds.start, start);
+            assert_eq!(bounds.end, op_count);
+            assert_eq!(
+                db.get(&b"alpha".to_vec()).await.expect("get alpha"),
+                expected_alpha
+            );
+            db.destroy().await.expect("destroy synced db");
+        });
+    })
+    .await
+    .expect("join nonzero any sync runner");
 }
 
 #[tokio::test]

@@ -16,7 +16,7 @@ use commonware_storage::{
             unordered::db::KeyValueProof as UnorderedKeyValueProof,
         },
         operation::Key as QmdbKey,
-        verify::{verify_multi_proof, verify_proof, verify_proof_and_extract_digests},
+        verify::{verify_multi_proof, verify_proof_and_extract_digests},
     },
 };
 
@@ -46,6 +46,7 @@ pub struct OperationRangeCheckpoint<D: Digest, F: Graftable> {
     pub root: D,
     pub ops_root_witness: Option<OpsRootWitness<F, D>>,
     pub start_location: Location<F>,
+    pub pinned_nodes: Vec<D>,
     pub proof: Proof<F, D>,
     pub encoded_operations: Vec<Vec<u8>>,
 }
@@ -56,15 +57,20 @@ impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
         let operations = self
             .encoded_operations
             .iter()
-            .map(|bytes| EncodedOperation(bytes.as_slice()))
+            .map(Vec::as_slice)
             .collect::<Vec<_>>();
-        verify_proof(
-            &hasher,
-            &self.proof,
-            self.start_location,
-            &operations,
-            &self.root,
-        )
+        if self.start_location == Location::new(0) {
+            self.proof
+                .verify_range_inclusion(&hasher, &operations, self.start_location, &self.root)
+        } else {
+            self.proof.verify_proof_and_pinned_nodes(
+                &hasher,
+                &operations,
+                self.start_location,
+                &self.pinned_nodes,
+                &self.root,
+            )
+        }
     }
 
     pub fn reconstruct_peaks<H: Hasher<Digest = D>>(
@@ -263,11 +269,28 @@ where
     )
     .await
     .map_err(|e| crate::QmdbError::CommonwareMerkle(e.to_string()))?;
+    let pinned_nodes = if start_location == Location::new(0) {
+        Vec::new()
+    } else {
+        futures::future::try_join_all(F::nodes_to_pin(start_location).map(|position| async move {
+            storage
+                .get_node(position)
+                .await
+                .map_err(|e| crate::QmdbError::CommonwareMerkle(e.to_string()))?
+                .ok_or_else(|| {
+                    crate::QmdbError::CommonwareMerkle(format!(
+                        "missing pinned node at position {position}"
+                    ))
+                })
+        }))
+        .await?
+    };
     let checkpoint = OperationRangeCheckpoint {
         watermark,
         root,
         ops_root_witness: None,
         start_location,
+        pinned_nodes,
         proof,
         encoded_operations,
     };

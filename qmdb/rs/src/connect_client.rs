@@ -479,10 +479,7 @@ pub struct CurrentOperationRangeProof<D: Digest, Op, const N: usize, F: Graftabl
 /// operation-log API.
 ///
 /// This resolver covers the operation-log portion shared by ordered,
-/// unordered, immutable, and keyless QMDBs. It syncs from operation zero.
-/// Exoware's operation-range endpoint
-/// does not expose lower-bound pinned nodes, so pruned lower-bound sync targets
-/// are intentionally rejected instead of retrying forever.
+/// unordered, immutable, and keyless QMDBs.
 pub struct OperationLogSyncResolver<T, F: Graftable, H: Hasher, Op: Encode + Read> {
     rpc: OperationLogServiceClient<T>,
     op_cfg: Arc<Op::Cfg>,
@@ -547,13 +544,26 @@ where
         &self,
         op_count: Location<F>,
     ) -> Result<any_sync::Target<F, H::Digest>, QmdbError> {
+        self.target_range(Location::new(0), op_count).await
+    }
+
+    pub async fn target_range(
+        &self,
+        start_loc: Location<F>,
+        op_count: Location<F>,
+    ) -> Result<any_sync::Target<F, H::Digest>, QmdbError> {
+        if start_loc >= op_count {
+            return Err(QmdbError::CorruptData(
+                "sync target range must be non-empty".to_string(),
+            ));
+        }
         let proto = self
-            .operation_range_proto(op_count, Location::new(0), NonZeroU64::MIN)
+            .operation_range_proto(op_count, start_loc, NonZeroU64::MIN)
             .await?;
         let root = decode_digest::<H>(proto.ops_root.as_slice(), "operation sync root")?;
         Ok(any_sync::Target::new(
             root,
-            commonware_utils::non_empty_range!(Location::new(0), op_count),
+            commonware_utils::non_empty_range!(start_loc, op_count),
         ))
     }
 
@@ -592,6 +602,8 @@ where
     fn fetch_result(
         &self,
         proto: HistoricalOperationRangeProof,
+        start_loc: Location<F>,
+        include_pinned_nodes: bool,
     ) -> Result<FetchResult<F, Op, H::Digest>, QmdbError> {
         let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
         let proof = Proof::<F, H::Digest>::decode_cfg(proto.proof.as_slice(), &max_digests)
@@ -609,11 +621,27 @@ where
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let pinned_nodes = if include_pinned_nodes {
+            if start_loc > Location::new(0) && proto.pinned_nodes.is_empty() {
+                return Err(QmdbError::CorruptData(
+                    "sync operation range response missing pinned nodes".to_string(),
+                ));
+            }
+            Some(
+                proto
+                    .pinned_nodes
+                    .iter()
+                    .map(|bytes| decode_digest::<H>(bytes.as_slice(), "operation sync pinned node"))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        } else {
+            None
+        };
         Ok(FetchResult {
             proof,
             operations,
             success_tx: oneshot::channel().0,
-            pinned_nodes: None,
+            pinned_nodes,
         })
     }
 }
@@ -641,15 +669,10 @@ where
         include_pinned_nodes: bool,
         _cancel_rx: oneshot::Receiver<()>,
     ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-        if include_pinned_nodes && start_loc > Location::new(0) {
-            return Err(QmdbError::CorruptData(
-                "sync from Exoware QMDB API does not support pruned lower bounds".to_string(),
-            ));
-        }
         let proto = self
             .operation_range_proto(op_count, start_loc, max_ops)
             .await?;
-        self.fetch_result(proto)
+        self.fetch_result(proto, start_loc, include_pinned_nodes)
     }
 }
 
@@ -737,9 +760,22 @@ where
         &self,
         op_count: Location<F>,
     ) -> Result<current_sync::Target<F, H::Digest>, QmdbError> {
+        self.target_range(Location::new(0), op_count).await
+    }
+
+    pub async fn target_range(
+        &self,
+        start_loc: Location<F>,
+        op_count: Location<F>,
+    ) -> Result<current_sync::Target<F, H::Digest>, QmdbError> {
+        if start_loc >= op_count {
+            return Err(QmdbError::CorruptData(
+                "sync target range must be non-empty".to_string(),
+            ));
+        }
         let proto = self
             .operation_log
-            .operation_range_proto(op_count, Location::new(0), NonZeroU64::MIN)
+            .operation_range_proto(op_count, start_loc, NonZeroU64::MIN)
             .await?;
         let ops_root = decode_digest::<H>(proto.ops_root.as_slice(), "current sync ops root")?;
         let witness = decode_ops_root_witness::<F, H>(proto.ops_root_witness.as_slice())?;
@@ -747,7 +783,7 @@ where
             self.current_root,
             ops_root,
             witness,
-            commonware_utils::non_empty_range!(Location::new(0), op_count),
+            commonware_utils::non_empty_range!(start_loc, op_count),
         ))
     }
 }

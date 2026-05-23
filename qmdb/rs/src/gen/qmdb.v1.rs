@@ -728,6 +728,17 @@ pub struct HistoricalOperationRangeProof {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
     pub ops_root_witness: ::buffa::alloc::vec::Vec<u8>,
+    /// Opaque Commonware operation-log Merkle node digests needed to reconstruct
+    /// a sync target whose lower operation bound is `start_location`.
+    ///
+    /// Field 6: `pinned_nodes`
+    #[serde(
+        rename = "pinnedNodes",
+        alias = "pinned_nodes",
+        with = "::buffa::json_helpers::proto_seq",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec"
+    )]
+    pub pinned_nodes: ::buffa::alloc::vec::Vec<::buffa::alloc::vec::Vec<u8>>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -743,6 +754,7 @@ impl ::core::fmt::Debug for HistoricalOperationRangeProof {
             .field("encoded_operations", &self.encoded_operations)
             .field("ops_root", &self.ops_root)
             .field("ops_root_witness", &self.ops_root_witness)
+            .field("pinned_nodes", &self.pinned_nodes)
             .finish()
     }
 }
@@ -787,6 +799,9 @@ impl ::buffa::Message for HistoricalOperationRangeProof {
         for v in &self.encoded_operations {
             size += 1u32 + ::buffa::types::bytes_encoded_len(v) as u32;
         }
+        for v in &self.pinned_nodes {
+            size += 1u32 + ::buffa::types::bytes_encoded_len(v) as u32;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
         self.__buffa_cached_size.set(size);
         size
@@ -826,6 +841,14 @@ impl ::buffa::Message for HistoricalOperationRangeProof {
         for v in &self.encoded_operations {
             ::buffa::encoding::Tag::new(
                     3u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::types::encode_bytes(v, buf);
+        }
+        for v in &self.pinned_nodes {
+            ::buffa::encoding::Tag::new(
+                    6u32,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )
                 .encode(buf);
@@ -894,6 +917,16 @@ impl ::buffa::Message for HistoricalOperationRangeProof {
                 }
                 self.encoded_operations.push(::buffa::types::decode_bytes(buf)?);
             }
+            6u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 6u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                self.pinned_nodes.push(::buffa::types::decode_bytes(buf)?);
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
@@ -910,6 +943,7 @@ impl ::buffa::Message for HistoricalOperationRangeProof {
         self.ops_root.clear();
         self.ops_root_witness.clear();
         self.encoded_operations.clear();
+        self.pinned_nodes.clear();
         self.__buffa_unknown_fields.clear();
         self.__buffa_cached_size.set(0);
     }
@@ -964,6 +998,11 @@ pub struct HistoricalOperationRangeProofView<'a> {
     ///
     /// Field 5: `ops_root_witness`
     pub ops_root_witness: &'a [u8],
+    /// Opaque Commonware operation-log Merkle node digests needed to reconstruct
+    /// a sync target whose lower operation bound is `start_location`.
+    ///
+    /// Field 6: `pinned_nodes`
+    pub pinned_nodes: ::buffa::RepeatedView<'a, &'a [u8]>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> HistoricalOperationRangeProofView<'a> {
@@ -1055,6 +1094,16 @@ impl<'a> HistoricalOperationRangeProofView<'a> {
                     view.encoded_operations
                         .push(::buffa::types::borrow_bytes(&mut cur)?);
                 }
+                6u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 6u32,
+                            expected: 2u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    view.pinned_nodes.push(::buffa::types::borrow_bytes(&mut cur)?);
+                }
                 _ => {
                     ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
                     let span_len = before_tag.len() - cur.len();
@@ -1091,6 +1140,7 @@ impl<'a> ::buffa::MessageView<'a> for HistoricalOperationRangeProofView<'a> {
                 .collect(),
             ops_root: (self.ops_root).to_vec(),
             ops_root_witness: (self.ops_root_witness).to_vec(),
+            pinned_nodes: self.pinned_nodes.iter().map(|b| (b).to_vec()).collect(),
             __buffa_unknown_fields: self
                 .__buffa_unknown_fields
                 .to_owned()

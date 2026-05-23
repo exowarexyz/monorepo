@@ -133,6 +133,11 @@ fn operation_range_checkpoint_to_proto<D: commonware_cryptography::Digest, F: Gr
             .as_ref()
             .map(|witness| witness.encode().to_vec())
             .unwrap_or_default(),
+        pinned_nodes: proof
+            .pinned_nodes
+            .iter()
+            .map(|node| node.encode().to_vec())
+            .collect(),
         ..Default::default()
     }
 }
