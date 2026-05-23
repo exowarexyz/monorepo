@@ -118,8 +118,16 @@ export type HistoricalOperationRangeProof = Message<"qmdb.v1.HistoricalOperation
   opsRootWitness: Uint8Array;
 
   /**
-   * Opaque Commonware operation-log Merkle node digests needed to reconstruct
-   * a sync target whose lower operation bound is `start_location`.
+   * Opaque Commonware operation-log Merkle node digests, each encoded with
+   * `commonware-codec`, in `Family::nodes_to_pin(start_location)` order. These
+   * are outside the opaque range proof because `proof` verifies range inclusion
+   * while pinned nodes provide the pruned-prefix boundary state needed to sync
+   * or checkpoint from a non-zero lower operation bound.
+   *
+   * This field must contain exactly one digest for each position returned by
+   * `Family::nodes_to_pin(start_location)`. Consequently it is empty when
+   * `start_location == 0`; for non-zero starts in the supported MMR/MMB
+   * operation-log families, it is non-empty.
    *
    * @generated from field: repeated bytes pinned_nodes = 6;
    */

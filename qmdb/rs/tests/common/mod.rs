@@ -373,9 +373,55 @@ impl OperationLogService for StaticOperationLogService {
     }
 }
 
+/// An `OperationLogService` impl that returns one caller-supplied
+/// `GetOperationRangeResponse`. Used to feed tampered range proofs into the
+/// validated client.
+#[derive(Clone)]
+pub struct StaticOperationRangeService {
+    pub operation_range_response: GetOperationRangeResponse,
+}
+
+impl OperationLogService for StaticOperationRangeService {
+    async fn get_operation_range(
+        &self,
+        ctx: Context,
+        _request: buffa::view::OwnedView<GetOperationRangeRequestView<'static>>,
+    ) -> Result<(GetOperationRangeResponse, Context), ConnectError> {
+        Ok((self.operation_range_response.clone(), ctx))
+    }
+
+    async fn subscribe(
+        &self,
+        _ctx: Context,
+        _request: buffa::view::OwnedView<SubscribeRequestView<'static>>,
+    ) -> Result<
+        (
+            Pin<Box<dyn futures::Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>>,
+            Context,
+        ),
+        ConnectError,
+    > {
+        Err(ConnectError::new(
+            ErrorCode::Unimplemented,
+            "not implemented",
+        ))
+    }
+}
+
 #[allow(dead_code)]
 pub async fn spawn_static_operation_log_service(
     service: StaticOperationLogService,
+) -> (tokio::task::JoinHandle<()>, String) {
+    spawn_operation_log_service(
+        ConnectRpcService::new(OperationLogServiceServer::new(service))
+            .with_compression(exoware_sdk::connect_compression_registry()),
+    )
+    .await
+}
+
+#[allow(dead_code)]
+pub async fn spawn_static_operation_range_service(
+    service: StaticOperationRangeService,
 ) -> (tokio::task::JoinHandle<()>, String) {
     spawn_operation_log_service(
         ConnectRpcService::new(OperationLogServiceServer::new(service))

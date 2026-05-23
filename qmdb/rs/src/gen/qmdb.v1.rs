@@ -728,8 +728,16 @@ pub struct HistoricalOperationRangeProof {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
     pub ops_root_witness: ::buffa::alloc::vec::Vec<u8>,
-    /// Opaque Commonware operation-log Merkle node digests needed to reconstruct
-    /// a sync target whose lower operation bound is `start_location`.
+    /// Opaque Commonware operation-log Merkle node digests, each encoded with
+    /// `commonware-codec`, in `Family::nodes_to_pin(start_location)` order. These
+    /// are outside the opaque range proof because `proof` verifies range inclusion
+    /// while pinned nodes provide the pruned-prefix boundary state needed to sync
+    /// or checkpoint from a non-zero lower operation bound.
+    ///
+    /// This field must contain exactly one digest for each position returned by
+    /// `Family::nodes_to_pin(start_location)`. Consequently it is empty when
+    /// `start_location == 0`; for non-zero starts in the supported MMR/MMB
+    /// operation-log families, it is non-empty.
     ///
     /// Field 6: `pinned_nodes`
     #[serde(
@@ -998,8 +1006,16 @@ pub struct HistoricalOperationRangeProofView<'a> {
     ///
     /// Field 5: `ops_root_witness`
     pub ops_root_witness: &'a [u8],
-    /// Opaque Commonware operation-log Merkle node digests needed to reconstruct
-    /// a sync target whose lower operation bound is `start_location`.
+    /// Opaque Commonware operation-log Merkle node digests, each encoded with
+    /// `commonware-codec`, in `Family::nodes_to_pin(start_location)` order. These
+    /// are outside the opaque range proof because `proof` verifies range inclusion
+    /// while pinned nodes provide the pruned-prefix boundary state needed to sync
+    /// or checkpoint from a non-zero lower operation bound.
+    ///
+    /// This field must contain exactly one digest for each position returned by
+    /// `Family::nodes_to_pin(start_location)`. Consequently it is empty when
+    /// `start_location == 0`; for non-zero starts in the supported MMR/MMB
+    /// operation-log families, it is non-empty.
     ///
     /// Field 6: `pinned_nodes`
     pub pinned_nodes: ::buffa::RepeatedView<'a, &'a [u8]>,

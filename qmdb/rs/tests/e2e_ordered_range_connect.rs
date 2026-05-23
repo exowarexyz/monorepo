@@ -7,11 +7,13 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
 
+use commonware_codec::Encode as _;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
 use commonware_storage::merkle::{mmb, mmr, Location, Proof};
 use commonware_storage::qmdb::any::ordered::variable::Operation as QmdbOperation;
+use commonware_storage::qmdb::sync::resolver::Resolver as _;
 use commonware_storage::qmdb::{
     any::ordered::{variable::Db as AnyOrderedQmdbDb, Update},
     current::ordered::variable::Db as LocalQmdbDb,
@@ -19,7 +21,10 @@ use commonware_storage::qmdb::{
     sync as qmdb_sync,
 };
 use commonware_storage::translator::TwoCap;
-use commonware_utils::{channel::mpsc, NZUsize, NZU16, NZU64};
+use commonware_utils::{
+    channel::{mpsc, oneshot},
+    NZUsize, NZU16, NZU64,
+};
 use exoware_qmdb::proto::qmdb::v1::{
     GetCurrentOperationRangeRequest as ProtoGetCurrentOperationRangeRequest,
     GetOperationRangeRequest as ProtoGetOperationRangeRequest,
@@ -677,6 +682,261 @@ async fn ordered_mmb_current_state_sync_from_nonzero_connect_api_reconstructs_cu
 }
 
 #[tokio::test]
+async fn ordered_mmb_sync_resolvers_return_pinned_nodes_for_nonzero_fetches() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_mmb_local_batch().await;
+    let start = Location::<mmb::Family>::new(3);
+    assert!(*start > 0, "regression must exercise a nonzero lower bound");
+    assert!(
+        local.operations.len() > usize::try_from(*start).expect("start fits usize"),
+        "sync start is inside operation log"
+    );
+    commit_mmb_upload(&store_client, &local).await;
+
+    let ordered_client = Arc::new(MmbTestOrderedClient::from_client(
+        store_client.clone(),
+        mmb_op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
+    let op_count = Location::new(local.operations.len() as u64);
+    let hasher = commonware_storage::qmdb::hasher::<Sha256>();
+
+    let any_resolver =
+        OperationLogSyncResolver::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
+            &qmdb_url,
+            mmb_op_cfg(),
+        );
+    let any_target = any_resolver
+        .target_range(start, op_count)
+        .await
+        .expect("any nonzero sync target");
+    let (_cancel_tx, cancel_rx) = oneshot::channel();
+    let any_fetch = any_resolver
+        .get_operations(op_count, start, NZU64!(1), true, cancel_rx)
+        .await
+        .expect("any resolver nonzero pinned fetch");
+    let any_pinned_nodes = any_fetch
+        .pinned_nodes
+        .as_ref()
+        .expect("any resolver returned pinned nodes");
+    assert!(!any_pinned_nodes.is_empty());
+    let any_elements = any_fetch
+        .operations
+        .iter()
+        .map(|operation| operation.encode())
+        .collect::<Vec<_>>();
+    assert!(any_fetch.proof.verify_proof_and_pinned_nodes(
+        &hasher,
+        &any_elements,
+        start,
+        any_pinned_nodes,
+        &any_target.root,
+    ));
+
+    let current_resolver =
+        CurrentSyncResolver::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
+            &qmdb_url,
+            local.current_boundary.root,
+            mmb_op_cfg(),
+        );
+    let current_target = current_resolver
+        .target_range(start, op_count)
+        .await
+        .expect("current nonzero sync target");
+    let (_cancel_tx, cancel_rx) = oneshot::channel();
+    let current_fetch = current_resolver
+        .get_operations(op_count, start, NZU64!(1), true, cancel_rx)
+        .await
+        .expect("current resolver nonzero pinned fetch");
+    let current_pinned_nodes = current_fetch
+        .pinned_nodes
+        .as_ref()
+        .expect("current resolver returned pinned nodes");
+    assert!(!current_pinned_nodes.is_empty());
+    let current_elements = current_fetch
+        .operations
+        .iter()
+        .map(|operation| operation.encode())
+        .collect::<Vec<_>>();
+    assert!(current_fetch.proof.verify_proof_and_pinned_nodes(
+        &hasher,
+        &current_elements,
+        start,
+        current_pinned_nodes,
+        &current_target.ops_root,
+    ));
+}
+
+#[tokio::test]
+async fn ordered_mmb_operation_range_client_rejects_missing_nonzero_pinned_nodes() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_mmb_local_batch().await;
+    let start = Location::<mmb::Family>::new(3);
+    assert!(
+        local.operations.len() > usize::try_from(*start).expect("start fits usize"),
+        "sync start is inside operation log"
+    );
+    commit_mmb_upload(&store_client, &local).await;
+
+    let ordered_client = Arc::new(MmbTestOrderedClient::from_client(
+        store_client.clone(),
+        mmb_op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
+    let request = ProtoGetOperationRangeRequest {
+        tip: (local.operations.len() - 1) as u64,
+        start_location: start.as_u64(),
+        max_locations: 1,
+        ..Default::default()
+    };
+    let mut response = common::operation_log_rpc_client(&qmdb_url)
+        .get_operation_range(request.clone())
+        .await
+        .expect("raw get operation range")
+        .into_view()
+        .to_owned_message();
+    let proof = mmb_validated_client(&qmdb_url)
+        .get_operation_range(request.clone(), &local.current_boundary.root)
+        .await
+        .expect("nonzero operation range verifies with pinned nodes");
+    assert_eq!(proof.start_location, start);
+    assert_eq!(
+        proof.operations,
+        vec![(
+            start,
+            local.operations[usize::try_from(*start).expect("start fits usize")].clone()
+        )]
+    );
+    let mut proof = response
+        .proof
+        .as_option()
+        .cloned()
+        .expect("operation range proof");
+    assert!(!proof.pinned_nodes.is_empty());
+    proof.pinned_nodes.clear();
+    response.proof = Some(proof).into();
+
+    let (_static_server, static_url) =
+        common::spawn_static_operation_range_service(common::StaticOperationRangeService {
+            operation_range_response: response,
+        })
+        .await;
+    let client = mmb_validated_client(&static_url);
+    let err = client
+        .get_operation_range(request, &local.current_boundary.root)
+        .await
+        .expect_err("missing pinned nodes should fail nonzero operation range verification");
+    assert!(
+        matches!(err, QmdbError::CorruptData(message) if message == "non-zero historical operation range proof missing pinned nodes")
+    );
+}
+
+#[tokio::test]
+async fn ordered_mmb_operation_range_client_rejects_extra_nonzero_pinned_node() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_mmb_local_batch().await;
+    let start = Location::<mmb::Family>::new(3);
+    assert!(
+        local.operations.len() > usize::try_from(*start).expect("start fits usize"),
+        "sync start is inside operation log"
+    );
+    commit_mmb_upload(&store_client, &local).await;
+
+    let ordered_client = Arc::new(MmbTestOrderedClient::from_client(
+        store_client.clone(),
+        mmb_op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
+    let request = ProtoGetOperationRangeRequest {
+        tip: (local.operations.len() - 1) as u64,
+        start_location: start.as_u64(),
+        max_locations: 1,
+        ..Default::default()
+    };
+    let mut response = common::operation_log_rpc_client(&qmdb_url)
+        .get_operation_range(request.clone())
+        .await
+        .expect("raw get operation range")
+        .into_view()
+        .to_owned_message();
+    let mut proof = response
+        .proof
+        .as_option()
+        .cloned()
+        .expect("operation range proof");
+    assert!(!proof.pinned_nodes.is_empty());
+    proof.pinned_nodes.push(proof.pinned_nodes[0].clone());
+    response.proof = Some(proof).into();
+
+    let (_static_server, static_url) =
+        common::spawn_static_operation_range_service(common::StaticOperationRangeService {
+            operation_range_response: response,
+        })
+        .await;
+    let client = mmb_validated_client(&static_url);
+    let err = client
+        .get_operation_range(request, &local.current_boundary.root)
+        .await
+        .expect_err("extra pinned nodes should fail operation range verification");
+    assert!(
+        matches!(err, QmdbError::CorruptData(message) if message.contains("historical operation range proof pinned node count mismatch"))
+    );
+}
+
+#[tokio::test]
+async fn ordered_mmb_operation_range_client_rejects_zero_start_pinned_nodes() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_mmb_local_batch().await;
+    commit_mmb_upload(&store_client, &local).await;
+
+    let ordered_client = Arc::new(MmbTestOrderedClient::from_client(
+        store_client.clone(),
+        mmb_op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
+    let request = ProtoGetOperationRangeRequest {
+        tip: (local.operations.len() - 1) as u64,
+        start_location: 0,
+        max_locations: 1,
+        ..Default::default()
+    };
+    let mut response = common::operation_log_rpc_client(&qmdb_url)
+        .get_operation_range(request.clone())
+        .await
+        .expect("raw get operation range")
+        .into_view()
+        .to_owned_message();
+    let mut proof = response
+        .proof
+        .as_option()
+        .cloned()
+        .expect("operation range proof");
+    assert!(proof.pinned_nodes.is_empty());
+    proof
+        .pinned_nodes
+        .push(local.current_boundary.root.encode().to_vec());
+    response.proof = Some(proof).into();
+
+    let (_static_server, static_url) =
+        common::spawn_static_operation_range_service(common::StaticOperationRangeService {
+            operation_range_response: response,
+        })
+        .await;
+    let client = mmb_validated_client(&static_url);
+    let err = client
+        .get_operation_range(request, &local.current_boundary.root)
+        .await
+        .expect_err("zero-start pinned nodes should fail operation range verification");
+    assert!(
+        matches!(err, QmdbError::CorruptData(message) if message == "zero-start historical operation range proof included pinned nodes")
+    );
+}
+
+#[tokio::test]
 async fn ordered_operation_range_connect_uses_current_root_witness() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
@@ -1153,16 +1413,30 @@ async fn ordered_mmb_operation_log_any_sync_accepts_target_update_from_growing_b
 
     let (_dir, _store_server, store_client) = common::local_store_client().await;
     let local = build_mmb_growing_local_batch().await;
+    let start = Location::<mmb::Family>::new(1);
+    let start_index = usize::try_from(*start).expect("start fits usize");
+    let initial_remaining_ops = local
+        .initial
+        .operations
+        .len()
+        .checked_sub(start_index)
+        .expect("sync start is inside initial operation log");
+    assert!(*start > 0, "growing MMB sync must exercise a nonzero start");
     assert!(
-        local.initial.operations.len() as u64 > FETCH_BATCH_SIZE * 2,
-        "initial MMB any-sync target must require at least three fetches"
+        start <= local.initial.inactivity_floor,
+        "growing MMB sync start must be within the safe sync boundary"
+    );
+    assert!(
+        initial_remaining_ops as u64 > FETCH_BATCH_SIZE * 2,
+        "initial MMB any-sync target must require at least three nonzero-start fetches"
     );
     let added_operations = local.updated.operations.len() - local.initial.operations.len();
     assert!(
         added_operations as u64 > FETCH_BATCH_SIZE * 2,
         "updated MMB any-sync target must add at least three fetches"
     );
-    let expected_alpha = latest_mmb_value_for_key(&local.updated.operations, b"alpha");
+    let expected_alpha =
+        latest_mmb_value_for_key(&local.updated.operations[start_index..], b"alpha");
     commit_mmb_upload(&store_client, &local.initial).await;
 
     let ordered_client = Arc::new(MmbTestOrderedClient::from_client(
@@ -1179,9 +1453,9 @@ async fn ordered_mmb_operation_log_any_sync_accepts_target_update_from_growing_b
     let initial_op_count = Location::new(local.initial.operations.len() as u64);
     let updated_op_count = Location::new(local.updated.operations.len() as u64);
     let initial_target = resolver
-        .target(initial_op_count)
+        .target_range(start, initial_op_count)
         .await
-        .expect("initial any sync target");
+        .expect("initial nonzero any sync target");
     let expected_initial_target = initial_target.clone();
 
     let (update_tx, update_rx) = mpsc::channel(1);
@@ -1219,6 +1493,9 @@ async fn ordered_mmb_operation_log_any_sync_accepts_target_update_from_growing_b
                 db.get(&b"alpha".to_vec()).await.expect("get alpha"),
                 sync_expected_alpha
             );
+            let bounds = db.bounds().await;
+            assert_eq!(bounds.start, start);
+            assert_eq!(bounds.end, updated_op_count);
             db.destroy().await.expect("destroy synced db");
         });
     });
@@ -1231,9 +1508,9 @@ async fn ordered_mmb_operation_log_any_sync_accepts_target_update_from_growing_b
 
     commit_mmb_upload(&store_client, &local.updated).await;
     let updated_target = target_resolver
-        .target(updated_op_count)
+        .target_range(start, updated_op_count)
         .await
-        .expect("updated any sync target");
+        .expect("updated nonzero any sync target");
     assert_ne!(updated_target, expected_initial_target);
     update_tx
         .send(updated_target.clone())

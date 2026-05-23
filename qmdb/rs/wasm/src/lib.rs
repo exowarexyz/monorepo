@@ -20,7 +20,7 @@ use commonware_storage::{
         },
         current::ordered::{db::KeyValueProof, ExclusionProof},
         current::proof::{OpsRootWitness, RangeProof},
-        verify::{verify_multi_proof, verify_proof},
+        verify::{verify_multi_proof, verify_proof, verify_proof_and_pinned_nodes},
     },
 };
 use js_sys::{Array, BigInt, Object, Reflect, Uint8Array};
@@ -284,8 +284,51 @@ where
         .iter()
         .map(|(_, operation)| operation.clone())
         .collect::<Vec<_>>();
+    let pinned_nodes = proto
+        .pinned_nodes
+        .iter()
+        .map(|bytes| {
+            decode_digest::<commonware_cryptography::sha256::Digest>(
+                bytes.as_slice(),
+                "historical operation range pinned node",
+            )
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    if !start.is_valid() {
+        return Err(format!(
+            "historical operation range proof has invalid start location {}",
+            start.as_u64()
+        ));
+    }
+    let expected_pinned_nodes = F::nodes_to_pin(start).count();
+    if expected_pinned_nodes == 0 && !pinned_nodes.is_empty() {
+        return Err(
+            "zero-start historical operation range proof included pinned nodes".to_string(),
+        );
+    }
+    if expected_pinned_nodes > 0 && pinned_nodes.is_empty() {
+        return Err("non-zero historical operation range proof missing pinned nodes".to_string());
+    }
+    if pinned_nodes.len() != expected_pinned_nodes {
+        return Err(format!(
+            "historical operation range proof pinned node count mismatch: expected {expected_pinned_nodes}, got {}",
+            pinned_nodes.len()
+        ));
+    }
     let hasher = commonware_storage::qmdb::hasher::<Sha256>();
-    if !verify_proof(&hasher, &proof, start, &ordered_operations, &target_root) {
+    let verified = if expected_pinned_nodes == 0 {
+        verify_proof(&hasher, &proof, start, &ordered_operations, &target_root)
+    } else {
+        verify_proof_and_pinned_nodes(
+            &hasher,
+            &proof,
+            start,
+            &ordered_operations,
+            &pinned_nodes,
+            &target_root,
+        )
+    };
+    if !verified {
         return Err("historical operation range proof failed verification".to_string());
     }
     Ok((*root, operations))
@@ -997,6 +1040,22 @@ mod tests {
         TestOperation<F>:
             Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
     {
+        historical_range_fixture_at::<F>(1, 4)
+    }
+
+    fn historical_range_fixture_at<F>(
+        start_offset: u64,
+        end_offset: u64,
+    ) -> (
+        HistoricalOperationRangeProof,
+        Sha256Digest,
+        Vec<(Location<F>, TestOperation<F>)>,
+    )
+    where
+        F: merkle::Graftable,
+        TestOperation<F>:
+            Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
+    {
         let hasher = commonware_storage::qmdb::hasher::<Sha256>();
         let mut merkle = Mem::<F, Sha256Digest>::new();
         let operations = sample_operations::<F>();
@@ -1010,26 +1069,42 @@ mod tests {
         merkle.apply_batch(&batch).unwrap();
 
         let root = merkle.root(&hasher, 0).unwrap();
-        let start = Location::<F>::new(1);
-        let end = Location::<F>::new(4);
+        let start = Location::<F>::new(start_offset);
+        let end = Location::<F>::new(end_offset);
         let proof = merkle.range_proof(&hasher, start..end, 0).unwrap();
-        let proven_operations = operations[1..4].to_vec();
+        let pinned_nodes = if start == Location::new(0) {
+            Vec::new()
+        } else {
+            F::nodes_to_pin(start)
+                .map(|position| {
+                    merkle
+                        .get_node(position)
+                        .expect("pinned node exists")
+                        .encode()
+                        .to_vec()
+                })
+                .collect()
+        };
+        let proven_operations = operations
+            [usize::try_from(start_offset).unwrap()..usize::try_from(end_offset).unwrap()]
+            .to_vec();
         let expected = proven_operations
             .iter()
             .cloned()
             .enumerate()
-            .map(|(offset, operation)| (Location::new(1 + offset as u64), operation))
+            .map(|(offset, operation)| (Location::new(start_offset + offset as u64), operation))
             .collect();
 
         (
             HistoricalOperationRangeProof {
                 proof: proof.encode().to_vec(),
-                start_location: 1,
+                start_location: start_offset,
                 encoded_operations: proven_operations
                     .iter()
                     .map(|operation| operation.encode().to_vec())
                     .collect(),
                 ops_root: root.encode().to_vec(),
+                pinned_nodes,
                 ..Default::default()
             },
             root,
@@ -1123,6 +1198,81 @@ mod tests {
 
         assert_eq!(verified_root, root);
         assert_eq!(verified, expected);
+    }
+
+    #[test]
+    fn rejects_historical_operation_range_mmr_without_nonzero_pinned_nodes() {
+        let (mut proto, root, _) = historical_range_fixture::<mmr::Family>();
+        proto.pinned_nodes.clear();
+
+        let err = verify_operation_range_from_proto::<mmr::Family>(&proto, &root).unwrap_err();
+
+        assert_eq!(
+            err,
+            "non-zero historical operation range proof missing pinned nodes"
+        );
+    }
+
+    #[test]
+    fn rejects_historical_operation_range_mmb_without_nonzero_pinned_nodes() {
+        let (mut proto, root, _) = historical_range_fixture::<mmb::Family>();
+        proto.pinned_nodes.clear();
+
+        let err = verify_operation_range_from_proto::<mmb::Family>(&proto, &root).unwrap_err();
+
+        assert_eq!(
+            err,
+            "non-zero historical operation range proof missing pinned nodes"
+        );
+    }
+
+    #[test]
+    fn rejects_historical_operation_range_mmr_with_zero_start_pinned_nodes() {
+        let (mut proto, root, _) = historical_range_fixture_at::<mmr::Family>(0, 3);
+        proto.pinned_nodes.push(root.encode().to_vec());
+
+        let err = verify_operation_range_from_proto::<mmr::Family>(&proto, &root).unwrap_err();
+
+        assert_eq!(
+            err,
+            "zero-start historical operation range proof included pinned nodes"
+        );
+    }
+
+    #[test]
+    fn rejects_historical_operation_range_mmb_with_zero_start_pinned_nodes() {
+        let (mut proto, root, _) = historical_range_fixture_at::<mmb::Family>(0, 3);
+        proto.pinned_nodes.push(root.encode().to_vec());
+
+        let err = verify_operation_range_from_proto::<mmb::Family>(&proto, &root).unwrap_err();
+
+        assert_eq!(
+            err,
+            "zero-start historical operation range proof included pinned nodes"
+        );
+    }
+
+    #[test]
+    fn rejects_historical_operation_range_mmb_with_tampered_pinned_node() {
+        let (mut proto, root, _) = historical_range_fixture::<mmb::Family>();
+        proto.pinned_nodes[0][0] ^= 0x01;
+
+        let err = verify_operation_range_from_proto::<mmb::Family>(&proto, &root).unwrap_err();
+
+        assert_eq!(err, "historical operation range proof failed verification");
+    }
+
+    #[test]
+    fn rejects_historical_operation_range_mmb_with_extra_pinned_node() {
+        let (mut proto, root, _) = historical_range_fixture::<mmb::Family>();
+        proto.pinned_nodes.push(proto.pinned_nodes[0].clone());
+
+        let err = verify_operation_range_from_proto::<mmb::Family>(&proto, &root).unwrap_err();
+
+        assert!(
+            err.contains("historical operation range proof pinned node count mismatch"),
+            "{err}"
+        );
     }
 
     #[test]
