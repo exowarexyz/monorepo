@@ -698,7 +698,7 @@ where
     fn clone(&self) -> Self {
         Self {
             operation_log: self.operation_log.clone(),
-            current_root: self.current_root.clone(),
+            current_root: self.current_root,
         }
     }
 }
