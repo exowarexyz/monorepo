@@ -1081,7 +1081,7 @@ where
                 location: location.as_u64(),
             });
         };
-        OpsRootWitness::<F, H::Digest>::decode_cfg(bytes.as_ref(), &()).map_err(|e| {
+        OpsRootWitness::<F, H::Digest>::decode(bytes.as_ref()).map_err(|e| {
             QmdbError::CorruptData(format!(
                 "current ops-root witness at {location} decode error: {e}"
             ))

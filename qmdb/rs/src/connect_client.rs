@@ -790,13 +790,12 @@ where
             .await?;
         let ops_root =
             decode_digest::<H::Digest>(proto.ops_root.as_slice(), "current sync ops root")?;
-        let witness =
-            OpsRootWitness::<F, H::Digest>::decode_cfg(proto.ops_root_witness.as_slice(), &())
-                .map_err(|err| {
-                    QmdbError::CorruptData(format!(
-                        "failed to decode current sync ops-root witness: {err}"
-                    ))
-                })?;
+        let witness = OpsRootWitness::<F, H::Digest>::decode(proto.ops_root_witness.as_slice())
+            .map_err(|err| {
+                QmdbError::CorruptData(format!(
+                    "failed to decode current sync ops-root witness: {err}"
+                ))
+            })?;
         Ok(current_sync::Target::new(
             self.current_root,
             ops_root,
@@ -1094,8 +1093,8 @@ where
         }
         (false, false) => {
             let ops_root = decode_digest::<H::Digest>(ops_root, "historical ops root")?;
-            let witness = OpsRootWitness::<F, H::Digest>::decode_cfg(ops_root_witness, &())
-                .map_err(|err| {
+            let witness =
+                OpsRootWitness::<F, H::Digest>::decode(ops_root_witness).map_err(|err| {
                     QmdbError::CorruptData(format!(
                         "failed to decode historical ops-root witness: {err}"
                     ))

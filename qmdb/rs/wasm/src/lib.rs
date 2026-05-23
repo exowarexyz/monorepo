@@ -8,7 +8,7 @@ use crate::proto::qmdb::v1::{
     HistoricalOperationRangeProofView,
 };
 use buffa::MessageView;
-use commonware_codec::{Decode, DecodeExt, Encode, FixedSize, RangeCfg, Read};
+use commonware_codec::{Decode, DecodeExt, DecodeRangeExt, Encode, FixedSize, RangeCfg, Read};
 use commonware_cryptography::{Digest, Sha256};
 use commonware_storage::{
     merkle::{self, Location},
@@ -60,16 +60,12 @@ pub mod proto {
 
 const MAX_OPERATION_SIZE: usize = u16::MAX as usize;
 
-fn vec_key_cfg() -> (RangeCfg<usize>, ()) {
-    ((0..=MAX_OPERATION_SIZE).into(), ())
-}
-
 fn encode_vec_key_wire(key: &[u8]) -> Vec<u8> {
-    key.to_vec().encode().to_vec()
+    key.encode().to_vec()
 }
 
 fn decode_vec_key_wire(encoded_key: &[u8]) -> Result<Vec<u8>, String> {
-    Vec::<u8>::decode_cfg(encoded_key, &vec_key_cfg())
+    Vec::<u8>::decode_range(encoded_key, 0..=MAX_OPERATION_SIZE)
         .map_err(|err| format!("failed to decode QMDB key: {err}"))
 }
 
@@ -137,9 +133,8 @@ fn historical_target_root<F: merkle::Graftable>(
         }
         (false, false) => {
             let ops_root = decode_digest(ops_root, "historical ops root")?;
-            let witness = OpsRootWitness::<F, commonware_cryptography::sha256::Digest>::decode_cfg(
+            let witness = OpsRootWitness::<F, commonware_cryptography::sha256::Digest>::decode(
                 ops_root_witness,
-                &(),
             )
             .map_err(|err| format!("failed to decode historical ops-root witness: {err}"))?;
             let hasher = commonware_storage::qmdb::hasher::<Sha256>();
@@ -214,9 +209,8 @@ where
     if proto.ops_root_witness.is_empty() {
         return Ok((ops_root, operations));
     }
-    let witness = OpsRootWitness::<F, commonware_cryptography::sha256::Digest>::decode_cfg(
+    let witness = OpsRootWitness::<F, commonware_cryptography::sha256::Digest>::decode(
         proto.ops_root_witness.as_slice(),
-        &(),
     )
     .map_err(|err| format!("failed to decode historical multi proof ops-root witness: {err}"))?;
     let hasher = commonware_storage::qmdb::hasher::<Sha256>();

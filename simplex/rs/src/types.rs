@@ -1,5 +1,5 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use commonware_codec::{Decode, Encode, EncodeSize, Error, Read, Write};
+use commonware_codec::{Decode, EncodeSize, Error, Read, Write};
 use commonware_consensus::{simplex::types, Block};
 use commonware_cryptography::{certificate, Digest};
 
@@ -7,19 +7,18 @@ const HEADER_LENGTH_BYTES: usize = 4;
 
 fn write_block_data<B>(header: &B, body: &[u8], buf: &mut impl BufMut)
 where
-    B: Encode,
+    B: Write + EncodeSize,
 {
-    let header_bytes = header.encode();
     let header_len =
-        u32::try_from(header_bytes.len()).expect("header block encoding exceeds u32 length");
+        u32::try_from(header.encode_size()).expect("header block encoding exceeds u32 length");
     buf.put_u32(header_len);
-    buf.put_slice(&header_bytes);
+    header.write(buf);
     buf.put_slice(body);
 }
 
 pub fn encode_block_data<B>(header: &B, body: &[u8]) -> Bytes
 where
-    B: Encode,
+    B: Write + EncodeSize,
 {
     let mut buf = BytesMut::with_capacity(HEADER_LENGTH_BYTES + header.encode_size() + body.len());
     write_block_data(header, body, &mut buf);
@@ -55,7 +54,7 @@ impl<B> BlockData<B> {
 
 impl<B> Write for BlockData<B>
 where
-    B: Encode,
+    B: Write + EncodeSize,
 {
     fn write(&self, buf: &mut impl BufMut) {
         write_block_data(&self.header, &self.body, buf);

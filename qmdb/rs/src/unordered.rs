@@ -572,7 +572,7 @@ where
         let Some(bytes) = session.get(&encode_ops_root_witness_key(location)).await? else {
             return Ok(None);
         };
-        OpsRootWitness::<F, H::Digest>::decode_cfg(bytes.as_ref(), &())
+        OpsRootWitness::<F, H::Digest>::decode(bytes.as_ref())
             .map(Some)
             .map_err(|e| {
                 QmdbError::CorruptData(format!(
