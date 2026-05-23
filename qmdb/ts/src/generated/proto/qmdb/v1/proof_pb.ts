@@ -232,6 +232,8 @@ export const CurrentKeyExclusionProofSchema: GenMessage<CurrentKeyExclusionProof
  */
 export type CurrentKeyLookupResult = Message<"qmdb.v1.CurrentKeyLookupResult"> & {
   /**
+   * Codec-encoded logical QMDB key (`K::encode()` bytes).
+   *
    * @generated from field: bytes key = 1;
    */
   key: Uint8Array;
@@ -266,6 +268,8 @@ export const CurrentKeyLookupResultSchema: GenMessage<CurrentKeyLookupResult> = 
  */
 export type CurrentKeyRangeEntry = Message<"qmdb.v1.CurrentKeyRangeEntry"> & {
   /**
+   * Codec-encoded logical QMDB key (`K::encode()` bytes).
+   *
    * @generated from field: bytes key = 1;
    */
   key: Uint8Array;

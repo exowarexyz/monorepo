@@ -19,7 +19,7 @@ service KeyLookupService {
 
 // Current key proof request.
 message GetRequest {
-  // Raw logical QMDB key (`K::as_ref()` bytes), not a store row key.
+  // Codec-encoded logical QMDB key (`K::encode()` bytes), not a store row key.
   bytes key = 1;
 
   // Published ordered-QMDB batch-boundary to prove against. The client must
@@ -29,7 +29,7 @@ message GetRequest {
 
 // Current key proof request for one or more logical keys.
 message GetManyRequest {
-  // Raw logical QMDB keys (`K::as_ref()` bytes), not store row keys.
+  // Codec-encoded logical QMDB keys (`K::encode()` bytes), not store row keys.
   repeated bytes keys = 1 [
     (buf.validate.field).repeated.min_items = 1,
     (buf.validate.field).repeated.max_items = 1024

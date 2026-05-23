@@ -7,6 +7,7 @@ mod common;
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 
+use commonware_codec::Encode;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
@@ -41,6 +42,7 @@ type LocalDb<F> = LocalQmdbDb<
     N,
     commonware_parallel::Sequential,
 >;
+
 type FixedLocalDb<F> = LocalFixedQmdbDb<
     F,
     cw_tokio::Context,
@@ -725,8 +727,8 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
     let raw_range = c
         .key_range_proof_raw_at(
             latest_location,
-            b"k-00000000".as_slice(),
-            Some(b"k-00000020".as_slice()),
+            b"k-00000000".to_vec(),
+            Some(b"k-00000020".to_vec()),
             10,
         )
         .await
@@ -738,7 +740,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
         .collect::<Vec<_>>();
     assert_eq!(raw_range.entries.len(), expected_range_keys.len());
     for (entry, expected_key) in raw_range.entries.iter().zip(expected_range_keys) {
-        assert_eq!(entry.key, expected_key);
+        assert_eq!(entry.key, expected_key.encode().to_vec());
         assert!(entry.proof.verify::<Sha256>());
     }
 }

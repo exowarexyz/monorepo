@@ -16,9 +16,11 @@ export const file_qmdb_v1_key_range: GenFile = /*@__PURE__*/
   fileDesc("ChdxbWRiL3YxL2tleV9yYW5nZS5wcm90bxIHcW1kYi52MSJrCg9HZXRSYW5nZVJlcXVlc3QSEQoJc3RhcnRfa2V5GAEgASgMEhQKB2VuZF9rZXkYAiABKAxIAIgBARIWCgVsaW1pdBgDIAEoDUIHukgEKgIgABILCgN0aXAYBCABKARCCgoIX2VuZF9rZXkiggIKEEdldFJhbmdlUmVzcG9uc2USLgoHZW50cmllcxgBIAMoCzIdLnFtZGIudjEuQ3VycmVudEtleVJhbmdlRW50cnkSOwoLc3RhcnRfcHJvb2YYAiABKAsyIS5xbWRiLnYxLkN1cnJlbnRLZXlFeGNsdXNpb25Qcm9vZkgAiAEBEjkKCWVuZF9wcm9vZhgDIAEoCzIhLnFtZGIudjEuQ3VycmVudEtleUV4Y2x1c2lvblByb29mSAGIAQESEAoIaGFzX21vcmUYBCABKAgSFgoObmV4dF9zdGFydF9rZXkYBSABKAxCDgoMX3N0YXJ0X3Byb29mQgwKCl9lbmRfcHJvb2YyWQoWT3JkZXJlZEtleVJhbmdlU2VydmljZRI/CghHZXRSYW5nZRIYLnFtZGIudjEuR2V0UmFuZ2VSZXF1ZXN0GhkucW1kYi52MS5HZXRSYW5nZVJlc3BvbnNlYgZwcm90bzM", [file_buf_validate_validate, file_qmdb_v1_proof]);
 
 /**
- * Current ordered key range proof request. The range is half-open:
- * `start_key <= key < end_key` when `end_key` is set; otherwise it scans to the
- * end of the ordered keyspace. `limit` must be non-zero.
+ * Current ordered key range proof request. Key fields are codec-encoded logical
+ * QMDB keys (`K::encode()` bytes), not store row keys. The range is half-open:
+ * `start_key <= key < end_key` after decoding `K` when `end_key` is set;
+ * otherwise it scans to the end of the ordered keyspace. `limit` must be
+ * non-zero.
  *
  * @generated from message qmdb.v1.GetRangeRequest
  */
@@ -52,7 +54,8 @@ export const GetRangeRequestSchema: GenMessage<GetRangeRequest> = /*@__PURE__*/
   messageDesc(file_qmdb_v1_key_range, 0);
 
 /**
- * Ordered current key-range proof response. `start_proof`, when present,
+ * Ordered current key-range proof response. Key fields are codec-encoded
+ * logical QMDB keys (`K::encode()` bytes). `start_proof`, when present,
  * authenticates the boundary before the first returned key (or the entire empty
  * range). `end_proof`, when present, authenticates the exclusive end boundary.
  *

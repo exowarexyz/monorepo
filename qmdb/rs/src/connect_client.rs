@@ -40,8 +40,8 @@ use exoware_sdk::ClientError;
 use http_body::Body;
 
 use crate::proof::{
-    raw_key_from_bytes, verify_ordered_exclusion_proof, verify_ordered_key_value_proof,
-    VerifiedKeyLookup, VerifiedKeyRange, VerifiedKeyValue, VerifiedUnorderedKeyValue,
+    verify_ordered_exclusion_proof, verify_ordered_key_value_proof, VerifiedKeyLookup,
+    VerifiedKeyRange, VerifiedKeyValue, VerifiedUnorderedKeyValue,
 };
 use crate::QmdbError;
 
@@ -163,6 +163,10 @@ where
         expected_root: &H::Digest,
     ) -> Result<VerifiedKeyValue<H::Digest, K, V, F, E>, QmdbError> {
         let requested_key = request.key.clone();
+        let decoded_requested_key = K::decode_cfg(requested_key.as_slice(), self.key_cfg.as_ref())
+            .map_err(|err| {
+                QmdbError::CorruptData(format!("failed to decode requested QMDB key: {err}"))
+            })?;
         let response = self
             .rpc
             .get(request)
@@ -185,7 +189,7 @@ where
                 "qmdb get proof did not verify an update".to_string(),
             ));
         };
-        if <K as AsRef<[u8]>>::as_ref(&update.key) != requested_key.as_slice() {
+        if update.key != decoded_requested_key {
             return Err(QmdbError::ProofVerification {
                 kind: crate::ProofKind::CurrentKeyValue,
             });
@@ -227,6 +231,13 @@ where
                         kind: crate::ProofKind::CurrentKeyValue,
                     });
                 }
+                let decoded_requested_key = K::decode_cfg(
+                    requested_key.as_slice(),
+                    self.key_cfg.as_ref(),
+                )
+                .map_err(|err| {
+                    QmdbError::CorruptData(format!("failed to decode requested QMDB key: {err}"))
+                })?;
                 match result.result.as_ref() {
                     Some(current_key_lookup_result::Result::Hit(proof)) => {
                         let verified = verify_key_value_from_proto::<F, H, K, V, N, E>(
@@ -240,7 +251,7 @@ where
                                 "qmdb get_many hit proof did not verify an update".to_string(),
                             ));
                         };
-                        if <K as AsRef<[u8]>>::as_ref(&update.key) != requested_key.as_slice() {
+                        if update.key != decoded_requested_key {
                             return Err(QmdbError::ProofVerification {
                                 kind: crate::ProofKind::CurrentKeyValue,
                             });
@@ -1122,8 +1133,8 @@ where
     }
 }
 
-enum ExclusionBoundary {
-    Span { start: Vec<u8>, end: Vec<u8> },
+enum ExclusionBoundary<K> {
+    Span { start: K, end: K },
     Empty,
 }
 
@@ -1428,7 +1439,7 @@ fn verify_key_exclusion_from_proto<F, H, K, V, const N: usize, E>(
     update_cfg: &<ordered::Update<K, E> as Read>::Cfg,
     key_cfg: &K::Cfg,
     value_cfg: &V::Cfg,
-) -> Result<ExclusionBoundary, QmdbError>
+) -> Result<ExclusionBoundary<K>, QmdbError>
 where
     F: Graftable,
     H: Hasher,
@@ -1453,7 +1464,7 @@ where
             "failed to decode current key-exclusion proof: {err}"
         ))
     })?;
-    let requested_key = raw_key_from_bytes::<K>(requested_key, key_cfg).map_err(|err| {
+    let requested_key = K::decode_cfg(requested_key, key_cfg).map_err(|err| {
         QmdbError::CorruptData(format!("failed to decode requested exclusion key: {err}"))
     })?;
     if !verify_ordered_exclusion_proof::<F, H, K, E, N>(&requested_key, &proof, root) {
@@ -1462,20 +1473,16 @@ where
         });
     }
     let boundary = match proof {
-        ExclusionProof::KeyValue(_, update) => {
-            let span_start = <K as AsRef<[u8]>>::as_ref(&update.key);
-            let span_end = <K as AsRef<[u8]>>::as_ref(&update.next_key);
-            ExclusionBoundary::Span {
-                start: span_start.to_vec(),
-                end: span_end.to_vec(),
-            }
-        }
+        ExclusionProof::KeyValue(_, update) => ExclusionBoundary::Span {
+            start: update.key,
+            end: update.next_key,
+        },
         ExclusionProof::Commit(_, _) => ExclusionBoundary::Empty,
     };
     Ok(boundary)
 }
 
-fn span_contains_key(span_start: &[u8], span_end: &[u8], key: &[u8]) -> bool {
+fn span_contains_key<K: Ord>(span_start: &K, span_end: &K, key: &K) -> bool {
     if span_start >= span_end {
         key >= span_start || key < span_end
     } else {
@@ -1509,6 +1516,18 @@ where
     ExclusionProof<F, K, E, H::Digest, N>:
         Read<Cfg = (usize, <ordered::Update<K, E> as Read>::Cfg, V::Cfg)>,
 {
+    let encoded_start_key = start_key;
+    let encoded_end_key = end_key;
+    let start_key = K::decode_cfg(encoded_start_key, key_cfg).map_err(|err| {
+        QmdbError::CorruptData(format!("failed to decode range start key: {err}"))
+    })?;
+    let end_key = encoded_end_key
+        .map(|key| {
+            K::decode_cfg(key, key_cfg).map_err(|err| {
+                QmdbError::CorruptData(format!("failed to decode range end key: {err}"))
+            })
+        })
+        .transpose()?;
     let mut entries = Vec::with_capacity(response.entries.len());
     for entry in &response.entries {
         let proof = entry.proof.as_option().ok_or_else(|| {
@@ -1521,7 +1540,10 @@ where
                 "qmdb get_range entry proof did not verify an update".to_string(),
             ));
         };
-        if <K as AsRef<[u8]>>::as_ref(&update.key) != entry.key.as_slice() {
+        let entry_key = K::decode_cfg(entry.key.as_slice(), key_cfg).map_err(|err| {
+            QmdbError::CorruptData(format!("failed to decode range entry key: {err}"))
+        })?;
+        if update.key != entry_key {
             return Err(QmdbError::ProofVerification {
                 kind: crate::ProofKind::CurrentKeyValue,
             });
@@ -1533,7 +1555,7 @@ where
         let ordered::Operation::Update(first_update) = &first.operation else {
             unreachable!("range entries were checked as updates");
         };
-        if <K as AsRef<[u8]>>::as_ref(&first_update.key) != start_key {
+        if first_update.key != start_key {
             let start_proof = response.start_proof.as_option().ok_or_else(|| {
                 QmdbError::CorruptData(
                     "qmdb get_range response missing start boundary proof".to_string(),
@@ -1541,14 +1563,13 @@ where
             })?;
             match verify_key_exclusion_from_proto::<F, H, K, V, N, E>(
                 start_proof,
-                start_key,
+                encoded_start_key,
                 root,
                 update_cfg,
                 key_cfg,
                 value_cfg,
             )? {
-                ExclusionBoundary::Span { end, .. }
-                    if end.as_slice() == <K as AsRef<[u8]>>::as_ref(&first_update.key) => {}
+                ExclusionBoundary::Span { end, .. } if end == first_update.key => {}
                 ExclusionBoundary::Span { .. } | ExclusionBoundary::Empty => {
                     return Err(QmdbError::ProofVerification {
                         kind: crate::ProofKind::CurrentKeyExclusion,
@@ -1564,21 +1585,21 @@ where
         })?;
         let boundary = verify_key_exclusion_from_proto::<F, H, K, V, N, E>(
             start_proof,
-            start_key,
+            encoded_start_key,
             root,
             update_cfg,
             key_cfg,
             value_cfg,
         )?;
-        match (end_key, boundary) {
+        match (end_key.as_ref(), boundary) {
             (Some(end_key), ExclusionBoundary::Span { start, end })
-                if !span_contains_key(&start, &end, end_key) && end.as_slice() != end_key =>
+                if !span_contains_key(&start, &end, end_key) && end != *end_key =>
             {
                 return Err(QmdbError::ProofVerification {
                     kind: crate::ProofKind::CurrentKeyExclusion,
                 });
             }
-            (None, ExclusionBoundary::Span { end, .. }) if end.as_slice() > start_key => {
+            (None, ExclusionBoundary::Span { end, .. }) if end > start_key => {
                 return Err(QmdbError::ProofVerification {
                     kind: crate::ProofKind::CurrentKeyExclusion,
                 });
@@ -1594,7 +1615,7 @@ where
         let ordered::Operation::Update(right) = &pair[1].operation else {
             unreachable!("range entries were checked as updates");
         };
-        if <K as AsRef<[u8]>>::as_ref(&left.next_key) != <K as AsRef<[u8]>>::as_ref(&right.key) {
+        if left.next_key != right.key {
             return Err(QmdbError::ProofVerification {
                 kind: crate::ProofKind::CurrentKeyValue,
             });
@@ -1610,7 +1631,11 @@ where
         let ordered::Operation::Update(last_update) = &last.operation else {
             unreachable!("range entries were checked as updates");
         };
-        if response.next_start_key.as_slice() != <K as AsRef<[u8]>>::as_ref(&last_update.next_key) {
+        let next_start_key =
+            K::decode_cfg(response.next_start_key.as_slice(), key_cfg).map_err(|err| {
+                QmdbError::CorruptData(format!("failed to decode range next_start_key: {err}"))
+            })?;
+        if next_start_key != last_update.next_key {
             return Err(QmdbError::ProofVerification {
                 kind: crate::ProofKind::CurrentKeyValue,
             });
@@ -1623,21 +1648,15 @@ where
         let ordered::Operation::Update(last_update) = &last.operation else {
             unreachable!("range entries were checked as updates");
         };
-        if let Some(end_key) = end_key {
-            if <K as AsRef<[u8]>>::as_ref(&last_update.next_key) != end_key
-                && !span_contains_key(
-                    <K as AsRef<[u8]>>::as_ref(&last_update.key),
-                    <K as AsRef<[u8]>>::as_ref(&last_update.next_key),
-                    end_key,
-                )
+        if let Some(end_key) = end_key.as_ref() {
+            if last_update.next_key != *end_key
+                && !span_contains_key(&last_update.key, &last_update.next_key, end_key)
             {
                 return Err(QmdbError::ProofVerification {
                     kind: crate::ProofKind::CurrentKeyValue,
                 });
             }
-        } else if <K as AsRef<[u8]>>::as_ref(&last_update.next_key)
-            > <K as AsRef<[u8]>>::as_ref(&first_update.key)
-        {
+        } else if last_update.next_key > first_update.key {
             return Err(QmdbError::ProofVerification {
                 kind: crate::ProofKind::CurrentKeyValue,
             });

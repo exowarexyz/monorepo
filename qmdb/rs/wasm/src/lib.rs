@@ -60,6 +60,19 @@ pub mod proto {
 
 const MAX_OPERATION_SIZE: usize = u16::MAX as usize;
 
+fn vec_key_cfg() -> (RangeCfg<usize>, ()) {
+    ((0..=MAX_OPERATION_SIZE).into(), ())
+}
+
+fn encode_vec_key_wire(key: &[u8]) -> Vec<u8> {
+    key.to_vec().encode().to_vec()
+}
+
+fn decode_vec_key_wire(encoded_key: &[u8]) -> Result<Vec<u8>, String> {
+    Vec::<u8>::decode_cfg(encoded_key, &vec_key_cfg())
+        .map_err(|err| format!("failed to decode QMDB key: {err}"))
+}
+
 enum ExclusionBoundary {
     Span { start: Vec<u8>, end: Vec<u8> },
     Empty,
@@ -437,11 +450,12 @@ where
     OrderedOperation<F, Vec<u8>, Vec<u8>>:
         Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
 {
+    let requested_key = decode_vec_key_wire(requested_key)?;
     let (location, operation) = verify_key_value_from_proto::<F>(proto, root)?;
     let OrderedOperation::Update(update) = &operation else {
         return Err("current key-value proof operation must be an update".to_string());
     };
-    if update.key.as_slice() != requested_key {
+    if update.key.as_slice() != requested_key.as_slice() {
         return Err("current key-value proof key mismatch".to_string());
     }
     Ok((location, operation))
@@ -473,7 +487,7 @@ where
         ),
     )
     .map_err(|err| format!("failed to decode current key-exclusion proof: {err}"))?;
-    let requested_key = requested_key.to_vec();
+    let requested_key = decode_vec_key_wire(requested_key)?;
     let hasher = commonware_storage::qmdb::hasher::<Sha256>();
     if !OrderedCurrentDb::<F>::verify_exclusion_proof(&hasher, &requested_key, &proof, current_root)
     {
@@ -624,8 +638,10 @@ where
         if result.key.as_slice() != requested_key.as_slice() {
             return Err(js_err("getMany result key does not match requested key"));
         }
+        let decoded_requested_key =
+            decode_vec_key_wire(requested_key.as_slice()).map_err(js_err)?;
         let entry = Object::new();
-        set_field(&entry, "key", &bytes_to_js(requested_key))?;
+        set_field(&entry, "key", &bytes_to_js(&decoded_requested_key))?;
         match result
             .result
             .as_ref()
@@ -671,6 +687,10 @@ where
     OrderedOperation<F, Vec<u8>, Vec<u8>>:
         Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
 {
+    let start_key = decode_vec_key_wire(start_key).map_err(js_err)?;
+    let end_key = end_key
+        .map(|key| decode_vec_key_wire(key).map_err(js_err))
+        .transpose()?;
     let mut decoded = Vec::<(Vec<u8>, Location<F>, OrderedOperation<F, Vec<u8>, Vec<u8>>)>::new();
     for entry in &proto.entries {
         let proof = entry
@@ -682,20 +702,25 @@ where
         let OrderedOperation::Update(update) = &operation else {
             return Err(js_err("getRange entry proof did not verify an update"));
         };
-        if update.key.as_slice() != entry.key.as_slice() {
+        let entry_key = decode_vec_key_wire(entry.key.as_slice()).map_err(js_err)?;
+        if update.key.as_slice() != entry_key.as_slice() {
             return Err(js_err("getRange entry key does not match proof operation"));
         }
-        decoded.push((entry.key.clone(), location, operation));
+        decoded.push((entry_key, location, operation));
     }
 
     if let Some((first_key, _, _)) = decoded.first() {
-        if first_key.as_slice() != start_key {
+        if first_key != &start_key {
             let start_proof = proto
                 .start_proof
                 .as_option()
                 .ok_or_else(|| js_err("getRange response missing start boundary proof"))?;
-            match verify_key_exclusion_from_proto::<F>(start_proof, start_key, current_root)
-                .map_err(js_err)?
+            match verify_key_exclusion_from_proto::<F>(
+                start_proof,
+                encode_vec_key_wire(&start_key).as_ref(),
+                current_root,
+            )
+            .map_err(js_err)?
             {
                 ExclusionBoundary::Span { end, .. } if end.as_slice() == first_key.as_slice() => {}
                 ExclusionBoundary::Span { .. } => {
@@ -713,17 +738,24 @@ where
             .start_proof
             .as_option()
             .ok_or_else(|| js_err("empty getRange response missing start boundary proof"))?;
-        let boundary = verify_key_exclusion_from_proto::<F>(start_proof, start_key, current_root)
-            .map_err(js_err)?;
-        match (end_key, boundary) {
+        let boundary = verify_key_exclusion_from_proto::<F>(
+            start_proof,
+            encode_vec_key_wire(&start_key).as_ref(),
+            current_root,
+        )
+        .map_err(js_err)?;
+        match (end_key.as_ref(), boundary) {
             (Some(end_key), ExclusionBoundary::Span { start, end })
-                if !span_contains_key(&start, &end, end_key) && end.as_slice() != end_key =>
+                if !span_contains_key(&start, &end, end_key)
+                    && end.as_slice() != end_key.as_slice() =>
             {
                 return Err(js_err(
                     "empty getRange boundary does not cover requested end",
                 ));
             }
-            (None, ExclusionBoundary::Span { end, .. }) if end.as_slice() > start_key => {
+            (None, ExclusionBoundary::Span { end, .. })
+                if end.as_slice() > start_key.as_slice() =>
+            {
                 return Err(js_err(
                     "empty unbounded getRange boundary does not reach ordered end",
                 ));
@@ -745,7 +777,9 @@ where
         let Some((_, _, OrderedOperation::Update(last))) = decoded.last() else {
             return Err(js_err("truncated getRange response has no final entry"));
         };
-        if proto.next_start_key.as_slice() != last.next_key.as_slice() {
+        let next_start_key =
+            decode_vec_key_wire(proto.next_start_key.as_slice()).map_err(js_err)?;
+        if next_start_key.as_slice() != last.next_key.as_slice() {
             return Err(js_err(
                 "getRange next_start_key does not match last next_key",
             ));
@@ -754,8 +788,8 @@ where
         let Some((last_key, _, OrderedOperation::Update(last))) = decoded.last() else {
             return Err(js_err("getRange final entry is not an update"));
         };
-        if let Some(end_key) = end_key {
-            if last.next_key.as_slice() != end_key
+        if let Some(end_key) = end_key.as_ref() {
+            if last.next_key.as_slice() != end_key.as_slice()
                 && !span_contains_key(last_key, &last.next_key, end_key)
             {
                 return Err(js_err("complete getRange response does not reach end_key"));
@@ -779,11 +813,12 @@ where
     let verified = Object::new();
     set_field(&verified, "entries", &entries.into())?;
     set_field(&verified, "hasMore", &JsValue::from_bool(proto.has_more))?;
-    set_field(
-        &verified,
-        "nextStartKey",
-        &bytes_to_js(&proto.next_start_key),
-    )?;
+    let next_start_key = if proto.has_more {
+        decode_vec_key_wire(proto.next_start_key.as_slice()).map_err(js_err)?
+    } else {
+        Vec::new()
+    };
+    set_field(&verified, "nextStartKey", &bytes_to_js(&next_start_key))?;
     Ok(verified.into())
 }
 
@@ -899,6 +934,11 @@ pub fn verify_current_operation_range_proof(
 }
 
 #[wasm_bindgen]
+pub fn encode_vec_key(key: &[u8]) -> Vec<u8> {
+    encode_vec_key_wire(key)
+}
+
+#[wasm_bindgen]
 pub fn verify_current_key_value_proof(
     bytes: &[u8],
     root: &[u8],
@@ -977,6 +1017,16 @@ mod tests {
     use commonware_storage::merkle::mem::Mem;
 
     type TestOperation<F> = OrderedOperation<F, Vec<u8>, Vec<u8>>;
+
+    #[test]
+    fn vec_key_wire_bytes_use_commonware_codec_frame() {
+        let key = b"alpha".to_vec();
+        assert_eq!(
+            decode_vec_key_wire(&encode_vec_key_wire(&key)).unwrap(),
+            key
+        );
+        assert!(decode_vec_key_wire(b"alpha").is_err());
+    }
 
     fn sample_operations<F>() -> Vec<TestOperation<F>>
     where

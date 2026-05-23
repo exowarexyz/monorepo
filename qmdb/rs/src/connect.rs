@@ -999,10 +999,12 @@ where
     ) -> impl Future<Output = Result<(GetResponse, Context), ConnectError>> + Send {
         let client = self.client.clone();
         async move {
-            let key = request.key.to_vec();
+            let key = client
+                .decode_key(request.key)
+                .map_err(qmdb_error_to_connect)?;
             let tip = Location::new(request.tip);
             let proof = client
-                .key_value_proof_raw_at::<&[u8]>(tip, key.as_slice())
+                .key_value_proof_raw_at(tip, key.as_ref())
                 .await
                 .map_err(qmdb_error_to_connect)?;
             Ok((
@@ -1024,8 +1026,13 @@ where
         async move {
             let tip = Location::new(request.tip);
             let keys: Vec<Vec<u8>> = request.keys.iter().map(|key| key.to_vec()).collect();
+            let decoded_keys = keys
+                .iter()
+                .map(|key| client.decode_key(key.as_slice()))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(qmdb_error_to_connect)?;
             let proofs = client
-                .key_lookup_proofs_raw_at(tip, &keys)
+                .key_lookup_proofs_raw_at(tip, &decoded_keys)
                 .await
                 .map_err(qmdb_error_to_connect)?;
             let results = keys
@@ -1151,9 +1158,16 @@ where
         let client = self.client.clone();
         async move {
             let tip = Location::new(request.tip);
-            let end_key = request.end_key;
+            let start_key = client
+                .decode_key(request.start_key)
+                .map_err(qmdb_error_to_connect)?;
+            let end_key = request
+                .end_key
+                .map(|key| client.decode_key(key))
+                .transpose()
+                .map_err(qmdb_error_to_connect)?;
             let proof = client
-                .key_range_proof_raw_at(tip, request.start_key, end_key, request.limit)
+                .key_range_proof_raw_at(tip, start_key, end_key, request.limit)
                 .await
                 .map_err(qmdb_error_to_connect)?;
             Ok((raw_key_range_proof_to_proto(&proof), ctx))

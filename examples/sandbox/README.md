@@ -104,6 +104,8 @@ In addition to the simulator running above:
    - **Get Many** verifies current hit/miss lookup proofs against the same root and reports proof size.
    - **Get Range** verifies an ordered current range plus boundary proofs
      against the same root and reports proof size.
+   - **Get Historical Operation Range** verifies a contiguous historical
+     operation-log range against the same trusted root and reports proof size.
    - **Subscribe** verifies each emitted historical proof from the trusted
      current root for that emitted tip and reports proof size. Paste seed
      output lines into Trusted Roots when replaying or following multiple tips.

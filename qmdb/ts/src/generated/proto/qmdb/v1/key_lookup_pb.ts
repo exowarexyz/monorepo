@@ -22,7 +22,7 @@ export const file_qmdb_v1_key_lookup: GenFile = /*@__PURE__*/
  */
 export type GetRequest = Message<"qmdb.v1.GetRequest"> & {
   /**
-   * Raw logical QMDB key (`K::as_ref()` bytes), not a store row key.
+   * Codec-encoded logical QMDB key (`K::encode()` bytes), not a store row key.
    *
    * @generated from field: bytes key = 1;
    */
@@ -51,7 +51,7 @@ export const GetRequestSchema: GenMessage<GetRequest> = /*@__PURE__*/
  */
 export type GetManyRequest = Message<"qmdb.v1.GetManyRequest"> & {
   /**
-   * Raw logical QMDB keys (`K::as_ref()` bytes), not store row keys.
+   * Codec-encoded logical QMDB keys (`K::encode()` bytes), not store row keys.
    *
    * @generated from field: repeated bytes keys = 1;
    */

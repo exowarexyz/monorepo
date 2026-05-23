@@ -37,22 +37,6 @@ impl EncodeSize for EncodedOperation<'_> {
     }
 }
 
-pub(crate) fn raw_key_from_bytes<K: QmdbKey + Codec>(
-    bytes: &[u8],
-    cfg: &K::Cfg,
-) -> Result<K, String> {
-    // Exoware requests carry raw key bytes. Vec<u8> keys are already in that representation;
-    // fixed-size key types can be decoded directly from those bytes.
-    if std::any::TypeId::of::<K>() == std::any::TypeId::of::<Vec<u8>>() {
-        let boxed: Box<dyn std::any::Any> = Box::new(bytes.to_vec());
-        return Ok(*boxed
-            .downcast::<K>()
-            .expect("Vec<u8> raw key downcast must match TypeId"));
-    }
-
-    K::decode_cfg(bytes, cfg).map_err(|err| err.to_string())
-}
-
 /// Historical operation range plus the raw Merkle proof material used to verify
 /// it. This is suitable for checkpointing and writer-frontier recovery.
 #[derive(Clone, Debug, PartialEq)]

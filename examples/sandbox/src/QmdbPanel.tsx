@@ -4,10 +4,12 @@ import {
   matchPrefix,
   matchRegex,
   OrderedQmdbClient,
+  type OrderedOperation,
   type OrderedSubscribeProof,
   type VerifiedCurrentKeyLookupProof,
   type VerifiedCurrentKeyRangeProof,
   type VerifiedCurrentKeyValueProof,
+  type VerifiedHistoricalMultiProof,
 } from '@qmdb-ts';
 
 export const QMDB_URL = import.meta.env.VITE_QMDB_URL as string | undefined;
@@ -56,21 +58,23 @@ function formatProofSize(bytes: number): string {
   return `${(bytes / 1024).toFixed(1)} KiB`;
 }
 
-function parseTip(value: string): bigint {
+function parseNonNegativeBigInt(value: string, label: string): bigint {
   const trimmed = value.trim();
   if (!trimmed) {
-    throw new Error('Tip is required');
+    throw new Error(`${label} is required`);
   }
-  const tip = BigInt(trimmed);
-  if (tip < 0n) {
-    throw new Error('Tip must be non-negative');
+  const parsed = BigInt(trimmed);
+  if (parsed < 0n) {
+    throw new Error(`${label} must be non-negative`);
   }
-  return tip;
+  return parsed;
 }
 
-function renderOperation(
-  proofOperation: OrderedSubscribeProof['proof']['operations'][number]['operation'],
-) {
+function parseTip(value: string): bigint {
+  return parseNonNegativeBigInt(value, 'Tip');
+}
+
+function renderOperation(proofOperation: OrderedOperation) {
   switch (proofOperation.type) {
     case 'update':
       return (
@@ -131,6 +135,11 @@ export function QmdbPanel({
   const [rangeLimit, setRangeLimit] = useState('5');
   const [rangeProof, setRangeProof] = useState<VerifiedCurrentKeyRangeProof | null>(null);
   const [isGettingRange, setIsGettingRange] = useState(false);
+
+  const [historyStartLocation, setHistoryStartLocation] = useState('0');
+  const [historyMaxLocations, setHistoryMaxLocations] = useState('5');
+  const [historyProof, setHistoryProof] = useState<VerifiedHistoricalMultiProof | null>(null);
+  const [isGettingHistory, setIsGettingHistory] = useState(false);
 
   const [keyMatcherKind, setKeyMatcherKind] = useState<'exact' | 'prefix' | 'regex' | 'none'>(
     'none',
@@ -245,6 +254,35 @@ export function QmdbPanel({
     }
   };
 
+  const handleGetOperationRange = async () => {
+    setIsGettingHistory(true);
+    setHistoryProof(null);
+    try {
+      const maxLocations = Number(historyMaxLocations);
+      if (!Number.isInteger(maxLocations) || maxLocations <= 0) {
+        throw new Error('Max Locations must be a positive integer');
+      }
+      const proof = await client.getOperationRange(
+        {
+          tip: parseTip(tip),
+          startLocation: parseNonNegativeBigInt(historyStartLocation, 'Start Location'),
+          maxLocations,
+        },
+        parseHexRoot(expectedCurrentRoot),
+      );
+      setHistoryProof(proof);
+      showNotification(
+        'success',
+        'QMDB Historical Range',
+        `Verified ${proof.operations.length} historical operations against expected root (${formatProofSize(proof.proofSizeBytes)})`,
+      );
+    } catch (error) {
+      showNotification('error', 'QMDB Historical Range Failed', String(error));
+    } finally {
+      setIsGettingHistory(false);
+    }
+  };
+
   function buildFilter(
     kind: 'exact' | 'prefix' | 'regex' | 'none',
     value: string,
@@ -310,9 +348,9 @@ export function QmdbPanel({
         <p className="section-note">
           Proofs are anchored to roots the writer emits per batch. Run `qmdb run`
           locally and `qmdb seed` to stream fresh tips; each line prints
-          `tip=N root=0x..`. Get Proof, Get Many, and Get Range verify
-          against that current root. Subscribe streams each proof with its tip
-          and included operations.
+          `tip=N root=0x..`. Get Proof, Get Many, Get Range, and historical
+          operation ranges verify against that current root. Subscribe streams
+          each proof with its tip and included operations.
         </p>
         <p><strong>Server:</strong> {qmdbUrl}</p>
         <p><strong>Merkle Family:</strong> MMB</p>
@@ -644,6 +682,67 @@ export function QmdbPanel({
             </div>
           )}
         </div>
+      </div>
+
+      <div className="form-section">
+        <h3>Get Historical Operation Range</h3>
+        <p className="section-note">
+          Fetches a contiguous historical operation proof for the operation log and verifies it
+          against the expected root for the selected tip.
+        </p>
+        <div className="form-row">
+          <div className="form-group">
+            <label htmlFor="qmdb-history-start">Start Location</label>
+            <input
+              id="qmdb-history-start"
+              type="number"
+              min="0"
+              value={historyStartLocation}
+              onChange={(event) => setHistoryStartLocation(event.target.value)}
+            />
+          </div>
+          <div className="form-group">
+            <label htmlFor="qmdb-history-max">Max Locations</label>
+            <input
+              id="qmdb-history-max"
+              type="number"
+              min="1"
+              value={historyMaxLocations}
+              onChange={(event) => setHistoryMaxLocations(event.target.value)}
+            />
+          </div>
+        </div>
+        <button
+          className={`btn-primary ${isGettingHistory ? 'loading' : ''}`}
+          onClick={handleGetOperationRange}
+          disabled={
+            isGettingHistory ||
+            !historyStartLocation.trim() ||
+            !historyMaxLocations.trim() ||
+            !tip.trim() ||
+            !expectedCurrentRoot.trim()
+          }
+        >
+          {isGettingHistory ? 'Verifying...' : 'Get Historical Range'}
+        </button>
+        {historyProof && (
+          <div className="result fade-in">
+            <h4>Verified Historical Operations</h4>
+            <p><strong>Proof Size:</strong> {formatProofSize(historyProof.proofSizeBytes)}</p>
+            <p><strong>Operations:</strong> {historyProof.operations.length}</p>
+            <div className="result-list">
+              {historyProof.operations.map((op, index) => (
+                <div
+                  key={`${op.location.toString()}-${index}`}
+                  className="result-row-block"
+                >
+                  <p><strong>Location:</strong> {op.location.toString()}</p>
+                  {renderOperation(op.operation)}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
