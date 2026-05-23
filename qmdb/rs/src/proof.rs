@@ -37,6 +37,22 @@ impl EncodeSize for EncodedOperation<'_> {
     }
 }
 
+pub(crate) fn raw_key_from_bytes<K: QmdbKey + Codec>(
+    bytes: &[u8],
+    cfg: &K::Cfg,
+) -> Result<K, String> {
+    // Exoware requests carry raw key bytes. Vec<u8> keys are already in that representation;
+    // fixed-size key types can be decoded directly from those bytes.
+    if std::any::TypeId::of::<K>() == std::any::TypeId::of::<Vec<u8>>() {
+        let boxed: Box<dyn std::any::Any> = Box::new(bytes.to_vec());
+        return Ok(*boxed
+            .downcast::<K>()
+            .expect("Vec<u8> raw key downcast must match TypeId"));
+    }
+
+    K::decode_cfg(bytes, cfg).map_err(|err| err.to_string())
+}
+
 /// Historical operation range plus the raw Merkle proof material used to verify
 /// it. This is suitable for checkpointing and writer-frontier recovery.
 #[derive(Clone, Debug, PartialEq)]
@@ -314,6 +330,58 @@ pub struct RawKeyValueProof<
     pub operation: ordered::Operation<F, K, E>,
 }
 
+type OrderedVerifierDb<F, K, E, H, const N: usize> =
+    commonware_storage::qmdb::current::ordered::db::Db<
+        F,
+        commonware_runtime::deterministic::Context,
+        commonware_storage::journal::contiguous::variable::Journal<
+            commonware_runtime::deterministic::Context,
+            ordered::Operation<F, K, E>,
+        >,
+        K,
+        E,
+        commonware_storage::index::ordered::Index<
+            commonware_storage::translator::TwoCap,
+            Location<F>,
+        >,
+        H,
+        N,
+        commonware_parallel::Sequential,
+    >;
+
+pub(crate) fn verify_ordered_key_value_proof<F, H, K, E, const N: usize>(
+    key: K,
+    value: E::Value,
+    proof: &KeyValueProof<F, K, H::Digest, N>,
+    root: &H::Digest,
+) -> bool
+where
+    F: Graftable,
+    H: Hasher,
+    K: QmdbKey + Codec,
+    E: ValueEncoding,
+    ordered::Operation<F, K, E>: Codec,
+{
+    let hasher = commonware_storage::qmdb::hasher::<H>();
+    OrderedVerifierDb::<F, K, E, H, N>::verify_key_value_proof(&hasher, key, value, proof, root)
+}
+
+pub(crate) fn verify_ordered_exclusion_proof<F, H, K, E, const N: usize>(
+    key: &K,
+    proof: &ExclusionProof<F, K, E, H::Digest, N>,
+    root: &H::Digest,
+) -> bool
+where
+    F: Graftable,
+    H: Hasher,
+    K: QmdbKey + Codec,
+    E: ValueEncoding,
+    ordered::Operation<F, K, E>: Codec,
+{
+    let hasher = commonware_storage::qmdb::hasher::<H>();
+    OrderedVerifierDb::<F, K, E, H, N>::verify_exclusion_proof(&hasher, key, proof, root)
+}
+
 impl<
         D: Digest,
         K: QmdbKey + Codec,
@@ -332,10 +400,12 @@ where
         if self.proof.next_key != update.next_key {
             return false;
         }
-        let hasher = commonware_storage::qmdb::hasher::<H>();
-        self.proof
-            .proof
-            .verify(&hasher, self.operation.clone(), &self.root)
+        verify_ordered_key_value_proof::<F, H, K, E, N>(
+            update.key.clone(),
+            update.value.clone(),
+            &self.proof,
+            &self.root,
+        )
     }
 }
 
@@ -352,7 +422,7 @@ pub struct RawKeyExclusionProof<
 > {
     pub watermark: Location<F>,
     pub root: D,
-    pub requested_key: Vec<u8>,
+    pub requested_key: K,
     pub proof: ExclusionProof<F, K, E, D, N>,
 }
 
@@ -368,32 +438,11 @@ where
     ordered::Operation<F, K, E>: Codec + Clone,
 {
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
-        let (op_proof, operation) = match &self.proof {
-            ExclusionProof::KeyValue(op_proof, update) => {
-                let span_start = update.key.as_ref();
-                let span_end = update.next_key.as_ref();
-                let key = self.requested_key.as_slice();
-                if span_start == key {
-                    return false;
-                }
-                let in_span = if span_start >= span_end {
-                    key >= span_start || key < span_end
-                } else {
-                    key >= span_start && key < span_end
-                };
-                if !in_span {
-                    return false;
-                }
-                (op_proof, ordered::Operation::Update(update.clone()))
-            }
-            ExclusionProof::Commit(op_proof, value) => (
-                op_proof,
-                ordered::Operation::CommitFloor(value.clone(), op_proof.loc),
-            ),
-        };
-
-        let hasher = commonware_storage::qmdb::hasher::<H>();
-        op_proof.verify(&hasher, operation, &self.root)
+        verify_ordered_exclusion_proof::<F, H, K, E, N>(
+            &self.requested_key,
+            &self.proof,
+            &self.root,
+        )
     }
 }
 

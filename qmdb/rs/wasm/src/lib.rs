@@ -65,6 +65,17 @@ enum ExclusionBoundary {
     Empty,
 }
 
+type OrderedCurrentDb<F> = commonware_storage::qmdb::current::ordered::variable::Db<
+    F,
+    commonware_runtime::deterministic::Context,
+    Vec<u8>,
+    Vec<u8>,
+    Sha256,
+    commonware_storage::translator::TwoCap,
+    32,
+    commonware_parallel::Sequential,
+>;
+
 fn op_cfg<F>() -> <OrderedOperation<F, Vec<u8>, Vec<u8>> as Read>::Cfg
 where
     F: merkle::Graftable,
@@ -404,7 +415,13 @@ where
         return Err("current key-value proof next_key mismatch".to_string());
     }
     let hasher = commonware_storage::qmdb::hasher::<Sha256>();
-    if !proof.proof.verify(&hasher, operation.clone(), root) {
+    if !OrderedCurrentDb::<F>::verify_key_value_proof(
+        &hasher,
+        update.key.clone(),
+        update.value.clone(),
+        &proof,
+        root,
+    ) {
         return Err("current key-value proof failed verification".to_string());
     }
     Ok((proof.proof.loc, operation))
@@ -456,40 +473,19 @@ where
         ),
     )
     .map_err(|err| format!("failed to decode current key-exclusion proof: {err}"))?;
-    let (op_proof, operation, boundary) = match proof {
-        ExclusionProof::KeyValue(op_proof, update) => {
-            let span_start = update.key.as_slice();
-            let span_end = update.next_key.as_slice();
-            if span_start == requested_key {
-                return Err("current key-exclusion proof starts at requested key".to_string());
-            }
-            let in_span = if span_start >= span_end {
-                requested_key >= span_start || requested_key < span_end
-            } else {
-                requested_key >= span_start && requested_key < span_end
-            };
-            if !in_span {
-                return Err("current key-exclusion proof does not cover requested key".to_string());
-            }
-            let boundary = ExclusionBoundary::Span {
-                start: update.key.clone(),
-                end: update.next_key.clone(),
-            };
-            (op_proof, OrderedOperation::Update(update), boundary)
-        }
-        ExclusionProof::Commit(op_proof, value) => {
-            let floor = op_proof.loc;
-            (
-                op_proof,
-                OrderedOperation::CommitFloor(value, floor),
-                ExclusionBoundary::Empty,
-            )
-        }
-    };
+    let requested_key = requested_key.to_vec();
     let hasher = commonware_storage::qmdb::hasher::<Sha256>();
-    if !op_proof.verify(&hasher, operation, current_root) {
+    if !OrderedCurrentDb::<F>::verify_exclusion_proof(&hasher, &requested_key, &proof, current_root)
+    {
         return Err("current key-exclusion proof failed verification".to_string());
     }
+    let boundary = match proof {
+        ExclusionProof::KeyValue(_, update) => ExclusionBoundary::Span {
+            start: update.key,
+            end: update.next_key,
+        },
+        ExclusionProof::Commit(_, _) => ExclusionBoundary::Empty,
+    };
     Ok(boundary)
 }
 

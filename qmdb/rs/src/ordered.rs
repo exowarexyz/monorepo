@@ -31,10 +31,10 @@ use crate::connect::OperationKv;
 use crate::core::HistoricalOpsClientCore;
 use crate::error::QmdbError;
 use crate::proof::{
-    CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
-    RawKeyExclusionProof, RawKeyLookupProof, RawKeyRangeEntry, RawKeyRangeProof, RawKeyValueProof,
-    RawMultiProof, VariantRoot, VerifiedCurrentRange, VerifiedKeyValue, VerifiedMultiOperations,
-    VerifiedOperationRange, VerifiedVariantRange,
+    raw_key_from_bytes, CurrentOperationRangeProofResult, OperationRangeCheckpoint,
+    RawBatchMultiProof, RawKeyExclusionProof, RawKeyLookupProof, RawKeyRangeEntry,
+    RawKeyRangeProof, RawKeyValueProof, RawMultiProof, VariantRoot, VerifiedCurrentRange,
+    VerifiedKeyValue, VerifiedMultiOperations, VerifiedOperationRange, VerifiedVariantRange,
 };
 use crate::storage::{KvCurrentStorage, KvMerkleStorage};
 use crate::{QmdbVariant, VersionedValue};
@@ -881,10 +881,14 @@ where
             ExclusionProof::KeyValue(op_proof, update)
         };
 
+        let requested_key =
+            raw_key_from_bytes::<K>(key, &self.update_row_cfg.0).map_err(|err| {
+                QmdbError::CorruptData(format!("failed to decode requested exclusion key: {err}"))
+            })?;
         let raw = RawKeyExclusionProof {
             watermark,
             root,
-            requested_key: key.to_vec(),
+            requested_key,
             proof,
         };
         if !raw.verify::<H>() {

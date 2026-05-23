@@ -40,6 +40,7 @@ use exoware_sdk::ClientError;
 use http_body::Body;
 
 use crate::proof::{
+    raw_key_from_bytes, verify_ordered_exclusion_proof, verify_ordered_key_value_proof,
     VerifiedKeyLookup, VerifiedKeyRange, VerifiedKeyValue, VerifiedUnorderedKeyValue,
 };
 use crate::QmdbError;
@@ -252,6 +253,7 @@ where
                             requested_key.as_slice(),
                             expected_root,
                             self.update_cfg.as_ref(),
+                            self.key_cfg.as_ref(),
                             self.value_cfg.as_ref(),
                         )?;
                         Ok(VerifiedKeyLookup::Miss {
@@ -1351,8 +1353,12 @@ where
             kind: crate::ProofKind::CurrentKeyValue,
         });
     }
-    let hasher = commonware_storage::qmdb::hasher::<H>();
-    if !proof.proof.verify(&hasher, operation.clone(), root) {
+    if !verify_ordered_key_value_proof::<F, H, K, E, N>(
+        update.key.clone(),
+        update.value.clone(),
+        &proof,
+        root,
+    ) {
         return Err(QmdbError::ProofVerification {
             kind: crate::ProofKind::CurrentKeyValue,
         });
@@ -1420,6 +1426,7 @@ fn verify_key_exclusion_from_proto<F, H, K, V, const N: usize, E>(
     requested_key: &[u8],
     root: &H::Digest,
     update_cfg: &<ordered::Update<K, E> as Read>::Cfg,
+    key_cfg: &K::Cfg,
     value_cfg: &V::Cfg,
 ) -> Result<ExclusionBoundary, QmdbError>
 where
@@ -1446,50 +1453,25 @@ where
             "failed to decode current key-exclusion proof: {err}"
         ))
     })?;
-    let (op_proof, operation, boundary) = match proof {
-        ExclusionProof::KeyValue(op_proof, update) => {
-            let span_start = <K as AsRef<[u8]>>::as_ref(&update.key);
-            let span_end = <K as AsRef<[u8]>>::as_ref(&update.next_key);
-            if span_start == requested_key {
-                return Err(QmdbError::ProofVerification {
-                    kind: crate::ProofKind::CurrentKeyExclusion,
-                });
-            }
-            let in_span = if span_start >= span_end {
-                requested_key >= span_start || requested_key < span_end
-            } else {
-                requested_key >= span_start && requested_key < span_end
-            };
-            if !in_span {
-                return Err(QmdbError::ProofVerification {
-                    kind: crate::ProofKind::CurrentKeyExclusion,
-                });
-            }
-            let boundary = ExclusionBoundary::Span {
-                start: span_start.to_vec(),
-                end: span_end.to_vec(),
-            };
-            (
-                op_proof,
-                ordered::Operation::<F, K, E>::Update(update),
-                boundary,
-            )
-        }
-        ExclusionProof::Commit(op_proof, value) => {
-            let floor = op_proof.loc;
-            (
-                op_proof,
-                ordered::Operation::<F, K, E>::CommitFloor(value, floor),
-                ExclusionBoundary::Empty,
-            )
-        }
-    };
-    let hasher = commonware_storage::qmdb::hasher::<H>();
-    if !op_proof.verify(&hasher, operation, root) {
+    let requested_key = raw_key_from_bytes::<K>(requested_key, key_cfg).map_err(|err| {
+        QmdbError::CorruptData(format!("failed to decode requested exclusion key: {err}"))
+    })?;
+    if !verify_ordered_exclusion_proof::<F, H, K, E, N>(&requested_key, &proof, root) {
         return Err(QmdbError::ProofVerification {
             kind: crate::ProofKind::CurrentKeyExclusion,
         });
     }
+    let boundary = match proof {
+        ExclusionProof::KeyValue(_, update) => {
+            let span_start = <K as AsRef<[u8]>>::as_ref(&update.key);
+            let span_end = <K as AsRef<[u8]>>::as_ref(&update.next_key);
+            ExclusionBoundary::Span {
+                start: span_start.to_vec(),
+                end: span_end.to_vec(),
+            }
+        }
+        ExclusionProof::Commit(_, _) => ExclusionBoundary::Empty,
+    };
     Ok(boundary)
 }
 
@@ -1562,6 +1544,7 @@ where
                 start_key,
                 root,
                 update_cfg,
+                key_cfg,
                 value_cfg,
             )? {
                 ExclusionBoundary::Span { end, .. }
@@ -1584,6 +1567,7 @@ where
             start_key,
             root,
             update_cfg,
+            key_cfg,
             value_cfg,
         )?;
         match (end_key, boundary) {
