@@ -64,8 +64,7 @@ impl<K: commonware_codec::Read, V: commonware_codec::Read> commonware_codec::Rea
         buf: &mut impl ::bytes::Buf,
         cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        let key = K::read_cfg(buf, &cfg.0)?;
-        let value = Option::<V>::read_cfg(buf, &cfg.1)?;
+        let (key, value) = <(K, Option<V>) as commonware_codec::Read>::read_cfg(buf, cfg)?;
         Ok(UpdateRow { key, value })
     }
 }
@@ -78,13 +77,10 @@ pub(crate) fn chunk_index_for_location<F: Family, const N: usize>(location: Loca
     *location / bitmap_chunk_bits::<N>()
 }
 
-pub(crate) fn decode_digest<D: Digest>(bytes: &[u8], label: String) -> Result<D, QmdbError> {
-    if bytes.len() != D::SIZE {
-        return Err(QmdbError::CorruptData(format!(
-            "{label} has invalid length {}",
-            bytes.len()
-        )));
-    }
+pub(crate) fn decode_digest<D: Digest>(
+    bytes: &[u8],
+    label: impl std::fmt::Display,
+) -> Result<D, QmdbError> {
     D::decode(bytes).map_err(|e| QmdbError::CorruptData(format!("{label} decode error: {e}")))
 }
 
@@ -94,36 +90,38 @@ pub(crate) struct CurrentBoundaryMetadata<D: Digest> {
     pub(crate) pruned_chunks: u64,
 }
 
-pub(crate) fn encode_current_boundary_metadata<D: Digest>(
-    metadata: CurrentBoundaryMetadata<D>,
-) -> Vec<u8> {
-    let mut out = Vec::with_capacity(D::SIZE + 8);
-    out.extend_from_slice(metadata.root.as_ref());
-    out.extend_from_slice(&metadata.pruned_chunks.to_be_bytes());
-    out
+impl<D: Digest> commonware_codec::Write for CurrentBoundaryMetadata<D> {
+    fn write(&self, buf: &mut impl ::bytes::BufMut) {
+        <(D, u64) as commonware_codec::Write>::write(&(self.root, self.pruned_chunks), buf);
+    }
+}
+
+impl<D: Digest> commonware_codec::FixedSize for CurrentBoundaryMetadata<D> {
+    const SIZE: usize =
+        <D as commonware_codec::FixedSize>::SIZE + <u64 as commonware_codec::FixedSize>::SIZE;
+}
+
+impl<D: Digest> commonware_codec::Read for CurrentBoundaryMetadata<D> {
+    type Cfg = ();
+
+    fn read_cfg(
+        buf: &mut impl ::bytes::Buf,
+        _: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let (root, pruned_chunks) = <(D, u64) as commonware_codec::Read>::read_cfg(buf, &((), ()))?;
+        Ok(CurrentBoundaryMetadata {
+            root,
+            pruned_chunks,
+        })
+    }
 }
 
 pub(crate) fn decode_current_boundary_metadata<D: Digest>(
     bytes: &[u8],
-    label: String,
+    label: impl std::fmt::Display,
 ) -> Result<CurrentBoundaryMetadata<D>, QmdbError> {
-    let expected_len = D::SIZE + 8;
-    if bytes.len() != expected_len {
-        return Err(QmdbError::CorruptData(format!(
-            "{label} has invalid length {}, expected {expected_len}",
-            bytes.len()
-        )));
-    }
-    let root = decode_digest(&bytes[..D::SIZE], format!("{label} root"))?;
-    let pruned_chunks = u64::from_be_bytes(
-        bytes[D::SIZE..expected_len]
-            .try_into()
-            .expect("pruned chunk slice length checked"),
-    );
-    Ok(CurrentBoundaryMetadata {
-        root,
-        pruned_chunks,
-    })
+    CurrentBoundaryMetadata::<D>::decode(bytes)
+        .map_err(|e| QmdbError::CorruptData(format!("{label} decode error: {e}")))
 }
 
 pub(crate) fn merkle_size_for_watermark<F: Family>(
@@ -446,17 +444,18 @@ pub(crate) fn decode_presence_location<F: Family>(key: &Key) -> Result<Location<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_codec::Encode;
     use commonware_cryptography::Sha256;
     use commonware_storage::merkle::mmr;
 
     #[test]
-    fn current_boundary_metadata_uses_manual_big_endian_layout() {
+    fn current_boundary_metadata_uses_commonware_codec_layout() {
         let root = Sha256::fill(0xA5);
         let metadata = CurrentBoundaryMetadata {
             root,
             pruned_chunks: 0x0102_0304_0506_0708,
         };
-        let encoded = encode_current_boundary_metadata(metadata);
+        let encoded = metadata.encode().to_vec();
 
         assert_eq!(encoded.len(), root.as_ref().len() + 8);
         assert_eq!(&encoded[..root.as_ref().len()], root.as_ref());

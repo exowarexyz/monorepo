@@ -39,6 +39,7 @@ use exoware_sdk::proto::PreferZstdHttpClient;
 use exoware_sdk::ClientError;
 use http_body::Body;
 
+use crate::codec::decode_digest;
 use crate::proof::{
     verify_ordered_exclusion_proof, verify_ordered_key_value_proof, VerifiedKeyLookup,
     VerifiedKeyRange, VerifiedKeyValue, VerifiedUnorderedKeyValue,
@@ -573,7 +574,7 @@ where
         let proto = self
             .operation_range_proto(op_count, start_loc, NonZeroU64::MIN)
             .await?;
-        let root = decode_digest::<H>(proto.ops_root.as_slice(), "operation sync root")?;
+        let root = decode_digest::<H::Digest>(proto.ops_root.as_slice(), "operation sync root")?;
         Ok(any_sync::Target::new(
             root,
             commonware_utils::non_empty_range!(start_loc, op_count),
@@ -639,7 +640,9 @@ where
                 proto
                     .pinned_nodes
                     .iter()
-                    .map(|bytes| decode_digest::<H>(bytes.as_slice(), "operation sync pinned node"))
+                    .map(|bytes| {
+                        decode_digest::<H::Digest>(bytes.as_slice(), "operation sync pinned node")
+                    })
                     .collect::<Result<Vec<_>, _>>()?,
             )
         } else {
@@ -785,8 +788,15 @@ where
             .operation_log
             .operation_range_proto(op_count, start_loc, NonZeroU64::MIN)
             .await?;
-        let ops_root = decode_digest::<H>(proto.ops_root.as_slice(), "current sync ops root")?;
-        let witness = decode_ops_root_witness::<F, H>(proto.ops_root_witness.as_slice())?;
+        let ops_root =
+            decode_digest::<H::Digest>(proto.ops_root.as_slice(), "current sync ops root")?;
+        let witness =
+            OpsRootWitness::<F, H::Digest>::decode_cfg(proto.ops_root_witness.as_slice(), &())
+                .map_err(|err| {
+                    QmdbError::CorruptData(format!(
+                        "failed to decode current sync ops-root witness: {err}"
+                    ))
+                })?;
         Ok(current_sync::Target::new(
             self.current_root,
             ops_root,
@@ -862,12 +872,11 @@ where
         })?;
         let tip = Location::<F>::new(frame.tip);
         let expected_root = root_for_tip(tip)?;
-        let (root, operations) = verify_multi_from_proto::<F, H, _, _>(
+        let (root, operations) = verify_multi_from_proto::<F, H, Op>(
             proof,
             self.op_cfg.as_ref(),
             crate::ProofKind::BatchMulti,
             &expected_root,
-            |bytes, cfg| Op::decode_cfg(bytes, cfg),
         )?;
         Ok(Some(OperationLogSubscribeProof {
             resume_sequence_number: frame.resume_sequence_number,
@@ -946,11 +955,10 @@ where
                 "qmdb get_current_operation_range response missing proof".to_string(),
             )
         })?;
-        let (root, operations, chunks) = verify_current_operation_range_from_proto::<F, H, _, _, N>(
+        let (root, operations, chunks) = verify_current_operation_range_from_proto::<F, H, Op, N>(
             proof,
             self.op_cfg.as_ref(),
             expected_root,
-            |bytes, cfg| Op::decode_cfg(bytes, cfg),
         )?;
         Ok(CurrentOperationRangeProof {
             tip,
@@ -1025,11 +1033,10 @@ where
         let proof = response.proof.as_option().ok_or_else(|| {
             QmdbError::CorruptData("qmdb get_operation_range response missing proof".to_string())
         })?;
-        let (root, operations) = verify_operation_range_from_proto::<F, H, _, _>(
+        let (root, operations) = verify_operation_range_from_proto::<F, H, Op>(
             proof,
             self.op_cfg.as_ref(),
             expected_root,
-            |bytes, cfg| Op::decode_cfg(bytes, cfg),
         )?;
         Ok(OperationLogRangeProof {
             tip,
@@ -1064,28 +1071,6 @@ fn proof_digest_cap<D: Digest>(encoded_proof: &[u8]) -> usize {
     encoded_proof.len() / D::SIZE + 1
 }
 
-fn decode_digest<H>(bytes: &[u8], label: &'static str) -> Result<H::Digest, QmdbError>
-where
-    H: Hasher,
-    H::Digest: DecodeExt<()>,
-{
-    H::Digest::decode_cfg(bytes, &())
-        .map_err(|err| QmdbError::CorruptData(format!("failed to decode {label}: {err}")))
-}
-
-fn decode_ops_root_witness<F, H>(bytes: &[u8]) -> Result<OpsRootWitness<F, H::Digest>, QmdbError>
-where
-    F: Graftable,
-    H: Hasher,
-    H::Digest: DecodeExt<()>,
-{
-    OpsRootWitness::<F, H::Digest>::decode_cfg(bytes, &()).map_err(|err| {
-        QmdbError::CorruptData(format!(
-            "failed to decode current sync ops-root witness: {err}"
-        ))
-    })
-}
-
 fn historical_target_root<F, H>(
     ops_root: &[u8],
     ops_root_witness: &[u8],
@@ -1099,9 +1084,7 @@ where
     match (ops_root.is_empty(), ops_root_witness.is_empty()) {
         (true, true) => Ok(*expected_root),
         (false, true) => {
-            let ops_root = H::Digest::decode_cfg(ops_root, &()).map_err(|err| {
-                QmdbError::CorruptData(format!("failed to decode historical ops root: {err}"))
-            })?;
+            let ops_root = decode_digest::<H::Digest>(ops_root, "historical ops root")?;
             if ops_root != *expected_root {
                 return Err(QmdbError::ProofVerification {
                     kind: crate::ProofKind::BatchMulti,
@@ -1110,9 +1093,7 @@ where
             Ok(ops_root)
         }
         (false, false) => {
-            let ops_root = H::Digest::decode_cfg(ops_root, &()).map_err(|err| {
-                QmdbError::CorruptData(format!("failed to decode historical ops root: {err}"))
-            })?;
+            let ops_root = decode_digest::<H::Digest>(ops_root, "historical ops root")?;
             let witness = OpsRootWitness::<F, H::Digest>::decode_cfg(ops_root_witness, &())
                 .map_err(|err| {
                     QmdbError::CorruptData(format!(
@@ -1138,30 +1119,29 @@ enum ExclusionBoundary<K> {
     Empty,
 }
 
-fn verify_multi_from_proto<F, H, Op, DecodeOp>(
+fn verify_multi_from_proto<F, H, Op>(
     proto: &HistoricalMultiProof,
     op_cfg: &Op::Cfg,
     kind: crate::ProofKind,
     root: &H::Digest,
-    decode: DecodeOp,
 ) -> Result<(H::Digest, Vec<(Location<F>, Op)>), QmdbError>
 where
     F: Graftable,
     H: Hasher,
     H::Digest: DecodeExt<()>,
-    Op: Encode + Read,
-    DecodeOp: Fn(&[u8], &Op::Cfg) -> Result<Op, commonware_codec::Error>,
+    Op: Decode + Encode + Read,
 {
     let operations = proto
         .operations
         .iter()
         .map(|op| {
-            let decoded = decode(op.encoded_operation.as_slice(), op_cfg).map_err(|err| {
-                QmdbError::CorruptData(format!(
-                    "failed to decode multi-proof operation at {}: {err}",
-                    op.location
-                ))
-            })?;
+            let decoded =
+                Op::decode_cfg(op.encoded_operation.as_slice(), op_cfg).map_err(|err| {
+                    QmdbError::CorruptData(format!(
+                        "failed to decode multi-proof operation at {}: {err}",
+                        op.location
+                    ))
+                })?;
             Ok((Location::<F>::new(op.location), decoded))
         })
         .collect::<Result<Vec<_>, QmdbError>>()?;
@@ -1179,18 +1159,16 @@ where
     Ok((*root, operations))
 }
 
-fn verify_operation_range_from_proto<F, H, Op, DecodeOp>(
+fn verify_operation_range_from_proto<F, H, Op>(
     proto: &HistoricalOperationRangeProof,
     op_cfg: &Op::Cfg,
     root: &H::Digest,
-    decode: DecodeOp,
 ) -> Result<(H::Digest, Vec<(Location<F>, Op)>), QmdbError>
 where
     F: Graftable,
     H: Hasher,
     H::Digest: DecodeExt<()>,
-    Op: Encode + Read,
-    DecodeOp: Fn(&[u8], &Op::Cfg) -> Result<Op, commonware_codec::Error>,
+    Op: Decode + Encode + Read,
 {
     if proto.encoded_operations.is_empty() {
         return Err(QmdbError::CorruptData(
@@ -1211,7 +1189,7 @@ where
         .encoded_operations
         .iter()
         .map(|bytes| {
-            let decoded = decode(bytes.as_slice(), op_cfg).map_err(|err| {
+            let decoded = Op::decode_cfg(bytes.as_slice(), op_cfg).map_err(|err| {
                 QmdbError::CorruptData(format!("failed to decode operation range entry: {err}"))
             })?;
             Ok(decoded)
@@ -1220,7 +1198,9 @@ where
     let pinned_nodes = proto
         .pinned_nodes
         .iter()
-        .map(|bytes| decode_digest::<H>(bytes.as_slice(), "historical operation range pinned node"))
+        .map(|bytes| {
+            decode_digest::<H::Digest>(bytes.as_slice(), "historical operation range pinned node")
+        })
         .collect::<Result<Vec<_>, QmdbError>>()?;
     let hasher = commonware_storage::qmdb::hasher::<H>();
     if !verify_proof_and_pinned_nodes(
@@ -1251,18 +1231,16 @@ where
     Ok((*root, operations))
 }
 
-fn verify_current_operation_range_from_proto<F, H, Op, DecodeOp, const N: usize>(
+fn verify_current_operation_range_from_proto<F, H, Op, const N: usize>(
     proto: &ProtoCurrentOperationRangeProof,
     op_cfg: &Op::Cfg,
     root: &H::Digest,
-    decode: DecodeOp,
 ) -> Result<(H::Digest, Vec<(Location<F>, Op)>, Vec<[u8; N]>), QmdbError>
 where
     F: Graftable,
     H: Hasher,
     H::Digest: DecodeExt<()>,
-    Op: Encode + Read,
-    DecodeOp: Fn(&[u8], &Op::Cfg) -> Result<Op, commonware_codec::Error>,
+    Op: Decode + Encode + Read,
 {
     if proto.encoded_operations.is_empty() {
         return Err(QmdbError::CorruptData(
@@ -1281,7 +1259,7 @@ where
         .encoded_operations
         .iter()
         .map(|bytes| {
-            let decoded = decode(bytes.as_slice(), op_cfg).map_err(|err| {
+            let decoded = Op::decode_cfg(bytes.as_slice(), op_cfg).map_err(|err| {
                 QmdbError::CorruptData(format!(
                     "failed to decode current operation range entry: {err}"
                 ))

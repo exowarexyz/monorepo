@@ -1,4 +1,4 @@
-use commonware_codec::{Encode, Read, ReadExt};
+use commonware_codec::{Decode, DecodeExt, Encode, Read};
 use commonware_consensus::{
     simplex::{
         scheme::{
@@ -56,8 +56,7 @@ fn participant_set<T>(bytes: &[u8]) -> Result<Set<T>, commonware_codec::Error>
 where
     T: Read<Cfg = ()> + Ord,
 {
-    let mut reader = bytes;
-    Set::<T>::read_cfg(&mut reader, &((0..=MAX_PARTICIPANTS).into(), ()))
+    Set::<T>::decode_cfg(bytes, &((0..=MAX_PARTICIPANTS).into(), ()))
 }
 
 fn participant_map<K, V>(bytes: &[u8]) -> Result<BiMap<K, V>, commonware_codec::Error>
@@ -65,13 +64,14 @@ where
     K: Read<Cfg = ()> + Ord,
     V: Read<Cfg = ()> + Eq + Hash,
 {
-    let mut reader = bytes;
-    BiMap::<K, V>::read_cfg(&mut reader, &((0..=MAX_PARTICIPANTS).into(), (), ()))
+    BiMap::<K, V>::decode_cfg(bytes, &((0..=MAX_PARTICIPANTS).into(), (), ()))
 }
 
-fn read_identity<V: Variant>(bytes: &[u8]) -> Result<V::Public, commonware_codec::Error> {
-    let mut reader = bytes;
-    V::Public::read(&mut reader)
+fn read_identity<V: Variant>(bytes: &[u8]) -> Result<V::Public, commonware_codec::Error>
+where
+    V::Public: DecodeExt<()>,
+{
+    V::Public::decode(bytes)
 }
 
 fn verify_notarized<S>(

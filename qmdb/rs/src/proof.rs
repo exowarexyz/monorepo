@@ -1,5 +1,4 @@
-use bytes::BufMut;
-use commonware_codec::{Codec, Encode, EncodeSize, Write};
+use commonware_codec::{Codec, Encode};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::{
     merkle::{
@@ -16,26 +15,12 @@ use commonware_storage::{
             unordered::db::KeyValueProof as UnorderedKeyValueProof,
         },
         operation::Key as QmdbKey,
-        verify::{verify_multi_proof, verify_proof_and_extract_digests},
+        verify::verify_multi_proof,
     },
 };
 
 use crate::QmdbError;
 use crate::QmdbVariant;
-
-struct EncodedOperation<'a>(&'a [u8]);
-
-impl Write for EncodedOperation<'_> {
-    fn write(&self, buf: &mut impl BufMut) {
-        buf.put_slice(self.0);
-    }
-}
-
-impl EncodeSize for EncodedOperation<'_> {
-    fn encode_size(&self) -> usize {
-        self.0.len()
-    }
-}
 
 /// Historical operation range plus the raw Merkle proof material used to verify
 /// it. This is suitable for checkpointing and writer-frontier recovery.
@@ -86,19 +71,17 @@ impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
         }
 
         let hasher = commonware_storage::qmdb::hasher::<H>();
-        let operations = self
-            .encoded_operations
-            .iter()
-            .map(|bytes| EncodedOperation(bytes.as_slice()))
-            .collect::<Vec<_>>();
-        let digests = verify_proof_and_extract_digests(
-            &hasher,
-            &self.proof,
-            self.start_location,
-            &operations,
-            &self.root,
-        )
-        .map_err(|e| QmdbError::CorruptData(format!("reconstruct checkpoint peaks failed: {e}")))?;
+        let digests = self
+            .proof
+            .verify_range_inclusion_and_extract_digests(
+                &hasher,
+                &self.encoded_operations,
+                self.start_location,
+                &self.root,
+            )
+            .map_err(|e| {
+                QmdbError::CorruptData(format!("reconstruct checkpoint peaks failed: {e}"))
+            })?;
         let digest_map: std::collections::BTreeMap<Position<F>, D> = digests.into_iter().collect();
         peak_entries
             .into_iter()
@@ -162,12 +145,13 @@ pub struct RawBatchMultiProof<D: Digest, F: Graftable> {
 impl<D: Digest, F: Graftable> RawBatchMultiProof<D, F> {
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
         let hasher = commonware_storage::qmdb::hasher::<H>();
-        let operations: Vec<_> = self
+        let elements: Vec<_> = self
             .operations
             .iter()
-            .map(|(loc, bytes)| (*loc, EncodedOperation(bytes.as_slice())))
+            .map(|(loc, bytes)| (bytes.as_slice(), *loc))
             .collect();
-        verify_multi_proof(&hasher, &self.proof, &operations, &self.root)
+        self.proof
+            .verify_multi_inclusion(&hasher, &elements, &self.root)
     }
 }
 

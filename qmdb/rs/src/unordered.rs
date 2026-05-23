@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::marker::PhantomData;
 
-use commonware_codec::{Codec, Decode, DecodeExt, Encode, Read as CodecRead};
+use commonware_codec::{Codec, Decode, DecodeExt, Encode};
 use commonware_cryptography::Hasher;
 use commonware_storage::merkle::{Graftable, Location};
 use commonware_storage::qmdb::{
@@ -421,7 +421,7 @@ where
         };
         let location = decode_update_location(&row_key)?;
         let decoded =
-            <UpdateRow<K, V> as CodecRead>::read_cfg(&mut row_value.as_ref(), &self.update_row_cfg)
+            <UpdateRow<K, V> as Decode>::decode_cfg(row_value.as_ref(), &self.update_row_cfg)
                 .map_err(|e| QmdbError::CorruptData(format!("update row decode: {e}")))?;
         if <K as AsRef<[u8]>>::as_ref(&decoded.key) != key.as_ref() {
             return Err(QmdbError::ProofKeyNotFound {

@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 use std::time::Duration;
 
-use commonware_codec::{Codec, Encode, Read as CodecRead};
+use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::merkle::{
     hasher::Hasher as MerkleHasher, mem::Mem, Family, Graftable, Location, Position,
@@ -16,11 +16,10 @@ use exoware_sdk::{ClientError, RangeMode, SerializableReadSession, StoreClient};
 
 use crate::codec::{
     decode_digest, decode_operation_location_key, decode_update_location,
-    decode_watermark_location, encode_chunk_key, encode_current_boundary_metadata,
-    encode_current_meta_key, encode_grafted_node_key, encode_node_key, encode_operation_key,
-    encode_ops_root_witness_key, encode_presence_key, encode_update_key, encode_watermark_key,
-    ensure_encoded_value_size, merkle_size_for_watermark, CurrentBoundaryMetadata, UpdateRow,
-    WATERMARK_CODEC,
+    decode_watermark_location, encode_chunk_key, encode_current_meta_key, encode_grafted_node_key,
+    encode_node_key, encode_operation_key, encode_ops_root_witness_key, encode_presence_key,
+    encode_update_key, encode_watermark_key, ensure_encoded_value_size, merkle_size_for_watermark,
+    CurrentBoundaryMetadata, UpdateRow, WATERMARK_CODEC,
 };
 use crate::error::QmdbError;
 use crate::VersionedValue;
@@ -274,8 +273,8 @@ impl<'a, F: Family, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, F
                     return Ok(None);
                 };
                 let location = decode_update_location(&row_key)?;
-                let decoded = <UpdateRow<K, V> as CodecRead>::read_cfg(
-                    &mut row_value.as_ref(),
+                let decoded = <UpdateRow<K, V> as Decode>::decode_cfg(
+                    row_value.as_ref(),
                     &self.update_row_cfg,
                 )
                 .map_err(|e| QmdbError::CorruptData(format!("update row decode: {e}")))?;
@@ -427,10 +426,12 @@ impl PreparedCurrentBoundaryUpload {
         );
         rows.push((
             encode_current_meta_key(latest_location),
-            encode_current_boundary_metadata(CurrentBoundaryMetadata {
+            CurrentBoundaryMetadata {
                 root: current_boundary.root,
                 pruned_chunks: current_boundary.pruned_chunks,
-            }),
+            }
+            .encode()
+            .to_vec(),
         ));
         rows.push((
             encode_ops_root_witness_key(latest_location),
