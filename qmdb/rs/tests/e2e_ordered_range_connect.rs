@@ -828,9 +828,12 @@ async fn ordered_mmb_operation_range_client_rejects_missing_nonzero_pinned_nodes
         .get_operation_range(request, &local.current_boundary.root)
         .await
         .expect_err("missing pinned nodes should fail nonzero operation range verification");
-    assert!(
-        matches!(err, QmdbError::CorruptData(message) if message == "non-zero historical operation range proof missing pinned nodes")
-    );
+    assert!(matches!(
+        err,
+        QmdbError::ProofVerification {
+            kind: exoware_qmdb::ProofKind::RangeCheckpoint
+        }
+    ));
 }
 
 #[tokio::test]
@@ -881,9 +884,12 @@ async fn ordered_mmb_operation_range_client_rejects_extra_nonzero_pinned_node() 
         .get_operation_range(request, &local.current_boundary.root)
         .await
         .expect_err("extra pinned nodes should fail operation range verification");
-    assert!(
-        matches!(err, QmdbError::CorruptData(message) if message.contains("historical operation range proof pinned node count mismatch"))
-    );
+    assert!(matches!(
+        err,
+        QmdbError::ProofVerification {
+            kind: exoware_qmdb::ProofKind::RangeCheckpoint
+        }
+    ));
 }
 
 #[tokio::test]
@@ -931,9 +937,12 @@ async fn ordered_mmb_operation_range_client_rejects_zero_start_pinned_nodes() {
         .get_operation_range(request, &local.current_boundary.root)
         .await
         .expect_err("zero-start pinned nodes should fail operation range verification");
-    assert!(
-        matches!(err, QmdbError::CorruptData(message) if message == "zero-start historical operation range proof included pinned nodes")
-    );
+    assert!(matches!(
+        err,
+        QmdbError::ProofVerification {
+            kind: exoware_qmdb::ProofKind::RangeCheckpoint
+        }
+    ));
 }
 
 #[tokio::test]

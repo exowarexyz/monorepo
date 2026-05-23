@@ -53,31 +53,19 @@ pub struct OperationRangeCheckpoint<D: Digest, F: Graftable> {
 
 impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
-        if !self.start_location.is_valid() {
-            return false;
-        }
-        let expected_pinned_nodes = F::nodes_to_pin(self.start_location).count();
-        if self.pinned_nodes.len() != expected_pinned_nodes {
-            return false;
-        }
         let hasher = commonware_storage::qmdb::hasher::<H>();
         let operations = self
             .encoded_operations
             .iter()
             .map(Vec::as_slice)
             .collect::<Vec<_>>();
-        if expected_pinned_nodes == 0 {
-            self.proof
-                .verify_range_inclusion(&hasher, &operations, self.start_location, &self.root)
-        } else {
-            self.proof.verify_proof_and_pinned_nodes(
-                &hasher,
-                &operations,
-                self.start_location,
-                &self.pinned_nodes,
-                &self.root,
-            )
-        }
+        self.proof.verify_proof_and_pinned_nodes(
+            &hasher,
+            &operations,
+            self.start_location,
+            &self.pinned_nodes,
+            &self.root,
+        )
     }
 
     pub fn reconstruct_peaks<H: Hasher<Digest = D>>(

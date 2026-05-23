@@ -29,7 +29,7 @@ use commonware_storage::{
         current::unordered::db::KeyValueProof as UnorderedKeyValueProof,
         operation::Key as QmdbKey,
         sync::resolver::{FetchResult, Resolver},
-        verify::{verify_multi_proof, verify_proof, verify_proof_and_pinned_nodes},
+        verify::{verify_multi_proof, verify_proof_and_pinned_nodes},
     },
 };
 use commonware_utils::channel::oneshot;
@@ -602,7 +602,7 @@ where
     fn fetch_result(
         &self,
         proto: HistoricalOperationRangeProof,
-        start_loc: Location<F>,
+        _start_loc: Location<F>,
         include_pinned_nodes: bool,
     ) -> Result<FetchResult<F, Op, H::Digest>, QmdbError> {
         let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
@@ -622,30 +622,13 @@ where
             })
             .collect::<Result<Vec<_>, _>>()?;
         let pinned_nodes = if include_pinned_nodes {
-            let pinned_nodes = proto
-                .pinned_nodes
-                .iter()
-                .map(|bytes| decode_digest::<H>(bytes.as_slice(), "operation sync pinned node"))
-                .collect::<Result<Vec<_>, _>>()?;
-            if !start_loc.is_valid() {
-                return Err(QmdbError::CorruptData(format!(
-                    "sync operation range response has invalid start location {}",
-                    start_loc.as_u64()
-                )));
-            }
-            let expected_pinned_nodes = F::nodes_to_pin(start_loc).count();
-            if expected_pinned_nodes > 0 && pinned_nodes.is_empty() {
-                return Err(QmdbError::CorruptData(
-                    "sync operation range response missing pinned nodes".to_string(),
-                ));
-            }
-            if pinned_nodes.len() != expected_pinned_nodes {
-                return Err(QmdbError::CorruptData(format!(
-                    "sync operation range response pinned node count mismatch: expected {expected_pinned_nodes}, got {}",
-                    pinned_nodes.len()
-                )));
-            }
-            Some(pinned_nodes)
+            Some(
+                proto
+                    .pinned_nodes
+                    .iter()
+                    .map(|bytes| decode_digest::<H>(bytes.as_slice(), "operation sync pinned node"))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
         } else {
             None
         };
@@ -1226,43 +1209,15 @@ where
         .iter()
         .map(|bytes| decode_digest::<H>(bytes.as_slice(), "historical operation range pinned node"))
         .collect::<Result<Vec<_>, QmdbError>>()?;
-    if !start.is_valid() {
-        return Err(QmdbError::CorruptData(format!(
-            "historical operation range proof has invalid start location {}",
-            start.as_u64()
-        )));
-    }
-    let expected_pinned_nodes = F::nodes_to_pin(start).count();
-    if expected_pinned_nodes == 0 && !pinned_nodes.is_empty() {
-        return Err(QmdbError::CorruptData(
-            "zero-start historical operation range proof included pinned nodes".to_string(),
-        ));
-    }
-    if expected_pinned_nodes > 0 && pinned_nodes.is_empty() {
-        return Err(QmdbError::CorruptData(
-            "non-zero historical operation range proof missing pinned nodes".to_string(),
-        ));
-    }
-    if pinned_nodes.len() != expected_pinned_nodes {
-        return Err(QmdbError::CorruptData(format!(
-            "historical operation range proof pinned node count mismatch: expected {expected_pinned_nodes}, got {}",
-            pinned_nodes.len()
-        )));
-    }
     let hasher = commonware_storage::qmdb::hasher::<H>();
-    let verified = if expected_pinned_nodes == 0 {
-        verify_proof(&hasher, &proof, start, &decoded_operations, &target_root)
-    } else {
-        verify_proof_and_pinned_nodes(
-            &hasher,
-            &proof,
-            start,
-            &decoded_operations,
-            &pinned_nodes,
-            &target_root,
-        )
-    };
-    if !verified {
+    if !verify_proof_and_pinned_nodes(
+        &hasher,
+        &proof,
+        start,
+        &decoded_operations,
+        &pinned_nodes,
+        &target_root,
+    ) {
         return Err(QmdbError::ProofVerification {
             kind: crate::ProofKind::RangeCheckpoint,
         });
