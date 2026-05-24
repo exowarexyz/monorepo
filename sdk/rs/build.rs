@@ -30,9 +30,15 @@ fn main() {
         "store/v1/stream.proto",
     ];
 
+    let mut buffa_config = connectrpc_build::CodeGenConfig::default();
+    buffa_config.generate_json = true;
+    buffa_config.file_per_package = true;
+    buffa_config.bytes_fields = vec![".".into()];
+
     connectrpc_build::Config::new()
         .files(&files)
         .descriptor_set(&descriptor)
+        .buffa_config(buffa_config)
         .emit_register_fn(false)
         .out_dir(&gen_dir)
         .compile()

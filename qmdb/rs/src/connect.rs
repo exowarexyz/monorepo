@@ -1,9 +1,12 @@
+#![allow(refining_impl_trait)]
+
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 
+use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_cryptography::Hasher;
 use commonware_storage::{
@@ -32,7 +35,9 @@ use crate::proto::qmdb::v1::{
     OperationLogServiceServer, OrderedKeyRangeService, OrderedKeyRangeServiceServer,
     SubscribeRequestView, SubscribeResponse,
 };
-use connectrpc::{Chain, ConnectError, ConnectRpcService, Context, ErrorCode, Limits};
+use connectrpc::{
+    Chain, ConnectError, ConnectRpcService, ErrorCode, Limits, RequestContext as Context,
+};
 use exoware_sdk::store::common::v1::bytes_filter::KindView as ProtoBytesFilterKindView;
 use exoware_sdk::stream_filter::{BytesFilter, CompiledBytesFilters};
 use futures::future::BoxFuture;
@@ -100,21 +105,21 @@ fn raw_batch_multi_proof_to_proto<D: commonware_cryptography::Digest, F: Graftab
     proof: &RawBatchMultiProof<D, F>,
 ) -> ProtoHistoricalMultiProof {
     ProtoHistoricalMultiProof {
-        proof: proof.proof.encode().to_vec(),
+        proof: proof.proof.encode(),
         operations: proof
             .operations
             .iter()
             .map(|(location, encoded_operation)| ProtoMultiProofOperation {
                 location: location.as_u64(),
-                encoded_operation: encoded_operation.clone(),
+                encoded_operation: encoded_operation.clone().into(),
                 ..Default::default()
             })
             .collect(),
-        ops_root: proof.root.encode().to_vec(),
+        ops_root: proof.root.encode(),
         ops_root_witness: proof
             .ops_root_witness
             .as_ref()
-            .map(|witness| witness.encode().to_vec())
+            .map(|witness| witness.encode())
             .unwrap_or_default(),
         ..Default::default()
     }
@@ -124,19 +129,24 @@ fn operation_range_checkpoint_to_proto<D: commonware_cryptography::Digest, F: Gr
     proof: &OperationRangeCheckpoint<D, F>,
 ) -> ProtoHistoricalOperationRangeProof {
     ProtoHistoricalOperationRangeProof {
-        proof: proof.proof.encode().to_vec(),
+        proof: proof.proof.encode(),
         start_location: proof.start_location.as_u64(),
-        encoded_operations: proof.encoded_operations.clone(),
-        ops_root: proof.root.encode().to_vec(),
+        encoded_operations: proof
+            .encoded_operations
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect(),
+        ops_root: proof.root.encode(),
         ops_root_witness: proof
             .ops_root_witness
             .as_ref()
-            .map(|witness| witness.encode().to_vec())
+            .map(|witness| witness.encode())
             .unwrap_or_default(),
         pinned_nodes: proof
             .pinned_nodes
             .iter()
-            .map(|node| node.encode().to_vec())
+            .map(|node| node.encode())
             .collect(),
         ..Default::default()
     }
@@ -151,18 +161,14 @@ fn current_operation_range_proof_to_proto<
     proof: &CurrentOperationRangeProofResult<D, Op, N, F>,
 ) -> ProtoCurrentOperationRangeProof {
     ProtoCurrentOperationRangeProof {
-        proof: proof.proof.encode().to_vec(),
+        proof: proof.proof.encode(),
         start_location: proof.start_location.as_u64(),
         encoded_operations: proof
             .operations
             .iter()
-            .map(|operation| operation.encode().to_vec())
+            .map(|operation| operation.encode())
             .collect(),
-        chunks: proof
-            .chunks
-            .iter()
-            .map(|chunk| chunk.encode().to_vec())
-            .collect(),
+        chunks: proof.chunks.iter().map(|chunk| chunk.encode()).collect(),
         ..Default::default()
     }
 }
@@ -181,8 +187,8 @@ where
     ordered::Operation<F, K, E>: Encode,
 {
     ProtoCurrentKeyValueProof {
-        proof: proof.proof.encode().to_vec(),
-        encoded_operation: proof.operation.encode().to_vec(),
+        proof: proof.proof.encode(),
+        encoded_operation: proof.operation.encode(),
         ..Default::default()
     }
 }
@@ -201,8 +207,8 @@ where
     unordered::Operation<F, K, E>: Encode,
 {
     ProtoCurrentKeyValueProof {
-        proof: proof.proof.encode().to_vec(),
-        encoded_operation: proof.operation.encode().to_vec(),
+        proof: proof.proof.encode(),
+        encoded_operation: proof.operation.encode(),
         ..Default::default()
     }
 }
@@ -221,7 +227,7 @@ where
     commonware_storage::qmdb::current::ordered::ExclusionProof<F, K, E, D, N>: Encode,
 {
     ProtoCurrentKeyExclusionProof {
-        proof: proof.proof.encode().to_vec(),
+        proof: proof.proof.encode(),
         ..Default::default()
     }
 }
@@ -737,8 +743,12 @@ where
     let mut domain = Vec::new();
     for filter in filters {
         domain.push(match filter.kind {
-            Some(ProtoBytesFilterKindView::Exact(exact)) => BytesFilter::Exact(exact.to_vec()),
-            Some(ProtoBytesFilterKindView::Prefix(prefix)) => BytesFilter::Prefix(prefix.to_vec()),
+            Some(ProtoBytesFilterKindView::Exact(exact)) => {
+                BytesFilter::Exact(Bytes::copy_from_slice(exact))
+            }
+            Some(ProtoBytesFilterKindView::Prefix(prefix)) => {
+                BytesFilter::Prefix(Bytes::copy_from_slice(prefix))
+            }
             Some(ProtoBytesFilterKindView::Regex(pattern)) => {
                 BytesFilter::Regex(pattern.to_string())
             }
@@ -994,9 +1004,9 @@ where
 {
     fn get(
         &self,
-        ctx: Context,
+        _ctx: Context,
         request: buffa::view::OwnedView<GetRequestView<'static>>,
-    ) -> impl Future<Output = Result<(GetResponse, Context), ConnectError>> + Send {
+    ) -> impl Future<Output = connectrpc::ServiceResult<GetResponse>> + Send {
         let client = self.client.clone();
         async move {
             let key = client
@@ -1007,28 +1017,26 @@ where
                 .key_value_proof_raw_at(tip, key.as_ref())
                 .await
                 .map_err(qmdb_error_to_connect)?;
-            Ok((
-                GetResponse {
-                    proof: Some(raw_key_value_proof_to_proto(&proof)).into(),
-                    ..Default::default()
-                },
-                ctx,
-            ))
+            connectrpc::Response::ok(GetResponse {
+                proof: Some(raw_key_value_proof_to_proto(&proof)).into(),
+                ..Default::default()
+            })
         }
     }
 
     fn get_many(
         &self,
-        ctx: Context,
+        _ctx: Context,
         request: buffa::view::OwnedView<GetManyRequestView<'static>>,
-    ) -> impl Future<Output = Result<(GetManyResponse, Context), ConnectError>> + Send {
+    ) -> impl Future<Output = connectrpc::ServiceResult<GetManyResponse>> + Send {
         let client = self.client.clone();
         async move {
             let tip = Location::new(request.tip);
-            let keys: Vec<Vec<u8>> = request.keys.iter().map(|key| key.to_vec()).collect();
+            let wire = request.bytes();
+            let keys: Vec<Bytes> = request.keys.iter().map(|key| wire.slice_ref(key)).collect();
             let decoded_keys = keys
                 .iter()
-                .map(|key| client.decode_key(key.as_slice()))
+                .map(|key| client.decode_key(key.as_ref()))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(qmdb_error_to_connect)?;
             let proofs = client
@@ -1054,13 +1062,10 @@ where
                     }
                 })
                 .collect();
-            Ok((
-                GetManyResponse {
-                    results,
-                    ..Default::default()
-                },
-                ctx,
-            ))
+            connectrpc::Response::ok(GetManyResponse {
+                results,
+                ..Default::default()
+            })
         }
     }
 }
@@ -1082,36 +1087,33 @@ where
 {
     fn get(
         &self,
-        ctx: Context,
+        _ctx: Context,
         request: buffa::view::OwnedView<GetRequestView<'static>>,
-    ) -> impl Future<Output = Result<(GetResponse, Context), ConnectError>> + Send {
+    ) -> impl Future<Output = connectrpc::ServiceResult<GetResponse>> + Send {
         let client = self.client.clone();
         async move {
-            let key = request.key.to_vec();
             let tip = Location::new(request.tip);
             let proof = client
-                .key_value_proof_raw_at::<N, _>(tip, key.as_slice())
+                .key_value_proof_raw_at::<N, _>(tip, request.key)
                 .await
                 .map_err(qmdb_error_to_connect)?;
-            Ok((
-                GetResponse {
-                    proof: Some(raw_unordered_key_value_proof_to_proto(&proof)).into(),
-                    ..Default::default()
-                },
-                ctx,
-            ))
+            connectrpc::Response::ok(GetResponse {
+                proof: Some(raw_unordered_key_value_proof_to_proto(&proof)).into(),
+                ..Default::default()
+            })
         }
     }
 
     fn get_many(
         &self,
-        ctx: Context,
+        _ctx: Context,
         request: buffa::view::OwnedView<GetManyRequestView<'static>>,
-    ) -> impl Future<Output = Result<(GetManyResponse, Context), ConnectError>> + Send {
+    ) -> impl Future<Output = connectrpc::ServiceResult<GetManyResponse>> + Send {
         let client = self.client.clone();
         async move {
             let tip = Location::new(request.tip);
-            let keys: Vec<Vec<u8>> = request.keys.iter().map(|key| key.to_vec()).collect();
+            let wire = request.bytes();
+            let keys: Vec<Bytes> = request.keys.iter().map(|key| wire.slice_ref(key)).collect();
             let proofs = client
                 .key_lookup_proofs_raw_at::<N, _>(tip, &keys)
                 .await
@@ -1120,8 +1122,10 @@ where
                 .iter()
                 .map(|proof| ProtoCurrentKeyLookupResult {
                     key: match &proof.operation {
-                        unordered::Operation::Update(update) => update.0.as_ref().to_vec(),
-                        _ => Vec::new(),
+                        unordered::Operation::Update(update) => {
+                            Bytes::copy_from_slice(update.0.as_ref())
+                        }
+                        _ => Bytes::new(),
                     },
                     result: Some(current_key_lookup_result::Result::Hit(Box::new(
                         raw_unordered_key_value_proof_to_proto(proof),
@@ -1129,13 +1133,10 @@ where
                     ..Default::default()
                 })
                 .collect();
-            Ok((
-                GetManyResponse {
-                    results,
-                    ..Default::default()
-                },
-                ctx,
-            ))
+            connectrpc::Response::ok(GetManyResponse {
+                results,
+                ..Default::default()
+            })
         }
     }
 }
@@ -1152,9 +1153,9 @@ where
 {
     fn get_range(
         &self,
-        ctx: Context,
+        _ctx: Context,
         request: buffa::view::OwnedView<GetRangeRequestView<'static>>,
-    ) -> impl Future<Output = Result<(GetRangeResponse, Context), ConnectError>> + Send {
+    ) -> impl Future<Output = connectrpc::ServiceResult<GetRangeResponse>> + Send {
         let client = self.client.clone();
         async move {
             let tip = Location::new(request.tip);
@@ -1170,7 +1171,7 @@ where
                 .key_range_proof_raw_at(tip, start_key, end_key, request.limit)
                 .await
                 .map_err(qmdb_error_to_connect)?;
-            Ok((raw_key_range_proof_to_proto(&proof), ctx))
+            connectrpc::Response::ok(raw_key_range_proof_to_proto(&proof))
         }
     }
 }
@@ -1178,10 +1179,9 @@ where
 impl<B: OperationLogBackend> OperationLogService for OperationLogConnect<B> {
     fn get_operation_range(
         &self,
-        ctx: Context,
+        _ctx: Context,
         request: buffa::view::OwnedView<GetOperationRangeRequestView<'static>>,
-    ) -> impl Future<Output = Result<(GetOperationRangeResponse, Context), ConnectError>> + Send
-    {
+    ) -> impl Future<Output = connectrpc::ServiceResult<GetOperationRangeResponse>> + Send {
         let backend = self.backend.clone();
         async move {
             let proof = backend
@@ -1192,29 +1192,19 @@ impl<B: OperationLogBackend> OperationLogService for OperationLogConnect<B> {
                 )
                 .await
                 .map_err(qmdb_error_to_connect)?;
-            Ok((
-                GetOperationRangeResponse {
-                    proof: Some(operation_range_checkpoint_to_proto(&proof)).into(),
-                    ..Default::default()
-                },
-                ctx,
-            ))
+            connectrpc::Response::ok(GetOperationRangeResponse {
+                proof: Some(operation_range_checkpoint_to_proto(&proof)).into(),
+                ..Default::default()
+            })
         }
     }
 
     fn subscribe(
         &self,
-        ctx: Context,
+        _ctx: Context,
         request: buffa::view::OwnedView<SubscribeRequestView<'static>>,
-    ) -> impl Future<
-        Output = Result<
-            (
-                Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>>,
-                Context,
-            ),
-            ConnectError,
-        >,
-    > + Send {
+    ) -> impl Future<Output = connectrpc::ServiceResult<connectrpc::ServiceStream<SubscribeResponse>>>
+           + Send {
         let backend = self.backend.clone();
         async move {
             if B::REJECTS_KEY_FILTERS && !request.key_filters.is_empty() {
@@ -1262,7 +1252,7 @@ impl<B: OperationLogBackend> OperationLogService for OperationLogConnect<B> {
                 build_proof,
                 sub,
             ));
-            Ok((stream, ctx))
+            Ok(connectrpc::Response::stream(stream))
         }
     }
 }
@@ -1274,9 +1264,9 @@ where
 {
     fn get_current_operation_range(
         &self,
-        ctx: Context,
+        _ctx: Context,
         request: buffa::view::OwnedView<GetCurrentOperationRangeRequestView<'static>>,
-    ) -> impl Future<Output = Result<(GetCurrentOperationRangeResponse, Context), ConnectError>> + Send
+    ) -> impl Future<Output = connectrpc::ServiceResult<GetCurrentOperationRangeResponse>> + Send
     {
         let backend = self.backend.clone();
         async move {
@@ -1288,13 +1278,10 @@ where
                 )
                 .await
                 .map_err(qmdb_error_to_connect)?;
-            Ok((
-                GetCurrentOperationRangeResponse {
-                    proof: Some(current_operation_range_proof_to_proto(&proof)).into(),
-                    ..Default::default()
-                },
-                ctx,
-            ))
+            connectrpc::Response::ok(GetCurrentOperationRangeResponse {
+                proof: Some(current_operation_range_proof_to_proto(&proof)).into(),
+                ..Default::default()
+            })
         }
     }
 }
@@ -1456,7 +1443,7 @@ mod tests {
 
         let proto = raw_batch_multi_proof_to_proto(&raw);
 
-        assert_eq!(proto.ops_root, root.encode().to_vec());
+        assert_eq!(proto.ops_root, root.encode());
         assert!(proto.ops_root_witness.is_empty());
     }
 

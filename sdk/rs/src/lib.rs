@@ -98,9 +98,9 @@ fn store_connect_client_config(
     request_compression: ConnectRequestCompression,
 ) -> ClientConfig {
     ClientConfig::new(base_uri)
-        .compression(proto_connect_compression_registry())
+        .with_compression(proto_connect_compression_registry())
         .compress_requests(request_compression.wire_name())
-        .default_max_message_size(STORE_CLIENT_MAX_MESSAGE_BYTES)
+        .with_default_max_message_size(STORE_CLIENT_MAX_MESSAGE_BYTES)
 }
 
 /// Store client error.
@@ -1366,8 +1366,8 @@ impl StoreClient {
                 )));
             }
             proto_kvs.push(exoware_proto::common::KvEntry {
-                key: (*key).to_vec(),
-                value: value.to_vec(),
+                key: Bytes::copy_from_slice(key),
+                value: Bytes::copy_from_slice(value),
                 ..Default::default()
             });
         }
@@ -1447,9 +1447,9 @@ impl StoreClient {
         let config =
             store_connect_client_config(self.query_uri.clone(), self.connect_request_compression);
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
-        let proto_keys: Vec<Vec<u8>> = keys
+        let proto_keys: Vec<Bytes> = keys
             .iter()
-            .map(|k| self.encode_store_key(k).map(|key| key.to_vec()))
+            .map(|k| self.encode_store_key(k).map(Bytes::from))
             .collect::<Result<Vec<_>, _>>()?;
         let effective_min = self.normalize_min_sequence_number(min_sequence_number);
         let max_attempts = self.retry_config.max_attempts.max(1);
@@ -1759,7 +1759,7 @@ impl StoreClient {
             .send_with_retry(|| async {
                 client
                     .get(ProtoGetRequest {
-                        key: key.to_vec(),
+                        key: key.clone().into(),
                         min_sequence_number,
                         ..Default::default()
                     })
@@ -1844,8 +1844,8 @@ impl StoreClient {
             // attempt budget so range opens do not multiply retries quadratically.
             let response = match client
                 .range(ProtoRangeRequest {
-                    start: start.to_vec(),
-                    end: end.to_vec(),
+                    start: start.clone().into(),
+                    end: end.clone().into(),
                     limit: Some(u32::try_from(limit).unwrap_or(u32::MAX)),
                     batch_size: u32::try_from(batch_size).unwrap_or(u32::MAX),
                     mode: mode.to_proto().into(),
@@ -1922,8 +1922,8 @@ impl StoreClient {
             .send_with_retry(|| async {
                 client
                     .reduce(ProtoWireReduceRequest {
-                        start: start.to_vec(),
-                        end: end.to_vec(),
+                        start: start.clone().into(),
+                        end: end.clone().into(),
                         params: Some(proto_params.clone()).into(),
                         min_sequence_number,
                         ..Default::default()
@@ -2350,8 +2350,8 @@ impl<'a> Stream<'a> {
                 use crate::stream_filter::BytesFilter;
                 use exoware_proto::store::common::v1::bytes_filter::Kind as ProtoKind;
                 let kind = match vf {
-                    BytesFilter::Exact(bytes) => ProtoKind::Exact(bytes),
-                    BytesFilter::Prefix(bytes) => ProtoKind::Prefix(bytes),
+                    BytesFilter::Exact(bytes) => ProtoKind::Exact(bytes.into()),
+                    BytesFilter::Prefix(bytes) => ProtoKind::Prefix(bytes.into()),
                     BytesFilter::Regex(pattern) => ProtoKind::Regex(pattern),
                 };
                 exoware_proto::store::common::v1::BytesFilter {

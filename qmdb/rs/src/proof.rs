@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use commonware_codec::{Codec, Encode};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::{
@@ -438,7 +439,7 @@ pub struct RawKeyRangeEntry<
     F: Graftable,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > {
-    pub key: Vec<u8>,
+    pub key: Bytes,
     pub proof: RawKeyValueProof<D, K, V, N, F, E>,
 }
 
@@ -457,7 +458,7 @@ pub struct RawKeyRangeProof<
     pub start_proof: Option<RawKeyExclusionProof<D, K, V, N, F, E>>,
     pub end_proof: Option<RawKeyExclusionProof<D, K, V, N, F, E>>,
     pub has_more: bool,
-    pub next_start_key: Vec<u8>,
+    pub next_start_key: Bytes,
 }
 
 /// Current unordered proof for one active key. Missing-key proofs are
@@ -570,7 +571,7 @@ pub enum VerifiedKeyLookup<
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > {
     Hit(VerifiedKeyValue<D, K, V, F, E>),
-    Miss { key: Vec<u8> },
+    Miss { key: Bytes },
 }
 
 /// A verified ordered current key range.
@@ -585,7 +586,7 @@ pub struct VerifiedKeyRange<
 > {
     pub entries: Vec<VerifiedKeyValue<D, K, V, F, E>>,
     pub has_more: bool,
-    pub next_start_key: Vec<u8>,
+    pub next_start_key: Bytes,
 }
 
 /// Contiguous range of operations plus bitmap chunks verified against the

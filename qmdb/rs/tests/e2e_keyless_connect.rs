@@ -7,6 +7,7 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_runtime::{deterministic, Runner as _};
 use commonware_storage::merkle::{mmr, Location};
@@ -300,7 +301,9 @@ async fn keyless_connect_client_rejects_invalid_streamed_proof() {
 
 fn match_exact(bytes: &[u8]) -> ProtoBytesFilter {
     ProtoBytesFilter {
-        kind: Some(proto_bytes_filter::Kind::Exact(bytes.to_vec())),
+        kind: Some(proto_bytes_filter::Kind::Exact(Bytes::copy_from_slice(
+            bytes,
+        ))),
         ..Default::default()
     }
 }

@@ -32,7 +32,7 @@ tokio = { workspace = true, features = ["full"] }
 tower = { workspace = true }
 
 [build-dependencies]
-connectrpc-build = "0.3.1"
+connectrpc-build = "0.6"
 
 [dev-dependencies]
 hex = { workspace = true }

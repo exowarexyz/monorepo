@@ -13,6 +13,8 @@
 //! expression DataFusion accepts (referring to the table's columns) works
 //! as the predicate.
 
+#![allow(refining_impl_trait)]
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -25,7 +27,7 @@ use crate::proto::sql::v1::{
     SubscribeResponse, Table as ProtoTable, TablesRequestView, TablesResponse,
 };
 use bytes::Bytes;
-use connectrpc::{ConnectError, ConnectRpcService, Context};
+use connectrpc::{ConnectError, ConnectRpcService, RequestContext as Context};
 use datafusion::arrow::array::{
     Array, ArrayRef, BooleanArray, Date32Array, Date64Array, Decimal128Array, Decimal256Array,
     FixedSizeBinaryArray, Float32Array, Float64Array, Int32Array, Int64Array, LargeListArray,
@@ -267,9 +269,9 @@ impl SqlConnect {
 impl Service for SqlConnect {
     fn subscribe(
         &self,
-        ctx: Context,
+        _ctx: Context,
         request: buffa::view::OwnedView<SubscribeRequestView<'static>>,
-    ) -> impl Future<Output = Result<(SubscribeStream, Context), ConnectError>> + Send {
+    ) -> impl Future<Output = connectrpc::ServiceResult<SubscribeStream>> + Send {
         let server = self.server.clone();
         async move {
             let table_name = request.table.to_string();
@@ -291,32 +293,29 @@ impl Service for SqlConnect {
             let output = Box::pin(BatchPredicateStream::new(
                 sub, stream, table_name, where_sql,
             ));
-            Ok((output as SubscribeStream, ctx))
+            Ok(connectrpc::Response::stream(output as SubscribeStream))
         }
     }
 
     fn tables(
         &self,
-        ctx: Context,
+        _ctx: Context,
         _request: buffa::view::OwnedView<TablesRequestView<'static>>,
-    ) -> impl Future<Output = Result<(TablesResponse, Context), ConnectError>> + Send {
+    ) -> impl Future<Output = connectrpc::ServiceResult<TablesResponse>> + Send {
         let server = self.server.clone();
         async move {
-            Ok((
-                TablesResponse {
-                    tables: server.describe_tables(),
-                    ..Default::default()
-                },
-                ctx,
-            ))
+            connectrpc::Response::ok(TablesResponse {
+                tables: server.describe_tables(),
+                ..Default::default()
+            })
         }
     }
 
     fn query(
         &self,
-        ctx: Context,
+        _ctx: Context,
         request: buffa::view::OwnedView<QueryRequestView<'static>>,
-    ) -> impl Future<Output = Result<(QueryResponse, Context), ConnectError>> + Send {
+    ) -> impl Future<Output = connectrpc::ServiceResult<QueryResponse>> + Send {
         let server = self.server.clone();
         async move {
             let sql = request.sql.to_string();
@@ -330,14 +329,11 @@ impl Service for SqlConnect {
             let columns: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
             let rows =
                 record_batches_to_proto_rows(&batches).map_err(datafusion_error_to_connect)?;
-            Ok((
-                QueryResponse {
-                    column: columns,
-                    rows,
-                    ..Default::default()
-                },
-                ctx,
-            ))
+            connectrpc::Response::ok(QueryResponse {
+                column: columns,
+                rows,
+                ..Default::default()
+            })
         }
     }
 }
@@ -589,14 +585,15 @@ fn arrow_value_to_kind(array: &ArrayRef, row: usize) -> DataFusionResult<ProtoCe
                 .value(row)
                 .to_string(),
         )),
-        DataType::FixedSizeBinary(_) => Ok(ProtoCellKind::FixedSizeBinaryValue(
-            array
-                .as_any()
-                .downcast_ref::<FixedSizeBinaryArray>()
-                .unwrap()
-                .value(row)
-                .to_vec(),
-        )),
+        DataType::FixedSizeBinary(_) => {
+            Ok(ProtoCellKind::FixedSizeBinaryValue(Bytes::copy_from_slice(
+                array
+                    .as_any()
+                    .downcast_ref::<FixedSizeBinaryArray>()
+                    .unwrap()
+                    .value(row),
+            )))
+        }
         DataType::Date32 => Ok(ProtoCellKind::Date32Value(
             array
                 .as_any()
@@ -642,7 +639,9 @@ fn arrow_value_to_kind(array: &ArrayRef, row: usize) -> DataFusionResult<ProtoCe
                 .downcast_ref::<Decimal128Array>()
                 .unwrap()
                 .value(row);
-            Ok(ProtoCellKind::Decimal128Value(v.to_be_bytes().to_vec()))
+            Ok(ProtoCellKind::Decimal128Value(Bytes::copy_from_slice(
+                &v.to_be_bytes(),
+            )))
         }
         DataType::Decimal256(_, _) => {
             let v = array
@@ -650,7 +649,9 @@ fn arrow_value_to_kind(array: &ArrayRef, row: usize) -> DataFusionResult<ProtoCe
                 .downcast_ref::<Decimal256Array>()
                 .unwrap()
                 .value(row);
-            Ok(ProtoCellKind::Decimal256Value(v.to_be_bytes().to_vec()))
+            Ok(ProtoCellKind::Decimal256Value(Bytes::copy_from_slice(
+                &v.to_be_bytes(),
+            )))
         }
         DataType::List(_) => {
             let list = array.as_any().downcast_ref::<ListArray>().unwrap();

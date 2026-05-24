@@ -51,7 +51,7 @@ pub mod proto {
                 #![allow(clippy::match_single_binding)]
                 include!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../../../sdk/rs/src/gen/store.v1.common.rs"
+                    "/../../../sdk/rs/src/gen/store.common.v1.rs"
                 ));
             }
         }
@@ -166,7 +166,7 @@ where
     let target_root = historical_target_root::<F>(&proto.ops_root, &proto.ops_root_witness, root)?;
     let max_digests = proof_digest_cap(&proto.proof);
     let proof = merkle::Proof::<F, commonware_cryptography::sha256::Digest>::decode_cfg(
-        proto.proof.as_slice(),
+        proto.proof.as_ref(),
         &max_digests,
     )
     .map_err(|err| format!("failed to decode historical multi proof: {err}"))?;
@@ -198,7 +198,7 @@ where
     let ops_root = decode_digest(&proto.ops_root, "historical multi proof ops root")?;
     let max_digests = proof_digest_cap(&proto.proof);
     let proof = merkle::Proof::<F, commonware_cryptography::sha256::Digest>::decode_cfg(
-        proto.proof.as_slice(),
+        proto.proof.as_ref(),
         &max_digests,
     )
     .map_err(|err| format!("failed to decode historical multi proof: {err}"))?;
@@ -210,7 +210,7 @@ where
         return Ok((ops_root, operations));
     }
     let witness = OpsRootWitness::<F, commonware_cryptography::sha256::Digest>::decode(
-        proto.ops_root_witness.as_slice(),
+        proto.ops_root_witness.as_ref(),
     )
     .map_err(|err| format!("failed to decode historical multi proof ops-root witness: {err}"))?;
     let hasher = commonware_storage::qmdb::hasher::<Sha256>();
@@ -232,7 +232,7 @@ where
             Ok((
                 Location::new(operation.location),
                 OrderedOperation::<F, Vec<u8>, Vec<u8>>::decode_cfg(
-                    operation.encoded_operation.as_slice(),
+                    operation.encoded_operation.as_ref(),
                     &op_cfg::<F>(),
                 )
                 .map_err(|err| {
@@ -267,7 +267,7 @@ where
     let target_root = historical_target_root::<F>(&proto.ops_root, &proto.ops_root_witness, root)?;
     let max_digests = proof_digest_cap(&proto.proof);
     let proof = merkle::Proof::<F, commonware_cryptography::sha256::Digest>::decode_cfg(
-        proto.proof.as_slice(),
+        proto.proof.as_ref(),
         &max_digests,
     )
     .map_err(|err| format!("failed to decode historical operation range proof: {err}"))?;
@@ -285,16 +285,14 @@ where
                     .checked_add(offset)
                     .ok_or_else(|| "operation range location overflow".to_string())?,
             );
-            let operation = OrderedOperation::<F, Vec<u8>, Vec<u8>>::decode_cfg(
-                bytes.as_slice(),
-                &op_cfg::<F>(),
-            )
-            .map_err(|err| {
-                format!(
-                    "failed to decode operation range entry at {}: {err}",
-                    *location
-                )
-            })?;
+            let operation =
+                OrderedOperation::<F, Vec<u8>, Vec<u8>>::decode_cfg(bytes.as_ref(), &op_cfg::<F>())
+                    .map_err(|err| {
+                        format!(
+                            "failed to decode operation range entry at {}: {err}",
+                            *location
+                        )
+                    })?;
             Ok((location, operation))
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -307,7 +305,7 @@ where
         .iter()
         .map(|bytes| {
             decode_digest::<commonware_cryptography::sha256::Digest>(
-                bytes.as_slice(),
+                bytes.as_ref(),
                 "historical operation range pinned node",
             )
         })
@@ -343,7 +341,7 @@ where
     }
     let max_digests = proof_digest_cap(&proto.proof);
     let proof = RangeProof::<F, commonware_cryptography::sha256::Digest>::decode_cfg(
-        proto.proof.as_slice(),
+        proto.proof.as_ref(),
         &max_digests,
     )
     .map_err(|err| format!("failed to decode current operation range proof: {err}"))?;
@@ -361,16 +359,14 @@ where
                     .checked_add(offset)
                     .ok_or_else(|| "operation range location overflow".to_string())?,
             );
-            let operation = OrderedOperation::<F, Vec<u8>, Vec<u8>>::decode_cfg(
-                bytes.as_slice(),
-                &op_cfg::<F>(),
-            )
-            .map_err(|err| {
-                format!(
-                    "failed to decode current operation range entry at {}: {err}",
-                    *location
-                )
-            })?;
+            let operation =
+                OrderedOperation::<F, Vec<u8>, Vec<u8>>::decode_cfg(bytes.as_ref(), &op_cfg::<F>())
+                    .map_err(|err| {
+                        format!(
+                            "failed to decode current operation range entry at {}: {err}",
+                            *location
+                        )
+                    })?;
             Ok((location, operation))
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -383,7 +379,7 @@ where
         .iter()
         .enumerate()
         .map(|(index, bytes)| {
-            <[u8; 32]>::decode(bytes.as_slice())
+            <[u8; 32]>::decode(bytes.as_ref())
                 .map_err(|err| format!("current operation range chunk {index} decode error: {err}"))
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -404,7 +400,7 @@ where
         Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
 {
     let operation = OrderedOperation::<F, Vec<u8>, Vec<u8>>::decode_cfg(
-        proto.encoded_operation.as_slice(),
+        proto.encoded_operation.as_ref(),
         &op_cfg::<F>(),
     )
     .map_err(|err| format!("failed to decode current key-value operation: {err}"))?;
@@ -414,7 +410,7 @@ where
     let max_digests = proof_digest_cap(&proto.proof);
     let proof =
         KeyValueProof::<F, Vec<u8>, commonware_cryptography::sha256::Digest, 32>::decode_cfg(
-            proto.proof.as_slice(),
+            proto.proof.as_ref(),
             &(max_digests, ((0..=MAX_OPERATION_SIZE).into(), ())),
         )
         .map_err(|err| format!("failed to decode current key-value proof: {err}"))?;
@@ -473,7 +469,7 @@ where
         commonware_cryptography::sha256::Digest,
         32,
     >::decode_cfg(
-        proto.proof.as_slice(),
+        proto.proof.as_ref(),
         &(
             max_digests,
             op_cfg::<F>(),
@@ -629,7 +625,7 @@ where
     }
     let results = Array::new();
     for (result, requested_key) in proto.results.iter().zip(requested_keys) {
-        if result.key.as_slice() != requested_key.as_slice() {
+        if result.key.as_ref() != requested_key.as_slice() {
             return Err(js_err("getMany result key does not match requested key"));
         }
         let decoded_requested_key =
@@ -696,7 +692,7 @@ where
         let OrderedOperation::Update(update) = &operation else {
             return Err(js_err("getRange entry proof did not verify an update"));
         };
-        let entry_key = decode_vec_key_wire(entry.key.as_slice()).map_err(js_err)?;
+        let entry_key = decode_vec_key_wire(entry.key.as_ref()).map_err(js_err)?;
         if update.key.as_slice() != entry_key.as_slice() {
             return Err(js_err("getRange entry key does not match proof operation"));
         }
@@ -771,8 +767,7 @@ where
         let Some((_, _, OrderedOperation::Update(last))) = decoded.last() else {
             return Err(js_err("truncated getRange response has no final entry"));
         };
-        let next_start_key =
-            decode_vec_key_wire(proto.next_start_key.as_slice()).map_err(js_err)?;
+        let next_start_key = decode_vec_key_wire(proto.next_start_key.as_ref()).map_err(js_err)?;
         if next_start_key.as_slice() != last.next_key.as_slice() {
             return Err(js_err(
                 "getRange next_start_key does not match last next_key",
@@ -808,7 +803,7 @@ where
     set_field(&verified, "entries", &entries.into())?;
     set_field(&verified, "hasMore", &JsValue::from_bool(proto.has_more))?;
     let next_start_key = if proto.has_more {
-        decode_vec_key_wire(proto.next_start_key.as_slice()).map_err(js_err)?
+        decode_vec_key_wire(proto.next_start_key.as_ref()).map_err(js_err)?
     } else {
         Vec::new()
     };
@@ -1095,7 +1090,6 @@ mod tests {
                         .get_node(position)
                         .expect("pinned node exists")
                         .encode()
-                        .to_vec()
                 })
                 .collect()
         };
@@ -1111,13 +1105,13 @@ mod tests {
 
         (
             HistoricalOperationRangeProof {
-                proof: proof.encode().to_vec(),
+                proof: proof.encode(),
                 start_location: start_offset,
                 encoded_operations: proven_operations
                     .iter()
-                    .map(|operation| operation.encode().to_vec())
+                    .map(|operation| operation.encode())
                     .collect(),
-                ops_root: root.encode().to_vec(),
+                ops_root: root.encode(),
                 pinned_nodes,
                 ..Default::default()
             },
@@ -1173,18 +1167,18 @@ mod tests {
 
         (
             HistoricalMultiProof {
-                proof: proof.encode().to_vec(),
+                proof: proof.encode(),
                 operations: expected
                     .iter()
                     .map(
                         |(location, operation)| proto::qmdb::v1::MultiProofOperation {
                             location: location.as_u64(),
-                            encoded_operation: operation.encode().to_vec(),
+                            encoded_operation: operation.encode(),
                             ..Default::default()
                         },
                     )
                     .collect(),
-                ops_root: root.encode().to_vec(),
+                ops_root: root.encode(),
                 ..Default::default()
             },
             root,
@@ -1215,6 +1209,54 @@ mod tests {
     }
 
     #[test]
+    fn historical_operation_range_pinned_nodes_match_mmr_start_location() {
+        let (zero_start, zero_root, zero_expected) =
+            historical_range_fixture_at::<mmr::Family>(0, 3);
+        assert!(
+            zero_start.pinned_nodes.is_empty(),
+            "zero-start MMR ranges must not carry pinned nodes"
+        );
+        let (_, zero_verified) =
+            verify_operation_range_from_proto::<mmr::Family>(&zero_start, &zero_root).unwrap();
+        assert_eq!(zero_verified, zero_expected);
+
+        let (nonzero_start, nonzero_root, nonzero_expected) =
+            historical_range_fixture_at::<mmr::Family>(1, 4);
+        assert!(
+            !nonzero_start.pinned_nodes.is_empty(),
+            "nonzero-start MMR ranges must carry pinned nodes"
+        );
+        let (_, nonzero_verified) =
+            verify_operation_range_from_proto::<mmr::Family>(&nonzero_start, &nonzero_root)
+                .unwrap();
+        assert_eq!(nonzero_verified, nonzero_expected);
+    }
+
+    #[test]
+    fn historical_operation_range_pinned_nodes_match_mmb_start_location() {
+        let (zero_start, zero_root, zero_expected) =
+            historical_range_fixture_at::<mmb::Family>(0, 3);
+        assert!(
+            zero_start.pinned_nodes.is_empty(),
+            "zero-start MMB ranges must not carry pinned nodes"
+        );
+        let (_, zero_verified) =
+            verify_operation_range_from_proto::<mmb::Family>(&zero_start, &zero_root).unwrap();
+        assert_eq!(zero_verified, zero_expected);
+
+        let (nonzero_start, nonzero_root, nonzero_expected) =
+            historical_range_fixture_at::<mmb::Family>(1, 4);
+        assert!(
+            !nonzero_start.pinned_nodes.is_empty(),
+            "nonzero-start MMB ranges must carry pinned nodes"
+        );
+        let (_, nonzero_verified) =
+            verify_operation_range_from_proto::<mmb::Family>(&nonzero_start, &nonzero_root)
+                .unwrap();
+        assert_eq!(nonzero_verified, nonzero_expected);
+    }
+
+    #[test]
     fn rejects_historical_operation_range_mmr_without_nonzero_pinned_nodes() {
         let (mut proto, root, _) = historical_range_fixture::<mmr::Family>();
         proto.pinned_nodes.clear();
@@ -1237,7 +1279,7 @@ mod tests {
     #[test]
     fn rejects_historical_operation_range_mmr_with_zero_start_pinned_nodes() {
         let (mut proto, root, _) = historical_range_fixture_at::<mmr::Family>(0, 3);
-        proto.pinned_nodes.push(root.encode().to_vec());
+        proto.pinned_nodes.push(root.encode());
 
         let err = verify_operation_range_from_proto::<mmr::Family>(&proto, &root).unwrap_err();
 
@@ -1247,7 +1289,7 @@ mod tests {
     #[test]
     fn rejects_historical_operation_range_mmb_with_zero_start_pinned_nodes() {
         let (mut proto, root, _) = historical_range_fixture_at::<mmb::Family>(0, 3);
-        proto.pinned_nodes.push(root.encode().to_vec());
+        proto.pinned_nodes.push(root.encode());
 
         let err = verify_operation_range_from_proto::<mmb::Family>(&proto, &root).unwrap_err();
 
@@ -1257,7 +1299,9 @@ mod tests {
     #[test]
     fn rejects_historical_operation_range_mmb_with_tampered_pinned_node() {
         let (mut proto, root, _) = historical_range_fixture::<mmb::Family>();
-        proto.pinned_nodes[0][0] ^= 0x01;
+        let mut pinned_node = proto.pinned_nodes[0].to_vec();
+        pinned_node[0] ^= 0x01;
+        proto.pinned_nodes[0] = pinned_node.into();
 
         let err = verify_operation_range_from_proto::<mmb::Family>(&proto, &root).unwrap_err();
 
@@ -1295,7 +1339,7 @@ mod tests {
         };
         let hasher = commonware_storage::qmdb::hasher::<Sha256>();
         let current_root = witness.root(&hasher, &ops_root);
-        proto.ops_root_witness = witness.encode().to_vec();
+        proto.ops_root_witness = witness.encode();
 
         let (root, verified) =
             decode_multi_with_embedded_root_from_proto::<mmb::Family>(&proto).unwrap();

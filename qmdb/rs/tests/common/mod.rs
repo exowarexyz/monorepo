@@ -1,7 +1,8 @@
 //! Local E2E: ephemeral RocksDB dir + simulator on an ephemeral port (no env vars).
 
+#![allow(refining_impl_trait)]
+
 use std::num::NonZeroU64;
-use std::pin::Pin;
 use std::time::Duration;
 
 use axum::{routing::get, Router};
@@ -23,7 +24,7 @@ use commonware_storage::{
 use commonware_utils::Array;
 use commonware_utils::{NZUsize, NZU64};
 use connectrpc::client::ClientConfig;
-use connectrpc::{ConnectError, ConnectRpcService, Context, ErrorCode};
+use connectrpc::{ConnectError, ConnectRpcService, ErrorCode, RequestContext as Context};
 use exoware_qmdb::proto::qmdb::v1::{
     GetOperationRangeRequestView, GetOperationRangeResponse, OperationLogService,
     OperationLogServiceClient, OperationLogServiceServer, SubscribeRequestView, SubscribeResponse,
@@ -341,7 +342,7 @@ impl OperationLogService for StaticOperationLogService {
         &self,
         _ctx: Context,
         _request: buffa::view::OwnedView<GetOperationRangeRequestView<'static>>,
-    ) -> Result<(GetOperationRangeResponse, Context), ConnectError> {
+    ) -> connectrpc::ServiceResult<GetOperationRangeResponse> {
         Err(ConnectError::new(
             ErrorCode::Unimplemented,
             "not implemented",
@@ -350,25 +351,16 @@ impl OperationLogService for StaticOperationLogService {
 
     fn subscribe(
         &self,
-        ctx: Context,
+        _ctx: Context,
         _request: buffa::view::OwnedView<SubscribeRequestView<'static>>,
     ) -> impl std::future::Future<
-        Output = Result<
-            (
-                Pin<
-                    Box<dyn futures::Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>,
-                >,
-                Context,
-            ),
-            ConnectError,
-        >,
+        Output = connectrpc::ServiceResult<connectrpc::ServiceStream<SubscribeResponse>>,
     > + Send {
         let response = self.subscribe_response.clone();
         async move {
-            let stream: Pin<
-                Box<dyn futures::Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>,
-            > = Box::pin(futures::stream::iter([Ok(response)]));
-            Ok((stream, ctx))
+            Ok(connectrpc::Response::stream(futures::stream::iter([Ok(
+                response,
+            )])))
         }
     }
 }
@@ -384,23 +376,17 @@ pub struct StaticOperationRangeService {
 impl OperationLogService for StaticOperationRangeService {
     async fn get_operation_range(
         &self,
-        ctx: Context,
+        _ctx: Context,
         _request: buffa::view::OwnedView<GetOperationRangeRequestView<'static>>,
-    ) -> Result<(GetOperationRangeResponse, Context), ConnectError> {
-        Ok((self.operation_range_response.clone(), ctx))
+    ) -> connectrpc::ServiceResult<GetOperationRangeResponse> {
+        connectrpc::Response::ok(self.operation_range_response.clone())
     }
 
     async fn subscribe(
         &self,
         _ctx: Context,
         _request: buffa::view::OwnedView<SubscribeRequestView<'static>>,
-    ) -> Result<
-        (
-            Pin<Box<dyn futures::Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>>,
-            Context,
-        ),
-        ConnectError,
-    > {
+    ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<SubscribeResponse>> {
         Err(ConnectError::new(
             ErrorCode::Unimplemented,
             "not implemented",
@@ -432,9 +418,10 @@ pub async fn spawn_static_operation_range_service(
 
 #[allow(dead_code)]
 pub fn tamper_subscribe_response(mut response: SubscribeResponse) -> SubscribeResponse {
-    if let Some(mut proof) = response.proof.as_option().cloned() {
-        proof.proof[0] ^= 0x01;
-        response.proof = Some(proof).into();
+    if let Some(proof) = response.proof.as_option_mut() {
+        let mut bytes = proof.proof.to_vec();
+        bytes[0] ^= 0x01;
+        proof.proof = bytes.into();
     }
     response
 }

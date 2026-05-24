@@ -84,8 +84,8 @@ pub(crate) fn apply_filter(matchers: &CompiledMatchers, kvs: &[(Bytes, Bytes)]) 
             };
             if matcher.regex.is_match(&payload) {
                 out.push(KvEntry {
-                    key: k.to_vec(),
-                    value: v.to_vec(),
+                    key: k.clone(),
+                    value: v.clone(),
                     ..Default::default()
                 });
                 continue 'outer;
@@ -217,7 +217,7 @@ mod tests {
         ];
         let entries = apply_filter(&matchers, &kvs);
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].value.as_slice(), b"v1");
+        assert_eq!(entries[0].value.as_ref(), b"v1");
     }
 
     #[test]
@@ -243,7 +243,7 @@ mod tests {
         ];
         let entries = apply_filter(&matchers, &kvs);
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].value.as_slice(), b"keep");
+        assert_eq!(entries[0].value.as_ref(), b"keep");
     }
 
     #[test]
@@ -251,7 +251,7 @@ mod tests {
         let matchers = compile_matchers(&filter_with_values(
             1,
             "(?s).*",
-            vec![BytesFilter::Exact(b"target".to_vec())],
+            vec![BytesFilter::Exact(Bytes::from_static(b"target"))],
         ))
         .unwrap();
         let kvs = vec![
@@ -260,7 +260,7 @@ mod tests {
         ];
         let entries = apply_filter(&matchers, &kvs);
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].value.as_slice(), b"target");
+        assert_eq!(entries[0].value.as_ref(), b"target");
     }
 
     #[test]

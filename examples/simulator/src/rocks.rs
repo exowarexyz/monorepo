@@ -482,11 +482,11 @@ impl Ingest for RocksStore {
 impl Query for RocksStore {
     type RangeScan = RocksRangeScanCursor;
 
-    async fn get(&self, key: Bytes) -> Result<(Option<Vec<u8>>, QueryExtra), String> {
+    async fn get(&self, key: Bytes) -> Result<(Option<Bytes>, QueryExtra), String> {
         let store = self.clone();
         store
             .get_rocksdb(&key)
-            .map(|value| (value, QueryExtra::default()))
+            .map(|value| (value.map(Bytes::from), QueryExtra::default()))
             .map_err(|e| e.to_string())
     }
 
@@ -504,7 +504,7 @@ impl Query for RocksStore {
     async fn get_many(
         &self,
         keys: Vec<Bytes>,
-    ) -> Result<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra), String> {
+    ) -> Result<(Vec<(Bytes, Option<Bytes>)>, QueryExtra), String> {
         let store = self.clone();
         let results = store.db.multi_get(keys.iter().map(|key| key.as_ref()));
         let entries = keys
@@ -512,7 +512,7 @@ impl Query for RocksStore {
             .zip(results)
             .map(|(k, r)| {
                 let value = r.map_err(|e| e.to_string())?;
-                Ok((k.to_vec(), value))
+                Ok((k, value.map(Bytes::from)))
             })
             .collect::<Result<Vec<_>, String>>()?;
         Ok((entries, QueryExtra::default()))

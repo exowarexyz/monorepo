@@ -41,10 +41,11 @@ message HistoricalOperationRangeProof {
   // while pinned nodes provide the pruned-prefix boundary state needed to sync
   // or checkpoint from a non-zero lower operation bound.
   //
-  // This field must contain exactly one digest for each position returned by
-  // `Family::nodes_to_pin(start_location)`. Consequently it is empty when
-  // `start_location == 0`; for non-zero starts in the supported MMR/MMB
-  // operation-log families, it is non-empty.
+  // The number of entries is exactly
+  // `Family::nodes_to_pin(start_location).count()`: no entries are required at
+  // the beginning of the operation log (`start_location == 0`), while non-zero
+  // starts in the supported MMR/MMB operation-log families require one or more
+  // pinned nodes.
   repeated bytes pinned_nodes = 6;
 }
 
