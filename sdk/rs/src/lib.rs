@@ -55,6 +55,48 @@ const DEFAULT_RETRY_MAX_ATTEMPTS: usize = 3;
 const DEFAULT_RETRY_INITIAL_BACKOFF_MS: u64 = 100;
 const DEFAULT_RETRY_MAX_BACKOFF_MS: u64 = 2_000;
 
+/// Converts caller-provided write values into the byte owner stored by
+/// [`StoreWriteBatch`].
+pub trait IntoStoreWriteValue {
+    fn into_store_write_value(self) -> Bytes;
+}
+
+impl IntoStoreWriteValue for Bytes {
+    fn into_store_write_value(self) -> Bytes {
+        self
+    }
+}
+
+impl IntoStoreWriteValue for &Bytes {
+    fn into_store_write_value(self) -> Bytes {
+        self.clone()
+    }
+}
+
+impl IntoStoreWriteValue for Vec<u8> {
+    fn into_store_write_value(self) -> Bytes {
+        self.into()
+    }
+}
+
+impl IntoStoreWriteValue for &Vec<u8> {
+    fn into_store_write_value(self) -> Bytes {
+        Bytes::copy_from_slice(self)
+    }
+}
+
+impl IntoStoreWriteValue for &[u8] {
+    fn into_store_write_value(self) -> Bytes {
+        Bytes::copy_from_slice(self)
+    }
+}
+
+impl<const N: usize> IntoStoreWriteValue for &[u8; N] {
+    fn into_store_write_value(self) -> Bytes {
+        Bytes::copy_from_slice(self)
+    }
+}
+
 /// Codec used to compress **outgoing** RPC request bodies when compression applies.
 ///
 /// connectrpc `ClientConfig::compress_requests` accepts a single encoding name; there is no
@@ -310,10 +352,12 @@ impl StoreWriteBatch {
         &mut self,
         client: &StoreClient,
         key: &Key,
-        value: &[u8],
+        value: impl IntoStoreWriteValue,
     ) -> Result<&mut Self, ClientError> {
-        self.entries
-            .push((client.encode_store_key(key)?, Bytes::copy_from_slice(value)));
+        self.entries.push((
+            client.encode_store_key(key)?,
+            value.into_store_write_value(),
+        ));
         Ok(self)
     }
 

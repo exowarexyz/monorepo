@@ -227,27 +227,27 @@ async fn upload_certificates(
     batch.push(
         client.store_client(),
         &keys::header_by_digest(&finalized.header.digest()),
-        &header,
+        header,
     )?;
     batch.push(
         client.store_client(),
         &keys::block_by_digest(&finalized.header.digest()),
-        &block,
+        block,
     )?;
     batch.push(
         client.store_client(),
         &keys::notarization_by_view(notarized.proof.view()),
-        &notarized_bytes,
+        notarized_bytes,
     )?;
     batch.push(
         client.store_client(),
         &keys::finalization_by_view(finalized.proof.view()),
-        &finalized_bytes,
+        finalized_bytes.clone(),
     )?;
     batch.push(
         client.store_client(),
         &keys::finalized_by_height(finalized.header.height()),
-        &finalized_bytes,
+        finalized_bytes,
     )?;
     Ok(batch.commit(client.store_client()).await?)
 }
