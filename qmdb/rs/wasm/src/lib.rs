@@ -597,7 +597,7 @@ where
     }
     let results = Array::new();
     for (result, requested_key) in proto.results.iter().zip(requested_keys) {
-        if result.key.as_ref() != requested_key.as_slice() {
+        if result.key.as_slice() != requested_key.as_slice() {
             return Err(js_err("getMany result key does not match requested key"));
         }
         let decoded_requested_key =
@@ -664,7 +664,7 @@ where
         let OrderedOperation::Update(update) = &operation else {
             return Err(js_err("getRange entry proof did not verify an update"));
         };
-        let entry_key = decode_vec_key_wire(entry.key.as_ref()).map_err(js_err)?;
+        let entry_key = decode_vec_key_wire(entry.key.as_slice()).map_err(js_err)?;
         if update.key.as_slice() != entry_key.as_slice() {
             return Err(js_err("getRange entry key does not match proof operation"));
         }
@@ -739,7 +739,8 @@ where
         let Some((_, _, OrderedOperation::Update(last))) = decoded.last() else {
             return Err(js_err("truncated getRange response has no final entry"));
         };
-        let next_start_key = decode_vec_key_wire(proto.next_start_key.as_ref()).map_err(js_err)?;
+        let next_start_key =
+            decode_vec_key_wire(proto.next_start_key.as_slice()).map_err(js_err)?;
         if next_start_key.as_slice() != last.next_key.as_slice() {
             return Err(js_err(
                 "getRange next_start_key does not match last next_key",
@@ -775,7 +776,7 @@ where
     set_field(&verified, "entries", &entries.into())?;
     set_field(&verified, "hasMore", &JsValue::from_bool(proto.has_more))?;
     let next_start_key = if proto.has_more {
-        decode_vec_key_wire(proto.next_start_key.as_ref()).map_err(js_err)?
+        decode_vec_key_wire(proto.next_start_key.as_slice()).map_err(js_err)?
     } else {
         Vec::new()
     };
