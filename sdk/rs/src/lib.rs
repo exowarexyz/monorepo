@@ -1410,7 +1410,7 @@ impl StoreClient {
                 )));
             }
             proto_kvs.push(exoware_proto::common::KvEntry {
-                key: Bytes::copy_from_slice(key),
+                key: key.to_vec(),
                 value: Bytes::copy_from_slice(value),
                 ..Default::default()
             });
@@ -1491,9 +1491,12 @@ impl StoreClient {
         let config =
             store_connect_client_config(self.query_uri.clone(), self.connect_request_compression);
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
-        let proto_keys: Vec<Bytes> = keys
+        let proto_keys: Vec<Vec<u8>> = keys
             .iter()
-            .map(|k| self.encode_store_key(k).map(Bytes::from))
+            .map(|k| match self.key_prefix {
+                Some(_) => self.encode_store_key(k).map(|key| key.to_vec()),
+                None => Ok(k.to_vec()),
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let effective_min = self.normalize_min_sequence_number(min_sequence_number);
         let max_attempts = self.retry_config.max_attempts.max(1);

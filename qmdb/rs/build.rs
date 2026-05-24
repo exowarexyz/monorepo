@@ -9,6 +9,24 @@ const QMDB_PROTO_FILES: &[&str] = &[
     "qmdb/v1/current_operation.proto",
 ];
 
+const QMDB_BYTES_FIELDS: &[&str] = &[
+    ".qmdb.v1.MultiProofOperation.encoded_operation",
+    ".qmdb.v1.HistoricalMultiProof.proof",
+    ".qmdb.v1.HistoricalMultiProof.ops_root",
+    ".qmdb.v1.HistoricalMultiProof.ops_root_witness",
+    ".qmdb.v1.HistoricalOperationRangeProof.proof",
+    ".qmdb.v1.HistoricalOperationRangeProof.encoded_operations",
+    ".qmdb.v1.HistoricalOperationRangeProof.ops_root",
+    ".qmdb.v1.HistoricalOperationRangeProof.ops_root_witness",
+    ".qmdb.v1.HistoricalOperationRangeProof.pinned_nodes",
+    ".qmdb.v1.CurrentOperationRangeProof.proof",
+    ".qmdb.v1.CurrentOperationRangeProof.encoded_operations",
+    ".qmdb.v1.CurrentOperationRangeProof.chunks",
+    ".qmdb.v1.CurrentKeyValueProof.proof",
+    ".qmdb.v1.CurrentKeyValueProof.encoded_operation",
+    ".qmdb.v1.CurrentKeyExclusionProof.proof",
+];
+
 fn main() {
     println!("cargo:rerun-if-env-changed=PROTO_GEN");
     println!("cargo:rerun-if-changed=../../proto");
@@ -32,7 +50,10 @@ fn main() {
     let mut buffa_config = connectrpc_build::CodeGenConfig::default();
     buffa_config.generate_json = true;
     buffa_config.file_per_package = true;
-    buffa_config.bytes_fields = vec![".".into()];
+    buffa_config.bytes_fields = QMDB_BYTES_FIELDS
+        .iter()
+        .map(|field| (*field).into())
+        .collect();
 
     connectrpc_build::Config::new()
         .files(QMDB_PROTO_FILES)

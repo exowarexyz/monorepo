@@ -37,7 +37,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [build-dependencies]
-connectrpc-build = "0.6"
+connectrpc-build = "0.6.0"
 
 [dev-dependencies]
 exoware-qmdb = { path = ".", features = ["test-utils"] }

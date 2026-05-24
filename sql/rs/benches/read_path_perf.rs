@@ -168,7 +168,7 @@ impl QueryService for BenchQuery {
         );
         for (key, value) in guard.range::<Key, _>(range).take(limit) {
             results.push(ProtoKvEntry {
-                key: key.clone(),
+                key: key.to_vec(),
                 value: value.clone(),
                 ..Default::default()
             });

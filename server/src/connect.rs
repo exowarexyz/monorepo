@@ -528,7 +528,7 @@ where
         let mut chunk = Vec::new();
         for (key, value) in entries {
             chunk.push(GetManyEntry {
-                key,
+                key: key.to_vec(),
                 value,
                 ..Default::default()
             });
@@ -1084,7 +1084,7 @@ where
                 let entries = kvs
                     .into_iter()
                     .map(|(k, v)| KvEntry {
-                        key: k,
+                        key: k.to_vec(),
                         value: v,
                         ..Default::default()
                     })

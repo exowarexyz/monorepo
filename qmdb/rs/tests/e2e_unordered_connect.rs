@@ -7,7 +7,6 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
@@ -508,7 +507,7 @@ async fn unordered_range_stack_does_not_expose_key_lookup_or_ordered_range_servi
 
     let err = key_lookup_rpc_client(&qmdb_url)
         .get_many(ProtoGetManyRequest {
-            keys: vec![Bytes::from_static(b"alpha")],
+            keys: vec![b"alpha".to_vec()],
             tip: 0,
             ..Default::default()
         })
@@ -518,7 +517,7 @@ async fn unordered_range_stack_does_not_expose_key_lookup_or_ordered_range_servi
 
     let err = ordered_range_rpc_client(&qmdb_url)
         .get_range(ProtoGetRangeRequest {
-            start_key: Bytes::from_static(b"a"),
+            start_key: b"a".to_vec(),
             limit: 1,
             tip: 0,
             ..Default::default()
@@ -580,10 +579,7 @@ async fn unordered_connect_get_many_returns_present_key_proofs() {
     let results = client
         .get_many(
             ProtoGetManyRequest {
-                keys: vec![
-                    Bytes::copy_from_slice(local.alpha.as_ref()),
-                    Bytes::copy_from_slice(local.beta.as_ref()),
-                ],
+                keys: vec![local.alpha.as_ref().to_vec(), local.beta.as_ref().to_vec()],
                 tip: local.latest_location.as_u64(),
                 ..Default::default()
             },
@@ -605,7 +601,7 @@ async fn unordered_connect_get_many_returns_present_key_proofs() {
     let one = client
         .get(
             ProtoGetRequest {
-                key: Bytes::copy_from_slice(local.alpha.as_ref()),
+                key: local.alpha.as_ref().to_vec(),
                 tip: local.latest_location.as_u64(),
                 ..Default::default()
             },
@@ -674,10 +670,7 @@ async fn unordered_connect_omits_missing_and_rejects_duplicate_range_and_stale_r
     let existing = client
         .get_many(
             ProtoGetManyRequest {
-                keys: vec![
-                    Bytes::copy_from_slice(local.alpha.as_ref()),
-                    Bytes::copy_from_slice(missing.as_ref()),
-                ],
+                keys: vec![local.alpha.as_ref().to_vec(), missing.as_ref().to_vec()],
                 tip: local.latest_location.as_u64(),
                 ..Default::default()
             },
@@ -692,10 +685,7 @@ async fn unordered_connect_omits_missing_and_rejects_duplicate_range_and_stale_r
 
     let err = key_lookup_rpc_client(&qmdb_url)
         .get_many(ProtoGetManyRequest {
-            keys: vec![
-                Bytes::copy_from_slice(local.alpha.as_ref()),
-                Bytes::copy_from_slice(local.alpha.as_ref()),
-            ],
+            keys: vec![local.alpha.as_ref().to_vec(), local.alpha.as_ref().to_vec()],
             tip: local.latest_location.as_u64(),
             ..Default::default()
         })
@@ -705,7 +695,7 @@ async fn unordered_connect_omits_missing_and_rejects_duplicate_range_and_stale_r
 
     let err = ordered_range_rpc_client(&qmdb_url)
         .get_range(ProtoGetRangeRequest {
-            start_key: Bytes::copy_from_slice(local.alpha.as_ref()),
+            start_key: local.alpha.as_ref().to_vec(),
             limit: 1,
             tip: local.latest_location.as_u64(),
             ..Default::default()
@@ -718,7 +708,7 @@ async fn unordered_connect_omits_missing_and_rejects_duplicate_range_and_stale_r
     let err = client
         .get_many(
             ProtoGetManyRequest {
-                keys: vec![Bytes::copy_from_slice(local.alpha.as_ref())],
+                keys: vec![local.alpha.as_ref().to_vec()],
                 tip: local.latest_location.as_u64(),
                 ..Default::default()
             },

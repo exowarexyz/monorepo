@@ -164,7 +164,7 @@ where
         expected_root: &H::Digest,
     ) -> Result<VerifiedKeyValue<H::Digest, K, V, F, E>, QmdbError> {
         let requested_key = request.key.clone();
-        let decoded_requested_key = K::decode_cfg(requested_key.as_ref(), self.key_cfg.as_ref())
+        let decoded_requested_key = K::decode_cfg(requested_key.as_slice(), self.key_cfg.as_ref())
             .map_err(|err| {
                 QmdbError::CorruptData(format!("failed to decode requested QMDB key: {err}"))
             })?;
@@ -207,7 +207,9 @@ where
         let mut requested = BTreeSet::<&[u8]>::new();
         for key in &requested_keys {
             if !requested.insert(key.as_ref()) {
-                return Err(QmdbError::DuplicateRequestedKey { key: key.clone() });
+                return Err(QmdbError::DuplicateRequestedKey {
+                    key: Bytes::from(key.clone()),
+                });
             }
         }
         let response = self
@@ -227,13 +229,13 @@ where
             .iter()
             .zip(requested_keys.iter())
             .map(|(result, requested_key)| {
-                if result.key.as_ref() != requested_key.as_ref() {
+                if result.key.as_slice() != requested_key.as_slice() {
                     return Err(QmdbError::ProofVerification {
                         kind: crate::ProofKind::CurrentKeyValue,
                     });
                 }
                 let decoded_requested_key = K::decode_cfg(
-                    requested_key.as_ref(),
+                    requested_key.as_slice(),
                     self.key_cfg.as_ref(),
                 )
                 .map_err(|err| {
@@ -262,14 +264,14 @@ where
                     Some(current_key_lookup_result::Result::Miss(proof)) => {
                         verify_key_exclusion_from_proto::<F, H, K, V, N, E>(
                             proof,
-                            requested_key.as_ref(),
+                            requested_key.as_slice(),
                             expected_root,
                             self.update_cfg.as_ref(),
                             self.key_cfg.as_ref(),
                             self.value_cfg.as_ref(),
                         )?;
                         Ok(VerifiedKeyLookup::Miss {
-                            key: requested_key.clone(),
+                            key: Bytes::from(requested_key.clone()),
                         })
                     }
                     None => Err(QmdbError::CorruptData(
@@ -394,7 +396,7 @@ where
             .ok_or_else(|| QmdbError::CorruptData("qmdb get response missing proof".to_string()))?;
         verify_unordered_key_value_from_proto::<F, H, K, V, N, E>(
             proof,
-            requested_key.as_ref(),
+            requested_key.as_slice(),
             expected_root,
             self.op_cfg.as_ref(),
         )
@@ -416,7 +418,9 @@ where
         let mut requested = BTreeMap::<&[u8], usize>::new();
         for (index, key) in requested_keys.iter().enumerate() {
             if requested.insert(key.as_ref(), index).is_some() {
-                return Err(QmdbError::DuplicateRequestedKey { key: key.clone() });
+                return Err(QmdbError::DuplicateRequestedKey {
+                    key: Bytes::from(key.clone()),
+                });
             }
         }
         let mut returned = BTreeSet::<&[u8]>::new();
@@ -425,12 +429,12 @@ where
             .results
             .iter()
             .map(|result| {
-                let Some(&request_index) = requested.get(result.key.as_ref()) else {
+                let Some(&request_index) = requested.get(result.key.as_slice()) else {
                     return Err(QmdbError::ProofVerification {
                         kind: crate::ProofKind::CurrentKeyValue,
                     });
                 };
-                if !returned.insert(result.key.as_ref()) {
+                if !returned.insert(result.key.as_slice()) {
                     return Err(QmdbError::ProofVerification {
                         kind: crate::ProofKind::CurrentKeyValue,
                     });
@@ -445,7 +449,7 @@ where
                     Some(current_key_lookup_result::Result::Hit(proof)) => {
                         verify_unordered_key_value_from_proto::<F, H, K, V, N, E>(
                             proof,
-                            result.key.as_ref(),
+                            result.key.as_slice(),
                             expected_root,
                             self.op_cfg.as_ref(),
                         )
@@ -1517,7 +1521,7 @@ where
                 "qmdb get_range entry proof did not verify an update".to_string(),
             ));
         };
-        let entry_key = K::decode_cfg(entry.key.as_ref(), key_cfg).map_err(|err| {
+        let entry_key = K::decode_cfg(entry.key.as_slice(), key_cfg).map_err(|err| {
             QmdbError::CorruptData(format!("failed to decode range entry key: {err}"))
         })?;
         if update.key != entry_key {
@@ -1609,7 +1613,7 @@ where
             unreachable!("range entries were checked as updates");
         };
         let next_start_key =
-            K::decode_cfg(response.next_start_key.as_ref(), key_cfg).map_err(|err| {
+            K::decode_cfg(response.next_start_key.as_slice(), key_cfg).map_err(|err| {
                 QmdbError::CorruptData(format!("failed to decode range next_start_key: {err}"))
             })?;
         if next_start_key != last_update.next_key {
@@ -1643,6 +1647,6 @@ where
     Ok(VerifiedKeyRange {
         entries,
         has_more: response.has_more,
-        next_start_key: response.next_start_key.clone(),
+        next_start_key: Bytes::from(response.next_start_key.clone()),
     })
 }

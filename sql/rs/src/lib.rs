@@ -274,7 +274,7 @@ mod tests {
             results: results
                 .into_iter()
                 .map(|(key, value)| ProtoKvEntry {
-                    key,
+                    key: key.to_vec(),
                     value: value.into(),
                     ..Default::default()
                 })
@@ -413,7 +413,7 @@ mod tests {
             let mut results: Vec<ProtoKvEntry> = Vec::new();
             for (key, value) in iter.take(limit) {
                 results.push(ProtoKvEntry {
-                    key: key.clone(),
+                    key: key.to_vec(),
                     value: value.clone(),
                     ..Default::default()
                 });
@@ -455,7 +455,7 @@ mod tests {
                 let key: Key = wire.slice_ref(key_bytes);
                 let value = guard.get(&key).cloned();
                 entries.push(ProtoGetManyEntry {
-                    key,
+                    key: key.to_vec(),
                     value,
                     ..Default::default()
                 });

@@ -84,7 +84,7 @@ pub(crate) fn apply_filter(matchers: &CompiledMatchers, kvs: &[(Bytes, Bytes)]) 
             };
             if matcher.regex.is_match(&payload) {
                 out.push(KvEntry {
-                    key: k.clone(),
+                    key: k.to_vec(),
                     value: v.clone(),
                     ..Default::default()
                 });
