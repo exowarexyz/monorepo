@@ -898,7 +898,7 @@ impl StreamSubscription {
                             Some(prefix) => prefix.decode_key(&key)?,
                             None => key,
                         };
-                        let value = Bytes::from(entry.value);
+                        let value = entry.value;
                         if self
                             .logical_filter
                             .as_ref()
@@ -1449,7 +1449,7 @@ impl StoreClient {
         let (response, _detail) = self
             .send_get(key, self.normalize_min_sequence_number(min_sequence_number))
             .await?;
-        Ok(response.value.map(Bytes::from))
+        Ok(response.value)
     }
 
     pub(crate) async fn get_many(
@@ -2397,8 +2397,8 @@ impl<'a> Stream<'a> {
                 use crate::stream_filter::BytesFilter;
                 use exoware_proto::store::common::v1::bytes_filter::Kind as ProtoKind;
                 let kind = match vf {
-                    BytesFilter::Exact(bytes) => ProtoKind::Exact(bytes.into()),
-                    BytesFilter::Prefix(bytes) => ProtoKind::Prefix(bytes.into()),
+                    BytesFilter::Exact(bytes) => ProtoKind::Exact(bytes),
+                    BytesFilter::Prefix(bytes) => ProtoKind::Prefix(bytes),
                     BytesFilter::Regex(pattern) => ProtoKind::Regex(pattern),
                 };
                 exoware_proto::store::common::v1::BytesFilter {
@@ -2460,10 +2460,8 @@ impl<'a> Stream<'a> {
                     let key = Bytes::from(entry.key);
                     match self.c.key_prefix {
                         Some(prefix) if !prefix.codec.matches(&key) => {}
-                        Some(prefix) => {
-                            entries.push((prefix.decode_key(&key)?, Bytes::from(entry.value)))
-                        }
-                        None => entries.push((key, Bytes::from(entry.value))),
+                        Some(prefix) => entries.push((prefix.decode_key(&key)?, entry.value)),
+                        None => entries.push((key, entry.value)),
                     }
                 }
                 Ok(Some(entries))
@@ -2505,7 +2503,7 @@ impl SerializableReadSession {
                     if let Some(detail) = detail {
                         observed_sequence.fetch_max(detail.sequence_number, Ordering::SeqCst);
                     }
-                    Ok(response.value.map(Bytes::from))
+                    Ok(response.value)
                 }
             },
         )

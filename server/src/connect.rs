@@ -111,7 +111,7 @@ where
             for (key, value) in batch.rows {
                 chunk.push(KvEntry {
                     key: key.into(),
-                    value: value.into(),
+                    value,
                     ..Default::default()
                 });
             }
@@ -1632,7 +1632,7 @@ mod tests {
     ) -> buffa::view::OwnedView<exoware_proto::store::ingest::v1::PutRequestView<'static>> {
         let bytes = exoware_proto::ingest::PutRequest {
             kvs: vec![exoware_proto::common::KvEntry {
-                key: Bytes::from_static(b"k"),
+                key: b"k".to_vec(),
                 value: Bytes::from(vec![1u8; value_len]),
                 ..Default::default()
             }],
@@ -1761,7 +1761,7 @@ mod tests {
         });
         let connect = QueryConnect::new(QueryState { query });
         let bytes = exoware_proto::query::GetRequest {
-            key: Bytes::from_static(b"k"),
+            key: b"k".to_vec(),
             ..Default::default()
         }
         .encode_to_vec();
@@ -1790,7 +1790,7 @@ mod tests {
         )]));
         let connect = QueryConnect::new(AppState::new(engine));
         let bytes = exoware_proto::query::GetRequest {
-            key: Bytes::from_static(b"k"),
+            key: b"k".to_vec(),
             ..Default::default()
         }
         .encode_to_vec();
@@ -1871,8 +1871,8 @@ mod tests {
         ]);
         let connect = QueryConnect::new(AppState::new(engine.clone()));
         let bytes = exoware_proto::query::ReduceRequest {
-            start: Bytes::from_static(b"a"),
-            end: Bytes::from_static(b"z"),
+            start: b"a".to_vec(),
+            end: b"z".to_vec(),
             params: Some(exoware_proto::query::ReduceParams {
                 reducers: vec![exoware_proto::query::RangeReducerSpec {
                     op: exoware_proto::query::RangeReduceOp::RANGE_REDUCE_OP_COUNT_ALL.into(),
@@ -1914,8 +1914,8 @@ mod tests {
         engine.set_range_eof_extra(numeric_query_extra("final_rows", 2.0));
         let connect = QueryConnect::new(AppState::new(engine));
         let bytes = exoware_proto::query::ReduceRequest {
-            start: Bytes::from_static(b"a"),
-            end: Bytes::from_static(b"z"),
+            start: b"a".to_vec(),
+            end: b"z".to_vec(),
             params: Some(exoware_proto::query::ReduceParams {
                 reducers: vec![exoware_proto::query::RangeReducerSpec {
                     op: exoware_proto::query::RangeReduceOp::RANGE_REDUCE_OP_COUNT_ALL.into(),
@@ -1951,11 +1951,7 @@ mod tests {
         engine.set_current_sequence(11);
         let connect = QueryConnect::new(AppState::new(engine));
         let bytes = exoware_proto::query::GetManyRequest {
-            keys: vec![
-                Bytes::from_static(b"a"),
-                Bytes::from_static(b"bb"),
-                Bytes::from_static(b"ccc"),
-            ],
+            keys: vec![b"a".to_vec(), b"bb".to_vec(), b"ccc".to_vec()],
             batch_size: 2,
             ..Default::default()
         }
@@ -2000,8 +1996,8 @@ mod tests {
         );
         let connect = QueryConnect::new(AppState::new(engine.clone()));
         let bytes = exoware_proto::query::RangeRequest {
-            start: Bytes::from_static(b"a"),
-            end: Bytes::from_static(b"z"),
+            start: b"a".to_vec(),
+            end: b"z".to_vec(),
             limit: Some(1000),
             batch_size: 1,
             ..Default::default()
@@ -2054,8 +2050,8 @@ mod tests {
         engine.set_range_eof_extra(numeric_query_extra("final_rows", 2.0));
         let connect = QueryConnect::new(AppState::new(engine));
         let bytes = exoware_proto::query::RangeRequest {
-            start: Bytes::from_static(b"a"),
-            end: Bytes::from_static(b"z"),
+            start: b"a".to_vec(),
+            end: b"z".to_vec(),
             limit: Some(2),
             batch_size: 2,
             ..Default::default()

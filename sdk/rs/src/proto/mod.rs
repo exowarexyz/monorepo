@@ -224,7 +224,7 @@ pub fn to_proto_reduced_value(value: KvReducedValue) -> query::KvReducedValue {
             query::kv_reduced_value::Value::Decimal256Value(v.to_vec().into())
         }
         KvReducedValue::FixedSizeBinary(v) => {
-            query::kv_reduced_value::Value::FixedSizeBinaryValue(v.into())
+            query::kv_reduced_value::Value::FixedSizeBinaryValue(v)
         }
     };
     query::KvReducedValue {
@@ -480,7 +480,7 @@ fn to_proto_predicate_constraint(
         }
         KvPredicateConstraint::BoolEq(v) => query::kv_predicate_constraint::Constraint::BoolEq(v),
         KvPredicateConstraint::FixedSizeBinaryEq(v) => {
-            query::kv_predicate_constraint::Constraint::FixedSizeBinaryEq(v.into())
+            query::kv_predicate_constraint::Constraint::FixedSizeBinaryEq(v)
         }
         KvPredicateConstraint::IntRange { min, max } => {
             query::kv_predicate_constraint::Constraint::IntRange(Box::new(
@@ -572,7 +572,7 @@ fn to_proto_predicate_constraint(
         KvPredicateConstraint::FixedSizeBinaryIn(values) => {
             query::kv_predicate_constraint::Constraint::FixedSizeBinaryIn(Box::new(
                 query::kv_predicate_constraint::FixedSizeBinaryIn {
-                    values: values.into_iter().map(Into::into).collect(),
+                    values,
                     ..Default::default()
                 },
             ))
