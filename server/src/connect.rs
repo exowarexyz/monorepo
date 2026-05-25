@@ -1,12 +1,14 @@
 //! Ingest, query, compact, and stream services; storage is provided by capability traits.
 
+#![allow(refining_impl_trait)]
+
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use connectrpc::{Chain, ConnectError, ConnectRpcService, Context, Limits};
+use connectrpc::{Chain, ConnectError, ConnectRpcService, Limits, RequestContext as Context};
 use exoware_proto::common::KvEntry;
 use exoware_proto::compact::{
     PruneResponse, Service as CompactApi, ServiceServer as CompactServiceServer,
@@ -109,7 +111,7 @@ where
             for (key, value) in batch.rows {
                 chunk.push(KvEntry {
                     key: key.into(),
-                    value: value.into(),
+                    value,
                     ..Default::default()
                 });
             }
@@ -360,7 +362,7 @@ where
         &self,
         _ctx: Context,
         request: buffa::view::OwnedView<exoware_proto::store::ingest::v1::PutRequestView<'static>>,
-    ) -> Result<(ProtoPutResponse, Context), ConnectError> {
+    ) -> connectrpc::ServiceResult<ProtoPutResponse> {
         if !self.state.ready.load(Ordering::SeqCst) {
             return Err(with_error_info_detail(
                 ConnectError::unavailable("ingest is not ready"),
@@ -394,13 +396,10 @@ where
             notifier.advance(seq);
         }
 
-        Ok((
-            ProtoPutResponse {
-                sequence_number: seq,
-                ..Default::default()
-            },
-            Context::default(),
-        ))
+        connectrpc::Response::ok(ProtoPutResponse {
+            sequence_number: seq,
+            ..Default::default()
+        })
     }
 }
 
@@ -484,9 +483,9 @@ where
 {
     async fn get(
         &self,
-        ctx: Context,
+        _ctx: Context,
         request: buffa::view::OwnedView<exoware_proto::store::query::v1::GetRequestView<'static>>,
-    ) -> Result<(GetResponse, Context), ConnectError> {
+    ) -> connectrpc::ServiceResult<GetResponse> {
         validate::validate_get_request(&request)?;
         let token = self.ensure_min_sequence_number(request.min_sequence_number)?;
         let wire = request.bytes();
@@ -498,29 +497,20 @@ where
             .await
             .map_err(ConnectError::internal)?;
         let detail = query_detail(token, extra);
-        Ok((
-            GetResponse {
-                value,
-                detail: Some(detail).into(),
-                ..Default::default()
-            },
-            ctx,
-        ))
+        connectrpc::Response::ok(GetResponse {
+            value,
+            detail: Some(detail).into(),
+            ..Default::default()
+        })
     }
 
     async fn get_many(
         &self,
-        ctx: Context,
+        _ctx: Context,
         request: buffa::view::OwnedView<
             exoware_proto::store::query::v1::GetManyRequestView<'static>,
         >,
-    ) -> Result<
-        (
-            Pin<Box<dyn Stream<Item = Result<GetManyFrame, ConnectError>> + Send>>,
-            Context,
-        ),
-        ConnectError,
-    > {
+    ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<GetManyFrame>> {
         validate::validate_get_many_request(&request)?;
         let sequence_number = self.ensure_min_sequence_number(request.min_sequence_number)?;
 
@@ -538,7 +528,7 @@ where
         let mut chunk = Vec::new();
         for (key, value) in entries {
             chunk.push(GetManyEntry {
-                key,
+                key: key.to_vec(),
                 value,
                 ..Default::default()
             });
@@ -563,20 +553,14 @@ where
             }));
         }
 
-        Ok((Box::pin(stream_util::iter(frames)), ctx))
+        Ok(connectrpc::Response::stream(stream_util::iter(frames)))
     }
 
     async fn range(
         &self,
-        ctx: Context,
+        _ctx: Context,
         request: buffa::view::OwnedView<exoware_proto::store::query::v1::RangeRequestView<'static>>,
-    ) -> Result<
-        (
-            Pin<Box<dyn Stream<Item = Result<RangeFrame, ConnectError>> + Send>>,
-            Context,
-        ),
-        ConnectError,
-    > {
+    ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<RangeFrame>> {
         validate::validate_range_request(&request)?;
         let sequence_number = self.ensure_min_sequence_number(request.min_sequence_number)?;
         let wire = request.bytes();
@@ -589,7 +573,7 @@ where
             Ok(RangeTraversalDirection::Reverse) => false,
             Err(e) => return Err(ConnectError::internal(format!("traversal mode: {e:?}"))),
         };
-        Ok((
+        Ok(connectrpc::Response::stream(
             range_stream(
                 self.state.query.clone(),
                 RangeStreamRequest {
@@ -602,17 +586,16 @@ where
                 },
             )
             .await?,
-            ctx,
         ))
     }
 
     async fn reduce(
         &self,
-        ctx: Context,
+        _ctx: Context,
         request: buffa::view::OwnedView<
             exoware_proto::store::query::v1::ReduceRequestView<'static>,
         >,
-    ) -> Result<(ReduceResponse, Context), ConnectError> {
+    ) -> connectrpc::ServiceResult<ReduceResponse> {
         validate::validate_reduce_request(&request)?;
         let token = self.ensure_min_sequence_number(request.min_sequence_number)?;
         let wire = request.bytes();
@@ -654,46 +637,43 @@ where
 
         let detail = query_detail(token, final_extra);
 
-        Ok((
-            ReduceResponse {
-                results: response
-                    .results
-                    .into_iter()
-                    .map(|result| exoware_proto::query::RangeReduceResult {
-                        value: result.value.map(to_proto_reduced_value).into(),
+        connectrpc::Response::ok(ReduceResponse {
+            results: response
+                .results
+                .into_iter()
+                .map(|result| exoware_proto::query::RangeReduceResult {
+                    value: result.value.map(to_proto_reduced_value).into(),
+                    ..Default::default()
+                })
+                .collect(),
+            groups: response
+                .groups
+                .into_iter()
+                .map(|group| {
+                    let group_values_present =
+                        group.group_values.iter().map(Option::is_some).collect();
+                    exoware_proto::query::RangeReduceGroup {
+                        group_values: group
+                            .group_values
+                            .into_iter()
+                            .map(to_proto_optional_reduced_value)
+                            .collect(),
+                        group_values_present,
+                        results: group
+                            .results
+                            .into_iter()
+                            .map(|result| exoware_proto::query::RangeReduceResult {
+                                value: result.value.map(to_proto_reduced_value).into(),
+                                ..Default::default()
+                            })
+                            .collect(),
                         ..Default::default()
-                    })
-                    .collect(),
-                groups: response
-                    .groups
-                    .into_iter()
-                    .map(|group| {
-                        let group_values_present =
-                            group.group_values.iter().map(Option::is_some).collect();
-                        exoware_proto::query::RangeReduceGroup {
-                            group_values: group
-                                .group_values
-                                .into_iter()
-                                .map(to_proto_optional_reduced_value)
-                                .collect(),
-                            group_values_present,
-                            results: group
-                                .results
-                                .into_iter()
-                                .map(|result| exoware_proto::query::RangeReduceResult {
-                                    value: result.value.map(to_proto_reduced_value).into(),
-                                    ..Default::default()
-                                })
-                                .collect(),
-                            ..Default::default()
-                        }
-                    })
-                    .collect(),
-                detail: Some(detail).into(),
-                ..Default::default()
-            },
-            ctx,
-        ))
+                    }
+                })
+                .collect(),
+            detail: Some(detail).into(),
+            ..Default::default()
+        })
     }
 }
 
@@ -726,11 +706,11 @@ where
 {
     async fn prune(
         &self,
-        ctx: Context,
+        _ctx: Context,
         request: buffa::view::OwnedView<
             exoware_proto::store::compact::v1::PruneRequestView<'static>,
         >,
-    ) -> Result<(PruneResponse, Context), ConnectError> {
+    ) -> connectrpc::ServiceResult<PruneResponse> {
         validate::validate_prune_request(&request)?;
         let document = exoware_proto::parse_and_validate_policy_document(&request)
             .map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
@@ -740,7 +720,7 @@ where
             .apply_prune_policies(document)
             .await
             .map_err(ConnectError::internal)?;
-        Ok((PruneResponse::default(), ctx))
+        connectrpc::Response::ok(PruneResponse::default())
     }
 }
 
@@ -1001,8 +981,12 @@ fn domain_filter_from_subscribe_view(
     let mut value_filters = Vec::with_capacity(req.value_filters.len());
     for vf in req.value_filters.iter() {
         value_filters.push(match vf.kind {
-            Some(ProtoBytesFilterKindView::Exact(bytes)) => BytesFilter::Exact(bytes.to_vec()),
-            Some(ProtoBytesFilterKindView::Prefix(bytes)) => BytesFilter::Prefix(bytes.to_vec()),
+            Some(ProtoBytesFilterKindView::Exact(bytes)) => {
+                BytesFilter::Exact(Bytes::copy_from_slice(bytes))
+            }
+            Some(ProtoBytesFilterKindView::Prefix(bytes)) => {
+                BytesFilter::Prefix(Bytes::copy_from_slice(bytes))
+            }
             Some(ProtoBytesFilterKindView::Regex(pattern)) => {
                 BytesFilter::Regex(pattern.to_string())
             }
@@ -1025,15 +1009,9 @@ where
 {
     async fn subscribe(
         &self,
-        ctx: Context,
+        _ctx: Context,
         request: buffa::view::OwnedView<SubscribeRequestView<'static>>,
-    ) -> Result<
-        (
-            Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>>,
-            Context,
-        ),
-        ConnectError,
-    > {
+    ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<SubscribeResponse>> {
         let filter = domain_filter_from_subscribe_view(&request)?;
         let since = request.since_sequence_number;
 
@@ -1077,7 +1055,7 @@ where
         };
         let next_live_sequence = replay_bound.saturating_add(1);
 
-        Ok((
+        Ok(connectrpc::Response::stream(
             SubscriptionState::new(
                 self.state.clone(),
                 matchers,
@@ -1086,15 +1064,14 @@ where
                 live_notify,
             )
             .into_stream(),
-            ctx,
         ))
     }
 
     async fn get(
         &self,
-        ctx: Context,
+        _ctx: Context,
         request: buffa::view::OwnedView<GetRequestView<'static>>,
-    ) -> Result<(StreamGetResponse, Context), ConnectError> {
+    ) -> connectrpc::ServiceResult<StreamGetResponse> {
         let seq = request.sequence_number;
         match self
             .state
@@ -1108,18 +1085,15 @@ where
                     .into_iter()
                     .map(|(k, v)| KvEntry {
                         key: k.to_vec(),
-                        value: v.to_vec(),
+                        value: v,
                         ..Default::default()
                     })
                     .collect();
-                Ok((
-                    StreamGetResponse {
-                        sequence_number: seq,
-                        entries,
-                        ..Default::default()
-                    },
-                    ctx,
-                ))
+                connectrpc::Response::ok(StreamGetResponse {
+                    sequence_number: seq,
+                    entries,
+                    ..Default::default()
+                })
             }
             None => {
                 let current = self.state.log.current_sequence();
@@ -1431,7 +1405,7 @@ mod tests {
     impl Query for FakeEngine {
         type RangeScan = IteratorRangeScan;
 
-        async fn get(&self, _key: Bytes) -> Result<(Option<Vec<u8>>, QueryExtra), String> {
+        async fn get(&self, _key: Bytes) -> Result<(Option<Bytes>, QueryExtra), String> {
             self.state
                 .lock()
                 .map(|state| (None, state.query_extra.clone()))
@@ -1441,11 +1415,11 @@ mod tests {
         async fn get_many(
             &self,
             keys: Vec<Bytes>,
-        ) -> Result<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra), String> {
+        ) -> Result<(Vec<(Bytes, Option<Bytes>)>, QueryExtra), String> {
             self.state
                 .lock()
                 .map(|state| {
-                    let entries = keys.into_iter().map(|key| (key.to_vec(), None)).collect();
+                    let entries = keys.into_iter().map(|key| (key, None)).collect();
                     (entries, state.query_extra.clone())
                 })
                 .map_err(|e| e.to_string())
@@ -1528,7 +1502,7 @@ mod tests {
 
     struct QueryOnlyEngine {
         sequence_number: u64,
-        value: Option<Vec<u8>>,
+        value: Option<Bytes>,
     }
 
     impl Sequence for QueryOnlyEngine {
@@ -1540,7 +1514,7 @@ mod tests {
     impl Query for QueryOnlyEngine {
         type RangeScan = IteratorRangeScan;
 
-        async fn get(&self, _key: Bytes) -> Result<(Option<Vec<u8>>, QueryExtra), String> {
+        async fn get(&self, _key: Bytes) -> Result<(Option<Bytes>, QueryExtra), String> {
             Ok((self.value.clone(), QueryExtra::default()))
         }
 
@@ -1557,9 +1531,9 @@ mod tests {
         async fn get_many(
             &self,
             keys: Vec<Bytes>,
-        ) -> Result<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra), String> {
+        ) -> Result<(Vec<(Bytes, Option<Bytes>)>, QueryExtra), String> {
             Ok((
-                keys.into_iter().map(|key| (key.to_vec(), None)).collect(),
+                keys.into_iter().map(|key| (key, None)).collect(),
                 QueryExtra::default(),
             ))
         }
@@ -1659,7 +1633,7 @@ mod tests {
         let bytes = exoware_proto::ingest::PutRequest {
             kvs: vec![exoware_proto::common::KvEntry {
                 key: b"k".to_vec(),
-                value: vec![1u8; value_len],
+                value: Bytes::from(vec![1u8; value_len]),
                 ..Default::default()
             }],
             ..Default::default()
@@ -1725,8 +1699,9 @@ mod tests {
         let bytes = subscribe_request_bytes(since_sequence_number);
         let request = buffa::view::OwnedView::<SubscribeRequestView<'static>>::decode(bytes.into())
             .expect("decode subscribe request");
-        let (stream, _ctx) = StreamApi::subscribe(connect, Context::default(), request).await?;
-        Ok(stream)
+        Ok(StreamApi::subscribe(connect, Context::default(), request)
+            .await?
+            .body)
     }
 
     #[tokio::test]
@@ -1782,7 +1757,7 @@ mod tests {
     async fn query_connect_accepts_query_only_engine() {
         let query = Arc::new(QueryOnlyEngine {
             sequence_number: 9,
-            value: Some(b"value".to_vec()),
+            value: Some(Bytes::from_static(b"value")),
         });
         let connect = QueryConnect::new(QueryState { query });
         let bytes = exoware_proto::query::GetRequest {
@@ -1795,9 +1770,10 @@ mod tests {
         >::decode(bytes.into())
         .expect("decode get request");
 
-        let (response, _ctx) = QueryApi::get(&connect, Context::default(), request)
+        let response = QueryApi::get(&connect, Context::default(), request)
             .await
-            .expect("get");
+            .expect("get")
+            .body;
         let detail = response.detail.as_option().expect("query detail");
 
         assert_eq!(response.value.as_deref(), Some(b"value".as_slice()));
@@ -1823,9 +1799,10 @@ mod tests {
         >::decode(bytes.into())
         .expect("decode get request");
 
-        let (response, _ctx) = QueryApi::get(&connect, Context::default(), request)
+        let response = QueryApi::get(&connect, Context::default(), request)
             .await
-            .expect("get");
+            .expect("get")
+            .body;
         let detail = response.detail.as_option().expect("query detail");
 
         assert_eq!(detail.sequence_number, 5);
@@ -1881,7 +1858,7 @@ mod tests {
             .expect("frame should be ok");
         assert_eq!(frame.sequence_number, 1);
         assert_eq!(frame.entries.len(), 1);
-        assert_eq!(frame.entries[0].value.as_slice(), b"v1");
+        assert_eq!(frame.entries[0].value.as_ref(), b"v1");
     }
 
     #[tokio::test]
@@ -1912,9 +1889,10 @@ mod tests {
         >::decode(bytes.into())
         .expect("decode reduce request");
 
-        let (response, _ctx) = QueryApi::reduce(&connect, Context::default(), request)
+        let response = QueryApi::reduce(&connect, Context::default(), request)
             .await
-            .expect("reduce");
+            .expect("reduce")
+            .body;
         let detail = response.detail.as_option().expect("query detail").clone();
         let response = to_domain_reduce_response(response).expect("decode reduce response");
 
@@ -1954,9 +1932,10 @@ mod tests {
         >::decode(bytes.into())
         .expect("decode reduce request");
 
-        let (response, _ctx) = QueryApi::reduce(&connect, Context::default(), request)
+        let response = QueryApi::reduce(&connect, Context::default(), request)
             .await
-            .expect("reduce");
+            .expect("reduce")
+            .body;
         let detail = response.detail.as_option().expect("query detail");
 
         assert_eq!(detail.sequence_number, 8);
@@ -1982,9 +1961,10 @@ mod tests {
         >::decode(bytes.into())
         .expect("decode get_many request");
 
-        let (mut stream, _ctx) = QueryApi::get_many(&connect, Context::default(), request)
+        let mut stream = QueryApi::get_many(&connect, Context::default(), request)
             .await
-            .expect("get_many");
+            .expect("get_many")
+            .body;
         let mut frame_sizes = Vec::new();
         let mut detail_frames = 0usize;
         while let Some(frame) = stream.next().await {
@@ -2028,9 +2008,10 @@ mod tests {
         >::decode(bytes.into())
         .expect("decode range request");
 
-        let (mut stream, _ctx) = QueryApi::range(&connect, Context::default(), request)
+        let mut stream = QueryApi::range(&connect, Context::default(), request)
             .await
-            .expect("range");
+            .expect("range")
+            .body;
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         let consumed = engine.range_next_count();
@@ -2081,9 +2062,10 @@ mod tests {
         >::decode(bytes.into())
         .expect("decode range request");
 
-        let (mut stream, _ctx) = QueryApi::range(&connect, Context::default(), request)
+        let mut stream = QueryApi::range(&connect, Context::default(), request)
             .await
-            .expect("range");
+            .expect("range")
+            .body;
         let mut frames = Vec::new();
         while let Some(frame) = stream.next().await {
             frames.push(frame.expect("range frame"));
@@ -2120,7 +2102,7 @@ mod tests {
             .expect("frame should be ok");
         assert_eq!(frame.sequence_number, 1);
         assert_eq!(frame.entries.len(), 1);
-        assert_eq!(frame.entries[0].value.as_slice(), b"v1");
+        assert_eq!(frame.entries[0].value.as_ref(), b"v1");
     }
 
     #[tokio::test]
@@ -2151,7 +2133,7 @@ mod tests {
             .expect("frame should be ok");
         assert_eq!(frame.sequence_number, 6);
         assert_eq!(frame.entries.len(), 1);
-        assert_eq!(frame.entries[0].value.as_slice(), b"n");
+        assert_eq!(frame.entries[0].value.as_ref(), b"n");
     }
 
     #[tokio::test]

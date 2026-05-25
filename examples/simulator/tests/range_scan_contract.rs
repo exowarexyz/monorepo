@@ -59,13 +59,13 @@ fn scan(
     rows
 }
 
-fn get_value(store: &RocksStore, key: &[u8]) -> Option<Vec<u8>> {
+fn get_value(store: &RocksStore, key: &[u8]) -> Option<Bytes> {
     block_on(store.get(Bytes::copy_from_slice(key)))
         .expect("get")
         .0
 }
 
-fn get_many_values(store: &RocksStore, keys: &[&[u8]]) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+fn get_many_values(store: &RocksStore, keys: &[&[u8]]) -> Vec<(Bytes, Option<Bytes>)> {
     let keys = keys.iter().map(|key| Bytes::copy_from_slice(key)).collect();
     block_on(store.get_many(keys)).expect("get_many").0
 }
@@ -242,7 +242,13 @@ fn get_many_returns_found_and_missing() {
 
     let results = get_many_values(&store, &[b"a", b"missing", b"c"]);
     assert_eq!(results.len(), 3);
-    assert_eq!(results[0], (b"a".to_vec(), Some(b"1".to_vec())));
-    assert_eq!(results[1], (b"missing".to_vec(), None));
-    assert_eq!(results[2], (b"c".to_vec(), Some(b"3".to_vec())));
+    assert_eq!(
+        results[0],
+        (Bytes::from_static(b"a"), Some(Bytes::from_static(b"1")))
+    );
+    assert_eq!(results[1], (Bytes::from_static(b"missing"), None));
+    assert_eq!(
+        results[2],
+        (Bytes::from_static(b"c"), Some(Bytes::from_static(b"3")))
+    );
 }

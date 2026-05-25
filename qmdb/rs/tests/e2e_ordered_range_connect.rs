@@ -7,6 +7,7 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use commonware_codec::Encode as _;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
@@ -924,7 +925,7 @@ async fn ordered_mmb_operation_range_client_rejects_zero_start_pinned_nodes() {
     assert!(proof.pinned_nodes.is_empty());
     proof
         .pinned_nodes
-        .push(local.current_boundary.root.encode().to_vec());
+        .push(local.current_boundary.root.encode());
     response.proof = Some(proof).into();
 
     let (_static_server, static_url) =
@@ -995,14 +996,16 @@ async fn ordered_operation_range_connect_uses_current_root_witness() {
 
 fn match_exact(key: &[u8]) -> ProtoBytesFilter {
     ProtoBytesFilter {
-        kind: Some(proto_bytes_filter::Kind::Exact(key.to_vec())),
+        kind: Some(proto_bytes_filter::Kind::Exact(Bytes::copy_from_slice(key))),
         ..Default::default()
     }
 }
 
 fn match_prefix(prefix: &[u8]) -> ProtoBytesFilter {
     ProtoBytesFilter {
-        kind: Some(proto_bytes_filter::Kind::Prefix(prefix.to_vec())),
+        kind: Some(proto_bytes_filter::Kind::Prefix(Bytes::copy_from_slice(
+            prefix,
+        ))),
         ..Default::default()
     }
 }

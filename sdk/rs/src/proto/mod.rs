@@ -9,7 +9,7 @@ pub mod store {
             #![allow(unused_imports)]
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
-            include!("../gen/store.v1.common.rs");
+            include!("../gen/store.common.v1.rs");
         }
     }
 
@@ -19,7 +19,7 @@ pub mod store {
             #![allow(unused_imports)]
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
-            include!("../gen/store.v1.compact.rs");
+            include!("../gen/store.compact.v1.rs");
         }
     }
 
@@ -29,7 +29,7 @@ pub mod store {
             #![allow(unused_imports)]
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
-            include!("../gen/store.v1.ingest.rs");
+            include!("../gen/store.ingest.v1.rs");
         }
     }
 
@@ -39,7 +39,7 @@ pub mod store {
             #![allow(unused_imports)]
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
-            include!("../gen/store.v1.query.rs");
+            include!("../gen/store.query.v1.rs");
         }
     }
 
@@ -49,7 +49,7 @@ pub mod store {
             #![allow(unused_imports)]
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
-            include!("../gen/store.v1.stream.rs");
+            include!("../gen/store.stream.v1.rs");
         }
     }
 }
@@ -60,7 +60,7 @@ pub mod google {
         #![allow(unused_imports)]
         #![allow(clippy::derivable_impls)]
         #![allow(clippy::match_single_binding)]
-        include!("../gen/google.rpc.error_details.rs");
+        include!("../gen/google.rpc.rs");
     }
 }
 
@@ -118,6 +118,7 @@ use crate::kv_codec::{
     KvExpr, KvFieldKind, KvFieldRef, KvPredicate, KvPredicateCheck, KvPredicateConstraint,
     KvReducedValue,
 };
+use bytes::Bytes;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RangeReduceOp {
@@ -217,10 +218,10 @@ pub fn to_proto_reduced_value(value: KvReducedValue) -> query::KvReducedValue {
         KvReducedValue::Date64(v) => query::kv_reduced_value::Value::Date64Value(v),
         KvReducedValue::Timestamp(v) => query::kv_reduced_value::Value::TimestampValue(v),
         KvReducedValue::Decimal128(v) => {
-            query::kv_reduced_value::Value::Decimal128Value(v.to_be_bytes().to_vec())
+            query::kv_reduced_value::Value::Decimal128Value(v.to_be_bytes().to_vec().into())
         }
         KvReducedValue::Decimal256(v) => {
-            query::kv_reduced_value::Value::Decimal256Value(v.to_vec())
+            query::kv_reduced_value::Value::Decimal256Value(v.to_vec().into())
         }
         KvReducedValue::FixedSizeBinary(v) => {
             query::kv_reduced_value::Value::FixedSizeBinaryValue(v)
@@ -250,14 +251,14 @@ pub fn to_domain_reduced_value(value: &query::KvReducedValue) -> Result<KvReduce
         }
         Some(query::kv_reduced_value::Value::Decimal128Value(bytes)) => {
             let raw: [u8; 16] = bytes
-                .as_slice()
+                .as_ref()
                 .try_into()
                 .map_err(|_| "decimal128 must be exactly 16 bytes".to_string())?;
             Ok(KvReducedValue::Decimal128(i128::from_be_bytes(raw)))
         }
         Some(query::kv_reduced_value::Value::Decimal256Value(bytes)) => {
             let raw: [u8; 32] = bytes
-                .as_slice()
+                .as_ref()
                 .try_into()
                 .map_err(|_| "decimal256 must be exactly 32 bytes".to_string())?;
             Ok(KvReducedValue::Decimal256(raw))
@@ -269,7 +270,7 @@ pub fn to_domain_reduced_value(value: &query::KvReducedValue) -> Result<KvReduce
     }
 }
 
-/// Like [`to_domain_reduced_value`], but consumes the proto message so `String` / `Vec<u8>` payloads
+/// Like [`to_domain_reduced_value`], but consumes the proto message so `String` / `Bytes` payloads
 /// are moved into the domain enum without an extra heap copy.
 pub fn to_domain_reduced_value_from_proto(
     mut value: query::KvReducedValue,
@@ -286,12 +287,14 @@ pub fn to_domain_reduced_value_from_proto(
         Some(query::kv_reduced_value::Value::TimestampValue(v)) => Ok(KvReducedValue::Timestamp(v)),
         Some(query::kv_reduced_value::Value::Decimal128Value(bytes)) => {
             let raw: [u8; 16] = bytes
+                .as_ref()
                 .try_into()
                 .map_err(|_| "decimal128 must be exactly 16 bytes".to_string())?;
             Ok(KvReducedValue::Decimal128(i128::from_be_bytes(raw)))
         }
         Some(query::kv_reduced_value::Value::Decimal256Value(bytes)) => {
             let raw: [u8; 32] = bytes
+                .as_ref()
                 .try_into()
                 .map_err(|_| "decimal256 must be exactly 32 bytes".to_string())?;
             Ok(KvReducedValue::Decimal256(raw))
@@ -525,8 +528,8 @@ fn to_proto_predicate_constraint(
         KvPredicateConstraint::Decimal128Range { min, max } => {
             query::kv_predicate_constraint::Constraint::Decimal128Range(Box::new(
                 query::kv_predicate_constraint::Decimal128Range {
-                    min: min.map(|v: i128| v.to_be_bytes().to_vec()),
-                    max: max.map(|v: i128| v.to_be_bytes().to_vec()),
+                    min: min.map(|v: i128| v.to_be_bytes().to_vec().into()),
+                    max: max.map(|v: i128| v.to_be_bytes().to_vec().into()),
                     ..Default::default()
                 },
             ))
@@ -534,8 +537,8 @@ fn to_proto_predicate_constraint(
         KvPredicateConstraint::Decimal256Range { min, max } => {
             query::kv_predicate_constraint::Constraint::Decimal256Range(Box::new(
                 query::kv_predicate_constraint::Decimal256Range {
-                    min: min.map(|v| v.to_vec()),
-                    max: max.map(|v| v.to_vec()),
+                    min: min.map(|v| v.to_vec().into()),
+                    max: max.map(|v| v.to_vec().into()),
                     ..Default::default()
                 },
             ))
@@ -624,7 +627,7 @@ fn to_domain_predicate_constraint(
                 .as_ref()
                 .map(|raw| {
                     let bytes: [u8; 16] = raw
-                        .as_slice()
+                        .as_ref()
                         .try_into()
                         .map_err(|_| "decimal128 min must be exactly 16 bytes".to_string())?;
                     Ok::<i128, String>(i128::from_be_bytes(bytes))
@@ -635,7 +638,7 @@ fn to_domain_predicate_constraint(
                 .as_ref()
                 .map(|raw| {
                     let bytes: [u8; 16] = raw
-                        .as_slice()
+                        .as_ref()
                         .try_into()
                         .map_err(|_| "decimal128 max must be exactly 16 bytes".to_string())?;
                     Ok::<i128, String>(i128::from_be_bytes(bytes))
@@ -649,7 +652,7 @@ fn to_domain_predicate_constraint(
                 .as_ref()
                 .map(|raw| {
                     let bytes: [u8; 32] = raw
-                        .as_slice()
+                        .as_ref()
                         .try_into()
                         .map_err(|_| "decimal256 min must be exactly 32 bytes".to_string())?;
                     Ok::<[u8; 32], String>(bytes)
@@ -660,7 +663,7 @@ fn to_domain_predicate_constraint(
                 .as_ref()
                 .map(|raw| {
                     let bytes: [u8; 32] = raw
-                        .as_slice()
+                        .as_ref()
                         .try_into()
                         .map_err(|_| "decimal256 max must be exactly 32 bytes".to_string())?;
                     Ok::<[u8; 32], String>(bytes)
@@ -828,7 +831,7 @@ fn to_domain_reduced_value_from_view(
             Ok(KvReducedValue::Decimal256(raw))
         }
         Some(query::kv_reduced_value::ValueView::FixedSizeBinaryValue(v)) => {
-            Ok(KvReducedValue::FixedSizeBinary(v.to_vec()))
+            Ok(KvReducedValue::FixedSizeBinary(Bytes::copy_from_slice(v)))
         }
         None => Err("missing reduced value".to_string()),
     }
@@ -926,9 +929,9 @@ fn to_domain_predicate_constraint_from_view(
         Some(query::kv_predicate_constraint::ConstraintView::BoolEq(v)) => {
             Ok(KvPredicateConstraint::BoolEq(*v))
         }
-        Some(query::kv_predicate_constraint::ConstraintView::FixedSizeBinaryEq(v)) => {
-            Ok(KvPredicateConstraint::FixedSizeBinaryEq(v.to_vec()))
-        }
+        Some(query::kv_predicate_constraint::ConstraintView::FixedSizeBinaryEq(v)) => Ok(
+            KvPredicateConstraint::FixedSizeBinaryEq(Bytes::copy_from_slice(v)),
+        ),
         Some(query::kv_predicate_constraint::ConstraintView::IntRange(v)) => {
             Ok(KvPredicateConstraint::IntRange {
                 min: v.min,
@@ -1014,9 +1017,11 @@ fn to_domain_predicate_constraint_from_view(
         Some(query::kv_predicate_constraint::ConstraintView::Uint64In(v)) => Ok(
             KvPredicateConstraint::UInt64In(v.values.iter().copied().collect()),
         ),
-        Some(query::kv_predicate_constraint::ConstraintView::FixedSizeBinaryIn(v)) => Ok(
-            KvPredicateConstraint::FixedSizeBinaryIn(v.values.iter().map(|b| b.to_vec()).collect()),
-        ),
+        Some(query::kv_predicate_constraint::ConstraintView::FixedSizeBinaryIn(v)) => {
+            Ok(KvPredicateConstraint::FixedSizeBinaryIn(
+                v.values.iter().map(|b| Bytes::copy_from_slice(b)).collect(),
+            ))
+        }
         None => Err("missing predicate constraint".to_string()),
     }
 }

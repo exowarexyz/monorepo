@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
     EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
 };
@@ -132,7 +132,7 @@ pub enum KvExpr {
 pub enum KvPredicateConstraint {
     StringEq(String),
     BoolEq(bool),
-    FixedSizeBinaryEq(Vec<u8>),
+    FixedSizeBinaryEq(Bytes),
     IntRange {
         min: Option<i64>,
         max: Option<i64>,
@@ -158,7 +158,7 @@ pub enum KvPredicateConstraint {
     StringIn(Vec<String>),
     IntIn(Vec<i64>),
     UInt64In(Vec<u64>),
-    FixedSizeBinaryIn(Vec<Vec<u8>>),
+    FixedSizeBinaryIn(Vec<Bytes>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -185,7 +185,7 @@ pub enum KvReducedValue {
     Timestamp(i64),
     Decimal128(i128),
     Decimal256([u8; 32]),
-    FixedSizeBinary(Vec<u8>),
+    FixedSizeBinary(Bytes),
 }
 
 impl KvReducedValue {
@@ -854,7 +854,7 @@ pub fn extract_stored_field(
             if bytes.as_slice().len() != usize::from(width) {
                 return Err("invalid FixedSizeBinary byte width".to_string());
             }
-            KvReducedValue::FixedSizeBinary(bytes.as_slice().to_vec())
+            KvReducedValue::FixedSizeBinary(Bytes::copy_from_slice(bytes))
         }
         _ => return Err("stored field type mismatch".to_string()),
     };
@@ -917,7 +917,7 @@ fn decode_ordered_key_field_bytes(bytes: &[u8], kind: KvFieldKind) -> Option<KvR
             if bytes.len() != usize::from(width) {
                 return None;
             }
-            KvReducedValue::FixedSizeBinary(bytes.to_vec())
+            KvReducedValue::FixedSizeBinary(Bytes::copy_from_slice(bytes))
         }
     })
 }

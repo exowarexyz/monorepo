@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use exoware_sdk::ClientError;
 
 /// Which proof shape failed verification. Carried on
@@ -51,18 +52,15 @@ pub enum QmdbError {
     #[error("range proof max_locations must be > 0")]
     InvalidRangeLength,
     #[error("invalid key range: start_key {start_key:?} must be less than end_key {end_key:?}")]
-    InvalidKeyRange {
-        start_key: Vec<u8>,
-        end_key: Vec<u8>,
-    },
+    InvalidKeyRange { start_key: Bytes, end_key: Bytes },
     #[error("duplicate key in proof request: {key:?}")]
-    DuplicateRequestedKey { key: Vec<u8> },
+    DuplicateRequestedKey { key: Bytes },
     #[error("requested location {requested} is above published writer watermark {available}")]
     WatermarkTooLow { requested: u64, available: u64 },
     #[error("proof key not found at watermark {watermark}: {key:?}")]
-    ProofKeyNotFound { watermark: u64, key: Vec<u8> },
+    ProofKeyNotFound { watermark: u64, key: Bytes },
     #[error("requested key is not active at watermark {watermark}: {key:?}")]
-    KeyNotActive { watermark: u64, key: Vec<u8> },
+    KeyNotActive { watermark: u64, key: Bytes },
     #[error("current proofs are only available at uploaded batch locations; no batch ends at {location}")]
     CurrentProofRequiresBatchBoundary { location: u64 },
     #[error("current boundary state has not been uploaded for batch location {location}")]

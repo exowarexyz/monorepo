@@ -95,7 +95,7 @@ fn decode_detail(detail: &ErrorDetail) -> Result<Any, buffa::DecodeError> {
         .unwrap_or_default();
     Ok(Any {
         type_url: detail.type_url.clone(),
-        value,
+        value: value.into(),
         ..Default::default()
     })
 }

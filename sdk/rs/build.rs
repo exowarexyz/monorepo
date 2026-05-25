@@ -1,6 +1,23 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const SDK_BYTES_FIELDS: &[&str] = &[
+    ".store.common.v1.KvEntry.value",
+    ".store.common.v1.BytesFilter.exact",
+    ".store.common.v1.BytesFilter.prefix",
+    ".store.query.v1.KvReducedValue.decimal128_value",
+    ".store.query.v1.KvReducedValue.fixed_size_binary_value",
+    ".store.query.v1.KvReducedValue.decimal256_value",
+    ".store.query.v1.KvPredicateConstraint.fixed_size_binary_eq",
+    ".store.query.v1.KvPredicateConstraint.Decimal128Range.min",
+    ".store.query.v1.KvPredicateConstraint.Decimal128Range.max",
+    ".store.query.v1.KvPredicateConstraint.Decimal256Range.min",
+    ".store.query.v1.KvPredicateConstraint.Decimal256Range.max",
+    ".store.query.v1.KvPredicateConstraint.FixedSizeBinaryIn.values",
+    ".store.query.v1.GetResponse.value",
+    ".store.query.v1.GetManyEntry.value",
+];
+
 fn main() {
     println!("cargo:rerun-if-env-changed=PROTO_GEN");
     println!("cargo:rerun-if-changed=../../proto");
@@ -30,9 +47,18 @@ fn main() {
         "store/v1/stream.proto",
     ];
 
+    let mut buffa_config = connectrpc_build::CodeGenConfig::default();
+    buffa_config.generate_json = true;
+    buffa_config.file_per_package = true;
+    buffa_config.bytes_fields = SDK_BYTES_FIELDS
+        .iter()
+        .map(|field| (*field).into())
+        .collect();
+
     connectrpc_build::Config::new()
         .files(&files)
         .descriptor_set(&descriptor)
+        .buffa_config(buffa_config)
         .emit_register_fn(false)
         .out_dir(&gen_dir)
         .compile()

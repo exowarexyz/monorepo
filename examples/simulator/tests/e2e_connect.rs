@@ -272,7 +272,7 @@ async fn prune_drop_all_removes_keys() {
     assert!(client.query().get(&ka).await.expect("get a").is_some());
 
     let compact_config = ClientConfig::new(url.parse::<http::Uri>().unwrap())
-        .compression(connect_compression_registry());
+        .with_compression(connect_compression_registry());
     let compact_client =
         CompactServiceClient::new(PreferZstdHttpClient::plaintext(), compact_config);
     compact_client
@@ -439,7 +439,7 @@ async fn prune_keep_latest_retains_newest() {
         .expect("put");
 
     let compact_config = ClientConfig::new(url.parse::<http::Uri>().unwrap())
-        .compression(connect_compression_registry());
+        .with_compression(connect_compression_registry());
     let compact_client =
         CompactServiceClient::new(PreferZstdHttpClient::plaintext(), compact_config);
     compact_client
@@ -662,7 +662,7 @@ async fn prune_greater_than_retains_above_threshold() {
         .expect("put");
 
     let compact_config = ClientConfig::new(url.parse::<http::Uri>().unwrap())
-        .compression(connect_compression_registry());
+        .with_compression(connect_compression_registry());
     let compact_client =
         CompactServiceClient::new(PreferZstdHttpClient::plaintext(), compact_config);
     compact_client

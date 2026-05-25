@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 
+use bytes::Bytes;
 use commonware_codec::{Codec, Decode, DecodeExt, Encode};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
@@ -294,10 +295,10 @@ where
             .compute_ops_root_with_inactive_peaks::<H>(session, watermark, inactive_peaks)
             .await?;
 
-        let mut seen = BTreeSet::<Vec<u8>>::new();
+        let mut seen = BTreeSet::<Bytes>::new();
         let mut operation_bytes = Vec::<(Location<F>, Vec<u8>)>::with_capacity(keys.len());
         for key in keys {
-            let key_bytes = key.as_ref().to_vec();
+            let key_bytes = Bytes::copy_from_slice(key.as_ref());
             if !seen.insert(key_bytes.clone()) {
                 return Err(QmdbError::DuplicateRequestedKey { key: key_bytes });
             }
@@ -309,7 +310,7 @@ where
             let Some((row_key, row_value)) = rows.into_iter().next() else {
                 return Err(QmdbError::ProofKeyNotFound {
                     watermark: watermark.as_u64(),
-                    key: key.as_ref().to_vec(),
+                    key: Bytes::copy_from_slice(key.as_ref()),
                 });
             };
             let global_loc = decode_update_location(&row_key)?;
@@ -319,7 +320,7 @@ where
             if <K as AsRef<[u8]>>::as_ref(&decoded.key) != key.as_ref() {
                 return Err(QmdbError::ProofKeyNotFound {
                     watermark: watermark.as_u64(),
-                    key: key.as_ref().to_vec(),
+                    key: Bytes::copy_from_slice(key.as_ref()),
                 });
             }
             let encoded = self
@@ -665,7 +666,7 @@ where
             .require_batch_boundary(session, watermark)
             .await?;
 
-        let key_bytes = key.as_ref().to_vec();
+        let key_bytes = Bytes::copy_from_slice(key.as_ref());
         let Some((row_key, row_value)) = self
             .load_latest_update_row(session, watermark, key.as_ref())
             .await?
@@ -682,20 +683,20 @@ where
         if <K as AsRef<[u8]>>::as_ref(&decoded.key) != key.as_ref() {
             return Err(QmdbError::ProofKeyNotFound {
                 watermark: watermark.as_u64(),
-                key: key.as_ref().to_vec(),
+                key: Bytes::copy_from_slice(key.as_ref()),
             });
         }
         let inactivity_floor = self.load_inactivity_floor_at(session, watermark).await?;
         if location < inactivity_floor {
             return Err(QmdbError::KeyNotActive {
                 watermark: watermark.as_u64(),
-                key: key.as_ref().to_vec(),
+                key: Bytes::copy_from_slice(key.as_ref()),
             });
         }
         if decoded.value.is_none() {
             return Err(QmdbError::KeyNotActive {
                 watermark: watermark.as_u64(),
-                key: key.as_ref().to_vec(),
+                key: Bytes::copy_from_slice(key.as_ref()),
             });
         }
 
@@ -703,7 +704,7 @@ where
         let ordered::Operation::Update(update) = &operation else {
             return Err(QmdbError::KeyNotActive {
                 watermark: watermark.as_u64(),
-                key: key.as_ref().to_vec(),
+                key: Bytes::copy_from_slice(key.as_ref()),
             });
         };
         let root = self.load_current_boundary_root(session, watermark).await?;
@@ -908,10 +909,10 @@ where
         }
 
         let session = self.client.create_session();
-        let mut seen = BTreeSet::<Vec<u8>>::new();
+        let mut seen = BTreeSet::<Bytes>::new();
         let mut proofs = Vec::with_capacity(keys.len());
         for key in keys {
-            let key_bytes = key.as_ref().to_vec();
+            let key_bytes = Bytes::copy_from_slice(key.as_ref());
             if !seen.insert(key_bytes.clone()) {
                 return Err(QmdbError::DuplicateRequestedKey { key: key_bytes });
             }
@@ -946,8 +947,8 @@ where
         if let Some(end) = end_key.as_ref() {
             if end <= &start_key {
                 return Err(QmdbError::InvalidKeyRange {
-                    start_key: start_key.encode().to_vec(),
-                    end_key: end.encode().to_vec(),
+                    start_key: start_key.encode(),
+                    end_key: end.encode(),
                 });
             }
         }
@@ -979,7 +980,7 @@ where
                 .key_value_proof_raw_in_session(&session, watermark, entry.key.as_ref())
                 .await?;
             entries.push(RawKeyRangeEntry {
-                key: entry.key.encode().to_vec(),
+                key: entry.key.encode(),
                 proof,
             });
         }
@@ -1000,7 +1001,7 @@ where
             entries
                 .last()
                 .and_then(|entry| match &entry.proof.operation {
-                    ordered::Operation::Update(update) => Some(update.next_key.encode().to_vec()),
+                    ordered::Operation::Update(update) => Some(update.next_key.encode()),
                     _ => None,
                 })
                 .ok_or_else(|| {
@@ -1009,7 +1010,7 @@ where
                     )
                 })?
         } else {
-            Vec::new()
+            Bytes::new()
         };
 
         let end_proof = if !has_more {
