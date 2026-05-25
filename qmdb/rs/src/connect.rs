@@ -85,6 +85,7 @@ fn qmdb_error_to_connect(err: QmdbError) -> ConnectError {
         | QmdbError::CurrentBoundaryStateMissing { .. } => {
             ConnectError::failed_precondition(err.to_string())
         }
+        QmdbError::SyncFetchCancelled => ConnectError::canceled(err.to_string()),
         QmdbError::Stream(_) => ConnectError::unavailable(err.to_string()),
         QmdbError::ProofVerification { .. }
         | QmdbError::CorruptData(_)

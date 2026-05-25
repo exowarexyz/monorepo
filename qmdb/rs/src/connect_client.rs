@@ -635,13 +635,24 @@ where
         } else {
             None
         };
+        let success_tx = sync_success_ack_sender();
         Ok(FetchResult {
             proof,
             operations,
-            success_tx: oneshot::channel().0,
+            success_tx,
             pinned_nodes,
         })
     }
+}
+
+fn sync_success_ack_sender() -> oneshot::Sender<bool> {
+    let (success_tx, success_rx) = oneshot::channel();
+    // Commonware sync reports validation after FetchResult is returned.
+    // Keep the receiver live until that acknowledgement arrives or is dropped.
+    let _ack_task = tokio::spawn(async move {
+        let _ = success_rx.await;
+    });
+    success_tx
 }
 
 impl<T, F, H, Op> Resolver for OperationLogSyncResolver<T, F, H, Op>
@@ -665,11 +676,19 @@ where
         start_loc: Location<Self::Family>,
         max_ops: NonZeroU64,
         include_pinned_nodes: bool,
-        _cancel_rx: oneshot::Receiver<()>,
+        mut cancel_rx: oneshot::Receiver<()>,
     ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-        let proto = self
-            .operation_range_proto(op_count, start_loc, max_ops)
-            .await?;
+        let proto = tokio::select! {
+            biased;
+            _ = &mut cancel_rx => return Err(QmdbError::SyncFetchCancelled),
+            proto = self.operation_range_proto(op_count, start_loc, max_ops) => proto?,
+        };
+        match cancel_rx.try_recv() {
+            Ok(()) | Err(oneshot::error::TryRecvError::Closed) => {
+                return Err(QmdbError::SyncFetchCancelled);
+            }
+            Err(oneshot::error::TryRecvError::Empty) => {}
+        }
         self.fetch_result(proto, include_pinned_nodes)
     }
 }

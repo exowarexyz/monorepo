@@ -244,6 +244,34 @@ async fn keyless_operation_log_sync_resolver_fetches_api_batches() {
         Location::new(0),
         &target.root
     ));
+    assert!(
+        fetched.success_tx.send(true).is_ok(),
+        "sync resolver keeps success acknowledgement receiver alive"
+    );
+}
+
+#[tokio::test]
+async fn keyless_operation_log_sync_resolver_observes_cancelled_fetch() {
+    let resolver = OperationLogSyncResolver::<
+        _,
+        mmr::Family,
+        commonware_cryptography::Sha256,
+        BatchOperation,
+    >::plaintext("http://127.0.0.1:1", ((0..=10000).into(), ()));
+    let (cancel_tx, cancel_rx) = oneshot::channel();
+    drop(cancel_tx);
+
+    let err = resolver
+        .get_operations(
+            Location::new(1),
+            Location::new(0),
+            NZU64!(1),
+            false,
+            cancel_rx,
+        )
+        .await
+        .expect_err("closed cancellation channel aborts fetch");
+    assert!(matches!(err, QmdbError::SyncFetchCancelled));
 }
 
 #[tokio::test]

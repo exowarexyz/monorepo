@@ -85,6 +85,8 @@ pub enum QmdbError {
     CommonwareMerkle(String),
     #[error("qmdb stream transport error: {0}")]
     Stream(String),
+    #[error("sync operation fetch was cancelled")]
+    SyncFetchCancelled,
     #[error("writer is poisoned after an earlier upload failure: {0}")]
     WriterPoisoned(String),
 }
