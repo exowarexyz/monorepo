@@ -32,7 +32,7 @@ use commonware_storage::{
         verify::{verify_multi_proof, verify_proof_and_pinned_nodes},
     },
 };
-use commonware_utils::channel::oneshot;
+use commonware_utils::{channel::oneshot, range::NonEmptyRange};
 use connectrpc::client::{ClientConfig, ClientTransport, ServerStream};
 use connectrpc::ConnectError;
 use exoware_sdk::proto::PreferZstdHttpClient;
@@ -499,9 +499,7 @@ pub struct CurrentOperationRangeProof<D: Digest, Op, const N: usize, F: Graftabl
 /// This resolver covers the operation-log portion shared by ordered,
 /// unordered, immutable, and keyless QMDBs.
 pub struct OperationLogSyncResolver<T, F: Graftable, H: Hasher, Op: Encode + Read> {
-    rpc: OperationLogServiceClient<T>,
-    op_cfg: Arc<Op::Cfg>,
-    _marker: PhantomData<(F, H, Op)>,
+    client: OperationLogClient<T, F, H, Op>,
 }
 
 impl<T, F, H, Op> Clone for OperationLogSyncResolver<T, F, H, Op>
@@ -509,13 +507,11 @@ where
     F: Graftable,
     H: Hasher,
     Op: Encode + Read,
-    OperationLogServiceClient<T>: Clone,
+    OperationLogClient<T, F, H, Op>: Clone,
 {
     fn clone(&self) -> Self {
         Self {
-            rpc: self.rpc.clone(),
-            op_cfg: Arc::clone(&self.op_cfg),
-            _marker: PhantomData,
+            client: self.client.clone(),
         }
     }
 }
@@ -552,9 +548,7 @@ where
 
     pub fn from_service_client(rpc: OperationLogServiceClient<T>, op_cfg: Op::Cfg) -> Self {
         Self {
-            rpc,
-            op_cfg: Arc::new(op_cfg),
-            _marker: PhantomData,
+            client: OperationLogClient::from_service_client(rpc, op_cfg),
         }
     }
 
@@ -570,19 +564,12 @@ where
         start_loc: Location<F>,
         op_count: Location<F>,
     ) -> Result<any_sync::Target<F, H::Digest>, QmdbError> {
-        if start_loc >= op_count {
-            return Err(QmdbError::CorruptData(
-                "sync target range must be non-empty".to_string(),
-            ));
-        }
+        let range = sync_range(start_loc, op_count)?;
         let proto = self
             .operation_range_proto(op_count, start_loc, NonZeroU64::MIN)
             .await?;
         let root = decode_digest::<H::Digest>(proto.ops_root.as_ref(), "operation sync root")?;
-        Ok(any_sync::Target::new(
-            root,
-            commonware_utils::non_empty_range!(start_loc, op_count),
-        ))
+        Ok(any_sync::Target::new(root, range))
     }
 
     async fn operation_range_proto(
@@ -600,27 +587,22 @@ where
         let max_locations = u32::try_from(max_ops.get()).map_err(|err| {
             QmdbError::CorruptData(format!("sync fetch batch size exceeds API limit: {err}"))
         })?;
-        let response = self
-            .rpc
-            .get_operation_range(GetOperationRangeRequest {
+        fetch_operation_range_proof(
+            &self.client.rpc,
+            GetOperationRangeRequest {
                 tip,
                 start_location: start_loc.as_u64(),
                 max_locations,
                 ..Default::default()
-            })
-            .await
-            .map_err(connect_error_to_qmdb)?
-            .into_view()
-            .to_owned_message();
-        response.proof.as_option().cloned().ok_or_else(|| {
-            QmdbError::CorruptData("sync operation range response missing proof".to_string())
-        })
+            },
+            "sync operation range response missing proof",
+        )
+        .await
     }
 
     fn fetch_result(
         &self,
         proto: HistoricalOperationRangeProof,
-        _start_loc: Location<F>,
         include_pinned_nodes: bool,
     ) -> Result<FetchResult<F, Op, H::Digest>, QmdbError> {
         let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
@@ -635,7 +617,7 @@ where
             .encoded_operations
             .iter()
             .map(|bytes| {
-                Op::decode_cfg(bytes.as_ref(), self.op_cfg.as_ref()).map_err(|err| {
+                Op::decode_cfg(bytes.as_ref(), self.client.op_cfg.as_ref()).map_err(|err| {
                     QmdbError::CorruptData(format!("failed to decode sync operation: {err}"))
                 })
             })
@@ -688,7 +670,7 @@ where
         let proto = self
             .operation_range_proto(op_count, start_loc, max_ops)
             .await?;
-        self.fetch_result(proto, start_loc, include_pinned_nodes)
+        self.fetch_result(proto, include_pinned_nodes)
     }
 }
 
@@ -784,11 +766,7 @@ where
         start_loc: Location<F>,
         op_count: Location<F>,
     ) -> Result<current_sync::Target<F, H::Digest>, QmdbError> {
-        if start_loc >= op_count {
-            return Err(QmdbError::CorruptData(
-                "sync target range must be non-empty".to_string(),
-            ));
-        }
+        let range = sync_range(start_loc, op_count)?;
         let proto = self
             .operation_log
             .operation_range_proto(op_count, start_loc, NonZeroU64::MIN)
@@ -805,7 +783,7 @@ where
             self.current_root,
             ops_root,
             witness,
-            commonware_utils::non_empty_range!(start_loc, op_count),
+            range,
         ))
     }
 }
@@ -976,11 +954,26 @@ where
 
 /// Client for `qmdb.v1.OperationLogService`, parameterized on the Merkle
 /// family and backend operation type.
-#[derive(Clone)]
 pub struct OperationLogClient<T, F: Graftable, H: Hasher, Op: Encode + Read> {
     rpc: OperationLogServiceClient<T>,
     op_cfg: Arc<Op::Cfg>,
     _marker: PhantomData<(F, H, Op)>,
+}
+
+impl<T, F, H, Op> Clone for OperationLogClient<T, F, H, Op>
+where
+    F: Graftable,
+    H: Hasher,
+    Op: Encode + Read,
+    OperationLogServiceClient<T>: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            rpc: self.rpc.clone(),
+            op_cfg: Arc::clone(&self.op_cfg),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<F, H, Op> OperationLogClient<PreferZstdHttpClient, F, H, Op>
@@ -1027,18 +1020,14 @@ where
         expected_root: &H::Digest,
     ) -> Result<OperationLogRangeProof<H::Digest, Op, F>, QmdbError> {
         let tip = Location::<F>::new(request.tip);
-        let response = self
-            .rpc
-            .get_operation_range(request)
-            .await
-            .map_err(connect_error_to_qmdb)?
-            .into_view()
-            .to_owned_message();
-        let proof = response.proof.as_option().ok_or_else(|| {
-            QmdbError::CorruptData("qmdb get_operation_range response missing proof".to_string())
-        })?;
+        let proof = fetch_operation_range_proof(
+            &self.rpc,
+            request,
+            "qmdb get_operation_range response missing proof",
+        )
+        .await?;
         let (root, operations) = verify_operation_range_from_proto::<F, H, Op>(
-            proof,
+            &proof,
             self.op_cfg.as_ref(),
             expected_root,
         )?;
@@ -1069,6 +1058,41 @@ where
 
 fn connect_error_to_qmdb(err: ConnectError) -> QmdbError {
     QmdbError::Client(ClientError::Rpc(Box::new(err)))
+}
+
+async fn fetch_operation_range_proof<T>(
+    rpc: &OperationLogServiceClient<T>,
+    request: GetOperationRangeRequest,
+    missing_proof_message: &'static str,
+) -> Result<HistoricalOperationRangeProof, QmdbError>
+where
+    T: ClientTransport,
+    T::ResponseBody: Body<Data = Bytes> + Unpin,
+    <T::ResponseBody as Body>::Error: Display,
+{
+    let response = rpc
+        .get_operation_range(request)
+        .await
+        .map_err(connect_error_to_qmdb)?
+        .into_view()
+        .to_owned_message();
+    response
+        .proof
+        .as_option()
+        .cloned()
+        .ok_or_else(|| QmdbError::CorruptData(missing_proof_message.to_string()))
+}
+
+fn sync_range<F: Family>(
+    start_loc: Location<F>,
+    op_count: Location<F>,
+) -> Result<NonEmptyRange<Location<F>>, QmdbError> {
+    if start_loc >= op_count {
+        return Err(QmdbError::CorruptData(
+            "sync target range must be non-empty".to_string(),
+        ));
+    }
+    Ok(commonware_utils::non_empty_range!(start_loc, op_count))
 }
 
 fn proof_digest_cap<D: Digest>(encoded_proof: &[u8]) -> usize {
