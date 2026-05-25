@@ -30,7 +30,7 @@ use crate::codec::{
 };
 use crate::connect::OperationKv;
 use crate::core::HistoricalOpsClientCore;
-use crate::error::QmdbError;
+use crate::error::{error_key, QmdbError};
 use crate::proof::{
     CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
     RawKeyExclusionProof, RawKeyLookupProof, RawKeyRangeEntry, RawKeyRangeProof, RawKeyValueProof,
@@ -295,10 +295,10 @@ where
             .compute_ops_root_with_inactive_peaks::<H>(session, watermark, inactive_peaks)
             .await?;
 
-        let mut seen = BTreeSet::<Bytes>::new();
+        let mut seen = BTreeSet::<Vec<u8>>::new();
         let mut operation_bytes = Vec::<(Location<F>, Vec<u8>)>::with_capacity(keys.len());
         for key in keys {
-            let key_bytes = Bytes::copy_from_slice(key.as_ref());
+            let key_bytes = error_key(key);
             if !seen.insert(key_bytes.clone()) {
                 return Err(QmdbError::DuplicateRequestedKey { key: key_bytes });
             }
@@ -310,7 +310,7 @@ where
             let Some((row_key, row_value)) = rows.into_iter().next() else {
                 return Err(QmdbError::ProofKeyNotFound {
                     watermark: watermark.as_u64(),
-                    key: Bytes::copy_from_slice(key.as_ref()),
+                    key: key_bytes.clone(),
                 });
             };
             let global_loc = decode_update_location(&row_key)?;
@@ -320,7 +320,7 @@ where
             if <K as AsRef<[u8]>>::as_ref(&decoded.key) != key.as_ref() {
                 return Err(QmdbError::ProofKeyNotFound {
                     watermark: watermark.as_u64(),
-                    key: Bytes::copy_from_slice(key.as_ref()),
+                    key: key_bytes.clone(),
                 });
             }
             let encoded = self
@@ -666,7 +666,7 @@ where
             .require_batch_boundary(session, watermark)
             .await?;
 
-        let key_bytes = Bytes::copy_from_slice(key.as_ref());
+        let key_bytes = error_key(&key);
         let Some((row_key, row_value)) = self
             .load_latest_update_row(session, watermark, key.as_ref())
             .await?
@@ -683,20 +683,20 @@ where
         if <K as AsRef<[u8]>>::as_ref(&decoded.key) != key.as_ref() {
             return Err(QmdbError::ProofKeyNotFound {
                 watermark: watermark.as_u64(),
-                key: Bytes::copy_from_slice(key.as_ref()),
+                key: key_bytes.clone(),
             });
         }
         let inactivity_floor = self.load_inactivity_floor_at(session, watermark).await?;
         if location < inactivity_floor {
             return Err(QmdbError::KeyNotActive {
                 watermark: watermark.as_u64(),
-                key: Bytes::copy_from_slice(key.as_ref()),
+                key: key_bytes.clone(),
             });
         }
         if decoded.value.is_none() {
             return Err(QmdbError::KeyNotActive {
                 watermark: watermark.as_u64(),
-                key: Bytes::copy_from_slice(key.as_ref()),
+                key: key_bytes.clone(),
             });
         }
 
@@ -704,7 +704,7 @@ where
         let ordered::Operation::Update(update) = &operation else {
             return Err(QmdbError::KeyNotActive {
                 watermark: watermark.as_u64(),
-                key: Bytes::copy_from_slice(key.as_ref()),
+                key: key_bytes,
             });
         };
         let root = self.load_current_boundary_root(session, watermark).await?;
@@ -909,10 +909,10 @@ where
         }
 
         let session = self.client.create_session();
-        let mut seen = BTreeSet::<Bytes>::new();
+        let mut seen = BTreeSet::<Vec<u8>>::new();
         let mut proofs = Vec::with_capacity(keys.len());
         for key in keys {
-            let key_bytes = Bytes::copy_from_slice(key.as_ref());
+            let key_bytes = error_key(key);
             if !seen.insert(key_bytes.clone()) {
                 return Err(QmdbError::DuplicateRequestedKey { key: key_bytes });
             }
@@ -947,8 +947,8 @@ where
         if let Some(end) = end_key.as_ref() {
             if end <= &start_key {
                 return Err(QmdbError::InvalidKeyRange {
-                    start_key: start_key.encode(),
-                    end_key: end.encode(),
+                    start_key: error_key(&start_key),
+                    end_key: error_key(end),
                 });
             }
         }

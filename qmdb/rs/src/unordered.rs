@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 use std::marker::PhantomData;
 
-use bytes::Bytes;
 use commonware_codec::{Codec, Decode, DecodeExt, Encode};
 use commonware_cryptography::Hasher;
 use commonware_storage::merkle::{Graftable, Location};
@@ -25,7 +24,7 @@ use crate::codec::{
 };
 use crate::connect::OperationKv;
 use crate::core::HistoricalOpsClientCore;
-use crate::error::QmdbError;
+use crate::error::{error_key, QmdbError};
 use crate::proof::{
     CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
     RawUnorderedKeyValueProof, VerifiedOperationRange, VerifiedUnorderedKeyValue,
@@ -410,7 +409,7 @@ where
             .require_batch_boundary(session, watermark)
             .await?;
 
-        let key_bytes = Bytes::copy_from_slice(key.as_ref());
+        let key_bytes = error_key(&key);
         let Some((row_key, row_value)) = self
             .load_latest_update_row(session, watermark, key.as_ref())
             .await?
@@ -427,13 +426,13 @@ where
         if <K as AsRef<[u8]>>::as_ref(&decoded.key) != key.as_ref() {
             return Err(QmdbError::ProofKeyNotFound {
                 watermark: watermark.as_u64(),
-                key: Bytes::copy_from_slice(key.as_ref()),
+                key: key_bytes.clone(),
             });
         }
         if decoded.value.is_none() {
             return Err(QmdbError::KeyNotActive {
                 watermark: watermark.as_u64(),
-                key: Bytes::copy_from_slice(key.as_ref()),
+                key: key_bytes.clone(),
             });
         }
 
@@ -441,7 +440,7 @@ where
         let unordered::Operation::Update(update) = &operation else {
             return Err(QmdbError::KeyNotActive {
                 watermark: watermark.as_u64(),
-                key: Bytes::copy_from_slice(key.as_ref()),
+                key: key_bytes,
             });
         };
         if update.0.as_ref() != key.as_ref() {
@@ -517,10 +516,10 @@ where
         }
 
         let session = self.client.create_session();
-        let mut seen = BTreeSet::<Bytes>::new();
+        let mut seen = BTreeSet::<Vec<u8>>::new();
         let mut proofs = Vec::with_capacity(keys.len());
         for key in keys {
-            let key_bytes = Bytes::copy_from_slice(key.as_ref());
+            let key_bytes = error_key(key);
             if !seen.insert(key_bytes.clone()) {
                 return Err(QmdbError::DuplicateRequestedKey { key: key_bytes });
             }

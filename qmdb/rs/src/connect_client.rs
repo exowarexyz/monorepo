@@ -207,9 +207,7 @@ where
         let mut requested = BTreeSet::<&[u8]>::new();
         for key in &requested_keys {
             if !requested.insert(key.as_ref()) {
-                return Err(QmdbError::DuplicateRequestedKey {
-                    key: Bytes::from(key.clone()),
-                });
+                return Err(QmdbError::DuplicateRequestedKey { key: key.clone() });
             }
         }
         let response = self
@@ -418,9 +416,7 @@ where
         let mut requested = BTreeMap::<&[u8], usize>::new();
         for (index, key) in requested_keys.iter().enumerate() {
             if requested.insert(key.as_ref(), index).is_some() {
-                return Err(QmdbError::DuplicateRequestedKey {
-                    key: Bytes::from(key.clone()),
-                });
+                return Err(QmdbError::DuplicateRequestedKey { key: key.clone() });
             }
         }
         let mut returned = BTreeSet::<&[u8]>::new();
