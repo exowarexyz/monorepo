@@ -9,11 +9,12 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use commonware_codec::Encode;
-use commonware_runtime::{deterministic, Runner as _};
+use commonware_glue::stateful::db::{StateSyncDb, SyncEngineConfig};
+use commonware_runtime::{deterministic, tokio as cw_tokio, Runner as _};
 use commonware_storage::merkle::{mmr, Location};
 use commonware_storage::qmdb::keyless::variable::{Db as Keyless, Operation as KeylessOperation};
 use commonware_storage::qmdb::sync::resolver::Resolver as _;
-use commonware_utils::channel::oneshot;
+use commonware_utils::channel::{mpsc, oneshot};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::proto::qmdb::v1::{
     GetOperationRangeRequest as ProtoGetOperationRangeRequest,
@@ -33,6 +34,13 @@ type Digest = commonware_cryptography::sha256::Digest;
 type LocalDb = Keyless<
     mmr::Family,
     deterministic::Context,
+    Vec<u8>,
+    commonware_cryptography::Sha256,
+    commonware_parallel::Sequential,
+>;
+type SyncDb = Keyless<
+    mmr::Family,
+    cw_tokio::Context,
     Vec<u8>,
     commonware_cryptography::Sha256,
     commonware_parallel::Sequential,
@@ -248,6 +256,104 @@ async fn keyless_operation_log_sync_resolver_fetches_api_batches() {
         fetched.callback.is_none(),
         "direct sync resolver fetches do not allocate an unused validation callback"
     );
+}
+
+#[tokio::test]
+async fn keyless_commonware_glue_state_sync_uses_operation_log_resolver() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_local_batch().await;
+    assert!(
+        *local.inactivity_floor > 0,
+        "glue state-sync test must exercise a nonzero replay floor"
+    );
+    commit_upload(&store_client, &local).await;
+
+    let keyless_client = Arc::new(TestKeylessClient::from_client(
+        store_client.clone(),
+        ((0..=10000).into(), ()),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
+    let resolver = OperationLogSyncResolver::<
+        _,
+        mmr::Family,
+        commonware_cryptography::Sha256,
+        BatchOperation,
+    >::plaintext(&qmdb_url, ((0..=10000).into(), ()));
+    let op_count = Location::new(local.operations.len() as u64);
+    let target = resolver
+        .target_range(local.inactivity_floor, op_count)
+        .await
+        .expect("limited sync target");
+    assert_eq!(target.root, local.root);
+    assert_eq!(target.range.start(), local.inactivity_floor);
+    assert_eq!(target.range.end(), op_count);
+
+    let start = local.inactivity_floor;
+    let start_index = usize::try_from(*start).expect("start fits usize");
+    let expected_values = local
+        .operations
+        .iter()
+        .enumerate()
+        .skip(start_index)
+        .filter_map(|(idx, operation)| match operation {
+            KeylessOperation::Append(value) => Some((Location::new(idx as u64), value.clone())),
+            KeylessOperation::Commit(Some(value), _) => {
+                Some((Location::new(idx as u64), value.clone()))
+            }
+            KeylessOperation::Commit(None, _) => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !expected_values.is_empty(),
+        "fixture must leave readable values inside the limited sync range"
+    );
+
+    tokio::task::spawn_blocking(move || {
+        cw_tokio::Runner::default().start(move |context| async move {
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
+
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = common::keyless_config(
+                "keyless-glue-state-sync",
+                page_cache,
+                ((0..=10000).into(), ()),
+                NZU64!(7),
+            );
+            let (_update_tx, update_rx) = mpsc::channel(1);
+            let synced: SyncDb = <SyncDb as StateSyncDb<_, _>>::sync_db(
+                context.child("glue_sync"),
+                cfg,
+                resolver,
+                target,
+                update_rx,
+                None,
+                None,
+                SyncEngineConfig {
+                    fetch_batch_size: NZU64!(1),
+                    apply_batch_size: 1,
+                    max_outstanding_requests: 2,
+                    update_channel_size: NZUsize!(1),
+                    max_retained_roots: 4,
+                },
+            )
+            .await
+            .expect("commonware glue state sync");
+
+            assert_eq!(synced.root(), local.root);
+            let bounds = synced.bounds().await;
+            assert_eq!(bounds.start, start);
+            assert_eq!(bounds.end, op_count);
+            for (location, expected) in expected_values {
+                assert_eq!(
+                    synced.get(location).await.expect("synced get"),
+                    Some(expected)
+                );
+            }
+            synced.destroy().await.expect("destroy synced db");
+        });
+    })
+    .await
+    .expect("join glue state sync runner");
 }
 
 #[tokio::test]
