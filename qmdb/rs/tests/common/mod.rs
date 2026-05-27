@@ -1,7 +1,8 @@
 //! Local E2E: ephemeral RocksDB dir + simulator on an ephemeral port (no env vars).
 
+#![allow(refining_impl_trait)]
+
 use std::num::NonZeroU64;
-use std::pin::Pin;
 use std::time::Duration;
 
 use axum::{routing::get, Router};
@@ -23,7 +24,7 @@ use commonware_storage::{
 use commonware_utils::Array;
 use commonware_utils::{NZUsize, NZU64};
 use connectrpc::client::ClientConfig;
-use connectrpc::{ConnectError, ConnectRpcService, Context, ErrorCode};
+use connectrpc::{ConnectError, ConnectRpcService, ErrorCode, RequestContext as Context};
 use exoware_qmdb::proto::qmdb::v1::{
     GetOperationRangeRequestView, GetOperationRangeResponse, OperationLogService,
     OperationLogServiceClient, OperationLogServiceServer, SubscribeRequestView, SubscribeResponse,
@@ -78,7 +79,7 @@ pub fn keyless_config<C>(
 }
 
 #[allow(dead_code)]
-pub fn unordered_variable_config<C>(
+pub fn any_variable_config<C>(
     prefix: &str,
     page_cache: CacheRef,
     codec_config: C,
@@ -94,6 +95,16 @@ pub fn unordered_variable_config<C>(
         ),
         translator: TwoCap,
     }
+}
+
+#[allow(dead_code)]
+pub fn unordered_variable_config<C>(
+    prefix: &str,
+    page_cache: CacheRef,
+    codec_config: C,
+    items_per_section: NonZeroU64,
+) -> any::VariableConfig<TwoCap, C, Sequential> {
+    any_variable_config(prefix, page_cache, codec_config, items_per_section)
 }
 
 #[allow(dead_code)]
@@ -331,7 +342,7 @@ impl OperationLogService for StaticOperationLogService {
         &self,
         _ctx: Context,
         _request: buffa::view::OwnedView<GetOperationRangeRequestView<'static>>,
-    ) -> Result<(GetOperationRangeResponse, Context), ConnectError> {
+    ) -> connectrpc::ServiceResult<GetOperationRangeResponse> {
         Err(ConnectError::new(
             ErrorCode::Unimplemented,
             "not implemented",
@@ -340,26 +351,46 @@ impl OperationLogService for StaticOperationLogService {
 
     fn subscribe(
         &self,
-        ctx: Context,
+        _ctx: Context,
         _request: buffa::view::OwnedView<SubscribeRequestView<'static>>,
     ) -> impl std::future::Future<
-        Output = Result<
-            (
-                Pin<
-                    Box<dyn futures::Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>,
-                >,
-                Context,
-            ),
-            ConnectError,
-        >,
+        Output = connectrpc::ServiceResult<connectrpc::ServiceStream<SubscribeResponse>>,
     > + Send {
         let response = self.subscribe_response.clone();
         async move {
-            let stream: Pin<
-                Box<dyn futures::Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>,
-            > = Box::pin(futures::stream::iter([Ok(response)]));
-            Ok((stream, ctx))
+            Ok(connectrpc::Response::stream(futures::stream::iter([Ok(
+                response,
+            )])))
         }
+    }
+}
+
+/// An `OperationLogService` impl that returns one caller-supplied
+/// `GetOperationRangeResponse`. Used to feed tampered range proofs into the
+/// validated client.
+#[derive(Clone)]
+pub struct StaticOperationRangeService {
+    pub operation_range_response: GetOperationRangeResponse,
+}
+
+impl OperationLogService for StaticOperationRangeService {
+    async fn get_operation_range(
+        &self,
+        _ctx: Context,
+        _request: buffa::view::OwnedView<GetOperationRangeRequestView<'static>>,
+    ) -> connectrpc::ServiceResult<GetOperationRangeResponse> {
+        connectrpc::Response::ok(self.operation_range_response.clone())
+    }
+
+    async fn subscribe(
+        &self,
+        _ctx: Context,
+        _request: buffa::view::OwnedView<SubscribeRequestView<'static>>,
+    ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<SubscribeResponse>> {
+        Err(ConnectError::new(
+            ErrorCode::Unimplemented,
+            "not implemented",
+        ))
     }
 }
 
@@ -375,10 +406,22 @@ pub async fn spawn_static_operation_log_service(
 }
 
 #[allow(dead_code)]
+pub async fn spawn_static_operation_range_service(
+    service: StaticOperationRangeService,
+) -> (tokio::task::JoinHandle<()>, String) {
+    spawn_operation_log_service(
+        ConnectRpcService::new(OperationLogServiceServer::new(service))
+            .with_compression(exoware_sdk::connect_compression_registry()),
+    )
+    .await
+}
+
+#[allow(dead_code)]
 pub fn tamper_subscribe_response(mut response: SubscribeResponse) -> SubscribeResponse {
-    if let Some(mut proof) = response.proof.as_option().cloned() {
-        proof.proof[0] ^= 0x01;
-        response.proof = Some(proof).into();
+    if let Some(proof) = response.proof.as_option_mut() {
+        let mut bytes = proof.proof.to_vec();
+        bytes[0] ^= 0x01;
+        proof.proof = bytes.into();
     }
     response
 }

@@ -11,6 +11,7 @@
 use std::collections::BTreeSet;
 
 use anyhow::ensure;
+use bytes::Bytes;
 use regex::bytes::Regex;
 
 use crate::keys::KeyCodec;
@@ -23,8 +24,8 @@ pub const MAX_VALUE_FILTERS_PER_FILTER: usize = 16;
 /// shape mirrors `store.common.v1.BytesFilter`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BytesFilter {
-    Exact(Vec<u8>),
-    Prefix(Vec<u8>),
+    Exact(Bytes),
+    Prefix(Bytes),
     Regex(String),
 }
 
@@ -40,8 +41,8 @@ pub struct StreamFilter {
 /// "no filter configured" as `Option::None` and skip the match.
 #[derive(Clone, Debug)]
 pub struct CompiledBytesFilters {
-    exacts: BTreeSet<Vec<u8>>,
-    prefixes: Vec<Vec<u8>>,
+    exacts: BTreeSet<Bytes>,
+    prefixes: Vec<Bytes>,
     regexes: Vec<Regex>,
 }
 
@@ -52,7 +53,7 @@ impl CompiledBytesFilters {
         if filters.is_empty() {
             return Ok(None);
         }
-        let mut exacts = BTreeSet::<Vec<u8>>::new();
+        let mut exacts = BTreeSet::<Bytes>::new();
         let mut prefixes = Vec::new();
         let mut regexes = Vec::new();
         for filter in filters {
@@ -80,7 +81,7 @@ impl CompiledBytesFilters {
     }
 
     pub fn matches(&self, bytes: &[u8]) -> bool {
-        self.exacts.contains(bytes)
+        self.exacts.iter().any(|exact| exact.as_ref() == bytes)
             || self.prefixes.iter().any(|p| bytes.starts_with(p))
             || self.regexes.iter().any(|r| r.is_match(bytes))
     }

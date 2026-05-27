@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::marker::PhantomData;
 
-use commonware_codec::{Codec, Decode, DecodeExt, Encode, Read as CodecRead};
+use commonware_codec::{Codec, Decode, DecodeExt, Encode};
 use commonware_cryptography::Hasher;
 use commonware_storage::merkle::{Graftable, Location};
 use commonware_storage::qmdb::{
@@ -24,7 +24,7 @@ use crate::codec::{
 };
 use crate::connect::OperationKv;
 use crate::core::HistoricalOpsClientCore;
-use crate::error::QmdbError;
+use crate::error::{error_key, QmdbError};
 use crate::proof::{
     CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
     RawUnorderedKeyValueProof, VerifiedOperationRange, VerifiedUnorderedKeyValue,
@@ -409,7 +409,7 @@ where
             .require_batch_boundary(session, watermark)
             .await?;
 
-        let key_bytes = key.as_ref().to_vec();
+        let key_bytes = error_key(&key);
         let Some((row_key, row_value)) = self
             .load_latest_update_row(session, watermark, key.as_ref())
             .await?
@@ -421,18 +421,18 @@ where
         };
         let location = decode_update_location(&row_key)?;
         let decoded =
-            <UpdateRow<K, V> as CodecRead>::read_cfg(&mut row_value.as_ref(), &self.update_row_cfg)
+            <UpdateRow<K, V> as Decode>::decode_cfg(row_value.as_ref(), &self.update_row_cfg)
                 .map_err(|e| QmdbError::CorruptData(format!("update row decode: {e}")))?;
         if <K as AsRef<[u8]>>::as_ref(&decoded.key) != key.as_ref() {
             return Err(QmdbError::ProofKeyNotFound {
                 watermark: watermark.as_u64(),
-                key: key.as_ref().to_vec(),
+                key: key_bytes.clone(),
             });
         }
         if decoded.value.is_none() {
             return Err(QmdbError::KeyNotActive {
                 watermark: watermark.as_u64(),
-                key: key.as_ref().to_vec(),
+                key: key_bytes.clone(),
             });
         }
 
@@ -440,7 +440,7 @@ where
         let unordered::Operation::Update(update) = &operation else {
             return Err(QmdbError::KeyNotActive {
                 watermark: watermark.as_u64(),
-                key: key.as_ref().to_vec(),
+                key: key_bytes,
             });
         };
         if update.0.as_ref() != key.as_ref() {
@@ -519,7 +519,7 @@ where
         let mut seen = BTreeSet::<Vec<u8>>::new();
         let mut proofs = Vec::with_capacity(keys.len());
         for key in keys {
-            let key_bytes = key.as_ref().to_vec();
+            let key_bytes = error_key(key);
             if !seen.insert(key_bytes.clone()) {
                 return Err(QmdbError::DuplicateRequestedKey { key: key_bytes });
             }
@@ -572,7 +572,7 @@ where
         let Some(bytes) = session.get(&encode_ops_root_witness_key(location)).await? else {
             return Ok(None);
         };
-        OpsRootWitness::<F, H::Digest>::decode_cfg(bytes.as_ref(), &())
+        OpsRootWitness::<F, H::Digest>::decode(bytes.as_ref())
             .map(Some)
             .map_err(|e| {
                 QmdbError::CorruptData(format!(

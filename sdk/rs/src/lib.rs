@@ -55,6 +55,48 @@ const DEFAULT_RETRY_MAX_ATTEMPTS: usize = 3;
 const DEFAULT_RETRY_INITIAL_BACKOFF_MS: u64 = 100;
 const DEFAULT_RETRY_MAX_BACKOFF_MS: u64 = 2_000;
 
+/// Converts caller-provided write values into the byte owner stored by
+/// [`StoreWriteBatch`].
+pub trait IntoStoreWriteValue {
+    fn into_store_write_value(self) -> Bytes;
+}
+
+impl IntoStoreWriteValue for Bytes {
+    fn into_store_write_value(self) -> Bytes {
+        self
+    }
+}
+
+impl IntoStoreWriteValue for &Bytes {
+    fn into_store_write_value(self) -> Bytes {
+        self.clone()
+    }
+}
+
+impl IntoStoreWriteValue for Vec<u8> {
+    fn into_store_write_value(self) -> Bytes {
+        self.into()
+    }
+}
+
+impl IntoStoreWriteValue for &Vec<u8> {
+    fn into_store_write_value(self) -> Bytes {
+        Bytes::copy_from_slice(self)
+    }
+}
+
+impl IntoStoreWriteValue for &[u8] {
+    fn into_store_write_value(self) -> Bytes {
+        Bytes::copy_from_slice(self)
+    }
+}
+
+impl<const N: usize> IntoStoreWriteValue for &[u8; N] {
+    fn into_store_write_value(self) -> Bytes {
+        Bytes::copy_from_slice(self)
+    }
+}
+
 /// Codec used to compress **outgoing** RPC request bodies when compression applies.
 ///
 /// connectrpc `ClientConfig::compress_requests` accepts a single encoding name; there is no
@@ -98,9 +140,9 @@ fn store_connect_client_config(
     request_compression: ConnectRequestCompression,
 ) -> ClientConfig {
     ClientConfig::new(base_uri)
-        .compression(proto_connect_compression_registry())
+        .with_compression(proto_connect_compression_registry())
         .compress_requests(request_compression.wire_name())
-        .default_max_message_size(STORE_CLIENT_MAX_MESSAGE_BYTES)
+        .with_default_max_message_size(STORE_CLIENT_MAX_MESSAGE_BYTES)
 }
 
 /// Store client error.
@@ -310,10 +352,12 @@ impl StoreWriteBatch {
         &mut self,
         client: &StoreClient,
         key: &Key,
-        value: &[u8],
+        value: impl IntoStoreWriteValue,
     ) -> Result<&mut Self, ClientError> {
-        self.entries
-            .push((client.encode_store_key(key)?, Bytes::copy_from_slice(value)));
+        self.entries.push((
+            client.encode_store_key(key)?,
+            value.into_store_write_value(),
+        ));
         Ok(self)
     }
 
@@ -854,7 +898,7 @@ impl StreamSubscription {
                             Some(prefix) => prefix.decode_key(&key)?,
                             None => key,
                         };
-                        let value = Bytes::from(entry.value);
+                        let value = entry.value;
                         if self
                             .logical_filter
                             .as_ref()
@@ -1366,8 +1410,8 @@ impl StoreClient {
                 )));
             }
             proto_kvs.push(exoware_proto::common::KvEntry {
-                key: (*key).to_vec(),
-                value: value.to_vec(),
+                key: key.to_vec(),
+                value: Bytes::copy_from_slice(value),
                 ..Default::default()
             });
         }
@@ -1405,7 +1449,7 @@ impl StoreClient {
         let (response, _detail) = self
             .send_get(key, self.normalize_min_sequence_number(min_sequence_number))
             .await?;
-        Ok(response.value.map(Bytes::from))
+        Ok(response.value)
     }
 
     pub(crate) async fn get_many(
@@ -1449,7 +1493,10 @@ impl StoreClient {
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
         let proto_keys: Vec<Vec<u8>> = keys
             .iter()
-            .map(|k| self.encode_store_key(k).map(|key| key.to_vec()))
+            .map(|k| match self.key_prefix {
+                Some(_) => self.encode_store_key(k).map(|key| key.to_vec()),
+                None => Ok(k.to_vec()),
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let effective_min = self.normalize_min_sequence_number(min_sequence_number);
         let max_attempts = self.retry_config.max_attempts.max(1);
@@ -1759,7 +1806,7 @@ impl StoreClient {
             .send_with_retry(|| async {
                 client
                     .get(ProtoGetRequest {
-                        key: key.to_vec(),
+                        key: key.clone().into(),
                         min_sequence_number,
                         ..Default::default()
                     })
@@ -1844,8 +1891,8 @@ impl StoreClient {
             // attempt budget so range opens do not multiply retries quadratically.
             let response = match client
                 .range(ProtoRangeRequest {
-                    start: start.to_vec(),
-                    end: end.to_vec(),
+                    start: start.clone().into(),
+                    end: end.clone().into(),
                     limit: Some(u32::try_from(limit).unwrap_or(u32::MAX)),
                     batch_size: u32::try_from(batch_size).unwrap_or(u32::MAX),
                     mode: mode.to_proto().into(),
@@ -1922,8 +1969,8 @@ impl StoreClient {
             .send_with_retry(|| async {
                 client
                     .reduce(ProtoWireReduceRequest {
-                        start: start.to_vec(),
-                        end: end.to_vec(),
+                        start: start.clone().into(),
+                        end: end.clone().into(),
                         params: Some(proto_params.clone()).into(),
                         min_sequence_number,
                         ..Default::default()
@@ -2413,10 +2460,8 @@ impl<'a> Stream<'a> {
                     let key = Bytes::from(entry.key);
                     match self.c.key_prefix {
                         Some(prefix) if !prefix.codec.matches(&key) => {}
-                        Some(prefix) => {
-                            entries.push((prefix.decode_key(&key)?, Bytes::from(entry.value)))
-                        }
-                        None => entries.push((key, Bytes::from(entry.value))),
+                        Some(prefix) => entries.push((prefix.decode_key(&key)?, entry.value)),
+                        None => entries.push((key, entry.value)),
                     }
                 }
                 Ok(Some(entries))
@@ -2458,7 +2503,7 @@ impl SerializableReadSession {
                     if let Some(detail) = detail {
                         observed_sequence.fetch_max(detail.sequence_number, Ordering::SeqCst);
                     }
-                    Ok(response.value.map(Bytes::from))
+                    Ok(response.value)
                 }
             },
         )

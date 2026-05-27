@@ -181,7 +181,7 @@ impl SimplexClient {
             return Err(SimplexError::EmptyUpload);
         }
         for entry in prepared.entries() {
-            batch.push(&self.client, &entry.key, entry.value.as_ref())?;
+            batch.push(&self.client, &entry.key, entry.value.clone())?;
         }
         Ok(())
     }

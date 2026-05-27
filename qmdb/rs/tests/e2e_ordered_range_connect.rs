@@ -7,16 +7,24 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
+use commonware_codec::Encode as _;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
 use commonware_storage::merkle::{mmb, mmr, Location, Proof};
 use commonware_storage::qmdb::any::ordered::variable::Operation as QmdbOperation;
+use commonware_storage::qmdb::sync::resolver::Resolver as _;
 use commonware_storage::qmdb::{
-    any::ordered::Update, current::ordered::variable::Db as LocalQmdbDb,
+    any::ordered::{variable::Db as AnyOrderedQmdbDb, Update},
+    current::ordered::variable::Db as LocalQmdbDb,
+    sync as qmdb_sync,
 };
 use commonware_storage::translator::TwoCap;
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{
+    channel::{mpsc, oneshot},
+    NZUsize, NZU16, NZU64,
+};
 use exoware_qmdb::proto::qmdb::v1::{
     GetCurrentOperationRangeRequest as ProtoGetCurrentOperationRangeRequest,
     GetOperationRangeRequest as ProtoGetOperationRangeRequest,
@@ -24,8 +32,8 @@ use exoware_qmdb::proto::qmdb::v1::{
 };
 use exoware_qmdb::{
     ordered_connect_stack, recover_boundary_state, CurrentBoundaryState, CurrentOperationClient,
-    OperationLogClient, OperationLogSubscribeProof, OrderedClient, OrderedWriter, QmdbError,
-    MAX_OPERATION_SIZE,
+    CurrentSyncResolver, OperationLogClient, OperationLogSubscribeProof, OperationLogSyncResolver,
+    OrderedClient, OrderedWriter, QmdbError, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
 use exoware_sdk::store::common::v1::{
@@ -34,6 +42,7 @@ use exoware_sdk::store::common::v1::{
 use exoware_sdk::StoreClient;
 
 const N: usize = 32;
+const MIN_MMB_OPERATIONS: usize = 10;
 type Digest = commonware_cryptography::sha256::Digest;
 type BatchProof = Proof<mmr::Family, Digest>;
 type BatchOperation = QmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>;
@@ -59,6 +68,15 @@ type MmbLocalDb = LocalQmdbDb<
     Sha256,
     TwoCap,
     N,
+    commonware_parallel::Sequential,
+>;
+type MmbAnyLocalDb = AnyOrderedQmdbDb<
+    mmb::Family,
+    cw_tokio::Context,
+    Vec<u8>,
+    Vec<u8>,
+    Sha256,
+    TwoCap,
     commonware_parallel::Sequential,
 >;
 
@@ -169,6 +187,11 @@ struct MmbLocalBatch {
     operations: Vec<MmbBatchOperation>,
     current_boundary: CurrentBoundaryState<Digest, N, mmb::Family>,
     inactivity_floor: Location<mmb::Family>,
+}
+
+struct MmbGrowingLocalBatch {
+    initial: MmbLocalBatch,
+    updated: MmbLocalBatch,
 }
 
 fn latest_inactivity_floor(operations: &[BatchOperation]) -> Location<mmr::Family> {
@@ -343,13 +366,13 @@ async fn build_mmb_local_batch() -> MmbLocalBatch {
                     .expect("proof");
                 inactivity_floor = latest_mmb_inactivity_floor(&cumulative);
                 ops = cumulative;
-                if *inactivity_floor > 0 {
+                if *inactivity_floor > 0 && ops.len() >= MIN_MMB_OPERATIONS {
                     break;
                 }
             }
             assert!(
-                *inactivity_floor > 0,
-                "MMB subscribe regression must exercise nonzero inactivity floor"
+                *inactivity_floor > 0 && ops.len() >= MIN_MMB_OPERATIONS,
+                "MMB fixture must exercise nonzero inactivity floor and multiple sync batches"
             );
             let boundary = boundary_from_mmb_local_db(&db, &ops).await;
             db.sync().await.expect("sync");
@@ -359,6 +382,95 @@ async fn build_mmb_local_batch() -> MmbLocalBatch {
                 operations: ops,
                 current_boundary: boundary,
                 inactivity_floor,
+            }
+        })
+    })
+    .await
+    .expect("join")
+}
+
+async fn build_mmb_growing_local_batch() -> MmbGrowingLocalBatch {
+    tokio::task::spawn_blocking(|| {
+        cw_tokio::Runner::default().start(|context| async move {
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = common::ordered_variable_config(
+                "ordered-range-connect-mmb-growing",
+                page_cache,
+                (
+                    ((0..=MAX_OPERATION_SIZE).into(), ()),
+                    ((0..=MAX_OPERATION_SIZE).into(), ()),
+                ),
+                NZU64!(8),
+            );
+            let mut db: MmbLocalDb = MmbLocalDb::init(context.child("qmdb"), cfg)
+                .await
+                .expect("init");
+
+            let mut ops = Vec::new();
+            let mut inactivity_floor = Location::<mmb::Family>::new(0);
+            let mut initial = None;
+            let mut initial_len = None;
+            for batch_index in 0..64u64 {
+                let finalized = {
+                    let alpha_value = format!("one-{batch_index}").into_bytes();
+                    let key = format!("k-{batch_index:08x}").into_bytes();
+                    let value = format!("v-{batch_index:08x}").into_bytes();
+                    let batch = db
+                        .new_batch()
+                        .write(b"alpha".to_vec(), Some(alpha_value))
+                        .write(key, Some(value));
+                    batch
+                        .merkleize(&db, None::<Vec<u8>>)
+                        .await
+                        .expect("merkleize")
+                };
+                db.apply_batch(finalized).await.expect("apply");
+
+                let latest = db.bounds().await.end - 1;
+                let n = NonZeroU64::new(*latest + 1).unwrap();
+                let (_proof, cumulative): (MmbBatchProof, Vec<MmbBatchOperation>) = db
+                    .ops_historical_proof(latest + 1, Location::new(0), n)
+                    .await
+                    .expect("proof");
+                inactivity_floor = latest_mmb_inactivity_floor(&cumulative);
+                ops = cumulative;
+
+                if initial.is_none() && *inactivity_floor > 0 && ops.len() >= MIN_MMB_OPERATIONS {
+                    let boundary = boundary_from_mmb_local_db(&db, &ops).await;
+                    initial_len = Some(ops.len());
+                    initial = Some(MmbLocalBatch {
+                        operations: ops.clone(),
+                        current_boundary: boundary,
+                        inactivity_floor,
+                    });
+                    continue;
+                }
+
+                if initial_len
+                    .map(|len| ops.len() >= len + MIN_MMB_OPERATIONS)
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+            }
+
+            let initial = initial.expect("MMB growing fixture initial target");
+            assert!(
+                ops.len() >= initial.operations.len() + MIN_MMB_OPERATIONS,
+                "MMB growing fixture must add enough operations for multiple updated sync fetches"
+            );
+            let boundary = boundary_from_mmb_local_db(&db, &ops).await;
+            db.sync().await.expect("sync");
+            db.destroy().await.expect("destroy");
+
+            MmbGrowingLocalBatch {
+                initial,
+                updated: MmbLocalBatch {
+                    operations: ops,
+                    current_boundary: boundary,
+                    inactivity_floor,
+                },
             }
         })
     })
@@ -421,6 +533,420 @@ async fn ordered_current_operation_range_connect_emits_verifiable_proof() {
 }
 
 #[tokio::test]
+async fn ordered_current_state_sync_from_connect_api_reconstructs_current_db() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_local_batch().await;
+    commit_upload(&store_client, &local).await;
+
+    let ordered_client = Arc::new(TestOrderedClient::from_client(
+        store_client.clone(),
+        op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client).await;
+    let resolver = CurrentSyncResolver::<_, mmr::Family, Sha256, BatchOperation>::plaintext(
+        &qmdb_url,
+        local.current_boundary.root,
+        op_cfg(),
+    );
+    let op_count = Location::new(local.operations.len() as u64);
+    let target = resolver.target(op_count).await.expect("api sync target");
+    assert_eq!(target.range.start(), Location::new(0));
+    assert_eq!(target.range.end(), op_count);
+
+    tokio::task::spawn_blocking(move || {
+        cw_tokio::Runner::default().start(|context| async move {
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
+
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = common::ordered_variable_config(
+                "ordered-current-sync-connect",
+                page_cache,
+                op_cfg(),
+                NZU64!(8),
+            );
+            let db: LocalDb = qmdb_sync::sync(qmdb_sync::engine::Config {
+                context: context.child("sync"),
+                resolver,
+                target,
+                max_outstanding_requests: 4,
+                fetch_batch_size: NZU64!(7),
+                apply_batch_size: 32,
+                db_config: cfg,
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 4,
+            })
+            .await
+            .expect("sync current db from API");
+
+            assert_eq!(db.root(), local.current_boundary.root);
+            assert_eq!(
+                db.get(&b"alpha".to_vec()).await.expect("get alpha"),
+                Some(b"one".to_vec())
+            );
+            assert_eq!(
+                db.get(&b"beta".to_vec()).await.expect("get beta"),
+                Some(b"two".to_vec())
+            );
+            db.destroy().await.expect("destroy synced db");
+        });
+    })
+    .await
+    .expect("join sync runner");
+}
+
+#[tokio::test]
+async fn ordered_mmb_current_state_sync_from_nonzero_connect_api_reconstructs_current_db() {
+    const FETCH_BATCH_SIZE: u64 = 3;
+
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_mmb_local_batch().await;
+    let start = Location::<mmb::Family>::new(1);
+    let start_index = usize::try_from(*start).expect("start fits usize");
+    let remaining_ops = local
+        .operations
+        .len()
+        .checked_sub(start_index)
+        .expect("sync start is inside operation log");
+    assert!(*start > 0, "MMB current-sync fixture must start after zero");
+    assert!(
+        start <= local.inactivity_floor,
+        "MMB current-sync start must be within the safe sync boundary"
+    );
+    assert!(
+        remaining_ops as u64 > FETCH_BATCH_SIZE * 2,
+        "MMB current-sync fixture must require at least three nonzero-start fetches"
+    );
+    let expected_alpha = latest_mmb_value_for_key(&local.operations[start_index..], b"alpha");
+    commit_mmb_upload(&store_client, &local).await;
+
+    let ordered_client = Arc::new(MmbTestOrderedClient::from_client(
+        store_client.clone(),
+        mmb_op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
+    let resolver = CurrentSyncResolver::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
+        &qmdb_url,
+        local.current_boundary.root,
+        mmb_op_cfg(),
+    );
+    let op_count = Location::new(local.operations.len() as u64);
+    let target = resolver
+        .target_range(start, op_count)
+        .await
+        .expect("api nonzero current sync target");
+    let expected_current_root = local.current_boundary.root;
+
+    tokio::task::spawn_blocking(move || {
+        cw_tokio::Runner::default().start(|context| async move {
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
+
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = common::ordered_variable_config(
+                "ordered-mmb-current-sync-nonzero-connect",
+                page_cache,
+                mmb_op_cfg(),
+                NZU64!(8),
+            );
+            let db: MmbLocalDb = qmdb_sync::sync(qmdb_sync::engine::Config {
+                context: context.child("sync"),
+                resolver,
+                target,
+                max_outstanding_requests: 4,
+                fetch_batch_size: NZU64!(3),
+                apply_batch_size: 32,
+                db_config: cfg,
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 4,
+            })
+            .await
+            .expect("sync current db from nonzero MMB API");
+
+            assert_eq!(db.root(), expected_current_root);
+            let bounds = db.bounds().await;
+            assert_eq!(bounds.start, start);
+            assert_eq!(bounds.end, op_count);
+            assert_eq!(
+                db.get(&b"alpha".to_vec()).await.expect("get alpha"),
+                expected_alpha
+            );
+            db.destroy().await.expect("destroy synced db");
+        });
+    })
+    .await
+    .expect("join nonzero current sync runner");
+}
+
+#[tokio::test]
+async fn ordered_mmb_sync_resolvers_return_pinned_nodes_for_nonzero_fetches() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_mmb_local_batch().await;
+    let start = Location::<mmb::Family>::new(3);
+    assert!(*start > 0, "regression must exercise a nonzero lower bound");
+    assert!(
+        local.operations.len() > usize::try_from(*start).expect("start fits usize"),
+        "sync start is inside operation log"
+    );
+    commit_mmb_upload(&store_client, &local).await;
+
+    let ordered_client = Arc::new(MmbTestOrderedClient::from_client(
+        store_client.clone(),
+        mmb_op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
+    let op_count = Location::new(local.operations.len() as u64);
+    let hasher = commonware_storage::qmdb::hasher::<Sha256>();
+
+    let any_resolver =
+        OperationLogSyncResolver::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
+            &qmdb_url,
+            mmb_op_cfg(),
+        );
+    let any_target = any_resolver
+        .target_range(start, op_count)
+        .await
+        .expect("any nonzero sync target");
+    let (_cancel_tx, cancel_rx) = oneshot::channel();
+    let any_fetch = any_resolver
+        .get_operations(op_count, start, NZU64!(1), true, cancel_rx)
+        .await
+        .expect("any resolver nonzero pinned fetch");
+    let any_pinned_nodes = any_fetch
+        .pinned_nodes
+        .as_ref()
+        .expect("any resolver returned pinned nodes");
+    assert!(!any_pinned_nodes.is_empty());
+    let any_elements = any_fetch
+        .operations
+        .iter()
+        .map(|operation| operation.encode())
+        .collect::<Vec<_>>();
+    assert!(any_fetch.proof.verify_proof_and_pinned_nodes(
+        &hasher,
+        &any_elements,
+        start,
+        any_pinned_nodes,
+        &any_target.root,
+    ));
+
+    let current_resolver =
+        CurrentSyncResolver::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
+            &qmdb_url,
+            local.current_boundary.root,
+            mmb_op_cfg(),
+        );
+    let current_target = current_resolver
+        .target_range(start, op_count)
+        .await
+        .expect("current nonzero sync target");
+    let (_cancel_tx, cancel_rx) = oneshot::channel();
+    let current_fetch = current_resolver
+        .get_operations(op_count, start, NZU64!(1), true, cancel_rx)
+        .await
+        .expect("current resolver nonzero pinned fetch");
+    let current_pinned_nodes = current_fetch
+        .pinned_nodes
+        .as_ref()
+        .expect("current resolver returned pinned nodes");
+    assert!(!current_pinned_nodes.is_empty());
+    let current_elements = current_fetch
+        .operations
+        .iter()
+        .map(|operation| operation.encode())
+        .collect::<Vec<_>>();
+    assert!(current_fetch.proof.verify_proof_and_pinned_nodes(
+        &hasher,
+        &current_elements,
+        start,
+        current_pinned_nodes,
+        &current_target.root,
+    ));
+}
+
+#[tokio::test]
+async fn ordered_mmb_operation_range_client_rejects_missing_nonzero_pinned_nodes() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_mmb_local_batch().await;
+    let start = Location::<mmb::Family>::new(3);
+    assert!(
+        local.operations.len() > usize::try_from(*start).expect("start fits usize"),
+        "sync start is inside operation log"
+    );
+    commit_mmb_upload(&store_client, &local).await;
+
+    let ordered_client = Arc::new(MmbTestOrderedClient::from_client(
+        store_client.clone(),
+        mmb_op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
+    let request = ProtoGetOperationRangeRequest {
+        tip: (local.operations.len() - 1) as u64,
+        start_location: start.as_u64(),
+        max_locations: 1,
+        ..Default::default()
+    };
+    let mut response = common::operation_log_rpc_client(&qmdb_url)
+        .get_operation_range(request.clone())
+        .await
+        .expect("raw get operation range")
+        .into_view()
+        .to_owned_message();
+    let proof = mmb_validated_client(&qmdb_url)
+        .get_operation_range(request.clone(), &local.current_boundary.root)
+        .await
+        .expect("nonzero operation range verifies with pinned nodes");
+    assert_eq!(proof.start_location, start);
+    assert_eq!(
+        proof.operations,
+        vec![(
+            start,
+            local.operations[usize::try_from(*start).expect("start fits usize")].clone()
+        )]
+    );
+    let mut proof = response
+        .proof
+        .as_option()
+        .cloned()
+        .expect("operation range proof");
+    assert!(!proof.pinned_nodes.is_empty());
+    proof.pinned_nodes.clear();
+    response.proof = Some(proof).into();
+
+    let (_static_server, static_url) =
+        common::spawn_static_operation_range_service(common::StaticOperationRangeService {
+            operation_range_response: response,
+        })
+        .await;
+    let client = mmb_validated_client(&static_url);
+    let err = client
+        .get_operation_range(request, &local.current_boundary.root)
+        .await
+        .expect_err("missing pinned nodes should fail nonzero operation range verification");
+    assert!(matches!(
+        err,
+        QmdbError::ProofVerification {
+            kind: exoware_qmdb::ProofKind::RangeCheckpoint
+        }
+    ));
+}
+
+#[tokio::test]
+async fn ordered_mmb_operation_range_client_rejects_extra_nonzero_pinned_node() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_mmb_local_batch().await;
+    let start = Location::<mmb::Family>::new(3);
+    assert!(
+        local.operations.len() > usize::try_from(*start).expect("start fits usize"),
+        "sync start is inside operation log"
+    );
+    commit_mmb_upload(&store_client, &local).await;
+
+    let ordered_client = Arc::new(MmbTestOrderedClient::from_client(
+        store_client.clone(),
+        mmb_op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
+    let request = ProtoGetOperationRangeRequest {
+        tip: (local.operations.len() - 1) as u64,
+        start_location: start.as_u64(),
+        max_locations: 1,
+        ..Default::default()
+    };
+    let mut response = common::operation_log_rpc_client(&qmdb_url)
+        .get_operation_range(request.clone())
+        .await
+        .expect("raw get operation range")
+        .into_view()
+        .to_owned_message();
+    let mut proof = response
+        .proof
+        .as_option()
+        .cloned()
+        .expect("operation range proof");
+    assert!(!proof.pinned_nodes.is_empty());
+    proof.pinned_nodes.push(proof.pinned_nodes[0].clone());
+    response.proof = Some(proof).into();
+
+    let (_static_server, static_url) =
+        common::spawn_static_operation_range_service(common::StaticOperationRangeService {
+            operation_range_response: response,
+        })
+        .await;
+    let client = mmb_validated_client(&static_url);
+    let err = client
+        .get_operation_range(request, &local.current_boundary.root)
+        .await
+        .expect_err("extra pinned nodes should fail operation range verification");
+    assert!(matches!(
+        err,
+        QmdbError::ProofVerification {
+            kind: exoware_qmdb::ProofKind::RangeCheckpoint
+        }
+    ));
+}
+
+#[tokio::test]
+async fn ordered_mmb_operation_range_client_rejects_zero_start_pinned_nodes() {
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_mmb_local_batch().await;
+    commit_mmb_upload(&store_client, &local).await;
+
+    let ordered_client = Arc::new(MmbTestOrderedClient::from_client(
+        store_client.clone(),
+        mmb_op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
+    let request = ProtoGetOperationRangeRequest {
+        tip: (local.operations.len() - 1) as u64,
+        start_location: 0,
+        max_locations: 1,
+        ..Default::default()
+    };
+    let mut response = common::operation_log_rpc_client(&qmdb_url)
+        .get_operation_range(request.clone())
+        .await
+        .expect("raw get operation range")
+        .into_view()
+        .to_owned_message();
+    let mut proof = response
+        .proof
+        .as_option()
+        .cloned()
+        .expect("operation range proof");
+    assert!(proof.pinned_nodes.is_empty());
+    proof
+        .pinned_nodes
+        .push(local.current_boundary.root.encode());
+    response.proof = Some(proof).into();
+
+    let (_static_server, static_url) =
+        common::spawn_static_operation_range_service(common::StaticOperationRangeService {
+            operation_range_response: response,
+        })
+        .await;
+    let client = mmb_validated_client(&static_url);
+    let err = client
+        .get_operation_range(request, &local.current_boundary.root)
+        .await
+        .expect_err("zero-start pinned nodes should fail operation range verification");
+    assert!(matches!(
+        err,
+        QmdbError::ProofVerification {
+            kind: exoware_qmdb::ProofKind::RangeCheckpoint
+        }
+    ));
+}
+
+#[tokio::test]
 async fn ordered_operation_range_connect_uses_current_root_witness() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
@@ -470,14 +996,16 @@ async fn ordered_operation_range_connect_uses_current_root_witness() {
 
 fn match_exact(key: &[u8]) -> ProtoBytesFilter {
     ProtoBytesFilter {
-        kind: Some(proto_bytes_filter::Kind::Exact(key.to_vec())),
+        kind: Some(proto_bytes_filter::Kind::Exact(Bytes::copy_from_slice(key))),
         ..Default::default()
     }
 }
 
 fn match_prefix(prefix: &[u8]) -> ProtoBytesFilter {
     ProtoBytesFilter {
-        kind: Some(proto_bytes_filter::Kind::Prefix(prefix.to_vec())),
+        kind: Some(proto_bytes_filter::Kind::Prefix(Bytes::copy_from_slice(
+            prefix,
+        ))),
         ..Default::default()
     }
 }
@@ -531,6 +1059,20 @@ fn all_mmb_operations_for_key(
             _ => None,
         })
         .collect()
+}
+
+fn latest_mmb_value_for_key(operations: &[MmbBatchOperation], key: &[u8]) -> Option<Vec<u8>> {
+    operations
+        .iter()
+        .rev()
+        .find_map(|operation| match operation {
+            MmbBatchOperation::Delete(found) if found.as_slice() == key => Some(None),
+            MmbBatchOperation::Update(Update {
+                key: found, value, ..
+            }) if found.as_slice() == key => Some(Some(value.clone())),
+            _ => None,
+        })
+        .expect("key appears in operation log")
 }
 
 #[tokio::test]
@@ -730,6 +1272,271 @@ async fn ordered_mmb_range_connect_subscribe_verifies_range_and_multi_proofs() {
     let expected_filtered = all_mmb_operations_for_key(&local.operations, b"alpha");
     assert!(!expected_filtered.is_empty());
     assert_eq!(multi_frame.operations, expected_filtered);
+}
+
+#[tokio::test]
+async fn ordered_mmb_operation_log_any_sync_from_connect_api_reconstructs_any_db() {
+    const FETCH_BATCH_SIZE: u64 = 3;
+
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_mmb_local_batch().await;
+    assert!(
+        local.operations.len() as u64 > FETCH_BATCH_SIZE * 2,
+        "MMB any-sync fixture must require at least three fetches"
+    );
+    let expected_alpha = latest_mmb_value_for_key(&local.operations, b"alpha");
+    commit_mmb_upload(&store_client, &local).await;
+
+    let ordered_client = Arc::new(MmbTestOrderedClient::from_client(
+        store_client.clone(),
+        mmb_op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
+    let resolver = OperationLogSyncResolver::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
+        &qmdb_url,
+        mmb_op_cfg(),
+    );
+    let op_count = Location::new(local.operations.len() as u64);
+    let target = resolver.target(op_count).await.expect("any sync target");
+    let target_root = target.root;
+
+    tokio::task::spawn_blocking(move || {
+        cw_tokio::Runner::default().start(|context| async move {
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
+
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = common::any_variable_config(
+                "ordered-mmb-any-sync-connect",
+                page_cache,
+                mmb_op_cfg(),
+                NZU64!(8),
+            );
+            let db: MmbAnyLocalDb = qmdb_sync::sync(qmdb_sync::engine::Config {
+                context: context.child("sync"),
+                resolver,
+                target,
+                max_outstanding_requests: 4,
+                fetch_batch_size: NZU64!(3),
+                apply_batch_size: 32,
+                db_config: cfg,
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 4,
+            })
+            .await
+            .expect("sync any db from MMB API");
+
+            assert_eq!(db.root(), target_root);
+            assert_eq!(
+                db.get(&b"alpha".to_vec()).await.expect("get alpha"),
+                expected_alpha
+            );
+            db.destroy().await.expect("destroy synced db");
+        });
+    })
+    .await
+    .expect("join any sync runner");
+}
+
+#[tokio::test]
+async fn ordered_mmb_operation_log_any_sync_from_nonzero_connect_api_reconstructs_any_db() {
+    const FETCH_BATCH_SIZE: u64 = 3;
+
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_mmb_local_batch().await;
+    let start = Location::<mmb::Family>::new(3);
+    let start_index = usize::try_from(*start).expect("start fits usize");
+    let remaining_ops = local
+        .operations
+        .len()
+        .checked_sub(start_index)
+        .expect("sync start is inside operation log");
+    assert!(
+        remaining_ops as u64 > FETCH_BATCH_SIZE * 2,
+        "MMB any-sync fixture must require at least three nonzero-start fetches"
+    );
+    let expected_alpha = latest_mmb_value_for_key(&local.operations[start_index..], b"alpha");
+    commit_mmb_upload(&store_client, &local).await;
+
+    let ordered_client = Arc::new(MmbTestOrderedClient::from_client(
+        store_client.clone(),
+        mmb_op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
+    let resolver = OperationLogSyncResolver::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
+        &qmdb_url,
+        mmb_op_cfg(),
+    );
+    let op_count = Location::new(local.operations.len() as u64);
+    let target = resolver
+        .target_range(start, op_count)
+        .await
+        .expect("any nonzero sync target");
+    let target_root = target.root;
+
+    tokio::task::spawn_blocking(move || {
+        cw_tokio::Runner::default().start(|context| async move {
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
+
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = common::any_variable_config(
+                "ordered-mmb-any-sync-nonzero-connect",
+                page_cache,
+                mmb_op_cfg(),
+                NZU64!(8),
+            );
+            let db: MmbAnyLocalDb = qmdb_sync::sync(qmdb_sync::engine::Config {
+                context: context.child("sync"),
+                resolver,
+                target,
+                max_outstanding_requests: 4,
+                fetch_batch_size: NZU64!(3),
+                apply_batch_size: 32,
+                db_config: cfg,
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 4,
+            })
+            .await
+            .expect("sync any db from nonzero MMB API");
+
+            assert_eq!(db.root(), target_root);
+            let bounds = db.bounds().await;
+            assert_eq!(bounds.start, start);
+            assert_eq!(bounds.end, op_count);
+            assert_eq!(
+                db.get(&b"alpha".to_vec()).await.expect("get alpha"),
+                expected_alpha
+            );
+            db.destroy().await.expect("destroy synced db");
+        });
+    })
+    .await
+    .expect("join nonzero any sync runner");
+}
+
+#[tokio::test]
+async fn ordered_mmb_operation_log_any_sync_accepts_target_update_from_growing_backend() {
+    const FETCH_BATCH_SIZE: u64 = 3;
+
+    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let local = build_mmb_growing_local_batch().await;
+    let start = Location::<mmb::Family>::new(1);
+    let start_index = usize::try_from(*start).expect("start fits usize");
+    let initial_remaining_ops = local
+        .initial
+        .operations
+        .len()
+        .checked_sub(start_index)
+        .expect("sync start is inside initial operation log");
+    assert!(*start > 0, "growing MMB sync must exercise a nonzero start");
+    assert!(
+        start <= local.initial.inactivity_floor,
+        "growing MMB sync start must be within the safe sync boundary"
+    );
+    assert!(
+        initial_remaining_ops as u64 > FETCH_BATCH_SIZE * 2,
+        "initial MMB any-sync target must require at least three nonzero-start fetches"
+    );
+    let added_operations = local.updated.operations.len() - local.initial.operations.len();
+    assert!(
+        added_operations as u64 > FETCH_BATCH_SIZE * 2,
+        "updated MMB any-sync target must add at least three fetches"
+    );
+    let expected_alpha =
+        latest_mmb_value_for_key(&local.updated.operations[start_index..], b"alpha");
+    commit_mmb_upload(&store_client, &local.initial).await;
+
+    let ordered_client = Arc::new(MmbTestOrderedClient::from_client(
+        store_client.clone(),
+        mmb_op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
+    let resolver = OperationLogSyncResolver::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
+        &qmdb_url,
+        mmb_op_cfg(),
+    );
+    let target_resolver = resolver.clone();
+    let initial_op_count = Location::new(local.initial.operations.len() as u64);
+    let updated_op_count = Location::new(local.updated.operations.len() as u64);
+    let initial_target = resolver
+        .target_range(start, initial_op_count)
+        .await
+        .expect("initial nonzero any sync target");
+    let expected_initial_target = initial_target.clone();
+
+    let (update_tx, update_rx) = mpsc::channel(1);
+    let (finish_tx, finish_rx) = mpsc::channel(1);
+    let (reached_tx, mut reached_rx) = mpsc::channel(2);
+    let sync_expected_alpha = expected_alpha;
+    let sync_handle = tokio::task::spawn_blocking(move || {
+        cw_tokio::Runner::default().start(|context| async move {
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
+
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = common::any_variable_config(
+                "ordered-mmb-any-sync-growing-connect",
+                page_cache,
+                mmb_op_cfg(),
+                NZU64!(8),
+            );
+            let db: MmbAnyLocalDb = qmdb_sync::sync(qmdb_sync::engine::Config {
+                context: context.child("sync"),
+                resolver,
+                target: initial_target,
+                max_outstanding_requests: 1,
+                fetch_batch_size: NZU64!(3),
+                apply_batch_size: 4,
+                db_config: cfg,
+                update_rx: Some(update_rx),
+                finish_rx: Some(finish_rx),
+                reached_target_tx: Some(reached_tx),
+                max_retained_roots: 4,
+            })
+            .await
+            .expect("sync any db from growing MMB API");
+
+            assert_eq!(
+                db.get(&b"alpha".to_vec()).await.expect("get alpha"),
+                sync_expected_alpha
+            );
+            let bounds = db.bounds().await;
+            assert_eq!(bounds.start, start);
+            assert_eq!(bounds.end, updated_op_count);
+            db.destroy().await.expect("destroy synced db");
+        });
+    });
+
+    let reached_initial = tokio::time::timeout(Duration::from_secs(30), reached_rx.recv())
+        .await
+        .expect("timed out waiting for initial sync target")
+        .expect("initial sync target channel closed");
+    assert_eq!(reached_initial, expected_initial_target);
+
+    commit_mmb_upload(&store_client, &local.updated).await;
+    let updated_target = target_resolver
+        .target_range(start, updated_op_count)
+        .await
+        .expect("updated nonzero any sync target");
+    assert_ne!(updated_target, expected_initial_target);
+    update_tx
+        .send(updated_target.clone())
+        .await
+        .expect("send updated sync target");
+
+    let reached_updated = tokio::time::timeout(Duration::from_secs(30), reached_rx.recv())
+        .await
+        .expect("timed out waiting for updated sync target")
+        .expect("updated sync target channel closed");
+    assert_eq!(reached_updated, updated_target);
+
+    finish_tx.send(()).await.expect("send finish request");
+    sync_handle.await.expect("join growing any sync runner");
 }
 
 #[tokio::test]

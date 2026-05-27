@@ -238,6 +238,15 @@ where
         )
         .await
         .expect("checkpoint");
+    assert!(checkpoint.verify::<commonware_cryptography::Sha256>());
+    let mut malformed_checkpoint = checkpoint.clone();
+    malformed_checkpoint
+        .pinned_nodes
+        .push(malformed_checkpoint.root);
+    assert!(
+        !malformed_checkpoint.verify::<commonware_cryptography::Sha256>(),
+        "zero-start checkpoints must not verify with pinned nodes"
+    );
     let peaks = checkpoint
         .reconstruct_peaks::<commonware_cryptography::Sha256>()
         .expect("reconstruct_peaks");

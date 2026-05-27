@@ -41,7 +41,7 @@ fn put_batch(store: &RocksStore, kvs: Vec<(Bytes, Bytes)>) -> u64 {
     block_on(store.put_batch(kvs)).expect("put_batch")
 }
 
-fn get_value(store: &RocksStore, key: &Bytes) -> Option<Vec<u8>> {
+fn get_value(store: &RocksStore, key: &Bytes) -> Option<Bytes> {
     block_on(store.get(key.clone())).expect("get").0
 }
 

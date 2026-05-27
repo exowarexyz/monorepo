@@ -143,6 +143,173 @@ dependencies = [
 ]
 
 [[package]]
+name = "ark-bls12-381"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3df4dcc01ff89867cd86b0da835f23c3f02738353aaee7dde7495af71363b8d5"
+dependencies = [
+ "ark-ec",
+ "ark-ff",
+ "ark-serialize",
+ "ark-std",
+]
+
+[[package]]
+name = "ark-ec"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43d68f2d516162846c1238e755a7c4d131b892b70cc70c471a8e3ca3ed818fce"
+dependencies = [
+ "ahash",
+ "ark-ff",
+ "ark-poly",
+ "ark-serialize",
+ "ark-std",
+ "educe",
+ "fnv",
+ "hashbrown 0.15.5",
+ "itertools 0.13.0",
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+ "zeroize",
+]
+
+[[package]]
+name = "ark-ed-on-bls12-381-bandersnatch"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1786b2e3832f6f0f7c8d62d5d5a282f6952a1ab99981c54cd52b6ac1d8f02df5"
+dependencies = [
+ "ark-bls12-381",
+ "ark-ec",
+ "ark-ff",
+ "ark-r1cs-std",
+ "ark-std",
+]
+
+[[package]]
+name = "ark-ff"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a177aba0ed1e0fbb62aa9f6d0502e9b46dad8c2eab04c14258a1212d2557ea70"
+dependencies = [
+ "ark-ff-asm",
+ "ark-ff-macros",
+ "ark-serialize",
+ "ark-std",
+ "arrayvec",
+ "digest",
+ "educe",
+ "itertools 0.13.0",
+ "num-bigint",
+ "num-traits",
+ "paste",
+ "zeroize",
+]
+
+[[package]]
+name = "ark-ff-asm"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62945a2f7e6de02a31fe400aa489f0e0f5b2502e69f95f853adb82a96c7a6b60"
+dependencies = [
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "ark-ff-macros"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09be120733ee33f7693ceaa202ca41accd5653b779563608f1234f78ae07c4b3"
+dependencies = [
+ "num-bigint",
+ "num-traits",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "ark-poly"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "579305839da207f02b89cd1679e50e67b4331e2f9294a57693e5051b7703fe27"
+dependencies = [
+ "ahash",
+ "ark-ff",
+ "ark-serialize",
+ "ark-std",
+ "educe",
+ "fnv",
+ "hashbrown 0.15.5",
+]
+
+[[package]]
+name = "ark-r1cs-std"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "941551ef1df4c7a401de7068758db6503598e6f01850bdb2cfdb614a1f9dbea1"
+dependencies = [
+ "ark-ec",
+ "ark-ff",
+ "ark-relations",
+ "ark-std",
+ "educe",
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+ "tracing",
+]
+
+[[package]]
+name = "ark-relations"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec46ddc93e7af44bcab5230937635b06fb5744464dd6a7e7b083e80ebd274384"
+dependencies = [
+ "ark-ff",
+ "ark-std",
+ "tracing",
+ "tracing-subscriber 0.2.25",
+]
+
+[[package]]
+name = "ark-serialize"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f4d068aaf107ebcd7dfb52bc748f8030e0fc930ac8e360146ca54c1203088f7"
+dependencies = [
+ "ark-serialize-derive",
+ "ark-std",
+ "arrayvec",
+ "digest",
+ "num-bigint",
+]
+
+[[package]]
+name = "ark-serialize-derive"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "213888f660fddcca0d257e88e54ac05bca01885f258ccdf695bafd77031bb69d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "ark-std"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "246a225cc6131e9ee4f24619af0f19d67761fff15d7ccc22e42b80846e69449a"
+dependencies = [
+ "num-traits",
+ "rand 0.8.5",
+]
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -426,9 +593,9 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "aws-lc-rs"
-version = "1.16.2"
+version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a054912289d18629dc78375ba2c3726a3afe3ff71b4edba9dedfca0e3446d1fc"
+checksum = "5ec2f1fc3ec205783a5da9a7e6c1509cc69dedf09a1949e412c1e18469326d00"
 dependencies = [
  "aws-lc-sys",
  "untrusted 0.7.1",
@@ -437,9 +604,9 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-sys"
-version = "0.39.1"
+version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83a25cf98105baa966497416dbd42565ce3a8cf8dbfd59803ec9ad46f3126399"
+checksum = "1a2f9779ce85b93ab6170dd940ad0169b5766ff848247aff13bb788b832fe3f4"
 dependencies = [
  "cc",
  "cmake",
@@ -642,9 +809,9 @@ dependencies = [
 
 [[package]]
 name = "buffa"
-version = "0.3.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df3fea50199859017c80584fef221c61abb882c69ed5b6e30a0bf75864e3c505"
+checksum = "941c714734a660caa93a210c531dec553cc0ef417890409914d24032c94ab840"
 dependencies = [
  "base64",
  "bytes",
@@ -657,9 +824,9 @@ dependencies = [
 
 [[package]]
 name = "buffa-codegen"
-version = "0.3.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f9ddcb25f0dde4d82e0a1128b0c459feba775e24dfa7cb0c3f4a9d61abfa245"
+checksum = "693ea91be01336fb0084b2e7bb071be7393224c72f737c846471e4013e58c327"
 dependencies = [
  "buffa",
  "buffa-descriptor",
@@ -672,20 +839,23 @@ dependencies = [
 
 [[package]]
 name = "buffa-descriptor"
-version = "0.3.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a0794ed1f8a0c6ab168c70258e21cf74ca7b87a7dd888a0a69745b075f2d351"
+checksum = "ad8df83adfcb525621f5a96c88e610f90aff1112ec57522d9b48a943df327394"
 dependencies = [
  "buffa",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
 name = "buffa-types"
-version = "0.3.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4d80c9929af9fcc673653b99f81c1d13aa32c2bb329bb1ef02ec533994389c6"
+checksum = "fc84fac1e7efc335e74934a4ebe0534a30411ec2ea6a5a17ed294201c6b3b23c"
 dependencies = [
  "buffa",
+ "bytes",
  "serde",
  "serde_json",
  "thiserror",
@@ -932,10 +1102,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-actor"
+version = "2026.4.0"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=df03d866237f44c6d0f81d05783da493654f0f8c#df03d866237f44c6d0f81d05783da493654f0f8c"
+dependencies = [
+ "cfg-if",
+ "commonware-macros",
+ "commonware-runtime",
+ "crossbeam-queue",
+ "futures-util",
+ "parking_lot",
+]
+
+[[package]]
 name = "commonware-broadcast"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=2cc941653cb936952c00587f8cb037c8021241a5#2cc941653cb936952c00587f8cb037c8021241a5"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=df03d866237f44c6d0f81d05783da493654f0f8c#df03d866237f44c6d0f81d05783da493654f0f8c"
 dependencies = [
+ "commonware-actor",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
@@ -949,7 +1133,7 @@ dependencies = [
 [[package]]
 name = "commonware-codec"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=2cc941653cb936952c00587f8cb037c8021241a5#2cc941653cb936952c00587f8cb037c8021241a5"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=df03d866237f44c6d0f81d05783da493654f0f8c#df03d866237f44c6d0f81d05783da493654f0f8c"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -963,7 +1147,7 @@ dependencies = [
 [[package]]
 name = "commonware-coding"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=2cc941653cb936952c00587f8cb037c8021241a5#2cc941653cb936952c00587f8cb037c8021241a5"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=df03d866237f44c6d0f81d05783da493654f0f8c#df03d866237f44c6d0f81d05783da493654f0f8c"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -984,10 +1168,11 @@ dependencies = [
 [[package]]
 name = "commonware-consensus"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=2cc941653cb936952c00587f8cb037c8021241a5#2cc941653cb936952c00587f8cb037c8021241a5"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=df03d866237f44c6d0f81d05783da493654f0f8c#df03d866237f44c6d0f81d05783da493654f0f8c"
 dependencies = [
  "bytes",
  "cfg-if",
+ "commonware-actor",
  "commonware-broadcast",
  "commonware-codec",
  "commonware-coding",
@@ -1014,9 +1199,15 @@ dependencies = [
 [[package]]
 name = "commonware-cryptography"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=2cc941653cb936952c00587f8cb037c8021241a5#2cc941653cb936952c00587f8cb037c8021241a5"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=df03d866237f44c6d0f81d05783da493654f0f8c#df03d866237f44c6d0f81d05783da493654f0f8c"
 dependencies = [
  "anyhow",
+ "ark-ec",
+ "ark-ed-on-bls12-381-bandersnatch",
+ "ark-ff",
+ "ark-r1cs-std",
+ "ark-relations",
+ "ark-serialize",
  "aws-lc-rs",
  "blake3",
  "blst",
@@ -1049,16 +1240,41 @@ dependencies = [
 [[package]]
 name = "commonware-formatting"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=2cc941653cb936952c00587f8cb037c8021241a5#2cc941653cb936952c00587f8cb037c8021241a5"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=df03d866237f44c6d0f81d05783da493654f0f8c#df03d866237f44c6d0f81d05783da493654f0f8c"
 dependencies = [
  "commonware-macros",
  "const-hex",
 ]
 
 [[package]]
+name = "commonware-glue"
+version = "2026.4.0"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=df03d866237f44c6d0f81d05783da493654f0f8c#df03d866237f44c6d0f81d05783da493654f0f8c"
+dependencies = [
+ "bytes",
+ "commonware-actor",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-parallel",
+ "commonware-resolver",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-utils",
+ "futures",
+ "prometheus-client",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "commonware-macros"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=2cc941653cb936952c00587f8cb037c8021241a5#2cc941653cb936952c00587f8cb037c8021241a5"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=df03d866237f44c6d0f81d05783da493654f0f8c#df03d866237f44c6d0f81d05783da493654f0f8c"
 dependencies = [
  "commonware-macros-impl",
  "tokio",
@@ -1067,7 +1283,7 @@ dependencies = [
 [[package]]
 name = "commonware-macros-impl"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=2cc941653cb936952c00587f8cb037c8021241a5#2cc941653cb936952c00587f8cb037c8021241a5"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=df03d866237f44c6d0f81d05783da493654f0f8c#df03d866237f44c6d0f81d05783da493654f0f8c"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -1079,7 +1295,7 @@ dependencies = [
 [[package]]
 name = "commonware-math"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=2cc941653cb936952c00587f8cb037c8021241a5#2cc941653cb936952c00587f8cb037c8021241a5"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=df03d866237f44c6d0f81d05783da493654f0f8c#df03d866237f44c6d0f81d05783da493654f0f8c"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1092,8 +1308,9 @@ dependencies = [
 [[package]]
 name = "commonware-p2p"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=2cc941653cb936952c00587f8cb037c8021241a5#2cc941653cb936952c00587f8cb037c8021241a5"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=df03d866237f44c6d0f81d05783da493654f0f8c#df03d866237f44c6d0f81d05783da493654f0f8c"
 dependencies = [
+ "commonware-actor",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
@@ -1117,7 +1334,7 @@ dependencies = [
 [[package]]
 name = "commonware-parallel"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=2cc941653cb936952c00587f8cb037c8021241a5#2cc941653cb936952c00587f8cb037c8021241a5"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=df03d866237f44c6d0f81d05783da493654f0f8c#df03d866237f44c6d0f81d05783da493654f0f8c"
 dependencies = [
  "cfg-if",
  "commonware-macros",
@@ -1127,9 +1344,10 @@ dependencies = [
 [[package]]
 name = "commonware-resolver"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=2cc941653cb936952c00587f8cb037c8021241a5#2cc941653cb936952c00587f8cb037c8021241a5"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=df03d866237f44c6d0f81d05783da493654f0f8c#df03d866237f44c6d0f81d05783da493654f0f8c"
 dependencies = [
  "bytes",
+ "commonware-actor",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-macros",
@@ -1146,7 +1364,7 @@ dependencies = [
 [[package]]
 name = "commonware-runtime"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=2cc941653cb936952c00587f8cb037c8021241a5#2cc941653cb936952c00587f8cb037c8021241a5"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=df03d866237f44c6d0f81d05783da493654f0f8c#df03d866237f44c6d0f81d05783da493654f0f8c"
 dependencies = [
  "axum",
  "bytes",
@@ -1177,13 +1395,13 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-opentelemetry",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.23",
 ]
 
 [[package]]
 name = "commonware-runtime-macros"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=2cc941653cb936952c00587f8cb037c8021241a5#2cc941653cb936952c00587f8cb037c8021241a5"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=df03d866237f44c6d0f81d05783da493654f0f8c#df03d866237f44c6d0f81d05783da493654f0f8c"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -1194,7 +1412,7 @@ dependencies = [
 [[package]]
 name = "commonware-storage"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=2cc941653cb936952c00587f8cb037c8021241a5#2cc941653cb936952c00587f8cb037c8021241a5"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=df03d866237f44c6d0f81d05783da493654f0f8c#df03d866237f44c6d0f81d05783da493654f0f8c"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1217,7 +1435,7 @@ dependencies = [
 [[package]]
 name = "commonware-stream"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=2cc941653cb936952c00587f8cb037c8021241a5#2cc941653cb936952c00587f8cb037c8021241a5"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=df03d866237f44c6d0f81d05783da493654f0f8c#df03d866237f44c6d0f81d05783da493654f0f8c"
 dependencies = [
  "chacha20poly1305",
  "commonware-codec",
@@ -1237,7 +1455,7 @@ dependencies = [
 [[package]]
 name = "commonware-utils"
 version = "2026.4.0"
-source = "git+https://github.com/commonwarexyz/monorepo?rev=2cc941653cb936952c00587f8cb037c8021241a5#2cc941653cb936952c00587f8cb037c8021241a5"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=df03d866237f44c6d0f81d05783da493654f0f8c#df03d866237f44c6d0f81d05783da493654f0f8c"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -1282,11 +1500,12 @@ checksum = "75984efb6ed102a0d42db99afb6c1948f0380d1d91808d5529916e6c08b49d8d"
 
 [[package]]
 name = "connectrpc"
-version = "0.3.2"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20d510caddfd82db44276604ce400d9fe13fa85fcc738eb457d82089f8e68b74"
+checksum = "3382e121377f6c160bbbe56f5809637ccbabff7edbf56bb8e96cc64e65998045"
 dependencies = [
  "async-compression",
+ "async-trait",
  "axum",
  "base64",
  "buffa",
@@ -1307,14 +1526,15 @@ dependencies = [
  "tokio-util",
  "tower",
  "tracing",
+ "wasm-bindgen-futures",
  "zstd",
 ]
 
 [[package]]
 name = "connectrpc-build"
-version = "0.3.2"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "888e07502105f763ac37e677480f0d6bf907436cbdddf24db8131ebac279c474"
+checksum = "e83c1366d73975a36aa5788beaef5e39747841d07ce9aa69237047aaf76c4fea"
 dependencies = [
  "anyhow",
  "buffa",
@@ -1325,9 +1545,9 @@ dependencies = [
 
 [[package]]
 name = "connectrpc-codegen"
-version = "0.3.2"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75af2f1a3e0e0eeb65091fa116b1860a2552ef0533143b784bf6ae4cc6ea997b"
+checksum = "4185bd4287223a2f5a2aef54c4d668e8e148cdd244ebf73db62a4e61e6c2f350"
 dependencies = [
  "anyhow",
  "buffa",
@@ -1530,6 +1750,15 @@ name = "crossbeam-epoch"
 version = "0.9.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-queue"
+version = "0.3.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f58bbc28f91df819d0aa2a2c00cd19754769c2fad90579b3592b1c9ba7a3115"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -2353,6 +2582,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "educe"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d7bc049e1bd8cdeb31b68bbd586a9464ecf9f3944af3958a7a9d0f8b9799417"
+dependencies = [
+ "enum-ordinalize",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2384,6 +2625,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "enum-ordinalize"
+version = "4.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a1091a7bb1f8f2c4b28f1fe2cef4980ca2d410a3d727d67ecc3178c9b0800f0"
+dependencies = [
+ "enum-ordinalize-derive",
+]
+
+[[package]]
+name = "enum-ordinalize-derive"
+version = "4.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ca9601fb2d62598ee17836250842873a413586e5d7ed88b356e38ddbb0ec631"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -2433,6 +2694,7 @@ dependencies = [
  "clap",
  "commonware-codec",
  "commonware-cryptography",
+ "commonware-glue",
  "commonware-parallel",
  "commonware-runtime",
  "commonware-storage",
@@ -2455,7 +2717,7 @@ dependencies = [
  "tokio",
  "tower-http 0.5.2",
  "tracing",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.23",
 ]
 
 [[package]]
@@ -2465,6 +2727,8 @@ dependencies = [
  "buffa",
  "commonware-codec",
  "commonware-cryptography",
+ "commonware-parallel",
+ "commonware-runtime",
  "commonware-storage",
  "connectrpc",
  "futures",
@@ -2523,11 +2787,16 @@ version = "2026.4.1"
 dependencies = [
  "bytes",
  "clap",
+ "commonware-actor",
  "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
  "commonware-math",
+ "commonware-p2p",
  "commonware-parallel",
+ "commonware-resolver",
+ "commonware-runtime",
+ "commonware-storage",
  "commonware-utils",
  "exoware-sdk",
  "exoware-simulator",
@@ -2538,7 +2807,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.23",
 ]
 
 [[package]]
@@ -2577,7 +2846,7 @@ dependencies = [
  "tokio",
  "tower-http 0.5.2",
  "tracing",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.23",
 ]
 
 [[package]]
@@ -2609,7 +2878,7 @@ dependencies = [
  "tokio",
  "tower-http 0.5.2",
  "tracing",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.23",
 ]
 
 [[package]]
@@ -2943,6 +3212,7 @@ version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
+ "allocator-api2",
  "foldhash 0.1.5",
  "serde",
 ]
@@ -4256,7 +4526,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "syn",
@@ -4960,6 +5230,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
+ "windows-sys 0.52.0",
  "windows-sys 0.59.0",
 ]
 
@@ -5051,7 +5322,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5415,7 +5686,7 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
- "tracing-subscriber",
+ "tracing-subscriber 0.3.23",
  "web-time",
 ]
 
@@ -5426,6 +5697,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
 dependencies = [
  "serde",
+ "tracing-core",
+]
+
+[[package]]
+name = "tracing-subscriber"
+version = "0.2.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e0d2eaa99c3c2e41547cfa109e910a68ea03823cccad4a0525dcbc9b01e8c71"
+dependencies = [
  "tracing-core",
 ]
 

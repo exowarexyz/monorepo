@@ -13,8 +13,10 @@ crate-type = ["cdylib"]
 buffa = { workspace = true }
 commonware-codec = { workspace = true }
 commonware-cryptography = { workspace = true }
+commonware-parallel = { workspace = true }
+commonware-runtime = { workspace = true }
 commonware-storage = { workspace = true }
-connectrpc = { version = "0.3.2", default-features = false }
+connectrpc = { version = "0.6.0", default-features = false }
 futures = { workspace = true }
 http-body = "1"
 js-sys = "0.3"

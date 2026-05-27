@@ -1,15 +1,5 @@
+pub mod proto;
 pub mod prune;
-pub mod proto {
-    pub mod sql {
-        pub mod v1 {
-            #![allow(non_camel_case_types)]
-            #![allow(unused_imports)]
-            #![allow(clippy::derivable_impls)]
-            #![allow(clippy::match_single_binding)]
-            include!("gen/sql.v1.rs");
-        }
-    }
-}
 pub mod server;
 
 mod aggregate;
@@ -34,6 +24,8 @@ pub use writer::{BatchReceipt, BatchWriter, PreparedBatch, TableWriter};
 
 #[cfg(test)]
 mod tests {
+    #![allow(refining_impl_trait)]
+
     use super::aggregate::*;
     use super::builder::*;
     use super::codec::*;
@@ -60,14 +52,13 @@ mod tests {
     use exoware_sdk::{RangeReduceOp, RangeReduceRequest, StoreBatchUpload, StoreClient};
     use std::collections::{BTreeMap, HashSet};
     use std::ops::Bound::{Included, Unbounded};
-    use std::pin::Pin;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use axum::Router;
     use bytes::Bytes;
-    use connectrpc::{Chain, ConnectError, ConnectRpcService, Context};
+    use connectrpc::{Chain, ConnectError, ConnectRpcService, RequestContext as Context};
     use exoware_sdk::connect_compression_registry;
     use exoware_sdk::kv_codec::{eval_expr, expr_needs_value};
     use exoware_sdk::store::common::v1::KvEntry as ProtoKvEntry;
@@ -87,7 +78,7 @@ mod tests {
         to_proto_reduced_value, RangeTraversalDirection, RangeTraversalModeError,
     };
     use exoware_sdk::{RangeReduceGroup, RangeReduceResponse, RangeReduceResult};
-    use futures::{stream, Stream, TryStreamExt};
+    use futures::{stream, TryStreamExt};
     use tokio::sync::{mpsc, oneshot, Notify};
 
     /// Assert EXPLAIN text includes the same `query_stats=...` suffix as [`format_query_stats_explain`].
@@ -284,7 +275,7 @@ mod tests {
                 .into_iter()
                 .map(|(key, value)| ProtoKvEntry {
                     key: key.to_vec(),
-                    value,
+                    value: value.into(),
                     ..Default::default()
                 })
                 .collect(),
@@ -323,14 +314,15 @@ mod tests {
     impl IngestService for MockIngestConnect {
         async fn put(
             &self,
-            ctx: Context,
+            _ctx: Context,
             request: buffa::view::OwnedView<
                 exoware_sdk::store::ingest::v1::PutRequestView<'static>,
             >,
-        ) -> Result<(ProtoPutResponse, Context), ConnectError> {
+        ) -> connectrpc::ServiceResult<ProtoPutResponse> {
             let mut parsed = Vec::<(Key, Bytes)>::new();
+            let wire = request.bytes();
             for kv in request.kvs.iter() {
-                parsed.push((kv.key.to_vec().into(), Bytes::copy_from_slice(kv.value)));
+                parsed.push((wire.slice_ref(kv.key), wire.slice_ref(kv.value)));
             }
             let mut guard = self.state.kv.lock().expect("kv mutex poisoned");
             for (key, value) in parsed.iter() {
@@ -341,13 +333,10 @@ mod tests {
                 .sequence_number
                 .fetch_add(1, AtomicOrdering::SeqCst)
                 + 1;
-            Ok((
-                ProtoPutResponse {
-                    sequence_number: seq,
-                    ..Default::default()
-                },
-                ctx,
-            ))
+            connectrpc::Response::ok(ProtoPutResponse {
+                sequence_number: seq,
+                ..Default::default()
+            })
         }
     }
 
@@ -361,20 +350,17 @@ mod tests {
             &self,
             _ctx: Context,
             request: buffa::view::OwnedView<exoware_sdk::store::query::v1::GetRequestView<'static>>,
-        ) -> Result<(ProtoGetResponse, Context), ConnectError> {
+        ) -> connectrpc::ServiceResult<ProtoGetResponse> {
             ensure_min_sequence_number(&self.state.sequence_number, request.min_sequence_number)?;
-            let key: Key = request.key.to_vec().into();
+            let key: Key = request.bytes().slice_ref(request.key);
             let guard = self.state.kv.lock().expect("kv mutex poisoned");
             let value = guard.get(&key).cloned();
             let token = self.state.sequence_number.load(AtomicOrdering::Relaxed);
-            Ok((
-                ProtoGetResponse {
-                    value: value.map(|v| v.to_vec()),
-                    detail: Some(query_detail(token)).into(),
-                    ..Default::default()
-                },
-                Context::default(),
-            ))
+            connectrpc::Response::ok(ProtoGetResponse {
+                value,
+                detail: Some(query_detail(token)).into(),
+                ..Default::default()
+            })
         }
 
         async fn range(
@@ -383,18 +369,13 @@ mod tests {
             request: buffa::view::OwnedView<
                 exoware_sdk::store::query::v1::RangeRequestView<'static>,
             >,
-        ) -> Result<
-            (
-                Pin<Box<dyn Stream<Item = Result<ProtoRangeFrame, ConnectError>> + Send>>,
-                Context,
-            ),
-            ConnectError,
-        > {
+        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoRangeFrame>> {
             ensure_min_sequence_number(&self.state.sequence_number, request.min_sequence_number)?;
             self.state.range_calls.fetch_add(1, AtomicOrdering::SeqCst);
 
-            let start_key: Key = request.start.to_vec().into();
-            let end_key: Key = request.end.to_vec().into();
+            let wire = request.bytes();
+            let start_key: Key = wire.slice_ref(request.start);
+            let end_key: Key = wire.slice_ref(request.end);
             let limit = request.limit.map(|v| v as usize).unwrap_or(usize::MAX);
             let batch_size = usize::try_from(request.batch_size).unwrap_or(usize::MAX);
             if batch_size == 0 {
@@ -433,7 +414,7 @@ mod tests {
             for (key, value) in iter.take(limit) {
                 results.push(ProtoKvEntry {
                     key: key.to_vec(),
-                    value: value.to_vec(),
+                    value: value.clone(),
                     ..Default::default()
                 });
             }
@@ -453,7 +434,7 @@ mod tests {
             if !emitted_frame {
                 frames.push(Ok(final_range_detail_frame(token)));
             }
-            Ok((Box::pin(stream::iter(frames)), Context::default()))
+            Ok(connectrpc::Response::stream(stream::iter(frames)))
         }
 
         async fn get_many(
@@ -462,25 +443,20 @@ mod tests {
             request: buffa::view::OwnedView<
                 exoware_sdk::store::query::v1::GetManyRequestView<'static>,
             >,
-        ) -> Result<
-            (
-                Pin<Box<dyn Stream<Item = Result<ProtoGetManyFrame, ConnectError>> + Send>>,
-                Context,
-            ),
-            ConnectError,
-        > {
+        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoGetManyFrame>> {
             ensure_min_sequence_number(&self.state.sequence_number, request.min_sequence_number)?;
             let batch_size = usize::try_from(request.batch_size)
                 .unwrap_or(usize::MAX)
                 .max(1);
             let guard = self.state.kv.lock().expect("kv mutex poisoned");
             let mut entries: Vec<ProtoGetManyEntry> = Vec::new();
+            let wire = request.bytes();
             for key_bytes in request.keys.iter() {
-                let key: Key = key_bytes.to_vec().into();
+                let key: Key = wire.slice_ref(key_bytes);
                 let value = guard.get(&key).cloned();
                 entries.push(ProtoGetManyEntry {
                     key: key.to_vec(),
-                    value: value.map(|v| v.to_vec()),
+                    value,
                     ..Default::default()
                 });
             }
@@ -499,7 +475,7 @@ mod tests {
             if !emitted_frame {
                 frames.push(Ok(final_get_many_detail_frame(token)));
             }
-            Ok((Box::pin(stream::iter(frames)), Context::default()))
+            Ok(connectrpc::Response::stream(stream::iter(frames)))
         }
 
         async fn reduce(
@@ -508,7 +484,7 @@ mod tests {
             request: buffa::view::OwnedView<
                 exoware_sdk::store::query::v1::ReduceRequestView<'static>,
             >,
-        ) -> Result<(ProtoReduceResponse, Context), ConnectError> {
+        ) -> connectrpc::ServiceResult<ProtoReduceResponse> {
             ensure_min_sequence_number(&self.state.sequence_number, request.min_sequence_number)?;
             self.state
                 .range_reduce_calls
@@ -653,48 +629,43 @@ mod tests {
             };
             drop(guard);
             let token = state.sequence_number.load(AtomicOrdering::Relaxed);
-            Ok((
-                ProtoReduceResponse {
-                    results: response
-                        .results
-                        .into_iter()
-                        .map(|result| exoware_sdk::store::query::v1::RangeReduceResult {
-                            value: result.value.map(to_proto_reduced_value).into(),
+            connectrpc::Response::ok(ProtoReduceResponse {
+                results: response
+                    .results
+                    .into_iter()
+                    .map(|result| exoware_sdk::store::query::v1::RangeReduceResult {
+                        value: result.value.map(to_proto_reduced_value).into(),
+                        ..Default::default()
+                    })
+                    .collect(),
+                groups: response
+                    .groups
+                    .into_iter()
+                    .map(|group| {
+                        let group_values_present: Vec<bool> =
+                            group.group_values.iter().map(|v| v.is_some()).collect();
+                        exoware_sdk::store::query::v1::RangeReduceGroup {
+                            group_values: group
+                                .group_values
+                                .into_iter()
+                                .map(to_proto_optional_reduced_value)
+                                .collect(),
+                            group_values_present,
+                            results: group
+                                .results
+                                .into_iter()
+                                .map(|result| exoware_sdk::store::query::v1::RangeReduceResult {
+                                    value: result.value.map(to_proto_reduced_value).into(),
+                                    ..Default::default()
+                                })
+                                .collect(),
                             ..Default::default()
-                        })
-                        .collect(),
-                    groups: response
-                        .groups
-                        .into_iter()
-                        .map(|group| {
-                            let group_values_present: Vec<bool> =
-                                group.group_values.iter().map(|v| v.is_some()).collect();
-                            exoware_sdk::store::query::v1::RangeReduceGroup {
-                                group_values: group
-                                    .group_values
-                                    .into_iter()
-                                    .map(to_proto_optional_reduced_value)
-                                    .collect(),
-                                group_values_present,
-                                results: group
-                                    .results
-                                    .into_iter()
-                                    .map(|result| {
-                                        exoware_sdk::store::query::v1::RangeReduceResult {
-                                            value: result.value.map(to_proto_reduced_value).into(),
-                                            ..Default::default()
-                                        }
-                                    })
-                                    .collect(),
-                                ..Default::default()
-                            }
-                        })
-                        .collect(),
-                    detail: Some(query_detail(token)).into(),
-                    ..Default::default()
-                },
-                Context::default(),
-            ))
+                        }
+                    })
+                    .collect(),
+                detail: Some(query_detail(token)).into(),
+                ..Default::default()
+            })
         }
     }
 
@@ -5869,7 +5840,7 @@ mod tests {
             _request: buffa::view::OwnedView<
                 exoware_sdk::store::query::v1::GetRequestView<'static>,
             >,
-        ) -> Result<(ProtoGetResponse, Context), ConnectError> {
+        ) -> connectrpc::ServiceResult<ProtoGetResponse> {
             Err(ConnectError::unimplemented("test harness"))
         }
 
@@ -5879,13 +5850,7 @@ mod tests {
             _request: buffa::view::OwnedView<
                 exoware_sdk::store::query::v1::GetManyRequestView<'static>,
             >,
-        ) -> Result<
-            (
-                Pin<Box<dyn Stream<Item = Result<ProtoGetManyFrame, ConnectError>> + Send>>,
-                Context,
-            ),
-            ConnectError,
-        > {
+        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoGetManyFrame>> {
             Err(ConnectError::unimplemented("test harness"))
         }
 
@@ -5895,13 +5860,7 @@ mod tests {
             _request: buffa::view::OwnedView<
                 exoware_sdk::store::query::v1::RangeRequestView<'static>,
             >,
-        ) -> Result<
-            (
-                Pin<Box<dyn Stream<Item = Result<ProtoRangeFrame, ConnectError>> + Send>>,
-                Context,
-            ),
-            ConnectError,
-        > {
+        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoRangeFrame>> {
             let first_chunk_sent = self.first_chunk_sent.clone();
             let release_second_chunk = self.release_second_chunk.clone();
             let first_frame = self.first_frame.clone();
@@ -5925,7 +5884,7 @@ mod tests {
                     }
                 }
             });
-            Ok((Box::pin(stream), Context::default()))
+            Ok(connectrpc::Response::stream(stream))
         }
 
         async fn reduce(
@@ -5934,7 +5893,7 @@ mod tests {
             _request: buffa::view::OwnedView<
                 exoware_sdk::store::query::v1::ReduceRequestView<'static>,
             >,
-        ) -> Result<(ProtoReduceResponse, Context), ConnectError> {
+        ) -> connectrpc::ServiceResult<ProtoReduceResponse> {
             Err(ConnectError::unimplemented("test harness"))
         }
     }
@@ -5954,7 +5913,7 @@ mod tests {
             _request: buffa::view::OwnedView<
                 exoware_sdk::store::query::v1::GetRequestView<'static>,
             >,
-        ) -> Result<(ProtoGetResponse, Context), ConnectError> {
+        ) -> connectrpc::ServiceResult<ProtoGetResponse> {
             Err(ConnectError::unimplemented("test harness"))
         }
 
@@ -5964,13 +5923,7 @@ mod tests {
             _request: buffa::view::OwnedView<
                 exoware_sdk::store::query::v1::GetManyRequestView<'static>,
             >,
-        ) -> Result<
-            (
-                Pin<Box<dyn Stream<Item = Result<ProtoGetManyFrame, ConnectError>> + Send>>,
-                Context,
-            ),
-            ConnectError,
-        > {
+        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoGetManyFrame>> {
             Err(ConnectError::unimplemented("test harness"))
         }
 
@@ -5980,13 +5933,7 @@ mod tests {
             request: buffa::view::OwnedView<
                 exoware_sdk::store::query::v1::RangeRequestView<'static>,
             >,
-        ) -> Result<
-            (
-                Pin<Box<dyn Stream<Item = Result<ProtoRangeFrame, ConnectError>> + Send>>,
-                Context,
-            ),
-            ConnectError,
-        > {
+        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoRangeFrame>> {
             let limit = request.limit.map(|v| v as usize).unwrap_or(usize::MAX);
             self.observed_limit.store(limit, AtomicOrdering::SeqCst);
             let release_second_chunk = self.release_second_chunk.clone();
@@ -6011,7 +5958,7 @@ mod tests {
                     }
                 }
             });
-            Ok((Box::pin(stream), Context::default()))
+            Ok(connectrpc::Response::stream(stream))
         }
 
         async fn reduce(
@@ -6020,7 +5967,7 @@ mod tests {
             _request: buffa::view::OwnedView<
                 exoware_sdk::store::query::v1::ReduceRequestView<'static>,
             >,
-        ) -> Result<(ProtoReduceResponse, Context), ConnectError> {
+        ) -> connectrpc::ServiceResult<ProtoReduceResponse> {
             Err(ConnectError::unimplemented("test harness"))
         }
     }
@@ -6038,7 +5985,7 @@ mod tests {
             _request: buffa::view::OwnedView<
                 exoware_sdk::store::query::v1::GetRequestView<'static>,
             >,
-        ) -> Result<(ProtoGetResponse, Context), ConnectError> {
+        ) -> connectrpc::ServiceResult<ProtoGetResponse> {
             Err(ConnectError::unimplemented("test harness"))
         }
 
@@ -6048,13 +5995,7 @@ mod tests {
             _request: buffa::view::OwnedView<
                 exoware_sdk::store::query::v1::GetManyRequestView<'static>,
             >,
-        ) -> Result<
-            (
-                Pin<Box<dyn Stream<Item = Result<ProtoGetManyFrame, ConnectError>> + Send>>,
-                Context,
-            ),
-            ConnectError,
-        > {
+        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoGetManyFrame>> {
             Err(ConnectError::unimplemented("test harness"))
         }
 
@@ -6064,13 +6005,7 @@ mod tests {
             request: buffa::view::OwnedView<
                 exoware_sdk::store::query::v1::RangeRequestView<'static>,
             >,
-        ) -> Result<
-            (
-                Pin<Box<dyn Stream<Item = Result<ProtoRangeFrame, ConnectError>> + Send>>,
-                Context,
-            ),
-            ConnectError,
-        > {
+        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoRangeFrame>> {
             let limit = request
                 .limit
                 .map(|v| {
@@ -6083,10 +6018,9 @@ mod tests {
                 .unwrap_or(usize::MAX);
             self.observed_limit.store(limit, AtomicOrdering::SeqCst);
             let entries_frame = self.entries_frame.clone();
-            Ok((
-                Box::pin(stream::iter(vec![Ok(entries_frame)])),
-                Context::default(),
-            ))
+            Ok(connectrpc::Response::stream(stream::iter(vec![Ok(
+                entries_frame,
+            )])))
         }
 
         async fn reduce(
@@ -6095,7 +6029,7 @@ mod tests {
             _request: buffa::view::OwnedView<
                 exoware_sdk::store::query::v1::ReduceRequestView<'static>,
             >,
-        ) -> Result<(ProtoReduceResponse, Context), ConnectError> {
+        ) -> connectrpc::ServiceResult<ProtoReduceResponse> {
             Err(ConnectError::unimplemented("test harness"))
         }
     }

@@ -568,7 +568,7 @@ pub(crate) fn reduced_value_to_scalar(
             }
         },
         (_, Some(KvReducedValue::FixedSizeBinary(v))) => cast_scalar_value(
-            ScalarValue::FixedSizeBinary(v.len() as i32, Some(v)),
+            ScalarValue::FixedSizeBinary(v.len() as i32, Some(v.to_vec())),
             data_type,
         )?,
         (DataType::Null, None) => ScalarValue::Null,
@@ -1452,7 +1452,7 @@ pub(crate) fn compile_kv_predicate_constraint(
         PredicateConstraint::StringEq(value) => KvPredicateConstraint::StringEq(value.clone()),
         PredicateConstraint::BoolEq(value) => KvPredicateConstraint::BoolEq(*value),
         PredicateConstraint::FixedBinaryEq(value) => {
-            KvPredicateConstraint::FixedSizeBinaryEq(value.clone())
+            KvPredicateConstraint::FixedSizeBinaryEq(value.clone().into())
         }
         PredicateConstraint::IntRange { min, max } => KvPredicateConstraint::IntRange {
             min: *min,
@@ -1477,9 +1477,9 @@ pub(crate) fn compile_kv_predicate_constraint(
         PredicateConstraint::StringIn(values) => KvPredicateConstraint::StringIn(values.clone()),
         PredicateConstraint::IntIn(values) => KvPredicateConstraint::IntIn(values.clone()),
         PredicateConstraint::UInt64In(values) => KvPredicateConstraint::UInt64In(values.clone()),
-        PredicateConstraint::FixedBinaryIn(values) => {
-            KvPredicateConstraint::FixedSizeBinaryIn(values.clone())
-        }
+        PredicateConstraint::FixedBinaryIn(values) => KvPredicateConstraint::FixedSizeBinaryIn(
+            values.iter().cloned().map(Into::into).collect(),
+        ),
         PredicateConstraint::Decimal256Range { min, max } => {
             KvPredicateConstraint::Decimal256Range {
                 min: min.map(|v| v.to_le_bytes()),

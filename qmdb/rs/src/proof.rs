@@ -1,5 +1,5 @@
-use bytes::BufMut;
-use commonware_codec::{Codec, Encode, EncodeSize, Write};
+use bytes::Bytes;
+use commonware_codec::{Codec, Encode};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::{
     merkle::{
@@ -16,26 +16,12 @@ use commonware_storage::{
             unordered::db::KeyValueProof as UnorderedKeyValueProof,
         },
         operation::Key as QmdbKey,
-        verify::{verify_multi_proof, verify_proof, verify_proof_and_extract_digests},
+        verify::verify_multi_proof,
     },
 };
 
 use crate::QmdbError;
 use crate::QmdbVariant;
-
-struct EncodedOperation<'a>(&'a [u8]);
-
-impl Write for EncodedOperation<'_> {
-    fn write(&self, buf: &mut impl BufMut) {
-        buf.put_slice(self.0);
-    }
-}
-
-impl EncodeSize for EncodedOperation<'_> {
-    fn encode_size(&self) -> usize {
-        self.0.len()
-    }
-}
 
 /// Historical operation range plus the raw Merkle proof material used to verify
 /// it. This is suitable for checkpointing and writer-frontier recovery.
@@ -46,6 +32,7 @@ pub struct OperationRangeCheckpoint<D: Digest, F: Graftable> {
     pub root: D,
     pub ops_root_witness: Option<OpsRootWitness<F, D>>,
     pub start_location: Location<F>,
+    pub pinned_nodes: Vec<D>,
     pub proof: Proof<F, D>,
     pub encoded_operations: Vec<Vec<u8>>,
 }
@@ -56,13 +43,13 @@ impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
         let operations = self
             .encoded_operations
             .iter()
-            .map(|bytes| EncodedOperation(bytes.as_slice()))
+            .map(Vec::as_slice)
             .collect::<Vec<_>>();
-        verify_proof(
+        self.proof.verify_proof_and_pinned_nodes(
             &hasher,
-            &self.proof,
-            self.start_location,
             &operations,
+            self.start_location,
+            &self.pinned_nodes,
             &self.root,
         )
     }
@@ -85,19 +72,17 @@ impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
         }
 
         let hasher = commonware_storage::qmdb::hasher::<H>();
-        let operations = self
-            .encoded_operations
-            .iter()
-            .map(|bytes| EncodedOperation(bytes.as_slice()))
-            .collect::<Vec<_>>();
-        let digests = verify_proof_and_extract_digests(
-            &hasher,
-            &self.proof,
-            self.start_location,
-            &operations,
-            &self.root,
-        )
-        .map_err(|e| QmdbError::CorruptData(format!("reconstruct checkpoint peaks failed: {e}")))?;
+        let digests = self
+            .proof
+            .verify_range_inclusion_and_extract_digests(
+                &hasher,
+                &self.encoded_operations,
+                self.start_location,
+                &self.root,
+            )
+            .map_err(|e| {
+                QmdbError::CorruptData(format!("reconstruct checkpoint peaks failed: {e}"))
+            })?;
         let digest_map: std::collections::BTreeMap<Position<F>, D> = digests.into_iter().collect();
         peak_entries
             .into_iter()
@@ -161,12 +146,13 @@ pub struct RawBatchMultiProof<D: Digest, F: Graftable> {
 impl<D: Digest, F: Graftable> RawBatchMultiProof<D, F> {
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
         let hasher = commonware_storage::qmdb::hasher::<H>();
-        let operations: Vec<_> = self
+        let elements: Vec<_> = self
             .operations
             .iter()
-            .map(|(loc, bytes)| (*loc, EncodedOperation(bytes.as_slice())))
+            .map(|(loc, bytes)| (bytes.as_slice(), *loc))
             .collect();
-        verify_multi_proof(&hasher, &self.proof, &operations, &self.root)
+        self.proof
+            .verify_multi_inclusion(&hasher, &elements, &self.root)
     }
 }
 
@@ -263,11 +249,28 @@ where
     )
     .await
     .map_err(|e| crate::QmdbError::CommonwareMerkle(e.to_string()))?;
+    let pinned_nodes = if start_location == Location::new(0) {
+        Vec::new()
+    } else {
+        futures::future::try_join_all(F::nodes_to_pin(start_location).map(|position| async move {
+            storage
+                .get_node(position)
+                .await
+                .map_err(|e| crate::QmdbError::CommonwareMerkle(e.to_string()))?
+                .ok_or_else(|| {
+                    crate::QmdbError::CommonwareMerkle(format!(
+                        "missing pinned node at position {position}"
+                    ))
+                })
+        }))
+        .await?
+    };
     let checkpoint = OperationRangeCheckpoint {
         watermark,
         root,
         ops_root_witness: None,
         start_location,
+        pinned_nodes,
         proof,
         encoded_operations,
     };
@@ -296,6 +299,58 @@ pub struct RawKeyValueProof<
     pub operation: ordered::Operation<F, K, E>,
 }
 
+type OrderedVerifierDb<F, K, E, H, const N: usize> =
+    commonware_storage::qmdb::current::ordered::db::Db<
+        F,
+        commonware_runtime::deterministic::Context,
+        commonware_storage::journal::contiguous::variable::Journal<
+            commonware_runtime::deterministic::Context,
+            ordered::Operation<F, K, E>,
+        >,
+        K,
+        E,
+        commonware_storage::index::ordered::Index<
+            commonware_storage::translator::TwoCap,
+            Location<F>,
+        >,
+        H,
+        N,
+        commonware_parallel::Sequential,
+    >;
+
+pub(crate) fn verify_ordered_key_value_proof<F, H, K, E, const N: usize>(
+    key: K,
+    value: E::Value,
+    proof: &KeyValueProof<F, K, H::Digest, N>,
+    root: &H::Digest,
+) -> bool
+where
+    F: Graftable,
+    H: Hasher,
+    K: QmdbKey + Codec,
+    E: ValueEncoding,
+    ordered::Operation<F, K, E>: Codec,
+{
+    let hasher = commonware_storage::qmdb::hasher::<H>();
+    OrderedVerifierDb::<F, K, E, H, N>::verify_key_value_proof(&hasher, key, value, proof, root)
+}
+
+pub(crate) fn verify_ordered_exclusion_proof<F, H, K, E, const N: usize>(
+    key: &K,
+    proof: &ExclusionProof<F, K, E, H::Digest, N>,
+    root: &H::Digest,
+) -> bool
+where
+    F: Graftable,
+    H: Hasher,
+    K: QmdbKey + Codec,
+    E: ValueEncoding,
+    ordered::Operation<F, K, E>: Codec,
+{
+    let hasher = commonware_storage::qmdb::hasher::<H>();
+    OrderedVerifierDb::<F, K, E, H, N>::verify_exclusion_proof(&hasher, key, proof, root)
+}
+
 impl<
         D: Digest,
         K: QmdbKey + Codec,
@@ -314,10 +369,12 @@ where
         if self.proof.next_key != update.next_key {
             return false;
         }
-        let hasher = commonware_storage::qmdb::hasher::<H>();
-        self.proof
-            .proof
-            .verify(&hasher, self.operation.clone(), &self.root)
+        verify_ordered_key_value_proof::<F, H, K, E, N>(
+            update.key.clone(),
+            update.value.clone(),
+            &self.proof,
+            &self.root,
+        )
     }
 }
 
@@ -334,7 +391,7 @@ pub struct RawKeyExclusionProof<
 > {
     pub watermark: Location<F>,
     pub root: D,
-    pub requested_key: Vec<u8>,
+    pub requested_key: K,
     pub proof: ExclusionProof<F, K, E, D, N>,
 }
 
@@ -350,32 +407,11 @@ where
     ordered::Operation<F, K, E>: Codec + Clone,
 {
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
-        let (op_proof, operation) = match &self.proof {
-            ExclusionProof::KeyValue(op_proof, update) => {
-                let span_start = update.key.as_ref();
-                let span_end = update.next_key.as_ref();
-                let key = self.requested_key.as_slice();
-                if span_start == key {
-                    return false;
-                }
-                let in_span = if span_start >= span_end {
-                    key >= span_start || key < span_end
-                } else {
-                    key >= span_start && key < span_end
-                };
-                if !in_span {
-                    return false;
-                }
-                (op_proof, ordered::Operation::Update(update.clone()))
-            }
-            ExclusionProof::Commit(op_proof, value) => (
-                op_proof,
-                ordered::Operation::CommitFloor(value.clone(), op_proof.loc),
-            ),
-        };
-
-        let hasher = commonware_storage::qmdb::hasher::<H>();
-        op_proof.verify(&hasher, operation, &self.root)
+        verify_ordered_exclusion_proof::<F, H, K, E, N>(
+            &self.requested_key,
+            &self.proof,
+            &self.root,
+        )
     }
 }
 
@@ -403,7 +439,7 @@ pub struct RawKeyRangeEntry<
     F: Graftable,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > {
-    pub key: Vec<u8>,
+    pub key: Bytes,
     pub proof: RawKeyValueProof<D, K, V, N, F, E>,
 }
 
@@ -422,7 +458,7 @@ pub struct RawKeyRangeProof<
     pub start_proof: Option<RawKeyExclusionProof<D, K, V, N, F, E>>,
     pub end_proof: Option<RawKeyExclusionProof<D, K, V, N, F, E>>,
     pub has_more: bool,
-    pub next_start_key: Vec<u8>,
+    pub next_start_key: Bytes,
 }
 
 /// Current unordered proof for one active key. Missing-key proofs are
@@ -535,7 +571,7 @@ pub enum VerifiedKeyLookup<
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > {
     Hit(VerifiedKeyValue<D, K, V, F, E>),
-    Miss { key: Vec<u8> },
+    Miss { key: Bytes },
 }
 
 /// A verified ordered current key range.
@@ -550,7 +586,7 @@ pub struct VerifiedKeyRange<
 > {
     pub entries: Vec<VerifiedKeyValue<D, K, V, F, E>>,
     pub has_more: bool,
-    pub next_start_key: Vec<u8>,
+    pub next_start_key: Bytes,
 }
 
 /// Contiguous range of operations plus bitmap chunks verified against the

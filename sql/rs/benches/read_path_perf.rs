@@ -1,3 +1,5 @@
+#![allow(refining_impl_trait)]
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::BTreeMap;
 use std::ops::Bound::{Included, Unbounded};
@@ -7,7 +9,7 @@ use std::time::Instant;
 
 use axum::Router;
 use bytes::Bytes;
-use connectrpc::{Chain, ConnectRpcService, Context};
+use connectrpc::{Chain, ConnectRpcService, RequestContext as Context};
 use criterion::{criterion_group, criterion_main, Criterion};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::prelude::SessionContext;
@@ -26,7 +28,6 @@ use exoware_sdk::keys::Key;
 use exoware_sdk::StoreClient;
 use exoware_sql::{CellValue, IndexSpec, KvSchema, TableColumnConfig};
 use futures::stream;
-use std::pin::Pin;
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
 
@@ -93,12 +94,13 @@ struct BenchIngest {
 impl IngestService for BenchIngest {
     async fn put(
         &self,
-        ctx: Context,
+        _ctx: Context,
         request: buffa::view::OwnedView<exoware_proto::store::ingest::v1::PutRequestView<'static>>,
-    ) -> Result<(ProtoPutResponse, Context), connectrpc::ConnectError> {
+    ) -> connectrpc::ServiceResult<ProtoPutResponse> {
         let mut parsed = Vec::<(Key, Bytes)>::new();
+        let wire = request.bytes();
         for kv in request.kvs.iter() {
-            parsed.push((kv.key.to_vec().into(), Bytes::copy_from_slice(kv.value)));
+            parsed.push((wire.slice_ref(kv.key), wire.slice_ref(kv.value)));
         }
         let mut guard = self.state.kv.lock().expect("kv mutex poisoned");
         for (key, value) in parsed.iter() {
@@ -109,13 +111,10 @@ impl IngestService for BenchIngest {
             .sequence_number
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
-        Ok((
-            ProtoPutResponse {
-                sequence_number: seq,
-                ..Default::default()
-            },
-            ctx,
-        ))
+        connectrpc::Response::ok(ProtoPutResponse {
+            sequence_number: seq,
+            ..Default::default()
+        })
     }
 }
 
@@ -129,7 +128,7 @@ impl QueryService for BenchQuery {
         &self,
         _ctx: Context,
         _request: buffa::view::OwnedView<exoware_proto::store::query::v1::GetRequestView<'static>>,
-    ) -> Result<(ProtoGetResponse, Context), connectrpc::ConnectError> {
+    ) -> connectrpc::ServiceResult<ProtoGetResponse> {
         Err(connectrpc::ConnectError::unimplemented("bench"))
     }
 
@@ -139,21 +138,8 @@ impl QueryService for BenchQuery {
         _request: buffa::view::OwnedView<
             exoware_proto::store::query::v1::GetManyRequestView<'static>,
         >,
-    ) -> Result<
-        (
-            Pin<
-                Box<
-                    dyn futures::Stream<
-                            Item = Result<
-                                exoware_proto::store::query::v1::GetManyFrame,
-                                connectrpc::ConnectError,
-                            >,
-                        > + Send,
-                >,
-            >,
-            Context,
-        ),
-        connectrpc::ConnectError,
+    ) -> connectrpc::ServiceResult<
+        connectrpc::ServiceStream<exoware_proto::store::query::v1::GetManyFrame>,
     > {
         Err(connectrpc::ConnectError::unimplemented("bench"))
     }
@@ -162,20 +148,10 @@ impl QueryService for BenchQuery {
         &self,
         _ctx: Context,
         request: buffa::view::OwnedView<exoware_proto::store::query::v1::RangeRequestView<'static>>,
-    ) -> Result<
-        (
-            Pin<
-                Box<
-                    dyn futures::Stream<Item = Result<ProtoRangeFrame, connectrpc::ConnectError>>
-                        + Send,
-                >,
-            >,
-            Context,
-        ),
-        connectrpc::ConnectError,
-    > {
-        let start_key = Key::from(request.start.to_vec());
-        let end_key = Key::from(request.end.to_vec());
+    ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoRangeFrame>> {
+        let wire = request.bytes();
+        let start_key = wire.slice_ref(request.start);
+        let end_key = wire.slice_ref(request.end);
         let limit = request.limit.map(|v| v as usize).unwrap_or(usize::MAX);
         let batch_size = usize::try_from(request.batch_size).unwrap_or(usize::MAX);
         let batch = batch_size.max(1);
@@ -193,7 +169,7 @@ impl QueryService for BenchQuery {
         for (key, value) in guard.range::<Key, _>(range).take(limit) {
             results.push(ProtoKvEntry {
                 key: key.to_vec(),
-                value: value.to_vec(),
+                value: value.clone(),
                 ..Default::default()
             });
         }
@@ -223,7 +199,7 @@ impl QueryService for BenchQuery {
                 ..Default::default()
             }));
         }
-        Ok((Box::pin(stream::iter(frames)), Context::default()))
+        Ok(connectrpc::Response::stream(stream::iter(frames)))
     }
 
     async fn reduce(
@@ -232,7 +208,7 @@ impl QueryService for BenchQuery {
         _request: buffa::view::OwnedView<
             exoware_proto::store::query::v1::ReduceRequestView<'static>,
         >,
-    ) -> Result<(ProtoReduceResponse, Context), connectrpc::ConnectError> {
+    ) -> connectrpc::ServiceResult<ProtoReduceResponse> {
         Err(connectrpc::ConnectError::unimplemented("bench"))
     }
 }

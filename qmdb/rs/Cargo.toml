@@ -37,12 +37,13 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [build-dependencies]
-connectrpc-build = "0.3.1"
+connectrpc-build = "0.6.0"
 
 [dev-dependencies]
 exoware-qmdb = { path = ".", features = ["test-utils"] }
 axum = { workspace = true }
 bytes = { workspace = true }
+commonware-glue = { workspace = true }
 commonware-runtime = { workspace = true }
 exoware-simulator = { path = "../../examples/simulator" }
 exoware-server = { workspace = true }

@@ -1,5 +1,5 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use commonware_codec::{EncodeSize, Error, Read, Write};
+use commonware_codec::{Decode, EncodeSize, Error, Read, Write};
 use commonware_consensus::{simplex::types, Block};
 use commonware_cryptography::{certificate, Digest};
 
@@ -9,12 +9,10 @@ fn write_block_data<B>(header: &B, body: &[u8], buf: &mut impl BufMut)
 where
     B: Write + EncodeSize,
 {
-    let mut header_bytes = BytesMut::with_capacity(header.encode_size());
-    header.write(&mut header_bytes);
     let header_len =
-        u32::try_from(header_bytes.len()).expect("header block encoding exceeds u32 length");
+        u32::try_from(header.encode_size()).expect("header block encoding exceeds u32 length");
     buf.put_u32(header_len);
-    buf.put_slice(&header_bytes);
+    header.write(buf);
     buf.put_slice(body);
 }
 
@@ -83,14 +81,7 @@ where
                 "header length exceeds remaining bytes",
             ));
         }
-        let mut header_bytes = buf.copy_to_bytes(header_len);
-        let header = B::read_cfg(&mut header_bytes, cfg)?;
-        if header_bytes.has_remaining() {
-            return Err(Error::Invalid(
-                "exoware_simplex::BlockData",
-                "header bytes contain trailing data",
-            ));
-        }
+        let header = B::decode_cfg(buf.copy_to_bytes(header_len), cfg)?;
         let body = buf.copy_to_bytes(buf.remaining());
         Ok(Self { header, body })
     }
@@ -170,14 +161,7 @@ where
     type Cfg = (<S::Certificate as Read>::Cfg, <B as Read>::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
-        let proof = types::Notarization::<S, D>::read_cfg(buf, &cfg.0)?;
-        let header = B::read_cfg(buf, &cfg.1)?;
-        if buf.has_remaining() {
-            return Err(Error::Invalid(
-                "exoware_simplex::Notarized",
-                "header bytes contain trailing data",
-            ));
-        }
+        let (proof, header) = <(types::Notarization<S, D>, B) as Read>::read_cfg(buf, cfg)?;
         Self::new(proof, header)
     }
 }
@@ -258,14 +242,7 @@ where
     type Cfg = (<S::Certificate as Read>::Cfg, <B as Read>::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
-        let proof = types::Finalization::<S, D>::read_cfg(buf, &cfg.0)?;
-        let header = B::read_cfg(buf, &cfg.1)?;
-        if buf.has_remaining() {
-            return Err(Error::Invalid(
-                "exoware_simplex::Finalized",
-                "header bytes contain trailing data",
-            ));
-        }
+        let (proof, header) = <(types::Finalization<S, D>, B) as Read>::read_cfg(buf, cfg)?;
         Self::new(proof, header)
     }
 }

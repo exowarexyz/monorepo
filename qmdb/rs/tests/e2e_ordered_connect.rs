@@ -1,5 +1,7 @@
 //! Ordered QMDB ConnectRPC e2e for current key lookup and range proof endpoints.
 
+#![allow(refining_impl_trait)]
+
 mod common;
 
 use std::num::NonZeroU64;
@@ -7,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{routing::get, Router};
+use commonware_codec::Encode;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
@@ -18,7 +21,7 @@ use commonware_storage::qmdb::{
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use connectrpc::client::ClientConfig;
-use connectrpc::{Chain, ConnectError, ConnectRpcService, Context};
+use connectrpc::{Chain, ConnectRpcService, RequestContext as Context};
 use exoware_qmdb::proto::qmdb::v1::{
     current_key_lookup_result, GetManyRequest as ProtoGetManyRequest,
     GetManyResponse as ProtoGetManyResponse, GetRangeRequest as ProtoGetRangeRequest,
@@ -49,6 +52,10 @@ type LocalDb = LocalQmdbDb<
     N,
     commonware_parallel::Sequential,
 >;
+
+fn encoded_key(key: &[u8]) -> Vec<u8> {
+    key.to_vec().encode().to_vec()
+}
 
 async fn health() -> &'static str {
     "ok"
@@ -293,38 +300,37 @@ struct StaticQmdbService {
 impl KeyLookupService for StaticQmdbService {
     fn get(
         &self,
-        ctx: Context,
+        _ctx: Context,
         _request: buffa::view::OwnedView<exoware_qmdb::proto::qmdb::v1::GetRequestView<'static>>,
-    ) -> impl std::future::Future<Output = Result<(ProtoGetResponse, Context), ConnectError>> + Send
-    {
+    ) -> impl std::future::Future<Output = connectrpc::ServiceResult<ProtoGetResponse>> + Send {
         let response = self.get_response.clone();
-        async move { Ok((response, ctx)) }
+        async move { connectrpc::Response::ok(response) }
     }
 
     fn get_many(
         &self,
-        ctx: Context,
+        _ctx: Context,
         _request: buffa::view::OwnedView<
             exoware_qmdb::proto::qmdb::v1::GetManyRequestView<'static>,
         >,
-    ) -> impl std::future::Future<Output = Result<(ProtoGetManyResponse, Context), ConnectError>> + Send
+    ) -> impl std::future::Future<Output = connectrpc::ServiceResult<ProtoGetManyResponse>> + Send
     {
         let response = self.get_many_response.clone();
-        async move { Ok((response, ctx)) }
+        async move { connectrpc::Response::ok(response) }
     }
 }
 
 impl OrderedKeyRangeService for StaticQmdbService {
     fn get_range(
         &self,
-        ctx: Context,
+        _ctx: Context,
         _request: buffa::view::OwnedView<
             exoware_qmdb::proto::qmdb::v1::GetRangeRequestView<'static>,
         >,
-    ) -> impl std::future::Future<Output = Result<(ProtoGetRangeResponse, Context), ConnectError>> + Send
+    ) -> impl std::future::Future<Output = connectrpc::ServiceResult<ProtoGetRangeResponse>> + Send
     {
         let response = self.get_range_response.clone();
-        async move { Ok((response, ctx)) }
+        async move { connectrpc::Response::ok(response) }
     }
 }
 
@@ -352,7 +358,9 @@ async fn spawn_static_server(service: StaticQmdbService) -> (tokio::task::JoinHa
 
 fn tamper_get_response(mut response: ProtoGetResponse) -> ProtoGetResponse {
     let mut proof = response.proof.as_option().cloned().expect("get proof");
-    proof.proof[0] ^= 0x01;
+    let mut bytes = proof.proof.to_vec();
+    bytes[0] ^= 0x01;
+    proof.proof = bytes.into();
     response.proof = Some(proof).into();
     response
 }
@@ -360,8 +368,16 @@ fn tamper_get_response(mut response: ProtoGetResponse) -> ProtoGetResponse {
 fn tamper_get_many_response(mut response: ProtoGetManyResponse) -> ProtoGetManyResponse {
     let result = response.results.first_mut().expect("get_many result");
     match result.result.as_mut().expect("get_many hit/miss") {
-        current_key_lookup_result::Result::Hit(proof) => proof.proof[0] ^= 0x01,
-        current_key_lookup_result::Result::Miss(proof) => proof.proof[0] ^= 0x01,
+        current_key_lookup_result::Result::Hit(proof) => {
+            let mut bytes = proof.proof.to_vec();
+            bytes[0] ^= 0x01;
+            proof.proof = bytes.into();
+        }
+        current_key_lookup_result::Result::Miss(proof) => {
+            let mut bytes = proof.proof.to_vec();
+            bytes[0] ^= 0x01;
+            proof.proof = bytes.into();
+        }
     }
     response
 }
@@ -382,7 +398,7 @@ async fn ordered_connect_get_returns_current_key_value_proof() {
     let proof = client
         .get(
             ProtoGetRequest {
-                key: b"alpha".to_vec(),
+                key: encoded_key(b"alpha"),
                 tip: local.latest_location.as_u64(),
                 ..Default::default()
             },
@@ -441,7 +457,7 @@ async fn ordered_connect_get_many_returns_current_key_lookup_proofs() {
     let proof = client
         .get_many(
             ProtoGetManyRequest {
-                keys: vec![b"alpha".to_vec(), b"beta".to_vec()],
+                keys: vec![encoded_key(b"alpha"), encoded_key(b"beta")],
                 tip: local.latest_location.as_u64(),
                 ..Default::default()
             },
@@ -487,7 +503,7 @@ async fn ordered_connect_get_many_returns_miss_proofs_and_rejects_duplicates() {
     let proof = client
         .get_many(
             ProtoGetManyRequest {
-                keys: vec![b"alpha".to_vec(), b"aardvark".to_vec()],
+                keys: vec![encoded_key(b"alpha"), encoded_key(b"aardvark")],
                 tip: local.latest_location.as_u64(),
                 ..Default::default()
             },
@@ -497,15 +513,16 @@ async fn ordered_connect_get_many_returns_miss_proofs_and_rejects_duplicates() {
         .expect("get_many");
     assert_eq!(proof.len(), 2);
     assert!(matches!(proof[0], VerifiedKeyLookup::Hit(_)));
+    let aardvark = encoded_key(b"aardvark");
     assert!(matches!(
         &proof[1],
-        VerifiedKeyLookup::Miss { key } if key == b"aardvark"
+        VerifiedKeyLookup::Miss { key } if key == &aardvark
     ));
 
     let err = client
         .get_many(
             ProtoGetManyRequest {
-                keys: vec![b"alpha".to_vec(), b"alpha".to_vec()],
+                keys: vec![encoded_key(b"alpha"), encoded_key(b"alpha")],
                 tip: local.latest_location.as_u64(),
                 ..Default::default()
             },
@@ -532,8 +549,8 @@ async fn ordered_connect_get_range_verifies_complete_empty_and_partial_pages() {
     let complete = client
         .get_range(
             ProtoGetRangeRequest {
-                start_key: b"a".to_vec(),
-                end_key: Some(b"c".to_vec()),
+                start_key: encoded_key(b"a"),
+                end_key: Some(encoded_key(b"c")),
                 limit: 10,
                 tip: local.latest_location.as_u64(),
                 ..Default::default()
@@ -556,8 +573,8 @@ async fn ordered_connect_get_range_verifies_complete_empty_and_partial_pages() {
     let partial = client
         .get_range(
             ProtoGetRangeRequest {
-                start_key: b"a".to_vec(),
-                end_key: Some(b"z".to_vec()),
+                start_key: encoded_key(b"a"),
+                end_key: Some(encoded_key(b"z")),
                 limit: 1,
                 tip: local.latest_location.as_u64(),
                 ..Default::default()
@@ -568,13 +585,13 @@ async fn ordered_connect_get_range_verifies_complete_empty_and_partial_pages() {
         .expect("partial get_range");
     assert!(partial.has_more);
     assert_eq!(partial.entries.len(), 1);
-    assert_eq!(partial.next_start_key, b"beta".to_vec());
+    assert_eq!(partial.next_start_key, encoded_key(b"beta"));
 
     let empty = client
         .get_range(
             ProtoGetRangeRequest {
-                start_key: b"aardvark".to_vec(),
-                end_key: Some(b"alpha".to_vec()),
+                start_key: encoded_key(b"aardvark"),
+                end_key: Some(encoded_key(b"alpha")),
                 limit: 10,
                 tip: local.latest_location.as_u64(),
                 ..Default::default()
@@ -604,7 +621,7 @@ async fn ordered_connect_client_rejects_get_range_boundary_omission() {
 
     let raw_get_response = rpc
         .get(ProtoGetRequest {
-            key: b"alpha".to_vec(),
+            key: encoded_key(b"alpha"),
             tip: local.latest_location.as_u64(),
             ..Default::default()
         })
@@ -614,7 +631,7 @@ async fn ordered_connect_client_rejects_get_range_boundary_omission() {
         .to_owned_message();
     let raw_get_many_response = rpc
         .get_many(ProtoGetManyRequest {
-            keys: vec![b"alpha".to_vec()],
+            keys: vec![encoded_key(b"alpha")],
             tip: local.latest_location.as_u64(),
             ..Default::default()
         })
@@ -624,8 +641,8 @@ async fn ordered_connect_client_rejects_get_range_boundary_omission() {
         .to_owned_message();
     let mut raw_get_range_response = range_rpc
         .get_range(ProtoGetRangeRequest {
-            start_key: b"a".to_vec(),
-            end_key: Some(b"c".to_vec()),
+            start_key: encoded_key(b"a"),
+            end_key: Some(encoded_key(b"c")),
             limit: 10,
             tip: local.latest_location.as_u64(),
             ..Default::default()
@@ -647,8 +664,8 @@ async fn ordered_connect_client_rejects_get_range_boundary_omission() {
     let err = client
         .get_range(
             ProtoGetRangeRequest {
-                start_key: b"a".to_vec(),
-                end_key: Some(b"c".to_vec()),
+                start_key: encoded_key(b"a"),
+                end_key: Some(encoded_key(b"c")),
                 limit: 10,
                 tip: local.latest_location.as_u64(),
                 ..Default::default()
@@ -677,7 +694,7 @@ async fn ordered_connect_client_rejects_empty_unbounded_get_range_before_next_ke
 
     let raw_get_response = rpc
         .get(ProtoGetRequest {
-            key: b"alpha".to_vec(),
+            key: encoded_key(b"alpha"),
             tip: local.latest_location.as_u64(),
             ..Default::default()
         })
@@ -687,7 +704,7 @@ async fn ordered_connect_client_rejects_empty_unbounded_get_range_before_next_ke
         .to_owned_message();
     let raw_get_many_response = rpc
         .get_many(ProtoGetManyRequest {
-            keys: vec![b"alpha".to_vec()],
+            keys: vec![encoded_key(b"alpha")],
             tip: local.latest_location.as_u64(),
             ..Default::default()
         })
@@ -697,8 +714,8 @@ async fn ordered_connect_client_rejects_empty_unbounded_get_range_before_next_ke
         .to_owned_message();
     let raw_get_range_response = range_rpc
         .get_range(ProtoGetRangeRequest {
-            start_key: b"aardvark".to_vec(),
-            end_key: Some(b"alpha".to_vec()),
+            start_key: encoded_key(b"aardvark"),
+            end_key: Some(encoded_key(b"alpha")),
             limit: 10,
             tip: local.latest_location.as_u64(),
             ..Default::default()
@@ -720,7 +737,7 @@ async fn ordered_connect_client_rejects_empty_unbounded_get_range_before_next_ke
     let err = client
         .get_range(
             ProtoGetRangeRequest {
-                start_key: b"aardvark".to_vec(),
+                start_key: encoded_key(b"aardvark"),
                 limit: 10,
                 tip: local.latest_location.as_u64(),
                 ..Default::default()
@@ -753,7 +770,7 @@ async fn ordered_connect_client_rejects_invalid_get_proof() {
 
     let raw_get_response = rpc
         .get(ProtoGetRequest {
-            key: b"alpha".to_vec(),
+            key: encoded_key(b"alpha"),
             tip: local.latest_location.as_u64(),
             ..Default::default()
         })
@@ -763,7 +780,7 @@ async fn ordered_connect_client_rejects_invalid_get_proof() {
         .to_owned_message();
     let raw_get_many_response = rpc
         .get_many(ProtoGetManyRequest {
-            keys: vec![b"alpha".to_vec(), b"beta".to_vec()],
+            keys: vec![encoded_key(b"alpha"), encoded_key(b"beta")],
             tip: local.latest_location.as_u64(),
             ..Default::default()
         })
@@ -783,7 +800,7 @@ async fn ordered_connect_client_rejects_invalid_get_proof() {
     let err = client
         .get(
             ProtoGetRequest {
-                key: b"alpha".to_vec(),
+                key: encoded_key(b"alpha"),
                 tip: local.latest_location.as_u64(),
                 ..Default::default()
             },
@@ -815,7 +832,7 @@ async fn ordered_connect_client_rejects_invalid_get_many_proof() {
 
     let raw_get_response = rpc
         .get(ProtoGetRequest {
-            key: b"alpha".to_vec(),
+            key: encoded_key(b"alpha"),
             tip: local.latest_location.as_u64(),
             ..Default::default()
         })
@@ -825,7 +842,7 @@ async fn ordered_connect_client_rejects_invalid_get_many_proof() {
         .to_owned_message();
     let raw_get_many_response = rpc
         .get_many(ProtoGetManyRequest {
-            keys: vec![b"alpha".to_vec(), b"beta".to_vec()],
+            keys: vec![encoded_key(b"alpha"), encoded_key(b"beta")],
             tip: local.latest_location.as_u64(),
             ..Default::default()
         })
@@ -845,7 +862,7 @@ async fn ordered_connect_client_rejects_invalid_get_many_proof() {
     let err = client
         .get_many(
             ProtoGetManyRequest {
-                keys: vec![b"alpha".to_vec(), b"beta".to_vec()],
+                keys: vec![encoded_key(b"alpha"), encoded_key(b"beta")],
                 tip: local.latest_location.as_u64(),
                 ..Default::default()
             },
@@ -877,7 +894,7 @@ async fn ordered_connect_client_rejects_get_many_proof_for_different_key() {
 
     let mut raw_get_many_response = rpc
         .get_many(ProtoGetManyRequest {
-            keys: vec![b"beta".to_vec()],
+            keys: vec![encoded_key(b"beta")],
             tip: local.latest_location.as_u64(),
             ..Default::default()
         })
@@ -889,7 +906,7 @@ async fn ordered_connect_client_rejects_get_many_proof_for_different_key() {
         .results
         .first_mut()
         .expect("get_many result")
-        .key = b"alpha".to_vec();
+        .key = encoded_key(b"alpha");
 
     let (_static_server, static_url) = spawn_static_server(StaticQmdbService {
         get_response: ProtoGetResponse::default(),
@@ -902,7 +919,7 @@ async fn ordered_connect_client_rejects_get_many_proof_for_different_key() {
     let err = client
         .get_many(
             ProtoGetManyRequest {
-                keys: vec![b"alpha".to_vec()],
+                keys: vec![encoded_key(b"alpha")],
                 tip: local.latest_location.as_u64(),
                 ..Default::default()
             },

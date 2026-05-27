@@ -12,9 +12,11 @@ service OrderedKeyRangeService {
   rpc GetRange(GetRangeRequest) returns (GetRangeResponse);
 }
 
-// Current ordered key range proof request. The range is half-open:
-// `start_key <= key < end_key` when `end_key` is set; otherwise it scans to the
-// end of the ordered keyspace. `limit` must be non-zero.
+// Current ordered key range proof request. Key fields are codec-encoded logical
+// QMDB keys (`K::encode()` bytes), not store row keys. The range is half-open:
+// `start_key <= key < end_key` after decoding `K` when `end_key` is set;
+// otherwise it scans to the end of the ordered keyspace. `limit` must be
+// non-zero.
 message GetRangeRequest {
   bytes start_key = 1;
   optional bytes end_key = 2;
@@ -22,7 +24,8 @@ message GetRangeRequest {
   uint64 tip = 4;
 }
 
-// Ordered current key-range proof response. `start_proof`, when present,
+// Ordered current key-range proof response. Key fields are codec-encoded
+// logical QMDB keys (`K::encode()` bytes). `start_proof`, when present,
 // authenticates the boundary before the first returned key (or the entire empty
 // range). `end_proof`, when present, authenticates the exclusive end boundary.
 message GetRangeResponse {

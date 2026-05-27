@@ -36,6 +36,7 @@ mod connect_client;
 mod core;
 pub mod error;
 pub mod proof;
+pub mod proto;
 pub mod prune;
 pub(crate) mod storage;
 
@@ -45,26 +46,6 @@ mod ordered;
 mod subscription;
 mod unordered;
 mod writer;
-
-pub mod proto {
-    pub mod store {
-        pub mod common {
-            pub mod v1 {
-                pub use exoware_sdk::store::common::v1::*;
-            }
-        }
-    }
-
-    pub mod qmdb {
-        pub mod v1 {
-            #![allow(non_camel_case_types)]
-            #![allow(unused_imports)]
-            #![allow(clippy::derivable_impls)]
-            #![allow(clippy::match_single_binding)]
-            include!("gen/qmdb.v1.rs");
-        }
-    }
-}
 
 pub use error::{ProofKind, QmdbError};
 pub use immutable::ImmutableClient;
@@ -91,9 +72,9 @@ pub use connect::{
     OrderedConnect, UnorderedConnect,
 };
 pub use connect_client::{
-    CurrentOperationClient, CurrentOperationRangeProof, OperationLogClient, OperationLogRangeProof,
-    OperationLogSubscribeProof, OperationLogSubscription, OrderedConnectClient,
-    UnorderedConnectClient,
+    CurrentOperationClient, CurrentOperationRangeProof, CurrentSyncResolver, OperationLogClient,
+    OperationLogRangeProof, OperationLogSubscribeProof, OperationLogSubscription,
+    OperationLogSyncResolver, OrderedConnectClient, UnorderedConnectClient,
 };
 
 use commonware_codec::Encode;

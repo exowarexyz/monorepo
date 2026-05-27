@@ -60,7 +60,7 @@ pub trait Query: Sequence {
     fn get(
         &self,
         key: Bytes,
-    ) -> impl Future<Output = Result<(Option<Vec<u8>>, QueryExtra), String>> + Send;
+    ) -> impl Future<Output = Result<(Option<Bytes>, QueryExtra), String>> + Send;
 
     /// Cursor over keys in `[start, end]` (inclusive) when `end` is non-empty;
     /// empty `end` means unbounded above. Matches `store.query.v1.RangeRequest`
@@ -78,7 +78,7 @@ pub trait Query: Sequence {
     fn get_many(
         &self,
         keys: Vec<Bytes>,
-    ) -> impl Future<Output = Result<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra), String>> + Send;
+    ) -> impl Future<Output = Result<(Vec<(Bytes, Option<Bytes>)>, QueryExtra), String>> + Send;
 }
 
 /// Prune mutation capability.

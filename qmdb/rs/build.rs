@@ -9,6 +9,24 @@ const QMDB_PROTO_FILES: &[&str] = &[
     "qmdb/v1/current_operation.proto",
 ];
 
+const QMDB_BYTES_FIELDS: &[&str] = &[
+    ".qmdb.v1.MultiProofOperation.encoded_operation",
+    ".qmdb.v1.HistoricalMultiProof.proof",
+    ".qmdb.v1.HistoricalMultiProof.ops_root",
+    ".qmdb.v1.HistoricalMultiProof.ops_root_witness",
+    ".qmdb.v1.HistoricalOperationRangeProof.proof",
+    ".qmdb.v1.HistoricalOperationRangeProof.encoded_operations",
+    ".qmdb.v1.HistoricalOperationRangeProof.ops_root",
+    ".qmdb.v1.HistoricalOperationRangeProof.ops_root_witness",
+    ".qmdb.v1.HistoricalOperationRangeProof.pinned_nodes",
+    ".qmdb.v1.CurrentOperationRangeProof.proof",
+    ".qmdb.v1.CurrentOperationRangeProof.encoded_operations",
+    ".qmdb.v1.CurrentOperationRangeProof.chunks",
+    ".qmdb.v1.CurrentKeyValueProof.proof",
+    ".qmdb.v1.CurrentKeyValueProof.encoded_operation",
+    ".qmdb.v1.CurrentKeyExclusionProof.proof",
+];
+
 fn main() {
     println!("cargo:rerun-if-env-changed=PROTO_GEN");
     println!("cargo:rerun-if-changed=../../proto");
@@ -29,45 +47,24 @@ fn main() {
     let descriptor = gen_dir.join("descriptor.bin");
     buf_build(&workspace_root, &descriptor);
 
+    let mut buffa_config = connectrpc_build::CodeGenConfig::default();
+    buffa_config.generate_json = true;
+    buffa_config.file_per_package = true;
+    buffa_config.bytes_fields = QMDB_BYTES_FIELDS
+        .iter()
+        .map(|field| (*field).into())
+        .collect();
+
     connectrpc_build::Config::new()
         .files(QMDB_PROTO_FILES)
         .descriptor_set(&descriptor)
+        .buffa_config(buffa_config)
         .emit_register_fn(false)
         .out_dir(&gen_dir)
         .compile()
         .expect("connectrpc codegen");
 
-    combine_generated_protos(&gen_dir, QMDB_PROTO_FILES, "qmdb.v1.rs");
-
     std::fs::remove_file(&descriptor).expect("cleanup descriptor");
-}
-
-fn combine_generated_protos(gen_dir: &Path, proto_paths: &[&str], to: &str) {
-    let to_path = gen_dir.join(to);
-    if to_path.exists() {
-        std::fs::remove_file(&to_path).expect("remove stale generated proto file");
-    }
-    let mut combined = String::new();
-    for (index, proto_path) in proto_paths.iter().enumerate() {
-        if index > 0 {
-            combined.push('\n');
-        }
-        let from_path = gen_dir.join(generated_rust_filename(proto_path));
-        let content = std::fs::read_to_string(&from_path).unwrap_or_else(|err| {
-            panic!("read generated proto file {}: {}", from_path.display(), err)
-        });
-        combined.push_str(&content);
-        if !combined.ends_with('\n') {
-            combined.push('\n');
-        }
-        std::fs::remove_file(&from_path).expect("remove split generated proto file");
-    }
-    std::fs::write(&to_path, combined).expect("write combined generated proto file");
-}
-
-fn generated_rust_filename(proto_path: &str) -> String {
-    let stem = proto_path.strip_suffix(".proto").unwrap_or(proto_path);
-    format!("{}.rs", stem.replace('/', "."))
 }
 
 fn buf_build(workspace_root: &Path, descriptor_out: &Path) {

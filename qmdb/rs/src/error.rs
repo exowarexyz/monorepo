@@ -1,5 +1,9 @@
 use exoware_sdk::ClientError;
 
+pub(crate) fn error_key<K: AsRef<[u8]> + ?Sized>(key: &K) -> Vec<u8> {
+    key.as_ref().to_vec()
+}
+
 /// Which proof shape failed verification. Carried on
 /// [`QmdbError::ProofVerification`] so callers and tests can discriminate
 /// without string matching on the error message.
@@ -87,6 +91,8 @@ pub enum QmdbError {
     CommonwareMerkle(String),
     #[error("qmdb stream transport error: {0}")]
     Stream(String),
+    #[error("sync operation fetch was cancelled")]
+    SyncFetchCancelled,
     #[error("writer is poisoned after an earlier upload failure: {0}")]
     WriterPoisoned(String),
 }

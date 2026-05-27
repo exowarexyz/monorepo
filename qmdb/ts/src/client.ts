@@ -40,6 +40,7 @@ import {
 } from './generated/proto/store/v1/common_pb.js';
 import initWasm, {
   decode_historical_multi_proof_operations,
+  encode_vec_key,
   verify_current_operation_range_proof,
   verify_current_key_value_proof,
   verify_get_many_response,
@@ -234,7 +235,7 @@ export class OrderedQmdbClient {
     options?: CallOptions,
   ): Promise<VerifiedCurrentKeyValueProof> {
     await ensureWasm();
-    const requestedKey = copyBytes(key);
+    const requestedKey = encode_vec_key(copyBytes(key));
     const response = await this.lookup.get(
       create(GetRequestSchema, {
         key: requestedKey,
@@ -262,7 +263,7 @@ export class OrderedQmdbClient {
     options?: CallOptions,
   ): Promise<VerifiedCurrentKeyLookupProof> {
     await ensureWasm();
-    const requestedKeys = keys.map((key) => copyBytes(key));
+    const requestedKeys = keys.map((key) => encode_vec_key(copyBytes(key)));
     assertDistinctKeys(requestedKeys);
     const response = await this.lookup.getMany(
       create(GetManyRequestSchema, {
@@ -292,9 +293,11 @@ export class OrderedQmdbClient {
     options?: CallOptions,
   ): Promise<VerifiedCurrentKeyRangeProof> {
     await ensureWasm();
-    const startKey = toBytes(request.startKey);
+    const startKey = encode_vec_key(copyBytes(request.startKey));
     const endKey =
-      request.endKey === undefined ? undefined : toBytes(request.endKey);
+      request.endKey === undefined
+        ? undefined
+        : encode_vec_key(copyBytes(request.endKey));
     const response = await this.orderedRange.getRange(
       create(GetRangeRequestSchema, {
         startKey,
