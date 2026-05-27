@@ -43,6 +43,7 @@ connectrpc-build = "0.6.0"
 exoware-qmdb = { path = ".", features = ["test-utils"] }
 axum = { workspace = true }
 bytes = { workspace = true }
+commonware-glue = { workspace = true }
 commonware-runtime = { workspace = true }
 exoware-simulator = { path = "../../examples/simulator" }
 exoware-server = { workspace = true }

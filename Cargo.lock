@@ -1247,6 +1247,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-glue"
+version = "2026.4.0"
+source = "git+https://github.com/commonwarexyz/monorepo?rev=df03d866237f44c6d0f81d05783da493654f0f8c#df03d866237f44c6d0f81d05783da493654f0f8c"
+dependencies = [
+ "bytes",
+ "commonware-actor",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-parallel",
+ "commonware-resolver",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-utils",
+ "futures",
+ "prometheus-client",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "commonware-macros"
 version = "2026.4.0"
 source = "git+https://github.com/commonwarexyz/monorepo?rev=df03d866237f44c6d0f81d05783da493654f0f8c#df03d866237f44c6d0f81d05783da493654f0f8c"
@@ -2669,6 +2694,7 @@ dependencies = [
  "clap",
  "commonware-codec",
  "commonware-cryptography",
+ "commonware-glue",
  "commonware-parallel",
  "commonware-runtime",
  "commonware-storage",
@@ -4500,7 +4526,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "syn",
@@ -5296,7 +5322,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6001,7 +6027,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
