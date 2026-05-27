@@ -245,8 +245,8 @@ async fn keyless_operation_log_sync_resolver_fetches_api_batches() {
         &target.root
     ));
     assert!(
-        fetched.success_tx.send(true).is_ok(),
-        "sync resolver keeps success acknowledgement receiver alive"
+        fetched.callback.is_none(),
+        "direct sync resolver fetches do not allocate an unused validation callback"
     );
 }
 

@@ -18,7 +18,6 @@ use commonware_storage::qmdb::sync::resolver::Resolver as _;
 use commonware_storage::qmdb::{
     any::ordered::{variable::Db as AnyOrderedQmdbDb, Update},
     current::ordered::variable::Db as LocalQmdbDb,
-    current::sync as current_sync,
     sync as qmdb_sync,
 };
 use commonware_storage::translator::TwoCap;
@@ -552,7 +551,8 @@ async fn ordered_current_state_sync_from_connect_api_reconstructs_current_db() {
     );
     let op_count = Location::new(local.operations.len() as u64);
     let target = resolver.target(op_count).await.expect("api sync target");
-    assert_eq!(target.root, local.current_boundary.root);
+    assert_eq!(target.range.start(), Location::new(0));
+    assert_eq!(target.range.end(), op_count);
 
     tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
@@ -565,7 +565,7 @@ async fn ordered_current_state_sync_from_connect_api_reconstructs_current_db() {
                 op_cfg(),
                 NZU64!(8),
             );
-            let db: LocalDb = current_sync::sync(current_sync::Config {
+            let db: LocalDb = qmdb_sync::sync(qmdb_sync::engine::Config {
                 context: context.child("sync"),
                 resolver,
                 target,
@@ -638,7 +638,7 @@ async fn ordered_mmb_current_state_sync_from_nonzero_connect_api_reconstructs_cu
         .target_range(start, op_count)
         .await
         .expect("api nonzero current sync target");
-    let target_root = target.root;
+    let expected_current_root = local.current_boundary.root;
 
     tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
@@ -651,7 +651,7 @@ async fn ordered_mmb_current_state_sync_from_nonzero_connect_api_reconstructs_cu
                 mmb_op_cfg(),
                 NZU64!(8),
             );
-            let db: MmbLocalDb = current_sync::sync(current_sync::Config {
+            let db: MmbLocalDb = qmdb_sync::sync(qmdb_sync::engine::Config {
                 context: context.child("sync"),
                 resolver,
                 target,
@@ -667,7 +667,7 @@ async fn ordered_mmb_current_state_sync_from_nonzero_connect_api_reconstructs_cu
             .await
             .expect("sync current db from nonzero MMB API");
 
-            assert_eq!(db.root(), target_root);
+            assert_eq!(db.root(), expected_current_root);
             let bounds = db.bounds().await;
             assert_eq!(bounds.start, start);
             assert_eq!(bounds.end, op_count);
@@ -765,7 +765,7 @@ async fn ordered_mmb_sync_resolvers_return_pinned_nodes_for_nonzero_fetches() {
         &current_elements,
         start,
         current_pinned_nodes,
-        &current_target.ops_root,
+        &current_target.root,
     ));
 }
 

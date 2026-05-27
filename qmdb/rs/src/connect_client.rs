@@ -20,15 +20,17 @@ use commonware_storage::{
     merkle::{Family, Graftable, Location, Proof},
     qmdb::{
         any::{
-            ordered, sync as any_sync, unordered,
+            ordered, unordered,
             value::{ValueEncoding, VariableEncoding},
         },
         current::ordered::{db::KeyValueProof, ExclusionProof},
         current::proof::{OpsRootWitness, RangeProof},
-        current::sync as current_sync,
         current::unordered::db::KeyValueProof as UnorderedKeyValueProof,
         operation::Key as QmdbKey,
-        sync::resolver::{FetchResult, Resolver},
+        sync::{
+            resolver::{fetch_operation_range, FetchResult, FetchedOperations, Resolver},
+            Target as SyncTarget,
+        },
         verify::{verify_multi_proof, verify_proof_and_pinned_nodes},
     },
 };
@@ -551,7 +553,7 @@ where
     pub async fn target(
         &self,
         op_count: Location<F>,
-    ) -> Result<any_sync::Target<F, H::Digest>, QmdbError> {
+    ) -> Result<SyncTarget<F, H::Digest>, QmdbError> {
         self.target_range(Location::new(0), op_count).await
     }
 
@@ -559,13 +561,13 @@ where
         &self,
         start_loc: Location<F>,
         op_count: Location<F>,
-    ) -> Result<any_sync::Target<F, H::Digest>, QmdbError> {
+    ) -> Result<SyncTarget<F, H::Digest>, QmdbError> {
         let range = sync_range(start_loc, op_count)?;
         let proto = self
             .operation_range_proto(op_count, start_loc, NonZeroU64::MIN)
             .await?;
         let root = decode_digest::<H::Digest>(proto.ops_root.as_ref(), "operation sync root")?;
-        Ok(any_sync::Target::new(root, range))
+        Ok(SyncTarget::new(root, range))
     }
 
     async fn operation_range_proto(
@@ -596,11 +598,11 @@ where
         .await
     }
 
-    fn fetch_result(
+    fn decode_fetched_operations(
         &self,
         proto: HistoricalOperationRangeProof,
         include_pinned_nodes: bool,
-    ) -> Result<FetchResult<F, Op, H::Digest>, QmdbError> {
+    ) -> Result<FetchedOperations<F, Op, H::Digest>, QmdbError> {
         let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
         let proof = Proof::<F, H::Digest>::decode_cfg(proto.proof.as_ref(), &max_digests).map_err(
             |err| {
@@ -631,24 +633,8 @@ where
         } else {
             None
         };
-        let success_tx = sync_success_ack_sender();
-        Ok(FetchResult {
-            proof,
-            operations,
-            success_tx,
-            pinned_nodes,
-        })
+        Ok(FetchedOperations::new(proof, operations, pinned_nodes))
     }
-}
-
-fn sync_success_ack_sender() -> oneshot::Sender<bool> {
-    let (success_tx, success_rx) = oneshot::channel();
-    // Commonware sync reports validation after FetchResult is returned.
-    // Keep the receiver live until that acknowledgement arrives or is dropped.
-    let _ack_task = tokio::spawn(async move {
-        let _ = success_rx.await;
-    });
-    success_tx
 }
 
 impl<T, F, H, Op> Resolver for OperationLogSyncResolver<T, F, H, Op>
@@ -674,10 +660,21 @@ where
         include_pinned_nodes: bool,
         mut cancel_rx: oneshot::Receiver<()>,
     ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-        let proto = tokio::select! {
+        let fetch_result = tokio::select! {
             biased;
             _ = &mut cancel_rx => return Err(QmdbError::SyncFetchCancelled),
-            proto = self.operation_range_proto(op_count, start_loc, max_ops) => proto?,
+            fetch_result = fetch_operation_range(
+                op_count,
+                start_loc,
+                max_ops,
+                include_pinned_nodes,
+                |op_count, start_loc, max_ops, include_pinned_nodes| async move {
+                    let proto = self
+                        .operation_range_proto(op_count, start_loc, max_ops)
+                        .await?;
+                    self.decode_fetched_operations(proto, include_pinned_nodes)
+                },
+            ) => fetch_result?,
         };
         match cancel_rx.try_recv() {
             Ok(()) | Err(oneshot::error::TryRecvError::Closed) => {
@@ -685,7 +682,7 @@ where
             }
             Err(oneshot::error::TryRecvError::Empty) => {}
         }
-        self.fetch_result(proto, include_pinned_nodes)
+        Ok(fetch_result)
     }
 }
 
@@ -772,7 +769,7 @@ where
     pub async fn target(
         &self,
         op_count: Location<F>,
-    ) -> Result<current_sync::Target<F, H::Digest>, QmdbError> {
+    ) -> Result<SyncTarget<F, H::Digest>, QmdbError> {
         self.target_range(Location::new(0), op_count).await
     }
 
@@ -780,26 +777,18 @@ where
         &self,
         start_loc: Location<F>,
         op_count: Location<F>,
-    ) -> Result<current_sync::Target<F, H::Digest>, QmdbError> {
+    ) -> Result<SyncTarget<F, H::Digest>, QmdbError> {
         let range = sync_range(start_loc, op_count)?;
         let proto = self
             .operation_log
             .operation_range_proto(op_count, start_loc, NonZeroU64::MIN)
             .await?;
-        let ops_root =
-            decode_digest::<H::Digest>(proto.ops_root.as_ref(), "current sync ops root")?;
-        let witness = OpsRootWitness::<F, H::Digest>::decode(proto.ops_root_witness.as_ref())
-            .map_err(|err| {
-                QmdbError::CorruptData(format!(
-                    "failed to decode current sync ops-root witness: {err}"
-                ))
-            })?;
-        Ok(current_sync::Target::new(
-            self.current_root,
-            ops_root,
-            witness,
+        current_sync_target_from_witness::<F, H>(
+            proto.ops_root.as_ref(),
+            proto.ops_root_witness.as_ref(),
+            &self.current_root,
             range,
-        ))
+        )
     }
 }
 
@@ -1112,6 +1101,38 @@ fn sync_range<F: Family>(
 
 fn proof_digest_cap<D: Digest>(encoded_proof: &[u8]) -> usize {
     encoded_proof.len() / D::SIZE + 1
+}
+
+/// Build the Commonware streaming-sync target for a current DB.
+///
+/// Current sync verifies fetched batches against the ops root, but Exoware
+/// callers anchor trust in the canonical current root. The witness is the
+/// bridge between those roots, so construct the sync target only after it
+/// verifies.
+fn current_sync_target_from_witness<F, H>(
+    ops_root: &[u8],
+    ops_root_witness: &[u8],
+    current_root: &H::Digest,
+    range: NonEmptyRange<Location<F>>,
+) -> Result<SyncTarget<F, H::Digest>, QmdbError>
+where
+    F: Graftable,
+    H::Digest: DecodeExt<()>,
+    H: Hasher,
+{
+    let ops_root = decode_digest::<H::Digest>(ops_root, "current sync ops root")?;
+    let witness = OpsRootWitness::<F, H::Digest>::decode(ops_root_witness).map_err(|err| {
+        QmdbError::CorruptData(format!(
+            "failed to decode current sync ops-root witness: {err}"
+        ))
+    })?;
+    let hasher = commonware_storage::qmdb::hasher::<H>();
+    if !witness.verify(&hasher, &ops_root, current_root) {
+        return Err(QmdbError::CorruptData(
+            "current sync ops-root witness failed verification".to_string(),
+        ));
+    }
+    Ok(SyncTarget::new(ops_root, range))
 }
 
 fn historical_target_root<F, H>(
