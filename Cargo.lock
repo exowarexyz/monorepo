@@ -967,6 +967,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-link 0.2.1",
 ]
@@ -2896,6 +2897,23 @@ dependencies = [
  "thiserror",
  "tokio",
  "tower-http 0.5.2",
+ "tracing",
+ "tracing-subscriber 0.3.23",
+]
+
+[[package]]
+name = "exoware-workload"
+version = "2026.5.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "connectrpc",
+ "exoware-sdk",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "tokio",
  "tracing",
  "tracing-subscriber 0.3.23",
 ]
