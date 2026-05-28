@@ -278,7 +278,7 @@ async fn run_standard_validation(
         return Ok(());
     }
 
-    let mut records = build_records(&keyspace, namespace, cli.keys, cli.value_size)?;
+    let records = build_records(&keyspace, namespace, cli.keys, cli.value_size)?;
     let mut sorted_records = records.clone();
     sorted_records.sort_by(|a, b| a.key.cmp(&b.key));
 
@@ -348,7 +348,6 @@ async fn run_standard_validation(
         range_plans.len(),
     );
 
-    records.clear();
     Ok(())
 }
 
@@ -433,7 +432,7 @@ async fn run_overlap_ledger_write_mode(
                     next_index = next_index.saturating_add(1);
                     break;
                 }
-                Err(err) if err.rpc_code().is_some_and(is_transient_ingest_code) => {
+                Err(err) if is_transient_ingest_error(&err) => {
                     attempt = attempt.saturating_add(1);
                     tracing::warn!(
                         label,
@@ -660,10 +659,7 @@ async fn ingest_refs_with_retry(
                 wal_seq = Some(token);
                 break;
             }
-            Err(err)
-                if err.rpc_code().is_some_and(is_transient_ingest_code)
-                    && attempt < ingest_retry_attempts =>
-            {
+            Err(err) if is_transient_ingest_error(&err) && attempt < ingest_retry_attempts => {
                 tracing::warn!(
                     label,
                     attempt,
@@ -1092,6 +1088,10 @@ async fn run_write_phase_generated(
 
 fn is_transient_ingest_code(code: ErrorCode) -> bool {
     matches!(code, ErrorCode::ResourceExhausted | ErrorCode::Unavailable)
+}
+
+fn is_transient_ingest_error(err: &ClientError) -> bool {
+    err.rpc_code().is_some_and(is_transient_ingest_code)
 }
 
 fn is_transient_query_code(code: ErrorCode) -> bool {
@@ -1655,8 +1655,9 @@ async fn run_range_samples(
                     );
                 }
 
-                // Range reads intentionally bypass WAL. Freshly written keys become visible
-                // only after compaction flushes WAL into queryable blocks.
+                // These reads carry the write phase's sequence floor, so a conformant backend
+                // already exposes every written key to range queries. A short page is tolerated
+                // as retry headroom; a full page with the wrong rows is a real fault (handled below).
                 if actual.len() < expected.len() {
                     pending_checks += 1;
                     pending_rows += expected.len() - actual.len();
@@ -1749,9 +1750,11 @@ fn sample_unique_indices(total: usize, requested: usize, rng: &mut StdRng) -> Ve
 }
 
 fn sample_missing_indices(count: usize, rng: &mut StdRng) -> Vec<u64> {
+    // Correctness comes from the keyspace's disjoint missing-key domain byte: these indexes never
+    // collide with inserted keys regardless of value, so the high offset and lack of dedup are
+    // only cosmetic.
     let mut values = Vec::with_capacity(count);
     for _ in 0..count {
-        // Use a high offset to stay far from inserted 0..keys indexes.
         values.push(1_000_000_000u64.wrapping_add(rng.gen::<u64>() % 1_000_000));
     }
     values

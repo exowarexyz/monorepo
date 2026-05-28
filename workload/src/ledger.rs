@@ -41,7 +41,7 @@ pub fn validate_overlap_ledger(ledger: &OverlapLedger) -> anyhow::Result<()> {
 /// Writes the overlap ledger with a temporary file and atomic rename.
 pub fn write_overlap_ledger(path: &str, ledger: &OverlapLedger) -> anyhow::Result<()> {
     let mut body = String::new();
-    body.push_str("ct-overlap-ledger-v1\n");
+    body.push_str("exoware-overlap-ledger-v1\n");
     body.push_str(&format!("namespace {}\n", ledger.namespace));
     body.push_str(&format!("successful_writes {}\n", ledger.successful_writes));
     body.push_str(&format!("sequence_number {}\n", ledger.sequence_number));
@@ -69,7 +69,7 @@ pub fn read_overlap_ledger(path: &str) -> anyhow::Result<OverlapLedger> {
     let mut lines = body.lines();
     let version = lines.next().context("missing overlap ledger header")?;
     ensure!(
-        version == "ct-overlap-ledger-v1",
+        version == "exoware-overlap-ledger-v1",
         "unsupported overlap ledger header `{version}`"
     );
 
@@ -135,7 +135,7 @@ pub fn read_overlap_ledger(path: &str) -> anyhow::Result<OverlapLedger> {
 
 /// Encodes bytes as lowercase hexadecimal for report and error text.
 pub fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    hex::encode(bytes)
 }
 
 fn parse_prefixed_u64(line: &str, prefix: &str) -> anyhow::Result<u64> {
@@ -146,32 +146,14 @@ fn parse_prefixed_u64(line: &str, prefix: &str) -> anyhow::Result<u64> {
         .with_context(|| format!("invalid integer `{raw}` in overlap ledger line `{line}`"))
 }
 
-fn decode_hex_key(hex: &str) -> anyhow::Result<Key> {
-    let bytes = decode_hex_bytes(hex)?;
+fn decode_hex_key(hex_str: &str) -> anyhow::Result<Key> {
+    let bytes = decode_hex_bytes(hex_str)?;
     validate_key_size(bytes.len()).context("decoded key length is invalid")?;
     Ok(Key::from(bytes))
 }
 
-fn decode_hex_bytes(hex: &str) -> anyhow::Result<Vec<u8>> {
-    ensure!(
-        hex.len().is_multiple_of(2),
-        "hex string must have even length, got {}",
-        hex.len()
-    );
-
-    let mut out = Vec::with_capacity(hex.len() / 2);
-    let bytes = hex.as_bytes();
-    let mut idx = 0usize;
-    while idx < bytes.len() {
-        let hi = bytes[idx] as char;
-        let lo = bytes[idx + 1] as char;
-        let pair = format!("{hi}{lo}");
-        let value =
-            u8::from_str_radix(&pair, 16).with_context(|| format!("invalid hex byte `{pair}`"))?;
-        out.push(value);
-        idx += 2;
-    }
-    Ok(out)
+fn decode_hex_bytes(hex_str: &str) -> anyhow::Result<Vec<u8>> {
+    hex::decode(hex_str).with_context(|| format!("invalid hex string `{hex_str}`"))
 }
 
 #[cfg(test)]
@@ -236,7 +218,7 @@ mod tests {
             records: overlap_records(42, 3),
         };
         let path =
-            std::env::temp_dir().join(format!("ct-overlap-ledger-test-{}.txt", std::process::id()));
+            std::env::temp_dir().join(format!("exoware-overlap-ledger-test-{}.txt", std::process::id()));
         write_overlap_ledger(path.to_str().unwrap(), &ledger).unwrap();
         let decoded = read_overlap_ledger(path.to_str().unwrap()).unwrap();
         assert_eq!(decoded.namespace, ledger.namespace);

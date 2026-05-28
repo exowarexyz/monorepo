@@ -109,7 +109,7 @@ pub struct Args {
 pub struct Config {
     client: ClientConfig,
     keyspace: Keyspace,
-    key_space: u64,
+    initial_keys: u64,
     total_ops: u64,
     concurrency: usize,
     scenario: Scenario,
@@ -151,7 +151,7 @@ impl TryFrom<Args> for Config {
         Ok(Self {
             client: ClientConfig::new(args.url, args.read_retry_attempts)?,
             keyspace: Keyspace::unnamespaced(args.key_len)?,
-            key_space: args.keys,
+            initial_keys: args.keys,
             total_ops: args.ops,
             concurrency: args.concurrency,
             scenario: args.scenario,
@@ -197,7 +197,7 @@ impl Config {
                 manifest.config.read_retry_attempts,
             )?,
             keyspace: Keyspace::unnamespaced(manifest.config.key_len)?,
-            key_space: manifest.config.key_space,
+            initial_keys: manifest.config.key_space,
             total_ops: manifest.config.total_ops,
             concurrency: manifest.config.concurrency,
             scenario: manifest.config.scenario,
@@ -217,7 +217,7 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
     let Config {
         client: client_config,
         keyspace,
-        key_space,
+        initial_keys,
         total_ops,
         concurrency,
         scenario,
@@ -230,7 +230,7 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
     let client = Arc::new(build_client(&client_config)?);
     let report_config = BenchConfig {
         endpoint: client_config.endpoint.clone(),
-        key_space,
+        key_space: initial_keys,
         total_ops,
         concurrency,
         scenario,
@@ -251,12 +251,12 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
     // Latency is recorded for every SDK attempt, including failed backend
     // calls, so error-heavy runs still explain where time was spent.
     let latencies = Arc::new(LatencyHistogramsRecorder::default());
-    let next_write_index = Arc::new(AtomicU64::new(key_space));
+    let next_write_index = Arc::new(AtomicU64::new(initial_keys));
     let started_at = Utc::now();
     let start = Instant::now();
 
     tracing::info!(
-        key_space,
+        key_space = initial_keys,
         total_ops,
         concurrency,
         scenario = ?scenario,
@@ -544,7 +544,7 @@ mod tests {
             .expect("manifest should parse");
 
         assert_eq!(config.client.endpoint, "http://localhost:10000");
-        assert_eq!(config.key_space, 1_000);
+        assert_eq!(config.initial_keys, 1_000);
         assert_eq!(config.total_ops, 10_000);
         assert_eq!(config.concurrency, 4);
         assert_eq!(config.scenario, Scenario::ScanHeavy);

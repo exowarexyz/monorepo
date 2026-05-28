@@ -31,10 +31,11 @@ impl ClientConfig {
 
 /// Constructs the SDK client used by load, bench, and validate commands.
 pub fn build_client(config: &ClientConfig) -> anyhow::Result<StoreClient> {
+    // `ClientConfig` exposes public fields, so re-validate here to catch a config built without
+    // `new`. The endpoint is already normalized by `new`, so it is passed through unchanged.
     validate_config(config)?;
-    let endpoint = normalize_endpoint(&config.endpoint);
     Ok(StoreClient::with_retry_config(
-        &endpoint,
+        &config.endpoint,
         RetryConfig::standard()
             .with_max_attempts(config.read_retry_attempts)
             .with_initial_backoff(Duration::from_millis(config.initial_backoff_ms))

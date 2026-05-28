@@ -294,8 +294,12 @@ pub fn read_bench_manifest_json(path: &Path) -> anyhow::Result<BenchManifest> {
         .with_context(|| format!("failed to read benchmark manifest {path:?}"))?;
     let manifest: BenchManifest =
         serde_json::from_str(&body).context("failed to parse benchmark manifest")?;
+    // A report JSON carries the same `config` and `seed` as a manifest, so reports are
+    // intentionally replayable via `--manifest`. Accept either schema version so the manifest
+    // and report schemas can evolve independently without silently breaking report replay.
     ensure!(
-        manifest.schema_version == BENCH_MANIFEST_SCHEMA_VERSION,
+        manifest.schema_version == BENCH_MANIFEST_SCHEMA_VERSION
+            || manifest.schema_version == BENCH_REPORT_SCHEMA_VERSION,
         "unsupported benchmark manifest schema_version {}",
         manifest.schema_version
     );
@@ -657,5 +661,44 @@ mod tests {
         assert_eq!(manifest.schema_version, 1);
         assert_eq!(manifest.config, report.config);
         assert_eq!(manifest.seed, report.seed);
+    }
+
+    #[test]
+    fn read_manifest_accepts_report_schema_version_and_rejects_unknown() {
+        let report = sample_report();
+        let manifest = BenchManifest::new(report.config.clone(), report.seed);
+        let mut value = serde_json::to_value(&manifest).expect("manifest should serialize");
+
+        // A file stamped with the report schema version must still parse as a manifest, even
+        // once that version diverges from the manifest schema version. Building the fixture from
+        // the constant (rather than a literal) keeps this honest if the report schema is bumped.
+        value["schema_version"] = serde_json::Value::from(BENCH_REPORT_SCHEMA_VERSION);
+        let accepted_path = std::env::temp_dir().join(format!(
+            "exoware-workload-manifest-report-version-{}-{}.json",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::write(&accepted_path, value.to_string()).expect("manifest fixture should write");
+        let parsed = read_bench_manifest_json(&accepted_path)
+            .expect("report-versioned manifest should parse");
+        std::fs::remove_file(&accepted_path).ok();
+        assert_eq!(parsed.config, manifest.config);
+        assert_eq!(parsed.seed, manifest.seed);
+
+        // A schema version belonging to neither the manifest nor the report is still rejected.
+        let unsupported = BENCH_MANIFEST_SCHEMA_VERSION.max(BENCH_REPORT_SCHEMA_VERSION) + 1;
+        value["schema_version"] = serde_json::Value::from(unsupported);
+        let rejected_path = std::env::temp_dir().join(format!(
+            "exoware-workload-manifest-bad-version-{}-{}.json",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::write(&rejected_path, value.to_string()).expect("manifest fixture should write");
+        let err = read_bench_manifest_json(&rejected_path)
+            .expect_err("unsupported manifest schema_version should be rejected");
+        std::fs::remove_file(&rejected_path).ok();
+        assert!(err
+            .to_string()
+            .contains("unsupported benchmark manifest schema_version"));
     }
 }
