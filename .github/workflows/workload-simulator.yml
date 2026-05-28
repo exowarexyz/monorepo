@@ -1,0 +1,95 @@
+name: Workload Simulator
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  workload-simulator:
+    name: Workload against simulator
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Clear disk space
+        uses: ./.github/actions/disk
+
+      - name: Run setup
+        uses: ./.github/actions/setup
+
+      - name: Build simulator and workload
+        run: cargo build -p exoware-simulator -p exoware-workload --bins
+
+      - name: Resolve binaries
+        id: bins
+        shell: bash
+        run: |
+          set -euo pipefail
+          target_dir="${CARGO_TARGET_DIR:-target}"
+          echo "simulator=$target_dir/debug/simulator" >> "$GITHUB_OUTPUT"
+          echo "workload=$target_dir/debug/workload" >> "$GITHUB_OUTPUT"
+
+      - name: Start simulator
+        id: simulator
+        shell: bash
+        env:
+          SIMULATOR: ${{ steps.bins.outputs.simulator }}
+        run: |
+          set -euo pipefail
+          simulator_dir="$RUNNER_TEMP/exoware-simulator"
+          simulator_log="$RUNNER_TEMP/simulator.log"
+          mkdir -p "$simulator_dir"
+          "$SIMULATOR" server run --directory "$simulator_dir" --port 10000 >"$simulator_log" 2>&1 &
+          simulator_pid="$!"
+          echo "pid=$simulator_pid" >> "$GITHUB_OUTPUT"
+          echo "log=$simulator_log" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for simulator health
+        shell: bash
+        run: |
+          set -euo pipefail
+          for _ in {1..60}; do
+            if curl --fail --silent --show-error http://127.0.0.1:10000/health >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "simulator did not become healthy at http://127.0.0.1:10000/health" >&2
+          exit 1
+
+      - name: Run workload
+        uses: ./.github/actions/run-workload
+        with:
+          endpoint: http://127.0.0.1:10000
+          workload-bin: ${{ steps.bins.outputs.workload }}
+
+      - name: Print simulator log on failure
+        if: failure()
+        shell: bash
+        run: |
+          if [[ -f "${{ steps.simulator.outputs.log }}" ]]; then
+            cat "${{ steps.simulator.outputs.log }}"
+          fi
+
+      - name: Stop simulator
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "${{ steps.simulator.outputs.pid }}" ]]; then
+            kill "${{ steps.simulator.outputs.pid }}" >/dev/null 2>&1 || true
+          fi
+
+      - name: Upload simulator log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: workload-simulator-log
+          path: ${{ steps.simulator.outputs.log }}
+          if-no-files-found: ignore
