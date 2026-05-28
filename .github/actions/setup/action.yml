@@ -7,6 +7,15 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Relocate Cargo directories to /mnt on Linux
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo mkdir -p /mnt/target /mnt/.cargo/bin
+        sudo chown -R "$(id -u):$(id -g)" /mnt/target /mnt/.cargo
+        echo "CARGO_TARGET_DIR=/mnt/target" >> "$GITHUB_ENV"
+        echo "CARGO_HOME=/mnt/.cargo" >> "$GITHUB_ENV"
+        echo "/mnt/.cargo/bin" >> "$GITHUB_PATH"
     - name: Install stable Rust toolchain
       uses: dtolnay/rust-toolchain@stable
     - name: Normalize cache key
@@ -23,6 +32,7 @@ runs:
         save-if: ${{ github.ref == 'refs/heads/main' }}
         key: ${{ steps.cache-key.outputs.key }}
         cache-on-failure: false
+        cache-directories: ${{ env.CARGO_TARGET_DIR }}
     - name: Set up Node.js
       uses: actions/setup-node@v4
       with:
