@@ -81,6 +81,10 @@ async fn run_load(config: Config) -> anyhow::Result<()> {
     tracing::info!(total_keys, batch_size, concurrency, "Starting load phase");
 
     let mut handles = Vec::new();
+
+    // Each worker owns a contiguous key range so generated keys stay disjoint without
+    // coordination. When keys < concurrency the leading workers get empty ranges and the last
+    // worker covers the remainder: correct, but not fully parallel for tiny key counts.
     let keys_per_worker = total_keys / concurrency as u64;
 
     for worker in 0..concurrency {

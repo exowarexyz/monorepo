@@ -68,7 +68,7 @@ impl Keyspace {
         let mut next = key.as_ref().to_vec();
         for idx in (0..next.len()).rev() {
             if next[idx] != u8::MAX {
-                next[idx] = next[idx].saturating_add(1);
+                next[idx] += 1;
                 for byte in next.iter_mut().skip(idx + 1) {
                     *byte = 0;
                 }
