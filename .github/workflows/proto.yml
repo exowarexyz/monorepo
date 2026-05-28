@@ -18,6 +18,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      - name: Clear disk space
+        uses: ./.github/actions/disk
       - name: Install Buf CLI
         uses: bufbuild/buf-setup-action@v1
         with:

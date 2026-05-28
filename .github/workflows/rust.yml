@@ -21,6 +21,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      - name: Clear disk space
+        uses: ./.github/actions/disk
       - name: Run setup
         uses: ./.github/actions/setup
       - name: Install nightly Rust toolchain
@@ -41,6 +43,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      - name: Clear disk space
+        uses: ./.github/actions/disk
       - name: Run setup
         uses: ./.github/actions/setup
       - name: Run tests
@@ -53,6 +57,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      - name: Clear disk space
+        uses: ./.github/actions/disk
       - name: Install nightly Rust toolchain
         run: rustup toolchain install ${{ env.NIGHTLY_VERSION }}
       - name: Verify toolchain
