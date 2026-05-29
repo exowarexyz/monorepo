@@ -75,7 +75,7 @@ Benchmark JSON reports include the normalized config, seed, counters, and per-op
     "concurrency": 8,
     "scenario": "balanced",
     "workload": {
-      "mix": { "read_ratio": 0.7, "write_ratio": 0.3, "scan_ratio": 0.0 },
+      "mix": { "read_ratio": 0.6, "write_ratio": 0.3, "scan_ratio": 0.1 },
       "scan_length": 25,
       "key_dist": "uniform",
       "latest_window": 5000,
