@@ -24,6 +24,7 @@ const LATENCY_BUCKET_UPPER_BOUNDS_US: [u64; 15] = [
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct BenchConfig {
     pub endpoint: String,
+    pub namespace: u64,
     pub key_space: u64,
     pub total_ops: u64,
     pub concurrency: usize,
@@ -225,6 +226,7 @@ impl fmt::Display for BenchReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "benchmark report")?;
         writeln!(f, "  endpoint: {}", self.config.endpoint)?;
+        writeln!(f, "  namespace: {}", self.config.namespace)?;
         writeln!(f, "  seed: {}", self.seed)?;
         writeln!(f, "  scenario: {:?}", self.config.scenario)?;
         writeln!(f, "  key_space: {}", self.config.key_space)?;
@@ -517,6 +519,7 @@ mod tests {
         BenchReport {
             config: BenchConfig {
                 endpoint: "http://localhost:10000".to_string(),
+                namespace: 42,
                 key_space: 1_000,
                 total_ops: 10_000,
                 concurrency: 4,

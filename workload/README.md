@@ -23,13 +23,13 @@ Run workload commands from another terminal. The examples below use the default 
 Load deterministic records:
 
 ```bash
-cargo run -p exoware-workload -- load --keys 10000 --batch-size 100 --concurrency 4
+cargo run -p exoware-workload -- load --namespace 2026052901 --keys 10000 --batch-size 100 --concurrency 4
 ```
 
 Run a benchmark:
 
 ```bash
-cargo run -p exoware-workload -- bench --keys 10000 --ops 50000 --concurrency 8 --scenario balanced --output bench-report.json
+cargo run -p exoware-workload -- bench --namespace 2026052901 --keys 10000 --ops 50000 --concurrency 8 --scenario balanced --output bench-report.json
 ```
 
 Replay a benchmark from a previous JSON report:
@@ -54,6 +54,8 @@ cargo run -p exoware-workload -- validate --keys 100 --lookup-samples 25 --missi
 
 Benchmark JSON reports include the normalized config, seed, counters, and per-operation latency histograms for reads, writes, and scans. Histograms use fixed microsecond buckets; stdout and GitHub summaries show p50/p95/p99/max latency lines for readability.
 
+`load` and `bench` use run-specific namespaces by default so independent runs do not reuse the same physical keys on persistent stores. Pass the same `--namespace` to both commands when a benchmark should read from a keyspace written by `load`.
+
 ## Benchmark Manifests
 
 `workload bench --manifest <path>` accepts the normalized `config` and `seed` fields from a benchmark JSON report, so a run can be replayed without reconstructing CLI flags. A minimal manifest has this shape:
@@ -63,6 +65,7 @@ Benchmark JSON reports include the normalized config, seed, counters, and per-op
   "schema_version": 1,
   "config": {
     "endpoint": "http://localhost:10000",
+    "namespace": 2026052901,
     "key_space": 10000,
     "total_ops": 50000,
     "concurrency": 8,

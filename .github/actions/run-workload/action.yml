@@ -21,6 +21,10 @@ inputs:
     description: Load worker concurrency.
     required: false
     default: "2"
+  namespace:
+    description: Shared load/bench key namespace. Empty generates one for this action run.
+    required: false
+    default: ""
   bench-keys:
     description: Keyspace size for bench.
     required: false
@@ -138,11 +142,34 @@ runs:
         fi
         echo "path=$workload" >> "$GITHUB_OUTPUT"
 
+    - name: Resolve workload namespace
+      id: namespace
+      shell: bash
+      env:
+        WORKLOAD_NAMESPACE: ${{ inputs.namespace }}
+        ACTION_RUN_ID: ${{ github.run_id }}
+        ACTION_RUN_ATTEMPT: ${{ github.run_attempt }}
+      run: |
+        set -euo pipefail
+        namespace="$WORKLOAD_NAMESPACE"
+        if [[ -z "$namespace" && -n "$ACTION_RUN_ID" ]]; then
+          namespace="$((ACTION_RUN_ID ^ (${ACTION_RUN_ATTEMPT:-0} << 48)))"
+        fi
+        if [[ -z "$namespace" ]]; then
+          namespace="$(date +%s)"
+        fi
+        if [[ ! "$namespace" =~ ^[0-9]+$ ]]; then
+          echo "namespace must be an unsigned integer: $namespace" >&2
+          exit 1
+        fi
+        echo "value=$namespace" >> "$GITHUB_OUTPUT"
+
     - name: Run load workload
       shell: bash
       env:
         WORKLOAD: ${{ steps.workload.outputs.path }}
         ENDPOINT: ${{ inputs.endpoint }}
+        WORKLOAD_NAMESPACE: ${{ steps.namespace.outputs.value }}
         LOAD_KEYS: ${{ inputs.load-keys }}
         LOAD_BATCH_SIZE: ${{ inputs.load-batch-size }}
         LOAD_CONCURRENCY: ${{ inputs.load-concurrency }}
@@ -150,6 +177,7 @@ runs:
         set -euo pipefail
         "$WORKLOAD" load \
           --url "$ENDPOINT" \
+          --namespace "$WORKLOAD_NAMESPACE" \
           --keys "$LOAD_KEYS" \
           --batch-size "$LOAD_BATCH_SIZE" \
           --concurrency "$LOAD_CONCURRENCY"
@@ -159,6 +187,7 @@ runs:
       env:
         WORKLOAD: ${{ steps.workload.outputs.path }}
         ENDPOINT: ${{ inputs.endpoint }}
+        WORKLOAD_NAMESPACE: ${{ steps.namespace.outputs.value }}
         BENCH_KEYS: ${{ inputs.bench-keys }}
         BENCH_OPS: ${{ inputs.bench-ops }}
         BENCH_CONCURRENCY: ${{ inputs.bench-concurrency }}
@@ -168,6 +197,7 @@ runs:
         set -euo pipefail
         "$WORKLOAD" bench \
           --url "$ENDPOINT" \
+          --namespace "$WORKLOAD_NAMESPACE" \
           --keys "$BENCH_KEYS" \
           --ops "$BENCH_OPS" \
           --concurrency "$BENCH_CONCURRENCY" \
@@ -180,14 +210,17 @@ runs:
       shell: bash
       env:
         BENCH_OPS: ${{ inputs.bench-ops }}
+        WORKLOAD_NAMESPACE: ${{ steps.namespace.outputs.value }}
       run: |
         set -euo pipefail
         python3 - "$RUNNER_TEMP/workload-bench-report.json" "$BENCH_OPS" <<'PY'
         import json
+        import os
         import sys
 
         path = sys.argv[1]
         expected_ops = int(sys.argv[2])
+        expected_namespace = int(os.environ["WORKLOAD_NAMESPACE"])
         with open(path, "r", encoding="utf-8") as f:
             report = json.load(f)
 
@@ -195,6 +228,7 @@ runs:
         assert report["operations"] == expected_ops
         assert report["errors"] == 0
         assert "config" in report
+        assert report["config"]["namespace"] == expected_namespace
         assert "seed" in report
         assert "latency_histograms" in report
         PY
@@ -234,6 +268,7 @@ runs:
 
         rows = [
             ("Endpoint", config["endpoint"]),
+            ("Namespace", config["namespace"]),
             ("Scenario", config["scenario"]),
             ("Seed", report["seed"]),
             ("Operations", report["operations"]),
