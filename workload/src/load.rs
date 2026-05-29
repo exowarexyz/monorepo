@@ -12,7 +12,7 @@ use exoware_sdk::keys::Key;
 
 use crate::client::{build_client, ClientConfig};
 use crate::keyspace::{default_run_namespace, Keyspace, DEFAULT_KEY_LEN};
-use crate::value::default_value_for_index;
+use crate::value::{value_for_index, DEFAULT_VALUE_SIZE};
 
 /// Load phase: insert keys via ingest API.
 #[derive(clap::Args, Debug)]
@@ -34,6 +34,9 @@ pub struct Args {
     /// Key namespace; pass the same value to bench to use this loaded keyspace.
     #[arg(long)]
     namespace: Option<u64>,
+    /// Size in bytes of generated values.
+    #[arg(long, default_value_t = DEFAULT_VALUE_SIZE)]
+    value_size: usize,
 }
 
 /// Validated load configuration independent of Clap.
@@ -43,6 +46,7 @@ pub struct Config {
     namespace: u64,
     keyspace: Keyspace,
     keys: u64,
+    value_size: usize,
     batch_size: usize,
     concurrency: usize,
 }
@@ -60,6 +64,7 @@ impl TryFrom<Args> for Config {
             namespace,
             keyspace: Keyspace::from_u64_namespace(namespace, args.key_len)?,
             keys: args.keys,
+            value_size: args.value_size,
             batch_size: args.batch_size,
             concurrency: args.concurrency,
         })
@@ -76,6 +81,7 @@ async fn run_load(config: Config) -> anyhow::Result<()> {
         namespace,
         keyspace,
         keys: total_keys,
+        value_size,
         batch_size,
         concurrency,
     } = config;
@@ -118,7 +124,7 @@ async fn run_load(config: Config) -> anyhow::Result<()> {
                 let batch_end = std::cmp::min(i + batch_size as u64, end_key);
                 let mut kvs: Vec<(Key, Vec<u8>)> = Vec::new();
                 for j in i..batch_end {
-                    kvs.push((keyspace.inserted_key(j)?, default_value_for_index(j)));
+                    kvs.push((keyspace.inserted_key(j)?, value_for_index(namespace, j, value_size)));
                 }
 
                 let refs: Vec<(&Key, &[u8])> = kvs.iter().map(|(k, v)| (k, v.as_slice())).collect();
@@ -171,6 +177,7 @@ mod tests {
             read_retry_attempts: 3,
             key_len: DEFAULT_KEY_LEN,
             namespace: Some(42),
+            value_size: DEFAULT_VALUE_SIZE,
         }
     }
 

@@ -32,7 +32,6 @@ use crate::ledger::{
     hex_encode, read_overlap_ledger, validate_overlap_ledger, write_overlap_ledger, OverlapLedger,
 };
 use crate::record::Record;
-use crate::report;
 use crate::value::{
     overlap_value_for_index, validate_value_size, value_for_index, DEFAULT_MAX_VALUE_SIZE,
     DEFAULT_VALUE_SIZE,
@@ -268,13 +267,17 @@ async fn run_standard_validation(
             cli.keys,
             cli.value_size,
             cli.range_page_size,
-            Some(min_sequence_number),
+            min_sequence_number,
             timeout,
             poll_interval,
             url,
         )
         .await?;
-        report::full_range_validation_complete(cli.keys);
+        tracing::info!(
+            inserted_keys = cli.keys,
+            mode = "full-range-verify",
+            "Validation completed successfully"
+        );
         return Ok(());
     }
 
@@ -304,7 +307,7 @@ async fn run_standard_validation(
     wait_for_all_visible(
         client,
         &records,
-        Some(min_sequence_number),
+        min_sequence_number,
         timeout,
         poll_interval,
         url,
@@ -314,7 +317,7 @@ async fn run_standard_validation(
         client,
         &records,
         &point_indices,
-        Some(min_sequence_number),
+        min_sequence_number,
         timeout,
         poll_interval,
         url,
@@ -324,7 +327,7 @@ async fn run_standard_validation(
         client,
         &keyspace,
         &missing_indices,
-        Some(min_sequence_number),
+        min_sequence_number,
         timeout,
         poll_interval,
         url,
@@ -334,18 +337,19 @@ async fn run_standard_validation(
         client,
         &sorted_records,
         &range_plans,
-        Some(min_sequence_number),
+        min_sequence_number,
         timeout,
         poll_interval,
         url,
     )
     .await?;
 
-    report::standard_validation_complete(
-        records.len(),
-        point_indices.len(),
-        missing_indices.len(),
-        range_plans.len(),
+    tracing::info!(
+        inserted_keys = records.len(),
+        point_samples = point_indices.len(),
+        missing_samples = missing_indices.len(),
+        range_samples = range_plans.len(),
+        "Validation completed successfully"
     );
 
     Ok(())
@@ -480,7 +484,12 @@ async fn run_overlap_ledger_write_mode(
         successful_writes,
         cli.overlap_min_writes
     );
-    report::overlap_ledger_writer_complete(namespace, successful_writes, ledger_path);
+    tracing::info!(
+        namespace,
+        successful_writes,
+        ledger_path,
+        "Overlap ledger writer completed successfully"
+    );
     Ok(())
 }
 
@@ -512,7 +521,7 @@ async fn run_overlap_ledger_verify_mode(
     wait_for_all_visible(
         client,
         &sorted_records,
-        Some(ledger.sequence_number),
+        ledger.sequence_number,
         timeout,
         poll_interval,
         url,
@@ -521,16 +530,18 @@ async fn run_overlap_ledger_verify_mode(
     wait_for_exact_range_match(
         client,
         &sorted_records,
-        Some(ledger.sequence_number),
+        RangeMode::Forward,
+        ledger.sequence_number,
         timeout,
         poll_interval,
         url,
     )
     .await?;
-    wait_for_exact_reverse_range_match(
+    wait_for_exact_range_match(
         client,
         &sorted_records,
-        Some(ledger.sequence_number),
+        RangeMode::Reverse,
+        ledger.sequence_number,
         timeout,
         poll_interval,
         url,
@@ -545,10 +556,11 @@ async fn run_overlap_ledger_verify_mode(
         url,
     )
     .await?;
-    report::overlap_ledger_verification_complete(
-        ledger.namespace,
-        sorted_records.len(),
-        ledger.successful_writes,
+    tracing::info!(
+        namespace = ledger.namespace,
+        expected_keys = sorted_records.len(),
+        successful_writes = ledger.successful_writes,
+        "Overlap ledger verification completed successfully"
     );
     Ok(())
 }
@@ -692,7 +704,8 @@ async fn ingest_refs_with_retry(
 async fn wait_for_exact_range_match(
     client: &StoreClient,
     expected_records: &[Record],
-    min_sequence_number: Option<u64>,
+    mode: RangeMode,
+    min_sequence_number: u64,
     timeout: Duration,
     poll_interval: Duration,
     query_url: &str,
@@ -704,36 +717,42 @@ async fn wait_for_exact_range_match(
         .last()
         .context("expected_records must not be empty for exact range match")?;
     let limit = expected_records.len().saturating_add(1);
+    // Reverse scans return rows highest-key-first, so compare against the reversed expectation.
+    let expected_order: Vec<&Record> = match mode {
+        RangeMode::Forward => expected_records.iter().collect(),
+        RangeMode::Reverse => expected_records.iter().rev().collect(),
+    };
     let deadline = Instant::now() + timeout;
     let mut attempt = 0u64;
 
     loop {
         attempt = attempt.saturating_add(1);
-        let range_result = match min_sequence_number {
-            Some(sequence) => {
-                client
-                    .query()
-                    .range_with_min_sequence_number(&first.key, &last.key, limit, sequence)
-                    .await
-            }
-            None => client.query().range(&first.key, &last.key, limit).await,
-        };
+        let range_result = client
+            .query()
+            .range_with_mode_and_min_sequence_number(
+                &first.key,
+                &last.key,
+                limit,
+                mode,
+                min_sequence_number,
+            )
+            .await;
         let detail = match range_result {
             Ok(rows) => {
                 if rows.len() != expected_records.len() {
                     format!(
-                        "range returned {} rows, expected {}",
+                        "{mode:?} range returned {} rows, expected {}",
                         rows.len(),
                         expected_records.len()
                     )
                 } else {
                     let mut mismatch = None;
                     for (idx, ((actual_key, actual_value), expected)) in
-                        rows.iter().zip(expected_records.iter()).enumerate()
+                        rows.iter().zip(expected_order.iter().copied()).enumerate()
                     {
                         if actual_key != &expected.key {
                             mismatch = Some(format!(
-                                "row {idx} key mismatch: expected {}, got {}",
+                                "{mode:?} row {idx} key mismatch: expected {}, got {}",
                                 hex_encode(&expected.key),
                                 hex_encode(actual_key)
                             ));
@@ -741,7 +760,7 @@ async fn wait_for_exact_range_match(
                         }
                         if actual_value.as_ref() != expected.value.as_slice() {
                             mismatch = Some(format!(
-                                "row {idx} value mismatch for key {}",
+                                "{mode:?} row {idx} value mismatch for key {}",
                                 hex_encode(&expected.key)
                             ));
                             break;
@@ -752,6 +771,7 @@ async fn wait_for_exact_range_match(
                     } else {
                         tracing::info!(
                             query_url = %query_url,
+                            mode = ?mode,
                             attempts = attempt,
                             rows = rows.len(),
                             "Exact overlap-ledger range match succeeded"
@@ -760,134 +780,24 @@ async fn wait_for_exact_range_match(
                     }
                 }
             }
-            Err(err) if is_transient_query_error(&err) => format!("transient range error: {err}"),
-            Err(err) => {
-                return Err(anyhow!("exact overlap-ledger range query failed: {err}"));
-            }
-        };
-
-        if Instant::now() >= deadline {
-            bail!(
-                "exact overlap-ledger range match timed out on query {} after {} attempts: {}",
-                query_url,
-                attempt,
-                detail
-            );
-        }
-        tokio::time::sleep(poll_interval).await;
-    }
-}
-
-async fn wait_for_exact_reverse_range_match(
-    client: &StoreClient,
-    expected_records: &[Record],
-    min_sequence_number: Option<u64>,
-    timeout: Duration,
-    poll_interval: Duration,
-    query_url: &str,
-) -> anyhow::Result<()> {
-    let first = expected_records
-        .first()
-        .context("expected_records must not be empty for reverse range match")?;
-    let last = expected_records
-        .last()
-        .context("expected_records must not be empty for reverse range match")?;
-    let limit = expected_records.len().saturating_add(1);
-    let deadline = Instant::now() + timeout;
-    let mut attempt = 0u64;
-
-    loop {
-        attempt = attempt.saturating_add(1);
-        let range_result = match min_sequence_number {
-            Some(sequence) => {
-                client
-                    .query()
-                    .range_with_mode_and_min_sequence_number(
-                        &first.key,
-                        &last.key,
-                        limit,
-                        RangeMode::Reverse,
-                        sequence,
-                    )
-                    .await
-            }
-            None => {
-                client
-                    .query()
-                    .range_with_mode(&first.key, &last.key, limit, RangeMode::Reverse)
-                    .await
-            }
-        };
-        let detail = match range_result {
-            Ok(rows) => {
-                if rows.len() != expected_records.len() {
-                    format!(
-                        "reverse range returned {} rows, expected {}",
-                        rows.len(),
-                        expected_records.len()
-                    )
-                } else {
-                    let mut mismatch = None;
-                    for (idx, ((actual_key, actual_value), expected)) in
-                        rows.iter().zip(expected_records.iter().rev()).enumerate()
-                    {
-                        if actual_key != &expected.key {
-                            mismatch = Some(format!(
-                                "reverse row {} key mismatch: expected {}, got {}",
-                                idx,
-                                hex_encode(&expected.key),
-                                hex_encode(actual_key)
-                            ));
-                            break;
-                        }
-                        if actual_value.as_ref() != expected.value.as_slice() {
-                            mismatch = Some(format!(
-                                "reverse row {} value mismatch for key {}",
-                                idx,
-                                hex_encode(&expected.key)
-                            ));
-                            break;
-                        }
-                    }
-                    if let Some(mismatch) = mismatch {
-                        mismatch
-                    } else {
-                        tracing::info!(
-                            query_url = %query_url,
-                            attempts = attempt,
-                            rows = rows.len(),
-                            "Reverse range matched exact expected record set"
-                        );
-                        return Ok(());
-                    }
-                }
-            }
             Err(err) if is_transient_query_error(&err) => {
-                format!("reverse range transient failure: {err}")
+                format!("{mode:?} transient range error: {err}")
             }
             Err(err) => {
                 return Err(err).with_context(|| {
-                    format!(
-                        "reverse exact-range verification failed against {}",
-                        query_url
-                    )
+                    format!("exact {mode:?} overlap-ledger range query failed against {query_url}")
                 });
             }
         };
+
         if Instant::now() >= deadline {
             bail!(
-                "reverse exact-range timeout on {} after {} attempts: {}",
+                "exact {mode:?} overlap-ledger range match timed out on query {} after {} attempts: {}",
                 query_url,
                 attempt,
                 detail
             );
         }
-        tracing::info!(
-            query_url = %query_url,
-            attempts = attempt,
-            detail = %detail,
-            "Reverse exact-range retry"
-        );
         tokio::time::sleep(poll_interval).await;
     }
 }
@@ -1111,7 +1021,7 @@ fn is_transient_query_error(err: &ClientError) -> bool {
 async fn wait_for_all_visible(
     client: &StoreClient,
     records: &[Record],
-    min_sequence_number: Option<u64>,
+    min_sequence_number: u64,
     timeout: Duration,
     poll_interval: Duration,
     query_url: &str,
@@ -1131,15 +1041,10 @@ async fn wait_for_all_visible(
         let mut remaining = Vec::new();
         for idx in pending {
             let record = &records[idx];
-            let get_result = match min_sequence_number {
-                Some(sequence) => {
-                    client
-                        .query()
-                        .get_with_min_sequence_number(&record.key, sequence)
-                        .await
-                }
-                None => client.query().get(&record.key).await,
-            };
+            let get_result = client
+                .query()
+                .get_with_min_sequence_number(&record.key, min_sequence_number)
+                .await;
             match get_result {
                 Ok(Some(value)) => {
                     if value.as_ref() != record.value.as_slice() {
@@ -1205,7 +1110,7 @@ async fn wait_for_all_visible_via_range(
     total_keys: u64,
     value_size: usize,
     page_size: usize,
-    min_sequence_number: Option<u64>,
+    min_sequence_number: u64,
     timeout: Duration,
     poll_interval: Duration,
     query_url: &str,
@@ -1288,7 +1193,7 @@ async fn scan_visible_prefix_via_range(
     total_keys: u64,
     value_size: usize,
     page_size: usize,
-    min_sequence_number: Option<u64>,
+    min_sequence_number: u64,
 ) -> Result<RangeVisibilityScan, RangeScanError> {
     if total_keys == 0 {
         return Ok(RangeVisibilityScan {
@@ -1308,16 +1213,11 @@ async fn scan_visible_prefix_via_range(
     let mut pages_scanned = 0u64;
 
     loop {
-        let rows = match min_sequence_number {
-            Some(sequence) => {
-                client
-                    .query()
-                    .range_with_min_sequence_number(&next_start, &end_key, page_size, sequence)
-                    .await
-            }
-            None => client.query().range(&next_start, &end_key, page_size).await,
-        }
-        .map_err(|err| RangeScanError::Transient(anyhow!(err)))?;
+        let rows = client
+            .query()
+            .range_with_min_sequence_number(&next_start, &end_key, page_size, min_sequence_number)
+            .await
+            .map_err(|err| RangeScanError::Transient(anyhow!(err)))?;
         pages_scanned += 1;
 
         if rows.is_empty() {
@@ -1406,7 +1306,7 @@ async fn run_point_samples(
     client: &StoreClient,
     records: &[Record],
     point_indices: &[usize],
-    min_sequence_number: Option<u64>,
+    min_sequence_number: u64,
     timeout: Duration,
     poll_interval: Duration,
     query_url: &str,
@@ -1420,15 +1320,10 @@ async fn run_point_samples(
     for idx in point_indices {
         let record = &records[*idx];
         loop {
-            let get_result = match min_sequence_number {
-                Some(sequence) => {
-                    client
-                        .query()
-                        .get_with_min_sequence_number(&record.key, sequence)
-                        .await
-                }
-                None => client.query().get(&record.key).await,
-            };
+            let get_result = client
+                .query()
+                .get_with_min_sequence_number(&record.key, min_sequence_number)
+                .await;
             match get_result {
                 Ok(Some(value)) => {
                     if value.as_ref() != record.value.as_slice() {
@@ -1483,7 +1378,7 @@ async fn run_missing_samples(
     client: &StoreClient,
     keyspace: &Keyspace,
     missing_indices: &[u64],
-    min_sequence_number: Option<u64>,
+    min_sequence_number: u64,
     timeout: Duration,
     poll_interval: Duration,
     query_url: &str,
@@ -1497,15 +1392,10 @@ async fn run_missing_samples(
     for idx in missing_indices {
         let key = keyspace.missing_key(*idx)?;
         loop {
-            let get_result = match min_sequence_number {
-                Some(sequence) => {
-                    client
-                        .query()
-                        .get_with_min_sequence_number(&key, sequence)
-                        .await
-                }
-                None => client.query().get(&key).await,
-            };
+            let get_result = client
+                .query()
+                .get_with_min_sequence_number(&key, min_sequence_number)
+                .await;
             match get_result {
                 Ok(result) => {
                     if result.is_some() {
@@ -1553,7 +1443,7 @@ async fn run_range_samples(
     client: &StoreClient,
     sorted_records: &[Record],
     range_plans: &[RangePlan],
-    min_sequence_number: Option<u64>,
+    min_sequence_number: u64,
     timeout: Duration,
     poll_interval: Duration,
     query_url: &str,
@@ -1576,42 +1466,16 @@ async fn run_range_samples(
                 let end = &sorted_records[check.plan.end_idx].key;
                 let expected =
                     expected_range_slice_for_mode(sorted_records, check.plan, check.mode);
-                let range_result = match check.mode {
-                    RangeMode::Forward => match min_sequence_number {
-                        Some(sequence) => {
-                            client
-                                .query()
-                                .range_with_min_sequence_number(
-                                    start,
-                                    end,
-                                    check.plan.limit,
-                                    sequence,
-                                )
-                                .await
-                        }
-                        None => client.query().range(start, end, check.plan.limit).await,
-                    },
-                    RangeMode::Reverse => match min_sequence_number {
-                        Some(sequence) => {
-                            client
-                                .query()
-                                .range_with_mode_and_min_sequence_number(
-                                    start,
-                                    end,
-                                    check.plan.limit,
-                                    RangeMode::Reverse,
-                                    sequence,
-                                )
-                                .await
-                        }
-                        None => {
-                            client
-                                .query()
-                                .range_with_mode(start, end, check.plan.limit, RangeMode::Reverse)
-                                .await
-                        }
-                    },
-                };
+                let range_result = client
+                    .query()
+                    .range_with_mode_and_min_sequence_number(
+                        start,
+                        end,
+                        check.plan.limit,
+                        check.mode,
+                        min_sequence_number,
+                    )
+                    .await;
                 let actual = match range_result {
                     Ok(rows) => rows,
                     Err(err) if is_transient_query_error(&err) => {

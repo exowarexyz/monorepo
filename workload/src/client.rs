@@ -11,8 +11,6 @@ const DEFAULT_MAX_BACKOFF_MS: u64 = 1_000;
 pub struct ClientConfig {
     pub endpoint: String,
     pub read_retry_attempts: usize,
-    pub initial_backoff_ms: u64,
-    pub max_backoff_ms: u64,
 }
 
 impl ClientConfig {
@@ -21,8 +19,6 @@ impl ClientConfig {
         let config = Self {
             endpoint: normalize_endpoint(&endpoint.into()),
             read_retry_attempts,
-            initial_backoff_ms: DEFAULT_INITIAL_BACKOFF_MS,
-            max_backoff_ms: DEFAULT_MAX_BACKOFF_MS,
         };
         validate_config(&config)?;
         Ok(config)
@@ -39,8 +35,8 @@ pub fn build_client(config: &ClientConfig) -> anyhow::Result<StoreClient> {
         .retry_config(
             RetryConfig::standard()
                 .with_max_attempts(config.read_retry_attempts)
-                .with_initial_backoff(Duration::from_millis(config.initial_backoff_ms))
-                .with_max_backoff(Duration::from_millis(config.max_backoff_ms)),
+                .with_initial_backoff(Duration::from_millis(DEFAULT_INITIAL_BACKOFF_MS))
+                .with_max_backoff(Duration::from_millis(DEFAULT_MAX_BACKOFF_MS)),
         )
         .build()?)
 }
@@ -104,8 +100,6 @@ mod tests {
         let config = ClientConfig {
             endpoint: "http://[::1".to_string(),
             read_retry_attempts: 3,
-            initial_backoff_ms: DEFAULT_INITIAL_BACKOFF_MS,
-            max_backoff_ms: DEFAULT_MAX_BACKOFF_MS,
         };
         let err = build_client(&config).expect_err("malformed endpoint should be rejected");
         assert!(err.to_string().contains("invalid endpoint URL"));

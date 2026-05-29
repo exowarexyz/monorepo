@@ -23,13 +23,13 @@ Run workload commands from another terminal. The examples below use the default 
 Load deterministic records:
 
 ```bash
-cargo run -p exoware-workload -- load --namespace 2026052901 --keys 10000 --batch-size 100 --concurrency 4
+cargo run -p exoware-workload -- load --namespace 2026052901 --keys 10000 --value-size 256 --batch-size 100 --concurrency 4
 ```
 
 Run a benchmark:
 
 ```bash
-cargo run -p exoware-workload -- bench --namespace 2026052901 --keys 10000 --ops 50000 --concurrency 8 --scenario balanced --output bench-report.json
+cargo run -p exoware-workload -- bench --namespace 2026052901 --keys 10000 --value-size 256 --ops 50000 --concurrency 8 --scenario balanced --output bench-report.json
 ```
 
 Replay a benchmark from a previous JSON report:
@@ -56,6 +56,8 @@ Benchmark JSON reports include the normalized config, seed, counters, and per-op
 
 `load` and `bench` use run-specific namespaces by default so independent runs do not reuse the same physical keys on persistent stores. Pass the same `--namespace` to both commands when a benchmark should read from a keyspace written by `load`.
 
+`load`, `bench`, and `validate` accept `--value-size` (bytes, default 160) to control generated value size. Pass the same `--value-size` to `load` and a reading `bench` so writes appended during the benchmark match the loaded data.
+
 ## Benchmark Manifests
 
 `workload bench --manifest <path>` accepts the normalized `config` and `seed` fields from a benchmark JSON report, so a run can be replayed without reconstructing CLI flags. A minimal manifest has this shape:
@@ -79,6 +81,7 @@ Benchmark JSON reports include the normalized config, seed, counters, and per-op
       "zipf_theta": 0.99
     },
     "key_len": 48,
+    "value_size": 256,
     "keyspace_layout_version": 1,
     "value_generator_version": 1,
     "read_retry_attempts": 3
