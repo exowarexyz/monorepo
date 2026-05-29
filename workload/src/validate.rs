@@ -27,6 +27,7 @@ use rand::{Rng, SeedableRng};
 
 use crate::client::{build_client, ClientConfig};
 use crate::deterministic::mix64;
+use crate::ingest::{ingest_with_retry, is_transient_ingest_error};
 use crate::keyspace::{Keyspace, DEFAULT_KEY_LEN};
 use crate::ledger::{
     hex_encode, read_overlap_ledger, validate_overlap_ledger, write_overlap_ledger, OverlapLedger,
@@ -656,51 +657,6 @@ fn build_overlap_records(
     Ok(records)
 }
 
-async fn ingest_refs_with_retry(
-    client: &StoreClient,
-    refs: &[(&Key, &[u8])],
-    ingest_retry_attempts: usize,
-    ingest_retry_backoff: Duration,
-    label: &str,
-) -> anyhow::Result<u64> {
-    let mut wal_seq = None;
-    let mut last_err: Option<ClientError> = None;
-    for attempt in 1..=ingest_retry_attempts {
-        match client.ingest().put(refs).await {
-            Ok(token) => {
-                wal_seq = Some(token);
-                break;
-            }
-            Err(err) if is_transient_ingest_error(&err) && attempt < ingest_retry_attempts => {
-                tracing::warn!(
-                    label,
-                    attempt,
-                    code = ?err.rpc_code(),
-                    error = %err,
-                    "transient ingest failure during validation; retrying"
-                );
-                tokio::time::sleep(ingest_retry_backoff).await;
-            }
-            Err(err) => {
-                last_err = Some(err);
-                break;
-            }
-        }
-    }
-    match wal_seq {
-        Some(token) => Ok(token),
-        None => {
-            let err_text = last_err
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| "ingest exhausted retries without success".to_string());
-            Err(anyhow!(
-                "ingest failed for {label} after {} attempts: {err_text}",
-                ingest_retry_attempts
-            ))
-        }
-    }
-}
-
 async fn wait_for_exact_range_match(
     client: &StoreClient,
     expected_records: &[Record],
@@ -937,14 +893,15 @@ async fn run_write_phase(
             .iter()
             .map(|record| (&record.key, record.value.as_slice()))
             .collect();
-        last_sequence_number = ingest_refs_with_retry(
+        last_sequence_number = ingest_with_retry(
             client,
             &refs,
             ingest_retry_attempts,
             ingest_retry_backoff,
             &format!("batch index {chunk_idx}"),
         )
-        .await?;
+        .await?
+        .sequence_number;
     }
     tracing::info!("Write phase complete");
     Ok(last_sequence_number)
@@ -981,27 +938,20 @@ async fn run_write_phase_generated(
             ));
         }
         let refs: Vec<(&Key, &[u8])> = kvs.iter().map(|(k, v)| (k, v.as_slice())).collect();
-        last_sequence_number = ingest_refs_with_retry(
+        last_sequence_number = ingest_with_retry(
             client,
             &refs,
             ingest_retry_attempts,
             ingest_retry_backoff,
             &format!("generated batch index {chunk_idx}"),
         )
-        .await?;
+        .await?
+        .sequence_number;
         chunk_idx += 1;
         start_idx = end_idx;
     }
     tracing::info!("Generated write phase complete");
     Ok(last_sequence_number)
-}
-
-fn is_transient_ingest_code(code: ErrorCode) -> bool {
-    matches!(code, ErrorCode::ResourceExhausted | ErrorCode::Unavailable)
-}
-
-fn is_transient_ingest_error(err: &ClientError) -> bool {
-    err.rpc_code().is_some_and(is_transient_ingest_code)
 }
 
 fn is_transient_query_code(code: ErrorCode) -> bool {
@@ -1855,13 +1805,6 @@ mod tests {
             overlap_write_interval_ms: 0,
             overlap_min_writes: 1,
         }
-    }
-
-    #[test]
-    fn transient_ingest_codes_cover_connect_transients() {
-        assert!(is_transient_ingest_code(ErrorCode::ResourceExhausted));
-        assert!(is_transient_ingest_code(ErrorCode::Unavailable));
-        assert!(!is_transient_ingest_code(ErrorCode::InvalidArgument));
     }
 
     #[test]
