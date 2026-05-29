@@ -21,6 +21,12 @@ const LATENCY_BUCKET_UPPER_BOUNDS_US: [u64; 15] = [
     1_000_000, 2_500_000, 5_000_000,
 ];
 
+// Reports and manifests written before `value_size` existed omit the field;
+// default it to the generator default so they still parse and replay.
+fn default_value_size() -> usize {
+    crate::value::DEFAULT_VALUE_SIZE
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct BenchConfig {
     pub endpoint: String,
@@ -31,6 +37,8 @@ pub struct BenchConfig {
     pub scenario: Scenario,
     pub workload: WorkloadSpec,
     pub key_len: usize,
+    #[serde(default = "default_value_size")]
+    pub value_size: usize,
     pub keyspace_layout_version: u16,
     pub value_generator_version: u16,
     pub read_retry_attempts: usize,
@@ -231,6 +239,7 @@ impl fmt::Display for BenchReport {
         writeln!(f, "  scenario: {:?}", self.config.scenario)?;
         writeln!(f, "  key_space: {}", self.config.key_space)?;
         writeln!(f, "  key_len: {}", self.config.key_len)?;
+        writeln!(f, "  value_size: {}", self.config.value_size)?;
         writeln!(
             f,
             "  keyspace_layout_version: {}",
@@ -440,51 +449,6 @@ fn temporary_output_path(path: &Path) -> PathBuf {
     path.with_file_name(filename)
 }
 
-pub fn standard_validation_complete(
-    inserted_keys: usize,
-    point_samples: usize,
-    missing_samples: usize,
-    range_samples: usize,
-) {
-    tracing::info!(
-        inserted_keys,
-        point_samples,
-        missing_samples,
-        range_samples,
-        "Validation completed successfully"
-    );
-}
-
-pub fn full_range_validation_complete(inserted_keys: u64) {
-    tracing::info!(
-        inserted_keys,
-        mode = "full-range-verify",
-        "Validation completed successfully"
-    );
-}
-
-pub fn overlap_ledger_writer_complete(namespace: u64, successful_writes: u64, ledger_path: &str) {
-    tracing::info!(
-        namespace,
-        successful_writes,
-        ledger_path,
-        "Overlap ledger writer completed successfully"
-    );
-}
-
-pub fn overlap_ledger_verification_complete(
-    namespace: u64,
-    expected_keys: usize,
-    successful_writes: u64,
-) {
-    tracing::info!(
-        namespace,
-        expected_keys,
-        successful_writes,
-        "Overlap ledger verification completed successfully"
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,6 +501,7 @@ mod tests {
                     zipf_theta: 0.99,
                 },
                 key_len: 48,
+                value_size: crate::value::DEFAULT_VALUE_SIZE,
                 keyspace_layout_version: crate::keyspace::KEYSPACE_LAYOUT_VERSION,
                 value_generator_version: crate::value::VALUE_GENERATOR_VERSION,
                 read_retry_attempts: 3,
@@ -703,5 +668,28 @@ mod tests {
         assert!(err
             .to_string()
             .contains("unsupported benchmark manifest schema_version"));
+    }
+
+    #[test]
+    fn manifest_without_value_size_defaults_to_generator_default() {
+        // Manifests predate `value_size`, so a config missing the field must still parse and
+        // replay at the generator default rather than failing deserialization.
+        let report = sample_report();
+        let manifest = BenchManifest::new(report.config.clone(), report.seed);
+        let mut value = serde_json::to_value(&manifest).expect("manifest should serialize");
+        value["config"]
+            .as_object_mut()
+            .expect("config should be a JSON object")
+            .remove("value_size");
+
+        let path = std::env::temp_dir().join(format!(
+            "exoware-workload-manifest-no-value-size-{}-{}.json",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::write(&path, value.to_string()).expect("manifest fixture should write");
+        let parsed = read_bench_manifest_json(&path).expect("legacy manifest should parse");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(parsed.config.value_size, crate::value::DEFAULT_VALUE_SIZE);
     }
 }

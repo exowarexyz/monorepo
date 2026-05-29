@@ -25,11 +25,6 @@ pub fn validate_value_size(value_size: usize, max_value_size: usize) -> anyhow::
     Ok(())
 }
 
-/// Returns the default deterministic value for load/benchmark writes.
-pub fn default_value_for_index(index: u64) -> Vec<u8> {
-    value_for_index(0, index, DEFAULT_VALUE_SIZE)
-}
-
 /// Returns a deterministic value for a namespace/index pair.
 ///
 /// The bytes are stable for reproducibility, but are not intended to be random
@@ -63,11 +58,6 @@ mod tests {
         let value_b = value_for_index(7, 42, 160);
         assert_eq!(value_a, value_b);
         assert_eq!(value_a.len(), 160);
-    }
-
-    #[test]
-    fn default_value_generation_uses_default_size() {
-        assert_eq!(default_value_for_index(42).len(), DEFAULT_VALUE_SIZE);
     }
 
     #[test]

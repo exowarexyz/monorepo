@@ -213,29 +213,13 @@ pub fn resolve_mix(
 ) -> anyhow::Result<WorkloadMix> {
     match (read_ratio, write_ratio, scan_ratio) {
         (None, None, None) => Ok(scenario.mix()),
-        (Some(read_ratio), Some(write_ratio), Some(scan_ratio)) => {
-            ensure!(
-                (0.0..=1.0).contains(&read_ratio),
-                "--read-ratio must be in [0, 1]"
-            );
-            ensure!(
-                (0.0..=1.0).contains(&write_ratio),
-                "--write-ratio must be in [0, 1]"
-            );
-            ensure!(
-                (0.0..=1.0).contains(&scan_ratio),
-                "--scan-ratio must be in [0, 1]"
-            );
-            ensure!(
-                approx_eq(read_ratio + write_ratio + scan_ratio, 1.0, 1e-9),
-                "custom ratios must sum to 1.0"
-            );
-            Ok(WorkloadMix {
-                read_ratio,
-                write_ratio,
-                scan_ratio,
-            })
-        }
+        // Range and sum validation runs in `WorkloadSpec::validate` once the mix is built, so
+        // only the all-or-nothing override shape is enforced here.
+        (Some(read_ratio), Some(write_ratio), Some(scan_ratio)) => Ok(WorkloadMix {
+            read_ratio,
+            write_ratio,
+            scan_ratio,
+        }),
         _ => anyhow::bail!(
             "custom ratio override requires all of --read-ratio, --write-ratio, and --scan-ratio"
         ),

@@ -20,7 +20,7 @@ use crate::report::{
     print_bench_report, read_bench_manifest_json, write_bench_report_json, BenchConfig,
     BenchManifest, BenchReport, LatencyHistogramsRecorder,
 };
-use crate::value::{default_value_for_index, VALUE_GENERATOR_VERSION};
+use crate::value::{value_for_index, DEFAULT_VALUE_SIZE, VALUE_GENERATOR_VERSION};
 use crate::workload::{
     resolve_mix, worker_operation_count, KeyDistribution, Operation, Scenario, WorkerPlan,
     WorkloadSpec, DEFAULT_BENCH_RNG_SEED,
@@ -49,7 +49,8 @@ pub struct Args {
             "rng_seed",
             "read_retry_attempts",
             "key_len",
-            "namespace"
+            "namespace",
+            "value_size"
         ]
     )]
     manifest: Option<PathBuf>,
@@ -100,6 +101,9 @@ pub struct Args {
     /// Key namespace; use the same value as load for a preloaded keyspace.
     #[arg(long)]
     namespace: Option<u64>,
+    /// Size in bytes of generated values written by ingest operations.
+    #[arg(long, default_value_t = DEFAULT_VALUE_SIZE)]
+    value_size: usize,
     /// Emit periodic `Benchmark progress` logs every N seconds (0 = off).
     #[arg(long, default_value_t = 10)]
     progress_interval_secs: u64,
@@ -115,6 +119,7 @@ pub struct Config {
     namespace: u64,
     keyspace: Keyspace,
     initial_keys: u64,
+    value_size: usize,
     total_ops: u64,
     concurrency: usize,
     scenario: Scenario,
@@ -159,6 +164,7 @@ impl TryFrom<Args> for Config {
             namespace,
             keyspace: Keyspace::from_u64_namespace(namespace, args.key_len)?,
             initial_keys: args.keys,
+            value_size: args.value_size,
             total_ops: args.ops,
             concurrency: args.concurrency,
             scenario: args.scenario,
@@ -209,6 +215,7 @@ impl Config {
                 manifest.config.key_len,
             )?,
             initial_keys: manifest.config.key_space,
+            value_size: manifest.config.value_size,
             total_ops: manifest.config.total_ops,
             concurrency: manifest.config.concurrency,
             scenario: manifest.config.scenario,
@@ -230,6 +237,7 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
         namespace,
         keyspace,
         initial_keys,
+        value_size,
         total_ops,
         concurrency,
         scenario,
@@ -249,6 +257,7 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
         scenario,
         workload,
         key_len: keyspace.key_len,
+        value_size,
         keyspace_layout_version: KEYSPACE_LAYOUT_VERSION,
         value_generator_version: VALUE_GENERATOR_VERSION,
         read_retry_attempts: client_config.read_retry_attempts,
@@ -348,7 +357,7 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
                     Operation::Write => {
                         let write_idx = next_write_index.fetch_add(1, Ordering::Relaxed);
                         let key = keyspace.inserted_key(write_idx)?;
-                        let value = default_value_for_index(write_idx);
+                        let value = value_for_index(namespace, write_idx, value_size);
 
                         let request_start = Instant::now();
                         let result = client.ingest().put(&[(&key, &value)]).await;
@@ -465,6 +474,7 @@ mod tests {
                 )
                 .unwrap(),
                 key_len: DEFAULT_KEY_LEN,
+                value_size: DEFAULT_VALUE_SIZE,
                 keyspace_layout_version: KEYSPACE_LAYOUT_VERSION,
                 value_generator_version: VALUE_GENERATOR_VERSION,
                 read_retry_attempts: 5,
@@ -493,6 +503,7 @@ mod tests {
             read_retry_attempts: 3,
             key_len: DEFAULT_KEY_LEN,
             namespace: Some(42),
+            value_size: DEFAULT_VALUE_SIZE,
             progress_interval_secs: 10,
             output: None,
         }
