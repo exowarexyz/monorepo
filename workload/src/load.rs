@@ -157,7 +157,10 @@ async fn run_load(config: Config) -> anyhow::Result<()> {
                 let batch_end = std::cmp::min(i + batch_size as u64, end_key);
                 let mut kvs: Vec<(Key, Vec<u8>)> = Vec::new();
                 for j in i..batch_end {
-                    kvs.push((keyspace.inserted_key(j)?, value_for_index(namespace, j, value_size)));
+                    kvs.push((
+                        keyspace.inserted_key(j)?,
+                        value_for_index(namespace, j, value_size),
+                    ));
                 }
 
                 let refs: Vec<(&Key, &[u8])> = kvs.iter().map(|(k, v)| (k, v.as_slice())).collect();
@@ -178,7 +181,8 @@ async fn run_load(config: Config) -> anyhow::Result<()> {
                     Err(e) => {
                         tracing::debug!("{e}");
                         errors.fetch_add(1, Ordering::Relaxed);
-                        *last_error.lock().expect("last_error mutex poisoned") = Some(e.to_string());
+                        *last_error.lock().expect("last_error mutex poisoned") =
+                            Some(e.to_string());
                     }
                 }
 
@@ -202,7 +206,11 @@ async fn run_load(config: Config) -> anyhow::Result<()> {
                     break;
                 }
                 let elapsed = start.elapsed().as_secs_f64();
-                let rate = if elapsed > 0.0 { loaded as f64 / elapsed } else { 0.0 };
+                let rate = if elapsed > 0.0 {
+                    loaded as f64 / elapsed
+                } else {
+                    0.0
+                };
                 let pct = (loaded as f64 / total_keys as f64 * 100.0).min(100.0);
                 tracing::info!(
                     keys_loaded = loaded,
@@ -249,7 +257,10 @@ async fn run_load(config: Config) -> anyhow::Result<()> {
     // `load` exists to produce a complete keyspace for later benchmarking, so a short write is a
     // failure of the command's purpose, not just a counter: surface it as a non-zero exit.
     if loaded < total_keys {
-        let last_error = last_error.lock().expect("last_error mutex poisoned").clone();
+        let last_error = last_error
+            .lock()
+            .expect("last_error mutex poisoned")
+            .clone();
         anyhow::bail!(
             "load incomplete: wrote {loaded} of {total_keys} requested keys ({failed} missing) across {errs} failed ingest batches; last error: {}",
             last_error.as_deref().unwrap_or("none captured")
