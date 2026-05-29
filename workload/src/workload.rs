@@ -85,10 +85,12 @@ impl Scenario {
                 write_ratio: 0.05,
                 scan_ratio: 0.00,
             },
+            // Read-dominant with meaningful writes and a modest scan share, so the default mix
+            // exercises every read path (point, ingest, range) rather than skipping scans.
             Scenario::Balanced => WorkloadMix {
-                read_ratio: 0.70,
+                read_ratio: 0.60,
                 write_ratio: 0.30,
-                scan_ratio: 0.00,
+                scan_ratio: 0.10,
             },
             Scenario::WriteHeavy => WorkloadMix {
                 read_ratio: 0.20,

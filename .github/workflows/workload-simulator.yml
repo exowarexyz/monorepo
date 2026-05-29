@@ -76,8 +76,10 @@ jobs:
         with:
           endpoint: http://127.0.0.1:10000
           workload-bin: ${{ steps.bins.outputs.workload }}
-          # Tag the report with the PR head commit (not the ephemeral merge SHA) so an
-          # uploaded artifact is unambiguously tied to the commit it was produced from.
+          # Uses the default `balanced` scenario, which now mixes reads, writes, and scans.
+          # Stamp the PR head commit (not the ephemeral merge SHA) into the report, summary, and
+          # artifact name so results are unambiguously tied to the commit they came from.
+          commit: ${{ github.event.pull_request.head.sha || github.sha }}
           artifact-name: workload-benchmark-report-${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Print simulator log on failure
