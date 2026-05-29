@@ -15,7 +15,7 @@ use chrono::Utc;
 use tokio::time::MissedTickBehavior;
 
 use crate::client::{build_client, ClientConfig};
-use crate::keyspace::{Keyspace, DEFAULT_KEY_LEN, KEYSPACE_LAYOUT_VERSION};
+use crate::keyspace::{default_run_namespace, Keyspace, DEFAULT_KEY_LEN, KEYSPACE_LAYOUT_VERSION};
 use crate::report::{
     print_bench_report, read_bench_manifest_json, write_bench_report_json, BenchConfig,
     BenchManifest, BenchReport, LatencyHistogramsRecorder,
@@ -48,7 +48,8 @@ pub struct Args {
             "scan_ratio",
             "rng_seed",
             "read_retry_attempts",
-            "key_len"
+            "key_len",
+            "namespace"
         ]
     )]
     manifest: Option<PathBuf>,
@@ -96,6 +97,9 @@ pub struct Args {
     /// Physical key length for generated workload keys.
     #[arg(long, default_value_t = DEFAULT_KEY_LEN)]
     key_len: usize,
+    /// Key namespace; use the same value as load for a preloaded keyspace.
+    #[arg(long)]
+    namespace: Option<u64>,
     /// Emit periodic `Benchmark progress` logs every N seconds (0 = off).
     #[arg(long, default_value_t = 10)]
     progress_interval_secs: u64,
@@ -108,6 +112,7 @@ pub struct Args {
 #[derive(Debug)]
 pub struct Config {
     client: ClientConfig,
+    namespace: u64,
     keyspace: Keyspace,
     initial_keys: u64,
     total_ops: u64,
@@ -139,6 +144,7 @@ impl TryFrom<Args> for Config {
         )?;
         ensure!(args.concurrency > 0, "--concurrency must be > 0");
         ensure!(args.keys > 0, "--keys must be > 0");
+        let namespace = args.namespace.unwrap_or_else(default_run_namespace);
         let workload = WorkloadSpec::new(
             mix,
             args.scan_length,
@@ -150,7 +156,8 @@ impl TryFrom<Args> for Config {
 
         Ok(Self {
             client: ClientConfig::new(args.url, args.read_retry_attempts)?,
-            keyspace: Keyspace::unnamespaced(args.key_len)?,
+            namespace,
+            keyspace: Keyspace::from_u64_namespace(namespace, args.key_len)?,
             initial_keys: args.keys,
             total_ops: args.ops,
             concurrency: args.concurrency,
@@ -196,7 +203,11 @@ impl Config {
                 manifest.config.endpoint,
                 manifest.config.read_retry_attempts,
             )?,
-            keyspace: Keyspace::unnamespaced(manifest.config.key_len)?,
+            namespace: manifest.config.namespace,
+            keyspace: Keyspace::from_u64_namespace(
+                manifest.config.namespace,
+                manifest.config.key_len,
+            )?,
             initial_keys: manifest.config.key_space,
             total_ops: manifest.config.total_ops,
             concurrency: manifest.config.concurrency,
@@ -216,6 +227,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 async fn run_workload(config: Config) -> anyhow::Result<()> {
     let Config {
         client: client_config,
+        namespace,
         keyspace,
         initial_keys,
         total_ops,
@@ -230,6 +242,7 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
     let client = Arc::new(build_client(&client_config)?);
     let report_config = BenchConfig {
         endpoint: client_config.endpoint.clone(),
+        namespace,
         key_space: initial_keys,
         total_ops,
         concurrency,
@@ -259,6 +272,7 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
         key_space = initial_keys,
         total_ops,
         concurrency,
+        namespace,
         scenario = ?scenario,
         read_ratio = workload.mix.read_ratio,
         write_ratio = workload.mix.write_ratio,
@@ -433,6 +447,7 @@ mod tests {
             BenchConfig {
                 endpoint: "http://localhost:10000/".to_string(),
                 key_space: 1_000,
+                namespace: 42,
                 total_ops: 10_000,
                 concurrency: 4,
                 scenario: Scenario::ScanHeavy,
@@ -477,6 +492,7 @@ mod tests {
             rng_seed: DEFAULT_BENCH_RNG_SEED,
             read_retry_attempts: 3,
             key_len: DEFAULT_KEY_LEN,
+            namespace: Some(42),
             progress_interval_secs: 10,
             output: None,
         }
@@ -494,6 +510,19 @@ mod tests {
         args.key_len = 24;
         let config = Config::try_from(args).expect("bench args should be valid");
         assert_eq!(config.keyspace.key_len, 24);
+    }
+
+    #[test]
+    fn config_uses_namespace() {
+        let config = Config::try_from(sample_args()).expect("bench args should be valid");
+        assert_eq!(config.namespace, 42);
+        assert_eq!(
+            config.keyspace.inserted_key(0).unwrap(),
+            Keyspace::from_u64_namespace(42, DEFAULT_KEY_LEN)
+                .unwrap()
+                .inserted_key(0)
+                .unwrap()
+        );
     }
 
     #[test]
@@ -544,6 +573,7 @@ mod tests {
             .expect("manifest should parse");
 
         assert_eq!(config.client.endpoint, "http://localhost:10000");
+        assert_eq!(config.namespace, 42);
         assert_eq!(config.initial_keys, 1_000);
         assert_eq!(config.total_ops, 10_000);
         assert_eq!(config.concurrency, 4);

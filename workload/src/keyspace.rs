@@ -1,3 +1,5 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use anyhow::ensure;
 use exoware_sdk::keys::{validate_key_size, Key};
 
@@ -15,6 +17,16 @@ const MISSING_KEY_DOMAIN: u8 = 0xF0;
 const NAMESPACE_LEN_BYTES: usize = 1;
 const DOMAIN_BYTES: usize = 1;
 const INDEX_BYTES: usize = 8;
+
+/// Defaults are run-specific so independent runs against persistent stores do
+/// not reuse the same physical keys unless the caller opts into a namespace.
+pub fn default_run_namespace() -> u64 {
+    let now_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    now_nanos ^ u64::from(std::process::id()).rotate_left(17)
+}
 
 /// Deterministic workload key generator.
 ///

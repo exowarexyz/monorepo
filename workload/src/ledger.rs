@@ -217,8 +217,10 @@ mod tests {
             sequence_number: 1234,
             records: overlap_records(42, 3),
         };
-        let path =
-            std::env::temp_dir().join(format!("exoware-overlap-ledger-test-{}.txt", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "exoware-overlap-ledger-test-{}.txt",
+            std::process::id()
+        ));
         write_overlap_ledger(path.to_str().unwrap(), &ledger).unwrap();
         let decoded = read_overlap_ledger(path.to_str().unwrap()).unwrap();
         assert_eq!(decoded.namespace, ledger.namespace);

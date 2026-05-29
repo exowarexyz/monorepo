@@ -11,7 +11,7 @@ use anyhow::ensure;
 use exoware_sdk::keys::Key;
 
 use crate::client::{build_client, ClientConfig};
-use crate::keyspace::{Keyspace, DEFAULT_KEY_LEN};
+use crate::keyspace::{default_run_namespace, Keyspace, DEFAULT_KEY_LEN};
 use crate::value::default_value_for_index;
 
 /// Load phase: insert keys via ingest API.
@@ -31,12 +31,16 @@ pub struct Args {
     /// Physical key length for generated workload keys.
     #[arg(long, default_value_t = DEFAULT_KEY_LEN)]
     key_len: usize,
+    /// Key namespace; pass the same value to bench to use this loaded keyspace.
+    #[arg(long)]
+    namespace: Option<u64>,
 }
 
 /// Validated load configuration independent of Clap.
 #[derive(Debug)]
 pub struct Config {
     client: ClientConfig,
+    namespace: u64,
     keyspace: Keyspace,
     keys: u64,
     batch_size: usize,
@@ -49,10 +53,12 @@ impl TryFrom<Args> for Config {
     fn try_from(args: Args) -> anyhow::Result<Self> {
         ensure!(args.batch_size > 0, "--batch-size must be > 0");
         ensure!(args.concurrency > 0, "--concurrency must be > 0");
+        let namespace = args.namespace.unwrap_or_else(default_run_namespace);
 
         Ok(Self {
             client: ClientConfig::new(args.url, args.read_retry_attempts)?,
-            keyspace: Keyspace::unnamespaced(args.key_len)?,
+            namespace,
+            keyspace: Keyspace::from_u64_namespace(namespace, args.key_len)?,
             keys: args.keys,
             batch_size: args.batch_size,
             concurrency: args.concurrency,
@@ -67,6 +73,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 async fn run_load(config: Config) -> anyhow::Result<()> {
     let Config {
         client: client_config,
+        namespace,
         keyspace,
         keys: total_keys,
         batch_size,
@@ -78,7 +85,13 @@ async fn run_load(config: Config) -> anyhow::Result<()> {
     let errors = Arc::new(AtomicU64::new(0));
     let start = Instant::now();
 
-    tracing::info!(total_keys, batch_size, concurrency, "Starting load phase");
+    tracing::info!(
+        total_keys,
+        batch_size,
+        concurrency,
+        namespace,
+        "Starting load phase"
+    );
 
     let mut handles = Vec::new();
 
@@ -157,6 +170,7 @@ mod tests {
             concurrency: 4,
             read_retry_attempts: 3,
             key_len: DEFAULT_KEY_LEN,
+            namespace: Some(42),
         }
     }
 
@@ -172,6 +186,19 @@ mod tests {
         args.key_len = 24;
         let config = Config::try_from(args).expect("load args should be valid");
         assert_eq!(config.keyspace.key_len, 24);
+    }
+
+    #[test]
+    fn config_uses_namespace() {
+        let config = Config::try_from(sample_args()).expect("load args should be valid");
+        assert_eq!(config.namespace, 42);
+        assert_eq!(
+            config.keyspace.inserted_key(0).unwrap(),
+            Keyspace::from_u64_namespace(42, DEFAULT_KEY_LEN)
+                .unwrap()
+                .inserted_key(0)
+                .unwrap()
+        );
     }
 
     #[test]
