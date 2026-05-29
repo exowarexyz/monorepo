@@ -46,9 +46,11 @@ cargo run -p exoware-workload -- validate --keys 100 --lookup-samples 25 --missi
 
 ## Exit Semantics
 
-`load` and `bench` exit non-zero when the tool itself fails, such as invalid configuration, a failed manifest read, or a failed JSON report write. Backend operation failures are logged and reported in counters, but do not make those commands fail by exit code. Automation should inspect the report counters, especially `errors`, and apply its own policy.
+Exit codes follow each command's purpose:
 
-`validate` is a correctness check, so correctness failures return non-zero.
+- `bench` is a measurement tool. It exits non-zero only when the tool itself fails (invalid configuration, a failed manifest read, or a failed JSON report write). Backend operation failures are recorded as counters in the report, not treated as failures; inspect `errors` and apply your own policy.
+- `load` prepares a complete keyspace for later benchmarking. It retries transient ingest failures (`--ingest-retry-attempts`, `--ingest-retry-backoff-ms`) so a complete fixture is far more likely, while still surfacing them: every retry is logged, the total retried count is reported in the final summary, and a persistent failure or any non-transient error still makes `load` exit non-zero rather than hand back an incomplete keyspace.
+- `validate` is a correctness check. It exits non-zero when the tool fails or when any correctness check fails.
 
 ## Benchmark Reports
 

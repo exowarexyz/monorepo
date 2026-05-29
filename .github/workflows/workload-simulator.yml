@@ -2,6 +2,13 @@ name: Workload Simulator
 
 on:
   workflow_dispatch:
+  pull_request:
+
+# Cancel a PR's in-flight run when a new commit is pushed, so the visible result always
+# corresponds to the latest commit rather than a slower, superseded run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -69,6 +76,9 @@ jobs:
         with:
           endpoint: http://127.0.0.1:10000
           workload-bin: ${{ steps.bins.outputs.workload }}
+          # Tag the report with the PR head commit (not the ephemeral merge SHA) so an
+          # uploaded artifact is unambiguously tied to the commit it was produced from.
+          artifact-name: workload-benchmark-report-${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Print simulator log on failure
         if: failure()
