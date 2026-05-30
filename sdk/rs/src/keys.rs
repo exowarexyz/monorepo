@@ -371,6 +371,38 @@ pub(crate) fn write_bits_from_bytes(
     src: &[u8],
     bit_len: usize,
 ) {
+    if bit_len == 0 {
+        return;
+    }
+
+    if bit_len.is_multiple_of(8) {
+        let byte_len = bit_len / 8;
+        let byte_offset = dst_bit_offset / 8;
+        let bit_shift = dst_bit_offset % 8;
+        if byte_len <= src.len() {
+            if let Some(end) = byte_offset.checked_add(byte_len) {
+                if bit_shift == 0 && end <= dst.len() {
+                    dst[byte_offset..end].copy_from_slice(&src[..byte_len]);
+                    return;
+                }
+
+                if bit_shift != 0 && end < dst.len() {
+                    let head_bits = 8 - bit_shift;
+                    let head_mask = ((1u16 << head_bits) - 1) as u8;
+                    let tail_mask = !head_mask;
+                    for (idx, byte) in src.iter().take(byte_len).enumerate() {
+                        let dst_idx = byte_offset + idx;
+                        dst[dst_idx] =
+                            (dst[dst_idx] & !head_mask) | ((*byte >> bit_shift) & head_mask);
+                        dst[dst_idx + 1] =
+                            (dst[dst_idx + 1] & !tail_mask) | ((*byte << head_bits) & tail_mask);
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
     for bit_idx in 0..bit_len {
         let value = read_bit_be(src, bit_idx);
         write_bit_be(dst, dst_bit_offset + bit_idx, value);
@@ -384,6 +416,33 @@ pub(crate) fn read_bits_to_bytes(
     bit_len: usize,
 ) {
     dst.fill(0);
+    if bit_len == 0 {
+        return;
+    }
+
+    if bit_len.is_multiple_of(8) {
+        let byte_len = bit_len / 8;
+        let byte_offset = src_bit_offset / 8;
+        let bit_shift = src_bit_offset % 8;
+        if byte_len <= dst.len() {
+            if let Some(end) = byte_offset.checked_add(byte_len) {
+                if bit_shift == 0 && end <= src.len() {
+                    dst[..byte_len].copy_from_slice(&src[byte_offset..end]);
+                    return;
+                }
+
+                if bit_shift != 0 && end < src.len() {
+                    let head_bits = 8 - bit_shift;
+                    for idx in 0..byte_len {
+                        dst[idx] = (src[byte_offset + idx] << bit_shift)
+                            | (src[byte_offset + idx + 1] >> head_bits);
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
     for bit_idx in 0..bit_len {
         let value = read_bit_be(src, src_bit_offset + bit_idx);
         write_bit_be(dst, bit_idx, value);
@@ -525,6 +584,64 @@ mod tests {
                 .expect("read payload"),
             vec![0xDE, 0xAD, 0xBE]
         );
+    }
+
+    fn write_bits_from_bytes_naive(
+        dst: &mut [u8],
+        dst_bit_offset: usize,
+        src: &[u8],
+        bit_len: usize,
+    ) {
+        for bit_idx in 0..bit_len {
+            let value = read_bit_be(src, bit_idx);
+            write_bit_be(dst, dst_bit_offset + bit_idx, value);
+        }
+    }
+
+    fn read_bits_to_bytes_naive(src: &[u8], src_bit_offset: usize, dst: &mut [u8], bit_len: usize) {
+        dst.fill(0);
+        for bit_idx in 0..bit_len {
+            let value = read_bit_be(src, src_bit_offset + bit_idx);
+            write_bit_be(dst, bit_idx, value);
+        }
+    }
+
+    #[test]
+    fn write_bits_from_bytes_matches_bit_by_bit_copy() {
+        let src: Vec<u8> = (0..16)
+            .map(|idx| (idx as u8).wrapping_mul(37).wrapping_add(11))
+            .collect();
+        for dst_bit_offset in 0..16 {
+            for bit_len in 0..=src.len() * 8 {
+                let mut expected = vec![0xA5; 24];
+                let mut actual = expected.clone();
+                write_bits_from_bytes_naive(&mut expected, dst_bit_offset, &src, bit_len);
+                write_bits_from_bytes(&mut actual, dst_bit_offset, &src, bit_len);
+                assert_eq!(
+                    actual, expected,
+                    "dst_bit_offset={dst_bit_offset} bit_len={bit_len}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn read_bits_to_bytes_matches_bit_by_bit_copy() {
+        let src: Vec<u8> = (0..24)
+            .map(|idx| (idx as u8).wrapping_mul(19).wrapping_add(7))
+            .collect();
+        for src_bit_offset in 0..16 {
+            for bit_len in 0..=16 * 8 {
+                let mut expected = vec![0x5A; 16];
+                let mut actual = expected.clone();
+                read_bits_to_bytes_naive(&src, src_bit_offset, &mut expected, bit_len);
+                read_bits_to_bytes(&src, src_bit_offset, &mut actual, bit_len);
+                assert_eq!(
+                    actual, expected,
+                    "src_bit_offset={src_bit_offset} bit_len={bit_len}"
+                );
+            }
+        }
     }
 
     #[test]

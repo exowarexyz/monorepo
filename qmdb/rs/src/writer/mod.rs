@@ -87,6 +87,7 @@ pub(crate) fn stage_rows(
     batch: &mut StoreWriteBatch,
     rows: &[(Key, Vec<u8>)],
 ) -> Result<(), QmdbError> {
+    batch.reserve(rows.len());
     for (key, value) in rows {
         batch.push(client, key, value)?;
     }
