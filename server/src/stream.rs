@@ -2,15 +2,17 @@
 //!
 //! A [`StreamNotifier`] tracks the highest published batch sequence and wakes
 //! subscribers. Each subscriber then pulls batches from the log at its own
-//! pace, so live delivery is naturally paced by client reads instead of an
-//! internal per-subscriber backlog.
+//! pace. In-process publishers only expose a contiguous frontier, so a later
+//! put completing before an earlier put does not wake subscribers into a log
+//! hole.
 //!
 //! `StreamNotifier` is an in-process coordination primitive. Split deployments
-//! need a separate remote notification path that advances a local notifier after
-//! the query worker can serve the announced batches.
+//! need a separate remote notification path that publishes into a local notifier
+//! after the query worker can serve the batches.
 
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use connectrpc::ConnectError;
@@ -111,13 +113,52 @@ pub trait StreamNotifier: Send + Sync + 'static {
     /// Highest batch sequence currently visible to live subscribers.
     fn current_sequence(&self) -> u64;
 
-    /// Announce that batches through `seq` may now be visible.
-    fn advance(&self, seq: u64);
+    /// Announce one just-committed in-process batch.
+    fn publish(&self, seq: u64);
+}
+
+struct StreamHubState {
+    published_sequence: u64,
+    pending_sequences: BTreeSet<u64>,
+}
+
+impl StreamHubState {
+    fn new(initial_sequence: u64) -> Self {
+        Self {
+            published_sequence: initial_sequence,
+            pending_sequences: BTreeSet::new(),
+        }
+    }
+
+    fn drain_pending(&mut self) {
+        while let Some(next) = self.published_sequence.checked_add(1) {
+            if !self.pending_sequences.remove(&next) {
+                break;
+            }
+            self.published_sequence = next;
+        }
+    }
+
+    fn publish_one(&mut self, seq: u64) -> Option<u64> {
+        let previous = self.published_sequence;
+        if seq <= previous {
+            return None;
+        }
+
+        if previous.checked_add(1) == Some(seq) {
+            self.published_sequence = seq;
+            self.drain_pending();
+        } else {
+            self.pending_sequences.insert(seq);
+        }
+        (self.published_sequence > previous).then_some(self.published_sequence)
+    }
 }
 
 pub struct StreamHub {
     published_sequence: AtomicU64,
     notify: Arc<Notify>,
+    state: Mutex<StreamHubState>,
 }
 
 impl StreamHub {
@@ -125,12 +166,27 @@ impl StreamHub {
         Self {
             published_sequence: AtomicU64::new(initial_sequence),
             notify: Arc::new(Notify::new()),
+            state: Mutex::new(StreamHubState::new(initial_sequence)),
         }
     }
 
-    /// Announce a newly committed batch sequence to subscribers.
+    fn publish_one(&self, seq: u64) {
+        let advanced = {
+            let mut state = self.state.lock().expect("stream hub state poisoned");
+            let advanced = state.publish_one(seq);
+            if let Some(seq) = advanced {
+                self.published_sequence.store(seq, Ordering::Release);
+            }
+            advanced.is_some()
+        };
+        if advanced {
+            self.notify.notify_waiters();
+        }
+    }
+
+    /// Announce one newly committed batch sequence to subscribers.
     pub fn publish(&self, seq: u64) {
-        self.advance(seq);
+        self.publish_one(seq);
     }
 }
 
@@ -146,9 +202,8 @@ impl StreamNotifier for StreamHub {
         self.published_sequence.load(Ordering::Acquire)
     }
 
-    fn advance(&self, seq: u64) {
-        self.published_sequence.fetch_max(seq, Ordering::SeqCst);
-        self.notify.notify_waiters();
+    fn publish(&self, seq: u64) {
+        StreamHub::publish(self, seq);
     }
 }
 
@@ -192,13 +247,26 @@ mod tests {
     }
 
     #[test]
-    fn publish_sequence_is_monotonic() {
+    fn publish_sequence_is_monotonic_and_contiguous() {
         let hub = StreamHub::new(7);
         assert_eq!(hub.current_sequence(), 7);
         hub.publish(3);
         assert_eq!(hub.current_sequence(), 7);
         hub.publish(9);
+        assert_eq!(hub.current_sequence(), 7);
+        hub.publish(8);
         assert_eq!(hub.current_sequence(), 9);
+    }
+
+    #[test]
+    fn publish_waits_for_contiguous_sequences() {
+        let hub = StreamHub::new(0);
+
+        hub.publish(2);
+        assert_eq!(hub.current_sequence(), 0);
+
+        hub.publish(1);
+        assert_eq!(hub.current_sequence(), 2);
     }
 
     #[test]
