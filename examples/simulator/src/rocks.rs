@@ -7,7 +7,6 @@
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -263,19 +262,10 @@ fn keys_to_delete(
 pub struct RocksStore {
     db: Arc<DB>,
     sequence: Arc<Mutex<u64>>,
-    /// Optional handle updated whenever the sequence advances (for tests).
-    observer: Option<Arc<AtomicU64>>,
 }
 
 impl RocksStore {
     pub fn open(path: &Path) -> Result<Self, rocksdb::Error> {
-        Self::open_with_observer(path, None)
-    }
-
-    pub fn open_with_observer(
-        path: &Path,
-        observer: Option<Arc<AtomicU64>>,
-    ) -> Result<Self, rocksdb::Error> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
@@ -299,7 +289,6 @@ impl RocksStore {
         Ok(Self {
             db,
             sequence: Arc::new(Mutex::new(seq)),
-            observer,
         })
     }
 
@@ -326,9 +315,6 @@ impl RocksStore {
         batch.put_cf(self.log_cf(), next.to_be_bytes(), &encoded_log);
         self.db.write(batch)?;
         *sequence = next;
-        if let Some(obs) = &self.observer {
-            obs.store(next, Ordering::SeqCst);
-        }
         Ok(next)
     }
 
