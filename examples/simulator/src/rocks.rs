@@ -340,8 +340,7 @@ impl RocksStore {
         for k in keys {
             batch.delete(k.as_ref());
         }
-        // Record an empty batch so sequence numbers stay contiguous for stream replay.
-        self.commit_sequence_batch_rocksdb(batch, encode_batch_entries(&[]))?;
+        self.db.write(batch)?;
         Ok(())
     }
 

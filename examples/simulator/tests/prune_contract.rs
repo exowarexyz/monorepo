@@ -119,7 +119,7 @@ fn keys_drop_all_deletes_matching_family_keys() {
 }
 
 #[test]
-fn keys_keep_latest_deletes_old_versions_and_advances_sequence_once() {
+fn keys_keep_latest_deletes_old_versions_without_advancing_sequence() {
     let dir = tempdir().expect("tempdir");
     let store = RocksStore::open(dir.path()).expect("open db");
     let v1 = versioned_key(b"row", 1);
@@ -142,11 +142,10 @@ fn keys_keep_latest_deletes_old_versions_and_advances_sequence_once() {
     assert!(get_value(&store, &v1).is_none());
     assert!(get_value(&store, &v2).is_none());
     assert_eq!(get_value(&store, &v3).as_deref(), Some(b"v3".as_slice()));
-    assert_eq!(store.current_sequence(), initial_sequence + 1);
-    assert_eq!(
-        block_on(store.get_batch(initial_sequence + 1)).expect("get batch"),
-        Some(Vec::new())
-    );
+    assert_eq!(store.current_sequence(), initial_sequence);
+    assert!(block_on(store.get_batch(initial_sequence + 1))
+        .expect("get batch")
+        .is_none());
 }
 
 #[test]
@@ -173,7 +172,7 @@ fn key_prune_is_idempotent_when_reapplied() {
     assert!(get_value(&store, &v1).is_none());
     assert!(get_value(&store, &v2).is_none());
     assert_eq!(get_value(&store, &v3).as_deref(), Some(b"v3".as_slice()));
-    assert_eq!(sequence_after_first_prune, initial_sequence + 1);
+    assert_eq!(sequence_after_first_prune, initial_sequence);
     assert_eq!(store.current_sequence(), sequence_after_first_prune);
     assert!(block_on(store.get_batch(sequence_after_first_prune + 1))
         .expect("get batch")
@@ -274,15 +273,14 @@ fn overlapping_prune_policies_apply_in_input_order() {
         ],
     );
 
-    assert_eq!(sequence_then_keys.current_sequence(), initial_sequence + 1);
+    assert_eq!(sequence_then_keys.current_sequence(), initial_sequence);
     assert!(get_value(&sequence_then_keys, &key).is_none());
     assert!(block_on(sequence_then_keys.get_batch(initial_sequence))
         .expect("get batch")
         .is_none());
-    assert_eq!(
-        block_on(sequence_then_keys.get_batch(initial_sequence + 1)).expect("get batch"),
-        Some(Vec::new())
-    );
+    assert!(block_on(sequence_then_keys.get_batch(initial_sequence + 1))
+        .expect("get batch")
+        .is_none());
 
     let keys_then_sequence_dir = tempdir().expect("tempdir");
     let keys_then_sequence = RocksStore::open(keys_then_sequence_dir.path()).expect("open db");
@@ -300,7 +298,7 @@ fn overlapping_prune_policies_apply_in_input_order() {
         ],
     );
 
-    assert_eq!(keys_then_sequence.current_sequence(), initial_sequence + 1);
+    assert_eq!(keys_then_sequence.current_sequence(), initial_sequence);
     assert!(get_value(&keys_then_sequence, &key).is_none());
     assert!(block_on(keys_then_sequence.get_batch(initial_sequence))
         .expect("get batch")
