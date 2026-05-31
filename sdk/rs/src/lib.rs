@@ -345,6 +345,13 @@ impl StoreWriteBatch {
         Self::default()
     }
 
+    /// Build an empty batch with room for at least `capacity` entries.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            entries: Vec::with_capacity(capacity),
+        }
+    }
+
     /// Build a batch from rows already encoded in physical Store keyspace.
     ///
     /// This is intended for callers that construct rows for an unprefixed
@@ -352,6 +359,30 @@ impl StoreWriteBatch {
     /// into the same atomic Store `Put`.
     pub fn from_physical_entries(entries: Vec<(Key, Bytes)>) -> Self {
         Self { entries }
+    }
+
+    /// Build a batch from multiple physical Store row groups.
+    ///
+    /// The first group becomes the batch backing storage, then the batch reserves
+    /// once for all remaining groups plus `additional_capacity`. This avoids
+    /// recopying large already-encoded row sets when callers coalesce adjacent
+    /// prepared uploads.
+    pub fn from_physical_entry_groups<I>(groups: I, additional_capacity: usize) -> Self
+    where
+        I: IntoIterator<Item = Vec<(Key, Bytes)>>,
+    {
+        let mut groups = groups.into_iter();
+        let Some(first) = groups.next() else {
+            return Self::with_capacity(additional_capacity);
+        };
+        let remaining_groups = groups.collect::<Vec<_>>();
+        let remaining_entries = remaining_groups.iter().map(Vec::len).sum::<usize>();
+        let mut batch = Self::from_physical_entries(first);
+        batch.reserve(remaining_entries.saturating_add(additional_capacity));
+        for group in remaining_groups {
+            batch.extend_physical_entries(group);
+        }
+        batch
     }
 
     pub fn len(&self) -> usize {
@@ -371,8 +402,9 @@ impl StoreWriteBatch {
     }
 
     /// Extend this batch with rows already encoded in physical Store keyspace.
-    pub fn extend_physical_entries(&mut self, entries: Vec<(Key, Bytes)>) {
+    pub fn extend_physical_entries(&mut self, entries: Vec<(Key, Bytes)>) -> &mut Self {
         self.entries.extend(entries);
+        self
     }
 
     pub fn push(
@@ -3139,6 +3171,21 @@ mod tests {
             batch.entries[1].0,
             b.key_prefix().unwrap().encode_key(&key_b).unwrap()
         );
+    }
+
+    #[test]
+    fn store_write_batch_coalesces_physical_entry_groups() {
+        let first_key = Bytes::from_static(b"a");
+        let second_key = Bytes::from_static(b"b");
+        let first = vec![(first_key.clone(), Bytes::from_static(b"va"))];
+        let second = vec![(second_key.clone(), Bytes::from_static(b"vb"))];
+
+        let batch = StoreWriteBatch::from_physical_entry_groups([first, second], 3);
+
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch.entries[0].0, first_key);
+        assert_eq!(batch.entries[1].0, second_key);
+        assert!(batch.entries.capacity() >= batch.len() + 3);
     }
 
     fn hex_encode(data: &[u8]) -> String {

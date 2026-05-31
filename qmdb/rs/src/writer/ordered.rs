@@ -247,6 +247,14 @@ where
         super::stage_rows(&self.client, batch, &prepared.rows)
     }
 
+    pub fn stage_upload_owned(
+        &self,
+        prepared: &mut super::PreparedUpload<F>,
+        batch: &mut StoreWriteBatch,
+    ) -> Result<(), QmdbError> {
+        super::stage_rows_owned(&self.client, batch, &mut prepared.rows)
+    }
+
     pub async fn mark_upload_persisted(
         &self,
         prepared: super::PreparedUpload<F>,
