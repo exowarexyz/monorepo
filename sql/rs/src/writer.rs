@@ -250,7 +250,7 @@ impl StoreBatchUpload for BatchWriter {
 
     fn stage_upload(
         &self,
-        prepared: &Self::Prepared,
+        prepared: &mut Self::Prepared,
         batch: &mut StoreWriteBatch,
     ) -> Result<(), Self::Error> {
         self.stage_flush(prepared, batch)

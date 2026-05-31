@@ -223,18 +223,10 @@ where
 
     pub fn stage_upload(
         &self,
-        prepared: &super::PreparedUpload<F>,
-        batch: &mut StoreWriteBatch,
-    ) -> Result<(), QmdbError> {
-        super::stage_rows(&self.client, batch, &prepared.rows)
-    }
-
-    pub fn stage_upload_owned(
-        &self,
         prepared: &mut super::PreparedUpload<F>,
         batch: &mut StoreWriteBatch,
     ) -> Result<(), QmdbError> {
-        super::stage_rows_owned(&self.client, batch, &mut prepared.rows)
+        super::stage_rows(&self.client, batch, prepared.rows.drain(..))
     }
 
     pub async fn mark_upload_persisted(
@@ -328,7 +320,7 @@ where
 
     fn stage_upload(
         &self,
-        prepared: &Self::Prepared,
+        prepared: &mut Self::Prepared,
         batch: &mut StoreWriteBatch,
     ) -> Result<(), Self::Error> {
         KeylessWriter::stage_upload(self, prepared, batch)

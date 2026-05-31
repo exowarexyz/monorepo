@@ -432,7 +432,7 @@ impl StoreWriteBatch {
 /// each writer's input shape differs. Once a caller has a prepared handle,
 /// this trait provides the common lifecycle:
 ///
-/// 1. stage rows into a [`StoreWriteBatch`]
+/// 1. stage rows into a [`StoreWriteBatch`], consuming staged payloads if useful
 /// 2. commit that batch
 /// 3. mark the prepared handle persisted with the returned Store sequence
 ///    number, or failed if staging/commit does not complete
@@ -443,7 +443,7 @@ pub trait StoreBatchUpload {
 
     fn stage_upload(
         &self,
-        prepared: &Self::Prepared,
+        prepared: &mut Self::Prepared,
         batch: &mut StoreWriteBatch,
     ) -> Result<(), Self::Error>;
 
@@ -479,8 +479,9 @@ pub trait StoreBatchUpload {
         Self::Error: 'a,
     {
         Box::pin(async move {
+            let mut prepared = prepared;
             let mut batch = StoreWriteBatch::new();
-            if let Err(err) = self.stage_upload(&prepared, &mut batch) {
+            if let Err(err) = self.stage_upload(&mut prepared, &mut batch) {
                 let message = err.to_string();
                 self.mark_upload_failed(prepared, message).await;
                 return Err(err);

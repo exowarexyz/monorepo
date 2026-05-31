@@ -568,9 +568,9 @@ async fn prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_receipts(
         qmdb_writer.prepare_upload(&ops1),
         qmdb_writer.prepare_upload(&ops2)
     );
-    let prepared_qmdb_1 = prepared_qmdb_1.expect("prepare qmdb 1");
-    let prepared_qmdb_2 = prepared_qmdb_2.expect("prepare qmdb 2");
-    let prepared_sql = sql_writer
+    let mut prepared_qmdb_1 = prepared_qmdb_1.expect("prepare qmdb 1");
+    let mut prepared_qmdb_2 = prepared_qmdb_2.expect("prepare qmdb 2");
+    let mut prepared_sql = sql_writer
         .prepare_flush()
         .expect("prepare sql")
         .expect("sql rows");
@@ -594,10 +594,10 @@ async fn prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_receipts(
     );
 
     let mut batch = StoreWriteBatch::new();
-    StoreBatchUpload::stage_upload(&sql_writer, &prepared_sql, &mut batch).expect("stage sql");
-    StoreBatchUpload::stage_upload(&qmdb_writer, &prepared_qmdb_1, &mut batch)
+    StoreBatchUpload::stage_upload(&sql_writer, &mut prepared_sql, &mut batch).expect("stage sql");
+    StoreBatchUpload::stage_upload(&qmdb_writer, &mut prepared_qmdb_1, &mut batch)
         .expect("stage qmdb 1");
-    StoreBatchUpload::stage_upload(&qmdb_writer, &prepared_qmdb_2, &mut batch)
+    StoreBatchUpload::stage_upload(&qmdb_writer, &mut prepared_qmdb_2, &mut batch)
         .expect("stage qmdb 2");
     StoreBatchPublication::stage_publication(&qmdb_writer, &prepared_qmdb_watermark, &mut batch)
         .expect("stage qmdb watermark");
