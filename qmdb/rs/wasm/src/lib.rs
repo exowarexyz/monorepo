@@ -8,7 +8,9 @@ use crate::proto::qmdb::v1::{
     HistoricalOperationRangeProofView,
 };
 use buffa::MessageView;
-use commonware_codec::{Decode, DecodeExt, DecodeRangeExt, Encode, FixedSize, RangeCfg, Read};
+use commonware_codec::{
+    Decode, DecodeExt, DecodeRangeExt, Encode, EncodeSize, FixedSize, RangeCfg, Read, Write,
+};
 use commonware_cryptography::{Digest, Sha256};
 use commonware_storage::{
     merkle::{self, Location},
@@ -31,6 +33,25 @@ use wasm_bindgen::JsCast;
 pub mod proto;
 
 const MAX_OPERATION_SIZE: usize = u16::MAX as usize;
+const KEYLESS_APPEND_CONTEXT: u8 = 1;
+const ANY_DELETE_CONTEXT: u8 = 0xD1;
+const ANY_UPDATE_CONTEXT: u8 = 0xD2;
+const ANY_COMMIT_CONTEXT: u8 = 0xD3;
+
+#[derive(Clone, Copy)]
+struct RawOperation<'a>(&'a [u8]);
+
+impl Write for RawOperation<'_> {
+    fn write(&self, buf: &mut impl commonware_runtime::BufMut) {
+        buf.put_slice(self.0);
+    }
+}
+
+impl EncodeSize for RawOperation<'_> {
+    fn encode_size(&self) -> usize {
+        self.0.len()
+    }
+}
 
 fn encode_vec_key_wire(key: &[u8]) -> Vec<u8> {
     key.encode().to_vec()
@@ -294,6 +315,76 @@ where
         return Err("historical operation range proof failed verification".to_string());
     }
     Ok((*root, operations))
+}
+
+fn verify_raw_operation_range_from_proto<F>(
+    proto: &HistoricalOperationRangeProof,
+    root: &commonware_cryptography::sha256::Digest,
+) -> Result<
+    (
+        commonware_cryptography::sha256::Digest,
+        merkle::Proof<F, commonware_cryptography::sha256::Digest>,
+        Vec<(Location<F>, Vec<u8>)>,
+    ),
+    String,
+>
+where
+    F: merkle::Graftable,
+{
+    if proto.encoded_operations.is_empty() {
+        return Err("historical operation range proof has no operations".to_string());
+    }
+    let target_root = historical_target_root::<F>(&proto.ops_root, &proto.ops_root_witness, root)?;
+    let max_digests = proof_digest_cap(&proto.proof);
+    let proof = merkle::Proof::<F, commonware_cryptography::sha256::Digest>::decode_cfg(
+        proto.proof.as_ref(),
+        &max_digests,
+    )
+    .map_err(|err| format!("failed to decode historical operation range proof: {err}"))?;
+    let start = Location::new(proto.start_location);
+    let operations = proto
+        .encoded_operations
+        .iter()
+        .enumerate()
+        .map(|(offset, bytes)| {
+            let offset = u64::try_from(offset)
+                .map_err(|err| format!("operation range offset overflow: {err}"))?;
+            let location = Location::new(
+                proto
+                    .start_location
+                    .checked_add(offset)
+                    .ok_or_else(|| "operation range location overflow".to_string())?,
+            );
+            Ok((location, bytes.to_vec()))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let raw_operations = proto
+        .encoded_operations
+        .iter()
+        .map(|bytes| RawOperation(bytes.as_ref()))
+        .collect::<Vec<_>>();
+    let pinned_nodes = proto
+        .pinned_nodes
+        .iter()
+        .map(|bytes| {
+            decode_digest::<commonware_cryptography::sha256::Digest>(
+                bytes.as_ref(),
+                "historical operation range pinned node",
+            )
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let hasher = commonware_storage::qmdb::hasher::<Sha256>();
+    if !verify_proof_and_pinned_nodes(
+        &hasher,
+        &proof,
+        start,
+        &raw_operations,
+        &pinned_nodes,
+        &target_root,
+    ) {
+        return Err("historical operation range proof failed verification".to_string());
+    }
+    Ok((*root, proof, operations))
 }
 
 fn verify_current_operation_range_from_proto<F>(
@@ -576,6 +667,179 @@ where
     }
     let verified = Object::new();
     set_field(&verified, "operations", &operations.into())?;
+    Ok(verified.into())
+}
+
+fn raw_operations_to_js<F>(
+    root: commonware_cryptography::sha256::Digest,
+    proof_size_bytes: usize,
+    raw_operations: Vec<(Location<F>, Vec<u8>)>,
+) -> Result<JsValue, JsValue>
+where
+    F: merkle::Family,
+{
+    let operations = Array::new();
+    for (location, encoded_operation) in raw_operations {
+        let entry = Object::new();
+        set_field(&entry, "location", &location_to_bigint(location)?)?;
+        set_field(&entry, "encodedOperation", &bytes_to_js(&encoded_operation))?;
+        operations.push(&entry.into());
+    }
+    let verified = Object::new();
+    set_field(&verified, "root", &bytes_to_js(root.as_ref()))?;
+    set_field(&verified, "operations", &operations.into())?;
+    set_field(
+        &verified,
+        "proofSizeBytes",
+        &JsValue::from_f64(proof_size_bytes as f64),
+    )?;
+    Ok(verified.into())
+}
+
+fn expected_raw_operation<F>(
+    start_location: u64,
+    operations: &[(Location<F>, Vec<u8>)],
+    expected_location: u64,
+    label: &str,
+) -> Result<Vec<u8>, String>
+where
+    F: merkle::Family,
+{
+    let offset = expected_location
+        .checked_sub(start_location)
+        .ok_or_else(|| format!("expected {label} location is before proof range"))?;
+    let offset = usize::try_from(offset)
+        .map_err(|_| format!("expected {label} location does not fit usize"))?;
+    let Some((_, operation)) = operations.get(offset) else {
+        return Err(format!("expected {label} location is outside proof range"));
+    };
+    Ok(operation.clone())
+}
+
+fn ensure_zero_padding(bytes: &[u8], label: &str) -> Result<(), String> {
+    if bytes.iter().any(|byte| *byte != 0) {
+        return Err(format!("{label} padding was non-zero"));
+    }
+    Ok(())
+}
+
+fn fixed_keyless_append_value<'a>(
+    operation: &'a [u8],
+    expected_value: &[u8],
+) -> Result<&'a [u8], String> {
+    let value_size = expected_value.len();
+    let total = 2 + value_size + u64::SIZE;
+    if operation.len() != total {
+        return Err(format!(
+            "fixed keyless operation size {} did not match expected {total}",
+            operation.len()
+        ));
+    }
+    if operation[0] != KEYLESS_APPEND_CONTEXT {
+        return Err("expected keyless location is not an append".to_string());
+    }
+    let value_end = 1 + value_size;
+    let value = &operation[1..value_end];
+    if value != expected_value {
+        return Err("keyless append value does not match expected value".to_string());
+    }
+    ensure_zero_padding(&operation[value_end..], "fixed keyless append")?;
+    Ok(value)
+}
+
+fn fixed_unordered_update_value<'a>(
+    operation: &'a [u8],
+    expected_key: &[u8],
+    value_size: usize,
+) -> Result<&'a [u8], String> {
+    let key_size = expected_key.len();
+    let update_size = 1 + key_size + value_size;
+    let delete_size = 1 + key_size;
+    let commit_size = 1 + 1 + value_size + u64::SIZE;
+    let total = update_size.max(delete_size).max(commit_size);
+    if operation.len() != total {
+        return Err(format!(
+            "fixed unordered operation size {} did not match expected {total}",
+            operation.len()
+        ));
+    }
+    match operation[0] {
+        ANY_UPDATE_CONTEXT => {}
+        ANY_DELETE_CONTEXT => {
+            return Err("expected unordered location is a delete".to_string());
+        }
+        ANY_COMMIT_CONTEXT => {
+            return Err("expected unordered location is a commit".to_string());
+        }
+        other => {
+            return Err(format!(
+                "expected unordered location has unsupported operation context {other}"
+            ));
+        }
+    }
+    let key_start = 1;
+    let key_end = key_start + key_size;
+    let value_end = key_end + value_size;
+    if &operation[key_start..key_end] != expected_key {
+        return Err("unordered update key does not match expected key".to_string());
+    }
+    ensure_zero_padding(&operation[value_end..], "fixed unordered update")?;
+    Ok(&operation[key_end..value_end])
+}
+
+fn fixed_keyless_append_to_js<F>(
+    root: commonware_cryptography::sha256::Digest,
+    proof_size_bytes: usize,
+    operation_count: usize,
+    location: Location<F>,
+    value: &[u8],
+) -> Result<JsValue, JsValue>
+where
+    F: merkle::Family,
+{
+    let verified = Object::new();
+    set_field(&verified, "location", &location_to_bigint(location)?)?;
+    set_field(&verified, "value", &bytes_to_js(value))?;
+    set_field(&verified, "root", &bytes_to_js(root.as_ref()))?;
+    set_field(
+        &verified,
+        "proofSizeBytes",
+        &JsValue::from_f64(proof_size_bytes as f64),
+    )?;
+    set_field(
+        &verified,
+        "operationCount",
+        &JsValue::from_f64(operation_count as f64),
+    )?;
+    Ok(verified.into())
+}
+
+fn fixed_unordered_update_to_js<F>(
+    root: commonware_cryptography::sha256::Digest,
+    proof_size_bytes: usize,
+    operation_count: usize,
+    location: Location<F>,
+    key: &[u8],
+    value: &[u8],
+) -> Result<JsValue, JsValue>
+where
+    F: merkle::Family,
+{
+    let verified = Object::new();
+    set_field(&verified, "location", &location_to_bigint(location)?)?;
+    set_field(&verified, "key", &bytes_to_js(key))?;
+    set_field(&verified, "value", &bytes_to_js(value))?;
+    set_field(&verified, "root", &bytes_to_js(root.as_ref()))?;
+    set_field(
+        &verified,
+        "proofSizeBytes",
+        &JsValue::from_f64(proof_size_bytes as f64),
+    )?;
+    set_field(
+        &verified,
+        "operationCount",
+        &JsValue::from_f64(operation_count as f64),
+    )?;
     Ok(verified.into())
 }
 
@@ -873,6 +1137,152 @@ pub fn verify_historical_operation_range_proof(
 }
 
 #[wasm_bindgen]
+pub fn verify_historical_raw_operation_range_proof(
+    bytes: &[u8],
+    root: &[u8],
+    merkle_family: &str,
+) -> Result<JsValue, JsValue> {
+    let proto = HistoricalOperationRangeProofView::decode_view(bytes)
+        .map_err(|err| js_err(format!("decode historical operation range proof: {err}")))?
+        .to_owned_message();
+    let root = decode_digest(root, "historical operation range root").map_err(js_err)?;
+    match normalize_family(merkle_family, "historical operation range proof").map_err(js_err)? {
+        "mmr" => {
+            let (root, proof, operations) =
+                verify_raw_operation_range_from_proto::<mmr::Family>(&proto, &root)
+                    .map_err(js_err)?;
+            raw_operations_to_js(root, proof.encode().len(), operations)
+        }
+        "mmb" => {
+            let (root, proof, operations) =
+                verify_raw_operation_range_from_proto::<mmb::Family>(&proto, &root)
+                    .map_err(js_err)?;
+            raw_operations_to_js(root, proof.encode().len(), operations)
+        }
+        _ => unreachable!("normalize_family only returns supported values"),
+    }
+}
+
+#[wasm_bindgen]
+pub fn verify_historical_fixed_keyless_append_proof(
+    bytes: &[u8],
+    root: &[u8],
+    merkle_family: &str,
+    expected_location: u64,
+    expected_value: &[u8],
+) -> Result<JsValue, JsValue> {
+    let proto = HistoricalOperationRangeProofView::decode_view(bytes)
+        .map_err(|err| js_err(format!("decode historical operation range proof: {err}")))?
+        .to_owned_message();
+    let root = decode_digest(root, "historical operation range root").map_err(js_err)?;
+    match normalize_family(merkle_family, "historical operation range proof").map_err(js_err)? {
+        "mmr" => {
+            let (root, proof, operations) =
+                verify_raw_operation_range_from_proto::<mmr::Family>(&proto, &root)
+                    .map_err(js_err)?;
+            let operation = expected_raw_operation(
+                proto.start_location,
+                &operations,
+                expected_location,
+                "keyless",
+            )
+            .map_err(js_err)?;
+            let value = fixed_keyless_append_value(&operation, expected_value).map_err(js_err)?;
+            fixed_keyless_append_to_js(
+                root,
+                proof.encode().len(),
+                operations.len(),
+                Location::<mmr::Family>::new(expected_location),
+                value,
+            )
+        }
+        "mmb" => {
+            let (root, proof, operations) =
+                verify_raw_operation_range_from_proto::<mmb::Family>(&proto, &root)
+                    .map_err(js_err)?;
+            let operation = expected_raw_operation(
+                proto.start_location,
+                &operations,
+                expected_location,
+                "keyless",
+            )
+            .map_err(js_err)?;
+            let value = fixed_keyless_append_value(&operation, expected_value).map_err(js_err)?;
+            fixed_keyless_append_to_js(
+                root,
+                proof.encode().len(),
+                operations.len(),
+                Location::<mmb::Family>::new(expected_location),
+                value,
+            )
+        }
+        _ => unreachable!("normalize_family only returns supported values"),
+    }
+}
+
+#[wasm_bindgen]
+pub fn verify_historical_fixed_unordered_update_proof(
+    bytes: &[u8],
+    root: &[u8],
+    merkle_family: &str,
+    expected_location: u64,
+    expected_key: &[u8],
+    value_size: usize,
+) -> Result<JsValue, JsValue> {
+    let proto = HistoricalOperationRangeProofView::decode_view(bytes)
+        .map_err(|err| js_err(format!("decode historical operation range proof: {err}")))?
+        .to_owned_message();
+    let root = decode_digest(root, "historical operation range root").map_err(js_err)?;
+    match normalize_family(merkle_family, "historical operation range proof").map_err(js_err)? {
+        "mmr" => {
+            let (root, proof, operations) =
+                verify_raw_operation_range_from_proto::<mmr::Family>(&proto, &root)
+                    .map_err(js_err)?;
+            let operation = expected_raw_operation(
+                proto.start_location,
+                &operations,
+                expected_location,
+                "unordered",
+            )
+            .map_err(js_err)?;
+            let value = fixed_unordered_update_value(&operation, expected_key, value_size)
+                .map_err(js_err)?;
+            fixed_unordered_update_to_js(
+                root,
+                proof.encode().len(),
+                operations.len(),
+                Location::<mmr::Family>::new(expected_location),
+                expected_key,
+                value,
+            )
+        }
+        "mmb" => {
+            let (root, proof, operations) =
+                verify_raw_operation_range_from_proto::<mmb::Family>(&proto, &root)
+                    .map_err(js_err)?;
+            let operation = expected_raw_operation(
+                proto.start_location,
+                &operations,
+                expected_location,
+                "unordered",
+            )
+            .map_err(js_err)?;
+            let value = fixed_unordered_update_value(&operation, expected_key, value_size)
+                .map_err(js_err)?;
+            fixed_unordered_update_to_js(
+                root,
+                proof.encode().len(),
+                operations.len(),
+                Location::<mmb::Family>::new(expected_location),
+                expected_key,
+                value,
+            )
+        }
+        _ => unreachable!("normalize_family only returns supported values"),
+    }
+}
+
+#[wasm_bindgen]
 pub fn verify_current_operation_range_proof(
     bytes: &[u8],
     root: &[u8],
@@ -977,6 +1387,13 @@ mod tests {
     use super::*;
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_storage::merkle::mem::Mem;
+    use commonware_storage::qmdb::{
+        any::{
+            unordered::{Operation as UnorderedOperation, Update as UnorderedUpdate},
+            value::FixedEncoding,
+        },
+        keyless,
+    };
 
     type TestOperation<F> = OrderedOperation<F, Vec<u8>, Vec<u8>>;
 
@@ -1093,6 +1510,68 @@ mod tests {
         )
     }
 
+    fn historical_raw_range_fixture_at<F>(
+        encoded_operations: &[Vec<u8>],
+        start_offset: u64,
+        end_offset: u64,
+    ) -> (
+        HistoricalOperationRangeProof,
+        Sha256Digest,
+        Vec<(Location<F>, Vec<u8>)>,
+    )
+    where
+        F: merkle::Graftable,
+    {
+        let hasher = commonware_storage::qmdb::hasher::<Sha256>();
+        let mut merkle = Mem::<F, Sha256Digest>::new();
+
+        let mut batch = merkle.new_batch();
+        for operation in encoded_operations {
+            batch = batch.add(&hasher, operation);
+        }
+        let batch = batch.merkleize(&merkle, &hasher);
+        merkle.apply_batch(&batch).unwrap();
+
+        let root = merkle.root(&hasher, 0).unwrap();
+        let start = Location::<F>::new(start_offset);
+        let end = Location::<F>::new(end_offset);
+        let proof = merkle.range_proof(&hasher, start..end, 0).unwrap();
+        let pinned_nodes = if start == Location::new(0) {
+            Vec::new()
+        } else {
+            F::nodes_to_pin(start)
+                .map(|position| {
+                    merkle
+                        .get_node(position)
+                        .expect("pinned node exists")
+                        .encode()
+                })
+                .collect()
+        };
+        let proven_operations = encoded_operations
+            [usize::try_from(start_offset).unwrap()..usize::try_from(end_offset).unwrap()]
+            .to_vec();
+        let expected = proven_operations
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(offset, operation)| (Location::new(start_offset + offset as u64), operation))
+            .collect();
+
+        (
+            HistoricalOperationRangeProof {
+                proof: proof.encode(),
+                start_location: start_offset,
+                encoded_operations: proven_operations.into_iter().map(Into::into).collect(),
+                ops_root: root.encode(),
+                pinned_nodes,
+                ..Default::default()
+            },
+            root,
+            expected,
+        )
+    }
+
     fn historical_multi_fixture<F>() -> (
         HistoricalMultiProof,
         Sha256Digest,
@@ -1179,6 +1658,78 @@ mod tests {
 
         assert_eq!(verified_root, root);
         assert_eq!(verified, expected);
+    }
+
+    #[test]
+    fn verifies_raw_historical_operation_range_without_decoding() {
+        let (proto, root, expected) = historical_range_fixture::<mmr::Family>();
+        let expected = expected
+            .into_iter()
+            .map(|(location, operation)| (location, operation.encode().to_vec()))
+            .collect::<Vec<_>>();
+
+        let (verified_root, _, verified) =
+            verify_raw_operation_range_from_proto::<mmr::Family>(&proto, &root).unwrap();
+
+        assert_eq!(verified_root, root);
+        assert_eq!(verified, expected);
+    }
+
+    #[test]
+    fn verifies_fixed_keyless_append_operation() {
+        type Operation<F> = keyless::Operation<F, FixedEncoding<Sha256Digest>>;
+
+        let expected_value = Sha256::fill(0x22);
+        let operations = vec![
+            Operation::<mmr::Family>::Append(Sha256::fill(0x11))
+                .encode()
+                .to_vec(),
+            Operation::<mmr::Family>::Append(expected_value)
+                .encode()
+                .to_vec(),
+            Operation::<mmr::Family>::Append(Sha256::fill(0x33))
+                .encode()
+                .to_vec(),
+        ];
+        let (proto, root, _) = historical_raw_range_fixture_at::<mmr::Family>(&operations, 0, 3);
+        let (_, proof, verified) =
+            verify_raw_operation_range_from_proto::<mmr::Family>(&proto, &root).unwrap();
+        let operation =
+            expected_raw_operation(proto.start_location, &verified, 1, "keyless").unwrap();
+
+        let value = fixed_keyless_append_value(&operation, expected_value.as_ref()).unwrap();
+
+        assert_eq!(proof.encode().len(), proto.proof.len());
+        assert_eq!(value, expected_value.as_ref());
+    }
+
+    #[test]
+    fn verifies_fixed_unordered_update_operation() {
+        type Operation<F> = UnorderedOperation<F, Sha256Digest, FixedEncoding<u64>>;
+
+        let expected_key = Sha256::fill(0x44);
+        let expected_value = 7u64;
+        let operations = vec![
+            Operation::<mmr::Family>::Update(UnorderedUpdate(Sha256::fill(0x11), 1))
+                .encode()
+                .to_vec(),
+            Operation::<mmr::Family>::Update(UnorderedUpdate(expected_key, expected_value))
+                .encode()
+                .to_vec(),
+            Operation::<mmr::Family>::Update(UnorderedUpdate(Sha256::fill(0x33), 3))
+                .encode()
+                .to_vec(),
+        ];
+        let (proto, root, _) = historical_raw_range_fixture_at::<mmr::Family>(&operations, 0, 3);
+        let (_, _, verified) =
+            verify_raw_operation_range_from_proto::<mmr::Family>(&proto, &root).unwrap();
+        let operation =
+            expected_raw_operation(proto.start_location, &verified, 1, "unordered").unwrap();
+
+        let value =
+            fixed_unordered_update_value(&operation, expected_key.as_ref(), u64::SIZE).unwrap();
+
+        assert_eq!(value, expected_value.encode().as_ref());
     }
 
     #[test]

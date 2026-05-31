@@ -3,7 +3,7 @@
 use std::future::Future;
 
 use bytes::Bytes;
-use exoware_server::{Ingest, Query, RangeScan, Sequence};
+use exoware_server::{Ingest, Log, Query, RangeScan, Sequence};
 use exoware_simulator::RocksStore;
 use tempfile::tempdir;
 
@@ -130,6 +130,55 @@ fn sequence_persists_across_reopen() {
         vec![(Bytes::from_static(b"c"), Bytes::from_static(b"3"))],
     );
     assert_eq!(s3, 3);
+}
+
+#[test]
+fn concurrent_puts_keep_sequence_frontier_at_committed_tail() {
+    let dir = tempdir().expect("tempdir");
+    let store = RocksStore::open(dir.path()).expect("open db");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .expect("runtime");
+
+    let mut sequences = runtime.block_on({
+        let store = store.clone();
+        async move {
+            let mut puts = Vec::new();
+            for i in 0..32usize {
+                let store = store.clone();
+                puts.push(tokio::spawn(async move {
+                    let key = Bytes::from(format!("k{i:02}").into_bytes());
+                    let value = Bytes::from(vec![i as u8; 64 * 1024]);
+                    store
+                        .put_batch(vec![(key, value)])
+                        .await
+                        .expect("put_batch")
+                }));
+            }
+
+            let mut sequences = Vec::new();
+            for put in puts {
+                sequences.push(put.await.expect("put task should not panic"));
+            }
+            sequences
+        }
+    });
+    sequences.sort_unstable();
+
+    let expected: Vec<u64> = (1..=32).collect();
+    assert_eq!(sequences, expected);
+    assert_eq!(store.current_sequence(), 32);
+    for sequence in expected {
+        assert!(block_on(store.get_batch(sequence))
+            .expect("get batch")
+            .is_some());
+    }
+    drop(store);
+
+    let reopened = RocksStore::open(dir.path()).expect("reopen db");
+    assert_eq!(reopened.current_sequence(), 32);
 }
 
 // -- forward range_scan --
