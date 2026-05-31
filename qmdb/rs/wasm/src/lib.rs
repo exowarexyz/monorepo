@@ -9,7 +9,7 @@ use crate::proto::qmdb::v1::{
 };
 use buffa::MessageView;
 use commonware_codec::{
-    Decode, DecodeExt, DecodeRangeExt, Encode, EncodeSize, FixedSize, RangeCfg, Read, Write,
+    types::lazy::Lazy, Decode, DecodeExt, DecodeRangeExt, Encode, FixedSize, RangeCfg, Read,
 };
 use commonware_cryptography::{Digest, Sha256};
 use commonware_storage::{
@@ -35,21 +35,6 @@ use wasm_bindgen::JsCast;
 pub mod proto;
 
 const MAX_OPERATION_SIZE: usize = u16::MAX as usize;
-
-#[derive(Clone, Copy)]
-struct RawOperation<'a>(&'a [u8]);
-
-impl Write for RawOperation<'_> {
-    fn write(&self, buf: &mut impl commonware_runtime::BufMut) {
-        buf.put_slice(self.0);
-    }
-}
-
-impl EncodeSize for RawOperation<'_> {
-    fn encode_size(&self) -> usize {
-        self.0.len()
-    }
-}
 
 fn encode_vec_key_wire(key: &[u8]) -> Vec<u8> {
     key.encode().to_vec()
@@ -364,7 +349,9 @@ where
     let raw_operations = proto
         .encoded_operations
         .iter()
-        .map(|bytes| RawOperation(bytes.as_ref()))
+        .map(|bytes| {
+            Lazy::<Vec<u8>>::deferred(&mut bytes.as_ref(), ((0..=MAX_OPERATION_SIZE).into(), ()))
+        })
         .collect::<Vec<_>>();
     let pinned_nodes = proto
         .pinned_nodes
