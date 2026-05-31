@@ -350,6 +350,8 @@ where
         .encoded_operations
         .iter()
         .map(|bytes| {
+            // Preserve the exact operation encoding used as a Merkle leaf.
+            // Decoding as Vec<u8>/Bytes would reinterpret these bytes as a length-prefixed value.
             Lazy::<Vec<u8>>::deferred(&mut bytes.as_ref(), ((0..=MAX_OPERATION_SIZE).into(), ()))
         })
         .collect::<Vec<_>>();
@@ -659,7 +661,6 @@ where
 
 fn raw_operations_to_js<F>(
     root: commonware_cryptography::sha256::Digest,
-    proof_size_bytes: usize,
     raw_operations: Vec<(Location<F>, Vec<u8>)>,
 ) -> Result<JsValue, JsValue>
 where
@@ -675,11 +676,6 @@ where
     let verified = Object::new();
     set_field(&verified, "root", &bytes_to_js(root.as_ref()))?;
     set_field(&verified, "operations", &operations.into())?;
-    set_field(
-        &verified,
-        "proofSizeBytes",
-        &JsValue::from_f64(proof_size_bytes as f64),
-    )?;
     Ok(verified.into())
 }
 
@@ -774,7 +770,6 @@ where
 
 fn fixed_keyless_append_to_js<F>(
     root: commonware_cryptography::sha256::Digest,
-    proof_size_bytes: usize,
     operation_count: usize,
     location: Location<F>,
     value: &[u8],
@@ -788,11 +783,6 @@ where
     set_field(&verified, "root", &bytes_to_js(root.as_ref()))?;
     set_field(
         &verified,
-        "proofSizeBytes",
-        &JsValue::from_f64(proof_size_bytes as f64),
-    )?;
-    set_field(
-        &verified,
         "operationCount",
         &JsValue::from_f64(operation_count as f64),
     )?;
@@ -801,7 +791,6 @@ where
 
 fn fixed_unordered_update_to_js<F>(
     root: commonware_cryptography::sha256::Digest,
-    proof_size_bytes: usize,
     operation_count: usize,
     location: Location<F>,
     key: &[u8],
@@ -815,11 +804,6 @@ where
     set_field(&verified, "key", &bytes_to_js(key))?;
     set_field(&verified, "value", &bytes_to_js(value))?;
     set_field(&verified, "root", &bytes_to_js(root.as_ref()))?;
-    set_field(
-        &verified,
-        "proofSizeBytes",
-        &JsValue::from_f64(proof_size_bytes as f64),
-    )?;
     set_field(
         &verified,
         "operationCount",
@@ -1133,16 +1117,16 @@ pub fn verify_historical_raw_operation_range_proof(
     let root = decode_digest(root, "historical operation range root").map_err(js_err)?;
     match normalize_family(merkle_family, "historical operation range proof").map_err(js_err)? {
         "mmr" => {
-            let (root, proof, operations) =
+            let (root, _, operations) =
                 verify_raw_operation_range_from_proto::<mmr::Family, Sha256>(&proto, &root)
                     .map_err(js_err)?;
-            raw_operations_to_js(root, proof.encode().len(), operations)
+            raw_operations_to_js(root, operations)
         }
         "mmb" => {
-            let (root, proof, operations) =
+            let (root, _, operations) =
                 verify_raw_operation_range_from_proto::<mmb::Family, Sha256>(&proto, &root)
                     .map_err(js_err)?;
-            raw_operations_to_js(root, proof.encode().len(), operations)
+            raw_operations_to_js(root, operations)
         }
         _ => unreachable!("normalize_family only returns supported values"),
     }
@@ -1162,7 +1146,7 @@ pub fn verify_historical_fixed_keyless_append_proof(
     let root = decode_digest(root, "historical operation range root").map_err(js_err)?;
     match normalize_family(merkle_family, "historical operation range proof").map_err(js_err)? {
         "mmr" => {
-            let (root, proof, operations) =
+            let (root, _, operations) =
                 verify_raw_operation_range_from_proto::<mmr::Family, Sha256>(&proto, &root)
                     .map_err(js_err)?;
             let operation = expected_raw_operation(
@@ -1176,14 +1160,13 @@ pub fn verify_historical_fixed_keyless_append_proof(
                 .map_err(js_err)?;
             fixed_keyless_append_to_js(
                 root,
-                proof.encode().len(),
                 operations.len(),
                 Location::<mmr::Family>::new(expected_location),
                 &value,
             )
         }
         "mmb" => {
-            let (root, proof, operations) =
+            let (root, _, operations) =
                 verify_raw_operation_range_from_proto::<mmb::Family, Sha256>(&proto, &root)
                     .map_err(js_err)?;
             let operation = expected_raw_operation(
@@ -1197,7 +1180,6 @@ pub fn verify_historical_fixed_keyless_append_proof(
                 .map_err(js_err)?;
             fixed_keyless_append_to_js(
                 root,
-                proof.encode().len(),
                 operations.len(),
                 Location::<mmb::Family>::new(expected_location),
                 &value,
@@ -1222,7 +1204,7 @@ pub fn verify_historical_fixed_unordered_update_proof(
     let root = decode_digest(root, "historical operation range root").map_err(js_err)?;
     match normalize_family(merkle_family, "historical operation range proof").map_err(js_err)? {
         "mmr" => {
-            let (root, proof, operations) =
+            let (root, _, operations) =
                 verify_raw_operation_range_from_proto::<mmr::Family, Sha256>(&proto, &root)
                     .map_err(js_err)?;
             let operation = expected_raw_operation(
@@ -1237,7 +1219,6 @@ pub fn verify_historical_fixed_unordered_update_proof(
                     .map_err(js_err)?;
             fixed_unordered_update_to_js(
                 root,
-                proof.encode().len(),
                 operations.len(),
                 Location::<mmr::Family>::new(expected_location),
                 expected_key,
@@ -1245,7 +1226,7 @@ pub fn verify_historical_fixed_unordered_update_proof(
             )
         }
         "mmb" => {
-            let (root, proof, operations) =
+            let (root, _, operations) =
                 verify_raw_operation_range_from_proto::<mmb::Family, Sha256>(&proto, &root)
                     .map_err(js_err)?;
             let operation = expected_raw_operation(
@@ -1260,7 +1241,6 @@ pub fn verify_historical_fixed_unordered_update_proof(
                     .map_err(js_err)?;
             fixed_unordered_update_to_js(
                 root,
-                proof.encode().len(),
                 operations.len(),
                 Location::<mmb::Family>::new(expected_location),
                 expected_key,
