@@ -282,13 +282,13 @@ impl<D: Digest, F: Family> WriterCore<D, F> {
         }
     }
 
-    /// If the latest dispatched batch's `latest_location` is ahead of the
+    /// If the latest contiguous ACKed batch's `latest_location` is ahead of the
     /// currently published watermark, return that location so the caller can
     /// issue a catch-up watermark PUT.
     pub(crate) async fn pending_watermark(&self) -> Result<Option<Location<F>>, QmdbError> {
         let state = self.state.lock().await;
         match &*state {
-            State::Ready(c) => Ok(match c.latest_dispatched {
+            State::Ready(c) => Ok(match c.latest_contiguous_acked {
                 Some(d) if c.latest_published.is_some_and(|p| p >= d) => None,
                 Some(d) => Some(d),
                 _ => None,
@@ -296,6 +296,39 @@ impl<D: Digest, F: Family> WriterCore<D, F> {
             State::Uninit => unreachable!("writer core is always constructed with state"),
             State::Poisoned { msg, .. } => Err(QmdbError::WriterPoisoned(msg.clone())),
         }
+    }
+
+    /// Return the watermark that can be published by a Store batch containing
+    /// `uploads`. This treats the provided dispatch IDs as committed
+    /// atomically with the watermark row, but still stops at the first pending
+    /// prefix hole not covered by those uploads.
+    pub(crate) async fn pending_watermark_for_uploads(
+        &self,
+        uploads: &[(u64, Location<F>)],
+    ) -> Result<Option<Location<F>>, QmdbError> {
+        let state = self.state.lock().await;
+        let cache = match &*state {
+            State::Ready(c) => c,
+            State::Uninit => unreachable!("writer core is always constructed with state"),
+            State::Poisoned { msg, .. } => return Err(QmdbError::WriterPoisoned(msg.clone())),
+        };
+        let mut candidate = cache.latest_contiguous_acked;
+        for pending in &cache.pending {
+            if pending.acked
+                || uploads.iter().any(|&(dispatch_id, latest)| {
+                    dispatch_id == pending.id && latest == pending.latest
+                })
+            {
+                candidate = Some(pending.latest);
+                continue;
+            }
+            break;
+        }
+        Ok(match candidate {
+            Some(d) if cache.latest_published.is_some_and(|p| p >= d) => None,
+            Some(d) => Some(d),
+            _ => None,
+        })
     }
 
     /// Mark a catch-up watermark (emitted by `flush()`) as published.
@@ -464,6 +497,11 @@ mod tests {
             None,
             "committed watermark must not advance past an unacked prefix hole",
         );
+        assert_eq!(
+            core.pending_watermark().await.expect("pending watermark"),
+            None,
+            "flush must not publish past an unacked prefix hole",
+        );
         {
             let state = core.state.lock().await;
             let cache = match &*state {
@@ -480,11 +518,36 @@ mod tests {
             .prepare(1, passthrough_build)
             .await
             .expect("prepare fourth");
+        let fourth_upload = (fourth.dispatch_id, fourth.latest_location);
         assert_eq!(fourth.watermark_at, None);
+        assert_eq!(
+            core.pending_watermark().await.expect("pending watermark"),
+            None,
+            "flush must stay blocked while the prefix hole remains",
+        );
+        assert_eq!(
+            core.pending_watermark_for_uploads(std::slice::from_ref(&fourth_upload))
+                .await
+                .expect("batch watermark"),
+            None,
+            "an atomic Store batch cannot publish through an uncovered prefix hole",
+        );
 
         // Once the missing first batch ACKs, the contiguous frontier jumps to
         // the highest already-acked predecessor (batch 2 / location 2).
         core.ack_success(first.dispatch_id, 10).await;
+        assert_eq!(
+            core.pending_watermark().await.expect("pending watermark"),
+            Some(loc(2)),
+            "flush may publish the contiguous ACKed prefix, but not the in-flight tail",
+        );
+        assert_eq!(
+            core.pending_watermark_for_uploads(std::slice::from_ref(&fourth_upload))
+                .await
+                .expect("batch watermark"),
+            Some(loc(3)),
+            "an atomic Store batch may publish the tail it contains",
+        );
         {
             let state = core.state.lock().await;
             let cache = match &*state {

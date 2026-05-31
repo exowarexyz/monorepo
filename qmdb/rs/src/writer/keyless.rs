@@ -259,6 +259,30 @@ where
         }))
     }
 
+    /// Prepare a watermark row to stage into the same Store batch as `uploads`.
+    ///
+    /// This may publish through the provided uploads because their rows and the
+    /// watermark row commit atomically in the caller's Store batch.
+    pub async fn prepare_flush_for_uploads<'a>(
+        &self,
+        uploads: impl IntoIterator<Item = &'a super::PreparedUpload<F>>,
+    ) -> Result<Option<super::PreparedWatermark<F>>, QmdbError>
+    where
+        F: 'a,
+    {
+        let uploads = uploads
+            .into_iter()
+            .map(|upload| (upload.dispatch_id, upload.latest_location))
+            .collect::<Vec<_>>();
+        let Some(target) = self.core.pending_watermark_for_uploads(&uploads).await? else {
+            return Ok(None);
+        };
+        Ok(Some(super::PreparedWatermark::<F> {
+            location: target,
+            row: (encode_auth_watermark_key(NAMESPACE, target), Vec::new()),
+        }))
+    }
+
     pub fn stage_flush(
         &self,
         prepared: &super::PreparedWatermark<F>,

@@ -574,7 +574,15 @@ async fn prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_receipts(
         .prepare_flush()
         .expect("prepare sql")
         .expect("sql rows");
-    let prepared_qmdb_watermark = StorePublicationFrontierWriter::prepare_publication(&qmdb_writer)
+    assert!(
+        StorePublicationFrontierWriter::prepare_publication(&qmdb_writer)
+            .await
+            .expect("prepare standalone qmdb watermark")
+            .is_none(),
+        "standalone QMDB publication must not publish unpersisted uploads"
+    );
+    let prepared_qmdb_watermark = qmdb_writer
+        .prepare_flush_for_uploads([&prepared_qmdb_1, &prepared_qmdb_2])
         .await
         .expect("prepare qmdb watermark")
         .expect("qmdb tail watermark");

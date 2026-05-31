@@ -5,8 +5,8 @@
 //! turns (Merkle peaks, ops) into the full set of store rows, plus a stateful
 //! `*Writer` wrapper around [`core::WriterCore`] that starts from caller-supplied
 //! frontier state, prepares rows for caller-owned Store write batches, gates
-//! in-band watermark emission on pipeline emptiness, and exposes a `flush()` to
-//! publish a catch-up watermark after bursts.
+//! watermark emission on contiguous committed prefixes, and exposes `flush()`
+//! plus batch-local flush preparation for atomic multi-upload Store batches.
 //!
 //! Multiple `prepare_upload` calls may be issued concurrently against the same
 //! writer instance. The writer serializes frontier assignment under its
