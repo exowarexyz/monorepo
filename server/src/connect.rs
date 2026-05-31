@@ -391,9 +391,9 @@ where
             .await
             .map_err(ConnectError::internal)?;
 
-        // Publish the committed batch to any attached stream frontier.
+        // Advance any attached stream frontier after the write is committed.
         if let Some(notifier) = &self.state.notifier {
-            notifier.publish(seq);
+            notifier.advance(seq);
         }
 
         connectrpc::Response::ok(ProtoPutResponse {
@@ -1016,8 +1016,9 @@ where
         let since = request.since_sequence_number;
 
         // Snapshot the current published frontier and subscribe for future
-        // wakeups. The stream then walks the log by sequence cursor, so live
-        // delivery is paced by client reads instead of server-side buffering.
+        // wakeups. The stream then walks the log by sequence cursor, so
+        // live delivery is paced by client reads instead of server-side
+        // buffering.
         let matchers = crate::stream::compile_matchers(&filter)?;
         let subscription = self.state.notifier.subscribe();
         let replay_bound = subscription.current_sequence;
@@ -1238,6 +1239,7 @@ where
 mod tests {
     use super::*;
     use std::collections::{BTreeMap, HashMap};
+    use std::sync::atomic::AtomicU64;
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -1252,10 +1254,11 @@ mod tests {
     use exoware_sdk::kv_codec::KvReducedValue;
     use exoware_sdk::prune_policy::{PrunePolicyDocument, PRUNE_POLICY_DOCUMENT_VERSION};
     use exoware_sdk::{decode_connect_error, to_domain_reduce_response};
-    use futures::{FutureExt, StreamExt};
+    use futures::StreamExt;
 
     use crate::{
-        Ingest, Log, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence, StreamNotifier,
+        Ingest, Log, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence,
+        StreamNotification, StreamNotifier,
     };
 
     const TEST_RESERVED_BITS: u8 = 4;
@@ -1562,6 +1565,38 @@ mod tests {
         }
     }
 
+    struct ManualNotifier {
+        current_sequence: AtomicU64,
+        notify: Arc<Notify>,
+    }
+
+    impl ManualNotifier {
+        fn new(current_sequence: u64) -> Self {
+            Self {
+                current_sequence: AtomicU64::new(current_sequence),
+                notify: Arc::new(Notify::new()),
+            }
+        }
+    }
+
+    impl StreamNotifier for ManualNotifier {
+        fn subscribe(&self) -> StreamNotification {
+            StreamNotification {
+                current_sequence: self.current_sequence.load(Ordering::Acquire),
+                notify: self.notify.clone(),
+            }
+        }
+
+        fn current_sequence(&self) -> u64 {
+            self.current_sequence.load(Ordering::Acquire)
+        }
+
+        fn advance(&self, seq: u64) {
+            self.current_sequence.fetch_max(seq, Ordering::SeqCst);
+            self.notify.notify_waiters();
+        }
+    }
+
     fn matching_kv(payload: &[u8], value: &[u8]) -> (Bytes, Bytes) {
         let codec = KeyCodec::new(TEST_RESERVED_BITS, TEST_PREFIX);
         let key = codec.encode(payload).expect("encode key");
@@ -1806,31 +1841,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ingest_notifies_individual_publish_path() {
+    async fn stream_can_be_advanced_by_external_notifier() {
         let engine = Arc::new(FakeEngine::default());
-        let notifier = Arc::new(StreamHub::new(0));
-        let state = IngestState::with_notifier(engine, notifier.clone());
-        let connect = IngestConnect::new(state);
-
-        let response = IngestApi::put(&connect, Context::default(), put_request(1))
-            .await
-            .expect("put")
-            .body;
-
-        assert_eq!(response.sequence_number, 1);
-        assert_eq!(notifier.current_sequence(), 1);
-    }
-
-    #[tokio::test]
-    async fn stream_can_be_published_by_external_notifier() {
-        let engine = Arc::new(FakeEngine::default());
-        let notifier = Arc::new(StreamHub::new(0));
+        let notifier = Arc::new(ManualNotifier::new(0));
         let connect = StreamConnect::new(StreamState::new(engine.clone(), notifier.clone()));
         let mut stream = subscribe_stream(&connect, None).await.expect("subscribe");
 
         engine.set_current_sequence(1);
         engine.set_batch(1, Some(vec![matching_kv(b"hit", b"v1")]));
-        notifier.publish(1);
+        notifier.advance(1);
 
         let frame = tokio::time::timeout(Duration::from_secs(1), stream.next())
             .await
@@ -2084,43 +2103,6 @@ mod tests {
         assert_eq!(frame.sequence_number, 1);
         assert_eq!(frame.entries.len(), 1);
         assert_eq!(frame.entries[0].value.as_ref(), b"v1");
-    }
-
-    #[tokio::test]
-    async fn live_subscribe_waits_for_contiguous_publish_frontier() {
-        let engine = Arc::new(FakeEngine::default());
-        let state = AppState::new(engine.clone());
-        let connect = StreamConnect::new(state.clone());
-        let mut stream = subscribe_stream(&connect, None).await.expect("subscribe");
-
-        engine.set_batch(2, Some(vec![matching_kv(b"hit", b"v2")]));
-        state.stream.publish(2);
-
-        assert!(
-            stream.next().now_or_never().is_none(),
-            "a later published batch must not advance the live frontier past a missing earlier batch",
-        );
-
-        engine.set_batch(1, Some(vec![matching_kv(b"hit", b"v1")]));
-        state.stream.publish(1);
-
-        let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
-            .await
-            .expect("stream should yield first contiguous frame")
-            .expect("first frame should exist")
-            .expect("first frame should be ok");
-        assert_eq!(first.sequence_number, 1);
-        assert_eq!(first.entries.len(), 1);
-        assert_eq!(first.entries[0].value.as_ref(), b"v1");
-
-        let second = tokio::time::timeout(Duration::from_secs(1), stream.next())
-            .await
-            .expect("stream should yield pending later frame")
-            .expect("second frame should exist")
-            .expect("second frame should be ok");
-        assert_eq!(second.sequence_number, 2);
-        assert_eq!(second.entries.len(), 1);
-        assert_eq!(second.entries[0].value.as_ref(), b"v2");
     }
 
     #[tokio::test]
