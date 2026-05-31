@@ -9,9 +9,10 @@ import {
 } from '@exowarexyz/sdk';
 import { Buffer } from 'buffer';
 import './App.css';
-import { QMDB_URL, QmdbPanel } from './QmdbPanel';
-import { SIMPLEX_URL, SimplexPanel } from './SimplexPanel';
-import { SQL_URL, SqlPanel } from './SqlPanel';
+import { QMDB_URL, SIMPLEX_URL, SQL_URL } from './env';
+import { QmdbPanel } from './QmdbPanel';
+import { SimplexPanel } from './SimplexPanel';
+import { SqlPanel } from './SqlPanel';
 
 const MAX_STREAM_EVENTS = 10;
 

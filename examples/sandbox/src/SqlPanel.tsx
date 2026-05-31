@@ -7,7 +7,6 @@ import {
   type DecodedTable,
 } from '@sql-ts';
 
-export const SQL_URL = import.meta.env.VITE_SQL_URL as string | undefined;
 const MAX_EVENTS = 10;
 const DEFAULT_TABLE = 'orders_kv';
 const DEFAULT_WHERE = "region = 'us-east' AND amount_cents >= 2000";

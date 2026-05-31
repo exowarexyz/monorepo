@@ -14,7 +14,6 @@ import {
 } from '@simplex-ts';
 import { createWasmSimplexVerifier } from '@simplex-ts/wasm';
 
-export const SIMPLEX_URL = import.meta.env.VITE_SIMPLEX_URL as string | undefined;
 const MAX_EVENTS = 10;
 const SIMPLEX_DEMO_SCHEME: SimplexScheme = 'bls12381-threshold-vrf-min-sig';
 const SIMPLEX_DEMO_PAYLOAD: SimplexPayload = 'sha256';
