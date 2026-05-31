@@ -197,20 +197,6 @@ impl BatchWriter {
         Ok(())
     }
 
-    pub fn stage_flush_owned(
-        &self,
-        prepared: &mut PreparedBatch,
-        batch: &mut StoreWriteBatch,
-    ) -> DataFusionResult<()> {
-        batch.reserve(prepared.entry_count());
-        for (key, value) in prepared.keys.drain(..).zip(prepared.values.drain(..)) {
-            batch
-                .push(&self.client, &key, value)
-                .map_err(|e| DataFusionError::External(Box::new(e)))?;
-        }
-        Ok(())
-    }
-
     pub fn mark_flush_persisted(
         &self,
         prepared: PreparedBatch,
@@ -983,4 +969,38 @@ pub(crate) async fn flush_ingest_batch(
     keys.clear();
     values.clear();
     Ok(token)
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+
+    use super::*;
+
+    #[test]
+    fn store_batch_upload_stage_preserves_rows_for_failed_retry() {
+        let writer = BatchWriter::new(StoreClient::new("http://127.0.0.1:1"), &[]);
+        let mut prepared = PreparedBatch {
+            request_id: 7,
+            entry_count: 2,
+            keys: vec![Bytes::from_static(b"a"), Bytes::from_static(b"b")],
+            values: vec![vec![1], vec![2, 3]],
+        };
+        let mut batch = StoreWriteBatch::new();
+
+        StoreBatchUpload::stage_upload(&writer, &mut prepared, &mut batch).expect("stage flush");
+
+        assert_eq!(batch.len(), 2);
+        assert_eq!(prepared.entry_count(), 2);
+        assert_eq!(prepared.keys.len(), 2);
+        assert_eq!(prepared.values.len(), 2);
+
+        writer.mark_flush_failed(prepared);
+        let mut retry = writer.take_failed_prepared().expect("failed batch queued");
+        assert_eq!(retry.entry_count(), 2);
+
+        let mut retry_batch = StoreWriteBatch::new();
+        StoreBatchUpload::stage_upload(&writer, &mut retry, &mut retry_batch).expect("stage retry");
+        assert_eq!(retry_batch.len(), 2);
+    }
 }

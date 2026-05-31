@@ -289,11 +289,12 @@ export class QmdbOperationLogClient {
       request,
       options,
     );
-    return verify_historical_raw_operation_range_proof(
+    const verified = verify_historical_raw_operation_range_proof(
       proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,
-    ) as VerifiedRawOperationRangeProof;
+    ) as Omit<VerifiedRawOperationRangeProof, 'proofSizeBytes'>;
+    return { ...verified, proofSizeBytes: proofBytes.length };
   }
 
   async getFixedKeylessAppend(
@@ -309,13 +310,14 @@ export class QmdbOperationLogClient {
       request,
       options,
     );
-    return verify_historical_fixed_keyless_append_proof(
+    const verified = verify_historical_fixed_keyless_append_proof(
       proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,
       expectedLocation,
       toBytes(expectedValue),
-    ) as VerifiedFixedKeylessAppendProof;
+    ) as Omit<VerifiedFixedKeylessAppendProof, 'proofSizeBytes'>;
+    return { ...verified, proofSizeBytes: proofBytes.length };
   }
 
   async getFixedUnorderedUpdate(
@@ -332,14 +334,15 @@ export class QmdbOperationLogClient {
       request,
       options,
     );
-    return verify_historical_fixed_unordered_update_proof(
+    const verified = verify_historical_fixed_unordered_update_proof(
       proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,
       expectedLocation,
       toBytes(expectedKey),
       valueSize,
-    ) as VerifiedFixedUnorderedUpdateProof;
+    ) as Omit<VerifiedFixedUnorderedUpdateProof, 'proofSizeBytes'>;
+    return { ...verified, proofSizeBytes: proofBytes.length };
   }
 }
 
