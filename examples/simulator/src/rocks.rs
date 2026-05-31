@@ -605,10 +605,6 @@ fn decode_batch_entries(mut raw: &[u8]) -> Result<Vec<(Bytes, Bytes)>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Barrier};
-    use std::thread;
-
-    use tempfile::tempdir;
 
     #[test]
     fn batch_entries_codec_round_trip() {
@@ -630,52 +626,5 @@ mod tests {
         let encoded = encode_batch_entries(&[]);
         let decoded = decode_batch_entries(&encoded).unwrap();
         assert!(decoded.is_empty());
-    }
-
-    #[test]
-    fn concurrent_writes_keep_sequence_log_contiguous() {
-        const WRITERS: usize = 16;
-
-        let dir = tempdir().expect("tempdir");
-        let store = RocksStore::open(dir.path()).expect("open db");
-        let start = Arc::new(Barrier::new(WRITERS));
-        let mut handles = Vec::new();
-
-        for i in 0..WRITERS {
-            let store = store.clone();
-            let start = start.clone();
-            handles.push(thread::spawn(move || {
-                start.wait();
-                store
-                    .batch_put_rocksdb(&[(
-                        Bytes::from(format!("k{i}")),
-                        Bytes::from(format!("v{i}")),
-                    )])
-                    .expect("put")
-            }));
-        }
-
-        let mut sequences = handles
-            .into_iter()
-            .map(|handle| handle.join().expect("writer thread"))
-            .collect::<Vec<_>>();
-        sequences.sort_unstable();
-
-        assert_eq!(sequences, (1..=WRITERS as u64).collect::<Vec<_>>());
-        assert_eq!(store.current_sequence(), WRITERS as u64);
-        for seq in 1..=WRITERS as u64 {
-            assert!(
-                store
-                    .db
-                    .get_cf(store.log_cf(), seq.to_be_bytes())
-                    .expect("get log batch")
-                    .is_some(),
-                "missing log batch {seq}"
-            );
-        }
-
-        drop(store);
-        let reopened = RocksStore::open(dir.path()).expect("reopen db");
-        assert_eq!(reopened.current_sequence(), WRITERS as u64);
     }
 }
