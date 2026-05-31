@@ -1,27 +1,27 @@
 import initWasm, * as wasm from './generated/wasm/exoware_simplex_wasm.js';
 import {
-  createCommonwareSimplexVerifier,
-  type CommonwareVerifiedSimplexCertificate,
-  type CommonwareSimplexVerifierOptions,
+  createSimplexVerifier,
+  type VerifiedSimplexCertificate,
+  type SimplexVerifierOptions,
   type SimplexCertificateVerifier,
 } from './client.js';
 
 let wasmReady: Promise<unknown> | undefined;
 type InitWasmInput = Parameters<typeof initWasm>[0];
 
-export function ensureCommonwareSimplexWasm(initInput?: InitWasmInput): Promise<unknown> {
+export function ensureSimplexWasm(initInput?: InitWasmInput): Promise<unknown> {
   return (wasmReady ??= initWasm(initInput));
 }
 
-export async function createCommonwareWasmSimplexVerifier(
-  options: CommonwareSimplexVerifierOptions,
+export async function createWasmSimplexVerifier(
+  options: SimplexVerifierOptions,
   initInput?: InitWasmInput,
 ): Promise<
   SimplexCertificateVerifier<
-    CommonwareVerifiedSimplexCertificate,
-    CommonwareVerifiedSimplexCertificate
+    VerifiedSimplexCertificate,
+    VerifiedSimplexCertificate
   >
 > {
-  await ensureCommonwareSimplexWasm(initInput);
-  return createCommonwareSimplexVerifier(wasm, options);
+  await ensureSimplexWasm(initInput);
+  return createSimplexVerifier(wasm, options);
 }
