@@ -7,7 +7,6 @@
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -262,27 +261,11 @@ fn keys_to_delete(
 #[derive(Clone)]
 pub struct RocksStore {
     db: Arc<DB>,
-    sequence: Arc<AtomicU64>,
-    /// Serializes sequence assignment, sequence metadata, and log writes.
-    commit_lock: Arc<Mutex<()>>,
-    /// Optional handle updated whenever the sequence advances (for tests).
-    observer: Option<Arc<AtomicU64>>,
-}
-
-struct PreparedRocksBatch {
-    batch: rocksdb::WriteBatch,
-    encoded_log: Vec<u8>,
+    sequence: Arc<Mutex<u64>>,
 }
 
 impl RocksStore {
     pub fn open(path: &Path) -> Result<Self, rocksdb::Error> {
-        Self::open_with_observer(path, None)
-    }
-
-    pub fn open_with_observer(
-        path: &Path,
-        observer: Option<Arc<AtomicU64>>,
-    ) -> Result<Self, rocksdb::Error> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
@@ -305,9 +288,7 @@ impl RocksStore {
         };
         Ok(Self {
             db,
-            sequence: Arc::new(AtomicU64::new(seq)),
-            commit_lock: Arc::new(Mutex::new(())),
-            observer,
+            sequence: Arc::new(Mutex::new(seq)),
         })
     }
 
@@ -323,53 +304,27 @@ impl RocksStore {
             .expect("meta CF must exist (created on open)")
     }
 
-    fn prepare_put_batch(kvs: Vec<(Bytes, Bytes)>) -> PreparedRocksBatch {
-        let encoded_log = encode_batch_entries(&kvs);
+    fn commit_sequence_batch_rocksdb(
+        &self,
+        mut batch: rocksdb::WriteBatch,
+        encoded_log: Vec<u8>,
+    ) -> Result<u64, rocksdb::Error> {
+        let mut sequence = self.sequence.lock().expect("rocks sequence lock poisoned");
+        let next = *sequence + 1;
+        batch.put_cf(self.meta_cf(), SEQ_META_KEY, next.to_le_bytes());
+        batch.put_cf(self.log_cf(), next.to_be_bytes(), &encoded_log);
+        self.db.write(batch)?;
+        *sequence = next;
+        Ok(next)
+    }
+
+    fn batch_put_rocksdb(&self, kvs: &[(Bytes, Bytes)]) -> Result<u64, rocksdb::Error> {
+        let encoded = encode_batch_entries(kvs);
         let mut batch = rocksdb::WriteBatch::default();
         for (k, v) in kvs {
             batch.put(k.as_ref(), v.as_ref());
         }
-        PreparedRocksBatch { batch, encoded_log }
-    }
-
-    fn prepare_delete_batch(keys: &[Bytes]) -> PreparedRocksBatch {
-        let mut batch = rocksdb::WriteBatch::default();
-        for k in keys {
-            batch.delete(k.as_ref());
-        }
-        // Record an empty batch so sequence numbers stay contiguous for stream replay.
-        PreparedRocksBatch {
-            batch,
-            encoded_log: encode_batch_entries(&[]),
-        }
-    }
-
-    fn commit_prepared_batch(
-        &self,
-        mut prepared: PreparedRocksBatch,
-    ) -> Result<u64, rocksdb::Error> {
-        let _commit_guard = self
-            .commit_lock
-            .lock()
-            .expect("rocks store commit lock should not be poisoned");
-        let next = self.sequence.load(Ordering::SeqCst) + 1;
-        prepared
-            .batch
-            .put_cf(self.meta_cf(), SEQ_META_KEY, next.to_le_bytes());
-        prepared
-            .batch
-            .put_cf(self.log_cf(), next.to_be_bytes(), &prepared.encoded_log);
-        self.db.write(prepared.batch)?;
-        self.sequence.store(next, Ordering::SeqCst);
-        if let Some(obs) = &self.observer {
-            obs.store(next, Ordering::SeqCst);
-        }
-        Ok(next)
-    }
-
-    fn batch_put_rocksdb(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, rocksdb::Error> {
-        let prepared = Self::prepare_put_batch(kvs);
-        self.commit_prepared_batch(prepared)
+        self.commit_sequence_batch_rocksdb(batch, encoded)
     }
 
     fn get_rocksdb(&self, key: &[u8]) -> Result<Option<Vec<u8>>, rocksdb::Error> {
@@ -381,8 +336,12 @@ impl RocksStore {
             return Ok(());
         }
 
-        let prepared = Self::prepare_delete_batch(keys);
-        self.commit_prepared_batch(prepared).map(|_| ())
+        let mut batch = rocksdb::WriteBatch::default();
+        for k in keys {
+            batch.delete(k.as_ref());
+        }
+        self.db.write(batch)?;
+        Ok(())
     }
 
     fn prune_log_rocksdb(&self, cutoff_exclusive: u64) -> Result<u64, rocksdb::Error> {
@@ -476,7 +435,10 @@ impl RocksStore {
     }
 
     fn apply_sequence_prune_policy_rocksdb(&self, retain: &RetainPolicy) -> Result<(), String> {
-        let current = self.sequence.load(Ordering::SeqCst);
+        let current = *self
+            .sequence
+            .lock()
+            .map_err(|e| format!("rocks sequence lock poisoned: {e}"))?;
         let cutoff_exclusive = match retain {
             RetainPolicy::KeepLatest { count } => {
                 let count = *count as u64;
@@ -494,7 +456,7 @@ impl RocksStore {
 
 impl Sequence for RocksStore {
     fn current_sequence(&self) -> u64 {
-        self.sequence.load(Ordering::SeqCst)
+        *self.sequence.lock().expect("rocks sequence lock poisoned")
     }
 }
 
@@ -504,7 +466,7 @@ impl Sequence for RocksStore {
 impl Ingest for RocksStore {
     async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, String> {
         let store = self.clone();
-        store.batch_put_rocksdb(kvs).map_err(|e| e.to_string())
+        store.batch_put_rocksdb(&kvs).map_err(|e| e.to_string())
     }
 }
 
