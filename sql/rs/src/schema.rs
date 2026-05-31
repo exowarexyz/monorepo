@@ -2,6 +2,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::catalog::Session;
 use datafusion::common::{DataFusionError, Result as DataFusionResult, SchemaExt};
@@ -276,7 +277,7 @@ impl KvSchema {
             index_entries_written: 0,
         };
         let mut pending_keys = Vec::new();
-        let mut pending_values = Vec::new();
+        let mut pending_values: Vec<Bytes> = Vec::new();
         let session = self.client.create_session();
         let decode_pk_mask = vec![true; model.primary_key_kinds.len()];
         send_backfill_event(
@@ -343,7 +344,7 @@ impl KvSchema {
                         let index_value =
                             encode_secondary_index_value_from_archived(&archived, &model, spec)?;
                         pending_keys.push(index_key);
-                        pending_values.push(index_value);
+                        pending_values.push(index_value.into());
                         report.index_entries_written += 1;
                     }
 

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use commonware_codec::Encode;
 use datafusion::arrow::array::{
     ArrayRef, BooleanArray, Date32Array, Date64Array, Decimal128Array, Decimal256Array,
@@ -65,7 +66,7 @@ pub struct BatchWriter {
     next_request_id: u64,
     failed_prepared: Mutex<Vec<PreparedBatch>>,
     pub(crate) pending_keys: Vec<Key>,
-    pub(crate) pending_values: Vec<Vec<u8>>,
+    pub(crate) pending_values: Vec<Bytes>,
 }
 
 #[derive(Debug)]
@@ -74,7 +75,7 @@ pub struct PreparedBatch {
     request_id: u64,
     entry_count: usize,
     keys: Vec<Key>,
-    values: Vec<Vec<u8>>,
+    values: Vec<Bytes>,
 }
 
 impl PreparedBatch {
@@ -134,7 +135,7 @@ impl BatchWriter {
         let entries = writer.encode_row(values)?;
         for (key, value) in entries {
             self.pending_keys.push(key);
-            self.pending_values.push(value);
+            self.pending_values.push(value.into());
         }
         Ok(self)
     }
@@ -320,7 +321,7 @@ impl DataSink for KvIngestSink {
     ) -> DataFusionResult<u64> {
         let mut data = data;
         let mut pending_keys: Vec<Key> = Vec::new();
-        let mut pending_values: Vec<Vec<u8>> = Vec::new();
+        let mut pending_values: Vec<Bytes> = Vec::new();
         let mut logical_rows_written = 0u64;
 
         while let Some(batch) = data.try_next().await? {
@@ -328,7 +329,7 @@ impl DataSink for KvIngestSink {
             logical_rows_written += batch.num_rows() as u64;
             for (key, value) in encoded_entries {
                 pending_keys.push(key);
-                pending_values.push(value);
+                pending_values.push(value.into());
             }
         }
 
@@ -951,7 +952,7 @@ pub(crate) fn list_value_at(
 pub(crate) async fn flush_ingest_batch(
     client: &StoreClient,
     keys: &mut Vec<Key>,
-    values: &mut Vec<Vec<u8>>,
+    values: &mut Vec<Bytes>,
 ) -> DataFusionResult<u64> {
     if keys.is_empty() {
         return Ok(0);
@@ -984,7 +985,7 @@ mod tests {
             request_id: 7,
             entry_count: 2,
             keys: vec![Bytes::from_static(b"a"), Bytes::from_static(b"b")],
-            values: vec![vec![1], vec![2, 3]],
+            values: vec![Bytes::from_static(&[1]), Bytes::from_static(&[2, 3])],
         };
         let mut batch = StoreWriteBatch::new();
 
