@@ -345,6 +345,15 @@ impl StoreWriteBatch {
         Self::default()
     }
 
+    /// Build a batch from rows already encoded in physical Store keyspace.
+    ///
+    /// This is intended for callers that construct rows for an unprefixed
+    /// [`StoreClient`] and then stage prefixed rows from other logical clients
+    /// into the same atomic Store `Put`.
+    pub fn from_physical_entries(entries: Vec<(Key, Bytes)>) -> Self {
+        Self { entries }
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -359,6 +368,11 @@ impl StoreWriteBatch {
 
     pub fn reserve(&mut self, additional: usize) {
         self.entries.reserve(additional);
+    }
+
+    /// Extend this batch with rows already encoded in physical Store keyspace.
+    pub fn extend_physical_entries(&mut self, entries: Vec<(Key, Bytes)>) {
+        self.entries.extend(entries);
     }
 
     pub fn push(

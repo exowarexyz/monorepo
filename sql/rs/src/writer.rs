@@ -72,6 +72,7 @@ pub struct BatchWriter {
 #[must_use]
 pub struct PreparedBatch {
     request_id: u64,
+    entry_count: usize,
     keys: Vec<Key>,
     values: Vec<Vec<u8>>,
 }
@@ -82,7 +83,7 @@ impl PreparedBatch {
     }
 
     pub fn entry_count(&self) -> usize {
-        self.keys.len()
+        self.entry_count
     }
 
     pub fn is_empty(&self) -> bool {
@@ -177,6 +178,7 @@ impl BatchWriter {
         self.next_request_id += 1;
         Ok(Some(PreparedBatch {
             request_id,
+            entry_count: self.pending_keys.len(),
             keys: std::mem::take(&mut self.pending_keys),
             values: std::mem::take(&mut self.pending_values),
         }))
@@ -190,6 +192,20 @@ impl BatchWriter {
         for (key, value) in prepared.keys.iter().zip(prepared.values.iter()) {
             batch
                 .push(&self.client, key, value)
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        }
+        Ok(())
+    }
+
+    pub fn stage_flush_owned(
+        &self,
+        prepared: &mut PreparedBatch,
+        batch: &mut StoreWriteBatch,
+    ) -> DataFusionResult<()> {
+        batch.reserve(prepared.entry_count());
+        for (key, value) in prepared.keys.drain(..).zip(prepared.values.drain(..)) {
+            batch
+                .push(&self.client, &key, value)
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
         }
         Ok(())

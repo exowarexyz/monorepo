@@ -94,6 +94,18 @@ pub(crate) fn stage_rows(
     Ok(())
 }
 
+pub(crate) fn stage_rows_owned(
+    client: &StoreClient,
+    batch: &mut StoreWriteBatch,
+    rows: &mut Vec<(Key, Vec<u8>)>,
+) -> Result<(), QmdbError> {
+    batch.reserve(rows.len());
+    for (key, value) in rows.drain(..) {
+        batch.push(client, &key, value)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn stage_watermark(
     client: &StoreClient,
     batch: &mut StoreWriteBatch,
