@@ -18,10 +18,12 @@ use commonware_storage::{
     qmdb::{
         any::{
             ordered::{variable::Operation as OrderedOperation, Update},
+            unordered::fixed::Operation as FixedUnorderedOperation,
             value::VariableEncoding,
         },
         current::ordered::{db::KeyValueProof, ExclusionProof},
         current::proof::{OpsRootWitness, RangeProof},
+        keyless::fixed::Operation as FixedKeylessOperation,
         verify::{verify_multi_proof, verify_proof_and_pinned_nodes},
     },
 };
@@ -33,10 +35,6 @@ use wasm_bindgen::JsCast;
 pub mod proto;
 
 const MAX_OPERATION_SIZE: usize = u16::MAX as usize;
-const KEYLESS_APPEND_CONTEXT: u8 = 1;
-const ANY_DELETE_CONTEXT: u8 = 0xD1;
-const ANY_UPDATE_CONTEXT: u8 = 0xD2;
-const ANY_COMMIT_CONTEXT: u8 = 0xD3;
 
 #[derive(Clone, Copy)]
 struct RawOperation<'a>(&'a [u8]);
@@ -716,75 +714,73 @@ where
     Ok(operation.clone())
 }
 
-fn ensure_zero_padding(bytes: &[u8], label: &str) -> Result<(), String> {
-    if bytes.iter().any(|byte| *byte != 0) {
-        return Err(format!("{label} padding was non-zero"));
-    }
-    Ok(())
-}
-
-fn fixed_keyless_append_value<'a>(
-    operation: &'a [u8],
-    expected_value: &[u8],
-) -> Result<&'a [u8], String> {
-    let value_size = expected_value.len();
-    let total = 2 + value_size + u64::SIZE;
-    if operation.len() != total {
+fn fixed_keyless_append_value<F>(operation: &[u8], expected_value: &[u8]) -> Result<Vec<u8>, String>
+where
+    F: merkle::Family,
+{
+    if expected_value.len() != commonware_cryptography::sha256::Digest::SIZE {
         return Err(format!(
-            "fixed keyless operation size {} did not match expected {total}",
-            operation.len()
+            "fixed keyless append verifier supports {}-byte values, got {}",
+            commonware_cryptography::sha256::Digest::SIZE,
+            expected_value.len()
         ));
     }
-    if operation[0] != KEYLESS_APPEND_CONTEXT {
-        return Err("expected keyless location is not an append".to_string());
+    let operation =
+        FixedKeylessOperation::<F, commonware_cryptography::sha256::Digest>::decode(operation)
+            .map_err(|err| format!("failed to decode fixed keyless operation: {err}"))?;
+    match operation {
+        FixedKeylessOperation::Append(value) => {
+            if value.as_ref() != expected_value {
+                return Err("keyless append value does not match expected value".to_string());
+            }
+            Ok(value.as_ref().to_vec())
+        }
+        FixedKeylessOperation::Commit(_, _) => {
+            Err("expected keyless location is not an append".to_string())
+        }
     }
-    let value_end = 1 + value_size;
-    let value = &operation[1..value_end];
-    if value != expected_value {
-        return Err("keyless append value does not match expected value".to_string());
-    }
-    ensure_zero_padding(&operation[value_end..], "fixed keyless append")?;
-    Ok(value)
 }
 
-fn fixed_unordered_update_value<'a>(
-    operation: &'a [u8],
+fn fixed_unordered_update_value<F>(
+    operation: &[u8],
     expected_key: &[u8],
     value_size: usize,
-) -> Result<&'a [u8], String> {
-    let key_size = expected_key.len();
-    let update_size = 1 + key_size + value_size;
-    let delete_size = 1 + key_size;
-    let commit_size = 1 + 1 + value_size + u64::SIZE;
-    let total = update_size.max(delete_size).max(commit_size);
-    if operation.len() != total {
+) -> Result<Vec<u8>, String>
+where
+    F: merkle::Family,
+{
+    if expected_key.len() != commonware_cryptography::sha256::Digest::SIZE {
         return Err(format!(
-            "fixed unordered operation size {} did not match expected {total}",
-            operation.len()
+            "fixed unordered update verifier supports {}-byte keys, got {}",
+            commonware_cryptography::sha256::Digest::SIZE,
+            expected_key.len()
         ));
     }
-    match operation[0] {
-        ANY_UPDATE_CONTEXT => {}
-        ANY_DELETE_CONTEXT => {
-            return Err("expected unordered location is a delete".to_string());
+    if value_size != u64::SIZE {
+        return Err(format!(
+            "fixed unordered update verifier supports {}-byte values, got {value_size}",
+            u64::SIZE
+        ));
+    }
+    let operation =
+        FixedUnorderedOperation::<F, commonware_cryptography::sha256::Digest, u64>::decode(
+            operation,
+        )
+        .map_err(|err| format!("failed to decode fixed unordered operation: {err}"))?;
+    match operation {
+        FixedUnorderedOperation::Update(update) => {
+            if update.0.as_ref() != expected_key {
+                return Err("unordered update key does not match expected key".to_string());
+            }
+            Ok(update.1.encode().to_vec())
         }
-        ANY_COMMIT_CONTEXT => {
-            return Err("expected unordered location is a commit".to_string());
+        FixedUnorderedOperation::Delete(_) => {
+            Err("expected unordered location is a delete".to_string())
         }
-        other => {
-            return Err(format!(
-                "expected unordered location has unsupported operation context {other}"
-            ));
+        FixedUnorderedOperation::CommitFloor(_, _) => {
+            Err("expected unordered location is a commit".to_string())
         }
     }
-    let key_start = 1;
-    let key_end = key_start + key_size;
-    let value_end = key_end + value_size;
-    if &operation[key_start..key_end] != expected_key {
-        return Err("unordered update key does not match expected key".to_string());
-    }
-    ensure_zero_padding(&operation[value_end..], "fixed unordered update")?;
-    Ok(&operation[key_end..value_end])
 }
 
 fn fixed_keyless_append_to_js<F>(
@@ -1187,13 +1183,14 @@ pub fn verify_historical_fixed_keyless_append_proof(
                 "keyless",
             )
             .map_err(js_err)?;
-            let value = fixed_keyless_append_value(&operation, expected_value).map_err(js_err)?;
+            let value = fixed_keyless_append_value::<mmr::Family>(&operation, expected_value)
+                .map_err(js_err)?;
             fixed_keyless_append_to_js(
                 root,
                 proof.encode().len(),
                 operations.len(),
                 Location::<mmr::Family>::new(expected_location),
-                value,
+                &value,
             )
         }
         "mmb" => {
@@ -1207,13 +1204,14 @@ pub fn verify_historical_fixed_keyless_append_proof(
                 "keyless",
             )
             .map_err(js_err)?;
-            let value = fixed_keyless_append_value(&operation, expected_value).map_err(js_err)?;
+            let value = fixed_keyless_append_value::<mmb::Family>(&operation, expected_value)
+                .map_err(js_err)?;
             fixed_keyless_append_to_js(
                 root,
                 proof.encode().len(),
                 operations.len(),
                 Location::<mmb::Family>::new(expected_location),
-                value,
+                &value,
             )
         }
         _ => unreachable!("normalize_family only returns supported values"),
@@ -1245,15 +1243,16 @@ pub fn verify_historical_fixed_unordered_update_proof(
                 "unordered",
             )
             .map_err(js_err)?;
-            let value = fixed_unordered_update_value(&operation, expected_key, value_size)
-                .map_err(js_err)?;
+            let value =
+                fixed_unordered_update_value::<mmr::Family>(&operation, expected_key, value_size)
+                    .map_err(js_err)?;
             fixed_unordered_update_to_js(
                 root,
                 proof.encode().len(),
                 operations.len(),
                 Location::<mmr::Family>::new(expected_location),
                 expected_key,
-                value,
+                &value,
             )
         }
         "mmb" => {
@@ -1267,15 +1266,16 @@ pub fn verify_historical_fixed_unordered_update_proof(
                 "unordered",
             )
             .map_err(js_err)?;
-            let value = fixed_unordered_update_value(&operation, expected_key, value_size)
-                .map_err(js_err)?;
+            let value =
+                fixed_unordered_update_value::<mmb::Family>(&operation, expected_key, value_size)
+                    .map_err(js_err)?;
             fixed_unordered_update_to_js(
                 root,
                 proof.encode().len(),
                 operations.len(),
                 Location::<mmb::Family>::new(expected_location),
                 expected_key,
-                value,
+                &value,
             )
         }
         _ => unreachable!("normalize_family only returns supported values"),
@@ -1697,10 +1697,11 @@ mod tests {
         let operation =
             expected_raw_operation(proto.start_location, &verified, 1, "keyless").unwrap();
 
-        let value = fixed_keyless_append_value(&operation, expected_value.as_ref()).unwrap();
+        let value =
+            fixed_keyless_append_value::<mmr::Family>(&operation, expected_value.as_ref()).unwrap();
 
         assert_eq!(proof.encode().len(), proto.proof.len());
-        assert_eq!(value, expected_value.as_ref());
+        assert_eq!(value.as_slice(), expected_value.as_ref());
     }
 
     #[test]
@@ -1726,10 +1727,14 @@ mod tests {
         let operation =
             expected_raw_operation(proto.start_location, &verified, 1, "unordered").unwrap();
 
-        let value =
-            fixed_unordered_update_value(&operation, expected_key.as_ref(), u64::SIZE).unwrap();
+        let value = fixed_unordered_update_value::<mmr::Family>(
+            &operation,
+            expected_key.as_ref(),
+            u64::SIZE,
+        )
+        .unwrap();
 
-        assert_eq!(value, expected_value.encode().as_ref());
+        assert_eq!(value.as_slice(), expected_value.encode().as_ref());
     }
 
     #[test]
