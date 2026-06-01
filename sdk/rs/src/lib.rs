@@ -361,14 +361,6 @@ impl StoreWriteBatch {
         self.entries.reserve(additional);
     }
 
-    /// Extend this batch with rows already encoded in physical Store keyspace.
-    ///
-    /// Prefer [`Self::push`] when staging rows for a prefixed logical client.
-    pub fn extend_physical_entries(&mut self, entries: Vec<(Key, Bytes)>) -> &mut Self {
-        self.entries.extend(entries);
-        self
-    }
-
     pub fn push(
         &mut self,
         client: &StoreClient,
@@ -3134,22 +3126,6 @@ mod tests {
             batch.entries[1].0,
             b.key_prefix().unwrap().encode_key(&key_b).unwrap()
         );
-    }
-
-    #[test]
-    fn store_write_batch_extends_physical_entries() {
-        let first_key = Bytes::from_static(b"a");
-        let second_key = Bytes::from_static(b"b");
-        let mut batch = StoreWriteBatch::new();
-
-        batch.extend_physical_entries(vec![
-            (first_key.clone(), Bytes::from_static(b"va")),
-            (second_key.clone(), Bytes::from_static(b"vb")),
-        ]);
-
-        assert_eq!(batch.len(), 2);
-        assert_eq!(batch.entries[0].0, first_key);
-        assert_eq!(batch.entries[1].0, second_key);
     }
 
     fn hex_encode(data: &[u8]) -> String {

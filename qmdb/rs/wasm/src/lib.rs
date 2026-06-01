@@ -308,14 +308,7 @@ where
 fn verify_raw_operation_range_from_proto<F, H>(
     proto: &HistoricalOperationRangeProof,
     root: &H::Digest,
-) -> Result<
-    (
-        H::Digest,
-        merkle::Proof<F, H::Digest>,
-        Vec<(Location<F>, Vec<u8>)>,
-    ),
-    String,
->
+) -> Result<(H::Digest, Vec<(Location<F>, Vec<u8>)>), String>
 where
     F: merkle::Graftable,
     H: commonware_cryptography::Hasher,
@@ -373,7 +366,7 @@ where
     ) {
         return Err("historical operation range proof failed verification".to_string());
     }
-    Ok((*root, proof, operations))
+    Ok((*root, operations))
 }
 
 fn verify_current_operation_range_from_proto<F>(
@@ -1117,13 +1110,13 @@ pub fn verify_historical_raw_operation_range_proof(
     let root = decode_digest(root, "historical operation range root").map_err(js_err)?;
     match normalize_family(merkle_family, "historical operation range proof").map_err(js_err)? {
         "mmr" => {
-            let (root, _, operations) =
+            let (root, operations) =
                 verify_raw_operation_range_from_proto::<mmr::Family, Sha256>(&proto, &root)
                     .map_err(js_err)?;
             raw_operations_to_js(root, operations)
         }
         "mmb" => {
-            let (root, _, operations) =
+            let (root, operations) =
                 verify_raw_operation_range_from_proto::<mmb::Family, Sha256>(&proto, &root)
                     .map_err(js_err)?;
             raw_operations_to_js(root, operations)
@@ -1146,7 +1139,7 @@ pub fn verify_historical_fixed_keyless_append_proof(
     let root = decode_digest(root, "historical operation range root").map_err(js_err)?;
     match normalize_family(merkle_family, "historical operation range proof").map_err(js_err)? {
         "mmr" => {
-            let (root, _, operations) =
+            let (root, operations) =
                 verify_raw_operation_range_from_proto::<mmr::Family, Sha256>(&proto, &root)
                     .map_err(js_err)?;
             let operation = expected_raw_operation(
@@ -1166,7 +1159,7 @@ pub fn verify_historical_fixed_keyless_append_proof(
             )
         }
         "mmb" => {
-            let (root, _, operations) =
+            let (root, operations) =
                 verify_raw_operation_range_from_proto::<mmb::Family, Sha256>(&proto, &root)
                     .map_err(js_err)?;
             let operation = expected_raw_operation(
@@ -1204,7 +1197,7 @@ pub fn verify_historical_fixed_unordered_update_proof(
     let root = decode_digest(root, "historical operation range root").map_err(js_err)?;
     match normalize_family(merkle_family, "historical operation range proof").map_err(js_err)? {
         "mmr" => {
-            let (root, _, operations) =
+            let (root, operations) =
                 verify_raw_operation_range_from_proto::<mmr::Family, Sha256>(&proto, &root)
                     .map_err(js_err)?;
             let operation = expected_raw_operation(
@@ -1226,7 +1219,7 @@ pub fn verify_historical_fixed_unordered_update_proof(
             )
         }
         "mmb" => {
-            let (root, _, operations) =
+            let (root, operations) =
                 verify_raw_operation_range_from_proto::<mmb::Family, Sha256>(&proto, &root)
                     .map_err(js_err)?;
             let operation = expected_raw_operation(
@@ -1637,7 +1630,7 @@ mod tests {
             .map(|(location, operation)| (location, operation.encode().to_vec()))
             .collect::<Vec<_>>();
 
-        let (verified_root, _, verified) =
+        let (verified_root, verified) =
             verify_raw_operation_range_from_proto::<mmr::Family, Sha256>(&proto, &root).unwrap();
 
         assert_eq!(verified_root, root);
@@ -1661,7 +1654,7 @@ mod tests {
                 .to_vec(),
         ];
         let (proto, root, _) = historical_raw_range_fixture_at::<mmr::Family>(&operations, 0, 3);
-        let (_, proof, verified) =
+        let (_, verified) =
             verify_raw_operation_range_from_proto::<mmr::Family, Sha256>(&proto, &root).unwrap();
         let operation =
             expected_raw_operation(proto.start_location, &verified, 1, "keyless").unwrap();
@@ -1669,7 +1662,6 @@ mod tests {
         let value =
             fixed_keyless_append_value::<mmr::Family>(&operation, expected_value.as_ref()).unwrap();
 
-        assert_eq!(proof.encode().len(), proto.proof.len());
         assert_eq!(value.as_slice(), expected_value.as_ref());
     }
 
@@ -1691,7 +1683,7 @@ mod tests {
                 .to_vec(),
         ];
         let (proto, root, _) = historical_raw_range_fixture_at::<mmr::Family>(&operations, 0, 3);
-        let (_, _, verified) =
+        let (_, verified) =
             verify_raw_operation_range_from_proto::<mmr::Family, Sha256>(&proto, &root).unwrap();
         let operation =
             expected_raw_operation(proto.start_location, &verified, 1, "unordered").unwrap();
