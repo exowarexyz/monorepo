@@ -28,7 +28,6 @@ use tokio::sync::oneshot;
 const META_CF: &str = "meta";
 const SEQ_META_KEY: &[u8] = b"sequence";
 const LOG_CF: &str = "log";
-const LEGACY_LOG_KEY_LEN: usize = 8;
 const INDEXED_LOG_KEY_LEN: usize = 16;
 const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
 const WRITE_DRAIN_MAX_REQUESTS: usize = 64;
@@ -676,14 +675,6 @@ impl Log for RocksStore {
         let store = self.clone();
         let cf = store.log_cf();
         let sequence_key = sequence_number.to_be_bytes();
-        if let Some(raw) = store
-            .db
-            .get_cf(cf, sequence_key)
-            .map_err(|e| e.to_string())?
-        {
-            return Ok(Some(decode_batch_entries(&raw).map_err(|e| e.to_string())?));
-        }
-
         let mut keys = Vec::new();
         let iter = store
             .db
@@ -738,65 +729,12 @@ fn indexed_log_key(sequence: u64, index: u64) -> [u8; INDEXED_LOG_KEY_LEN] {
 }
 
 fn sequence_from_log_key(key: &[u8]) -> Result<u64, String> {
-    if key.len() != LEGACY_LOG_KEY_LEN && key.len() != INDEXED_LOG_KEY_LEN {
+    if key.len() != INDEXED_LOG_KEY_LEN {
         return Err(format!("log CF key has unexpected length {}", key.len()));
     }
     let mut raw = [0u8; 8];
     raw.copy_from_slice(&key[..8]);
     Ok(u64::from_be_bytes(raw))
-}
-
-// --- legacy log codec: `count: u32_be | for each (k,v): klen: u32_be | k | vlen: u32_be | v` ---
-
-#[cfg(test)]
-fn encode_batch_entries(kvs: &[(Bytes, Bytes)]) -> Vec<u8> {
-    let mut size = 4;
-    for (k, v) in kvs {
-        size += 4 + k.len() + 4 + v.len();
-    }
-    let mut out = Vec::with_capacity(size);
-    out.extend_from_slice(&(kvs.len() as u32).to_be_bytes());
-    for (k, v) in kvs {
-        out.extend_from_slice(&(k.len() as u32).to_be_bytes());
-        out.extend_from_slice(k.as_ref());
-        out.extend_from_slice(&(v.len() as u32).to_be_bytes());
-        out.extend_from_slice(v.as_ref());
-    }
-    out
-}
-
-fn decode_batch_entries(mut raw: &[u8]) -> Result<Vec<(Bytes, Bytes)>, String> {
-    fn take_u32(buf: &mut &[u8]) -> Result<u32, String> {
-        if buf.len() < 4 {
-            return Err("log truncated at u32 header".to_string());
-        }
-        let (head, rest) = buf.split_at(4);
-        *buf = rest;
-        let mut raw = [0u8; 4];
-        raw.copy_from_slice(head);
-        Ok(u32::from_be_bytes(raw))
-    }
-    fn take_n<'a>(buf: &mut &'a [u8], n: usize) -> Result<&'a [u8], String> {
-        if buf.len() < n {
-            return Err("log truncated at payload".to_string());
-        }
-        let (head, rest) = buf.split_at(n);
-        *buf = rest;
-        Ok(head)
-    }
-    let n = take_u32(&mut raw)? as usize;
-    let mut out = Vec::with_capacity(n);
-    for _ in 0..n {
-        let klen = take_u32(&mut raw)? as usize;
-        let k = Bytes::copy_from_slice(take_n(&mut raw, klen)?);
-        let vlen = take_u32(&mut raw)? as usize;
-        let v = Bytes::copy_from_slice(take_n(&mut raw, vlen)?);
-        out.push((k, v));
-    }
-    if !raw.is_empty() {
-        return Err(format!("log had {} trailing bytes after decode", raw.len()));
-    }
-    Ok(out)
 }
 
 #[cfg(test)]
@@ -806,28 +744,6 @@ mod tests {
 
     use exoware_server::{Ingest, Log, Sequence};
     use tempfile::tempdir;
-
-    #[test]
-    fn batch_entries_codec_round_trip() {
-        let kvs = vec![
-            (Bytes::from_static(b"a"), Bytes::from_static(b"1")),
-            (Bytes::from_static(b""), Bytes::from_static(b"empty key ok")),
-            (
-                Bytes::from_static(b"binary\x00\xff"),
-                Bytes::from_static(&[0u8, 1, 2, 3]),
-            ),
-        ];
-        let encoded = encode_batch_entries(&kvs);
-        let decoded = decode_batch_entries(&encoded).unwrap();
-        assert_eq!(decoded, kvs);
-    }
-
-    #[test]
-    fn empty_batch_round_trips() {
-        let encoded = encode_batch_entries(&[]);
-        let decoded = decode_batch_entries(&encoded).unwrap();
-        assert!(decoded.is_empty());
-    }
 
     #[tokio::test]
     async fn coalesced_requests_share_sequence_and_log_batch() {
@@ -866,31 +782,6 @@ mod tests {
                 (Bytes::from_static(b"c"), Bytes::from_static(b"3")),
             ]
         );
-    }
-
-    #[tokio::test]
-    async fn legacy_value_log_batch_still_reads() {
-        let dir = tempdir().expect("tempdir");
-        let store = RocksStore::open(dir.path()).expect("open db");
-        let kvs = vec![
-            (Bytes::from_static(b"legacy-a"), Bytes::from_static(b"1")),
-            (Bytes::from_static(b"legacy-b"), Bytes::from_static(b"2")),
-        ];
-        store
-            .db
-            .put_cf(
-                store.log_cf(),
-                42u64.to_be_bytes(),
-                encode_batch_entries(&kvs),
-            )
-            .expect("write legacy log entry");
-
-        let batch = store
-            .get_batch(42)
-            .await
-            .expect("get batch")
-            .expect("batch retained");
-        assert_eq!(batch, kvs);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -53,23 +53,6 @@ fn op_cfg() -> <UnorderedBatchOperation as commonware_codec::Read>::Cfg {
     )
 }
 
-fn update_row_cfg() -> (
-    <Vec<u8> as commonware_codec::Read>::Cfg,
-    <Vec<u8> as commonware_codec::Read>::Cfg,
-) {
-    (
-        ((0..=MAX_OPERATION_SIZE).into(), ()),
-        ((0..=MAX_OPERATION_SIZE).into(), ()),
-    )
-}
-
-fn fixed_update_row_cfg() -> (
-    <Digest as commonware_codec::Read>::Cfg,
-    <Digest as commonware_codec::Read>::Cfg,
-) {
-    ((), ())
-}
-
 struct LocalReference {
     latest_location: Location<mmr::Family>,
     operations: Vec<UnorderedBatchOperation>,
@@ -220,7 +203,7 @@ async fn unordered_round_trip() {
         .await
         .expect("commit upload");
 
-    let c = TestUnorderedClient::from_client(client.clone(), op_cfg(), update_row_cfg());
+    let c = TestUnorderedClient::from_client(client.clone(), op_cfg());
     let watermark = c.writer_location_watermark().await.expect("watermark");
     assert_eq!(watermark, Some(local.latest_location));
 
@@ -262,7 +245,7 @@ async fn unordered_fixed_round_trip() {
         .await
         .expect("commit fixed upload");
 
-    let c = FixedTestUnorderedClient::from_client(client.clone(), (), fixed_update_row_cfg());
+    let c = FixedTestUnorderedClient::from_client(client.clone(), ());
     let watermark = c.writer_location_watermark().await.expect("watermark");
     assert_eq!(watermark, Some(local.latest_location));
 

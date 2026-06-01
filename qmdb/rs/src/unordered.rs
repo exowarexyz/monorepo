@@ -91,7 +91,6 @@ pub struct UnorderedClient<
 {
     client: StoreClient,
     op_cfg: <unordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
-    update_row_cfg: (K::Cfg, V::Cfg),
     _marker: PhantomData<(F, H, K, E)>,
 }
 
@@ -116,7 +115,6 @@ where
     H: Hasher,
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
-    V::Cfg: Clone,
     E: ValueEncoding<Value = V>,
     unordered::Operation<F, K, E>: Encode + Decode,
 {
@@ -130,20 +128,17 @@ where
     pub fn new(
         url: &str,
         op_cfg: <unordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
-        update_row_cfg: (K::Cfg, V::Cfg),
     ) -> Self {
-        Self::from_client(StoreClient::new(url), op_cfg, update_row_cfg)
+        Self::from_client(StoreClient::new(url), op_cfg)
     }
 
     pub fn from_client(
         client: StoreClient,
         op_cfg: <unordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
-        update_row_cfg: (K::Cfg, V::Cfg),
     ) -> Self {
         Self {
             client,
             op_cfg,
-            update_row_cfg,
             _marker: PhantomData,
         }
     }
@@ -455,7 +450,7 @@ where
             });
         };
         let location = decode_update_location(&row_key)?;
-        if !decode_update_index_value_present::<K, V>(row_value.as_ref(), &self.update_row_cfg)? {
+        if !decode_update_index_value_present(row_value.as_ref())? {
             return Err(QmdbError::KeyNotActive {
                 watermark: watermark.as_u64(),
                 key: key_bytes.clone(),

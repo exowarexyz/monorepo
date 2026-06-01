@@ -1,4 +1,4 @@
-use commonware_codec::{Decode, DecodeExt};
+use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
 use commonware_storage::merkle::{Family, Location, Position};
 use exoware_sdk::keys::{Key, KeyCodec};
@@ -316,21 +316,14 @@ pub(crate) fn encode_update_index_value(value_present: bool) -> Vec<u8> {
     }]
 }
 
-pub(crate) fn decode_update_index_value_present<
-    K: commonware_codec::Read,
-    V: commonware_codec::Read,
->(
-    bytes: &[u8],
-    cfg: &(K::Cfg, V::Cfg),
-) -> Result<bool, QmdbError> {
+pub(crate) fn decode_update_index_value_present(bytes: &[u8]) -> Result<bool, QmdbError> {
     match bytes {
         [UPDATE_INDEX_INACTIVE] => Ok(false),
         [UPDATE_INDEX_ACTIVE] => Ok(true),
-        legacy => {
-            let decoded = UpdateRow::<K, V>::decode_cfg(legacy, cfg)
-                .map_err(|e| QmdbError::CorruptData(format!("update row decode: {e}")))?;
-            Ok(decoded.value.is_some())
-        }
+        _ => Err(QmdbError::CorruptData(format!(
+            "update index value has unexpected length {}",
+            bytes.len()
+        ))),
     }
 }
 

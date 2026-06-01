@@ -161,10 +161,6 @@ async fn mirror_unordered_from_local() {
                 ((0..=MAX_OPERATION_SIZE).into(), ()),
                 ((0..=MAX_OPERATION_SIZE).into(), ()),
             ),
-            (
-                ((0..=MAX_OPERATION_SIZE).into(), ()),
-                ((0..=MAX_OPERATION_SIZE).into(), ()),
-            ),
         );
     assert_eq!(
         reader.root_at(latest1).await.expect("root_at 1"),

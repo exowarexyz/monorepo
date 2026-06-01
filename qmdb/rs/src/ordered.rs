@@ -726,7 +726,7 @@ where
                 key: key_bytes.clone(),
             });
         }
-        if !decode_update_index_value_present::<K, V>(row_value.as_ref(), &self.update_row_cfg)? {
+        if !decode_update_index_value_present(row_value.as_ref())? {
             return Err(QmdbError::KeyNotActive {
                 watermark: watermark.as_u64(),
                 key: key_bytes.clone(),
@@ -810,8 +810,7 @@ where
                 if location < inactivity_floor || location > watermark {
                     continue;
                 }
-                let value_present =
-                    decode_update_index_value_present::<K, V>(&row_value, &self.update_row_cfg)?;
+                let value_present = decode_update_index_value_present(&row_value)?;
                 let key = decode_update_raw_key(&row_key)?;
                 latest
                     .entry(key)
