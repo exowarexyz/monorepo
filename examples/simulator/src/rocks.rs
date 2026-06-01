@@ -719,27 +719,14 @@ impl RocksStore {
         Ok(())
     }
 
-    fn prune_log_rocksdb(&self, cutoff_exclusive: u64) -> Result<u64, String> {
-        // Count before deleting so callers know how much was pruned. For the
-        // simulator a simple iterator scan is fine; a production engine would
-        // expose delete_range_cf and return the logical count separately.
+    fn prune_log_rocksdb(&self, cutoff_exclusive: u64) -> Result<(), String> {
+        if cutoff_exclusive == 0 {
+            return Ok(());
+        }
         let cf = self.log_cf();
-        let mut deleted = 0u64;
-        let mut batch = rocksdb::WriteBatch::default();
-        let iter = self.db.iterator_cf(cf, IteratorMode::Start);
-        for item in iter {
-            let (k, _) = item.map_err(|e| e.to_string())?;
-            let sequence = sequence_from_log_key(k.as_ref())?;
-            if sequence >= cutoff_exclusive {
-                break;
-            }
-            batch.delete_cf(cf, k.as_ref());
-            deleted += 1;
-        }
-        if deleted > 0 {
-            self.db.write(batch).map_err(|e| e.to_string())?;
-        }
-        Ok(deleted)
+        self.db
+            .delete_range_cf(cf, sequence_log_key(0), sequence_log_key(cutoff_exclusive))
+            .map_err(|e| e.to_string())
     }
 
     fn apply_prune_policies_rocksdb(&self, document: PrunePolicyDocument) -> Result<(), String> {
@@ -823,7 +810,7 @@ impl RocksStore {
             RetainPolicy::GreaterThanOrEqual { threshold } => *threshold,
             RetainPolicy::DropAll => current.saturating_add(1),
         };
-        self.prune_log_rocksdb(cutoff_exclusive).map(|_| ())
+        self.prune_log_rocksdb(cutoff_exclusive)
     }
 }
 

@@ -25,8 +25,9 @@ use exoware_sdk::{RangeMode, SerializableReadSession, StoreClient};
 use crate::codec::{
     bitmap_chunk_bits, chunk_index_for_location, clear_below_floor,
     decode_current_boundary_metadata, decode_update_index_value_present, decode_update_location,
-    decode_update_raw_key, encode_chunk_key, encode_current_meta_key, encode_ops_root_witness_key,
-    encode_update_key, merkle_size_for_watermark, CurrentBoundaryMetadata, UPDATE_CODEC,
+    decode_update_raw_key, encode_chunk_key, encode_current_meta_key, encode_operation_key,
+    encode_ops_root_witness_key, encode_update_key, merkle_size_for_watermark,
+    CurrentBoundaryMetadata, UPDATE_CODEC,
 };
 use crate::connect::OperationKv;
 use crate::core::HistoricalOpsClientCore;
@@ -39,6 +40,8 @@ use crate::proof::{
 };
 use crate::storage::{KvCurrentStorage, KvMerkleStorage};
 use crate::{QmdbVariant, VersionedValue};
+
+const ACTIVE_OPERATION_GET_MANY_BATCH: usize = 1024;
 
 #[derive(Clone, Debug)]
 struct MaterializedBitmapStatus<const N: usize> {
@@ -824,12 +827,51 @@ where
             }
         }
 
-        let mut active = Vec::new();
+        let mut active_locations = Vec::new();
         for (key, (location, value_present)) in latest {
             if !value_present {
                 continue;
             }
-            let operation = self.load_operation_at(session, location).await?;
+            active_locations.push((key, location));
+        }
+
+        let mut loaded_operations =
+            std::collections::HashMap::with_capacity(active_locations.len());
+        for chunk in active_locations.chunks(ACTIVE_OPERATION_GET_MANY_BATCH) {
+            let operation_keys = chunk
+                .iter()
+                .map(|(_, location)| encode_operation_key(*location))
+                .collect::<Vec<_>>();
+            let operation_key_refs = operation_keys.iter().collect::<Vec<_>>();
+            let batch_size = u32::try_from(operation_key_refs.len()).map_err(|_| {
+                QmdbError::CorruptData(
+                    "active operation get_many batch size overflows u32".to_string(),
+                )
+            })?;
+            let fetched = session
+                .get_many(&operation_key_refs, batch_size)
+                .await?
+                .collect()
+                .await?;
+            loaded_operations.extend(fetched);
+        }
+
+        let mut active = Vec::new();
+        for (key, location) in active_locations {
+            let operation_key = encode_operation_key(location);
+            let Some(encoded) = loaded_operations.remove(&operation_key) else {
+                return Err(QmdbError::CorruptData(format!(
+                    "missing operation row at location {location}"
+                )));
+            };
+            let operation =
+                ordered::Operation::<F, K, E>::decode_cfg(encoded.as_ref(), &self.op_cfg).map_err(
+                    |e| {
+                        QmdbError::CorruptData(format!(
+                            "failed to decode qmdb operation at location {location}: {e}"
+                        ))
+                    },
+                )?;
             let ordered::Operation::Update(update) = &operation else {
                 return Err(QmdbError::CorruptData(format!(
                     "latest active key row at {location} does not point to an update operation"
