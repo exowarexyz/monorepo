@@ -9,7 +9,6 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use exoware_sdk::keys::KeyCodec;
@@ -31,7 +30,6 @@ const LOG_CF: &str = "log";
 const INDEXED_LOG_KEY_LEN: usize = 16;
 const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
 const WRITE_DRAIN_MAX_REQUESTS: usize = 64;
-const WRITE_DRAIN_COALESCE_WINDOW: Duration = Duration::from_millis(2);
 const ROCKS_BACKGROUND_JOBS: i32 = 16;
 const ROCKS_MAX_SUBCOMPACTIONS: u32 = 8;
 const ROCKS_WRITE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
@@ -334,24 +332,11 @@ fn run_rocks_writer(
     while let Ok(first) = receiver.recv() {
         let mut requests = vec![first];
         let mut disconnected = false;
-        let drain_until = Instant::now() + WRITE_DRAIN_COALESCE_WINDOW;
 
         while requests.len() < WRITE_DRAIN_MAX_REQUESTS {
             match receiver.try_recv() {
                 Ok(request) => requests.push(request),
-                Err(mpsc::TryRecvError::Empty) => {
-                    let Some(remaining) = drain_until.checked_duration_since(Instant::now()) else {
-                        break;
-                    };
-                    match receiver.recv_timeout(remaining) {
-                        Ok(request) => requests.push(request),
-                        Err(mpsc::RecvTimeoutError::Timeout) => break,
-                        Err(mpsc::RecvTimeoutError::Disconnected) => {
-                            disconnected = true;
-                            break;
-                        }
-                    }
-                }
+                Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
                     disconnected = true;
                     break;
@@ -615,8 +600,8 @@ impl Sequence for RocksStore {
 }
 
 // Ingest uses a dedicated writer thread so blocking RocksDB writes do not occupy Tokio workers.
-// The writer assigns one sequence per drained group and returns that sequence to every coalesced
-// request, reducing both per-commit overhead and log-CF rows under concurrent upload load.
+// The writer assigns one sequence to the first inbound request plus any already-queued requests,
+// reducing both per-commit overhead and log-CF rows under concurrent upload load.
 impl Ingest for RocksStore {
     async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, String> {
         self.writer.put_batch(kvs).await
