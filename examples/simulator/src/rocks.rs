@@ -34,6 +34,7 @@ const INDEXED_LOG_KEY_LEN: usize = 16;
 const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
 const WRITE_DRAIN_MAX_REQUESTS: usize = 64;
 const WRITE_DRAIN_COALESCE_WINDOW: Duration = Duration::from_millis(2);
+const WRITE_BUILDERS: usize = 4;
 const ROCKS_BACKGROUND_JOBS: i32 = 16;
 const ROCKS_MAX_SUBCOMPACTIONS: u32 = 8;
 const ROCKS_WRITE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
@@ -282,21 +283,63 @@ struct WriteRequest {
     response: oneshot::Sender<Result<u64, String>>,
 }
 
+struct BuildJob {
+    order: u64,
+    sequence: u64,
+    requests: Vec<WriteRequest>,
+}
+
+struct PreparedWrite {
+    order: u64,
+    sequence: u64,
+    requests: Vec<WriteRequest>,
+    batch: Result<rocksdb::WriteBatch, String>,
+}
+
 struct RocksWriter {
     sender: Mutex<Option<mpsc::Sender<WriteRequest>>>,
-    handle: Mutex<Option<thread::JoinHandle<()>>>,
+    handles: Mutex<Vec<thread::JoinHandle<()>>>,
 }
 
 impl RocksWriter {
     fn start(db: Arc<DB>, sequence: Arc<Mutex<u64>>) -> Self {
         let (sender, receiver) = mpsc::channel();
-        let handle = thread::Builder::new()
-            .name("simulator-rocks-writer".to_string())
-            .spawn(move || run_rocks_writer(db, sequence, receiver))
-            .expect("failed to spawn RocksDB writer thread");
+        let (prepared_sender, prepared_receiver) = mpsc::channel();
+        let builders = WRITE_BUILDERS.max(1);
+        let mut worker_senders = Vec::with_capacity(builders);
+        let mut handles = Vec::with_capacity(builders + 2);
+
+        for worker in 0..builders {
+            let (job_sender, job_receiver) = mpsc::channel();
+            worker_senders.push(job_sender);
+            let db = db.clone();
+            let prepared_sender = prepared_sender.clone();
+            handles.push(
+                thread::Builder::new()
+                    .name(format!("simulator-rocks-build-{worker}"))
+                    .spawn(move || run_rocks_build_worker(db, job_receiver, prepared_sender))
+                    .expect("failed to spawn RocksDB build worker"),
+            );
+        }
+        drop(prepared_sender);
+
+        let dispatcher_sequence = sequence.clone();
+        let dispatcher = thread::Builder::new()
+            .name("simulator-rocks-dispatch".to_string())
+            .spawn(move || {
+                run_rocks_write_dispatcher(dispatcher_sequence, receiver, worker_senders)
+            })
+            .expect("failed to spawn RocksDB write dispatcher");
+        handles.insert(0, dispatcher);
+        handles.push(
+            thread::Builder::new()
+                .name("simulator-rocks-commit".to_string())
+                .spawn(move || run_rocks_commit_worker(db, sequence, prepared_receiver))
+                .expect("failed to spawn RocksDB commit worker"),
+        );
         Self {
             sender: Mutex::new(Some(sender)),
-            handle: Mutex::new(Some(handle)),
+            handles: Mutex::new(handles),
         }
     }
 
@@ -323,19 +366,29 @@ impl Drop for RocksWriter {
         if let Ok(mut sender) = self.sender.lock() {
             sender.take();
         }
-        if let Ok(mut handle) = self.handle.lock() {
-            if let Some(handle) = handle.take() {
+        if let Ok(mut handles) = self.handles.lock() {
+            for handle in handles.drain(..) {
                 let _ = handle.join();
             }
         }
     }
 }
 
-fn run_rocks_writer(
-    db: Arc<DB>,
+fn run_rocks_write_dispatcher(
     sequence: Arc<Mutex<u64>>,
     receiver: mpsc::Receiver<WriteRequest>,
+    worker_senders: Vec<mpsc::Sender<BuildJob>>,
 ) {
+    let mut order = 0u64;
+    let mut next_sequence = match sequence.lock() {
+        Ok(sequence) => *sequence,
+        Err(error) => {
+            fail_pending_receiver(receiver, format!("rocks sequence lock poisoned: {error}"));
+            return;
+        }
+    };
+    let mut worker = 0usize;
+
     while let Ok(first) = receiver.recv() {
         let mut requests = vec![first];
         let mut disconnected = false;
@@ -363,18 +416,39 @@ fn run_rocks_writer(
             }
         }
 
-        match commit_sequence_requests_rocksdb(&db, &sequence, &requests) {
-            Ok(sequence) => {
-                for request in requests {
-                    let _ = request.response.send(Ok(sequence));
-                }
+        next_sequence = match next_sequence.checked_add(1) {
+            Some(sequence) => sequence,
+            None => {
+                fail_requests(requests, "rocks sequence number overflowed".to_string());
+                fail_pending_receiver(receiver, "rocks sequence number overflowed".to_string());
+                return;
             }
-            Err(error) => {
-                for request in requests {
-                    let _ = request.response.send(Err(error.clone()));
-                }
-            }
+        };
+        let Some(sender) = worker_senders.get(worker % worker_senders.len()) else {
+            fail_requests(requests, "rocks write workers stopped".to_string());
+            fail_pending_receiver(receiver, "rocks write workers stopped".to_string());
+            return;
+        };
+        worker = worker.wrapping_add(1);
+
+        if sender
+            .send(BuildJob {
+                order,
+                sequence: next_sequence,
+                requests,
+            })
+            .is_err()
+        {
+            fail_pending_receiver(receiver, "rocks write workers stopped".to_string());
+            return;
         }
+        order = match order.checked_add(1) {
+            Some(order) => order,
+            None => {
+                fail_pending_receiver(receiver, "rocks write order overflowed".to_string());
+                return;
+            }
+        };
 
         if disconnected {
             break;
@@ -382,43 +456,172 @@ fn run_rocks_writer(
     }
 }
 
+fn run_rocks_build_worker(
+    db: Arc<DB>,
+    receiver: mpsc::Receiver<BuildJob>,
+    sender: mpsc::Sender<PreparedWrite>,
+) {
+    while let Ok(job) = receiver.recv() {
+        let batch = build_sequence_requests_rocksdb_batch(&db, job.sequence, &job.requests);
+        if sender
+            .send(PreparedWrite {
+                order: job.order,
+                sequence: job.sequence,
+                requests: job.requests,
+                batch,
+            })
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
+fn run_rocks_commit_worker(
+    db: Arc<DB>,
+    sequence: Arc<Mutex<u64>>,
+    receiver: mpsc::Receiver<PreparedWrite>,
+) {
+    let mut next_order = 0u64;
+    let mut pending = BTreeMap::new();
+
+    while let Ok(prepared) = receiver.recv() {
+        pending.insert(prepared.order, prepared);
+
+        while let Some(prepared) = pending.remove(&next_order) {
+            let result = match prepared.batch {
+                Ok(batch) => {
+                    commit_prepared_sequence_rocksdb(&db, &sequence, prepared.sequence, batch)
+                }
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(sequence) => fail_or_complete_requests(prepared.requests, Ok(sequence)),
+                Err(error) => {
+                    fail_or_complete_requests(prepared.requests, Err(error.clone()));
+                    fail_pending_prepared(pending, error.clone());
+                    fail_prepared_receiver(receiver, error);
+                    return;
+                }
+            }
+            next_order = match next_order.checked_add(1) {
+                Some(order) => order,
+                None => {
+                    let error = "rocks write order overflowed".to_string();
+                    fail_pending_prepared(pending, error.clone());
+                    fail_prepared_receiver(receiver, error);
+                    return;
+                }
+            };
+        }
+    }
+}
+
+#[cfg(test)]
 fn commit_sequence_requests_rocksdb(
     db: &DB,
     sequence: &Mutex<u64>,
     requests: &[WriteRequest],
 ) -> Result<u64, String> {
-    let meta_cf = db
-        .cf_handle(META_CF)
-        .expect("meta CF must exist (created on open)");
-    let log_cf = db
-        .cf_handle(LOG_CF)
-        .expect("log CF must exist (created on open)");
     let mut sequence = sequence
         .lock()
         .map_err(|e| format!("rocks sequence lock poisoned: {e}"))?;
     let next = (*sequence)
         .checked_add(1)
         .ok_or_else(|| "rocks sequence number overflowed".to_string())?;
+    let batch = build_sequence_requests_rocksdb_batch(db, next, requests)?;
+    write_sequence_batch_rocksdb(db, next, batch)?;
+    *sequence = next;
+    Ok(next)
+}
+
+fn build_sequence_requests_rocksdb_batch(
+    db: &DB,
+    sequence: u64,
+    requests: &[WriteRequest],
+) -> Result<rocksdb::WriteBatch, String> {
+    let meta_cf = db
+        .cf_handle(META_CF)
+        .expect("meta CF must exist (created on open)");
+    let log_cf = db
+        .cf_handle(LOG_CF)
+        .expect("log CF must exist (created on open)");
     let mut batch = rocksdb::WriteBatch::default();
     let mut log_index = 0u64;
 
     for request in requests {
         for (k, v) in &request.kvs {
             batch.put(k.as_ref(), v.as_ref());
-            batch.put_cf(log_cf, indexed_log_key(next, log_index), k.as_ref());
+            batch.put_cf(log_cf, indexed_log_key(sequence, log_index), k.as_ref());
             log_index = log_index
                 .checked_add(1)
                 .ok_or_else(|| "sequence log index overflowed".to_string())?;
         }
     }
-    batch.put_cf(meta_cf, SEQ_META_KEY, next.to_le_bytes());
+    batch.put_cf(meta_cf, SEQ_META_KEY, sequence.to_le_bytes());
+    Ok(batch)
+}
 
+fn commit_prepared_sequence_rocksdb(
+    db: &DB,
+    sequence: &Mutex<u64>,
+    prepared_sequence: u64,
+    batch: rocksdb::WriteBatch,
+) -> Result<u64, String> {
+    let mut sequence = sequence
+        .lock()
+        .map_err(|e| format!("rocks sequence lock poisoned: {e}"))?;
+    let expected = (*sequence)
+        .checked_add(1)
+        .ok_or_else(|| "rocks sequence number overflowed".to_string())?;
+    if prepared_sequence != expected {
+        return Err(format!(
+            "prepared rocks sequence {prepared_sequence} is not contiguous after {}",
+            *sequence
+        ));
+    }
+    write_sequence_batch_rocksdb(db, prepared_sequence, batch)?;
+    *sequence = prepared_sequence;
+    Ok(prepared_sequence)
+}
+
+fn write_sequence_batch_rocksdb(
+    db: &DB,
+    _sequence: u64,
+    batch: rocksdb::WriteBatch,
+) -> Result<(), String> {
     let mut write_options = WriteOptions::default();
     write_options.set_sync(true);
     db.write_opt(batch, &write_options)
-        .map_err(|e| e.to_string())?;
-    *sequence = next;
-    Ok(next)
+        .map_err(|e| e.to_string())
+}
+
+fn fail_requests(requests: Vec<WriteRequest>, error: String) {
+    fail_or_complete_requests(requests, Err(error));
+}
+
+fn fail_or_complete_requests(requests: Vec<WriteRequest>, result: Result<u64, String>) {
+    for request in requests {
+        let _ = request.response.send(result.clone());
+    }
+}
+
+fn fail_pending_receiver(receiver: mpsc::Receiver<WriteRequest>, error: String) {
+    for request in receiver {
+        let _ = request.response.send(Err(error.clone()));
+    }
+}
+
+fn fail_pending_prepared(pending: BTreeMap<u64, PreparedWrite>, error: String) {
+    for (_, prepared) in pending {
+        fail_requests(prepared.requests, error.clone());
+    }
+}
+
+fn fail_prepared_receiver(receiver: mpsc::Receiver<PreparedWrite>, error: String) {
+    for prepared in receiver {
+        fail_requests(prepared.requests, error.clone());
+    }
 }
 
 fn write_heavy_options() -> Options {
@@ -834,60 +1037,25 @@ mod tests {
     #[tokio::test]
     async fn writer_coalesces_arrivals_during_drain_window() {
         let dir = tempdir().expect("tempdir");
-        let mut opts = write_heavy_options();
-        opts.create_if_missing(true);
-        opts.create_missing_column_families(true);
-        let db = Arc::new(
-            DB::open_cf_descriptors(
-                &opts,
-                dir.path(),
-                vec![
-                    ColumnFamilyDescriptor::new(
-                        rocksdb::DEFAULT_COLUMN_FAMILY_NAME,
-                        write_heavy_options(),
-                    ),
-                    ColumnFamilyDescriptor::new(META_CF, Options::default()),
-                    ColumnFamilyDescriptor::new(LOG_CF, write_heavy_options()),
-                ],
-            )
-            .expect("open db"),
+        let store = RocksStore::open(dir.path()).expect("open db");
+
+        let (seq_a, seq_b) = tokio::join!(
+            store.put_batch(vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))]),
+            store.put_batch(vec![(Bytes::from_static(b"b"), Bytes::from_static(b"2"))])
         );
-        let sequence = Arc::new(Mutex::new(0));
-        let (sender, receiver) = mpsc::channel();
-        let writer_db = db.clone();
-        let writer_sequence = sequence.clone();
-        let writer = thread::spawn(move || run_rocks_writer(writer_db, writer_sequence, receiver));
-        let (response_a, result_a) = oneshot::channel();
-        let (response_b, result_b) = oneshot::channel();
-
-        sender
-            .send(WriteRequest {
-                kvs: vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))],
-                response: response_a,
-            })
-            .expect("send first write");
-        sender
-            .send(WriteRequest {
-                kvs: vec![(Bytes::from_static(b"b"), Bytes::from_static(b"2"))],
-                response: response_b,
-            })
-            .expect("send second write");
-        drop(sender);
-
-        let seq_a = result_a
-            .await
-            .expect("first response")
-            .expect("first write");
-        let seq_b = result_b
-            .await
-            .expect("second response")
-            .expect("second write");
-        writer.join().expect("writer exits");
+        let seq_a = seq_a.expect("first write");
+        let seq_b = seq_b.expect("second write");
 
         assert_eq!(seq_a, 1);
         assert_eq!(seq_b, seq_a);
-        assert_eq!(*sequence.lock().expect("sequence lock"), 1);
-        assert_eq!(db.get(b"a").expect("get a").as_deref(), Some(&b"1"[..]));
-        assert_eq!(db.get(b"b").expect("get b").as_deref(), Some(&b"2"[..]));
+        assert_eq!(store.current_sequence(), 1);
+        assert_eq!(
+            store.db.get(b"a").expect("get a").as_deref(),
+            Some(&b"1"[..])
+        );
+        assert_eq!(
+            store.db.get(b"b").expect("get b").as_deref(),
+            Some(&b"2"[..])
+        );
     }
 }
