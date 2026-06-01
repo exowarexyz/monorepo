@@ -6,6 +6,7 @@ export {
   QmdbOperationLogClient,
   type BytesLike,
   type DecodedHistoricalMultiProof,
+  type HashFamily,
   type LocatedRawOperation,
   type LocatedOrderedOperation,
   type MerkleFamily,
