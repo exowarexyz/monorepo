@@ -1,8 +1,8 @@
 //! Naive reference storage for local development: user keys and values are written as-is to
 //! RocksDB. A `meta` column family stores the monotonically increasing sequence number for RPCs.
-//! A separate `log` column family keeps per-sequence-number key lists so the stream service can
-//! serve replay and point lookups. Batch-log pruning is driven exclusively by the compact service's
-//! `Sequence` scope.
+//! A separate `log` column family keeps per-sequence-number batch payloads so the stream service
+//! can serve replay and point lookups. Batch-log pruning is driven exclusively by the compact
+//! service's `Sequence` scope.
 
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BTreeMap;
@@ -30,6 +30,7 @@ const LOG_CF: &str = "log";
 const LOG_BATCH_KEY_LEN: usize = 8;
 const LOG_VALUE_COUNT_LEN: usize = 8;
 const LOG_VALUE_KEY_LEN_LEN: usize = 4;
+const LOG_VALUE_VALUE_LEN_LEN: usize = 4;
 const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
 const WRITE_DRAIN_MAX_REQUESTS: usize = 256;
 const WRITE_BUILDERS: usize = 4;
@@ -538,20 +539,20 @@ fn build_sequence_requests_rocksdb_batch(
         .cf_handle(LOG_CF)
         .expect("log CF must exist (created on open)");
     let mut batch = rocksdb::WriteBatch::default();
-    let mut logged_keys = 0u64;
+    let mut logged_entries = 0u64;
     let mut log_value = vec![0u8; LOG_VALUE_COUNT_LEN];
 
     for request in requests {
         for (k, v) in &request.kvs {
             batch.put(k.as_ref(), v.as_ref());
-            append_sequence_log_key(&mut log_value, k.as_ref())?;
-            logged_keys = logged_keys
+            append_sequence_log_entry(&mut log_value, k.as_ref(), v.as_ref())?;
+            logged_entries = logged_entries
                 .checked_add(1)
                 .ok_or_else(|| "sequence log index overflowed".to_string())?;
         }
     }
-    if logged_keys > 0 {
-        log_value[..LOG_VALUE_COUNT_LEN].copy_from_slice(&logged_keys.to_be_bytes());
+    if logged_entries > 0 {
+        log_value[..LOG_VALUE_COUNT_LEN].copy_from_slice(&logged_entries.to_be_bytes());
         batch.put_cf(log_cf, sequence_log_key(sequence), log_value);
     }
     batch.put_cf(meta_cf, SEQ_META_KEY, sequence.to_le_bytes());
@@ -894,7 +895,7 @@ impl Log for RocksStore {
         let store = self.clone();
         let cf = store.log_cf();
         let sequence_key = sequence_log_key(sequence_number);
-        let keys = match store
+        let entries = match store
             .db
             .get_cf(cf, sequence_key)
             .map_err(|e| e.to_string())?
@@ -902,17 +903,8 @@ impl Log for RocksStore {
             Some(value) => decode_sequence_log_value(&value)?,
             None => return Ok(None),
         };
-        if keys.is_empty() {
+        if entries.is_empty() {
             return Ok(None);
-        }
-
-        let values = store.db.multi_get(keys.iter().map(|key| key.as_ref()));
-        let mut entries = Vec::with_capacity(keys.len());
-        for (key, value) in keys.into_iter().zip(values) {
-            match value.map_err(|e| e.to_string())? {
-                Some(value) => entries.push((key, Bytes::from(value))),
-                None => return Ok(None),
-            }
         }
         Ok(Some(entries))
     }
@@ -944,15 +936,23 @@ fn sequence_from_log_key(key: &[u8]) -> Result<u64, String> {
     Ok(u64::from_be_bytes(raw))
 }
 
-fn append_sequence_log_key(log_value: &mut Vec<u8>, key: &[u8]) -> Result<(), String> {
+fn append_sequence_log_entry(
+    log_value: &mut Vec<u8>,
+    key: &[u8],
+    value: &[u8],
+) -> Result<(), String> {
     let key_len = u32::try_from(key.len())
         .map_err(|_| format!("sequence log key length {} exceeds u32", key.len()))?;
+    let value_len = u32::try_from(value.len())
+        .map_err(|_| format!("sequence log value length {} exceeds u32", value.len()))?;
     log_value.extend_from_slice(&key_len.to_be_bytes());
     log_value.extend_from_slice(key);
+    log_value.extend_from_slice(&value_len.to_be_bytes());
+    log_value.extend_from_slice(value);
     Ok(())
 }
 
-fn decode_sequence_log_value(value: &[u8]) -> Result<Vec<Bytes>, String> {
+fn decode_sequence_log_value(value: &[u8]) -> Result<Vec<(Bytes, Bytes)>, String> {
     if value.len() < LOG_VALUE_COUNT_LEN {
         return Err(format!(
             "sequence log value too short: {} bytes",
@@ -963,17 +963,17 @@ fn decode_sequence_log_value(value: &[u8]) -> Result<Vec<Bytes>, String> {
     count_bytes.copy_from_slice(&value[..LOG_VALUE_COUNT_LEN]);
     let count = u64::from_be_bytes(count_bytes);
     let mut offset = LOG_VALUE_COUNT_LEN;
-    let mut keys = Vec::with_capacity(usize::try_from(count).unwrap_or(usize::MAX).min(4096));
+    let mut entries = Vec::with_capacity(usize::try_from(count).unwrap_or(usize::MAX).min(4096));
     for _ in 0..count {
-        let end_len = offset
+        let end_key_len = offset
             .checked_add(LOG_VALUE_KEY_LEN_LEN)
-            .ok_or_else(|| "sequence log value offset overflowed".to_string())?;
-        if end_len > value.len() {
+            .ok_or_else(|| "sequence log key length offset overflowed".to_string())?;
+        if end_key_len > value.len() {
             return Err("sequence log value ended before key length".to_string());
         }
         let mut key_len_bytes = [0u8; LOG_VALUE_KEY_LEN_LEN];
-        key_len_bytes.copy_from_slice(&value[offset..end_len]);
-        offset = end_len;
+        key_len_bytes.copy_from_slice(&value[offset..end_key_len]);
+        offset = end_key_len;
         let key_len = u32::from_be_bytes(key_len_bytes) as usize;
         let end_key = offset
             .checked_add(key_len)
@@ -981,8 +981,27 @@ fn decode_sequence_log_value(value: &[u8]) -> Result<Vec<Bytes>, String> {
         if end_key > value.len() {
             return Err("sequence log value ended before key bytes".to_string());
         }
-        keys.push(Bytes::copy_from_slice(&value[offset..end_key]));
+        let key = Bytes::copy_from_slice(&value[offset..end_key]);
         offset = end_key;
+        let end_value_len = offset
+            .checked_add(LOG_VALUE_VALUE_LEN_LEN)
+            .ok_or_else(|| "sequence log value length offset overflowed".to_string())?;
+        if end_value_len > value.len() {
+            return Err("sequence log value ended before value length".to_string());
+        }
+        let mut value_len_bytes = [0u8; LOG_VALUE_VALUE_LEN_LEN];
+        value_len_bytes.copy_from_slice(&value[offset..end_value_len]);
+        offset = end_value_len;
+        let value_len = u32::from_be_bytes(value_len_bytes) as usize;
+        let end_value = offset
+            .checked_add(value_len)
+            .ok_or_else(|| "sequence log value offset overflowed".to_string())?;
+        if end_value > value.len() {
+            return Err("sequence log value ended before value bytes".to_string());
+        }
+        let entry_value = Bytes::copy_from_slice(&value[offset..end_value]);
+        offset = end_value;
+        entries.push((key, entry_value));
     }
     if offset != value.len() {
         return Err(format!(
@@ -990,7 +1009,7 @@ fn decode_sequence_log_value(value: &[u8]) -> Result<Vec<Bytes>, String> {
             value.len() - offset
         ));
     }
-    Ok(keys)
+    Ok(entries)
 }
 
 #[cfg(test)]
@@ -1036,9 +1055,9 @@ mod tests {
         assert_eq!(
             decode_sequence_log_value(log_rows[0].1.as_ref()).expect("decode log value"),
             vec![
-                Bytes::from_static(b"a"),
-                Bytes::from_static(b"b"),
-                Bytes::from_static(b"c"),
+                (Bytes::from_static(b"a"), Bytes::from_static(b"1")),
+                (Bytes::from_static(b"b"), Bytes::from_static(b"2")),
+                (Bytes::from_static(b"c"), Bytes::from_static(b"3")),
             ]
         );
         let batch = store
@@ -1096,6 +1115,29 @@ mod tests {
             }
         }
         assert_eq!(logged_keys, (0u8..32).collect::<BTreeSet<_>>());
+    }
+
+    #[tokio::test]
+    async fn get_batch_reads_values_from_sequence_log() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path()).expect("open db");
+        let key = Bytes::from_static(b"key");
+        let value = Bytes::from_static(b"value");
+        let sequence = store
+            .put_batch(vec![(key.clone(), value.clone())])
+            .await
+            .expect("put");
+
+        store
+            .delete_keys_rocksdb(std::slice::from_ref(&key))
+            .expect("delete primary row");
+
+        let batch = store
+            .get_batch(sequence)
+            .await
+            .expect("get batch")
+            .expect("batch retained");
+        assert_eq!(batch, vec![(key, value)]);
     }
 
     #[tokio::test]
