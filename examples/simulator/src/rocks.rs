@@ -8,7 +8,10 @@ use std::cmp::Ordering as CmpOrdering;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{mpsc, Arc, Mutex};
-use std::thread;
+use std::{
+    thread,
+    time::{Duration, Instant},
+};
 
 use bytes::Bytes;
 use exoware_sdk::keys::KeyCodec;
@@ -30,11 +33,15 @@ const LOG_CF: &str = "log";
 const INDEXED_LOG_KEY_LEN: usize = 16;
 const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
 const WRITE_DRAIN_MAX_REQUESTS: usize = 64;
+const WRITE_DRAIN_COALESCE_WINDOW: Duration = Duration::from_millis(2);
 const ROCKS_BACKGROUND_JOBS: i32 = 16;
 const ROCKS_MAX_SUBCOMPACTIONS: u32 = 8;
 const ROCKS_WRITE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
-const ROCKS_DB_WRITE_BUFFER_SIZE: usize = 1024 * 1024 * 1024;
+const ROCKS_DB_WRITE_BUFFER_SIZE: usize = 4 * 1024 * 1024 * 1024;
 const ROCKS_LEVEL_BASE_SIZE: usize = 256 * 1024 * 1024;
+const ROCKS_LEVEL_ZERO_COMPACTION_TRIGGER: i32 = 16;
+const ROCKS_LEVEL_ZERO_SLOWDOWN_WRITES_TRIGGER: i32 = 256;
+const ROCKS_LEVEL_ZERO_STOP_WRITES_TRIGGER: i32 = 512;
 const ROCKS_SOFT_PENDING_COMPACTION_BYTES_LIMIT: usize = 512 * 1024 * 1024 * 1024;
 const ROCKS_HARD_PENDING_COMPACTION_BYTES_LIMIT: usize = 768 * 1024 * 1024 * 1024;
 const ROCKS_SYNC_BYTES: u64 = 8 * 1024 * 1024;
@@ -332,14 +339,26 @@ fn run_rocks_writer(
     while let Ok(first) = receiver.recv() {
         let mut requests = vec![first];
         let mut disconnected = false;
+        let drain_deadline = Instant::now() + WRITE_DRAIN_COALESCE_WINDOW;
 
-        while requests.len() < WRITE_DRAIN_MAX_REQUESTS {
+        while requests.len() < WRITE_DRAIN_MAX_REQUESTS && !disconnected {
             match receiver.try_recv() {
                 Ok(request) => requests.push(request),
-                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Empty) => {
+                    let remaining = drain_deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    match receiver.recv_timeout(remaining) {
+                        Ok(request) => requests.push(request),
+                        Err(mpsc::RecvTimeoutError::Timeout) => break,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            disconnected = true;
+                        }
+                    }
+                }
                 Err(mpsc::TryRecvError::Disconnected) => {
                     disconnected = true;
-                    break;
                 }
             }
         }
@@ -411,9 +430,9 @@ fn write_heavy_options() -> Options {
     opts.set_write_buffer_size(ROCKS_WRITE_BUFFER_SIZE);
     opts.set_db_write_buffer_size(ROCKS_DB_WRITE_BUFFER_SIZE);
     opts.set_max_write_buffer_number(8);
-    opts.set_level_zero_file_num_compaction_trigger(16);
-    opts.set_level_zero_slowdown_writes_trigger(128);
-    opts.set_level_zero_stop_writes_trigger(256);
+    opts.set_level_zero_file_num_compaction_trigger(ROCKS_LEVEL_ZERO_COMPACTION_TRIGGER);
+    opts.set_level_zero_slowdown_writes_trigger(ROCKS_LEVEL_ZERO_SLOWDOWN_WRITES_TRIGGER);
+    opts.set_level_zero_stop_writes_trigger(ROCKS_LEVEL_ZERO_STOP_WRITES_TRIGGER);
     opts.set_soft_pending_compaction_bytes_limit(ROCKS_SOFT_PENDING_COMPACTION_BYTES_LIMIT);
     opts.set_hard_pending_compaction_bytes_limit(ROCKS_HARD_PENDING_COMPACTION_BYTES_LIMIT);
     opts.set_bytes_per_sync(ROCKS_SYNC_BYTES);
@@ -600,8 +619,9 @@ impl Sequence for RocksStore {
 }
 
 // Ingest uses a dedicated writer thread so blocking RocksDB writes do not occupy Tokio workers.
-// The writer assigns one sequence to the first inbound request plus any already-queued requests,
-// reducing both per-commit overhead and log-CF rows under concurrent upload load.
+// The writer assigns one sequence to the first inbound request plus any request
+// that arrives during a tiny bounded drain window, reducing synced commits and
+// log-CF rows under concurrent upload load.
 impl Ingest for RocksStore {
     async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, String> {
         self.writer.put_batch(kvs).await
@@ -809,5 +829,65 @@ mod tests {
             }
         }
         assert_eq!(logged_keys, (0u8..32).collect::<BTreeSet<_>>());
+    }
+
+    #[tokio::test]
+    async fn writer_coalesces_arrivals_during_drain_window() {
+        let dir = tempdir().expect("tempdir");
+        let mut opts = write_heavy_options();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+        let db = Arc::new(
+            DB::open_cf_descriptors(
+                &opts,
+                dir.path(),
+                vec![
+                    ColumnFamilyDescriptor::new(
+                        rocksdb::DEFAULT_COLUMN_FAMILY_NAME,
+                        write_heavy_options(),
+                    ),
+                    ColumnFamilyDescriptor::new(META_CF, Options::default()),
+                    ColumnFamilyDescriptor::new(LOG_CF, write_heavy_options()),
+                ],
+            )
+            .expect("open db"),
+        );
+        let sequence = Arc::new(Mutex::new(0));
+        let (sender, receiver) = mpsc::channel();
+        let writer_db = db.clone();
+        let writer_sequence = sequence.clone();
+        let writer = thread::spawn(move || run_rocks_writer(writer_db, writer_sequence, receiver));
+        let (response_a, result_a) = oneshot::channel();
+        let (response_b, result_b) = oneshot::channel();
+
+        sender
+            .send(WriteRequest {
+                kvs: vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))],
+                response: response_a,
+            })
+            .expect("send first write");
+        sender
+            .send(WriteRequest {
+                kvs: vec![(Bytes::from_static(b"b"), Bytes::from_static(b"2"))],
+                response: response_b,
+            })
+            .expect("send second write");
+        drop(sender);
+
+        let seq_a = result_a
+            .await
+            .expect("first response")
+            .expect("first write");
+        let seq_b = result_b
+            .await
+            .expect("second response")
+            .expect("second write");
+        writer.join().expect("writer exits");
+
+        assert_eq!(seq_a, 1);
+        assert_eq!(seq_b, seq_a);
+        assert_eq!(*sequence.lock().expect("sequence lock"), 1);
+        assert_eq!(db.get(b"a").expect("get a").as_deref(), Some(&b"1"[..]));
+        assert_eq!(db.get(b"b").expect("get b").as_deref(), Some(&b"2"[..]));
     }
 }
