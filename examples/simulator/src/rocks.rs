@@ -19,8 +19,8 @@ use exoware_sdk::prune_policy::{
 use exoware_server::{Ingest, Log, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence};
 use regex::bytes::Regex;
 use rocksdb::{
-    ColumnFamily, ColumnFamilyDescriptor, DBCompressionType, DBIterator, Direction, IteratorMode,
-    Options, UniversalCompactOptions, WriteOptions, DB,
+    BlockBasedOptions, Cache, ColumnFamily, ColumnFamilyDescriptor, DBCompressionType, DBIterator,
+    Direction, IteratorMode, Options, UniversalCompactOptions, WriteOptions, DB,
 };
 use tokio::sync::oneshot;
 
@@ -52,6 +52,8 @@ const ROCKS_SYNC_BYTES: u64 = 8 * 1024 * 1024;
 const ROCKS_COMPACTION_READAHEAD_SIZE: usize = 8 * 1024 * 1024;
 const ROCKS_MIN_BLOB_SIZE: u64 = 16 * 1024;
 const ROCKS_BLOB_FILE_SIZE: u64 = 512 * 1024 * 1024;
+const ROCKS_BLOCK_CACHE_SIZE: usize = 1024 * 1024 * 1024;
+const ROCKS_BLOB_CACHE_SIZE: usize = 4 * 1024 * 1024 * 1024;
 type RocksIterItem = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
 
 struct OwnedRocksIterator {
@@ -621,11 +623,22 @@ fn fail_prepared_receiver(receiver: mpsc::Receiver<PreparedWrite>, error: String
     }
 }
 
-fn write_heavy_options() -> Options {
+fn block_based_options(block_cache: &Cache) -> BlockBasedOptions {
+    let mut opts = BlockBasedOptions::default();
+    opts.set_block_cache(block_cache);
+    opts.set_cache_index_and_filter_blocks(true);
+    opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+    opts.set_pin_top_level_index_and_filter(true);
+    opts
+}
+
+fn write_heavy_options(block_cache: &Cache, blob_cache: &Cache) -> Options {
     let mut opts = Options::default();
+    let block_opts = block_based_options(block_cache);
     opts.increase_parallelism(ROCKS_BACKGROUND_JOBS);
     opts.set_max_background_jobs(ROCKS_BACKGROUND_JOBS);
     opts.set_max_subcompactions(ROCKS_MAX_SUBCOMPACTIONS);
+    opts.set_block_based_table_factory(&block_opts);
     opts.optimize_universal_style_compaction(ROCKS_MEMTABLE_MEMORY_BUDGET);
     let mut universal = UniversalCompactOptions::default();
     universal.set_size_ratio(ROCKS_UNIVERSAL_COMPACTION_SIZE_RATIO);
@@ -653,6 +666,7 @@ fn write_heavy_options() -> Options {
     opts.set_blob_file_size(ROCKS_BLOB_FILE_SIZE);
     opts.set_blob_compression_type(DBCompressionType::None);
     opts.set_blob_compaction_readahead_size(ROCKS_COMPACTION_READAHEAD_SIZE as u64);
+    opts.set_blob_cache(blob_cache);
     opts
 }
 
@@ -667,14 +681,19 @@ pub struct RocksStore {
 
 impl RocksStore {
     pub fn open(path: &Path) -> Result<Self, rocksdb::Error> {
-        let mut opts = write_heavy_options();
+        let block_cache = Cache::new_lru_cache(ROCKS_BLOCK_CACHE_SIZE);
+        let blob_cache = Cache::new_lru_cache(ROCKS_BLOB_CACHE_SIZE);
+        let mut opts = write_heavy_options(&block_cache, &blob_cache);
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
 
-        let cf_default =
-            ColumnFamilyDescriptor::new(rocksdb::DEFAULT_COLUMN_FAMILY_NAME, write_heavy_options());
+        let cf_default = ColumnFamilyDescriptor::new(
+            rocksdb::DEFAULT_COLUMN_FAMILY_NAME,
+            write_heavy_options(&block_cache, &blob_cache),
+        );
         let cf_meta = ColumnFamilyDescriptor::new(META_CF, Options::default());
-        let cf_log = ColumnFamilyDescriptor::new(LOG_CF, write_heavy_options());
+        let cf_log =
+            ColumnFamilyDescriptor::new(LOG_CF, write_heavy_options(&block_cache, &blob_cache));
         let db = Arc::new(DB::open_cf_descriptors(
             &opts,
             path,

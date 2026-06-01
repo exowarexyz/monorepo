@@ -45,7 +45,7 @@ commonware-resolver = { git = "https://github.com/commonwarexyz/monorepo", rev =
 commonware-runtime = { git = "https://github.com/commonwarexyz/monorepo", rev = "d3c80052d28c6f3b681354d0b483ecda06f2ea1a" }
 commonware-storage = { git = "https://github.com/commonwarexyz/monorepo", rev = "d3c80052d28c6f3b681354d0b483ecda06f2ea1a" }
 commonware-utils = { git = "https://github.com/commonwarexyz/monorepo", rev = "d3c80052d28c6f3b681354d0b483ecda06f2ea1a" }
-rocksdb = "0.22.0"
+rocksdb = "0.24.0"
 rand = "0.8.5"
 bincode = "1.3.3"
 dashmap = "5.5.3"
