@@ -44,7 +44,9 @@ pub trait Sequence: Send + Sync + 'static {
 
 /// Ingest write capability.
 pub trait Ingest: Send + Sync + 'static {
-    /// Persist key-value pairs atomically and return the new global sequence number for this write.
+    /// Persist key-value pairs atomically and return the global sequence number that includes this
+    /// write. Backends may coalesce concurrent writes and return the same sequence number to each
+    /// coalesced caller.
     fn put_batch(
         &self,
         kvs: Vec<(Bytes, Bytes)>,
