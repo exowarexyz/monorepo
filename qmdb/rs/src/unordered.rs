@@ -18,9 +18,9 @@ use exoware_sdk::{RangeMode, SerializableReadSession, StoreClient};
 
 use crate::codec::{
     bitmap_chunk_bits, chunk_index_for_location, clear_below_floor,
-    decode_current_boundary_metadata, decode_update_location, encode_chunk_key,
-    encode_current_meta_key, encode_ops_root_witness_key, merkle_size_for_watermark,
-    CurrentBoundaryMetadata, UpdateRow,
+    decode_current_boundary_metadata, decode_update_index_value_present, decode_update_location,
+    encode_chunk_key, encode_current_meta_key, encode_ops_root_witness_key,
+    merkle_size_for_watermark, CurrentBoundaryMetadata,
 };
 use crate::connect::OperationKv;
 use crate::core::HistoricalOpsClientCore;
@@ -123,7 +123,6 @@ where
     fn core(&self) -> HistoricalOpsClientCore<'_, F, H::Digest, K, V> {
         HistoricalOpsClientCore {
             client: &self.client,
-            update_row_cfg: self.update_row_cfg.clone(),
             _marker: PhantomData,
         }
     }
@@ -184,7 +183,43 @@ where
         keys: &[Q],
         watermark: Location<F>,
     ) -> Result<Vec<Option<VersionedValue<K, V, F>>>, QmdbError> {
-        self.core().query_many_at(keys, watermark).await
+        let session = self.client.create_session();
+        self.core()
+            .require_published_watermark(&session, watermark)
+            .await?;
+
+        let futs = keys.iter().map(|key| {
+            let key_bytes = key.as_ref();
+            async {
+                let Some((row_key, _row_value)) = self
+                    .load_latest_update_row(&session, watermark, key_bytes)
+                    .await?
+                else {
+                    return Ok(None);
+                };
+                let location = decode_update_location(&row_key)?;
+                let operation = self.load_operation_at(&session, location).await?;
+                let versioned = match operation {
+                    unordered::Operation::Update(update) => VersionedValue {
+                        key: update.0,
+                        location,
+                        value: Some(update.1),
+                    },
+                    unordered::Operation::Delete(key) => VersionedValue {
+                        key,
+                        location,
+                        value: None,
+                    },
+                    unordered::Operation::CommitFloor(_, _) => {
+                        return Err(QmdbError::CorruptData(format!(
+                            "latest update row at {location} points to a commit operation"
+                        )));
+                    }
+                };
+                Ok(Some(versioned))
+            }
+        });
+        futures::future::join_all(futs).await.into_iter().collect()
     }
 
     pub async fn root_at(&self, watermark: Location<F>) -> Result<H::Digest, QmdbError> {
@@ -420,16 +455,7 @@ where
             });
         };
         let location = decode_update_location(&row_key)?;
-        let decoded =
-            <UpdateRow<K, V> as Decode>::decode_cfg(row_value.as_ref(), &self.update_row_cfg)
-                .map_err(|e| QmdbError::CorruptData(format!("update row decode: {e}")))?;
-        if <K as AsRef<[u8]>>::as_ref(&decoded.key) != key.as_ref() {
-            return Err(QmdbError::ProofKeyNotFound {
-                watermark: watermark.as_u64(),
-                key: key_bytes.clone(),
-            });
-        }
-        if decoded.value.is_none() {
+        if !decode_update_index_value_present::<K, V>(row_value.as_ref(), &self.update_row_cfg)? {
             return Err(QmdbError::KeyNotActive {
                 watermark: watermark.as_u64(),
                 key: key_bytes.clone(),

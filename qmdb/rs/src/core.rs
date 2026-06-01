@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 use std::time::Duration;
 
-use commonware_codec::{Codec, Decode, Encode};
+use commonware_codec::{Codec, Encode};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::merkle::{
     hasher::Hasher as MerkleHasher, mem::Mem, Family, Graftable, Location, Position,
@@ -15,14 +15,13 @@ use exoware_sdk::keys::Key;
 use exoware_sdk::{ClientError, RangeMode, SerializableReadSession, StoreClient};
 
 use crate::codec::{
-    decode_digest, decode_operation_location_key, decode_update_location,
-    decode_watermark_location, encode_chunk_key, encode_current_meta_key, encode_grafted_node_key,
-    encode_node_key, encode_operation_key, encode_ops_root_witness_key, encode_presence_key,
-    encode_update_key, encode_watermark_key, ensure_encoded_value_size, merkle_size_for_watermark,
-    CurrentBoundaryMetadata, UpdateRow, WATERMARK_CODEC,
+    decode_digest, decode_operation_location_key, decode_watermark_location, encode_chunk_key,
+    encode_current_meta_key, encode_grafted_node_key, encode_node_key, encode_operation_key,
+    encode_ops_root_witness_key, encode_presence_key, encode_update_index_value, encode_update_key,
+    encode_watermark_key, ensure_encoded_value_size, merkle_size_for_watermark,
+    CurrentBoundaryMetadata, WATERMARK_CODEC,
 };
 use crate::error::QmdbError;
-use crate::VersionedValue;
 
 const POST_INGEST_QUERY_RETRY_MAX_ATTEMPTS: usize = 6;
 const POST_INGEST_QUERY_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
@@ -77,7 +76,6 @@ where
 #[derive(Clone, Debug)]
 pub(crate) struct HistoricalOpsClientCore<'a, F: Family, D: Digest, K: Codec, V: Codec> {
     pub(crate) client: &'a StoreClient,
-    pub(crate) update_row_cfg: (K::Cfg, V::Cfg),
     pub(crate) _marker: PhantomData<(F, D, K, V)>,
 }
 
@@ -253,40 +251,6 @@ impl<'a, F: Family, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, F
         }
         Ok(encoded)
     }
-
-    pub(crate) async fn query_many_at<Q: AsRef<[u8]>>(
-        &self,
-        keys: &[Q],
-        max_location: Location<F>,
-    ) -> Result<Vec<Option<VersionedValue<K, V, F>>>, QmdbError> {
-        let session = self.client.create_session();
-        self.require_published_watermark(&session, max_location)
-            .await?;
-
-        let futs = keys.iter().map(|key| {
-            let key_bytes = key.as_ref();
-            async {
-                let Some((row_key, row_value)) = self
-                    .load_latest_update_row(&session, max_location, key_bytes)
-                    .await?
-                else {
-                    return Ok(None);
-                };
-                let location = decode_update_location(&row_key)?;
-                let decoded = <UpdateRow<K, V> as Decode>::decode_cfg(
-                    row_value.as_ref(),
-                    &self.update_row_cfg,
-                )
-                .map_err(|e| QmdbError::CorruptData(format!("update row decode: {e}")))?;
-                Ok(Some(VersionedValue {
-                    key: decoded.key,
-                    location,
-                    value: decoded.value,
-                }))
-            }
-        });
-        futures::future::join_all(futs).await.into_iter().collect()
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -386,13 +350,9 @@ impl PreparedUpload {
 
             if let Some((key, value)) = extract_keyed(op) {
                 keyed_operation_count += 1;
-                let update_row = UpdateRow {
-                    key: key.clone(),
-                    value: value.cloned(),
-                };
                 aux_rows.push((
                     encode_update_key(key.as_ref(), location)?,
-                    update_row.encode().to_vec(),
+                    encode_update_index_value(value.is_some()),
                 ));
             }
         }
