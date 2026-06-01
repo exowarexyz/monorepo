@@ -32,21 +32,25 @@ const SEQ_META_KEY: &[u8] = b"sequence";
 const LOG_CF: &str = "log";
 const INDEXED_LOG_KEY_LEN: usize = 16;
 const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
-const WRITE_DRAIN_MAX_REQUESTS: usize = 64;
-const WRITE_DRAIN_COALESCE_WINDOW: Duration = Duration::from_millis(2);
+const WRITE_DRAIN_MAX_REQUESTS: usize = 256;
+const WRITE_DRAIN_COALESCE_WINDOW: Duration = Duration::from_millis(10);
 const WRITE_BUILDERS: usize = 4;
 const ROCKS_BACKGROUND_JOBS: i32 = 16;
 const ROCKS_MAX_SUBCOMPACTIONS: u32 = 8;
 const ROCKS_WRITE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
 const ROCKS_DB_WRITE_BUFFER_SIZE: usize = 4 * 1024 * 1024 * 1024;
-const ROCKS_LEVEL_BASE_SIZE: usize = 256 * 1024 * 1024;
+const ROCKS_MEMTABLE_MEMORY_BUDGET: usize = ROCKS_DB_WRITE_BUFFER_SIZE;
+const ROCKS_TARGET_FILE_SIZE_BASE: u64 = 512 * 1024 * 1024;
+const ROCKS_MAX_BYTES_FOR_LEVEL_BASE: u64 = 16 * 1024 * 1024 * 1024;
 const ROCKS_LEVEL_ZERO_COMPACTION_TRIGGER: i32 = 16;
-const ROCKS_LEVEL_ZERO_SLOWDOWN_WRITES_TRIGGER: i32 = 256;
-const ROCKS_LEVEL_ZERO_STOP_WRITES_TRIGGER: i32 = 512;
+const ROCKS_LEVEL_ZERO_SLOWDOWN_WRITES_TRIGGER: i32 = 1024;
+const ROCKS_LEVEL_ZERO_STOP_WRITES_TRIGGER: i32 = 2048;
 const ROCKS_SOFT_PENDING_COMPACTION_BYTES_LIMIT: usize = 512 * 1024 * 1024 * 1024;
 const ROCKS_HARD_PENDING_COMPACTION_BYTES_LIMIT: usize = 768 * 1024 * 1024 * 1024;
 const ROCKS_SYNC_BYTES: u64 = 8 * 1024 * 1024;
 const ROCKS_COMPACTION_READAHEAD_SIZE: usize = 8 * 1024 * 1024;
+const ROCKS_MIN_BLOB_SIZE: u64 = 64 * 1024;
+const ROCKS_BLOB_FILE_SIZE: u64 = 512 * 1024 * 1024;
 type RocksIterItem = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
 
 struct OwnedRocksIterator {
@@ -629,10 +633,12 @@ fn write_heavy_options() -> Options {
     opts.increase_parallelism(ROCKS_BACKGROUND_JOBS);
     opts.set_max_background_jobs(ROCKS_BACKGROUND_JOBS);
     opts.set_max_subcompactions(ROCKS_MAX_SUBCOMPACTIONS);
-    opts.optimize_level_style_compaction(ROCKS_LEVEL_BASE_SIZE);
+    opts.optimize_universal_style_compaction(ROCKS_MEMTABLE_MEMORY_BUDGET);
     opts.set_write_buffer_size(ROCKS_WRITE_BUFFER_SIZE);
     opts.set_db_write_buffer_size(ROCKS_DB_WRITE_BUFFER_SIZE);
     opts.set_max_write_buffer_number(8);
+    opts.set_target_file_size_base(ROCKS_TARGET_FILE_SIZE_BASE);
+    opts.set_max_bytes_for_level_base(ROCKS_MAX_BYTES_FOR_LEVEL_BASE);
     opts.set_level_zero_file_num_compaction_trigger(ROCKS_LEVEL_ZERO_COMPACTION_TRIGGER);
     opts.set_level_zero_slowdown_writes_trigger(ROCKS_LEVEL_ZERO_SLOWDOWN_WRITES_TRIGGER);
     opts.set_level_zero_stop_writes_trigger(ROCKS_LEVEL_ZERO_STOP_WRITES_TRIGGER);
@@ -641,6 +647,10 @@ fn write_heavy_options() -> Options {
     opts.set_bytes_per_sync(ROCKS_SYNC_BYTES);
     opts.set_wal_bytes_per_sync(ROCKS_SYNC_BYTES);
     opts.set_compaction_readahead_size(ROCKS_COMPACTION_READAHEAD_SIZE);
+    opts.set_enable_blob_files(true);
+    opts.set_min_blob_size(ROCKS_MIN_BLOB_SIZE);
+    opts.set_blob_file_size(ROCKS_BLOB_FILE_SIZE);
+    opts.set_blob_compaction_readahead_size(ROCKS_COMPACTION_READAHEAD_SIZE as u64);
     opts
 }
 
