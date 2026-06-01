@@ -91,19 +91,6 @@ impl IntoStoreWriteValue for &[u8] {
     }
 }
 
-fn encoded_bytes_field_len(bytes: &[u8]) -> usize {
-    if bytes.is_empty() {
-        return 0;
-    }
-    1 + buffa::encoding::varint_len(bytes.len() as u64) as usize + bytes.len()
-}
-
-/// Encoded request-body bytes contributed by one key-value pair in a Store `PutRequest`.
-pub fn put_request_entry_encoded_len(key: &[u8], value: &[u8]) -> usize {
-    let entry_len = encoded_bytes_field_len(key).saturating_add(encoded_bytes_field_len(value));
-    1 + buffa::encoding::varint_len(entry_len as u64) as usize + entry_len
-}
-
 impl<const N: usize> IntoStoreWriteValue for &[u8; N] {
     fn into_store_write_value(self) -> Bytes {
         Bytes::copy_from_slice(self)
@@ -3163,35 +3150,6 @@ mod tests {
         assert_eq!(batch.len(), 2);
         assert_eq!(batch.entries[0].0, first_key);
         assert_eq!(batch.entries[1].0, second_key);
-    }
-
-    #[test]
-    fn put_request_entry_encoded_len_matches_wire_size() {
-        use buffa::Message as _;
-
-        let request = ProtoPutRequest {
-            kvs: vec![
-                exoware_proto::common::KvEntry {
-                    key: b"key".to_vec(),
-                    value: Bytes::from_static(b"value"),
-                    ..Default::default()
-                },
-                exoware_proto::common::KvEntry {
-                    key: b"watermark".to_vec(),
-                    value: Bytes::new(),
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        };
-        let mut encoded = bytes::BytesMut::new();
-        request.encode(&mut encoded);
-
-        assert_eq!(
-            put_request_entry_encoded_len(b"key", b"value")
-                + put_request_entry_encoded_len(b"watermark", b""),
-            encoded.len()
-        );
     }
 
     fn hex_encode(data: &[u8]) -> String {

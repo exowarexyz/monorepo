@@ -33,9 +33,7 @@ pub use unordered::{build_unordered_upload, BuiltUnorderedUpload, UnorderedWrite
 use std::borrow::Borrow;
 
 use commonware_storage::merkle::{Family, Location};
-use exoware_sdk::{
-    keys::Key, put_request_entry_encoded_len, IntoStoreWriteValue, StoreClient, StoreWriteBatch,
-};
+use exoware_sdk::{keys::Key, IntoStoreWriteValue, StoreClient, StoreWriteBatch};
 
 use crate::{PublishedCheckpoint, QmdbError, UploadReceipt};
 
@@ -69,14 +67,6 @@ impl<F: Family> PreparedUpload<F> {
 
     pub fn row_count(&self) -> usize {
         self.rows.len()
-    }
-
-    /// Encoded Store `PutRequest` body bytes contributed by this prepared upload.
-    pub fn store_request_bytes(&self) -> usize {
-        self.rows
-            .iter()
-            .map(|(key, value)| put_request_entry_encoded_len(key, value))
-            .sum()
     }
 }
 
@@ -138,31 +128,5 @@ pub(crate) fn upload_receipt<F: Family>(
                 sequence_number,
             }
         }),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use bytes::Bytes;
-    use commonware_storage::merkle::{mmr, Location};
-
-    #[test]
-    fn prepared_upload_store_request_bytes_sums_rows() {
-        let upload = PreparedUpload::<mmr::Family> {
-            dispatch_id: 0,
-            latest_location: Location::new(1),
-            writer_location_watermark: None,
-            rows: vec![
-                (Bytes::from_static(b"a"), vec![1, 2, 3]),
-                (Bytes::from_static(b"bb"), Vec::new()),
-            ],
-        };
-
-        assert_eq!(
-            upload.store_request_bytes(),
-            put_request_entry_encoded_len(b"a", &[1, 2, 3])
-                + put_request_entry_encoded_len(b"bb", &[])
-        );
     }
 }
