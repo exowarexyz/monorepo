@@ -19,8 +19,8 @@ use exoware_sdk::prune_policy::{
 use exoware_server::{Ingest, Log, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence};
 use regex::bytes::Regex;
 use rocksdb::{
-    ColumnFamily, ColumnFamilyDescriptor, DBIterator, Direction, IteratorMode, Options,
-    WriteOptions, DB,
+    ColumnFamily, ColumnFamilyDescriptor, DBCompressionType, DBIterator, Direction, IteratorMode,
+    Options, UniversalCompactOptions, WriteOptions, DB,
 };
 use tokio::sync::oneshot;
 
@@ -40,9 +40,11 @@ const ROCKS_DB_WRITE_BUFFER_SIZE: usize = 4 * 1024 * 1024 * 1024;
 const ROCKS_MEMTABLE_MEMORY_BUDGET: usize = ROCKS_DB_WRITE_BUFFER_SIZE;
 const ROCKS_TARGET_FILE_SIZE_BASE: u64 = 512 * 1024 * 1024;
 const ROCKS_MAX_BYTES_FOR_LEVEL_BASE: u64 = 16 * 1024 * 1024 * 1024;
-const ROCKS_LEVEL_ZERO_COMPACTION_TRIGGER: i32 = 16;
+const ROCKS_LEVEL_ZERO_COMPACTION_TRIGGER: i32 = 64;
 const ROCKS_LEVEL_ZERO_SLOWDOWN_WRITES_TRIGGER: i32 = 1024;
 const ROCKS_LEVEL_ZERO_STOP_WRITES_TRIGGER: i32 = 2048;
+const ROCKS_UNIVERSAL_COMPACTION_SIZE_RATIO: i32 = 10;
+const ROCKS_UNIVERSAL_COMPACTION_MIN_MERGE_WIDTH: i32 = 4;
 const ROCKS_SOFT_PENDING_COMPACTION_BYTES_LIMIT: usize = 512 * 1024 * 1024 * 1024;
 const ROCKS_HARD_PENDING_COMPACTION_BYTES_LIMIT: usize = 768 * 1024 * 1024 * 1024;
 const ROCKS_SYNC_BYTES: u64 = 8 * 1024 * 1024;
@@ -624,6 +626,13 @@ fn write_heavy_options() -> Options {
     opts.set_max_background_jobs(ROCKS_BACKGROUND_JOBS);
     opts.set_max_subcompactions(ROCKS_MAX_SUBCOMPACTIONS);
     opts.optimize_universal_style_compaction(ROCKS_MEMTABLE_MEMORY_BUDGET);
+    let mut universal = UniversalCompactOptions::default();
+    universal.set_size_ratio(ROCKS_UNIVERSAL_COMPACTION_SIZE_RATIO);
+    universal.set_min_merge_width(ROCKS_UNIVERSAL_COMPACTION_MIN_MERGE_WIDTH);
+    opts.set_universal_compaction_options(&universal);
+    opts.set_compression_type(DBCompressionType::None);
+    opts.set_bottommost_compression_type(DBCompressionType::None);
+    opts.set_wal_compression_type(DBCompressionType::None);
     opts.set_write_buffer_size(ROCKS_WRITE_BUFFER_SIZE);
     opts.set_db_write_buffer_size(ROCKS_DB_WRITE_BUFFER_SIZE);
     opts.set_max_write_buffer_number(8);
@@ -636,10 +645,12 @@ fn write_heavy_options() -> Options {
     opts.set_hard_pending_compaction_bytes_limit(ROCKS_HARD_PENDING_COMPACTION_BYTES_LIMIT);
     opts.set_bytes_per_sync(ROCKS_SYNC_BYTES);
     opts.set_wal_bytes_per_sync(ROCKS_SYNC_BYTES);
+    opts.set_use_direct_io_for_flush_and_compaction(true);
     opts.set_compaction_readahead_size(ROCKS_COMPACTION_READAHEAD_SIZE);
     opts.set_enable_blob_files(true);
     opts.set_min_blob_size(ROCKS_MIN_BLOB_SIZE);
     opts.set_blob_file_size(ROCKS_BLOB_FILE_SIZE);
+    opts.set_blob_compression_type(DBCompressionType::None);
     opts.set_blob_compaction_readahead_size(ROCKS_COMPACTION_READAHEAD_SIZE as u64);
     opts
 }
