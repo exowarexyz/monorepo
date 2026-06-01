@@ -21,7 +21,10 @@ use commonware_storage::{
             ordered::{variable::Operation as OrderedOperation, Update},
             value::VariableEncoding,
         },
-        current::proof::{OpsRootWitness, RangeProof},
+        current::{
+            grafting::graftable_chunks,
+            proof::{OpsRootWitness, RangeProof},
+        },
         verify::{verify_multi_proof, verify_proof_and_pinned_nodes},
     },
 };
@@ -143,16 +146,6 @@ fn current_proof_config<D: Digest>(
         chunk_bits,
         grafting_height: chunk_bits.trailing_zeros(),
     })
-}
-
-fn graftable_chunks<F: merkle::Graftable>(ops_leaves: u64, grafting_height: u32) -> u64 {
-    let pos = F::subtree_root_position(Location::<F>::new(0), grafting_height);
-    let birth_chunk_0 = F::peak_birth_size(pos, grafting_height);
-    if ops_leaves < birth_chunk_0 {
-        return 0;
-    }
-    let chunk_size = 1u64 << grafting_height;
-    (ops_leaves - birth_chunk_0) / chunk_size + 1
 }
 
 #[derive(Clone)]
