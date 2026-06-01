@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use exoware_sdk::keys::KeyCodec;
@@ -20,16 +20,28 @@ use exoware_sdk::prune_policy::{
 use exoware_server::{Ingest, Log, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence};
 use regex::bytes::Regex;
 use rocksdb::{
-    ColumnFamily, ColumnFamilyDescriptor, DBIterator, Direction, IteratorMode, Options, DB,
+    ColumnFamily, ColumnFamilyDescriptor, DBIterator, Direction, IteratorMode, Options,
+    WriteOptions, DB,
 };
 use tokio::sync::oneshot;
 
 const META_CF: &str = "meta";
 const SEQ_META_KEY: &[u8] = b"sequence";
 const LOG_CF: &str = "log";
+const LEGACY_LOG_KEY_LEN: usize = 8;
+const INDEXED_LOG_KEY_LEN: usize = 16;
 const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
 const WRITE_DRAIN_MAX_REQUESTS: usize = 64;
-const WRITE_DRAIN_COALESCE_WINDOW: Duration = Duration::from_micros(250);
+const WRITE_DRAIN_COALESCE_WINDOW: Duration = Duration::from_millis(2);
+const ROCKS_BACKGROUND_JOBS: i32 = 16;
+const ROCKS_MAX_SUBCOMPACTIONS: u32 = 8;
+const ROCKS_WRITE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
+const ROCKS_DB_WRITE_BUFFER_SIZE: usize = 1024 * 1024 * 1024;
+const ROCKS_LEVEL_BASE_SIZE: usize = 256 * 1024 * 1024;
+const ROCKS_SOFT_PENDING_COMPACTION_BYTES_LIMIT: usize = 512 * 1024 * 1024 * 1024;
+const ROCKS_HARD_PENDING_COMPACTION_BYTES_LIMIT: usize = 768 * 1024 * 1024 * 1024;
+const ROCKS_SYNC_BYTES: u64 = 8 * 1024 * 1024;
+const ROCKS_COMPACTION_READAHEAD_SIZE: usize = 8 * 1024 * 1024;
 type RocksIterItem = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
 
 struct OwnedRocksIterator {
@@ -323,19 +335,24 @@ fn run_rocks_writer(
     while let Ok(first) = receiver.recv() {
         let mut requests = vec![first];
         let mut disconnected = false;
-
-        if requests.len() < WRITE_DRAIN_MAX_REQUESTS {
-            match receiver.recv_timeout(WRITE_DRAIN_COALESCE_WINDOW) {
-                Ok(request) => requests.push(request),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => disconnected = true,
-            }
-        }
+        let drain_until = Instant::now() + WRITE_DRAIN_COALESCE_WINDOW;
 
         while requests.len() < WRITE_DRAIN_MAX_REQUESTS {
             match receiver.try_recv() {
                 Ok(request) => requests.push(request),
-                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Empty) => {
+                    let Some(remaining) = drain_until.checked_duration_since(Instant::now()) else {
+                        break;
+                    };
+                    match receiver.recv_timeout(remaining) {
+                        Ok(request) => requests.push(request),
+                        Err(mpsc::RecvTimeoutError::Timeout) => break,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            disconnected = true;
+                            break;
+                        }
+                    }
+                }
                 Err(mpsc::TryRecvError::Disconnected) => {
                     disconnected = true;
                     break;
@@ -380,22 +397,45 @@ fn commit_sequence_requests_rocksdb(
         .checked_add(1)
         .ok_or_else(|| "rocks sequence number overflowed".to_string())?;
     let mut batch = rocksdb::WriteBatch::default();
+    let mut log_index = 0u64;
 
     for request in requests {
         for (k, v) in &request.kvs {
             batch.put(k.as_ref(), v.as_ref());
+            batch.put_cf(log_cf, indexed_log_key(next, log_index), k.as_ref());
+            log_index = log_index
+                .checked_add(1)
+                .ok_or_else(|| "sequence log index overflowed".to_string())?;
         }
     }
-    batch.put_cf(
-        log_cf,
-        next.to_be_bytes(),
-        encode_drained_batch_entries(requests)?,
-    );
     batch.put_cf(meta_cf, SEQ_META_KEY, next.to_le_bytes());
 
-    db.write(batch).map_err(|e| e.to_string())?;
+    let mut write_options = WriteOptions::default();
+    write_options.set_sync(true);
+    db.write_opt(batch, &write_options)
+        .map_err(|e| e.to_string())?;
     *sequence = next;
     Ok(next)
+}
+
+fn write_heavy_options() -> Options {
+    let mut opts = Options::default();
+    opts.increase_parallelism(ROCKS_BACKGROUND_JOBS);
+    opts.set_max_background_jobs(ROCKS_BACKGROUND_JOBS);
+    opts.set_max_subcompactions(ROCKS_MAX_SUBCOMPACTIONS);
+    opts.optimize_level_style_compaction(ROCKS_LEVEL_BASE_SIZE);
+    opts.set_write_buffer_size(ROCKS_WRITE_BUFFER_SIZE);
+    opts.set_db_write_buffer_size(ROCKS_DB_WRITE_BUFFER_SIZE);
+    opts.set_max_write_buffer_number(8);
+    opts.set_level_zero_file_num_compaction_trigger(16);
+    opts.set_level_zero_slowdown_writes_trigger(128);
+    opts.set_level_zero_stop_writes_trigger(256);
+    opts.set_soft_pending_compaction_bytes_limit(ROCKS_SOFT_PENDING_COMPACTION_BYTES_LIMIT);
+    opts.set_hard_pending_compaction_bytes_limit(ROCKS_HARD_PENDING_COMPACTION_BYTES_LIMIT);
+    opts.set_bytes_per_sync(ROCKS_SYNC_BYTES);
+    opts.set_wal_bytes_per_sync(ROCKS_SYNC_BYTES);
+    opts.set_compaction_readahead_size(ROCKS_COMPACTION_READAHEAD_SIZE);
+    opts
 }
 
 /// Minimal RocksDB-backed store for the simulator: batch writes plus a global sequence u64
@@ -409,14 +449,14 @@ pub struct RocksStore {
 
 impl RocksStore {
     pub fn open(path: &Path) -> Result<Self, rocksdb::Error> {
-        let mut opts = Options::default();
+        let mut opts = write_heavy_options();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
 
         let cf_default =
-            ColumnFamilyDescriptor::new(rocksdb::DEFAULT_COLUMN_FAMILY_NAME, Options::default());
+            ColumnFamilyDescriptor::new(rocksdb::DEFAULT_COLUMN_FAMILY_NAME, write_heavy_options());
         let cf_meta = ColumnFamilyDescriptor::new(META_CF, Options::default());
-        let cf_log = ColumnFamilyDescriptor::new(LOG_CF, Options::default());
+        let cf_log = ColumnFamilyDescriptor::new(LOG_CF, write_heavy_options());
         let db = Arc::new(DB::open_cf_descriptors(
             &opts,
             path,
@@ -461,25 +501,25 @@ impl RocksStore {
         Ok(())
     }
 
-    fn prune_log_rocksdb(&self, cutoff_exclusive: u64) -> Result<u64, rocksdb::Error> {
+    fn prune_log_rocksdb(&self, cutoff_exclusive: u64) -> Result<u64, String> {
         // Count before deleting so callers know how much was pruned. For the
         // simulator a simple iterator scan is fine; a production engine would
         // expose delete_range_cf and return the logical count separately.
         let cf = self.log_cf();
-        let end_key = cutoff_exclusive.to_be_bytes();
         let mut deleted = 0u64;
         let mut batch = rocksdb::WriteBatch::default();
         let iter = self.db.iterator_cf(cf, IteratorMode::Start);
         for item in iter {
-            let (k, _) = item?;
-            if k.as_ref() >= &end_key[..] {
+            let (k, _) = item.map_err(|e| e.to_string())?;
+            let sequence = sequence_from_log_key(k.as_ref())?;
+            if sequence >= cutoff_exclusive {
                 break;
             }
             batch.delete_cf(cf, k.as_ref());
             deleted += 1;
         }
         if deleted > 0 {
-            self.db.write(batch)?;
+            self.db.write(batch).map_err(|e| e.to_string())?;
         }
         Ok(deleted)
     }
@@ -565,9 +605,7 @@ impl RocksStore {
             RetainPolicy::GreaterThanOrEqual { threshold } => *threshold,
             RetainPolicy::DropAll => current.saturating_add(1),
         };
-        self.prune_log_rocksdb(cutoff_exclusive)
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+        self.prune_log_rocksdb(cutoff_exclusive).map(|_| ())
     }
 }
 
@@ -637,14 +675,45 @@ impl Log for RocksStore {
     async fn get_batch(&self, sequence_number: u64) -> Result<Option<Vec<(Bytes, Bytes)>>, String> {
         let store = self.clone();
         let cf = store.log_cf();
-        match store
+        let sequence_key = sequence_number.to_be_bytes();
+        if let Some(raw) = store
             .db
-            .get_cf(cf, sequence_number.to_be_bytes())
+            .get_cf(cf, sequence_key)
             .map_err(|e| e.to_string())?
         {
-            Some(raw) => Ok(Some(decode_batch_entries(&raw).map_err(|e| e.to_string())?)),
-            None => Ok(None),
+            return Ok(Some(decode_batch_entries(&raw).map_err(|e| e.to_string())?));
         }
+
+        let mut keys = Vec::new();
+        let iter = store
+            .db
+            .iterator_cf(cf, IteratorMode::From(&sequence_key, Direction::Forward));
+        for item in iter {
+            let (log_key, user_key) = item.map_err(|e| e.to_string())?;
+            if !log_key.as_ref().starts_with(&sequence_key) {
+                break;
+            }
+            if log_key.len() != INDEXED_LOG_KEY_LEN {
+                return Err(format!(
+                    "log CF key has unexpected length {}",
+                    log_key.len()
+                ));
+            }
+            keys.push(Bytes::copy_from_slice(user_key.as_ref()));
+        }
+        if keys.is_empty() {
+            return Ok(None);
+        }
+
+        let values = store.db.multi_get(keys.iter().map(|key| key.as_ref()));
+        let mut entries = Vec::with_capacity(keys.len());
+        for (key, value) in keys.into_iter().zip(values) {
+            match value.map_err(|e| e.to_string())? {
+                Some(value) => entries.push((key, Bytes::from(value))),
+                None => return Ok(None),
+            }
+        }
+        Ok(Some(entries))
     }
 
     async fn oldest_retained_batch(&self) -> Result<Option<u64>, String> {
@@ -655,18 +724,29 @@ impl Log for RocksStore {
             None => Ok(None),
             Some(item) => {
                 let (key, _) = item.map_err(|e| e.to_string())?;
-                if key.len() != 8 {
-                    return Err(format!("log CF key has unexpected length {}", key.len()));
-                }
-                let mut buf = [0u8; 8];
-                buf.copy_from_slice(key.as_ref());
-                Ok(Some(u64::from_be_bytes(buf)))
+                Ok(Some(sequence_from_log_key(key.as_ref())?))
             }
         }
     }
 }
 
-// --- log codec: `count: u32_be | for each (k,v): klen: u32_be | k | vlen: u32_be | v` ---
+fn indexed_log_key(sequence: u64, index: u64) -> [u8; INDEXED_LOG_KEY_LEN] {
+    let mut key = [0u8; INDEXED_LOG_KEY_LEN];
+    key[..8].copy_from_slice(&sequence.to_be_bytes());
+    key[8..].copy_from_slice(&index.to_be_bytes());
+    key
+}
+
+fn sequence_from_log_key(key: &[u8]) -> Result<u64, String> {
+    if key.len() != LEGACY_LOG_KEY_LEN && key.len() != INDEXED_LOG_KEY_LEN {
+        return Err(format!("log CF key has unexpected length {}", key.len()));
+    }
+    let mut raw = [0u8; 8];
+    raw.copy_from_slice(&key[..8]);
+    Ok(u64::from_be_bytes(raw))
+}
+
+// --- legacy log codec: `count: u32_be | for each (k,v): klen: u32_be | k | vlen: u32_be | v` ---
 
 #[cfg(test)]
 fn encode_batch_entries(kvs: &[(Bytes, Bytes)]) -> Vec<u8> {
@@ -683,34 +763,6 @@ fn encode_batch_entries(kvs: &[(Bytes, Bytes)]) -> Vec<u8> {
         out.extend_from_slice(v.as_ref());
     }
     out
-}
-
-fn encode_drained_batch_entries(requests: &[WriteRequest]) -> Result<Vec<u8>, String> {
-    let count = requests
-        .iter()
-        .try_fold(0usize, |count, request| {
-            count.checked_add(request.kvs.len())
-        })
-        .ok_or_else(|| "drained batch entry count overflowed".to_string())?;
-    let count =
-        u32::try_from(count).map_err(|_| "drained batch entry count exceeds u32".to_string())?;
-    let mut size = 4;
-    for request in requests {
-        for (k, v) in &request.kvs {
-            size += 4 + k.len() + 4 + v.len();
-        }
-    }
-    let mut out = Vec::with_capacity(size);
-    out.extend_from_slice(&count.to_be_bytes());
-    for request in requests {
-        for (k, v) in &request.kvs {
-            out.extend_from_slice(&(k.len() as u32).to_be_bytes());
-            out.extend_from_slice(k.as_ref());
-            out.extend_from_slice(&(v.len() as u32).to_be_bytes());
-            out.extend_from_slice(v.as_ref());
-        }
-    }
-    Ok(out)
 }
 
 fn decode_batch_entries(mut raw: &[u8]) -> Result<Vec<(Bytes, Bytes)>, String> {
@@ -814,6 +866,31 @@ mod tests {
                 (Bytes::from_static(b"c"), Bytes::from_static(b"3")),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn legacy_value_log_batch_still_reads() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path()).expect("open db");
+        let kvs = vec![
+            (Bytes::from_static(b"legacy-a"), Bytes::from_static(b"1")),
+            (Bytes::from_static(b"legacy-b"), Bytes::from_static(b"2")),
+        ];
+        store
+            .db
+            .put_cf(
+                store.log_cf(),
+                42u64.to_be_bytes(),
+                encode_batch_entries(&kvs),
+            )
+            .expect("write legacy log entry");
+
+        let batch = store
+            .get_batch(42)
+            .await
+            .expect("get batch")
+            .expect("batch retained");
+        assert_eq!(batch, kvs);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
