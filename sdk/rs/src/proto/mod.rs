@@ -107,9 +107,7 @@ pub mod stream {
 pub mod compression;
 mod range_traversal;
 
-pub use compression::{
-    connect_compression_registry, PreferZstdHttpClient, EXOWARE_AFFINITY_COOKIE,
-};
+pub use compression::{connect_compression_registry, PreferZstdHttpClient};
 pub use range_traversal::{
     parse_range_traversal_direction, RangeTraversalDirection, RangeTraversalModeError,
 };

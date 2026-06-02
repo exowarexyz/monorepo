@@ -18,11 +18,15 @@
 //!
 //! ## Edge upstream affinity (cookie)
 //!
-//! Deployments behind a load balancer or proxy may use HTTP sticky sessions: the edge sets
-//! `Set-Cookie` for [`EXOWARE_AFFINITY_COOKIE`] so each client session sticks to one backend
-//! (cache locality). This repo's Docker/Envoy example uses the stateful session filter for that.
-//! [`PreferZstdHttpClient`] stores `Set-Cookie` from responses and sends `Cookie` on subsequent RPCs.
+//! Deployments behind a load balancer or proxy may use HTTP sticky sessions: the edge sets a
+//! `Set-Cookie` so each client session sticks to one backend (cache locality). The cookie name is
+//! the edge's concern, not ours -- [`PreferZstdHttpClient`] keeps a small per-host cookie jar: it
+//! stores every `Set-Cookie` from responses and replays them as `Cookie`, but only to the host
+//! that set them. Host scoping means a single client targeting several upstreams (e.g. per-service
+//! load balancers, each naming its cookie `AWSALB`) never sends one upstream's affinity token to
+//! another.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -39,26 +43,55 @@ pub fn connect_compression_registry() -> CompressionRegistry {
     CompressionRegistry::default()
 }
 
-/// Sticky-session cookie name; must match whatever the edge emits in `Set-Cookie`.
-pub const EXOWARE_AFFINITY_COOKIE: &str = "exoware_affinity_cookie";
-
 /// Wraps [`HttpClient`] so every RPC sends `Accept-Encoding: zstd, gzip` (see module docs).
 ///
-/// Also persists **HTTP sticky-session** behavior for [`EXOWARE_AFFINITY_COOKIE`]: when responses
-/// include `Set-Cookie: exoware_affinity_cookie=...`, the value is stored and sent on later requests as
-/// `Cookie: exoware_affinity_cookie=...` so the same client handle stays pinned to one upstream.
+/// Also persists **HTTP sticky sessions** generically: it stores every `Set-Cookie` the edge
+/// returns and replays them as `Cookie` on later requests to the same host, so the same client
+/// handle stays pinned to one upstream -- regardless of the edge's cookie name, and without
+/// leaking one host's cookie to another.
 #[derive(Clone, Debug)]
 pub struct PreferZstdHttpClient {
     inner: HttpClient,
-    /// `Cookie` header line body (`name=value`) for [`EXOWARE_AFFINITY_COOKIE`], no `Cookie:` prefix.
-    sticky_cookie: Arc<Mutex<Option<String>>>,
+    /// Per-host cookie jar: request authority (host[:port]) -> that host's cookies (name -> value).
+    /// Host scoping keeps one upstream's sticky cookie from being replayed to a different host.
+    cookies: Arc<Mutex<BTreeMap<String, BTreeMap<String, String>>>>,
 }
 
 impl PreferZstdHttpClient {
     pub fn plaintext() -> Self {
         Self {
             inner: HttpClient::plaintext(),
-            sticky_cookie: Arc::new(Mutex::new(None)),
+            cookies: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
+
+    /// Render the `Cookie` header value for `authority` from the jar, or `None` if it holds none.
+    fn cookie_header_for(&self, authority: &str) -> Option<String> {
+        let jar = self.cookies.lock().ok()?;
+        let origin = jar.get(authority)?;
+        if origin.is_empty() {
+            return None;
+        }
+        Some(
+            origin
+                .iter()
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    }
+
+    /// Store every `Set-Cookie` in `headers` under `authority`, so it is only replayed to that host.
+    fn store_set_cookies(&self, authority: &str, headers: &http::HeaderMap) {
+        let Ok(mut jar) = self.cookies.lock() else {
+            return;
+        };
+        for val in headers.get_all(SET_COOKIE) {
+            if let Ok(s) = val.to_str() {
+                if let Some((name, value)) = parse_set_cookie(s) {
+                    jar.entry(authority.to_string()).or_default().insert(name, value);
+                }
+            }
         }
     }
 }
@@ -71,58 +104,115 @@ impl ClientTransport for PreferZstdHttpClient {
         &self,
         mut request: Request<ClientBody>,
     ) -> BoxFuture<'static, Result<Response<Self::ResponseBody>, Self::Error>> {
-        if let Ok(guard) = self.sticky_cookie.lock() {
-            if let Some(ref pair) = *guard {
-                if let Ok(hv) = http::HeaderValue::from_str(pair) {
+        // Scope cookies to the target host so one upstream's sticky cookie is never replayed to
+        // another. Captured before `request` is moved into the future.
+        let authority = request.uri().authority().map(|a| a.as_str().to_string());
+
+        if let Some(ref authority) = authority {
+            if let Some(header) = self.cookie_header_for(authority) {
+                if let Ok(hv) = http::HeaderValue::from_str(&header) {
                     request.headers_mut().insert(COOKIE, hv);
                 }
             }
         }
+
         request.headers_mut().insert(
             ACCEPT_ENCODING,
             http::HeaderValue::from_static("zstd, gzip"),
         );
-        let inner = self.inner.clone();
-        let sticky_cookie = Arc::clone(&self.sticky_cookie);
+
+        let this = self.clone();
         Box::pin(async move {
-            let response = inner.send(request).await?;
+            let response = this.inner.send(request).await?;
             let (parts, body) = response.into_parts();
-            if let Ok(mut g) = sticky_cookie.lock() {
-                for val in parts.headers.get_all(SET_COOKIE) {
-                    if let Ok(s) = val.to_str() {
-                        if let Some(pair) = parse_sticky_cookie_pair(s, EXOWARE_AFFINITY_COOKIE) {
-                            *g = Some(pair);
-                            break;
-                        }
-                    }
-                }
+            if let Some(authority) = authority {
+                this.store_set_cookies(&authority, &parts.headers);
             }
             Ok(Response::from_parts(parts, body))
         })
     }
 }
 
-/// From one `Set-Cookie` header value, extract `name=value` for the affinity cookie.
-fn parse_sticky_cookie_pair(set_cookie: &str, name: &str) -> Option<String> {
+/// From one `Set-Cookie` header value, extract the `(name, value)` pair, ignoring attributes
+/// (`Path`, `Domain`, `Expires`, ...). The cookie is always the first `;`-separated segment.
+fn parse_set_cookie(set_cookie: &str) -> Option<(String, String)> {
     let first = set_cookie.split(';').next()?.trim();
-    let rest = first.strip_prefix(name)?.strip_prefix('=')?;
-    let val = rest.trim().trim_matches('"');
-    if val.is_empty() {
+    let (name, value) = first.split_once('=')?;
+    let name = name.trim();
+    let value = value.trim().trim_matches('"');
+    if name.is_empty() || value.is_empty() {
         return None;
     }
-    Some(format!("{name}={val}"))
+    Some((name.to_string(), value.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn set_cookie_headers(values: &[&str]) -> http::HeaderMap {
+        let mut headers = http::HeaderMap::new();
+        for v in values {
+            headers.append(SET_COOKIE, v.parse().unwrap());
+        }
+        headers
+    }
+
     #[test]
-    fn parse_sticky_cookie_pair_handles_quoted_value() {
-        let s = r#"exoware_affinity_cookie="Cg4xMjcuMC4wLjE6ODA4MQ=="; Path=/; HttpOnly"#;
+    fn parse_set_cookie_extracts_name_value_ignoring_attrs() {
+        // Quoted value with attributes.
         assert_eq!(
-            parse_sticky_cookie_pair(s, EXOWARE_AFFINITY_COOKIE),
-            Some("exoware_affinity_cookie=Cg4xMjcuMC4wLjE6ODA4MQ==".to_string())
+            parse_set_cookie(r#"affinity="Zm9vYmFy"; Path=/; HttpOnly"#),
+            Some(("affinity".to_string(), "Zm9vYmFy".to_string()))
+        );
+        // A typical load-balancer stickiness cookie (e.g. AWS ALB).
+        assert_eq!(
+            parse_set_cookie("AWSALB=abc.def.ghi; Expires=Mon, 02 Jun 2026 00:00:00 GMT; Path=/"),
+            Some(("AWSALB".to_string(), "abc.def.ghi".to_string()))
+        );
+        // Empty value -> ignored.
+        assert_eq!(parse_set_cookie("AWSALB=; Path=/"), None);
+    }
+
+    #[test]
+    fn cookies_are_scoped_per_host() {
+        let client = PreferZstdHttpClient::plaintext();
+
+        // Two hosts each set a cookie of the same name (`AWSALB`) with different values.
+        client.store_set_cookies(
+            "query.internal:80",
+            &set_cookie_headers(&["AWSALB=hostA; Path=/"]),
+        );
+        client.store_set_cookies(
+            "ingest.internal:80",
+            &set_cookie_headers(&["AWSALB=hostB; Path=/"]),
+        );
+
+        // Each host replays only its own cookie -- no cross-host clobber or leak.
+        assert_eq!(
+            client.cookie_header_for("query.internal:80").as_deref(),
+            Some("AWSALB=hostA")
+        );
+        assert_eq!(
+            client.cookie_header_for("ingest.internal:80").as_deref(),
+            Some("AWSALB=hostB")
+        );
+        // A host that set nothing replays nothing.
+        assert_eq!(client.cookie_header_for("other.internal:80"), None);
+    }
+
+    #[test]
+    fn multiple_cookies_for_one_host_are_merged() {
+        let client = PreferZstdHttpClient::plaintext();
+        client.store_set_cookies(
+            "edge.internal:443",
+            &set_cookie_headers(&["AWSALB=abc; Path=/", "AWSALBCORS=abc; Path=/; SameSite=None"]),
+        );
+
+        // BTreeMap keeps a deterministic, sorted `Cookie` line.
+        assert_eq!(
+            client.cookie_header_for("edge.internal:443").as_deref(),
+            Some("AWSALB=abc; AWSALBCORS=abc")
         );
     }
 }
