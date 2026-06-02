@@ -37,6 +37,12 @@ use connectrpc::ConnectError;
 use http::header::{ACCEPT_ENCODING, COOKIE, SET_COOKIE};
 use http::{Request, Response};
 
+// This jar exists for edge affinity, not general browser state. Keep it bounded so a broken or
+// compromised edge cannot amplify memory usage or outbound request headers through Set-Cookie.
+const MAX_COOKIES_PER_HOST: usize = 16;
+const MAX_COOKIE_BYTES: usize = 4096;
+const MAX_COOKIE_HEADER_BYTES: usize = 8192;
+
 /// gzip + zstd - used for [`connectrpc::ConnectRpcService::with_compression`] and
 /// [`connectrpc::client::ClientConfig::compression`].
 #[must_use]
@@ -91,9 +97,7 @@ impl PreferZstdHttpClient {
             if let Ok(s) = val.to_str() {
                 match parse_set_cookie(s) {
                     Some(SetCookieUpdate::Store { name, value }) => {
-                        jar.entry(authority.to_string())
-                            .or_default()
-                            .insert(name, value);
+                        store_cookie(&mut jar, authority, name, value);
                     }
                     Some(SetCookieUpdate::Delete { name }) => {
                         if let Some(origin) = jar.get_mut(authority) {
@@ -108,6 +112,51 @@ impl PreferZstdHttpClient {
             }
         }
     }
+}
+
+fn store_cookie(
+    jar: &mut BTreeMap<String, BTreeMap<String, String>>,
+    authority: &str,
+    name: String,
+    value: String,
+) {
+    if cookie_pair_len(&name, &value) > MAX_COOKIE_BYTES {
+        return;
+    }
+
+    let remove_authority = {
+        let origin = jar.entry(authority.to_string()).or_default();
+        if !origin.contains_key(&name) && origin.len() >= MAX_COOKIES_PER_HOST {
+            return;
+        }
+
+        let previous = origin.insert(name.clone(), value);
+        if rendered_cookie_header_len(origin) > MAX_COOKIE_HEADER_BYTES {
+            if let Some(previous) = previous {
+                origin.insert(name, previous);
+            } else {
+                origin.remove(&name);
+            }
+        }
+
+        origin.is_empty()
+    };
+
+    if remove_authority {
+        jar.remove(authority);
+    }
+}
+
+fn cookie_pair_len(name: &str, value: &str) -> usize {
+    name.len() + 1 + value.len()
+}
+
+fn rendered_cookie_header_len(cookies: &BTreeMap<String, String>) -> usize {
+    let pair_bytes = cookies
+        .iter()
+        .map(|(name, value)| cookie_pair_len(name, value))
+        .sum::<usize>();
+    pair_bytes + cookies.len().saturating_sub(1) * 2
 }
 
 impl ClientTransport for PreferZstdHttpClient {
@@ -395,6 +444,69 @@ mod tests {
             client.cookie_header_for("edge.internal:443").as_deref(),
             Some("AWSALB=abc; AWSALBCORS=abc")
         );
+    }
+
+    #[test]
+    fn oversized_cookie_is_not_stored() {
+        let client = PreferZstdHttpClient::plaintext();
+        let mut headers = http::HeaderMap::new();
+        headers.append(
+            SET_COOKIE,
+            format!("AWSALB={}; Path=/", "x".repeat(MAX_COOKIE_BYTES))
+                .parse()
+                .unwrap(),
+        );
+
+        client.store_set_cookies("edge.internal:443", &headers);
+
+        assert_eq!(client.cookie_header_for("edge.internal:443"), None);
+    }
+
+    #[test]
+    fn cookie_count_cap_rejects_new_names_but_allows_replacement() {
+        let client = PreferZstdHttpClient::plaintext();
+        let mut headers = http::HeaderMap::new();
+        for idx in 0..MAX_COOKIES_PER_HOST {
+            headers.append(SET_COOKIE, format!("c{idx:02}=v; Path=/").parse().unwrap());
+        }
+        headers.append(SET_COOKIE, "extra=v; Path=/".parse().unwrap());
+
+        client.store_set_cookies("edge.internal:443", &headers);
+
+        let header = client
+            .cookie_header_for("edge.internal:443")
+            .expect("stored bounded cookies");
+        assert_eq!(header.split("; ").count(), MAX_COOKIES_PER_HOST);
+        assert!(!header.contains("extra="));
+
+        client.store_set_cookies(
+            "edge.internal:443",
+            &set_cookie_headers(&["c00=rotated; Path=/"]),
+        );
+
+        let header = client
+            .cookie_header_for("edge.internal:443")
+            .expect("replacement should be stored");
+        assert!(header.contains("c00=rotated"));
+    }
+
+    #[test]
+    fn cookie_header_size_cap_rejects_insert_that_would_overflow_header() {
+        let client = PreferZstdHttpClient::plaintext();
+        let first = "a".repeat(MAX_COOKIE_BYTES - "a=".len());
+        let second = "b".repeat(MAX_COOKIE_BYTES - "b=".len());
+        let mut headers = http::HeaderMap::new();
+        headers.append(SET_COOKIE, format!("a={first}; Path=/").parse().unwrap());
+        headers.append(SET_COOKIE, format!("b={second}; Path=/").parse().unwrap());
+
+        client.store_set_cookies("edge.internal:443", &headers);
+
+        let header = client
+            .cookie_header_for("edge.internal:443")
+            .expect("first bounded cookie should be stored");
+        assert!(header.len() <= MAX_COOKIE_HEADER_BYTES);
+        assert_eq!(header.split("; ").count(), 1);
+        assert!(header.starts_with("a="));
     }
 
     #[test]
