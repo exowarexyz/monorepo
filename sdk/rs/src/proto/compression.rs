@@ -124,26 +124,18 @@ fn store_cookie(
         return;
     }
 
-    let remove_authority = {
-        let origin = jar.entry(authority.to_string()).or_default();
-        if !origin.contains_key(&name) && origin.len() >= MAX_COOKIES_PER_HOST {
-            return;
+    let origin = jar.entry(authority.to_string()).or_default();
+    if !origin.contains_key(&name) && origin.len() >= MAX_COOKIES_PER_HOST {
+        return;
+    }
+
+    let previous = origin.insert(name.clone(), value);
+    if rendered_cookie_header_len(origin) > MAX_COOKIE_HEADER_BYTES {
+        if let Some(previous) = previous {
+            origin.insert(name, previous);
+        } else {
+            origin.remove(&name);
         }
-
-        let previous = origin.insert(name.clone(), value);
-        if rendered_cookie_header_len(origin) > MAX_COOKIE_HEADER_BYTES {
-            if let Some(previous) = previous {
-                origin.insert(name, previous);
-            } else {
-                origin.remove(&name);
-            }
-        }
-
-        origin.is_empty()
-    };
-
-    if remove_authority {
-        jar.remove(authority);
     }
 }
 
