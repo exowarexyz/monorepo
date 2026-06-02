@@ -85,9 +85,10 @@ pub(crate) struct WriterCore<D: Digest, F: Family> {
     ack_notify: Notify,
 }
 
-/// Snapshot of cache state handed to the variant-specific build closure
-/// inside [`WriterCore::prepare`]. Ownership of `peaks` transfers so the
-/// closure can feed them directly to `extend_merkle_from_peaks` without cloning.
+/// Snapshot of cache state handed to the variant-specific build closure inside
+/// [`WriterCore::prepare`]. `peaks` is cloned from the live cache so the
+/// closure can build the next Merkle frontier while the cache keeps its last
+/// committed snapshot until the build result is accepted.
 pub(crate) struct BuildContext<D: Digest, F: Family> {
     pub peaks: Vec<(Position<F>, u32, D)>,
     pub ops_size: Position<F>,
