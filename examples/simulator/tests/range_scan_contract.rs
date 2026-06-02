@@ -75,14 +75,14 @@ fn get_many_values(store: &RocksStore, keys: &[&[u8]]) -> Vec<(Bytes, Option<Byt
 #[test]
 fn get_returns_none_for_missing_key() {
     let dir = tempdir().expect("tempdir");
-    let store = RocksStore::open(dir.path()).expect("open db");
+    let store = RocksStore::open(dir.path(), false).expect("open db");
     assert!(get_value(&store, b"missing").is_none());
 }
 
 #[test]
 fn get_returns_value_after_put() {
     let dir = tempdir().expect("tempdir");
-    let store = RocksStore::open(dir.path()).expect("open db");
+    let store = RocksStore::open(dir.path(), false).expect("open db");
     put_batch(
         &store,
         vec![(Bytes::from_static(b"k"), Bytes::from_static(b"v"))],
@@ -95,7 +95,7 @@ fn get_returns_value_after_put() {
 #[test]
 fn put_batch_returns_monotonic_sequence_numbers() {
     let dir = tempdir().expect("tempdir");
-    let store = RocksStore::open(dir.path()).expect("open db");
+    let store = RocksStore::open(dir.path(), false).expect("open db");
     let s1 = put_batch(
         &store,
         vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))],
@@ -112,7 +112,7 @@ fn put_batch_returns_monotonic_sequence_numbers() {
 #[test]
 fn sequence_persists_across_reopen() {
     let dir = tempdir().expect("tempdir");
-    let store = RocksStore::open(dir.path()).expect("open db");
+    let store = RocksStore::open(dir.path(), false).expect("open db");
     put_batch(
         &store,
         vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))],
@@ -123,7 +123,7 @@ fn sequence_persists_across_reopen() {
     );
     drop(store);
 
-    let reopened = RocksStore::open(dir.path()).expect("reopen db");
+    let reopened = RocksStore::open(dir.path(), false).expect("reopen db");
     assert_eq!(reopened.current_sequence(), 2);
     let s3 = put_batch(
         &reopened,
@@ -137,7 +137,7 @@ fn sequence_persists_across_reopen() {
 #[test]
 fn range_scan_inclusive_end_includes_end_key() {
     let dir = tempdir().expect("tempdir");
-    let store = RocksStore::open(dir.path()).expect("open db");
+    let store = RocksStore::open(dir.path(), false).expect("open db");
     seed_abc(&store);
 
     let rows = scan(&store, b"a", b"c", usize::MAX, true);
@@ -147,7 +147,7 @@ fn range_scan_inclusive_end_includes_end_key() {
 #[test]
 fn range_scan_empty_end_is_unbounded_above() {
     let dir = tempdir().expect("tempdir");
-    let store = RocksStore::open(dir.path()).expect("open db");
+    let store = RocksStore::open(dir.path(), false).expect("open db");
     put_batch(
         &store,
         vec![
@@ -163,7 +163,7 @@ fn range_scan_empty_end_is_unbounded_above() {
 #[test]
 fn range_scan_forward_respects_limit() {
     let dir = tempdir().expect("tempdir");
-    let store = RocksStore::open(dir.path()).expect("open db");
+    let store = RocksStore::open(dir.path(), false).expect("open db");
     seed_abc(&store);
 
     let rows = scan(&store, b"a", b"c", 2, true);
@@ -173,7 +173,7 @@ fn range_scan_forward_respects_limit() {
 #[test]
 fn range_scan_returns_empty_when_no_keys_match() {
     let dir = tempdir().expect("tempdir");
-    let store = RocksStore::open(dir.path()).expect("open db");
+    let store = RocksStore::open(dir.path(), false).expect("open db");
     seed_abc(&store);
 
     let rows = scan(&store, b"d", b"f", usize::MAX, true);
@@ -183,7 +183,7 @@ fn range_scan_returns_empty_when_no_keys_match() {
 #[test]
 fn range_scan_limit_zero_returns_empty() {
     let dir = tempdir().expect("tempdir");
-    let store = RocksStore::open(dir.path()).expect("open db");
+    let store = RocksStore::open(dir.path(), false).expect("open db");
     seed_abc(&store);
 
     let rows = scan(&store, b"a", b"c", 0, true);
@@ -195,7 +195,7 @@ fn range_scan_limit_zero_returns_empty() {
 #[test]
 fn range_scan_reverse_returns_descending_order() {
     let dir = tempdir().expect("tempdir");
-    let store = RocksStore::open(dir.path()).expect("open db");
+    let store = RocksStore::open(dir.path(), false).expect("open db");
     seed_abc(&store);
 
     let rows = scan(&store, b"a", b"c", usize::MAX, false);
@@ -205,7 +205,7 @@ fn range_scan_reverse_returns_descending_order() {
 #[test]
 fn range_scan_reverse_respects_limit() {
     let dir = tempdir().expect("tempdir");
-    let store = RocksStore::open(dir.path()).expect("open db");
+    let store = RocksStore::open(dir.path(), false).expect("open db");
     seed_abc(&store);
 
     let rows = scan(&store, b"a", b"c", 2, false);
@@ -215,7 +215,7 @@ fn range_scan_reverse_respects_limit() {
 #[test]
 fn range_scan_reverse_unbounded_end() {
     let dir = tempdir().expect("tempdir");
-    let store = RocksStore::open(dir.path()).expect("open db");
+    let store = RocksStore::open(dir.path(), false).expect("open db");
     seed_abc(&store);
 
     let rows = scan(&store, b"a", b"", usize::MAX, false);
@@ -225,7 +225,7 @@ fn range_scan_reverse_unbounded_end() {
 #[test]
 fn range_scan_single_key() {
     let dir = tempdir().expect("tempdir");
-    let store = RocksStore::open(dir.path()).expect("open db");
+    let store = RocksStore::open(dir.path(), false).expect("open db");
     seed_abc(&store);
 
     let rows = scan(&store, b"b", b"b", usize::MAX, true);
@@ -237,7 +237,7 @@ fn range_scan_single_key() {
 #[test]
 fn get_many_returns_found_and_missing() {
     let dir = tempdir().expect("tempdir");
-    let store = RocksStore::open(dir.path()).expect("open db");
+    let store = RocksStore::open(dir.path(), false).expect("open db");
     seed_abc(&store);
 
     let results = get_many_values(&store, &[b"a", b"missing", b"c"]);

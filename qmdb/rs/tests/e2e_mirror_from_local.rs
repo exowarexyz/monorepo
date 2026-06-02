@@ -278,7 +278,6 @@ async fn mirror_immutable_from_local() {
     let reader: ImmutableClient<mmr::Family, Sha256, ImmK, Vec<u8>> = ImmutableClient::from_client(
         client.clone(),
         ((), ((0..=MAX_OPERATION_SIZE).into(), ())),
-        ((), ((0..=MAX_OPERATION_SIZE).into(), ())),
     );
     assert_eq!(
         reader.root_at(latest1).await.expect("root_at 1"),

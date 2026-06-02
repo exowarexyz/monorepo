@@ -15,13 +15,14 @@ use exoware_sdk::keys::Key;
 use exoware_sdk::{ClientError, RangeMode, SerializableReadSession, StoreClient};
 
 use crate::codec::{
-    decode_digest, decode_operation_location_key, decode_watermark_location, encode_chunk_key,
-    encode_current_meta_key, encode_grafted_node_key, encode_node_key, encode_operation_key,
-    encode_ops_root_witness_key, encode_presence_key, encode_update_index_value, encode_update_key,
-    encode_watermark_key, ensure_encoded_value_size, merkle_size_for_watermark,
-    CurrentBoundaryMetadata, WATERMARK_CODEC,
+    decode_digest, decode_operation_location_key, decode_update_location, decode_watermark_location,
+    encode_chunk_key, encode_current_meta_key, encode_grafted_node_key, encode_node_key,
+    encode_operation_key, encode_ops_root_witness_key, encode_presence_key,
+    encode_update_index_value, encode_update_key, encode_watermark_key, ensure_encoded_value_size,
+    merkle_size_for_watermark, CurrentBoundaryMetadata, WATERMARK_CODEC,
 };
 use crate::error::QmdbError;
+use crate::VersionedValue;
 
 const POST_INGEST_QUERY_RETRY_MAX_ATTEMPTS: usize = 6;
 const POST_INGEST_QUERY_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
@@ -77,6 +78,19 @@ where
 pub(crate) struct HistoricalOpsClientCore<'a, F: Family, D: Digest, K: Codec, V: Codec> {
     pub(crate) client: &'a StoreClient,
     pub(crate) _marker: PhantomData<(F, D, K, V)>,
+}
+
+/// Maps the operation recorded at an update-index row's location into a
+/// `VersionedValue`, verifying it matches the requested key. Each QMDB variant
+/// loads and matches its own operation enum; the shared scan-and-await pipeline
+/// lives in [`HistoricalOpsClientCore::query_many_at`].
+pub(crate) trait LatestValueResolver<F: Family, K: Codec, V: Codec> {
+    fn resolve_latest_value(
+        &self,
+        session: &SerializableReadSession,
+        location: Location<F>,
+        requested_key: &[u8],
+    ) -> impl std::future::Future<Output = Result<VersionedValue<K, V, F>, QmdbError>>;
 }
 
 impl<'a, F: Family, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, F, D, K, V> {
@@ -155,6 +169,44 @@ impl<'a, F: Family, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, F
             .into_iter()
             .next()
             .map(|(key, value)| (key, value.to_vec())))
+    }
+
+    /// Concurrently resolve the latest value for each key at `watermark`:
+    /// reverse-scan each key's update index for its newest location, then defer
+    /// to `resolver` to load and verify the operation there. Returns `None` per
+    /// key with no update row.
+    pub(crate) async fn query_many_at<Q, R>(
+        &self,
+        keys: &[Q],
+        watermark: Location<F>,
+        resolver: &R,
+    ) -> Result<Vec<Option<VersionedValue<K, V, F>>>, QmdbError>
+    where
+        Q: AsRef<[u8]>,
+        R: LatestValueResolver<F, K, V>,
+    {
+        let session = self.client.create_session();
+        self.require_published_watermark(&session, watermark).await?;
+
+        let futs = keys.iter().map(|key| {
+            let key_bytes = key.as_ref();
+            let session = &session;
+            async move {
+                let Some((row_key, _row_value)) = self
+                    .load_latest_update_row(session, watermark, key_bytes)
+                    .await?
+                else {
+                    return Ok(None);
+                };
+                let location = decode_update_location(&row_key)?;
+                Ok(Some(
+                    resolver
+                        .resolve_latest_value(session, location, key_bytes)
+                        .await?,
+                ))
+            }
+        });
+        futures::future::join_all(futs).await.into_iter().collect()
     }
 
     pub(crate) async fn compute_ops_root_with_inactive_peaks<H: Hasher<Digest = D>>(

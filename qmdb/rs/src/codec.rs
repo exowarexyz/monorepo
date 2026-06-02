@@ -35,42 +35,6 @@ pub(crate) const CHUNK_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, CHUNK_FAMI
 pub(crate) const OPS_ROOT_WITNESS_CODEC: KeyCodec =
     KeyCodec::new(RESERVED_BITS, OPS_ROOT_WITNESS_FAMILY);
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct UpdateRow<K, V> {
-    pub(crate) key: K,
-    pub(crate) value: Option<V>,
-}
-
-impl<K: commonware_codec::Encode, V: commonware_codec::Encode> commonware_codec::Write
-    for UpdateRow<K, V>
-{
-    fn write(&self, buf: &mut impl ::bytes::BufMut) {
-        self.key.write(buf);
-        self.value.write(buf);
-    }
-}
-
-impl<K: commonware_codec::Encode, V: commonware_codec::Encode> commonware_codec::EncodeSize
-    for UpdateRow<K, V>
-{
-    fn encode_size(&self) -> usize {
-        self.key.encode_size() + self.value.encode_size()
-    }
-}
-
-impl<K: commonware_codec::Read, V: commonware_codec::Read> commonware_codec::Read
-    for UpdateRow<K, V>
-{
-    type Cfg = (K::Cfg, V::Cfg);
-    fn read_cfg(
-        buf: &mut impl ::bytes::Buf,
-        cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        let (key, value) = <(K, Option<V>) as commonware_codec::Read>::read_cfg(buf, cfg)?;
-        Ok(UpdateRow { key, value })
-    }
-}
-
 pub(crate) const fn bitmap_chunk_bits<const N: usize>() -> u64 {
     (N as u64) * 8
 }

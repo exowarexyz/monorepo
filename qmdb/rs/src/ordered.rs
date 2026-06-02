@@ -135,6 +135,45 @@ where
     }
 }
 
+impl<F, H, K, V, const N: usize, E> crate::core::LatestValueResolver<F, K, V>
+    for OrderedClient<F, H, K, V, N, E>
+where
+    F: Graftable,
+    H: Hasher,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+    V::Cfg: Clone,
+    E: ValueEncoding<Value = V>,
+    ordered::Operation<F, K, E>: Encode + Decode,
+{
+    async fn resolve_latest_value(
+        &self,
+        session: &SerializableReadSession,
+        location: Location<F>,
+        requested_key: &[u8],
+    ) -> Result<VersionedValue<K, V, F>, QmdbError> {
+        let (key, value) = match self.load_operation_at(session, location).await? {
+            ordered::Operation::Update(update) => (update.key, Some(update.value)),
+            ordered::Operation::Delete(key) => (key, None),
+            ordered::Operation::CommitFloor(_, _) => {
+                return Err(QmdbError::CorruptData(format!(
+                    "latest update row at {location} points to a commit operation"
+                )));
+            }
+        };
+        if key.as_ref() != requested_key {
+            return Err(QmdbError::CorruptData(format!(
+                "latest update row at {location} points to a different key"
+            )));
+        }
+        Ok(VersionedValue {
+            key,
+            location,
+            value,
+        })
+    }
+}
+
 impl<F, H, K, V, const N: usize, E> OrderedClient<F, H, K, V, N, E>
 where
     F: Graftable,
@@ -236,59 +275,7 @@ where
         keys: &[Q],
         max_location: Location<F>,
     ) -> Result<Vec<Option<VersionedValue<K, V, F>>>, QmdbError> {
-        let session = self.client.create_session();
-        self.core()
-            .require_published_watermark(&session, max_location)
-            .await?;
-
-        let futs = keys.iter().map(|key| {
-            let key_bytes = key.as_ref().to_vec();
-            let session = &session;
-            async move {
-                let Some((row_key, _row_value)) = self
-                    .core()
-                    .load_latest_update_row(session, max_location, &key_bytes)
-                    .await?
-                else {
-                    return Ok(None);
-                };
-                let location = decode_update_location(&row_key)?;
-                let operation = self.load_operation_at(session, location).await?;
-                let versioned = match operation {
-                    ordered::Operation::Update(update) => {
-                        if update.key.as_ref() != key_bytes.as_slice() {
-                            return Err(QmdbError::CorruptData(format!(
-                                "latest update row at {location} points to a different key"
-                            )));
-                        }
-                        VersionedValue {
-                            key: update.key,
-                            location,
-                            value: Some(update.value),
-                        }
-                    }
-                    ordered::Operation::Delete(key) => {
-                        if key.as_ref() != key_bytes.as_slice() {
-                            return Err(QmdbError::CorruptData(format!(
-                                "latest update row at {location} points to a different key"
-                            )));
-                        }
-                        VersionedValue {
-                            key,
-                            location,
-                            value: None,
-                        }
-                    }
-                    ordered::Operation::CommitFloor(_, _) => {
-                        return Err(QmdbError::CorruptData(format!(
-                            "latest update row at {location} points to a commit operation"
-                        )));
-                    }
-                };
-                Ok(Some(versioned))
-            }
-        });
-        futures::future::join_all(futs).await.into_iter().collect()
+        self.core().query_many_at(keys, max_location, self).await
     }
 
     pub(crate) fn store_client(&self) -> &StoreClient {

@@ -109,6 +109,43 @@ where
     }
 }
 
+impl<F, H, K, V, E> crate::core::LatestValueResolver<F, K, V> for UnorderedClient<F, H, K, V, E>
+where
+    F: Graftable,
+    H: Hasher,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V>,
+    unordered::Operation<F, K, E>: Encode + Decode,
+{
+    async fn resolve_latest_value(
+        &self,
+        session: &SerializableReadSession,
+        location: Location<F>,
+        requested_key: &[u8],
+    ) -> Result<VersionedValue<K, V, F>, QmdbError> {
+        let (key, value) = match self.load_operation_at(session, location).await? {
+            unordered::Operation::Update(update) => (update.0, Some(update.1)),
+            unordered::Operation::Delete(key) => (key, None),
+            unordered::Operation::CommitFloor(_, _) => {
+                return Err(QmdbError::CorruptData(format!(
+                    "latest update row at {location} points to a commit operation"
+                )));
+            }
+        };
+        if key.as_ref() != requested_key {
+            return Err(QmdbError::CorruptData(format!(
+                "latest update row at {location} points to a different key"
+            )));
+        }
+        Ok(VersionedValue {
+            key,
+            location,
+            value,
+        })
+    }
+}
+
 impl<F, H, K, V, E> UnorderedClient<F, H, K, V, E>
 where
     F: Graftable,
@@ -178,43 +215,7 @@ where
         keys: &[Q],
         watermark: Location<F>,
     ) -> Result<Vec<Option<VersionedValue<K, V, F>>>, QmdbError> {
-        let session = self.client.create_session();
-        self.core()
-            .require_published_watermark(&session, watermark)
-            .await?;
-
-        let futs = keys.iter().map(|key| {
-            let key_bytes = key.as_ref();
-            async {
-                let Some((row_key, _row_value)) = self
-                    .load_latest_update_row(&session, watermark, key_bytes)
-                    .await?
-                else {
-                    return Ok(None);
-                };
-                let location = decode_update_location(&row_key)?;
-                let operation = self.load_operation_at(&session, location).await?;
-                let versioned = match operation {
-                    unordered::Operation::Update(update) => VersionedValue {
-                        key: update.0,
-                        location,
-                        value: Some(update.1),
-                    },
-                    unordered::Operation::Delete(key) => VersionedValue {
-                        key,
-                        location,
-                        value: None,
-                    },
-                    unordered::Operation::CommitFloor(_, _) => {
-                        return Err(QmdbError::CorruptData(format!(
-                            "latest update row at {location} points to a commit operation"
-                        )));
-                    }
-                };
-                Ok(Some(versioned))
-            }
-        });
-        futures::future::join_all(futs).await.into_iter().collect()
+        self.core().query_many_at(keys, watermark, self).await
     }
 
     pub async fn root_at(&self, watermark: Location<F>) -> Result<H::Digest, QmdbError> {

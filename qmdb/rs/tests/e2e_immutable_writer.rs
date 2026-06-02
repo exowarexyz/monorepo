@@ -35,11 +35,7 @@ type TestReader = ImmutableClient<mmr::Family, commonware_cryptography::Sha256, 
 type TestWriter = ImmutableWriter<mmr::Family, commonware_cryptography::Sha256, K, V>;
 
 fn fresh_reader(c: StoreClient) -> TestReader {
-    TestReader::from_client(
-        c,
-        ((), ((0..=10000).into(), ())),
-        ((), ((0..=10000).into(), ())),
-    )
+    TestReader::from_client(c, ((), ((0..=10000).into(), ())))
 }
 
 fn fresh_writer(c: StoreClient) -> TestWriter {

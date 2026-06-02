@@ -6,9 +6,9 @@ use exoware_sdk::keys::{Key, KeyCodec};
 use exoware_sdk::{RangeMode, SerializableReadSession};
 
 use crate::codec::{
-    decode_digest, encode_ordered_update_payload, ensure_encoded_value_size,
-    merkle_size_for_watermark, validate_ordered_key_bytes, UpdateRow, ORDERED_KEY_TERMINATOR_LEN,
-    RESERVED_BITS, UPDATE_VERSION_LEN,
+    decode_digest, encode_ordered_update_payload, encode_update_index_value,
+    ensure_encoded_value_size, merkle_size_for_watermark, validate_ordered_key_bytes,
+    ORDERED_KEY_TERMINATOR_LEN, RESERVED_BITS, UPDATE_VERSION_LEN,
 };
 use crate::error::QmdbError;
 
@@ -359,15 +359,11 @@ where
             encode_auth_operation_key(AuthenticatedBackendNamespace::Immutable, location),
             encoded,
         ));
-        if let ImmutableOperation::Set(key, value) = operation {
+        if let ImmutableOperation::Set(key, _) = operation {
             keyed_operation_count += 1;
-            let update_row = UpdateRow {
-                key: key.clone(),
-                value: Some(value.clone()),
-            };
             aux_rows.push((
                 encode_auth_immutable_update_key(key.as_ref(), location)?,
-                update_row.encode().to_vec(),
+                encode_update_index_value(true),
             ));
         }
     }
@@ -550,4 +546,48 @@ pub(crate) fn decode_auth_presence_location<F: Family>(
         key,
         "authenticated presence",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codec::{decode_update_index_value_present, encode_update_index_value};
+    use commonware_storage::merkle::mmr;
+    use commonware_storage::qmdb::any::value::VariableEncoding;
+    use commonware_storage::qmdb::immutable::Operation as ImmutableOperation;
+    use commonware_utils::sequence::FixedBytes;
+
+    type TestOp = ImmutableOperation<mmr::Family, FixedBytes<32>, VariableEncoding<Vec<u8>>>;
+
+    #[test]
+    fn immutable_update_rows_store_only_a_presence_flag() {
+        let key = FixedBytes::<32>::new([0x11; 32]);
+        let value = b"a value long enough to dwarf a one byte presence flag".to_vec();
+        let ops = vec![
+            TestOp::Set(key.clone(), value),
+            TestOp::Commit(None, Location::new(0)),
+        ];
+
+        let prepared = build_auth_immutable_upload_rows::<
+            mmr::Family,
+            FixedBytes<32>,
+            VariableEncoding<Vec<u8>>,
+        >(Location::new(1), &ops)
+        .expect("build immutable upload rows");
+
+        assert_eq!(prepared.keyed_operation_count, 1);
+
+        let update_key =
+            encode_auth_immutable_update_key(key.as_ref(), Location::<mmr::Family>::new(0))
+                .expect("encode update key");
+        let (_, row_value) = prepared
+            .aux_rows
+            .iter()
+            .find(|(row_key, _)| *row_key == update_key)
+            .expect("immutable update row present");
+
+        assert_eq!(row_value, &encode_update_index_value(true));
+        assert_eq!(row_value.len(), 1, "update index row must be a single byte");
+        assert!(decode_update_index_value_present(row_value).expect("decode presence"));
+    }
 }

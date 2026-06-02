@@ -96,7 +96,7 @@ fn sequence_policy(retain: RetainPolicy) -> PrunePolicy {
 #[test]
 fn keys_drop_all_deletes_matching_family_keys() {
     let dir = tempdir().expect("tempdir");
-    let store = RocksStore::open(dir.path()).expect("open db");
+    let store = RocksStore::open(dir.path(), false).expect("open db");
     let a1 = versioned_key(b"a", 1);
     let b1 = versioned_key(b"b", 1);
     put_batch(
@@ -121,7 +121,7 @@ fn keys_drop_all_deletes_matching_family_keys() {
 #[test]
 fn keys_keep_latest_deletes_old_versions_without_advancing_sequence() {
     let dir = tempdir().expect("tempdir");
-    let store = RocksStore::open(dir.path()).expect("open db");
+    let store = RocksStore::open(dir.path(), false).expect("open db");
     let v1 = versioned_key(b"row", 1);
     let v2 = versioned_key(b"row", 2);
     let v3 = versioned_key(b"row", 3);
@@ -151,7 +151,7 @@ fn keys_keep_latest_deletes_old_versions_without_advancing_sequence() {
 #[test]
 fn key_prune_is_idempotent_when_reapplied() {
     let dir = tempdir().expect("tempdir");
-    let store = RocksStore::open(dir.path()).expect("open db");
+    let store = RocksStore::open(dir.path(), false).expect("open db");
     let v1 = versioned_key(b"row", 1);
     let v2 = versioned_key(b"row", 2);
     let v3 = versioned_key(b"row", 3);
@@ -182,7 +182,7 @@ fn key_prune_is_idempotent_when_reapplied() {
 #[test]
 fn keys_threshold_retains_greater_than_or_equal_versions() {
     let dir = tempdir().expect("tempdir");
-    let store = RocksStore::open(dir.path()).expect("open db");
+    let store = RocksStore::open(dir.path(), false).expect("open db");
     let v3 = versioned_key(b"row", 3);
     let v4 = versioned_key(b"row", 4);
     let v5 = versioned_key(b"row", 5);
@@ -210,7 +210,7 @@ fn keys_threshold_retains_greater_than_or_equal_versions() {
 #[test]
 fn keys_threshold_retention_rejects_i64_ordering() {
     let dir = tempdir().expect("tempdir");
-    let store = RocksStore::open(dir.path()).expect("open db");
+    let store = RocksStore::open(dir.path(), false).expect("open db");
     let v1 = versioned_key(b"row", 1);
     put_batch(&store, vec![(v1.clone(), Bytes::from_static(b"v1"))]);
 
@@ -230,7 +230,7 @@ fn keys_threshold_retention_rejects_i64_ordering() {
 #[test]
 fn sequence_scope_prunes_log_without_advancing_sequence() {
     let dir = tempdir().expect("tempdir");
-    let store = RocksStore::open(dir.path()).expect("open db");
+    let store = RocksStore::open(dir.path(), false).expect("open db");
     put_batch(
         &store,
         vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))],
@@ -258,7 +258,7 @@ fn sequence_scope_prunes_log_without_advancing_sequence() {
 #[test]
 fn overlapping_prune_policies_apply_in_input_order() {
     let sequence_then_keys_dir = tempdir().expect("tempdir");
-    let sequence_then_keys = RocksStore::open(sequence_then_keys_dir.path()).expect("open db");
+    let sequence_then_keys = RocksStore::open(sequence_then_keys_dir.path(), false).expect("open db");
     let key = versioned_key(b"row", 1);
     let initial_sequence = put_batch(
         &sequence_then_keys,
@@ -283,7 +283,7 @@ fn overlapping_prune_policies_apply_in_input_order() {
         .is_none());
 
     let keys_then_sequence_dir = tempdir().expect("tempdir");
-    let keys_then_sequence = RocksStore::open(keys_then_sequence_dir.path()).expect("open db");
+    let keys_then_sequence = RocksStore::open(keys_then_sequence_dir.path(), false).expect("open db");
     let key = versioned_key(b"row", 1);
     let initial_sequence = put_batch(
         &keys_then_sequence,
