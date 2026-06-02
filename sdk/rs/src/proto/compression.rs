@@ -59,7 +59,7 @@ pub fn connect_compression_registry() -> CompressionRegistry {
 #[derive(Clone, Debug)]
 pub struct PreferZstdHttpClient {
     inner: HttpClient,
-    /// Per-host cookie jar: request authority (host[:port]) -> that host's cookies (name -> value).
+    /// Per-host cookie jar: request authority (`host` or `host:port`) -> that host's cookies (name -> value).
     /// Host scoping keeps one upstream's sticky cookie from being replayed to a different host.
     cookies: Arc<Mutex<BTreeMap<String, BTreeMap<String, String>>>>,
 }
