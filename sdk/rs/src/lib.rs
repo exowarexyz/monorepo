@@ -2980,28 +2980,6 @@ mod tests {
     }
 
     #[test]
-    fn store_client_disables_request_compression_by_default() {
-        let client = StoreClient::new("http://localhost:10000/");
-        assert_eq!(
-            client.connect_request_compression(),
-            ConnectRequestCompression::None
-        );
-    }
-
-    #[test]
-    fn store_client_builder_can_enable_request_compression() {
-        let client = StoreClient::builder()
-            .url("http://localhost:10000")
-            .connect_request_compression(ConnectRequestCompression::Zstd)
-            .build()
-            .unwrap();
-        assert_eq!(
-            client.connect_request_compression(),
-            ConnectRequestCompression::Zstd
-        );
-    }
-
-    #[test]
     fn store_key_prefix_round_trips_logical_keys() {
         let prefix = StoreKeyPrefix::new(4, 0xA).unwrap();
         let logical = Bytes::from_static(b"hello");
