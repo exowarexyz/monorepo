@@ -636,6 +636,7 @@ impl Default for RocksWritePipelineConfig {
 }
 
 /// RocksDB engine and application-level write pipeline options used by [`RocksStore::open`].
+#[derive(Default)]
 pub struct RocksConfig {
     /// Database-wide options.
     pub db_options: Options,
@@ -647,18 +648,6 @@ pub struct RocksConfig {
     pub log_cf_options: Options,
     /// Options for the application-level ingest write pipeline.
     pub write_pipeline: RocksWritePipelineConfig,
-}
-
-impl Default for RocksConfig {
-    fn default() -> Self {
-        Self {
-            db_options: Options::default(),
-            default_cf_options: Options::default(),
-            meta_cf_options: Options::default(),
-            log_cf_options: Options::default(),
-            write_pipeline: RocksWritePipelineConfig::default(),
-        }
-    }
 }
 
 /// Minimal RocksDB-backed store for the simulator: batch writes plus a global sequence u64

@@ -1160,10 +1160,7 @@ fn fixed_keyless_operation_size(value_size: usize) -> Result<usize, String> {
     Ok(total)
 }
 
-fn fixed_keyless_append_value<F>(operation: &[u8], expected_value: &[u8]) -> Result<Vec<u8>, String>
-where
-    F: merkle::Family,
-{
+fn fixed_keyless_append_value(operation: &[u8], expected_value: &[u8]) -> Result<Vec<u8>, String> {
     let value_size = expected_value.len();
     let total = fixed_keyless_operation_size(value_size)?;
     if operation.len() != total {
@@ -1202,14 +1199,11 @@ fn fixed_unordered_operation_sizes(
     Ok(FixedUnorderedOperationSizes { update, total })
 }
 
-fn fixed_unordered_update_value<F>(
+fn fixed_unordered_update_value(
     operation: &[u8],
     expected_key: &[u8],
     value_size: usize,
-) -> Result<Vec<u8>, String>
-where
-    F: merkle::Family,
-{
+) -> Result<Vec<u8>, String> {
     let sizes = fixed_unordered_operation_sizes(expected_key.len(), value_size)?;
     if operation.len() != sizes.total {
         return Err(format!(
@@ -1676,8 +1670,8 @@ pub fn verify_historical_fixed_keyless_append_proof(
                     "keyless",
                 )
                 .map_err(js_err)?;
-                let value = fixed_keyless_append_value::<mmr::Family>(&operation, expected_value)
-                    .map_err(js_err)?;
+                let value =
+                    fixed_keyless_append_value(&operation, expected_value).map_err(js_err)?;
                 fixed_keyless_append_to_js(
                     root,
                     operations.len(),
@@ -1696,8 +1690,8 @@ pub fn verify_historical_fixed_keyless_append_proof(
                     "keyless",
                 )
                 .map_err(js_err)?;
-                let value = fixed_keyless_append_value::<mmb::Family>(&operation, expected_value)
-                    .map_err(js_err)?;
+                let value =
+                    fixed_keyless_append_value(&operation, expected_value).map_err(js_err)?;
                 fixed_keyless_append_to_js(
                     root,
                     operations.len(),
@@ -1741,12 +1735,8 @@ pub fn verify_historical_fixed_unordered_update_proof(
                     "unordered",
                 )
                 .map_err(js_err)?;
-                let value = fixed_unordered_update_value::<mmr::Family>(
-                    &operation,
-                    expected_key,
-                    value_size,
-                )
-                .map_err(js_err)?;
+                let value = fixed_unordered_update_value(&operation, expected_key, value_size)
+                    .map_err(js_err)?;
                 fixed_unordered_update_to_js(
                     root,
                     operations.len(),
@@ -1766,12 +1756,8 @@ pub fn verify_historical_fixed_unordered_update_proof(
                     "unordered",
                 )
                 .map_err(js_err)?;
-                let value = fixed_unordered_update_value::<mmb::Family>(
-                    &operation,
-                    expected_key,
-                    value_size,
-                )
-                .map_err(js_err)?;
+                let value = fixed_unordered_update_value(&operation, expected_key, value_size)
+                    .map_err(js_err)?;
                 fixed_unordered_update_to_js(
                     root,
                     operations.len(),
@@ -1916,6 +1902,7 @@ pub fn verify_get_many_response(
 }
 
 #[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
 pub fn verify_get_range_response(
     bytes: &[u8],
     current_root: &[u8],
@@ -2348,8 +2335,7 @@ mod tests {
         let operation =
             expected_raw_operation(proto.start_location, &verified, 1, "keyless").unwrap();
 
-        let value =
-            fixed_keyless_append_value::<mmr::Family>(&operation, expected_value.as_ref()).unwrap();
+        let value = fixed_keyless_append_value(&operation, expected_value.as_ref()).unwrap();
 
         assert_eq!(value.as_slice(), expected_value.as_ref());
     }
@@ -2376,8 +2362,7 @@ mod tests {
         let operation =
             expected_raw_operation(proto.start_location, &verified, 1, "keyless").unwrap();
 
-        let value =
-            fixed_keyless_append_value::<mmr::Family>(&operation, expected_value.as_ref()).unwrap();
+        let value = fixed_keyless_append_value(&operation, expected_value.as_ref()).unwrap();
 
         assert_eq!(value.as_slice(), expected_value.as_ref());
     }
@@ -2405,12 +2390,8 @@ mod tests {
         let operation =
             expected_raw_operation(proto.start_location, &verified, 1, "unordered").unwrap();
 
-        let value = fixed_unordered_update_value::<mmr::Family>(
-            &operation,
-            expected_key.as_ref(),
-            u64::SIZE,
-        )
-        .unwrap();
+        let value =
+            fixed_unordered_update_value(&operation, expected_key.as_ref(), u64::SIZE).unwrap();
 
         assert_eq!(value.as_slice(), expected_value.encode().as_ref());
     }
@@ -2438,12 +2419,9 @@ mod tests {
         let operation =
             expected_raw_operation(proto.start_location, &verified, 1, "unordered").unwrap();
 
-        let value = fixed_unordered_update_value::<mmr::Family>(
-            &operation,
-            expected_key.as_ref(),
-            expected_value.len(),
-        )
-        .unwrap();
+        let value =
+            fixed_unordered_update_value(&operation, expected_key.as_ref(), expected_value.len())
+                .unwrap();
 
         assert_eq!(value.as_slice(), expected_value.as_ref());
     }
