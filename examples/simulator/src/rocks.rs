@@ -19,7 +19,9 @@ use exoware_sdk::prune_policy::{
     KeysScope, OrderEncoding, PolicyScope, PrunePolicyDocument, RetainPolicy,
 };
 use exoware_sdk::store::{common::v1::KvEntry, stream::v1::GetResponse as StreamGetResponse};
-use exoware_server::{Ingest, Log, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence};
+use exoware_server::{
+    Ingest, Log, LogBatch, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence,
+};
 use regex::bytes::Regex;
 use rocksdb::{
     ColumnFamily, ColumnFamilyDescriptor, DBIterator, Direction, IteratorMode, Options,
@@ -847,22 +849,19 @@ impl Prune for RocksStore {
 }
 
 impl Log for RocksStore {
-    async fn get_batch(&self, sequence_number: u64) -> Result<Option<Vec<(Bytes, Bytes)>>, String> {
+    async fn get_batch(&self, sequence_number: u64) -> Result<Option<LogBatch>, String> {
         let store = self.clone();
         let cf = store.log_cf();
         let sequence_key = sequence_log_key(sequence_number);
-        let entries = match store
+        let value = match store
             .db
             .get_cf(cf, sequence_key)
             .map_err(|e| e.to_string())?
         {
-            Some(value) => decode_log_value(&value)?,
+            Some(value) => value,
             None => return Ok(None),
         };
-        if entries.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(entries))
+        Ok(Some(LogBatch::from_response_bytes(sequence_number, value)))
     }
 
     async fn oldest_retained_batch(&self) -> Result<Option<u64>, String> {
@@ -916,17 +915,6 @@ fn encode_log_value(sequence: u64, requests: &[WriteRequest]) -> Option<Vec<u8>>
     )
 }
 
-fn decode_log_value(value: &[u8]) -> Result<Vec<(Bytes, Bytes)>, String> {
-    let mut raw = value;
-    let response = StreamGetResponse::decode(&mut raw)
-        .map_err(|err| format!("failed to decode sequence log value: {err}"))?;
-    Ok(response
-        .entries
-        .into_iter()
-        .map(|entry| (Bytes::from(entry.key), entry.value))
-        .collect())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -941,6 +929,22 @@ mod tests {
             kvs: vec![(Bytes::from_static(key), Bytes::from_static(b"value"))],
             response,
         }
+    }
+
+    fn response_entries(response: StreamGetResponse) -> Vec<(Bytes, Bytes)> {
+        response
+            .entries
+            .into_iter()
+            .map(|entry| (Bytes::from(entry.key), entry.value))
+            .collect()
+    }
+
+    fn decode_log_entries(value: &[u8]) -> Vec<(Bytes, Bytes)> {
+        response_entries(StreamGetResponse::decode_from_slice(value).expect("decode log value"))
+    }
+
+    fn batch_entries(batch: LogBatch) -> Vec<(Bytes, Bytes)> {
+        response_entries(batch.decode_response().expect("decode batch response"))
     }
 
     fn dispatch_write_jobs(
@@ -1086,7 +1090,7 @@ mod tests {
         assert_eq!(log_rows.len(), 1);
         assert_eq!(log_rows[0].0.as_ref(), sequence_log_key(sequence));
         assert_eq!(
-            decode_log_value(log_rows[0].1.as_ref()).expect("decode log value"),
+            decode_log_entries(log_rows[0].1.as_ref()),
             vec![
                 (Bytes::from_static(b"a"), Bytes::from_static(b"1")),
                 (Bytes::from_static(b"b"), Bytes::from_static(b"2")),
@@ -1099,7 +1103,7 @@ mod tests {
             .expect("get batch")
             .expect("batch retained");
         assert_eq!(
-            batch,
+            batch_entries(batch),
             vec![
                 (Bytes::from_static(b"a"), Bytes::from_static(b"1")),
                 (Bytes::from_static(b"b"), Bytes::from_static(b"2")),
@@ -1141,6 +1145,7 @@ mod tests {
                 .await
                 .expect("get batch")
                 .expect("batch retained");
+            let batch = batch_entries(batch);
             assert!(!batch.is_empty());
             for (key, value) in batch {
                 assert_eq!(value.as_ref(), &[key[0] + 1]);
@@ -1170,7 +1175,7 @@ mod tests {
             .await
             .expect("get batch")
             .expect("batch retained");
-        assert_eq!(batch, vec![(key, value)]);
+        assert_eq!(batch_entries(batch), vec![(key, value)]);
     }
 
     #[tokio::test]
