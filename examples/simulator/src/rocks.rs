@@ -435,14 +435,13 @@ fn run_write_dispatcher(
         };
         worker = worker.wrapping_add(1);
 
-        if sender
-            .send(BuildJob {
-                order,
-                sequence: next_sequence,
-                requests,
-            })
-            .is_err()
-        {
+        let job = BuildJob {
+            order,
+            sequence: next_sequence,
+            requests,
+        };
+        if let Err(error) = sender.send(job) {
+            fail_requests(error.0.requests, "rocks write workers stopped".to_string());
             fail_pending_receiver(receiver, "rocks write workers stopped".to_string());
             return;
         }
@@ -1069,6 +1068,35 @@ mod tests {
         assert_eq!(jobs[0].requests.len(), 1);
         assert_eq!(jobs[1].sequence, 2);
         assert_eq!(jobs[1].requests.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn dispatcher_fails_inflight_job_when_build_worker_stops() {
+        let (request_sender, request_receiver) = mpsc::channel();
+        let (worker_sender, worker_receiver) = mpsc::channel();
+        let (response, result) = oneshot::channel();
+
+        drop(worker_receiver);
+        request_sender
+            .send(WriteRequest {
+                kvs: vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))],
+                response,
+            })
+            .expect("send request");
+        drop(request_sender);
+
+        run_write_dispatcher(
+            Arc::new(Mutex::new(0)),
+            request_receiver,
+            vec![worker_sender],
+            NonZeroUsize::new(1).expect("nonzero"),
+        );
+
+        let error = result
+            .await
+            .expect("request should receive an explicit worker error")
+            .expect_err("request should fail");
+        assert_eq!(error, "rocks write workers stopped");
     }
 
     #[tokio::test]
