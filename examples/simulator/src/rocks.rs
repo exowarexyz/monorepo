@@ -6,6 +6,7 @@
 
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -32,8 +33,8 @@ const LOG_VALUE_COUNT_LEN: usize = 8;
 const LOG_VALUE_KEY_LEN_LEN: usize = 4;
 const LOG_VALUE_VALUE_LEN_LEN: usize = 4;
 const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
-const WRITE_DRAIN_MAX_REQUESTS: usize = 256;
-const WRITE_BUILDERS: usize = 4;
+const DEFAULT_WRITE_MAX_COALESCED_REQUESTS: usize = 1;
+const DEFAULT_WRITE_BUILDERS: usize = 1;
 type RocksIterItem = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
 
 struct OwnedRocksIterator {
@@ -289,10 +290,14 @@ struct RocksWriter {
 }
 
 impl RocksWriter {
-    fn start(db: Arc<DB>, sequence: Arc<Mutex<u64>>) -> Self {
+    fn start(
+        db: Arc<DB>,
+        sequence: Arc<Mutex<u64>>,
+        write_pipeline: RocksWritePipelineConfig,
+    ) -> Self {
         let (sender, receiver) = mpsc::channel();
         let (prepared_sender, prepared_receiver) = mpsc::channel();
-        let builders = WRITE_BUILDERS.max(1);
+        let builders = write_pipeline.builder_threads.get();
         let mut worker_senders = Vec::with_capacity(builders);
         let mut handles = Vec::with_capacity(builders + 2);
 
@@ -311,10 +316,16 @@ impl RocksWriter {
         drop(prepared_sender);
 
         let dispatcher_sequence = sequence.clone();
+        let max_coalesced_requests = write_pipeline.max_coalesced_requests;
         let dispatcher = thread::Builder::new()
             .name("simulator-rocks-dispatch".to_string())
             .spawn(move || {
-                run_rocks_write_dispatcher(dispatcher_sequence, receiver, worker_senders)
+                run_rocks_write_dispatcher(
+                    dispatcher_sequence,
+                    receiver,
+                    worker_senders,
+                    max_coalesced_requests,
+                )
             })
             .expect("failed to spawn RocksDB write dispatcher");
         handles.insert(0, dispatcher);
@@ -365,6 +376,7 @@ fn run_rocks_write_dispatcher(
     sequence: Arc<Mutex<u64>>,
     receiver: mpsc::Receiver<WriteRequest>,
     worker_senders: Vec<mpsc::Sender<BuildJob>>,
+    max_coalesced_requests: NonZeroUsize,
 ) {
     let mut order = 0u64;
     let mut next_sequence = match sequence.lock() {
@@ -380,7 +392,7 @@ fn run_rocks_write_dispatcher(
         let mut requests = vec![first];
         let mut disconnected = false;
 
-        while requests.len() < WRITE_DRAIN_MAX_REQUESTS && !disconnected {
+        while requests.len() < max_coalesced_requests.get() && !disconnected {
             match receiver.try_recv() {
                 Ok(request) => requests.push(request),
                 Err(mpsc::TryRecvError::Empty) => break,
@@ -603,8 +615,27 @@ fn fail_prepared_receiver(receiver: mpsc::Receiver<PreparedWrite>, error: String
     }
 }
 
-/// RocksDB options used by [`RocksStore::open`].
-#[derive(Default)]
+/// Application-level write pipeline options used by [`RocksStore::open`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RocksWritePipelineConfig {
+    /// Maximum number of already-queued ingest requests to fold into one RocksDB write.
+    pub max_coalesced_requests: NonZeroUsize,
+    /// Number of batch-building worker threads.
+    pub builder_threads: NonZeroUsize,
+}
+
+impl Default for RocksWritePipelineConfig {
+    fn default() -> Self {
+        Self {
+            max_coalesced_requests: NonZeroUsize::new(DEFAULT_WRITE_MAX_COALESCED_REQUESTS)
+                .expect("default max coalesced requests must be nonzero"),
+            builder_threads: NonZeroUsize::new(DEFAULT_WRITE_BUILDERS)
+                .expect("default write builders must be nonzero"),
+        }
+    }
+}
+
+/// RocksDB engine and application-level write pipeline options used by [`RocksStore::open`].
 pub struct RocksConfig {
     /// Database-wide options.
     pub db_options: Options,
@@ -614,6 +645,20 @@ pub struct RocksConfig {
     pub meta_cf_options: Options,
     /// Options for the sequence log column family.
     pub log_cf_options: Options,
+    /// Options for the application-level ingest write pipeline.
+    pub write_pipeline: RocksWritePipelineConfig,
+}
+
+impl Default for RocksConfig {
+    fn default() -> Self {
+        Self {
+            db_options: Options::default(),
+            default_cf_options: Options::default(),
+            meta_cf_options: Options::default(),
+            log_cf_options: Options::default(),
+            write_pipeline: RocksWritePipelineConfig::default(),
+        }
+    }
 }
 
 /// Minimal RocksDB-backed store for the simulator: batch writes plus a global sequence u64
@@ -634,6 +679,7 @@ impl RocksStore {
             default_cf_options,
             meta_cf_options,
             log_cf_options,
+            write_pipeline,
         } = config.unwrap_or_default();
 
         db_options.create_if_missing(true);
@@ -656,7 +702,11 @@ impl RocksStore {
             _ => 0,
         };
         let sequence = Arc::new(Mutex::new(seq));
-        let writer = Arc::new(RocksWriter::start(db.clone(), sequence.clone()));
+        let writer = Arc::new(RocksWriter::start(
+            db.clone(),
+            sequence.clone(),
+            write_pipeline,
+        ));
         Ok(Self {
             db,
             sequence,
@@ -974,6 +1024,107 @@ mod tests {
 
     use exoware_server::{Ingest, Log, Sequence};
     use tempfile::tempdir;
+
+    fn write_request(key: &'static [u8]) -> WriteRequest {
+        let (response, _result) = oneshot::channel();
+        WriteRequest {
+            kvs: vec![(Bytes::from_static(key), Bytes::from_static(b"value"))],
+            response,
+        }
+    }
+
+    fn dispatch_write_jobs(
+        max_coalesced_requests: NonZeroUsize,
+        requests: Vec<WriteRequest>,
+    ) -> Vec<BuildJob> {
+        let (request_sender, request_receiver) = mpsc::channel();
+        for request in requests {
+            request_sender.send(request).expect("send request");
+        }
+        drop(request_sender);
+
+        let (worker_sender, worker_receiver) = mpsc::channel();
+        run_rocks_write_dispatcher(
+            Arc::new(Mutex::new(0)),
+            request_receiver,
+            vec![worker_sender],
+            max_coalesced_requests,
+        );
+        worker_receiver.try_iter().collect()
+    }
+
+    #[test]
+    fn rocks_config_defaults_preserve_write_pipeline_profile() {
+        assert_eq!(
+            RocksWritePipelineConfig::default(),
+            RocksWritePipelineConfig {
+                max_coalesced_requests: NonZeroUsize::new(DEFAULT_WRITE_MAX_COALESCED_REQUESTS)
+                    .expect("nonzero"),
+                builder_threads: NonZeroUsize::new(DEFAULT_WRITE_BUILDERS).expect("nonzero"),
+            }
+        );
+        assert_eq!(
+            RocksConfig::default().write_pipeline,
+            RocksWritePipelineConfig::default()
+        );
+    }
+
+    #[test]
+    fn dispatcher_uses_configured_coalescing_width() {
+        let jobs = dispatch_write_jobs(
+            NonZeroUsize::new(2).expect("nonzero"),
+            vec![
+                write_request(b"a"),
+                write_request(b"b"),
+                write_request(b"c"),
+            ],
+        );
+
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].order, 0);
+        assert_eq!(jobs[0].sequence, 1);
+        assert_eq!(jobs[0].requests.len(), 2);
+        assert_eq!(jobs[1].order, 1);
+        assert_eq!(jobs[1].sequence, 2);
+        assert_eq!(jobs[1].requests.len(), 1);
+    }
+
+    #[test]
+    fn dispatcher_supports_single_request_coalescing_width() {
+        let jobs = dispatch_write_jobs(
+            NonZeroUsize::new(1).expect("nonzero"),
+            vec![write_request(b"a"), write_request(b"b")],
+        );
+
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].sequence, 1);
+        assert_eq!(jobs[0].requests.len(), 1);
+        assert_eq!(jobs[1].sequence, 2);
+        assert_eq!(jobs[1].requests.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn rocks_store_accepts_configured_write_pipeline() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(
+            dir.path(),
+            Some(RocksConfig {
+                write_pipeline: RocksWritePipelineConfig {
+                    max_coalesced_requests: NonZeroUsize::new(1).expect("nonzero"),
+                    builder_threads: NonZeroUsize::new(1).expect("nonzero"),
+                },
+                ..Default::default()
+            }),
+        )
+        .expect("open db");
+
+        let sequence = store
+            .put_batch(vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))])
+            .await
+            .expect("put");
+        assert_eq!(sequence, 1);
+        assert_eq!(store.current_sequence(), 1);
+    }
 
     #[tokio::test]
     async fn coalesced_requests_share_sequence_and_log_batch() {
