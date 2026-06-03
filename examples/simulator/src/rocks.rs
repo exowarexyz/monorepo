@@ -38,12 +38,14 @@ const DEFAULT_WRITE_MAX_COALESCED_REQUESTS: usize = 1;
 const DEFAULT_WRITE_BUILDERS: usize = 1;
 type RocksIterItem = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
 
+/// Owns the DB handle for a RocksDB iterator that is moved through blocking tasks.
 struct OwnedRocksIterator {
     iter: DBIterator<'static>,
     _db: Arc<DB>,
 }
 
 impl OwnedRocksIterator {
+    /// Creates a RocksDB iterator whose borrowed DB handle is kept alive by the wrapper.
     fn new(db: Arc<DB>, mode: IteratorMode<'_>) -> Self {
         // SAFETY: `iter` is dropped before `db` because fields are dropped in
         // declaration order. The RocksDB iterator therefore cannot outlive the
@@ -53,6 +55,7 @@ impl OwnedRocksIterator {
         Self { iter, _db: db }
     }
 
+    /// Advances the wrapped RocksDB iterator without exposing its borrowed lifetime.
     fn next(&mut self) -> Option<RocksIterItem> {
         self.iter.next()
     }
@@ -69,6 +72,7 @@ struct RocksRangeScanState {
 }
 
 impl RocksRangeScanState {
+    /// Creates an iterator positioned at the first row that may belong to the requested range.
     fn new(db: Arc<DB>, start: Bytes, end: Bytes, limit: usize, forward: bool) -> Self {
         let mode = if forward {
             IteratorMode::From(start.as_ref(), Direction::Forward)
@@ -88,6 +92,7 @@ impl RocksRangeScanState {
         }
     }
 
+    /// Reads one page from the existing RocksDB iterator and stops at the range or item limit.
     fn next_batch(&mut self, max_items: usize) -> Result<Vec<(Bytes, Bytes)>, String> {
         if max_items == 0 || self.done {
             return Ok(Vec::new());
@@ -135,6 +140,7 @@ pub struct RocksRangeScanCursor {
 }
 
 impl RocksRangeScanCursor {
+    /// Stores scan state in an `Option` so it can be moved into `spawn_blocking` per page.
     fn new(db: Arc<DB>, start: Bytes, end: Bytes, limit: usize, forward: bool) -> Self {
         Self {
             state: Some(RocksRangeScanState::new(db, start, end, limit, forward)),
@@ -200,6 +206,7 @@ fn extract_group_key(payload: &[u8], regex: &Regex, scope: &KeysScope) -> Option
     Some(group_key)
 }
 
+/// Compares captured policy order values according to the encoding declared by the key scope.
 fn compare_order_values(a: &[u8], b: &[u8], scope: &KeysScope) -> CmpOrdering {
     match scope.order_by.as_ref().map(|o| &o.encoding) {
         Some(OrderEncoding::U64Be) => {
@@ -216,6 +223,7 @@ fn compare_order_values(a: &[u8], b: &[u8], scope: &KeysScope) -> CmpOrdering {
     }
 }
 
+/// Encodes a retention threshold into the same representation used by captured order values.
 fn threshold_order_value(scope: &KeysScope, threshold: u64) -> Result<[u8; 8], String> {
     match scope.order_by.as_ref().map(|o| &o.encoding) {
         Some(OrderEncoding::U64Be) => Ok(threshold.to_be_bytes()),
@@ -226,6 +234,7 @@ fn threshold_order_value(scope: &KeysScope, threshold: u64) -> Result<[u8; 8], S
     }
 }
 
+/// Selects the keys to delete from one already-partitioned retention group.
 fn keys_to_delete(
     mut entries: Vec<KeyEntry>,
     scope: &KeysScope,
@@ -291,6 +300,8 @@ struct Writer {
 }
 
 impl Writer {
+    /// Starts a three-stage write pipeline: dispatch assigns sequences, builders prepare
+    /// side-effect-free `WriteBatch` values, and the commit worker publishes them in order.
     fn start(
         db: Arc<DB>,
         sequence: Arc<Mutex<u64>>,
@@ -342,6 +353,7 @@ impl Writer {
         }
     }
 
+    /// Enqueues one ingest request and resolves once the commit worker has durably published it.
     async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, String> {
         let (response, result) = oneshot::channel();
         let sender = self
@@ -362,6 +374,8 @@ impl Writer {
 
 impl Drop for Writer {
     fn drop(&mut self) {
+        // Closing the request channel lets the dispatcher exit; joining keeps background RocksDB
+        // users from outliving the store during tests and local shutdown.
         if let Ok(mut sender) = self.sender.lock() {
             sender.take();
         }
@@ -373,12 +387,14 @@ impl Drop for Writer {
     }
 }
 
+/// Assigns contiguous sequence numbers and sends coalesced jobs to batch builders.
 fn run_write_dispatcher(
     sequence: Arc<Mutex<u64>>,
     receiver: mpsc::Receiver<WriteRequest>,
     worker_senders: Vec<mpsc::Sender<BuildJob>>,
     max_coalesced_requests: NonZeroUsize,
 ) {
+    // `order` lets builders run in parallel while the commit worker preserves assignment order.
     let mut order = 0u64;
     let mut next_sequence = match sequence.lock() {
         Ok(sequence) => *sequence,
@@ -390,6 +406,7 @@ fn run_write_dispatcher(
     let mut worker = 0usize;
 
     while let Ok(first) = receiver.recv() {
+        // Drain only requests already queued so quiet writers do not wait for a wider batch.
         let mut requests = vec![first];
         let mut disconnected = false;
 
@@ -443,6 +460,7 @@ fn run_write_dispatcher(
     }
 }
 
+/// Converts assigned write jobs into `WriteBatch` values without publishing them.
 fn run_build_worker(
     db: Arc<DB>,
     receiver: mpsc::Receiver<BuildJob>,
@@ -464,12 +482,14 @@ fn run_build_worker(
     }
 }
 
+/// Publishes prepared batches in dispatcher order and resolves each request with the commit result.
 fn run_commit_worker(
     db: Arc<DB>,
     sequence: Arc<Mutex<u64>>,
     receiver: mpsc::Receiver<PreparedWrite>,
 ) {
     let mut next_order = 0u64;
+    // Buffer out-of-order builder results until every earlier batch has committed.
     let mut pending = BTreeMap::new();
 
     while let Ok(prepared) = receiver.recv() {
@@ -502,6 +522,7 @@ fn run_commit_worker(
     }
 }
 
+/// Builds the atomic RocksDB batch for one assigned sequence number.
 fn build_sequence_requests_batch(
     db: &DB,
     sequence: u64,
@@ -527,6 +548,7 @@ fn build_sequence_requests_batch(
     Ok(batch)
 }
 
+/// Commits one prepared sequence after rechecking contiguity under the sequence lock.
 fn commit_prepared_sequence(
     db: &DB,
     sequence: &Mutex<u64>,
@@ -550,6 +572,7 @@ fn commit_prepared_sequence(
     Ok(prepared_sequence)
 }
 
+/// Writes a sequence batch with sync enabled because it defines the stream log high-water mark.
 fn write_sequence_batch(db: &DB, batch: rocksdb::WriteBatch) -> Result<(), String> {
     let mut write_options = WriteOptions::default();
     write_options.set_sync(true);
@@ -557,28 +580,33 @@ fn write_sequence_batch(db: &DB, batch: rocksdb::WriteBatch) -> Result<(), Strin
         .map_err(|e| e.to_string())
 }
 
+/// Sends the same failure to every request in a coalesced write job.
 fn fail_requests(requests: Vec<WriteRequest>, error: String) {
     fail_or_complete_requests(requests, Err(error));
 }
 
+/// Resolves every request folded into one sequence with that sequence's commit result.
 fn fail_or_complete_requests(requests: Vec<WriteRequest>, result: Result<u64, String>) {
     for request in requests {
         let _ = request.response.send(result.clone());
     }
 }
 
+/// Fails requests still waiting on the dispatcher input channel after a terminal worker error.
 fn fail_pending_receiver(receiver: mpsc::Receiver<WriteRequest>, error: String) {
     for request in receiver {
         let _ = request.response.send(Err(error.clone()));
     }
 }
 
+/// Fails prepared batches buffered behind a commit error that cannot be published contiguously.
 fn fail_pending_prepared(pending: BTreeMap<u64, PreparedWrite>, error: String) {
     for (_, prepared) in pending {
         fail_requests(prepared.requests, error.clone());
     }
 }
 
+/// Fails prepared batches produced after the commit worker has hit a terminal error.
 fn fail_prepared_receiver(receiver: mpsc::Receiver<PreparedWrite>, error: String) {
     for prepared in receiver {
         fail_requests(prepared.requests, error.clone());
@@ -669,16 +697,19 @@ impl RocksStore {
         })
     }
 
+    /// Returns the log column-family handle created during open.
     fn log_cf(&self) -> &ColumnFamily {
         self.db
             .cf_handle(LOG_CF)
             .expect("log CF must exist (created on open)")
     }
 
+    /// Reads the current value for one default-column-family key.
     fn get_raw(&self, key: &[u8]) -> Result<Option<Vec<u8>>, rocksdb::Error> {
         self.db.get(key)
     }
 
+    /// Deletes current rows without touching sequence metadata or the replay log.
     fn delete_keys(&self, keys: &[Bytes]) -> Result<(), rocksdb::Error> {
         if keys.is_empty() {
             return Ok(());
@@ -692,6 +723,7 @@ impl RocksStore {
         Ok(())
     }
 
+    /// Deletes replay-log batches with sequence numbers below `cutoff_exclusive`.
     fn prune_log(&self, cutoff_exclusive: u64) -> Result<(), String> {
         if cutoff_exclusive == 0 {
             return Ok(());
@@ -702,6 +734,7 @@ impl RocksStore {
             .map_err(|e| e.to_string())
     }
 
+    /// Applies each prune policy in document order to either current rows or replay-log rows.
     fn apply_prune_policies(&self, document: PrunePolicyDocument) -> Result<(), String> {
         for policy in &document.policies {
             match &policy.scope {
@@ -716,6 +749,7 @@ impl RocksStore {
         Ok(())
     }
 
+    /// Scans matching current keys in bounded chunks, groups them, and deletes non-retained rows.
     fn apply_key_prune_policy(
         &self,
         scope: &KeysScope,
@@ -768,6 +802,7 @@ impl RocksStore {
         self.delete_keys(&all_deletes).map_err(|e| e.to_string())
     }
 
+    /// Computes the replay-log cutoff for a sequence policy and prunes only log rows.
     fn apply_sequence_prune_policy(&self, retain: &RetainPolicy) -> Result<(), String> {
         let current = *self
             .sequence
@@ -878,10 +913,12 @@ impl Log for RocksStore {
     }
 }
 
+/// Encodes a sequence number as a log-CF key that preserves numeric order in RocksDB.
 fn sequence_log_key(sequence: u64) -> [u8; LOG_BATCH_KEY_LEN] {
     sequence.to_be_bytes()
 }
 
+/// Decodes a log-CF key back into the sequence number it indexes.
 fn sequence_from_log_key(key: &[u8]) -> Result<u64, String> {
     if key.len() != LOG_BATCH_KEY_LEN {
         return Err(format!("log CF key has unexpected length {}", key.len()));
@@ -891,6 +928,7 @@ fn sequence_from_log_key(key: &[u8]) -> Result<u64, String> {
     Ok(u64::from_be_bytes(raw))
 }
 
+/// Encodes the replay payload for every key/value row folded into one sequence.
 fn encode_log_value(sequence: u64, requests: &[WriteRequest]) -> Option<Vec<u8>> {
     let entries = requests
         .iter()
