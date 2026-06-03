@@ -248,6 +248,7 @@ fn verify_for_scheme<D: Digest>(
     artifact: ArtifactKind,
 ) -> Result<VerifiedCertificate, String> {
     if scheme_name == "ed25519" {
+        // The native Ed25519 Simplex verifier is not parameterized by identity type.
         if identity_name != "ed25519" {
             return Err("Simplex ed25519 scheme requires ed25519 identity".to_string());
         }

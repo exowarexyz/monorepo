@@ -25,7 +25,6 @@ pub async fn run(
     directory: &std::path::Path,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    info!("opening RocksDB store");
     let engine = Arc::new(RocksStore::open(directory, None)?);
     let state = AppState::new(engine);
     let connect = connect_stack(state);

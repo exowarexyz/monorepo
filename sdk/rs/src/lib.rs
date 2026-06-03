@@ -1447,16 +1447,13 @@ impl StoreClient {
         self.send_put(proto_kvs).await
     }
 
-    async fn send_put(
-        &self,
-        proto_kvs: Vec<exoware_proto::common::KvEntry>,
-    ) -> Result<u64, ClientError> {
+    async fn send_put(&self, kvs: Vec<exoware_proto::common::KvEntry>) -> Result<u64, ClientError> {
         let config =
             store_connect_client_config(self.ingest_uri.clone(), self.connect_request_compression);
         let client = IngestServiceClient::new(self.connect_http.clone(), config);
         let response = client
             .put(ProtoPutRequest {
-                kvs: proto_kvs,
+                kvs,
                 ..Default::default()
             })
             .await

@@ -2831,6 +2831,7 @@ name = "exoware-simulator"
 version = "2026.5.0"
 dependencies = [
  "axum",
+ "buffa",
  "bytes",
  "clap",
  "commonware-codec",

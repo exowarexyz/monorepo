@@ -20,6 +20,9 @@ pub(crate) const OPS_ROOT_WITNESS_FAMILY: u16 = 0x9;
 pub(crate) const UPDATE_VERSION_LEN: usize = 8;
 const UPDATE_INDEX_INACTIVE: u8 = 0;
 const UPDATE_INDEX_ACTIVE: u8 = 1;
+// Ordered keys are embedded in zero-padded store keys and compared lexicographically.
+// A length prefix would sort by length before key bytes, so use an escaped zero
+// terminator and escape embedded zero bytes.
 pub(crate) const ORDERED_KEY_ESCAPE_BYTE: u8 = 0x00;
 pub(crate) const ORDERED_KEY_ZERO_ESCAPE: u8 = 0xFF;
 pub(crate) const ORDERED_KEY_TERMINATOR_LEN: usize = 2;
