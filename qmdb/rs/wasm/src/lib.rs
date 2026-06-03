@@ -14,7 +14,7 @@ use commonware_codec::{
 };
 use commonware_cryptography::{Blake3, Crc32, Digest, Sha256};
 use commonware_storage::{
-    merkle::{self, hasher::Hasher as MerkleHasher, Location, PendingChunk, Position},
+    merkle::{self, hasher::Hasher as MerkleHasher, Location, PendingChunk},
     mmb, mmr,
     qmdb::{
         any::{
@@ -22,14 +22,14 @@ use commonware_storage::{
             value::VariableEncoding,
         },
         current::{
-            grafting::graftable_chunks,
+            grafting::{graftable_chunks, Verifier as GraftingVerifier},
             proof::{OpsRootWitness, RangeProof},
         },
         verify::{verify_multi_proof, verify_proof_and_pinned_nodes},
     },
 };
 use js_sys::{Array, BigInt, Object, Reflect, Uint8Array};
-use std::{cmp::Ordering, collections::BTreeSet, marker::PhantomData};
+use std::collections::BTreeSet;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
@@ -149,120 +149,6 @@ fn current_proof_config<D: Digest>(
     })
 }
 
-#[derive(Clone)]
-// Commonware has this grafting verifier internally, but the type is not public.
-// The WASM boundary still needs to verify runtime-provided chunks, so this mirrors
-// that combine step while using Commonware's public `RangeProof` verifier.
-struct GraftingVerifier<'a, F: merkle::Graftable, H: commonware_cryptography::Hasher> {
-    hasher: merkle::hasher::Standard<H>,
-    grafting_height: u32,
-    chunks: Vec<&'a [u8]>,
-    start_chunk_index: u64,
-    graftable_chunks: u64,
-    _family: PhantomData<F>,
-}
-
-impl<'a, F: merkle::Graftable, H: commonware_cryptography::Hasher> GraftingVerifier<'a, F, H> {
-    fn new(
-        root_hasher: &merkle::hasher::Standard<H>,
-        config: &CurrentProofConfig,
-        chunks: Vec<&'a [u8]>,
-        start_chunk_index: u64,
-        graftable_chunks: u64,
-    ) -> Self {
-        Self {
-            hasher: merkle::hasher::Standard::new(root_hasher.root_bagging()),
-            grafting_height: config.grafting_height,
-            chunks,
-            start_chunk_index,
-            graftable_chunks,
-            _family: PhantomData,
-        }
-    }
-}
-
-impl<F: merkle::Graftable, H: commonware_cryptography::Hasher> MerkleHasher<F>
-    for GraftingVerifier<'_, F, H>
-{
-    type Digest = H::Digest;
-
-    fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
-        self.hasher.hash(parts)
-    }
-
-    fn root_bagging(&self) -> merkle::Bagging {
-        <merkle::hasher::Standard<H> as MerkleHasher<F>>::root_bagging(&self.hasher)
-    }
-
-    fn node_digest(
-        &self,
-        pos: Position<F>,
-        left_digest: &H::Digest,
-        right_digest: &H::Digest,
-    ) -> H::Digest {
-        match F::pos_to_height(pos).cmp(&self.grafting_height) {
-            Ordering::Less | Ordering::Greater => {
-                self.hasher.node_digest(pos, left_digest, right_digest)
-            }
-            Ordering::Equal => {
-                let ops_subtree_root = self.hasher.node_digest(pos, left_digest, right_digest);
-                let loc = F::leftmost_leaf(pos, self.grafting_height);
-                let chunk_idx = *loc >> self.grafting_height;
-                if chunk_idx >= self.graftable_chunks {
-                    return ops_subtree_root;
-                }
-                let Some(local) = chunk_idx
-                    .checked_sub(self.start_chunk_index)
-                    .filter(|&local| local < self.chunks.len() as u64)
-                    .map(|local| local as usize)
-                else {
-                    return ops_subtree_root;
-                };
-                let chunk = self.chunks[local];
-                if chunk.iter().all(|byte| *byte == 0) {
-                    ops_subtree_root
-                } else {
-                    self.hash([chunk, ops_subtree_root.as_ref()])
-                }
-            }
-        }
-    }
-}
-
-fn combine_current_roots<H: commonware_cryptography::Hasher>(
-    hasher: &merkle::hasher::Standard<H>,
-    ops_root: &H::Digest,
-    grafted_root: &H::Digest,
-    pending: Option<&H::Digest>,
-    partial: Option<(u64, &H::Digest)>,
-) -> H::Digest {
-    match (pending, partial) {
-        (None, None) => hasher.hash([ops_root.as_ref(), grafted_root.as_ref()]),
-        (Some(pending), None) => {
-            hasher.hash([ops_root.as_ref(), grafted_root.as_ref(), pending.as_ref()])
-        }
-        (None, Some((next_bit, partial))) => {
-            let next_bit = next_bit.to_be_bytes();
-            hasher.hash([
-                ops_root.as_ref(),
-                grafted_root.as_ref(),
-                next_bit.as_slice(),
-                partial.as_ref(),
-            ])
-        }
-        (Some(pending), Some((next_bit, partial))) => {
-            let next_bit = next_bit.to_be_bytes();
-            hasher.hash([
-                ops_root.as_ref(),
-                grafted_root.as_ref(),
-                pending.as_ref(),
-                next_bit.as_slice(),
-                partial.as_ref(),
-            ])
-        }
-    }
-}
-
 fn get_bit_from_chunk(chunk: &[u8], bit: u64, chunk_bits: u64) -> bool {
     let bit = bit % chunk_bits;
     let byte = (bit / 8) as usize;
@@ -330,11 +216,11 @@ where
 
     let chunk_refs = chunks.iter().map(Vec::as_slice).collect::<Vec<_>>();
     let grafting_verifier = GraftingVerifier::<F, H>::new(
-        root_hasher,
-        config,
-        chunk_refs,
+        config.grafting_height,
         start_chunk,
+        chunk_refs,
         graftable_chunks,
+        root_hasher.root_bagging(),
     );
 
     if has_partial_chunk {
@@ -370,19 +256,18 @@ where
         .proof
         .reconstruct_root(&grafting_verifier, &encoded_ops, start_loc)
         .map_err(|_| "current proof failed root reconstruction".to_string())?;
-    let partial = has_partial_chunk.then(|| {
+    let partial_chunk = has_partial_chunk.then(|| {
         (
             next_bit,
-            proof.partial_chunk_digest.as_ref().expect("checked above"),
+            *proof.partial_chunk_digest.as_ref().expect("checked above"),
         )
     });
-    let reconstructed = combine_current_roots(
-        root_hasher,
-        &proof.ops_root,
-        &merkle_root,
-        proof.pending_chunk_digest.as_ref(),
-        partial,
-    );
+    let witness = OpsRootWitness::<F, H::Digest> {
+        grafted_root: merkle_root,
+        pending_chunk_digest: proof.pending_chunk_digest.clone(),
+        partial_chunk,
+    };
+    let reconstructed = witness.root(root_hasher, &proof.ops_root);
     if reconstructed != *root {
         return Err("current proof failed verification".to_string());
     }
@@ -2284,31 +2169,6 @@ mod tests {
             current_proof_config::<Sha256Digest>(16, "test proof").unwrap_err(),
             "test proof current chunk size must be a multiple of digest size 32"
         );
-    }
-
-    #[test]
-    fn current_root_combine_matches_commonware_witness_layout() {
-        let hasher = commonware_storage::qmdb::hasher::<Sha256>();
-        let ops_root = Sha256::fill(0x10);
-        let witness = OpsRootWitness::<mmb::Family, Sha256Digest> {
-            grafted_root: Sha256::fill(0x11),
-            pending_chunk_digest: Some(Sha256::fill(0x12)),
-            partial_chunk: Some((13, Sha256::fill(0x13))),
-        };
-        let partial = witness
-            .partial_chunk
-            .as_ref()
-            .map(|(next_bit, digest)| (*next_bit, digest));
-
-        let combined = combine_current_roots(
-            &hasher,
-            &ops_root,
-            &witness.grafted_root,
-            witness.pending_chunk_digest.as_ref(),
-            partial,
-        );
-
-        assert_eq!(combined, witness.root(&hasher, &ops_root));
     }
 
     #[test]
