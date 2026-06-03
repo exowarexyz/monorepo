@@ -13,7 +13,6 @@ pub fn crate_version() -> &'static str {
 const DIRECTORY_FLAG: &str = "directory";
 const PORT_FLAG: &str = "port";
 const VERBOSE_FLAG: &str = "verbose";
-const WRITE_OPTIMIZED_FLAG: &str = "write-optimized";
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
@@ -54,16 +53,6 @@ async fn main() -> std::process::ExitCode {
                                 .default_value("8080")
                                 .value_parser(clap::value_parser!(u16))
                                 .action(ArgAction::Set),
-                        )
-                        .arg(
-                            Arg::new(WRITE_OPTIMIZED_FLAG)
-                                .long(WRITE_OPTIMIZED_FLAG)
-                                .help(
-                                    "Use the tuned write-optimized RocksDB ingest profile \
-                                     (large memtables, blob files, dedicated caches) \
-                                     instead of stock RocksDB defaults.",
-                                )
-                                .action(ArgAction::SetTrue),
                         ),
                 ),
         )
@@ -81,8 +70,7 @@ async fn main() -> std::process::ExitCode {
             Some((server::RUN_CMD, m)) => {
                 let directory = m.get_one::<PathBuf>(DIRECTORY_FLAG).unwrap();
                 let port = m.get_one::<u16>(PORT_FLAG).unwrap();
-                let write_optimized = m.get_flag(WRITE_OPTIMIZED_FLAG);
-                match server::run(directory, *port, write_optimized).await {
+                match server::run(directory, *port).await {
                     Ok(()) => return std::process::ExitCode::SUCCESS,
                     Err(e) => {
                         error!(error = ?e, "server failed");

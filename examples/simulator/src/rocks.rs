@@ -19,8 +19,8 @@ use exoware_sdk::prune_policy::{
 use exoware_server::{Ingest, Log, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence};
 use regex::bytes::Regex;
 use rocksdb::{
-    BlockBasedOptions, Cache, ColumnFamily, ColumnFamilyDescriptor, DBCompressionType, DBIterator,
-    Direction, IteratorMode, Options, UniversalCompactOptions, WriteOptions, DB,
+    ColumnFamily, ColumnFamilyDescriptor, DBIterator, Direction, IteratorMode, Options,
+    WriteOptions, DB,
 };
 use tokio::sync::oneshot;
 
@@ -34,24 +34,6 @@ const LOG_VALUE_VALUE_LEN_LEN: usize = 4;
 const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
 const WRITE_DRAIN_MAX_REQUESTS: usize = 256;
 const WRITE_BUILDERS: usize = 4;
-const ROCKS_BACKGROUND_JOBS: i32 = 16;
-const ROCKS_MAX_SUBCOMPACTIONS: u32 = 8;
-const ROCKS_WRITE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
-const ROCKS_DB_WRITE_BUFFER_SIZE: usize = 4 * 1024 * 1024 * 1024;
-const ROCKS_MEMTABLE_MEMORY_BUDGET: usize = ROCKS_DB_WRITE_BUFFER_SIZE;
-const ROCKS_TARGET_FILE_SIZE_BASE: u64 = 512 * 1024 * 1024;
-const ROCKS_MAX_BYTES_FOR_LEVEL_BASE: u64 = 16 * 1024 * 1024 * 1024;
-const ROCKS_LEVEL_ZERO_COMPACTION_TRIGGER: i32 = 64;
-const ROCKS_LEVEL_ZERO_SLOWDOWN_WRITES_TRIGGER: i32 = 1024;
-const ROCKS_LEVEL_ZERO_STOP_WRITES_TRIGGER: i32 = 2048;
-const ROCKS_UNIVERSAL_COMPACTION_SIZE_RATIO: i32 = 10;
-const ROCKS_UNIVERSAL_COMPACTION_MIN_MERGE_WIDTH: i32 = 4;
-const ROCKS_SYNC_BYTES: u64 = 8 * 1024 * 1024;
-const ROCKS_COMPACTION_READAHEAD_SIZE: usize = 8 * 1024 * 1024;
-const ROCKS_MIN_BLOB_SIZE: u64 = 16 * 1024;
-const ROCKS_BLOB_FILE_SIZE: u64 = 512 * 1024 * 1024;
-const ROCKS_BLOCK_CACHE_SIZE: usize = 1024 * 1024 * 1024;
-const ROCKS_BLOB_CACHE_SIZE: usize = 4 * 1024 * 1024 * 1024;
 type RocksIterItem = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
 
 struct OwnedRocksIterator {
@@ -621,49 +603,17 @@ fn fail_prepared_receiver(receiver: mpsc::Receiver<PreparedWrite>, error: String
     }
 }
 
-fn block_based_options(block_cache: &Cache) -> BlockBasedOptions {
-    let mut opts = BlockBasedOptions::default();
-    opts.set_block_cache(block_cache);
-    opts.set_cache_index_and_filter_blocks(true);
-    opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
-    opts.set_pin_top_level_index_and_filter(true);
-    opts
-}
-
-fn write_optimized_options(block_cache: &Cache, blob_cache: &Cache) -> Options {
-    let mut opts = Options::default();
-    let block_opts = block_based_options(block_cache);
-    opts.increase_parallelism(ROCKS_BACKGROUND_JOBS);
-    opts.set_max_background_jobs(ROCKS_BACKGROUND_JOBS);
-    opts.set_max_subcompactions(ROCKS_MAX_SUBCOMPACTIONS);
-    opts.set_block_based_table_factory(&block_opts);
-    opts.optimize_universal_style_compaction(ROCKS_MEMTABLE_MEMORY_BUDGET);
-    let mut universal = UniversalCompactOptions::default();
-    universal.set_size_ratio(ROCKS_UNIVERSAL_COMPACTION_SIZE_RATIO);
-    universal.set_min_merge_width(ROCKS_UNIVERSAL_COMPACTION_MIN_MERGE_WIDTH);
-    opts.set_universal_compaction_options(&universal);
-    opts.set_compression_type(DBCompressionType::None);
-    opts.set_bottommost_compression_type(DBCompressionType::None);
-    opts.set_wal_compression_type(DBCompressionType::None);
-    opts.set_write_buffer_size(ROCKS_WRITE_BUFFER_SIZE);
-    opts.set_db_write_buffer_size(ROCKS_DB_WRITE_BUFFER_SIZE);
-    opts.set_max_write_buffer_number(8);
-    opts.set_target_file_size_base(ROCKS_TARGET_FILE_SIZE_BASE);
-    opts.set_max_bytes_for_level_base(ROCKS_MAX_BYTES_FOR_LEVEL_BASE);
-    opts.set_level_zero_file_num_compaction_trigger(ROCKS_LEVEL_ZERO_COMPACTION_TRIGGER);
-    opts.set_level_zero_slowdown_writes_trigger(ROCKS_LEVEL_ZERO_SLOWDOWN_WRITES_TRIGGER);
-    opts.set_level_zero_stop_writes_trigger(ROCKS_LEVEL_ZERO_STOP_WRITES_TRIGGER);
-    opts.set_bytes_per_sync(ROCKS_SYNC_BYTES);
-    opts.set_wal_bytes_per_sync(ROCKS_SYNC_BYTES);
-    opts.set_use_direct_io_for_flush_and_compaction(true);
-    opts.set_compaction_readahead_size(ROCKS_COMPACTION_READAHEAD_SIZE);
-    opts.set_enable_blob_files(true);
-    opts.set_min_blob_size(ROCKS_MIN_BLOB_SIZE);
-    opts.set_blob_file_size(ROCKS_BLOB_FILE_SIZE);
-    opts.set_blob_compression_type(DBCompressionType::None);
-    opts.set_blob_compaction_readahead_size(ROCKS_COMPACTION_READAHEAD_SIZE as u64);
-    opts.set_blob_cache(blob_cache);
-    opts
+/// RocksDB options used by [`RocksStore::open`].
+#[derive(Default)]
+pub struct RocksConfig {
+    /// Database-wide options.
+    pub db_options: Options,
+    /// Options for the default column family, which stores the current key-value state.
+    pub default_cf_options: Options,
+    /// Options for the metadata column family.
+    pub meta_cf_options: Options,
+    /// Options for the sequence log column family.
+    pub log_cf_options: Options,
 }
 
 /// Minimal RocksDB-backed store for the simulator: batch writes plus a global sequence u64
@@ -676,33 +626,25 @@ pub struct RocksStore {
 }
 
 impl RocksStore {
-    /// Open the store. With `write_optimized`, use the tuned high-throughput
-    /// ingest profile (large memtables, universal compaction, blob files,
-    /// dedicated block/blob caches) at the cost of significant memory;
-    /// otherwise use stock RocksDB defaults, which are gentle and the right
-    /// choice for tests.
-    pub fn open(path: &Path, write_optimized: bool) -> Result<Self, rocksdb::Error> {
-        let caches = write_optimized.then(|| {
-            (
-                Cache::new_lru_cache(ROCKS_BLOCK_CACHE_SIZE),
-                Cache::new_lru_cache(ROCKS_BLOB_CACHE_SIZE),
-            )
-        });
-        let cf_options = || match &caches {
-            Some((block_cache, blob_cache)) => write_optimized_options(block_cache, blob_cache),
-            None => Options::default(),
-        };
+    /// Open the store with stock RocksDB defaults, unless `config` overrides
+    /// the database and column-family options.
+    pub fn open(path: &Path, config: Option<RocksConfig>) -> Result<Self, rocksdb::Error> {
+        let RocksConfig {
+            mut db_options,
+            default_cf_options,
+            meta_cf_options,
+            log_cf_options,
+        } = config.unwrap_or_default();
 
-        let mut opts = cf_options();
-        opts.create_if_missing(true);
-        opts.create_missing_column_families(true);
+        db_options.create_if_missing(true);
+        db_options.create_missing_column_families(true);
 
         let cf_default =
-            ColumnFamilyDescriptor::new(rocksdb::DEFAULT_COLUMN_FAMILY_NAME, cf_options());
-        let cf_meta = ColumnFamilyDescriptor::new(META_CF, Options::default());
-        let cf_log = ColumnFamilyDescriptor::new(LOG_CF, cf_options());
+            ColumnFamilyDescriptor::new(rocksdb::DEFAULT_COLUMN_FAMILY_NAME, default_cf_options);
+        let cf_meta = ColumnFamilyDescriptor::new(META_CF, meta_cf_options);
+        let cf_log = ColumnFamilyDescriptor::new(LOG_CF, log_cf_options);
         let db = Arc::new(DB::open_cf_descriptors(
-            &opts,
+            &db_options,
             path,
             vec![cf_default, cf_meta, cf_log],
         )?);
@@ -1036,7 +978,7 @@ mod tests {
     #[tokio::test]
     async fn coalesced_requests_share_sequence_and_log_batch() {
         let dir = tempdir().expect("tempdir");
-        let store = RocksStore::open(dir.path(), false).expect("open db");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
         let (response_a, _rx_a) = oneshot::channel();
         let (response_b, _rx_b) = oneshot::channel();
         let requests = vec![
@@ -1091,7 +1033,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_puts_keep_all_rows_in_sequence_logs() {
         let dir = tempdir().expect("tempdir");
-        let store = RocksStore::open(dir.path(), false).expect("open db");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
         let mut puts = Vec::new();
 
         for i in 0u8..32 {
@@ -1133,7 +1075,7 @@ mod tests {
     #[tokio::test]
     async fn get_batch_reads_values_from_sequence_log() {
         let dir = tempdir().expect("tempdir");
-        let store = RocksStore::open(dir.path(), false).expect("open db");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
         let key = Bytes::from_static(b"key");
         let value = Bytes::from_static(b"value");
         let sequence = store
@@ -1156,7 +1098,7 @@ mod tests {
     #[tokio::test]
     async fn writer_accepts_concurrent_arrivals_without_waiting() {
         let dir = tempdir().expect("tempdir");
-        let store = RocksStore::open(dir.path(), false).expect("open db");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
 
         let (seq_a, seq_b) = tokio::join!(
             store.put_batch(vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))]),

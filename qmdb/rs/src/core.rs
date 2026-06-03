@@ -15,9 +15,9 @@ use exoware_sdk::keys::Key;
 use exoware_sdk::{ClientError, RangeMode, SerializableReadSession, StoreClient};
 
 use crate::codec::{
-    decode_digest, decode_operation_location_key, decode_update_location, decode_watermark_location,
-    encode_chunk_key, encode_current_meta_key, encode_grafted_node_key, encode_node_key,
-    encode_operation_key, encode_ops_root_witness_key, encode_presence_key,
+    decode_digest, decode_operation_location_key, decode_update_location,
+    decode_watermark_location, encode_chunk_key, encode_current_meta_key, encode_grafted_node_key,
+    encode_node_key, encode_operation_key, encode_ops_root_witness_key, encode_presence_key,
     encode_update_index_value, encode_update_key, encode_watermark_key, ensure_encoded_value_size,
     merkle_size_for_watermark, CurrentBoundaryMetadata, WATERMARK_CODEC,
 };
@@ -186,7 +186,8 @@ impl<'a, F: Family, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, F
         R: LatestValueResolver<F, K, V>,
     {
         let session = self.client.create_session();
-        self.require_published_watermark(&session, watermark).await?;
+        self.require_published_watermark(&session, watermark)
+            .await?;
 
         let futs = keys.iter().map(|key| {
             let key_bytes = key.as_ref();

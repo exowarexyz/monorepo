@@ -275,10 +275,8 @@ async fn mirror_immutable_from_local() {
     common::commit_immutable_upload(&client, &writer, &ops1)
         .await
         .expect("upload 1");
-    let reader: ImmutableClient<mmr::Family, Sha256, ImmK, Vec<u8>> = ImmutableClient::from_client(
-        client.clone(),
-        ((), ((0..=MAX_OPERATION_SIZE).into(), ())),
-    );
+    let reader: ImmutableClient<mmr::Family, Sha256, ImmK, Vec<u8>> =
+        ImmutableClient::from_client(client.clone(), ((), ((0..=MAX_OPERATION_SIZE).into(), ())));
     assert_eq!(
         reader.root_at(latest1).await.expect("root_at 1"),
         root1,
