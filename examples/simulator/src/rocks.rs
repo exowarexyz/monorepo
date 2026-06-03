@@ -468,15 +468,14 @@ fn run_build_worker(
 ) {
     while let Ok(job) = receiver.recv() {
         let batch = build_sequence_requests_batch(&db, job.sequence, &job.requests);
-        if sender
-            .send(PreparedWrite {
-                order: job.order,
-                sequence: job.sequence,
-                requests: job.requests,
-                batch,
-            })
-            .is_err()
-        {
+        let prepared = PreparedWrite {
+            order: job.order,
+            sequence: job.sequence,
+            requests: job.requests,
+            batch,
+        };
+        if let Err(error) = sender.send(prepared) {
+            fail_requests(error.0.requests, "rocks commit worker stopped".to_string());
             break;
         }
     }
@@ -1070,6 +1069,36 @@ mod tests {
         assert_eq!(jobs[0].requests.len(), 1);
         assert_eq!(jobs[1].sequence, 2);
         assert_eq!(jobs[1].requests.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn build_worker_fails_inflight_job_when_commit_worker_stops() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let (job_sender, job_receiver) = mpsc::channel();
+        let (prepared_sender, prepared_receiver) = mpsc::channel();
+        let (response, result) = oneshot::channel();
+
+        drop(prepared_receiver);
+        job_sender
+            .send(BuildJob {
+                order: 0,
+                sequence: 1,
+                requests: vec![WriteRequest {
+                    kvs: vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))],
+                    response,
+                }],
+            })
+            .expect("send build job");
+        drop(job_sender);
+
+        run_build_worker(store.db.clone(), job_receiver, prepared_sender);
+
+        let error = result
+            .await
+            .expect("request should receive an explicit worker error")
+            .expect_err("request should fail");
+        assert_eq!(error, "rocks commit worker stopped");
     }
 
     #[tokio::test]
