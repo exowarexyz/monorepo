@@ -150,24 +150,7 @@ fn mmb_op_cfg() -> <MmbBatchOperation as commonware_codec::Read>::Cfg {
     )
 }
 
-fn update_row_cfg() -> (
-    <Vec<u8> as commonware_codec::Read>::Cfg,
-    <Vec<u8> as commonware_codec::Read>::Cfg,
-) {
-    (
-        ((0..=MAX_OPERATION_SIZE).into(), ()),
-        ((0..=MAX_OPERATION_SIZE).into(), ()),
-    )
-}
-
 fn fixed_op_cfg() -> <FixedBatchOperation as commonware_codec::Read>::Cfg {
-    ((), ((0..=MAX_OPERATION_SIZE).into(), ()))
-}
-
-fn fixed_update_row_cfg() -> (
-    <Digest as commonware_codec::Read>::Cfg,
-    <Vec<u8> as commonware_codec::Read>::Cfg,
-) {
     ((), ((0..=MAX_OPERATION_SIZE).into(), ()))
 }
 
@@ -498,11 +481,7 @@ fn latest_fixed_operation_for_key(
 #[tokio::test]
 async fn unordered_range_stack_does_not_expose_key_lookup_or_ordered_range_services() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
-    let unordered_client = Arc::new(TestUnorderedClient::from_client(
-        store_client,
-        op_cfg(),
-        update_row_cfg(),
-    ));
+    let unordered_client = Arc::new(TestUnorderedClient::from_client(store_client, op_cfg()));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_range_server(unordered_client).await;
 
     let err = key_lookup_rpc_client(&qmdb_url)
@@ -533,11 +512,7 @@ async fn unordered_connect_get_operation_range_returns_verifiable_proof() {
     let local = build_local_batch().await;
     commit_upload(&store_client, &local).await;
 
-    let unordered_client = Arc::new(TestUnorderedClient::from_client(
-        store_client,
-        op_cfg(),
-        update_row_cfg(),
-    ));
+    let unordered_client = Arc::new(TestUnorderedClient::from_client(store_client, op_cfg()));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_range_server(unordered_client).await;
     let client = validated_client(&qmdb_url);
 
@@ -571,7 +546,6 @@ async fn unordered_connect_get_many_returns_present_key_proofs() {
     let unordered_client = Arc::new(FixedTestUnorderedClient::from_client(
         store_client,
         fixed_op_cfg(),
-        fixed_update_row_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_full_server(unordered_client).await;
     let client = validated_key_client(&qmdb_url);
@@ -622,7 +596,6 @@ async fn unordered_current_operation_range_connect_returns_verifiable_proof() {
     let unordered_client = Arc::new(FixedTestUnorderedClient::from_client(
         store_client,
         fixed_op_cfg(),
-        fixed_update_row_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_full_server(unordered_client).await;
     let client = validated_current_operation_client(&qmdb_url);
@@ -661,7 +634,6 @@ async fn unordered_connect_omits_missing_and_rejects_duplicate_range_and_stale_r
     let unordered_client = Arc::new(FixedTestUnorderedClient::from_client(
         store_client,
         fixed_op_cfg(),
-        fixed_update_row_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_full_server(unordered_client).await;
 
@@ -735,7 +707,6 @@ async fn unordered_connect_subscribe_emits_verifiable_range_proof() {
     let unordered_client = Arc::new(TestUnorderedClient::from_client(
         store_client.clone(),
         op_cfg(),
-        update_row_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_range_server(unordered_client).await;
     let client = validated_client(&qmdb_url);
@@ -779,7 +750,6 @@ async fn unordered_mmb_connect_subscribe_emits_verifiable_range_proof() {
     let unordered_client = Arc::new(MmbTestUnorderedClient::from_client(
         store_client.clone(),
         mmb_op_cfg(),
-        update_row_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_range_server(unordered_client).await;
     let client = mmb_validated_client(&qmdb_url);
@@ -821,7 +791,6 @@ async fn unordered_connect_client_rejects_invalid_streamed_proof() {
     let unordered_client = Arc::new(TestUnorderedClient::from_client(
         store_client.clone(),
         op_cfg(),
-        update_row_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_range_server(unordered_client).await;
     let rpc = common::operation_log_rpc_client(&qmdb_url);

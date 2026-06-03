@@ -12,7 +12,6 @@ import {
   type VerifiedHistoricalMultiProof,
 } from '@qmdb-ts';
 
-export const QMDB_URL = import.meta.env.VITE_QMDB_URL as string | undefined;
 const MAX_EVENTS = 10;
 
 function parseHexRoot(value: string): Uint8Array {

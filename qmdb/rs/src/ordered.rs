@@ -24,9 +24,10 @@ use exoware_sdk::{RangeMode, SerializableReadSession, StoreClient};
 
 use crate::codec::{
     bitmap_chunk_bits, chunk_index_for_location, clear_below_floor,
-    decode_current_boundary_metadata, decode_update_location, encode_chunk_key,
-    encode_current_meta_key, encode_ops_root_witness_key, encode_update_key,
-    merkle_size_for_watermark, CurrentBoundaryMetadata, UpdateRow, UPDATE_CODEC,
+    decode_current_boundary_metadata, decode_update_index_value_present, decode_update_location,
+    decode_update_raw_key, encode_chunk_key, encode_current_meta_key, encode_operation_key,
+    encode_ops_root_witness_key, encode_update_key, merkle_size_for_watermark,
+    CurrentBoundaryMetadata, UPDATE_CODEC,
 };
 use crate::connect::OperationKv;
 use crate::core::HistoricalOpsClientCore;
@@ -39,6 +40,8 @@ use crate::proof::{
 };
 use crate::storage::{KvCurrentStorage, KvMerkleStorage};
 use crate::{QmdbVariant, VersionedValue};
+
+const ACTIVE_OPERATION_GET_MANY_BATCH: usize = 1024;
 
 #[derive(Clone, Debug)]
 struct MaterializedBitmapStatus<const N: usize> {
@@ -132,6 +135,45 @@ where
     }
 }
 
+impl<F, H, K, V, const N: usize, E> crate::core::LatestValueResolver<F, K, V>
+    for OrderedClient<F, H, K, V, N, E>
+where
+    F: Graftable,
+    H: Hasher,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+    V::Cfg: Clone,
+    E: ValueEncoding<Value = V>,
+    ordered::Operation<F, K, E>: Encode + Decode,
+{
+    async fn resolve_latest_value(
+        &self,
+        session: &SerializableReadSession,
+        location: Location<F>,
+        requested_key: &[u8],
+    ) -> Result<VersionedValue<K, V, F>, QmdbError> {
+        let (key, value) = match self.load_operation_at(session, location).await? {
+            ordered::Operation::Update(update) => (update.key, Some(update.value)),
+            ordered::Operation::Delete(key) => (key, None),
+            ordered::Operation::CommitFloor(_, _) => {
+                return Err(QmdbError::CorruptData(format!(
+                    "latest update row at {location} points to a commit operation"
+                )));
+            }
+        };
+        if key.as_ref() != requested_key {
+            return Err(QmdbError::CorruptData(format!(
+                "latest update row at {location} points to a different key"
+            )));
+        }
+        Ok(VersionedValue {
+            key,
+            location,
+            value,
+        })
+    }
+}
+
 impl<F, H, K, V, const N: usize, E> OrderedClient<F, H, K, V, N, E>
 where
     F: Graftable,
@@ -145,7 +187,6 @@ where
     fn core(&self) -> HistoricalOpsClientCore<'_, F, H::Digest, K, V> {
         HistoricalOpsClientCore {
             client: &self.client,
-            update_row_cfg: self.update_row_cfg.clone(),
             _marker: PhantomData,
         }
     }
@@ -234,7 +275,7 @@ where
         keys: &[Q],
         max_location: Location<F>,
     ) -> Result<Vec<Option<VersionedValue<K, V, F>>>, QmdbError> {
-        self.core().query_many_at(keys, max_location).await
+        self.core().query_many_at(keys, max_location, self).await
     }
 
     pub(crate) fn store_client(&self) -> &StoreClient {
@@ -307,22 +348,13 @@ where
             let rows = session
                 .range_with_mode(&start, &end, 1, RangeMode::Reverse)
                 .await?;
-            let Some((row_key, row_value)) = rows.into_iter().next() else {
+            let Some((row_key, _row_value)) = rows.into_iter().next() else {
                 return Err(QmdbError::ProofKeyNotFound {
                     watermark: watermark.as_u64(),
                     key: key_bytes.clone(),
                 });
             };
             let global_loc = decode_update_location(&row_key)?;
-            let decoded =
-                <UpdateRow<K, V> as Decode>::decode_cfg(row_value.as_ref(), &self.update_row_cfg)
-                    .map_err(|e| QmdbError::CorruptData(format!("update row decode: {e}")))?;
-            if <K as AsRef<[u8]>>::as_ref(&decoded.key) != key.as_ref() {
-                return Err(QmdbError::ProofKeyNotFound {
-                    watermark: watermark.as_u64(),
-                    key: key_bytes.clone(),
-                });
-            }
             let encoded = self
                 .core()
                 .load_operation_bytes_at(session, global_loc)
@@ -677,15 +709,6 @@ where
             });
         };
         let location = decode_update_location(&row_key)?;
-        let decoded =
-            <UpdateRow<K, V> as Decode>::decode_cfg(row_value.as_ref(), &self.update_row_cfg)
-                .map_err(|e| QmdbError::CorruptData(format!("update row decode: {e}")))?;
-        if <K as AsRef<[u8]>>::as_ref(&decoded.key) != key.as_ref() {
-            return Err(QmdbError::ProofKeyNotFound {
-                watermark: watermark.as_u64(),
-                key: key_bytes.clone(),
-            });
-        }
         let inactivity_floor = self.load_inactivity_floor_at(session, watermark).await?;
         if location < inactivity_floor {
             return Err(QmdbError::KeyNotActive {
@@ -693,7 +716,7 @@ where
                 key: key_bytes.clone(),
             });
         }
-        if decoded.value.is_none() {
+        if !decode_update_index_value_present(row_value.as_ref())? {
             return Err(QmdbError::KeyNotActive {
                 watermark: watermark.as_u64(),
                 key: key_bytes.clone(),
@@ -707,6 +730,11 @@ where
                 key: key_bytes,
             });
         };
+        if update.key.as_ref() != key.as_ref() {
+            return Err(QmdbError::CorruptData(format!(
+                "latest active ordered key row at {location} points to a different key"
+            )));
+        }
         let root = self.load_current_boundary_root(session, watermark).await?;
         let operation_proof = self
             .build_current_operation_proof(session, watermark, location)
@@ -765,37 +793,72 @@ where
         let inactivity_floor = self.load_inactivity_floor_at(session, watermark).await?;
         let (start, end) = UPDATE_CODEC.prefix_bounds();
         let mut rows = session.range_stream(&start, &end, usize::MAX, 1024).await?;
-        let mut latest = BTreeMap::<Vec<u8>, (Location<F>, UpdateRow<K, V>)>::new();
+        let mut latest = BTreeMap::<Vec<u8>, (Location<F>, bool)>::new();
         while let Some(chunk) = rows.next_chunk().await? {
             for (row_key, row_value) in chunk.rows {
                 let location = decode_update_location(&row_key)?;
                 if location < inactivity_floor || location > watermark {
                     continue;
                 }
-                let decoded = <UpdateRow<K, V> as Decode>::decode_cfg(
-                    row_value.as_ref(),
-                    &self.update_row_cfg,
-                )
-                .map_err(|e| QmdbError::CorruptData(format!("update row decode: {e}")))?;
-                let key = decoded.key.as_ref().to_vec();
+                let value_present = decode_update_index_value_present(&row_value)?;
+                let key = decode_update_raw_key(&row_key)?;
                 latest
                     .entry(key)
-                    .and_modify(|(known_location, known_row)| {
+                    .and_modify(|(known_location, known_value_present)| {
                         if location > *known_location {
                             *known_location = location;
-                            *known_row = decoded.clone();
+                            *known_value_present = value_present;
                         }
                     })
-                    .or_insert((location, decoded));
+                    .or_insert((location, value_present));
             }
         }
 
-        let mut active = Vec::new();
-        for (key, (location, row)) in latest {
-            if row.value.is_none() {
+        let mut active_locations = Vec::new();
+        for (key, (location, value_present)) in latest {
+            if !value_present {
                 continue;
             }
-            let operation = self.load_operation_at(session, location).await?;
+            active_locations.push((key, location));
+        }
+
+        let mut loaded_operations =
+            std::collections::HashMap::with_capacity(active_locations.len());
+        for chunk in active_locations.chunks(ACTIVE_OPERATION_GET_MANY_BATCH) {
+            let operation_keys = chunk
+                .iter()
+                .map(|(_, location)| encode_operation_key(*location))
+                .collect::<Vec<_>>();
+            let operation_key_refs = operation_keys.iter().collect::<Vec<_>>();
+            let batch_size = u32::try_from(operation_key_refs.len()).map_err(|_| {
+                QmdbError::CorruptData(
+                    "active operation get_many batch size overflows u32".to_string(),
+                )
+            })?;
+            let fetched = session
+                .get_many(&operation_key_refs, batch_size)
+                .await?
+                .collect()
+                .await?;
+            loaded_operations.extend(fetched);
+        }
+
+        let mut active = Vec::new();
+        for (key, location) in active_locations {
+            let operation_key = encode_operation_key(location);
+            let Some(encoded) = loaded_operations.remove(&operation_key) else {
+                return Err(QmdbError::CorruptData(format!(
+                    "missing operation row at location {location}"
+                )));
+            };
+            let operation =
+                ordered::Operation::<F, K, E>::decode_cfg(encoded.as_ref(), &self.op_cfg).map_err(
+                    |e| {
+                        QmdbError::CorruptData(format!(
+                            "failed to decode qmdb operation at location {location}: {e}"
+                        ))
+                    },
+                )?;
             let ordered::Operation::Update(update) = &operation else {
                 return Err(QmdbError::CorruptData(format!(
                     "latest active key row at {location} does not point to an update operation"

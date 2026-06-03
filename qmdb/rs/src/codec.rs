@@ -18,6 +18,11 @@ pub(crate) const CURRENT_META_FAMILY: u16 = 0x8;
 pub(crate) const OPS_ROOT_WITNESS_FAMILY: u16 = 0x9;
 
 pub(crate) const UPDATE_VERSION_LEN: usize = 8;
+const UPDATE_INDEX_INACTIVE: u8 = 0;
+const UPDATE_INDEX_ACTIVE: u8 = 1;
+// Ordered keys are embedded in zero-padded store keys and compared lexicographically.
+// A length prefix would sort by length before key bytes, so use an escaped zero
+// terminator and escape embedded zero bytes.
 pub(crate) const ORDERED_KEY_ESCAPE_BYTE: u8 = 0x00;
 pub(crate) const ORDERED_KEY_ZERO_ESCAPE: u8 = 0xFF;
 pub(crate) const ORDERED_KEY_TERMINATOR_LEN: usize = 2;
@@ -32,42 +37,6 @@ pub(crate) const GRAFTED_NODE_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, GRA
 pub(crate) const CHUNK_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, CHUNK_FAMILY);
 pub(crate) const OPS_ROOT_WITNESS_CODEC: KeyCodec =
     KeyCodec::new(RESERVED_BITS, OPS_ROOT_WITNESS_FAMILY);
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct UpdateRow<K, V> {
-    pub(crate) key: K,
-    pub(crate) value: Option<V>,
-}
-
-impl<K: commonware_codec::Encode, V: commonware_codec::Encode> commonware_codec::Write
-    for UpdateRow<K, V>
-{
-    fn write(&self, buf: &mut impl ::bytes::BufMut) {
-        self.key.write(buf);
-        self.value.write(buf);
-    }
-}
-
-impl<K: commonware_codec::Encode, V: commonware_codec::Encode> commonware_codec::EncodeSize
-    for UpdateRow<K, V>
-{
-    fn encode_size(&self) -> usize {
-        self.key.encode_size() + self.value.encode_size()
-    }
-}
-
-impl<K: commonware_codec::Read, V: commonware_codec::Read> commonware_codec::Read
-    for UpdateRow<K, V>
-{
-    type Cfg = (K::Cfg, V::Cfg);
-    fn read_cfg(
-        buf: &mut impl ::bytes::Buf,
-        cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        let (key, value) = <(K, Option<V>) as commonware_codec::Read>::read_cfg(buf, cfg)?;
-        Ok(UpdateRow { key, value })
-    }
-}
 
 pub(crate) const fn bitmap_chunk_bits<const N: usize>() -> u64 {
     (N as u64) * 8
@@ -204,6 +173,23 @@ pub(crate) fn validate_ordered_key_bytes(bytes: &[u8], label: &str) -> Result<()
     Ok(())
 }
 
+pub(crate) fn decode_ordered_key_bytes(bytes: &[u8]) -> Result<Vec<u8>, QmdbError> {
+    validate_ordered_key_bytes(bytes, "update key")?;
+    let mut out = Vec::with_capacity(bytes.len().saturating_sub(ORDERED_KEY_TERMINATOR_LEN));
+    let end = bytes.len() - ORDERED_KEY_TERMINATOR_LEN;
+    let mut idx = 0usize;
+    while idx < end {
+        if bytes[idx] == ORDERED_KEY_ESCAPE_BYTE {
+            out.push(ORDERED_KEY_ESCAPE_BYTE);
+            idx += 2;
+        } else {
+            out.push(bytes[idx]);
+            idx += 1;
+        }
+    }
+    Ok(out)
+}
+
 pub(crate) fn encode_ordered_update_payload(
     codec: KeyCodec,
     raw_key: &[u8],
@@ -267,6 +253,45 @@ pub(crate) fn decode_update_location<F: Family>(key: &Key) -> Result<Location<F>
         .read_payload_exact::<8>(key, ordered_len)
         .map_err(|e| QmdbError::CorruptData(format!("cannot decode update location: {e}")))?;
     Ok(Location::new(u64::from_be_bytes(bytes)))
+}
+
+pub(crate) fn decode_update_raw_key(key: &Key) -> Result<Vec<u8>, QmdbError> {
+    let codec = UPDATE_CODEC;
+    if !codec.matches(key) {
+        return Err(QmdbError::CorruptData(
+            "update key prefix mismatch".to_string(),
+        ));
+    }
+    let payload_capacity = codec.payload_capacity_bytes_for_key_len(key.len());
+    if payload_capacity < ORDERED_KEY_TERMINATOR_LEN + UPDATE_VERSION_LEN {
+        return Err(QmdbError::CorruptData(
+            "update key payload shorter than minimum layout".to_string(),
+        ));
+    }
+    let ordered_len = payload_capacity - UPDATE_VERSION_LEN;
+    let ordered_key = codec
+        .read_payload(key, 0, ordered_len)
+        .map_err(|e| QmdbError::CorruptData(format!("cannot decode update key bytes: {e}")))?;
+    decode_ordered_key_bytes(&ordered_key)
+}
+
+pub(crate) fn encode_update_index_value(value_present: bool) -> Vec<u8> {
+    vec![if value_present {
+        UPDATE_INDEX_ACTIVE
+    } else {
+        UPDATE_INDEX_INACTIVE
+    }]
+}
+
+pub(crate) fn decode_update_index_value_present(bytes: &[u8]) -> Result<bool, QmdbError> {
+    match bytes {
+        [UPDATE_INDEX_INACTIVE] => Ok(false),
+        [UPDATE_INDEX_ACTIVE] => Ok(true),
+        _ => Err(QmdbError::CorruptData(format!(
+            "update index value has unexpected length {}",
+            bytes.len()
+        ))),
+    }
 }
 
 pub(crate) fn encode_presence_key<F: Family>(latest_location: Location<F>) -> Key {

@@ -25,7 +25,7 @@ pub async fn run(
     directory: &std::path::Path,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let engine = Arc::new(RocksStore::open(directory)?);
+    let engine = Arc::new(RocksStore::open(directory, None)?);
     let state = AppState::new(engine);
     let connect = connect_stack(state);
 
@@ -45,7 +45,7 @@ pub async fn run(
 pub async fn spawn_for_test(
     data_dir: &Path,
 ) -> Result<(tokio::task::JoinHandle<()>, String), Box<dyn std::error::Error + Send + Sync>> {
-    let engine = Arc::new(RocksStore::open(data_dir)?);
+    let engine = Arc::new(RocksStore::open(data_dir, None)?);
     let state = AppState::new(engine);
     let connect = connect_stack(state);
     let app = Router::new()

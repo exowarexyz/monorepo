@@ -66,11 +66,13 @@ npm --prefix simplex/ts run build:wasm
 ```
 
 ```ts
-import { createCommonwareWasmSimplexVerifier } from '@exowarexyz/simplex/wasm';
+import { createWasmSimplexVerifier } from '@exowarexyz/simplex/wasm';
 import { SimplexClient, hexToBytes } from '@exowarexyz/simplex';
 
-const verifier = await createCommonwareWasmSimplexVerifier({
+const verifier = await createWasmSimplexVerifier({
   scheme: 'bls12381-threshold-vrf-min-sig',
+  payload: 'sha256',
+  identity: 'ed25519',
   namespace: new TextEncoder().encode('_MY_SIMPLEX_NAMESPACE'),
   verificationMaterial: hexToBytes('...'),
   verifyHeader: ({ payload, header }) => verifyHeaderPayload(payload, header),
@@ -79,22 +81,23 @@ const verifier = await createCommonwareWasmSimplexVerifier({
 const simplex = new SimplexClient('http://localhost:10000', { verifier });
 ```
 
-Supported Commonware schemes are `ed25519`, `secp256r1`,
+Supported schemes are `ed25519`, `secp256r1`,
 `bls12381-multisig-min-pk`, `bls12381-multisig-min-sig`,
 `bls12381-threshold-standard-min-pk`,
 `bls12381-threshold-standard-min-sig`, `bls12381-threshold-vrf-min-pk`, and
-`bls12381-threshold-vrf-min-sig`. Verification material is encoded Commonware
-key material: an Ed25519 participant set, a Secp256r1/BLS multisig
-identity-to-signing-key map, or a threshold identity depending on the scheme.
-The Commonware WASM verifier treats certificates as opaque proof-plus-header
-records and verifies the configured certificate key material. Pass
-`verifyHeader` to validate the application-specific relationship between the
-certificate payload and header. Bodies are not embedded in streamed certificate
-records; fetch full `{ header, body }` block data separately with `getBlock` or
-`subscribeBlocks` when needed. The client does not hardcode SHA or trust a
-server body-presence flag; the caller-selected verifier defines the required
-payload/header relationship before the TS client returns a fetched or streamed
-certificate.
+`bls12381-threshold-vrf-min-sig`. Supported payloads are `sha256`, `blake3`,
+`transcript-summary`, and `coding-commitment`. Supported identity key types are
+`ed25519` and `secp256r1`. Verification material is encoded key material: an
+Ed25519 participant set, a Secp256r1/BLS multisig identity-to-signing-key map,
+or a threshold identity depending on the scheme.
+The WASM verifier treats certificates as opaque proof-plus-header records and
+verifies the configured certificate key material. Pass `verifyHeader` to
+validate the application-specific relationship between the certificate payload
+and header. Bodies are not embedded in streamed certificate records; fetch full
+`{ header, body }` block data separately with `getBlock` or `subscribeBlocks`
+when needed. The client does not hardcode SHA or trust a server body-presence
+flag; the caller-selected verifier defines the required payload/header
+relationship before the TS client returns a fetched or streamed certificate.
 
 Header and block integrity can also live in caller-owned WASM. Implement the
 ABI you need:
@@ -114,12 +117,15 @@ pub fn verify_block(payload: Vec<u8>, header: Vec<u8>, body: Vec<u8>) -> bool {
 Then adapt the module in TS:
 
 ```ts
+import { createWasmSimplexVerifier } from '@exowarexyz/simplex/wasm';
 import {
   createWasmSimplexHeaderVerifier,
 } from '@exowarexyz/simplex';
 
-const verifier = await createCommonwareWasmSimplexVerifier({
+const verifier = await createWasmSimplexVerifier({
   scheme,
+  payload,
+  identity,
   namespace,
   verificationMaterial,
   verifyHeader: createWasmSimplexHeaderVerifier(myBlockVerifierWasm),

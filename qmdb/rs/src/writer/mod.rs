@@ -5,8 +5,8 @@
 //! turns (Merkle peaks, ops) into the full set of store rows, plus a stateful
 //! `*Writer` wrapper around [`core::WriterCore`] that starts from caller-supplied
 //! frontier state, prepares rows for caller-owned Store write batches, gates
-//! in-band watermark emission on pipeline emptiness, and exposes a `flush()` to
-//! publish a catch-up watermark after bursts.
+//! watermark emission on contiguous committed prefixes, and exposes `flush()`
+//! plus batch-local flush preparation for atomic multi-upload Store batches.
 //!
 //! Multiple `prepare_upload` calls may be issued concurrently against the same
 //! writer instance. The writer serializes frontier assignment under its
@@ -30,16 +30,19 @@ pub use keyless::{build_keyless_upload, BuiltKeylessUpload, KeylessWriter};
 pub use ordered::{build_ordered_upload, BuiltOrderedUpload, OrderedWriter};
 pub use unordered::{build_unordered_upload, BuiltUnorderedUpload, UnorderedWriter};
 
+use std::borrow::Borrow;
+
 use commonware_storage::merkle::{Family, Location};
-use exoware_sdk::{keys::Key, StoreClient, StoreWriteBatch};
+use exoware_sdk::{keys::Key, IntoStoreWriteValue, StoreClient, StoreWriteBatch};
 
 use crate::{PublishedCheckpoint, QmdbError, UploadReceipt};
 
 /// A QMDB upload that has reserved writer state and encoded its Store rows,
 /// but has not yet been persisted.
 ///
-/// Stage this into a [`StoreWriteBatch`] with the originating writer, commit
-/// the batch, then mark the upload persisted with the returned Store sequence.
+/// Stage this once into a [`StoreWriteBatch`] with the originating writer,
+/// commit the batch, then mark the upload persisted with the returned Store
+/// sequence.
 #[derive(Debug)]
 #[must_use]
 pub struct PreparedUpload<F: Family> {
@@ -82,13 +85,21 @@ impl<F: Family> PreparedWatermark<F> {
     }
 }
 
-pub(crate) fn stage_rows(
+pub(crate) fn stage_rows<I, K, V>(
     client: &StoreClient,
     batch: &mut StoreWriteBatch,
-    rows: &[(Key, Vec<u8>)],
-) -> Result<(), QmdbError> {
+    rows: I,
+) -> Result<(), QmdbError>
+where
+    I: IntoIterator<Item = (K, V)>,
+    I::IntoIter: ExactSizeIterator,
+    K: Borrow<Key>,
+    V: IntoStoreWriteValue,
+{
+    let rows = rows.into_iter();
+    batch.reserve(rows.len());
     for (key, value) in rows {
-        batch.push(client, key, value)?;
+        batch.push(client, key.borrow(), value)?;
     }
     Ok(())
 }

@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 use std::time::Duration;
 
-use commonware_codec::{Codec, Decode, Encode};
+use commonware_codec::{Codec, Encode};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::merkle::{
     hasher::Hasher as MerkleHasher, mem::Mem, Family, Graftable, Location, Position,
@@ -18,8 +18,8 @@ use crate::codec::{
     decode_digest, decode_operation_location_key, decode_update_location,
     decode_watermark_location, encode_chunk_key, encode_current_meta_key, encode_grafted_node_key,
     encode_node_key, encode_operation_key, encode_ops_root_witness_key, encode_presence_key,
-    encode_update_key, encode_watermark_key, ensure_encoded_value_size, merkle_size_for_watermark,
-    CurrentBoundaryMetadata, UpdateRow, WATERMARK_CODEC,
+    encode_update_index_value, encode_update_key, encode_watermark_key, ensure_encoded_value_size,
+    merkle_size_for_watermark, CurrentBoundaryMetadata, WATERMARK_CODEC,
 };
 use crate::error::QmdbError;
 use crate::VersionedValue;
@@ -77,8 +77,20 @@ where
 #[derive(Clone, Debug)]
 pub(crate) struct HistoricalOpsClientCore<'a, F: Family, D: Digest, K: Codec, V: Codec> {
     pub(crate) client: &'a StoreClient,
-    pub(crate) update_row_cfg: (K::Cfg, V::Cfg),
     pub(crate) _marker: PhantomData<(F, D, K, V)>,
+}
+
+/// Maps the operation recorded at an update-index row's location into a
+/// `VersionedValue`, verifying it matches the requested key. Each QMDB variant
+/// loads and matches its own operation enum; the shared scan-and-await pipeline
+/// lives in [`HistoricalOpsClientCore::query_many_at`].
+pub(crate) trait LatestValueResolver<F: Family, K: Codec, V: Codec> {
+    fn resolve_latest_value(
+        &self,
+        session: &SerializableReadSession,
+        location: Location<F>,
+        requested_key: &[u8],
+    ) -> impl std::future::Future<Output = Result<VersionedValue<K, V, F>, QmdbError>>;
 }
 
 impl<'a, F: Family, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, F, D, K, V> {
@@ -157,6 +169,45 @@ impl<'a, F: Family, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, F
             .into_iter()
             .next()
             .map(|(key, value)| (key, value.to_vec())))
+    }
+
+    /// Concurrently resolve the latest value for each key at `watermark`:
+    /// reverse-scan each key's update index for its newest location, then defer
+    /// to `resolver` to load and verify the operation there. Returns `None` per
+    /// key with no update row.
+    pub(crate) async fn query_many_at<Q, R>(
+        &self,
+        keys: &[Q],
+        watermark: Location<F>,
+        resolver: &R,
+    ) -> Result<Vec<Option<VersionedValue<K, V, F>>>, QmdbError>
+    where
+        Q: AsRef<[u8]>,
+        R: LatestValueResolver<F, K, V>,
+    {
+        let session = self.client.create_session();
+        self.require_published_watermark(&session, watermark)
+            .await?;
+
+        let futs = keys.iter().map(|key| {
+            let key_bytes = key.as_ref();
+            let session = &session;
+            async move {
+                let Some((row_key, _row_value)) = self
+                    .load_latest_update_row(session, watermark, key_bytes)
+                    .await?
+                else {
+                    return Ok(None);
+                };
+                let location = decode_update_location(&row_key)?;
+                Ok(Some(
+                    resolver
+                        .resolve_latest_value(session, location, key_bytes)
+                        .await?,
+                ))
+            }
+        });
+        futures::future::join_all(futs).await.into_iter().collect()
     }
 
     pub(crate) async fn compute_ops_root_with_inactive_peaks<H: Hasher<Digest = D>>(
@@ -252,40 +303,6 @@ impl<'a, F: Family, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, F
             encoded.push(value.to_vec());
         }
         Ok(encoded)
-    }
-
-    pub(crate) async fn query_many_at<Q: AsRef<[u8]>>(
-        &self,
-        keys: &[Q],
-        max_location: Location<F>,
-    ) -> Result<Vec<Option<VersionedValue<K, V, F>>>, QmdbError> {
-        let session = self.client.create_session();
-        self.require_published_watermark(&session, max_location)
-            .await?;
-
-        let futs = keys.iter().map(|key| {
-            let key_bytes = key.as_ref();
-            async {
-                let Some((row_key, row_value)) = self
-                    .load_latest_update_row(&session, max_location, key_bytes)
-                    .await?
-                else {
-                    return Ok(None);
-                };
-                let location = decode_update_location(&row_key)?;
-                let decoded = <UpdateRow<K, V> as Decode>::decode_cfg(
-                    row_value.as_ref(),
-                    &self.update_row_cfg,
-                )
-                .map_err(|e| QmdbError::CorruptData(format!("update row decode: {e}")))?;
-                Ok(Some(VersionedValue {
-                    key: decoded.key,
-                    location,
-                    value: decoded.value,
-                }))
-            }
-        });
-        futures::future::join_all(futs).await.into_iter().collect()
     }
 }
 
@@ -386,13 +403,9 @@ impl PreparedUpload {
 
             if let Some((key, value)) = extract_keyed(op) {
                 keyed_operation_count += 1;
-                let update_row = UpdateRow {
-                    key: key.clone(),
-                    value: value.cloned(),
-                };
                 aux_rows.push((
                     encode_update_key(key.as_ref(), location)?,
-                    update_row.encode().to_vec(),
+                    encode_update_index_value(value.is_some()),
                 ));
             }
         }

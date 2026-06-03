@@ -189,10 +189,10 @@ where
 
     pub fn stage_upload(
         &self,
-        prepared: &super::PreparedUpload<F>,
+        prepared: &mut super::PreparedUpload<F>,
         batch: &mut StoreWriteBatch,
     ) -> Result<(), QmdbError> {
-        super::stage_rows(&self.client, batch, &prepared.rows)
+        super::stage_rows(&self.client, batch, prepared.rows.drain(..))
     }
 
     pub async fn mark_upload_persisted(
@@ -217,6 +217,30 @@ where
 
     pub async fn prepare_flush(&self) -> Result<Option<super::PreparedWatermark<F>>, QmdbError> {
         let Some(target) = self.core.pending_watermark().await? else {
+            return Ok(None);
+        };
+        Ok(Some(super::PreparedWatermark::<F> {
+            location: target,
+            row: (encode_auth_watermark_key(NAMESPACE, target), Vec::new()),
+        }))
+    }
+
+    /// Prepare a watermark row to stage into the same Store batch as `uploads`.
+    ///
+    /// This may publish through the provided uploads because their rows and the
+    /// watermark row commit atomically in the caller's Store batch.
+    pub async fn prepare_flush_for_uploads<'a>(
+        &self,
+        uploads: impl IntoIterator<Item = &'a super::PreparedUpload<F>>,
+    ) -> Result<Option<super::PreparedWatermark<F>>, QmdbError>
+    where
+        F: 'a,
+    {
+        let uploads = uploads
+            .into_iter()
+            .map(|upload| (upload.dispatch_id, upload.latest_location))
+            .collect::<Vec<_>>();
+        let Some(target) = self.core.pending_watermark_for_uploads(&uploads).await? else {
             return Ok(None);
         };
         Ok(Some(super::PreparedWatermark::<F> {
@@ -290,7 +314,7 @@ where
 
     fn stage_upload(
         &self,
-        prepared: &Self::Prepared,
+        prepared: &mut Self::Prepared,
         batch: &mut StoreWriteBatch,
     ) -> Result<(), Self::Error> {
         ImmutableWriter::stage_upload(self, prepared, batch)

@@ -6,8 +6,10 @@
 use std::collections::HashMap;
 use std::future::Future;
 
+use buffa::Message;
 use bytes::Bytes;
 use exoware_sdk::prune_policy::PrunePolicyDocument;
+use exoware_sdk::store::{common::v1::KvEntry, stream::v1::GetResponse as StreamGetResponse};
 
 /// Backend-defined query metadata.
 ///
@@ -44,7 +46,9 @@ pub trait Sequence: Send + Sync + 'static {
 
 /// Ingest write capability.
 pub trait Ingest: Send + Sync + 'static {
-    /// Persist key-value pairs atomically and return the new global sequence number for this write.
+    /// Persist key-value pairs atomically and return the global sequence number that includes this
+    /// write. Backends may coalesce concurrent writes and return the same sequence number to each
+    /// coalesced caller.
     fn put_batch(
         &self,
         kvs: Vec<(Bytes, Bytes)>,
@@ -90,9 +94,66 @@ pub trait Prune: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), String>> + Send;
 }
 
+/// Pre-encoded `store.stream.v1.GetResponse` stored for a retained sequence batch.
+#[derive(Clone, Debug)]
+pub struct LogBatch {
+    sequence_number: u64,
+    response_bytes: Bytes,
+}
+
+impl LogBatch {
+    /// Wrap protobuf bytes already encoded as `store.stream.v1.GetResponse`.
+    pub fn from_response_bytes(sequence_number: u64, response_bytes: impl Into<Bytes>) -> Self {
+        Self {
+            sequence_number,
+            response_bytes: response_bytes.into(),
+        }
+    }
+
+    /// Build a log batch from key-value pairs.
+    pub fn from_entries(sequence_number: u64, kvs: Vec<(Bytes, Bytes)>) -> Self {
+        Self::from_response(StreamGetResponse {
+            sequence_number,
+            entries: kvs
+                .into_iter()
+                .map(|(key, value)| KvEntry {
+                    key: key.to_vec(),
+                    value,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        })
+    }
+
+    /// Build a log batch from an owned response.
+    pub fn from_response(response: StreamGetResponse) -> Self {
+        Self {
+            sequence_number: response.sequence_number,
+            response_bytes: Bytes::from(response.encode_to_vec()),
+        }
+    }
+
+    /// Sequence number under which this batch was loaded.
+    pub fn sequence_number(&self) -> u64 {
+        self.sequence_number
+    }
+
+    /// Consume the batch into its pre-encoded response bytes.
+    pub fn into_response_bytes(self) -> Bytes {
+        self.response_bytes
+    }
+
+    /// Decode the stored response for paths that need to inspect entries.
+    pub fn decode_response(&self) -> Result<StreamGetResponse, String> {
+        StreamGetResponse::decode_from_slice(&self.response_bytes)
+            .map_err(|err| format!("failed to decode sequence log value: {err}"))
+    }
+}
+
 /// Retained per-sequence batch-log access for stream replay and lookups.
 pub trait Log: Sequence {
-    /// Return the (key, value) pairs written by the `put_batch` call that was
+    /// Return the pre-encoded `GetResponse` for the `put_batch` call that was
     /// assigned `sequence_number`. Return `Ok(None)` when the batch is not
     /// available from this log.
     ///
@@ -106,7 +167,7 @@ pub trait Log: Sequence {
     fn get_batch(
         &self,
         sequence_number: u64,
-    ) -> impl Future<Output = Result<Option<Vec<(Bytes, Bytes)>>, String>> + Send;
+    ) -> impl Future<Output = Result<Option<LogBatch>, String>> + Send;
 
     /// Lowest retained batch sequence number, or `None` when the log is
     /// empty. Surfaced in `BATCH_EVICTED` error details so clients know where

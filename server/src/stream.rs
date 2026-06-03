@@ -66,28 +66,26 @@ pub(crate) fn compile_matchers(filter: &StreamFilter) -> Result<CompiledMatchers
     Ok(CompiledMatchers { keys, values })
 }
 
-/// Apply a compiled filter to a batch. First-match-wins per `(key, value)`.
-pub(crate) fn apply_filter(matchers: &CompiledMatchers, kvs: &[(Bytes, Bytes)]) -> Vec<KvEntry> {
+/// Apply a compiled filter to a batch. First-match-wins per entry.
+pub(crate) fn apply_filter(matchers: &CompiledMatchers, kvs: &[KvEntry]) -> Vec<KvEntry> {
     let mut out = Vec::with_capacity(kvs.len());
-    'outer: for (k, v) in kvs {
+    'outer: for kv in kvs {
+        let v = kv.value.as_ref();
         let value_ok = matchers.values.as_ref().is_none_or(|m| m.matches(v));
         if !value_ok {
             continue;
         }
+        let k = Bytes::copy_from_slice(&kv.key);
         for matcher in &matchers.keys {
-            if !matcher.codec.matches(k) {
+            if !matcher.codec.matches(&k) {
                 continue;
             }
             let payload_len = matcher.codec.payload_capacity_bytes_for_key_len(k.len());
-            let Ok(payload) = matcher.codec.read_payload(k, 0, payload_len) else {
+            let Ok(payload) = matcher.codec.read_payload(&k, 0, payload_len) else {
                 continue;
             };
             if matcher.regex.is_match(&payload) {
-                out.push(KvEntry {
-                    key: k.to_vec(),
-                    value: v.clone(),
-                    ..Default::default()
-                });
+                out.push(kv.clone());
                 continue 'outer;
             }
         }
@@ -191,6 +189,14 @@ mod tests {
         Bytes::copy_from_slice(key.as_ref())
     }
 
+    fn kv(family: u8, payload: &[u8], value: &'static [u8]) -> KvEntry {
+        KvEntry {
+            key: key(family, payload).to_vec(),
+            value: Bytes::from_static(value),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn publish_sequence_is_monotonic() {
         let hub = StreamHub::new(7);
@@ -211,10 +217,7 @@ mod tests {
     #[test]
     fn apply_filter_still_selects_matching_entries() {
         let matchers = compile_matchers(&filter(1, "(?s).*")).unwrap();
-        let kvs = vec![
-            (key(1, b"hit"), Bytes::from_static(b"v1")),
-            (key(2, b"miss"), Bytes::from_static(b"v2")),
-        ];
+        let kvs = vec![kv(1, b"hit", b"v1"), kv(2, b"miss", b"v2")];
         let entries = apply_filter(&matchers, &kvs);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].value.as_ref(), b"v1");
@@ -237,10 +240,7 @@ mod tests {
             vec![BytesFilter::Regex("^keep$".into())],
         ))
         .unwrap();
-        let kvs = vec![
-            (key(1, b"a"), Bytes::from_static(b"keep")),
-            (key(1, b"b"), Bytes::from_static(b"drop")),
-        ];
+        let kvs = vec![kv(1, b"a", b"keep"), kv(1, b"b", b"drop")];
         let entries = apply_filter(&matchers, &kvs);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].value.as_ref(), b"keep");
@@ -254,10 +254,7 @@ mod tests {
             vec![BytesFilter::Exact(Bytes::from_static(b"target"))],
         ))
         .unwrap();
-        let kvs = vec![
-            (key(1, b"a"), Bytes::from_static(b"target")),
-            (key(1, b"b"), Bytes::from_static(b"other")),
-        ];
+        let kvs = vec![kv(1, b"a", b"target"), kv(1, b"b", b"other")];
         let entries = apply_filter(&matchers, &kvs);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].value.as_ref(), b"target");
@@ -266,10 +263,7 @@ mod tests {
     #[test]
     fn value_filter_empty_accepts_all_matching_keys() {
         let matchers = compile_matchers(&filter(1, "(?s).*")).unwrap();
-        let kvs = vec![
-            (key(1, b"a"), Bytes::from_static(b"one")),
-            (key(1, b"b"), Bytes::from_static(b"two")),
-        ];
+        let kvs = vec![kv(1, b"a", b"one"), kv(1, b"b", b"two")];
         let entries = apply_filter(&matchers, &kvs);
         assert_eq!(entries.len(), 2);
     }

@@ -107,7 +107,7 @@ export interface SimplexWasmVerifierModule<TNotarization = unknown, TFinalizatio
   verify_finalized?: (verificationKey: Uint8Array, bytes: Uint8Array) => TFinalization | null | undefined | false;
 }
 
-export type CommonwareSimplexScheme =
+export type SimplexScheme =
   | 'ed25519'
   | 'secp256r1'
   | 'bls12381-multisig-min-pk'
@@ -117,8 +117,18 @@ export type CommonwareSimplexScheme =
   | 'bls12381-threshold-vrf-min-pk'
   | 'bls12381-threshold-vrf-min-sig';
 
-export interface CommonwareVerifiedSimplexCertificate {
-  scheme: CommonwareSimplexScheme;
+export type SimplexPayload =
+  | 'sha256'
+  | 'blake3'
+  | 'transcript-summary'
+  | 'coding-commitment';
+
+export type SimplexIdentity =
+  | 'ed25519'
+  | 'secp256r1';
+
+export interface VerifiedSimplexCertificate {
+  scheme: SimplexScheme;
   view: bigint;
   parent: bigint;
   payload: Uint8Array;
@@ -126,33 +136,33 @@ export interface CommonwareVerifiedSimplexCertificate {
   header: Uint8Array;
 }
 
-export type CommonwareSimplexCertificateVerificationContext =
+export type SimplexCertificateVerificationContext =
   | SimplexNotarizationVerificationContext
   | SimplexFinalizationVerificationContext;
 
-export interface CommonwareSimplexHeaderVerification {
-  certificate: CommonwareVerifiedSimplexCertificate;
-  context: CommonwareSimplexCertificateVerificationContext;
+export interface SimplexHeaderVerification {
+  certificate: VerifiedSimplexCertificate;
+  context: SimplexCertificateVerificationContext;
   raw: Uint8Array;
   payload: Uint8Array;
   header: Uint8Array;
 }
 
-export interface CommonwareSimplexBlockVerification {
-  certificate: CommonwareVerifiedSimplexCertificate;
-  context: CommonwareSimplexCertificateVerificationContext;
+export interface SimplexBlockVerification {
+  certificate: VerifiedSimplexCertificate;
+  context: SimplexCertificateVerificationContext;
   raw: Uint8Array;
   payload: Uint8Array;
   header: Uint8Array;
   body: Uint8Array;
 }
 
-export type CommonwareSimplexHeaderVerifier = (
-  verification: CommonwareSimplexHeaderVerification,
+export type SimplexHeaderVerifier = (
+  verification: SimplexHeaderVerification,
 ) => MaybePromise<boolean | null | undefined>;
 
-export type CommonwareSimplexBlockVerifier = (
-  verification: CommonwareSimplexBlockVerification,
+export type SimplexBlockVerifier = (
+  verification: SimplexBlockVerification,
 ) => MaybePromise<boolean | null | undefined>;
 
 export interface SimplexWasmHeaderVerifierModule {
@@ -170,21 +180,27 @@ export interface SimplexWasmBlockVerifierModule {
   ) => boolean | null | undefined;
 }
 
-export interface CommonwareSimplexVerifierOptions {
-  scheme: CommonwareSimplexScheme;
+export interface SimplexVerifierOptions {
+  scheme: SimplexScheme;
+  payload: SimplexPayload;
+  identity: SimplexIdentity;
   namespace: BytesLike;
   verificationMaterial: BytesLike;
-  verifyHeader?: CommonwareSimplexHeaderVerifier;
+  verifyHeader?: SimplexHeaderVerifier;
 }
 
-export interface CommonwareSimplexWasmVerifierModule {
-  verify_notarized_commonware: (
+export interface SimplexPayloadWasmVerifierModule {
+  verify_notarized_payload: (
+    payload: string,
+    identity: string,
     scheme: string,
     namespace: Uint8Array,
     verificationMaterial: Uint8Array,
     bytes: Uint8Array,
   ) => unknown;
-  verify_finalized_commonware: (
+  verify_finalized_payload: (
+    payload: string,
+    identity: string,
     scheme: string,
     namespace: Uint8Array,
     verificationMaterial: Uint8Array,
@@ -445,7 +461,7 @@ export function createWasmSimplexVerifier<TNotarization = unknown, TFinalization
 
 export function createWasmSimplexHeaderVerifier(
   module: SimplexWasmHeaderVerifierModule,
-): CommonwareSimplexHeaderVerifier {
+): SimplexHeaderVerifier {
   if (!module.verify_header) {
     throw new Error('simplex WASM header verifier missing verify_header');
   }
@@ -455,7 +471,7 @@ export function createWasmSimplexHeaderVerifier(
 
 export function createWasmSimplexBlockVerifier(
   module: SimplexWasmBlockVerifierModule,
-): CommonwareSimplexBlockVerifier {
+): SimplexBlockVerifier {
   if (!module.verify_block) {
     throw new Error('simplex WASM block verifier missing verify_block');
   }
@@ -463,16 +479,21 @@ export function createWasmSimplexBlockVerifier(
     module.verify_block(copyBytes(payload), copyBytes(header), copyBytes(body)) === true;
 }
 
-export function createCommonwareSimplexVerifier(
-  module: CommonwareSimplexWasmVerifierModule,
-  options: CommonwareSimplexVerifierOptions,
-): SimplexCertificateVerifier<CommonwareVerifiedSimplexCertificate, CommonwareVerifiedSimplexCertificate> {
+export function createSimplexVerifier(
+  module: SimplexPayloadWasmVerifierModule,
+  options: SimplexVerifierOptions,
+): SimplexCertificateVerifier<VerifiedSimplexCertificate, VerifiedSimplexCertificate> {
   const namespace = toSimplexBytes(options.namespace);
   const verificationMaterial = toSimplexBytes(options.verificationMaterial);
+  if (!module.verify_notarized_payload || !module.verify_finalized_payload) {
+    throw new Error('simplex WASM verifier missing payload support');
+  }
   return {
     verifyNotarization: (bytes, context) =>
-      normalizeAndVerifyCommonwareCertificate(
-        module.verify_notarized_commonware(
+      normalizeAndVerifyCertificate(
+        module.verify_notarized_payload(
+          options.payload,
+          options.identity,
           options.scheme,
           copyBytes(namespace),
           copyBytes(verificationMaterial),
@@ -483,8 +504,10 @@ export function createCommonwareSimplexVerifier(
         options.verifyHeader,
       ),
     verifyFinalization: (bytes, context) =>
-      normalizeAndVerifyCommonwareCertificate(
-        module.verify_finalized_commonware(
+      normalizeAndVerifyCertificate(
+        module.verify_finalized_payload(
+          options.payload,
+          options.identity,
           options.scheme,
           copyBytes(namespace),
           copyBytes(verificationMaterial),
@@ -497,13 +520,13 @@ export function createCommonwareSimplexVerifier(
   };
 }
 
-async function normalizeAndVerifyCommonwareCertificate(
+async function normalizeAndVerifyCertificate(
   value: unknown,
   raw: Uint8Array,
-  context: CommonwareSimplexCertificateVerificationContext,
-  verifyHeader?: CommonwareSimplexHeaderVerifier,
-): Promise<CommonwareVerifiedSimplexCertificate | null> {
-  const certificate = normalizeCommonwareVerifiedCertificate(value);
+  context: SimplexCertificateVerificationContext,
+  verifyHeader?: SimplexHeaderVerifier,
+): Promise<VerifiedSimplexCertificate | null> {
+  const certificate = normalizeVerifiedCertificate(value);
   if (!certificate) {
     return null;
   }
@@ -522,18 +545,18 @@ async function normalizeAndVerifyCommonwareCertificate(
   return certificate;
 }
 
-function normalizeCommonwareVerifiedCertificate(
+function normalizeVerifiedCertificate(
   value: unknown,
-): CommonwareVerifiedSimplexCertificate | null {
+): VerifiedSimplexCertificate | null {
   if (!value) {
     return null;
   }
   if (typeof value !== 'object') {
-    throw new Error('simplex Commonware verifier returned a non-object certificate');
+    throw new Error('simplex verifier returned a non-object certificate');
   }
   const record = value as Record<string, unknown>;
   return {
-    scheme: commonwareSchemeFromUnknown(record.scheme),
+    scheme: schemeFromUnknown(record.scheme),
     view: u64FromUnknown(record.view, 'view'),
     parent: u64FromUnknown(record.parent, 'parent'),
     payload: bytesFromUnknown(record.payload, 'payload'),
@@ -542,7 +565,7 @@ function normalizeCommonwareVerifiedCertificate(
   };
 }
 
-function commonwareSchemeFromUnknown(value: unknown): CommonwareSimplexScheme {
+function schemeFromUnknown(value: unknown): SimplexScheme {
   switch (value) {
     case 'ed25519':
     case 'secp256r1':
@@ -554,7 +577,7 @@ function commonwareSchemeFromUnknown(value: unknown): CommonwareSimplexScheme {
     case 'bls12381-threshold-vrf-min-sig':
       return value;
     default:
-      throw new Error(`simplex Commonware verifier returned unsupported scheme ${String(value)}`);
+      throw new Error(`simplex verifier returned unsupported scheme ${String(value)}`);
   }
 }
 
@@ -568,7 +591,7 @@ function u64FromUnknown(value: unknown, field: string): bigint {
   if (typeof value === 'string' && /^[0-9]+$/.test(value)) {
     return BigInt(value);
   }
-  throw new Error(`simplex Commonware verifier returned invalid ${field}`);
+  throw new Error(`simplex verifier returned invalid ${field}`);
 }
 
 function bytesFromUnknown(value: unknown, field: string): Uint8Array {
@@ -581,7 +604,7 @@ function bytesFromUnknown(value: unknown, field: string): Uint8Array {
   ) {
     return Uint8Array.from(value);
   }
-  throw new Error(`simplex Commonware verifier returned invalid ${field} bytes`);
+  throw new Error(`simplex verifier returned invalid ${field} bytes`);
 }
 
 function emptySummary(): SimplexUploadSummary {

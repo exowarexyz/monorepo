@@ -45,11 +45,15 @@ import initWasm, {
   verify_current_key_value_proof,
   verify_get_many_response,
   verify_get_range_response,
+  verify_historical_fixed_keyless_append_proof,
+  verify_historical_fixed_unordered_update_proof,
   verify_historical_operation_range_proof,
+  verify_historical_raw_operation_range_proof,
 } from './generated/wasm/exoware_qmdb_wasm.js';
 
 export type BytesLike = Uint8Array | string;
 export type MerkleFamily = 'mmr' | 'mmb';
+export type HashFamily = 'sha256' | 'blake3' | 'crc32c';
 
 export type OrderedOperation =
   | {
@@ -82,6 +86,40 @@ export interface VerifiedHistoricalMultiProof {
   root: Uint8Array;
   operations: LocatedOrderedOperation[];
   proofSizeBytes: number;
+}
+
+export interface OperationRangeRequest {
+  tip: bigint;
+  startLocation: bigint;
+  maxLocations: number;
+}
+
+export interface LocatedRawOperation {
+  location: bigint;
+  encodedOperation: Uint8Array;
+}
+
+export interface VerifiedRawOperationRangeProof {
+  root: Uint8Array;
+  operations: LocatedRawOperation[];
+  proofSizeBytes: number;
+}
+
+export interface VerifiedFixedKeylessAppendProof {
+  location: bigint;
+  value: Uint8Array;
+  root: Uint8Array;
+  proofSizeBytes: number;
+  operationCount: number;
+}
+
+export interface VerifiedFixedUnorderedUpdateProof {
+  location: bigint;
+  key: Uint8Array;
+  value: Uint8Array;
+  root: Uint8Array;
+  proofSizeBytes: number;
+  operationCount: number;
 }
 
 export interface DecodedHistoricalMultiProof {
@@ -146,6 +184,13 @@ export interface OrderedSubscribeProof {
 
 export type OrderedQmdbClientOptions = SdkClientOptions & {
   merkleFamily?: MerkleFamily;
+  hashFamily?: HashFamily;
+  currentChunkSize?: number;
+};
+
+export type QmdbOperationLogClientOptions = SdkClientOptions & {
+  merkleFamily?: MerkleFamily;
+  hashFamily?: HashFamily;
 };
 
 let wasmReady: Promise<unknown> | undefined;
@@ -183,6 +228,18 @@ function assertMerkleFamily(value: MerkleFamily, label: string): void {
   }
 }
 
+function assertHashFamily(value: HashFamily, label: string): void {
+  if (value !== 'sha256' && value !== 'blake3' && value !== 'crc32c') {
+    throw new Error(`${label} unsupported hash family ${String(value)}`);
+  }
+}
+
+function assertCurrentChunkSize(value: number, label: string): void {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${label} current chunk size must be a positive integer`);
+  }
+}
+
 export function matchExact(bytes: BytesLike): BytesFilter {
   return create(BytesFilterSchema, {
     kind: {
@@ -210,17 +267,135 @@ export function matchRegex(regex: string): BytesFilter {
   });
 }
 
+async function operationRangeProofBytes(
+  operationLog: ConnectClient<typeof OperationLogService>,
+  request: OperationRangeRequest,
+  options?: CallOptions,
+): Promise<Uint8Array> {
+  const response = await operationLog.getOperationRange(
+    create(GetOperationRangeRequestSchema, request),
+    options,
+  );
+  if (!response.proof) {
+    throw new Error('qmdb getOperationRange response missing proof');
+  }
+  return toBinary(HistoricalOperationRangeProofSchema, response.proof);
+}
+
+export class QmdbOperationLogClient {
+  private readonly operationLog: ConnectClient<typeof OperationLogService>;
+  private readonly merkleFamily: MerkleFamily;
+  private readonly hashFamily: HashFamily;
+
+  constructor(baseUrl: string, options: QmdbOperationLogClientOptions = {}) {
+    const {
+      merkleFamily = 'mmr',
+      hashFamily = 'sha256',
+      ...transportOptions
+    } = options;
+    assertMerkleFamily(merkleFamily, 'qmdb operation log client');
+    assertHashFamily(hashFamily, 'qmdb operation log client');
+    this.merkleFamily = merkleFamily;
+    this.hashFamily = hashFamily;
+    this.operationLog = createClient(
+      OperationLogService,
+      createTransport(baseUrl, transportOptions),
+    );
+  }
+
+  async getOperationRange(
+    request: OperationRangeRequest,
+    expectedRoot: BytesLike,
+    options?: CallOptions,
+  ): Promise<VerifiedRawOperationRangeProof> {
+    await ensureWasm();
+    const proofBytes = await operationRangeProofBytes(
+      this.operationLog,
+      request,
+      options,
+    );
+    const verified = verify_historical_raw_operation_range_proof(
+      proofBytes,
+      toBytes(expectedRoot),
+      this.merkleFamily,
+      this.hashFamily,
+    ) as Omit<VerifiedRawOperationRangeProof, 'proofSizeBytes'>;
+    return { ...verified, proofSizeBytes: proofBytes.length };
+  }
+
+  async getFixedKeylessAppend(
+    request: OperationRangeRequest,
+    expectedRoot: BytesLike,
+    expectedLocation: bigint,
+    expectedValue: BytesLike,
+    options?: CallOptions,
+  ): Promise<VerifiedFixedKeylessAppendProof> {
+    await ensureWasm();
+    const proofBytes = await operationRangeProofBytes(
+      this.operationLog,
+      request,
+      options,
+    );
+    const verified = verify_historical_fixed_keyless_append_proof(
+      proofBytes,
+      toBytes(expectedRoot),
+      this.merkleFamily,
+      this.hashFamily,
+      expectedLocation,
+      toBytes(expectedValue),
+    ) as Omit<VerifiedFixedKeylessAppendProof, 'proofSizeBytes'>;
+    return { ...verified, proofSizeBytes: proofBytes.length };
+  }
+
+  async getFixedUnorderedUpdate(
+    request: OperationRangeRequest,
+    expectedRoot: BytesLike,
+    expectedLocation: bigint,
+    expectedKey: BytesLike,
+    valueSize: number,
+    options?: CallOptions,
+  ): Promise<VerifiedFixedUnorderedUpdateProof> {
+    await ensureWasm();
+    const proofBytes = await operationRangeProofBytes(
+      this.operationLog,
+      request,
+      options,
+    );
+    const verified = verify_historical_fixed_unordered_update_proof(
+      proofBytes,
+      toBytes(expectedRoot),
+      this.merkleFamily,
+      this.hashFamily,
+      expectedLocation,
+      toBytes(expectedKey),
+      valueSize,
+    ) as Omit<VerifiedFixedUnorderedUpdateProof, 'proofSizeBytes'>;
+    return { ...verified, proofSizeBytes: proofBytes.length };
+  }
+}
+
 export class OrderedQmdbClient {
   private readonly lookup: ConnectClient<typeof KeyLookupService>;
   private readonly orderedRange: ConnectClient<typeof OrderedKeyRangeService>;
   private readonly operationLog: ConnectClient<typeof OperationLogService>;
   private readonly currentOperation: ConnectClient<typeof CurrentOperationService>;
   private readonly merkleFamily: MerkleFamily;
+  private readonly hashFamily: HashFamily;
+  private readonly currentChunkSize: number;
 
   constructor(baseUrl: string, options: OrderedQmdbClientOptions = {}) {
-    const { merkleFamily = 'mmr', ...transportOptions } = options;
+    const {
+      merkleFamily = 'mmr',
+      hashFamily = 'sha256',
+      currentChunkSize = 32,
+      ...transportOptions
+    } = options;
     assertMerkleFamily(merkleFamily, 'qmdb client');
+    assertHashFamily(hashFamily, 'qmdb client');
+    assertCurrentChunkSize(currentChunkSize, 'qmdb client');
     this.merkleFamily = merkleFamily;
+    this.hashFamily = hashFamily;
+    this.currentChunkSize = currentChunkSize;
     const transport = createTransport(baseUrl, transportOptions);
     this.lookup = createClient(KeyLookupService, transport);
     this.orderedRange = createClient(OrderedKeyRangeService, transport);
@@ -251,6 +426,8 @@ export class OrderedQmdbClient {
       proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,
+      this.hashFamily,
+      this.currentChunkSize,
       requestedKey,
     ) as Omit<VerifiedCurrentKeyValueProof, 'proofSizeBytes'>;
     return { ...verified, proofSizeBytes: proofBytes.length };
@@ -277,6 +454,8 @@ export class OrderedQmdbClient {
       proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,
+      this.hashFamily,
+      this.currentChunkSize,
       requestedKeys,
     ) as Omit<VerifiedCurrentKeyLookupProof, 'proofSizeBytes'>;
     return { ...verified, proofSizeBytes: proofBytes.length };
@@ -312,6 +491,8 @@ export class OrderedQmdbClient {
       proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,
+      this.hashFamily,
+      this.currentChunkSize,
       startKey,
       endKey ?? new Uint8Array(),
       endKey !== undefined,
@@ -346,6 +527,7 @@ export class OrderedQmdbClient {
       const proof = decode_historical_multi_proof_operations(
         proofBytes,
         this.merkleFamily,
+        this.hashFamily,
       ) as Omit<DecodedHistoricalMultiProof, 'proofSizeBytes'>;
       yield {
         resumeSequenceNumber: frame.resumeSequenceNumber,
@@ -356,27 +538,21 @@ export class OrderedQmdbClient {
   }
 
   async getOperationRange(
-    request: {
-      tip: bigint;
-      startLocation: bigint;
-      maxLocations: number;
-    },
+    request: OperationRangeRequest,
     expectedRoot: BytesLike,
     options?: CallOptions,
   ): Promise<VerifiedHistoricalMultiProof> {
     await ensureWasm();
-    const response = await this.operationLog.getOperationRange(
-      create(GetOperationRangeRequestSchema, request),
+    const proofBytes = await operationRangeProofBytes(
+      this.operationLog,
+      request,
       options,
     );
-    if (!response.proof) {
-      throw new Error('qmdb getOperationRange response missing proof');
-    }
-    const proofBytes = toBinary(HistoricalOperationRangeProofSchema, response.proof);
     const verified = verify_historical_operation_range_proof(
       proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,
+      this.hashFamily,
     ) as Omit<VerifiedHistoricalMultiProof, 'proofSizeBytes'>;
     return { ...verified, proofSizeBytes: proofBytes.length };
   }
@@ -403,6 +579,8 @@ export class OrderedQmdbClient {
       proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,
+      this.hashFamily,
+      this.currentChunkSize,
     ) as Omit<VerifiedCurrentOperationRangeProof, 'proofSizeBytes'>;
     return { ...verified, proofSizeBytes: proofBytes.length };
   }

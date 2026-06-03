@@ -2,23 +2,26 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   bytesToHex,
   hexToBytes,
-  type CommonwareSimplexHeaderVerification,
-  type CommonwareSimplexScheme,
+  type SimplexHeaderVerification,
+  type SimplexIdentity,
+  type SimplexPayload,
+  type SimplexScheme,
   SimplexClient,
-  type CommonwareVerifiedSimplexCertificate,
   type SimplexBlockData,
   type SimplexCertificateVerifier,
+  type VerifiedSimplexCertificate,
   type VerifiedSimplexCertificateStreamEntry,
 } from '@simplex-ts';
-import { createCommonwareWasmSimplexVerifier } from '@simplex-ts/wasm';
+import { createWasmSimplexVerifier } from '@simplex-ts/wasm';
 
-export const SIMPLEX_URL = import.meta.env.VITE_SIMPLEX_URL as string | undefined;
 const MAX_EVENTS = 10;
-const SIMPLEX_DEMO_SCHEME: CommonwareSimplexScheme = 'bls12381-threshold-vrf-min-sig';
+const SIMPLEX_DEMO_SCHEME: SimplexScheme = 'bls12381-threshold-vrf-min-sig';
+const SIMPLEX_DEMO_PAYLOAD: SimplexPayload = 'sha256';
+const SIMPLEX_DEMO_IDENTITY: SimplexIdentity = 'ed25519';
 const SIMPLEX_DEMO_NAMESPACE = '_EXOWARE_SIMPLEX_DEMO';
 const SIMPLEX_DEMO_VERIFICATION_MATERIAL =
   'a1195547a176e10913080f5f367fe413698890f3b9809e24c2bc4e7928d41d74ef29d81e49fa2ec3c129be87479f666811d200bb29e70093c9cc86946c47d7156b9a0440c08894e00e3702c06642f45dbdfabcbab0763d225a0c66cd3e30bffe';
-const SIMPLEX_SCHEMES: CommonwareSimplexScheme[] = [
+const SIMPLEX_SCHEMES: SimplexScheme[] = [
   'ed25519',
   'secp256r1',
   'bls12381-multisig-min-pk',
@@ -34,8 +37,8 @@ interface NotificationFn {
 }
 
 type VerifiedSimplexEntry = VerifiedSimplexCertificateStreamEntry<
-  CommonwareVerifiedSimplexCertificate,
-  CommonwareVerifiedSimplexCertificate
+  VerifiedSimplexCertificate,
+  VerifiedSimplexCertificate
 >;
 
 interface VerifiedSimplexEvent {
@@ -44,7 +47,7 @@ interface VerifiedSimplexEvent {
 }
 
 interface VerifierConfig {
-  scheme: CommonwareSimplexScheme;
+  scheme: SimplexScheme;
   namespace: string;
   verificationMaterialHex: string;
 }
@@ -56,7 +59,7 @@ interface VerifiedFullBlock {
 
 const READ_CERTIFICATE_IDS = ['notarization', 'latest', 'view', 'height'] as const;
 type ReadCertificateId = typeof READ_CERTIFICATE_IDS[number];
-type ReadCertificates = Record<ReadCertificateId, CommonwareVerifiedSimplexCertificate | null>;
+type ReadCertificates = Record<ReadCertificateId, VerifiedSimplexCertificate | null>;
 
 function renderBytes(value: Uint8Array): string {
   const hex = bytesToHex(value);
@@ -74,7 +77,7 @@ async function sha256(bytes: Uint8Array): Promise<Uint8Array> {
 async function verifyDemoHeader({
   payload,
   header,
-}: CommonwareSimplexHeaderVerification): Promise<boolean> {
+}: SimplexHeaderVerification): Promise<boolean> {
   return bytesEqual(payload, await sha256(header));
 }
 
@@ -85,7 +88,7 @@ async function verifyDemoBlock(header: Uint8Array, body: Uint8Array): Promise<bo
   return bytesEqual(header.slice(header.byteLength - 32), await sha256(body));
 }
 
-function renderCertificate(value: CommonwareVerifiedSimplexCertificate): string {
+function renderCertificate(value: VerifiedSimplexCertificate): string {
   return [
     `scheme ${value.scheme}`,
     `view ${value.view.toString()}`,
@@ -132,8 +135,8 @@ export function SimplexPanel({
   const subscribeAbortRef = useRef<AbortController | null>(null);
   const showNotificationRef = useRef(showNotification);
   const readCertificatesRef = useRef<ReadCertificates>(emptyReadCertificates());
-  const streamCertificatesRef = useRef<Record<string, CommonwareVerifiedSimplexCertificate>>({});
-  const [scheme, setScheme] = useState<CommonwareSimplexScheme>(SIMPLEX_DEMO_SCHEME);
+  const streamCertificatesRef = useRef<Record<string, VerifiedSimplexCertificate>>({});
+  const [scheme, setScheme] = useState<SimplexScheme>(SIMPLEX_DEMO_SCHEME);
   const [namespace, setNamespace] = useState(SIMPLEX_DEMO_NAMESPACE);
   const [verificationMaterialHex, setVerificationMaterialHex] = useState(
     SIMPLEX_DEMO_VERIFICATION_MATERIAL,
@@ -145,16 +148,16 @@ export function SimplexPanel({
   });
   const [verifier, setVerifier] = useState<
     SimplexCertificateVerifier<
-      CommonwareVerifiedSimplexCertificate,
-      CommonwareVerifiedSimplexCertificate
+      VerifiedSimplexCertificate,
+      VerifiedSimplexCertificate
     >
   >();
   const [verifierStatus, setVerifierStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const client = useMemo(
     () =>
       new SimplexClient<
-        CommonwareVerifiedSimplexCertificate,
-        CommonwareVerifiedSimplexCertificate
+        VerifiedSimplexCertificate,
+        VerifiedSimplexCertificate
       >(simplexUrl, verifier ? { verifier } : {}),
     [simplexUrl, verifier],
   );
@@ -180,21 +183,21 @@ export function SimplexPanel({
   const [blockReadResult, setBlockReadResult] = useState<SimplexBlockData | null>(null);
 
   const [notarization, setNotarization] =
-    useState<CommonwareVerifiedSimplexCertificate | null>(null);
+    useState<VerifiedSimplexCertificate | null>(null);
   const [notarizationMissing, setNotarizationMissing] = useState(false);
   const [latestFinalization, setLatestFinalization] =
-    useState<CommonwareVerifiedSimplexCertificate | null>(null);
+    useState<VerifiedSimplexCertificate | null>(null);
   const [latestFinalizationMissing, setLatestFinalizationMissing] = useState(false);
   const [viewFinalization, setViewFinalization] =
-    useState<CommonwareVerifiedSimplexCertificate | null>(null);
+    useState<VerifiedSimplexCertificate | null>(null);
   const [viewFinalizationMissing, setViewFinalizationMissing] = useState(false);
   const [heightFinalization, setHeightFinalization] =
-    useState<CommonwareVerifiedSimplexCertificate | null>(null);
+    useState<VerifiedSimplexCertificate | null>(null);
   const [heightFinalizationMissing, setHeightFinalizationMissing] = useState(false);
 
   const setReadCertificateRef = (
     id: ReadCertificateId,
-    certificate: CommonwareVerifiedSimplexCertificate | null,
+    certificate: VerifiedSimplexCertificate | null,
   ) => {
     readCertificatesRef.current = {
       ...readCertificatesRef.current,
@@ -217,8 +220,10 @@ export function SimplexPanel({
     setVerifierStatus('loading');
     void (async () => {
       try {
-        const nextVerifier = await createCommonwareWasmSimplexVerifier({
+        const nextVerifier = await createWasmSimplexVerifier({
           scheme: appliedVerifierConfig.scheme,
+          payload: SIMPLEX_DEMO_PAYLOAD,
+          identity: SIMPLEX_DEMO_IDENTITY,
           namespace: new TextEncoder().encode(appliedVerifierConfig.namespace),
           verificationMaterial: hexToBytes(appliedVerifierConfig.verificationMaterialHex),
           verifyHeader: verifyDemoHeader,
@@ -457,7 +462,7 @@ export function SimplexPanel({
 
   const verifyFullBlock = async (
     id: string,
-    certificate: CommonwareVerifiedSimplexCertificate,
+    certificate: VerifiedSimplexCertificate,
   ) => {
     setVerifyingFullBlockId(id);
     setVerifiedFullBlocks((previous) => {
@@ -581,7 +586,7 @@ export function SimplexPanel({
             <select
               id="simplex-verifier-scheme"
               value={scheme}
-              onChange={(event) => setScheme(event.target.value as CommonwareSimplexScheme)}
+              onChange={(event) => setScheme(event.target.value as SimplexScheme)}
             >
               {SIMPLEX_SCHEMES.map((item) => (
                 <option key={item} value={item}>{item}</option>

@@ -143,7 +143,6 @@ async fn immutable_connect_subscribe_emits_verifiable_multi_proof() {
     let immutable_client = Arc::new(TestImmutableClient::from_client(
         store_client.clone(),
         ((), ((0..=10000).into(), ())),
-        ((), ((0..=10000).into(), ())),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(immutable_client).await;
     let client = validated_client(&qmdb_url);
@@ -190,7 +189,6 @@ async fn immutable_connect_get_operation_range_returns_verifiable_proof() {
     let immutable_client = Arc::new(TestImmutableClient::from_client(
         store_client.clone(),
         ((), ((0..=10000).into(), ())),
-        ((), ((0..=10000).into(), ())),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(immutable_client).await;
     let client = validated_client(&qmdb_url);
@@ -228,7 +226,6 @@ async fn immutable_connect_client_rejects_invalid_streamed_proof() {
 
     let immutable_client = Arc::new(TestImmutableClient::from_client(
         store_client.clone(),
-        ((), ((0..=10000).into(), ())),
         ((), ((0..=10000).into(), ())),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(immutable_client).await;

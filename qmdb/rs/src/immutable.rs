@@ -19,7 +19,7 @@ use crate::auth::{
     load_auth_operation_at, load_auth_operation_bytes_range, load_latest_auth_immutable_update_row,
     read_latest_auth_watermark, require_published_auth_watermark,
 };
-use crate::codec::{merkle_size_for_watermark, UpdateRow};
+use crate::codec::merkle_size_for_watermark;
 use crate::connect::OperationKv;
 use crate::core::retry_transient_post_ingest_query;
 use crate::error::QmdbError;
@@ -39,7 +39,6 @@ pub struct ImmutableClient<
 {
     client: StoreClient,
     operation_cfg: <immutable::Operation<F, K, E> as CodecRead>::Cfg,
-    update_row_cfg: (K::Cfg, V::Cfg),
     _marker: PhantomData<(F, H, K, E)>,
 }
 
@@ -63,28 +62,23 @@ where
     H: Hasher,
     K: Array + Codec + Clone + AsRef<[u8]>,
     V: Codec + Clone + Send + Sync,
-    V::Cfg: Clone,
-    K::Cfg: Clone,
     E: ValueEncoding<Value = V>,
     immutable::Operation<F, K, E>: Encode + Decode + Clone,
 {
     pub fn new(
         url: &str,
         operation_cfg: <immutable::Operation<F, K, E> as CodecRead>::Cfg,
-        update_row_cfg: (K::Cfg, V::Cfg),
     ) -> Self {
-        Self::from_client(StoreClient::new(url), operation_cfg, update_row_cfg)
+        Self::from_client(StoreClient::new(url), operation_cfg)
     }
 
     pub fn from_client(
         client: StoreClient,
         operation_cfg: <immutable::Operation<F, K, E> as CodecRead>::Cfg,
-        update_row_cfg: (K::Cfg, V::Cfg),
     ) -> Self {
         Self {
             client,
             operation_cfg,
-            update_row_cfg,
             _marker: PhantomData,
         }
     }
@@ -144,20 +138,12 @@ where
         let namespace = AuthenticatedBackendNamespace::Immutable;
         let session = self.client.create_session();
         require_published_auth_watermark(&session, namespace, watermark).await?;
-        let Some((row_key, row_value)) =
+        let Some((row_key, _row_value)) =
             load_latest_auth_immutable_update_row(&session, watermark, key.as_ref()).await?
         else {
             return Ok(None);
         };
         let location = decode_auth_immutable_update_location::<F>(&row_key)?;
-        let decoded =
-            <UpdateRow<K, V> as Decode>::decode_cfg(row_value.as_ref(), &self.update_row_cfg)
-                .map_err(|e| QmdbError::CorruptData(format!("update row decode: {e}")))?;
-        if <K as AsRef<[u8]>>::as_ref(&decoded.key) != key.as_ref() {
-            return Err(QmdbError::CorruptData(format!(
-                "authenticated immutable update row key mismatch at location {location}"
-            )));
-        }
         let operation = load_auth_operation_at::<F, immutable::Operation<F, K, E>>(
             &session,
             namespace,

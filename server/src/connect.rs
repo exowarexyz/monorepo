@@ -8,7 +8,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use connectrpc::{Chain, ConnectError, ConnectRpcService, Limits, RequestContext as Context};
+use connectrpc::{
+    Chain, ConnectError, ConnectRpcService, Limits, PreEncoded, RequestContext as Context,
+};
 use exoware_proto::common::KvEntry;
 use exoware_proto::compact::{
     PruneResponse, Service as CompactApi, ServiceServer as CompactServiceServer,
@@ -41,7 +43,7 @@ use tokio::sync::Notify;
 use crate::reduce::RangeReducer;
 use crate::stream::{StreamHub, StreamNotifier};
 use crate::validate::{self, IngestLimits};
-use crate::{Ingest, Log, Prune, Query, QueryExtra, RangeScan, StoreEngine};
+use crate::{Ingest, Log, LogBatch, Prune, Query, QueryExtra, RangeScan, StoreEngine};
 
 // TODO (#57): Make limits configurable.
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
@@ -782,22 +784,22 @@ where
 }
 
 fn filtered_subscribe_response(
-    seq: u64,
-    kvs: &[(Bytes, Bytes)],
+    batch: &LogBatch,
     matchers: &crate::stream::CompiledMatchers,
-) -> Option<SubscribeResponse> {
-    let entries = crate::stream::apply_filter(matchers, kvs);
-    (!entries.is_empty()).then_some(SubscribeResponse {
-        sequence_number: seq,
+) -> Result<Option<SubscribeResponse>, ConnectError> {
+    let response = batch.decode_response().map_err(ConnectError::internal)?;
+    let entries = crate::stream::apply_filter(matchers, &response.entries);
+    Ok((!entries.is_empty()).then_some(SubscribeResponse {
+        sequence_number: batch.sequence_number(),
         entries,
         ..Default::default()
-    })
+    }))
 }
 
 struct ReplayState {
     next_sequence: u64,
     bound: u64,
-    first_batch: Option<Vec<(Bytes, Bytes)>>,
+    first_batch: Option<LogBatch>,
 }
 
 enum ReplayProgress {
@@ -883,7 +885,7 @@ where
             return Ok(ReplayProgress::Done);
         };
         let seq = replay.next_sequence;
-        let kvs = if let Some(first_batch) = replay.first_batch.take() {
+        let batch = if let Some(first_batch) = replay.first_batch.take() {
             Some(first_batch)
         } else {
             self.state
@@ -896,7 +898,7 @@ where
         if replay.next_sequence > replay.bound {
             self.replay = None;
         }
-        let Some(kvs) = kvs else {
+        let Some(batch) = batch else {
             let oldest = self
                 .state
                 .log
@@ -905,12 +907,10 @@ where
                 .map_err(ConnectError::internal)?;
             return Err(StreamConnect::<B>::batch_evicted_connect_error(oldest));
         };
-        Ok(
-            match filtered_subscribe_response(seq, &kvs, &self.matchers) {
-                Some(frame) => ReplayProgress::Frame(frame),
-                None => ReplayProgress::Advanced,
-            },
-        )
+        Ok(match filtered_subscribe_response(&batch, &self.matchers)? {
+            Some(frame) => ReplayProgress::Frame(frame),
+            None => ReplayProgress::Advanced,
+        })
     }
 
     async fn next_live_frame(&mut self) -> Result<LiveProgress, ConnectError> {
@@ -920,13 +920,13 @@ where
         }
         let seq = self.next_live_sequence;
         self.next_live_sequence += 1;
-        let kvs = self
+        let batch = self
             .state
             .log
             .get_batch(seq)
             .await
             .map_err(ConnectError::internal)?;
-        let Some(kvs) = kvs else {
+        let Some(batch) = batch else {
             let oldest = self
                 .state
                 .log
@@ -935,12 +935,10 @@ where
                 .map_err(ConnectError::internal)?;
             return Err(StreamConnect::<B>::batch_evicted_connect_error(oldest));
         };
-        Ok(
-            match filtered_subscribe_response(seq, &kvs, &self.matchers) {
-                Some(frame) => LiveProgress::Frame(frame),
-                None => LiveProgress::Advanced,
-            },
-        )
+        Ok(match filtered_subscribe_response(&batch, &self.matchers)? {
+            Some(frame) => LiveProgress::Frame(frame),
+            None => LiveProgress::Advanced,
+        })
     }
 
     async fn wait_for_live(&self) {
@@ -1071,7 +1069,7 @@ where
         &self,
         _ctx: Context,
         request: buffa::view::OwnedView<GetRequestView<'static>>,
-    ) -> connectrpc::ServiceResult<StreamGetResponse> {
+    ) -> connectrpc::ServiceResult<PreEncoded<StreamGetResponse>> {
         let seq = request.sequence_number;
         match self
             .state
@@ -1080,21 +1078,9 @@ where
             .await
             .map_err(ConnectError::internal)?
         {
-            Some(kvs) => {
-                let entries = kvs
-                    .into_iter()
-                    .map(|(k, v)| KvEntry {
-                        key: k.to_vec(),
-                        value: v,
-                        ..Default::default()
-                    })
-                    .collect();
-                connectrpc::Response::ok(StreamGetResponse {
-                    sequence_number: seq,
-                    entries,
-                    ..Default::default()
-                })
-            }
+            Some(batch) => connectrpc::Response::ok(PreEncoded::from_bytes_unchecked(
+                batch.into_response_bytes(),
+            )),
             None => {
                 let current = self.state.log.current_sequence();
                 // Distinguish "never existed" (seq > current) vs "evicted".
@@ -1463,10 +1449,7 @@ mod tests {
     }
 
     impl Log for FakeEngine {
-        async fn get_batch(
-            &self,
-            sequence_number: u64,
-        ) -> Result<Option<Vec<(Bytes, Bytes)>>, String> {
+        async fn get_batch(&self, sequence_number: u64) -> Result<Option<LogBatch>, String> {
             let result: Result<_, String> = (|| {
                 let mut state = self.state.lock().map_err(|e| e.to_string())?;
                 let publish = state.publish_on_get_batch.clone();
@@ -1489,7 +1472,7 @@ mod tests {
                     .hub
                     .publish(publish.sequence_offset + sequence_number);
             }
-            Ok(batch)
+            Ok(batch.map(|kvs| LogBatch::from_entries(sequence_number, kvs)))
         }
 
         async fn oldest_retained_batch(&self) -> Result<Option<u64>, String> {

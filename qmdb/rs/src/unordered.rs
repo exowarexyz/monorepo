@@ -18,9 +18,9 @@ use exoware_sdk::{RangeMode, SerializableReadSession, StoreClient};
 
 use crate::codec::{
     bitmap_chunk_bits, chunk_index_for_location, clear_below_floor,
-    decode_current_boundary_metadata, decode_update_location, encode_chunk_key,
-    encode_current_meta_key, encode_ops_root_witness_key, merkle_size_for_watermark,
-    CurrentBoundaryMetadata, UpdateRow,
+    decode_current_boundary_metadata, decode_update_index_value_present, decode_update_location,
+    encode_chunk_key, encode_current_meta_key, encode_ops_root_witness_key,
+    merkle_size_for_watermark, CurrentBoundaryMetadata,
 };
 use crate::connect::OperationKv;
 use crate::core::HistoricalOpsClientCore;
@@ -91,7 +91,6 @@ pub struct UnorderedClient<
 {
     client: StoreClient,
     op_cfg: <unordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
-    update_row_cfg: (K::Cfg, V::Cfg),
     _marker: PhantomData<(F, H, K, E)>,
 }
 
@@ -110,20 +109,55 @@ where
     }
 }
 
+impl<F, H, K, V, E> crate::core::LatestValueResolver<F, K, V> for UnorderedClient<F, H, K, V, E>
+where
+    F: Graftable,
+    H: Hasher,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V>,
+    unordered::Operation<F, K, E>: Encode + Decode,
+{
+    async fn resolve_latest_value(
+        &self,
+        session: &SerializableReadSession,
+        location: Location<F>,
+        requested_key: &[u8],
+    ) -> Result<VersionedValue<K, V, F>, QmdbError> {
+        let (key, value) = match self.load_operation_at(session, location).await? {
+            unordered::Operation::Update(update) => (update.0, Some(update.1)),
+            unordered::Operation::Delete(key) => (key, None),
+            unordered::Operation::CommitFloor(_, _) => {
+                return Err(QmdbError::CorruptData(format!(
+                    "latest update row at {location} points to a commit operation"
+                )));
+            }
+        };
+        if key.as_ref() != requested_key {
+            return Err(QmdbError::CorruptData(format!(
+                "latest update row at {location} points to a different key"
+            )));
+        }
+        Ok(VersionedValue {
+            key,
+            location,
+            value,
+        })
+    }
+}
+
 impl<F, H, K, V, E> UnorderedClient<F, H, K, V, E>
 where
     F: Graftable,
     H: Hasher,
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
-    V::Cfg: Clone,
     E: ValueEncoding<Value = V>,
     unordered::Operation<F, K, E>: Encode + Decode,
 {
     fn core(&self) -> HistoricalOpsClientCore<'_, F, H::Digest, K, V> {
         HistoricalOpsClientCore {
             client: &self.client,
-            update_row_cfg: self.update_row_cfg.clone(),
             _marker: PhantomData,
         }
     }
@@ -131,20 +165,17 @@ where
     pub fn new(
         url: &str,
         op_cfg: <unordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
-        update_row_cfg: (K::Cfg, V::Cfg),
     ) -> Self {
-        Self::from_client(StoreClient::new(url), op_cfg, update_row_cfg)
+        Self::from_client(StoreClient::new(url), op_cfg)
     }
 
     pub fn from_client(
         client: StoreClient,
         op_cfg: <unordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
-        update_row_cfg: (K::Cfg, V::Cfg),
     ) -> Self {
         Self {
             client,
             op_cfg,
-            update_row_cfg,
             _marker: PhantomData,
         }
     }
@@ -184,7 +215,7 @@ where
         keys: &[Q],
         watermark: Location<F>,
     ) -> Result<Vec<Option<VersionedValue<K, V, F>>>, QmdbError> {
-        self.core().query_many_at(keys, watermark).await
+        self.core().query_many_at(keys, watermark, self).await
     }
 
     pub async fn root_at(&self, watermark: Location<F>) -> Result<H::Digest, QmdbError> {
@@ -420,16 +451,7 @@ where
             });
         };
         let location = decode_update_location(&row_key)?;
-        let decoded =
-            <UpdateRow<K, V> as Decode>::decode_cfg(row_value.as_ref(), &self.update_row_cfg)
-                .map_err(|e| QmdbError::CorruptData(format!("update row decode: {e}")))?;
-        if <K as AsRef<[u8]>>::as_ref(&decoded.key) != key.as_ref() {
-            return Err(QmdbError::ProofKeyNotFound {
-                watermark: watermark.as_u64(),
-                key: key_bytes.clone(),
-            });
-        }
-        if decoded.value.is_none() {
+        if !decode_update_index_value_present(row_value.as_ref())? {
             return Err(QmdbError::KeyNotActive {
                 watermark: watermark.as_u64(),
                 key: key_bytes.clone(),

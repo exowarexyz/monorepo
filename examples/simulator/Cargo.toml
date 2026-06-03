@@ -12,6 +12,7 @@ documentation = "https://docs.rs/exoware-simulator"
 
 [dependencies]
 axum = { workspace = true }
+buffa = { workspace = true }
 bytes = { workspace = true }
 exoware-sdk = { workspace = true }
 exoware-server = { workspace = true }

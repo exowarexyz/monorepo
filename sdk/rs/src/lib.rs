@@ -99,27 +99,32 @@ impl<const N: usize> IntoStoreWriteValue for &[u8; N] {
 
 /// Codec used to compress **outgoing** RPC request bodies when compression applies.
 ///
-/// connectrpc `ClientConfig::compress_requests` accepts a single encoding name; there is no
-/// HTTP-style negotiation list for requests. Prefer [`Zstd`](Self::Zstd); use [`Gzip`](Self::Gzip)
-/// when talking to a peer that only accepts gzip-compressed requests. Response decompression still
-/// follows [`PreferZstdHttpClient`] and the shared [`connect_compression_registry`].
+/// Request compression is disabled by default because large ingest batches are
+/// often CPU-bound before they are network-bound. Use [`Zstd`](Self::Zstd) when
+/// upload bandwidth matters more than client CPU, or [`Gzip`](Self::Gzip) when
+/// talking to a peer that only accepts gzip-compressed requests. Response
+/// decompression still follows [`PreferZstdHttpClient`] and the shared
+/// [`connect_compression_registry`].
 ///
 /// To drive this from configuration or environment variables, map your setting to this enum and
 /// pass it to [`StoreClientBuilder::connect_request_compression`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ConnectRequestCompression {
-    /// `compress_requests("zstd")`.
+    /// Do not compress outgoing request bodies.
     #[default]
+    None,
+    /// `compress_requests("zstd")`.
     Zstd,
     /// `compress_requests("gzip")`.
     Gzip,
 }
 
 impl ConnectRequestCompression {
-    fn wire_name(self) -> &'static str {
+    fn wire_name(self) -> Option<&'static str> {
         match self {
-            Self::Zstd => "zstd",
-            Self::Gzip => "gzip",
+            Self::None => None,
+            Self::Zstd => Some("zstd"),
+            Self::Gzip => Some("gzip"),
         }
     }
 }
@@ -133,16 +138,20 @@ const STORE_CLIENT_MAX_MESSAGE_BYTES: usize = 256 * 1024 * 1024;
 /// Store client defaults: [`connect_compression_registry`] for codecs;
 /// [`PreferZstdHttpClient`] sets `Accept-Encoding: zstd, gzip` on responses.
 ///
-/// Request body compression uses [`ConnectRequestCompression`] (default zstd); connectrpc only
-/// supports one request encoding per config (see [`ConnectRequestCompression`]).
+/// Request body compression uses [`ConnectRequestCompression`] (default none);
+/// connectrpc only supports one request encoding per config (see
+/// [`ConnectRequestCompression`]).
 fn store_connect_client_config(
     base_uri: http::Uri,
     request_compression: ConnectRequestCompression,
 ) -> ClientConfig {
-    ClientConfig::new(base_uri)
+    let config = ClientConfig::new(base_uri)
         .with_compression(proto_connect_compression_registry())
-        .compress_requests(request_compression.wire_name())
-        .with_default_max_message_size(STORE_CLIENT_MAX_MESSAGE_BYTES)
+        .with_default_max_message_size(STORE_CLIENT_MAX_MESSAGE_BYTES);
+    match request_compression.wire_name() {
+        Some(name) => config.compress_requests(name),
+        None => config,
+    }
 }
 
 /// Store client error.
@@ -348,6 +357,10 @@ impl StoreWriteBatch {
         self.entries.clear();
     }
 
+    pub fn reserve(&mut self, additional: usize) {
+        self.entries.reserve(additional);
+    }
+
     pub fn push(
         &mut self,
         client: &StoreClient,
@@ -362,12 +375,7 @@ impl StoreWriteBatch {
     }
 
     pub async fn commit(&self, client: &StoreClient) -> Result<u64, ClientError> {
-        let refs: Vec<(&Key, &[u8])> = self
-            .entries
-            .iter()
-            .map(|(key, value)| (key, value.as_ref()))
-            .collect();
-        client.put_physical(&refs).await
+        client.put_prepared_physical(&self.entries).await
     }
 }
 
@@ -378,7 +386,7 @@ impl StoreWriteBatch {
 /// each writer's input shape differs. Once a caller has a prepared handle,
 /// this trait provides the common lifecycle:
 ///
-/// 1. stage rows into a [`StoreWriteBatch`]
+/// 1. stage rows into a [`StoreWriteBatch`], consuming staged payloads if useful
 /// 2. commit that batch
 /// 3. mark the prepared handle persisted with the returned Store sequence
 ///    number, or failed if staging/commit does not complete
@@ -389,7 +397,7 @@ pub trait StoreBatchUpload {
 
     fn stage_upload(
         &self,
-        prepared: &Self::Prepared,
+        prepared: &mut Self::Prepared,
         batch: &mut StoreWriteBatch,
     ) -> Result<(), Self::Error>;
 
@@ -425,8 +433,9 @@ pub trait StoreBatchUpload {
         Self::Error: 'a,
     {
         Box::pin(async move {
+            let mut prepared = prepared;
             let mut batch = StoreWriteBatch::new();
-            if let Err(err) = self.stage_upload(&prepared, &mut batch) {
+            if let Err(err) = self.stage_upload(&mut prepared, &mut batch) {
                 let message = err.to_string();
                 self.mark_upload_failed(prepared, message).await;
                 return Err(err);
@@ -1149,7 +1158,7 @@ impl StoreClientBuilder {
         self
     }
 
-    /// Codec for compressing **outgoing** RPC request bodies (default [`ConnectRequestCompression::Zstd`]).
+    /// Codec for compressing **outgoing** RPC request bodies (default [`ConnectRequestCompression::None`]).
     pub fn connect_request_compression(mut self, compression: ConnectRequestCompression) -> Self {
         self.connect_request_compression = compression;
         self
@@ -1302,7 +1311,7 @@ impl StoreClient {
     pub fn encode_store_key(&self, key: &Key) -> Result<Key, ClientError> {
         match self.key_prefix {
             Some(prefix) => Ok(prefix.encode_key(key)?),
-            None => Ok(Bytes::copy_from_slice(key)),
+            None => Ok(key.clone()),
         }
     }
 
@@ -1310,14 +1319,14 @@ impl StoreClient {
     pub fn decode_store_key(&self, key: &Key) -> Result<Key, ClientError> {
         match self.key_prefix {
             Some(prefix) => Ok(prefix.decode_key(key)?),
-            None => Ok(Bytes::copy_from_slice(key)),
+            None => Ok(key.clone()),
         }
     }
 
     fn encode_store_range(&self, start: &Key, end: &Key) -> Result<(Key, Key), ClientError> {
         match self.key_prefix {
             Some(prefix) => Ok(prefix.encode_range(start, end)?),
-            None => Ok((Bytes::copy_from_slice(start), Bytes::copy_from_slice(end))),
+            None => Ok((start.clone(), end.clone())),
         }
     }
 
@@ -1415,13 +1424,36 @@ impl StoreClient {
                 ..Default::default()
             });
         }
+        self.send_put(proto_kvs).await
+    }
 
+    async fn put_prepared_physical(&self, kvs: &[(Key, Bytes)]) -> Result<u64, ClientError> {
+        let mut proto_kvs = Vec::with_capacity(kvs.len());
+        for (key, value) in kvs {
+            if !is_valid_key_size(key.len()) {
+                return Err(ClientError::WireFormat(format!(
+                    "key length {} is outside valid store key range ({}..={})",
+                    key.len(),
+                    keys::MIN_KEY_LEN,
+                    MAX_KEY_LEN
+                )));
+            }
+            proto_kvs.push(exoware_proto::common::KvEntry {
+                key: key.to_vec(),
+                value: value.clone(),
+                ..Default::default()
+            });
+        }
+        self.send_put(proto_kvs).await
+    }
+
+    async fn send_put(&self, kvs: Vec<exoware_proto::common::KvEntry>) -> Result<u64, ClientError> {
         let config =
             store_connect_client_config(self.ingest_uri.clone(), self.connect_request_compression);
         let client = IngestServiceClient::new(self.connect_http.clone(), config);
         let response = client
             .put(ProtoPutRequest {
-                kvs: proto_kvs,
+                kvs,
                 ..Default::default()
             })
             .await

@@ -53,15 +53,11 @@ type FixedTestImmutableClient = ImmutableClient<
 >;
 
 fn fresh_immutable(c: StoreClient) -> TestImmutableClient {
-    TestImmutableClient::from_client(
-        c,
-        ((), ((0..=10000).into(), ())),
-        ((), ((0..=10000).into(), ())),
-    )
+    TestImmutableClient::from_client(c, ((), ((0..=10000).into(), ())))
 }
 
 fn fresh_fixed_immutable(c: StoreClient) -> FixedTestImmutableClient {
-    FixedTestImmutableClient::from_client(c, (), ((), ()))
+    FixedTestImmutableClient::from_client(c, ())
 }
 
 type TestImmutableWriter =

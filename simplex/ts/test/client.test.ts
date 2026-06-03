@@ -5,7 +5,7 @@ import {
   SimplexClient,
   SimplexRecordKind,
   headerByDigestKey,
-  createCommonwareSimplexVerifier,
+  createSimplexVerifier,
   createWasmSimplexBlockVerifier,
   createWasmSimplexHeaderVerifier,
   createWasmSimplexVerifier,
@@ -258,29 +258,31 @@ test('WASM block verifier adapter passes payload, header, and body', () => {
   assert.throws(() => createWasmSimplexBlockVerifier({} as never), /missing verify_block/);
 });
 
-test('Commonware WASM verifier adapter is scheme-parameterized', async () => {
+test('Simplex WASM verifier adapter is scheme-parameterized', async () => {
   const headerVerifications: string[] = [];
-  const verifier = createCommonwareSimplexVerifier(
+  const verifier = createSimplexVerifier(
     {
-      verify_notarized_commonware: (scheme, namespace, material, bytes) => ({
+      verify_notarized_payload: (payload, identity, scheme, namespace, material, bytes) => ({
         scheme,
         view: 11n,
         parent: 10n,
-        payload: namespace,
+        payload: payload === 'sha256' ? namespace : new Uint8Array(),
         certificate: material,
         header: bytes,
       }),
-      verify_finalized_commonware: (scheme, namespace, material, bytes) => ({
+      verify_finalized_payload: (payload, identity, scheme, namespace, material, bytes) => ({
         scheme,
         view: '12',
         parent: 11,
-        payload: Array.from(namespace),
+        payload: payload === 'sha256' ? Array.from(namespace) : [],
         certificate: Array.from(material),
         header: Array.from(bytes),
       }),
     },
     {
       scheme: 'bls12381-threshold-vrf-min-sig',
+      payload: 'sha256',
+      identity: 'ed25519',
       namespace: '0a',
       verificationMaterial: '0b',
       verifyHeader: ({ payload, header, raw, context }) => {
@@ -339,10 +341,126 @@ test('Commonware WASM verifier adapter is scheme-parameterized', async () => {
   ]);
 });
 
-test('Commonware WASM verifier adapter rejects failed header verification', async () => {
-  const verifier = createCommonwareSimplexVerifier(
+test('Simplex WASM verifier adapter supports coding commitment payloads', async () => {
+  const calls: string[] = [];
+  const verifier = createSimplexVerifier(
     {
-      verify_notarized_commonware: () => ({
+      verify_notarized_payload: (payload, identity, scheme, namespace, material, bytes) => {
+        calls.push(`notarized:${payload}:${identity}:${scheme}:${bytesToHex(bytes)}`);
+        return {
+          scheme,
+          view: 3n,
+          parent: 2n,
+          payload: namespace,
+          certificate: material,
+          header: bytes,
+        };
+      },
+      verify_finalized_payload: (payload, identity, scheme, namespace, material, bytes) => {
+        calls.push(`finalized:${payload}:${identity}:${scheme}:${bytesToHex(bytes)}`);
+        return {
+          scheme,
+          view: 4n,
+          parent: 3n,
+          payload: namespace,
+          certificate: material,
+          header: bytes,
+        };
+      },
+    },
+    {
+      scheme: 'bls12381-threshold-standard-min-sig',
+      payload: 'coding-commitment',
+      identity: 'ed25519',
+      namespace: 'aa',
+      verificationMaterial: 'bb',
+    },
+  );
+
+  await verifier.verifyNotarization(new Uint8Array([0xc1]), {
+    kind: 'notarization',
+    source: 'get',
+    key: notarizationByViewKey(3),
+    value: new Uint8Array([0xc1]),
+    view: 3n,
+  });
+  await verifier.verifyFinalization(new Uint8Array([0xd1]), {
+    kind: 'finalization',
+    index: 'view',
+    source: 'get',
+    key: finalizationByViewKey(4),
+    value: new Uint8Array([0xd1]),
+    view: 4n,
+  });
+
+  assert.deepEqual(calls, [
+    'notarized:coding-commitment:ed25519:bls12381-threshold-standard-min-sig:c1',
+    'finalized:coding-commitment:ed25519:bls12381-threshold-standard-min-sig:d1',
+  ]);
+});
+
+test('Simplex WASM verifier adapter passes non-SHA payloads through', async () => {
+  const calls: string[] = [];
+  const verifier = createSimplexVerifier(
+    {
+      verify_notarized_payload: (payload, identity, scheme, namespace, material, bytes) => {
+        calls.push(`notarized:${payload}:${identity}:${scheme}:${bytesToHex(bytes)}`);
+        return {
+          scheme,
+          view: 5n,
+          parent: 4n,
+          payload: namespace,
+          certificate: material,
+          header: bytes,
+        };
+      },
+      verify_finalized_payload: (payload, identity, scheme, namespace, material, bytes) => {
+        calls.push(`finalized:${payload}:${identity}:${scheme}:${bytesToHex(bytes)}`);
+        return {
+          scheme,
+          view: 6n,
+          parent: 5n,
+          payload: namespace,
+          certificate: material,
+          header: bytes,
+        };
+      },
+    },
+    {
+      scheme: 'ed25519',
+      payload: 'blake3',
+      identity: 'ed25519',
+      namespace: '01',
+      verificationMaterial: '02',
+    },
+  );
+
+  await verifier.verifyNotarization(new Uint8Array([0xa1]), {
+    kind: 'notarization',
+    source: 'get',
+    key: notarizationByViewKey(5),
+    value: new Uint8Array([0xa1]),
+    view: 5n,
+  });
+  await verifier.verifyFinalization(new Uint8Array([0xb1]), {
+    kind: 'finalization',
+    index: 'view',
+    source: 'get',
+    key: finalizationByViewKey(6),
+    value: new Uint8Array([0xb1]),
+    view: 6n,
+  });
+
+  assert.deepEqual(calls, [
+    'notarized:blake3:ed25519:ed25519:a1',
+    'finalized:blake3:ed25519:ed25519:b1',
+  ]);
+});
+
+test('Simplex WASM verifier adapter rejects failed header verification', async () => {
+  const verifier = createSimplexVerifier(
+    {
+      verify_notarized_payload: () => ({
         scheme: 'ed25519',
         view: 1n,
         parent: 0n,
@@ -350,10 +468,12 @@ test('Commonware WASM verifier adapter rejects failed header verification', asyn
         certificate: [0x02],
         header: [0x03],
       }),
-      verify_finalized_commonware: () => null,
+      verify_finalized_payload: () => null,
     },
     {
       scheme: 'ed25519',
+      payload: 'sha256',
+      identity: 'ed25519',
       namespace: '',
       verificationMaterial: '',
       verifyHeader: () => false,
@@ -372,18 +492,20 @@ test('Commonware WASM verifier adapter rejects failed header verification', asyn
   );
 });
 
-test('Commonware WASM verifier adapter propagates verifier errors', async () => {
-  const verifier = createCommonwareSimplexVerifier(
+test('Simplex WASM verifier adapter propagates verifier errors', async () => {
+  const verifier = createSimplexVerifier(
     {
-      verify_notarized_commonware: () => {
+      verify_notarized_payload: () => {
         throw new Error('failed to decode notarized artifact: bad bytes');
       },
-      verify_finalized_commonware: () => {
+      verify_finalized_payload: () => {
         throw new Error('finalization certificate verification failed');
       },
     },
     {
       scheme: 'ed25519',
+      payload: 'sha256',
+      identity: 'ed25519',
       namespace: '',
       verificationMaterial: '',
     },

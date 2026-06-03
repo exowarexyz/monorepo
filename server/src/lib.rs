@@ -15,7 +15,8 @@ pub use connect::{
     AppState, CompactState, IngestState, QueryState, StreamState,
 };
 pub use engine::{
-    Ingest, Log, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence, StoreEngine,
+    Ingest, Log, LogBatch, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence,
+    StoreEngine,
 };
 pub use reduce::RangeError;
 pub use stream::{StreamHub, StreamNotification, StreamNotifier};
