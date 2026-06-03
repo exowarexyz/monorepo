@@ -1,5 +1,6 @@
 import { createClient, type Client as ConnectClient, type Interceptor, Code, ConnectError } from '@connectrpc/connect';
 import { createConnectTransport } from '@connectrpc/connect-web';
+import { CookieJar, fetchWithCookieJar } from './cookies.js';
 import { StoreClient, type StoreKeyPrefix } from './store.js';
 import { Service as CompactService } from './gen/ts/store/v1/compact_pb.js';
 import { Service as IngestService } from './gen/ts/store/v1/ingest_pb.js';
@@ -80,6 +81,7 @@ export function createTransport(baseUrl: string, tokenOrOptions?: string | Clien
     return createConnectTransport({
         baseUrl: baseUrl.replace(/\/$/, ''),
         interceptors,
+        fetch: fetchWithCookieJar(new CookieJar()),
     });
 }
 

@@ -20,17 +20,18 @@
 //!
 //! Deployments behind a load balancer or proxy may use HTTP sticky sessions: the edge sets a
 //! `Set-Cookie` so each client session sticks to one backend (cache locality). The cookie name is
-//! the edge's concern, not ours -- [`PreferZstdHttpClient`] keeps a small per-host cookie jar: it
-//! stores every `Set-Cookie` from responses and replays them as `Cookie`, but only to the host
-//! that set them. Host scoping means a single client targeting several upstreams (e.g. per-service
-//! load balancers, each naming its cookie `AWSALB`) never sends one upstream's affinity token to
-//! another.
+//! the edge's concern, not ours. [`PreferZstdHttpClient`] keeps a small cookie jar partitioned by
+//! host: it stores every `Set-Cookie` from responses and replays them as `Cookie`, but only to the
+//! host that set them. Host scoping means a single client targeting several upstreams (e.g.
+//! per-service load balancers, each naming its cookie `AWSALB`) never sends one upstream's affinity
+//! token to another. Cookie expiry (`Max-Age`/`Expires`) is honored both at receipt and lazily on
+//! read, so a cookie is dropped once it lapses even if the edge never sends a deletion.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, NaiveDateTime, TimeZone, Utc};
 use connectrpc::client::{BoxFuture, ClientBody, ClientTransport, HttpClient};
 use connectrpc::compression::CompressionRegistry;
 use connectrpc::ConnectError;
@@ -38,7 +39,9 @@ use http::header::{ACCEPT_ENCODING, COOKIE, SET_COOKIE};
 use http::{Request, Response};
 
 // This jar exists for edge affinity, not general browser state. Keep it bounded so a broken or
-// compromised edge cannot amplify memory usage or outbound request headers through Set-Cookie.
+// compromised edge cannot amplify memory usage or outbound request headers through Set-Cookie, and
+// so a client fanning out to many upstreams cannot grow the jar without limit.
+const MAX_HOSTS: usize = 256;
 const MAX_COOKIES_PER_HOST: usize = 16;
 const MAX_COOKIE_BYTES: usize = 4096;
 const MAX_COOKIE_HEADER_BYTES: usize = 8192;
@@ -50,18 +53,33 @@ pub fn connect_compression_registry() -> CompressionRegistry {
     CompressionRegistry::default()
 }
 
+/// One stored cookie value and its optional expiry. A `None` expiry is a session cookie, kept until
+/// overwritten or explicitly deleted.
+#[derive(Clone, Debug)]
+struct StoredCookie {
+    value: String,
+    expires: Option<DateTime<Utc>>,
+}
+
+impl StoredCookie {
+    fn is_expired(&self, now: DateTime<Utc>) -> bool {
+        self.expires.is_some_and(|expiry| expiry <= now)
+    }
+}
+
 /// Wraps [`HttpClient`] so every RPC sends `Accept-Encoding: zstd, gzip` (see module docs).
 ///
 /// Also persists **HTTP sticky sessions** generically: it stores every `Set-Cookie` the edge
 /// returns and replays them as `Cookie` on later requests to the same host, so the same client
-/// handle stays pinned to one upstream -- regardless of the edge's cookie name, and without
-/// leaking one host's cookie to another.
+/// handle stays pinned to one upstream, regardless of the edge's cookie name, and without leaking
+/// one host's cookie to another.
 #[derive(Clone, Debug)]
 pub struct PreferZstdHttpClient {
     inner: HttpClient,
-    /// Per-host cookie jar: request authority (`host` or `host:port`) -> that host's cookies (name -> value).
-    /// Host scoping keeps one upstream's sticky cookie from being replayed to a different host.
-    cookies: Arc<Mutex<BTreeMap<String, BTreeMap<String, String>>>>,
+    /// Cookie jar partitioned by request authority (`host` or `host:port`) -> that host's cookies
+    /// (name -> value). Host scoping keeps one upstream's sticky cookie from being replayed to a
+    /// different host.
+    cookies: Arc<Mutex<BTreeMap<String, BTreeMap<String, StoredCookie>>>>,
 }
 
 impl PreferZstdHttpClient {
@@ -73,16 +91,22 @@ impl PreferZstdHttpClient {
     }
 
     /// Render the `Cookie` header value for `authority` from the jar, or `None` if it holds none.
+    /// Expired cookies are pruned here so a lapsed cookie is dropped even without a deletion from
+    /// the edge.
     fn cookie_header_for(&self, authority: &str) -> Option<String> {
-        let jar = self.cookies.lock().ok()?;
-        let origin = jar.get(authority)?;
+        let mut jar = self.cookies.lock().ok()?;
+        let now = Utc::now();
+        let origin = jar.get_mut(authority)?;
+        origin.retain(|_, cookie| !cookie.is_expired(now));
         if origin.is_empty() {
+            jar.remove(authority);
             return None;
         }
+        let origin = jar.get(authority)?;
         Some(
             origin
                 .iter()
-                .map(|(name, value)| format!("{name}={value}"))
+                .map(|(name, cookie)| format!("{name}={}", cookie.value))
                 .collect::<Vec<_>>()
                 .join("; "),
         )
@@ -96,8 +120,12 @@ impl PreferZstdHttpClient {
         for val in headers.get_all(SET_COOKIE) {
             if let Ok(s) = val.to_str() {
                 match parse_set_cookie(s) {
-                    Some(SetCookieUpdate::Store { name, value }) => {
-                        store_cookie(&mut jar, authority, name, value);
+                    Some(SetCookieUpdate::Store {
+                        name,
+                        value,
+                        expires,
+                    }) => {
+                        store_cookie(&mut jar, authority, name, value, expires);
                     }
                     Some(SetCookieUpdate::Delete { name }) => {
                         if let Some(origin) = jar.get_mut(authority) {
@@ -115,13 +143,22 @@ impl PreferZstdHttpClient {
 }
 
 fn store_cookie(
-    jar: &mut BTreeMap<String, BTreeMap<String, String>>,
+    jar: &mut BTreeMap<String, BTreeMap<String, StoredCookie>>,
     authority: &str,
     name: String,
     value: String,
+    expires: Option<DateTime<Utc>>,
 ) {
     if cookie_pair_len(&name, &value) > MAX_COOKIE_BYTES {
         return;
+    }
+
+    // Evict an arbitrary existing host to make room for a new one rather than rejecting it, so a
+    // long-lived client that rotates through upstreams keeps affinity for whatever it talks to now.
+    if !jar.contains_key(authority) && jar.len() >= MAX_HOSTS {
+        if let Some(victim) = jar.keys().next().cloned() {
+            jar.remove(&victim);
+        }
     }
 
     let origin = jar.entry(authority.to_string()).or_default();
@@ -129,12 +166,15 @@ fn store_cookie(
         return;
     }
 
-    let previous = origin.insert(name.clone(), value);
+    let previous = origin.insert(name.clone(), StoredCookie { value, expires });
     if rendered_cookie_header_len(origin) > MAX_COOKIE_HEADER_BYTES {
-        if let Some(previous) = previous {
-            origin.insert(name, previous);
-        } else {
-            origin.remove(&name);
+        match previous {
+            Some(previous) => {
+                origin.insert(name, previous);
+            }
+            None => {
+                origin.remove(&name);
+            }
         }
     }
 }
@@ -143,10 +183,10 @@ fn cookie_pair_len(name: &str, value: &str) -> usize {
     name.len() + 1 + value.len()
 }
 
-fn rendered_cookie_header_len(cookies: &BTreeMap<String, String>) -> usize {
+fn rendered_cookie_header_len(cookies: &BTreeMap<String, StoredCookie>) -> usize {
     let pair_bytes = cookies
         .iter()
-        .map(|(name, value)| cookie_pair_len(name, value))
+        .map(|(name, cookie)| cookie_pair_len(name, &cookie.value))
         .sum::<usize>();
     pair_bytes + cookies.len().saturating_sub(1) * 2
 }
@@ -188,8 +228,22 @@ impl ClientTransport for PreferZstdHttpClient {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum SetCookieUpdate {
-    Store { name: String, value: String },
-    Delete { name: String },
+    Store {
+        name: String,
+        value: String,
+        expires: Option<DateTime<Utc>>,
+    },
+    Delete {
+        name: String,
+    },
+}
+
+/// Whether a `Set-Cookie`'s lifetime attributes leave it live, dead, or session-scoped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lifetime {
+    Expired,
+    ExpiresAt(DateTime<Utc>),
+    Session,
 }
 
 /// From one `Set-Cookie` header value, extract the cookie update, honoring expiry/deletion
@@ -204,19 +258,25 @@ fn parse_set_cookie(set_cookie: &str) -> Option<SetCookieUpdate> {
         return None;
     }
 
-    if cookie_is_expired(segments) {
-        return Some(SetCookieUpdate::Delete {
+    match cookie_lifetime(segments) {
+        Lifetime::Expired => Some(SetCookieUpdate::Delete {
             name: name.to_string(),
-        });
+        }),
+        Lifetime::ExpiresAt(expiry) => Some(SetCookieUpdate::Store {
+            name: name.to_string(),
+            value: value.to_string(),
+            expires: Some(expiry),
+        }),
+        Lifetime::Session => Some(SetCookieUpdate::Store {
+            name: name.to_string(),
+            value: value.to_string(),
+            expires: None,
+        }),
     }
-
-    Some(SetCookieUpdate::Store {
-        name: name.to_string(),
-        value: value.to_string(),
-    })
 }
 
-fn cookie_is_expired<'a>(attributes: impl IntoIterator<Item = &'a str>) -> bool {
+fn cookie_lifetime<'a>(attributes: impl IntoIterator<Item = &'a str>) -> Lifetime {
+    let now = Utc::now();
     let mut expires = None;
 
     for attr in attributes {
@@ -227,10 +287,17 @@ fn cookie_is_expired<'a>(attributes: impl IntoIterator<Item = &'a str>) -> bool 
         let value = value.trim();
 
         if name.eq_ignore_ascii_case("max-age") {
-            if let Ok(seconds) = value.parse::<i64>() {
-                return seconds <= 0;
+            // Max-Age takes precedence over Expires per RFC 6265.
+            let Ok(seconds) = value.parse::<i64>() else {
+                continue;
+            };
+            if seconds <= 0 {
+                return Lifetime::Expired;
             }
-            continue;
+            return match now.checked_add_signed(Duration::seconds(seconds)) {
+                Some(expiry) => Lifetime::ExpiresAt(expiry),
+                None => Lifetime::Session,
+            };
         }
 
         if name.eq_ignore_ascii_case("expires") {
@@ -238,33 +305,62 @@ fn cookie_is_expired<'a>(attributes: impl IntoIterator<Item = &'a str>) -> bool 
         }
     }
 
-    expires.is_some_and(|expiry| expiry <= Utc::now())
+    match expires {
+        Some(expiry) if expiry <= now => Lifetime::Expired,
+        Some(expiry) => Lifetime::ExpiresAt(expiry),
+        None => Lifetime::Session,
+    }
 }
 
+/// Parse a cookie `Expires` value. Cookie dates are always GMT/UTC but appear in several legacy
+/// formats (RFC 1123, RFC 850 with a two-digit year, dashed variants, and asctime), so try each.
 fn parse_cookie_expires(value: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc2822(value)
-        .map(|date| date.with_timezone(&Utc))
-        .ok()
+    if let Ok(date) = DateTime::parse_from_rfc2822(value) {
+        return Some(date.with_timezone(&Utc));
+    }
+
+    const NAIVE_FORMATS: &[&str] = &[
+        "%a, %d %b %Y %H:%M:%S GMT", // RFC 1123
+        "%a, %d-%b-%Y %H:%M:%S GMT", // RFC 1123 with dashes
+        "%A, %d-%b-%y %H:%M:%S GMT", // RFC 850, two-digit year
+        "%a %b %e %H:%M:%S %Y",      // asctime
+    ];
+    for format in NAIVE_FORMATS {
+        if let Ok(naive) = NaiveDateTime::parse_from_str(value, format) {
+            return Some(Utc.from_utc_datetime(&naive));
+        }
+    }
+    None
 }
 
 fn merge_cookie_header(headers: &mut http::HeaderMap, jar_header: &str) {
-    let mut existing_values = Vec::new();
+    let mut readable = Vec::new();
+    let mut has_opaque = false;
     for value in headers.get_all(COOKIE) {
-        let Ok(value) = value.to_str() else {
-            append_cookie_header(headers, jar_header);
-            return;
-        };
-        existing_values.push(value.to_string());
+        match value.to_str() {
+            Ok(value) => readable.push(value.to_string()),
+            Err(_) => has_opaque = true,
+        }
     }
 
-    if existing_values.is_empty() {
-        insert_cookie_header(headers, jar_header);
+    if !has_opaque {
+        // All existing cookies are readable: merge into a single clean Cookie header.
+        let merged = if readable.is_empty() {
+            jar_header.to_string()
+        } else {
+            merge_cookie_values(readable.iter().map(String::as_str), jar_header)
+        };
+        insert_cookie_header(headers, &merged);
         return;
     }
 
-    let merged = merge_cookie_values(existing_values.iter().map(String::as_str), jar_header);
-    if let Ok(value) = http::HeaderValue::from_str(&merged) {
-        headers.insert(COOKIE, value);
+    // Some existing cookies are opaque (non UTF-8) and cannot be merged into a string. Leave the
+    // existing headers in place and append only the jar cookies whose names do not collide with the
+    // readable existing ones, as an additional Cookie header.
+    let existing_names = cookie_names(readable.iter().map(String::as_str));
+    let additions = jar_cookies_excluding(&existing_names, jar_header);
+    if !additions.is_empty() {
+        append_cookie_header(headers, &additions);
     }
 }
 
@@ -288,7 +384,7 @@ fn merge_cookie_values<'a>(
     let mut existing_names = BTreeSet::new();
 
     for value in existing_values {
-        for cookie in value.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        for cookie in split_cookies(value) {
             if let Some(name) = cookie_name(cookie) {
                 existing_names.insert(name.to_string());
             }
@@ -296,21 +392,40 @@ fn merge_cookie_values<'a>(
         }
     }
 
-    for cookie in jar_header
-        .split(';')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        let should_append = match cookie_name(cookie) {
-            Some(name) => !existing_names.contains(name),
-            None => true,
-        };
-        if should_append {
-            merged.push(cookie.to_string());
-        }
+    let additions = jar_cookies_excluding(&existing_names, jar_header);
+    if !additions.is_empty() {
+        merged.push(additions);
     }
 
     merged.join("; ")
+}
+
+/// Jar cookies whose names are not already present in `existing_names`, rendered as a `Cookie` line.
+/// Jar names never override caller-supplied ones.
+fn jar_cookies_excluding(existing_names: &BTreeSet<String>, jar_header: &str) -> String {
+    split_cookies(jar_header)
+        .filter(|cookie| match cookie_name(cookie) {
+            Some(name) => !existing_names.contains(name),
+            None => true,
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn cookie_names<'a>(values: impl IntoIterator<Item = &'a str>) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for value in values {
+        for cookie in split_cookies(value) {
+            if let Some(name) = cookie_name(cookie) {
+                names.insert(name.to_string());
+            }
+        }
+    }
+    names
+}
+
+fn split_cookies(value: &str) -> impl Iterator<Item = &str> {
+    value.split(';').map(str::trim).filter(|s| !s.is_empty())
 }
 
 fn cookie_name(cookie: &str) -> Option<&str> {
@@ -342,6 +457,7 @@ mod tests {
             Some(SetCookieUpdate::Store {
                 name: "affinity".to_string(),
                 value: "Zm9vYmFy".to_string(),
+                expires: None,
             })
         );
         // A typical load-balancer stickiness cookie (e.g. AWS ALB).
@@ -350,6 +466,7 @@ mod tests {
             Some(SetCookieUpdate::Store {
                 name: "AWSALB".to_string(),
                 value: "abc.def.ghi".to_string(),
+                expires: None,
             })
         );
         // Empty values are valid cookies; deletion is signaled by lifetime attributes below.
@@ -358,6 +475,7 @@ mod tests {
             Some(SetCookieUpdate::Store {
                 name: "AWSALB".to_string(),
                 value: String::new(),
+                expires: None,
             })
         );
     }
@@ -382,15 +500,34 @@ mod tests {
                 name: "AWSALB".to_string(),
             })
         );
-        assert_eq!(
-            parse_set_cookie(
-                "AWSALB=abc; Max-Age=3600; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/"
-            ),
+    }
+
+    #[test]
+    fn parse_set_cookie_max_age_takes_precedence_and_sets_expiry() {
+        // Max-Age beats an already-past Expires, and yields a future expiry.
+        match parse_set_cookie(
+            "AWSALB=abc; Max-Age=3600; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/",
+        ) {
             Some(SetCookieUpdate::Store {
-                name: "AWSALB".to_string(),
-                value: "abc".to_string(),
-            })
-        );
+                name,
+                value,
+                expires,
+            }) => {
+                assert_eq!(name, "AWSALB");
+                assert_eq!(value, "abc");
+                assert!(expires.is_some_and(|e| e > Utc::now()));
+            }
+            other => panic!("expected store, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_cookie_expires_handles_legacy_formats() {
+        assert!(parse_cookie_expires("Sun, 06 Nov 1994 08:49:37 GMT").is_some()); // RFC 1123
+        assert!(parse_cookie_expires("Sun, 06-Nov-1994 08:49:37 GMT").is_some()); // dashed
+        assert!(parse_cookie_expires("Sunday, 06-Nov-94 08:49:37 GMT").is_some()); // RFC 850
+        assert!(parse_cookie_expires("Sun Nov  6 08:49:37 1994").is_some()); // asctime
+        assert!(parse_cookie_expires("not a date").is_none());
     }
 
     #[test]
@@ -407,7 +544,7 @@ mod tests {
             &set_cookie_headers(&["AWSALB=hostB; Path=/"]),
         );
 
-        // Each host replays only its own cookie -- no cross-host clobber or leak.
+        // Each host replays only its own cookie, no cross-host clobber or leak.
         assert_eq!(
             client.cookie_header_for("query.internal:80").as_deref(),
             Some("AWSALB=hostA")
@@ -483,6 +620,27 @@ mod tests {
     }
 
     #[test]
+    fn host_cap_evicts_to_bound_total_hosts() {
+        let client = PreferZstdHttpClient::plaintext();
+        for idx in 0..MAX_HOSTS {
+            client.store_set_cookies(
+                &format!("h{idx:04}.internal:443"),
+                &set_cookie_headers(&["AWSALB=v; Path=/"]),
+            );
+        }
+        assert_eq!(client.cookies.lock().unwrap().len(), MAX_HOSTS);
+
+        client.store_set_cookies(
+            "new.internal:443",
+            &set_cookie_headers(&["AWSALB=v; Path=/"]),
+        );
+
+        let jar = client.cookies.lock().unwrap();
+        assert_eq!(jar.len(), MAX_HOSTS);
+        assert!(jar.contains_key("new.internal:443"));
+    }
+
+    #[test]
     fn cookie_header_size_cap_rejects_insert_that_would_overflow_header() {
         let client = PreferZstdHttpClient::plaintext();
         let first = "a".repeat(MAX_COOKIE_BYTES - "a=".len());
@@ -535,6 +693,60 @@ mod tests {
     }
 
     #[test]
+    fn cookie_header_for_prunes_lapsed_cookies_lazily() {
+        let client = PreferZstdHttpClient::plaintext();
+        {
+            let mut jar = client.cookies.lock().unwrap();
+            let origin = jar.entry("edge.internal:443".to_string()).or_default();
+            origin.insert(
+                "live".to_string(),
+                StoredCookie {
+                    value: "1".to_string(),
+                    expires: None,
+                },
+            );
+            origin.insert(
+                "dead".to_string(),
+                StoredCookie {
+                    value: "2".to_string(),
+                    expires: Some(Utc::now() - Duration::seconds(1)),
+                },
+            );
+        }
+
+        // The lapsed cookie is dropped on read even though no deletion arrived from the edge.
+        assert_eq!(
+            client.cookie_header_for("edge.internal:443").as_deref(),
+            Some("live=1")
+        );
+        assert_eq!(client.cookies.lock().unwrap()["edge.internal:443"].len(), 1);
+    }
+
+    #[test]
+    fn cookie_header_for_drops_host_when_all_cookies_lapsed() {
+        let client = PreferZstdHttpClient::plaintext();
+        {
+            let mut jar = client.cookies.lock().unwrap();
+            jar.entry("edge.internal:443".to_string())
+                .or_default()
+                .insert(
+                    "dead".to_string(),
+                    StoredCookie {
+                        value: "1".to_string(),
+                        expires: Some(Utc::now() - Duration::seconds(1)),
+                    },
+                );
+        }
+
+        assert_eq!(client.cookie_header_for("edge.internal:443"), None);
+        assert!(!client
+            .cookies
+            .lock()
+            .unwrap()
+            .contains_key("edge.internal:443"));
+    }
+
+    #[test]
     fn merge_cookie_values_appends_jar_cookies_to_existing_cookies() {
         assert_eq!(
             merge_cookie_values(["caller=token"].into_iter(), "AWSALB=abc; AWSALBCORS=def"),
@@ -566,5 +778,30 @@ mod tests {
             Some("caller=token; app=session; AWSALB=abc")
         );
         assert_eq!(headers.get_all(COOKIE).iter().count(), 1);
+    }
+
+    #[test]
+    fn merge_cookie_header_preserves_opaque_cookie_and_appends_jar() {
+        let mut headers = http::HeaderMap::new();
+        // A non UTF-8 Cookie value cannot be merged into a string.
+        headers.append(
+            COOKIE,
+            http::HeaderValue::from_bytes(b"opaque=\xff\xfe").unwrap(),
+        );
+        headers.append(COOKIE, "caller=token".parse().unwrap());
+
+        merge_cookie_header(&mut headers, "AWSALB=abc; caller=jar");
+
+        // The opaque and readable existing headers survive, and only the non-colliding jar cookie
+        // is appended as a separate Cookie header.
+        let values: Vec<_> = headers
+            .get_all(COOKIE)
+            .iter()
+            .map(|v| v.as_bytes().to_vec())
+            .collect();
+        assert_eq!(values.len(), 3);
+        assert!(values.contains(&b"opaque=\xff\xfe".to_vec()));
+        assert!(values.contains(&b"caller=token".to_vec()));
+        assert!(values.contains(&b"AWSALB=abc".to_vec()));
     }
 }
