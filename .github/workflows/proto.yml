@@ -24,6 +24,7 @@ jobs:
         uses: bufbuild/buf-setup-action@v1
         with:
           version: 1.67.0
+          github_token: ${{ github.token }}
       - name: Run setup (Rust + Node)
         uses: ./.github/actions/setup
       - name: Buf build
