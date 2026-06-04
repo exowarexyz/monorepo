@@ -143,4 +143,43 @@ describe('fetchWithCookieJar', () => {
             { path: '/final', cookie: 'redirected=1' },
         ]);
     });
+
+    test('does not replay caller cookies when redirect init omits redirect count', async () => {
+        jest.resetModules();
+        const makeFetchCookie = jest.fn((fetchImpl: typeof fetch) => {
+            return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+                const response = await fetchImpl(input, init);
+                await fetchImpl('https://other.internal/final', {
+                    ...init,
+                    headers: new Headers(init?.headers),
+                });
+                return response;
+            };
+        });
+        jest.doMock('fetch-cookie', () => ({ __esModule: true, default: makeFetchCookie }));
+        try {
+            const { CookieJar: MockedCookieJar, fetchWithCookieJar: fetchWithMockedCookieJar } = require('../src/cookies') as typeof import('../src/cookies');
+            const jar = new MockedCookieJar();
+            const seen: Array<{ host: string; cookie: string | null }> = [];
+            const baseFetch: typeof fetch = async (input, init) => {
+                const url = typeof input === 'string' ? input : (input as URL).href;
+                seen.push({
+                    host: new URL(url).host,
+                    cookie: new Headers(init?.headers).get('cookie'),
+                });
+                return responseFor(url);
+            };
+            const wrapped = fetchWithMockedCookieJar(jar, baseFetch);
+
+            await wrapped('https://edge.internal/start', { headers: { cookie: 'caller=token' } });
+
+            expect(seen).toEqual([
+                { host: 'edge.internal', cookie: 'caller=token' },
+                { host: 'other.internal', cookie: null },
+            ]);
+        } finally {
+            jest.dontMock('fetch-cookie');
+            jest.resetModules();
+        }
+    });
 });

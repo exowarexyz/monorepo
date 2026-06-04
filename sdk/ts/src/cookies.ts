@@ -58,12 +58,14 @@ function cookieName(cookie: string): string | null {
 export function fetchWithCookieJar(jar: CookieJar = new CookieJar(), baseFetch: typeof fetch = fetch): typeof fetch {
     return (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
         const callerCookie = requestHeaders(input, init).get('cookie');
+        let forwardedCallerCookie = false;
         const fetchWithCredentials = async (
             currentInput: RequestInfo | URL,
             currentInit?: FetchCookieRequestInit,
         ): Promise<Response> => {
             const headers = requestHeaders(currentInput, currentInit);
-            if (callerCookie && currentInit?.redirectCount === undefined) {
+            if (callerCookie && !forwardedCallerCookie) {
+                forwardedCallerCookie = true;
                 headers.set('cookie', mergeCookieValues(callerCookie, headers.get('cookie')));
             }
             return baseFetch(currentInput, {
