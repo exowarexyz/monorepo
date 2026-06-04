@@ -410,7 +410,7 @@ async fn marshal_resolver_sinks_finalized_chain_from_simplex_api() {
                             "{partition_prefix}-finalizations-by-height-ordinal"
                         ),
                         items_per_section: NZU64!(10),
-                        codec_config: <Scheme as commonware_cryptography::certificate::Scheme>::certificate_codec_config_unbounded(),
+                        codec_config: <Scheme as commonware_cryptography::certificate::Verifier>::certificate_codec_config_unbounded(),
                         replay_buffer: config.replay_buffer,
                         freezer_key_write_buffer: config.key_write_buffer,
                         freezer_value_write_buffer: config.value_write_buffer,
