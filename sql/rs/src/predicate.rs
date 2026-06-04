@@ -49,16 +49,23 @@ pub(crate) struct PrimaryKeyTerminalRange {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct PrimaryKeyPointConstraint {
+    pub(crate) value: CellValue,
+    pub(crate) encoded_width: usize,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) enum PrimaryKeyRangeConstraint {
-    Point(CellValue),
+    Point(PrimaryKeyPointConstraint),
     Terminal(Vec<PrimaryKeyTerminalRange>),
     NotEnforced,
 }
 
-impl PrimaryKeyRangeConstraint {
-    pub(crate) fn is_point(&self) -> bool {
-        matches!(self, Self::Point(_))
-    }
+fn primary_key_point(value: CellValue, encoded_width: usize) -> PrimaryKeyRangeConstraint {
+    PrimaryKeyRangeConstraint::Point(PrimaryKeyPointConstraint {
+        value,
+        encoded_width,
+    })
 }
 
 pub(crate) fn primary_key_range_constraint(
@@ -67,10 +74,9 @@ pub(crate) fn primary_key_range_constraint(
 ) -> PrimaryKeyRangeConstraint {
     match (kind, constraint) {
         (ColumnKind::Utf8, PredicateConstraint::StringEq(value)) => {
-            if encode_string_variable(value).is_ok() {
-                PrimaryKeyRangeConstraint::Point(CellValue::Utf8(value.clone()))
-            } else {
-                PrimaryKeyRangeConstraint::Terminal(Vec::new())
+            match encode_string_variable(value) {
+                Ok(encoded) => primary_key_point(CellValue::Utf8(value.clone()), encoded.len()),
+                Err(_) => PrimaryKeyRangeConstraint::Terminal(Vec::new()),
             }
         }
         (ColumnKind::Int64, PredicateConstraint::IntRange { min, max }) => {
@@ -79,7 +85,7 @@ pub(crate) fn primary_key_range_constraint(
             if lower > upper {
                 PrimaryKeyRangeConstraint::Terminal(Vec::new())
             } else if min.is_some() && min == max {
-                PrimaryKeyRangeConstraint::Point(CellValue::Int64(lower))
+                primary_key_point(CellValue::Int64(lower), kind.key_width())
             } else {
                 PrimaryKeyRangeConstraint::Terminal(vec![PrimaryKeyTerminalRange {
                     lower: CellValue::Int64(lower),
@@ -104,7 +110,7 @@ pub(crate) fn primary_key_range_constraint(
             if lower > upper {
                 PrimaryKeyRangeConstraint::Terminal(Vec::new())
             } else if min.is_some() && min == max {
-                PrimaryKeyRangeConstraint::Point(CellValue::UInt64(lower))
+                primary_key_point(CellValue::UInt64(lower), kind.key_width())
             } else {
                 PrimaryKeyRangeConstraint::Terminal(vec![PrimaryKeyTerminalRange {
                     lower: CellValue::UInt64(lower),
@@ -126,7 +132,7 @@ pub(crate) fn primary_key_range_constraint(
         (ColumnKind::FixedSizeBinary(expected), PredicateConstraint::FixedBinaryEq(value))
             if value.len() == expected =>
         {
-            PrimaryKeyRangeConstraint::Point(CellValue::FixedBinary(value.clone()))
+            primary_key_point(CellValue::FixedBinary(value.clone()), expected)
         }
         (ColumnKind::FixedSizeBinary(expected), PredicateConstraint::FixedBinaryIn(values))
             if !values.is_empty() && values.iter().all(|value| value.len() == expected) =>
@@ -142,6 +148,58 @@ pub(crate) fn primary_key_range_constraint(
             )
         }
         _ => PrimaryKeyRangeConstraint::NotEnforced,
+    }
+}
+
+fn primary_key_value_encoded_width(value: &CellValue, kind: ColumnKind) -> Option<usize> {
+    encode_cell_into_ordered_key_bytes(value, kind)
+        .ok()
+        .map(|encoded| encoded.len())
+}
+
+fn primary_key_prefix_width_fits(
+    model: &TableModel,
+    prefix_encoded_width: usize,
+    value_encoded_width: usize,
+) -> bool {
+    prefix_encoded_width
+        .checked_add(value_encoded_width)
+        .is_some_and(|width| width <= model.primary_key_codec.payload_capacity_bytes())
+}
+
+pub(crate) fn primary_key_range_constraint_for_prefix(
+    model: &TableModel,
+    prefix_encoded_width: usize,
+    kind: ColumnKind,
+    constraint: &PredicateConstraint,
+) -> PrimaryKeyRangeConstraint {
+    match primary_key_range_constraint(kind, constraint) {
+        PrimaryKeyRangeConstraint::Point(point) => {
+            if primary_key_prefix_width_fits(model, prefix_encoded_width, point.encoded_width) {
+                PrimaryKeyRangeConstraint::Point(point)
+            } else {
+                PrimaryKeyRangeConstraint::Terminal(Vec::new())
+            }
+        }
+        PrimaryKeyRangeConstraint::Terminal(spans) => {
+            let fitting_spans = spans
+                .into_iter()
+                .filter(|span| {
+                    let Some(lower_width) = primary_key_value_encoded_width(&span.lower, kind)
+                    else {
+                        return false;
+                    };
+                    let Some(upper_width) = primary_key_value_encoded_width(&span.upper, kind)
+                    else {
+                        return false;
+                    };
+                    primary_key_prefix_width_fits(model, prefix_encoded_width, lower_width)
+                        && primary_key_prefix_width_fits(model, prefix_encoded_width, upper_width)
+                })
+                .collect();
+            PrimaryKeyRangeConstraint::Terminal(fitting_spans)
+        }
+        PrimaryKeyRangeConstraint::NotEnforced => PrimaryKeyRangeConstraint::NotEnforced,
     }
 }
 
@@ -1778,6 +1836,7 @@ impl QueryPredicate {
         }
 
         let mut prefix_values: Vec<CellValue> = Vec::new();
+        let mut prefix_encoded_width = 0usize;
 
         for (&pk_idx, &pk_kind) in model
             .primary_key_indices
@@ -1787,9 +1846,15 @@ impl QueryPredicate {
             let Some(constraint) = self.constraints.get(&pk_idx) else {
                 break;
             };
-            match primary_key_range_constraint(pk_kind, constraint) {
-                PrimaryKeyRangeConstraint::Point(value) => {
-                    prefix_values.push(value);
+            match primary_key_range_constraint_for_prefix(
+                model,
+                prefix_encoded_width,
+                pk_kind,
+                constraint,
+            ) {
+                PrimaryKeyRangeConstraint::Point(point) => {
+                    prefix_encoded_width += point.encoded_width;
+                    prefix_values.push(point.value);
                 }
                 PrimaryKeyRangeConstraint::Terminal(spans) => {
                     let mut ranges = Vec::with_capacity(spans.len());

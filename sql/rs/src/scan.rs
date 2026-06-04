@@ -175,21 +175,43 @@ impl KvScanExec {
     }
 
     fn primary_key_order_columns_after_eq_prefix(&self) -> Vec<usize> {
-        self.model
+        let mut prefix_encoded_width = 0usize;
+        let mut key_columns = Vec::new();
+        let mut in_order_tail = false;
+
+        for (&col_idx, &kind) in self
+            .model
             .primary_key_indices
             .iter()
-            .copied()
-            .zip(self.model.primary_key_kinds.iter().copied())
-            .skip_while(|(col_idx, kind)| {
-                self.predicate
-                    .constraints
-                    .get(col_idx)
-                    .is_some_and(|constraint| {
-                        primary_key_range_constraint(*kind, constraint).is_point()
-                    })
-            })
-            .map(|(col_idx, _kind)| col_idx)
-            .collect()
+            .zip(self.model.primary_key_kinds.iter())
+        {
+            if in_order_tail {
+                key_columns.push(col_idx);
+                continue;
+            }
+
+            let Some(constraint) = self.predicate.constraints.get(&col_idx) else {
+                in_order_tail = true;
+                key_columns.push(col_idx);
+                continue;
+            };
+            match primary_key_range_constraint_for_prefix(
+                &self.model,
+                prefix_encoded_width,
+                kind,
+                constraint,
+            ) {
+                PrimaryKeyRangeConstraint::Point(point) => {
+                    prefix_encoded_width += point.encoded_width;
+                }
+                PrimaryKeyRangeConstraint::Terminal(_) | PrimaryKeyRangeConstraint::NotEnforced => {
+                    in_order_tail = true;
+                    key_columns.push(col_idx);
+                }
+            }
+        }
+
+        key_columns
     }
 
     pub(crate) fn plan_diagnostics(&self) -> DataFusionResult<AccessPathDiagnostics> {

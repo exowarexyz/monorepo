@@ -345,6 +345,7 @@ impl ScanAccessPlan {
 
     pub(crate) fn predicate_fully_enforced_by_primary_key(&self, model: &TableModel) -> bool {
         let mut enforced_pk_positions = vec![false; model.primary_key_indices.len()];
+        let mut prefix_encoded_width = 0usize;
 
         for (pk_pos, &kind) in model.primary_key_kinds.iter().enumerate() {
             let Some(constraint) = self.predicate_checks.iter().find_map(|check| match check {
@@ -357,9 +358,15 @@ impl ScanAccessPlan {
                 break;
             };
 
-            match primary_key_range_constraint(kind, constraint) {
-                PrimaryKeyRangeConstraint::Point(_) => {
+            match primary_key_range_constraint_for_prefix(
+                model,
+                prefix_encoded_width,
+                kind,
+                constraint,
+            ) {
+                PrimaryKeyRangeConstraint::Point(point) => {
                     enforced_pk_positions[pk_pos] = true;
+                    prefix_encoded_width += point.encoded_width;
                 }
                 PrimaryKeyRangeConstraint::Terminal(_) => {
                     enforced_pk_positions[pk_pos] = true;

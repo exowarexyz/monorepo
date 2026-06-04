@@ -2953,6 +2953,21 @@ mod tests {
     }
 
     #[test]
+    fn oversized_utf8_primary_key_constraint_is_empty_terminal_range() {
+        let too_large = "a".repeat(exoware_sdk::keys::MAX_KEY_LEN + 1);
+        match primary_key_range_constraint(
+            ColumnKind::Utf8,
+            &PredicateConstraint::StringEq(too_large),
+        ) {
+            PrimaryKeyRangeConstraint::Terminal(spans) => assert!(
+                spans.is_empty(),
+                "unencodable UTF-8 PK equality should be impossible"
+            ),
+            other => panic!("unexpected oversized UTF-8 PK constraint: {other:?}"),
+        }
+    }
+
+    #[test]
     fn in_predicate_generates_multiple_index_ranges() {
         let (model, specs) = test_model();
         let region_idx = *model.columns_by_name.get("region").unwrap();
@@ -3088,6 +3103,41 @@ mod tests {
             ranges.len(),
             2,
             "duplicate FixedBinary IN values must be deduped"
+        );
+    }
+
+    #[test]
+    fn composite_utf8_primary_key_prefix_overflow_produces_no_ranges() {
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("a", DataType::Utf8, false),
+                TableColumnConfig::new("b", DataType::Utf8, false),
+            ],
+            vec!["a".to_string(), "b".to_string()],
+            vec![],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let capacity = model.primary_key_codec.payload_capacity_bytes();
+        let a = "a".repeat(capacity - 10);
+        let b = "b".repeat(10);
+        let a_width = encode_string_variable(&a).expect("a should encode").len();
+        let b_width = encode_string_variable(&b).expect("b should encode").len();
+        assert!(a_width <= capacity, "first component should fit alone");
+        assert!(
+            a_width + b_width > capacity,
+            "composite UTF-8 prefix should overflow"
+        );
+
+        let mut pred = QueryPredicate::default();
+        pred.constraints.insert(0, PredicateConstraint::StringEq(a));
+        pred.constraints.insert(1, PredicateConstraint::StringEq(b));
+
+        let ranges = pred.primary_key_ranges(&model).unwrap();
+        assert!(
+            ranges.is_empty(),
+            "overflowing composite UTF-8 PK equality can never match"
         );
     }
 
@@ -6746,7 +6796,11 @@ mod tests {
         let ctx = SessionContext::new();
         schema.register_all(&ctx).expect("register");
 
-        let oversized = "a".repeat(exoware_sdk::keys::MAX_KEY_LEN + 1);
+        let oversized = "a".repeat(
+            primary_key_codec(0)
+                .expect("primary-key codec")
+                .payload_capacity_bytes(),
+        );
         let sql = format!("SELECT id FROM items WHERE id = '{oversized}'");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
