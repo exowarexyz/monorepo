@@ -303,10 +303,10 @@ struct Writer {
 }
 
 impl Writer {
-    /// Starts the two-stage write pipeline. `prepare` drains queued requests, assigns a contiguous
-    /// sequence number to each, and builds size-capped `WriteBatch` groups; `commit` syncs each
-    /// group and resolves its requests. Keeping `commit` on its own thread lets `prepare` build the
-    /// next wave while the current one is being fsync'd.
+    /// Starts the two-stage write pipeline. `prepare` drains queued requests up to the configured
+    /// byte cap, assigns a contiguous sequence number to each, and builds a size-capped
+    /// `WriteBatch`; `commit` syncs each group and resolves its requests. Keeping `commit` on its
+    /// own thread lets `prepare` build the next wave while the current one is being fsync'd.
     fn start(
         db: Arc<DB>,
         sequence: Arc<AtomicU64>,
@@ -385,9 +385,10 @@ impl Drop for Writer {
     }
 }
 
-/// Drains each wave of queued requests, assigns contiguous sequence numbers, builds size-capped
-/// commit groups, and hands them to `commit`. After a commit failure bumps the epoch, the next wave
-/// re-syncs `next` to the durable frontier so the abandoned sequence numbers are re-allocated.
+/// Drains each byte-bounded wave of queued requests, assigns contiguous sequence numbers, builds a
+/// size-capped commit group, and hands it to `commit`. After a commit failure bumps the epoch, the
+/// next wave re-syncs `next` to the durable frontier so the abandoned sequence numbers are
+/// re-allocated.
 fn run_prepare(
     db: Arc<DB>,
     sequence: Arc<AtomicU64>,
@@ -408,18 +409,25 @@ fn run_prepare(
             next = sequence.load(Ordering::Acquire);
         }
 
-        let (requests, disconnected) = drain_queued_requests(&receiver, first);
-        match assign_sequences(next, requests) {
-            Ok(writes) => {
-                if let Some(last) = writes.last() {
-                    next = last.sequence;
-                }
-                let groups = build_prepared_writes(&db, writes, max_commit_batch_bytes, seen_epoch);
-                if !forward_groups(&sender, groups) {
-                    break;
-                }
+        let (group, disconnected) = match prepare_queued_write(
+            &db,
+            &receiver,
+            first,
+            next,
+            max_commit_batch_bytes,
+            seen_epoch,
+        ) {
+            Ok(prepared) => prepared,
+            Err((requests, error)) => {
+                fail_requests(requests, error);
+                continue;
             }
-            Err((requests, error)) => fail_requests(requests, error),
+        };
+        if let Some(last) = group.writes.last() {
+            next = last.sequence;
+        }
+        if !forward_group(&sender, group) {
+            break;
         }
 
         if disconnected {
@@ -428,18 +436,54 @@ fn run_prepare(
     }
 }
 
-/// Reads every request already queued behind `first` without waiting for new arrivals.
-fn drain_queued_requests(
+/// Builds one prepared write from requests already queued behind `first` without waiting for new
+/// arrivals, stopping once the accumulated RocksDB batch reaches the soft byte cap. The request
+/// that crosses the cap stays in the wave so a single large request can still make progress.
+fn prepare_queued_write(
+    db: &DB,
     receiver: &mpsc::Receiver<WriteRequest>,
     first: WriteRequest,
-) -> (Vec<WriteRequest>, bool) {
-    let mut requests = Vec::with_capacity(64);
-    requests.push(first);
+    from: u64,
+    max_batch_bytes: usize,
+    epoch: u64,
+) -> Result<(PreparedWrite, bool), (Vec<WriteRequest>, String)> {
+    let mut writes = Vec::with_capacity(64);
+    let mut batch = rocksdb::WriteBatch::default();
+    let mut next = from;
+    let mut request = first;
     let mut disconnected = false;
 
     loop {
+        next = match next.checked_add(1) {
+            Some(next) => next,
+            None => {
+                return Err((
+                    vec![request],
+                    "rocks sequence number overflowed".to_string(),
+                ));
+            }
+        };
+        let write = AssignedWrite {
+            sequence: next,
+            request,
+        };
+        if let Err(error) = append_assigned_write_batch(db, &mut batch, &write) {
+            writes.push(write);
+            let group = PreparedWrite {
+                writes,
+                batch: Err(error),
+                batch_bytes: 0,
+                epoch,
+            };
+            return Ok((group, disconnected));
+        }
+        writes.push(write);
+        if batch.size_in_bytes() >= max_batch_bytes || next == u64::MAX {
+            break;
+        }
+
         match receiver.try_recv() {
-            Ok(request) => requests.push(request),
+            Ok(next_request) => request = next_request,
             Err(mpsc::TryRecvError::Empty) => break,
             Err(mpsc::TryRecvError::Disconnected) => {
                 disconnected = true;
@@ -448,44 +492,17 @@ fn drain_queued_requests(
         }
     }
 
-    (requests, disconnected)
+    Ok((
+        finalize_prepared_write(db, writes, batch, epoch),
+        disconnected,
+    ))
 }
 
-/// Pairs each request with a contiguous sequence number starting at `from + 1`.
-fn assign_sequences(
-    from: u64,
-    requests: Vec<WriteRequest>,
-) -> Result<Vec<AssignedWrite>, (Vec<WriteRequest>, String)> {
-    let fits = u64::try_from(requests.len())
-        .ok()
-        .and_then(|count| from.checked_add(count))
-        .is_some();
-    if !fits {
-        return Err((requests, "rocks sequence number overflowed".to_string()));
-    }
-
-    let mut sequence = from;
-    let writes = requests
-        .into_iter()
-        .map(|request| {
-            sequence += 1;
-            AssignedWrite { sequence, request }
-        })
-        .collect();
-    Ok(writes)
-}
-
-/// Sends each group to `commit`, returning false (and failing any unsent groups) if it has stopped.
-fn forward_groups(sender: &mpsc::SyncSender<PreparedWrite>, groups: Vec<PreparedWrite>) -> bool {
-    let mut groups = groups.into_iter();
-    for group in groups.by_ref() {
-        if let Err(error) = sender.send(group) {
-            fail_assigned_writes(error.0.writes, "rocks commit worker stopped".to_string());
-            for remaining in groups {
-                fail_assigned_writes(remaining.writes, "rocks commit worker stopped".to_string());
-            }
-            return false;
-        }
+/// Sends one group to `commit`, returning false if it has stopped.
+fn forward_group(sender: &mpsc::SyncSender<PreparedWrite>, group: PreparedWrite) -> bool {
+    if let Err(error) = sender.send(group) {
+        fail_assigned_writes(error.0.writes, "rocks commit worker stopped".to_string());
+        return false;
     }
     true
 }
@@ -535,7 +552,12 @@ fn commit_group(
         Ok((writes, last_sequence)) => {
             // Release so `current_sequence` readers only observe rows that are already durable.
             sequence.store(last_sequence, Ordering::Release);
-            debug!(requests, batch_bytes, sequence = last_sequence, "committed write batch");
+            debug!(
+                requests,
+                batch_bytes,
+                sequence = last_sequence,
+                "committed write batch"
+            );
             complete_assigned_writes(writes);
             last_sequence
         }
@@ -568,53 +590,6 @@ fn write_prepared_group(
         Ok(()) => Ok((writes, last_sequence)),
         Err(error) => Err((writes, error)),
     }
-}
-
-/// Builds RocksDB batches from contiguous sequence numbers, cutting after the soft size cap. Every
-/// group is tagged with `epoch` so `commit` can reject groups assigned under a superseded frontier.
-fn build_prepared_writes(
-    db: &DB,
-    writes: Vec<AssignedWrite>,
-    max_batch_bytes: usize,
-    epoch: u64,
-) -> Vec<PreparedWrite> {
-    let mut prepared = Vec::new();
-    let mut current_writes = Vec::new();
-    let mut batch = rocksdb::WriteBatch::default();
-    let mut writes = writes.into_iter();
-
-    while let Some(write) = writes.next() {
-        match append_assigned_write_batch(db, &mut batch, &write) {
-            Ok(()) => {
-                current_writes.push(write);
-                if batch.size_in_bytes() >= max_batch_bytes {
-                    prepared.push(finalize_prepared_write(
-                        db,
-                        std::mem::take(&mut current_writes),
-                        std::mem::take(&mut batch),
-                        epoch,
-                    ));
-                }
-            }
-            Err(error) => {
-                current_writes.push(write);
-                current_writes.extend(writes);
-                prepared.push(PreparedWrite {
-                    writes: current_writes,
-                    batch: Err(error),
-                    batch_bytes: 0,
-                    epoch,
-                });
-                return prepared;
-            }
-        }
-    }
-
-    if !current_writes.is_empty() {
-        prepared.push(finalize_prepared_write(db, current_writes, batch, epoch));
-    }
-
-    prepared
 }
 
 fn finalize_prepared_write(
@@ -1071,6 +1046,19 @@ mod tests {
         response_entries(batch.decode_response().expect("decode batch response"))
     }
 
+    fn encoded_log_entry(sequence: u64, key: &'static [u8], value: &'static [u8]) -> Vec<u8> {
+        StreamGetResponse {
+            sequence_number: sequence,
+            entries: vec![KvEntry {
+                key: key.to_vec(),
+                value: Bytes::from_static(value),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
     /// Builds a group whose batch is already an error, modeling a build/commit failure for a
     /// contiguous run of assigned sequence numbers tagged with `epoch`.
     fn failing_group(
@@ -1136,10 +1124,21 @@ mod tests {
     }
 
     fn prepared_write(db: &DB, epoch: u64, writes: Vec<AssignedWrite>) -> PreparedWrite {
-        build_prepared_writes(db, writes, DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES, epoch)
-            .into_iter()
-            .next()
-            .expect("prepared write")
+        let mut prepared = Vec::with_capacity(writes.len());
+        let mut batch = rocksdb::WriteBatch::default();
+        for write in writes {
+            if let Err(error) = append_assigned_write_batch(db, &mut batch, &write) {
+                prepared.push(write);
+                return PreparedWrite {
+                    writes: prepared,
+                    batch: Err(error),
+                    batch_bytes: 0,
+                    epoch,
+                };
+            }
+            prepared.push(write);
+        }
+        finalize_prepared_write(db, prepared, batch, epoch)
     }
 
     #[test]
@@ -1158,7 +1157,9 @@ mod tests {
     }
 
     #[test]
-    fn drain_queued_requests_collects_all_pending() {
+    fn prepare_queued_write_collects_all_pending_below_byte_cap() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
         let (sender, receiver) = mpsc::channel();
         sender.send(write_request(b"a")).expect("send");
         sender.send(write_request(b"b")).expect("send");
@@ -1166,69 +1167,60 @@ mod tests {
         drop(sender);
 
         let first = receiver.recv().expect("first request");
-        let (requests, disconnected) = drain_queued_requests(&receiver, first);
-        assert_eq!(requests.len(), 3);
+        let (group, disconnected) = match prepare_queued_write(
+            &store.db,
+            &receiver,
+            first,
+            0,
+            DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES,
+            7,
+        ) {
+            Ok(prepared) => prepared,
+            Err((_, error)) => panic!("{error}"),
+        };
+        assert_eq!(group.writes.len(), 3);
+        assert!(group.batch.is_ok());
+        assert!(group.batch_bytes > 0);
+        assert_eq!(group.epoch, 7);
         assert!(disconnected);
     }
 
     #[test]
-    fn assign_sequences_numbers_requests_contiguously() {
-        let Ok(writes) = assign_sequences(
-            0,
-            vec![write_request(b"a"), write_request(b"b"), write_request(b"c")],
-        ) else {
-            panic!("assign should succeed");
-        };
-
-        assert_eq!(
-            writes.iter().map(|write| write.sequence).collect::<Vec<_>>(),
-            vec![1, 2, 3]
-        );
-        assert!(writes.iter().all(|write| write.request.kvs.len() == 1));
-    }
-
-    #[test]
-    fn assign_sequences_continues_from_prior_frontier() {
-        let Ok(writes) = assign_sequences(10, vec![write_request(b"a"), write_request(b"b")]) else {
-            panic!("assign should succeed");
-        };
-
-        assert_eq!(
-            writes.iter().map(|write| write.sequence).collect::<Vec<_>>(),
-            vec![11, 12]
-        );
-    }
-
-    #[test]
-    fn builder_cuts_prepared_writes_after_soft_size_cap() {
+    fn prepare_queued_write_stops_after_soft_byte_cap() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
-        let prepared = build_prepared_writes(
-            &store.db,
-            vec![
-                assigned_write(1, b"a", b"1"),
-                assigned_write(2, b"b", b"2"),
-                assigned_write(3, b"c", b"3"),
-            ],
-            1,
-            7,
-        );
+        let (sender, receiver) = mpsc::channel();
+        sender.send(write_request(b"a")).expect("send");
+        sender.send(write_request(b"b")).expect("send");
+        sender.send(write_request(b"c")).expect("send");
+        drop(sender);
 
-        assert_eq!(prepared.len(), 3);
+        let first = receiver.recv().expect("first request");
+        let (group, disconnected) = match prepare_queued_write(&store.db, &receiver, first, 0, 1, 7)
+        {
+            Ok(prepared) => prepared,
+            Err((_, error)) => panic!("{error}"),
+        };
+
+        assert_eq!(group.writes.len(), 1);
+        assert_eq!(group.writes[0].request.kvs[0].0.as_ref(), b"a");
+        assert!(group.batch.is_ok());
+        assert!(group.batch_bytes >= 1);
+        assert_eq!(group.epoch, 7);
+        assert!(!disconnected);
         assert_eq!(
-            prepared
-                .iter()
-                .flat_map(|write| write.writes.iter().map(|write| write.sequence))
-                .collect::<Vec<_>>(),
-            vec![1, 2, 3]
+            receiver
+                .try_recv()
+                .expect("next wave should keep queued request")
+                .kvs[0]
+                .0
+                .as_ref(),
+            b"b"
         );
-        assert!(prepared
-            .iter()
-            .all(|write| write.writes.len() == 1 && write.batch_bytes > 0 && write.epoch == 7));
     }
 
     #[tokio::test]
-    async fn forward_groups_fails_requests_when_commit_stopped() {
+    async fn forward_group_fails_request_when_commit_stopped() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
         let (group_sender, group_receiver) = mpsc::sync_channel(0);
@@ -1236,7 +1228,7 @@ mod tests {
 
         let (write, result) = assigned_write_with_response(1, b"a", b"1");
         let group = prepared_write(&store.db, 0, vec![write]);
-        let forwarded = forward_groups(&group_sender, vec![group]);
+        let forwarded = forward_group(&group_sender, group);
 
         assert!(!forwarded);
         let error = result
@@ -1319,7 +1311,10 @@ mod tests {
             let current = epoch.load(Ordering::Acquire);
             let (group, receivers) = failing_group(current, &[(1, b"k", b"v")], "boom");
             let committed = commit_group(&store.db, &store.sequence, &epoch, 0, group);
-            assert_eq!(committed, 0, "attempt {attempt:?} must not advance the frontier");
+            assert_eq!(
+                committed, 0,
+                "attempt {attempt:?} must not advance the frontier"
+            );
             assert_eq!(epoch.load(Ordering::Acquire), current + 1);
             for receiver in receivers {
                 assert_eq!(receiver.await.expect("response"), Err("boom".to_string()));
@@ -1334,6 +1329,49 @@ mod tests {
         assert_eq!(committed, 1);
         assert_eq!(result.await.expect("response"), Ok(1));
         assert_eq!(store.current_sequence(), 1);
+    }
+
+    #[tokio::test]
+    async fn reused_sequence_overwrites_abandoned_log_row() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let epoch = AtomicU64::new(0);
+
+        // Model an abandoned sequence index: the durable frontier is still 0, but a row
+        // already exists at the next log key and must be replaced by the successful retry.
+        store
+            .db
+            .put_cf(
+                store.log_cf(),
+                sequence_log_key(1),
+                encoded_log_entry(1, b"k", b"stale"),
+            )
+            .expect("seed abandoned log row");
+        assert_eq!(
+            batch_entries(store.get_batch(1).await.expect("get").expect("retained")),
+            vec![(Bytes::from_static(b"k"), Bytes::from_static(b"stale"))]
+        );
+
+        let (failed, receivers) = failing_group(0, &[(1, b"k", b"failed")], "boom");
+        let committed = commit_group(&store.db, &store.sequence, &epoch, 0, failed);
+        assert_eq!(committed, 0);
+        assert_eq!(store.current_sequence(), 0);
+        assert_eq!(epoch.load(Ordering::Acquire), 1);
+        for receiver in receivers {
+            assert_eq!(receiver.await.expect("response"), Err("boom".to_string()));
+        }
+
+        let (write, result) = assigned_write_with_response(1, b"k", b"new");
+        let group = prepared_write(&store.db, 1, vec![write]);
+        let committed = commit_group(&store.db, &store.sequence, &epoch, committed, group);
+
+        assert_eq!(committed, 1);
+        assert_eq!(result.await.expect("response"), Ok(1));
+        assert_eq!(store.current_sequence(), 1);
+        assert_eq!(
+            batch_entries(store.get_batch(1).await.expect("get").expect("retained")),
+            vec![(Bytes::from_static(b"k"), Bytes::from_static(b"new"))]
+        );
     }
 
     #[tokio::test]
