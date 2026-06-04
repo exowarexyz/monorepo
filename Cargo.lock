@@ -1643,7 +1643,6 @@ dependencies = [
  "document-features",
  "idna",
  "log",
- "publicsuffix",
  "time",
  "url",
 ]
@@ -2820,6 +2819,7 @@ dependencies = [
  "http",
  "http-body",
  "hyper",
+ "psl",
  "regex",
  "reqwest",
  "serde",
@@ -4615,6 +4615,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "psl"
+version = "2.1.212"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9f6415ab1b08394487005d41ae7ee69e69903efa1ace538f3b274db605bf8ec"
+dependencies = [
+ "psl-types",
+]
+
+[[package]]
 name = "psl-types"
 version = "2.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4628,16 +4637,6 @@ checksum = "3852766467df634d74f0b2d7819bf8dc483a0eb2e3b0f50f756f9cfe8b0d18d8"
 dependencies = [
  "ar_archive_writer",
  "cc",
-]
-
-[[package]]
-name = "publicsuffix"
-version = "2.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f42ea446cab60335f76979ec15e12619a2165b5ae2c12166bef27d283a9fadf"
-dependencies = [
- "idna",
- "psl-types",
 ]
 
 [[package]]

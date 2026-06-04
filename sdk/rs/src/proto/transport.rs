@@ -29,7 +29,7 @@ use std::sync::Mutex;
 use connectrpc::client::{BoxFuture, ClientBody, ClientTransport, HttpClient};
 use connectrpc::compression::CompressionRegistry;
 use connectrpc::ConnectError;
-use cookie_store::CookieStore;
+use cookie_store::{Cookie, CookieDomain, CookieStore};
 use http::header::{ACCEPT_ENCODING, COOKIE, SET_COOKIE};
 use http::{Request, Response};
 use reqwest::Url;
@@ -77,10 +77,26 @@ impl PreferZstdHttpClient {
         };
         for val in headers.get_all(SET_COOKIE) {
             if let Ok(s) = val.to_str() {
-                let _ = jar.parse(s, url);
+                if let Some(cookie) = parse_set_cookie(s, url) {
+                    let _ = jar.insert(cookie, url);
+                }
             }
         }
     }
+}
+
+/// Parse one `Set-Cookie` header and reject cookies scoped to a public suffix.
+fn parse_set_cookie(set_cookie: &str, url: &Url) -> Option<Cookie<'static>> {
+    let cookie = Cookie::parse(set_cookie, url).ok()?;
+    if let CookieDomain::Suffix(domain) = &cookie.domain {
+        // `cookie_store` needs a dynamic suffix list; `psl` supplies the compiled Mozilla list.
+        if psl::suffix(domain.as_bytes())
+            .is_some_and(|suffix| suffix.is_known() && suffix == domain.as_str())
+        {
+            return None;
+        }
+    }
+    Some(cookie.into_owned())
 }
 
 fn request_url(uri: &http::Uri) -> Option<Url> {
@@ -133,8 +149,8 @@ fn merge_cookie_header(headers: &mut http::HeaderMap, jar_header: &str) {
         }
     }
 
+    // All existing cookies are readable: merge into a single clean Cookie header.
     if !has_opaque {
-        // All existing cookies are readable: merge into a single clean Cookie header.
         let merged = if readable.is_empty() {
             jar_header.to_string()
         } else {
@@ -308,6 +324,25 @@ mod tests {
         );
         assert_eq!(
             client.cookie_header_for(&url("https://query.example.com/other")),
+            None
+        );
+    }
+
+    #[test]
+    fn public_suffix_domain_cookies_are_rejected() {
+        let client = PreferZstdHttpClient::plaintext();
+
+        client.store_set_cookies(
+            &url("https://api.example.com/rpc"),
+            &set_cookie_headers(&["leak=1; Domain=com; Path=/"]),
+        );
+
+        assert_eq!(
+            client.cookie_header_for(&url("https://api.example.com/rpc")),
+            None
+        );
+        assert_eq!(
+            client.cookie_header_for(&url("https://other.com/rpc")),
             None
         );
     }

@@ -51,6 +51,31 @@ describe('fetchWithCookieJar', () => {
         expect(seen[2].cookie).toBeNull();
     });
 
+    test('rejects public suffix domain cookies', async () => {
+        const jar = new CookieJar();
+        const seen: Array<{ host: string; cookie: string | null }> = [];
+        const baseFetch: typeof fetch = async (input, init) => {
+            const url = typeof input === 'string' ? input : (input as URL).href;
+            seen.push({ host: new URL(url).host, cookie: new Headers(init?.headers).get('cookie') });
+            return responseFor(url, {
+                headers: {
+                    'set-cookie': 'leak=1; Domain=com; Path=/',
+                },
+            });
+        };
+        const wrapped = fetchWithCookieJar(jar, baseFetch);
+
+        await wrapped('https://api.example.com/rpc');
+        await wrapped('https://api.example.com/rpc');
+        await wrapped('https://other.com/rpc');
+
+        expect(seen).toEqual([
+            { host: 'api.example.com', cookie: null },
+            { host: 'api.example.com', cookie: null },
+            { host: 'other.com', cookie: null },
+        ]);
+    });
+
     test('removes cookies expired by the server', async () => {
         const jar = new CookieJar();
         const seen: Array<string | null> = [];
