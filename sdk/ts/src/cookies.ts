@@ -8,17 +8,13 @@ type FetchCookieRequestInit = RequestInit & {
     redirectCount?: number;
 };
 
+type PreparedFetchCookieRequest = {
+    input: RequestInfo | URL;
+    init?: FetchCookieRequestInit;
+};
+
 function requestHeaders(input: RequestInfo | URL, init?: RequestInit): Headers {
     return new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
-}
-
-function initWithoutCookieHeader(input: RequestInfo | URL, init?: RequestInit): FetchCookieRequestInit | undefined {
-    const headers = requestHeaders(input, init);
-    if (!headers.has('cookie') && init?.headers === undefined) {
-        return init as FetchCookieRequestInit | undefined;
-    }
-    headers.delete('cookie');
-    return { ...init, headers };
 }
 
 function mergeCookieValues(callerHeader: string, jarHeader: string | null): string {
@@ -64,27 +60,32 @@ function effectiveCredentials(input: RequestInfo | URL, init?: RequestInit): Req
     return init?.credentials ?? (input instanceof Request ? input.credentials : undefined);
 }
 
-// Creates a wrapper-owned Request so fetch-cookie can add jar cookies without mutating caller headers.
-function requestWithoutCookieHeader(input: Request, init?: RequestInit): Request {
+// Normalizes caller input before fetch-cookie can add jar cookies to mutable headers.
+function prepareRequestForCookieJar(input: RequestInfo | URL, init?: RequestInit): PreparedFetchCookieRequest {
     const headers = requestHeaders(input, init);
+    const hasCookie = headers.has('cookie');
     headers.delete('cookie');
-    return new Request(input, { ...init, headers });
-}
 
-// Keeps fetch-cookie redirect state separate from the wrapper-owned Request's effective headers.
-function requestInitForFetchCookie(request: Request, init?: RequestInit): FetchCookieRequestInit {
-    const fetchCookieInit: FetchCookieRequestInit = {
-        headers: new Headers(request.headers),
-        redirect: request.redirect,
-    };
-    const { maxRedirect, redirectCount } = (init ?? {}) as FetchCookieRequestInit;
-    if (maxRedirect !== undefined) {
-        fetchCookieInit.maxRedirect = maxRedirect;
+    if (input instanceof Request) {
+        const request = new Request(input, { ...init, headers });
+        const requestInit: FetchCookieRequestInit = {
+            headers: new Headers(request.headers),
+            redirect: request.redirect,
+        };
+        const { maxRedirect, redirectCount } = (init ?? {}) as FetchCookieRequestInit;
+        if (maxRedirect !== undefined) {
+            requestInit.maxRedirect = maxRedirect;
+        }
+        if (redirectCount !== undefined) {
+            requestInit.redirectCount = redirectCount;
+        }
+        return { input: request, init: requestInit };
     }
-    if (redirectCount !== undefined) {
-        fetchCookieInit.redirectCount = redirectCount;
+
+    if (!hasCookie && init?.headers === undefined) {
+        return { input, init: init as FetchCookieRequestInit | undefined };
     }
-    return fetchCookieInit;
+    return { input, init: { ...init, headers } };
 }
 
 // Wrap a fetch implementation with a real RFC6265 cookie jar. Browsers still use their native jar
@@ -136,10 +137,7 @@ export function fetchWithCookieJar(jar: CookieJar = new CookieJar(), baseFetch: 
             jar,
         );
 
-        if (input instanceof Request) {
-            const request = requestWithoutCookieHeader(input, init);
-            return fetchWithCookies(request, requestInitForFetchCookie(request, init));
-        }
-        return fetchWithCookies(input, initWithoutCookieHeader(input, init));
+        const request = prepareRequestForCookieJar(input, init);
+        return fetchWithCookies(request.input, request.init);
     };
 }
