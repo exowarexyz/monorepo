@@ -38,7 +38,8 @@ export class CookieJar {
     // Render the `Cookie` header value for `authority`, or undefined if it holds none. Expired
     // cookies are pruned here so a lapsed cookie is dropped even without a deletion from the edge.
     cookieHeaderFor(authority: string): string | undefined {
-        const origin = this.hosts.get(authority);
+        const key = authorityKey(authority);
+        const origin = this.hosts.get(key);
         if (!origin) {
             return undefined;
         }
@@ -49,7 +50,7 @@ export class CookieJar {
             }
         }
         if (origin.size === 0) {
-            this.hosts.delete(authority);
+            this.hosts.delete(key);
             return undefined;
         }
         return [...origin.keys()]
@@ -60,21 +61,22 @@ export class CookieJar {
 
     // Store every `Set-Cookie` value under `authority`, so each is only replayed to that host.
     storeSetCookies(authority: string, setCookies: readonly string[]): void {
+        const key = authorityKey(authority);
         for (const raw of setCookies) {
             const update = parseSetCookie(raw);
             if (!update) {
                 continue;
             }
             if (update.kind === 'delete') {
-                const origin = this.hosts.get(authority);
+                const origin = this.hosts.get(key);
                 if (origin) {
                     origin.delete(update.name);
                     if (origin.size === 0) {
-                        this.hosts.delete(authority);
+                        this.hosts.delete(key);
                     }
                 }
             } else {
-                this.store(authority, update.name, update.value, update.expires);
+                this.store(key, update.name, update.value, update.expires);
             }
         }
     }
@@ -114,6 +116,10 @@ export class CookieJar {
     }
 }
 
+function authorityKey(authority: string): string {
+    return authority.toLowerCase();
+}
+
 function cookiePairLen(name: string, value: string): number {
     return name.length + 1 + value.length;
 }
@@ -136,10 +142,7 @@ export function parseSetCookie(setCookie: string): SetCookieUpdate | null {
         return null;
     }
     const name = first.slice(0, eq).trim();
-    const value = first
-        .slice(eq + 1)
-        .trim()
-        .replace(/^"+|"+$/g, '');
+    const value = trimDoubleQuotes(first.slice(eq + 1).trim());
     if (name === '') {
         return null;
     }
@@ -152,6 +155,18 @@ export function parseSetCookie(setCookie: string): SetCookieUpdate | null {
         return { kind: 'store', name, value };
     }
     return { kind: 'store', name, value, expires: lifetime };
+}
+
+function trimDoubleQuotes(value: string): string {
+    let start = 0;
+    let end = value.length;
+    while (start < end && value[start] === '"') {
+        start++;
+    }
+    while (end > start && value[end - 1] === '"') {
+        end--;
+    }
+    return value.slice(start, end);
 }
 
 function cookieLifetime(attributes: readonly string[]): Lifetime {

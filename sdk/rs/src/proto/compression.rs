@@ -76,9 +76,9 @@ impl StoredCookie {
 #[derive(Clone, Debug)]
 pub struct PreferZstdHttpClient {
     inner: HttpClient,
-    /// Cookie jar partitioned by request authority (`host` or `host:port`) -> that host's cookies
-    /// (name -> value). Host scoping keeps one upstream's sticky cookie from being replayed to a
-    /// different host.
+    /// Cookie jar partitioned by normalized request authority (`host` or `host:port`) -> that
+    /// host's cookies (name -> value). Host scoping keeps one upstream's sticky cookie from being
+    /// replayed to a different host.
     cookies: Arc<Mutex<BTreeMap<String, BTreeMap<String, StoredCookie>>>>,
 }
 
@@ -94,15 +94,16 @@ impl PreferZstdHttpClient {
     /// Expired cookies are pruned here so a lapsed cookie is dropped even without a deletion from
     /// the edge.
     fn cookie_header_for(&self, authority: &str) -> Option<String> {
+        let authority = authority_key(authority);
         let mut jar = self.cookies.lock().ok()?;
         let now = Utc::now();
-        let origin = jar.get_mut(authority)?;
+        let origin = jar.get_mut(&authority)?;
         origin.retain(|_, cookie| !cookie.is_expired(now));
         if origin.is_empty() {
-            jar.remove(authority);
+            jar.remove(&authority);
             return None;
         }
-        let origin = jar.get(authority)?;
+        let origin = jar.get(&authority)?;
         Some(
             origin
                 .iter()
@@ -117,6 +118,7 @@ impl PreferZstdHttpClient {
         let Ok(mut jar) = self.cookies.lock() else {
             return;
         };
+        let authority = authority_key(authority);
         for val in headers.get_all(SET_COOKIE) {
             if let Ok(s) = val.to_str() {
                 match parse_set_cookie(s) {
@@ -125,13 +127,13 @@ impl PreferZstdHttpClient {
                         value,
                         expires,
                     }) => {
-                        store_cookie(&mut jar, authority, name, value, expires);
+                        store_cookie(&mut jar, &authority, name, value, expires);
                     }
                     Some(SetCookieUpdate::Delete { name }) => {
-                        if let Some(origin) = jar.get_mut(authority) {
+                        if let Some(origin) = jar.get_mut(&authority) {
                             origin.remove(&name);
                             if origin.is_empty() {
-                                jar.remove(authority);
+                                jar.remove(&authority);
                             }
                         }
                     }
@@ -140,6 +142,10 @@ impl PreferZstdHttpClient {
             }
         }
     }
+}
+
+fn authority_key(authority: &str) -> String {
+    authority.to_ascii_lowercase()
 }
 
 fn store_cookie(
@@ -201,7 +207,7 @@ impl ClientTransport for PreferZstdHttpClient {
     ) -> BoxFuture<'static, Result<Response<Self::ResponseBody>, Self::Error>> {
         // Scope cookies to the target host so one upstream's sticky cookie is never replayed to
         // another. Captured before `request` is moved into the future.
-        let authority = request.uri().authority().map(|a| a.as_str().to_string());
+        let authority = request.uri().authority().map(|a| authority_key(a.as_str()));
 
         if let Some(ref authority) = authority {
             if let Some(header) = self.cookie_header_for(authority) {
@@ -555,6 +561,26 @@ mod tests {
         );
         // A host that set nothing replays nothing.
         assert_eq!(client.cookie_header_for("other.internal:80"), None);
+    }
+
+    #[test]
+    fn cookie_authority_keys_are_case_insensitive() {
+        let client = PreferZstdHttpClient::plaintext();
+
+        client.store_set_cookies(
+            "API.example.com:443",
+            &set_cookie_headers(&["AWSALB=stick; Path=/"]),
+        );
+
+        assert_eq!(
+            client.cookie_header_for("api.example.com:443").as_deref(),
+            Some("AWSALB=stick")
+        );
+        assert!(client
+            .cookies
+            .lock()
+            .unwrap()
+            .contains_key("api.example.com:443"));
     }
 
     #[test]

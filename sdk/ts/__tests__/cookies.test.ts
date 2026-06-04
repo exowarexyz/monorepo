@@ -33,6 +33,14 @@ describe('parseSetCookie', () => {
         });
     });
 
+    test('trims quoted values without regex backtracking', () => {
+        expect(parseSetCookie(`affinity=${'"'.repeat(1024)}value${'"'.repeat(1024)}; Path=/`)).toEqual({
+            kind: 'store',
+            name: 'affinity',
+            value: 'value',
+        });
+    });
+
     test('marks expired cookies for deletion', () => {
         expect(parseSetCookie('AWSALB=abc; Max-Age=0; Path=/')).toEqual({ kind: 'delete', name: 'AWSALB' });
         expect(parseSetCookie('AWSALB=abc; Max-Age=-1; Path=/')).toEqual({ kind: 'delete', name: 'AWSALB' });
@@ -69,6 +77,13 @@ describe('CookieJar', () => {
         expect(jar.cookieHeaderFor('query.internal:80')).toBe('AWSALB=hostA');
         expect(jar.cookieHeaderFor('ingest.internal:80')).toBe('AWSALB=hostB');
         expect(jar.cookieHeaderFor('other.internal:80')).toBeUndefined();
+    });
+
+    test('normalizes host key case', () => {
+        const jar = new CookieJar();
+        jar.storeSetCookies('API.example.com:443', ['AWSALB=stick; Path=/']);
+
+        expect(jar.cookieHeaderFor('api.example.com:443')).toBe('AWSALB=stick');
     });
 
     test('merges multiple cookies for one host deterministically', () => {
