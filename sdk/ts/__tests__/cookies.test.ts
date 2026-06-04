@@ -46,17 +46,21 @@ describe('fetchWithCookieJar', () => {
 
         try {
             const { CookieJar: BrowserCookieJar, fetchWithCookieJar: fetchWithBrowserCookieJar } = require('../src/cookies') as typeof import('../src/cookies');
-            let observedCredentials: RequestCredentials | undefined;
+            const observedCredentials: Array<RequestCredentials | undefined> = [];
             const baseFetch: typeof fetch = async (input, init) => {
-                observedCredentials = init?.credentials;
+                observedCredentials.push(init?.credentials);
                 const url = input instanceof Request ? input.url : typeof input === 'string' ? input : input.href;
                 return responseFor(url);
             };
             const wrapped = fetchWithBrowserCookieJar(new BrowserCookieJar(), baseFetch);
 
             await wrapped('https://edge.internal/rpc');
+            await wrapped(new Request('https://edge.internal/rpc'));
+            await wrapped('https://edge.internal/rpc', { credentials: 'same-origin' });
+            await wrapped('https://edge.internal/rpc', { credentials: 'omit' });
+            await wrapped(new Request('https://edge.internal/rpc', { credentials: 'omit' }));
 
-            expect(observedCredentials).toBe('include');
+            expect(observedCredentials).toEqual(['include', 'include', 'include', 'omit', 'omit']);
         } finally {
             if (hadWindow) {
                 Object.defineProperty(globals, 'window', { value: previousWindow, configurable: true });

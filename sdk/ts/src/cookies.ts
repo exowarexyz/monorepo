@@ -154,7 +154,7 @@ export function fetchWithCookieJar(jar: CookieJar = new CookieJar(), baseFetch: 
         if (hasNativeBrowserCookieJar()) {
             return baseFetch(input, {
                 ...init,
-                credentials: effectiveCredentials(input, init) ?? 'include',
+                credentials: effectiveCredentials(input, init) === 'omit' ? 'omit' : 'include',
             });
         }
 
