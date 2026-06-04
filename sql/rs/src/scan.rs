@@ -292,10 +292,6 @@ impl ExecutionPlan for KvScanExec {
         )))
     }
 
-    fn supports_limit_pushdown(&self) -> bool {
-        true
-    }
-
     fn with_fetch(&self, limit: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {
         let limit = match (self.limit, limit) {
             (Some(existing), Some(limit)) => Some(existing.min(limit)),

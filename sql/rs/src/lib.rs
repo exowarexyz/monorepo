@@ -40,8 +40,11 @@ mod tests {
     use datafusion::arrow::array::{Float64Array, Int64Array, LargeStringArray, StringViewArray};
     use datafusion::arrow::datatypes::{i256, DataType, TimeUnit};
     use datafusion::arrow::record_batch::RecordBatch;
-    use datafusion::common::ScalarValue;
+    use datafusion::common::{config::ConfigOptions, ScalarValue};
     use datafusion::logical_expr::{Expr, Operator};
+    use datafusion::physical_optimizer::limit_pushdown::LimitPushdown;
+    use datafusion::physical_optimizer::PhysicalOptimizerRule;
+    use datafusion::physical_plan::limit::GlobalLimitExec;
     use datafusion::physical_plan::ExecutionPlan;
     use datafusion::prelude::SessionContext;
     use exoware_sdk::keys::{Key, KeyCodec};
@@ -6204,6 +6207,31 @@ mod tests {
         release_second_chunk.notify_one();
     }
 
+    #[test]
+    fn kv_scan_physical_limit_pushdown_sets_leaf_fetch() {
+        let model = Arc::new(simple_int64_model(0));
+        let scan = Arc::new(KvScanExec::new(
+            StoreClient::new("http://127.0.0.1:0"),
+            model.clone(),
+            Arc::new(Vec::new()),
+            QueryPredicate::default(),
+            None,
+            model.schema.clone(),
+            None,
+        ));
+        let limited: Arc<dyn ExecutionPlan> = Arc::new(GlobalLimitExec::new(scan, 0, Some(1)));
+
+        let optimized = LimitPushdown::new()
+            .optimize(limited, &ConfigOptions::new())
+            .expect("limit pushdown");
+
+        let scan = optimized
+            .as_any()
+            .downcast_ref::<KvScanExec>()
+            .expect("physical limit should be converted to a scan fetch");
+        assert_eq!(scan.fetch(), Some(1));
+    }
+
     #[tokio::test]
     async fn kv_scan_activity_desc_order_pushes_reverse_range_limit() {
         let release_second_chunk = Arc::new(Notify::new());
@@ -6444,6 +6472,100 @@ mod tests {
         assert!(
             !explain.contains("KvScanExec: limit=Some(1)"),
             "top-K fetch crossed a filter into the scan:\n{explain}"
+        );
+
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn kv_topk_reverse_scan_keeps_reading_after_later_pk_filter_rejects_first_key() {
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state).await;
+        let client = StoreClient::new(&base_url);
+
+        let schema = KvSchema::new(client.clone())
+            .table(
+                "tx_activity",
+                vec![
+                    TableColumnConfig::new("account", DataType::UInt64, false),
+                    TableColumnConfig::new("height", DataType::UInt64, false),
+                    TableColumnConfig::new("index", DataType::UInt64, false),
+                    TableColumnConfig::new("role", DataType::UInt64, false),
+                ],
+                vec![
+                    "account".to_string(),
+                    "height".to_string(),
+                    "index".to_string(),
+                    "role".to_string(),
+                ],
+                vec![],
+            )
+            .expect("schema");
+        let mut writer = schema.batch_writer();
+        writer
+            .insert(
+                "tx_activity",
+                vec![
+                    CellValue::UInt64(8),
+                    CellValue::UInt64(0),
+                    CellValue::UInt64(0),
+                    CellValue::UInt64(0),
+                ],
+            )
+            .expect("non-matching higher key");
+        writer
+            .insert(
+                "tx_activity",
+                vec![
+                    CellValue::UInt64(7),
+                    CellValue::UInt64(9),
+                    CellValue::UInt64(4),
+                    CellValue::UInt64(1),
+                ],
+            )
+            .expect("matching lower key");
+        writer.flush().await.expect("seed rows");
+
+        let ctx = SessionContext::new();
+        schema.register_all(&ctx).expect("register");
+        let sql = "SELECT account, height \
+                   FROM tx_activity \
+                   WHERE account >= 7 AND height = 9 \
+                   ORDER BY account DESC \
+                   LIMIT 1";
+        let explain = physical_plan_text(&explain_plan_rows(&ctx, sql).await);
+        assert!(
+            explain.contains("KvScanExec: limit=Some(1), direction=Reverse"),
+            "test must exercise reverse top-K scan pushdown:\n{explain}"
+        );
+
+        let batches = ctx
+            .sql(sql)
+            .await
+            .expect("query")
+            .collect()
+            .await
+            .expect("collect");
+        assert_eq!(
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            1
+        );
+        let batch = batches
+            .iter()
+            .find(|batch| batch.num_rows() > 0)
+            .expect("non-empty result batch");
+        assert_eq!(
+            ScalarValue::try_from_array(batch.column(0), 0).expect("account scalar"),
+            ScalarValue::UInt64(Some(7))
+        );
+        assert_eq!(
+            ScalarValue::try_from_array(batch.column(1), 0).expect("height scalar"),
+            ScalarValue::UInt64(Some(9))
         );
 
         let _ = shutdown_tx.send(());
