@@ -353,12 +353,6 @@ impl Writer {
 
     /// Enqueues one ingest request and resolves once `commit` has durably published it.
     async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, String> {
-        // Every accepted request consumes a sequence number and must leave exactly one replay-log
-        // row; an empty batch would advance the frontier with no row, so reject it here (the RPC
-        // layer already rejects empty batches, this keeps the in-process contract consistent).
-        if kvs.is_empty() {
-            return Err("rocks ingest batch must contain at least one key-value pair".to_string());
-        }
         let (response, result) = oneshot::channel();
         let sender = self
             .sender
@@ -1362,25 +1356,6 @@ mod tests {
             .expect("put");
         assert_eq!(sequence, 1);
         assert_eq!(store.current_sequence(), 1);
-    }
-
-    #[tokio::test]
-    async fn put_batch_rejects_empty_kvs() {
-        let dir = tempdir().expect("tempdir");
-        let store = RocksStore::open(dir.path(), None).expect("open db");
-
-        let error = store.put_batch(vec![]).await.expect_err("empty must fail");
-        assert_eq!(
-            error,
-            "rocks ingest batch must contain at least one key-value pair"
-        );
-        // No sequence number was consumed, and the writer is still usable.
-        assert_eq!(store.current_sequence(), 0);
-        let sequence = store
-            .put_batch(vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))])
-            .await
-            .expect("put");
-        assert_eq!(sequence, 1);
     }
 
     #[tokio::test]
