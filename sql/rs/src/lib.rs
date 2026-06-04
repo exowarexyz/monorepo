@@ -6719,6 +6719,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kv_scan_impossible_utf8_primary_key_equality_skips_scan() {
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state.clone()).await;
+        let client = StoreClient::new(&base_url);
+
+        let schema = KvSchema::new(client.clone())
+            .table(
+                "items",
+                vec![TableColumnConfig::new("id", DataType::Utf8, false)],
+                vec!["id".to_string()],
+                vec![],
+            )
+            .expect("schema");
+        let mut writer = schema.batch_writer();
+        writer
+            .insert("items", vec![CellValue::Utf8("present".to_string())])
+            .expect("row");
+        writer.flush().await.expect("seed rows");
+
+        let ctx = SessionContext::new();
+        schema.register_all(&ctx).expect("register");
+
+        let oversized = "a".repeat(exoware_sdk::keys::MAX_KEY_LEN + 1);
+        let sql = format!("SELECT id FROM items WHERE id = '{oversized}'");
+
+        state.range_calls.store(0, AtomicOrdering::SeqCst);
+        let batches = ctx
+            .sql(&sql)
+            .await
+            .expect("query")
+            .collect()
+            .await
+            .expect("collect");
+        assert_eq!(
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            0,
+            "an unencodable PK equality can never match any row"
+        );
+        assert_eq!(
+            state.range_calls.load(AtomicOrdering::SeqCst),
+            0,
+            "an impossible PK equality must not issue a range scan"
+        );
+
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
     async fn kv_scan_index_limit_does_not_push_upstream_when_seen_dedup_can_drop_entries() {
         let observed_limit = Arc::new(AtomicUsize::new(0));
         let config = KvTableConfig::new(

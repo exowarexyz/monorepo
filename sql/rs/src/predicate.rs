@@ -70,7 +70,7 @@ pub(crate) fn primary_key_range_constraint(
             if encode_string_variable(value).is_ok() {
                 PrimaryKeyRangeConstraint::Point(CellValue::Utf8(value.clone()))
             } else {
-                PrimaryKeyRangeConstraint::NotEnforced
+                PrimaryKeyRangeConstraint::Terminal(Vec::new())
             }
         }
         (ColumnKind::Int64, PredicateConstraint::IntRange { min, max }) => {
