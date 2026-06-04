@@ -99,6 +99,7 @@ fn parse_set_cookie(set_cookie: &str, url: &Url) -> Option<Cookie<'static>> {
     Some(cookie.into_owned())
 }
 
+/// Convert an absolute HTTP URI into a URL usable by the cookie store.
 fn request_url(uri: &http::Uri) -> Option<Url> {
     let scheme = uri.scheme_str()?;
     let authority = uri.authority()?;
@@ -139,6 +140,7 @@ impl ClientTransport for PreferZstdHttpClient {
     }
 }
 
+/// Add jar cookies to existing `Cookie` headers without overriding caller-supplied names.
 fn merge_cookie_header(headers: &mut http::HeaderMap, jar_header: &str) {
     let mut readable = Vec::new();
     let mut has_opaque = false;
@@ -170,18 +172,21 @@ fn merge_cookie_header(headers: &mut http::HeaderMap, jar_header: &str) {
     }
 }
 
+/// Replace all existing `Cookie` headers with one validated header value.
 fn insert_cookie_header(headers: &mut http::HeaderMap, value: &str) {
     if let Ok(value) = http::HeaderValue::from_str(value) {
         headers.insert(COOKIE, value);
     }
 }
 
+/// Append one validated `Cookie` header value without disturbing existing headers.
 fn append_cookie_header(headers: &mut http::HeaderMap, value: &str) {
     if let Ok(value) = http::HeaderValue::from_str(value) {
         headers.append(COOKIE, value);
     }
 }
 
+/// Merge readable caller cookie values with jar cookies, preserving caller values on name collision.
 fn merge_cookie_values<'a>(
     existing_values: impl IntoIterator<Item = &'a str>,
     jar_header: &str,
@@ -218,6 +223,7 @@ fn jar_cookies_excluding(existing_names: &BTreeSet<String>, jar_header: &str) ->
         .join("; ")
 }
 
+/// Collect cookie names from one or more readable `Cookie` header values.
 fn cookie_names<'a>(values: impl IntoIterator<Item = &'a str>) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     for value in values {
@@ -230,10 +236,12 @@ fn cookie_names<'a>(values: impl IntoIterator<Item = &'a str>) -> BTreeSet<Strin
     names
 }
 
+/// Split a `Cookie` header body into non-empty `name=value` fragments.
 fn split_cookies(value: &str) -> impl Iterator<Item = &str> {
     value.split(';').map(str::trim).filter(|s| !s.is_empty())
 }
 
+/// Return the non-empty name before the first `=` in a cookie fragment.
 fn cookie_name(cookie: &str) -> Option<&str> {
     let (name, _) = cookie.split_once('=')?;
     let name = name.trim();
@@ -247,10 +255,12 @@ fn cookie_name(cookie: &str) -> Option<&str> {
 mod tests {
     use super::*;
 
+    /// Parse a test URL literal.
     fn url(value: &str) -> Url {
         Url::parse(value).unwrap()
     }
 
+    /// Build a header map containing the supplied `Set-Cookie` values.
     fn set_cookie_headers(values: &[&str]) -> http::HeaderMap {
         let mut headers = http::HeaderMap::new();
         for v in values {
