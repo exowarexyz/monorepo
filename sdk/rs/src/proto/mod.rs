@@ -104,13 +104,13 @@ pub mod stream {
     pub use crate::store::stream::v1::*;
 }
 
-pub mod compression;
 mod range_traversal;
+pub mod transport;
 
-pub use compression::{connect_compression_registry, PreferZstdHttpClient};
 pub use range_traversal::{
     parse_range_traversal_direction, RangeTraversalDirection, RangeTraversalModeError,
 };
+pub use transport::{connect_compression_registry, PreferZstdHttpClient};
 
 use crate::kv_codec::{
     KvExpr, KvFieldKind, KvFieldRef, KvPredicate, KvPredicateCheck, KvPredicateConstraint,
