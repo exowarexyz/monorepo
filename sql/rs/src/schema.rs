@@ -8,6 +8,7 @@ use datafusion::catalog::Session;
 use datafusion::common::{DataFusionError, Result as DataFusionResult, SchemaExt};
 use datafusion::datasource::sink::DataSinkExec;
 use datafusion::datasource::TableProvider;
+use datafusion::execution::SessionStateBuilder;
 use datafusion::logical_expr::dml::InsertOp;
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, TableType};
 use datafusion::physical_plan::ExecutionPlan;
@@ -130,6 +131,7 @@ impl KvSchema {
     pub fn register_all(self, ctx: &SessionContext) -> DataFusionResult<()> {
         let _ = ctx.remove_optimizer_rule("kv_aggregate_pushdown");
         ctx.add_optimizer_rule(Arc::new(KvAggregatePushdownRule::new()));
+        register_kv_physical_optimizer(ctx);
         for (name, config) in &self.tables {
             register_kv_table(ctx, name, self.client.clone(), config.clone())?;
         }
@@ -389,6 +391,28 @@ impl KvSchema {
         send_backfill_event(progress_tx, IndexBackfillEvent::Completed { report });
         Ok(report)
     }
+}
+
+fn register_kv_physical_optimizer(ctx: &SessionContext) {
+    let state_ref = ctx.state_ref();
+    let mut state = state_ref.write();
+    if state
+        .physical_optimizers()
+        .iter()
+        .any(|rule| rule.name() == "kv_topk_sort_pushdown")
+    {
+        return;
+    }
+    let mut rules = state.physical_optimizers().to_vec();
+    let insert_at = rules
+        .iter()
+        .position(|rule| rule.name() == "SanityCheckPlan")
+        .unwrap_or(rules.len());
+    rules.insert(insert_at, Arc::new(KvTopKSortPushdownRule::new()));
+    let new_state = SessionStateBuilder::new_from_existing(state.clone())
+        .with_physical_optimizer_rules(rules)
+        .build();
+    *state = new_state;
 }
 
 pub(crate) fn send_backfill_event(
