@@ -162,10 +162,10 @@ fn merge_cookie_header(headers: &mut http::HeaderMap, jar_header: &str) {
         return;
     }
 
-    // Some existing cookies are opaque (non UTF-8) and cannot be merged into a string. Leave the
-    // existing headers in place and append only the jar cookies whose names do not collide with the
-    // readable existing ones, as an additional Cookie header.
-    let existing_names = cookie_names(readable.iter().map(String::as_str));
+    // Some existing cookies have opaque values and cannot be merged into a string. Leave the
+    // existing headers in place, but still read names from raw header bytes so jar cookies never
+    // duplicate caller-supplied names.
+    let existing_names = cookie_names_from_headers(headers);
     let additions = jar_cookies_excluding(&existing_names, jar_header);
     if !additions.is_empty() {
         append_cookie_header(headers, &additions);
@@ -197,7 +197,7 @@ fn merge_cookie_values<'a>(
     for value in existing_values {
         for cookie in split_cookies(value) {
             if let Some(name) = cookie_name(cookie) {
-                existing_names.insert(name.to_string());
+                existing_names.insert(name.as_bytes().to_vec());
             }
             merged.push(cookie.to_string());
         }
@@ -213,23 +213,23 @@ fn merge_cookie_values<'a>(
 
 /// Jar cookies whose names are not already present in `existing_names`, rendered as a `Cookie` line.
 /// Jar names never override caller-supplied ones.
-fn jar_cookies_excluding(existing_names: &BTreeSet<String>, jar_header: &str) -> String {
+fn jar_cookies_excluding(existing_names: &BTreeSet<Vec<u8>>, jar_header: &str) -> String {
     split_cookies(jar_header)
         .filter(|cookie| match cookie_name(cookie) {
-            Some(name) => !existing_names.contains(name),
+            Some(name) => !existing_names.contains(name.as_bytes()),
             None => true,
         })
         .collect::<Vec<_>>()
         .join("; ")
 }
 
-/// Collect cookie names from one or more readable `Cookie` header values.
-fn cookie_names<'a>(values: impl IntoIterator<Item = &'a str>) -> BTreeSet<String> {
+/// Collect cookie names from raw `Cookie` headers, including ones with opaque values.
+fn cookie_names_from_headers(headers: &http::HeaderMap) -> BTreeSet<Vec<u8>> {
     let mut names = BTreeSet::new();
-    for value in values {
-        for cookie in split_cookies(value) {
-            if let Some(name) = cookie_name(cookie) {
-                names.insert(name.to_string());
+    for value in headers.get_all(COOKIE) {
+        for cookie in split_cookie_bytes(value.as_bytes()) {
+            if let Some(name) = cookie_name_bytes(cookie) {
+                names.insert(name.to_vec());
             }
         }
     }
@@ -241,6 +241,14 @@ fn split_cookies(value: &str) -> impl Iterator<Item = &str> {
     value.split(';').map(str::trim).filter(|s| !s.is_empty())
 }
 
+/// Split a raw `Cookie` header body into non-empty `name=value` fragments.
+fn split_cookie_bytes(value: &[u8]) -> impl Iterator<Item = &[u8]> {
+    value
+        .split(|b| *b == b';')
+        .map(trim_cookie_bytes)
+        .filter(|s| !s.is_empty())
+}
+
 /// Return the non-empty name before the first `=` in a cookie fragment.
 fn cookie_name(cookie: &str) -> Option<&str> {
     let (name, _) = cookie.split_once('=')?;
@@ -249,6 +257,29 @@ fn cookie_name(cookie: &str) -> Option<&str> {
         return None;
     }
     Some(name)
+}
+
+/// Return the non-empty raw name before the first `=` in a cookie fragment.
+fn cookie_name_bytes(cookie: &[u8]) -> Option<&[u8]> {
+    let eq = cookie.iter().position(|b| *b == b'=')?;
+    let name = trim_cookie_bytes(&cookie[..eq]);
+    if name.is_empty() {
+        return None;
+    }
+    Some(name)
+}
+
+/// Trim HTTP optional whitespace around cookie fragments.
+fn trim_cookie_bytes(value: &[u8]) -> &[u8] {
+    let start = value
+        .iter()
+        .position(|b| !matches!(*b, b' ' | b'\t'))
+        .unwrap_or(value.len());
+    let end = value
+        .iter()
+        .rposition(|b| !matches!(*b, b' ' | b'\t'))
+        .map_or(start, |i| i + 1);
+    &value[start..end]
 }
 
 #[cfg(test)]
@@ -431,19 +462,20 @@ mod tests {
     }
 
     #[test]
-    fn merge_cookie_header_preserves_opaque_cookie_and_appends_jar() {
+    fn merge_cookie_header_checks_opaque_cookie_names_before_appending_jar() {
         let mut headers = http::HeaderMap::new();
-        // A non UTF-8 Cookie value cannot be merged into a string.
+        // A Cookie value with an opaque value cannot be merged into a string, but its ASCII name is
+        // still available from the raw header bytes.
         headers.append(
             COOKIE,
             http::HeaderValue::from_bytes(b"opaque=\xff\xfe").unwrap(),
         );
         headers.append(COOKIE, "caller=token".parse().unwrap());
 
-        merge_cookie_header(&mut headers, "AWSALB=abc; caller=jar");
+        merge_cookie_header(&mut headers, "AWSALB=abc; opaque=jar; caller=jar");
 
-        // The opaque and readable existing headers survive, and only the non-colliding jar cookie
-        // is appended as a separate Cookie header.
+        // The opaque and readable existing headers survive, and only the jar cookie that does not
+        // collide with either existing name is appended as a separate Cookie header.
         let values: Vec<_> = headers
             .get_all(COOKIE)
             .iter()
@@ -453,5 +485,6 @@ mod tests {
         assert!(values.contains(&b"opaque=\xff\xfe".to_vec()));
         assert!(values.contains(&b"caller=token".to_vec()));
         assert!(values.contains(&b"AWSALB=abc".to_vec()));
+        assert!(!values.contains(&b"opaque=jar".to_vec()));
     }
 }
