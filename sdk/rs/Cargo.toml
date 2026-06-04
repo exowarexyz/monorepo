@@ -30,6 +30,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tower = { workspace = true }
+cookie_store = { version = "0.22.1", default-features = false }
+psl = "2.1.212"
 
 [build-dependencies]
 connectrpc-build = "0.6.0"

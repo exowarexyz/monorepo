@@ -1,4 +1,5 @@
 export { Client, createTransport, type ClientOptions, type RetryConfig } from './client.js';
+export { CookieJar, fetchWithCookieJar } from './cookies.js';
 export {
     SerializableReadSession,
     StoreClient,
