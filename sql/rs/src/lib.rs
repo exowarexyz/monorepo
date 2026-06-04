@@ -708,6 +708,21 @@ mod tests {
         }
     }
 
+    fn collect_i64_column(batches: &[RecordBatch], col_idx: usize) -> Vec<i64> {
+        let mut values = Vec::new();
+        for batch in batches {
+            for row_idx in 0..batch.num_rows() {
+                match ScalarValue::try_from_array(batch.column(col_idx), row_idx)
+                    .expect("int64 scalar should decode")
+                {
+                    ScalarValue::Int64(Some(value)) => values.push(value),
+                    other => panic!("unexpected int64 scalar: {other:?}"),
+                }
+            }
+        }
+        values
+    }
+
     async fn explain_plan_rows(ctx: &SessionContext, sql: &str) -> Vec<(String, String)> {
         let batches = ctx
             .sql(&format!("EXPLAIN {sql}"))
@@ -2959,10 +2974,26 @@ mod tests {
         let mut pred = QueryPredicate::default();
         pred.constraints.insert(
             model.primary_key_indices[0],
-            PredicateConstraint::IntIn(vec![100, 200, 300]),
+            PredicateConstraint::IntIn(vec![200, 100, 300]),
         );
         let ranges = pred.primary_key_ranges(&model).unwrap();
         assert_eq!(ranges.len(), 3);
+        let expected_starts = [100, 200, 300]
+            .into_iter()
+            .map(|id| {
+                let value = CellValue::Int64(id);
+                encode_primary_key_bound(model.table_prefix, &[&value], &model, false)
+                    .expect("primary key lower bound")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ranges
+                .iter()
+                .map(|range| range.start.clone())
+                .collect::<Vec<_>>(),
+            expected_starts,
+            "primary_key_ranges should sort terminal IN ranges by encoded start key"
+        );
     }
 
     #[test]
@@ -6566,6 +6597,122 @@ mod tests {
         assert_eq!(
             ScalarValue::try_from_array(batch.column(1), 0).expect("height scalar"),
             ScalarValue::UInt64(Some(9))
+        );
+
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn kv_topk_reverse_scan_orders_multiple_primary_key_ranges() {
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state.clone()).await;
+        let client = StoreClient::new(&base_url);
+
+        let schema = KvSchema::new(client.clone())
+            .table(
+                "events",
+                vec![TableColumnConfig::new("id", DataType::Int64, false)],
+                vec!["id".to_string()],
+                vec![],
+            )
+            .expect("schema");
+        let mut writer = schema.batch_writer();
+        for id in [1, 3, 10, 20] {
+            writer
+                .insert("events", vec![CellValue::Int64(id)])
+                .expect("row");
+        }
+        writer.flush().await.expect("seed rows");
+
+        let ctx = SessionContext::new();
+        schema.register_all(&ctx).expect("register");
+        let sql = "SELECT id \
+                   FROM events \
+                   WHERE id IN (3, 20, 1, 10) \
+                   ORDER BY id DESC \
+                   LIMIT 3";
+        let explain = physical_plan_text(&explain_plan_rows(&ctx, sql).await);
+        assert!(
+            explain.contains("KvScanExec: limit=Some(3), direction=Reverse"),
+            "test must exercise reverse top-K scan pushdown over IN ranges:\n{explain}"
+        );
+
+        state.range_calls.store(0, AtomicOrdering::SeqCst);
+        let batches = ctx
+            .sql(sql)
+            .await
+            .expect("query")
+            .collect()
+            .await
+            .expect("collect");
+        assert_eq!(collect_i64_column(&batches, 0), vec![20, 10, 3]);
+        assert_eq!(
+            state.range_calls.load(AtomicOrdering::SeqCst),
+            3,
+            "reverse scan should stop after the three highest IN ranges"
+        );
+
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn kv_topk_reverse_scan_applies_offset_over_multiple_primary_key_ranges() {
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state.clone()).await;
+        let client = StoreClient::new(&base_url);
+
+        let schema = KvSchema::new(client.clone())
+            .table(
+                "events",
+                vec![TableColumnConfig::new("id", DataType::Int64, false)],
+                vec!["id".to_string()],
+                vec![],
+            )
+            .expect("schema");
+        let mut writer = schema.batch_writer();
+        for id in [1, 3, 10, 20] {
+            writer
+                .insert("events", vec![CellValue::Int64(id)])
+                .expect("row");
+        }
+        writer.flush().await.expect("seed rows");
+
+        let ctx = SessionContext::new();
+        schema.register_all(&ctx).expect("register");
+        let sql = "SELECT id \
+                   FROM events \
+                   WHERE id IN (3, 20, 1, 10) \
+                   ORDER BY id DESC \
+                   LIMIT 2 OFFSET 1";
+        let explain = physical_plan_text(&explain_plan_rows(&ctx, sql).await);
+        assert!(
+            explain.contains("KvScanExec: limit=Some(3), direction=Reverse"),
+            "OFFSET requires fetching offset + limit rows from the reverse scan:\n{explain}"
+        );
+
+        state.range_calls.store(0, AtomicOrdering::SeqCst);
+        let batches = ctx
+            .sql(sql)
+            .await
+            .expect("query")
+            .collect()
+            .await
+            .expect("collect");
+        assert_eq!(collect_i64_column(&batches, 0), vec![10, 3]);
+        assert_eq!(
+            state.range_calls.load(AtomicOrdering::SeqCst),
+            3,
+            "reverse OFFSET scan should fetch only offset + limit IN ranges"
         );
 
         let _ = shutdown_tx.send(());

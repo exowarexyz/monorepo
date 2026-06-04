@@ -346,38 +346,31 @@ impl ScanAccessPlan {
     pub(crate) fn predicate_fully_enforced_by_primary_key(&self, model: &TableModel) -> bool {
         let mut enforced_pk_positions = vec![false; model.primary_key_indices.len()];
 
-        for (pk_pos, (&col_idx, &kind)) in model
-            .primary_key_indices
-            .iter()
-            .zip(model.primary_key_kinds.iter())
-            .enumerate()
-        {
+        for (pk_pos, &kind) in model.primary_key_kinds.iter().enumerate() {
             let Some(constraint) = self.predicate_checks.iter().find_map(|check| match check {
                 PredicateAccess::Pk {
                     pk_pos: check_pos,
                     constraint,
-                } if model.primary_key_indices[*check_pos] == col_idx => Some(constraint),
+                } if *check_pos == pk_pos => Some(constraint),
                 _ => None,
             }) else {
                 break;
             };
 
-            match primary_key_range_enforcement(kind, constraint) {
-                PrimaryKeyRangeEnforcement::Point => {
+            match primary_key_range_constraint(kind, constraint) {
+                PrimaryKeyRangeConstraint::Point(_) => {
                     enforced_pk_positions[pk_pos] = true;
                 }
-                PrimaryKeyRangeEnforcement::Terminal => {
+                PrimaryKeyRangeConstraint::Terminal(_) => {
                     enforced_pk_positions[pk_pos] = true;
                     break;
                 }
-                PrimaryKeyRangeEnforcement::NotEnforced => break,
+                PrimaryKeyRangeConstraint::NotEnforced => break,
             }
         }
 
         self.predicate_checks.iter().all(|check| match check {
-            PredicateAccess::Pk { pk_pos, .. } => {
-                enforced_pk_positions.get(*pk_pos).copied().unwrap_or(false)
-            }
+            PredicateAccess::Pk { pk_pos, .. } => enforced_pk_positions[*pk_pos],
             PredicateAccess::NonPk { .. } => false,
         })
     }
@@ -466,59 +459,6 @@ pub(crate) fn matches_encoded_constraint(
             }
             true
         }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum PrimaryKeyRangeEnforcement {
-    Point,
-    Terminal,
-    NotEnforced,
-}
-
-fn primary_key_range_enforcement(
-    kind: ColumnKind,
-    constraint: &PredicateConstraint,
-) -> PrimaryKeyRangeEnforcement {
-    match (kind, constraint) {
-        (ColumnKind::Utf8, PredicateConstraint::StringEq(value)) => {
-            if encode_string_variable(value).is_ok() {
-                PrimaryKeyRangeEnforcement::Point
-            } else {
-                PrimaryKeyRangeEnforcement::NotEnforced
-            }
-        }
-        (ColumnKind::Int64, PredicateConstraint::IntRange { min, max }) => {
-            if min.is_some() && min == max {
-                PrimaryKeyRangeEnforcement::Point
-            } else {
-                PrimaryKeyRangeEnforcement::Terminal
-            }
-        }
-        (ColumnKind::Int64, PredicateConstraint::IntIn(values)) if !values.is_empty() => {
-            PrimaryKeyRangeEnforcement::Terminal
-        }
-        (ColumnKind::UInt64, PredicateConstraint::UInt64Range { min, max }) => {
-            if min.is_some() && min == max {
-                PrimaryKeyRangeEnforcement::Point
-            } else {
-                PrimaryKeyRangeEnforcement::Terminal
-            }
-        }
-        (ColumnKind::UInt64, PredicateConstraint::UInt64In(values)) if !values.is_empty() => {
-            PrimaryKeyRangeEnforcement::Terminal
-        }
-        (ColumnKind::FixedSizeBinary(expected), PredicateConstraint::FixedBinaryEq(value))
-            if value.len() == expected =>
-        {
-            PrimaryKeyRangeEnforcement::Point
-        }
-        (ColumnKind::FixedSizeBinary(expected), PredicateConstraint::FixedBinaryIn(values))
-            if !values.is_empty() && values.iter().all(|value| value.len() == expected) =>
-        {
-            PrimaryKeyRangeEnforcement::Terminal
-        }
-        _ => PrimaryKeyRangeEnforcement::NotEnforced,
     }
 }
 

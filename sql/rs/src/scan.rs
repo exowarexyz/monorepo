@@ -179,12 +179,16 @@ impl KvScanExec {
             .primary_key_indices
             .iter()
             .copied()
-            .skip_while(|col_idx| {
+            .zip(self.model.primary_key_kinds.iter().copied())
+            .skip_while(|(col_idx, kind)| {
                 self.predicate
                     .constraints
                     .get(col_idx)
-                    .is_some_and(single_value_constraint)
+                    .is_some_and(|constraint| {
+                        primary_key_range_constraint(*kind, constraint).is_point()
+                    })
             })
+            .map(|(col_idx, _kind)| col_idx)
             .collect()
     }
 
@@ -380,27 +384,11 @@ pub(crate) async fn stream_kv_scan(
             .access_plan
             .index_covers_required_non_pk(&index_specs[plan.spec_idx])
         {
-            return stream_index_scan(
-                tx,
-                ctx,
-                index_specs,
-                &plan,
-                flush_threshold,
-                target_rows,
-                direction,
-            )
-            .await;
+            return stream_index_scan(tx, ctx, index_specs, &plan, flush_threshold, target_rows)
+                .await;
         }
-        return stream_index_lookup_scan(
-            tx,
-            ctx,
-            index_specs,
-            &plan,
-            flush_threshold,
-            target_rows,
-            direction,
-        )
-        .await;
+        return stream_index_lookup_scan(tx, ctx, index_specs, &plan, flush_threshold, target_rows)
+            .await;
     }
 
     let exact = ctx
@@ -489,7 +477,6 @@ pub(crate) async fn stream_index_lookup_scan(
     plan: &IndexPlan,
     flush_threshold: usize,
     target_rows: usize,
-    direction: ScanDirection,
 ) -> DataFusionResult<()> {
     let spec = &index_specs[plan.spec_idx];
     let key_predicate_plan = ctx
@@ -502,13 +489,18 @@ pub(crate) async fn stream_index_lookup_scan(
     let mut emitted = 0usize;
     let mut batch_builder = ProjectedBatchBuilder::from_access_plan(ctx.model, ctx.access_plan);
 
-    for range in ordered_ranges(&plan.ranges, direction) {
+    for range in &plan.ranges {
         if emitted + batch_builder.row_count() >= target_rows {
             break;
         }
-        let mut stream =
-            range_stream_with_direction(ctx.session, range, usize::MAX, flush_threshold, direction)
-                .await?;
+        let mut stream = range_stream_with_direction(
+            ctx.session,
+            range,
+            usize::MAX,
+            flush_threshold,
+            ScanDirection::Forward,
+        )
+        .await?;
         while let Some(chunk) = stream
             .next_chunk()
             .await
@@ -598,7 +590,6 @@ pub(crate) async fn stream_index_scan(
     plan: &IndexPlan,
     flush_threshold: usize,
     target_rows: usize,
-    direction: ScanDirection,
 ) -> DataFusionResult<()> {
     let spec = &index_specs[plan.spec_idx];
     let key_predicate_plan = ctx
@@ -611,7 +602,7 @@ pub(crate) async fn stream_index_scan(
     let mut emitted = 0usize;
     let mut batch_builder = ProjectedBatchBuilder::from_access_plan(ctx.model, ctx.access_plan);
 
-    for range in ordered_ranges(&plan.ranges, direction) {
+    for range in &plan.ranges {
         if emitted + batch_builder.row_count() >= target_rows {
             break;
         }
@@ -619,9 +610,14 @@ pub(crate) async fn stream_index_scan(
         if remaining == 0 {
             break;
         }
-        let mut stream =
-            range_stream_with_direction(ctx.session, range, usize::MAX, flush_threshold, direction)
-                .await?;
+        let mut stream = range_stream_with_direction(
+            ctx.session,
+            range,
+            usize::MAX,
+            flush_threshold,
+            ScanDirection::Forward,
+        )
+        .await?;
         while let Some(chunk) = stream
             .next_chunk()
             .await
@@ -717,35 +713,6 @@ async fn range_stream_with_direction(
         )
         .await
         .map_err(|e| DataFusionError::External(Box::new(e)))
-}
-
-fn single_value_constraint(constraint: &PredicateConstraint) -> bool {
-    match constraint {
-        PredicateConstraint::StringEq(_)
-        | PredicateConstraint::BoolEq(_)
-        | PredicateConstraint::FixedBinaryEq(_) => true,
-        PredicateConstraint::IntRange {
-            min: Some(min),
-            max: Some(max),
-        } => min == max,
-        PredicateConstraint::UInt64Range {
-            min: Some(min),
-            max: Some(max),
-        } => min == max,
-        PredicateConstraint::FloatRange {
-            min: Some((min, min_inclusive)),
-            max: Some((max, max_inclusive)),
-        } => *min_inclusive && *max_inclusive && min == max,
-        PredicateConstraint::Decimal128Range {
-            min: Some(min),
-            max: Some(max),
-        } => min == max,
-        PredicateConstraint::Decimal256Range {
-            min: Some(min),
-            max: Some(max),
-        } => min == max,
-        _ => false,
-    }
 }
 
 #[derive(Debug, Clone, Default)]

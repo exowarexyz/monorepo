@@ -42,6 +42,109 @@ pub(crate) enum PredicateConstraint {
     FixedBinaryIn(Vec<Vec<u8>>),
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PrimaryKeyTerminalRange {
+    lower: CellValue,
+    upper: CellValue,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum PrimaryKeyRangeConstraint {
+    Point(CellValue),
+    Terminal(Vec<PrimaryKeyTerminalRange>),
+    NotEnforced,
+}
+
+impl PrimaryKeyRangeConstraint {
+    pub(crate) fn is_point(&self) -> bool {
+        matches!(self, Self::Point(_))
+    }
+}
+
+pub(crate) fn primary_key_range_constraint(
+    kind: ColumnKind,
+    constraint: &PredicateConstraint,
+) -> PrimaryKeyRangeConstraint {
+    match (kind, constraint) {
+        (ColumnKind::Utf8, PredicateConstraint::StringEq(value)) => {
+            if encode_string_variable(value).is_ok() {
+                PrimaryKeyRangeConstraint::Point(CellValue::Utf8(value.clone()))
+            } else {
+                PrimaryKeyRangeConstraint::NotEnforced
+            }
+        }
+        (ColumnKind::Int64, PredicateConstraint::IntRange { min, max }) => {
+            let lower = min.unwrap_or(i64::MIN);
+            let upper = max.unwrap_or(i64::MAX);
+            if lower > upper {
+                PrimaryKeyRangeConstraint::Terminal(Vec::new())
+            } else if min.is_some() && min == max {
+                PrimaryKeyRangeConstraint::Point(CellValue::Int64(lower))
+            } else {
+                PrimaryKeyRangeConstraint::Terminal(vec![PrimaryKeyTerminalRange {
+                    lower: CellValue::Int64(lower),
+                    upper: CellValue::Int64(upper),
+                }])
+            }
+        }
+        (ColumnKind::Int64, PredicateConstraint::IntIn(values)) if !values.is_empty() => {
+            PrimaryKeyRangeConstraint::Terminal(
+                values
+                    .iter()
+                    .map(|&value| PrimaryKeyTerminalRange {
+                        lower: CellValue::Int64(value),
+                        upper: CellValue::Int64(value),
+                    })
+                    .collect(),
+            )
+        }
+        (ColumnKind::UInt64, PredicateConstraint::UInt64Range { min, max }) => {
+            let lower = min.unwrap_or(0);
+            let upper = max.unwrap_or(u64::MAX);
+            if lower > upper {
+                PrimaryKeyRangeConstraint::Terminal(Vec::new())
+            } else if min.is_some() && min == max {
+                PrimaryKeyRangeConstraint::Point(CellValue::UInt64(lower))
+            } else {
+                PrimaryKeyRangeConstraint::Terminal(vec![PrimaryKeyTerminalRange {
+                    lower: CellValue::UInt64(lower),
+                    upper: CellValue::UInt64(upper),
+                }])
+            }
+        }
+        (ColumnKind::UInt64, PredicateConstraint::UInt64In(values)) if !values.is_empty() => {
+            PrimaryKeyRangeConstraint::Terminal(
+                values
+                    .iter()
+                    .map(|&value| PrimaryKeyTerminalRange {
+                        lower: CellValue::UInt64(value),
+                        upper: CellValue::UInt64(value),
+                    })
+                    .collect(),
+            )
+        }
+        (ColumnKind::FixedSizeBinary(expected), PredicateConstraint::FixedBinaryEq(value))
+            if value.len() == expected =>
+        {
+            PrimaryKeyRangeConstraint::Point(CellValue::FixedBinary(value.clone()))
+        }
+        (ColumnKind::FixedSizeBinary(expected), PredicateConstraint::FixedBinaryIn(values))
+            if !values.is_empty() && values.iter().all(|value| value.len() == expected) =>
+        {
+            PrimaryKeyRangeConstraint::Terminal(
+                values
+                    .iter()
+                    .map(|value| PrimaryKeyTerminalRange {
+                        lower: CellValue::FixedBinary(value.clone()),
+                        upper: CellValue::FixedBinary(value.clone()),
+                    })
+                    .collect(),
+            )
+        }
+        _ => PrimaryKeyRangeConstraint::NotEnforced,
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct QueryPredicate {
     pub(crate) constraints: HashMap<usize, PredicateConstraint>,
@@ -1674,165 +1777,50 @@ impl QueryPredicate {
             return Ok(Vec::new());
         }
 
-        // Walk PK columns left-to-right collecting equality-constrained
-        // prefix values. When we hit a range-constrained or unconstrained
-        // column, produce the final key range(s).
         let mut prefix_values: Vec<CellValue> = Vec::new();
 
-        for (pos, (&pk_idx, &pk_kind)) in model
+        for (&pk_idx, &pk_kind) in model
             .primary_key_indices
             .iter()
             .zip(model.primary_key_kinds.iter())
-            .enumerate()
         {
-            match pk_kind {
-                ColumnKind::FixedSizeBinary(_) => match self.constraints.get(&pk_idx) {
-                    Some(PredicateConstraint::FixedBinaryEq(data)) => {
-                        prefix_values.push(CellValue::FixedBinary(data.clone()));
-                        continue;
-                    }
-                    Some(PredicateConstraint::FixedBinaryIn(values)) => {
-                        let mut ranges = Vec::with_capacity(values.len());
-                        for data in values {
-                            let mut lo = prefix_values.clone();
-                            lo.push(CellValue::FixedBinary(data.clone()));
-                            let refs: Vec<&CellValue> = lo.iter().collect();
-                            ranges.push(KeyRange {
-                                start: encode_primary_key_bound(
-                                    model.table_prefix,
-                                    &refs,
-                                    model,
-                                    false,
-                                )
-                                .map_err(DataFusionError::Execution)?,
-                                end: encode_primary_key_bound(
-                                    model.table_prefix,
-                                    &refs,
-                                    model,
-                                    true,
-                                )
-                                .map_err(DataFusionError::Execution)?,
-                            });
-                        }
-                        return Ok(ranges);
-                    }
-                    _ => break,
-                },
-                ColumnKind::Int64 => {
-                    if let Some(PredicateConstraint::IntIn(values)) = self.constraints.get(&pk_idx)
-                    {
-                        let mut ranges = Vec::with_capacity(values.len());
-                        for &v in values {
-                            let mut lo = prefix_values.clone();
-                            lo.push(CellValue::Int64(v));
-                            let refs: Vec<&CellValue> = lo.iter().collect();
-                            ranges.push(KeyRange {
-                                start: encode_primary_key_bound(
-                                    model.table_prefix,
-                                    &refs,
-                                    model,
-                                    false,
-                                )
-                                .map_err(DataFusionError::Execution)?,
-                                end: encode_primary_key_bound(
-                                    model.table_prefix,
-                                    &refs,
-                                    model,
-                                    true,
-                                )
-                                .map_err(DataFusionError::Execution)?,
-                            });
-                        }
-                        return Ok(ranges);
-                    }
-                    let (pk_min, pk_max) = self.int_bounds(pk_idx);
-                    if let (Some(lo), Some(hi)) = (pk_min, pk_max) {
-                        if lo == hi {
-                            prefix_values.push(CellValue::Int64(lo));
-                            continue;
-                        }
-                    }
-                    if pk_min.is_none() && pk_max.is_none() && pos == 0 {
-                        return Ok(vec![primary_key_prefix_range(model.table_prefix)]);
-                    }
-                    let mut lo = prefix_values.clone();
-                    lo.push(CellValue::Int64(pk_min.unwrap_or(i64::MIN)));
-                    let mut hi = prefix_values;
-                    hi.push(CellValue::Int64(pk_max.unwrap_or(i64::MAX)));
-                    let lo_refs: Vec<&CellValue> = lo.iter().collect();
-                    let hi_refs: Vec<&CellValue> = hi.iter().collect();
-                    return Ok(vec![KeyRange {
-                        start: encode_primary_key_bound(model.table_prefix, &lo_refs, model, false)
-                            .map_err(DataFusionError::Execution)?,
-                        end: encode_primary_key_bound(model.table_prefix, &hi_refs, model, true)
-                            .map_err(DataFusionError::Execution)?,
-                    }]);
+            let Some(constraint) = self.constraints.get(&pk_idx) else {
+                break;
+            };
+            match primary_key_range_constraint(pk_kind, constraint) {
+                PrimaryKeyRangeConstraint::Point(value) => {
+                    prefix_values.push(value);
                 }
-                ColumnKind::UInt64 => {
-                    if let Some(PredicateConstraint::UInt64In(values)) =
-                        self.constraints.get(&pk_idx)
-                    {
-                        let mut ranges = Vec::new();
-                        for &v in values {
-                            let mut lo = prefix_values.clone();
-                            lo.push(CellValue::UInt64(v));
-                            let refs: Vec<&CellValue> = lo.iter().collect();
-                            ranges.push(KeyRange {
-                                start: encode_primary_key_bound(
-                                    model.table_prefix,
-                                    &refs,
-                                    model,
-                                    false,
-                                )
-                                .map_err(DataFusionError::Execution)?,
-                                end: encode_primary_key_bound(
-                                    model.table_prefix,
-                                    &refs,
-                                    model,
-                                    true,
-                                )
-                                .map_err(DataFusionError::Execution)?,
-                            });
-                        }
-                        return Ok(ranges);
-                    }
-                    let (pk_min, pk_max) = match self.constraints.get(&pk_idx) {
-                        Some(PredicateConstraint::UInt64Range { min, max }) => (*min, *max),
-                        _ => (None, None),
-                    };
-                    let pk_lower = pk_min.unwrap_or(0);
-                    let pk_upper = pk_max.unwrap_or(u64::MAX);
-                    if pk_lower > pk_upper {
-                        return Ok(Vec::new());
-                    }
-                    if pk_lower == pk_upper {
-                        prefix_values.push(CellValue::UInt64(pk_lower));
-                        continue;
-                    }
-                    if pk_min.is_none() && pk_max.is_none() && pos == 0 {
-                        return Ok(vec![primary_key_prefix_range(model.table_prefix)]);
-                    }
-                    let mut lo = prefix_values.clone();
-                    lo.push(CellValue::UInt64(pk_lower));
-                    let mut hi = prefix_values;
-                    hi.push(CellValue::UInt64(pk_upper));
-                    let lo_refs: Vec<&CellValue> = lo.iter().collect();
-                    let hi_refs: Vec<&CellValue> = hi.iter().collect();
-                    return Ok(vec![KeyRange {
-                        start: encode_primary_key_bound(model.table_prefix, &lo_refs, model, false)
+                PrimaryKeyRangeConstraint::Terminal(spans) => {
+                    let mut ranges = Vec::with_capacity(spans.len());
+                    for span in spans {
+                        let mut lo = prefix_values.clone();
+                        lo.push(span.lower);
+                        let mut hi = prefix_values.clone();
+                        hi.push(span.upper);
+                        let lo_refs: Vec<&CellValue> = lo.iter().collect();
+                        let hi_refs: Vec<&CellValue> = hi.iter().collect();
+                        ranges.push(KeyRange {
+                            start: encode_primary_key_bound(
+                                model.table_prefix,
+                                &lo_refs,
+                                model,
+                                false,
+                            )
                             .map_err(DataFusionError::Execution)?,
-                        end: encode_primary_key_bound(model.table_prefix, &hi_refs, model, true)
+                            end: encode_primary_key_bound(
+                                model.table_prefix,
+                                &hi_refs,
+                                model,
+                                true,
+                            )
                             .map_err(DataFusionError::Execution)?,
-                    }]);
-                }
-                ColumnKind::Utf8 => {
-                    if let Some(PredicateConstraint::StringEq(s)) = self.constraints.get(&pk_idx) {
-                        prefix_values.push(CellValue::Utf8(s.clone()));
-                        continue;
+                        });
                     }
-                    break;
+                    ranges.sort_by(|lhs, rhs| lhs.start.cmp(&rhs.start));
+                    return Ok(ranges);
                 }
-                _ => break,
+                PrimaryKeyRangeConstraint::NotEnforced => break,
             }
         }
 
