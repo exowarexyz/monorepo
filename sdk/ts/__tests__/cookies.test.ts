@@ -7,6 +7,117 @@ function responseFor(url: string, init?: ResponseInit): Response {
 }
 
 describe('fetchWithCookieJar', () => {
+    test('top-level sdk import does not load node cookie packages', () => {
+        jest.resetModules();
+        jest.doMock('fetch-cookie', () => {
+            throw new Error('fetch-cookie should not be loaded by sdk index import');
+        });
+        jest.doMock('tough-cookie', () => {
+            throw new Error('tough-cookie should not be loaded by sdk index import');
+        });
+        try {
+            expect(() => require('../src/index')).not.toThrow();
+        } finally {
+            jest.dontMock('fetch-cookie');
+            jest.dontMock('tough-cookie');
+            jest.resetModules();
+        }
+    });
+
+    test('browser runtimes use native credentials without node cookie packages', async () => {
+        jest.resetModules();
+        jest.doMock('fetch-cookie', () => {
+            throw new Error('fetch-cookie should not be loaded in browser runtimes');
+        });
+        jest.doMock('tough-cookie', () => {
+            throw new Error('tough-cookie should not be loaded in browser runtimes');
+        });
+
+        const globals = globalThis as typeof globalThis & {
+            window?: unknown;
+            document?: unknown;
+        };
+        const hadWindow = 'window' in globals;
+        const hadDocument = 'document' in globals;
+        const previousWindow = globals.window;
+        const previousDocument = globals.document;
+        Object.defineProperty(globals, 'window', { value: {}, configurable: true });
+        Object.defineProperty(globals, 'document', { value: {}, configurable: true });
+
+        try {
+            const { CookieJar: BrowserCookieJar, fetchWithCookieJar: fetchWithBrowserCookieJar } = require('../src/cookies') as typeof import('../src/cookies');
+            const observedCredentials: Array<RequestCredentials | undefined> = [];
+            const baseFetch: typeof fetch = async (input, init) => {
+                observedCredentials.push(init?.credentials);
+                const url = input instanceof Request ? input.url : typeof input === 'string' ? input : input.href;
+                return responseFor(url);
+            };
+            const wrapped = fetchWithBrowserCookieJar(new BrowserCookieJar(), baseFetch);
+
+            await wrapped('https://edge.internal/rpc');
+            await wrapped(new Request('https://edge.internal/rpc'));
+            await wrapped('https://edge.internal/rpc', { credentials: 'same-origin' });
+            await wrapped('https://edge.internal/rpc', { credentials: 'omit' });
+            await wrapped(new Request('https://edge.internal/rpc', { credentials: 'omit' }));
+
+            expect(observedCredentials).toEqual(['include', 'include', 'include', 'omit', 'omit']);
+        } finally {
+            if (hadWindow) {
+                Object.defineProperty(globals, 'window', { value: previousWindow, configurable: true });
+            } else {
+                Reflect.deleteProperty(globals, 'window');
+            }
+            if (hadDocument) {
+                Object.defineProperty(globals, 'document', { value: previousDocument, configurable: true });
+            } else {
+                Reflect.deleteProperty(globals, 'document');
+            }
+            jest.dontMock('fetch-cookie');
+            jest.dontMock('tough-cookie');
+            jest.resetModules();
+        }
+    });
+
+    test('shares one backend during concurrent first cookie writes', async () => {
+        jest.resetModules();
+
+        const instances: MockToughCookieJar[] = [];
+        class MockToughCookieJar {
+            private readonly cookies = new Map<string, string>();
+
+            public constructor() {
+                instances.push(this);
+            }
+
+            public getCookieString(_currentUrl: string): string {
+                return Array.from(this.cookies.values()).join('; ');
+            }
+
+            public setCookie(cookieString: string, _currentUrl: string): void {
+                const [pair] = cookieString.split(';', 1);
+                const eq = pair.indexOf('=');
+                this.cookies.set(pair.slice(0, eq), pair);
+            }
+        }
+
+        jest.doMock('tough-cookie', () => ({ CookieJar: MockToughCookieJar }));
+        try {
+            const { CookieJar: MockedCookieJar } = require('../src/cookies') as typeof import('../src/cookies');
+            const jar = new MockedCookieJar();
+
+            await Promise.all([
+                jar.setCookie('first=1; Path=/', 'https://edge.internal/rpc'),
+                jar.setCookie('second=2; Path=/', 'https://edge.internal/rpc'),
+            ]);
+
+            expect(instances).toHaveLength(1);
+            expect(await jar.getCookieString('https://edge.internal/rpc')).toBe('first=1; second=2');
+        } finally {
+            jest.dontMock('tough-cookie');
+            jest.resetModules();
+        }
+    });
+
     test('replays host cookies to the same host and not to others', async () => {
         const jar = new CookieJar();
         const seen: Array<{ url: string; cookie: string | null }> = [];

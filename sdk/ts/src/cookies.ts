@@ -1,17 +1,72 @@
-import makeFetchCookie from 'fetch-cookie';
-import { CookieJar } from 'tough-cookie';
-
-export { CookieJar } from 'tough-cookie';
-
 type FetchCookieRequestInit = RequestInit & {
     maxRedirect?: number;
     redirectCount?: number;
 };
 
+type CookieJarBackend = {
+    getCookieString(currentUrl: string): Promise<string> | string;
+    setCookie(cookieString: string, currentUrl: string, opts?: { ignoreError?: boolean }): Promise<unknown> | unknown;
+};
+
+type MakeFetchCookie = (
+    fetchImpl: (input: RequestInfo | URL, init?: FetchCookieRequestInit) => Promise<Response>,
+    jar?: CookieJarBackend,
+    ignoreError?: boolean,
+) => (input: RequestInfo | URL, init?: FetchCookieRequestInit) => Promise<Response>;
+
 type PreparedFetchCookieRequest = {
     input: RequestInfo | URL;
     init?: FetchCookieRequestInit;
 };
+
+let fetchCookieLoader: Promise<MakeFetchCookie> | undefined;
+let toughCookieLoader: Promise<new () => CookieJarBackend> | undefined;
+
+async function loadFetchCookie(): Promise<MakeFetchCookie> {
+    fetchCookieLoader ??= import('fetch-cookie').then((module) => module.default as MakeFetchCookie);
+    return fetchCookieLoader;
+}
+
+async function loadToughCookieJar(): Promise<new () => CookieJarBackend> {
+    toughCookieLoader ??= import('tough-cookie').then(
+        (module) => module.CookieJar as unknown as new () => CookieJarBackend,
+    );
+    return toughCookieLoader;
+}
+
+export class CookieJar implements CookieJarBackend {
+    private backend?: CookieJarBackend;
+    private backendPromise?: Promise<CookieJarBackend>;
+
+    private async jar(): Promise<CookieJarBackend> {
+        if (this.backend !== undefined) {
+            return this.backend;
+        }
+        this.backendPromise ??= loadToughCookieJar()
+            .then((ToughCookieJar) => {
+                const backend = new ToughCookieJar();
+                this.backend = backend;
+                return backend;
+            })
+            .catch((error) => {
+                this.backendPromise = undefined;
+                throw error;
+            });
+        return await this.backendPromise;
+    }
+
+    public async getCookieString(currentUrl: string): Promise<string> {
+        return await (await this.jar()).getCookieString(currentUrl);
+    }
+
+    public async setCookie(
+        cookieString: string,
+        currentUrl: string,
+        opts?: { ignoreError?: boolean },
+    ): Promise<unknown> {
+        return await (await this.jar()).setCookie(cookieString, currentUrl, opts);
+    }
+}
 
 function requestHeaders(input: RequestInfo | URL, init?: RequestInit): Headers {
     return new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
@@ -88,10 +143,21 @@ function prepareRequestForCookieJar(input: RequestInfo | URL, init?: RequestInit
     return { input, init: { ...init, headers } };
 }
 
+function hasNativeBrowserCookieJar(): boolean {
+    return typeof window !== 'undefined' && typeof document !== 'undefined';
+}
+
 // Wrap a fetch implementation with a real RFC6265 cookie jar. Browsers still use their native jar
 // through `credentials: 'include'`; Node fetch uses the explicit jar because it has no ambient one.
 export function fetchWithCookieJar(jar: CookieJar = new CookieJar(), baseFetch: typeof fetch = fetch): typeof fetch {
-    return (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        if (hasNativeBrowserCookieJar()) {
+            return baseFetch(input, {
+                ...init,
+                credentials: effectiveCredentials(input, init) === 'omit' ? 'omit' : 'include',
+            });
+        }
+
         const callerCookie = requestHeaders(input, init).get('cookie');
         if (effectiveCredentials(input, init) === 'omit') {
             const headers = requestHeaders(input, init);
@@ -132,10 +198,8 @@ export function fetchWithCookieJar(jar: CookieJar = new CookieJar(), baseFetch: 
                 credentials: currentInit?.credentials ?? 'include',
             });
         };
-        const fetchWithCookies = makeFetchCookie<RequestInfo | URL, FetchCookieRequestInit, Response>(
-            fetchWithCredentials,
-            jar,
-        );
+        const makeFetchCookie = await loadFetchCookie();
+        const fetchWithCookies = makeFetchCookie(fetchWithCredentials, jar);
 
         const request = prepareRequestForCookieJar(input, init);
         return fetchWithCookies(request.input, request.init);
