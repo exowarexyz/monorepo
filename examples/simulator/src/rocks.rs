@@ -8,6 +8,7 @@ use std::cmp::Ordering as CmpOrdering;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
@@ -28,14 +29,14 @@ use rocksdb::{
     WriteOptions, DB,
 };
 use tokio::sync::oneshot;
+use tracing::debug;
 
 const META_CF: &str = "meta";
 const SEQ_META_KEY: &[u8] = b"sequence";
 const LOG_CF: &str = "log";
 const LOG_BATCH_KEY_LEN: usize = 8;
 const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
-const DEFAULT_WRITE_MAX_COALESCED_REQUESTS: usize = 1;
-const DEFAULT_WRITE_BUILDERS: usize = 1;
+const DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
 type RocksIterItem = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
 
 /// Owns the DB handle for a RocksDB iterator that is moved through blocking tasks.
@@ -281,17 +282,19 @@ struct WriteRequest {
     response: oneshot::Sender<Result<u64, String>>,
 }
 
-struct BuildJob {
-    order: u64,
+struct AssignedWrite {
     sequence: u64,
-    requests: Vec<WriteRequest>,
+    request: WriteRequest,
 }
 
+/// One RocksDB `WriteBatch` covering a contiguous run of assigned sequence numbers, committed
+/// atomically by a single synced write.
 struct PreparedWrite {
-    order: u64,
-    sequence: u64,
-    requests: Vec<WriteRequest>,
+    writes: Vec<AssignedWrite>,
     batch: Result<rocksdb::WriteBatch, String>,
+    batch_bytes: usize,
+    /// Assignment epoch; `commit` rejects a group whose epoch an earlier failure has superseded.
+    epoch: u64,
 }
 
 struct Writer {
@@ -300,60 +303,55 @@ struct Writer {
 }
 
 impl Writer {
-    /// Starts a three-stage write pipeline: dispatch assigns sequences, builders prepare
-    /// side-effect-free `WriteBatch` values, and the commit worker publishes them in order.
+    /// Starts the two-stage write pipeline. `prepare` drains queued requests up to the configured
+    /// byte cap, assigns a contiguous sequence number to each, and builds a size-capped
+    /// `WriteBatch`; `commit` syncs each group and resolves its requests. Keeping `commit` on its
+    /// own thread lets `prepare` build the next wave while the current one is being fsync'd.
     fn start(
         db: Arc<DB>,
-        sequence: Arc<Mutex<u64>>,
+        sequence: Arc<AtomicU64>,
         write_pipeline: RocksWritePipelineConfig,
     ) -> Self {
-        let (sender, receiver) = mpsc::channel();
-        let (prepared_sender, prepared_receiver) = mpsc::channel();
-        let builders = write_pipeline.builder_threads.get();
-        let mut worker_senders = Vec::with_capacity(builders);
-        let mut handles = Vec::with_capacity(builders + 2);
+        let (request_sender, request_receiver) = mpsc::channel();
+        // Rendezvous so `prepare` runs at most one wave ahead of `commit`: it hands off a built
+        // group, then builds the next while `commit` syncs this one.
+        let (group_sender, group_receiver) = mpsc::sync_channel(0);
+        let max_commit_batch_bytes = write_pipeline.max_commit_batch_bytes.get();
 
-        for worker in 0..builders {
-            let (job_sender, job_receiver) = mpsc::channel();
-            worker_senders.push(job_sender);
-            let db = db.clone();
-            let prepared_sender = prepared_sender.clone();
-            handles.push(
-                thread::Builder::new()
-                    .name(format!("simulator-rocks-build-{worker}"))
-                    .spawn(move || run_build_worker(db, job_receiver, prepared_sender))
-                    .expect("failed to spawn RocksDB build worker"),
-            );
-        }
-        drop(prepared_sender);
+        // Bumped by `commit` whenever a group fails. That rejects the in-flight groups assigned
+        // under the failed frontier and signals `prepare` to re-sync its counter to the durable
+        // sequence, re-allocating the abandoned numbers.
+        let epoch = Arc::new(AtomicU64::new(0));
 
-        let dispatcher_sequence = sequence.clone();
-        let max_coalesced_requests = write_pipeline.max_coalesced_requests;
-        let dispatcher = thread::Builder::new()
-            .name("simulator-rocks-dispatch".to_string())
+        let commit_db = db.clone();
+        let commit_sequence = sequence.clone();
+        let commit_epoch = epoch.clone();
+        let commit = thread::Builder::new()
+            .name("simulator-rocks-commit".to_string())
+            .spawn(move || run_commit(commit_db, commit_sequence, commit_epoch, group_receiver))
+            .expect("failed to spawn RocksDB commit worker");
+
+        let prepare = thread::Builder::new()
+            .name("simulator-rocks-prepare".to_string())
             .spawn(move || {
-                run_write_dispatcher(
-                    dispatcher_sequence,
-                    receiver,
-                    worker_senders,
-                    max_coalesced_requests,
+                run_prepare(
+                    db,
+                    sequence,
+                    epoch,
+                    request_receiver,
+                    group_sender,
+                    max_commit_batch_bytes,
                 )
             })
-            .expect("failed to spawn RocksDB write dispatcher");
-        handles.insert(0, dispatcher);
-        handles.push(
-            thread::Builder::new()
-                .name("simulator-rocks-commit".to_string())
-                .spawn(move || run_commit_worker(db, sequence, prepared_receiver))
-                .expect("failed to spawn RocksDB commit worker"),
-        );
+            .expect("failed to spawn RocksDB prepare worker");
+
         Self {
-            sender: Mutex::new(Some(sender)),
-            handles: Mutex::new(handles),
+            sender: Mutex::new(Some(request_sender)),
+            handles: Mutex::new(vec![prepare, commit]),
         }
     }
 
-    /// Enqueues one ingest request and resolves once the commit worker has durably published it.
+    /// Enqueues one ingest request and resolves once `commit` has durably published it.
     async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, String> {
         let (response, result) = oneshot::channel();
         let sender = self
@@ -374,8 +372,8 @@ impl Writer {
 
 impl Drop for Writer {
     fn drop(&mut self) {
-        // Closing the request channel lets the dispatcher exit; joining keeps background RocksDB
-        // users from outliving the store during tests and local shutdown.
+        // Closing the request channel lets `prepare` drain and exit, which drops the group channel
+        // and stops `commit`; joining keeps background RocksDB writers from outliving the store.
         if let Ok(mut sender) = self.sender.lock() {
             sender.take();
         }
@@ -387,71 +385,50 @@ impl Drop for Writer {
     }
 }
 
-/// Assigns contiguous sequence numbers and sends coalesced jobs to batch builders.
-fn run_write_dispatcher(
-    sequence: Arc<Mutex<u64>>,
+/// Drains each byte-bounded wave of queued requests, assigns contiguous sequence numbers, builds a
+/// size-capped commit group, and hands it to `commit`. After a commit failure bumps the epoch, the
+/// next wave re-syncs `next` to the durable frontier so the abandoned sequence numbers are
+/// re-allocated.
+fn run_prepare(
+    db: Arc<DB>,
+    sequence: Arc<AtomicU64>,
+    epoch: Arc<AtomicU64>,
     receiver: mpsc::Receiver<WriteRequest>,
-    worker_senders: Vec<mpsc::Sender<BuildJob>>,
-    max_coalesced_requests: NonZeroUsize,
+    sender: mpsc::SyncSender<PreparedWrite>,
+    max_commit_batch_bytes: usize,
 ) {
-    // `order` lets builders run in parallel while the commit worker preserves assignment order.
-    let mut order = 0u64;
-    let mut next_sequence = match sequence.lock() {
-        Ok(sequence) => *sequence,
-        Err(error) => {
-            fail_pending_receiver(receiver, format!("rocks sequence lock poisoned: {error}"));
-            return;
-        }
-    };
-    let mut worker = 0usize;
+    let mut next = sequence.load(Ordering::Acquire);
+    let mut seen_epoch = epoch.load(Ordering::Acquire);
 
     while let Ok(first) = receiver.recv() {
-        // Drain only requests already queued so quiet writers do not wait for a wider batch.
-        let mut requests = vec![first];
-        let mut disconnected = false;
-
-        while requests.len() < max_coalesced_requests.get() && !disconnected {
-            match receiver.try_recv() {
-                Ok(request) => requests.push(request),
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    disconnected = true;
-                }
-            }
+        let current_epoch = epoch.load(Ordering::Acquire);
+        if current_epoch != seen_epoch {
+            // A commit failed: each group commits atomically so nothing past the durable frontier
+            // persisted, and the failed numbers can be reclaimed.
+            seen_epoch = current_epoch;
+            next = sequence.load(Ordering::Acquire);
         }
 
-        next_sequence = match next_sequence.checked_add(1) {
-            Some(sequence) => sequence,
-            None => {
-                fail_requests(requests, "rocks sequence number overflowed".to_string());
-                fail_pending_receiver(receiver, "rocks sequence number overflowed".to_string());
-                return;
+        let (group, disconnected) = match prepare_queued_write(
+            &db,
+            &receiver,
+            first,
+            next,
+            max_commit_batch_bytes,
+            seen_epoch,
+        ) {
+            Ok(prepared) => prepared,
+            Err((requests, error)) => {
+                fail_requests(requests, error);
+                continue;
             }
         };
-        let Some(sender) = worker_senders.get(worker % worker_senders.len()) else {
-            fail_requests(requests, "rocks write workers stopped".to_string());
-            fail_pending_receiver(receiver, "rocks write workers stopped".to_string());
-            return;
-        };
-        worker = worker.wrapping_add(1);
-
-        let job = BuildJob {
-            order,
-            sequence: next_sequence,
-            requests,
-        };
-        if let Err(error) = sender.send(job) {
-            fail_requests(error.0.requests, "rocks write workers stopped".to_string());
-            fail_pending_receiver(receiver, "rocks write workers stopped".to_string());
-            return;
+        if let Some(last) = group.writes.last() {
+            next = last.sequence;
         }
-        order = match order.checked_add(1) {
-            Some(order) => order,
-            None => {
-                fail_pending_receiver(receiver, "rocks write order overflowed".to_string());
-                return;
-            }
-        };
+        if !forward_group(&sender, group) {
+            break;
+        }
 
         if disconnected {
             break;
@@ -459,80 +436,203 @@ fn run_write_dispatcher(
     }
 }
 
-/// Converts assigned write jobs into `WriteBatch` values without publishing them.
-fn run_build_worker(
-    db: Arc<DB>,
-    receiver: mpsc::Receiver<BuildJob>,
-    sender: mpsc::Sender<PreparedWrite>,
-) {
-    while let Ok(job) = receiver.recv() {
-        let batch = build_sequence_requests_batch(&db, job.sequence, &job.requests);
-        let prepared = PreparedWrite {
-            order: job.order,
-            sequence: job.sequence,
-            requests: job.requests,
-            batch,
+/// Builds one prepared write from requests already queued behind `first` without waiting for new
+/// arrivals, stopping once the accumulated RocksDB batch reaches the soft byte cap. The request
+/// that crosses the cap stays in the wave so a single large request can still make progress.
+fn prepare_queued_write(
+    db: &DB,
+    receiver: &mpsc::Receiver<WriteRequest>,
+    first: WriteRequest,
+    from: u64,
+    max_batch_bytes: usize,
+    epoch: u64,
+) -> Result<(PreparedWrite, bool), (Vec<WriteRequest>, String)> {
+    let mut writes = Vec::with_capacity(64);
+    let mut batch = rocksdb::WriteBatch::default();
+    let mut next = from;
+    let mut request = first;
+    let mut disconnected = false;
+
+    loop {
+        next = match next.checked_add(1) {
+            Some(next) => next,
+            None => {
+                return Err((
+                    vec![request],
+                    "rocks sequence number overflowed".to_string(),
+                ));
+            }
         };
-        if let Err(error) = sender.send(prepared) {
-            fail_requests(error.0.requests, "rocks commit worker stopped".to_string());
+        let write = AssignedWrite {
+            sequence: next,
+            request,
+        };
+        if let Err(error) = append_assigned_write_batch(db, &mut batch, &write) {
+            writes.push(write);
+            let group = PreparedWrite {
+                writes,
+                batch: Err(error),
+                batch_bytes: 0,
+                epoch,
+            };
+            return Ok((group, disconnected));
+        }
+        writes.push(write);
+        if batch.size_in_bytes() >= max_batch_bytes || next == u64::MAX {
             break;
         }
+
+        match receiver.try_recv() {
+            Ok(next_request) => request = next_request,
+            Err(mpsc::TryRecvError::Empty) => break,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                disconnected = true;
+                break;
+            }
+        }
+    }
+
+    Ok((
+        finalize_prepared_write(db, writes, batch, epoch),
+        disconnected,
+    ))
+}
+
+/// Sends one group to `commit`, returning false if it has stopped.
+fn forward_group(sender: &mpsc::SyncSender<PreparedWrite>, group: PreparedWrite) -> bool {
+    if let Err(error) = sender.send(group) {
+        fail_assigned_writes(error.0.writes, "rocks commit worker stopped".to_string());
+        return false;
+    }
+    true
+}
+
+/// Commits prepared groups one at a time with a synced write, publishing the durable frontier after
+/// each success. A group whose epoch was superseded by an earlier failure is rejected without being
+/// written; a failing group bumps the epoch so its frontier (and every later group assigned under
+/// it) is abandoned and re-allocated by `prepare`.
+fn run_commit(
+    db: Arc<DB>,
+    sequence: Arc<AtomicU64>,
+    epoch: Arc<AtomicU64>,
+    receiver: mpsc::Receiver<PreparedWrite>,
+) {
+    let mut committed = sequence.load(Ordering::Acquire);
+    while let Ok(group) = receiver.recv() {
+        committed = commit_group(&db, &sequence, &epoch, committed, group);
     }
 }
 
-/// Publishes prepared batches in dispatcher order and resolves each request with the commit result.
-fn run_commit_worker(
-    db: Arc<DB>,
-    sequence: Arc<Mutex<u64>>,
-    receiver: mpsc::Receiver<PreparedWrite>,
-) {
-    let mut next_order = 0u64;
-    // Buffer out-of-order builder results until every earlier batch has committed.
-    let mut pending = BTreeMap::new();
+/// Commits one group, returning the durable frontier afterwards (unchanged on rejection or failure).
+fn commit_group(
+    db: &DB,
+    sequence: &AtomicU64,
+    epoch: &AtomicU64,
+    committed: u64,
+    group: PreparedWrite,
+) -> u64 {
+    if group.writes.is_empty() {
+        return committed;
+    }
+    if group.epoch != epoch.load(Ordering::Acquire) {
+        // This group was assigned under a frontier an earlier commit failure has since abandoned
+        // (prepare can build one wave ahead before it observes the bump). Rejecting it keeps the
+        // durable log gap-free; the requests never reached the disk, so the caller is told to
+        // retry, which re-allocates them fresh sequence numbers under the current epoch.
+        fail_assigned_writes(
+            group.writes,
+            "rocks write batch superseded by an earlier failure, retry".to_string(),
+        );
+        return committed;
+    }
 
-    while let Ok(prepared) = receiver.recv() {
-        pending.insert(prepared.order, prepared);
-
-        while let Some(prepared) = pending.remove(&next_order) {
-            let result = match prepared.batch {
-                Ok(batch) => commit_prepared_sequence(&db, &sequence, prepared.sequence, batch),
-                Err(error) => Err(error),
-            };
-            match result {
-                Ok(sequence) => fail_or_complete_requests(prepared.requests, Ok(sequence)),
-                Err(error) => {
-                    fail_or_complete_requests(prepared.requests, Err(error.clone()));
-                    fail_pending_prepared(pending, error.clone());
-                    fail_prepared_receiver(receiver, error);
-                    return;
-                }
-            }
-            next_order = match next_order.checked_add(1) {
-                Some(order) => order,
-                None => {
-                    let error = "rocks write order overflowed".to_string();
-                    fail_pending_prepared(pending, error.clone());
-                    fail_prepared_receiver(receiver, error);
-                    return;
-                }
-            };
+    let requests = group.writes.len();
+    let batch_bytes = group.batch_bytes;
+    match write_prepared_group(db, group) {
+        Ok((writes, last_sequence)) => {
+            // Release so `current_sequence` readers only observe rows that are already durable.
+            sequence.store(last_sequence, Ordering::Release);
+            debug!(
+                requests,
+                batch_bytes,
+                sequence = last_sequence,
+                "committed write batch"
+            );
+            complete_assigned_writes(writes);
+            last_sequence
+        }
+        Err((writes, error)) => {
+            // Bump before failing: any in-flight group sharing the failed epoch is then rejected,
+            // and `prepare` re-syncs to `committed`, leaving the abandoned numbers for reuse.
+            epoch.fetch_add(1, Ordering::AcqRel);
+            fail_assigned_writes(writes, error);
+            committed
         }
     }
 }
 
-/// Builds the atomic RocksDB batch for one assigned sequence number.
-fn build_sequence_requests_batch(
+/// Commits one prepared group with a single synced write. Returns the group's writes alongside its
+/// last sequence number on success, or the writes and the error on failure.
+fn write_prepared_group(
     db: &DB,
+    group: PreparedWrite,
+) -> Result<(Vec<AssignedWrite>, u64), (Vec<AssignedWrite>, String)> {
+    let PreparedWrite { writes, batch, .. } = group;
+    let last_sequence = match writes.last() {
+        Some(write) => write.sequence,
+        None => return Ok((writes, 0)),
+    };
+    let batch = match batch {
+        Ok(batch) => batch,
+        Err(error) => return Err((writes, error)),
+    };
+    match write_sequence_batch(db, batch) {
+        Ok(()) => Ok((writes, last_sequence)),
+        Err(error) => Err((writes, error)),
+    }
+}
+
+fn finalize_prepared_write(
+    db: &DB,
+    writes: Vec<AssignedWrite>,
+    mut batch: rocksdb::WriteBatch,
+    epoch: u64,
+) -> PreparedWrite {
+    if let Some(write) = writes.last() {
+        append_sequence_meta(db, &mut batch, write.sequence);
+    }
+    let batch_bytes = batch.size_in_bytes();
+    PreparedWrite {
+        writes,
+        batch: Ok(batch),
+        batch_bytes,
+        epoch,
+    }
+}
+
+fn append_assigned_write_batch(
+    db: &DB,
+    batch: &mut rocksdb::WriteBatch,
+    write: &AssignedWrite,
+) -> Result<(), String> {
+    append_sequence_entries(
+        db,
+        batch,
+        write.sequence,
+        std::slice::from_ref(&write.request),
+    )
+}
+
+/// Appends one sequence's current-state rows plus its replay-log row to `batch`.
+fn append_sequence_entries(
+    db: &DB,
+    batch: &mut rocksdb::WriteBatch,
     sequence: u64,
     requests: &[WriteRequest],
-) -> Result<rocksdb::WriteBatch, String> {
-    let meta_cf = db
-        .cf_handle(META_CF)
-        .expect("meta CF must exist (created on open)");
+) -> Result<(), String> {
     let log_cf = db
         .cf_handle(LOG_CF)
         .expect("log CF must exist (created on open)");
-    let mut batch = rocksdb::WriteBatch::default();
 
     for request in requests {
         for (k, v) in &request.kvs {
@@ -542,32 +642,14 @@ fn build_sequence_requests_batch(
     if let Some(log_value) = encode_log_value(sequence, requests) {
         batch.put_cf(log_cf, sequence_log_key(sequence), log_value);
     }
-    batch.put_cf(meta_cf, SEQ_META_KEY, sequence.to_le_bytes());
-    Ok(batch)
+    Ok(())
 }
 
-/// Commits one prepared sequence after rechecking contiguity under the sequence lock.
-fn commit_prepared_sequence(
-    db: &DB,
-    sequence: &Mutex<u64>,
-    prepared_sequence: u64,
-    batch: rocksdb::WriteBatch,
-) -> Result<u64, String> {
-    let mut sequence = sequence
-        .lock()
-        .map_err(|e| format!("rocks sequence lock poisoned: {e}"))?;
-    let expected = (*sequence)
-        .checked_add(1)
-        .ok_or_else(|| "rocks sequence number overflowed".to_string())?;
-    if prepared_sequence != expected {
-        return Err(format!(
-            "prepared rocks sequence {prepared_sequence} is not contiguous after {}",
-            *sequence
-        ));
-    }
-    write_sequence_batch(db, batch)?;
-    *sequence = prepared_sequence;
-    Ok(prepared_sequence)
+fn append_sequence_meta(db: &DB, batch: &mut rocksdb::WriteBatch, sequence: u64) {
+    let meta_cf = db
+        .cf_handle(META_CF)
+        .expect("meta CF must exist (created on open)");
+    batch.put_cf(meta_cf, SEQ_META_KEY, sequence.to_le_bytes());
 }
 
 /// Writes a sequence batch with sync enabled because it defines the stream log high-water mark.
@@ -578,55 +660,39 @@ fn write_sequence_batch(db: &DB, batch: rocksdb::WriteBatch) -> Result<(), Strin
         .map_err(|e| e.to_string())
 }
 
-/// Sends the same failure to every request in a coalesced write job.
+/// Sends the same assignment failure to every request in a wave.
 fn fail_requests(requests: Vec<WriteRequest>, error: String) {
-    fail_or_complete_requests(requests, Err(error));
-}
-
-/// Resolves every request folded into one sequence with that sequence's commit result.
-fn fail_or_complete_requests(requests: Vec<WriteRequest>, result: Result<u64, String>) {
     for request in requests {
-        let _ = request.response.send(result.clone());
-    }
-}
-
-/// Fails requests still waiting on the dispatcher input channel after a terminal worker error.
-fn fail_pending_receiver(receiver: mpsc::Receiver<WriteRequest>, error: String) {
-    for request in receiver {
         let _ = request.response.send(Err(error.clone()));
     }
 }
 
-/// Fails prepared batches buffered behind a commit error that cannot be published contiguously.
-fn fail_pending_prepared(pending: BTreeMap<u64, PreparedWrite>, error: String) {
-    for (_, prepared) in pending {
-        fail_requests(prepared.requests, error.clone());
+/// Fails every assigned write with the same error.
+fn fail_assigned_writes(writes: Vec<AssignedWrite>, error: String) {
+    for write in writes {
+        let _ = write.request.response.send(Err(error.clone()));
     }
 }
 
-/// Fails prepared batches produced after the commit worker has hit a terminal error.
-fn fail_prepared_receiver(receiver: mpsc::Receiver<PreparedWrite>, error: String) {
-    for prepared in receiver {
-        fail_requests(prepared.requests, error.clone());
+/// Resolves every assigned write with its own committed sequence number.
+fn complete_assigned_writes(writes: Vec<AssignedWrite>) {
+    for write in writes {
+        let _ = write.request.response.send(Ok(write.sequence));
     }
 }
 
 /// Application-level write pipeline options used by [`RocksStore::open`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RocksWritePipelineConfig {
-    /// Maximum number of already-queued ingest requests to fold into one RocksDB write.
-    pub max_coalesced_requests: NonZeroUsize,
-    /// Number of batch-building worker threads.
-    pub builder_threads: NonZeroUsize,
+    /// Soft maximum RocksDB `WriteBatch` size before cutting a prepared commit group.
+    pub max_commit_batch_bytes: NonZeroUsize,
 }
 
 impl Default for RocksWritePipelineConfig {
     fn default() -> Self {
         Self {
-            max_coalesced_requests: NonZeroUsize::new(DEFAULT_WRITE_MAX_COALESCED_REQUESTS)
-                .expect("default max coalesced requests must be nonzero"),
-            builder_threads: NonZeroUsize::new(DEFAULT_WRITE_BUILDERS)
-                .expect("default write builders must be nonzero"),
+            max_commit_batch_bytes: NonZeroUsize::new(DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES)
+                .expect("default commit batch byte limit must be nonzero"),
         }
     }
 }
@@ -651,7 +717,7 @@ pub struct RocksConfig {
 #[derive(Clone)]
 pub struct RocksStore {
     db: Arc<DB>,
-    sequence: Arc<Mutex<u64>>,
+    sequence: Arc<AtomicU64>,
     writer: Arc<Writer>,
 }
 
@@ -686,7 +752,7 @@ impl RocksStore {
             Some(bytes) if bytes.len() == 8 => u64::from_le_bytes(bytes.try_into().unwrap()),
             _ => 0,
         };
-        let sequence = Arc::new(Mutex::new(seq));
+        let sequence = Arc::new(AtomicU64::new(seq));
         let writer = Arc::new(Writer::start(db.clone(), sequence.clone(), write_pipeline));
         Ok(Self {
             db,
@@ -802,10 +868,7 @@ impl RocksStore {
 
     /// Computes the replay-log cutoff for a sequence policy and prunes only log rows.
     fn apply_sequence_prune_policy(&self, retain: &RetainPolicy) -> Result<(), String> {
-        let current = *self
-            .sequence
-            .lock()
-            .map_err(|e| format!("rocks sequence lock poisoned: {e}"))?;
+        let current = self.sequence.load(Ordering::Acquire);
         let cutoff_exclusive = match retain {
             RetainPolicy::KeepLatest { count } => {
                 let count = *count as u64;
@@ -821,13 +884,13 @@ impl RocksStore {
 
 impl Sequence for RocksStore {
     fn current_sequence(&self) -> u64 {
-        *self.sequence.lock().expect("rocks sequence lock poisoned")
+        self.sequence.load(Ordering::Acquire)
     }
 }
 
 // Ingest uses a dedicated writer thread so blocking RocksDB writes do not occupy Tokio workers.
-// The writer assigns one sequence to the first inbound request plus any already-queued requests,
-// reducing synced commits and log-CF rows under concurrent upload load.
+// The writer folds already-queued requests into one RocksDB batch while preserving a contiguous
+// sequence number and replay-log row for each request.
 impl Ingest for RocksStore {
     async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, String> {
         self.writer.put_batch(kvs).await
@@ -983,41 +1046,99 @@ mod tests {
         response_entries(batch.decode_response().expect("decode batch response"))
     }
 
-    fn dispatch_write_jobs(
-        max_coalesced_requests: NonZeroUsize,
-        requests: Vec<WriteRequest>,
-    ) -> Vec<BuildJob> {
-        let (request_sender, request_receiver) = mpsc::channel();
-        for request in requests {
-            request_sender.send(request).expect("send request");
+    fn encoded_log_entry(sequence: u64, key: &'static [u8], value: &'static [u8]) -> Vec<u8> {
+        StreamGetResponse {
+            sequence_number: sequence,
+            entries: vec![KvEntry {
+                key: key.to_vec(),
+                value: Bytes::from_static(value),
+                ..Default::default()
+            }],
+            ..Default::default()
         }
-        drop(request_sender);
+        .encode_to_vec()
+    }
 
-        let (worker_sender, worker_receiver) = mpsc::channel();
-        run_write_dispatcher(
-            Arc::new(Mutex::new(0)),
-            request_receiver,
-            vec![worker_sender],
-            max_coalesced_requests,
-        );
-        worker_receiver.try_iter().collect()
+    /// Builds a group whose batch is already an error, modeling a build/commit failure for a
+    /// contiguous run of assigned sequence numbers tagged with `epoch`.
+    fn failing_group(
+        epoch: u64,
+        entries: &[(u64, &'static [u8], &'static [u8])],
+        error: &str,
+    ) -> (PreparedWrite, Vec<oneshot::Receiver<Result<u64, String>>>) {
+        let mut writes = Vec::new();
+        let mut receivers = Vec::new();
+        for (sequence, key, value) in entries {
+            let (write, receiver) = assigned_write_with_response(*sequence, key, value);
+            writes.push(write);
+            receivers.push(receiver);
+        }
+        (
+            PreparedWrite {
+                writes,
+                batch: Err(error.to_string()),
+                batch_bytes: 0,
+                epoch,
+            },
+            receivers,
+        )
     }
 
     fn commit_sequence_requests(
         db: &DB,
-        sequence: &Mutex<u64>,
+        sequence: &AtomicU64,
         requests: &[WriteRequest],
     ) -> Result<u64, String> {
-        let mut sequence = sequence
-            .lock()
-            .map_err(|e| format!("rocks sequence lock poisoned: {e}"))?;
-        let next = (*sequence)
+        let next = sequence
+            .load(Ordering::Acquire)
             .checked_add(1)
             .ok_or_else(|| "rocks sequence number overflowed".to_string())?;
-        let batch = build_sequence_requests_batch(db, next, requests)?;
+        let mut batch = rocksdb::WriteBatch::default();
+        append_sequence_entries(db, &mut batch, next, requests)?;
+        append_sequence_meta(db, &mut batch, next);
         write_sequence_batch(db, batch)?;
-        *sequence = next;
+        sequence.store(next, Ordering::Release);
         Ok(next)
+    }
+
+    fn assigned_write(sequence: u64, key: &'static [u8], value: &'static [u8]) -> AssignedWrite {
+        assigned_write_with_response(sequence, key, value).0
+    }
+
+    fn assigned_write_with_response(
+        sequence: u64,
+        key: &'static [u8],
+        value: &'static [u8],
+    ) -> (AssignedWrite, oneshot::Receiver<Result<u64, String>>) {
+        let (response, result) = oneshot::channel();
+        (
+            AssignedWrite {
+                sequence,
+                request: WriteRequest {
+                    kvs: vec![(Bytes::from_static(key), Bytes::from_static(value))],
+                    response,
+                },
+            },
+            result,
+        )
+    }
+
+    fn prepared_write(db: &DB, epoch: u64, writes: Vec<AssignedWrite>) -> PreparedWrite {
+        let mut prepared = Vec::with_capacity(writes.len());
+        let mut batch = rocksdb::WriteBatch::default();
+        for write in writes {
+            if let Err(error) = append_assigned_write_batch(db, &mut batch, &write) {
+                prepared.push(write);
+                return PreparedWrite {
+                    writes: prepared,
+                    batch: Err(error),
+                    batch_bytes: 0,
+                    epoch,
+                };
+            }
+            prepared.push(write);
+        }
+        finalize_prepared_write(db, prepared, batch, epoch)
     }
 
     #[test]
@@ -1025,9 +1146,8 @@ mod tests {
         assert_eq!(
             RocksWritePipelineConfig::default(),
             RocksWritePipelineConfig {
-                max_coalesced_requests: NonZeroUsize::new(DEFAULT_WRITE_MAX_COALESCED_REQUESTS)
+                max_commit_batch_bytes: NonZeroUsize::new(DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES,)
                     .expect("nonzero"),
-                builder_threads: NonZeroUsize::new(DEFAULT_WRITE_BUILDERS).expect("nonzero"),
             }
         );
         assert_eq!(
@@ -1037,96 +1157,221 @@ mod tests {
     }
 
     #[test]
-    fn dispatcher_uses_configured_coalescing_width() {
-        let jobs = dispatch_write_jobs(
-            NonZeroUsize::new(2).expect("nonzero"),
-            vec![
-                write_request(b"a"),
-                write_request(b"b"),
-                write_request(b"c"),
-            ],
-        );
+    fn prepare_queued_write_collects_all_pending_below_byte_cap() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let (sender, receiver) = mpsc::channel();
+        sender.send(write_request(b"a")).expect("send");
+        sender.send(write_request(b"b")).expect("send");
+        sender.send(write_request(b"c")).expect("send");
+        drop(sender);
 
-        assert_eq!(jobs.len(), 2);
-        assert_eq!(jobs[0].order, 0);
-        assert_eq!(jobs[0].sequence, 1);
-        assert_eq!(jobs[0].requests.len(), 2);
-        assert_eq!(jobs[1].order, 1);
-        assert_eq!(jobs[1].sequence, 2);
-        assert_eq!(jobs[1].requests.len(), 1);
+        let first = receiver.recv().expect("first request");
+        let (group, disconnected) = match prepare_queued_write(
+            &store.db,
+            &receiver,
+            first,
+            0,
+            DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES,
+            7,
+        ) {
+            Ok(prepared) => prepared,
+            Err((_, error)) => panic!("{error}"),
+        };
+        assert_eq!(group.writes.len(), 3);
+        assert!(group.batch.is_ok());
+        assert!(group.batch_bytes > 0);
+        assert_eq!(group.epoch, 7);
+        assert!(disconnected);
     }
 
     #[test]
-    fn dispatcher_supports_single_request_coalescing_width() {
-        let jobs = dispatch_write_jobs(
-            NonZeroUsize::new(1).expect("nonzero"),
-            vec![write_request(b"a"), write_request(b"b")],
-        );
-
-        assert_eq!(jobs.len(), 2);
-        assert_eq!(jobs[0].sequence, 1);
-        assert_eq!(jobs[0].requests.len(), 1);
-        assert_eq!(jobs[1].sequence, 2);
-        assert_eq!(jobs[1].requests.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn dispatcher_fails_inflight_job_when_build_worker_stops() {
-        let (request_sender, request_receiver) = mpsc::channel();
-        let (worker_sender, worker_receiver) = mpsc::channel();
-        let (response, result) = oneshot::channel();
-
-        drop(worker_receiver);
-        request_sender
-            .send(WriteRequest {
-                kvs: vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))],
-                response,
-            })
-            .expect("send request");
-        drop(request_sender);
-
-        run_write_dispatcher(
-            Arc::new(Mutex::new(0)),
-            request_receiver,
-            vec![worker_sender],
-            NonZeroUsize::new(1).expect("nonzero"),
-        );
-
-        let error = result
-            .await
-            .expect("request should receive an explicit worker error")
-            .expect_err("request should fail");
-        assert_eq!(error, "rocks write workers stopped");
-    }
-
-    #[tokio::test]
-    async fn build_worker_fails_inflight_job_when_commit_worker_stops() {
+    fn prepare_queued_write_stops_after_soft_byte_cap() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
-        let (job_sender, job_receiver) = mpsc::channel();
-        let (prepared_sender, prepared_receiver) = mpsc::channel();
-        let (response, result) = oneshot::channel();
+        let (sender, receiver) = mpsc::channel();
+        sender.send(write_request(b"a")).expect("send");
+        sender.send(write_request(b"b")).expect("send");
+        sender.send(write_request(b"c")).expect("send");
+        drop(sender);
 
-        drop(prepared_receiver);
-        job_sender
-            .send(BuildJob {
-                order: 0,
-                sequence: 1,
-                requests: vec![WriteRequest {
-                    kvs: vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))],
-                    response,
-                }],
-            })
-            .expect("send build job");
-        drop(job_sender);
+        let first = receiver.recv().expect("first request");
+        let (group, disconnected) = match prepare_queued_write(&store.db, &receiver, first, 0, 1, 7)
+        {
+            Ok(prepared) => prepared,
+            Err((_, error)) => panic!("{error}"),
+        };
 
-        run_build_worker(store.db.clone(), job_receiver, prepared_sender);
+        assert_eq!(group.writes.len(), 1);
+        assert_eq!(group.writes[0].request.kvs[0].0.as_ref(), b"a");
+        assert!(group.batch.is_ok());
+        assert!(group.batch_bytes >= 1);
+        assert_eq!(group.epoch, 7);
+        assert!(!disconnected);
+        assert_eq!(
+            receiver
+                .try_recv()
+                .expect("next wave should keep queued request")
+                .kvs[0]
+                .0
+                .as_ref(),
+            b"b"
+        );
+    }
 
+    #[tokio::test]
+    async fn forward_group_fails_request_when_commit_stopped() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let (group_sender, group_receiver) = mpsc::sync_channel(0);
+        drop(group_receiver);
+
+        let (write, result) = assigned_write_with_response(1, b"a", b"1");
+        let group = prepared_write(&store.db, 0, vec![write]);
+        let forwarded = forward_group(&group_sender, group);
+
+        assert!(!forwarded);
         let error = result
             .await
             .expect("request should receive an explicit worker error")
             .expect_err("request should fail");
         assert_eq!(error, "rocks commit worker stopped");
+    }
+
+    #[tokio::test]
+    async fn failed_group_supersedes_epoch_and_frees_sequence_numbers() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let epoch = AtomicU64::new(0);
+
+        // A group that cannot commit (modeled with an already-failed batch) at sequences 1 and 2.
+        let (group, receivers) = failing_group(0, &[(1, b"a", b"1"), (2, b"b", b"2")], "disk full");
+        let committed = commit_group(&store.db, &store.sequence, &epoch, 0, group);
+
+        // Nothing was published, and the epoch advanced so the abandoned numbers can be re-used.
+        assert_eq!(committed, 0);
+        assert_eq!(store.current_sequence(), 0);
+        assert_eq!(epoch.load(Ordering::Acquire), 1);
+        for receiver in receivers {
+            assert_eq!(
+                receiver.await.expect("response"),
+                Err("disk full".to_string())
+            );
+        }
+
+        // The next epoch re-allocates sequences 1 and 2 to fresh requests, which commit cleanly.
+        let (write_x, result_x) = assigned_write_with_response(1, b"x", b"24");
+        let (write_y, result_y) = assigned_write_with_response(2, b"y", b"25");
+        let group = prepared_write(&store.db, 1, vec![write_x, write_y]);
+        let committed = commit_group(&store.db, &store.sequence, &epoch, committed, group);
+
+        assert_eq!(committed, 2);
+        assert_eq!(store.current_sequence(), 2);
+        assert_eq!(result_x.await.expect("response"), Ok(1));
+        assert_eq!(result_y.await.expect("response"), Ok(2));
+        assert_eq!(
+            batch_entries(store.get_batch(1).await.expect("get").expect("retained")),
+            vec![(Bytes::from_static(b"x"), Bytes::from_static(b"24"))]
+        );
+        assert_eq!(
+            batch_entries(store.get_batch(2).await.expect("get").expect("retained")),
+            vec![(Bytes::from_static(b"y"), Bytes::from_static(b"25"))]
+        );
+    }
+
+    #[tokio::test]
+    async fn superseded_epoch_group_is_rejected_without_write() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        // The current epoch is 1: an earlier failure already superseded epoch 0.
+        let epoch = AtomicU64::new(1);
+
+        let (write, result) = assigned_write_with_response(1, b"a", b"1");
+        let group = prepared_write(&store.db, 0, vec![write]);
+        let committed = commit_group(&store.db, &store.sequence, &epoch, 0, group);
+
+        assert_eq!(committed, 0);
+        assert_eq!(store.current_sequence(), 0);
+        assert_eq!(epoch.load(Ordering::Acquire), 1);
+        assert_eq!(
+            result.await.expect("response"),
+            Err("rocks write batch superseded by an earlier failure, retry".to_string())
+        );
+        assert!(store.get_batch(1).await.expect("get").is_none());
+    }
+
+    #[tokio::test]
+    async fn writer_reallocates_sequence_numbers_after_failed_batch() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let epoch = AtomicU64::new(5);
+
+        // Two successive failures both abandon sequence 1 without ever consuming it.
+        for attempt in [b"first" as &[u8], b"second"] {
+            let current = epoch.load(Ordering::Acquire);
+            let (group, receivers) = failing_group(current, &[(1, b"k", b"v")], "boom");
+            let committed = commit_group(&store.db, &store.sequence, &epoch, 0, group);
+            assert_eq!(
+                committed, 0,
+                "attempt {attempt:?} must not advance the frontier"
+            );
+            assert_eq!(epoch.load(Ordering::Acquire), current + 1);
+            for receiver in receivers {
+                assert_eq!(receiver.await.expect("response"), Err("boom".to_string()));
+            }
+        }
+
+        // The first durable write still takes sequence 1.
+        let current = epoch.load(Ordering::Acquire);
+        let (write, result) = assigned_write_with_response(1, b"k", b"v");
+        let group = prepared_write(&store.db, current, vec![write]);
+        let committed = commit_group(&store.db, &store.sequence, &epoch, 0, group);
+        assert_eq!(committed, 1);
+        assert_eq!(result.await.expect("response"), Ok(1));
+        assert_eq!(store.current_sequence(), 1);
+    }
+
+    #[tokio::test]
+    async fn reused_sequence_overwrites_abandoned_log_row() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let epoch = AtomicU64::new(0);
+
+        // Model an abandoned sequence index: the durable frontier is still 0, but a row
+        // already exists at the next log key and must be replaced by the successful retry.
+        store
+            .db
+            .put_cf(
+                store.log_cf(),
+                sequence_log_key(1),
+                encoded_log_entry(1, b"k", b"stale"),
+            )
+            .expect("seed abandoned log row");
+        assert_eq!(
+            batch_entries(store.get_batch(1).await.expect("get").expect("retained")),
+            vec![(Bytes::from_static(b"k"), Bytes::from_static(b"stale"))]
+        );
+
+        let (failed, receivers) = failing_group(0, &[(1, b"k", b"failed")], "boom");
+        let committed = commit_group(&store.db, &store.sequence, &epoch, 0, failed);
+        assert_eq!(committed, 0);
+        assert_eq!(store.current_sequence(), 0);
+        assert_eq!(epoch.load(Ordering::Acquire), 1);
+        for receiver in receivers {
+            assert_eq!(receiver.await.expect("response"), Err("boom".to_string()));
+        }
+
+        let (write, result) = assigned_write_with_response(1, b"k", b"new");
+        let group = prepared_write(&store.db, 1, vec![write]);
+        let committed = commit_group(&store.db, &store.sequence, &epoch, committed, group);
+
+        assert_eq!(committed, 1);
+        assert_eq!(result.await.expect("response"), Ok(1));
+        assert_eq!(store.current_sequence(), 1);
+        assert_eq!(
+            batch_entries(store.get_batch(1).await.expect("get").expect("retained")),
+            vec![(Bytes::from_static(b"k"), Bytes::from_static(b"new"))]
+        );
     }
 
     #[tokio::test]
@@ -1136,8 +1381,7 @@ mod tests {
             dir.path(),
             Some(RocksConfig {
                 write_pipeline: RocksWritePipelineConfig {
-                    max_coalesced_requests: NonZeroUsize::new(1).expect("nonzero"),
-                    builder_threads: NonZeroUsize::new(1).expect("nonzero"),
+                    max_commit_batch_bytes: NonZeroUsize::new(1).expect("nonzero"),
                 },
                 ..Default::default()
             }),
@@ -1153,7 +1397,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coalesced_requests_share_sequence_and_log_batch() {
+    async fn single_sequence_write_logs_all_requests() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
         let (response_a, _rx_a) = oneshot::channel();
@@ -1205,6 +1449,41 @@ mod tests {
                 (Bytes::from_static(b"c"), Bytes::from_static(b"3")),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn prepared_write_preserves_contiguous_sequence_logs() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let epoch = AtomicU64::new(0);
+        let prepared = prepared_write(
+            &store.db,
+            0,
+            vec![
+                assigned_write(1, b"a", b"1"),
+                assigned_write(2, b"b", b"2"),
+                assigned_write(3, b"c", b"3"),
+            ],
+        );
+
+        assert_eq!(prepared.writes.len(), 3);
+        assert!(prepared.batch_bytes > 0);
+        let committed = commit_group(&store.db, &store.sequence, &epoch, 0, prepared);
+        assert_eq!(committed, 3);
+
+        assert_eq!(store.current_sequence(), 3);
+        for (sequence, key, value) in [
+            (1, Bytes::from_static(b"a"), Bytes::from_static(b"1")),
+            (2, Bytes::from_static(b"b"), Bytes::from_static(b"2")),
+            (3, Bytes::from_static(b"c"), Bytes::from_static(b"3")),
+        ] {
+            let batch = store
+                .get_batch(sequence)
+                .await
+                .expect("get batch")
+                .expect("batch retained");
+            assert_eq!(batch_entries(batch), vec![(key, value)]);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1274,7 +1553,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn writer_accepts_concurrent_arrivals_without_waiting() {
+    async fn writer_accepts_concurrent_arrivals() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
 
