@@ -116,6 +116,140 @@ describe('fetchWithCookieJar', () => {
         expect(observed).toBe('caller=token; AWSALB=caller; other=jar');
     });
 
+    test('preserves jar cookies for Request inputs with init headers', async () => {
+        const jar = new CookieJar();
+        await jar.setCookie('AWSALB=jar; Path=/', 'https://edge.internal/rpc');
+        let observed: { cookie: string | null; initHeader: string | null; requestHeader: string | null } | null = null;
+        const baseFetch: typeof fetch = async (input, init) => {
+            const url = input instanceof Request ? input.url : typeof input === 'string' ? input : input.href;
+            const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+            observed = {
+                cookie: headers.get('cookie'),
+                initHeader: headers.get('x-init'),
+                requestHeader: headers.get('x-request'),
+            };
+            return responseFor(url);
+        };
+        const wrapped = fetchWithCookieJar(jar, baseFetch);
+        const request = new Request('https://edge.internal/rpc', {
+            headers: {
+                cookie: 'stale=request',
+                'x-request': 'request',
+            },
+        });
+
+        await wrapped(request, {
+            headers: {
+                cookie: 'caller=token',
+                'x-init': 'init',
+            },
+        });
+
+        expect(observed).toEqual({
+            cookie: 'caller=token; AWSALB=jar',
+            initHeader: 'init',
+            requestHeader: null,
+        });
+    });
+
+    test('preserves jar cookies for Request inputs with caller cookies', async () => {
+        const jar = new CookieJar();
+        await jar.setCookie('AWSALB=jar; Path=/', 'https://edge.internal/rpc');
+        let observed: string | null = null;
+        const baseFetch: typeof fetch = async (input, init) => {
+            const url = input instanceof Request ? input.url : typeof input === 'string' ? input : input.href;
+            const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+            observed = headers.get('cookie');
+            return responseFor(url);
+        };
+        const wrapped = fetchWithCookieJar(jar, baseFetch);
+        const request = new Request('https://edge.internal/rpc', {
+            headers: {
+                cookie: 'caller=token',
+            },
+        });
+
+        await wrapped(request);
+
+        expect(observed).toBe('caller=token; AWSALB=jar');
+    });
+
+    test('does not send or store jar cookies when credentials are omitted', async () => {
+        const jar = new CookieJar();
+        await jar.setCookie('AWSALB=jar; Path=/', 'https://edge.internal/rpc');
+        const seen: Array<string | null> = [];
+        let calls = 0;
+        const baseFetch: typeof fetch = async (input, init) => {
+            calls++;
+            const url = typeof input === 'string' ? input : input instanceof Request ? input.url : input.href;
+            const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+            seen.push(headers.get('cookie'));
+            return responseFor(url, {
+                headers: calls === 1 ? { 'set-cookie': 'omitted=stored; Path=/' } : undefined,
+            });
+        };
+        const wrapped = fetchWithCookieJar(jar, baseFetch);
+
+        await wrapped('https://edge.internal/rpc', {
+            credentials: 'omit',
+            headers: {
+                cookie: 'caller=token',
+            },
+        });
+        await wrapped('https://edge.internal/rpc');
+
+        expect(seen).toEqual([null, 'AWSALB=jar']);
+    });
+
+    test('does not mutate caller Request headers with jar cookies', async () => {
+        const jar = new CookieJar();
+        await jar.setCookie('AWSALB=jar; Path=/', 'https://edge.internal/rpc');
+        const seen: Array<string | null> = [];
+        let calls = 0;
+        const baseFetch: typeof fetch = async (input, init) => {
+            calls++;
+            const url = input instanceof Request ? input.url : typeof input === 'string' ? input : input.href;
+            const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+            seen.push(headers.get('cookie'));
+            return responseFor(url, {
+                headers: calls === 1 ? { 'set-cookie': 'AWSALB=; Max-Age=0; Path=/' } : undefined,
+            });
+        };
+        const wrapped = fetchWithCookieJar(jar, baseFetch);
+        const request = new Request('https://edge.internal/rpc');
+
+        await wrapped(request);
+        expect(request.headers.get('cookie')).toBeNull();
+        await wrapped(request);
+
+        expect(seen).toEqual(['AWSALB=jar', null]);
+        expect(request.headers.get('cookie')).toBeNull();
+    });
+
+    test('does not mutate caller init Headers with jar cookies', async () => {
+        const jar = new CookieJar();
+        await jar.setCookie('AWSALB=jar; Path=/', 'https://edge.internal/rpc');
+        const seen: Array<string | null> = [];
+        let calls = 0;
+        const baseFetch: typeof fetch = async (input, init) => {
+            calls++;
+            const url = typeof input === 'string' ? input : input instanceof Request ? input.url : input.href;
+            seen.push(new Headers(init?.headers).get('cookie'));
+            return responseFor(url, {
+                headers: calls === 1 ? { 'set-cookie': 'AWSALB=; Max-Age=0; Path=/' } : undefined,
+            });
+        };
+        const wrapped = fetchWithCookieJar(jar, baseFetch);
+        const headers = new Headers();
+
+        await wrapped('https://edge.internal/rpc', { headers });
+        expect(headers.get('cookie')).toBeNull();
+        await wrapped('https://edge.internal/rpc', { headers });
+
+        expect(seen).toEqual(['AWSALB=jar', null]);
+        expect(headers.get('cookie')).toBeNull();
+    });
+
     test('captures cookies across redirects', async () => {
         const jar = new CookieJar();
         const seen: Array<{ path: string; cookie: string | null }> = [];
