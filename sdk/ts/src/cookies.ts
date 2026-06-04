@@ -36,13 +36,23 @@ async function loadToughCookieJar(): Promise<new () => CookieJarBackend> {
 
 export class CookieJar implements CookieJarBackend {
     private backend?: CookieJarBackend;
+    private backendPromise?: Promise<CookieJarBackend>;
 
     private async jar(): Promise<CookieJarBackend> {
-        if (this.backend === undefined) {
-            const ToughCookieJar = await loadToughCookieJar();
-            this.backend = new ToughCookieJar();
+        if (this.backend !== undefined) {
+            return this.backend;
         }
-        return this.backend;
+        this.backendPromise ??= loadToughCookieJar()
+            .then((ToughCookieJar) => {
+                const backend = new ToughCookieJar();
+                this.backend = backend;
+                return backend;
+            })
+            .catch((error) => {
+                this.backendPromise = undefined;
+                throw error;
+            });
+        return await this.backendPromise;
     }
 
     public async getCookieString(currentUrl: string): Promise<string> {

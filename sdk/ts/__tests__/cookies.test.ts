@@ -74,6 +74,46 @@ describe('fetchWithCookieJar', () => {
         }
     });
 
+    test('shares one backend during concurrent first cookie writes', async () => {
+        jest.resetModules();
+
+        const instances: MockToughCookieJar[] = [];
+        class MockToughCookieJar {
+            private readonly cookies = new Map<string, string>();
+
+            public constructor() {
+                instances.push(this);
+            }
+
+            public getCookieString(_currentUrl: string): string {
+                return Array.from(this.cookies.values()).join('; ');
+            }
+
+            public setCookie(cookieString: string, _currentUrl: string): void {
+                const [pair] = cookieString.split(';', 1);
+                const eq = pair.indexOf('=');
+                this.cookies.set(pair.slice(0, eq), pair);
+            }
+        }
+
+        jest.doMock('tough-cookie', () => ({ CookieJar: MockToughCookieJar }));
+        try {
+            const { CookieJar: MockedCookieJar } = require('../src/cookies') as typeof import('../src/cookies');
+            const jar = new MockedCookieJar();
+
+            await Promise.all([
+                jar.setCookie('first=1; Path=/', 'https://edge.internal/rpc'),
+                jar.setCookie('second=2; Path=/', 'https://edge.internal/rpc'),
+            ]);
+
+            expect(instances).toHaveLength(1);
+            expect(await jar.getCookieString('https://edge.internal/rpc')).toBe('first=1; second=2');
+        } finally {
+            jest.dontMock('tough-cookie');
+            jest.resetModules();
+        }
+    });
+
     test('replays host cookies to the same host and not to others', async () => {
         const jar = new CookieJar();
         const seen: Array<{ url: string; cookie: string | null }> = [];
