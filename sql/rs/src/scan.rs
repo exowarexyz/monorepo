@@ -5,18 +5,23 @@ use std::sync::Arc;
 
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::common::config::ConfigOptions;
+use datafusion::common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion::common::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
-use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
+use datafusion::physical_expr::expressions::Column;
+use datafusion::physical_expr::{EquivalenceProperties, Partitioning, PhysicalSortExpr};
+use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::{
-    stream::RecordBatchStreamAdapter, DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
-    SendableRecordBatchStream,
+    coop::CooperativeExec, stream::RecordBatchStreamAdapter, DisplayAs, DisplayFormatType,
+    ExecutionPlan, PlanProperties, SendableRecordBatchStream, SortOrderPushdownResult,
 };
 use exoware_sdk::keys::Key;
 use exoware_sdk::kv_codec::decode_stored_row;
-use exoware_sdk::SerializableReadSession;
 use exoware_sdk::StoreClient;
+use exoware_sdk::{RangeMode, RangeStream, SerializableReadSession};
 use futures::SinkExt;
 
 use crate::builder::*;
@@ -26,19 +31,53 @@ use crate::filter::*;
 use crate::predicate::*;
 use crate::types::*;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScanDirection {
+    Forward,
+    Reverse,
+}
+
+impl ScanDirection {
+    fn range_mode(self) -> RangeMode {
+        match self {
+            Self::Forward => RangeMode::Forward,
+            Self::Reverse => RangeMode::Reverse,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct KvScanExec {
     pub(crate) client: StoreClient,
     pub(crate) model: Arc<TableModel>,
     pub(crate) index_specs: Arc<Vec<ResolvedIndexSpec>>,
     pub(crate) predicate: QueryPredicate,
     pub(crate) limit: Option<usize>,
+    pub(crate) direction: ScanDirection,
     pub(crate) projected_schema: SchemaRef,
     pub(crate) projection: Option<Vec<usize>>,
     pub(crate) properties: PlanProperties,
 }
 
 impl KvScanExec {
+    fn make_properties(
+        projected_schema: SchemaRef,
+        output_ordering: Option<Vec<PhysicalSortExpr>>,
+    ) -> PlanProperties {
+        let equivalence_properties = match output_ordering {
+            Some(ordering) if !ordering.is_empty() => {
+                EquivalenceProperties::new_with_orderings(projected_schema.clone(), [ordering])
+            }
+            _ => EquivalenceProperties::new(projected_schema.clone()),
+        };
+        PlanProperties::new(
+            equivalence_properties,
+            Partitioning::UnknownPartitioning(1),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        )
+    }
+
     pub(crate) fn new(
         client: StoreClient,
         model: Arc<TableModel>,
@@ -48,22 +87,131 @@ impl KvScanExec {
         projected_schema: SchemaRef,
         projection: Option<Vec<usize>>,
     ) -> Self {
-        let properties = PlanProperties::new(
-            EquivalenceProperties::new(projected_schema.clone()),
-            Partitioning::UnknownPartitioning(1),
-            EmissionType::Incremental,
-            Boundedness::Bounded,
-        );
+        let properties = Self::make_properties(projected_schema.clone(), None);
         Self {
             client,
             model,
             index_specs,
             predicate,
             limit,
+            direction: ScanDirection::Forward,
             projected_schema,
             projection,
             properties,
         }
+    }
+
+    fn with_scan_options(
+        &self,
+        limit: Option<usize>,
+        direction: ScanDirection,
+        output_ordering: Option<Vec<PhysicalSortExpr>>,
+    ) -> Self {
+        let properties = Self::make_properties(self.projected_schema.clone(), output_ordering);
+        Self {
+            client: self.client.clone(),
+            model: self.model.clone(),
+            index_specs: self.index_specs.clone(),
+            predicate: self.predicate.clone(),
+            limit,
+            direction,
+            projected_schema: self.projected_schema.clone(),
+            projection: self.projection.clone(),
+            properties,
+        }
+    }
+
+    fn with_ordering(
+        &self,
+        direction: ScanDirection,
+        output_ordering: Vec<PhysicalSortExpr>,
+    ) -> Self {
+        self.with_scan_options(self.limit, direction, Some(output_ordering))
+    }
+
+    fn order_direction_for_primary_key(
+        &self,
+        order: &[PhysicalSortExpr],
+    ) -> DataFusionResult<Option<ScanDirection>> {
+        if order.is_empty() || self.predicate.contradiction {
+            return Ok(None);
+        }
+        if self
+            .predicate
+            .choose_index_plan(&self.model, &self.index_specs)?
+            .is_some()
+        {
+            return Ok(None);
+        }
+
+        let key_columns = self.primary_key_order_columns_after_eq_prefix();
+        if order.len() > key_columns.len() {
+            return Ok(None);
+        }
+
+        let first_desc = order[0].options.descending;
+        let direction = if first_desc {
+            ScanDirection::Reverse
+        } else {
+            ScanDirection::Forward
+        };
+
+        for (sort_expr, &expected_col_idx) in order.iter().zip(key_columns.iter()) {
+            if sort_expr.options.descending != first_desc {
+                return Ok(None);
+            }
+            let Some(column) = sort_expr.expr.as_any().downcast_ref::<Column>() else {
+                return Ok(None);
+            };
+            let Some(&actual_col_idx) = self.model.columns_by_name.get(column.name()) else {
+                return Ok(None);
+            };
+            if actual_col_idx != expected_col_idx {
+                return Ok(None);
+            }
+        }
+
+        Ok(Some(direction))
+    }
+
+    fn primary_key_order_columns_after_eq_prefix(&self) -> Vec<usize> {
+        let mut prefix_encoded_width = 0usize;
+        let mut key_columns = Vec::new();
+        let mut in_order_tail = false;
+
+        for (&col_idx, &kind) in self
+            .model
+            .primary_key_indices
+            .iter()
+            .zip(self.model.primary_key_kinds.iter())
+        {
+            if in_order_tail {
+                key_columns.push(col_idx);
+                continue;
+            }
+
+            let Some(constraint) = self.predicate.constraints.get(&col_idx) else {
+                in_order_tail = true;
+                key_columns.push(col_idx);
+                continue;
+            };
+            match primary_key_range_constraint_for_prefix(
+                &self.model,
+                prefix_encoded_width,
+                kind,
+                constraint,
+            ) {
+                PrimaryKeyRangeConstraint::Point(point) => {
+                    prefix_encoded_width += point.encoded_width;
+                }
+                PrimaryKeyRangeConstraint::Terminal(_) | PrimaryKeyRangeConstraint::NotEnforced => {
+                    in_order_tail = true;
+                    key_columns.push(col_idx);
+                }
+            }
+        }
+
+        key_columns
     }
 
     pub(crate) fn plan_diagnostics(&self) -> DataFusionResult<AccessPathDiagnostics> {
@@ -81,15 +229,16 @@ impl DisplayAs for KvScanExec {
         match self.plan_diagnostics() {
             Ok(diag) => write!(
                 f,
-                "KvScanExec: limit={:?}, {}, query_stats={}",
+                "KvScanExec: limit={:?}, direction={:?}, {}, query_stats={}",
                 self.limit,
+                self.direction,
                 format_access_path_diagnostics(&diag),
                 format_query_stats_explain(QueryStatsExplainSurface::StreamedRangeDetail)
             ),
             Err(err) => write!(
                 f,
-                "KvScanExec: limit={:?}, diagnostics_error={err}",
-                self.limit
+                "KvScanExec: limit={:?}, direction={:?}, diagnostics_error={err}",
+                self.limit, self.direction
             ),
         }
     }
@@ -145,6 +294,7 @@ impl ExecutionPlan for KvScanExec {
         let index_specs = self.index_specs.clone();
         let predicate = self.predicate.clone();
         let limit = self.limit;
+        let direction = self.direction;
         let projection = self.projection.clone();
         let projected_schema = self.projected_schema.clone();
         let access_plan = Arc::new(ScanAccessPlan::new(&model, &projection, &predicate));
@@ -157,7 +307,7 @@ impl ExecutionPlan for KvScanExec {
                 projected_schema: &projected_schema,
                 access_plan: &access_plan,
             };
-            if let Err(e) = stream_kv_scan(&mut tx, &ctx, &index_specs, limit).await {
+            if let Err(e) = stream_kv_scan(&mut tx, &ctx, &index_specs, limit, direction).await {
                 let _ = tx.send(Err(e)).await;
             }
         });
@@ -166,6 +316,39 @@ impl ExecutionPlan for KvScanExec {
             self.projected_schema.clone(),
             rx,
         )))
+    }
+
+    fn with_fetch(&self, limit: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {
+        let limit = match (self.limit, limit) {
+            (Some(existing), Some(limit)) => Some(existing.min(limit)),
+            (None, Some(limit)) => Some(limit),
+            (_, None) => None,
+        };
+        Some(Arc::new(
+            self.with_scan_options(
+                limit,
+                self.direction,
+                self.properties
+                    .output_ordering()
+                    .map(|ordering| ordering.iter().cloned().collect::<Vec<PhysicalSortExpr>>()),
+            ),
+        ))
+    }
+
+    fn fetch(&self) -> Option<usize> {
+        self.limit
+    }
+
+    fn try_pushdown_sort(
+        &self,
+        order: &[PhysicalSortExpr],
+    ) -> DataFusionResult<SortOrderPushdownResult<Arc<dyn ExecutionPlan>>> {
+        let Some(direction) = self.order_direction_for_primary_key(order)? else {
+            return Ok(SortOrderPushdownResult::Unsupported);
+        };
+        Ok(SortOrderPushdownResult::Inexact {
+            inner: Arc::new(self.with_ordering(direction, order.to_vec())),
+        })
     }
 }
 
@@ -204,6 +387,7 @@ pub(crate) async fn stream_kv_scan(
     ctx: &ScanCtx<'_>,
     index_specs: &[ResolvedIndexSpec],
     limit: Option<usize>,
+    direction: ScanDirection,
 ) -> DataFusionResult<()> {
     if ctx.predicate.contradiction {
         return Ok(());
@@ -232,7 +416,7 @@ pub(crate) async fn stream_kv_scan(
     let exact = ctx
         .access_plan
         .predicate_fully_enforced_by_primary_key(ctx.model);
-    stream_pk_scan(tx, ctx, flush_threshold, target_rows, exact).await
+    stream_pk_scan(tx, ctx, flush_threshold, target_rows, exact, direction).await
 }
 
 pub(crate) async fn stream_pk_scan(
@@ -241,12 +425,13 @@ pub(crate) async fn stream_pk_scan(
     flush_threshold: usize,
     target_rows: usize,
     exact: bool,
+    direction: ScanDirection,
 ) -> DataFusionResult<()> {
     let ranges = ctx.predicate.primary_key_ranges(ctx.model)?;
     let mut emitted = 0usize;
     let mut batch_builder = ProjectedBatchBuilder::from_access_plan(ctx.model, ctx.access_plan);
 
-    for range in &ranges {
+    for range in ordered_ranges(&ranges, direction) {
         if range.start > range.end {
             continue;
         }
@@ -259,11 +444,9 @@ pub(crate) async fn stream_pk_scan(
         }
         let raw_limit = if exact { remaining } else { usize::MAX };
 
-        let mut stream = ctx
-            .session
-            .range_stream(&range.start, &range.end, raw_limit, flush_threshold)
-            .await
-            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let mut stream =
+            range_stream_with_direction(ctx.session, range, raw_limit, flush_threshold, direction)
+                .await?;
         while let Some(chunk) = stream
             .next_chunk()
             .await
@@ -332,11 +515,14 @@ pub(crate) async fn stream_index_lookup_scan(
         if emitted + batch_builder.row_count() >= target_rows {
             break;
         }
-        let mut stream = ctx
-            .session
-            .range_stream(&range.start, &range.end, usize::MAX, flush_threshold)
-            .await
-            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let mut stream = range_stream_with_direction(
+            ctx.session,
+            range,
+            usize::MAX,
+            flush_threshold,
+            ScanDirection::Forward,
+        )
+        .await?;
         while let Some(chunk) = stream
             .next_chunk()
             .await
@@ -446,11 +632,14 @@ pub(crate) async fn stream_index_scan(
         if remaining == 0 {
             break;
         }
-        let mut stream = ctx
-            .session
-            .range_stream(&range.start, &range.end, usize::MAX, flush_threshold)
-            .await
-            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let mut stream = range_stream_with_direction(
+            ctx.session,
+            range,
+            usize::MAX,
+            flush_threshold,
+            ScanDirection::Forward,
+        )
+        .await?;
         while let Some(chunk) = stream
             .next_chunk()
             .await
@@ -517,4 +706,119 @@ pub(crate) async fn stream_index_scan(
 
     let _ = flush_projected_batch(tx, ctx, &mut batch_builder, &mut emitted).await?;
     Ok(())
+}
+
+fn ordered_ranges<'a>(
+    ranges: &'a [KeyRange],
+    direction: ScanDirection,
+) -> Box<dyn Iterator<Item = &'a KeyRange> + Send + 'a> {
+    match direction {
+        ScanDirection::Forward => Box::new(ranges.iter()),
+        ScanDirection::Reverse => Box::new(ranges.iter().rev()),
+    }
+}
+
+async fn range_stream_with_direction(
+    session: &SerializableReadSession,
+    range: &KeyRange,
+    limit: usize,
+    batch_size: usize,
+    direction: ScanDirection,
+) -> DataFusionResult<RangeStream> {
+    session
+        .range_stream_with_mode(
+            &range.start,
+            &range.end,
+            limit,
+            batch_size,
+            direction.range_mode(),
+        )
+        .await
+        .map_err(|e| DataFusionError::External(Box::new(e)))
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct KvTopKSortPushdownRule;
+
+impl KvTopKSortPushdownRule {
+    pub(crate) fn new() -> Self {
+        Self
+    }
+}
+
+impl PhysicalOptimizerRule for KvTopKSortPushdownRule {
+    fn optimize(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        config: &ConfigOptions,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        if !config.optimizer.enable_sort_pushdown {
+            return Ok(plan);
+        }
+
+        plan.transform_down(|plan: Arc<dyn ExecutionPlan>| {
+            let Some(sort_exec) = plan.as_any().downcast_ref::<SortExec>() else {
+                return Ok(Transformed::no(plan));
+            };
+            let Some(fetch) = sort_exec.fetch() else {
+                return Ok(Transformed::no(plan));
+            };
+            let Some(ordered_scan) = push_topk_fetch_to_ordered_scan(
+                sort_exec.input().clone(),
+                sort_exec.expr(),
+                fetch,
+            )?
+            else {
+                return Ok(Transformed::no(plan));
+            };
+            let sort = SortExec::new(sort_exec.expr().clone(), ordered_scan)
+                .with_fetch(Some(fetch))
+                .with_preserve_partitioning(sort_exec.preserve_partitioning());
+            Ok(Transformed::yes(Arc::new(sort) as Arc<dyn ExecutionPlan>))
+        })
+        .data()
+    }
+
+    fn name(&self) -> &str {
+        "kv_topk_sort_pushdown"
+    }
+
+    fn schema_check(&self) -> bool {
+        true
+    }
+}
+
+fn push_topk_fetch_to_ordered_scan(
+    plan: Arc<dyn ExecutionPlan>,
+    order: &[PhysicalSortExpr],
+    fetch: usize,
+) -> DataFusionResult<Option<Arc<dyn ExecutionPlan>>> {
+    if let Some(scan_exec) = plan.as_any().downcast_ref::<KvScanExec>() {
+        let Some(direction) = scan_exec.order_direction_for_primary_key(order)? else {
+            return Ok(None);
+        };
+        let limit = Some(
+            scan_exec
+                .limit
+                .map_or(fetch, |existing| existing.min(fetch)),
+        );
+        return Ok(Some(Arc::new(scan_exec.with_scan_options(
+            limit,
+            direction,
+            Some(order.to_vec()),
+        ))));
+    }
+
+    if plan.as_any().downcast_ref::<CooperativeExec>().is_none() {
+        return Ok(None);
+    }
+    let children = plan.children();
+    if children.len() != 1 {
+        return Ok(None);
+    }
+    let Some(new_child) = push_topk_fetch_to_ordered_scan(Arc::clone(children[0]), order, fetch)?
+    else {
+        return Ok(None);
+    };
+    plan.with_new_children(vec![new_child]).map(Some)
 }

@@ -344,14 +344,40 @@ impl ScanAccessPlan {
     }
 
     pub(crate) fn predicate_fully_enforced_by_primary_key(&self, model: &TableModel) -> bool {
-        self.predicate_checks.iter().all(|check| match check {
-            PredicateAccess::Pk { pk_pos, constraint } => {
-                let kind = model.primary_key_kinds[*pk_pos];
-                !matches!(
-                    compile_encoded_constraint(kind, constraint),
-                    EncodedConstraintCompile::Unsupported
-                )
+        let mut enforced_pk_positions = vec![false; model.primary_key_indices.len()];
+        let mut prefix_encoded_width = 0usize;
+
+        for (pk_pos, &kind) in model.primary_key_kinds.iter().enumerate() {
+            let Some(constraint) = self.predicate_checks.iter().find_map(|check| match check {
+                PredicateAccess::Pk {
+                    pk_pos: check_pos,
+                    constraint,
+                } if *check_pos == pk_pos => Some(constraint),
+                _ => None,
+            }) else {
+                break;
+            };
+
+            match primary_key_range_constraint_for_prefix(
+                model,
+                prefix_encoded_width,
+                kind,
+                constraint,
+            ) {
+                PrimaryKeyRangeConstraint::Point(point) => {
+                    enforced_pk_positions[pk_pos] = true;
+                    prefix_encoded_width += point.encoded_width;
+                }
+                PrimaryKeyRangeConstraint::Terminal(_) => {
+                    enforced_pk_positions[pk_pos] = true;
+                    break;
+                }
+                PrimaryKeyRangeConstraint::NotEnforced => break,
             }
+        }
+
+        self.predicate_checks.iter().all(|check| match check {
+            PredicateAccess::Pk { pk_pos, .. } => enforced_pk_positions[*pk_pos],
             PredicateAccess::NonPk { .. } => false,
         })
     }

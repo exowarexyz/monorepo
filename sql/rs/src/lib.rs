@@ -40,8 +40,11 @@ mod tests {
     use datafusion::arrow::array::{Float64Array, Int64Array, LargeStringArray, StringViewArray};
     use datafusion::arrow::datatypes::{i256, DataType, TimeUnit};
     use datafusion::arrow::record_batch::RecordBatch;
-    use datafusion::common::ScalarValue;
+    use datafusion::common::{config::ConfigOptions, ScalarValue};
     use datafusion::logical_expr::{Expr, Operator};
+    use datafusion::physical_optimizer::limit_pushdown::LimitPushdown;
+    use datafusion::physical_optimizer::PhysicalOptimizerRule;
+    use datafusion::physical_plan::limit::GlobalLimitExec;
     use datafusion::physical_plan::ExecutionPlan;
     use datafusion::prelude::SessionContext;
     use exoware_sdk::keys::{Key, KeyCodec};
@@ -703,6 +706,21 @@ mod tests {
             ScalarValue::Int64(Some(value)) => assert_eq!(value, expected as i64),
             other => panic!("unexpected count scalar: {other:?}"),
         }
+    }
+
+    fn collect_i64_column(batches: &[RecordBatch], col_idx: usize) -> Vec<i64> {
+        let mut values = Vec::new();
+        for batch in batches {
+            for row_idx in 0..batch.num_rows() {
+                match ScalarValue::try_from_array(batch.column(col_idx), row_idx)
+                    .expect("int64 scalar should decode")
+                {
+                    ScalarValue::Int64(Some(value)) => values.push(value),
+                    other => panic!("unexpected int64 scalar: {other:?}"),
+                }
+            }
+        }
+        values
     }
 
     async fn explain_plan_rows(ctx: &SessionContext, sql: &str) -> Vec<(String, String)> {
@@ -2935,6 +2953,21 @@ mod tests {
     }
 
     #[test]
+    fn oversized_utf8_primary_key_constraint_is_empty_terminal_range() {
+        let too_large = "a".repeat(exoware_sdk::keys::MAX_KEY_LEN + 1);
+        match primary_key_range_constraint(
+            ColumnKind::Utf8,
+            &PredicateConstraint::StringEq(too_large),
+        ) {
+            PrimaryKeyRangeConstraint::Terminal(spans) => assert!(
+                spans.is_empty(),
+                "unencodable UTF-8 PK equality should be impossible"
+            ),
+            other => panic!("unexpected oversized UTF-8 PK constraint: {other:?}"),
+        }
+    }
+
+    #[test]
     fn in_predicate_generates_multiple_index_ranges() {
         let (model, specs) = test_model();
         let region_idx = *model.columns_by_name.get("region").unwrap();
@@ -2956,10 +2989,26 @@ mod tests {
         let mut pred = QueryPredicate::default();
         pred.constraints.insert(
             model.primary_key_indices[0],
-            PredicateConstraint::IntIn(vec![100, 200, 300]),
+            PredicateConstraint::IntIn(vec![200, 100, 300]),
         );
         let ranges = pred.primary_key_ranges(&model).unwrap();
         assert_eq!(ranges.len(), 3);
+        let expected_starts = [100, 200, 300]
+            .into_iter()
+            .map(|id| {
+                let value = CellValue::Int64(id);
+                encode_primary_key_bound(model.table_prefix, &[&value], &model, false)
+                    .expect("primary key lower bound")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ranges
+                .iter()
+                .map(|range| range.start.clone())
+                .collect::<Vec<_>>(),
+            expected_starts,
+            "primary_key_ranges should sort terminal IN ranges by encoded start key"
+        );
     }
 
     #[test]
@@ -3054,6 +3103,41 @@ mod tests {
             ranges.len(),
             2,
             "duplicate FixedBinary IN values must be deduped"
+        );
+    }
+
+    #[test]
+    fn composite_utf8_primary_key_prefix_overflow_produces_no_ranges() {
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("a", DataType::Utf8, false),
+                TableColumnConfig::new("b", DataType::Utf8, false),
+            ],
+            vec!["a".to_string(), "b".to_string()],
+            vec![],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let capacity = model.primary_key_codec.payload_capacity_bytes();
+        let a = "a".repeat(capacity - 10);
+        let b = "b".repeat(10);
+        let a_width = encode_string_variable(&a).expect("a should encode").len();
+        let b_width = encode_string_variable(&b).expect("b should encode").len();
+        assert!(a_width <= capacity, "first component should fit alone");
+        assert!(
+            a_width + b_width > capacity,
+            "composite UTF-8 prefix should overflow"
+        );
+
+        let mut pred = QueryPredicate::default();
+        pred.constraints.insert(0, PredicateConstraint::StringEq(a));
+        pred.constraints.insert(1, PredicateConstraint::StringEq(b));
+
+        let ranges = pred.primary_key_ranges(&model).unwrap();
+        assert!(
+            ranges.is_empty(),
+            "overflowing composite UTF-8 PK equality can never match"
         );
     }
 
@@ -5902,6 +5986,7 @@ mod tests {
     struct ObservedLimitRangeHarness {
         release_second_chunk: Arc<Notify>,
         observed_limit: Arc<AtomicUsize>,
+        observed_mode: Arc<AtomicUsize>,
         first_frame: ProtoRangeFrame,
         second_frame: ProtoRangeFrame,
     }
@@ -5936,6 +6021,12 @@ mod tests {
         ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoRangeFrame>> {
             let limit = request.limit.map(|v| v as usize).unwrap_or(usize::MAX);
             self.observed_limit.store(limit, AtomicOrdering::SeqCst);
+            let mode = match parse_range_traversal_direction(request.mode) {
+                Ok(RangeTraversalDirection::Forward) => 0,
+                Ok(RangeTraversalDirection::Reverse) => 1,
+                Err(_) => usize::MAX,
+            };
+            self.observed_mode.store(mode, AtomicOrdering::SeqCst);
             let release_second_chunk = self.release_second_chunk.clone();
             let first_frame = self.first_frame.clone();
             let second_frame = self.second_frame.clone();
@@ -6131,6 +6222,7 @@ mod tests {
     async fn kv_scan_sql_limit_is_pushed_upstream_on_exact_streaming_scan() {
         let release_second_chunk = Arc::new(Notify::new());
         let observed_limit = Arc::new(AtomicUsize::new(0));
+        let observed_mode = Arc::new(AtomicUsize::new(usize::MAX));
         let model = simple_int64_model(0);
 
         let encoded_row = (StoredRow { values: vec![None] }).encode().to_vec();
@@ -6146,6 +6238,7 @@ mod tests {
         let harness = ObservedLimitRangeHarness {
             release_second_chunk: release_second_chunk.clone(),
             observed_limit: observed_limit.clone(),
+            observed_mode,
             first_frame,
             second_frame,
         };
@@ -6172,7 +6265,6 @@ mod tests {
             .expect("schema");
         let ctx = SessionContext::new();
         schema.register_all(&ctx).expect("register");
-
         let batches = tokio::time::timeout(Duration::from_millis(200), async {
             ctx.sql("SELECT id FROM items LIMIT 1")
                 .await
@@ -6194,6 +6286,543 @@ mod tests {
             "exact streaming scan should push SQL LIMIT upstream"
         );
         release_second_chunk.notify_one();
+    }
+
+    #[test]
+    fn kv_scan_physical_limit_pushdown_sets_leaf_fetch() {
+        let model = Arc::new(simple_int64_model(0));
+        let scan = Arc::new(KvScanExec::new(
+            StoreClient::new("http://127.0.0.1:0"),
+            model.clone(),
+            Arc::new(Vec::new()),
+            QueryPredicate::default(),
+            None,
+            model.schema.clone(),
+            None,
+        ));
+        let limited: Arc<dyn ExecutionPlan> = Arc::new(GlobalLimitExec::new(scan, 0, Some(1)));
+
+        let optimized = LimitPushdown::new()
+            .optimize(limited, &ConfigOptions::new())
+            .expect("limit pushdown");
+
+        let scan = optimized
+            .as_any()
+            .downcast_ref::<KvScanExec>()
+            .expect("physical limit should be converted to a scan fetch");
+        assert_eq!(scan.fetch(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn kv_scan_activity_desc_order_pushes_reverse_range_limit() {
+        let release_second_chunk = Arc::new(Notify::new());
+        let observed_limit = Arc::new(AtomicUsize::new(0));
+        let observed_mode = Arc::new(AtomicUsize::new(usize::MAX));
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("account", DataType::UInt64, false),
+                TableColumnConfig::new("height", DataType::UInt64, false),
+                TableColumnConfig::new("index", DataType::UInt64, false),
+                TableColumnConfig::new("role", DataType::UInt64, false),
+            ],
+            vec![
+                "account".to_string(),
+                "height".to_string(),
+                "index".to_string(),
+                "role".to_string(),
+            ],
+            vec![],
+        )
+        .expect("config");
+        let model = TableModel::from_config(&config).expect("model");
+        let encoded_row = (StoredRow {
+            values: vec![None, None, None, None],
+        })
+        .encode()
+        .to_vec();
+
+        let receiver_key = encode_primary_key(
+            model.table_prefix,
+            &[
+                &CellValue::UInt64(7),
+                &CellValue::UInt64(9),
+                &CellValue::UInt64(4),
+                &CellValue::UInt64(1),
+            ],
+            &model,
+        )
+        .expect("receiver primary key");
+        let sender_key = encode_primary_key(
+            model.table_prefix,
+            &[
+                &CellValue::UInt64(7),
+                &CellValue::UInt64(9),
+                &CellValue::UInt64(4),
+                &CellValue::UInt64(0),
+            ],
+            &model,
+        )
+        .expect("sender primary key");
+
+        let first_frame = proto_range_entries_frame(vec![(receiver_key, encoded_row.clone())]);
+        let second_frame = proto_range_entries_frame(vec![(sender_key, encoded_row)]);
+
+        let harness = ObservedLimitRangeHarness {
+            release_second_chunk: release_second_chunk.clone(),
+            observed_limit: observed_limit.clone(),
+            observed_mode: observed_mode.clone(),
+            first_frame,
+            second_frame,
+        };
+        let connect = ConnectRpcService::new(QueryServiceServer::new(harness))
+            .with_compression(connect_compression_registry());
+        let app = Router::new().fallback_service(connect);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let url = format!("http://{}", listener.local_addr().expect("listener addr"));
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+
+        let client = StoreClient::new(&url);
+        let schema = KvSchema::new(client)
+            .table(
+                "tx_activity",
+                vec![
+                    TableColumnConfig::new("account", DataType::UInt64, false),
+                    TableColumnConfig::new("height", DataType::UInt64, false),
+                    TableColumnConfig::new("index", DataType::UInt64, false),
+                    TableColumnConfig::new("role", DataType::UInt64, false),
+                ],
+                vec![
+                    "account".to_string(),
+                    "height".to_string(),
+                    "index".to_string(),
+                    "role".to_string(),
+                ],
+                vec![],
+            )
+            .expect("schema");
+        let ctx = SessionContext::new();
+        schema.register_all(&ctx).expect("register");
+
+        let batches = tokio::time::timeout(Duration::from_millis(200), async {
+            ctx.sql(
+                "SELECT height, index, role \
+                 FROM tx_activity \
+                 WHERE account = 7 \
+                 ORDER BY height DESC, index DESC, role DESC \
+                 LIMIT 1",
+            )
+            .await
+            .expect("query")
+            .collect()
+            .await
+            .expect("collect")
+        })
+        .await
+        .expect("activity DESC LIMIT query should not wait for a delayed second chunk");
+
+        assert_eq!(
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            1
+        );
+        assert_eq!(
+            observed_mode.load(AtomicOrdering::SeqCst),
+            1,
+            "activity DESC primary-key order should use reverse range traversal"
+        );
+        assert_eq!(
+            observed_limit.load(AtomicOrdering::SeqCst),
+            1,
+            "activity DESC LIMIT should push the top-K limit to the range request"
+        );
+        release_second_chunk.notify_one();
+    }
+
+    #[tokio::test]
+    async fn kv_scan_activity_mixed_order_does_not_push_range_limit() {
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state).await;
+        let client = StoreClient::new(&base_url);
+
+        let schema = KvSchema::new(client)
+            .table(
+                "tx_activity",
+                vec![
+                    TableColumnConfig::new("account", DataType::UInt64, false),
+                    TableColumnConfig::new("height", DataType::UInt64, false),
+                    TableColumnConfig::new("index", DataType::UInt64, false),
+                    TableColumnConfig::new("role", DataType::UInt64, false),
+                ],
+                vec![
+                    "account".to_string(),
+                    "height".to_string(),
+                    "index".to_string(),
+                    "role".to_string(),
+                ],
+                vec![],
+            )
+            .expect("schema");
+        let ctx = SessionContext::new();
+        schema.register_all(&ctx).expect("register");
+
+        let explain = physical_plan_text(
+            &explain_plan_rows(
+                &ctx,
+                "SELECT height, index, role \
+                 FROM tx_activity \
+                 WHERE account = 7 \
+                 ORDER BY height DESC, index DESC, role ASC \
+                 LIMIT 1",
+            )
+            .await,
+        );
+        assert!(explain.contains("KvScanExec:"));
+        assert!(
+            explain.contains("KvScanExec: limit=None"),
+            "mixed direction order cannot be a bounded key-order scan:\n{explain}"
+        );
+        assert!(
+            !explain.contains("KvScanExec: limit=Some(1)"),
+            "mixed direction order incorrectly pushed top-K into the scan:\n{explain}"
+        );
+
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn kv_topk_sort_pushdown_stops_at_filter_exec() {
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state).await;
+        let client = StoreClient::new(&base_url);
+
+        let schema = KvSchema::new(client)
+            .table(
+                "tx_activity",
+                vec![
+                    TableColumnConfig::new("account", DataType::UInt64, false),
+                    TableColumnConfig::new("height", DataType::UInt64, false),
+                    TableColumnConfig::new("index", DataType::UInt64, false),
+                    TableColumnConfig::new("role", DataType::UInt64, false),
+                ],
+                vec![
+                    "account".to_string(),
+                    "height".to_string(),
+                    "index".to_string(),
+                    "role".to_string(),
+                ],
+                vec![],
+            )
+            .expect("schema");
+        let ctx = SessionContext::new();
+        schema.register_all(&ctx).expect("register");
+
+        let explain = physical_plan_text(
+            &explain_plan_rows(
+                &ctx,
+                "SELECT height, index, role \
+                 FROM tx_activity \
+                 WHERE account = 7 AND height + 0 > 1 \
+                 ORDER BY height DESC, index DESC, role DESC \
+                 LIMIT 1",
+            )
+            .await,
+        );
+        assert!(
+            explain.contains("FilterExec"),
+            "unsupported filter should remain above scan:\n{explain}"
+        );
+        assert!(
+            explain.contains("KvScanExec: limit=None"),
+            "top-K fetch must not cross a row-dropping filter:\n{explain}"
+        );
+        assert!(
+            !explain.contains("KvScanExec: limit=Some(1)"),
+            "top-K fetch crossed a filter into the scan:\n{explain}"
+        );
+
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn kv_topk_reverse_scan_keeps_reading_after_later_pk_filter_rejects_first_key() {
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state).await;
+        let client = StoreClient::new(&base_url);
+
+        let schema = KvSchema::new(client.clone())
+            .table(
+                "tx_activity",
+                vec![
+                    TableColumnConfig::new("account", DataType::UInt64, false),
+                    TableColumnConfig::new("height", DataType::UInt64, false),
+                    TableColumnConfig::new("index", DataType::UInt64, false),
+                    TableColumnConfig::new("role", DataType::UInt64, false),
+                ],
+                vec![
+                    "account".to_string(),
+                    "height".to_string(),
+                    "index".to_string(),
+                    "role".to_string(),
+                ],
+                vec![],
+            )
+            .expect("schema");
+        let mut writer = schema.batch_writer();
+        writer
+            .insert(
+                "tx_activity",
+                vec![
+                    CellValue::UInt64(8),
+                    CellValue::UInt64(0),
+                    CellValue::UInt64(0),
+                    CellValue::UInt64(0),
+                ],
+            )
+            .expect("non-matching higher key");
+        writer
+            .insert(
+                "tx_activity",
+                vec![
+                    CellValue::UInt64(7),
+                    CellValue::UInt64(9),
+                    CellValue::UInt64(4),
+                    CellValue::UInt64(1),
+                ],
+            )
+            .expect("matching lower key");
+        writer.flush().await.expect("seed rows");
+
+        let ctx = SessionContext::new();
+        schema.register_all(&ctx).expect("register");
+        let sql = "SELECT account, height \
+                   FROM tx_activity \
+                   WHERE account >= 7 AND height = 9 \
+                   ORDER BY account DESC \
+                   LIMIT 1";
+        let explain = physical_plan_text(&explain_plan_rows(&ctx, sql).await);
+        assert!(
+            explain.contains("KvScanExec: limit=Some(1), direction=Reverse"),
+            "test must exercise reverse top-K scan pushdown:\n{explain}"
+        );
+
+        let batches = ctx
+            .sql(sql)
+            .await
+            .expect("query")
+            .collect()
+            .await
+            .expect("collect");
+        assert_eq!(
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            1
+        );
+        let batch = batches
+            .iter()
+            .find(|batch| batch.num_rows() > 0)
+            .expect("non-empty result batch");
+        assert_eq!(
+            ScalarValue::try_from_array(batch.column(0), 0).expect("account scalar"),
+            ScalarValue::UInt64(Some(7))
+        );
+        assert_eq!(
+            ScalarValue::try_from_array(batch.column(1), 0).expect("height scalar"),
+            ScalarValue::UInt64(Some(9))
+        );
+
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn kv_topk_reverse_scan_orders_multiple_primary_key_ranges() {
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state.clone()).await;
+        let client = StoreClient::new(&base_url);
+
+        let schema = KvSchema::new(client.clone())
+            .table(
+                "events",
+                vec![TableColumnConfig::new("id", DataType::Int64, false)],
+                vec!["id".to_string()],
+                vec![],
+            )
+            .expect("schema");
+        let mut writer = schema.batch_writer();
+        for id in [1, 3, 10, 20] {
+            writer
+                .insert("events", vec![CellValue::Int64(id)])
+                .expect("row");
+        }
+        writer.flush().await.expect("seed rows");
+
+        let ctx = SessionContext::new();
+        schema.register_all(&ctx).expect("register");
+        let sql = "SELECT id \
+                   FROM events \
+                   WHERE id IN (3, 20, 1, 10) \
+                   ORDER BY id DESC \
+                   LIMIT 3";
+        let explain = physical_plan_text(&explain_plan_rows(&ctx, sql).await);
+        assert!(
+            explain.contains("KvScanExec: limit=Some(3), direction=Reverse"),
+            "test must exercise reverse top-K scan pushdown over IN ranges:\n{explain}"
+        );
+
+        state.range_calls.store(0, AtomicOrdering::SeqCst);
+        let batches = ctx
+            .sql(sql)
+            .await
+            .expect("query")
+            .collect()
+            .await
+            .expect("collect");
+        assert_eq!(collect_i64_column(&batches, 0), vec![20, 10, 3]);
+        assert_eq!(
+            state.range_calls.load(AtomicOrdering::SeqCst),
+            3,
+            "reverse scan should stop after the three highest IN ranges"
+        );
+
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn kv_topk_reverse_scan_applies_offset_over_multiple_primary_key_ranges() {
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state.clone()).await;
+        let client = StoreClient::new(&base_url);
+
+        let schema = KvSchema::new(client.clone())
+            .table(
+                "events",
+                vec![TableColumnConfig::new("id", DataType::Int64, false)],
+                vec!["id".to_string()],
+                vec![],
+            )
+            .expect("schema");
+        let mut writer = schema.batch_writer();
+        for id in [1, 3, 10, 20] {
+            writer
+                .insert("events", vec![CellValue::Int64(id)])
+                .expect("row");
+        }
+        writer.flush().await.expect("seed rows");
+
+        let ctx = SessionContext::new();
+        schema.register_all(&ctx).expect("register");
+        let sql = "SELECT id \
+                   FROM events \
+                   WHERE id IN (3, 20, 1, 10) \
+                   ORDER BY id DESC \
+                   LIMIT 2 OFFSET 1";
+        let explain = physical_plan_text(&explain_plan_rows(&ctx, sql).await);
+        assert!(
+            explain.contains("KvScanExec: limit=Some(3), direction=Reverse"),
+            "OFFSET requires fetching offset + limit rows from the reverse scan:\n{explain}"
+        );
+
+        state.range_calls.store(0, AtomicOrdering::SeqCst);
+        let batches = ctx
+            .sql(sql)
+            .await
+            .expect("query")
+            .collect()
+            .await
+            .expect("collect");
+        assert_eq!(collect_i64_column(&batches, 0), vec![10, 3]);
+        assert_eq!(
+            state.range_calls.load(AtomicOrdering::SeqCst),
+            3,
+            "reverse OFFSET scan should fetch only offset + limit IN ranges"
+        );
+
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn kv_scan_impossible_utf8_primary_key_equality_skips_scan() {
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state.clone()).await;
+        let client = StoreClient::new(&base_url);
+
+        let schema = KvSchema::new(client.clone())
+            .table(
+                "items",
+                vec![TableColumnConfig::new("id", DataType::Utf8, false)],
+                vec!["id".to_string()],
+                vec![],
+            )
+            .expect("schema");
+        let mut writer = schema.batch_writer();
+        writer
+            .insert("items", vec![CellValue::Utf8("present".to_string())])
+            .expect("row");
+        writer.flush().await.expect("seed rows");
+
+        let ctx = SessionContext::new();
+        schema.register_all(&ctx).expect("register");
+
+        let oversized = "a".repeat(
+            primary_key_codec(0)
+                .expect("primary-key codec")
+                .payload_capacity_bytes(),
+        );
+        let sql = format!("SELECT id FROM items WHERE id = '{oversized}'");
+
+        state.range_calls.store(0, AtomicOrdering::SeqCst);
+        let batches = ctx
+            .sql(&sql)
+            .await
+            .expect("query")
+            .collect()
+            .await
+            .expect("collect");
+        assert_eq!(
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            0,
+            "an unencodable PK equality can never match any row"
+        );
+        assert_eq!(
+            state.range_calls.load(AtomicOrdering::SeqCst),
+            0,
+            "an impossible PK equality must not issue a range scan"
+        );
+
+        let _ = shutdown_tx.send(());
     }
 
     #[tokio::test]
