@@ -1,0 +1,30 @@
+[package]
+name = "exoware-workload"
+version.workspace = true
+edition.workspace = true
+publish = true
+license.workspace = true
+description = "Generate an execute workloads against Exoware deployments."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/exowarexyz/monorepo/tree/main/workload"
+documentation = "https://docs.rs/exoware-workload"
+
+[dependencies]
+exoware-sdk = { workspace = true }
+tokio = { version = "1", features = ["full"] }
+rand = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+hex = { workspace = true }
+connectrpc = { workspace = true }
+http = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = "1"
+
+[[bin]]
+name = "workload"
+path = "src/main.rs"
