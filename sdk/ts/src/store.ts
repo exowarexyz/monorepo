@@ -36,6 +36,11 @@ import {
 
 const STREAM_SERVER_PAYLOAD_REGEX = '(?s-u).*';
 
+// Max entries per frame requested by `getBatch`. The server streams the batch
+// back in frames bounded by this count and by its own byte budget, so a small
+// batch returns in one frame and a large one is split transparently.
+const DEFAULT_GET_BATCH_SIZE = 1024;
+
 type DetailObserver = (detail: Detail) => void;
 
 export { TraversalMode };
@@ -751,10 +756,20 @@ async function performGetBatch(
     prefix?: StoreKeyPrefix,
     options?: CallOptions,
 ): Promise<StoreBatch | null> {
-    const req = create(StreamGetRequestSchema, { sequenceNumber });
+    const req = create(StreamGetRequestSchema, {
+        sequenceNumber,
+        batchSize: DEFAULT_GET_BATCH_SIZE,
+    });
     try {
-        const res = await client.stream.get(req, options);
-        return toStoreBatch(res, prefix);
+        // The server streams the batch back in size-bounded frames that share
+        // one sequence number; concatenate their entries in arrival order.
+        const entries: { key: Uint8Array; value: Uint8Array }[] = [];
+        for await (const frame of client.stream.get(req, options)) {
+            for (const entry of frame.entries) {
+                entries.push(entry);
+            }
+        }
+        return toStoreBatch({ sequenceNumber, entries }, prefix);
     } catch (e) {
         if (
             e instanceof ConnectError &&
@@ -789,8 +804,25 @@ async function* performSubscribe(
     });
     try {
         const stream = client.stream.subscribe(req, options);
+        // The server may split one atomic batch across multiple frames sharing a
+        // sequenceNumber, marking the final one lastFrame. Reassemble them so
+        // each yielded StoreBatch is a complete batch (preserving the
+        // atomic-batch contract and keeping since-resume safe).
+        let sequenceNumber: bigint | undefined;
+        let entries: { key: Uint8Array; value: Uint8Array }[] = [];
         for await (const frame of stream) {
-            const batch = toStoreBatch(frame, prefix, logicalFilter);
+            if (sequenceNumber === undefined) {
+                sequenceNumber = frame.sequenceNumber;
+            }
+            for (const entry of frame.entries) {
+                entries.push(entry);
+            }
+            if (!frame.lastFrame) {
+                continue;
+            }
+            const batch = toStoreBatch({ sequenceNumber, entries }, prefix, logicalFilter);
+            sequenceNumber = undefined;
+            entries = [];
             if (batch.entries.length === 0) {
                 continue;
             }

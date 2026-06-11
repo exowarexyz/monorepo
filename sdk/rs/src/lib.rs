@@ -135,6 +135,11 @@ impl ConnectRequestCompression {
 /// The store simulator uses the same 256 MiB cap for large `Range` frames.
 const STORE_CLIENT_MAX_MESSAGE_BYTES: usize = 256 * 1024 * 1024;
 
+/// Max entries per frame requested by [`Stream::get`]. The server streams the
+/// batch back in frames bounded by this count and by its own byte budget, so a
+/// small batch returns in one frame and a large one is split transparently.
+pub const DEFAULT_GET_BATCH_SIZE: u32 = 1024;
+
 /// Store client defaults: [`connect_compression_registry`] for codecs;
 /// [`PreferZstdHttpClient`] sets `Accept-Encoding: zstd, gzip` on responses.
 ///
@@ -889,8 +894,17 @@ impl std::fmt::Debug for StreamSubscription {
 }
 
 impl StreamSubscription {
-    /// Pull the next frame. `Ok(None)` = server closed the stream cleanly.
+    /// Pull the next atomic batch. `Ok(None)` = server closed the stream cleanly.
+    ///
+    /// The server may split one batch across multiple wire frames sharing a
+    /// `sequence_number`, marking the final one `last_frame`. This reassembles
+    /// those frames so each returned `StreamSubscriptionFrame` is again a
+    /// complete batch — preserving the atomic-batch contract and making
+    /// `since_sequence_number` resume safe (the caller only ever observes, and
+    /// resumes past, whole batches).
     pub async fn next(&mut self) -> Result<Option<StreamSubscriptionFrame>, ClientError> {
+        let mut sequence_number: Option<u64> = None;
+        let mut entries: Vec<StreamSubscriptionEntry> = Vec::new();
         loop {
             match self
                 .stream
@@ -900,7 +914,7 @@ impl StreamSubscription {
             {
                 Some(view) => {
                     let owned = view.to_owned_message();
-                    let mut entries = Vec::with_capacity(owned.entries.len());
+                    sequence_number.get_or_insert(owned.sequence_number);
                     for entry in owned.entries {
                         let key = Bytes::from(entry.key);
                         let key = match self.key_prefix {
@@ -916,21 +930,28 @@ impl StreamSubscription {
                             entries.push(StreamSubscriptionEntry { key, value });
                         }
                     }
-                    if entries.is_empty() {
+                    if !owned.last_frame {
                         continue;
                     }
-                    let frame = StreamSubscriptionFrame {
-                        sequence_number: owned.sequence_number,
+                    // Batch complete. Skip it entirely if the client-side filter
+                    // dropped every row, mirroring the server's empty-batch skip.
+                    if entries.is_empty() {
+                        sequence_number = None;
+                        continue;
+                    }
+                    return Ok(Some(StreamSubscriptionFrame {
+                        sequence_number: sequence_number.take().expect("sequence set"),
                         entries,
-                    };
-                    return Ok(Some(frame));
+                    }));
                 }
                 None => {
                     if let Some(err) = self.stream.error() {
                         return Err(client_error_from_connect(err.clone()));
-                    } else {
-                        return Ok(None);
                     }
+                    // Clean close. A partial accumulation here would mean the
+                    // server ended mid-batch without a `last_frame`; drop it
+                    // rather than surface a torn batch.
+                    return Ok(None);
                 }
             }
         }
@@ -2464,8 +2485,11 @@ impl<'a> Stream<'a> {
         })
     }
 
-    /// `store.stream.v1.Service.Get` — `Ok(None)` collapses the server's
-    /// `BATCH_EVICTED` / `BATCH_NOT_FOUND` error details.
+    /// `store.stream.v1.Service.Get` — the server streams the batch at
+    /// `sequence_number` back in size-bounded frames, which this method
+    /// reassembles into the full batch in write order. `Ok(None)` collapses the
+    /// server's `BATCH_EVICTED` / `BATCH_NOT_FOUND` error details, which may
+    /// surface either on the initial call or once the stream begins.
     pub async fn get(
         &self,
         sequence_number: u64,
@@ -2478,31 +2502,57 @@ impl<'a> Stream<'a> {
             self.c.connect_http.clone(),
             config,
         );
-        match client
+        let mut stream = match client
             .get(exoware_proto::store::stream::v1::GetRequest {
                 sequence_number,
+                batch_size: DEFAULT_GET_BATCH_SIZE,
                 ..Default::default()
             })
             .await
         {
-            Ok(resp) => {
-                let owned = resp.into_owned();
-                let mut entries = Vec::with_capacity(owned.entries.len());
-                for entry in owned.entries {
-                    let key = Bytes::from(entry.key);
-                    match self.c.key_prefix {
-                        Some(prefix) if !prefix.codec.matches(&key) => {}
-                        Some(prefix) => entries.push((prefix.decode_key(&key)?, entry.value)),
-                        None => entries.push((key, entry.value)),
-                    }
-                }
-                Ok(Some(entries))
-            }
+            Ok(stream) => stream,
             Err(err) => {
-                if is_batch_missing_error(&err) {
+                return if is_batch_missing_error(&err) {
                     Ok(None)
                 } else {
                     Err(client_error_from_connect(err))
+                };
+            }
+        };
+
+        let mut entries = Vec::new();
+        loop {
+            match stream.message().await {
+                Ok(Some(view)) => {
+                    let owned = view.to_owned_message();
+                    for entry in owned.entries {
+                        let key = Bytes::from(entry.key);
+                        match self.c.key_prefix {
+                            Some(prefix) if !prefix.codec.matches(&key) => {}
+                            Some(prefix) => entries.push((prefix.decode_key(&key)?, entry.value)),
+                            None => entries.push((key, entry.value)),
+                        }
+                    }
+                }
+                // Clean end-of-stream surfaces a deferred error (e.g. the batch
+                // was evicted before the first frame flushed) via `error()`.
+                Ok(None) => {
+                    if let Some(err) = stream.error() {
+                        let err = err.clone();
+                        return if is_batch_missing_error(&err) {
+                            Ok(None)
+                        } else {
+                            Err(client_error_from_connect(err))
+                        };
+                    }
+                    return Ok(Some(entries));
+                }
+                Err(err) => {
+                    return if is_batch_missing_error(&err) {
+                        Ok(None)
+                    } else {
+                        Err(client_error_from_connect(err))
+                    };
                 }
             }
         }

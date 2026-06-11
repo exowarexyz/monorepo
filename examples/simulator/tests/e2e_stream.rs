@@ -381,6 +381,71 @@ async fn get_batch_after_keep_latest_evicts_old_but_keeps_new() {
     assert_eq!(last[0].1.as_ref(), &[b'v', 19]);
 }
 
+#[tokio::test]
+async fn get_batch_reassembles_across_frames() {
+    let (_h, client) = spawn_client().await;
+    // A batch larger than one streamed frame forces the server to split it; the
+    // SDK must reassemble every entry in write order.
+    let count = exoware_sdk::DEFAULT_GET_BATCH_SIZE as usize + 50;
+    let keys: Vec<Key> = (0..count)
+        .map(|i| key(1, &(i as u32).to_be_bytes()))
+        .collect();
+    let pairs: Vec<(&Key, &[u8])> = keys.iter().map(|k| (k, b"v".as_slice())).collect();
+    let seq = client.ingest().put(&pairs).await.expect("put");
+
+    let got = client
+        .stream()
+        .get(seq)
+        .await
+        .expect("get_batch")
+        .expect("some");
+    assert_eq!(got.len(), count);
+    for (i, (k, v)) in got.iter().enumerate() {
+        assert_eq!(k.as_ref(), keys[i].as_ref(), "entry {i} key out of order");
+        assert_eq!(v.as_ref(), b"v");
+    }
+}
+
+#[tokio::test]
+async fn subscribe_reassembles_large_batch_into_one_frame() {
+    let (_h, client) = spawn_client().await;
+    let mut sub = client
+        .stream()
+        .subscribe(filter(1), None)
+        .await
+        .expect("subscribe");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Exceeds the server's per-frame entry cap (STREAM_FRAME_MAX_ENTRIES = 4096),
+    // so the server splits this one batch across frames. The SDK must reassemble
+    // them into a single atomic frame, preserving the one-frame-per-batch contract.
+    let count = 5000usize;
+    let keys: Vec<Key> = (0..count)
+        .map(|i| key(1, &(i as u32).to_be_bytes()))
+        .collect();
+    let pairs: Vec<(&Key, &[u8])> = keys.iter().map(|k| (k, b"v".as_slice())).collect();
+    let seq = client.ingest().put(&pairs).await.expect("put");
+
+    let frame = next_with_timeout(&mut sub, 5_000)
+        .await
+        .expect("should receive the reassembled batch");
+    assert_eq!(frame.sequence_number, seq);
+    assert_eq!(
+        frame.entries.len(),
+        count,
+        "split batch must arrive as one reassembled frame"
+    );
+    // A second matching put must arrive as its own distinct frame.
+    let seq2 = client
+        .ingest()
+        .put(&[(&key(1, b"after"), b"x")])
+        .await
+        .expect("put2");
+    let next = next_with_timeout(&mut sub, 1_000).await.expect("next frame");
+    assert_eq!(next.sequence_number, seq2);
+    assert_eq!(next.entries.len(), 1);
+}
+
 // ---------- slow subscriber is dropped without blocking ingest ----------
 
 #[tokio::test]

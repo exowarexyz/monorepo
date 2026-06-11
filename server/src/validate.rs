@@ -235,6 +235,25 @@ pub fn reduce_params_error(description: impl Into<String>) -> ConnectError {
     )
 }
 
+// -- stream --
+
+pub fn validate_stream_get_request(
+    request: &exoware_proto::store::stream::v1::GetRequestView<'_>,
+) -> Result<(), ConnectError> {
+    // buf.validate: uint32.gt = 0
+    if request.batch_size == 0 {
+        return Err(field_error(
+            "store.stream",
+            "batch_size",
+            "batch_size must be greater than 0",
+            "INVALID_BATCH_SIZE",
+            "get batch_size must be positive",
+            [],
+        ));
+    }
+    Ok(())
+}
+
 // -- compact --
 
 pub fn validate_prune_request(

@@ -2,15 +2,13 @@
 
 #![allow(refining_impl_trait)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use connectrpc::{
-    Chain, ConnectError, ConnectRpcService, Limits, PreEncoded, RequestContext as Context,
-};
+use connectrpc::{Chain, ConnectError, ConnectRpcService, Limits, RequestContext as Context};
 use exoware_proto::common::KvEntry;
 use exoware_proto::compact::{
     PruneResponse, Service as CompactApi, ServiceServer as CompactServiceServer,
@@ -49,6 +47,53 @@ use crate::{Ingest, Log, LogBatch, Prune, Query, QueryExtra, RangeScan, StoreEng
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
 const RANGE_STREAM_MAX_FRAME_ROWS: usize = 4096;
 const REDUCE_SCAN_BATCH_SIZE: usize = 4096;
+
+/// Target maximum encoded size of one streamed `store.stream.v1` frame (`Get`
+/// and `Subscribe`). A sequence batch can aggregate many `Put` requests and
+/// exceed `MAX_CONNECTRPC_BODY_BYTES`, so the server splits it into frames
+/// capped at this budget. Kept well below `MAX_CONNECTRPC_BODY_BYTES` so no
+/// frame can trip a peer's decode limit, and above the default ingest max value
+/// size so any single entry still fits one frame.
+const STREAM_FRAME_MAX_BYTES: usize = 16 * 1024 * 1024;
+/// Secondary per-frame cap on entry count for `store.stream.v1` frames,
+/// mirroring `RANGE_STREAM_MAX_FRAME_ROWS` on the query path.
+const STREAM_FRAME_MAX_ENTRIES: usize = RANGE_STREAM_MAX_FRAME_ROWS;
+/// Bytes added per entry on top of `key.len() + value.len()` when estimating a
+/// frame's encoded size: protobuf field tags plus length varints for the
+/// repeated `KvEntry` element and its `key`/`value` fields. Deliberately
+/// conservative; the byte budget has ample headroom under the hard limit.
+const KV_ENTRY_FRAME_OVERHEAD: usize = 16;
+
+/// Split `entries` into frame-sized groups, bounding each group by both the
+/// encoded byte budget and the entry count. Uses emit-then-check so a single
+/// entry larger than `max_frame_bytes` still makes progress in its own frame.
+/// Returns an empty `Vec` for empty input; callers decide whether to emit a
+/// terminal empty frame.
+fn chunk_entries(
+    entries: Vec<KvEntry>,
+    max_frame_bytes: usize,
+    max_frame_entries: usize,
+) -> Vec<Vec<KvEntry>> {
+    let mut frames: Vec<Vec<KvEntry>> = Vec::new();
+    let mut current: Vec<KvEntry> = Vec::new();
+    let mut current_bytes = 0usize;
+    for entry in entries {
+        let entry_bytes = entry.key.len() + entry.value.len() + KV_ENTRY_FRAME_OVERHEAD;
+        if !current.is_empty()
+            && (current.len() >= max_frame_entries
+                || current_bytes + entry_bytes > max_frame_bytes)
+        {
+            frames.push(std::mem::take(&mut current));
+            current_bytes = 0;
+        }
+        current_bytes += entry_bytes;
+        current.push(entry);
+    }
+    if !current.is_empty() {
+        frames.push(current);
+    }
+    frames
+}
 
 fn query_detail(sequence_number: u64, extra: QueryExtra) -> Detail {
     Detail {
@@ -783,34 +828,18 @@ where
     }
 }
 
-fn filtered_subscribe_response(
-    batch: &LogBatch,
-    matchers: &crate::stream::CompiledMatchers,
-) -> Result<Option<SubscribeResponse>, ConnectError> {
-    let response = batch.decode_response().map_err(ConnectError::internal)?;
-    let entries = crate::stream::apply_filter(matchers, &response.entries);
-    Ok((!entries.is_empty()).then_some(SubscribeResponse {
-        sequence_number: batch.sequence_number(),
-        entries,
-        ..Default::default()
-    }))
-}
-
 struct ReplayState {
     next_sequence: u64,
     bound: u64,
     first_batch: Option<LogBatch>,
 }
 
-enum ReplayProgress {
-    Frame(SubscribeResponse),
-    Advanced,
-    Done,
-}
-
-enum LiveProgress {
-    Frame(SubscribeResponse),
-    Advanced,
+/// Result of pulling the next live batch into the pending-frame queue.
+enum LiveStep {
+    /// The caller's sequence was consumed (frames may have been queued). The
+    /// stream loop should re-check the pending queue and continue.
+    Filled,
+    /// Caught up to the published frontier; park until notified.
     NeedWait,
 }
 
@@ -820,6 +849,10 @@ struct SubscriptionState<B> {
     replay: Option<ReplayState>,
     next_live_sequence: u64,
     live_notify: Arc<Notify>,
+    // Frames already chunked from the current batch, awaiting delivery. A single
+    // batch can exceed one frame's byte budget, so it is split here and drained
+    // one frame per poll before the cursor advances to the next sequence.
+    pending: VecDeque<SubscribeResponse>,
     terminated: bool,
 }
 
@@ -840,6 +873,7 @@ where
             replay,
             next_live_sequence,
             live_notify,
+            pending: VecDeque::new(),
             terminated: false,
         }
     }
@@ -849,28 +883,24 @@ where
     ) -> Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>> {
         Box::pin(stream_util::unfold(self, |mut state| async move {
             loop {
+                if let Some(frame) = state.pending.pop_front() {
+                    return Some((Ok(frame), state));
+                }
                 if state.terminated {
                     return None;
                 }
 
                 if state.replay.is_some() {
-                    match state.next_replay_frame().await {
-                        Ok(ReplayProgress::Frame(frame)) => return Some((Ok(frame), state)),
-                        Ok(ReplayProgress::Advanced) => continue,
-                        Ok(ReplayProgress::Done) => {}
-                        Err(err) => {
-                            state.terminated = true;
-                            return Some((Err(err), state));
-                        }
+                    if let Err(err) = state.fill_from_replay().await {
+                        state.terminated = true;
+                        return Some((Err(err), state));
                     }
+                    continue;
                 }
 
-                match state.next_live_frame().await {
-                    Ok(LiveProgress::Frame(frame)) => return Some((Ok(frame), state)),
-                    Ok(LiveProgress::Advanced) => continue,
-                    Ok(LiveProgress::NeedWait) => {
-                        state.wait_for_live().await;
-                    }
+                match state.fill_from_live().await {
+                    Ok(LiveStep::Filled) => continue,
+                    Ok(LiveStep::NeedWait) => state.wait_for_live().await,
                     Err(err) => {
                         state.terminated = true;
                         return Some((Err(err), state));
@@ -880,9 +910,30 @@ where
         }))
     }
 
-    async fn next_replay_frame(&mut self) -> Result<ReplayProgress, ConnectError> {
+    /// Decode the batch, apply the subscriber filter, and enqueue the matching
+    /// rows as one or more byte-bounded frames sharing the batch's sequence.
+    /// Enqueues nothing when no row matches (the batch is then skipped).
+    fn push_filtered_frames(&mut self, batch: &LogBatch) -> Result<(), ConnectError> {
+        let response = batch.decode_response().map_err(ConnectError::internal)?;
+        let entries = crate::stream::apply_filter(&self.matchers, &response.entries);
+        let groups = chunk_entries(entries, STREAM_FRAME_MAX_BYTES, STREAM_FRAME_MAX_ENTRIES);
+        let frame_count = groups.len();
+        for (i, group) in groups.into_iter().enumerate() {
+            self.pending.push_back(SubscribeResponse {
+                sequence_number: batch.sequence_number(),
+                entries: group,
+                // Mark the batch boundary so the client reassembles one atomic
+                // batch and only advances its resume cursor past a complete one.
+                last_frame: i + 1 == frame_count,
+                ..Default::default()
+            });
+        }
+        Ok(())
+    }
+
+    async fn fill_from_replay(&mut self) -> Result<(), ConnectError> {
         let Some(replay) = &mut self.replay else {
-            return Ok(ReplayProgress::Done);
+            return Ok(());
         };
         let seq = replay.next_sequence;
         let batch = if let Some(first_batch) = replay.first_batch.take() {
@@ -907,16 +958,13 @@ where
                 .map_err(ConnectError::internal)?;
             return Err(StreamConnect::<B>::batch_evicted_connect_error(oldest));
         };
-        Ok(match filtered_subscribe_response(&batch, &self.matchers)? {
-            Some(frame) => ReplayProgress::Frame(frame),
-            None => ReplayProgress::Advanced,
-        })
+        self.push_filtered_frames(&batch)
     }
 
-    async fn next_live_frame(&mut self) -> Result<LiveProgress, ConnectError> {
+    async fn fill_from_live(&mut self) -> Result<LiveStep, ConnectError> {
         let current = self.state.notifier.current_sequence();
         if self.next_live_sequence > current {
-            return Ok(LiveProgress::NeedWait);
+            return Ok(LiveStep::NeedWait);
         }
         let seq = self.next_live_sequence;
         self.next_live_sequence += 1;
@@ -935,10 +983,8 @@ where
                 .map_err(ConnectError::internal)?;
             return Err(StreamConnect::<B>::batch_evicted_connect_error(oldest));
         };
-        Ok(match filtered_subscribe_response(&batch, &self.matchers)? {
-            Some(frame) => LiveProgress::Frame(frame),
-            None => LiveProgress::Advanced,
-        })
+        self.push_filtered_frames(&batch)?;
+        Ok(LiveStep::Filled)
     }
 
     async fn wait_for_live(&self) {
@@ -1069,22 +1115,23 @@ where
         &self,
         _ctx: Context,
         request: buffa::view::OwnedView<GetRequestView<'static>>,
-    ) -> connectrpc::ServiceResult<PreEncoded<StreamGetResponse>> {
+    ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<StreamGetResponse>> {
+        validate::validate_stream_get_request(&request)?;
         let seq = request.sequence_number;
-        match self
+        let max_entries = (request.batch_size as usize).min(STREAM_FRAME_MAX_ENTRIES);
+
+        let batch = match self
             .state
             .log
             .get_batch(seq)
             .await
             .map_err(ConnectError::internal)?
         {
-            Some(batch) => connectrpc::Response::ok(PreEncoded::from_bytes_unchecked(
-                batch.into_response_bytes(),
-            )),
+            Some(batch) => batch,
             None => {
                 let current = self.state.log.current_sequence();
                 // Distinguish "never existed" (seq > current) vs "evicted".
-                if seq > current {
+                return if seq > current {
                     Err(self.batch_not_found_error())
                 } else {
                     let oldest = self
@@ -1094,9 +1141,41 @@ where
                         .await
                         .map_err(ConnectError::internal)?;
                     Err(self.batch_evicted_error(oldest))
-                }
+                };
             }
+        };
+
+        // A batch can aggregate many Put requests, so decode it once and
+        // re-frame the entries into byte- and count-bounded chunks. Every frame
+        // repeats the same sequence_number; the client concatenates them in
+        // arrival order to recover the batch in write order.
+        let response = batch.decode_response().map_err(ConnectError::internal)?;
+        let sequence_number = response.sequence_number;
+        let groups = chunk_entries(response.entries, STREAM_FRAME_MAX_BYTES, max_entries);
+        let frame_count = groups.len().max(1);
+        let mut frames: Vec<Result<StreamGetResponse, ConnectError>> = groups
+            .into_iter()
+            .enumerate()
+            .map(|(i, entries)| {
+                Ok(StreamGetResponse {
+                    sequence_number,
+                    entries,
+                    last_frame: i + 1 == frame_count,
+                    ..Default::default()
+                })
+            })
+            .collect();
+        // Always emit at least one (terminal) frame so the client observes the
+        // sequence number and a clean end-of-stream, even for an empty batch.
+        if frames.is_empty() {
+            frames.push(Ok(StreamGetResponse {
+                sequence_number,
+                last_frame: true,
+                ..Default::default()
+            }));
         }
+
+        Ok(connectrpc::Response::stream(stream_util::iter(frames)))
     }
 }
 
@@ -1626,6 +1705,195 @@ mod tests {
             bytes.into(),
         )
         .expect("decode put request")
+    }
+
+    fn kv_entry(key: &[u8], value: &[u8]) -> KvEntry {
+        KvEntry {
+            key: key.to_vec(),
+            value: Bytes::copy_from_slice(value),
+            ..Default::default()
+        }
+    }
+
+    async fn collect_get<B>(
+        connect: &StreamConnect<B>,
+        sequence_number: u64,
+        batch_size: u32,
+    ) -> Result<Vec<StreamGetResponse>, ConnectError>
+    where
+        B: Log,
+    {
+        let bytes = exoware_proto::store::stream::v1::GetRequest {
+            sequence_number,
+            batch_size,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let request = buffa::view::OwnedView::<GetRequestView<'static>>::decode(bytes.into())
+            .expect("decode get request");
+        let mut body = StreamApi::get(connect, Context::default(), request)
+            .await?
+            .body;
+        let mut frames = Vec::new();
+        while let Some(item) = body.next().await {
+            frames.push(item?);
+        }
+        Ok(frames)
+    }
+
+    #[test]
+    fn chunk_entries_splits_by_count() {
+        let entries: Vec<KvEntry> = (0..5u8).map(|i| kv_entry(&[i], b"v")).collect();
+        let groups = chunk_entries(entries, usize::MAX, 2);
+        assert_eq!(
+            groups.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![2, 2, 1]
+        );
+    }
+
+    #[test]
+    fn chunk_entries_splits_by_bytes() {
+        let per_entry = 1 + 100 + KV_ENTRY_FRAME_OVERHEAD;
+        let entries: Vec<KvEntry> = (0..4u8).map(|i| kv_entry(&[i], &[0u8; 100])).collect();
+        let groups = chunk_entries(entries, per_entry * 2, usize::MAX);
+        assert_eq!(groups.len(), 2);
+        assert!(groups.iter().all(|g| g.len() == 2));
+    }
+
+    #[test]
+    fn chunk_entries_emits_oversized_entry_in_its_own_frame() {
+        let entries = vec![
+            kv_entry(b"a", &[0u8; 10]),
+            kv_entry(b"big", &[0u8; 1000]),
+            kv_entry(b"c", &[0u8; 10]),
+        ];
+        let groups = chunk_entries(entries, 100, usize::MAX);
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[1].len(), 1);
+        assert_eq!(groups[1][0].key.as_slice(), b"big");
+    }
+
+    #[test]
+    fn chunk_entries_empty_returns_no_groups() {
+        assert!(chunk_entries(Vec::new(), 100, 10).is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_streams_large_batch_in_multiple_frames() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(1);
+        let kvs: Vec<(Bytes, Bytes)> = (0..5u8)
+            .map(|i| (Bytes::copy_from_slice(&[i]), Bytes::from_static(b"v")))
+            .collect();
+        engine.set_batch(1, Some(kvs));
+        let connect = StreamConnect::new(AppState::new(engine));
+
+        let frames = collect_get(&connect, 1, 2).await.expect("get");
+        assert_eq!(frames.len(), 3, "5 entries at batch_size 2 -> 3 frames");
+        assert!(frames.iter().all(|f| f.sequence_number == 1));
+        assert!(frames.iter().all(|f| f.entries.len() <= 2));
+        assert!(frames.last().expect("frame").last_frame, "final frame marked");
+        assert!(
+            frames[..frames.len() - 1].iter().all(|f| !f.last_frame),
+            "only the final frame is marked last_frame"
+        );
+        let reassembled: Vec<Vec<u8>> = frames
+            .iter()
+            .flat_map(|f| f.entries.iter().map(|e| e.key.clone()))
+            .collect();
+        let expected: Vec<Vec<u8>> = (0..5u8).map(|i| vec![i]).collect();
+        assert_eq!(reassembled, expected, "frames reassemble in write order");
+    }
+
+    #[tokio::test]
+    async fn get_small_batch_returns_single_frame() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(1);
+        engine.set_batch(1, Some(vec![matching_kv(b"a", b"1"), matching_kv(b"b", b"2")]));
+        let connect = StreamConnect::new(AppState::new(engine));
+
+        let frames = collect_get(&connect, 1, 1024).await.expect("get");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].entries.len(), 2);
+        assert_eq!(frames[0].sequence_number, 1);
+        assert!(frames[0].last_frame, "single frame is terminal");
+    }
+
+    #[tokio::test]
+    async fn get_rejects_zero_batch_size() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(1);
+        engine.set_batch(1, Some(vec![matching_kv(b"a", b"1")]));
+        let connect = StreamConnect::new(AppState::new(engine));
+
+        let err = collect_get(&connect, 1, 0).await.expect_err("zero batch_size");
+        assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn get_unknown_sequence_returns_batch_not_found() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(1);
+        let connect = StreamConnect::new(AppState::new(engine));
+
+        let err = collect_get(&connect, 5, 16).await.expect_err("missing");
+        let decoded = decode_connect_error(&err).expect("decode connect error");
+        assert_eq!(
+            decoded.error_info.expect("error info").reason,
+            crate::stream::REASON_BATCH_NOT_FOUND,
+        );
+    }
+
+    #[tokio::test]
+    async fn get_evicted_sequence_returns_batch_evicted() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(10);
+        engine.set_oldest_retained(Some(5));
+        let connect = StreamConnect::new(AppState::new(engine));
+
+        let err = collect_get(&connect, 3, 16).await.expect_err("evicted");
+        let decoded = decode_connect_error(&err).expect("decode connect error");
+        assert_eq!(
+            decoded.error_info.expect("error info").reason,
+            crate::stream::REASON_BATCH_EVICTED,
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_splits_large_batch_across_frames() {
+        let count = STREAM_FRAME_MAX_ENTRIES + 1;
+        let engine = Arc::new(FakeEngine::default());
+        let state = AppState::new(engine.clone());
+        let connect = StreamConnect::new(state.clone());
+        let mut stream = subscribe_stream(&connect, None).await.expect("subscribe");
+
+        let kvs: Vec<(Bytes, Bytes)> = (0..count)
+            .map(|i| matching_kv(&(i as u32).to_be_bytes(), b"v"))
+            .collect();
+        engine.publish_live(state.stream.clone(), 1, kvs);
+
+        let mut frames = Vec::new();
+        loop {
+            let frame = tokio::time::timeout(Duration::from_secs(2), stream.next())
+                .await
+                .expect("stream should keep yielding")
+                .expect("frame should exist")
+                .expect("frame should be ok");
+            assert_eq!(frame.sequence_number, 1);
+            assert!(frame.entries.len() <= STREAM_FRAME_MAX_ENTRIES);
+            let last = frame.last_frame;
+            frames.push(frame);
+            if last {
+                break;
+            }
+        }
+
+        let total: usize = frames.iter().map(|f| f.entries.len()).sum();
+        assert_eq!(total, count);
+        assert!(frames.len() >= 2, "a batch over the entry cap must span >1 frame");
+        // Exactly the final frame carries the batch boundary.
+        assert_eq!(frames.iter().filter(|f| f.last_frame).count(), 1);
+        assert!(frames.last().expect("frame").last_frame);
     }
 
     fn sequence_drop_all_policy() -> ProtoPolicy {

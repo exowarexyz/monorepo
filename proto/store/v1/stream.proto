@@ -7,16 +7,20 @@ import "store/v1/common.proto";
 
 // Push-based subscription + point-lookup over the store's log.
 //
-// `Subscribe` delivers a `SubscribeResponse` per atomic `Put` batch whose
-// entries match any of the subscriber's `match_keys`. Optional
+// `Subscribe` delivers `SubscribeResponse` frames for atomic `Put` batches
+// whose entries match any of the subscriber's `match_keys`. Optional
 // `since_sequence_number` replays retained batches before transitioning live.
 //
-// `Get` returns the complete batch at a given sequence number (no filter
-// applied server-side). `SubscribeResponse` and `GetResponse` carry the
-// same shape so callers can share decoders.
+// `Get` streams the complete batch at a given sequence number (no filter
+// applied server-side) back as one or more `GetResponse` frames. A single
+// batch can aggregate many original `Put` requests and exceed the maximum
+// message size, so both RPCs chunk a large batch into size-bounded frames that
+// share one `sequence_number`; reassemble frames in arrival order to recover
+// the batch. `SubscribeResponse` and `GetResponse` carry the same shape so
+// callers can share decoders.
 service Service {
   rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
-  rpc Get(GetRequest) returns (GetResponse);
+  rpc Get(GetRequest) returns (stream GetResponse);
 }
 
 // Live (and optionally replayed) subscription request.
@@ -45,23 +49,46 @@ message SubscribeRequest {
   optional uint64 since_sequence_number = 3;
 }
 
-// Point-lookup for one historical batch. Always returns the complete batch.
+// Point-lookup for one historical batch, streamed back in size-bounded frames.
+// Always returns the complete batch (no server-side filter applied).
 message GetRequest {
   uint64 sequence_number = 1;
+  // Maximum entries per streamed frame. The server additionally bounds each
+  // frame by an internal byte budget, so a frame may carry fewer entries than
+  // this; every non-empty batch yields at least one entry per frame.
+  uint32 batch_size = 2 [(buf.validate.field).uint32.gt = 0];
 }
 
-// One item delivered on a `Subscribe` stream: all rows from a single atomic
-// `Put` batch that matched the subscriber's filter. Live and replayed frames
-// are indistinguishable by content; only the observed `sequence_number`
-// (strictly monotonically increasing either way) differs.
+// One frame delivered on a `Subscribe` stream: rows from a single atomic `Put`
+// batch that matched the subscriber's filter. A batch whose matching rows
+// exceed the server's per-frame size budget is split across consecutive frames
+// that share one `sequence_number`; all frames for a batch precede the next
+// sequence number, and the final frame of a batch sets `last_frame`.
+// Reassemble frames until `last_frame` to recover the atomic batch. Live and
+// replayed frames are indistinguishable by content; only the observed
+// `sequence_number` (monotonically non-decreasing across frames) differs.
+//
+// Resume safety: a subscriber must advance its `since_sequence_number` cursor
+// only past a sequence whose `last_frame` it has observed, since reconnect
+// replays whole batches; a cursor parked mid-batch would otherwise duplicate or
+// drop the split tail.
 message SubscribeResponse {
   uint64 sequence_number = 1;
   repeated store.common.v1.KvEntry entries = 2;
+  // True on the final frame of this `sequence_number`'s batch (and on a
+  // single-frame batch). False means more frames for the same batch follow.
+  bool last_frame = 3;
 }
 
-// Response for `Get`: the full contents of the batch at the requested
-// sequence number, with no server-side filter applied.
+// One frame of a `Get` response: a chunk of the batch at `sequence_number`.
+// Every frame for one `Get` carries the same `sequence_number`; concatenating
+// their `entries` in arrival order yields the complete batch in write order.
+// Clients may reassemble until end-of-stream or, equivalently, until the frame
+// with `last_frame` set.
 message GetResponse {
   uint64 sequence_number = 1;
   repeated store.common.v1.KvEntry entries = 2;
+  // True on the final frame of the batch (and on a single-frame batch). Kept
+  // identical to `SubscribeResponse` so callers can share decoders.
+  bool last_frame = 3;
 }

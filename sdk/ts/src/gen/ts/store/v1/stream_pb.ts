@@ -13,7 +13,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file store/v1/stream.proto.
  */
 export const file_store_v1_stream: GenFile = /*@__PURE__*/
-  fileDesc("ChVzdG9yZS92MS9zdHJlYW0ucHJvdG8SD3N0b3JlLnN0cmVhbS52MSLKAQoQU3Vic2NyaWJlUmVxdWVzdBI5CgptYXRjaF9rZXlzGAEgAygLMhkuc3RvcmUuY29tbW9uLnYxLk1hdGNoS2V5Qgq6SAeSAQQIARAQEj0KDXZhbHVlX2ZpbHRlcnMYAiADKAsyHC5zdG9yZS5jb21tb24udjEuQnl0ZXNGaWx0ZXJCCLpIBZIBAhAQEiIKFXNpbmNlX3NlcXVlbmNlX251bWJlchgDIAEoBEgAiAEBQhgKFl9zaW5jZV9zZXF1ZW5jZV9udW1iZXIiJQoKR2V0UmVxdWVzdBIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQiVwoRU3Vic2NyaWJlUmVzcG9uc2USFwoPc2VxdWVuY2VfbnVtYmVyGAEgASgEEikKB2VudHJpZXMYAiADKAsyGC5zdG9yZS5jb21tb24udjEuS3ZFbnRyeSJRCgtHZXRSZXNwb25zZRIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQSKQoHZW50cmllcxgCIAMoCzIYLnN0b3JlLmNvbW1vbi52MS5LdkVudHJ5MqEBCgdTZXJ2aWNlElQKCVN1YnNjcmliZRIhLnN0b3JlLnN0cmVhbS52MS5TdWJzY3JpYmVSZXF1ZXN0GiIuc3RvcmUuc3RyZWFtLnYxLlN1YnNjcmliZVJlc3BvbnNlMAESQAoDR2V0Ehsuc3RvcmUuc3RyZWFtLnYxLkdldFJlcXVlc3QaHC5zdG9yZS5zdHJlYW0udjEuR2V0UmVzcG9uc2ViBnByb3RvMw", [file_buf_validate_validate, file_store_v1_common]);
+  fileDesc("ChVzdG9yZS92MS9zdHJlYW0ucHJvdG8SD3N0b3JlLnN0cmVhbS52MSLKAQoQU3Vic2NyaWJlUmVxdWVzdBI5CgptYXRjaF9rZXlzGAEgAygLMhkuc3RvcmUuY29tbW9uLnYxLk1hdGNoS2V5Qgq6SAeSAQQIARAQEj0KDXZhbHVlX2ZpbHRlcnMYAiADKAsyHC5zdG9yZS5jb21tb24udjEuQnl0ZXNGaWx0ZXJCCLpIBZIBAhAQEiIKFXNpbmNlX3NlcXVlbmNlX251bWJlchgDIAEoBEgAiAEBQhgKFl9zaW5jZV9zZXF1ZW5jZV9udW1iZXIiQgoKR2V0UmVxdWVzdBIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQSGwoKYmF0Y2hfc2l6ZRgCIAEoDUIHukgEKgIgACJrChFTdWJzY3JpYmVSZXNwb25zZRIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQSKQoHZW50cmllcxgCIAMoCzIYLnN0b3JlLmNvbW1vbi52MS5LdkVudHJ5EhIKCmxhc3RfZnJhbWUYAyABKAgiZQoLR2V0UmVzcG9uc2USFwoPc2VxdWVuY2VfbnVtYmVyGAEgASgEEikKB2VudHJpZXMYAiADKAsyGC5zdG9yZS5jb21tb24udjEuS3ZFbnRyeRISCgpsYXN0X2ZyYW1lGAMgASgIMqMBCgdTZXJ2aWNlElQKCVN1YnNjcmliZRIhLnN0b3JlLnN0cmVhbS52MS5TdWJzY3JpYmVSZXF1ZXN0GiIuc3RvcmUuc3RyZWFtLnYxLlN1YnNjcmliZVJlc3BvbnNlMAESQgoDR2V0Ehsuc3RvcmUuc3RyZWFtLnYxLkdldFJlcXVlc3QaHC5zdG9yZS5zdHJlYW0udjEuR2V0UmVzcG9uc2UwAWIGcHJvdG8z", [file_buf_validate_validate, file_store_v1_common]);
 
 /**
  * Live (and optionally replayed) subscription request.
@@ -64,7 +64,8 @@ export const SubscribeRequestSchema: GenMessage<SubscribeRequest> = /*@__PURE__*
   messageDesc(file_store_v1_stream, 0);
 
 /**
- * Point-lookup for one historical batch. Always returns the complete batch.
+ * Point-lookup for one historical batch, streamed back in size-bounded frames.
+ * Always returns the complete batch (no server-side filter applied).
  *
  * @generated from message store.stream.v1.GetRequest
  */
@@ -73,6 +74,15 @@ export type GetRequest = Message<"store.stream.v1.GetRequest"> & {
    * @generated from field: uint64 sequence_number = 1;
    */
   sequenceNumber: bigint;
+
+  /**
+   * Maximum entries per streamed frame. The server additionally bounds each
+   * frame by an internal byte budget, so a frame may carry fewer entries than
+   * this; every non-empty batch yields at least one entry per frame.
+   *
+   * @generated from field: uint32 batch_size = 2;
+   */
+  batchSize: number;
 };
 
 /**
@@ -83,10 +93,19 @@ export const GetRequestSchema: GenMessage<GetRequest> = /*@__PURE__*/
   messageDesc(file_store_v1_stream, 1);
 
 /**
- * One item delivered on a `Subscribe` stream: all rows from a single atomic
- * `Put` batch that matched the subscriber's filter. Live and replayed frames
- * are indistinguishable by content; only the observed `sequence_number`
- * (strictly monotonically increasing either way) differs.
+ * One frame delivered on a `Subscribe` stream: rows from a single atomic `Put`
+ * batch that matched the subscriber's filter. A batch whose matching rows
+ * exceed the server's per-frame size budget is split across consecutive frames
+ * that share one `sequence_number`; all frames for a batch precede the next
+ * sequence number, and the final frame of a batch sets `last_frame`.
+ * Reassemble frames until `last_frame` to recover the atomic batch. Live and
+ * replayed frames are indistinguishable by content; only the observed
+ * `sequence_number` (monotonically non-decreasing across frames) differs.
+ *
+ * Resume safety: a subscriber must advance its `since_sequence_number` cursor
+ * only past a sequence whose `last_frame` it has observed, since reconnect
+ * replays whole batches; a cursor parked mid-batch would otherwise duplicate or
+ * drop the split tail.
  *
  * @generated from message store.stream.v1.SubscribeResponse
  */
@@ -100,6 +119,14 @@ export type SubscribeResponse = Message<"store.stream.v1.SubscribeResponse"> & {
    * @generated from field: repeated store.common.v1.KvEntry entries = 2;
    */
   entries: KvEntry[];
+
+  /**
+   * True on the final frame of this `sequence_number`'s batch (and on a
+   * single-frame batch). False means more frames for the same batch follow.
+   *
+   * @generated from field: bool last_frame = 3;
+   */
+  lastFrame: boolean;
 };
 
 /**
@@ -110,8 +137,11 @@ export const SubscribeResponseSchema: GenMessage<SubscribeResponse> = /*@__PURE_
   messageDesc(file_store_v1_stream, 2);
 
 /**
- * Response for `Get`: the full contents of the batch at the requested
- * sequence number, with no server-side filter applied.
+ * One frame of a `Get` response: a chunk of the batch at `sequence_number`.
+ * Every frame for one `Get` carries the same `sequence_number`; concatenating
+ * their `entries` in arrival order yields the complete batch in write order.
+ * Clients may reassemble until end-of-stream or, equivalently, until the frame
+ * with `last_frame` set.
  *
  * @generated from message store.stream.v1.GetResponse
  */
@@ -125,6 +155,14 @@ export type GetResponse = Message<"store.stream.v1.GetResponse"> & {
    * @generated from field: repeated store.common.v1.KvEntry entries = 2;
    */
   entries: KvEntry[];
+
+  /**
+   * True on the final frame of the batch (and on a single-frame batch). Kept
+   * identical to `SubscribeResponse` so callers can share decoders.
+   *
+   * @generated from field: bool last_frame = 3;
+   */
+  lastFrame: boolean;
 };
 
 /**
@@ -137,13 +175,17 @@ export const GetResponseSchema: GenMessage<GetResponse> = /*@__PURE__*/
 /**
  * Push-based subscription + point-lookup over the store's log.
  *
- * `Subscribe` delivers a `SubscribeResponse` per atomic `Put` batch whose
- * entries match any of the subscriber's `match_keys`. Optional
+ * `Subscribe` delivers `SubscribeResponse` frames for atomic `Put` batches
+ * whose entries match any of the subscriber's `match_keys`. Optional
  * `since_sequence_number` replays retained batches before transitioning live.
  *
- * `Get` returns the complete batch at a given sequence number (no filter
- * applied server-side). `SubscribeResponse` and `GetResponse` carry the
- * same shape so callers can share decoders.
+ * `Get` streams the complete batch at a given sequence number (no filter
+ * applied server-side) back as one or more `GetResponse` frames. A single
+ * batch can aggregate many original `Put` requests and exceed the maximum
+ * message size, so both RPCs chunk a large batch into size-bounded frames that
+ * share one `sequence_number`; reassemble frames in arrival order to recover
+ * the batch. `SubscribeResponse` and `GetResponse` carry the same shape so
+ * callers can share decoders.
  *
  * @generated from service store.stream.v1.Service
  */
@@ -160,7 +202,7 @@ export const Service: GenService<{
    * @generated from rpc store.stream.v1.Service.Get
    */
   get: {
-    methodKind: "unary";
+    methodKind: "server_streaming";
     input: typeof GetRequestSchema;
     output: typeof GetResponseSchema;
   },

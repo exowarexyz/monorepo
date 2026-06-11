@@ -244,7 +244,8 @@ pub const __SUBSCRIBE_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = :
     from_json: ::buffa::type_registry::any_from_json::<SubscribeRequest>,
     is_wkt: false,
 };
-/// Point-lookup for one historical batch. Always returns the complete batch.
+/// Point-lookup for one historical batch, streamed back in size-bounded frames.
+/// Always returns the complete batch (no server-side filter applied).
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
@@ -257,6 +258,18 @@ pub struct GetRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
     )]
     pub sequence_number: u64,
+    /// Maximum entries per streamed frame. The server additionally bounds each
+    /// frame by an internal byte budget, so a frame may carry fewer entries than
+    /// this; every non-empty batch yields at least one entry per frame.
+    ///
+    /// Field 2: `batch_size`
+    #[serde(
+        rename = "batchSize",
+        alias = "batch_size",
+        with = "::buffa::json_helpers::uint32",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u32"
+    )]
+    pub batch_size: u32,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -265,6 +278,7 @@ impl ::core::fmt::Debug for GetRequest {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         f.debug_struct("GetRequest")
             .field("sequence_number", &self.sequence_number)
+            .field("batch_size", &self.batch_size)
             .finish()
     }
 }
@@ -303,6 +317,9 @@ impl ::buffa::Message for GetRequest {
                 += 1u32
                     + ::buffa::types::uint64_encoded_len(self.sequence_number) as u32;
         }
+        if self.batch_size != 0u32 {
+            size += 1u32 + ::buffa::types::uint32_encoded_len(self.batch_size) as u32;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
         size
     }
@@ -317,6 +334,11 @@ impl ::buffa::Message for GetRequest {
             ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Varint)
                 .encode(buf);
             ::buffa::types::encode_uint64(self.sequence_number, buf);
+        }
+        if self.batch_size != 0u32 {
+            ::buffa::encoding::Tag::new(2u32, ::buffa::encoding::WireType::Varint)
+                .encode(buf);
+            ::buffa::types::encode_uint32(self.batch_size, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -341,6 +363,16 @@ impl ::buffa::Message for GetRequest {
                 }
                 self.sequence_number = ::buffa::types::decode_uint64(buf)?;
             }
+            2u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 2u32,
+                        expected: 0u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                self.batch_size = ::buffa::types::decode_uint32(buf)?;
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
@@ -350,6 +382,7 @@ impl ::buffa::Message for GetRequest {
     }
     fn clear(&mut self) {
         self.sequence_number = 0u64;
+        self.batch_size = 0u32;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -382,10 +415,19 @@ pub const __GET_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa
     from_json: ::buffa::type_registry::any_from_json::<GetRequest>,
     is_wkt: false,
 };
-/// One item delivered on a `Subscribe` stream: all rows from a single atomic
-/// `Put` batch that matched the subscriber's filter. Live and replayed frames
-/// are indistinguishable by content; only the observed `sequence_number`
-/// (strictly monotonically increasing either way) differs.
+/// One frame delivered on a `Subscribe` stream: rows from a single atomic `Put`
+/// batch that matched the subscriber's filter. A batch whose matching rows
+/// exceed the server's per-frame size budget is split across consecutive frames
+/// that share one `sequence_number`; all frames for a batch precede the next
+/// sequence number, and the final frame of a batch sets `last_frame`.
+/// Reassemble frames until `last_frame` to recover the atomic batch. Live and
+/// replayed frames are indistinguishable by content; only the observed
+/// `sequence_number` (monotonically non-decreasing across frames) differs.
+///
+/// Resume safety: a subscriber must advance its `since_sequence_number` cursor
+/// only past a sequence whose `last_frame` it has observed, since reconnect
+/// replays whole batches; a cursor parked mid-batch would otherwise duplicate or
+/// drop the split tail.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
@@ -405,6 +447,17 @@ pub struct SubscribeResponse {
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
     pub entries: ::buffa::alloc::vec::Vec<super::super::common::v1::KvEntry>,
+    /// True on the final frame of this `sequence_number`'s batch (and on a
+    /// single-frame batch). False means more frames for the same batch follow.
+    ///
+    /// Field 3: `last_frame`
+    #[serde(
+        rename = "lastFrame",
+        alias = "last_frame",
+        with = "::buffa::json_helpers::proto_bool",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_false"
+    )]
+    pub last_frame: bool,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -414,6 +467,7 @@ impl ::core::fmt::Debug for SubscribeResponse {
         f.debug_struct("SubscribeResponse")
             .field("sequence_number", &self.sequence_number)
             .field("entries", &self.entries)
+            .field("last_frame", &self.last_frame)
             .finish()
     }
 }
@@ -460,6 +514,9 @@ impl ::buffa::Message for SubscribeResponse {
                 += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
                     + inner_size;
         }
+        if self.last_frame {
+            size += 1u32 + ::buffa::types::BOOL_ENCODED_LEN as u32;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
         size
     }
@@ -483,6 +540,11 @@ impl ::buffa::Message for SubscribeResponse {
                 .encode(buf);
             ::buffa::encoding::encode_varint(__cache.consume_next() as u64, buf);
             v.write_to(__cache, buf);
+        }
+        if self.last_frame {
+            ::buffa::encoding::Tag::new(3u32, ::buffa::encoding::WireType::Varint)
+                .encode(buf);
+            ::buffa::types::encode_bool(self.last_frame, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -519,6 +581,16 @@ impl ::buffa::Message for SubscribeResponse {
                 ::buffa::Message::merge_length_delimited(&mut elem, buf, depth)?;
                 self.entries.push(elem);
             }
+            3u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 3u32,
+                        expected: 0u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                self.last_frame = ::buffa::types::decode_bool(buf)?;
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
@@ -529,6 +601,7 @@ impl ::buffa::Message for SubscribeResponse {
     fn clear(&mut self) {
         self.sequence_number = 0u64;
         self.entries.clear();
+        self.last_frame = false;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -561,8 +634,11 @@ pub const __SUBSCRIBE_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = 
     from_json: ::buffa::type_registry::any_from_json::<SubscribeResponse>,
     is_wkt: false,
 };
-/// Response for `Get`: the full contents of the batch at the requested
-/// sequence number, with no server-side filter applied.
+/// One frame of a `Get` response: a chunk of the batch at `sequence_number`.
+/// Every frame for one `Get` carries the same `sequence_number`; concatenating
+/// their `entries` in arrival order yields the complete batch in write order.
+/// Clients may reassemble until end-of-stream or, equivalently, until the frame
+/// with `last_frame` set.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
@@ -582,6 +658,17 @@ pub struct GetResponse {
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
     pub entries: ::buffa::alloc::vec::Vec<super::super::common::v1::KvEntry>,
+    /// True on the final frame of the batch (and on a single-frame batch). Kept
+    /// identical to `SubscribeResponse` so callers can share decoders.
+    ///
+    /// Field 3: `last_frame`
+    #[serde(
+        rename = "lastFrame",
+        alias = "last_frame",
+        with = "::buffa::json_helpers::proto_bool",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_false"
+    )]
+    pub last_frame: bool,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -591,6 +678,7 @@ impl ::core::fmt::Debug for GetResponse {
         f.debug_struct("GetResponse")
             .field("sequence_number", &self.sequence_number)
             .field("entries", &self.entries)
+            .field("last_frame", &self.last_frame)
             .finish()
     }
 }
@@ -637,6 +725,9 @@ impl ::buffa::Message for GetResponse {
                 += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
                     + inner_size;
         }
+        if self.last_frame {
+            size += 1u32 + ::buffa::types::BOOL_ENCODED_LEN as u32;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
         size
     }
@@ -660,6 +751,11 @@ impl ::buffa::Message for GetResponse {
                 .encode(buf);
             ::buffa::encoding::encode_varint(__cache.consume_next() as u64, buf);
             v.write_to(__cache, buf);
+        }
+        if self.last_frame {
+            ::buffa::encoding::Tag::new(3u32, ::buffa::encoding::WireType::Varint)
+                .encode(buf);
+            ::buffa::types::encode_bool(self.last_frame, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -696,6 +792,16 @@ impl ::buffa::Message for GetResponse {
                 ::buffa::Message::merge_length_delimited(&mut elem, buf, depth)?;
                 self.entries.push(elem);
             }
+            3u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 3u32,
+                        expected: 0u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                self.last_frame = ::buffa::types::decode_bool(buf)?;
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
@@ -706,6 +812,7 @@ impl ::buffa::Message for GetResponse {
     fn clear(&mut self) {
         self.sequence_number = 0u64;
         self.entries.clear();
+        self.last_frame = false;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -1073,11 +1180,18 @@ pub mod __buffa {
                 this
             }
         }
-        /// Point-lookup for one historical batch. Always returns the complete batch.
+        /// Point-lookup for one historical batch, streamed back in size-bounded frames.
+        /// Always returns the complete batch (no server-side filter applied).
         #[derive(Clone, Debug, Default)]
         pub struct GetRequestView<'a> {
             /// Field 1: `sequence_number`
             pub sequence_number: u64,
+            /// Maximum entries per streamed frame. The server additionally bounds each
+            /// frame by an internal byte budget, so a frame may carry fewer entries than
+            /// this; every non-empty batch yields at least one entry per frame.
+            ///
+            /// Field 2: `batch_size`
+            pub batch_size: u32,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
         impl<'a> GetRequestView<'a> {
@@ -1130,6 +1244,16 @@ pub mod __buffa {
                                 &mut cur,
                             )?;
                         }
+                        2u32 => {
+                            if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                                return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                                    field_number: 2u32,
+                                    expected: 0u8,
+                                    actual: tag.wire_type() as u8,
+                                });
+                            }
+                            view.batch_size = ::buffa::types::decode_uint32(&mut cur)?;
+                        }
                         _ => {
                             ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
                             let span_len = before_tag.len() - cur.len();
@@ -1167,6 +1291,7 @@ pub mod __buffa {
                 let _ = __buffa_src;
                 super::super::GetRequest {
                     sequence_number: self.sequence_number,
+                    batch_size: self.batch_size,
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields
                         .to_owned()
@@ -1188,6 +1313,11 @@ pub mod __buffa {
                             + ::buffa::types::uint64_encoded_len(self.sequence_number)
                                 as u32;
                 }
+                if self.batch_size != 0u32 {
+                    size
+                        += 1u32
+                            + ::buffa::types::uint32_encoded_len(self.batch_size) as u32;
+                }
                 size += self.__buffa_unknown_fields.encoded_len() as u32;
                 size
             }
@@ -1206,6 +1336,14 @@ pub mod __buffa {
                         )
                         .encode(buf);
                     ::buffa::types::encode_uint64(self.sequence_number, buf);
+                }
+                if self.batch_size != 0u32 {
+                    ::buffa::encoding::Tag::new(
+                            2u32,
+                            ::buffa::encoding::WireType::Varint,
+                        )
+                        .encode(buf);
+                    ::buffa::types::encode_uint32(self.batch_size, buf);
                 }
                 self.__buffa_unknown_fields.write_to(buf);
             }
@@ -1240,6 +1378,18 @@ pub mod __buffa {
                     }
                     __map.serialize_entry("sequenceNumber", &_W(self.sequence_number))?;
                 }
+                if !::buffa::json_helpers::skip_if::is_zero_u32(&self.batch_size) {
+                    struct _W(u32);
+                    impl ::serde::Serialize for _W {
+                        fn serialize<__S: ::serde::Serializer>(
+                            &self,
+                            __s: __S,
+                        ) -> ::core::result::Result<__S::Ok, __S::Error> {
+                            ::buffa::json_helpers::uint32::serialize(&self.0, __s)
+                        }
+                    }
+                    __map.serialize_entry("batchSize", &_W(self.batch_size))?;
+                }
                 __map.end()
             }
         }
@@ -1267,10 +1417,19 @@ pub mod __buffa {
                 this
             }
         }
-        /// One item delivered on a `Subscribe` stream: all rows from a single atomic
-        /// `Put` batch that matched the subscriber's filter. Live and replayed frames
-        /// are indistinguishable by content; only the observed `sequence_number`
-        /// (strictly monotonically increasing either way) differs.
+        /// One frame delivered on a `Subscribe` stream: rows from a single atomic `Put`
+        /// batch that matched the subscriber's filter. A batch whose matching rows
+        /// exceed the server's per-frame size budget is split across consecutive frames
+        /// that share one `sequence_number`; all frames for a batch precede the next
+        /// sequence number, and the final frame of a batch sets `last_frame`.
+        /// Reassemble frames until `last_frame` to recover the atomic batch. Live and
+        /// replayed frames are indistinguishable by content; only the observed
+        /// `sequence_number` (monotonically non-decreasing across frames) differs.
+        ///
+        /// Resume safety: a subscriber must advance its `since_sequence_number` cursor
+        /// only past a sequence whose `last_frame` it has observed, since reconnect
+        /// replays whole batches; a cursor parked mid-batch would otherwise duplicate or
+        /// drop the split tail.
         #[derive(Clone, Debug, Default)]
         pub struct SubscribeResponseView<'a> {
             /// Field 1: `sequence_number`
@@ -1280,6 +1439,11 @@ pub mod __buffa {
                 'a,
                 super::super::super::super::common::v1::__buffa::view::KvEntryView<'a>,
             >,
+            /// True on the final frame of this `sequence_number`'s batch (and on a
+            /// single-frame batch). False means more frames for the same batch follow.
+            ///
+            /// Field 3: `last_frame`
+            pub last_frame: bool,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
         impl<'a> SubscribeResponseView<'a> {
@@ -1331,6 +1495,16 @@ pub mod __buffa {
                             view.sequence_number = ::buffa::types::decode_uint64(
                                 &mut cur,
                             )?;
+                        }
+                        3u32 => {
+                            if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                                return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                                    field_number: 3u32,
+                                    expected: 0u8,
+                                    actual: tag.wire_type() as u8,
+                                });
+                            }
+                            view.last_frame = ::buffa::types::decode_bool(&mut cur)?;
                         }
                         2u32 => {
                             if tag.wire_type()
@@ -1396,6 +1570,7 @@ pub mod __buffa {
                         .iter()
                         .map(|v| v.to_owned_from_source(__buffa_src))
                         .collect(),
+                    last_frame: self.last_frame,
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields
                         .to_owned()
@@ -1425,6 +1600,9 @@ pub mod __buffa {
                         += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
                             + inner_size;
                 }
+                if self.last_frame {
+                    size += 1u32 + ::buffa::types::BOOL_ENCODED_LEN as u32;
+                }
                 size += self.__buffa_unknown_fields.encoded_len() as u32;
                 size
             }
@@ -1452,6 +1630,14 @@ pub mod __buffa {
                         .encode(buf);
                     ::buffa::encoding::encode_varint(__cache.consume_next() as u64, buf);
                     v.write_to(__cache, buf);
+                }
+                if self.last_frame {
+                    ::buffa::encoding::Tag::new(
+                            3u32,
+                            ::buffa::encoding::WireType::Varint,
+                        )
+                        .encode(buf);
+                    ::buffa::types::encode_bool(self.last_frame, buf);
                 }
                 self.__buffa_unknown_fields.write_to(buf);
             }
@@ -1489,6 +1675,9 @@ pub mod __buffa {
                 if !self.entries.is_empty() {
                     __map.serialize_entry("entries", &*self.entries)?;
                 }
+                if self.last_frame {
+                    __map.serialize_entry("lastFrame", &self.last_frame)?;
+                }
                 __map.end()
             }
         }
@@ -1518,8 +1707,11 @@ pub mod __buffa {
                 this
             }
         }
-        /// Response for `Get`: the full contents of the batch at the requested
-        /// sequence number, with no server-side filter applied.
+        /// One frame of a `Get` response: a chunk of the batch at `sequence_number`.
+        /// Every frame for one `Get` carries the same `sequence_number`; concatenating
+        /// their `entries` in arrival order yields the complete batch in write order.
+        /// Clients may reassemble until end-of-stream or, equivalently, until the frame
+        /// with `last_frame` set.
         #[derive(Clone, Debug, Default)]
         pub struct GetResponseView<'a> {
             /// Field 1: `sequence_number`
@@ -1529,6 +1721,11 @@ pub mod __buffa {
                 'a,
                 super::super::super::super::common::v1::__buffa::view::KvEntryView<'a>,
             >,
+            /// True on the final frame of the batch (and on a single-frame batch). Kept
+            /// identical to `SubscribeResponse` so callers can share decoders.
+            ///
+            /// Field 3: `last_frame`
+            pub last_frame: bool,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
         impl<'a> GetResponseView<'a> {
@@ -1580,6 +1777,16 @@ pub mod __buffa {
                             view.sequence_number = ::buffa::types::decode_uint64(
                                 &mut cur,
                             )?;
+                        }
+                        3u32 => {
+                            if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                                return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                                    field_number: 3u32,
+                                    expected: 0u8,
+                                    actual: tag.wire_type() as u8,
+                                });
+                            }
+                            view.last_frame = ::buffa::types::decode_bool(&mut cur)?;
                         }
                         2u32 => {
                             if tag.wire_type()
@@ -1645,6 +1852,7 @@ pub mod __buffa {
                         .iter()
                         .map(|v| v.to_owned_from_source(__buffa_src))
                         .collect(),
+                    last_frame: self.last_frame,
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields
                         .to_owned()
@@ -1674,6 +1882,9 @@ pub mod __buffa {
                         += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
                             + inner_size;
                 }
+                if self.last_frame {
+                    size += 1u32 + ::buffa::types::BOOL_ENCODED_LEN as u32;
+                }
                 size += self.__buffa_unknown_fields.encoded_len() as u32;
                 size
             }
@@ -1701,6 +1912,14 @@ pub mod __buffa {
                         .encode(buf);
                     ::buffa::encoding::encode_varint(__cache.consume_next() as u64, buf);
                     v.write_to(__cache, buf);
+                }
+                if self.last_frame {
+                    ::buffa::encoding::Tag::new(
+                            3u32,
+                            ::buffa::encoding::WireType::Varint,
+                        )
+                        .encode(buf);
+                    ::buffa::types::encode_bool(self.last_frame, buf);
                 }
                 self.__buffa_unknown_fields.write_to(buf);
             }
@@ -1737,6 +1956,9 @@ pub mod __buffa {
                 }
                 if !self.entries.is_empty() {
                     __map.serialize_entry("entries", &*self.entries)?;
+                }
+                if self.last_frame {
+                    __map.serialize_entry("lastFrame", &self.last_frame)?;
                 }
                 __map.end()
             }
@@ -1844,16 +2066,20 @@ pub const SERVICE_SUBSCRIBE_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::serve
 /// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
 pub const SERVICE_GET_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/store.stream.v1.Service/Get",
-        ::connectrpc::StreamType::Unary,
+        ::connectrpc::StreamType::ServerStream,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
 /// Push-based subscription + point-lookup over the store's log.
-/// `Subscribe` delivers a `SubscribeResponse` per atomic `Put` batch whose
-/// entries match any of the subscriber's `match_keys`. Optional
+/// `Subscribe` delivers `SubscribeResponse` frames for atomic `Put` batches
+/// whose entries match any of the subscriber's `match_keys`. Optional
 /// `since_sequence_number` replays retained batches before transitioning live.
-/// `Get` returns the complete batch at a given sequence number (no filter
-/// applied server-side). `SubscribeResponse` and `GetResponse` carry the
-/// same shape so callers can share decoders.
+/// `Get` streams the complete batch at a given sequence number (no filter
+/// applied server-side) back as one or more `GetResponse` frames. A single
+/// batch can aggregate many original `Put` requests and exceed the maximum
+/// message size, so both RPCs chunk a large batch into size-bounded frames that
+/// share one `sequence_number`; reassemble frames in arrival order to recover
+/// the batch. `SubscribeResponse` and `GetResponse` carry the same shape so
+/// callers can share decoders.
 ///
 /// # Implementing handlers
 ///
@@ -1903,15 +2129,15 @@ pub trait Service: Send + Sync + 'static {
         >,
     > + Send;
     /// Handle the Get RPC.
-    ///
-    /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
-    fn get<'a>(
-        &'a self,
+    fn get(
+        &self,
         ctx: ::connectrpc::RequestContext,
         request: OwnedGetRequestView,
     ) -> impl ::std::future::Future<
         Output = ::connectrpc::ServiceResult<
-            impl ::connectrpc::Encodable<GetResponse> + Send + use<'a, Self>,
+            ::connectrpc::ServiceStream<
+                impl ::connectrpc::Encodable<GetResponse> + Send + use<Self>,
+            >,
         >,
     > + Send;
 }
@@ -1959,18 +2185,20 @@ impl<S: Service> ServiceExt for S {
                 }),
             )
             .with_spec(SERVICE_SUBSCRIBE_SPEC)
-            .route_view(
+            .route_view_server_stream::<
+                _,
+                _,
+                GetResponse,
+            >(
                 SERVICE_SERVICE_NAME,
                 "Get",
-                {
+                ::connectrpc::view_streaming_handler_fn({
                     let svc = ::std::sync::Arc::clone(&self);
-                    ::connectrpc::view_handler_fn(move |ctx, req, format| {
+                    move |ctx, req| {
                         let svc = ::std::sync::Arc::clone(&svc);
-                        async move {
-                            svc.get(ctx, req).await?.encode::<GetResponse>(format)
-                        }
-                    })
-                },
+                        async move { svc.get(ctx, req).await }
+                    }
+                }),
             )
             .with_spec(SERVICE_GET_SPEC)
     }
@@ -2026,7 +2254,7 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
             }
             "Get" => {
                 Some(
-                    ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
+                    ::connectrpc::dispatcher::codegen::MethodDescriptor::server_streaming()
                         .with_spec(SERVICE_GET_SPEC),
                 )
             }
@@ -2045,15 +2273,6 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
         };
         let _ = (&ctx, &request, &format);
         match method {
-            "Get" => {
-                let svc = ::std::sync::Arc::clone(&self.inner);
-                Box::pin(async move {
-                    let req = ::connectrpc::dispatcher::codegen::decode_request_view::<
-                        __buffa::view::GetRequestView,
-                    >(request.encoded()?, format)?;
-                    svc.get(ctx, req).await?.encode::<GetResponse>(format)
-                })
-            }
             _ => ::connectrpc::dispatcher::codegen::unimplemented_unary(path),
         }
     }
@@ -2080,6 +2299,23 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
                         resp
                             .map_body(|s| ::connectrpc::dispatcher::codegen::encode_response_stream::<
                                 SubscribeResponse,
+                                _,
+                                _,
+                            >(s, format)),
+                    )
+                })
+            }
+            "Get" => {
+                let svc = ::std::sync::Arc::clone(&self.inner);
+                Box::pin(async move {
+                    let req = ::connectrpc::dispatcher::codegen::decode_request_view::<
+                        __buffa::view::GetRequestView,
+                    >(request, format)?;
+                    let resp = svc.get(ctx, req).await?;
+                    Ok(
+                        resp
+                            .map_body(|s| ::connectrpc::dispatcher::codegen::encode_response_stream::<
+                                GetResponse,
                                 _,
                                 _,
                             >(s, format)),
@@ -2235,8 +2471,9 @@ where
         &self,
         request: GetRequest,
     ) -> Result<
-        ::connectrpc::client::UnaryResponse<
-            ::buffa::view::OwnedView<__buffa::view::GetResponseView<'static>>,
+        ::connectrpc::client::ServerStream<
+            T::ResponseBody,
+            __buffa::view::GetResponseView<'static>,
         >,
         ::connectrpc::ConnectError,
     > {
@@ -2249,12 +2486,13 @@ where
         request: GetRequest,
         options: ::connectrpc::client::CallOptions,
     ) -> Result<
-        ::connectrpc::client::UnaryResponse<
-            ::buffa::view::OwnedView<__buffa::view::GetResponseView<'static>>,
+        ::connectrpc::client::ServerStream<
+            T::ResponseBody,
+            __buffa::view::GetResponseView<'static>,
         >,
         ::connectrpc::ConnectError,
     > {
-        ::connectrpc::client::call_unary(
+        ::connectrpc::client::call_server_stream(
                 &self.transport,
                 &self.config,
                 SERVICE_SERVICE_NAME,
