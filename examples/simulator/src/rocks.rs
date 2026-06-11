@@ -357,7 +357,7 @@ impl Frontiers {
 
 struct WriteRequest {
     kvs: Vec<(Bytes, Bytes)>,
-    response: oneshot::Sender<Result<u64, String>>,
+    response: oneshot::Sender<Result<u64, IngestError>>,
 }
 
 /// One staged commit group: every coalesced request shares a single sequence number, whose log
@@ -430,12 +430,14 @@ impl Writer {
     }
 
     /// Enqueues one ingest request and resolves once `commit` has durably published it.
-    async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, String> {
+    async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
         // An empty batch would still cut a log row, but rejecting it keeps every sequence
         // backed by at least one entry. The RPC layer already requires at least one entry per
         // put.
         if kvs.is_empty() {
-            return Err("cannot ingest an empty batch".to_string());
+            return Err(IngestError::Internal(
+                "cannot ingest an empty batch".to_string(),
+            ));
         }
         let (response, result) = oneshot::channel();
 
@@ -447,10 +449,10 @@ impl Writer {
             .as_ref()
             .expect("sender is None only during drop, which cannot overlap a call")
             .send(WriteRequest { kvs, response })
-            .map_err(|_| "rocks writer stopped".to_string())?;
-        result
-            .await
-            .map_err(|_| "rocks writer stopped before completing write".to_string())?
+            .map_err(|_| IngestError::Internal("rocks writer stopped".to_string()))?;
+        result.await.map_err(|_| {
+            IngestError::Internal("rocks writer stopped before completing write".to_string())
+        })?
     }
 }
 
@@ -1086,12 +1088,7 @@ impl Sequence for RocksStore {
 // number and replay-log batch.
 impl Ingest for RocksStore {
     async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
-        // Local RocksDB writes have no transient-dependency failure mode; a stopped writer is a
-        // broken invariant, so every error here is fatal.
-        self.writer
-            .put_batch(kvs)
-            .await
-            .map_err(IngestError::Internal)
+        self.writer.put_batch(kvs).await
     }
 }
 
@@ -1555,7 +1552,10 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
         let error = store.put_batch(Vec::new()).await.expect_err("must reject");
-        assert_eq!(error, "cannot ingest an empty batch");
+        assert_eq!(
+            error,
+            IngestError::Internal("cannot ingest an empty batch".to_string())
+        );
         assert_eq!(store.current_sequence(), 0);
     }
 
