@@ -43,7 +43,7 @@ use tokio::sync::Notify;
 use crate::reduce::RangeReducer;
 use crate::stream::{StreamHub, StreamNotifier};
 use crate::validate::{self, IngestLimits};
-use crate::{Ingest, Log, LogBatch, Prune, Query, QueryExtra, RangeScan, StoreEngine};
+use crate::{Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan, StoreEngine};
 
 // TODO (#57): Make limits configurable.
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
@@ -356,6 +356,29 @@ where
     }
 }
 
+/// Maps a backend's transient write failure to the wire. `INGEST_UNAVAILABLE` is distinct from the
+/// pre-call `WORKER_NOT_READY` gate so operators can tell "probe said not ready" from "the request
+/// itself discovered the backend was down".
+fn ingest_unavailable_error(message: String) -> ConnectError {
+    with_retry_info_detail(
+        with_error_info_detail(
+            ConnectError::unavailable(message),
+            ErrorInfo {
+                reason: "INGEST_UNAVAILABLE".to_string(),
+                domain: "store.ingest".to_string(),
+                ..Default::default()
+            },
+        ),
+        RetryInfo {
+            retry_delay: Some(buffa_types::google::protobuf::Duration::from(
+                std::time::Duration::from_secs(1),
+            ))
+            .into(),
+            ..Default::default()
+        },
+    )
+}
+
 impl<I> IngestApi for IngestConnect<I>
 where
     I: Ingest,
@@ -391,7 +414,10 @@ where
             .ingest
             .put_batch(batch)
             .await
-            .map_err(ConnectError::internal)?;
+            .map_err(|e| match e {
+                IngestError::Unavailable(msg) => ingest_unavailable_error(msg),
+                IngestError::Internal(msg) => ConnectError::internal(msg),
+            })?;
 
         // Advance any attached stream frontier after the write is committed.
         if let Some(notifier) = &self.state.notifier {
@@ -1228,7 +1254,7 @@ mod tests {
     use futures::StreamExt;
 
     use crate::{
-        Ingest, Log, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence,
+        Ingest, IngestError, Log, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence,
         StreamNotification, StreamNotifier,
     };
 
@@ -1252,6 +1278,7 @@ mod tests {
         range_next_count: usize,
         query_extra: QueryExtra,
         prune_policy_counts: Vec<usize>,
+        put_error: Option<IngestError>,
     }
 
     #[derive(Default)]
@@ -1299,6 +1326,10 @@ mod tests {
     impl FakeEngine {
         fn set_current_sequence(&self, sequence_number: u64) {
             self.state.lock().expect("lock").current_sequence = sequence_number;
+        }
+
+        fn set_put_error(&self, err: IngestError) {
+            self.state.lock().expect("lock").put_error = Some(err);
         }
 
         fn set_batch(&self, sequence_number: u64, kvs: Option<Vec<(Bytes, Bytes)>>) {
@@ -1363,8 +1394,14 @@ mod tests {
     }
 
     impl Ingest for FakeEngine {
-        async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, String> {
-            let mut state = self.state.lock().map_err(|e| e.to_string())?;
+        async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|e| IngestError::Internal(e.to_string()))?;
+            if let Some(err) = state.put_error.take() {
+                return Err(err);
+            }
             state.current_sequence += 1;
             let seq = state.current_sequence;
             state.batches.insert(seq, Some(kvs));
@@ -1802,6 +1839,40 @@ mod tests {
             .expect_err("put should reject oversized value");
 
         assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn ingest_unavailable_surfaces_as_unavailable_with_retry_info() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_put_error(IngestError::Unavailable("backend bouncing".to_string()));
+        let connect = IngestConnect::new(IngestState::new(engine));
+
+        let err = IngestApi::put(&connect, Context::default(), put_request(1))
+            .await
+            .expect_err("transient put failure should surface");
+
+        assert_eq!(err.code, connectrpc::ErrorCode::Unavailable);
+        let decoded = decode_connect_error(&err).expect("decode details");
+        assert_eq!(
+            decoded.error_info.expect("error info").reason,
+            "INGEST_UNAVAILABLE"
+        );
+        assert!(decoded.retry_info.is_some());
+    }
+
+    #[tokio::test]
+    async fn ingest_internal_surfaces_as_internal_without_error_info() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_put_error(IngestError::Internal("invariant violated".to_string()));
+        let connect = IngestConnect::new(IngestState::new(engine));
+
+        let err = IngestApi::put(&connect, Context::default(), put_request(1))
+            .await
+            .expect_err("fatal put failure should surface");
+
+        assert_eq!(err.code, connectrpc::ErrorCode::Internal);
+        let decoded = decode_connect_error(&err).expect("decode details");
+        assert!(decoded.error_info.is_none());
     }
 
     #[tokio::test]

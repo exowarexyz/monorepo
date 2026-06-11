@@ -41,7 +41,8 @@ use exoware_sdk::prune_policy::{
 };
 use exoware_sdk::selector::compile_payload_regex;
 use exoware_server::{
-    Ingest, Log, LogBatch, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence,
+    Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan, RangeScanBatch,
+    Sequence,
 };
 use parking_lot::Mutex;
 use regex::bytes::Regex;
@@ -1084,8 +1085,13 @@ impl Sequence for RocksStore {
 // The writer folds already-queued requests into one commit group that shares a single sequence
 // number and replay-log batch.
 impl Ingest for RocksStore {
-    async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, String> {
-        self.writer.put_batch(kvs).await
+    async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
+        // Local RocksDB writes have no transient-dependency failure mode; a stopped writer is a
+        // broken invariant, so every error here is fatal.
+        self.writer
+            .put_batch(kvs)
+            .await
+            .map_err(IngestError::Internal)
     }
 }
 

@@ -1,7 +1,8 @@
 //! Storage callbacks for the store services.
 //!
-//! Implement the capability traits your component serves. Errors are surfaced to clients as
-//! internal RPC failures (string message only; keep messages safe to expose if you rely on that).
+//! Implement the capability traits your component serves. String errors are surfaced to clients as
+//! internal RPC failures (message only; keep messages safe to expose if you rely on that). `Ingest`
+//! additionally lets a backend mark a write failure transient via [`IngestError`].
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -45,6 +46,30 @@ pub trait Sequence: Send + Sync + 'static {
     fn current_sequence(&self) -> u64;
 }
 
+/// Why an ingest write was not accepted.
+///
+/// The variant picks the wire code, so retryability decided by the backend survives to clients:
+/// transient conditions (a dependency down, overload) must surface as `unavailable`, not `internal`,
+/// which retry policies rightly treat as fatal.
+#[derive(Debug)]
+pub enum IngestError {
+    /// The write cannot currently be accepted; clients may retry with backoff.
+    Unavailable(String),
+    /// The write failed in a way retries will not fix.
+    Internal(String),
+}
+
+impl std::fmt::Display for IngestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Message only; the wire code carries the retryable/fatal class.
+        match self {
+            IngestError::Unavailable(msg) | IngestError::Internal(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+impl std::error::Error for IngestError {}
+
 /// Ingest write capability.
 pub trait Ingest: Send + Sync + 'static {
     /// Persist key-value pairs atomically and return the global sequence number that includes this
@@ -53,7 +78,7 @@ pub trait Ingest: Send + Sync + 'static {
     fn put_batch(
         &self,
         kvs: Vec<(Bytes, Bytes)>,
-    ) -> impl Future<Output = Result<u64, String>> + Send;
+    ) -> impl Future<Output = Result<u64, IngestError>> + Send;
 }
 
 /// Query read capability.
