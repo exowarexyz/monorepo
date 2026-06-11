@@ -21,7 +21,8 @@ use exoware_sdk::prune_policy::{
 };
 use exoware_sdk::store::{common::v1::KvEntry, stream::v1::GetResponse as StreamGetResponse};
 use exoware_server::{
-    Ingest, Log, LogBatch, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence,
+    Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan, RangeScanBatch,
+    Sequence,
 };
 use regex::bytes::Regex;
 use rocksdb::{
@@ -892,8 +893,13 @@ impl Sequence for RocksStore {
 // The writer folds already-queued requests into one RocksDB batch while preserving a contiguous
 // sequence number and replay-log row for each request.
 impl Ingest for RocksStore {
-    async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, String> {
-        self.writer.put_batch(kvs).await
+    async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
+        // Local RocksDB writes have no transient-dependency failure mode; a stopped writer is a
+        // broken invariant, so every error here is fatal.
+        self.writer
+            .put_batch(kvs)
+            .await
+            .map_err(IngestError::Internal)
     }
 }
 
