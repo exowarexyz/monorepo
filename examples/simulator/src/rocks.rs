@@ -280,7 +280,7 @@ fn keys_to_delete(
 
 struct WriteRequest {
     kvs: Vec<(Bytes, Bytes)>,
-    response: oneshot::Sender<Result<u64, String>>,
+    response: oneshot::Sender<Result<u64, IngestError>>,
 }
 
 struct AssignedWrite {
@@ -353,21 +353,21 @@ impl Writer {
     }
 
     /// Enqueues one ingest request and resolves once `commit` has durably published it.
-    async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, String> {
+    async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
         let (response, result) = oneshot::channel();
         let sender = self
             .sender
             .lock()
-            .map_err(|e| format!("rocks writer lock poisoned: {e}"))?
+            .map_err(|e| IngestError::Internal(format!("rocks writer lock poisoned: {e}")))?
             .as_ref()
             .cloned()
-            .ok_or_else(|| "rocks writer stopped".to_string())?;
+            .ok_or_else(|| IngestError::Internal("rocks writer stopped".to_string()))?;
         sender
             .send(WriteRequest { kvs, response })
-            .map_err(|_| "rocks writer stopped".to_string())?;
-        result
-            .await
-            .map_err(|_| "rocks writer stopped before completing write".to_string())?
+            .map_err(|_| IngestError::Internal("rocks writer stopped".to_string()))?;
+        result.await.map_err(|_| {
+            IngestError::Internal("rocks writer stopped before completing write".to_string())
+        })?
     }
 }
 
@@ -420,7 +420,7 @@ fn run_prepare(
         ) {
             Ok(prepared) => prepared,
             Err((requests, error)) => {
-                fail_requests(requests, error);
+                fail_requests(requests, IngestError::Internal(error));
                 continue;
             }
         };
@@ -502,7 +502,10 @@ fn prepare_queued_write(
 /// Sends one group to `commit`, returning false if it has stopped.
 fn forward_group(sender: &mpsc::SyncSender<PreparedWrite>, group: PreparedWrite) -> bool {
     if let Err(error) = sender.send(group) {
-        fail_assigned_writes(error.0.writes, "rocks commit worker stopped".to_string());
+        fail_assigned_writes(
+            error.0.writes,
+            IngestError::Internal("rocks commit worker stopped".to_string()),
+        );
         return false;
     }
     true
@@ -538,11 +541,14 @@ fn commit_group(
     if group.epoch != epoch.load(Ordering::Acquire) {
         // This group was assigned under a frontier an earlier commit failure has since abandoned
         // (prepare can build one wave ahead before it observes the bump). Rejecting it keeps the
-        // durable log gap-free; the requests never reached the disk, so the caller is told to
-        // retry, which re-allocates them fresh sequence numbers under the current epoch.
+        // durable log gap-free; the requests never reached the disk and the writer stays healthy, so
+        // this is transient: the caller retries and re-allocates fresh sequence numbers under the
+        // current epoch.
         fail_assigned_writes(
             group.writes,
-            "rocks write batch superseded by an earlier failure, retry".to_string(),
+            IngestError::Unavailable(
+                "rocks write batch superseded by an earlier failure, retry".to_string(),
+            ),
         );
         return committed;
     }
@@ -566,7 +572,7 @@ fn commit_group(
             // Bump before failing: any in-flight group sharing the failed epoch is then rejected,
             // and `prepare` re-syncs to `committed`, leaving the abandoned numbers for reuse.
             epoch.fetch_add(1, Ordering::AcqRel);
-            fail_assigned_writes(writes, error);
+            fail_assigned_writes(writes, IngestError::Internal(error));
             committed
         }
     }
@@ -662,14 +668,14 @@ fn write_sequence_batch(db: &DB, batch: rocksdb::WriteBatch) -> Result<(), Strin
 }
 
 /// Sends the same assignment failure to every request in a wave.
-fn fail_requests(requests: Vec<WriteRequest>, error: String) {
+fn fail_requests(requests: Vec<WriteRequest>, error: IngestError) {
     for request in requests {
         let _ = request.response.send(Err(error.clone()));
     }
 }
 
 /// Fails every assigned write with the same error.
-fn fail_assigned_writes(writes: Vec<AssignedWrite>, error: String) {
+fn fail_assigned_writes(writes: Vec<AssignedWrite>, error: IngestError) {
     for write in writes {
         let _ = write.request.response.send(Err(error.clone()));
     }
@@ -894,12 +900,7 @@ impl Sequence for RocksStore {
 // sequence number and replay-log row for each request.
 impl Ingest for RocksStore {
     async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
-        // Local RocksDB writes have no transient-dependency failure mode; a stopped writer is a
-        // broken invariant, so every error here is fatal.
-        self.writer
-            .put_batch(kvs)
-            .await
-            .map_err(IngestError::Internal)
+        self.writer.put_batch(kvs).await
     }
 }
 
@@ -1071,7 +1072,10 @@ mod tests {
         epoch: u64,
         entries: &[(u64, &'static [u8], &'static [u8])],
         error: &str,
-    ) -> (PreparedWrite, Vec<oneshot::Receiver<Result<u64, String>>>) {
+    ) -> (
+        PreparedWrite,
+        Vec<oneshot::Receiver<Result<u64, IngestError>>>,
+    ) {
         let mut writes = Vec::new();
         let mut receivers = Vec::new();
         for (sequence, key, value) in entries {
@@ -1115,7 +1119,7 @@ mod tests {
         sequence: u64,
         key: &'static [u8],
         value: &'static [u8],
-    ) -> (AssignedWrite, oneshot::Receiver<Result<u64, String>>) {
+    ) -> (AssignedWrite, oneshot::Receiver<Result<u64, IngestError>>) {
         let (response, result) = oneshot::channel();
         (
             AssignedWrite {
@@ -1241,7 +1245,10 @@ mod tests {
             .await
             .expect("request should receive an explicit worker error")
             .expect_err("request should fail");
-        assert_eq!(error, "rocks commit worker stopped");
+        assert_eq!(
+            error,
+            IngestError::Internal("rocks commit worker stopped".to_string())
+        );
     }
 
     #[tokio::test]
@@ -1261,7 +1268,7 @@ mod tests {
         for receiver in receivers {
             assert_eq!(
                 receiver.await.expect("response"),
-                Err("disk full".to_string())
+                Err(IngestError::Internal("disk full".to_string()))
             );
         }
 
@@ -1299,9 +1306,14 @@ mod tests {
         assert_eq!(committed, 0);
         assert_eq!(store.current_sequence(), 0);
         assert_eq!(epoch.load(Ordering::Acquire), 1);
+        // The writer is healthy and the requests never hit disk, so this must classify as
+        // `Unavailable` (retryable), not `Internal`: otherwise the only backend-produced transient
+        // condition would surface to clients as a fatal error.
         assert_eq!(
             result.await.expect("response"),
-            Err("rocks write batch superseded by an earlier failure, retry".to_string())
+            Err(IngestError::Unavailable(
+                "rocks write batch superseded by an earlier failure, retry".to_string()
+            ))
         );
         assert!(store.get_batch(1).await.expect("get").is_none());
     }
@@ -1323,7 +1335,10 @@ mod tests {
             );
             assert_eq!(epoch.load(Ordering::Acquire), current + 1);
             for receiver in receivers {
-                assert_eq!(receiver.await.expect("response"), Err("boom".to_string()));
+                assert_eq!(
+                    receiver.await.expect("response"),
+                    Err(IngestError::Internal("boom".to_string()))
+                );
             }
         }
 
@@ -1364,7 +1379,10 @@ mod tests {
         assert_eq!(store.current_sequence(), 0);
         assert_eq!(epoch.load(Ordering::Acquire), 1);
         for receiver in receivers {
-            assert_eq!(receiver.await.expect("response"), Err("boom".to_string()));
+            assert_eq!(
+                receiver.await.expect("response"),
+                Err(IngestError::Internal("boom".to_string()))
+            );
         }
 
         let (write, result) = assigned_write_with_response(1, b"k", b"new");

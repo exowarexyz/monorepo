@@ -356,27 +356,35 @@ where
     }
 }
 
-/// Maps a backend's transient write failure to the wire. `INGEST_UNAVAILABLE` is distinct from the
-/// pre-call `WORKER_NOT_READY` gate so operators can tell "probe said not ready" from "the request
-/// itself discovered the backend was down".
-fn ingest_unavailable_error(message: String) -> ConnectError {
+/// Backoff floor advertised to `RetryInfo`-aware clients for transient store conditions.
+const RETRY_HINT_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Attaches the shared transient-retry hint so every "come back soon" response advertises one delay.
+fn with_retry_hint(err: ConnectError) -> ConnectError {
     with_retry_info_detail(
-        with_error_info_detail(
-            ConnectError::unavailable(message),
-            ErrorInfo {
-                reason: "INGEST_UNAVAILABLE".to_string(),
-                domain: "store.ingest".to_string(),
-                ..Default::default()
-            },
-        ),
+        err,
         RetryInfo {
             retry_delay: Some(buffa_types::google::protobuf::Duration::from(
-                std::time::Duration::from_secs(1),
+                RETRY_HINT_DELAY,
             ))
             .into(),
             ..Default::default()
         },
     )
+}
+
+/// Maps a backend's transient write failure to the wire. Shares the `unavailable` wire code with the
+/// pre-call `WORKER_NOT_READY` gate; the two are told apart by `ErrorInfo.reason`, letting operators
+/// distinguish "probe said not ready" from "the request itself discovered the backend was down".
+fn ingest_unavailable_error(message: String) -> ConnectError {
+    with_retry_hint(with_error_info_detail(
+        ConnectError::unavailable(message),
+        ErrorInfo {
+            reason: "INGEST_UNAVAILABLE".to_string(),
+            domain: "store.ingest".to_string(),
+            ..Default::default()
+        },
+    ))
 }
 
 impl<I> IngestApi for IngestConnect<I>
@@ -389,14 +397,14 @@ where
         request: buffa::view::OwnedView<exoware_proto::store::ingest::v1::PutRequestView<'static>>,
     ) -> connectrpc::ServiceResult<ProtoPutResponse> {
         if !self.state.ready.load(Ordering::SeqCst) {
-            return Err(with_error_info_detail(
+            return Err(with_retry_hint(with_error_info_detail(
                 ConnectError::unavailable("ingest is not ready"),
                 ErrorInfo {
                     reason: "WORKER_NOT_READY".to_string(),
                     domain: "store.ingest".to_string(),
                     ..Default::default()
                 },
-            ));
+            )));
         }
 
         validate::validate_put_request(&request, self.state.limits)?;
@@ -465,16 +473,9 @@ where
     }
 
     fn consistency_not_ready_error(&self, required: u64, current: u64) -> ConnectError {
-        let err = with_retry_info_detail(
-            ConnectError::aborted("minimum consistency token is not yet visible"),
-            RetryInfo {
-                retry_delay: Some(buffa_types::google::protobuf::Duration::from(
-                    std::time::Duration::from_secs(1),
-                ))
-                .into(),
-                ..Default::default()
-            },
-        );
+        let err = with_retry_hint(ConnectError::aborted(
+            "minimum consistency token is not yet visible",
+        ));
         with_query_detail(
             with_error_info_detail(
                 err,
@@ -1876,7 +1877,9 @@ mod tests {
             decoded.error_info.expect("error info").reason,
             "INGEST_UNAVAILABLE"
         );
-        assert!(decoded.retry_info.is_some());
+        let retry_delay = decoded.retry_info.expect("retry info").retry_delay;
+        let retry_delay = retry_delay.as_option().expect("retry delay");
+        assert_eq!((retry_delay.seconds, retry_delay.nanos), (1, 0));
     }
 
     #[tokio::test]
@@ -1892,6 +1895,27 @@ mod tests {
         assert_eq!(err.code, connectrpc::ErrorCode::Internal);
         let decoded = decode_connect_error(&err).expect("decode details");
         assert!(decoded.error_info.is_none());
+    }
+
+    #[tokio::test]
+    async fn put_when_not_ready_keeps_worker_not_ready_reason() {
+        let engine = Arc::new(FakeEngine::default());
+        let state = IngestState::new(engine);
+        state.ready.store(false, Ordering::SeqCst);
+        let connect = IngestConnect::new(state);
+
+        let err = IngestApi::put(&connect, Context::default(), put_request(1))
+            .await
+            .expect_err("not-ready gate should reject");
+
+        // Both the gate and a backend-discovered outage surface `unavailable`; the reason string is
+        // what keeps them distinguishable, so pin it against drift toward `INGEST_UNAVAILABLE`.
+        assert_eq!(err.code, connectrpc::ErrorCode::Unavailable);
+        let decoded = decode_connect_error(&err).expect("decode details");
+        assert_eq!(
+            decoded.error_info.expect("error info").reason,
+            "WORKER_NOT_READY"
+        );
     }
 
     #[tokio::test]

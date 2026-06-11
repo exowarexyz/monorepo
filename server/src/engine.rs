@@ -48,26 +48,18 @@ pub trait Sequence: Send + Sync + 'static {
 /// Why an ingest write was not accepted.
 ///
 /// The variant picks the wire code, so retryability decided by the backend survives to clients:
-/// transient conditions (a dependency down, overload) must surface as `unavailable`, not `internal`,
-/// which retry policies rightly treat as fatal.
-#[derive(Debug)]
+/// transient conditions (a dependency down, overload) should surface as `unavailable`, since
+/// code-based retry policies (load balancers, gRPC clients) typically retry `unavailable` but not
+/// `internal`. `Display` renders the message only; the wire code carries the retryable/fatal class.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IngestError {
     /// The write cannot currently be accepted; clients may retry with backoff.
+    #[error("{0}")]
     Unavailable(String),
     /// The write failed in a way retries will not fix.
+    #[error("{0}")]
     Internal(String),
 }
-
-impl std::fmt::Display for IngestError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Message only; the wire code carries the retryable/fatal class.
-        match self {
-            IngestError::Unavailable(msg) | IngestError::Internal(msg) => write!(f, "{msg}"),
-        }
-    }
-}
-
-impl std::error::Error for IngestError {}
 
 /// Ingest write capability.
 pub trait Ingest: Send + Sync + 'static {
