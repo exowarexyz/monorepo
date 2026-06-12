@@ -435,9 +435,9 @@ impl Writer {
         // backed by at least one entry. The RPC layer already requires at least one entry per
         // put.
         if kvs.is_empty() {
-            return Err(IngestError::Internal(
-                "cannot ingest an empty batch".to_string(),
-            ));
+            return Err(IngestError::Internal {
+                message: "cannot ingest an empty batch".to_string(),
+            });
         }
         let (response, result) = oneshot::channel();
 
@@ -449,9 +449,11 @@ impl Writer {
             .as_ref()
             .expect("sender is None only during drop, which cannot overlap a call")
             .send(WriteRequest { kvs, response })
-            .map_err(|_| IngestError::Internal("rocks writer stopped".to_string()))?;
-        result.await.map_err(|_| {
-            IngestError::Internal("rocks writer stopped before completing write".to_string())
+            .map_err(|_| IngestError::Internal {
+                message: "rocks writer stopped".to_string(),
+            })?;
+        result.await.map_err(|_| IngestError::Internal {
+            message: "rocks writer stopped before completing write".to_string(),
         })?
     }
 }
@@ -1554,7 +1556,9 @@ mod tests {
         let error = store.put_batch(Vec::new()).await.expect_err("must reject");
         assert_eq!(
             error,
-            IngestError::Internal("cannot ingest an empty batch".to_string())
+            IngestError::Internal {
+                message: "cannot ingest an empty batch".to_string(),
+            }
         );
         assert_eq!(store.current_sequence(), 0);
     }

@@ -48,18 +48,16 @@ pub trait Sequence: Send + Sync + 'static {
 
 /// Why an ingest write was not accepted.
 ///
-/// The variant picks the wire code, so retryability decided by the backend survives to clients:
-/// transient conditions (a dependency down, overload) should surface as `unavailable`, since
-/// code-based retry policies (load balancers, gRPC clients) typically retry `unavailable` but not
-/// `internal`. `Display` renders the message only; the wire code carries the retryable/fatal class.
+/// Backends choose the variant; the Connect layer maps it to the wire code and retry details.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IngestError {
     /// The write cannot currently be accepted; clients may retry with backoff.
-    #[error("{0}")]
-    Unavailable(String),
+    #[error("unavailable: {message}")]
+    Unavailable { message: String },
+
     /// The write failed in a way retries will not fix.
-    #[error("{0}")]
-    Internal(String),
+    #[error("internal: {message}")]
+    Internal { message: String },
 }
 
 /// Ingest write capability.
