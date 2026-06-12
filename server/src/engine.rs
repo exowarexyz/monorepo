@@ -1,7 +1,8 @@
 //! Storage callbacks for the store services.
 //!
-//! Implement the capability traits your component serves. Errors are surfaced to clients as
-//! internal RPC failures (string message only; keep messages safe to expose if you rely on that).
+//! Implement the capability traits your component serves. String errors are surfaced to clients as
+//! internal RPC failures (message only; keep messages safe to expose if you rely on that). `Ingest`
+//! additionally lets a backend mark a write failure transient via [`IngestError`].
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -44,6 +45,20 @@ pub trait Sequence: Send + Sync + 'static {
     fn current_sequence(&self) -> u64;
 }
 
+/// Why an ingest write was not accepted.
+///
+/// Backends choose the variant; the Connect layer maps it to the wire code and retry details.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum IngestError {
+    /// The write cannot currently be accepted; clients may retry with backoff.
+    #[error("unavailable: {message}")]
+    Unavailable { message: String },
+
+    /// The write failed in a way retries will not fix.
+    #[error("internal: {message}")]
+    Internal { message: String },
+}
+
 /// Ingest write capability.
 pub trait Ingest: Send + Sync + 'static {
     /// Persist key-value pairs atomically and return the global sequence number that includes this
@@ -52,7 +67,7 @@ pub trait Ingest: Send + Sync + 'static {
     fn put_batch(
         &self,
         kvs: Vec<(Bytes, Bytes)>,
-    ) -> impl Future<Output = Result<u64, String>> + Send;
+    ) -> impl Future<Output = Result<u64, IngestError>> + Send;
 }
 
 /// Query read capability.
