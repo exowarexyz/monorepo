@@ -358,33 +358,39 @@ where
 
 /// Backoff floor advertised to `RetryInfo`-aware clients for transient store conditions.
 const RETRY_HINT_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+/// `ErrorInfo.domain` used for ingest-service errors.
+const INGEST_ERROR_DOMAIN: &str = "store.ingest";
+/// `ErrorInfo.reason` when the ingest worker has not passed its readiness gate.
+const REASON_WORKER_NOT_READY: &str = "WORKER_NOT_READY";
+/// `ErrorInfo.reason` when the backend discovers a transient ingest write failure.
+const REASON_INGEST_UNAVAILABLE: &str = "INGEST_UNAVAILABLE";
 
-/// Attaches the shared transient-retry hint so every "come back soon" response advertises one delay.
-fn with_retry_hint(err: ConnectError) -> ConnectError {
+/// Attaches an explicit retry hint for "come back soon" responses.
+fn with_retry_hint(err: ConnectError, retry_delay: std::time::Duration) -> ConnectError {
     with_retry_info_detail(
         err,
         RetryInfo {
-            retry_delay: Some(buffa_types::google::protobuf::Duration::from(
-                RETRY_HINT_DELAY,
-            ))
-            .into(),
+            retry_delay: Some(buffa_types::google::protobuf::Duration::from(retry_delay)).into(),
             ..Default::default()
         },
     )
 }
 
-/// Maps a backend's transient write failure to the wire. Shares the `unavailable` wire code with the
-/// pre-call `WORKER_NOT_READY` gate; the two are told apart by `ErrorInfo.reason`, letting operators
-/// distinguish "probe said not ready" from "the request itself discovered the backend was down".
-fn ingest_unavailable_error(message: String) -> ConnectError {
-    with_retry_hint(with_error_info_detail(
-        ConnectError::unavailable(message),
-        ErrorInfo {
-            reason: "INGEST_UNAVAILABLE".to_string(),
-            domain: "store.ingest".to_string(),
-            ..Default::default()
-        },
-    ))
+fn ingest_error_to_connect(err: IngestError) -> ConnectError {
+    match err {
+        IngestError::Unavailable { message } => with_retry_hint(
+            with_error_info_detail(
+                ConnectError::unavailable(message),
+                ErrorInfo {
+                    reason: REASON_INGEST_UNAVAILABLE.to_string(),
+                    domain: INGEST_ERROR_DOMAIN.to_string(),
+                    ..Default::default()
+                },
+            ),
+            RETRY_HINT_DELAY,
+        ),
+        IngestError::Internal { message } => ConnectError::internal(message),
+    }
 }
 
 impl<I> IngestApi for IngestConnect<I>
@@ -397,14 +403,17 @@ where
         request: buffa::view::OwnedView<exoware_proto::store::ingest::v1::PutRequestView<'static>>,
     ) -> connectrpc::ServiceResult<ProtoPutResponse> {
         if !self.state.ready.load(Ordering::SeqCst) {
-            return Err(with_retry_hint(with_error_info_detail(
-                ConnectError::unavailable("ingest is not ready"),
-                ErrorInfo {
-                    reason: "WORKER_NOT_READY".to_string(),
-                    domain: "store.ingest".to_string(),
-                    ..Default::default()
-                },
-            )));
+            return Err(with_retry_hint(
+                with_error_info_detail(
+                    ConnectError::unavailable("ingest is not ready"),
+                    ErrorInfo {
+                        reason: REASON_WORKER_NOT_READY.to_string(),
+                        domain: INGEST_ERROR_DOMAIN.to_string(),
+                        ..Default::default()
+                    },
+                ),
+                RETRY_HINT_DELAY,
+            ));
         }
 
         validate::validate_put_request(&request, self.state.limits)?;
@@ -422,10 +431,7 @@ where
             .ingest
             .put_batch(batch)
             .await
-            .map_err(|e| match e {
-                IngestError::Unavailable(msg) => ingest_unavailable_error(msg),
-                IngestError::Internal(msg) => ConnectError::internal(msg),
-            })?;
+            .map_err(ingest_error_to_connect)?;
 
         // Advance any attached stream frontier after the write is committed.
         if let Some(notifier) = &self.state.notifier {
@@ -473,9 +479,10 @@ where
     }
 
     fn consistency_not_ready_error(&self, required: u64, current: u64) -> ConnectError {
-        let err = with_retry_hint(ConnectError::aborted(
-            "minimum consistency token is not yet visible",
-        ));
+        let err = with_retry_hint(
+            ConnectError::aborted("minimum consistency token is not yet visible"),
+            RETRY_HINT_DELAY,
+        );
         with_query_detail(
             with_error_info_detail(
                 err,
@@ -1412,10 +1419,9 @@ mod tests {
 
     impl Ingest for FakeEngine {
         async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
-            let mut state = self
-                .state
-                .lock()
-                .map_err(|e| IngestError::Internal(e.to_string()))?;
+            let mut state = self.state.lock().map_err(|e| IngestError::Internal {
+                message: e.to_string(),
+            })?;
             if let Some(err) = state.put_error.take() {
                 return Err(err);
             }
@@ -1864,7 +1870,9 @@ mod tests {
     #[tokio::test]
     async fn ingest_unavailable_surfaces_as_unavailable_with_retry_info() {
         let engine = Arc::new(FakeEngine::default());
-        engine.set_put_error(IngestError::Unavailable("backend bouncing".to_string()));
+        engine.set_put_error(IngestError::Unavailable {
+            message: "backend bouncing".to_string(),
+        });
         let connect = IngestConnect::new(IngestState::new(engine));
 
         let err = IngestApi::put(&connect, Context::default(), put_request(1))
@@ -1875,7 +1883,7 @@ mod tests {
         let decoded = decode_connect_error(&err).expect("decode details");
         assert_eq!(
             decoded.error_info.expect("error info").reason,
-            "INGEST_UNAVAILABLE"
+            REASON_INGEST_UNAVAILABLE
         );
         let retry_delay = decoded.retry_info.expect("retry info").retry_delay;
         let retry_delay = retry_delay.as_option().expect("retry delay");
@@ -1885,7 +1893,9 @@ mod tests {
     #[tokio::test]
     async fn ingest_internal_surfaces_as_internal_without_error_info() {
         let engine = Arc::new(FakeEngine::default());
-        engine.set_put_error(IngestError::Internal("invariant violated".to_string()));
+        engine.set_put_error(IngestError::Internal {
+            message: "invariant violated".to_string(),
+        });
         let connect = IngestConnect::new(IngestState::new(engine));
 
         let err = IngestApi::put(&connect, Context::default(), put_request(1))
@@ -1914,7 +1924,7 @@ mod tests {
         let decoded = decode_connect_error(&err).expect("decode details");
         assert_eq!(
             decoded.error_info.expect("error info").reason,
-            "WORKER_NOT_READY"
+            REASON_WORKER_NOT_READY
         );
     }
 

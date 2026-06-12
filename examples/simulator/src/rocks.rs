@@ -358,15 +358,21 @@ impl Writer {
         let sender = self
             .sender
             .lock()
-            .map_err(|e| IngestError::Internal(format!("rocks writer lock poisoned: {e}")))?
+            .map_err(|e| IngestError::Internal {
+                message: format!("rocks writer lock poisoned: {e}"),
+            })?
             .as_ref()
             .cloned()
-            .ok_or_else(|| IngestError::Internal("rocks writer stopped".to_string()))?;
+            .ok_or_else(|| IngestError::Internal {
+                message: "rocks writer stopped".to_string(),
+            })?;
         sender
             .send(WriteRequest { kvs, response })
-            .map_err(|_| IngestError::Internal("rocks writer stopped".to_string()))?;
-        result.await.map_err(|_| {
-            IngestError::Internal("rocks writer stopped before completing write".to_string())
+            .map_err(|_| IngestError::Internal {
+                message: "rocks writer stopped".to_string(),
+            })?;
+        result.await.map_err(|_| IngestError::Internal {
+            message: "rocks writer stopped before completing write".to_string(),
         })?
     }
 }
@@ -420,7 +426,7 @@ fn run_prepare(
         ) {
             Ok(prepared) => prepared,
             Err((requests, error)) => {
-                fail_requests(requests, IngestError::Internal(error));
+                fail_requests(requests, IngestError::Internal { message: error });
                 continue;
             }
         };
@@ -504,7 +510,9 @@ fn forward_group(sender: &mpsc::SyncSender<PreparedWrite>, group: PreparedWrite)
     if let Err(error) = sender.send(group) {
         fail_assigned_writes(
             error.0.writes,
-            IngestError::Internal("rocks commit worker stopped".to_string()),
+            IngestError::Internal {
+                message: "rocks commit worker stopped".to_string(),
+            },
         );
         return false;
     }
@@ -546,9 +554,9 @@ fn commit_group(
         // current epoch.
         fail_assigned_writes(
             group.writes,
-            IngestError::Unavailable(
-                "rocks write batch superseded by an earlier failure, retry".to_string(),
-            ),
+            IngestError::Unavailable {
+                message: "rocks write batch superseded by an earlier failure, retry".to_string(),
+            },
         );
         return committed;
     }
@@ -572,7 +580,7 @@ fn commit_group(
             // Bump before failing: any in-flight group sharing the failed epoch is then rejected,
             // and `prepare` re-syncs to `committed`, leaving the abandoned numbers for reuse.
             epoch.fetch_add(1, Ordering::AcqRel);
-            fail_assigned_writes(writes, IngestError::Internal(error));
+            fail_assigned_writes(writes, IngestError::Internal { message: error });
             committed
         }
     }
@@ -1247,7 +1255,9 @@ mod tests {
             .expect_err("request should fail");
         assert_eq!(
             error,
-            IngestError::Internal("rocks commit worker stopped".to_string())
+            IngestError::Internal {
+                message: "rocks commit worker stopped".to_string(),
+            }
         );
     }
 
@@ -1268,7 +1278,9 @@ mod tests {
         for receiver in receivers {
             assert_eq!(
                 receiver.await.expect("response"),
-                Err(IngestError::Internal("disk full".to_string()))
+                Err(IngestError::Internal {
+                    message: "disk full".to_string(),
+                })
             );
         }
 
@@ -1311,9 +1323,9 @@ mod tests {
         // condition would surface to clients as a fatal error.
         assert_eq!(
             result.await.expect("response"),
-            Err(IngestError::Unavailable(
-                "rocks write batch superseded by an earlier failure, retry".to_string()
-            ))
+            Err(IngestError::Unavailable {
+                message: "rocks write batch superseded by an earlier failure, retry".to_string(),
+            })
         );
         assert!(store.get_batch(1).await.expect("get").is_none());
     }
@@ -1337,7 +1349,9 @@ mod tests {
             for receiver in receivers {
                 assert_eq!(
                     receiver.await.expect("response"),
-                    Err(IngestError::Internal("boom".to_string()))
+                    Err(IngestError::Internal {
+                        message: "boom".to_string(),
+                    })
                 );
             }
         }
@@ -1381,7 +1395,9 @@ mod tests {
         for receiver in receivers {
             assert_eq!(
                 receiver.await.expect("response"),
-                Err(IngestError::Internal("boom".to_string()))
+                Err(IngestError::Internal {
+                    message: "boom".to_string(),
+                })
             );
         }
 
