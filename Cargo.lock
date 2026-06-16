@@ -1084,7 +1084,7 @@ dependencies = [
 [[package]]
 name = "commonware-actor"
 version = "2026.5.0"
-source = "git+https://github.com/commonwarexyz/monorepo.git?rev=6f665a354d594b004f2b0326447dd02144afda29#6f665a354d594b004f2b0326447dd02144afda29"
+source = "git+https://github.com/commonwarexyz/monorepo.git?rev=41ff919657d58711eb5668c61df5c5afcd099965#41ff919657d58711eb5668c61df5c5afcd099965"
 dependencies = [
  "cfg-if",
  "commonware-macros",
@@ -1097,7 +1097,7 @@ dependencies = [
 [[package]]
 name = "commonware-broadcast"
 version = "2026.5.0"
-source = "git+https://github.com/commonwarexyz/monorepo.git?rev=6f665a354d594b004f2b0326447dd02144afda29#6f665a354d594b004f2b0326447dd02144afda29"
+source = "git+https://github.com/commonwarexyz/monorepo.git?rev=41ff919657d58711eb5668c61df5c5afcd099965#41ff919657d58711eb5668c61df5c5afcd099965"
 dependencies = [
  "commonware-actor",
  "commonware-codec",
@@ -1113,7 +1113,7 @@ dependencies = [
 [[package]]
 name = "commonware-codec"
 version = "2026.5.0"
-source = "git+https://github.com/commonwarexyz/monorepo.git?rev=6f665a354d594b004f2b0326447dd02144afda29#6f665a354d594b004f2b0326447dd02144afda29"
+source = "git+https://github.com/commonwarexyz/monorepo.git?rev=41ff919657d58711eb5668c61df5c5afcd099965#41ff919657d58711eb5668c61df5c5afcd099965"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -1128,7 +1128,7 @@ dependencies = [
 [[package]]
 name = "commonware-codec-macros"
 version = "2026.5.0"
-source = "git+https://github.com/commonwarexyz/monorepo.git?rev=6f665a354d594b004f2b0326447dd02144afda29#6f665a354d594b004f2b0326447dd02144afda29"
+source = "git+https://github.com/commonwarexyz/monorepo.git?rev=41ff919657d58711eb5668c61df5c5afcd099965#41ff919657d58711eb5668c61df5c5afcd099965"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -1139,7 +1139,7 @@ dependencies = [
 [[package]]
 name = "commonware-coding"
 version = "2026.5.0"
-source = "git+https://github.com/commonwarexyz/monorepo.git?rev=6f665a354d594b004f2b0326447dd02144afda29#6f665a354d594b004f2b0326447dd02144afda29"
+source = "git+https://github.com/commonwarexyz/monorepo.git?rev=41ff919657d58711eb5668c61df5c5afcd099965#41ff919657d58711eb5668c61df5c5afcd099965"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1160,7 +1160,7 @@ dependencies = [
 [[package]]
 name = "commonware-consensus"
 version = "2026.5.0"
-source = "git+https://github.com/commonwarexyz/monorepo.git?rev=6f665a354d594b004f2b0326447dd02144afda29#6f665a354d594b004f2b0326447dd02144afda29"
+source = "git+https://github.com/commonwarexyz/monorepo.git?rev=41ff919657d58711eb5668c61df5c5afcd099965#41ff919657d58711eb5668c61df5c5afcd099965"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -1191,7 +1191,7 @@ dependencies = [
 [[package]]
 name = "commonware-cryptography"
 version = "2026.5.0"
-source = "git+https://github.com/commonwarexyz/monorepo.git?rev=6f665a354d594b004f2b0326447dd02144afda29#6f665a354d594b004f2b0326447dd02144afda29"
+source = "git+https://github.com/commonwarexyz/monorepo.git?rev=41ff919657d58711eb5668c61df5c5afcd099965#41ff919657d58711eb5668c61df5c5afcd099965"
 dependencies = [
  "anyhow",
  "ark-ec",
@@ -1232,7 +1232,7 @@ dependencies = [
 [[package]]
 name = "commonware-formatting"
 version = "2026.5.0"
-source = "git+https://github.com/commonwarexyz/monorepo.git?rev=6f665a354d594b004f2b0326447dd02144afda29#6f665a354d594b004f2b0326447dd02144afda29"
+source = "git+https://github.com/commonwarexyz/monorepo.git?rev=41ff919657d58711eb5668c61df5c5afcd099965#41ff919657d58711eb5668c61df5c5afcd099965"
 dependencies = [
  "commonware-macros",
  "const-hex",
@@ -1241,7 +1241,7 @@ dependencies = [
 [[package]]
 name = "commonware-glue"
 version = "2026.5.0"
-source = "git+https://github.com/commonwarexyz/monorepo.git?rev=6f665a354d594b004f2b0326447dd02144afda29#6f665a354d594b004f2b0326447dd02144afda29"
+source = "git+https://github.com/commonwarexyz/monorepo.git?rev=41ff919657d58711eb5668c61df5c5afcd099965#41ff919657d58711eb5668c61df5c5afcd099965"
 dependencies = [
  "bytes",
  "commonware-actor",
@@ -1266,7 +1266,7 @@ dependencies = [
 [[package]]
 name = "commonware-macros"
 version = "2026.5.0"
-source = "git+https://github.com/commonwarexyz/monorepo.git?rev=6f665a354d594b004f2b0326447dd02144afda29#6f665a354d594b004f2b0326447dd02144afda29"
+source = "git+https://github.com/commonwarexyz/monorepo.git?rev=41ff919657d58711eb5668c61df5c5afcd099965#41ff919657d58711eb5668c61df5c5afcd099965"
 dependencies = [
  "commonware-macros-impl",
  "tokio",
@@ -1275,7 +1275,7 @@ dependencies = [
 [[package]]
 name = "commonware-macros-impl"
 version = "2026.5.0"
-source = "git+https://github.com/commonwarexyz/monorepo.git?rev=6f665a354d594b004f2b0326447dd02144afda29#6f665a354d594b004f2b0326447dd02144afda29"
+source = "git+https://github.com/commonwarexyz/monorepo.git?rev=41ff919657d58711eb5668c61df5c5afcd099965#41ff919657d58711eb5668c61df5c5afcd099965"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -1287,7 +1287,7 @@ dependencies = [
 [[package]]
 name = "commonware-math"
 version = "2026.5.0"
-source = "git+https://github.com/commonwarexyz/monorepo.git?rev=6f665a354d594b004f2b0326447dd02144afda29#6f665a354d594b004f2b0326447dd02144afda29"
+source = "git+https://github.com/commonwarexyz/monorepo.git?rev=41ff919657d58711eb5668c61df5c5afcd099965#41ff919657d58711eb5668c61df5c5afcd099965"
 dependencies = [
  "bytes",
  "commonware-codec",
@@ -1300,7 +1300,7 @@ dependencies = [
 [[package]]
 name = "commonware-p2p"
 version = "2026.5.0"
-source = "git+https://github.com/commonwarexyz/monorepo.git?rev=6f665a354d594b004f2b0326447dd02144afda29#6f665a354d594b004f2b0326447dd02144afda29"
+source = "git+https://github.com/commonwarexyz/monorepo.git?rev=41ff919657d58711eb5668c61df5c5afcd099965#41ff919657d58711eb5668c61df5c5afcd099965"
 dependencies = [
  "commonware-actor",
  "commonware-codec",
@@ -1326,7 +1326,7 @@ dependencies = [
 [[package]]
 name = "commonware-parallel"
 version = "2026.5.0"
-source = "git+https://github.com/commonwarexyz/monorepo.git?rev=6f665a354d594b004f2b0326447dd02144afda29#6f665a354d594b004f2b0326447dd02144afda29"
+source = "git+https://github.com/commonwarexyz/monorepo.git?rev=41ff919657d58711eb5668c61df5c5afcd099965#41ff919657d58711eb5668c61df5c5afcd099965"
 dependencies = [
  "cfg-if",
  "commonware-macros",
@@ -1336,7 +1336,7 @@ dependencies = [
 [[package]]
 name = "commonware-resolver"
 version = "2026.5.0"
-source = "git+https://github.com/commonwarexyz/monorepo.git?rev=6f665a354d594b004f2b0326447dd02144afda29#6f665a354d594b004f2b0326447dd02144afda29"
+source = "git+https://github.com/commonwarexyz/monorepo.git?rev=41ff919657d58711eb5668c61df5c5afcd099965#41ff919657d58711eb5668c61df5c5afcd099965"
 dependencies = [
  "bytes",
  "commonware-actor",
@@ -1356,7 +1356,7 @@ dependencies = [
 [[package]]
 name = "commonware-runtime"
 version = "2026.5.0"
-source = "git+https://github.com/commonwarexyz/monorepo.git?rev=6f665a354d594b004f2b0326447dd02144afda29#6f665a354d594b004f2b0326447dd02144afda29"
+source = "git+https://github.com/commonwarexyz/monorepo.git?rev=41ff919657d58711eb5668c61df5c5afcd099965#41ff919657d58711eb5668c61df5c5afcd099965"
 dependencies = [
  "ahash",
  "axum",
@@ -1394,7 +1394,7 @@ dependencies = [
 [[package]]
 name = "commonware-runtime-macros"
 version = "2026.5.0"
-source = "git+https://github.com/commonwarexyz/monorepo.git?rev=6f665a354d594b004f2b0326447dd02144afda29#6f665a354d594b004f2b0326447dd02144afda29"
+source = "git+https://github.com/commonwarexyz/monorepo.git?rev=41ff919657d58711eb5668c61df5c5afcd099965#41ff919657d58711eb5668c61df5c5afcd099965"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -1405,7 +1405,7 @@ dependencies = [
 [[package]]
 name = "commonware-storage"
 version = "2026.5.0"
-source = "git+https://github.com/commonwarexyz/monorepo.git?rev=6f665a354d594b004f2b0326447dd02144afda29#6f665a354d594b004f2b0326447dd02144afda29"
+source = "git+https://github.com/commonwarexyz/monorepo.git?rev=41ff919657d58711eb5668c61df5c5afcd099965#41ff919657d58711eb5668c61df5c5afcd099965"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1429,7 +1429,7 @@ dependencies = [
 [[package]]
 name = "commonware-stream"
 version = "2026.5.0"
-source = "git+https://github.com/commonwarexyz/monorepo.git?rev=6f665a354d594b004f2b0326447dd02144afda29#6f665a354d594b004f2b0326447dd02144afda29"
+source = "git+https://github.com/commonwarexyz/monorepo.git?rev=41ff919657d58711eb5668c61df5c5afcd099965#41ff919657d58711eb5668c61df5c5afcd099965"
 dependencies = [
  "chacha20poly1305",
  "commonware-codec",
@@ -1449,7 +1449,7 @@ dependencies = [
 [[package]]
 name = "commonware-utils"
 version = "2026.5.0"
-source = "git+https://github.com/commonwarexyz/monorepo.git?rev=6f665a354d594b004f2b0326447dd02144afda29#6f665a354d594b004f2b0326447dd02144afda29"
+source = "git+https://github.com/commonwarexyz/monorepo.git?rev=41ff919657d58711eb5668c61df5c5afcd099965#41ff919657d58711eb5668c61df5c5afcd099965"
 dependencies = [
  "bytes",
  "cfg-if",
