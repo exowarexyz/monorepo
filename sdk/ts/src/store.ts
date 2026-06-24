@@ -9,10 +9,10 @@ import {
     BytesFilterSchema,
     KvEntrySchema,
     MatchKeySchema,
-} from './gen/ts/store/v1/common_pb.js';
-import type { MatchKey } from './gen/ts/store/v1/common_pb.js';
+} from './gen/ts/log/v1/common_pb.js';
+import type { MatchKey } from './gen/ts/log/v1/common_pb.js';
 import { ErrorInfoSchema } from './gen/ts/google/rpc/error_details_pb.js';
-import { PutRequestSchema } from './gen/ts/store/v1/ingest_pb.js';
+import { PutRequestSchema } from './gen/ts/log/v1/ingest_pb.js';
 import {
     GetManyRequestSchema,
     GetRequestSchema as QueryGetRequestSchema,
@@ -32,7 +32,7 @@ import type {
 import {
     GetRequestSchema as StreamGetRequestSchema,
     SubscribeRequestSchema,
-} from './gen/ts/store/v1/stream_pb.js';
+} from './gen/ts/log/v1/stream_pb.js';
 
 const STREAM_SERVER_PAYLOAD_REGEX = '(?s-u).*';
 
@@ -361,7 +361,7 @@ function connectCodeToHttpStatus(code: Code): number {
 function isMissingBatchError(err: ConnectError): boolean {
     return err.findDetails(ErrorInfoSchema).some(
         (detail) =>
-            detail.domain === 'store.stream' &&
+            detail.domain === 'log.stream' &&
             (detail.reason === 'BATCH_EVICTED' || detail.reason === 'BATCH_NOT_FOUND'),
     );
 }

@@ -1,4 +1,4 @@
-//! Validated filter for `store.stream.v1.Subscribe`.
+//! Validated filter for `log.stream.v1.Subscribe`.
 //!
 //! The filter is a list of `MatchKey`s with OR semantics: a row is delivered
 //! if any match_key's (reserved_bits, prefix) selects its family AND its
@@ -21,7 +21,7 @@ pub const MAX_MATCH_KEYS_PER_FILTER: usize = 16;
 pub const MAX_VALUE_FILTERS_PER_FILTER: usize = 16;
 
 /// Matches a row's raw value bytes by exact match, prefix, or regex. Wire
-/// shape mirrors `store.common.v1.BytesFilter`.
+/// shape mirrors `log.common.v1.BytesFilter`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BytesFilter {
     Exact(Bytes),

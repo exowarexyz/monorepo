@@ -32,7 +32,7 @@ use connectrpc::{
     Chain, ConnectError, ConnectRpcService, ErrorCode, Limits, PreEncoded,
     RequestContext as Context,
 };
-use exoware_sdk::store::common::v1::bytes_filter::KindView as ProtoBytesFilterKindView;
+use exoware_sdk::log::common::v1::bytes_filter::KindView as ProtoBytesFilterKindView;
 use exoware_sdk::stream_filter::{BytesFilter, CompiledBytesFilters};
 use futures::future::BoxFuture;
 use futures::{FutureExt, Stream};
@@ -559,7 +559,7 @@ fn parse_bytes_filters<'a, 'b, I>(
     label: &str,
 ) -> Result<Option<CompiledBytesFilters>, String>
 where
-    I: IntoIterator<Item = &'b exoware_sdk::store::common::v1::BytesFilterView<'a>>,
+    I: IntoIterator<Item = &'b exoware_sdk::log::common::v1::BytesFilterView<'a>>,
     'a: 'b,
 {
     let mut domain = Vec::new();

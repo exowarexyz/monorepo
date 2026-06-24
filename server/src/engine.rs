@@ -8,8 +8,8 @@ use std::future::Future;
 
 use buffa::Message;
 use bytes::Bytes;
+use exoware_sdk::log::{common::v1::KvEntry, stream::v1::GetResponse as StreamGetResponse};
 use exoware_sdk::prune_policy::PrunePolicyDocument;
-use exoware_sdk::store::{common::v1::KvEntry, stream::v1::GetResponse as StreamGetResponse};
 
 /// Backend-defined query metadata.
 ///
@@ -94,7 +94,7 @@ pub trait Prune: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), String>> + Send;
 }
 
-/// Pre-encoded `store.stream.v1.GetResponse` stored for a retained sequence batch.
+/// Pre-encoded `log.stream.v1.GetResponse` stored for a retained sequence batch.
 #[derive(Clone, Debug)]
 pub struct LogBatch {
     sequence_number: u64,
@@ -102,7 +102,7 @@ pub struct LogBatch {
 }
 
 impl LogBatch {
-    /// Wrap protobuf bytes already encoded as `store.stream.v1.GetResponse`.
+    /// Wrap protobuf bytes already encoded as `log.stream.v1.GetResponse`.
     pub fn from_response_bytes(sequence_number: u64, response_bytes: impl Into<Bytes>) -> Self {
         Self {
             sequence_number,

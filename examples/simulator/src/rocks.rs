@@ -15,11 +15,11 @@ use std::thread;
 use buffa::Message;
 use bytes::Bytes;
 use exoware_sdk::keys::KeyCodec;
+use exoware_sdk::log::{common::v1::KvEntry, stream::v1::GetResponse as StreamGetResponse};
 use exoware_sdk::match_key::compile_payload_regex;
 use exoware_sdk::prune_policy::{
     KeysScope, OrderEncoding, PolicyScope, PrunePolicyDocument, RetainPolicy,
 };
-use exoware_sdk::store::{common::v1::KvEntry, stream::v1::GetResponse as StreamGetResponse};
 use exoware_server::{
     Ingest, Log, LogBatch, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence,
 };

@@ -3,9 +3,9 @@ import { createConnectTransport } from '@connectrpc/connect-web';
 import { CookieJar, fetchWithCookieJar } from './cookies.js';
 import { StoreClient, type StoreKeyPrefix } from './store.js';
 import { Service as CompactService } from './gen/ts/store/v1/compact_pb.js';
-import { Service as IngestService } from './gen/ts/store/v1/ingest_pb.js';
+import { Service as IngestService } from './gen/ts/log/v1/ingest_pb.js';
 import { Service as QueryService } from './gen/ts/store/v1/query_pb.js';
-import { Service as StreamService } from './gen/ts/store/v1/stream_pb.js';
+import { Service as StreamService } from './gen/ts/log/v1/stream_pb.js';
 
 export type RetryConfig = {
     maxAttempts: number;

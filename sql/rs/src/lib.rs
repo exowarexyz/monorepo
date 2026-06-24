@@ -64,8 +64,8 @@ mod tests {
     use connectrpc::{Chain, ConnectError, ConnectRpcService, RequestContext as Context};
     use exoware_sdk::connect_compression_registry;
     use exoware_sdk::kv_codec::{eval_expr, expr_needs_value};
-    use exoware_sdk::store::common::v1::KvEntry as ProtoKvEntry;
-    use exoware_sdk::store::ingest::v1::{
+    use exoware_sdk::log::common::v1::KvEntry as ProtoKvEntry;
+    use exoware_sdk::log::ingest::v1::{
         PutResponse as ProtoPutResponse, Service as IngestService,
         ServiceServer as IngestServiceServer,
     };
@@ -318,9 +318,7 @@ mod tests {
         async fn put(
             &self,
             _ctx: Context,
-            request: buffa::view::OwnedView<
-                exoware_sdk::store::ingest::v1::PutRequestView<'static>,
-            >,
+            request: buffa::view::OwnedView<exoware_sdk::log::ingest::v1::PutRequestView<'static>>,
         ) -> connectrpc::ServiceResult<ProtoPutResponse> {
             let mut parsed = Vec::<(Key, Bytes)>::new();
             let wire = request.bytes();

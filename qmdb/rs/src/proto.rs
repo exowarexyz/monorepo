@@ -1,7 +1,7 @@
-pub mod store {
+pub mod log {
     pub mod common {
         pub mod v1 {
-            pub use exoware_sdk::store::common::v1::*;
+            pub use exoware_sdk::log::common::v1::*;
         }
     }
 }

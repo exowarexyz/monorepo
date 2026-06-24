@@ -11,7 +11,7 @@ pub mod qmdb {
     }
 }
 
-pub mod store {
+pub mod log {
     pub mod common {
         pub mod v1 {
             #![allow(non_camel_case_types)]
@@ -20,7 +20,7 @@ pub mod store {
             #![allow(clippy::match_single_binding)]
             include!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../../sdk/rs/src/gen/store.common.v1.rs"
+                "/../../../sdk/rs/src/gen/log.common.v1.rs"
             ));
         }
     }

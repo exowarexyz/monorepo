@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SDK_BYTES_FIELDS: &[&str] = &[
-    ".store.common.v1.KvEntry.value",
-    ".store.common.v1.BytesFilter.exact",
-    ".store.common.v1.BytesFilter.prefix",
+    ".log.common.v1.KvEntry.value",
+    ".log.common.v1.BytesFilter.exact",
+    ".log.common.v1.BytesFilter.prefix",
     ".store.query.v1.KvReducedValue.decimal128_value",
     ".store.query.v1.KvReducedValue.fixed_size_binary_value",
     ".store.query.v1.KvReducedValue.decimal256_value",
@@ -40,11 +40,11 @@ fn main() {
 
     let files = [
         "google/rpc/error_details.proto",
-        "store/v1/common.proto",
+        "log/v1/common.proto",
+        "log/v1/ingest.proto",
+        "log/v1/stream.proto",
         "store/v1/compact.proto",
-        "store/v1/ingest.proto",
         "store/v1/query.proto",
-        "store/v1/stream.proto",
     ];
 
     let mut buffa_config = connectrpc_build::CodeGenConfig::default();

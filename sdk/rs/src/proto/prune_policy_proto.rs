@@ -4,12 +4,12 @@
 //! validation helpers on the parsed output before applying policy effects.
 
 use crate::kv_codec::Utf8;
+use crate::log::common::v1::MatchKey as ProtoMatchKey;
 use crate::match_key::MatchKey;
 use crate::prune_policy::{
     GroupBy, KeysScope, OrderBy, OrderEncoding, PolicyScope, PrunePolicy, PrunePolicyDocument,
     RetainPolicy, PRUNE_POLICY_DOCUMENT_VERSION,
 };
-use crate::store::common::v1::MatchKey as ProtoMatchKey;
 use crate::store::compact::v1::{
     policy, policy_retain, KeysScope as ProtoKeysScope, Policy as ProtoPolicy, PolicyOrderBy,
     PolicyOrderEncoding, PruneRequestView,

@@ -1,7 +1,7 @@
 //! Shared key-filter shape: `(reserved_bits, prefix, payload_regex)`.
 //!
 //! Used by both `prune_policy` (compact service) and `stream_filter` (stream
-//! service) so one domain type round-trips through the `store.common.v1.MatchKey`
+//! service) so one domain type round-trips through the `log.common.v1.MatchKey`
 //! proto message and one regex compiler handles validation everywhere.
 
 use anyhow::{ensure, Context};
@@ -12,7 +12,7 @@ use regex::bytes::Regex;
 use crate::kv_codec::Utf8;
 
 /// Identifies a subset of keys by `KeyCodec` family + payload regex. Matches
-/// the `store.common.v1.MatchKey` wire shape (see `proto/store/v1/common.proto`).
+/// the `log.common.v1.MatchKey` wire shape (see `proto/log/v1/common.proto`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MatchKey {
     pub reserved_bits: u8,

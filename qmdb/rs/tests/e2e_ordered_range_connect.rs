@@ -35,10 +35,10 @@ use exoware_qmdb::{
     CurrentSyncResolver, OperationLogClient, OperationLogSubscribeProof, OperationLogSyncResolver,
     OrderedClient, OrderedWriter, QmdbError, MAX_OPERATION_SIZE,
 };
-use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::store::common::v1::{
+use exoware_sdk::log::common::v1::{
     bytes_filter as proto_bytes_filter, BytesFilter as ProtoBytesFilter,
 };
+use exoware_sdk::proto::PreferZstdHttpClient;
 use exoware_sdk::StoreClient;
 
 const N: usize = 32;

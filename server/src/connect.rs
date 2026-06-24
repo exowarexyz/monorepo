@@ -19,13 +19,13 @@ use exoware_proto::google::rpc::{ErrorInfo, RetryInfo};
 use exoware_proto::ingest::{
     PutResponse as ProtoPutResponse, Service as IngestApi, ServiceServer as IngestServiceServer,
 };
+use exoware_proto::log::stream::v1::{
+    GetRequestView, GetResponse as StreamGetResponse, Service as StreamApi,
+    ServiceServer as StreamServiceServer, SubscribeRequestView, SubscribeResponse,
+};
 use exoware_proto::query::{
     Detail, GetManyEntry, GetManyFrame, GetResponse, RangeFrame, ReduceResponse,
     Service as QueryApi, ServiceServer as QueryServiceServer,
-};
-use exoware_proto::store::stream::v1::{
-    GetRequestView, GetResponse as StreamGetResponse, Service as StreamApi,
-    ServiceServer as StreamServiceServer, SubscribeRequestView, SubscribeResponse,
 };
 use exoware_proto::stream_filter::{BytesFilter, StreamFilter};
 use exoware_proto::{
@@ -35,8 +35,8 @@ use exoware_proto::{
 };
 use exoware_sdk as exoware_proto;
 use exoware_sdk::keys::Key;
+use exoware_sdk::log::common::v1::bytes_filter::KindView as ProtoBytesFilterKindView;
 use exoware_sdk::match_key::MatchKey;
-use exoware_sdk::store::common::v1::bytes_filter::KindView as ProtoBytesFilterKindView;
 use futures::{stream as stream_util, Stream};
 use tokio::sync::Notify;
 
@@ -139,7 +139,7 @@ pub struct AppState<E> {
     /// Gates ingest (writes) only. Query and compact remain available during drains so that
     /// in-flight reads can complete while the worker sheds write traffic.
     pub ready: Arc<AtomicBool>,
-    /// Shared fan-out hub for `store.stream.v1.Subscribe`.
+    /// Shared fan-out hub for `log.stream.v1.Subscribe`.
     pub stream: Arc<StreamHub>,
 }
 
@@ -363,14 +363,14 @@ where
     async fn put(
         &self,
         _ctx: Context,
-        request: buffa::view::OwnedView<exoware_proto::store::ingest::v1::PutRequestView<'static>>,
+        request: buffa::view::OwnedView<exoware_proto::log::ingest::v1::PutRequestView<'static>>,
     ) -> connectrpc::ServiceResult<ProtoPutResponse> {
         if !self.state.ready.load(Ordering::SeqCst) {
             return Err(with_error_info_detail(
                 ConnectError::unavailable("ingest is not ready"),
                 ErrorInfo {
                     reason: "WORKER_NOT_READY".to_string(),
-                    domain: "store.ingest".to_string(),
+                    domain: crate::validate::INGEST_ERROR_DOMAIN.to_string(),
                     ..Default::default()
                 },
             ));
@@ -1230,12 +1230,12 @@ mod tests {
     use std::time::Duration;
 
     use buffa::Message;
-    use exoware_proto::store::common::v1::MatchKey as ProtoMatchKey;
+    use exoware_proto::log::common::v1::MatchKey as ProtoMatchKey;
+    use exoware_proto::log::stream::v1::{SubscribeRequest, SubscribeRequestView};
     use exoware_proto::store::compact::v1::{
         policy, policy_retain, Policy as ProtoPolicy, PolicyRetain, PruneRequest, PruneRequestView,
         RetainKeepLatest,
     };
-    use exoware_proto::store::stream::v1::{SubscribeRequest, SubscribeRequestView};
     use exoware_sdk::keys::KeyCodec;
     use exoware_sdk::kv_codec::KvReducedValue;
     use exoware_sdk::prune_policy::{PrunePolicyDocument, PRUNE_POLICY_DOCUMENT_VERSION};
@@ -1612,7 +1612,7 @@ mod tests {
 
     fn put_request(
         value_len: usize,
-    ) -> buffa::view::OwnedView<exoware_proto::store::ingest::v1::PutRequestView<'static>> {
+    ) -> buffa::view::OwnedView<exoware_proto::log::ingest::v1::PutRequestView<'static>> {
         let bytes = exoware_proto::ingest::PutRequest {
             kvs: vec![exoware_proto::common::KvEntry {
                 key: b"k".to_vec(),
@@ -1622,7 +1622,7 @@ mod tests {
             ..Default::default()
         }
         .encode_to_vec();
-        buffa::view::OwnedView::<exoware_proto::store::ingest::v1::PutRequestView<'static>>::decode(
+        buffa::view::OwnedView::<exoware_proto::log::ingest::v1::PutRequestView<'static>>::decode(
             bytes.into(),
         )
         .expect("decode put request")

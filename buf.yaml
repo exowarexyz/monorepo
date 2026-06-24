@@ -8,8 +8,10 @@ lint:
   use:
     - STANDARD
   except:
-    # Three logically separate services share one directory for convenience.
-    # The generated code uses the distinct package names for proper namespacing.
+    # Each directory (e.g. log/v1, store/v1) holds several logically separate
+    # packages for convenience (log/v1 -> common, ingest, stream; store/v1 ->
+    # compact, query). The generated code uses the distinct package names for
+    # proper namespacing.
     - PACKAGE_DIRECTORY_MATCH
     - PACKAGE_SAME_DIRECTORY
     - DIRECTORY_SAME_PACKAGE

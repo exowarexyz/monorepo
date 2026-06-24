@@ -24,10 +24,10 @@ use exoware_qmdb::{
     keyless_operation_log_connect_stack, KeylessClient, KeylessWriter, OperationLogClient,
     OperationLogSubscribeProof, OperationLogSyncResolver, QmdbError,
 };
-use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::store::common::v1::{
+use exoware_sdk::log::common::v1::{
     bytes_filter as proto_bytes_filter, BytesFilter as ProtoBytesFilter,
 };
+use exoware_sdk::proto::PreferZstdHttpClient;
 use exoware_sdk::StoreClient;
 
 type Digest = commonware_cryptography::sha256::Digest;

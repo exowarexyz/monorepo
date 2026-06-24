@@ -24,7 +24,7 @@ pub struct PrunePolicy {
 /// Which keyspace a `PrunePolicy` applies to. `Keys` mirrors the original
 /// user-keys prune (filter by family+regex, group, order, then retain).
 /// `Sequence` operates over the sequence-number-indexed log served by
-/// `store.stream.v1` — no grouping/ordering needed.
+/// `log.stream.v1` — no grouping/ordering needed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PolicyScope {
     Keys(KeysScope),

@@ -2,17 +2,39 @@
 //!
 //! Proto sources: `proto/`. Run `./gen.sh` to regenerate all bindings.
 
-pub mod store {
+pub mod log {
     pub mod common {
         pub mod v1 {
             #![allow(non_camel_case_types)]
             #![allow(unused_imports)]
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
-            include!("../gen/store.common.v1.rs");
+            include!("../gen/log.common.v1.rs");
         }
     }
 
+    pub mod ingest {
+        pub mod v1 {
+            #![allow(non_camel_case_types)]
+            #![allow(unused_imports)]
+            #![allow(clippy::derivable_impls)]
+            #![allow(clippy::match_single_binding)]
+            include!("../gen/log.ingest.v1.rs");
+        }
+    }
+
+    pub mod stream {
+        pub mod v1 {
+            #![allow(non_camel_case_types)]
+            #![allow(unused_imports)]
+            #![allow(clippy::derivable_impls)]
+            #![allow(clippy::match_single_binding)]
+            include!("../gen/log.stream.v1.rs");
+        }
+    }
+}
+
+pub mod store {
     pub mod compact {
         pub mod v1 {
             #![allow(non_camel_case_types)]
@@ -23,16 +45,6 @@ pub mod store {
         }
     }
 
-    pub mod ingest {
-        pub mod v1 {
-            #![allow(non_camel_case_types)]
-            #![allow(unused_imports)]
-            #![allow(clippy::derivable_impls)]
-            #![allow(clippy::match_single_binding)]
-            include!("../gen/store.ingest.v1.rs");
-        }
-    }
-
     pub mod query {
         pub mod v1 {
             #![allow(non_camel_case_types)]
@@ -40,16 +52,6 @@ pub mod store {
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
             include!("../gen/store.query.v1.rs");
-        }
-    }
-
-    pub mod stream {
-        pub mod v1 {
-            #![allow(non_camel_case_types)]
-            #![allow(unused_imports)]
-            #![allow(clippy::derivable_impls)]
-            #![allow(clippy::match_single_binding)]
-            include!("../gen/store.stream.v1.rs");
         }
     }
 }
@@ -69,7 +71,7 @@ pub mod common {
     #![allow(unused_imports)]
     #![allow(clippy::derivable_impls)]
     #![allow(clippy::match_single_binding)]
-    pub use crate::store::common::v1::*;
+    pub use crate::log::common::v1::*;
 }
 
 pub mod compact {
@@ -85,7 +87,7 @@ pub mod ingest {
     #![allow(unused_imports)]
     #![allow(clippy::derivable_impls)]
     #![allow(clippy::match_single_binding)]
-    pub use crate::store::ingest::v1::*;
+    pub use crate::log::ingest::v1::*;
 }
 
 pub mod query {
@@ -101,7 +103,7 @@ pub mod stream {
     #![allow(unused_imports)]
     #![allow(clippy::derivable_impls)]
     #![allow(clippy::match_single_binding)]
-    pub use crate::store::stream::v1::*;
+    pub use crate::log::stream::v1::*;
 }
 
 mod range_traversal;

@@ -66,7 +66,7 @@ impl SubscribeRequest {
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.SubscribeRequest";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.SubscribeRequest";
 }
 impl SubscribeRequest {
     #[must_use = "with_* setters return `self` by value; assign or chain the result"]
@@ -84,10 +84,10 @@ impl ::buffa::DefaultInstance for SubscribeRequest {
     }
 }
 impl ::buffa::MessageName for SubscribeRequest {
-    const PACKAGE: &'static str = "store.stream.v1";
+    const PACKAGE: &'static str = "log.stream.v1";
     const NAME: &'static str = "SubscribeRequest";
-    const FULL_NAME: &'static str = "store.stream.v1.SubscribeRequest";
-    const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.SubscribeRequest";
+    const FULL_NAME: &'static str = "log.stream.v1.SubscribeRequest";
+    const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.SubscribeRequest";
 }
 impl ::buffa::Message for SubscribeRequest {
     /// Returns the total encoded size in bytes.
@@ -216,7 +216,7 @@ impl ::buffa::Message for SubscribeRequest {
     }
 }
 impl ::buffa::ExtensionSet for SubscribeRequest {
-    const PROTO_FQN: &'static str = "store.stream.v1.SubscribeRequest";
+    const PROTO_FQN: &'static str = "log.stream.v1.SubscribeRequest";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -239,7 +239,7 @@ impl ::buffa::json_helpers::ProtoElemJson for SubscribeRequest {
 }
 #[doc(hidden)]
 pub const __SUBSCRIBE_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.stream.v1.SubscribeRequest",
+    type_url: "type.googleapis.com/log.stream.v1.SubscribeRequest",
     to_json: ::buffa::type_registry::any_to_json::<SubscribeRequest>,
     from_json: ::buffa::type_registry::any_from_json::<SubscribeRequest>,
     is_wkt: false,
@@ -273,7 +273,7 @@ impl GetRequest {
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.GetRequest";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.GetRequest";
 }
 impl ::buffa::DefaultInstance for GetRequest {
     fn default_instance() -> &'static Self {
@@ -282,10 +282,10 @@ impl ::buffa::DefaultInstance for GetRequest {
     }
 }
 impl ::buffa::MessageName for GetRequest {
-    const PACKAGE: &'static str = "store.stream.v1";
+    const PACKAGE: &'static str = "log.stream.v1";
     const NAME: &'static str = "GetRequest";
-    const FULL_NAME: &'static str = "store.stream.v1.GetRequest";
-    const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.GetRequest";
+    const FULL_NAME: &'static str = "log.stream.v1.GetRequest";
+    const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.GetRequest";
 }
 impl ::buffa::Message for GetRequest {
     /// Returns the total encoded size in bytes.
@@ -354,7 +354,7 @@ impl ::buffa::Message for GetRequest {
     }
 }
 impl ::buffa::ExtensionSet for GetRequest {
-    const PROTO_FQN: &'static str = "store.stream.v1.GetRequest";
+    const PROTO_FQN: &'static str = "log.stream.v1.GetRequest";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -377,7 +377,7 @@ impl ::buffa::json_helpers::ProtoElemJson for GetRequest {
 }
 #[doc(hidden)]
 pub const __GET_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.stream.v1.GetRequest",
+    type_url: "type.googleapis.com/log.stream.v1.GetRequest",
     to_json: ::buffa::type_registry::any_to_json::<GetRequest>,
     from_json: ::buffa::type_registry::any_from_json::<GetRequest>,
     is_wkt: false,
@@ -422,7 +422,7 @@ impl SubscribeResponse {
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.SubscribeResponse";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.SubscribeResponse";
 }
 impl ::buffa::DefaultInstance for SubscribeResponse {
     fn default_instance() -> &'static Self {
@@ -431,10 +431,10 @@ impl ::buffa::DefaultInstance for SubscribeResponse {
     }
 }
 impl ::buffa::MessageName for SubscribeResponse {
-    const PACKAGE: &'static str = "store.stream.v1";
+    const PACKAGE: &'static str = "log.stream.v1";
     const NAME: &'static str = "SubscribeResponse";
-    const FULL_NAME: &'static str = "store.stream.v1.SubscribeResponse";
-    const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.SubscribeResponse";
+    const FULL_NAME: &'static str = "log.stream.v1.SubscribeResponse";
+    const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.SubscribeResponse";
 }
 impl ::buffa::Message for SubscribeResponse {
     /// Returns the total encoded size in bytes.
@@ -533,7 +533,7 @@ impl ::buffa::Message for SubscribeResponse {
     }
 }
 impl ::buffa::ExtensionSet for SubscribeResponse {
-    const PROTO_FQN: &'static str = "store.stream.v1.SubscribeResponse";
+    const PROTO_FQN: &'static str = "log.stream.v1.SubscribeResponse";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -556,7 +556,7 @@ impl ::buffa::json_helpers::ProtoElemJson for SubscribeResponse {
 }
 #[doc(hidden)]
 pub const __SUBSCRIBE_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.stream.v1.SubscribeResponse",
+    type_url: "type.googleapis.com/log.stream.v1.SubscribeResponse",
     to_json: ::buffa::type_registry::any_to_json::<SubscribeResponse>,
     from_json: ::buffa::type_registry::any_from_json::<SubscribeResponse>,
     is_wkt: false,
@@ -599,7 +599,7 @@ impl GetResponse {
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.GetResponse";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.GetResponse";
 }
 impl ::buffa::DefaultInstance for GetResponse {
     fn default_instance() -> &'static Self {
@@ -608,10 +608,10 @@ impl ::buffa::DefaultInstance for GetResponse {
     }
 }
 impl ::buffa::MessageName for GetResponse {
-    const PACKAGE: &'static str = "store.stream.v1";
+    const PACKAGE: &'static str = "log.stream.v1";
     const NAME: &'static str = "GetResponse";
-    const FULL_NAME: &'static str = "store.stream.v1.GetResponse";
-    const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.GetResponse";
+    const FULL_NAME: &'static str = "log.stream.v1.GetResponse";
+    const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.GetResponse";
 }
 impl ::buffa::Message for GetResponse {
     /// Returns the total encoded size in bytes.
@@ -710,7 +710,7 @@ impl ::buffa::Message for GetResponse {
     }
 }
 impl ::buffa::ExtensionSet for GetResponse {
-    const PROTO_FQN: &'static str = "store.stream.v1.GetResponse";
+    const PROTO_FQN: &'static str = "log.stream.v1.GetResponse";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -733,7 +733,7 @@ impl ::buffa::json_helpers::ProtoElemJson for GetResponse {
 }
 #[doc(hidden)]
 pub const __GET_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.stream.v1.GetResponse",
+    type_url: "type.googleapis.com/log.stream.v1.GetResponse",
     to_json: ::buffa::type_registry::any_to_json::<GetResponse>,
     from_json: ::buffa::type_registry::any_from_json::<GetResponse>,
     is_wkt: false,
@@ -1048,10 +1048,10 @@ pub mod __buffa {
             }
         }
         impl<'a> ::buffa::MessageName for SubscribeRequestView<'a> {
-            const PACKAGE: &'static str = "store.stream.v1";
+            const PACKAGE: &'static str = "log.stream.v1";
             const NAME: &'static str = "SubscribeRequest";
-            const FULL_NAME: &'static str = "store.stream.v1.SubscribeRequest";
-            const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.SubscribeRequest";
+            const FULL_NAME: &'static str = "log.stream.v1.SubscribeRequest";
+            const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.SubscribeRequest";
         }
         impl<'v> ::buffa::DefaultViewInstance for SubscribeRequestView<'v> {
             fn default_view_instance<'a>() -> &'a Self
@@ -1244,10 +1244,10 @@ pub mod __buffa {
             }
         }
         impl<'a> ::buffa::MessageName for GetRequestView<'a> {
-            const PACKAGE: &'static str = "store.stream.v1";
+            const PACKAGE: &'static str = "log.stream.v1";
             const NAME: &'static str = "GetRequest";
-            const FULL_NAME: &'static str = "store.stream.v1.GetRequest";
-            const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.GetRequest";
+            const FULL_NAME: &'static str = "log.stream.v1.GetRequest";
+            const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.GetRequest";
         }
         impl<'v> ::buffa::DefaultViewInstance for GetRequestView<'v> {
             fn default_view_instance<'a>() -> &'a Self
@@ -1493,10 +1493,10 @@ pub mod __buffa {
             }
         }
         impl<'a> ::buffa::MessageName for SubscribeResponseView<'a> {
-            const PACKAGE: &'static str = "store.stream.v1";
+            const PACKAGE: &'static str = "log.stream.v1";
             const NAME: &'static str = "SubscribeResponse";
-            const FULL_NAME: &'static str = "store.stream.v1.SubscribeResponse";
-            const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.SubscribeResponse";
+            const FULL_NAME: &'static str = "log.stream.v1.SubscribeResponse";
+            const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.SubscribeResponse";
         }
         impl<'v> ::buffa::DefaultViewInstance for SubscribeResponseView<'v> {
             fn default_view_instance<'a>() -> &'a Self
@@ -1742,10 +1742,10 @@ pub mod __buffa {
             }
         }
         impl<'a> ::buffa::MessageName for GetResponseView<'a> {
-            const PACKAGE: &'static str = "store.stream.v1";
+            const PACKAGE: &'static str = "log.stream.v1";
             const NAME: &'static str = "GetResponse";
-            const FULL_NAME: &'static str = "store.stream.v1.GetResponse";
-            const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.GetResponse";
+            const FULL_NAME: &'static str = "log.stream.v1.GetResponse";
+            const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.GetResponse";
         }
         impl<'v> ::buffa::DefaultViewInstance for GetResponseView<'v> {
             fn default_view_instance<'a>() -> &'a Self
@@ -1828,13 +1828,13 @@ for ::buffa::view::OwnedView<__buffa::view::GetResponseView<'static>> {
     }
 }
 /// Full service name for this service.
-pub const SERVICE_SERVICE_NAME: &str = "store.stream.v1.Service";
+pub const SERVICE_SERVICE_NAME: &str = "log.stream.v1.Service";
 /// Static [`Spec`](::connectrpc::Spec) for the server-side `Subscribe` RPC.
 ///
 /// The dispatcher surfaces this on
 /// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
 pub const SERVICE_SUBSCRIBE_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
-        "/store.stream.v1.Service/Subscribe",
+        "/log.stream.v1.Service/Subscribe",
         ::connectrpc::StreamType::ServerStream,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
@@ -1843,7 +1843,7 @@ pub const SERVICE_SUBSCRIBE_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::serve
 /// The dispatcher surfaces this on
 /// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
 pub const SERVICE_GET_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
-        "/store.stream.v1.Service/Get",
+        "/log.stream.v1.Service/Get",
         ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
@@ -2016,7 +2016,7 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
         &self,
         path: &str,
     ) -> Option<::connectrpc::dispatcher::codegen::MethodDescriptor> {
-        let method = path.strip_prefix("store.stream.v1.Service/")?;
+        let method = path.strip_prefix("log.stream.v1.Service/")?;
         match method {
             "Subscribe" => {
                 Some(
@@ -2040,7 +2040,7 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
         request: ::connectrpc::Payload,
         format: ::connectrpc::CodecFormat,
     ) -> ::connectrpc::dispatcher::codegen::UnaryResult {
-        let Some(method) = path.strip_prefix("store.stream.v1.Service/") else {
+        let Some(method) = path.strip_prefix("log.stream.v1.Service/") else {
             return ::connectrpc::dispatcher::codegen::unimplemented_unary(path);
         };
         let _ = (&ctx, &request, &format);
@@ -2064,7 +2064,7 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
         request: ::buffa::bytes::Bytes,
         format: ::connectrpc::CodecFormat,
     ) -> ::connectrpc::dispatcher::codegen::StreamingResult {
-        let Some(method) = path.strip_prefix("store.stream.v1.Service/") else {
+        let Some(method) = path.strip_prefix("log.stream.v1.Service/") else {
             return ::connectrpc::dispatcher::codegen::unimplemented_streaming(path);
         };
         let _ = (&ctx, &request, &format);
@@ -2096,7 +2096,7 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
         requests: ::connectrpc::dispatcher::codegen::RequestStream,
         format: ::connectrpc::CodecFormat,
     ) -> ::connectrpc::dispatcher::codegen::UnaryResult {
-        let Some(method) = path.strip_prefix("store.stream.v1.Service/") else {
+        let Some(method) = path.strip_prefix("log.stream.v1.Service/") else {
             return ::connectrpc::dispatcher::codegen::unimplemented_unary(path);
         };
         let _ = (&ctx, &requests, &format);
@@ -2111,7 +2111,7 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
         requests: ::connectrpc::dispatcher::codegen::RequestStream,
         format: ::connectrpc::CodecFormat,
     ) -> ::connectrpc::dispatcher::codegen::StreamingResult {
-        let Some(method) = path.strip_prefix("store.stream.v1.Service/") else {
+        let Some(method) = path.strip_prefix("log.stream.v1.Service/") else {
             return ::connectrpc::dispatcher::codegen::unimplemented_streaming(path);
         };
         let _ = (&ctx, &requests, &format);
@@ -2191,7 +2191,7 @@ where
     pub fn config_mut(&mut self) -> &mut ::connectrpc::client::ClientConfig {
         &mut self.config
     }
-    /// Call the Subscribe RPC. Sends a request to /store.stream.v1.Service/Subscribe.
+    /// Call the Subscribe RPC. Sends a request to /log.stream.v1.Service/Subscribe.
     pub async fn subscribe(
         &self,
         request: SubscribeRequest,
@@ -2230,7 +2230,7 @@ where
             )
             .await
     }
-    /// Call the Get RPC. Sends a request to /store.stream.v1.Service/Get.
+    /// Call the Get RPC. Sends a request to /log.stream.v1.Service/Get.
     pub async fn get(
         &self,
         request: GetRequest,

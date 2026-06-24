@@ -1,4 +1,4 @@
-//! Live stream coordination for `store.stream.v1`.
+//! Live stream coordination for `log.stream.v1`.
 //!
 //! A [`StreamNotifier`] tracks the highest published batch sequence and wakes
 //! subscribers. Each subscriber then pulls batches from the log at its own
@@ -22,7 +22,7 @@ use regex::bytes::Regex;
 use tokio::sync::Notify;
 
 /// `ErrorInfo.domain` used for all stream-service errors.
-pub const STREAM_ERROR_DOMAIN: &str = "store.stream";
+pub const STREAM_ERROR_DOMAIN: &str = "log.stream";
 /// `ErrorInfo.reason` when a `since_sequence_number` or `Get(seq)` references a
 /// batch that has been pruned from the log.
 pub const REASON_BATCH_EVICTED: &str = "BATCH_EVICTED";

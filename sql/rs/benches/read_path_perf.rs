@@ -14,8 +14,8 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::prelude::SessionContext;
 use exoware_proto::connect_compression_registry;
-use exoware_proto::store::common::v1::KvEntry as ProtoKvEntry;
-use exoware_proto::store::ingest::v1::{
+use exoware_proto::log::common::v1::KvEntry as ProtoKvEntry;
+use exoware_proto::log::ingest::v1::{
     PutResponse as ProtoPutResponse, Service as IngestService, ServiceServer as IngestServiceServer,
 };
 use exoware_proto::store::query::v1::{
@@ -95,7 +95,7 @@ impl IngestService for BenchIngest {
     async fn put(
         &self,
         _ctx: Context,
-        request: buffa::view::OwnedView<exoware_proto::store::ingest::v1::PutRequestView<'static>>,
+        request: buffa::view::OwnedView<exoware_proto::log::ingest::v1::PutRequestView<'static>>,
     ) -> connectrpc::ServiceResult<ProtoPutResponse> {
         let mut parsed = Vec::<(Key, Bytes)>::new();
         let wire = request.bytes();

@@ -25,10 +25,10 @@ use connectrpc::client::{ClientConfig, ServerStream as ConnectServerStream};
 use connectrpc::{ConnectError, ErrorCode};
 use exoware_proto::compact::ServiceClient as CompactServiceClient;
 use exoware_proto::ingest::ServiceClient as IngestServiceClient;
+use exoware_proto::log::ingest::v1::PutRequest as ProtoPutRequest;
 use exoware_proto::query as proto_query;
 use exoware_proto::query::ServiceClient as QueryServiceClient;
 use exoware_proto::store::compact::v1::PruneRequest as ProtoPruneRequest;
-use exoware_proto::store::ingest::v1::PutRequest as ProtoPutRequest;
 use exoware_proto::store::query::v1::{
     GetManyRequest as ProtoGetManyRequest, GetRequest as ProtoGetRequest,
     RangeRequest as ProtoRangeRequest, ReduceRequest as ProtoWireReduceRequest,
@@ -876,7 +876,7 @@ pub struct StreamSubscriptionFrame {
 pub struct StreamSubscription {
     stream: ConnectServerStream<
         hyper::body::Incoming,
-        exoware_proto::store::stream::v1::SubscribeResponseView<'static>,
+        exoware_proto::log::stream::v1::SubscribeResponseView<'static>,
     >,
     key_prefix: Option<StoreKeyPrefix>,
     logical_filter: Option<ClientStreamFilter>,
@@ -991,12 +991,12 @@ impl ClientStreamFilter {
     }
 }
 
-/// Inspect a Connect error for `store.stream.BATCH_EVICTED` / `BATCH_NOT_FOUND`
+/// Inspect a Connect error for `log.stream.BATCH_EVICTED` / `BATCH_NOT_FOUND`
 /// `ErrorInfo` details. Used by `get_batch` to collapse both into `Ok(None)`.
 fn is_batch_missing_error(err: &ConnectError) -> bool {
     match proto_decode_connect_error(err) {
         Ok(decoded) => decoded.error_info.is_some_and(|info| {
-            info.domain == "store.stream"
+            info.domain == "log.stream"
                 && matches!(info.reason.as_str(), "BATCH_EVICTED" | "BATCH_NOT_FOUND")
         }),
         Err(_) => false,
@@ -1122,7 +1122,7 @@ impl StoreClientBuilder {
         self
     }
 
-    /// Base URL for the ingest service (`store.ingest.v1.Service`).
+    /// Base URL for the ingest service (`log.ingest.v1.Service`).
     pub fn ingest_url(mut self, url: &str) -> Self {
         self.ingest_url = Some(trim_connect_base(url));
         self
@@ -1140,7 +1140,7 @@ impl StoreClientBuilder {
         self
     }
 
-    /// Base URL for the stream service (`store.stream.v1.Service`).
+    /// Base URL for the stream service (`log.stream.v1.Service`).
     pub fn stream_url(mut self, url: &str) -> Self {
         self.stream_url = Some(trim_connect_base(url));
         self
@@ -1365,7 +1365,7 @@ impl StoreClient {
         }
     }
 
-    /// Typed access to the `store.ingest.v1` service.
+    /// Typed access to the `log.ingest.v1` service.
     pub fn ingest(&self) -> Ingest<'_> {
         Ingest { c: self }
     }
@@ -1380,7 +1380,7 @@ impl StoreClient {
         Compact { c: self }
     }
 
-    /// Typed access to the `store.stream.v1` service.
+    /// Typed access to the `log.stream.v1` service.
     pub fn stream(&self) -> Stream<'_> {
         Stream { c: self }
     }
@@ -2393,7 +2393,7 @@ impl<'a> Compact<'a> {
 }
 
 impl<'a> Stream<'a> {
-    /// `store.stream.v1.Service.Subscribe` — see `StreamSubscription::next`
+    /// `log.stream.v1.Service.Subscribe` — see `StreamSubscription::next`
     /// for consuming delivered frames. `since_sequence_number = None` starts
     /// live from the next Put; `Some(N)` replays retained batches before
     /// transitioning to live. An evicted `since` returns a
@@ -2415,7 +2415,7 @@ impl<'a> Stream<'a> {
         let match_keys = filter
             .match_keys
             .into_iter()
-            .map(|mk| exoware_proto::store::common::v1::MatchKey {
+            .map(|mk| exoware_proto::log::common::v1::MatchKey {
                 reserved_bits: u32::from(mk.reserved_bits),
                 prefix: u32::from(mk.prefix),
                 payload_regex: mk.payload_regex.0,
@@ -2427,19 +2427,19 @@ impl<'a> Stream<'a> {
             .into_iter()
             .map(|vf| {
                 use crate::stream_filter::BytesFilter;
-                use exoware_proto::store::common::v1::bytes_filter::Kind as ProtoKind;
+                use exoware_proto::log::common::v1::bytes_filter::Kind as ProtoKind;
                 let kind = match vf {
                     BytesFilter::Exact(bytes) => ProtoKind::Exact(bytes),
                     BytesFilter::Prefix(bytes) => ProtoKind::Prefix(bytes),
                     BytesFilter::Regex(pattern) => ProtoKind::Regex(pattern),
                 };
-                exoware_proto::store::common::v1::BytesFilter {
+                exoware_proto::log::common::v1::BytesFilter {
                     kind: Some(kind),
                     ..Default::default()
                 }
             })
             .collect();
-        let request = exoware_proto::store::stream::v1::SubscribeRequest {
+        let request = exoware_proto::log::stream::v1::SubscribeRequest {
             match_keys,
             value_filters,
             since_sequence_number,
@@ -2449,10 +2449,8 @@ impl<'a> Stream<'a> {
             self.c.stream_uri.clone(),
             self.c.connect_request_compression,
         );
-        let client = exoware_proto::store::stream::v1::ServiceClient::new(
-            self.c.connect_http.clone(),
-            config,
-        );
+        let client =
+            exoware_proto::log::stream::v1::ServiceClient::new(self.c.connect_http.clone(), config);
         let stream = client
             .subscribe(request)
             .await
@@ -2464,7 +2462,7 @@ impl<'a> Stream<'a> {
         })
     }
 
-    /// `store.stream.v1.Service.Get` — `Ok(None)` collapses the server's
+    /// `log.stream.v1.Service.Get` — `Ok(None)` collapses the server's
     /// `BATCH_EVICTED` / `BATCH_NOT_FOUND` error details.
     pub async fn get(
         &self,
@@ -2474,12 +2472,10 @@ impl<'a> Stream<'a> {
             self.c.stream_uri.clone(),
             self.c.connect_request_compression,
         );
-        let client = exoware_proto::store::stream::v1::ServiceClient::new(
-            self.c.connect_http.clone(),
-            config,
-        );
+        let client =
+            exoware_proto::log::stream::v1::ServiceClient::new(self.c.connect_http.clone(), config);
         match client
-            .get(exoware_proto::store::stream::v1::GetRequest {
+            .get(exoware_proto::log::stream::v1::GetRequest {
                 sequence_number,
                 ..Default::default()
             })
