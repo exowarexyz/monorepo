@@ -318,6 +318,15 @@ mod tests {
             exoware_proto::store::ingest::v1::PutRequestView::decode_view(&bytes).expect("parse");
         let err = validate_put_request(&view, IngestLimits::default()).unwrap_err();
         assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
+        // Pin the wire-visible `ErrorInfo.domain`. Nothing branches on this
+        // string at runtime, so a half-done package rename (emit side renamed,
+        // this literal left behind, or vice versa) would otherwise pass CI
+        // silently. Keep this in lockstep with the emit sites in this module.
+        let decoded = exoware_proto::decode_connect_error(&err).expect("decode error details");
+        assert_eq!(
+            decoded.error_info.expect("error_info detail").domain,
+            "store.ingest",
+        );
     }
 
     #[test]
