@@ -8798,7 +8798,7 @@ pub struct RangeFrame {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
-    pub results: ::buffa::alloc::vec::Vec<super::super::super::log::common::v1::KvEntry>,
+    pub results: ::buffa::alloc::vec::Vec<super::super::super::common::v1::KvEntry>,
     /// Running query detail after the rows in this frame have been read. For a
     /// successful stream, the last detail observed by the client is the final
     /// sequence/metadata summary.
@@ -19550,7 +19550,7 @@ pub mod __buffa {
             /// Field 1: `results`
             pub results: ::buffa::RepeatedView<
                 'a,
-                super::super::super::super::super::log::common::v1::__buffa::view::KvEntryView<
+                super::super::super::super::super::common::v1::__buffa::view::KvEntryView<
                     'a,
                 >,
             >,
@@ -19644,7 +19644,7 @@ pub mod __buffa {
                             let sub = ::buffa::types::borrow_bytes(&mut cur)?;
                             view.results
                                 .push(
-                                    super::super::super::super::super::log::common::v1::__buffa::view::KvEntryView::_decode_depth(
+                                    super::super::super::super::super::common::v1::__buffa::view::KvEntryView::_decode_depth(
                                         sub,
                                         depth - 1,
                                     )?,

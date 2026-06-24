@@ -40,7 +40,7 @@ impl KvEntry {
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/log.common.v1.KvEntry";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/common.v1.KvEntry";
 }
 impl ::buffa::DefaultInstance for KvEntry {
     fn default_instance() -> &'static Self {
@@ -49,10 +49,10 @@ impl ::buffa::DefaultInstance for KvEntry {
     }
 }
 impl ::buffa::MessageName for KvEntry {
-    const PACKAGE: &'static str = "log.common.v1";
+    const PACKAGE: &'static str = "common.v1";
     const NAME: &'static str = "KvEntry";
-    const FULL_NAME: &'static str = "log.common.v1.KvEntry";
-    const TYPE_URL: &'static str = "type.googleapis.com/log.common.v1.KvEntry";
+    const FULL_NAME: &'static str = "common.v1.KvEntry";
+    const TYPE_URL: &'static str = "type.googleapis.com/common.v1.KvEntry";
 }
 impl ::buffa::Message for KvEntry {
     /// Returns the total encoded size in bytes.
@@ -144,7 +144,7 @@ impl ::buffa::Message for KvEntry {
     }
 }
 impl ::buffa::ExtensionSet for KvEntry {
-    const PROTO_FQN: &'static str = "log.common.v1.KvEntry";
+    const PROTO_FQN: &'static str = "common.v1.KvEntry";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -167,7 +167,7 @@ impl ::buffa::json_helpers::ProtoElemJson for KvEntry {
 }
 #[doc(hidden)]
 pub const __KV_ENTRY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/log.common.v1.KvEntry",
+    type_url: "type.googleapis.com/common.v1.KvEntry",
     to_json: ::buffa::type_registry::any_to_json::<KvEntry>,
     from_json: ::buffa::type_registry::any_from_json::<KvEntry>,
     is_wkt: false,
@@ -233,7 +233,7 @@ impl MatchKey {
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/log.common.v1.MatchKey";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/common.v1.MatchKey";
 }
 impl ::buffa::DefaultInstance for MatchKey {
     fn default_instance() -> &'static Self {
@@ -242,10 +242,10 @@ impl ::buffa::DefaultInstance for MatchKey {
     }
 }
 impl ::buffa::MessageName for MatchKey {
-    const PACKAGE: &'static str = "log.common.v1";
+    const PACKAGE: &'static str = "common.v1";
     const NAME: &'static str = "MatchKey";
-    const FULL_NAME: &'static str = "log.common.v1.MatchKey";
-    const TYPE_URL: &'static str = "type.googleapis.com/log.common.v1.MatchKey";
+    const FULL_NAME: &'static str = "common.v1.MatchKey";
+    const TYPE_URL: &'static str = "type.googleapis.com/common.v1.MatchKey";
 }
 impl ::buffa::Message for MatchKey {
     /// Returns the total encoded size in bytes.
@@ -354,7 +354,7 @@ impl ::buffa::Message for MatchKey {
     }
 }
 impl ::buffa::ExtensionSet for MatchKey {
-    const PROTO_FQN: &'static str = "log.common.v1.MatchKey";
+    const PROTO_FQN: &'static str = "common.v1.MatchKey";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -377,7 +377,7 @@ impl ::buffa::json_helpers::ProtoElemJson for MatchKey {
 }
 #[doc(hidden)]
 pub const __MATCH_KEY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/log.common.v1.MatchKey",
+    type_url: "type.googleapis.com/common.v1.MatchKey",
     to_json: ::buffa::type_registry::any_to_json::<MatchKey>,
     from_json: ::buffa::type_registry::any_from_json::<MatchKey>,
     is_wkt: false,
@@ -405,7 +405,7 @@ impl BytesFilter {
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/log.common.v1.BytesFilter";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/common.v1.BytesFilter";
 }
 impl ::buffa::DefaultInstance for BytesFilter {
     fn default_instance() -> &'static Self {
@@ -414,10 +414,10 @@ impl ::buffa::DefaultInstance for BytesFilter {
     }
 }
 impl ::buffa::MessageName for BytesFilter {
-    const PACKAGE: &'static str = "log.common.v1";
+    const PACKAGE: &'static str = "common.v1";
     const NAME: &'static str = "BytesFilter";
-    const FULL_NAME: &'static str = "log.common.v1.BytesFilter";
-    const TYPE_URL: &'static str = "type.googleapis.com/log.common.v1.BytesFilter";
+    const FULL_NAME: &'static str = "common.v1.BytesFilter";
+    const TYPE_URL: &'static str = "type.googleapis.com/common.v1.BytesFilter";
 }
 impl ::buffa::Message for BytesFilter {
     /// Returns the total encoded size in bytes.
@@ -549,7 +549,7 @@ impl ::buffa::Message for BytesFilter {
     }
 }
 impl ::buffa::ExtensionSet for BytesFilter {
-    const PROTO_FQN: &'static str = "log.common.v1.BytesFilter";
+    const PROTO_FQN: &'static str = "common.v1.BytesFilter";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -691,7 +691,7 @@ impl ::buffa::json_helpers::ProtoElemJson for BytesFilter {
 }
 #[doc(hidden)]
 pub const __BYTES_FILTER_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/log.common.v1.BytesFilter",
+    type_url: "type.googleapis.com/common.v1.BytesFilter",
     to_json: ::buffa::type_registry::any_to_json::<BytesFilter>,
     from_json: ::buffa::type_registry::any_from_json::<BytesFilter>,
     is_wkt: false,
@@ -931,10 +931,10 @@ pub mod __buffa {
             }
         }
         impl<'a> ::buffa::MessageName for KvEntryView<'a> {
-            const PACKAGE: &'static str = "log.common.v1";
+            const PACKAGE: &'static str = "common.v1";
             const NAME: &'static str = "KvEntry";
-            const FULL_NAME: &'static str = "log.common.v1.KvEntry";
-            const TYPE_URL: &'static str = "type.googleapis.com/log.common.v1.KvEntry";
+            const FULL_NAME: &'static str = "common.v1.KvEntry";
+            const TYPE_URL: &'static str = "type.googleapis.com/common.v1.KvEntry";
         }
         impl<'v> ::buffa::DefaultViewInstance for KvEntryView<'v> {
             fn default_view_instance<'a>() -> &'a Self
@@ -1209,10 +1209,10 @@ pub mod __buffa {
             }
         }
         impl<'a> ::buffa::MessageName for MatchKeyView<'a> {
-            const PACKAGE: &'static str = "log.common.v1";
+            const PACKAGE: &'static str = "common.v1";
             const NAME: &'static str = "MatchKey";
-            const FULL_NAME: &'static str = "log.common.v1.MatchKey";
-            const TYPE_URL: &'static str = "type.googleapis.com/log.common.v1.MatchKey";
+            const FULL_NAME: &'static str = "common.v1.MatchKey";
+            const TYPE_URL: &'static str = "type.googleapis.com/common.v1.MatchKey";
         }
         impl<'v> ::buffa::DefaultViewInstance for MatchKeyView<'v> {
             fn default_view_instance<'a>() -> &'a Self
@@ -1531,10 +1531,10 @@ pub mod __buffa {
             }
         }
         impl<'a> ::buffa::MessageName for BytesFilterView<'a> {
-            const PACKAGE: &'static str = "log.common.v1";
+            const PACKAGE: &'static str = "common.v1";
             const NAME: &'static str = "BytesFilter";
-            const FULL_NAME: &'static str = "log.common.v1.BytesFilter";
-            const TYPE_URL: &'static str = "type.googleapis.com/log.common.v1.BytesFilter";
+            const FULL_NAME: &'static str = "common.v1.BytesFilter";
+            const TYPE_URL: &'static str = "type.googleapis.com/common.v1.BytesFilter";
         }
         impl<'v> ::buffa::DefaultViewInstance for BytesFilterView<'v> {
             fn default_view_instance<'a>() -> &'a Self

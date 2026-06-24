@@ -9,9 +9,9 @@ lint:
     - STANDARD
   except:
     # Each directory (e.g. log/v1, store/v1) holds several logically separate
-    # packages for convenience (log/v1 -> common, ingest, stream; store/v1 ->
-    # compact, query). The generated code uses the distinct package names for
-    # proper namespacing.
+    # packages for convenience (log/v1 -> ingest, stream; store/v1 ->
+    # compact, query). The shared common.v1 package lives at common/v1. The
+    # generated code uses the distinct package names for proper namespacing.
     - PACKAGE_DIRECTORY_MATCH
     - PACKAGE_SAME_DIRECTORY
     - DIRECTORY_SAME_PACKAGE

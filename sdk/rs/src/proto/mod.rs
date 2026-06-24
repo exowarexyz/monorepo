@@ -3,16 +3,6 @@
 //! Proto sources: `proto/`. Run `./gen.sh` to regenerate all bindings.
 
 pub mod log {
-    pub mod common {
-        pub mod v1 {
-            #![allow(non_camel_case_types)]
-            #![allow(unused_imports)]
-            #![allow(clippy::derivable_impls)]
-            #![allow(clippy::match_single_binding)]
-            include!("../gen/log.common.v1.rs");
-        }
-    }
-
     pub mod ingest {
         pub mod v1 {
             #![allow(non_camel_case_types)]
@@ -67,11 +57,16 @@ pub mod google {
 }
 
 pub mod common {
-    #![allow(non_camel_case_types)]
-    #![allow(unused_imports)]
-    #![allow(clippy::derivable_impls)]
-    #![allow(clippy::match_single_binding)]
-    pub use crate::log::common::v1::*;
+    pub mod v1 {
+        #![allow(non_camel_case_types)]
+        #![allow(unused_imports)]
+        #![allow(clippy::derivable_impls)]
+        #![allow(clippy::match_single_binding)]
+        include!("../gen/common.v1.rs");
+    }
+    // Flat re-export so call sites use `exoware_sdk::common::KvEntry` while
+    // generated cross-package refs resolve `crate::common::v1`.
+    pub use v1::*;
 }
 
 pub mod compact {

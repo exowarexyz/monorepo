@@ -4,7 +4,7 @@ package qmdb.v1;
 
 import "buf/validate/validate.proto";
 import "qmdb/v1/proof.proto";
-import "log/v1/common.proto";
+import "common/v1/common.proto";
 
 // Historical operation-log proof service over a QMDB backend.
 //
@@ -31,12 +31,12 @@ service OperationLogService {
 // which have no logical key).
 message SubscribeRequest {
   // Filters applied to each operation's decoded logical key.
-  repeated log.common.v1.BytesFilter key_filters = 1
+  repeated common.v1.BytesFilter key_filters = 1
       [(buf.validate.field).repeated.max_items = 1024];
 
   // Filters applied to each operation's decoded value bytes. Operations
   // without a value (e.g. deletes, commits) never match a value filter.
-  repeated log.common.v1.BytesFilter value_filters = 2
+  repeated common.v1.BytesFilter value_filters = 2
       [(buf.validate.field).repeated.max_items = 1024];
 
   // Resume cursor over the underlying store batch log. Use

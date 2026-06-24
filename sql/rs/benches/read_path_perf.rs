@@ -13,8 +13,8 @@ use connectrpc::{Chain, ConnectRpcService, RequestContext as Context};
 use criterion::{criterion_group, criterion_main, Criterion};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::prelude::SessionContext;
+use exoware_proto::common::v1::KvEntry as ProtoKvEntry;
 use exoware_proto::connect_compression_registry;
-use exoware_proto::log::common::v1::KvEntry as ProtoKvEntry;
 use exoware_proto::log::ingest::v1::{
     PutResponse as ProtoPutResponse, Service as IngestService, ServiceServer as IngestServiceServer,
 };

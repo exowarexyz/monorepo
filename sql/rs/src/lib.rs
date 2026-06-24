@@ -62,9 +62,9 @@ mod tests {
     use axum::Router;
     use bytes::Bytes;
     use connectrpc::{Chain, ConnectError, ConnectRpcService, RequestContext as Context};
+    use exoware_sdk::common::v1::KvEntry as ProtoKvEntry;
     use exoware_sdk::connect_compression_registry;
     use exoware_sdk::kv_codec::{eval_expr, expr_needs_value};
-    use exoware_sdk::log::common::v1::KvEntry as ProtoKvEntry;
     use exoware_sdk::log::ingest::v1::{
         PutResponse as ProtoPutResponse, Service as IngestService,
         ServiceServer as IngestServiceServer,

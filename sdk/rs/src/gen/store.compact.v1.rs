@@ -155,7 +155,7 @@ impl ::buffa::Enumeration for PolicyOrderEncoding {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct PolicyGroupBy {
-    /// Named capture groups from `log.common.v1.MatchKey.payload_regex` whose
+    /// Named capture groups from `common.v1.MatchKey.payload_regex` whose
     /// matched bytes are concatenated (length-prefixed) to form each group's
     /// identity. Must not contain duplicates. When empty, all matched keys
     /// belong to a single group.
@@ -301,7 +301,7 @@ pub const __POLICY_GROUP_BY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::b
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct PolicyOrderBy {
-    /// Name of the capture group in `log.common.v1.MatchKey.payload_regex`
+    /// Name of the capture group in `common.v1.MatchKey.payload_regex`
     /// that provides the ordering value.
     ///
     /// Field 1: `capture_group`
@@ -1439,7 +1439,7 @@ pub struct KeysScope {
         alias = "match_key",
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
     )]
-    pub match_key: ::buffa::MessageField<super::super::super::log::common::v1::MatchKey>,
+    pub match_key: ::buffa::MessageField<super::super::super::common::v1::MatchKey>,
     /// Field 2: `group_by`
     #[serde(
         rename = "groupBy",
@@ -2397,7 +2397,7 @@ pub mod __buffa {
         /// the retain policy is applied. Each group is pruned independently.
         #[derive(Clone, Debug, Default)]
         pub struct PolicyGroupByView<'a> {
-            /// Named capture groups from `log.common.v1.MatchKey.payload_regex` whose
+            /// Named capture groups from `common.v1.MatchKey.payload_regex` whose
             /// matched bytes are concatenated (length-prefixed) to form each group's
             /// identity. Must not contain duplicates. When empty, all matched keys
             /// belong to a single group.
@@ -2591,7 +2591,7 @@ pub mod __buffa {
         /// Required for `RetainKeepLatest` and threshold-based retain policies.
         #[derive(Clone, Debug, Default)]
         pub struct PolicyOrderByView<'a> {
-            /// Name of the capture group in `log.common.v1.MatchKey.payload_regex`
+            /// Name of the capture group in `common.v1.MatchKey.payload_regex`
             /// that provides the ordering value.
             ///
             /// Field 1: `capture_group`
@@ -4022,7 +4022,7 @@ pub mod __buffa {
         pub struct KeysScopeView<'a> {
             /// Field 1: `match_key`
             pub match_key: ::buffa::MessageFieldView<
-                super::super::super::super::super::log::common::v1::__buffa::view::MatchKeyView<
+                super::super::super::super::super::common::v1::__buffa::view::MatchKeyView<
                     'a,
                 >,
             >,
@@ -4092,7 +4092,7 @@ pub mod __buffa {
                                 Some(existing) => existing._merge_into_view(sub, depth - 1)?,
                                 None => {
                                     view.match_key = ::buffa::MessageFieldView::set(
-                                        super::super::super::super::super::log::common::v1::__buffa::view::MatchKeyView::_decode_depth(
+                                        super::super::super::super::super::common::v1::__buffa::view::MatchKeyView::_decode_depth(
                                             sub,
                                             depth - 1,
                                         )?,
@@ -4191,7 +4191,7 @@ pub mod __buffa {
                     match_key: match self.match_key.as_option() {
                         Some(v) => {
                             ::buffa::MessageField::<
-                                super::super::super::super::super::log::common::v1::MatchKey,
+                                super::super::super::super::super::common::v1::MatchKey,
                             >::some(v.to_owned_from_source(__buffa_src))
                         }
                         None => ::buffa::MessageField::none(),

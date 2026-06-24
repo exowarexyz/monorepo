@@ -4,7 +4,7 @@ package store.query.v1;
 
 import "buf/validate/validate.proto";
 import "google/protobuf/struct.proto";
-import "log/v1/common.proto";
+import "common/v1/common.proto";
 
 // --- Query wire types ---
 
@@ -405,7 +405,7 @@ message RangeRequest {
 // rows in that frame have been read. For an empty result, the stream contains a
 // single frame with empty `results` and populated `detail`.
 message RangeFrame {
-  repeated log.common.v1.KvEntry results = 1;
+  repeated common.v1.KvEntry results = 1;
   // Running query detail after the rows in this frame have been read. For a
   // successful stream, the last detail observed by the client is the final
   // sequence/metadata summary.

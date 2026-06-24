@@ -8,7 +8,8 @@ use std::future::Future;
 
 use buffa::Message;
 use bytes::Bytes;
-use exoware_sdk::log::{common::v1::KvEntry, stream::v1::GetResponse as StreamGetResponse};
+use exoware_sdk::common::v1::KvEntry;
+use exoware_sdk::log::stream::v1::GetResponse as StreamGetResponse;
 use exoware_sdk::prune_policy::PrunePolicyDocument;
 
 /// Backend-defined query metadata.

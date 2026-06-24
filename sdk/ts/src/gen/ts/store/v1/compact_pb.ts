@@ -5,15 +5,15 @@
 import type { GenEnum, GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv1";
 import { enumDesc, fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv1";
 import { file_buf_validate_validate } from "../../buf/validate/validate_pb.js";
-import type { MatchKey } from "../../log/v1/common_pb.js";
-import { file_log_v1_common } from "../../log/v1/common_pb.js";
+import type { MatchKey } from "../../common/v1/common_pb.js";
+import { file_common_v1_common } from "../../common/v1/common_pb.js";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
  * Describes the file store/v1/compact.proto.
  */
 export const file_store_v1_compact: GenFile = /*@__PURE__*/
-  fileDesc("ChZzdG9yZS92MS9jb21wYWN0LnByb3RvEhBzdG9yZS5jb21wYWN0LnYxIicKDVBvbGljeUdyb3VwQnkSFgoOY2FwdHVyZV9ncm91cHMYASADKAkiXwoNUG9saWN5T3JkZXJCeRIVCg1jYXB0dXJlX2dyb3VwGAEgASgJEjcKCGVuY29kaW5nGAIgASgOMiUuc3RvcmUuY29tcGFjdC52MS5Qb2xpY3lPcmRlckVuY29kaW5nIioKEFJldGFpbktlZXBMYXRlc3QSFgoFY291bnQYASABKARCB7pIBDICIAAiJgoRUmV0YWluR3JlYXRlclRoYW4SEQoJdGhyZXNob2xkGAEgASgEIi0KGFJldGFpbkdyZWF0ZXJUaGFuT3JFcXVhbBIRCgl0aHJlc2hvbGQYASABKAQiDwoNUmV0YWluRHJvcEFsbCKQAgoMUG9saWN5UmV0YWluEjkKC2tlZXBfbGF0ZXN0GAEgASgLMiIuc3RvcmUuY29tcGFjdC52MS5SZXRhaW5LZWVwTGF0ZXN0SAASOwoMZ3JlYXRlcl90aGFuGAIgASgLMiMuc3RvcmUuY29tcGFjdC52MS5SZXRhaW5HcmVhdGVyVGhhbkgAEksKFWdyZWF0ZXJfdGhhbl9vcl9lcXVhbBgDIAEoCzIqLnN0b3JlLmNvbXBhY3QudjEuUmV0YWluR3JlYXRlclRoYW5PckVxdWFsSAASMwoIZHJvcF9hbGwYBCABKAsyHy5zdG9yZS5jb21wYWN0LnYxLlJldGFpbkRyb3BBbGxIAEIGCgRraW5kIq8BCglLZXlzU2NvcGUSKgoJbWF0Y2hfa2V5GAEgASgLMhcubG9nLmNvbW1vbi52MS5NYXRjaEtleRIxCghncm91cF9ieRgCIAEoCzIfLnN0b3JlLmNvbXBhY3QudjEuUG9saWN5R3JvdXBCeRI2CghvcmRlcl9ieRgDIAEoCzIfLnN0b3JlLmNvbXBhY3QudjEuUG9saWN5T3JkZXJCeUgAiAEBQgsKCV9vcmRlcl9ieSIPCg1TZXF1ZW5jZVNjb3BlIqMBCgZQb2xpY3kSKwoEa2V5cxgBIAEoCzIbLnN0b3JlLmNvbXBhY3QudjEuS2V5c1Njb3BlSAASMwoIc2VxdWVuY2UYAiABKAsyHy5zdG9yZS5jb21wYWN0LnYxLlNlcXVlbmNlU2NvcGVIABIuCgZyZXRhaW4YAyABKAsyHi5zdG9yZS5jb21wYWN0LnYxLlBvbGljeVJldGFpbkIHCgVzY29wZSJECgxQcnVuZVJlcXVlc3QSNAoIcG9saWNpZXMYASADKAsyGC5zdG9yZS5jb21wYWN0LnYxLlBvbGljeUIIukgFkgECCAEiDwoNUHJ1bmVSZXNwb25zZSp+ChNQb2xpY3lPcmRlckVuY29kaW5nEiMKH1BPTElDWV9PUkRFUl9FTkNPRElOR19CWVRFU19BU0MQABIgChxQT0xJQ1lfT1JERVJfRU5DT0RJTkdfVTY0X0JFEAESIAocUE9MSUNZX09SREVSX0VOQ09ESU5HX0k2NF9CRRACMlMKB1NlcnZpY2USSAoFUHJ1bmUSHi5zdG9yZS5jb21wYWN0LnYxLlBydW5lUmVxdWVzdBofLnN0b3JlLmNvbXBhY3QudjEuUHJ1bmVSZXNwb25zZWIGcHJvdG8z", [file_buf_validate_validate, file_log_v1_common]);
+  fileDesc("ChZzdG9yZS92MS9jb21wYWN0LnByb3RvEhBzdG9yZS5jb21wYWN0LnYxIicKDVBvbGljeUdyb3VwQnkSFgoOY2FwdHVyZV9ncm91cHMYASADKAkiXwoNUG9saWN5T3JkZXJCeRIVCg1jYXB0dXJlX2dyb3VwGAEgASgJEjcKCGVuY29kaW5nGAIgASgOMiUuc3RvcmUuY29tcGFjdC52MS5Qb2xpY3lPcmRlckVuY29kaW5nIioKEFJldGFpbktlZXBMYXRlc3QSFgoFY291bnQYASABKARCB7pIBDICIAAiJgoRUmV0YWluR3JlYXRlclRoYW4SEQoJdGhyZXNob2xkGAEgASgEIi0KGFJldGFpbkdyZWF0ZXJUaGFuT3JFcXVhbBIRCgl0aHJlc2hvbGQYASABKAQiDwoNUmV0YWluRHJvcEFsbCKQAgoMUG9saWN5UmV0YWluEjkKC2tlZXBfbGF0ZXN0GAEgASgLMiIuc3RvcmUuY29tcGFjdC52MS5SZXRhaW5LZWVwTGF0ZXN0SAASOwoMZ3JlYXRlcl90aGFuGAIgASgLMiMuc3RvcmUuY29tcGFjdC52MS5SZXRhaW5HcmVhdGVyVGhhbkgAEksKFWdyZWF0ZXJfdGhhbl9vcl9lcXVhbBgDIAEoCzIqLnN0b3JlLmNvbXBhY3QudjEuUmV0YWluR3JlYXRlclRoYW5PckVxdWFsSAASMwoIZHJvcF9hbGwYBCABKAsyHy5zdG9yZS5jb21wYWN0LnYxLlJldGFpbkRyb3BBbGxIAEIGCgRraW5kIqsBCglLZXlzU2NvcGUSJgoJbWF0Y2hfa2V5GAEgASgLMhMuY29tbW9uLnYxLk1hdGNoS2V5EjEKCGdyb3VwX2J5GAIgASgLMh8uc3RvcmUuY29tcGFjdC52MS5Qb2xpY3lHcm91cEJ5EjYKCG9yZGVyX2J5GAMgASgLMh8uc3RvcmUuY29tcGFjdC52MS5Qb2xpY3lPcmRlckJ5SACIAQFCCwoJX29yZGVyX2J5Ig8KDVNlcXVlbmNlU2NvcGUiowEKBlBvbGljeRIrCgRrZXlzGAEgASgLMhsuc3RvcmUuY29tcGFjdC52MS5LZXlzU2NvcGVIABIzCghzZXF1ZW5jZRgCIAEoCzIfLnN0b3JlLmNvbXBhY3QudjEuU2VxdWVuY2VTY29wZUgAEi4KBnJldGFpbhgDIAEoCzIeLnN0b3JlLmNvbXBhY3QudjEuUG9saWN5UmV0YWluQgcKBXNjb3BlIkQKDFBydW5lUmVxdWVzdBI0Cghwb2xpY2llcxgBIAMoCzIYLnN0b3JlLmNvbXBhY3QudjEuUG9saWN5Qgi6SAWSAQIIASIPCg1QcnVuZVJlc3BvbnNlKn4KE1BvbGljeU9yZGVyRW5jb2RpbmcSIwofUE9MSUNZX09SREVSX0VOQ09ESU5HX0JZVEVTX0FTQxAAEiAKHFBPTElDWV9PUkRFUl9FTkNPRElOR19VNjRfQkUQARIgChxQT0xJQ1lfT1JERVJfRU5DT0RJTkdfSTY0X0JFEAIyUwoHU2VydmljZRJICgVQcnVuZRIeLnN0b3JlLmNvbXBhY3QudjEuUHJ1bmVSZXF1ZXN0Gh8uc3RvcmUuY29tcGFjdC52MS5QcnVuZVJlc3BvbnNlYgZwcm90bzM", [file_buf_validate_validate, file_common_v1_common]);
 
 /**
  * Controls how matched keys are partitioned into independent groups before
@@ -23,7 +23,7 @@ export const file_store_v1_compact: GenFile = /*@__PURE__*/
  */
 export type PolicyGroupBy = Message<"store.compact.v1.PolicyGroupBy"> & {
   /**
-   * Named capture groups from `log.common.v1.MatchKey.payload_regex` whose
+   * Named capture groups from `common.v1.MatchKey.payload_regex` whose
    * matched bytes are concatenated (length-prefixed) to form each group's
    * identity. Must not contain duplicates. When empty, all matched keys
    * belong to a single group.
@@ -49,7 +49,7 @@ export const PolicyGroupBySchema: GenMessage<PolicyGroupBy> = /*@__PURE__*/
  */
 export type PolicyOrderBy = Message<"store.compact.v1.PolicyOrderBy"> & {
   /**
-   * Name of the capture group in `log.common.v1.MatchKey.payload_regex`
+   * Name of the capture group in `common.v1.MatchKey.payload_regex`
    * that provides the ordering value.
    *
    * @generated from field: string capture_group = 1;
@@ -204,7 +204,7 @@ export const PolicyRetainSchema: GenMessage<PolicyRetain> = /*@__PURE__*/
  */
 export type KeysScope = Message<"store.compact.v1.KeysScope"> & {
   /**
-   * @generated from field: log.common.v1.MatchKey match_key = 1;
+   * @generated from field: common.v1.MatchKey match_key = 1;
    */
   matchKey?: MatchKey;
 

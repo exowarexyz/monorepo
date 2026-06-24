@@ -7,15 +7,15 @@ import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv1
 import { file_buf_validate_validate } from "../../buf/validate/validate_pb.js";
 import type { HistoricalMultiProof, HistoricalOperationRangeProof } from "./proof_pb.js";
 import { file_qmdb_v1_proof } from "./proof_pb.js";
-import type { BytesFilter } from "../../log/v1/common_pb.js";
-import { file_log_v1_common } from "../../log/v1/common_pb.js";
+import type { BytesFilter } from "../../common/v1/common_pb.js";
+import { file_common_v1_common } from "../../common/v1/common_pb.js";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
  * Describes the file qmdb/v1/operation_log.proto.
  */
 export const file_qmdb_v1_operation_log: GenFile = /*@__PURE__*/
-  fileDesc("ChtxbWRiL3YxL29wZXJhdGlvbl9sb2cucHJvdG8SB3FtZGIudjEiygEKEFN1YnNjcmliZVJlcXVlc3QSOgoLa2V5X2ZpbHRlcnMYASADKAsyGi5sb2cuY29tbW9uLnYxLkJ5dGVzRmlsdGVyQgm6SAaSAQMQgAgSPAoNdmFsdWVfZmlsdGVycxgCIAMoCzIaLmxvZy5jb21tb24udjEuQnl0ZXNGaWx0ZXJCCbpIBpIBAxCACBIiChVzaW5jZV9zZXF1ZW5jZV9udW1iZXIYAyABKARIAIgBAUIYChZfc2luY2Vfc2VxdWVuY2VfbnVtYmVyIm4KEVN1YnNjcmliZVJlc3BvbnNlEh4KFnJlc3VtZV9zZXF1ZW5jZV9udW1iZXIYASABKAQSLAoFcHJvb2YYAiABKAsyHS5xbWRiLnYxLkhpc3RvcmljYWxNdWx0aVByb29mEgsKA3RpcBgDIAEoBCJfChhHZXRPcGVyYXRpb25SYW5nZVJlcXVlc3QSCwoDdGlwGAEgASgEEhYKDnN0YXJ0X2xvY2F0aW9uGAIgASgEEh4KDW1heF9sb2NhdGlvbnMYAyABKA1CB7pIBCoCIAAiUgoZR2V0T3BlcmF0aW9uUmFuZ2VSZXNwb25zZRI1CgVwcm9vZhgBIAEoCzImLnFtZGIudjEuSGlzdG9yaWNhbE9wZXJhdGlvblJhbmdlUHJvb2YytwEKE09wZXJhdGlvbkxvZ1NlcnZpY2USWgoRR2V0T3BlcmF0aW9uUmFuZ2USIS5xbWRiLnYxLkdldE9wZXJhdGlvblJhbmdlUmVxdWVzdBoiLnFtZGIudjEuR2V0T3BlcmF0aW9uUmFuZ2VSZXNwb25zZRJECglTdWJzY3JpYmUSGS5xbWRiLnYxLlN1YnNjcmliZVJlcXVlc3QaGi5xbWRiLnYxLlN1YnNjcmliZVJlc3BvbnNlMAFiBnByb3RvMw", [file_buf_validate_validate, file_qmdb_v1_proof, file_log_v1_common]);
+  fileDesc("ChtxbWRiL3YxL29wZXJhdGlvbl9sb2cucHJvdG8SB3FtZGIudjEiwgEKEFN1YnNjcmliZVJlcXVlc3QSNgoLa2V5X2ZpbHRlcnMYASADKAsyFi5jb21tb24udjEuQnl0ZXNGaWx0ZXJCCbpIBpIBAxCACBI4Cg12YWx1ZV9maWx0ZXJzGAIgAygLMhYuY29tbW9uLnYxLkJ5dGVzRmlsdGVyQgm6SAaSAQMQgAgSIgoVc2luY2Vfc2VxdWVuY2VfbnVtYmVyGAMgASgESACIAQFCGAoWX3NpbmNlX3NlcXVlbmNlX251bWJlciJuChFTdWJzY3JpYmVSZXNwb25zZRIeChZyZXN1bWVfc2VxdWVuY2VfbnVtYmVyGAEgASgEEiwKBXByb29mGAIgASgLMh0ucW1kYi52MS5IaXN0b3JpY2FsTXVsdGlQcm9vZhILCgN0aXAYAyABKAQiXwoYR2V0T3BlcmF0aW9uUmFuZ2VSZXF1ZXN0EgsKA3RpcBgBIAEoBBIWCg5zdGFydF9sb2NhdGlvbhgCIAEoBBIeCg1tYXhfbG9jYXRpb25zGAMgASgNQge6SAQqAiAAIlIKGUdldE9wZXJhdGlvblJhbmdlUmVzcG9uc2USNQoFcHJvb2YYASABKAsyJi5xbWRiLnYxLkhpc3RvcmljYWxPcGVyYXRpb25SYW5nZVByb29mMrcBChNPcGVyYXRpb25Mb2dTZXJ2aWNlEloKEUdldE9wZXJhdGlvblJhbmdlEiEucW1kYi52MS5HZXRPcGVyYXRpb25SYW5nZVJlcXVlc3QaIi5xbWRiLnYxLkdldE9wZXJhdGlvblJhbmdlUmVzcG9uc2USRAoJU3Vic2NyaWJlEhkucW1kYi52MS5TdWJzY3JpYmVSZXF1ZXN0GhoucW1kYi52MS5TdWJzY3JpYmVSZXNwb25zZTABYgZwcm90bzM", [file_buf_validate_validate, file_qmdb_v1_proof, file_common_v1_common]);
 
 /**
  * Subscribe to operations whose logical key and/or value match the given
@@ -33,7 +33,7 @@ export type SubscribeRequest = Message<"qmdb.v1.SubscribeRequest"> & {
   /**
    * Filters applied to each operation's decoded logical key.
    *
-   * @generated from field: repeated log.common.v1.BytesFilter key_filters = 1;
+   * @generated from field: repeated common.v1.BytesFilter key_filters = 1;
    */
   keyFilters: BytesFilter[];
 
@@ -41,7 +41,7 @@ export type SubscribeRequest = Message<"qmdb.v1.SubscribeRequest"> & {
    * Filters applied to each operation's decoded value bytes. Operations
    * without a value (e.g. deletes, commits) never match a value filter.
    *
-   * @generated from field: repeated log.common.v1.BytesFilter value_filters = 2;
+   * @generated from field: repeated common.v1.BytesFilter value_filters = 2;
    */
   valueFilters: BytesFilter[];
 

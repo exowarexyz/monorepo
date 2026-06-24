@@ -21,7 +21,7 @@ pub const MAX_MATCH_KEYS_PER_FILTER: usize = 16;
 pub const MAX_VALUE_FILTERS_PER_FILTER: usize = 16;
 
 /// Matches a row's raw value bytes by exact match, prefix, or regex. Wire
-/// shape mirrors `log.common.v1.BytesFilter`.
+/// shape mirrors `common.v1.BytesFilter`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BytesFilter {
     Exact(Bytes),

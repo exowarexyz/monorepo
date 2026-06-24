@@ -13,7 +13,7 @@ pub struct PutRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
-    pub kvs: ::buffa::alloc::vec::Vec<super::super::common::v1::KvEntry>,
+    pub kvs: ::buffa::alloc::vec::Vec<super::super::super::common::v1::KvEntry>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -313,7 +313,9 @@ pub mod __buffa {
             /// Field 1: `kvs`
             pub kvs: ::buffa::RepeatedView<
                 'a,
-                super::super::super::super::common::v1::__buffa::view::KvEntryView<'a>,
+                super::super::super::super::super::common::v1::__buffa::view::KvEntryView<
+                    'a,
+                >,
             >,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
@@ -371,7 +373,7 @@ pub mod __buffa {
                             let sub = ::buffa::types::borrow_bytes(&mut cur)?;
                             view.kvs
                                 .push(
-                                    super::super::super::super::common::v1::__buffa::view::KvEntryView::_decode_depth(
+                                    super::super::super::super::super::common::v1::__buffa::view::KvEntryView::_decode_depth(
                                         sub,
                                         depth - 1,
                                     )?,

@@ -3,14 +3,14 @@ syntax = "proto3";
 package store.compact.v1;
 
 import "buf/validate/validate.proto";
-import "log/v1/common.proto";
+import "common/v1/common.proto";
 
 // Prune policy graph and admin RPC (served by the compaction worker).
 
 // Controls how matched keys are partitioned into independent groups before
 // the retain policy is applied. Each group is pruned independently.
 message PolicyGroupBy {
-  // Named capture groups from `log.common.v1.MatchKey.payload_regex` whose
+  // Named capture groups from `common.v1.MatchKey.payload_regex` whose
   // matched bytes are concatenated (length-prefixed) to form each group's
   // identity. Must not contain duplicates. When empty, all matched keys
   // belong to a single group.
@@ -32,7 +32,7 @@ enum PolicyOrderEncoding {
 // extracted from the payload regex and decoded according to `encoding`.
 // Required for `RetainKeepLatest` and threshold-based retain policies.
 message PolicyOrderBy {
-  // Name of the capture group in `log.common.v1.MatchKey.payload_regex`
+  // Name of the capture group in `common.v1.MatchKey.payload_regex`
   // that provides the ordering value.
   string capture_group = 1;
   // How to decode and compare the captured bytes.
@@ -77,7 +77,7 @@ message PolicyRetain {
 // matched keys into `group_by` groups, order within each group by
 // `order_by`, then apply `retain` to decide which keys to delete.
 message KeysScope {
-  log.common.v1.MatchKey match_key = 1;
+  common.v1.MatchKey match_key = 1;
   PolicyGroupBy group_by = 2;
   optional PolicyOrderBy order_by = 3;
 }

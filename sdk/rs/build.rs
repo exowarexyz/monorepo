@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SDK_BYTES_FIELDS: &[&str] = &[
-    ".log.common.v1.KvEntry.value",
-    ".log.common.v1.BytesFilter.exact",
-    ".log.common.v1.BytesFilter.prefix",
+    ".common.v1.KvEntry.value",
+    ".common.v1.BytesFilter.exact",
+    ".common.v1.BytesFilter.prefix",
     ".store.query.v1.KvReducedValue.decimal128_value",
     ".store.query.v1.KvReducedValue.fixed_size_binary_value",
     ".store.query.v1.KvReducedValue.decimal256_value",
@@ -40,7 +40,7 @@ fn main() {
 
     let files = [
         "google/rpc/error_details.proto",
-        "log/v1/common.proto",
+        "common/v1/common.proto",
         "log/v1/ingest.proto",
         "log/v1/stream.proto",
         "store/v1/compact.proto",
