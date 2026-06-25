@@ -104,7 +104,7 @@ fn fresh_reader(c: StoreClient) -> TestReader {
 }
 
 fn fresh_writer(c: StoreClient) -> TestWriter {
-    TestWriter::empty(c)
+    TestWriter::fresh(c)
 }
 
 struct LocalReference {

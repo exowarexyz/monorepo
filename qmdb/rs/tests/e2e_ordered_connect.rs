@@ -264,7 +264,7 @@ async fn build_grafted_boundary_local_batch() -> LocalBatch {
 
 async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
     let writer: OrderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
-        OrderedWriter::empty(client.clone());
+        OrderedWriter::fresh(client.clone());
     common::commit_ordered_upload(client, &writer, &batch.operations, &batch.current_boundary)
         .await
         .expect("commit upload");
@@ -420,7 +420,7 @@ async fn ordered_get_after_grafted_boundary_returns_current_key_value_proof() {
     let ordered_client =
         TestOrderedClient::from_client(store_client.clone(), op_cfg(), update_row_cfg());
     let writer: OrderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
-        OrderedWriter::empty(store_client.clone());
+        OrderedWriter::fresh(store_client.clone());
     common::commit_ordered_upload(
         &store_client,
         &writer,

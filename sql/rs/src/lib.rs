@@ -52,7 +52,9 @@ mod tests {
         canonicalize_reduced_group_values, decode_stored_row, encode_reduced_group_key,
         eval_predicate, KvReducedValue, StoredRow,
     };
-    use exoware_sdk::{RangeReduceOp, RangeReduceRequest, StoreBatchUpload, StoreClient};
+    use exoware_sdk::{
+        PrefixedStoreClient, RangeReduceOp, RangeReduceRequest, StoreBatchUpload, StoreClient,
+    };
     use std::collections::{BTreeMap, HashSet};
     use std::ops::Bound::{Included, Unbounded};
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
@@ -4924,7 +4926,7 @@ mod tests {
         let (base_url, shutdown_tx) = spawn_mock_server(state.clone()).await;
         let client = StoreClient::new(&base_url);
 
-        let seed_schema = KvSchema::unprefixed(client.clone())
+        let seed_schema = KvSchema::from_prefixed(PrefixedStoreClient::empty(client.clone()))
             .table(
                 "orders",
                 vec![
@@ -4965,7 +4967,7 @@ mod tests {
             assert_eq!(index_rows, 0);
         }
 
-        let backfill_schema = KvSchema::unprefixed(client.clone())
+        let backfill_schema = KvSchema::from_prefixed(PrefixedStoreClient::empty(client.clone()))
             .table(
                 "orders",
                 vec![
@@ -5024,7 +5026,7 @@ mod tests {
         let (base_url, shutdown_tx) = spawn_mock_server(state.clone()).await;
         let client = StoreClient::new(&base_url);
 
-        let seed_schema = KvSchema::unprefixed(client.clone())
+        let seed_schema = KvSchema::from_prefixed(PrefixedStoreClient::empty(client.clone()))
             .table(
                 "points",
                 vec![
@@ -5053,7 +5055,7 @@ mod tests {
         }
         writer.flush().await.expect("seed flush");
 
-        let backfill_schema = KvSchema::unprefixed(client.clone())
+        let backfill_schema = KvSchema::from_prefixed(PrefixedStoreClient::empty(client.clone()))
             .table(
                 "points",
                 vec![
@@ -5326,7 +5328,7 @@ mod tests {
         let (base_url, shutdown_tx) = spawn_mock_server(state.clone()).await;
         let client = StoreClient::new(&base_url);
 
-        let seed_schema = KvSchema::unprefixed(client.clone())
+        let seed_schema = KvSchema::from_prefixed(PrefixedStoreClient::empty(client.clone()))
             .table(
                 "orders",
                 vec![
@@ -5353,7 +5355,7 @@ mod tests {
         }
         writer.flush().await.expect("seed flush");
 
-        let backfill_schema = KvSchema::unprefixed(client.clone())
+        let backfill_schema = KvSchema::from_prefixed(PrefixedStoreClient::empty(client.clone()))
             .table(
                 "orders",
                 vec![
@@ -5440,7 +5442,7 @@ mod tests {
         let (base_url, shutdown_tx) = spawn_mock_server(state.clone()).await;
         let client = StoreClient::new(&base_url);
 
-        let schema = KvSchema::unprefixed(client.clone())
+        let schema = KvSchema::from_prefixed(PrefixedStoreClient::empty(client.clone()))
             .table(
                 "orders",
                 vec![
@@ -5507,7 +5509,7 @@ mod tests {
         let (base_url, shutdown_tx) = spawn_mock_server(state.clone()).await;
         let client = StoreClient::new(&base_url);
 
-        let schema = KvSchema::unprefixed(client.clone())
+        let schema = KvSchema::from_prefixed(PrefixedStoreClient::empty(client.clone()))
             .table(
                 "orders",
                 vec![
@@ -5668,7 +5670,7 @@ mod tests {
         let (base_url, shutdown_tx) = spawn_mock_server(state.clone()).await;
         let client = StoreClient::new(&base_url);
 
-        let seed_schema = KvSchema::unprefixed(client.clone())
+        let seed_schema = KvSchema::from_prefixed(PrefixedStoreClient::empty(client.clone()))
             .table(
                 "orders",
                 vec![
@@ -5695,7 +5697,7 @@ mod tests {
         }
         writer.flush().await.expect("seed flush");
 
-        let backfill_schema = KvSchema::unprefixed(client.clone())
+        let backfill_schema = KvSchema::from_prefixed(PrefixedStoreClient::empty(client.clone()))
             .table(
                 "orders",
                 vec![
@@ -5708,7 +5710,7 @@ mod tests {
             )
             .expect("backfill schema");
 
-        let task_schema = KvSchema::unprefixed(client.clone())
+        let task_schema = KvSchema::from_prefixed(PrefixedStoreClient::empty(client.clone()))
             .table(
                 "orders",
                 vec![
@@ -5788,7 +5790,7 @@ mod tests {
         let (base_url, shutdown_tx) = spawn_mock_server(state.clone()).await;
         let client = StoreClient::new(&base_url);
 
-        let seed_schema = KvSchema::unprefixed(client.clone())
+        let seed_schema = KvSchema::from_prefixed(PrefixedStoreClient::empty(client.clone()))
             .table(
                 "orders",
                 vec![
@@ -5815,7 +5817,7 @@ mod tests {
         }
         seed_writer.flush().await.expect("seed flush");
 
-        let backfill_schema = KvSchema::unprefixed(client.clone())
+        let backfill_schema = KvSchema::from_prefixed(PrefixedStoreClient::empty(client.clone()))
             .table(
                 "orders",
                 vec![
@@ -5830,7 +5832,7 @@ mod tests {
             )
             .expect("backfill schema");
 
-        let task_schema = KvSchema::unprefixed(client.clone())
+        let task_schema = KvSchema::from_prefixed(PrefixedStoreClient::empty(client.clone()))
             .table(
                 "orders",
                 vec![
@@ -6174,7 +6176,7 @@ mod tests {
 
         let client = StoreClient::new(&url);
         let scan = KvScanExec::new(
-            client,
+            PrefixedStoreClient::empty(client),
             model.clone(),
             Arc::new(Vec::new()),
             QueryPredicate::default(),
@@ -6253,7 +6255,7 @@ mod tests {
         });
 
         let client = StoreClient::new(&url);
-        let schema = KvSchema::unprefixed(client)
+        let schema = KvSchema::from_prefixed(PrefixedStoreClient::empty(client))
             .table(
                 "items",
                 vec![TableColumnConfig::new("id", DataType::Int64, false)],
@@ -6290,7 +6292,7 @@ mod tests {
     fn kv_scan_physical_limit_pushdown_sets_leaf_fetch() {
         let model = Arc::new(simple_int64_model(0));
         let scan = Arc::new(KvScanExec::new(
-            StoreClient::new("http://127.0.0.1:0"),
+            PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:0")),
             model.clone(),
             Arc::new(Vec::new()),
             QueryPredicate::default(),
@@ -6386,7 +6388,7 @@ mod tests {
         });
 
         let client = StoreClient::new(&url);
-        let schema = KvSchema::unprefixed(client)
+        let schema = KvSchema::from_prefixed(PrefixedStoreClient::empty(client))
             .table(
                 "tx_activity",
                 vec![
@@ -6903,7 +6905,7 @@ mod tests {
         });
 
         let client = StoreClient::new(&url);
-        let schema = KvSchema::unprefixed(client)
+        let schema = KvSchema::from_prefixed(PrefixedStoreClient::empty(client))
             .table(
                 "orders",
                 vec![

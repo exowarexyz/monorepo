@@ -74,33 +74,26 @@ impl PreparedUpload {
 /// - finalized `{ proof, header }` bytes by header height
 #[derive(Clone, Debug)]
 pub struct SimplexClient {
-    client: StoreClient,
+    client: PrefixedStoreClient,
 }
 
 impl SimplexClient {
     /// Build a client over the canonical [`Namespace::Simplex`] keyspace — the
-    /// safe default when the Store is co-tenanted with SQL/QMDB. Use
-    /// [`Self::unprefixed`] only for a Store simplex owns exclusively.
+    /// safe default when the Store is co-tenanted with SQL/QMDB.
     pub fn new(client: StoreClient) -> Self {
-        Self::prefixed(client.for_namespace(Namespace::Simplex))
+        Self::from_prefixed(client.for_namespace(Namespace::Simplex))
     }
 
     /// Build a client over a caller-chosen namespace.
-    pub fn prefixed(client: PrefixedStoreClient) -> Self {
-        Self::unprefixed(client.into_client())
-    }
-
-    /// Build a client over a raw, un-namespaced client — escape hatch for a
-    /// Store simplex owns exclusively.
-    pub fn unprefixed(client: StoreClient) -> Self {
+    pub fn from_prefixed(client: PrefixedStoreClient) -> Self {
         Self { client }
     }
 
-    pub fn store_client(&self) -> &StoreClient {
+    pub fn store_client(&self) -> &PrefixedStoreClient {
         &self.client
     }
 
-    pub fn into_store_client(self) -> StoreClient {
+    pub fn into_store_client(self) -> PrefixedStoreClient {
         self.client
     }
 

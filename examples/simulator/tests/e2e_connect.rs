@@ -14,12 +14,12 @@ use exoware_sdk::kv_codec::{
 use exoware_sdk::prune_policy;
 use exoware_sdk::selector::Selector as DomainSelector;
 use exoware_sdk::{
-    connect_compression_registry, PreferZstdHttpClient, RangeMode, RangeReduceOp,
-    RangeReduceRequest, RangeReducerSpec, RetryConfig, StoreClient,
+    connect_compression_registry, PreferZstdHttpClient, PrefixedStoreClient, RangeMode,
+    RangeReduceOp, RangeReduceRequest, RangeReducerSpec, RetryConfig, StoreClient,
 };
 use tempfile::tempdir;
 
-async fn spawn_client() -> (tokio::task::JoinHandle<()>, StoreClient, String) {
+async fn spawn_client() -> (tokio::task::JoinHandle<()>, PrefixedStoreClient, String) {
     let dir = tempdir().expect("tempdir");
     let dir_path = dir.path().to_owned();
     let _dir = dir;
@@ -31,7 +31,7 @@ async fn spawn_client() -> (tokio::task::JoinHandle<()>, StoreClient, String) {
         .retry_config(RetryConfig::disabled())
         .build()
         .expect("build client");
-    (handle, client, url)
+    (handle, PrefixedStoreClient::empty(client), url)
 }
 
 fn key(b: &[u8]) -> Key {
@@ -333,7 +333,7 @@ async fn create_session_with_sequence_reads_at_or_above_floor() {
 #[tokio::test]
 async fn health_endpoint() {
     let (_h, client, _url) = spawn_client().await;
-    assert!(client.health().await.expect("health"));
+    assert!(client.client().health().await.expect("health"));
 }
 
 // -- batch put multiple keys --

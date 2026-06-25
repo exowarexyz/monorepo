@@ -32,7 +32,7 @@ pub struct KeylessClient<
 > where
     keyless::Operation<F, E>: CodecRead,
 {
-    client: StoreClient,
+    client: PrefixedStoreClient,
     op_cfg: <keyless::Operation<F, E> as CodecRead>::Cfg,
     _marker: PhantomData<(F, H, E)>,
 }
@@ -77,14 +77,6 @@ where
         client: PrefixedStoreClient,
         op_cfg: <keyless::Operation<F, E> as CodecRead>::Cfg,
     ) -> Self {
-        Self::from_unprefixed(client.into_client(), op_cfg)
-    }
-
-    /// Read client over a raw, un-namespaced client.
-    pub fn from_unprefixed(
-        client: StoreClient,
-        op_cfg: <keyless::Operation<F, E> as CodecRead>::Cfg,
-    ) -> Self {
         Self {
             client,
             op_cfg,
@@ -92,7 +84,7 @@ where
         }
     }
 
-    pub(crate) fn store_client(&self) -> &StoreClient {
+    pub(crate) fn store_client(&self) -> &PrefixedStoreClient {
         &self.client
     }
 

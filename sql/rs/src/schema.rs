@@ -26,7 +26,7 @@ use crate::writer::*;
 pub(crate) fn register_kv_table(
     ctx: &SessionContext,
     table_name: &str,
-    client: StoreClient,
+    client: PrefixedStoreClient,
     config: KvTableConfig,
 ) -> DataFusionResult<()> {
     let table = Arc::new(
@@ -38,7 +38,7 @@ pub(crate) fn register_kv_table(
 }
 
 pub struct KvSchema {
-    client: StoreClient,
+    client: PrefixedStoreClient,
     tables: Vec<(String, KvTableConfig)>,
     next_prefix: u8,
 }
@@ -46,22 +46,15 @@ pub struct KvSchema {
 impl KvSchema {
     /// Build a schema over the canonical [`Namespace::Sql`] keyspace — the safe
     /// default when the Store is co-tenanted with simplex/qmdb, so SQL's
-    /// prefix-bounded scans can't observe foreign keys. Use [`Self::unprefixed`]
-    /// only for a Store SQL owns exclusively.
+    /// prefix-bounded scans can't observe another namespace's keys.
     pub fn new(client: StoreClient) -> Self {
-        Self::prefixed(client.for_namespace(Namespace::Sql))
+        Self::from_prefixed(client.for_namespace(Namespace::Sql))
     }
 
     /// Build a schema over a caller-chosen namespace (e.g. multiple `KvSchema`
     /// instances in one Store). The caller must pick a slot disjoint from every
     /// co-tenant.
-    pub fn prefixed(client: PrefixedStoreClient) -> Self {
-        Self::unprefixed(client.into_client())
-    }
-
-    /// Build a schema over a raw, un-namespaced client — escape hatch for a
-    /// single-tenant Store. `grep` for `unprefixed` to audit such call sites.
-    pub fn unprefixed(client: StoreClient) -> Self {
+    pub fn from_prefixed(client: PrefixedStoreClient) -> Self {
         Self {
             client,
             tables: Vec::new(),
@@ -137,7 +130,7 @@ impl KvSchema {
         self.tables.len()
     }
 
-    pub(crate) fn client(&self) -> &StoreClient {
+    pub(crate) fn client(&self) -> &PrefixedStoreClient {
         &self.client
     }
 

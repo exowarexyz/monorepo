@@ -160,7 +160,7 @@ trait OperationLogBackend: Clone + Send + Sync + 'static {
     /// ops have no logical key).
     const REJECTS_KEY_FILTERS: bool = false;
 
-    fn store_client(&self) -> &exoware_sdk::StoreClient;
+    fn store_client(&self) -> &exoware_sdk::PrefixedStoreClient;
     fn classify_and_filter(
         &self,
     ) -> (
@@ -247,7 +247,7 @@ where
     type Family = F;
     type Digest = H::Digest;
 
-    fn store_client(&self) -> &exoware_sdk::StoreClient {
+    fn store_client(&self) -> &exoware_sdk::PrefixedStoreClient {
         OrderedClient::store_client(self)
     }
 
@@ -301,7 +301,7 @@ where
     type Family = F;
     type Digest = H::Digest;
 
-    fn store_client(&self) -> &exoware_sdk::StoreClient {
+    fn store_client(&self) -> &exoware_sdk::PrefixedStoreClient {
         UnorderedClient::store_client(self)
     }
 
@@ -362,7 +362,7 @@ where
     type Family = F;
     type Digest = H::Digest;
 
-    fn store_client(&self) -> &exoware_sdk::StoreClient {
+    fn store_client(&self) -> &exoware_sdk::PrefixedStoreClient {
         ImmutableClient::store_client(self)
     }
 
@@ -416,7 +416,7 @@ where
     type Digest = H::Digest;
     const REJECTS_KEY_FILTERS: bool = true;
 
-    fn store_client(&self) -> &exoware_sdk::StoreClient {
+    fn store_client(&self) -> &exoware_sdk::PrefixedStoreClient {
         KeylessClient::store_client(self)
     }
 

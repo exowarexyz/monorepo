@@ -431,7 +431,7 @@ async fn build_fixed_local_batch() -> FixedLocalBatch {
 
 async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
     let writer: UnorderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>> =
-        UnorderedWriter::empty(client.clone());
+        UnorderedWriter::fresh(client.clone());
     common::commit_unordered_upload(client, &writer, &batch.operations)
         .await
         .expect("commit upload");
@@ -439,7 +439,7 @@ async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
 
 async fn commit_mmb_upload(client: &StoreClient, batch: &MmbLocalBatch) {
     let writer: UnorderedWriter<mmb::Family, Sha256, Vec<u8>, Vec<u8>> =
-        UnorderedWriter::empty(client.clone());
+        UnorderedWriter::fresh(client.clone());
     common::commit_unordered_upload(client, &writer, &batch.operations)
         .await
         .expect("commit upload");
@@ -447,7 +447,7 @@ async fn commit_mmb_upload(client: &StoreClient, batch: &MmbLocalBatch) {
 
 async fn commit_fixed_upload(client: &StoreClient, batch: &FixedLocalBatch) {
     let writer: UnorderedWriter<mmr::Family, Sha256, Digest, Vec<u8>> =
-        UnorderedWriter::empty(client.clone());
+        UnorderedWriter::fresh(client.clone());
     common::commit_unordered_current_upload::<_, _, _, _, N, _>(
         client,
         &writer,

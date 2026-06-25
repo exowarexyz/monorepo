@@ -48,7 +48,7 @@ async fn mirror_keyless_from_local() {
         b"gamma".to_vec(),
     ]])
     .await;
-    let writer: KeylessWriter<mmr::Family, Sha256, Vec<u8>> = KeylessWriter::empty(client.clone());
+    let writer: KeylessWriter<mmr::Family, Sha256, Vec<u8>> = KeylessWriter::fresh(client.clone());
     common::commit_keyless_upload(&client, &writer, &ops1)
         .await
         .expect("upload 1");
@@ -150,7 +150,7 @@ async fn mirror_unordered_from_local() {
     ]])
     .await;
     let writer: UnorderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>> =
-        UnorderedWriter::empty(client.clone());
+        UnorderedWriter::fresh(client.clone());
     common::commit_unordered_upload(&client, &writer, &ops1)
         .await
         .expect("upload 1");
@@ -271,7 +271,7 @@ async fn mirror_immutable_from_local() {
     ]])
     .await;
     let writer: ImmutableWriter<mmr::Family, Sha256, ImmK, Vec<u8>> =
-        ImmutableWriter::empty(client.clone());
+        ImmutableWriter::fresh(client.clone());
     common::commit_immutable_upload(&client, &writer, &ops1)
         .await
         .expect("upload 1");
@@ -435,7 +435,7 @@ async fn mirror_ordered_from_local() {
     )
     .await;
     let writer: OrderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
-        OrderedWriter::empty(client.clone());
+        OrderedWriter::fresh(client.clone());
     common::commit_ordered_upload(&client, &writer, &ops1, &boundary1)
         .await
         .expect("upload 1");

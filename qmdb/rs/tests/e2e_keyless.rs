@@ -47,7 +47,7 @@ fn fresh_keyless<F: Graftable>(c: StoreClient) -> TestKeylessClient<F> {
 }
 
 fn fresh_writer<F: Family>(c: StoreClient) -> TestKeylessWriter<F> {
-    TestKeylessWriter::empty(c)
+    TestKeylessWriter::fresh(c)
 }
 
 fn fresh_fixed_keyless<F: Graftable>(c: StoreClient) -> FixedTestKeylessClient<F>
@@ -58,7 +58,7 @@ where
 }
 
 fn fresh_fixed_writer<F: Family>(c: StoreClient) -> FixedTestKeylessWriter<F> {
-    FixedTestKeylessWriter::empty(c)
+    FixedTestKeylessWriter::fresh(c)
 }
 
 struct LocalReference<F: Family> {

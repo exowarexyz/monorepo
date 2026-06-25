@@ -236,7 +236,7 @@ async fn mirror_ordered_prune_past_chunk_zero() {
     // `load_bitmap_chunk` must fold that bit to 0 for the root recomputation
     // to match.
     let writer: OrderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
-        OrderedWriter::empty(client.clone());
+        OrderedWriter::fresh(client.clone());
     let reader: OrderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
         OrderedClient::from_client(
             client.clone(),

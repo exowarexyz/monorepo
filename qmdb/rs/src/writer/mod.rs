@@ -33,7 +33,7 @@ pub use unordered::{build_unordered_upload, BuiltUnorderedUpload, UnorderedWrite
 use std::borrow::Borrow;
 
 use commonware_storage::merkle::{Family, Location};
-use exoware_sdk::{keys::Key, IntoStoreWriteValue, StoreClient, StoreWriteBatch};
+use exoware_sdk::{keys::Key, IntoStoreWriteValue, PrefixedStoreClient, StoreWriteBatch};
 
 use crate::{PublishedCheckpoint, QmdbError, UploadReceipt};
 
@@ -86,7 +86,7 @@ impl<F: Family> PreparedWatermark<F> {
 }
 
 pub(crate) fn stage_rows<I, K, V>(
-    client: &StoreClient,
+    client: &PrefixedStoreClient,
     batch: &mut StoreWriteBatch,
     rows: I,
 ) -> Result<(), QmdbError>
@@ -105,7 +105,7 @@ where
 }
 
 pub(crate) fn stage_watermark(
-    client: &StoreClient,
+    client: &PrefixedStoreClient,
     batch: &mut StoreWriteBatch,
     watermark: &PreparedWatermark<impl Family>,
 ) -> Result<(), QmdbError> {

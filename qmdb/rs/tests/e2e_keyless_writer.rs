@@ -32,7 +32,7 @@ fn fresh_reader(c: StoreClient) -> TestKeylessClient {
 }
 
 fn fresh_writer(c: StoreClient) -> TestKeylessWriter {
-    TestKeylessWriter::empty(c)
+    TestKeylessWriter::fresh(c)
 }
 
 /// Reference Commonware keyless DB fed the same ops the writer will upload.

@@ -126,7 +126,7 @@ async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
         commonware_cryptography::Sha256,
         FixedBytes<32>,
         Vec<u8>,
-    > = ImmutableWriter::empty(client.clone());
+    > = ImmutableWriter::fresh(client.clone());
     common::commit_immutable_upload(client, &writer, &batch.operations)
         .await
         .expect("commit upload");

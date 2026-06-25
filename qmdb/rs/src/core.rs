@@ -12,7 +12,7 @@ use commonware_storage::qmdb::{
     operation::Key as QmdbKey,
 };
 use exoware_sdk::keys::Key;
-use exoware_sdk::{ClientError, RangeMode, SerializableReadSession, StoreClient};
+use exoware_sdk::{ClientError, PrefixedStoreClient, RangeMode, SerializableReadSession};
 
 use crate::codec::{
     decode_digest, decode_operation_location_key, decode_update_location,
@@ -76,7 +76,7 @@ where
 
 #[derive(Clone, Debug)]
 pub(crate) struct HistoricalOpsClientCore<'a, F: Family, D: Digest, K: Codec, V: Codec> {
-    pub(crate) client: &'a StoreClient,
+    pub(crate) client: &'a PrefixedStoreClient,
     pub(crate) _marker: PhantomData<(F, D, K, V)>,
 }
 

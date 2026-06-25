@@ -37,7 +37,7 @@ pub struct ImmutableClient<
 > where
     immutable::Operation<F, K, E>: CodecRead,
 {
-    client: StoreClient,
+    client: PrefixedStoreClient,
     operation_cfg: <immutable::Operation<F, K, E> as CodecRead>::Cfg,
     _marker: PhantomData<(F, H, K, E)>,
 }
@@ -86,14 +86,6 @@ where
         client: PrefixedStoreClient,
         operation_cfg: <immutable::Operation<F, K, E> as CodecRead>::Cfg,
     ) -> Self {
-        Self::from_unprefixed(client.into_client(), operation_cfg)
-    }
-
-    /// Read client over a raw, un-namespaced client.
-    pub fn from_unprefixed(
-        client: StoreClient,
-        operation_cfg: <immutable::Operation<F, K, E> as CodecRead>::Cfg,
-    ) -> Self {
         Self {
             client,
             operation_cfg,
@@ -101,7 +93,7 @@ where
         }
     }
 
-    pub(crate) fn store_client(&self) -> &StoreClient {
+    pub(crate) fn store_client(&self) -> &PrefixedStoreClient {
         &self.client
     }
 

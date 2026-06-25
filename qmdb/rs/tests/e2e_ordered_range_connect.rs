@@ -478,7 +478,7 @@ async fn build_mmb_growing_local_batch() -> MmbGrowingLocalBatch {
 
 async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
     let writer: OrderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
-        OrderedWriter::empty(client.clone());
+        OrderedWriter::fresh(client.clone());
     common::commit_ordered_upload(client, &writer, &batch.operations, &batch.current_boundary)
         .await
         .expect("commit upload");
@@ -486,7 +486,7 @@ async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
 
 async fn commit_mmb_upload(client: &StoreClient, batch: &MmbLocalBatch) {
     let writer: OrderedWriter<mmb::Family, Sha256, Vec<u8>, Vec<u8>, N> =
-        OrderedWriter::empty(client.clone());
+        OrderedWriter::fresh(client.clone());
     common::commit_ordered_upload(client, &writer, &batch.operations, &batch.current_boundary)
         .await
         .expect("commit upload");

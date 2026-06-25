@@ -20,7 +20,7 @@ use datafusion::physical_plan::{
 };
 use exoware_sdk::keys::Key;
 use exoware_sdk::kv_codec::decode_stored_row;
-use exoware_sdk::StoreClient;
+use exoware_sdk::PrefixedStoreClient;
 use exoware_sdk::{RangeMode, RangeStream, SerializableReadSession};
 use futures::SinkExt;
 
@@ -48,7 +48,7 @@ impl ScanDirection {
 
 #[derive(Debug, Clone)]
 pub(crate) struct KvScanExec {
-    pub(crate) client: StoreClient,
+    pub(crate) client: PrefixedStoreClient,
     pub(crate) model: Arc<TableModel>,
     pub(crate) index_specs: Arc<Vec<ResolvedIndexSpec>>,
     pub(crate) predicate: QueryPredicate,
@@ -79,7 +79,7 @@ impl KvScanExec {
     }
 
     pub(crate) fn new(
-        client: StoreClient,
+        client: PrefixedStoreClient,
         model: Arc<TableModel>,
         index_specs: Arc<Vec<ResolvedIndexSpec>>,
         predicate: QueryPredicate,

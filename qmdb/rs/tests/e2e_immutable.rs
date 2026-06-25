@@ -71,11 +71,11 @@ type FixedTestImmutableWriter = ImmutableWriter<
 >;
 
 fn fresh_writer(c: StoreClient) -> TestImmutableWriter {
-    TestImmutableWriter::empty(c)
+    TestImmutableWriter::fresh(c)
 }
 
 fn fresh_fixed_writer(c: StoreClient) -> FixedTestImmutableWriter {
-    FixedTestImmutableWriter::empty(c)
+    FixedTestImmutableWriter::fresh(c)
 }
 
 struct LocalReference {

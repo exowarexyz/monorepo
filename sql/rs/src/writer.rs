@@ -22,7 +22,7 @@ use exoware_sdk::keys::Key;
 #[cfg(test)]
 use exoware_sdk::kv_codec::decode_stored_row;
 use exoware_sdk::kv_codec::{StoredRow, StoredValue};
-use exoware_sdk::{StoreBatchUpload, StoreClient, StoreWriteBatch};
+use exoware_sdk::{PrefixedStoreClient, StoreBatchUpload, StoreWriteBatch};
 use futures::{future::BoxFuture, TryStreamExt};
 
 use crate::builder::archived_non_pk_value_is_valid;
@@ -61,7 +61,7 @@ impl TableWriter {
 
 #[derive(Debug)]
 pub struct BatchWriter {
-    client: StoreClient,
+    client: PrefixedStoreClient,
     tables: HashMap<String, TableWriter>,
     next_request_id: u64,
     failed_prepared: Mutex<Vec<PreparedBatch>>,
@@ -100,7 +100,10 @@ pub struct BatchReceipt {
 }
 
 impl BatchWriter {
-    pub(crate) fn new(client: StoreClient, table_configs: &[(String, KvTableConfig)]) -> Self {
+    pub(crate) fn new(
+        client: PrefixedStoreClient,
+        table_configs: &[(String, KvTableConfig)],
+    ) -> Self {
         let mut tables = HashMap::new();
         for (name, config) in table_configs {
             let model = Arc::new(
@@ -276,7 +279,7 @@ impl StoreBatchUpload for BatchWriter {
 
 #[derive(Debug)]
 pub(crate) struct KvIngestSink {
-    pub(crate) client: StoreClient,
+    pub(crate) client: PrefixedStoreClient,
     pub(crate) schema: SchemaRef,
     pub(crate) model: Arc<TableModel>,
     pub(crate) index_specs: Arc<Vec<ResolvedIndexSpec>>,
@@ -284,7 +287,7 @@ pub(crate) struct KvIngestSink {
 
 impl KvIngestSink {
     pub(crate) fn new(
-        client: StoreClient,
+        client: PrefixedStoreClient,
         schema: SchemaRef,
         model: Arc<TableModel>,
         index_specs: Arc<Vec<ResolvedIndexSpec>>,
@@ -950,7 +953,7 @@ pub(crate) fn list_value_at(
 }
 
 pub(crate) async fn flush_ingest_batch(
-    client: &StoreClient,
+    client: &PrefixedStoreClient,
     keys: &mut Vec<Key>,
     values: &mut Vec<Bytes>,
 ) -> DataFusionResult<u64> {
@@ -975,12 +978,16 @@ pub(crate) async fn flush_ingest_batch(
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
+    use exoware_sdk::StoreClient;
 
     use super::*;
 
     #[test]
     fn store_batch_upload_stage_preserves_rows_for_failed_retry() {
-        let writer = BatchWriter::new(StoreClient::new("http://127.0.0.1:1"), &[]);
+        let writer = BatchWriter::new(
+            PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:1")),
+            &[],
+        );
         let mut prepared = PreparedBatch {
             request_id: 7,
             entry_count: 2,

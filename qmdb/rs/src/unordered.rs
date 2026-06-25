@@ -91,7 +91,7 @@ pub struct UnorderedClient<
 > where
     unordered::Operation<F, K, E>: commonware_codec::Read,
 {
-    client: StoreClient,
+    client: PrefixedStoreClient,
     op_cfg: <unordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
     _marker: PhantomData<(F, H, K, E)>,
 }
@@ -185,14 +185,6 @@ where
         client: PrefixedStoreClient,
         op_cfg: <unordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
     ) -> Self {
-        Self::from_unprefixed(client.into_client(), op_cfg)
-    }
-
-    /// Read client over a raw, un-namespaced client.
-    pub fn from_unprefixed(
-        client: StoreClient,
-        op_cfg: <unordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
-    ) -> Self {
         Self {
             client,
             op_cfg,
@@ -200,7 +192,7 @@ where
         }
     }
 
-    pub(crate) fn store_client(&self) -> &StoreClient {
+    pub(crate) fn store_client(&self) -> &PrefixedStoreClient {
         &self.client
     }
 

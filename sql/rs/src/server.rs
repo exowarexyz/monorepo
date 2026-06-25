@@ -44,7 +44,7 @@ use exoware_sdk::keys::Key;
 use exoware_sdk::kv_codec::{decode_stored_row, Utf8};
 use exoware_sdk::selector::Selector;
 use exoware_sdk::stream_filter::StreamFilter;
-use exoware_sdk::{StoreClient, StreamSubscription};
+use exoware_sdk::{PrefixedStoreClient, StreamSubscription};
 use futures::future::BoxFuture;
 use futures::stream::Stream;
 use futures::FutureExt;
@@ -131,7 +131,7 @@ pub struct SqlServer {
     // Registration order, preserved for the `Tables` RPC so clients see
     // tables in the same order the operator declared them.
     table_names: Vec<String>,
-    store: StoreClient,
+    store: PrefixedStoreClient,
 }
 
 impl SqlServer {

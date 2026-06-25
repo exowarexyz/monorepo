@@ -107,7 +107,7 @@ where
     BatchOperation<F>:
         commonware_codec::Codec + commonware_codec::Encode + commonware_codec::Decode,
 {
-    let writer: TestOrderedWriter<F> = TestOrderedWriter::empty(client.clone());
+    let writer: TestOrderedWriter<F> = TestOrderedWriter::fresh(client.clone());
     common::commit_ordered_upload(client, &writer, &local.operations, &local.current_boundary)
         .await
         .expect("commit upload");
@@ -559,7 +559,7 @@ async fn ordered_mmb_multi_peak_grafted_chunk_round_trip() {
     );
 
     let writer: OrderedWriter<mmb::Family, Sha256, Vec<u8>, Vec<u8>, N> =
-        OrderedWriter::empty(client.clone());
+        OrderedWriter::fresh(client.clone());
     common::commit_ordered_upload(&client, &writer, &local.operations, &local.current_boundary)
         .await
         .expect("commit upload");
@@ -682,7 +682,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
         .await
         .expect("join");
 
-    let writer: TestOrderedWriter<F> = TestOrderedWriter::empty(client.clone());
+    let writer: TestOrderedWriter<F> = TestOrderedWriter::fresh(client.clone());
     for (delta, boundary) in &uploads {
         common::commit_ordered_upload(&client, &writer, delta, boundary)
             .await
@@ -775,7 +775,7 @@ async fn ordered_mmb_persistent_interleaved_seed_batches_keep_current_proofs_ver
                     let mut db: LocalDb<mmb::Family> = LocalQmdbDb::init(context.child("db"), cfg)
                         .await
                         .expect("init");
-                    let writer = TestOrderedWriter::<mmb::Family>::empty(store.clone());
+                    let writer = TestOrderedWriter::<mmb::Family>::fresh(store.clone());
                     let mut previous_ops = Vec::<BatchOperation<mmb::Family>>::new();
                     let mut counter = 0u64;
 
@@ -875,7 +875,7 @@ async fn ordered_fixed_round_trip() {
     let (_dir, _server, client) = common::local_store_client().await;
     let local = build_fixed_local_db::<mmr::Family>().await;
 
-    let writer: FixedTestOrderedWriter<mmr::Family> = FixedTestOrderedWriter::empty(client.clone());
+    let writer: FixedTestOrderedWriter<mmr::Family> = FixedTestOrderedWriter::fresh(client.clone());
     common::commit_ordered_upload(&client, &writer, &local.operations, &local.current_boundary)
         .await
         .expect("commit fixed upload");
