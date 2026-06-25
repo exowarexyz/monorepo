@@ -2415,7 +2415,7 @@ impl<'a> Stream<'a> {
         let match_keys = filter
             .match_keys
             .into_iter()
-            .map(|mk| exoware_proto::common::v1::MatchKey {
+            .map(|mk| exoware_proto::common::kv::v1::MatchKey {
                 reserved_bits: u32::from(mk.reserved_bits),
                 prefix: u32::from(mk.prefix),
                 payload_regex: mk.payload_regex.0,
@@ -2427,13 +2427,13 @@ impl<'a> Stream<'a> {
             .into_iter()
             .map(|vf| {
                 use crate::stream_filter::BytesFilter;
-                use exoware_proto::common::v1::bytes_filter::Kind as ProtoKind;
+                use exoware_proto::common::kv::v1::bytes_filter::Kind as ProtoKind;
                 let kind = match vf {
                     BytesFilter::Exact(bytes) => ProtoKind::Exact(bytes),
                     BytesFilter::Prefix(bytes) => ProtoKind::Prefix(bytes),
                     BytesFilter::Regex(pattern) => ProtoKind::Regex(pattern),
                 };
-                exoware_proto::common::v1::BytesFilter {
+                exoware_proto::common::kv::v1::BytesFilter {
                     kind: Some(kind),
                     ..Default::default()
                 }

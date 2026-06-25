@@ -34,7 +34,7 @@ use exoware_proto::{
     with_error_info_detail, with_query_detail, with_retry_info_detail, RangeTraversalDirection,
 };
 use exoware_sdk as exoware_proto;
-use exoware_sdk::common::v1::bytes_filter::KindView as ProtoBytesFilterKindView;
+use exoware_sdk::common::kv::v1::bytes_filter::KindView as ProtoBytesFilterKindView;
 use exoware_sdk::keys::Key;
 use exoware_sdk::match_key::MatchKey;
 use futures::{stream as stream_util, Stream};
@@ -1230,7 +1230,7 @@ mod tests {
     use std::time::Duration;
 
     use buffa::Message;
-    use exoware_proto::common::v1::MatchKey as ProtoMatchKey;
+    use exoware_proto::common::kv::v1::MatchKey as ProtoMatchKey;
     use exoware_proto::log::stream::v1::{SubscribeRequest, SubscribeRequestView};
     use exoware_proto::store::compact::v1::{
         policy, policy_retain, Policy as ProtoPolicy, PolicyRetain, PruneRequest, PruneRequestView,

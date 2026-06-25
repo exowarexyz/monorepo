@@ -9,8 +9,8 @@ import {
     BytesFilterSchema,
     KvEntrySchema,
     MatchKeySchema,
-} from './gen/ts/common/v1/common_pb.js';
-import type { MatchKey } from './gen/ts/common/v1/common_pb.js';
+} from './gen/ts/common/kv/v1/kv_pb.js';
+import type { MatchKey } from './gen/ts/common/kv/v1/kv_pb.js';
 import { ErrorInfoSchema } from './gen/ts/google/rpc/error_details_pb.js';
 import { PutRequestSchema } from './gen/ts/log/v1/ingest_pb.js';
 import {

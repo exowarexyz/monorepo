@@ -97,8 +97,8 @@ export type {
     PruneRequest,
     PruneResponse,
 } from './gen/ts/store/v1/compact_pb.js';
-export { BytesFilterSchema, KvEntrySchema, MatchKeySchema } from './gen/ts/common/v1/common_pb.js';
-export type { BytesFilter, KvEntry, MatchKey } from './gen/ts/common/v1/common_pb.js';
+export { BytesFilterSchema, KvEntrySchema, MatchKeySchema } from './gen/ts/common/kv/v1/kv_pb.js';
+export type { BytesFilter, KvEntry, MatchKey } from './gen/ts/common/kv/v1/kv_pb.js';
 export {
     SubscribeRequestSchema,
     SubscribeResponseSchema,

@@ -3,7 +3,7 @@
 //! Parsing checks only protobuf shape and numeric width conversions. Call the
 //! validation helpers on the parsed output before applying policy effects.
 
-use crate::common::v1::MatchKey as ProtoMatchKey;
+use crate::common::kv::v1::MatchKey as ProtoMatchKey;
 use crate::kv_codec::Utf8;
 use crate::match_key::MatchKey;
 use crate::prune_policy::{

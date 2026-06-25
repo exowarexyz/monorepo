@@ -5,15 +5,15 @@
 import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv1";
 import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv1";
 import { file_buf_validate_validate } from "../../buf/validate/validate_pb.js";
-import type { BytesFilter, KvEntry, MatchKey } from "../../common/v1/common_pb.js";
-import { file_common_v1_common } from "../../common/v1/common_pb.js";
+import type { BytesFilter, KvEntry, MatchKey } from "../../common/kv/v1/kv_pb.js";
+import { file_common_kv_v1_kv } from "../../common/kv/v1/kv_pb.js";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
  * Describes the file log/v1/stream.proto.
  */
 export const file_log_v1_stream: GenFile = /*@__PURE__*/
-  fileDesc("ChNsb2cvdjEvc3RyZWFtLnByb3RvEg1sb2cuc3RyZWFtLnYxIr4BChBTdWJzY3JpYmVSZXF1ZXN0EjMKCm1hdGNoX2tleXMYASADKAsyEy5jb21tb24udjEuTWF0Y2hLZXlCCrpIB5IBBAgBEBASNwoNdmFsdWVfZmlsdGVycxgCIAMoCzIWLmNvbW1vbi52MS5CeXRlc0ZpbHRlckIIukgFkgECEBASIgoVc2luY2Vfc2VxdWVuY2VfbnVtYmVyGAMgASgESACIAQFCGAoWX3NpbmNlX3NlcXVlbmNlX251bWJlciIlCgpHZXRSZXF1ZXN0EhcKD3NlcXVlbmNlX251bWJlchgBIAEoBCJRChFTdWJzY3JpYmVSZXNwb25zZRIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQSIwoHZW50cmllcxgCIAMoCzISLmNvbW1vbi52MS5LdkVudHJ5IksKC0dldFJlc3BvbnNlEhcKD3NlcXVlbmNlX251bWJlchgBIAEoBBIjCgdlbnRyaWVzGAIgAygLMhIuY29tbW9uLnYxLkt2RW50cnkymQEKB1NlcnZpY2USUAoJU3Vic2NyaWJlEh8ubG9nLnN0cmVhbS52MS5TdWJzY3JpYmVSZXF1ZXN0GiAubG9nLnN0cmVhbS52MS5TdWJzY3JpYmVSZXNwb25zZTABEjwKA0dldBIZLmxvZy5zdHJlYW0udjEuR2V0UmVxdWVzdBoaLmxvZy5zdHJlYW0udjEuR2V0UmVzcG9uc2ViBnByb3RvMw", [file_buf_validate_validate, file_common_v1_common]);
+  fileDesc("ChNsb2cvdjEvc3RyZWFtLnByb3RvEg1sb2cuc3RyZWFtLnYxIsQBChBTdWJzY3JpYmVSZXF1ZXN0EjYKCm1hdGNoX2tleXMYASADKAsyFi5jb21tb24ua3YudjEuTWF0Y2hLZXlCCrpIB5IBBAgBEBASOgoNdmFsdWVfZmlsdGVycxgCIAMoCzIZLmNvbW1vbi5rdi52MS5CeXRlc0ZpbHRlckIIukgFkgECEBASIgoVc2luY2Vfc2VxdWVuY2VfbnVtYmVyGAMgASgESACIAQFCGAoWX3NpbmNlX3NlcXVlbmNlX251bWJlciIlCgpHZXRSZXF1ZXN0EhcKD3NlcXVlbmNlX251bWJlchgBIAEoBCJUChFTdWJzY3JpYmVSZXNwb25zZRIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQSJgoHZW50cmllcxgCIAMoCzIVLmNvbW1vbi5rdi52MS5LdkVudHJ5Ik4KC0dldFJlc3BvbnNlEhcKD3NlcXVlbmNlX251bWJlchgBIAEoBBImCgdlbnRyaWVzGAIgAygLMhUuY29tbW9uLmt2LnYxLkt2RW50cnkymQEKB1NlcnZpY2USUAoJU3Vic2NyaWJlEh8ubG9nLnN0cmVhbS52MS5TdWJzY3JpYmVSZXF1ZXN0GiAubG9nLnN0cmVhbS52MS5TdWJzY3JpYmVSZXNwb25zZTABEjwKA0dldBIZLmxvZy5zdHJlYW0udjEuR2V0UmVxdWVzdBoaLmxvZy5zdHJlYW0udjEuR2V0UmVzcG9uc2ViBnByb3RvMw", [file_buf_validate_validate, file_common_kv_v1_kv]);
 
 /**
  * Live (and optionally replayed) subscription request.
@@ -25,7 +25,7 @@ export type SubscribeRequest = Message<"log.stream.v1.SubscribeRequest"> & {
    * OR semantics across `match_keys`: a row is delivered if any match_key
    * matches. Bounded to keep server-side regex compilation cost predictable.
    *
-   * @generated from field: repeated common.v1.MatchKey match_keys = 1;
+   * @generated from field: repeated common.kv.v1.MatchKey match_keys = 1;
    */
   matchKeys: MatchKey[];
 
@@ -35,7 +35,7 @@ export type SubscribeRequest = Message<"log.stream.v1.SubscribeRequest"> & {
    * its raw value bytes satisfy any one of `value_filters` (or the list is
    * empty).
    *
-   * @generated from field: repeated common.v1.BytesFilter value_filters = 2;
+   * @generated from field: repeated common.kv.v1.BytesFilter value_filters = 2;
    */
   valueFilters: BytesFilter[];
 
@@ -97,7 +97,7 @@ export type SubscribeResponse = Message<"log.stream.v1.SubscribeResponse"> & {
   sequenceNumber: bigint;
 
   /**
-   * @generated from field: repeated common.v1.KvEntry entries = 2;
+   * @generated from field: repeated common.kv.v1.KvEntry entries = 2;
    */
   entries: KvEntry[];
 };
@@ -122,7 +122,7 @@ export type GetResponse = Message<"log.stream.v1.GetResponse"> & {
   sequenceNumber: bigint;
 
   /**
-   * @generated from field: repeated common.v1.KvEntry entries = 2;
+   * @generated from field: repeated common.kv.v1.KvEntry entries = 2;
    */
   entries: KvEntry[];
 };

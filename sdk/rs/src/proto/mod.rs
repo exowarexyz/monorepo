@@ -57,16 +57,18 @@ pub mod google {
 }
 
 pub mod common {
-    pub mod v1 {
-        #![allow(non_camel_case_types)]
-        #![allow(unused_imports)]
-        #![allow(clippy::derivable_impls)]
-        #![allow(clippy::match_single_binding)]
-        include!("../gen/common.v1.rs");
+    pub mod kv {
+        pub mod v1 {
+            #![allow(non_camel_case_types)]
+            #![allow(unused_imports)]
+            #![allow(clippy::derivable_impls)]
+            #![allow(clippy::match_single_binding)]
+            include!("../gen/common.kv.v1.rs");
+        }
     }
     // Flat re-export so call sites use `exoware_sdk::common::KvEntry` while
-    // generated cross-package refs resolve `crate::common::v1`.
-    pub use v1::*;
+    // generated cross-package refs resolve `crate::common::kv::v1`.
+    pub use kv::v1::*;
 }
 
 pub mod compact {

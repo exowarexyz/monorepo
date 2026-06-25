@@ -5,15 +5,15 @@
 import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv1";
 import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv1";
 import { file_buf_validate_validate } from "../../buf/validate/validate_pb.js";
-import type { KvEntry } from "../../common/v1/common_pb.js";
-import { file_common_v1_common } from "../../common/v1/common_pb.js";
+import type { KvEntry } from "../../common/kv/v1/kv_pb.js";
+import { file_common_kv_v1_kv } from "../../common/kv/v1/kv_pb.js";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
  * Describes the file log/v1/ingest.proto.
  */
 export const file_log_v1_ingest: GenFile = /*@__PURE__*/
-  fileDesc("ChNsb2cvdjEvaW5nZXN0LnByb3RvEg1sb2cuaW5nZXN0LnYxIjcKClB1dFJlcXVlc3QSKQoDa3ZzGAEgAygLMhIuY29tbW9uLnYxLkt2RW50cnlCCLpIBZIBAggBIiYKC1B1dFJlc3BvbnNlEhcKD3NlcXVlbmNlX251bWJlchgBIAEoBDJHCgdTZXJ2aWNlEjwKA1B1dBIZLmxvZy5pbmdlc3QudjEuUHV0UmVxdWVzdBoaLmxvZy5pbmdlc3QudjEuUHV0UmVzcG9uc2ViBnByb3RvMw", [file_buf_validate_validate, file_common_v1_common]);
+  fileDesc("ChNsb2cvdjEvaW5nZXN0LnByb3RvEg1sb2cuaW5nZXN0LnYxIjoKClB1dFJlcXVlc3QSLAoDa3ZzGAEgAygLMhUuY29tbW9uLmt2LnYxLkt2RW50cnlCCLpIBZIBAggBIiYKC1B1dFJlc3BvbnNlEhcKD3NlcXVlbmNlX251bWJlchgBIAEoBDJHCgdTZXJ2aWNlEjwKA1B1dBIZLmxvZy5pbmdlc3QudjEuUHV0UmVxdWVzdBoaLmxvZy5pbmdlc3QudjEuUHV0UmVzcG9uc2ViBnByb3RvMw", [file_buf_validate_validate, file_common_kv_v1_kv]);
 
 /**
  * Batch write request. All pairs are applied atomically.
@@ -24,7 +24,7 @@ export type PutRequest = Message<"log.ingest.v1.PutRequest"> & {
   /**
    * Key-value pairs to write. At least one pair is required.
    *
-   * @generated from field: repeated common.v1.KvEntry kvs = 1;
+   * @generated from field: repeated common.kv.v1.KvEntry kvs = 1;
    */
   kvs: KvEntry[];
 };

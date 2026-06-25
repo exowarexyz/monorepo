@@ -14,7 +14,7 @@ use std::thread;
 
 use buffa::Message;
 use bytes::Bytes;
-use exoware_sdk::common::v1::KvEntry;
+use exoware_sdk::common::kv::v1::KvEntry;
 use exoware_sdk::keys::KeyCodec;
 use exoware_sdk::log::stream::v1::GetResponse as StreamGetResponse;
 use exoware_sdk::match_key::compile_payload_regex;

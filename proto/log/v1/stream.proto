@@ -3,7 +3,7 @@ syntax = "proto3";
 package log.stream.v1;
 
 import "buf/validate/validate.proto";
-import "common/v1/common.proto";
+import "common/kv/v1/kv.proto";
 
 // Push-based subscription + point-lookup over the store's log.
 //
@@ -23,14 +23,14 @@ service Service {
 message SubscribeRequest {
   // OR semantics across `match_keys`: a row is delivered if any match_key
   // matches. Bounded to keep server-side regex compilation cost predictable.
-  repeated common.v1.MatchKey match_keys = 1
+  repeated common.kv.v1.MatchKey match_keys = 1
     [(buf.validate.field).repeated.min_items = 1,
      (buf.validate.field).repeated.max_items = 16];
   // Optional value-side filter, AND'd with `match_keys`. OR semantics within
   // the list: once a row's key passes a `MatchKey`, it is delivered only if
   // its raw value bytes satisfy any one of `value_filters` (or the list is
   // empty).
-  repeated common.v1.BytesFilter value_filters = 2
+  repeated common.kv.v1.BytesFilter value_filters = 2
     [(buf.validate.field).repeated.max_items = 16];
   // Optional replay cursor.
   //
@@ -56,12 +56,12 @@ message GetRequest {
 // (strictly monotonically increasing either way) differs.
 message SubscribeResponse {
   uint64 sequence_number = 1;
-  repeated common.v1.KvEntry entries = 2;
+  repeated common.kv.v1.KvEntry entries = 2;
 }
 
 // Response for `Get`: the full contents of the batch at the requested
 // sequence number, with no server-side filter applied.
 message GetResponse {
   uint64 sequence_number = 1;
-  repeated common.v1.KvEntry entries = 2;
+  repeated common.kv.v1.KvEntry entries = 2;
 }

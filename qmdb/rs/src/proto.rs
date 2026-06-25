@@ -1,6 +1,8 @@
 pub mod common {
-    pub mod v1 {
-        pub use exoware_sdk::common::v1::*;
+    pub mod kv {
+        pub mod v1 {
+            pub use exoware_sdk::common::kv::v1::*;
+        }
     }
 }
 

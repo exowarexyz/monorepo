@@ -2991,7 +2991,7 @@ pub struct SubscribeRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
-    pub key_filters: ::buffa::alloc::vec::Vec<super::super::common::v1::BytesFilter>,
+    pub key_filters: ::buffa::alloc::vec::Vec<super::super::common::kv::v1::BytesFilter>,
     /// Filters applied to each operation's decoded value bytes. Operations
     /// without a value (e.g. deletes, commits) never match a value filter.
     ///
@@ -3002,7 +3002,9 @@ pub struct SubscribeRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
-    pub value_filters: ::buffa::alloc::vec::Vec<super::super::common::v1::BytesFilter>,
+    pub value_filters: ::buffa::alloc::vec::Vec<
+        super::super::common::kv::v1::BytesFilter,
+    >,
     /// Resume cursor over the underlying store batch log. Use
     /// `SubscribeResponse.resume_sequence_number + 1` to resume after a
     /// disconnect.
@@ -8211,7 +8213,7 @@ pub mod __buffa {
             /// Field 1: `key_filters`
             pub key_filters: ::buffa::RepeatedView<
                 'a,
-                super::super::super::super::common::v1::__buffa::view::BytesFilterView<
+                super::super::super::super::common::kv::v1::__buffa::view::BytesFilterView<
                     'a,
                 >,
             >,
@@ -8221,7 +8223,7 @@ pub mod __buffa {
             /// Field 2: `value_filters`
             pub value_filters: ::buffa::RepeatedView<
                 'a,
-                super::super::super::super::common::v1::__buffa::view::BytesFilterView<
+                super::super::super::super::common::kv::v1::__buffa::view::BytesFilterView<
                     'a,
                 >,
             >,
@@ -8299,7 +8301,7 @@ pub mod __buffa {
                             let sub = ::buffa::types::borrow_bytes(&mut cur)?;
                             view.key_filters
                                 .push(
-                                    super::super::super::super::common::v1::__buffa::view::BytesFilterView::_decode_depth(
+                                    super::super::super::super::common::kv::v1::__buffa::view::BytesFilterView::_decode_depth(
                                         sub,
                                         depth - 1,
                                     )?,
@@ -8321,7 +8323,7 @@ pub mod __buffa {
                             let sub = ::buffa::types::borrow_bytes(&mut cur)?;
                             view.value_filters
                                 .push(
-                                    super::super::super::super::common::v1::__buffa::view::BytesFilterView::_decode_depth(
+                                    super::super::super::super::common::kv::v1::__buffa::view::BytesFilterView::_decode_depth(
                                         sub,
                                         depth - 1,
                                     )?,
