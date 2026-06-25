@@ -208,7 +208,11 @@ where
         op_cfg: <ordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
         update_row_cfg: (K::Cfg, V::Cfg),
     ) -> Self {
-        Self::from_prefixed(client.for_namespace(Namespace::Qmdb), op_cfg, update_row_cfg)
+        Self::from_prefixed(
+            client.for_namespace(Namespace::Qmdb),
+            op_cfg,
+            update_row_cfg,
+        )
     }
 
     /// Read client over a caller-chosen namespace.

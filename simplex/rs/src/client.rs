@@ -187,7 +187,7 @@ impl SimplexClient {
             return Err(SimplexError::EmptyUpload);
         }
         for entry in prepared.entries() {
-            batch.push(&self.client, &entry.key, entry.value.clone())?;
+            batch.push(self.client.key_prefix(), &entry.key, entry.value.clone())?;
         }
         Ok(())
     }
@@ -210,7 +210,7 @@ impl SimplexClient {
         B: Block,
     {
         let prepared = self.prepare_header(header);
-        self.commit_upload(&self.client, prepared).await
+        self.commit_upload(self.client.client(), prepared).await
     }
 
     pub async fn upload_block<B>(
@@ -222,7 +222,7 @@ impl SimplexClient {
         B: Block,
     {
         let prepared = self.prepare_block(header, body);
-        self.commit_upload(&self.client, prepared).await
+        self.commit_upload(self.client.client(), prepared).await
     }
 
     pub async fn upload_notarized<B, S, D>(
@@ -235,7 +235,7 @@ impl SimplexClient {
         D: Digest,
     {
         let prepared = self.prepare_notarized(notarized)?;
-        self.commit_upload(&self.client, prepared).await
+        self.commit_upload(self.client.client(), prepared).await
     }
 
     pub async fn upload_finalized<B, S, D>(
@@ -248,7 +248,7 @@ impl SimplexClient {
         D: Digest,
     {
         let prepared = self.prepare_finalized(finalized)?;
-        self.commit_upload(&self.client, prepared).await
+        self.commit_upload(self.client.client(), prepared).await
     }
 
     pub async fn get_header_raw<D: Digest>(

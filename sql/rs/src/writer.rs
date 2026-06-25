@@ -168,7 +168,9 @@ impl BatchWriter {
         let Some(prepared) = self.prepare_flush()? else {
             return Ok(None);
         };
-        Ok(Some(self.commit_upload(&self.client, prepared).await?))
+        Ok(Some(
+            self.commit_upload(self.client.client(), prepared).await?,
+        ))
     }
 
     pub fn prepare_flush(&mut self) -> DataFusionResult<Option<PreparedBatch>> {
@@ -195,7 +197,7 @@ impl BatchWriter {
     ) -> DataFusionResult<()> {
         for (key, value) in prepared.keys.iter().zip(prepared.values.iter()) {
             batch
-                .push(&self.client, key, value)
+                .push(self.client.key_prefix(), key, value)
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
         }
         Ok(())
@@ -963,11 +965,11 @@ pub(crate) async fn flush_ingest_batch(
     let mut batch = StoreWriteBatch::new();
     for (key, value) in keys.iter().zip(values.iter()) {
         batch
-            .push(client, key, value)
+            .push(client.key_prefix(), key, value)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
     }
     let token = batch
-        .commit(client)
+        .commit(client.client())
         .await
         .map_err(|e| DataFusionError::External(Box::new(e)))?;
     keys.clear();

@@ -34,7 +34,7 @@ use exoware_qmdb::{
     UnorderedWriter, UploadReceipt,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::{PrefixedStoreClient, StoreBatchUpload, StoreClient};
+use exoware_sdk::{StoreBatchUpload, StoreClient};
 
 #[allow(dead_code)]
 pub fn merkle_config(prefix: &str, page_cache: CacheRef) -> MerkleConfig<Sequential> {
@@ -184,9 +184,7 @@ where
     keyless::Operation<F, E>: Encode,
 {
     let prepared = writer.prepare_upload(ops).await?;
-    writer
-        .commit_upload(&PrefixedStoreClient::empty(commit_client.clone()), prepared)
-        .await
+    writer.commit_upload(commit_client, prepared).await
 }
 
 #[allow(dead_code)]
@@ -205,9 +203,7 @@ where
     unordered::Operation<F, K, E>: Encode,
 {
     let prepared = writer.prepare_upload(ops).await?;
-    writer
-        .commit_upload(&PrefixedStoreClient::empty(commit_client.clone()), prepared)
-        .await
+    writer.commit_upload(commit_client, prepared).await
 }
 
 #[allow(dead_code)]
@@ -227,9 +223,7 @@ where
     unordered::Operation<F, K, E>: Encode,
 {
     let prepared = writer.prepare_current_upload(ops, current_boundary).await?;
-    writer
-        .commit_upload(&PrefixedStoreClient::empty(commit_client.clone()), prepared)
-        .await
+    writer.commit_upload(commit_client, prepared).await
 }
 
 #[allow(dead_code)]
@@ -249,9 +243,7 @@ where
     ordered::Operation<F, K, E>: Encode + Decode,
 {
     let prepared = writer.prepare_upload(ops, current_boundary).await?;
-    writer
-        .commit_upload(&PrefixedStoreClient::empty(commit_client.clone()), prepared)
-        .await
+    writer.commit_upload(commit_client, prepared).await
 }
 
 #[allow(dead_code)]
@@ -271,9 +263,7 @@ where
     immutable::Operation<F, K, E>: Encode + Decode + Clone,
 {
     let prepared = writer.prepare_upload(ops).await?;
-    writer
-        .commit_upload(&PrefixedStoreClient::empty(commit_client.clone()), prepared)
-        .await
+    writer.commit_upload(commit_client, prepared).await
 }
 
 #[allow(dead_code)]

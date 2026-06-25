@@ -158,7 +158,7 @@ async fn commit_qmdb_upload(
     ops: &[QmdbOp],
 ) -> Result<exoware_qmdb::UploadReceipt<QmdbFamily>, QmdbError> {
     let prepared = writer.prepare_upload(ops).await?;
-    writer.commit_upload(commit_client, prepared).await
+    writer.commit_upload(commit_client.client(), prepared).await
 }
 
 fn qops(label: &str, batch: usize) -> Vec<QmdbOp> {
@@ -278,11 +278,17 @@ async fn raw_prefixes_support_atomic_batch_fetch_range_and_stream() {
     let shared = Bytes::from_static(b"shared-key");
     let only_a = Bytes::from_static(b"only-a");
     let mut batch = StoreWriteBatch::new();
-    batch.push(&a, &shared, b"value-a").expect("push a shared");
-    batch.push(&b, &shared, b"value-b").expect("push b shared");
-    batch.push(&a, &only_a, b"value-a2").expect("push a only");
+    batch
+        .push(a.key_prefix(), &shared, b"value-a")
+        .expect("push a shared");
+    batch
+        .push(b.key_prefix(), &shared, b"value-b")
+        .expect("push b shared");
+    batch
+        .push(a.key_prefix(), &only_a, b"value-a2")
+        .expect("push a only");
     let sequence = batch
-        .commit(&unprefixed)
+        .commit(&base)
         .await
         .expect("commit cross-prefix batch");
 
@@ -617,10 +623,7 @@ async fn prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_receipts(
     StoreBatchPublication::stage_publication(&qmdb_writer, &prepared_qmdb_watermark, &mut batch)
         .expect("stage qmdb watermark");
 
-    let sequence = batch
-        .commit(&PrefixedStoreClient::empty(base.clone()))
-        .await
-        .expect("atomic Store commit");
+    let sequence = batch.commit(&base).await.expect("atomic Store commit");
     let sql_receipt =
         StoreBatchUpload::mark_upload_persisted(&sql_writer, prepared_sql, sequence).await;
     let receipt_qmdb_1 =

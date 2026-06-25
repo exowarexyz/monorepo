@@ -77,7 +77,7 @@ async fn commit_ordered_upload(
 ) {
     let prepared = writer.prepare_upload(ops, boundary).await.expect("prepare");
     writer
-        .commit_upload(client, prepared)
+        .commit_upload(client.client(), prepared)
         .await
         .expect("commit upload");
 }

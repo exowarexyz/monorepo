@@ -413,16 +413,9 @@ impl Namespace {
     }
 }
 
-/// The sole logical Store client: a physical [`StoreClient`] paired with a
-/// [`StoreKeyPrefix`] that namespaces every key on the wire.
-///
-/// `StoreClient` itself is purely physical — it has no notion of a prefix — so
-/// this type is the *only* way to perform namespaced reads and writes. All key
-/// translation (encode on the way out, decode on the way back) lives here.
-///
-/// Because the prefix can be the zero-width [`StoreKeyPrefix::identity`], this
-/// single type also represents the un-namespaced case; there is no separate
-/// "raw client" surface that could silently skip namespacing.
+/// A physical [`StoreClient`] paired with a [`StoreKeyPrefix`] that namespaces
+/// every key on the wire. The prefix can be the zero-width
+/// [`StoreKeyPrefix::identity`], representing the un-namespaced case.
 #[derive(Clone, Debug)]
 pub struct PrefixedStoreClient {
     client: StoreClient,
@@ -574,14 +567,6 @@ impl PrefixedStoreClient {
             .map(|(key, (_, value))| (key, *value))
             .collect();
         self.client.put_physical(&prefixed).await
-    }
-
-    /// Submit an already-prepared (physical) batch.
-    pub(crate) async fn put_prepared_physical(
-        &self,
-        kvs: &[(Key, Bytes)],
-    ) -> Result<u64, ClientError> {
-        self.client.put_prepared_physical(kvs).await
     }
 
     // --- reads ---------------------------------------------------------------
@@ -999,18 +984,16 @@ impl StoreWriteBatch {
 
     pub fn push(
         &mut self,
-        client: &PrefixedStoreClient,
+        prefix: StoreKeyPrefix,
         key: &Key,
         value: impl IntoStoreWriteValue,
     ) -> Result<&mut Self, ClientError> {
-        self.entries.push((
-            client.encode_store_key(key)?,
-            value.into_store_write_value(),
-        ));
+        self.entries
+            .push((prefix.encode_key(key)?, value.into_store_write_value()));
         Ok(self)
     }
 
-    pub async fn commit(&self, client: &PrefixedStoreClient) -> Result<u64, ClientError> {
+    pub async fn commit(&self, client: &StoreClient) -> Result<u64, ClientError> {
         client.put_prepared_physical(&self.entries).await
     }
 }
@@ -1059,7 +1042,7 @@ pub trait StoreBatchUpload {
 
     fn commit_upload<'a>(
         &'a self,
-        client: &'a PrefixedStoreClient,
+        client: &'a StoreClient,
         prepared: Self::Prepared,
     ) -> BoxFuture<'a, Result<Self::Receipt, Self::Error>>
     where
@@ -1133,7 +1116,7 @@ pub trait StoreBatchPublication {
 
     fn commit_publication<'a>(
         &'a self,
-        client: &'a PrefixedStoreClient,
+        client: &'a StoreClient,
         prepared: Self::PreparedPublication,
     ) -> BoxFuture<'a, Result<Self::PublicationReceipt, Self::Error>>
     where
@@ -1942,7 +1925,7 @@ impl StoreClient {
     ///
     /// On success returns the **store sequence number** from the response. Use it for immediate
     /// `get_with_min_sequence_number` / range calls or to seed
-    /// [`Self::create_session_with_sequence`].
+    /// [`PrefixedStoreClient::create_session_with_sequence`].
     /// If the request succeeds, the server accepts the full batch (count is `kvs.len()`).
     pub(crate) async fn put_physical(&self, kvs: &[(&Key, &[u8])]) -> Result<u64, ClientError> {
         let mut proto_kvs = Vec::with_capacity(kvs.len());
@@ -2491,7 +2474,7 @@ impl<'a> Ingest<'a> {
     /// Submit a [`StoreWriteBatch`] that has already been encoded into the
     /// physical Store keyspace.
     pub async fn put_prepared(&self, batch: &StoreWriteBatch) -> Result<u64, ClientError> {
-        batch.commit(self.c).await
+        batch.commit(self.c.client()).await
     }
 }
 
@@ -2722,7 +2705,7 @@ impl SerializableReadSession {
     /// Fixed sequence floor for this session, if one has been established yet.
     ///
     /// Fresh sessions start with `None` unless created via
-    /// [`StoreClient::create_session_with_sequence`]. A first streamed query
+    /// [`PrefixedStoreClient::create_session_with_sequence`]. A first streamed query
     /// read (`get_many`, `range_stream`) sets this once a detail-bearing chunk
     /// is consumed.
     pub fn fixed_sequence(&self) -> Option<u64> {
@@ -3358,8 +3341,8 @@ mod tests {
         let key_b = Bytes::from_static(b"b");
 
         let mut batch = StoreWriteBatch::new();
-        batch.push(&a, &key_a, b"va").unwrap();
-        batch.push(&b, &key_b, b"vb").unwrap();
+        batch.push(a.key_prefix(), &key_a, b"va").unwrap();
+        batch.push(b.key_prefix(), &key_b, b"vb").unwrap();
 
         assert_eq!(
             batch.entries[0].0,
