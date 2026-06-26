@@ -66,8 +66,6 @@ pub mod common {
             include!("../gen/common.kv.v1.rs");
         }
     }
-    // Flat re-export so call sites use `exoware_sdk::common::Entry` while
-    // generated cross-package refs resolve `crate::common::kv::v1`.
     pub use kv::v1::*;
 }
 
