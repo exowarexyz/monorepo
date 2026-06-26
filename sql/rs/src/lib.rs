@@ -62,10 +62,10 @@ mod tests {
     use axum::Router;
     use bytes::Bytes;
     use connectrpc::{Chain, ConnectError, ConnectRpcService, RequestContext as Context};
+    use exoware_sdk::common::kv::v1::Entry as ProtoEntry;
     use exoware_sdk::connect_compression_registry;
     use exoware_sdk::kv_codec::{eval_expr, expr_needs_value};
-    use exoware_sdk::store::common::v1::KvEntry as ProtoKvEntry;
-    use exoware_sdk::store::ingest::v1::{
+    use exoware_sdk::log::ingest::v1::{
         PutResponse as ProtoPutResponse, Service as IngestService,
         ServiceServer as IngestServiceServer,
     };
@@ -276,7 +276,7 @@ mod tests {
         ProtoRangeFrame {
             results: results
                 .into_iter()
-                .map(|(key, value)| ProtoKvEntry {
+                .map(|(key, value)| ProtoEntry {
                     key: key.to_vec(),
                     value: value.into(),
                     ..Default::default()
@@ -318,9 +318,7 @@ mod tests {
         async fn put(
             &self,
             _ctx: Context,
-            request: buffa::view::OwnedView<
-                exoware_sdk::store::ingest::v1::PutRequestView<'static>,
-            >,
+            request: buffa::view::OwnedView<exoware_sdk::log::ingest::v1::PutRequestView<'static>>,
         ) -> connectrpc::ServiceResult<ProtoPutResponse> {
             let mut parsed = Vec::<(Key, Bytes)>::new();
             let wire = request.bytes();
@@ -413,9 +411,9 @@ mod tests {
                 RangeMode::Forward => Box::new(range_iter),
                 RangeMode::Reverse => Box::new(range_iter.rev()),
             };
-            let mut results: Vec<ProtoKvEntry> = Vec::new();
+            let mut results: Vec<ProtoEntry> = Vec::new();
             for (key, value) in iter.take(limit) {
-                results.push(ProtoKvEntry {
+                results.push(ProtoEntry {
                     key: key.to_vec(),
                     value: value.clone(),
                     ..Default::default()

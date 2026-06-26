@@ -1,8 +1,8 @@
 use exoware_sdk::kv_codec::Utf8;
-use exoware_sdk::match_key::MatchKey;
 use exoware_sdk::prune_policy::{
     GroupBy, KeysScope, OrderBy, OrderEncoding, PolicyScope, PrunePolicy, RetainPolicy,
 };
+use exoware_sdk::selector::Selector;
 
 use crate::codec::{RESERVED_BITS, UPDATE_FAMILY};
 
@@ -12,7 +12,7 @@ fn update_payload_regex() -> Utf8 {
 
 fn base_keys_scope() -> KeysScope {
     KeysScope {
-        match_key: MatchKey {
+        selector: Selector {
             reserved_bits: RESERVED_BITS,
             prefix: UPDATE_FAMILY,
             payload_regex: update_payload_regex(),
@@ -77,10 +77,10 @@ mod tests {
         let PolicyScope::Keys(scope) = &policy.scope else {
             panic!("expected UserKeys scope");
         };
-        assert_eq!(scope.match_key.reserved_bits, RESERVED_BITS);
-        assert_eq!(scope.match_key.prefix, UPDATE_FAMILY);
+        assert_eq!(scope.selector.reserved_bits, RESERVED_BITS);
+        assert_eq!(scope.selector.prefix, UPDATE_FAMILY);
         assert_eq!(
-            &*scope.match_key.payload_regex,
+            &*scope.selector.payload_regex,
             "(?s-u)^(?P<logical>(?:\\x00\\xFF|[^\\x00])*)\\x00\\x00(?P<version>.{8})$"
         );
         assert_eq!(scope.group_by.capture_groups, vec![Utf8::from("logical")]);

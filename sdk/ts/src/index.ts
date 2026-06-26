@@ -97,17 +97,17 @@ export type {
     PruneRequest,
     PruneResponse,
 } from './gen/ts/store/v1/compact_pb.js';
-export { BytesFilterSchema, KvEntrySchema, MatchKeySchema } from './gen/ts/store/v1/common_pb.js';
-export type { BytesFilter, KvEntry, MatchKey } from './gen/ts/store/v1/common_pb.js';
+export { FilterSchema, EntrySchema, SelectorSchema } from './gen/ts/common/v1/kv_pb.js';
+export type { Filter, Entry, Selector } from './gen/ts/common/v1/kv_pb.js';
 export {
     SubscribeRequestSchema,
     SubscribeResponseSchema,
     GetRequestSchema,
     GetResponseSchema,
-} from './gen/ts/store/v1/stream_pb.js';
+} from './gen/ts/log/v1/stream_pb.js';
 export type {
     SubscribeRequest,
     SubscribeResponse,
     GetRequest,
     GetResponse,
-} from './gen/ts/store/v1/stream_pb.js';
+} from './gen/ts/log/v1/stream_pb.js';

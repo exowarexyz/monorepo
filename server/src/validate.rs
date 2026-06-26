@@ -16,6 +16,11 @@ use exoware_sdk::keys::{validate_key_size, MAX_KEY_LEN};
 /// Default maximum value size accepted by ingest validation.
 pub const DEFAULT_MAX_VALUE_LEN: usize = 10 * 1024 * 1024;
 
+/// `ErrorInfo.domain` used for all ingest-service errors. The
+/// `put_rejects_oversized_key` test pins this wire string independently so a
+/// silent drift is caught.
+pub const INGEST_ERROR_DOMAIN: &str = "log.ingest";
+
 /// Limits enforced before ingest requests reach the backend.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IngestLimits {
@@ -107,13 +112,13 @@ fn validate_value_field(
 // -- ingest --
 
 pub fn validate_put_request(
-    request: &exoware_proto::store::ingest::v1::PutRequestView<'_>,
+    request: &exoware_proto::log::ingest::v1::PutRequestView<'_>,
     limits: IngestLimits,
 ) -> Result<(), ConnectError> {
     // buf.validate: repeated.min_items = 1
     if request.kvs.is_empty() {
         return Err(field_error(
-            "store.ingest",
+            INGEST_ERROR_DOMAIN,
             "kvs",
             "at least one key-value pair is required",
             "INVALID_BATCH",
@@ -121,11 +126,11 @@ pub fn validate_put_request(
             [],
         ));
     }
-    // buf.validate: KvEntry.key bytes.max_len = 254
+    // buf.validate: Entry.key bytes.max_len = 254
     for (index, kv) in request.kvs.iter().enumerate() {
-        validate_key_field("store.ingest", &format!("kvs[{index}].key"), kv.key)?;
+        validate_key_field(INGEST_ERROR_DOMAIN, &format!("kvs[{index}].key"), kv.key)?;
         validate_value_field(
-            "store.ingest",
+            INGEST_ERROR_DOMAIN,
             &format!("kvs[{index}].value"),
             kv.value,
             limits,
@@ -266,7 +271,7 @@ mod tests {
     fn put_request_with_oversized_key() -> Vec<u8> {
         use buffa::Message;
         let req = exoware_proto::ingest::PutRequest {
-            kvs: vec![exoware_proto::common::KvEntry {
+            kvs: vec![exoware_proto::common::Entry {
                 key: vec![0u8; 255],
                 value: Bytes::from_static(&[1]),
                 ..Default::default()
@@ -279,7 +284,7 @@ mod tests {
     fn put_request_with_oversized_value() -> Vec<u8> {
         use buffa::Message;
         let req = exoware_proto::ingest::PutRequest {
-            kvs: vec![exoware_proto::common::KvEntry {
+            kvs: vec![exoware_proto::common::Entry {
                 key: vec![0u8; 10],
                 value: Bytes::from(vec![1u8; DEFAULT_MAX_VALUE_LEN + 1]),
                 ..Default::default()
@@ -292,7 +297,7 @@ mod tests {
     fn valid_put_request_with_value_len(value_len: usize) -> Vec<u8> {
         use buffa::Message;
         let req = exoware_proto::ingest::PutRequest {
-            kvs: vec![exoware_proto::common::KvEntry {
+            kvs: vec![exoware_proto::common::Entry {
                 key: vec![0u8; 10],
                 value: Bytes::from(vec![1u8; value_len]),
                 ..Default::default()
@@ -306,7 +311,7 @@ mod tests {
     fn put_rejects_empty_batch() {
         let bytes = empty_put_request_bytes();
         let view =
-            exoware_proto::store::ingest::v1::PutRequestView::decode_view(&bytes).expect("parse");
+            exoware_proto::log::ingest::v1::PutRequestView::decode_view(&bytes).expect("parse");
         let err = validate_put_request(&view, IngestLimits::default()).unwrap_err();
         assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
     }
@@ -315,16 +320,25 @@ mod tests {
     fn put_rejects_oversized_key() {
         let bytes = put_request_with_oversized_key();
         let view =
-            exoware_proto::store::ingest::v1::PutRequestView::decode_view(&bytes).expect("parse");
+            exoware_proto::log::ingest::v1::PutRequestView::decode_view(&bytes).expect("parse");
         let err = validate_put_request(&view, IngestLimits::default()).unwrap_err();
         assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
+        // Pin the wire-visible `ErrorInfo.domain`. Nothing branches on this
+        // string at runtime, so a half-done package rename (emit side renamed,
+        // this literal left behind, or vice versa) would otherwise pass CI
+        // silently. Keep this in lockstep with the emit sites in this module.
+        let decoded = exoware_proto::decode_connect_error(&err).expect("decode error details");
+        assert_eq!(
+            decoded.error_info.expect("error_info detail").domain,
+            "log.ingest",
+        );
     }
 
     #[test]
     fn put_rejects_oversized_value() {
         let bytes = put_request_with_oversized_value();
         let view =
-            exoware_proto::store::ingest::v1::PutRequestView::decode_view(&bytes).expect("parse");
+            exoware_proto::log::ingest::v1::PutRequestView::decode_view(&bytes).expect("parse");
         let err = validate_put_request(&view, IngestLimits::default()).unwrap_err();
         assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
     }
@@ -333,7 +347,7 @@ mod tests {
     fn put_rejects_value_over_custom_limit() {
         let bytes = valid_put_request_with_value_len(5);
         let view =
-            exoware_proto::store::ingest::v1::PutRequestView::decode_view(&bytes).expect("parse");
+            exoware_proto::log::ingest::v1::PutRequestView::decode_view(&bytes).expect("parse");
         let limits = IngestLimits { max_value_len: 4 };
         let err = validate_put_request(&view, limits).unwrap_err();
 
@@ -344,7 +358,7 @@ mod tests {
     fn put_accepts_valid_request() {
         let bytes = valid_put_request_with_value_len(1);
         let view =
-            exoware_proto::store::ingest::v1::PutRequestView::decode_view(&bytes).expect("parse");
+            exoware_proto::log::ingest::v1::PutRequestView::decode_view(&bytes).expect("parse");
         validate_put_request(&view, IngestLimits::default()).expect("should be valid");
     }
 

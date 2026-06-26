@@ -14,7 +14,7 @@ import {
     KvFieldKind,
     PolicySchema,
     KeysScopeSchema,
-    MatchKeySchema,
+    SelectorSchema,
     PolicyGroupBySchema,
     PolicyOrderBySchema,
     PolicyRetainSchema,
@@ -37,8 +37,8 @@ function encodeStoredRowInt64(value: bigint): Uint8Array {
     return new Uint8Array(buf);
 }
 
-function makeStreamMatchKey(prefix: string) {
-    return create(MatchKeySchema, {
+function makeStreamSelector(prefix: string) {
+    return create(SelectorSchema, {
         reservedBits: 0,
         prefix: 0,
         payloadRegex: `(?s-u)^${prefix}.*$`,
@@ -176,7 +176,7 @@ describe('Exoware TS SDK', () => {
             const batches = [];
 
             for await (const batch of store.subscribe({
-                matchKeys: [makeStreamMatchKey(prefix)],
+                selectors: [makeStreamSelector(prefix)],
                 sinceSequenceNumber: sequenceNumber,
             })) {
                 batches.push(batch);
@@ -235,8 +235,8 @@ describe('Exoware TS SDK', () => {
 
             const iterator = store
                 .subscribe({
-                    matchKeys: [
-                        create(MatchKeySchema, {
+                    selectors: [
+                        create(SelectorSchema, {
                             reservedBits: 0,
                             prefix: 0,
                             payloadRegex: '(?s-u)^prefixed-stream-hit$',
@@ -501,7 +501,7 @@ describe('Exoware TS SDK', () => {
                 scope: {
                     case: 'keys',
                     value: create(KeysScopeSchema, {
-                        matchKey: create(MatchKeySchema, {
+                        selector: create(SelectorSchema, {
                             reservedBits: 0,
                             prefix: 0,
                             payloadRegex:

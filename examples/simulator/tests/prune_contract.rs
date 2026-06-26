@@ -5,11 +5,11 @@ use std::future::Future;
 use bytes::Bytes;
 use exoware_sdk::keys::KeyCodec;
 use exoware_sdk::kv_codec::Utf8;
-use exoware_sdk::match_key::MatchKey;
 use exoware_sdk::prune_policy::{
     GroupBy, KeysScope, OrderBy, OrderEncoding, PolicyScope, PrunePolicy, PrunePolicyDocument,
     RetainPolicy, PRUNE_POLICY_DOCUMENT_VERSION,
 };
+use exoware_sdk::selector::Selector;
 use exoware_server::{Ingest, Log, Prune, Query, Sequence};
 use exoware_simulator::RocksStore;
 use tempfile::tempdir;
@@ -63,7 +63,7 @@ fn apply_prune(store: &RocksStore, policies: &[PrunePolicy]) {
 fn version_policy_with_encoding(retain: RetainPolicy, encoding: OrderEncoding) -> PrunePolicy {
     PrunePolicy {
         scope: PolicyScope::Keys(KeysScope {
-            match_key: MatchKey {
+            selector: Selector {
                 reserved_bits: TEST_RESERVED_BITS,
                 prefix: TEST_PREFIX,
                 payload_regex: Utf8::from(

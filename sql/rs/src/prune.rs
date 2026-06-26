@@ -1,8 +1,8 @@
 use exoware_sdk::kv_codec::Utf8;
-use exoware_sdk::match_key::MatchKey;
 use exoware_sdk::prune_policy::{
     GroupBy, KeysScope, OrderBy, OrderEncoding, PolicyScope, PrunePolicy, RetainPolicy,
 };
+use exoware_sdk::selector::Selector;
 
 use crate::codec::primary_key_codec;
 use crate::types::PRIMARY_RESERVED_BITS;
@@ -33,7 +33,7 @@ fn keep_latest_versions_with_regex(
 
     Ok(PrunePolicy {
         scope: PolicyScope::Keys(KeysScope {
-            match_key: MatchKey {
+            selector: Selector {
                 reserved_bits: PRIMARY_RESERVED_BITS,
                 prefix: codec.prefix(),
                 payload_regex,
@@ -93,8 +93,8 @@ mod tests {
     use crate::CellValue;
     use datafusion::arrow::datatypes::DataType;
     use exoware_sdk::kv_codec::Utf8;
-    use exoware_sdk::match_key::compile_payload_regex;
     use exoware_sdk::prune_policy::{validate_policy, OrderEncoding, PolicyScope, RetainPolicy};
+    use exoware_sdk::selector::compile_payload_regex;
 
     fn keys_scope(policy: &super::PrunePolicy) -> &super::KeysScope {
         match &policy.scope {
@@ -107,10 +107,10 @@ mod tests {
     fn keep_latest_versions_builds_expected_policy_for_fixed_width_entity() {
         let policy = keep_latest_versions(3, 32, 1).expect("policy");
         let scope = keys_scope(&policy);
-        assert_eq!(scope.match_key.reserved_bits, 5);
-        assert_eq!(scope.match_key.prefix, 6);
+        assert_eq!(scope.selector.reserved_bits, 5);
+        assert_eq!(scope.selector.prefix, 6);
         assert_eq!(
-            scope.match_key.payload_regex,
+            scope.selector.payload_regex,
             r"(?s-u)^(?P<entity>.{32})(?P<version>.{8})$"
         );
         assert_eq!(scope.group_by.capture_groups, vec![Utf8::from("entity")]);
@@ -142,10 +142,10 @@ mod tests {
     fn keep_latest_versions_utf8_builds_expected_policy() {
         let policy = keep_latest_versions_utf8(3, 1).expect("policy");
         let scope = keys_scope(&policy);
-        assert_eq!(scope.match_key.reserved_bits, 5);
-        assert_eq!(scope.match_key.prefix, 6);
+        assert_eq!(scope.selector.reserved_bits, 5);
+        assert_eq!(scope.selector.prefix, 6);
         assert_eq!(
-            scope.match_key.payload_regex,
+            scope.selector.payload_regex,
             format!(r"(?s-u)^(?P<entity>{ORDERED_UTF8_REGEX})(?P<version>.{{8}})$")
         );
         assert_eq!(scope.group_by.capture_groups, vec![Utf8::from("entity")]);
@@ -165,7 +165,7 @@ mod tests {
     fn keep_latest_versions_utf8_matches_variable_length_entity_payloads() {
         let policy = keep_latest_versions_utf8(3, 1).expect("policy");
         let scope = keys_scope(&policy);
-        let regex = compile_payload_regex(&scope.match_key.payload_regex).expect("regex");
+        let regex = compile_payload_regex(&scope.selector.payload_regex).expect("regex");
         let config = KvTableConfig::new(
             3,
             vec![

@@ -13,9 +13,9 @@ use connectrpc::{Chain, ConnectRpcService, RequestContext as Context};
 use criterion::{criterion_group, criterion_main, Criterion};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::prelude::SessionContext;
+use exoware_proto::common::kv::v1::Entry as ProtoEntry;
 use exoware_proto::connect_compression_registry;
-use exoware_proto::store::common::v1::KvEntry as ProtoKvEntry;
-use exoware_proto::store::ingest::v1::{
+use exoware_proto::log::ingest::v1::{
     PutResponse as ProtoPutResponse, Service as IngestService, ServiceServer as IngestServiceServer,
 };
 use exoware_proto::store::query::v1::{
@@ -95,7 +95,7 @@ impl IngestService for BenchIngest {
     async fn put(
         &self,
         _ctx: Context,
-        request: buffa::view::OwnedView<exoware_proto::store::ingest::v1::PutRequestView<'static>>,
+        request: buffa::view::OwnedView<exoware_proto::log::ingest::v1::PutRequestView<'static>>,
     ) -> connectrpc::ServiceResult<ProtoPutResponse> {
         let mut parsed = Vec::<(Key, Bytes)>::new();
         let wire = request.bytes();
@@ -157,7 +157,7 @@ impl QueryService for BenchQuery {
         let batch = batch_size.max(1);
 
         let guard = self.state.kv.lock().expect("kv mutex poisoned");
-        let mut results: Vec<ProtoKvEntry> = Vec::new();
+        let mut results: Vec<ProtoEntry> = Vec::new();
         let range: (std::ops::Bound<&Key>, std::ops::Bound<&Key>) = (
             Included(&start_key),
             if end_key.is_empty() {
@@ -167,7 +167,7 @@ impl QueryService for BenchQuery {
             },
         );
         for (key, value) in guard.range::<Key, _>(range).take(limit) {
-            results.push(ProtoKvEntry {
+            results.push(ProtoEntry {
                 key: key.to_vec(),
                 value: value.clone(),
                 ..Default::default()

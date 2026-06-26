@@ -9,11 +9,11 @@ inputs:
   - directory: ../../proto
     paths:
       - ../../proto/google/rpc/error_details.proto
-      - ../../proto/store/v1/common.proto
+      - ../../proto/common/v1/kv.proto
       - ../../proto/store/v1/compact.proto
-      - ../../proto/store/v1/ingest.proto
+      - ../../proto/log/v1/ingest.proto
       - ../../proto/store/v1/query.proto
-      - ../../proto/store/v1/stream.proto
+      - ../../proto/log/v1/stream.proto
   - module: buf.build/bufbuild/protovalidate
     paths:
       - buf/validate/validate.proto

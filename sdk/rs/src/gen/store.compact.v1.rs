@@ -155,7 +155,7 @@ impl ::buffa::Enumeration for PolicyOrderEncoding {
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct PolicyGroupBy {
-    /// Named capture groups from `store.common.v1.MatchKey.payload_regex` whose
+    /// Named capture groups from `common.kv.v1.Selector.payload_regex` whose
     /// matched bytes are concatenated (length-prefixed) to form each group's
     /// identity. Must not contain duplicates. When empty, all matched keys
     /// belong to a single group.
@@ -301,7 +301,7 @@ pub const __POLICY_GROUP_BY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::b
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct PolicyOrderBy {
-    /// Name of the capture group in `store.common.v1.MatchKey.payload_regex`
+    /// Name of the capture group in `common.kv.v1.Selector.payload_regex`
     /// that provides the ordering value.
     ///
     /// Field 1: `capture_group`
@@ -1426,20 +1426,19 @@ pub mod policy_retain {
     #[doc(inline)]
     pub use super::__buffa::view::oneof::policy_retain::Kind as KindView;
 }
-/// User-key-space scope: scan a KeyCodec family by `match_key`, partition
+/// User-key-space scope: scan a KeyCodec family by `selector`, partition
 /// matched keys into `group_by` groups, order within each group by
 /// `order_by`, then apply `retain` to decide which keys to delete.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct KeysScope {
-    /// Field 1: `match_key`
+    /// Field 1: `selector`
     #[serde(
-        rename = "matchKey",
-        alias = "match_key",
+        rename = "selector",
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
     )]
-    pub match_key: ::buffa::MessageField<super::super::common::v1::MatchKey>,
+    pub selector: ::buffa::MessageField<super::super::super::common::kv::v1::Selector>,
     /// Field 2: `group_by`
     #[serde(
         rename = "groupBy",
@@ -1461,7 +1460,7 @@ pub struct KeysScope {
 impl ::core::fmt::Debug for KeysScope {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         f.debug_struct("KeysScope")
-            .field("match_key", &self.match_key)
+            .field("selector", &self.selector)
             .field("group_by", &self.group_by)
             .field("order_by", &self.order_by)
             .finish()
@@ -1497,9 +1496,9 @@ impl ::buffa::Message for KeysScope {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
-        if self.match_key.is_set() {
+        if self.selector.is_set() {
             let __slot = __cache.reserve();
-            let inner_size = self.match_key.compute_size(__cache);
+            let inner_size = self.selector.compute_size(__cache);
             __cache.set(__slot, inner_size);
             size
                 += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
@@ -1531,14 +1530,14 @@ impl ::buffa::Message for KeysScope {
     ) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.match_key.is_set() {
+        if self.selector.is_set() {
             ::buffa::encoding::Tag::new(
                     1u32,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )
                 .encode(buf);
             ::buffa::encoding::encode_varint(__cache.consume_next() as u64, buf);
-            self.match_key.write_to(__cache, buf);
+            self.selector.write_to(__cache, buf);
         }
         if self.group_by.is_set() {
             ::buffa::encoding::Tag::new(
@@ -1580,7 +1579,7 @@ impl ::buffa::Message for KeysScope {
                     });
                 }
                 ::buffa::Message::merge_length_delimited(
-                    self.match_key.get_or_insert_default(),
+                    self.selector.get_or_insert_default(),
                     buf,
                     depth,
                 )?;
@@ -1621,7 +1620,7 @@ impl ::buffa::Message for KeysScope {
         ::core::result::Result::Ok(())
     }
     fn clear(&mut self) {
-        self.match_key = ::buffa::MessageField::none();
+        self.selector = ::buffa::MessageField::none();
         self.group_by = ::buffa::MessageField::none();
         self.order_by = ::buffa::MessageField::none();
         self.__buffa_unknown_fields.clear();
@@ -1657,7 +1656,7 @@ pub const __KEYS_SCOPE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa:
     is_wkt: false,
 };
 /// Sequence-number scope: prune the per-batch sequence log served by the
-/// store's `Stream` service. `match_key` / `group_by` / `order_by` are not
+/// store's `Stream` service. `selector` / `group_by` / `order_by` are not
 /// meaningful here — the log has a single implicit ordering by sequence
 /// number. The `retain` rule on the parent `Policy` is interpreted directly
 /// over sequence numbers:
@@ -2397,7 +2396,7 @@ pub mod __buffa {
         /// the retain policy is applied. Each group is pruned independently.
         #[derive(Clone, Debug, Default)]
         pub struct PolicyGroupByView<'a> {
-            /// Named capture groups from `store.common.v1.MatchKey.payload_regex` whose
+            /// Named capture groups from `common.kv.v1.Selector.payload_regex` whose
             /// matched bytes are concatenated (length-prefixed) to form each group's
             /// identity. Must not contain duplicates. When empty, all matched keys
             /// belong to a single group.
@@ -2591,7 +2590,7 @@ pub mod __buffa {
         /// Required for `RetainKeepLatest` and threshold-based retain policies.
         #[derive(Clone, Debug, Default)]
         pub struct PolicyOrderByView<'a> {
-            /// Name of the capture group in `store.common.v1.MatchKey.payload_regex`
+            /// Name of the capture group in `common.kv.v1.Selector.payload_regex`
             /// that provides the ordering value.
             ///
             /// Field 1: `capture_group`
@@ -4015,14 +4014,16 @@ pub mod __buffa {
                 this
             }
         }
-        /// User-key-space scope: scan a KeyCodec family by `match_key`, partition
+        /// User-key-space scope: scan a KeyCodec family by `selector`, partition
         /// matched keys into `group_by` groups, order within each group by
         /// `order_by`, then apply `retain` to decide which keys to delete.
         #[derive(Clone, Debug, Default)]
         pub struct KeysScopeView<'a> {
-            /// Field 1: `match_key`
-            pub match_key: ::buffa::MessageFieldView<
-                super::super::super::super::common::v1::__buffa::view::MatchKeyView<'a>,
+            /// Field 1: `selector`
+            pub selector: ::buffa::MessageFieldView<
+                super::super::super::super::super::common::kv::v1::__buffa::view::SelectorView<
+                    'a,
+                >,
             >,
             /// Field 2: `group_by`
             pub group_by: ::buffa::MessageFieldView<
@@ -4086,11 +4087,11 @@ pub mod __buffa {
                                 return Err(::buffa::DecodeError::RecursionLimitExceeded);
                             }
                             let sub = ::buffa::types::borrow_bytes(&mut cur)?;
-                            match view.match_key.as_mut() {
+                            match view.selector.as_mut() {
                                 Some(existing) => existing._merge_into_view(sub, depth - 1)?,
                                 None => {
-                                    view.match_key = ::buffa::MessageFieldView::set(
-                                        super::super::super::super::common::v1::__buffa::view::MatchKeyView::_decode_depth(
+                                    view.selector = ::buffa::MessageFieldView::set(
+                                        super::super::super::super::super::common::kv::v1::__buffa::view::SelectorView::_decode_depth(
                                             sub,
                                             depth - 1,
                                         )?,
@@ -4186,10 +4187,10 @@ pub mod __buffa {
                 use ::buffa::alloc::string::ToString as _;
                 let _ = __buffa_src;
                 super::super::KeysScope {
-                    match_key: match self.match_key.as_option() {
+                    selector: match self.selector.as_option() {
                         Some(v) => {
                             ::buffa::MessageField::<
-                                super::super::super::super::common::v1::MatchKey,
+                                super::super::super::super::super::common::kv::v1::Selector,
                             >::some(v.to_owned_from_source(__buffa_src))
                         }
                         None => ::buffa::MessageField::none(),
@@ -4225,9 +4226,9 @@ pub mod __buffa {
                 #[allow(unused_imports)]
                 use ::buffa::Enumeration as _;
                 let mut size = 0u32;
-                if self.match_key.is_set() {
+                if self.selector.is_set() {
                     let __slot = __cache.reserve();
-                    let inner_size = self.match_key.compute_size(__cache);
+                    let inner_size = self.selector.compute_size(__cache);
                     __cache.set(__slot, inner_size);
                     size
                         += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
@@ -4260,14 +4261,14 @@ pub mod __buffa {
             ) {
                 #[allow(unused_imports)]
                 use ::buffa::Enumeration as _;
-                if self.match_key.is_set() {
+                if self.selector.is_set() {
                     ::buffa::encoding::Tag::new(
                             1u32,
                             ::buffa::encoding::WireType::LengthDelimited,
                         )
                         .encode(buf);
                     ::buffa::encoding::encode_varint(__cache.consume_next() as u64, buf);
-                    self.match_key.write_to(__cache, buf);
+                    self.selector.write_to(__cache, buf);
                 }
                 if self.group_by.is_set() {
                     ::buffa::encoding::Tag::new(
@@ -4309,9 +4310,9 @@ pub mod __buffa {
                 use ::serde::ser::SerializeMap as _;
                 let mut __map = __s.serialize_map(::core::option::Option::None)?;
                 {
-                    if let ::core::option::Option::Some(__v) = self.match_key.as_option()
+                    if let ::core::option::Option::Some(__v) = self.selector.as_option()
                     {
-                        __map.serialize_entry("matchKey", __v)?;
+                        __map.serialize_entry("selector", __v)?;
                     }
                 }
                 {
@@ -4354,7 +4355,7 @@ pub mod __buffa {
             }
         }
         /// Sequence-number scope: prune the per-batch sequence log served by the
-        /// store's `Stream` service. `match_key` / `group_by` / `order_by` are not
+        /// store's `Stream` service. `selector` / `group_by` / `order_by` are not
         /// meaningful here — the log has a single implicit ordering by sequence
         /// number. The `retain` rule on the parent `Policy` is interpreted directly
         /// over sequence numbers:

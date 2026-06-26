@@ -35,10 +35,8 @@ use exoware_qmdb::{
     CurrentSyncResolver, OperationLogClient, OperationLogSubscribeProof, OperationLogSyncResolver,
     OrderedClient, OrderedWriter, QmdbError, MAX_OPERATION_SIZE,
 };
+use exoware_sdk::common::kv::v1::{filter as proto_filter, Filter as ProtoFilter};
 use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::store::common::v1::{
-    bytes_filter as proto_bytes_filter, BytesFilter as ProtoBytesFilter,
-};
 use exoware_sdk::StoreClient;
 
 const N: usize = 32;
@@ -994,25 +992,23 @@ async fn ordered_operation_range_connect_uses_current_root_witness() {
     assert_eq!(proof.operations, expected);
 }
 
-fn match_exact(key: &[u8]) -> ProtoBytesFilter {
-    ProtoBytesFilter {
-        kind: Some(proto_bytes_filter::Kind::Exact(Bytes::copy_from_slice(key))),
+fn match_exact(key: &[u8]) -> ProtoFilter {
+    ProtoFilter {
+        kind: Some(proto_filter::Kind::Exact(Bytes::copy_from_slice(key))),
         ..Default::default()
     }
 }
 
-fn match_prefix(prefix: &[u8]) -> ProtoBytesFilter {
-    ProtoBytesFilter {
-        kind: Some(proto_bytes_filter::Kind::Prefix(Bytes::copy_from_slice(
-            prefix,
-        ))),
+fn match_prefix(prefix: &[u8]) -> ProtoFilter {
+    ProtoFilter {
+        kind: Some(proto_filter::Kind::Prefix(Bytes::copy_from_slice(prefix))),
         ..Default::default()
     }
 }
 
-fn match_regex(regex: &str) -> ProtoBytesFilter {
-    ProtoBytesFilter {
-        kind: Some(proto_bytes_filter::Kind::Regex(regex.to_string())),
+fn match_regex(regex: &str) -> ProtoFilter {
+    ProtoFilter {
+        kind: Some(proto_filter::Kind::Regex(regex.to_string())),
         ..Default::default()
     }
 }

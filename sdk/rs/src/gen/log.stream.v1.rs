@@ -5,19 +5,20 @@
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct SubscribeRequest {
-    /// OR semantics across `match_keys`: a row is delivered if any match_key
+    /// OR semantics across `selectors`: a row is delivered if any selector
     /// matches. Bounded to keep server-side regex compilation cost predictable.
     ///
-    /// Field 1: `match_keys`
+    /// Field 1: `selectors`
     #[serde(
-        rename = "matchKeys",
-        alias = "match_keys",
+        rename = "selectors",
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
-    pub match_keys: ::buffa::alloc::vec::Vec<super::super::common::v1::MatchKey>,
-    /// Optional value-side filter, AND'd with `match_keys`. OR semantics within
-    /// the list: once a row's key passes a `MatchKey`, it is delivered only if
+    pub selectors: ::buffa::alloc::vec::Vec<
+        super::super::super::common::kv::v1::Selector,
+    >,
+    /// Optional value-side filter, AND'd with `selectors`. OR semantics within
+    /// the list: once a row's key passes a `Selector`, it is delivered only if
     /// its raw value bytes satisfy any one of `value_filters` (or the list is
     /// empty).
     ///
@@ -28,7 +29,9 @@ pub struct SubscribeRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
-    pub value_filters: ::buffa::alloc::vec::Vec<super::super::common::v1::BytesFilter>,
+    pub value_filters: ::buffa::alloc::vec::Vec<
+        super::super::super::common::kv::v1::Filter,
+    >,
     /// Optional replay cursor.
     ///
     /// Unset / 0 -\> subscription starts from the next live batch; no replay.
@@ -55,7 +58,7 @@ pub struct SubscribeRequest {
 impl ::core::fmt::Debug for SubscribeRequest {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         f.debug_struct("SubscribeRequest")
-            .field("match_keys", &self.match_keys)
+            .field("selectors", &self.selectors)
             .field("value_filters", &self.value_filters)
             .field("since_sequence_number", &self.since_sequence_number)
             .finish()
@@ -66,7 +69,7 @@ impl SubscribeRequest {
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.SubscribeRequest";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.SubscribeRequest";
 }
 impl SubscribeRequest {
     #[must_use = "with_* setters return `self` by value; assign or chain the result"]
@@ -84,10 +87,10 @@ impl ::buffa::DefaultInstance for SubscribeRequest {
     }
 }
 impl ::buffa::MessageName for SubscribeRequest {
-    const PACKAGE: &'static str = "store.stream.v1";
+    const PACKAGE: &'static str = "log.stream.v1";
     const NAME: &'static str = "SubscribeRequest";
-    const FULL_NAME: &'static str = "store.stream.v1.SubscribeRequest";
-    const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.SubscribeRequest";
+    const FULL_NAME: &'static str = "log.stream.v1.SubscribeRequest";
+    const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.SubscribeRequest";
 }
 impl ::buffa::Message for SubscribeRequest {
     /// Returns the total encoded size in bytes.
@@ -100,7 +103,7 @@ impl ::buffa::Message for SubscribeRequest {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
-        for v in &self.match_keys {
+        for v in &self.selectors {
             let __slot = __cache.reserve();
             let inner_size = v.compute_size(__cache);
             __cache.set(__slot, inner_size);
@@ -129,7 +132,7 @@ impl ::buffa::Message for SubscribeRequest {
     ) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        for v in &self.match_keys {
+        for v in &self.selectors {
             ::buffa::encoding::Tag::new(
                     1u32,
                     ::buffa::encoding::WireType::LengthDelimited,
@@ -175,7 +178,7 @@ impl ::buffa::Message for SubscribeRequest {
                 }
                 let mut elem = ::core::default::Default::default();
                 ::buffa::Message::merge_length_delimited(&mut elem, buf, depth)?;
-                self.match_keys.push(elem);
+                self.selectors.push(elem);
             }
             2u32 => {
                 if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
@@ -209,14 +212,14 @@ impl ::buffa::Message for SubscribeRequest {
         ::core::result::Result::Ok(())
     }
     fn clear(&mut self) {
-        self.match_keys.clear();
+        self.selectors.clear();
         self.value_filters.clear();
         self.since_sequence_number = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }
 impl ::buffa::ExtensionSet for SubscribeRequest {
-    const PROTO_FQN: &'static str = "store.stream.v1.SubscribeRequest";
+    const PROTO_FQN: &'static str = "log.stream.v1.SubscribeRequest";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -239,7 +242,7 @@ impl ::buffa::json_helpers::ProtoElemJson for SubscribeRequest {
 }
 #[doc(hidden)]
 pub const __SUBSCRIBE_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.stream.v1.SubscribeRequest",
+    type_url: "type.googleapis.com/log.stream.v1.SubscribeRequest",
     to_json: ::buffa::type_registry::any_to_json::<SubscribeRequest>,
     from_json: ::buffa::type_registry::any_from_json::<SubscribeRequest>,
     is_wkt: false,
@@ -273,7 +276,7 @@ impl GetRequest {
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.GetRequest";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.GetRequest";
 }
 impl ::buffa::DefaultInstance for GetRequest {
     fn default_instance() -> &'static Self {
@@ -282,10 +285,10 @@ impl ::buffa::DefaultInstance for GetRequest {
     }
 }
 impl ::buffa::MessageName for GetRequest {
-    const PACKAGE: &'static str = "store.stream.v1";
+    const PACKAGE: &'static str = "log.stream.v1";
     const NAME: &'static str = "GetRequest";
-    const FULL_NAME: &'static str = "store.stream.v1.GetRequest";
-    const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.GetRequest";
+    const FULL_NAME: &'static str = "log.stream.v1.GetRequest";
+    const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.GetRequest";
 }
 impl ::buffa::Message for GetRequest {
     /// Returns the total encoded size in bytes.
@@ -354,7 +357,7 @@ impl ::buffa::Message for GetRequest {
     }
 }
 impl ::buffa::ExtensionSet for GetRequest {
-    const PROTO_FQN: &'static str = "store.stream.v1.GetRequest";
+    const PROTO_FQN: &'static str = "log.stream.v1.GetRequest";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -377,7 +380,7 @@ impl ::buffa::json_helpers::ProtoElemJson for GetRequest {
 }
 #[doc(hidden)]
 pub const __GET_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.stream.v1.GetRequest",
+    type_url: "type.googleapis.com/log.stream.v1.GetRequest",
     to_json: ::buffa::type_registry::any_to_json::<GetRequest>,
     from_json: ::buffa::type_registry::any_from_json::<GetRequest>,
     is_wkt: false,
@@ -404,7 +407,7 @@ pub struct SubscribeResponse {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
-    pub entries: ::buffa::alloc::vec::Vec<super::super::common::v1::KvEntry>,
+    pub entries: ::buffa::alloc::vec::Vec<super::super::super::common::kv::v1::Entry>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -422,7 +425,7 @@ impl SubscribeResponse {
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.SubscribeResponse";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.SubscribeResponse";
 }
 impl ::buffa::DefaultInstance for SubscribeResponse {
     fn default_instance() -> &'static Self {
@@ -431,10 +434,10 @@ impl ::buffa::DefaultInstance for SubscribeResponse {
     }
 }
 impl ::buffa::MessageName for SubscribeResponse {
-    const PACKAGE: &'static str = "store.stream.v1";
+    const PACKAGE: &'static str = "log.stream.v1";
     const NAME: &'static str = "SubscribeResponse";
-    const FULL_NAME: &'static str = "store.stream.v1.SubscribeResponse";
-    const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.SubscribeResponse";
+    const FULL_NAME: &'static str = "log.stream.v1.SubscribeResponse";
+    const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.SubscribeResponse";
 }
 impl ::buffa::Message for SubscribeResponse {
     /// Returns the total encoded size in bytes.
@@ -533,7 +536,7 @@ impl ::buffa::Message for SubscribeResponse {
     }
 }
 impl ::buffa::ExtensionSet for SubscribeResponse {
-    const PROTO_FQN: &'static str = "store.stream.v1.SubscribeResponse";
+    const PROTO_FQN: &'static str = "log.stream.v1.SubscribeResponse";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -556,7 +559,7 @@ impl ::buffa::json_helpers::ProtoElemJson for SubscribeResponse {
 }
 #[doc(hidden)]
 pub const __SUBSCRIBE_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.stream.v1.SubscribeResponse",
+    type_url: "type.googleapis.com/log.stream.v1.SubscribeResponse",
     to_json: ::buffa::type_registry::any_to_json::<SubscribeResponse>,
     from_json: ::buffa::type_registry::any_from_json::<SubscribeResponse>,
     is_wkt: false,
@@ -581,7 +584,7 @@ pub struct GetResponse {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
-    pub entries: ::buffa::alloc::vec::Vec<super::super::common::v1::KvEntry>,
+    pub entries: ::buffa::alloc::vec::Vec<super::super::super::common::kv::v1::Entry>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -599,7 +602,7 @@ impl GetResponse {
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.GetResponse";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.GetResponse";
 }
 impl ::buffa::DefaultInstance for GetResponse {
     fn default_instance() -> &'static Self {
@@ -608,10 +611,10 @@ impl ::buffa::DefaultInstance for GetResponse {
     }
 }
 impl ::buffa::MessageName for GetResponse {
-    const PACKAGE: &'static str = "store.stream.v1";
+    const PACKAGE: &'static str = "log.stream.v1";
     const NAME: &'static str = "GetResponse";
-    const FULL_NAME: &'static str = "store.stream.v1.GetResponse";
-    const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.GetResponse";
+    const FULL_NAME: &'static str = "log.stream.v1.GetResponse";
+    const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.GetResponse";
 }
 impl ::buffa::Message for GetResponse {
     /// Returns the total encoded size in bytes.
@@ -710,7 +713,7 @@ impl ::buffa::Message for GetResponse {
     }
 }
 impl ::buffa::ExtensionSet for GetResponse {
-    const PROTO_FQN: &'static str = "store.stream.v1.GetResponse";
+    const PROTO_FQN: &'static str = "log.stream.v1.GetResponse";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -733,7 +736,7 @@ impl ::buffa::json_helpers::ProtoElemJson for GetResponse {
 }
 #[doc(hidden)]
 pub const __GET_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.stream.v1.GetResponse",
+    type_url: "type.googleapis.com/log.stream.v1.GetResponse",
     to_json: ::buffa::type_registry::any_to_json::<GetResponse>,
     from_json: ::buffa::type_registry::any_from_json::<GetResponse>,
     is_wkt: false,
@@ -758,23 +761,25 @@ pub mod __buffa {
         /// Live (and optionally replayed) subscription request.
         #[derive(Clone, Debug, Default)]
         pub struct SubscribeRequestView<'a> {
-            /// OR semantics across `match_keys`: a row is delivered if any match_key
+            /// OR semantics across `selectors`: a row is delivered if any selector
             /// matches. Bounded to keep server-side regex compilation cost predictable.
             ///
-            /// Field 1: `match_keys`
-            pub match_keys: ::buffa::RepeatedView<
+            /// Field 1: `selectors`
+            pub selectors: ::buffa::RepeatedView<
                 'a,
-                super::super::super::super::common::v1::__buffa::view::MatchKeyView<'a>,
+                super::super::super::super::super::common::kv::v1::__buffa::view::SelectorView<
+                    'a,
+                >,
             >,
-            /// Optional value-side filter, AND'd with `match_keys`. OR semantics within
-            /// the list: once a row's key passes a `MatchKey`, it is delivered only if
+            /// Optional value-side filter, AND'd with `selectors`. OR semantics within
+            /// the list: once a row's key passes a `Selector`, it is delivered only if
             /// its raw value bytes satisfy any one of `value_filters` (or the list is
             /// empty).
             ///
             /// Field 2: `value_filters`
             pub value_filters: ::buffa::RepeatedView<
                 'a,
-                super::super::super::super::common::v1::__buffa::view::BytesFilterView<
+                super::super::super::super::super::common::kv::v1::__buffa::view::FilterView<
                     'a,
                 >,
             >,
@@ -857,9 +862,9 @@ pub mod __buffa {
                                 return Err(::buffa::DecodeError::RecursionLimitExceeded);
                             }
                             let sub = ::buffa::types::borrow_bytes(&mut cur)?;
-                            view.match_keys
+                            view.selectors
                                 .push(
-                                    super::super::super::super::common::v1::__buffa::view::MatchKeyView::_decode_depth(
+                                    super::super::super::super::super::common::kv::v1::__buffa::view::SelectorView::_decode_depth(
                                         sub,
                                         depth - 1,
                                     )?,
@@ -881,7 +886,7 @@ pub mod __buffa {
                             let sub = ::buffa::types::borrow_bytes(&mut cur)?;
                             view.value_filters
                                 .push(
-                                    super::super::super::super::common::v1::__buffa::view::BytesFilterView::_decode_depth(
+                                    super::super::super::super::super::common::kv::v1::__buffa::view::FilterView::_decode_depth(
                                         sub,
                                         depth - 1,
                                     )?,
@@ -923,8 +928,8 @@ pub mod __buffa {
                 use ::buffa::alloc::string::ToString as _;
                 let _ = __buffa_src;
                 super::super::SubscribeRequest {
-                    match_keys: self
-                        .match_keys
+                    selectors: self
+                        .selectors
                         .iter()
                         .map(|v| v.to_owned_from_source(__buffa_src))
                         .collect(),
@@ -949,7 +954,7 @@ pub mod __buffa {
                 #[allow(unused_imports)]
                 use ::buffa::Enumeration as _;
                 let mut size = 0u32;
-                for v in &self.match_keys {
+                for v in &self.selectors {
                     let __slot = __cache.reserve();
                     let inner_size = v.compute_size(__cache);
                     __cache.set(__slot, inner_size);
@@ -979,7 +984,7 @@ pub mod __buffa {
             ) {
                 #[allow(unused_imports)]
                 use ::buffa::Enumeration as _;
-                for v in &self.match_keys {
+                for v in &self.selectors {
                     ::buffa::encoding::Tag::new(
                             1u32,
                             ::buffa::encoding::WireType::LengthDelimited,
@@ -1026,8 +1031,8 @@ pub mod __buffa {
             ) -> ::core::result::Result<__S::Ok, __S::Error> {
                 use ::serde::ser::SerializeMap as _;
                 let mut __map = __s.serialize_map(::core::option::Option::None)?;
-                if !self.match_keys.is_empty() {
-                    __map.serialize_entry("matchKeys", &*self.match_keys)?;
+                if !self.selectors.is_empty() {
+                    __map.serialize_entry("selectors", &*self.selectors)?;
                 }
                 if !self.value_filters.is_empty() {
                     __map.serialize_entry("valueFilters", &*self.value_filters)?;
@@ -1048,10 +1053,10 @@ pub mod __buffa {
             }
         }
         impl<'a> ::buffa::MessageName for SubscribeRequestView<'a> {
-            const PACKAGE: &'static str = "store.stream.v1";
+            const PACKAGE: &'static str = "log.stream.v1";
             const NAME: &'static str = "SubscribeRequest";
-            const FULL_NAME: &'static str = "store.stream.v1.SubscribeRequest";
-            const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.SubscribeRequest";
+            const FULL_NAME: &'static str = "log.stream.v1.SubscribeRequest";
+            const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.SubscribeRequest";
         }
         impl<'v> ::buffa::DefaultViewInstance for SubscribeRequestView<'v> {
             fn default_view_instance<'a>() -> &'a Self
@@ -1244,10 +1249,10 @@ pub mod __buffa {
             }
         }
         impl<'a> ::buffa::MessageName for GetRequestView<'a> {
-            const PACKAGE: &'static str = "store.stream.v1";
+            const PACKAGE: &'static str = "log.stream.v1";
             const NAME: &'static str = "GetRequest";
-            const FULL_NAME: &'static str = "store.stream.v1.GetRequest";
-            const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.GetRequest";
+            const FULL_NAME: &'static str = "log.stream.v1.GetRequest";
+            const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.GetRequest";
         }
         impl<'v> ::buffa::DefaultViewInstance for GetRequestView<'v> {
             fn default_view_instance<'a>() -> &'a Self
@@ -1278,7 +1283,9 @@ pub mod __buffa {
             /// Field 2: `entries`
             pub entries: ::buffa::RepeatedView<
                 'a,
-                super::super::super::super::common::v1::__buffa::view::KvEntryView<'a>,
+                super::super::super::super::super::common::kv::v1::__buffa::view::EntryView<
+                    'a,
+                >,
             >,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
@@ -1348,7 +1355,7 @@ pub mod __buffa {
                             let sub = ::buffa::types::borrow_bytes(&mut cur)?;
                             view.entries
                                 .push(
-                                    super::super::super::super::common::v1::__buffa::view::KvEntryView::_decode_depth(
+                                    super::super::super::super::super::common::kv::v1::__buffa::view::EntryView::_decode_depth(
                                         sub,
                                         depth - 1,
                                     )?,
@@ -1493,10 +1500,10 @@ pub mod __buffa {
             }
         }
         impl<'a> ::buffa::MessageName for SubscribeResponseView<'a> {
-            const PACKAGE: &'static str = "store.stream.v1";
+            const PACKAGE: &'static str = "log.stream.v1";
             const NAME: &'static str = "SubscribeResponse";
-            const FULL_NAME: &'static str = "store.stream.v1.SubscribeResponse";
-            const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.SubscribeResponse";
+            const FULL_NAME: &'static str = "log.stream.v1.SubscribeResponse";
+            const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.SubscribeResponse";
         }
         impl<'v> ::buffa::DefaultViewInstance for SubscribeResponseView<'v> {
             fn default_view_instance<'a>() -> &'a Self
@@ -1527,7 +1534,9 @@ pub mod __buffa {
             /// Field 2: `entries`
             pub entries: ::buffa::RepeatedView<
                 'a,
-                super::super::super::super::common::v1::__buffa::view::KvEntryView<'a>,
+                super::super::super::super::super::common::kv::v1::__buffa::view::EntryView<
+                    'a,
+                >,
             >,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
@@ -1597,7 +1606,7 @@ pub mod __buffa {
                             let sub = ::buffa::types::borrow_bytes(&mut cur)?;
                             view.entries
                                 .push(
-                                    super::super::super::super::common::v1::__buffa::view::KvEntryView::_decode_depth(
+                                    super::super::super::super::super::common::kv::v1::__buffa::view::EntryView::_decode_depth(
                                         sub,
                                         depth - 1,
                                     )?,
@@ -1742,10 +1751,10 @@ pub mod __buffa {
             }
         }
         impl<'a> ::buffa::MessageName for GetResponseView<'a> {
-            const PACKAGE: &'static str = "store.stream.v1";
+            const PACKAGE: &'static str = "log.stream.v1";
             const NAME: &'static str = "GetResponse";
-            const FULL_NAME: &'static str = "store.stream.v1.GetResponse";
-            const TYPE_URL: &'static str = "type.googleapis.com/store.stream.v1.GetResponse";
+            const FULL_NAME: &'static str = "log.stream.v1.GetResponse";
+            const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.GetResponse";
         }
         impl<'v> ::buffa::DefaultViewInstance for GetResponseView<'v> {
             fn default_view_instance<'a>() -> &'a Self
@@ -1828,13 +1837,13 @@ for ::buffa::view::OwnedView<__buffa::view::GetResponseView<'static>> {
     }
 }
 /// Full service name for this service.
-pub const SERVICE_SERVICE_NAME: &str = "store.stream.v1.Service";
+pub const SERVICE_SERVICE_NAME: &str = "log.stream.v1.Service";
 /// Static [`Spec`](::connectrpc::Spec) for the server-side `Subscribe` RPC.
 ///
 /// The dispatcher surfaces this on
 /// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
 pub const SERVICE_SUBSCRIBE_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
-        "/store.stream.v1.Service/Subscribe",
+        "/log.stream.v1.Service/Subscribe",
         ::connectrpc::StreamType::ServerStream,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
@@ -1843,13 +1852,13 @@ pub const SERVICE_SUBSCRIBE_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::serve
 /// The dispatcher surfaces this on
 /// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
 pub const SERVICE_GET_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
-        "/store.stream.v1.Service/Get",
+        "/log.stream.v1.Service/Get",
         ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
 /// Push-based subscription + point-lookup over the store's log.
 /// `Subscribe` delivers a `SubscribeResponse` per atomic `Put` batch whose
-/// entries match any of the subscriber's `match_keys`. Optional
+/// entries match any of the subscriber's `selectors`. Optional
 /// `since_sequence_number` replays retained batches before transitioning live.
 /// `Get` returns the complete batch at a given sequence number (no filter
 /// applied server-side). `SubscribeResponse` and `GetResponse` carry the
@@ -2016,7 +2025,7 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
         &self,
         path: &str,
     ) -> Option<::connectrpc::dispatcher::codegen::MethodDescriptor> {
-        let method = path.strip_prefix("store.stream.v1.Service/")?;
+        let method = path.strip_prefix("log.stream.v1.Service/")?;
         match method {
             "Subscribe" => {
                 Some(
@@ -2040,7 +2049,7 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
         request: ::connectrpc::Payload,
         format: ::connectrpc::CodecFormat,
     ) -> ::connectrpc::dispatcher::codegen::UnaryResult {
-        let Some(method) = path.strip_prefix("store.stream.v1.Service/") else {
+        let Some(method) = path.strip_prefix("log.stream.v1.Service/") else {
             return ::connectrpc::dispatcher::codegen::unimplemented_unary(path);
         };
         let _ = (&ctx, &request, &format);
@@ -2064,7 +2073,7 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
         request: ::buffa::bytes::Bytes,
         format: ::connectrpc::CodecFormat,
     ) -> ::connectrpc::dispatcher::codegen::StreamingResult {
-        let Some(method) = path.strip_prefix("store.stream.v1.Service/") else {
+        let Some(method) = path.strip_prefix("log.stream.v1.Service/") else {
             return ::connectrpc::dispatcher::codegen::unimplemented_streaming(path);
         };
         let _ = (&ctx, &request, &format);
@@ -2096,7 +2105,7 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
         requests: ::connectrpc::dispatcher::codegen::RequestStream,
         format: ::connectrpc::CodecFormat,
     ) -> ::connectrpc::dispatcher::codegen::UnaryResult {
-        let Some(method) = path.strip_prefix("store.stream.v1.Service/") else {
+        let Some(method) = path.strip_prefix("log.stream.v1.Service/") else {
             return ::connectrpc::dispatcher::codegen::unimplemented_unary(path);
         };
         let _ = (&ctx, &requests, &format);
@@ -2111,7 +2120,7 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
         requests: ::connectrpc::dispatcher::codegen::RequestStream,
         format: ::connectrpc::CodecFormat,
     ) -> ::connectrpc::dispatcher::codegen::StreamingResult {
-        let Some(method) = path.strip_prefix("store.stream.v1.Service/") else {
+        let Some(method) = path.strip_prefix("log.stream.v1.Service/") else {
             return ::connectrpc::dispatcher::codegen::unimplemented_streaming(path);
         };
         let _ = (&ctx, &requests, &format);
@@ -2191,7 +2200,7 @@ where
     pub fn config_mut(&mut self) -> &mut ::connectrpc::client::ClientConfig {
         &mut self.config
     }
-    /// Call the Subscribe RPC. Sends a request to /store.stream.v1.Service/Subscribe.
+    /// Call the Subscribe RPC. Sends a request to /log.stream.v1.Service/Subscribe.
     pub async fn subscribe(
         &self,
         request: SubscribeRequest,
@@ -2230,7 +2239,7 @@ where
             )
             .await
     }
-    /// Call the Get RPC. Sends a request to /store.stream.v1.Service/Get.
+    /// Call the Get RPC. Sends a request to /log.stream.v1.Service/Get.
     pub async fn get(
         &self,
         request: GetRequest,

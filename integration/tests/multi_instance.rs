@@ -17,8 +17,8 @@ use exoware_qmdb::{
 };
 use exoware_sdk::keys::Key;
 use exoware_sdk::kv_codec::Utf8;
-use exoware_sdk::match_key::MatchKey;
 use exoware_sdk::proto::PreferZstdHttpClient;
+use exoware_sdk::selector::Selector;
 use exoware_sdk::stream_filter::StreamFilter;
 use exoware_sdk::{
     RetryConfig, StoreBatchPublication, StoreBatchUpload, StoreClient, StoreKeyPrefix,
@@ -124,7 +124,7 @@ fn store_prefix(prefix: u16) -> StoreKeyPrefix {
 
 fn all_logical_keys_filter() -> StreamFilter {
     StreamFilter {
-        match_keys: vec![MatchKey {
+        selectors: vec![Selector {
             reserved_bits: 0,
             prefix: 0,
             payload_regex: Utf8::from("(?s-u).*"),

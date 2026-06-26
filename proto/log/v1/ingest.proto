@@ -1,9 +1,9 @@
 syntax = "proto3";
 
-package store.ingest.v1;
+package log.ingest.v1;
 
 import "buf/validate/validate.proto";
-import "store/v1/common.proto";
+import "common/v1/kv.proto";
 
 // Ingest service for writing key-value pairs into the store.
 service Service {
@@ -17,7 +17,7 @@ service Service {
 // Batch write request. All pairs are applied atomically.
 message PutRequest {
   // Key-value pairs to write. At least one pair is required.
-  repeated store.common.v1.KvEntry kvs = 1
+  repeated common.kv.v1.Entry kvs = 1
     [(buf.validate.field).repeated.min_items = 1];
 }
 

@@ -12,9 +12,9 @@
 
 pub mod keys;
 pub mod kv_codec;
-pub mod match_key;
 pub mod proto;
 pub mod prune_policy;
+pub mod selector;
 pub mod stream_filter;
 pub use keys::{Key, KeyCodec, KeyCodecError, KeyMut, KeyValidationError, Value, MAX_KEY_LEN};
 pub use proto::*;
@@ -25,10 +25,10 @@ use connectrpc::client::{ClientConfig, ServerStream as ConnectServerStream};
 use connectrpc::{ConnectError, ErrorCode};
 use exoware_proto::compact::ServiceClient as CompactServiceClient;
 use exoware_proto::ingest::ServiceClient as IngestServiceClient;
+use exoware_proto::log::ingest::v1::PutRequest as ProtoPutRequest;
 use exoware_proto::query as proto_query;
 use exoware_proto::query::ServiceClient as QueryServiceClient;
 use exoware_proto::store::compact::v1::PruneRequest as ProtoPruneRequest;
-use exoware_proto::store::ingest::v1::PutRequest as ProtoPutRequest;
 use exoware_proto::store::query::v1::{
     GetManyRequest as ProtoGetManyRequest, GetRequest as ProtoGetRequest,
     RangeRequest as ProtoRangeRequest, ReduceRequest as ProtoWireReduceRequest,
@@ -281,48 +281,48 @@ impl StoreKeyPrefix {
         Ok((start, end))
     }
 
-    fn prefix_match_key(
+    fn prefix_selector(
         self,
-        match_key: &crate::match_key::MatchKey,
-    ) -> Result<crate::match_key::MatchKey, StoreKeyPrefixError> {
-        self.prefix_match_key_with_regex(match_key, match_key.payload_regex.clone())
+        selector: &crate::selector::Selector,
+    ) -> Result<crate::selector::Selector, StoreKeyPrefixError> {
+        self.prefix_selector_with_regex(selector, selector.payload_regex.clone())
     }
 
-    fn prefix_stream_match_key(
+    fn prefix_stream_selector(
         self,
-        match_key: &crate::match_key::MatchKey,
-    ) -> Result<crate::match_key::MatchKey, StoreKeyPrefixError> {
-        self.prefix_match_key_with_regex(match_key, crate::kv_codec::Utf8::from("(?s-u).*"))
+        selector: &crate::selector::Selector,
+    ) -> Result<crate::selector::Selector, StoreKeyPrefixError> {
+        self.prefix_selector_with_regex(selector, crate::kv_codec::Utf8::from("(?s-u).*"))
     }
 
-    fn prefix_match_key_with_regex(
+    fn prefix_selector_with_regex(
         self,
-        match_key: &crate::match_key::MatchKey,
+        selector: &crate::selector::Selector,
         payload_regex: crate::kv_codec::Utf8,
-    ) -> Result<crate::match_key::MatchKey, StoreKeyPrefixError> {
-        validate_prefix_bits(match_key.reserved_bits, match_key.prefix)?;
+    ) -> Result<crate::selector::Selector, StoreKeyPrefixError> {
+        validate_prefix_bits(selector.reserved_bits, selector.prefix)?;
         let reserved_bits = self
             .reserved_bits()
-            .checked_add(match_key.reserved_bits)
+            .checked_add(selector.reserved_bits)
             .ok_or(StoreKeyPrefixError::CombinedReservedBitsTooLarge {
                 prefix_bits: self.reserved_bits(),
-                logical_bits: match_key.reserved_bits,
+                logical_bits: selector.reserved_bits,
             })?;
         if reserved_bits > 16 {
             return Err(StoreKeyPrefixError::CombinedReservedBitsTooLarge {
                 prefix_bits: self.reserved_bits(),
-                logical_bits: match_key.reserved_bits,
+                logical_bits: selector.reserved_bits,
             });
         }
 
-        let prefix = (u32::from(self.prefix()) << u32::from(match_key.reserved_bits))
-            | u32::from(match_key.prefix);
+        let prefix = (u32::from(self.prefix()) << u32::from(selector.reserved_bits))
+            | u32::from(selector.prefix);
         let prefix = u16::try_from(prefix).map_err(|_| StoreKeyPrefixError::PrefixTooLarge {
             reserved_bits,
             prefix: u16::MAX,
         })?;
         validate_prefix_bits(reserved_bits, prefix)?;
-        Ok(crate::match_key::MatchKey {
+        Ok(crate::selector::Selector {
             reserved_bits,
             prefix,
             payload_regex,
@@ -856,7 +856,7 @@ fn validate_prefix_bits(reserved_bits: u8, prefix: u16) -> Result<(), StoreKeyPr
 }
 
 /// One delivered (key, value) row from a stream subscription. The client
-/// reapplies its own filter if it needs to know which match_key matched —
+/// reapplies its own filter if it needs to know which selector matched —
 /// the wire frame doesn't carry the index.
 #[derive(Clone, Debug)]
 pub struct StreamSubscriptionEntry {
@@ -876,7 +876,7 @@ pub struct StreamSubscriptionFrame {
 pub struct StreamSubscription {
     stream: ConnectServerStream<
         hyper::body::Incoming,
-        exoware_proto::store::stream::v1::SubscribeResponseView<'static>,
+        exoware_proto::log::stream::v1::SubscribeResponseView<'static>,
     >,
     key_prefix: Option<StoreKeyPrefix>,
     logical_filter: Option<ClientStreamFilter>,
@@ -946,7 +946,7 @@ struct ClientKeyMatcher {
 #[derive(Clone)]
 struct ClientStreamFilter {
     keys: Vec<ClientKeyMatcher>,
-    values: Option<crate::stream_filter::CompiledBytesFilters>,
+    values: Option<crate::stream_filter::CompiledFilters>,
 }
 
 impl ClientStreamFilter {
@@ -954,10 +954,10 @@ impl ClientStreamFilter {
         crate::stream_filter::validate_filter(filter)
             .map_err(|e| ClientError::WireFormat(e.to_string()))?;
         let keys = filter
-            .match_keys
+            .selectors
             .iter()
             .map(|mk| {
-                let regex = crate::match_key::compile_payload_regex(&mk.payload_regex)
+                let regex = crate::selector::compile_payload_regex(&mk.payload_regex)
                     .map_err(|e| ClientError::WireFormat(e.to_string()))?;
                 Ok(ClientKeyMatcher {
                     codec: KeyCodec::new(mk.reserved_bits, mk.prefix),
@@ -965,7 +965,7 @@ impl ClientStreamFilter {
                 })
             })
             .collect::<Result<Vec<_>, ClientError>>()?;
-        let values = crate::stream_filter::CompiledBytesFilters::compile(&filter.value_filters)
+        let values = crate::stream_filter::CompiledFilters::compile(&filter.value_filters)
             .map_err(ClientError::WireFormat)?;
         Ok(Self { keys, values })
     }
@@ -991,12 +991,12 @@ impl ClientStreamFilter {
     }
 }
 
-/// Inspect a Connect error for `store.stream.BATCH_EVICTED` / `BATCH_NOT_FOUND`
+/// Inspect a Connect error for `log.stream.BATCH_EVICTED` / `BATCH_NOT_FOUND`
 /// `ErrorInfo` details. Used by `get_batch` to collapse both into `Ok(None)`.
 fn is_batch_missing_error(err: &ConnectError) -> bool {
     match proto_decode_connect_error(err) {
         Ok(decoded) => decoded.error_info.is_some_and(|info| {
-            info.domain == "store.stream"
+            info.domain == "log.stream"
                 && matches!(info.reason.as_str(), "BATCH_EVICTED" | "BATCH_NOT_FOUND")
         }),
         Err(_) => false,
@@ -1122,7 +1122,7 @@ impl StoreClientBuilder {
         self
     }
 
-    /// Base URL for the ingest service (`store.ingest.v1.Service`).
+    /// Base URL for the ingest service (`log.ingest.v1.Service`).
     pub fn ingest_url(mut self, url: &str) -> Self {
         self.ingest_url = Some(trim_connect_base(url));
         self
@@ -1140,7 +1140,7 @@ impl StoreClientBuilder {
         self
     }
 
-    /// Base URL for the stream service (`store.stream.v1.Service`).
+    /// Base URL for the stream service (`log.stream.v1.Service`).
     pub fn stream_url(mut self, url: &str) -> Self {
         self.stream_url = Some(trim_connect_base(url));
         self
@@ -1365,7 +1365,7 @@ impl StoreClient {
         }
     }
 
-    /// Typed access to the `store.ingest.v1` service.
+    /// Typed access to the `log.ingest.v1` service.
     pub fn ingest(&self) -> Ingest<'_> {
         Ingest { c: self }
     }
@@ -1380,7 +1380,7 @@ impl StoreClient {
         Compact { c: self }
     }
 
-    /// Typed access to the `store.stream.v1` service.
+    /// Typed access to the `log.stream.v1` service.
     pub fn stream(&self) -> Stream<'_> {
         Stream { c: self }
     }
@@ -1418,7 +1418,7 @@ impl StoreClient {
                     MAX_KEY_LEN
                 )));
             }
-            proto_kvs.push(exoware_proto::common::KvEntry {
+            proto_kvs.push(exoware_proto::common::Entry {
                 key: key.to_vec(),
                 value: Bytes::copy_from_slice(value),
                 ..Default::default()
@@ -1438,7 +1438,7 @@ impl StoreClient {
                     MAX_KEY_LEN
                 )));
             }
-            proto_kvs.push(exoware_proto::common::KvEntry {
+            proto_kvs.push(exoware_proto::common::Entry {
                 key: key.to_vec(),
                 value: value.clone(),
                 ..Default::default()
@@ -1447,7 +1447,7 @@ impl StoreClient {
         self.send_put(proto_kvs).await
     }
 
-    async fn send_put(&self, kvs: Vec<exoware_proto::common::KvEntry>) -> Result<u64, ClientError> {
+    async fn send_put(&self, kvs: Vec<exoware_proto::common::Entry>) -> Result<u64, ClientError> {
         let config =
             store_connect_client_config(self.ingest_uri.clone(), self.connect_request_compression);
         let client = IngestServiceClient::new(self.connect_http.clone(), config);
@@ -2029,7 +2029,7 @@ impl StoreClient {
                 let scope = match &policy.scope {
                     PolicyScope::Keys(scope) => {
                         let mut scope = scope.clone();
-                        scope.match_key = prefix.prefix_match_key(&scope.match_key)?;
+                        scope.selector = prefix.prefix_selector(&scope.selector)?;
                         PolicyScope::Keys(scope)
                     }
                     PolicyScope::Sequence => PolicyScope::Sequence,
@@ -2050,13 +2050,13 @@ impl StoreClient {
         let Some(prefix) = self.key_prefix else {
             return Ok(filter);
         };
-        let match_keys = filter
-            .match_keys
+        let selectors = filter
+            .selectors
             .iter()
-            .map(|mk| prefix.prefix_stream_match_key(mk))
+            .map(|mk| prefix.prefix_stream_selector(mk))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(crate::stream_filter::StreamFilter {
-            match_keys,
+            selectors,
             value_filters: filter.value_filters,
         })
     }
@@ -2393,7 +2393,7 @@ impl<'a> Compact<'a> {
 }
 
 impl<'a> Stream<'a> {
-    /// `store.stream.v1.Service.Subscribe` — see `StreamSubscription::next`
+    /// `log.stream.v1.Service.Subscribe` — see `StreamSubscription::next`
     /// for consuming delivered frames. `since_sequence_number = None` starts
     /// live from the next Put; `Some(N)` replays retained batches before
     /// transitioning to live. An evicted `since` returns a
@@ -2412,10 +2412,10 @@ impl<'a> Stream<'a> {
         let filter = self.c.prefix_stream_filter(filter)?;
         crate::stream_filter::validate_filter(&filter)
             .map_err(|e| ClientError::WireFormat(e.to_string()))?;
-        let match_keys = filter
-            .match_keys
+        let selectors = filter
+            .selectors
             .into_iter()
-            .map(|mk| exoware_proto::store::common::v1::MatchKey {
+            .map(|mk| exoware_proto::common::kv::v1::Selector {
                 reserved_bits: u32::from(mk.reserved_bits),
                 prefix: u32::from(mk.prefix),
                 payload_regex: mk.payload_regex.0,
@@ -2426,21 +2426,21 @@ impl<'a> Stream<'a> {
             .value_filters
             .into_iter()
             .map(|vf| {
-                use crate::stream_filter::BytesFilter;
-                use exoware_proto::store::common::v1::bytes_filter::Kind as ProtoKind;
+                use crate::stream_filter::Filter;
+                use exoware_proto::common::kv::v1::filter::Kind as ProtoKind;
                 let kind = match vf {
-                    BytesFilter::Exact(bytes) => ProtoKind::Exact(bytes),
-                    BytesFilter::Prefix(bytes) => ProtoKind::Prefix(bytes),
-                    BytesFilter::Regex(pattern) => ProtoKind::Regex(pattern),
+                    Filter::Exact(bytes) => ProtoKind::Exact(bytes),
+                    Filter::Prefix(bytes) => ProtoKind::Prefix(bytes),
+                    Filter::Regex(pattern) => ProtoKind::Regex(pattern),
                 };
-                exoware_proto::store::common::v1::BytesFilter {
+                exoware_proto::common::kv::v1::Filter {
                     kind: Some(kind),
                     ..Default::default()
                 }
             })
             .collect();
-        let request = exoware_proto::store::stream::v1::SubscribeRequest {
-            match_keys,
+        let request = exoware_proto::log::stream::v1::SubscribeRequest {
+            selectors,
             value_filters,
             since_sequence_number,
             ..Default::default()
@@ -2449,10 +2449,8 @@ impl<'a> Stream<'a> {
             self.c.stream_uri.clone(),
             self.c.connect_request_compression,
         );
-        let client = exoware_proto::store::stream::v1::ServiceClient::new(
-            self.c.connect_http.clone(),
-            config,
-        );
+        let client =
+            exoware_proto::log::stream::v1::ServiceClient::new(self.c.connect_http.clone(), config);
         let stream = client
             .subscribe(request)
             .await
@@ -2464,7 +2462,7 @@ impl<'a> Stream<'a> {
         })
     }
 
-    /// `store.stream.v1.Service.Get` — `Ok(None)` collapses the server's
+    /// `log.stream.v1.Service.Get` — `Ok(None)` collapses the server's
     /// `BATCH_EVICTED` / `BATCH_NOT_FOUND` error details.
     pub async fn get(
         &self,
@@ -2474,12 +2472,10 @@ impl<'a> Stream<'a> {
             self.c.stream_uri.clone(),
             self.c.connect_request_compression,
         );
-        let client = exoware_proto::store::stream::v1::ServiceClient::new(
-            self.c.connect_http.clone(),
-            config,
-        );
+        let client =
+            exoware_proto::log::stream::v1::ServiceClient::new(self.c.connect_http.clone(), config);
         match client
-            .get(exoware_proto::store::stream::v1::GetRequest {
+            .get(exoware_proto::log::stream::v1::GetRequest {
                 sequence_number,
                 ..Default::default()
             })
@@ -3004,28 +3000,28 @@ mod tests {
     }
 
     #[test]
-    fn store_key_prefix_rewrites_match_key_family() {
+    fn store_key_prefix_rewrites_selector_family() {
         let prefix = StoreKeyPrefix::new(3, 0b101).unwrap();
-        let logical = crate::match_key::MatchKey {
+        let logical = crate::selector::Selector {
             reserved_bits: 4,
             prefix: 0b0110,
             payload_regex: crate::kv_codec::Utf8::from("(?s).*"),
         };
-        let physical = prefix.prefix_match_key(&logical).unwrap();
+        let physical = prefix.prefix_selector(&logical).unwrap();
         assert_eq!(physical.reserved_bits, 7);
         assert_eq!(physical.prefix, 0b101_0110);
         assert_eq!(physical.payload_regex, logical.payload_regex);
     }
 
     #[test]
-    fn store_key_prefix_broadens_stream_match_key_payload_regex() {
+    fn store_key_prefix_broadens_stream_selector_payload_regex() {
         let prefix = StoreKeyPrefix::new(3, 0b101).unwrap();
-        let logical = crate::match_key::MatchKey {
+        let logical = crate::selector::Selector {
             reserved_bits: 4,
             prefix: 0b0110,
             payload_regex: crate::kv_codec::Utf8::from("(?s).*"),
         };
-        let physical = prefix.prefix_stream_match_key(&logical).unwrap();
+        let physical = prefix.prefix_stream_selector(&logical).unwrap();
         assert_eq!(physical.reserved_bits, 7);
         assert_eq!(physical.prefix, 0b101_0110);
         assert_eq!(&*physical.payload_regex, "(?s-u).*");
