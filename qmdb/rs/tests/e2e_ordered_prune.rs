@@ -165,7 +165,7 @@ async fn mirror_ordered_prune_past_chunk_zero() {
                         .await
                         .expect("prune current");
 
-                    let latest = db.bounds().await.end - 1;
+                    let latest = db.bounds().end - 1;
                     let total = NonZeroU64::new(*latest + 1).expect("non-zero");
                     let (_proof, cumulative) = db
                         .ops_historical_proof(latest + 1, Location::<mmr::Family>::new(0), total)

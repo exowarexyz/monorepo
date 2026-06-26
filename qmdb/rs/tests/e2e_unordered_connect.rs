@@ -253,7 +253,7 @@ async fn build_local_batch() -> LocalBatch {
                 };
                 db.apply_batch(finalized).await.expect("apply");
 
-                let latest = db.bounds().await.end - 1;
+                let latest = db.bounds().end - 1;
                 let n = NonZeroU64::new(*latest + 1).unwrap();
                 let (_proof, cumulative): (BatchProof, Vec<BatchOperation>) = db
                     .historical_proof(latest + 1, Location::new(0), n)
@@ -332,7 +332,7 @@ async fn build_mmb_local_batch() -> MmbLocalBatch {
                 };
                 db.apply_batch(finalized).await.expect("apply");
 
-                let latest = db.bounds().await.end - 1;
+                let latest = db.bounds().end - 1;
                 let n = NonZeroU64::new(*latest + 1).unwrap();
                 let (_proof, cumulative): (MmbBatchProof, Vec<MmbBatchOperation>) = db
                     .historical_proof(latest + 1, Location::new(0), n)
@@ -404,7 +404,7 @@ async fn build_fixed_local_batch() -> FixedLocalBatch {
             };
             db.apply_batch(finalized).await.expect("apply");
 
-            let latest = db.bounds().await.end - 1;
+            let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
             let (_proof, ops): (BatchProof, Vec<FixedBatchOperation>) = db
                 .ops_historical_proof(latest + 1, Location::new(0), n)

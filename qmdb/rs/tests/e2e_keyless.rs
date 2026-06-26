@@ -98,7 +98,7 @@ where
             };
             db.apply_batch(finalized).await.expect("apply");
 
-            let latest = db.bounds().await.end - 1;
+            let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
             let (_proof, ops) = db
                 .historical_proof(latest + 1, Location::<F>::new(0), n)
@@ -157,7 +157,7 @@ where
             };
             db.apply_batch(finalized).await.expect("apply fixed");
 
-            let latest = db.bounds().await.end - 1;
+            let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
             let (_proof, ops) = db
                 .historical_proof(latest + 1, Location::<F>::new(0), n)

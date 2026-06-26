@@ -238,7 +238,7 @@ async fn build_local_batch() -> LocalBatch {
                 };
                 db.apply_batch(finalized).await.expect("apply");
 
-                let latest = db.bounds().await.end - 1;
+                let latest = db.bounds().end - 1;
                 let n = NonZeroU64::new(*latest + 1).unwrap();
                 let (_proof, cumulative): (BatchProof, Vec<BatchOperation>) = db
                     .ops_historical_proof(latest + 1, Location::new(0), n)
@@ -358,7 +358,7 @@ async fn build_mmb_local_batch() -> MmbLocalBatch {
                 };
                 db.apply_batch(finalized).await.expect("apply");
 
-                let latest = db.bounds().await.end - 1;
+                let latest = db.bounds().end - 1;
                 let n = NonZeroU64::new(*latest + 1).unwrap();
                 let (_proof, cumulative): (MmbBatchProof, Vec<MmbBatchOperation>) = db
                     .ops_historical_proof(latest + 1, Location::new(0), n)
@@ -427,7 +427,7 @@ async fn build_mmb_growing_local_batch() -> MmbGrowingLocalBatch {
                 };
                 db.apply_batch(finalized).await.expect("apply");
 
-                let latest = db.bounds().await.end - 1;
+                let latest = db.bounds().end - 1;
                 let n = NonZeroU64::new(*latest + 1).unwrap();
                 let (_proof, cumulative): (MmbBatchProof, Vec<MmbBatchOperation>) = db
                     .ops_historical_proof(latest + 1, Location::new(0), n)
@@ -668,7 +668,7 @@ async fn ordered_mmb_current_state_sync_from_nonzero_connect_api_reconstructs_cu
             .expect("sync current db from nonzero MMB API");
 
             assert_eq!(db.root(), expected_current_root);
-            let bounds = db.bounds().await;
+            let bounds = db.bounds();
             assert_eq!(bounds.start, start);
             assert_eq!(bounds.end, op_count);
             assert_eq!(
@@ -1405,7 +1405,7 @@ async fn ordered_mmb_operation_log_any_sync_from_nonzero_connect_api_reconstruct
             .expect("sync any db from nonzero MMB API");
 
             assert_eq!(db.root(), target_root);
-            let bounds = db.bounds().await;
+            let bounds = db.bounds();
             assert_eq!(bounds.start, start);
             assert_eq!(bounds.end, op_count);
             assert_eq!(
@@ -1505,7 +1505,7 @@ async fn ordered_mmb_operation_log_any_sync_accepts_target_update_from_growing_b
                 db.get(&b"alpha".to_vec()).await.expect("get alpha"),
                 sync_expected_alpha
             );
-            let bounds = db.bounds().await;
+            let bounds = db.bounds();
             assert_eq!(bounds.start, start);
             assert_eq!(bounds.end, updated_op_count);
             db.destroy().await.expect("destroy synced db");

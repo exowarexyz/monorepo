@@ -231,7 +231,7 @@ where
             };
             db.apply_batch(finalized).await.expect("apply");
 
-            let latest = db.bounds().await.end - 1;
+            let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
             let (_proof, ops): (Proof<F, Digest>, Vec<BatchOperation<F>>) = db
                 .ops_historical_proof(latest + 1, Location::<F>::new(0), n)
@@ -362,7 +362,7 @@ where
             };
             db.apply_batch(finalized).await.expect("apply");
 
-            let latest = db.bounds().await.end - 1;
+            let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
             let (_proof, ops): (Proof<F, Digest>, Vec<BatchOperation<F>>) = db
                 .ops_historical_proof(latest + 1, Location::<F>::new(0), n)
@@ -425,7 +425,7 @@ where
             };
             db.apply_batch(finalized).await.expect("apply fixed");
 
-            let latest = db.bounds().await.end - 1;
+            let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
             let (_proof, ops): (Proof<F, Digest>, Vec<FixedBatchOperation<F>>) = db
                 .ops_historical_proof(latest + 1, Location::<F>::new(0), n)
@@ -648,7 +648,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
                     };
                     db.apply_batch(finalized).await.expect("apply");
 
-                    let latest = db.bounds().await.end - 1;
+                    let latest = db.bounds().end - 1;
                     let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");
                     let (_proof, cumulative_ops) = db
                         .ops_historical_proof(latest + 1, Location::<F>::new(0), count)
@@ -666,7 +666,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
                     previous_ops = cumulative_ops;
                 }
 
-                let latest_location = db.bounds().await.end - 1;
+                let latest_location = db.bounds().end - 1;
                 let latest_key = format!("k-{:08x}", counter - 3).into_bytes();
                 let expected_root = db.root();
                 db.destroy().await.expect("destroy");
@@ -801,7 +801,7 @@ async fn ordered_mmb_persistent_interleaved_seed_batches_keep_current_proofs_ver
                         db.apply_batch(finalized).await.expect("apply");
                         db.sync().await.expect("sync");
 
-                        let latest = db.bounds().await.end - 1;
+                        let latest = db.bounds().end - 1;
                         let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");
                         let (proof, cumulative_ops) = db
                             .ops_historical_proof(
@@ -833,7 +833,7 @@ async fn ordered_mmb_persistent_interleaved_seed_batches_keep_current_proofs_ver
                         previous_ops = cumulative_ops;
                     }
 
-                    let latest_location = db.bounds().await.end - 1;
+                    let latest_location = db.bounds().end - 1;
                     let expected_root = db.root();
                     let expected_ops_root = db.ops_root();
                     db.sync().await.expect("sync");

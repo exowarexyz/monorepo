@@ -244,7 +244,7 @@ async fn seed(
 
             // `LocalQmdbDb::init` seeds location 0 with a genesis CommitFloor,
             // so `bounds.end == 1` means no seed batches have run yet.
-            let bounds = db.bounds().await;
+            let bounds = db.bounds();
             let (mut previous_ops, mut counter, writer) = if *bounds.end <= 1 {
                 info!("starting from empty local DB");
                 let writer =
@@ -328,7 +328,7 @@ async fn seed(
                 db.apply_batch(finalized).await.expect("apply batch");
                 db.sync().await.expect("sync local ordered db");
 
-                let latest = db.bounds().await.end - 1;
+                let latest = db.bounds().end - 1;
                 let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");
                 let (_proof, cumulative_ops) = db
                     .ops_historical_proof(latest + 1, Location::<DemoFamily>::new(0), count)

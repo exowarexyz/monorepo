@@ -88,7 +88,7 @@ async fn build_local_reference(batches: Vec<WriteBatch>) -> LocalReference {
                 };
                 db.apply_batch(finalized).await.expect("apply");
             }
-            let latest = db.bounds().await.end - 1;
+            let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
             let (_proof, ops): (BatchProof, Vec<UnorderedBatchOperation>) = db
                 .historical_proof(latest + 1, Location::<mmr::Family>::new(0), n)
