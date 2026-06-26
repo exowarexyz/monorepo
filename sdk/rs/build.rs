@@ -3,8 +3,8 @@ use std::process::Command;
 
 const SDK_BYTES_FIELDS: &[&str] = &[
     ".common.kv.v1.Entry.value",
-    ".common.kv.v1.BytesFilter.exact",
-    ".common.kv.v1.BytesFilter.prefix",
+    ".common.kv.v1.Filter.exact",
+    ".common.kv.v1.Filter.prefix",
     ".store.query.v1.KvReducedValue.decimal128_value",
     ".store.query.v1.KvReducedValue.fixed_size_binary_value",
     ".store.query.v1.KvReducedValue.decimal256_value",

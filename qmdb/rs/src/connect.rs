@@ -32,8 +32,8 @@ use connectrpc::{
     Chain, ConnectError, ConnectRpcService, ErrorCode, Limits, PreEncoded,
     RequestContext as Context,
 };
-use exoware_sdk::common::kv::v1::bytes_filter::KindView as ProtoBytesFilterKindView;
-use exoware_sdk::stream_filter::{BytesFilter, CompiledBytesFilters};
+use exoware_sdk::common::kv::v1::filter::KindView as ProtoFilterKindView;
+use exoware_sdk::stream_filter::{CompiledFilters, Filter};
 use futures::future::BoxFuture;
 use futures::{FutureExt, Stream};
 
@@ -554,26 +554,19 @@ struct ReadyBatch<F: Family> {
     matched: Vec<(Location<F>, Vec<u8>)>,
 }
 
-fn parse_bytes_filters<'a, 'b, I>(
-    filters: I,
-    label: &str,
-) -> Result<Option<CompiledBytesFilters>, String>
+fn parse_filters<'a, 'b, I>(filters: I, label: &str) -> Result<Option<CompiledFilters>, String>
 where
-    I: IntoIterator<Item = &'b exoware_sdk::common::kv::v1::BytesFilterView<'a>>,
+    I: IntoIterator<Item = &'b exoware_sdk::common::kv::v1::FilterView<'a>>,
     'a: 'b,
 {
     let mut domain = Vec::new();
     for filter in filters {
         domain.push(match filter.kind {
-            Some(ProtoBytesFilterKindView::Exact(exact)) => {
-                BytesFilter::Exact(Bytes::copy_from_slice(exact))
+            Some(ProtoFilterKindView::Exact(exact)) => Filter::Exact(Bytes::copy_from_slice(exact)),
+            Some(ProtoFilterKindView::Prefix(prefix)) => {
+                Filter::Prefix(Bytes::copy_from_slice(prefix))
             }
-            Some(ProtoBytesFilterKindView::Prefix(prefix)) => {
-                BytesFilter::Prefix(Bytes::copy_from_slice(prefix))
-            }
-            Some(ProtoBytesFilterKindView::Regex(pattern)) => {
-                BytesFilter::Regex(pattern.to_string())
-            }
+            Some(ProtoFilterKindView::Regex(pattern)) => Filter::Regex(pattern.to_string()),
             None => {
                 return Err(format!(
                     "each {label} filter must set exactly one of exact, prefix, or regex"
@@ -581,10 +574,10 @@ where
             }
         });
     }
-    CompiledBytesFilters::compile(&domain).map_err(|e| format!("invalid {label} filter: {e}"))
+    CompiledFilters::compile(&domain).map_err(|e| format!("invalid {label} filter: {e}"))
 }
 
-fn matcher_passes(matcher: &Option<CompiledBytesFilters>, bytes: Option<&[u8]>) -> bool {
+fn matcher_passes(matcher: &Option<CompiledFilters>, bytes: Option<&[u8]>) -> bool {
     match matcher {
         None => true,
         Some(m) => bytes.map(|b| m.matches(b)).unwrap_or(false),
@@ -592,8 +585,8 @@ fn matcher_passes(matcher: &Option<CompiledBytesFilters>, bytes: Option<&[u8]>) 
 }
 
 struct BatchSubscribeStream<D: commonware_cryptography::Digest, F: Graftable> {
-    key_matcher: Option<CompiledBytesFilters>,
-    value_matcher: Option<CompiledBytesFilters>,
+    key_matcher: Option<CompiledFilters>,
+    value_matcher: Option<CompiledFilters>,
     classify: RowClassifier<F>,
     extract_kv: Arc<
         dyn for<'a> Fn(Location<F>, &'a [u8]) -> Result<OperationKv, QmdbError>
@@ -622,8 +615,8 @@ impl<D: commonware_cryptography::Digest, F: Graftable> Unpin for BatchSubscribeS
 
 impl<D: commonware_cryptography::Digest, F: Graftable> BatchSubscribeStream<D, F> {
     fn new(
-        key_matcher: Option<CompiledBytesFilters>,
-        value_matcher: Option<CompiledBytesFilters>,
+        key_matcher: Option<CompiledFilters>,
+        value_matcher: Option<CompiledFilters>,
         classify: RowClassifier<F>,
         extract_kv: Arc<
             dyn for<'a> Fn(Location<F>, &'a [u8]) -> Result<OperationKv, QmdbError>
@@ -995,9 +988,9 @@ impl<B: OperationLogBackend> OperationLogService for OperationLogConnect<B> {
                     "this OperationLogService endpoint does not accept key_filters",
                 ));
             }
-            let key_matcher = parse_bytes_filters(request.key_filters.iter(), "key")
+            let key_matcher = parse_filters(request.key_filters.iter(), "key")
                 .map_err(ConnectError::invalid_argument)?;
-            let value_matcher = parse_bytes_filters(request.value_filters.iter(), "value")
+            let value_matcher = parse_filters(request.value_filters.iter(), "value")
                 .map_err(ConnectError::invalid_argument)?;
             let since = decode_since(request.since_sequence_number);
             let (classify, filter) = backend.classify_and_filter();

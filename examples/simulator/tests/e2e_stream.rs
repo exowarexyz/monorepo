@@ -3,8 +3,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use exoware_sdk::keys::{Key, KeyCodec};
 use exoware_sdk::kv_codec::Utf8;
-use exoware_sdk::match_key::MatchKey;
 use exoware_sdk::prune_policy::{PolicyScope, PrunePolicy, RetainPolicy};
+use exoware_sdk::selector::Selector;
 use exoware_sdk::stream_filter::StreamFilter;
 use exoware_sdk::{RetryConfig, StoreClient};
 use tempfile::tempdir;
@@ -30,7 +30,7 @@ fn key(family: u16, payload: &[u8]) -> Key {
 
 fn filter(family: u16) -> StreamFilter {
     StreamFilter {
-        match_keys: vec![MatchKey {
+        selectors: vec![Selector {
             reserved_bits: 4,
             prefix: family,
             payload_regex: Utf8::from("(?s).*"),
@@ -112,16 +112,16 @@ async fn non_matching_put_yields_no_frame() {
 }
 
 #[tokio::test]
-async fn multiple_match_keys_delivered_once_per_put() {
+async fn multiple_selectors_delivered_once_per_put() {
     let (_h, client) = spawn_client().await;
     let f = StreamFilter {
-        match_keys: vec![
-            MatchKey {
+        selectors: vec![
+            Selector {
                 reserved_bits: 4,
                 prefix: 1,
                 payload_regex: Utf8::from("(?s).*"),
             },
-            MatchKey {
+            Selector {
                 reserved_bits: 4,
                 prefix: 2,
                 payload_regex: Utf8::from("(?s).*"),
@@ -422,15 +422,15 @@ async fn slow_subscriber_drops_without_blocking_ingest() {
 
 #[tokio::test]
 async fn value_filter_restricts_to_matching_values() {
-    use exoware_sdk::stream_filter::BytesFilter;
+    use exoware_sdk::stream_filter::Filter;
     let (_h, client) = spawn_client().await;
     let f = StreamFilter {
-        match_keys: vec![MatchKey {
+        selectors: vec![Selector {
             reserved_bits: 4,
             prefix: 1,
             payload_regex: Utf8::from("(?s).*"),
         }],
-        value_filters: vec![BytesFilter::Regex("^keep.*$".into())],
+        value_filters: vec![Filter::Regex("^keep.*$".into())],
     };
     let mut sub = client.stream().subscribe(f, None).await.expect("subscribe");
     tokio::time::sleep(Duration::from_millis(50)).await;

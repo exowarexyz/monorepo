@@ -10,7 +10,7 @@ import "common/v1/kv.proto";
 // Controls how matched keys are partitioned into independent groups before
 // the retain policy is applied. Each group is pruned independently.
 message PolicyGroupBy {
-  // Named capture groups from `common.kv.v1.MatchKey.payload_regex` whose
+  // Named capture groups from `common.kv.v1.Selector.payload_regex` whose
   // matched bytes are concatenated (length-prefixed) to form each group's
   // identity. Must not contain duplicates. When empty, all matched keys
   // belong to a single group.
@@ -32,7 +32,7 @@ enum PolicyOrderEncoding {
 // extracted from the payload regex and decoded according to `encoding`.
 // Required for `RetainKeepLatest` and threshold-based retain policies.
 message PolicyOrderBy {
-  // Name of the capture group in `common.kv.v1.MatchKey.payload_regex`
+  // Name of the capture group in `common.kv.v1.Selector.payload_regex`
   // that provides the ordering value.
   string capture_group = 1;
   // How to decode and compare the captured bytes.
@@ -73,17 +73,17 @@ message PolicyRetain {
   }
 }
 
-// User-key-space scope: scan a KeyCodec family by `match_key`, partition
+// User-key-space scope: scan a KeyCodec family by `selector`, partition
 // matched keys into `group_by` groups, order within each group by
 // `order_by`, then apply `retain` to decide which keys to delete.
 message KeysScope {
-  common.kv.v1.MatchKey match_key = 1;
+  common.kv.v1.Selector selector = 1;
   PolicyGroupBy group_by = 2;
   optional PolicyOrderBy order_by = 3;
 }
 
 // Sequence-number scope: prune the per-batch sequence log served by the
-// store's `Stream` service. `match_key` / `group_by` / `order_by` are not
+// store's `Stream` service. `selector` / `group_by` / `order_by` are not
 // meaningful here — the log has a single implicit ordering by sequence
 // number. The `retain` rule on the parent `Policy` is interpreted directly
 // over sequence numbers:

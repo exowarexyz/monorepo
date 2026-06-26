@@ -5,21 +5,20 @@
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct SubscribeRequest {
-    /// OR semantics across `match_keys`: a row is delivered if any match_key
+    /// OR semantics across `selectors`: a row is delivered if any selector
     /// matches. Bounded to keep server-side regex compilation cost predictable.
     ///
-    /// Field 1: `match_keys`
+    /// Field 1: `selectors`
     #[serde(
-        rename = "matchKeys",
-        alias = "match_keys",
+        rename = "selectors",
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
-    pub match_keys: ::buffa::alloc::vec::Vec<
-        super::super::super::common::kv::v1::MatchKey,
+    pub selectors: ::buffa::alloc::vec::Vec<
+        super::super::super::common::kv::v1::Selector,
     >,
-    /// Optional value-side filter, AND'd with `match_keys`. OR semantics within
-    /// the list: once a row's key passes a `MatchKey`, it is delivered only if
+    /// Optional value-side filter, AND'd with `selectors`. OR semantics within
+    /// the list: once a row's key passes a `Selector`, it is delivered only if
     /// its raw value bytes satisfy any one of `value_filters` (or the list is
     /// empty).
     ///
@@ -31,7 +30,7 @@ pub struct SubscribeRequest {
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
     pub value_filters: ::buffa::alloc::vec::Vec<
-        super::super::super::common::kv::v1::BytesFilter,
+        super::super::super::common::kv::v1::Filter,
     >,
     /// Optional replay cursor.
     ///
@@ -59,7 +58,7 @@ pub struct SubscribeRequest {
 impl ::core::fmt::Debug for SubscribeRequest {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         f.debug_struct("SubscribeRequest")
-            .field("match_keys", &self.match_keys)
+            .field("selectors", &self.selectors)
             .field("value_filters", &self.value_filters)
             .field("since_sequence_number", &self.since_sequence_number)
             .finish()
@@ -104,7 +103,7 @@ impl ::buffa::Message for SubscribeRequest {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
-        for v in &self.match_keys {
+        for v in &self.selectors {
             let __slot = __cache.reserve();
             let inner_size = v.compute_size(__cache);
             __cache.set(__slot, inner_size);
@@ -133,7 +132,7 @@ impl ::buffa::Message for SubscribeRequest {
     ) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        for v in &self.match_keys {
+        for v in &self.selectors {
             ::buffa::encoding::Tag::new(
                     1u32,
                     ::buffa::encoding::WireType::LengthDelimited,
@@ -179,7 +178,7 @@ impl ::buffa::Message for SubscribeRequest {
                 }
                 let mut elem = ::core::default::Default::default();
                 ::buffa::Message::merge_length_delimited(&mut elem, buf, depth)?;
-                self.match_keys.push(elem);
+                self.selectors.push(elem);
             }
             2u32 => {
                 if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
@@ -213,7 +212,7 @@ impl ::buffa::Message for SubscribeRequest {
         ::core::result::Result::Ok(())
     }
     fn clear(&mut self) {
-        self.match_keys.clear();
+        self.selectors.clear();
         self.value_filters.clear();
         self.since_sequence_number = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
@@ -762,25 +761,25 @@ pub mod __buffa {
         /// Live (and optionally replayed) subscription request.
         #[derive(Clone, Debug, Default)]
         pub struct SubscribeRequestView<'a> {
-            /// OR semantics across `match_keys`: a row is delivered if any match_key
+            /// OR semantics across `selectors`: a row is delivered if any selector
             /// matches. Bounded to keep server-side regex compilation cost predictable.
             ///
-            /// Field 1: `match_keys`
-            pub match_keys: ::buffa::RepeatedView<
+            /// Field 1: `selectors`
+            pub selectors: ::buffa::RepeatedView<
                 'a,
-                super::super::super::super::super::common::kv::v1::__buffa::view::MatchKeyView<
+                super::super::super::super::super::common::kv::v1::__buffa::view::SelectorView<
                     'a,
                 >,
             >,
-            /// Optional value-side filter, AND'd with `match_keys`. OR semantics within
-            /// the list: once a row's key passes a `MatchKey`, it is delivered only if
+            /// Optional value-side filter, AND'd with `selectors`. OR semantics within
+            /// the list: once a row's key passes a `Selector`, it is delivered only if
             /// its raw value bytes satisfy any one of `value_filters` (or the list is
             /// empty).
             ///
             /// Field 2: `value_filters`
             pub value_filters: ::buffa::RepeatedView<
                 'a,
-                super::super::super::super::super::common::kv::v1::__buffa::view::BytesFilterView<
+                super::super::super::super::super::common::kv::v1::__buffa::view::FilterView<
                     'a,
                 >,
             >,
@@ -863,9 +862,9 @@ pub mod __buffa {
                                 return Err(::buffa::DecodeError::RecursionLimitExceeded);
                             }
                             let sub = ::buffa::types::borrow_bytes(&mut cur)?;
-                            view.match_keys
+                            view.selectors
                                 .push(
-                                    super::super::super::super::super::common::kv::v1::__buffa::view::MatchKeyView::_decode_depth(
+                                    super::super::super::super::super::common::kv::v1::__buffa::view::SelectorView::_decode_depth(
                                         sub,
                                         depth - 1,
                                     )?,
@@ -887,7 +886,7 @@ pub mod __buffa {
                             let sub = ::buffa::types::borrow_bytes(&mut cur)?;
                             view.value_filters
                                 .push(
-                                    super::super::super::super::super::common::kv::v1::__buffa::view::BytesFilterView::_decode_depth(
+                                    super::super::super::super::super::common::kv::v1::__buffa::view::FilterView::_decode_depth(
                                         sub,
                                         depth - 1,
                                     )?,
@@ -929,8 +928,8 @@ pub mod __buffa {
                 use ::buffa::alloc::string::ToString as _;
                 let _ = __buffa_src;
                 super::super::SubscribeRequest {
-                    match_keys: self
-                        .match_keys
+                    selectors: self
+                        .selectors
                         .iter()
                         .map(|v| v.to_owned_from_source(__buffa_src))
                         .collect(),
@@ -955,7 +954,7 @@ pub mod __buffa {
                 #[allow(unused_imports)]
                 use ::buffa::Enumeration as _;
                 let mut size = 0u32;
-                for v in &self.match_keys {
+                for v in &self.selectors {
                     let __slot = __cache.reserve();
                     let inner_size = v.compute_size(__cache);
                     __cache.set(__slot, inner_size);
@@ -985,7 +984,7 @@ pub mod __buffa {
             ) {
                 #[allow(unused_imports)]
                 use ::buffa::Enumeration as _;
-                for v in &self.match_keys {
+                for v in &self.selectors {
                     ::buffa::encoding::Tag::new(
                             1u32,
                             ::buffa::encoding::WireType::LengthDelimited,
@@ -1032,8 +1031,8 @@ pub mod __buffa {
             ) -> ::core::result::Result<__S::Ok, __S::Error> {
                 use ::serde::ser::SerializeMap as _;
                 let mut __map = __s.serialize_map(::core::option::Option::None)?;
-                if !self.match_keys.is_empty() {
-                    __map.serialize_entry("matchKeys", &*self.match_keys)?;
+                if !self.selectors.is_empty() {
+                    __map.serialize_entry("selectors", &*self.selectors)?;
                 }
                 if !self.value_filters.is_empty() {
                     __map.serialize_entry("valueFilters", &*self.value_filters)?;
@@ -1859,7 +1858,7 @@ pub const SERVICE_GET_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
 /// Push-based subscription + point-lookup over the store's log.
 /// `Subscribe` delivers a `SubscribeResponse` per atomic `Put` batch whose
-/// entries match any of the subscriber's `match_keys`. Optional
+/// entries match any of the subscriber's `selectors`. Optional
 /// `since_sequence_number` replays retained batches before transitioning live.
 /// `Get` returns the complete batch at a given sequence number (no filter
 /// applied server-side). `SubscribeResponse` and `GetResponse` carry the

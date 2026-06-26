@@ -6,11 +6,11 @@ import { HttpError } from './error.js';
 import { PruneRequestSchema } from './gen/ts/store/v1/compact_pb.js';
 import type { Policy } from './gen/ts/store/v1/compact_pb.js';
 import {
-    BytesFilterSchema,
+    FilterSchema,
     EntrySchema,
-    MatchKeySchema,
+    SelectorSchema,
 } from './gen/ts/common/v1/kv_pb.js';
-import type { MatchKey } from './gen/ts/common/v1/kv_pb.js';
+import type { Selector } from './gen/ts/common/v1/kv_pb.js';
 import { ErrorInfoSchema } from './gen/ts/google/rpc/error_details_pb.js';
 import { PutRequestSchema } from './gen/ts/log/v1/ingest_pb.js';
 import {
@@ -218,20 +218,20 @@ export class StoreKeyPrefix {
         return { start: physicalStart, end: physicalEnd };
     }
 
-    prefixMatchKey(matchKey: MessageInitShape<typeof MatchKeySchema>): MatchKey {
-        return this.prefixMatchKeyWithRegex(matchKey, matchKey.payloadRegex ?? '');
+    prefixSelector(selector: MessageInitShape<typeof SelectorSchema>): Selector {
+        return this.prefixSelectorWithRegex(selector, selector.payloadRegex ?? '');
     }
 
-    prefixStreamMatchKey(matchKey: MessageInitShape<typeof MatchKeySchema>): MatchKey {
-        return this.prefixMatchKeyWithRegex(matchKey, STREAM_SERVER_PAYLOAD_REGEX);
+    prefixStreamSelector(selector: MessageInitShape<typeof SelectorSchema>): Selector {
+        return this.prefixSelectorWithRegex(selector, STREAM_SERVER_PAYLOAD_REGEX);
     }
 
-    private prefixMatchKeyWithRegex(
-        matchKey: MessageInitShape<typeof MatchKeySchema>,
+    private prefixSelectorWithRegex(
+        selector: MessageInitShape<typeof SelectorSchema>,
         payloadRegex: string,
-    ): MatchKey {
-        const logicalReservedBits = matchKey.reservedBits ?? 0;
-        const logicalPrefix = matchKey.prefix ?? 0;
+    ): Selector {
+        const logicalReservedBits = selector.reservedBits ?? 0;
+        const logicalPrefix = selector.prefix ?? 0;
         validatePrefix(logicalReservedBits, logicalPrefix);
         const reservedBits = this.reservedBits + logicalReservedBits;
         if (reservedBits > 16) {
@@ -241,7 +241,7 @@ export class StoreKeyPrefix {
         }
         const prefix = (this.prefix << logicalReservedBits) | logicalPrefix;
         validatePrefix(reservedBits, prefix);
-        return create(MatchKeySchema, {
+        return create(SelectorSchema, {
             reservedBits,
             prefix,
             payloadRegex,
@@ -403,7 +403,7 @@ function prefixPolicies(policies: Policy[], prefix?: StoreKeyPrefix): Policy[] {
                 case: 'keys',
                 value: {
                     ...scope,
-                    matchKey: scope.matchKey ? prefix.prefixMatchKey(scope.matchKey) : undefined,
+                    selector: scope.selector ? prefix.prefixSelector(scope.selector) : undefined,
                 },
             },
         } as Policy;
@@ -417,7 +417,7 @@ function prefixSubscribeFilters(
     if (!prefix) return filters;
     return {
         ...filters,
-        matchKeys: filters.matchKeys.map((matchKey) => prefix.prefixStreamMatchKey(matchKey)),
+        selectors: filters.selectors.map((selector) => prefix.prefixStreamSelector(selector)),
     };
 }
 
@@ -470,21 +470,21 @@ function compileRustBytesRegex(pattern: string): RegExp {
 class ClientKeyMatcher {
     private readonly regex: RegExp;
 
-    constructor(private readonly matchKey: MatchKey) {
-        validatePrefix(matchKey.reservedBits, matchKey.prefix);
-        this.regex = compileRustBytesRegex(matchKey.payloadRegex);
+    constructor(private readonly selector: Selector) {
+        validatePrefix(selector.reservedBits, selector.prefix);
+        this.regex = compileRustBytesRegex(selector.payloadRegex);
     }
 
     matches(key: Uint8Array): boolean {
-        if (key.length < Math.ceil(this.matchKey.reservedBits / 8)) {
+        if (key.length < Math.ceil(this.selector.reservedBits / 8)) {
             return false;
         }
-        if (readPrefixBits(key, this.matchKey.reservedBits) !== this.matchKey.prefix) {
+        if (readPrefixBits(key, this.selector.reservedBits) !== this.selector.prefix) {
             return false;
         }
-        const payloadLen = payloadCapacityForKeyLen(this.matchKey.reservedBits, key.length);
+        const payloadLen = payloadCapacityForKeyLen(this.selector.reservedBits, key.length);
         const payload = new Uint8Array(payloadLen);
-        readBitsToBytes(key, this.matchKey.reservedBits, payload, payloadLen * 8);
+        readBitsToBytes(key, this.selector.reservedBits, payload, payloadLen * 8);
         this.regex.lastIndex = 0;
         return this.regex.test(bytesToBinaryString(payload));
     }
@@ -494,8 +494,8 @@ class ClientStreamFilter {
     private readonly keyMatchers: ClientKeyMatcher[];
 
     constructor(filters: SubscribeFilters) {
-        this.keyMatchers = filters.matchKeys.map(
-            (matchKey) => new ClientKeyMatcher(create(MatchKeySchema, matchKey)),
+        this.keyMatchers = filters.selectors.map(
+            (selector) => new ClientKeyMatcher(create(SelectorSchema, selector)),
         );
     }
 
@@ -767,8 +767,8 @@ async function performGetBatch(
 }
 
 export interface SubscribeFilters {
-    matchKeys: MessageInitShape<typeof MatchKeySchema>[];
-    valueFilters?: MessageInitShape<typeof BytesFilterSchema>[];
+    selectors: MessageInitShape<typeof SelectorSchema>[];
+    valueFilters?: MessageInitShape<typeof FilterSchema>[];
     sinceSequenceNumber?: bigint;
 }
 
@@ -781,7 +781,7 @@ async function* performSubscribe(
     const logicalFilter = prefix ? new ClientStreamFilter(filters) : undefined;
     const prefixed = prefixSubscribeFilters(filters, prefix);
     const req = create(SubscribeRequestSchema, {
-        matchKeys: prefixed.matchKeys,
+        selectors: prefixed.selectors,
         valueFilters: prefixed.valueFilters ?? [],
         ...(prefixed.sinceSequenceNumber !== undefined
             ? { sinceSequenceNumber: prefixed.sinceSequenceNumber }

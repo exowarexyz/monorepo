@@ -27,16 +27,16 @@ use exoware_proto::query::{
     Detail, GetManyEntry, GetManyFrame, GetResponse, RangeFrame, ReduceResponse,
     Service as QueryApi, ServiceServer as QueryServiceServer,
 };
-use exoware_proto::stream_filter::{BytesFilter, StreamFilter};
+use exoware_proto::stream_filter::{Filter, StreamFilter};
 use exoware_proto::{
     connect_compression_registry, parse_range_traversal_direction,
     to_domain_reduce_request_from_view, to_proto_optional_reduced_value, to_proto_reduced_value,
     with_error_info_detail, with_query_detail, with_retry_info_detail, RangeTraversalDirection,
 };
 use exoware_sdk as exoware_proto;
-use exoware_sdk::common::kv::v1::bytes_filter::KindView as ProtoBytesFilterKindView;
+use exoware_sdk::common::kv::v1::filter::KindView as ProtoFilterKindView;
 use exoware_sdk::keys::Key;
-use exoware_sdk::match_key::MatchKey;
+use exoware_sdk::selector::Selector;
 use futures::{stream as stream_util, Stream};
 use tokio::sync::Notify;
 
@@ -956,21 +956,21 @@ where
 fn domain_filter_from_subscribe_view(
     req: &SubscribeRequestView<'_>,
 ) -> Result<StreamFilter, ConnectError> {
-    let mut match_keys = Vec::with_capacity(req.match_keys.len());
-    for mk in req.match_keys.iter() {
+    let mut selectors = Vec::with_capacity(req.selectors.len());
+    for mk in req.selectors.iter() {
         let reserved_bits = u8::try_from(mk.reserved_bits).map_err(|_| {
             ConnectError::invalid_argument(format!(
-                "match_key.reserved_bits {} does not fit in u8",
+                "selector.reserved_bits {} does not fit in u8",
                 mk.reserved_bits
             ))
         })?;
         let prefix = u16::try_from(mk.prefix).map_err(|_| {
             ConnectError::invalid_argument(format!(
-                "match_key.prefix {} does not fit in u16",
+                "selector.prefix {} does not fit in u16",
                 mk.prefix
             ))
         })?;
-        match_keys.push(MatchKey {
+        selectors.push(Selector {
             reserved_bits,
             prefix,
             payload_regex: exoware_sdk::kv_codec::Utf8::from(mk.payload_regex),
@@ -979,15 +979,11 @@ fn domain_filter_from_subscribe_view(
     let mut value_filters = Vec::with_capacity(req.value_filters.len());
     for vf in req.value_filters.iter() {
         value_filters.push(match vf.kind {
-            Some(ProtoBytesFilterKindView::Exact(bytes)) => {
-                BytesFilter::Exact(Bytes::copy_from_slice(bytes))
+            Some(ProtoFilterKindView::Exact(bytes)) => Filter::Exact(Bytes::copy_from_slice(bytes)),
+            Some(ProtoFilterKindView::Prefix(bytes)) => {
+                Filter::Prefix(Bytes::copy_from_slice(bytes))
             }
-            Some(ProtoBytesFilterKindView::Prefix(bytes)) => {
-                BytesFilter::Prefix(Bytes::copy_from_slice(bytes))
-            }
-            Some(ProtoBytesFilterKindView::Regex(pattern)) => {
-                BytesFilter::Regex(pattern.to_string())
-            }
+            Some(ProtoFilterKindView::Regex(pattern)) => Filter::Regex(pattern.to_string()),
             None => {
                 return Err(ConnectError::invalid_argument(
                     "each value_filter must set exactly one of exact, prefix, or regex",
@@ -996,7 +992,7 @@ fn domain_filter_from_subscribe_view(
         });
     }
     Ok(StreamFilter {
-        match_keys,
+        selectors,
         value_filters,
     })
 }
@@ -1230,7 +1226,7 @@ mod tests {
     use std::time::Duration;
 
     use buffa::Message;
-    use exoware_proto::common::kv::v1::MatchKey as ProtoMatchKey;
+    use exoware_proto::common::kv::v1::Selector as ProtoSelector;
     use exoware_proto::log::stream::v1::{SubscribeRequest, SubscribeRequestView};
     use exoware_proto::store::compact::v1::{
         policy, policy_retain, Policy as ProtoPolicy, PolicyRetain, PruneRequest, PruneRequestView,
@@ -1598,7 +1594,7 @@ mod tests {
 
     fn subscribe_request_bytes(since_sequence_number: Option<u64>) -> Vec<u8> {
         SubscribeRequest {
-            match_keys: vec![ProtoMatchKey {
+            selectors: vec![ProtoSelector {
                 reserved_bits: u32::from(TEST_RESERVED_BITS),
                 prefix: u32::from(TEST_PREFIX),
                 payload_regex: "(?s).*".to_string(),

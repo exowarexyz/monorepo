@@ -1,7 +1,7 @@
 //! Shared key-filter shape: `(reserved_bits, prefix, payload_regex)`.
 //!
 //! Used by both `prune_policy` (compact service) and `stream_filter` (stream
-//! service) so one domain type round-trips through the `common.kv.v1.MatchKey`
+//! service) so one domain type round-trips through the `common.kv.v1.Selector`
 //! proto message and one regex compiler handles validation everywhere.
 
 use anyhow::{ensure, Context};
@@ -12,15 +12,15 @@ use regex::bytes::Regex;
 use crate::kv_codec::Utf8;
 
 /// Identifies a subset of keys by `KeyCodec` family + payload regex. Matches
-/// the `common.kv.v1.MatchKey` wire shape (see `proto/common/v1/kv.proto`).
+/// the `common.kv.v1.Selector` wire shape (see `proto/common/v1/kv.proto`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct MatchKey {
+pub struct Selector {
     pub reserved_bits: u8,
     pub prefix: u16,
     pub payload_regex: Utf8,
 }
 
-impl Write for MatchKey {
+impl Write for Selector {
     fn write(&self, buf: &mut impl BufMut) {
         self.reserved_bits.write(buf);
         self.prefix.write(buf);
@@ -28,16 +28,16 @@ impl Write for MatchKey {
     }
 }
 
-impl EncodeSize for MatchKey {
+impl EncodeSize for Selector {
     fn encode_size(&self) -> usize {
         u8::SIZE + u16::SIZE + self.payload_regex.encode_size()
     }
 }
 
-impl Read for MatchKey {
+impl Read for Selector {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Ok(MatchKey {
+        Ok(Selector {
             reserved_bits: u8::read(buf)?,
             prefix: u16::read(buf)?,
             payload_regex: Utf8::read(buf)?,
@@ -50,7 +50,7 @@ impl Read for MatchKey {
 pub fn compile_payload_regex(raw: &str) -> anyhow::Result<Regex> {
     ensure!(
         !raw.trim().is_empty(),
-        "match_key payload_regex must not be empty"
+        "selector payload_regex must not be empty"
     );
-    Regex::new(raw).with_context(|| format!("invalid match_key payload_regex {raw:?}"))
+    Regex::new(raw).with_context(|| format!("invalid selector payload_regex {raw:?}"))
 }

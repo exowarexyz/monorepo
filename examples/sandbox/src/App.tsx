@@ -249,7 +249,7 @@ function App() {
       const controller = new AbortController();
       streamAbortRef.current = controller;
       const sinceSequenceNumber = parseOptionalBigInt(streamSinceSequenceNumber);
-      const matchKey = {
+      const selector = {
         reservedBits,
         prefix,
         payloadRegex: streamPayloadRegex.trim()
@@ -263,7 +263,7 @@ function App() {
         try {
           for await (const batch of storeClient.subscribe(
             {
-              matchKeys: [matchKey],
+              selectors: [selector],
               valueFilters,
               sinceSequenceNumber,
             },

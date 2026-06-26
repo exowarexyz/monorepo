@@ -7,9 +7,7 @@ use std::collections::HashSet;
 
 use crate::keys::KeyCodec;
 use crate::kv_codec::Utf8;
-use crate::match_key::{compile_payload_regex, MatchKey};
-
-pub use crate::match_key::MatchKey as MatchKeyReexport;
+use crate::selector::{compile_payload_regex, Selector};
 
 pub const PRUNE_POLICY_CONTROL_KEY: &str = "manifest/control/compaction-prune-policies";
 pub const PRUNE_POLICY_DOCUMENT_VERSION: u32 = 1;
@@ -35,7 +33,7 @@ pub enum PolicyScope {
 /// fields, just nested under the scope discriminator.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeysScope {
-    pub match_key: MatchKey,
+    pub selector: Selector,
     pub group_by: GroupBy,
     pub order_by: Option<OrderBy>,
 }
@@ -196,7 +194,7 @@ impl Read for OrderBy {
 
 impl Write for KeysScope {
     fn write(&self, buf: &mut impl BufMut) {
-        self.match_key.write(buf);
+        self.selector.write(buf);
         self.group_by.write(buf);
         self.order_by.write(buf);
     }
@@ -204,7 +202,7 @@ impl Write for KeysScope {
 
 impl EncodeSize for KeysScope {
     fn encode_size(&self) -> usize {
-        self.match_key.encode_size() + self.group_by.encode_size() + self.order_by.encode_size()
+        self.selector.encode_size() + self.group_by.encode_size() + self.order_by.encode_size()
     }
 }
 
@@ -212,7 +210,7 @@ impl Read for KeysScope {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Ok(KeysScope {
-            match_key: MatchKey::read(buf)?,
+            selector: Selector::read(buf)?,
             group_by: GroupBy::read(buf)?,
             order_by: Option::<OrderBy>::read(buf)?,
         })
@@ -312,8 +310,8 @@ pub fn validate_policy(policy: &PrunePolicy) -> anyhow::Result<()> {
 }
 
 fn validate_user_keys_scope(scope: &KeysScope) -> anyhow::Result<()> {
-    KeyCodec::new(scope.match_key.reserved_bits, scope.match_key.prefix);
-    let regex = compile_payload_regex(&scope.match_key.payload_regex)?;
+    KeyCodec::new(scope.selector.reserved_bits, scope.selector.prefix);
+    let regex = compile_payload_regex(&scope.selector.payload_regex)?;
     validate_capture_groups(
         &regex,
         &scope.group_by.capture_groups,
@@ -374,10 +372,10 @@ pub fn ensure_unique_policy_families(policies: &[PrunePolicy]) -> anyhow::Result
         match &policy.scope {
             PolicyScope::Keys(scope) => {
                 ensure!(
-                    user_families.insert((scope.match_key.reserved_bits, scope.match_key.prefix)),
+                    user_families.insert((scope.selector.reserved_bits, scope.selector.prefix)),
                     "duplicate compaction prune policy for reserved_bits={} family={}",
-                    scope.match_key.reserved_bits,
-                    scope.match_key.prefix
+                    scope.selector.reserved_bits,
+                    scope.selector.prefix
                 );
             }
             PolicyScope::Sequence => {
@@ -447,8 +445,8 @@ fn capture_groups_are_unique(groups: &[Utf8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_policy_document, encode_policy_document, GroupBy, KeysScope, MatchKey, OrderBy,
-        OrderEncoding, PolicyScope, PrunePolicy, PrunePolicyDocument, RetainPolicy,
+        decode_policy_document, encode_policy_document, GroupBy, KeysScope, OrderBy, OrderEncoding,
+        PolicyScope, PrunePolicy, PrunePolicyDocument, RetainPolicy, Selector,
         PRUNE_POLICY_CONTROL_KEY,
     };
     use crate::kv_codec::Utf8;
@@ -456,7 +454,7 @@ mod tests {
     fn sample_policy() -> PrunePolicy {
         PrunePolicy {
             scope: PolicyScope::Keys(KeysScope {
-                match_key: MatchKey {
+                selector: Selector {
                     reserved_bits: 4,
                     prefix: 1,
                     payload_regex: Utf8::from(
@@ -506,7 +504,7 @@ mod tests {
             version: 1,
             policies: vec![PrunePolicy {
                 scope: PolicyScope::Keys(KeysScope {
-                    match_key: MatchKey {
+                    selector: Selector {
                         reserved_bits: 4,
                         prefix: 1,
                         payload_regex: Utf8::from(
@@ -535,7 +533,7 @@ mod tests {
             version: 1,
             policies: vec![PrunePolicy {
                 scope: PolicyScope::Keys(KeysScope {
-                    match_key: MatchKey {
+                    selector: Selector {
                         reserved_bits: 4,
                         prefix: 1,
                         payload_regex: Utf8::from("(?s)^(?P<logical>.+)$"),

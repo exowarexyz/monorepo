@@ -35,8 +35,8 @@ import {
   GetCurrentOperationRangeRequestSchema,
 } from './generated/proto/qmdb/v1/current_operation_pb.js';
 import {
-  BytesFilterSchema,
-  type BytesFilter,
+  FilterSchema,
+  type Filter,
 } from './generated/proto/common/v1/kv_pb.js';
 import initWasm, {
   decode_historical_multi_proof_operations,
@@ -240,8 +240,8 @@ function assertCurrentChunkSize(value: number, label: string): void {
   }
 }
 
-export function matchExact(bytes: BytesLike): BytesFilter {
-  return create(BytesFilterSchema, {
+export function matchExact(bytes: BytesLike): Filter {
+  return create(FilterSchema, {
     kind: {
       case: 'exact',
       value: toBytes(bytes),
@@ -249,8 +249,8 @@ export function matchExact(bytes: BytesLike): BytesFilter {
   });
 }
 
-export function matchPrefix(prefix: BytesLike): BytesFilter {
-  return create(BytesFilterSchema, {
+export function matchPrefix(prefix: BytesLike): Filter {
+  return create(FilterSchema, {
     kind: {
       case: 'prefix',
       value: toBytes(prefix),
@@ -258,8 +258,8 @@ export function matchPrefix(prefix: BytesLike): BytesFilter {
   });
 }
 
-export function matchRegex(regex: string): BytesFilter {
-  return create(BytesFilterSchema, {
+export function matchRegex(regex: string): Filter {
+  return create(FilterSchema, {
     kind: {
       case: 'regex',
       value: regex,
@@ -502,8 +502,8 @@ export class OrderedQmdbClient {
 
   async *subscribe(
     filters: {
-      keyFilters?: MessageInitShape<typeof BytesFilterSchema>[];
-      valueFilters?: MessageInitShape<typeof BytesFilterSchema>[];
+      keyFilters?: MessageInitShape<typeof FilterSchema>[];
+      valueFilters?: MessageInitShape<typeof FilterSchema>[];
       sinceSequenceNumber?: bigint;
     },
     options?: CallOptions,

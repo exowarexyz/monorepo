@@ -5,7 +5,7 @@
 import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv1";
 import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv1";
 import { file_buf_validate_validate } from "../../buf/validate/validate_pb.js";
-import type { BytesFilter, Entry, MatchKey } from "../../common/v1/kv_pb.js";
+import type { Entry, Filter, Selector } from "../../common/v1/kv_pb.js";
 import { file_common_v1_kv } from "../../common/v1/kv_pb.js";
 import type { Message } from "@bufbuild/protobuf";
 
@@ -13,7 +13,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file log/v1/stream.proto.
  */
 export const file_log_v1_stream: GenFile = /*@__PURE__*/
-  fileDesc("ChNsb2cvdjEvc3RyZWFtLnByb3RvEg1sb2cuc3RyZWFtLnYxIsQBChBTdWJzY3JpYmVSZXF1ZXN0EjYKCm1hdGNoX2tleXMYASADKAsyFi5jb21tb24ua3YudjEuTWF0Y2hLZXlCCrpIB5IBBAgBEBASOgoNdmFsdWVfZmlsdGVycxgCIAMoCzIZLmNvbW1vbi5rdi52MS5CeXRlc0ZpbHRlckIIukgFkgECEBASIgoVc2luY2Vfc2VxdWVuY2VfbnVtYmVyGAMgASgESACIAQFCGAoWX3NpbmNlX3NlcXVlbmNlX251bWJlciIlCgpHZXRSZXF1ZXN0EhcKD3NlcXVlbmNlX251bWJlchgBIAEoBCJSChFTdWJzY3JpYmVSZXNwb25zZRIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQSJAoHZW50cmllcxgCIAMoCzITLmNvbW1vbi5rdi52MS5FbnRyeSJMCgtHZXRSZXNwb25zZRIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQSJAoHZW50cmllcxgCIAMoCzITLmNvbW1vbi5rdi52MS5FbnRyeTKZAQoHU2VydmljZRJQCglTdWJzY3JpYmUSHy5sb2cuc3RyZWFtLnYxLlN1YnNjcmliZVJlcXVlc3QaIC5sb2cuc3RyZWFtLnYxLlN1YnNjcmliZVJlc3BvbnNlMAESPAoDR2V0EhkubG9nLnN0cmVhbS52MS5HZXRSZXF1ZXN0GhoubG9nLnN0cmVhbS52MS5HZXRSZXNwb25zZWIGcHJvdG8z", [file_buf_validate_validate, file_common_v1_kv]);
+  fileDesc("ChNsb2cvdjEvc3RyZWFtLnByb3RvEg1sb2cuc3RyZWFtLnYxIr4BChBTdWJzY3JpYmVSZXF1ZXN0EjUKCXNlbGVjdG9ycxgBIAMoCzIWLmNvbW1vbi5rdi52MS5TZWxlY3RvckIKukgHkgEECAEQEBI1Cg12YWx1ZV9maWx0ZXJzGAIgAygLMhQuY29tbW9uLmt2LnYxLkZpbHRlckIIukgFkgECEBASIgoVc2luY2Vfc2VxdWVuY2VfbnVtYmVyGAMgASgESACIAQFCGAoWX3NpbmNlX3NlcXVlbmNlX251bWJlciIlCgpHZXRSZXF1ZXN0EhcKD3NlcXVlbmNlX251bWJlchgBIAEoBCJSChFTdWJzY3JpYmVSZXNwb25zZRIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQSJAoHZW50cmllcxgCIAMoCzITLmNvbW1vbi5rdi52MS5FbnRyeSJMCgtHZXRSZXNwb25zZRIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQSJAoHZW50cmllcxgCIAMoCzITLmNvbW1vbi5rdi52MS5FbnRyeTKZAQoHU2VydmljZRJQCglTdWJzY3JpYmUSHy5sb2cuc3RyZWFtLnYxLlN1YnNjcmliZVJlcXVlc3QaIC5sb2cuc3RyZWFtLnYxLlN1YnNjcmliZVJlc3BvbnNlMAESPAoDR2V0EhkubG9nLnN0cmVhbS52MS5HZXRSZXF1ZXN0GhoubG9nLnN0cmVhbS52MS5HZXRSZXNwb25zZWIGcHJvdG8z", [file_buf_validate_validate, file_common_v1_kv]);
 
 /**
  * Live (and optionally replayed) subscription request.
@@ -22,22 +22,22 @@ export const file_log_v1_stream: GenFile = /*@__PURE__*/
  */
 export type SubscribeRequest = Message<"log.stream.v1.SubscribeRequest"> & {
   /**
-   * OR semantics across `match_keys`: a row is delivered if any match_key
+   * OR semantics across `selectors`: a row is delivered if any selector
    * matches. Bounded to keep server-side regex compilation cost predictable.
    *
-   * @generated from field: repeated common.kv.v1.MatchKey match_keys = 1;
+   * @generated from field: repeated common.kv.v1.Selector selectors = 1;
    */
-  matchKeys: MatchKey[];
+  selectors: Selector[];
 
   /**
-   * Optional value-side filter, AND'd with `match_keys`. OR semantics within
-   * the list: once a row's key passes a `MatchKey`, it is delivered only if
+   * Optional value-side filter, AND'd with `selectors`. OR semantics within
+   * the list: once a row's key passes a `Selector`, it is delivered only if
    * its raw value bytes satisfy any one of `value_filters` (or the list is
    * empty).
    *
-   * @generated from field: repeated common.kv.v1.BytesFilter value_filters = 2;
+   * @generated from field: repeated common.kv.v1.Filter value_filters = 2;
    */
-  valueFilters: BytesFilter[];
+  valueFilters: Filter[];
 
   /**
    * Optional replay cursor.
@@ -138,7 +138,7 @@ export const GetResponseSchema: GenMessage<GetResponse> = /*@__PURE__*/
  * Push-based subscription + point-lookup over the store's log.
  *
  * `Subscribe` delivers a `SubscribeResponse` per atomic `Put` batch whose
- * entries match any of the subscriber's `match_keys`. Optional
+ * entries match any of the subscriber's `selectors`. Optional
  * `since_sequence_number` replays retained batches before transitioning live.
  *
  * `Get` returns the complete batch at a given sequence number (no filter

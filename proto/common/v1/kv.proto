@@ -22,7 +22,7 @@ message Entry {
 //
 // Named capture groups referenced by callers (e.g. `PolicyGroupBy` /
 // `PolicyOrderBy`) must exist in `payload_regex`.
-message MatchKey {
+message Selector {
   // Number of high bits in the key reserved for internal routing. Together
   // with `prefix`, this selects the `KeyCodec` family to scan.
   uint32 reserved_bits = 1;
@@ -36,7 +36,7 @@ message MatchKey {
 // Matches an uninterpreted byte string by exact value, prefix, or full-string
 // regex. Used for filtering both decoded logical keys and operation values in
 // APIs that operate above the store-row `KeyCodec` layer.
-message BytesFilter {
+message Filter {
   oneof kind {
     bytes exact = 1;
     bytes prefix = 2;

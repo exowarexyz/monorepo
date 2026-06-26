@@ -17,10 +17,10 @@ use bytes::Bytes;
 use exoware_sdk::common::kv::v1::Entry;
 use exoware_sdk::keys::KeyCodec;
 use exoware_sdk::log::stream::v1::GetResponse as StreamGetResponse;
-use exoware_sdk::match_key::compile_payload_regex;
 use exoware_sdk::prune_policy::{
     KeysScope, OrderEncoding, PolicyScope, PrunePolicyDocument, RetainPolicy,
 };
+use exoware_sdk::selector::compile_payload_regex;
 use exoware_server::{
     Ingest, Log, LogBatch, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence,
 };
@@ -820,8 +820,8 @@ impl RocksStore {
         scope: &KeysScope,
         retain: &RetainPolicy,
     ) -> Result<(), String> {
-        let codec = KeyCodec::new(scope.match_key.reserved_bits, scope.match_key.prefix);
-        let regex = compile_payload_regex(&scope.match_key.payload_regex)
+        let codec = KeyCodec::new(scope.selector.reserved_bits, scope.selector.prefix);
+        let regex = compile_payload_regex(&scope.selector.payload_regex)
             .map_err(|e| format!("policy: {e}"))?;
 
         let (start, end) = codec.prefix_bounds();

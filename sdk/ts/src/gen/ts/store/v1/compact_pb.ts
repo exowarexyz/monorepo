@@ -5,7 +5,7 @@
 import type { GenEnum, GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv1";
 import { enumDesc, fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv1";
 import { file_buf_validate_validate } from "../../buf/validate/validate_pb.js";
-import type { MatchKey } from "../../common/v1/kv_pb.js";
+import type { Selector } from "../../common/v1/kv_pb.js";
 import { file_common_v1_kv } from "../../common/v1/kv_pb.js";
 import type { Message } from "@bufbuild/protobuf";
 
@@ -13,7 +13,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file store/v1/compact.proto.
  */
 export const file_store_v1_compact: GenFile = /*@__PURE__*/
-  fileDesc("ChZzdG9yZS92MS9jb21wYWN0LnByb3RvEhBzdG9yZS5jb21wYWN0LnYxIicKDVBvbGljeUdyb3VwQnkSFgoOY2FwdHVyZV9ncm91cHMYASADKAkiXwoNUG9saWN5T3JkZXJCeRIVCg1jYXB0dXJlX2dyb3VwGAEgASgJEjcKCGVuY29kaW5nGAIgASgOMiUuc3RvcmUuY29tcGFjdC52MS5Qb2xpY3lPcmRlckVuY29kaW5nIioKEFJldGFpbktlZXBMYXRlc3QSFgoFY291bnQYASABKARCB7pIBDICIAAiJgoRUmV0YWluR3JlYXRlclRoYW4SEQoJdGhyZXNob2xkGAEgASgEIi0KGFJldGFpbkdyZWF0ZXJUaGFuT3JFcXVhbBIRCgl0aHJlc2hvbGQYASABKAQiDwoNUmV0YWluRHJvcEFsbCKQAgoMUG9saWN5UmV0YWluEjkKC2tlZXBfbGF0ZXN0GAEgASgLMiIuc3RvcmUuY29tcGFjdC52MS5SZXRhaW5LZWVwTGF0ZXN0SAASOwoMZ3JlYXRlcl90aGFuGAIgASgLMiMuc3RvcmUuY29tcGFjdC52MS5SZXRhaW5HcmVhdGVyVGhhbkgAEksKFWdyZWF0ZXJfdGhhbl9vcl9lcXVhbBgDIAEoCzIqLnN0b3JlLmNvbXBhY3QudjEuUmV0YWluR3JlYXRlclRoYW5PckVxdWFsSAASMwoIZHJvcF9hbGwYBCABKAsyHy5zdG9yZS5jb21wYWN0LnYxLlJldGFpbkRyb3BBbGxIAEIGCgRraW5kIq4BCglLZXlzU2NvcGUSKQoJbWF0Y2hfa2V5GAEgASgLMhYuY29tbW9uLmt2LnYxLk1hdGNoS2V5EjEKCGdyb3VwX2J5GAIgASgLMh8uc3RvcmUuY29tcGFjdC52MS5Qb2xpY3lHcm91cEJ5EjYKCG9yZGVyX2J5GAMgASgLMh8uc3RvcmUuY29tcGFjdC52MS5Qb2xpY3lPcmRlckJ5SACIAQFCCwoJX29yZGVyX2J5Ig8KDVNlcXVlbmNlU2NvcGUiowEKBlBvbGljeRIrCgRrZXlzGAEgASgLMhsuc3RvcmUuY29tcGFjdC52MS5LZXlzU2NvcGVIABIzCghzZXF1ZW5jZRgCIAEoCzIfLnN0b3JlLmNvbXBhY3QudjEuU2VxdWVuY2VTY29wZUgAEi4KBnJldGFpbhgDIAEoCzIeLnN0b3JlLmNvbXBhY3QudjEuUG9saWN5UmV0YWluQgcKBXNjb3BlIkQKDFBydW5lUmVxdWVzdBI0Cghwb2xpY2llcxgBIAMoCzIYLnN0b3JlLmNvbXBhY3QudjEuUG9saWN5Qgi6SAWSAQIIASIPCg1QcnVuZVJlc3BvbnNlKn4KE1BvbGljeU9yZGVyRW5jb2RpbmcSIwofUE9MSUNZX09SREVSX0VOQ09ESU5HX0JZVEVTX0FTQxAAEiAKHFBPTElDWV9PUkRFUl9FTkNPRElOR19VNjRfQkUQARIgChxQT0xJQ1lfT1JERVJfRU5DT0RJTkdfSTY0X0JFEAIyUwoHU2VydmljZRJICgVQcnVuZRIeLnN0b3JlLmNvbXBhY3QudjEuUHJ1bmVSZXF1ZXN0Gh8uc3RvcmUuY29tcGFjdC52MS5QcnVuZVJlc3BvbnNlYgZwcm90bzM", [file_buf_validate_validate, file_common_v1_kv]);
+  fileDesc("ChZzdG9yZS92MS9jb21wYWN0LnByb3RvEhBzdG9yZS5jb21wYWN0LnYxIicKDVBvbGljeUdyb3VwQnkSFgoOY2FwdHVyZV9ncm91cHMYASADKAkiXwoNUG9saWN5T3JkZXJCeRIVCg1jYXB0dXJlX2dyb3VwGAEgASgJEjcKCGVuY29kaW5nGAIgASgOMiUuc3RvcmUuY29tcGFjdC52MS5Qb2xpY3lPcmRlckVuY29kaW5nIioKEFJldGFpbktlZXBMYXRlc3QSFgoFY291bnQYASABKARCB7pIBDICIAAiJgoRUmV0YWluR3JlYXRlclRoYW4SEQoJdGhyZXNob2xkGAEgASgEIi0KGFJldGFpbkdyZWF0ZXJUaGFuT3JFcXVhbBIRCgl0aHJlc2hvbGQYASABKAQiDwoNUmV0YWluRHJvcEFsbCKQAgoMUG9saWN5UmV0YWluEjkKC2tlZXBfbGF0ZXN0GAEgASgLMiIuc3RvcmUuY29tcGFjdC52MS5SZXRhaW5LZWVwTGF0ZXN0SAASOwoMZ3JlYXRlcl90aGFuGAIgASgLMiMuc3RvcmUuY29tcGFjdC52MS5SZXRhaW5HcmVhdGVyVGhhbkgAEksKFWdyZWF0ZXJfdGhhbl9vcl9lcXVhbBgDIAEoCzIqLnN0b3JlLmNvbXBhY3QudjEuUmV0YWluR3JlYXRlclRoYW5PckVxdWFsSAASMwoIZHJvcF9hbGwYBCABKAsyHy5zdG9yZS5jb21wYWN0LnYxLlJldGFpbkRyb3BBbGxIAEIGCgRraW5kIq0BCglLZXlzU2NvcGUSKAoIc2VsZWN0b3IYASABKAsyFi5jb21tb24ua3YudjEuU2VsZWN0b3ISMQoIZ3JvdXBfYnkYAiABKAsyHy5zdG9yZS5jb21wYWN0LnYxLlBvbGljeUdyb3VwQnkSNgoIb3JkZXJfYnkYAyABKAsyHy5zdG9yZS5jb21wYWN0LnYxLlBvbGljeU9yZGVyQnlIAIgBAUILCglfb3JkZXJfYnkiDwoNU2VxdWVuY2VTY29wZSKjAQoGUG9saWN5EisKBGtleXMYASABKAsyGy5zdG9yZS5jb21wYWN0LnYxLktleXNTY29wZUgAEjMKCHNlcXVlbmNlGAIgASgLMh8uc3RvcmUuY29tcGFjdC52MS5TZXF1ZW5jZVNjb3BlSAASLgoGcmV0YWluGAMgASgLMh4uc3RvcmUuY29tcGFjdC52MS5Qb2xpY3lSZXRhaW5CBwoFc2NvcGUiRAoMUHJ1bmVSZXF1ZXN0EjQKCHBvbGljaWVzGAEgAygLMhguc3RvcmUuY29tcGFjdC52MS5Qb2xpY3lCCLpIBZIBAggBIg8KDVBydW5lUmVzcG9uc2UqfgoTUG9saWN5T3JkZXJFbmNvZGluZxIjCh9QT0xJQ1lfT1JERVJfRU5DT0RJTkdfQllURVNfQVNDEAASIAocUE9MSUNZX09SREVSX0VOQ09ESU5HX1U2NF9CRRABEiAKHFBPTElDWV9PUkRFUl9FTkNPRElOR19JNjRfQkUQAjJTCgdTZXJ2aWNlEkgKBVBydW5lEh4uc3RvcmUuY29tcGFjdC52MS5QcnVuZVJlcXVlc3QaHy5zdG9yZS5jb21wYWN0LnYxLlBydW5lUmVzcG9uc2ViBnByb3RvMw", [file_buf_validate_validate, file_common_v1_kv]);
 
 /**
  * Controls how matched keys are partitioned into independent groups before
@@ -23,7 +23,7 @@ export const file_store_v1_compact: GenFile = /*@__PURE__*/
  */
 export type PolicyGroupBy = Message<"store.compact.v1.PolicyGroupBy"> & {
   /**
-   * Named capture groups from `common.kv.v1.MatchKey.payload_regex` whose
+   * Named capture groups from `common.kv.v1.Selector.payload_regex` whose
    * matched bytes are concatenated (length-prefixed) to form each group's
    * identity. Must not contain duplicates. When empty, all matched keys
    * belong to a single group.
@@ -49,7 +49,7 @@ export const PolicyGroupBySchema: GenMessage<PolicyGroupBy> = /*@__PURE__*/
  */
 export type PolicyOrderBy = Message<"store.compact.v1.PolicyOrderBy"> & {
   /**
-   * Name of the capture group in `common.kv.v1.MatchKey.payload_regex`
+   * Name of the capture group in `common.kv.v1.Selector.payload_regex`
    * that provides the ordering value.
    *
    * @generated from field: string capture_group = 1;
@@ -196,7 +196,7 @@ export const PolicyRetainSchema: GenMessage<PolicyRetain> = /*@__PURE__*/
   messageDesc(file_store_v1_compact, 6);
 
 /**
- * User-key-space scope: scan a KeyCodec family by `match_key`, partition
+ * User-key-space scope: scan a KeyCodec family by `selector`, partition
  * matched keys into `group_by` groups, order within each group by
  * `order_by`, then apply `retain` to decide which keys to delete.
  *
@@ -204,9 +204,9 @@ export const PolicyRetainSchema: GenMessage<PolicyRetain> = /*@__PURE__*/
  */
 export type KeysScope = Message<"store.compact.v1.KeysScope"> & {
   /**
-   * @generated from field: common.kv.v1.MatchKey match_key = 1;
+   * @generated from field: common.kv.v1.Selector selector = 1;
    */
-  matchKey?: MatchKey;
+  selector?: Selector;
 
   /**
    * @generated from field: store.compact.v1.PolicyGroupBy group_by = 2;
@@ -228,7 +228,7 @@ export const KeysScopeSchema: GenMessage<KeysScope> = /*@__PURE__*/
 
 /**
  * Sequence-number scope: prune the per-batch sequence log served by the
- * store's `Stream` service. `match_key` / `group_by` / `order_by` are not
+ * store's `Stream` service. `selector` / `group_by` / `order_by` are not
  * meaningful here — the log has a single implicit ordering by sequence
  * number. The `retain` rule on the parent `Policy` is interpreted directly
  * over sequence numbers:

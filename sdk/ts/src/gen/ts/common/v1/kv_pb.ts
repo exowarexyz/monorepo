@@ -11,7 +11,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file common/v1/kv.proto.
  */
 export const file_common_v1_kv: GenFile = /*@__PURE__*/
-  fileDesc("ChJjb21tb24vdjEva3YucHJvdG8SDGNvbW1vbi5rdi52MSItCgVFbnRyeRIVCgNrZXkYASABKAxCCLpIBXoDGP4BEg0KBXZhbHVlGAIgASgMIkgKCE1hdGNoS2V5EhUKDXJlc2VydmVkX2JpdHMYASABKA0SDgoGcHJlZml4GAIgASgNEhUKDXBheWxvYWRfcmVnZXgYAyABKAkiSQoLQnl0ZXNGaWx0ZXISDwoFZXhhY3QYASABKAxIABIQCgZwcmVmaXgYAiABKAxIABIPCgVyZWdleBgDIAEoCUgAQgYKBGtpbmRiBnByb3RvMw", [file_buf_validate_validate]);
+  fileDesc("ChJjb21tb24vdjEva3YucHJvdG8SDGNvbW1vbi5rdi52MSItCgVFbnRyeRIVCgNrZXkYASABKAxCCLpIBXoDGP4BEg0KBXZhbHVlGAIgASgMIkgKCFNlbGVjdG9yEhUKDXJlc2VydmVkX2JpdHMYASABKA0SDgoGcHJlZml4GAIgASgNEhUKDXBheWxvYWRfcmVnZXgYAyABKAkiRAoGRmlsdGVyEg8KBWV4YWN0GAEgASgMSAASEAoGcHJlZml4GAIgASgMSAASDwoFcmVnZXgYAyABKAlIAEIGCgRraW5kYgZwcm90bzM", [file_buf_validate_validate]);
 
 /**
  * A raw key-value pair shared by store APIs that move complete rows without
@@ -51,9 +51,9 @@ export const EntrySchema: GenMessage<Entry> = /*@__PURE__*/
  * Named capture groups referenced by callers (e.g. `PolicyGroupBy` /
  * `PolicyOrderBy`) must exist in `payload_regex`.
  *
- * @generated from message common.kv.v1.MatchKey
+ * @generated from message common.kv.v1.Selector
  */
-export type MatchKey = Message<"common.kv.v1.MatchKey"> & {
+export type Selector = Message<"common.kv.v1.Selector"> & {
   /**
    * Number of high bits in the key reserved for internal routing. Together
    * with `prefix`, this selects the `KeyCodec` family to scan.
@@ -79,10 +79,10 @@ export type MatchKey = Message<"common.kv.v1.MatchKey"> & {
 };
 
 /**
- * Describes the message common.kv.v1.MatchKey.
- * Use `create(MatchKeySchema)` to create a new message.
+ * Describes the message common.kv.v1.Selector.
+ * Use `create(SelectorSchema)` to create a new message.
  */
-export const MatchKeySchema: GenMessage<MatchKey> = /*@__PURE__*/
+export const SelectorSchema: GenMessage<Selector> = /*@__PURE__*/
   messageDesc(file_common_v1_kv, 1);
 
 /**
@@ -90,11 +90,11 @@ export const MatchKeySchema: GenMessage<MatchKey> = /*@__PURE__*/
  * regex. Used for filtering both decoded logical keys and operation values in
  * APIs that operate above the store-row `KeyCodec` layer.
  *
- * @generated from message common.kv.v1.BytesFilter
+ * @generated from message common.kv.v1.Filter
  */
-export type BytesFilter = Message<"common.kv.v1.BytesFilter"> & {
+export type Filter = Message<"common.kv.v1.Filter"> & {
   /**
-   * @generated from oneof common.kv.v1.BytesFilter.kind
+   * @generated from oneof common.kv.v1.Filter.kind
    */
   kind: {
     /**
@@ -118,9 +118,9 @@ export type BytesFilter = Message<"common.kv.v1.BytesFilter"> & {
 };
 
 /**
- * Describes the message common.kv.v1.BytesFilter.
- * Use `create(BytesFilterSchema)` to create a new message.
+ * Describes the message common.kv.v1.Filter.
+ * Use `create(FilterSchema)` to create a new message.
  */
-export const BytesFilterSchema: GenMessage<BytesFilter> = /*@__PURE__*/
+export const FilterSchema: GenMessage<Filter> = /*@__PURE__*/
   messageDesc(file_common_v1_kv, 2);
 

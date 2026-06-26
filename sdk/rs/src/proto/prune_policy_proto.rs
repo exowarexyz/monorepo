@@ -3,13 +3,13 @@
 //! Parsing checks only protobuf shape and numeric width conversions. Call the
 //! validation helpers on the parsed output before applying policy effects.
 
-use crate::common::kv::v1::MatchKey as ProtoMatchKey;
+use crate::common::kv::v1::Selector as ProtoSelector;
 use crate::kv_codec::Utf8;
-use crate::match_key::MatchKey;
 use crate::prune_policy::{
     GroupBy, KeysScope, OrderBy, OrderEncoding, PolicyScope, PrunePolicy, PrunePolicyDocument,
     RetainPolicy, PRUNE_POLICY_DOCUMENT_VERSION,
 };
+use crate::selector::Selector;
 use crate::store::compact::v1::{
     policy, policy_retain, KeysScope as ProtoKeysScope, Policy as ProtoPolicy, PolicyOrderBy,
     PolicyOrderEncoding, PruneRequestView,
@@ -56,10 +56,10 @@ fn retain_from_proto(kind: &policy_retain::Kind) -> Result<RetainPolicy, String>
     }
 }
 
-fn match_key_from_proto(mk: &ProtoMatchKey) -> Result<MatchKey, String> {
-    Ok(MatchKey {
-        reserved_bits: u8_from_u32("match_key.reserved_bits", mk.reserved_bits)?,
-        prefix: u16_from_u32("match_key.prefix", mk.prefix)?,
+fn selector_from_proto(mk: &ProtoSelector) -> Result<Selector, String> {
+    Ok(Selector {
+        reserved_bits: u8_from_u32("selector.reserved_bits", mk.reserved_bits)?,
+        prefix: u16_from_u32("selector.prefix", mk.prefix)?,
         payload_regex: Utf8::from(mk.payload_regex.clone()),
     })
 }
@@ -72,10 +72,10 @@ fn order_by_from_proto(o: &PolicyOrderBy) -> Result<OrderBy, String> {
 }
 
 fn keys_scope_from_proto(s: &ProtoKeysScope) -> Result<KeysScope, String> {
-    let Some(mk) = s.match_key.as_option() else {
-        return Err("keys scope match_key is required".to_string());
+    let Some(mk) = s.selector.as_option() else {
+        return Err("keys scope selector is required".to_string());
     };
-    let match_key = match_key_from_proto(mk)?;
+    let selector = selector_from_proto(mk)?;
 
     let group_by = if let Some(group_by) = s.group_by.as_option() {
         GroupBy {
@@ -96,7 +96,7 @@ fn keys_scope_from_proto(s: &ProtoKeysScope) -> Result<KeysScope, String> {
         .transpose()?;
 
     Ok(KeysScope {
-        match_key,
+        selector,
         group_by,
         order_by,
     })
@@ -134,8 +134,8 @@ pub fn prune_policies_to_proto(policies: &[PrunePolicy]) -> Vec<crate::store::co
     policies.iter().map(prune_policy_to_proto).collect()
 }
 
-fn match_key_to_proto(mk: &MatchKey) -> ProtoMatchKey {
-    ProtoMatchKey {
+fn selector_to_proto(mk: &Selector) -> ProtoSelector {
+    ProtoSelector {
         reserved_bits: u32::from(mk.reserved_bits),
         prefix: u32::from(mk.prefix),
         payload_regex: mk.payload_regex.0.clone(),
@@ -146,7 +146,7 @@ fn match_key_to_proto(mk: &MatchKey) -> ProtoMatchKey {
 fn keys_scope_to_proto(s: &KeysScope) -> ProtoKeysScope {
     use crate::store::compact::v1::{PolicyGroupBy, PolicyOrderBy};
 
-    let match_key = match_key_to_proto(&s.match_key);
+    let selector = selector_to_proto(&s.selector);
     let group_by = PolicyGroupBy {
         capture_groups: s
             .group_by
@@ -162,7 +162,7 @@ fn keys_scope_to_proto(s: &KeysScope) -> ProtoKeysScope {
         ..Default::default()
     });
     ProtoKeysScope {
-        match_key: Some(match_key).into(),
+        selector: Some(selector).into(),
         group_by: Some(group_by).into(),
         order_by: order_by.into(),
         ..Default::default()
@@ -249,14 +249,14 @@ mod tests {
     use super::*;
 
     use crate::kv_codec::Utf8;
-    use crate::match_key::MatchKey;
     use crate::prune_policy::{GroupBy, KeysScope, OrderBy, PrunePolicy, RetainPolicy};
+    use crate::selector::Selector;
 
     #[test]
     fn owned_proto_policy_round_trips_to_domain_policy() {
         let expected = PrunePolicy {
             scope: PolicyScope::Keys(KeysScope {
-                match_key: MatchKey {
+                selector: Selector {
                     reserved_bits: 4,
                     prefix: 1,
                     payload_regex: Utf8::from("(?s)^(?P<logical>.*)-(?P<version>.{8})$"),

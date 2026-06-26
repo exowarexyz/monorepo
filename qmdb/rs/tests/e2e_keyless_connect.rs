@@ -24,9 +24,7 @@ use exoware_qmdb::{
     keyless_operation_log_connect_stack, KeylessClient, KeylessWriter, OperationLogClient,
     OperationLogSubscribeProof, OperationLogSyncResolver, QmdbError,
 };
-use exoware_sdk::common::kv::v1::{
-    bytes_filter as proto_bytes_filter, BytesFilter as ProtoBytesFilter,
-};
+use exoware_sdk::common::kv::v1::{filter as proto_filter, Filter as ProtoFilter};
 use exoware_sdk::proto::PreferZstdHttpClient;
 use exoware_sdk::StoreClient;
 
@@ -433,18 +431,16 @@ async fn keyless_connect_client_rejects_invalid_streamed_proof() {
     ));
 }
 
-fn match_exact(bytes: &[u8]) -> ProtoBytesFilter {
-    ProtoBytesFilter {
-        kind: Some(proto_bytes_filter::Kind::Exact(Bytes::copy_from_slice(
-            bytes,
-        ))),
+fn match_exact(bytes: &[u8]) -> ProtoFilter {
+    ProtoFilter {
+        kind: Some(proto_filter::Kind::Exact(Bytes::copy_from_slice(bytes))),
         ..Default::default()
     }
 }
 
-fn match_regex(regex: &str) -> ProtoBytesFilter {
-    ProtoBytesFilter {
-        kind: Some(proto_bytes_filter::Kind::Regex(regex.to_string())),
+fn match_regex(regex: &str) -> ProtoFilter {
+    ProtoFilter {
+        kind: Some(proto_filter::Kind::Regex(regex.to_string())),
         ..Default::default()
     }
 }

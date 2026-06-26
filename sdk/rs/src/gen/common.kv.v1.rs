@@ -183,7 +183,7 @@ pub const __ENTRY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
-pub struct MatchKey {
+pub struct Selector {
     /// Number of high bits in the key reserved for internal routing. Together
     /// with `prefix`, this selects the `KeyCodec` family to scan.
     ///
@@ -219,35 +219,35 @@ pub struct MatchKey {
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
-impl ::core::fmt::Debug for MatchKey {
+impl ::core::fmt::Debug for Selector {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("MatchKey")
+        f.debug_struct("Selector")
             .field("reserved_bits", &self.reserved_bits)
             .field("prefix", &self.prefix)
             .field("payload_regex", &self.payload_regex)
             .finish()
     }
 }
-impl MatchKey {
+impl Selector {
     /// Protobuf type URL for this message, for use with `Any::pack` and
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/common.kv.v1.MatchKey";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/common.kv.v1.Selector";
 }
-impl ::buffa::DefaultInstance for MatchKey {
+impl ::buffa::DefaultInstance for Selector {
     fn default_instance() -> &'static Self {
-        static VALUE: ::buffa::__private::OnceBox<MatchKey> = ::buffa::__private::OnceBox::new();
+        static VALUE: ::buffa::__private::OnceBox<Selector> = ::buffa::__private::OnceBox::new();
         VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
     }
 }
-impl ::buffa::MessageName for MatchKey {
+impl ::buffa::MessageName for Selector {
     const PACKAGE: &'static str = "common.kv.v1";
-    const NAME: &'static str = "MatchKey";
-    const FULL_NAME: &'static str = "common.kv.v1.MatchKey";
-    const TYPE_URL: &'static str = "type.googleapis.com/common.kv.v1.MatchKey";
+    const NAME: &'static str = "Selector";
+    const FULL_NAME: &'static str = "common.kv.v1.Selector";
+    const TYPE_URL: &'static str = "type.googleapis.com/common.kv.v1.Selector";
 }
-impl ::buffa::Message for MatchKey {
+impl ::buffa::Message for Selector {
     /// Returns the total encoded size in bytes.
     ///
     /// The result is a `u32`; the protobuf specification requires all
@@ -353,8 +353,8 @@ impl ::buffa::Message for MatchKey {
         self.__buffa_unknown_fields.clear();
     }
 }
-impl ::buffa::ExtensionSet for MatchKey {
-    const PROTO_FQN: &'static str = "common.kv.v1.MatchKey";
+impl ::buffa::ExtensionSet for Selector {
+    const PROTO_FQN: &'static str = "common.kv.v1.Selector";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -362,7 +362,7 @@ impl ::buffa::ExtensionSet for MatchKey {
         &mut self.__buffa_unknown_fields
     }
 }
-impl ::buffa::json_helpers::ProtoElemJson for MatchKey {
+impl ::buffa::json_helpers::ProtoElemJson for Selector {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
         s: S,
@@ -376,10 +376,10 @@ impl ::buffa::json_helpers::ProtoElemJson for MatchKey {
     }
 }
 #[doc(hidden)]
-pub const __MATCH_KEY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/common.kv.v1.MatchKey",
-    to_json: ::buffa::type_registry::any_to_json::<MatchKey>,
-    from_json: ::buffa::type_registry::any_from_json::<MatchKey>,
+pub const __SELECTOR_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/common.kv.v1.Selector",
+    to_json: ::buffa::type_registry::any_to_json::<Selector>,
+    from_json: ::buffa::type_registry::any_from_json::<Selector>,
     is_wkt: false,
 };
 /// Matches an uninterpreted byte string by exact value, prefix, or full-string
@@ -388,38 +388,38 @@ pub const __MATCH_KEY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize)]
 #[serde(default)]
-pub struct BytesFilter {
+pub struct Filter {
     #[serde(flatten)]
-    pub kind: ::core::option::Option<__buffa::oneof::bytes_filter::Kind>,
+    pub kind: ::core::option::Option<__buffa::oneof::filter::Kind>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
-impl ::core::fmt::Debug for BytesFilter {
+impl ::core::fmt::Debug for Filter {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("BytesFilter").field("kind", &self.kind).finish()
+        f.debug_struct("Filter").field("kind", &self.kind).finish()
     }
 }
-impl BytesFilter {
+impl Filter {
     /// Protobuf type URL for this message, for use with `Any::pack` and
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/common.kv.v1.BytesFilter";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/common.kv.v1.Filter";
 }
-impl ::buffa::DefaultInstance for BytesFilter {
+impl ::buffa::DefaultInstance for Filter {
     fn default_instance() -> &'static Self {
-        static VALUE: ::buffa::__private::OnceBox<BytesFilter> = ::buffa::__private::OnceBox::new();
+        static VALUE: ::buffa::__private::OnceBox<Filter> = ::buffa::__private::OnceBox::new();
         VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
     }
 }
-impl ::buffa::MessageName for BytesFilter {
+impl ::buffa::MessageName for Filter {
     const PACKAGE: &'static str = "common.kv.v1";
-    const NAME: &'static str = "BytesFilter";
-    const FULL_NAME: &'static str = "common.kv.v1.BytesFilter";
-    const TYPE_URL: &'static str = "type.googleapis.com/common.kv.v1.BytesFilter";
+    const NAME: &'static str = "Filter";
+    const FULL_NAME: &'static str = "common.kv.v1.Filter";
+    const TYPE_URL: &'static str = "type.googleapis.com/common.kv.v1.Filter";
 }
-impl ::buffa::Message for BytesFilter {
+impl ::buffa::Message for Filter {
     /// Returns the total encoded size in bytes.
     ///
     /// The result is a `u32`; the protobuf specification requires all
@@ -432,13 +432,13 @@ impl ::buffa::Message for BytesFilter {
         let mut size = 0u32;
         if let ::core::option::Option::Some(ref v) = self.kind {
             match v {
-                __buffa::oneof::bytes_filter::Kind::Exact(x) => {
+                __buffa::oneof::filter::Kind::Exact(x) => {
                     size += 1u32 + ::buffa::types::bytes_encoded_len(x) as u32;
                 }
-                __buffa::oneof::bytes_filter::Kind::Prefix(x) => {
+                __buffa::oneof::filter::Kind::Prefix(x) => {
                     size += 1u32 + ::buffa::types::bytes_encoded_len(x) as u32;
                 }
-                __buffa::oneof::bytes_filter::Kind::Regex(x) => {
+                __buffa::oneof::filter::Kind::Regex(x) => {
                     size += 1u32 + ::buffa::types::string_encoded_len(x) as u32;
                 }
             }
@@ -455,7 +455,7 @@ impl ::buffa::Message for BytesFilter {
         use ::buffa::Enumeration as _;
         if let ::core::option::Option::Some(ref v) = self.kind {
             match v {
-                __buffa::oneof::bytes_filter::Kind::Exact(x) => {
+                __buffa::oneof::filter::Kind::Exact(x) => {
                     ::buffa::encoding::Tag::new(
                             1u32,
                             ::buffa::encoding::WireType::LengthDelimited,
@@ -463,7 +463,7 @@ impl ::buffa::Message for BytesFilter {
                         .encode(buf);
                     ::buffa::types::encode_bytes(x, buf);
                 }
-                __buffa::oneof::bytes_filter::Kind::Prefix(x) => {
+                __buffa::oneof::filter::Kind::Prefix(x) => {
                     ::buffa::encoding::Tag::new(
                             2u32,
                             ::buffa::encoding::WireType::LengthDelimited,
@@ -471,7 +471,7 @@ impl ::buffa::Message for BytesFilter {
                         .encode(buf);
                     ::buffa::types::encode_bytes(x, buf);
                 }
-                __buffa::oneof::bytes_filter::Kind::Regex(x) => {
+                __buffa::oneof::filter::Kind::Regex(x) => {
                     ::buffa::encoding::Tag::new(
                             3u32,
                             ::buffa::encoding::WireType::LengthDelimited,
@@ -503,7 +503,7 @@ impl ::buffa::Message for BytesFilter {
                     });
                 }
                 self.kind = ::core::option::Option::Some(
-                    __buffa::oneof::bytes_filter::Kind::Exact(
+                    __buffa::oneof::filter::Kind::Exact(
                         ::buffa::types::decode_bytes_to_bytes(buf)?,
                     ),
                 );
@@ -517,7 +517,7 @@ impl ::buffa::Message for BytesFilter {
                     });
                 }
                 self.kind = ::core::option::Option::Some(
-                    __buffa::oneof::bytes_filter::Kind::Prefix(
+                    __buffa::oneof::filter::Kind::Prefix(
                         ::buffa::types::decode_bytes_to_bytes(buf)?,
                     ),
                 );
@@ -531,7 +531,7 @@ impl ::buffa::Message for BytesFilter {
                     });
                 }
                 self.kind = ::core::option::Option::Some(
-                    __buffa::oneof::bytes_filter::Kind::Regex(
+                    __buffa::oneof::filter::Kind::Regex(
                         ::buffa::types::decode_string(buf)?,
                     ),
                 );
@@ -548,8 +548,8 @@ impl ::buffa::Message for BytesFilter {
         self.__buffa_unknown_fields.clear();
     }
 }
-impl ::buffa::ExtensionSet for BytesFilter {
-    const PROTO_FQN: &'static str = "common.kv.v1.BytesFilter";
+impl ::buffa::ExtensionSet for Filter {
+    const PROTO_FQN: &'static str = "common.kv.v1.Filter";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -557,23 +557,23 @@ impl ::buffa::ExtensionSet for BytesFilter {
         &mut self.__buffa_unknown_fields
     }
 }
-impl<'de> serde::Deserialize<'de> for BytesFilter {
+impl<'de> serde::Deserialize<'de> for Filter {
     fn deserialize<D: serde::Deserializer<'de>>(
         d: D,
     ) -> ::core::result::Result<Self, D::Error> {
         struct _V;
         impl<'de> serde::de::Visitor<'de> for _V {
-            type Value = BytesFilter;
+            type Value = Filter;
             fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                f.write_str("struct BytesFilter")
+                f.write_str("struct Filter")
             }
             #[allow(clippy::field_reassign_with_default)]
             fn visit_map<A: serde::de::MapAccess<'de>>(
                 self,
                 mut map: A,
-            ) -> ::core::result::Result<BytesFilter, A::Error> {
+            ) -> ::core::result::Result<Filter, A::Error> {
                 let mut __oneof_kind: ::core::option::Option<
-                    __buffa::oneof::bytes_filter::Kind,
+                    __buffa::oneof::filter::Kind,
                 > = None;
                 while let Some(key) = map.next_key::<::buffa::alloc::string::String>()? {
                     match key.as_str() {
@@ -603,9 +603,7 @@ impl<'de> serde::Deserialize<'de> for BytesFilter {
                                         ),
                                     );
                                 }
-                                __oneof_kind = Some(
-                                    __buffa::oneof::bytes_filter::Kind::Exact(v),
-                                );
+                                __oneof_kind = Some(__buffa::oneof::filter::Kind::Exact(v));
                             }
                         }
                         "prefix" => {
@@ -635,7 +633,7 @@ impl<'de> serde::Deserialize<'de> for BytesFilter {
                                     );
                                 }
                                 __oneof_kind = Some(
-                                    __buffa::oneof::bytes_filter::Kind::Prefix(v),
+                                    __buffa::oneof::filter::Kind::Prefix(v),
                                 );
                             }
                         }
@@ -658,9 +656,7 @@ impl<'de> serde::Deserialize<'de> for BytesFilter {
                                         ),
                                     );
                                 }
-                                __oneof_kind = Some(
-                                    __buffa::oneof::bytes_filter::Kind::Regex(v),
-                                );
+                                __oneof_kind = Some(__buffa::oneof::filter::Kind::Regex(v));
                             }
                         }
                         _ => {
@@ -668,7 +664,7 @@ impl<'de> serde::Deserialize<'de> for BytesFilter {
                         }
                     }
                 }
-                let mut __r = <BytesFilter as ::core::default::Default>::default();
+                let mut __r = <Filter as ::core::default::Default>::default();
                 __r.kind = __oneof_kind;
                 Ok(__r)
             }
@@ -676,7 +672,7 @@ impl<'de> serde::Deserialize<'de> for BytesFilter {
         d.deserialize_map(_V)
     }
 }
-impl ::buffa::json_helpers::ProtoElemJson for BytesFilter {
+impl ::buffa::json_helpers::ProtoElemJson for Filter {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
         s: S,
@@ -690,19 +686,19 @@ impl ::buffa::json_helpers::ProtoElemJson for BytesFilter {
     }
 }
 #[doc(hidden)]
-pub const __BYTES_FILTER_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/common.kv.v1.BytesFilter",
-    to_json: ::buffa::type_registry::any_to_json::<BytesFilter>,
-    from_json: ::buffa::type_registry::any_from_json::<BytesFilter>,
+pub const __FILTER_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/common.kv.v1.Filter",
+    to_json: ::buffa::type_registry::any_to_json::<Filter>,
+    from_json: ::buffa::type_registry::any_from_json::<Filter>,
     is_wkt: false,
 };
-pub mod bytes_filter {
+pub mod filter {
     #[allow(unused_imports)]
     use super::*;
     #[doc(inline)]
-    pub use super::__buffa::oneof::bytes_filter::Kind;
+    pub use super::__buffa::oneof::filter::Kind;
     #[doc(inline)]
-    pub use super::__buffa::view::oneof::bytes_filter::Kind as KindView;
+    pub use super::__buffa::view::oneof::filter::Kind as KindView;
 }
 #[allow(
     non_camel_case_types,
@@ -963,7 +959,7 @@ pub mod __buffa {
         /// Named capture groups referenced by callers (e.g. `PolicyGroupBy` /
         /// `PolicyOrderBy`) must exist in `payload_regex`.
         #[derive(Clone, Debug, Default)]
-        pub struct MatchKeyView<'a> {
+        pub struct SelectorView<'a> {
             /// Number of high bits in the key reserved for internal routing. Together
             /// with `prefix`, this selects the `KeyCodec` family to scan.
             ///
@@ -980,7 +976,7 @@ pub mod __buffa {
             pub payload_regex: &'a str,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
-        impl<'a> MatchKeyView<'a> {
+        impl<'a> SelectorView<'a> {
             /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
             ///
             /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
@@ -1063,8 +1059,8 @@ pub mod __buffa {
                 ::core::result::Result::Ok(())
             }
         }
-        impl<'a> ::buffa::MessageView<'a> for MatchKeyView<'a> {
-            type Owned = super::super::MatchKey;
+        impl<'a> ::buffa::MessageView<'a> for SelectorView<'a> {
+            type Owned = super::super::Selector;
             fn decode_view(
                 buf: &'a [u8],
             ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
@@ -1076,18 +1072,18 @@ pub mod __buffa {
             ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
                 Self::_decode_depth(buf, depth)
             }
-            fn to_owned_message(&self) -> super::super::MatchKey {
+            fn to_owned_message(&self) -> super::super::Selector {
                 self.to_owned_from_source(None)
             }
             #[allow(clippy::useless_conversion, clippy::needless_update)]
             fn to_owned_from_source(
                 &self,
                 __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
-            ) -> super::super::MatchKey {
+            ) -> super::super::Selector {
                 #[allow(unused_imports)]
                 use ::buffa::alloc::string::ToString as _;
                 let _ = __buffa_src;
-                super::super::MatchKey {
+                super::super::Selector {
                     reserved_bits: self.reserved_bits,
                     prefix: self.prefix,
                     payload_regex: self.payload_regex.to_string(),
@@ -1100,7 +1096,7 @@ pub mod __buffa {
                 }
             }
         }
-        impl<'a> ::buffa::ViewEncode<'a> for MatchKeyView<'a> {
+        impl<'a> ::buffa::ViewEncode<'a> for SelectorView<'a> {
             #[allow(clippy::needless_borrow, clippy::let_and_return)]
             fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
                 #[allow(unused_imports)]
@@ -1171,7 +1167,7 @@ pub mod __buffa {
         /// fields depends on default-omission rules; serializers that require
         /// known map lengths (e.g. `bincode`) will return a runtime error.
         /// Use the owned message type for those formats.
-        impl<'__a> ::serde::Serialize for MatchKeyView<'__a> {
+        impl<'__a> ::serde::Serialize for SelectorView<'__a> {
             fn serialize<__S: ::serde::Serializer>(
                 &self,
                 __s: __S,
@@ -1208,26 +1204,26 @@ pub mod __buffa {
                 __map.end()
             }
         }
-        impl<'a> ::buffa::MessageName for MatchKeyView<'a> {
+        impl<'a> ::buffa::MessageName for SelectorView<'a> {
             const PACKAGE: &'static str = "common.kv.v1";
-            const NAME: &'static str = "MatchKey";
-            const FULL_NAME: &'static str = "common.kv.v1.MatchKey";
-            const TYPE_URL: &'static str = "type.googleapis.com/common.kv.v1.MatchKey";
+            const NAME: &'static str = "Selector";
+            const FULL_NAME: &'static str = "common.kv.v1.Selector";
+            const TYPE_URL: &'static str = "type.googleapis.com/common.kv.v1.Selector";
         }
-        impl<'v> ::buffa::DefaultViewInstance for MatchKeyView<'v> {
+        impl<'v> ::buffa::DefaultViewInstance for SelectorView<'v> {
             fn default_view_instance<'a>() -> &'a Self
             where
                 Self: 'a,
             {
-                static VALUE: ::buffa::__private::OnceBox<MatchKeyView<'static>> = ::buffa::__private::OnceBox::new();
+                static VALUE: ::buffa::__private::OnceBox<SelectorView<'static>> = ::buffa::__private::OnceBox::new();
                 VALUE
                     .get_or_init(|| ::buffa::alloc::boxed::Box::new(
-                        <MatchKeyView<'static>>::default(),
+                        <SelectorView<'static>>::default(),
                     ))
             }
         }
-        impl ::buffa::ViewReborrow for MatchKeyView<'static> {
-            type Reborrowed<'b> = MatchKeyView<'b>;
+        impl ::buffa::ViewReborrow for SelectorView<'static> {
+            type Reborrowed<'b> = SelectorView<'b>;
             fn reborrow<'b>(this: &'b Self) -> &'b Self::Reborrowed<'b> {
                 this
             }
@@ -1236,13 +1232,13 @@ pub mod __buffa {
         /// regex. Used for filtering both decoded logical keys and operation values in
         /// APIs that operate above the store-row `KeyCodec` layer.
         #[derive(Clone, Debug, Default)]
-        pub struct BytesFilterView<'a> {
+        pub struct FilterView<'a> {
             pub kind: ::core::option::Option<
-                super::super::__buffa::view::oneof::bytes_filter::Kind<'a>,
+                super::super::__buffa::view::oneof::filter::Kind<'a>,
             >,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
-        impl<'a> BytesFilterView<'a> {
+        impl<'a> FilterView<'a> {
             /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
             ///
             /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
@@ -1291,7 +1287,7 @@ pub mod __buffa {
                                 });
                             }
                             view.kind = Some(
-                                super::super::__buffa::view::oneof::bytes_filter::Kind::Exact(
+                                super::super::__buffa::view::oneof::filter::Kind::Exact(
                                     ::buffa::types::borrow_bytes(&mut cur)?,
                                 ),
                             );
@@ -1307,7 +1303,7 @@ pub mod __buffa {
                                 });
                             }
                             view.kind = Some(
-                                super::super::__buffa::view::oneof::bytes_filter::Kind::Prefix(
+                                super::super::__buffa::view::oneof::filter::Kind::Prefix(
                                     ::buffa::types::borrow_bytes(&mut cur)?,
                                 ),
                             );
@@ -1323,7 +1319,7 @@ pub mod __buffa {
                                 });
                             }
                             view.kind = Some(
-                                super::super::__buffa::view::oneof::bytes_filter::Kind::Regex(
+                                super::super::__buffa::view::oneof::filter::Kind::Regex(
                                     ::buffa::types::borrow_str(&mut cur)?,
                                 ),
                             );
@@ -1339,8 +1335,8 @@ pub mod __buffa {
                 ::core::result::Result::Ok(())
             }
         }
-        impl<'a> ::buffa::MessageView<'a> for BytesFilterView<'a> {
-            type Owned = super::super::BytesFilter;
+        impl<'a> ::buffa::MessageView<'a> for FilterView<'a> {
+            type Owned = super::super::Filter;
             fn decode_view(
                 buf: &'a [u8],
             ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
@@ -1352,40 +1348,40 @@ pub mod __buffa {
             ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
                 Self::_decode_depth(buf, depth)
             }
-            fn to_owned_message(&self) -> super::super::BytesFilter {
+            fn to_owned_message(&self) -> super::super::Filter {
                 self.to_owned_from_source(None)
             }
             #[allow(clippy::useless_conversion, clippy::needless_update)]
             fn to_owned_from_source(
                 &self,
                 __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
-            ) -> super::super::BytesFilter {
+            ) -> super::super::Filter {
                 #[allow(unused_imports)]
                 use ::buffa::alloc::string::ToString as _;
                 let _ = __buffa_src;
-                super::super::BytesFilter {
+                super::super::Filter {
                     kind: self
                         .kind
                         .as_ref()
                         .map(|v| match v {
-                            super::super::__buffa::view::oneof::bytes_filter::Kind::Exact(
+                            super::super::__buffa::view::oneof::filter::Kind::Exact(
                                 v,
                             ) => {
-                                super::super::__buffa::oneof::bytes_filter::Kind::Exact(
+                                super::super::__buffa::oneof::filter::Kind::Exact(
                                     ::buffa::view::bytes_from_source(__buffa_src, v),
                                 )
                             }
-                            super::super::__buffa::view::oneof::bytes_filter::Kind::Prefix(
+                            super::super::__buffa::view::oneof::filter::Kind::Prefix(
                                 v,
                             ) => {
-                                super::super::__buffa::oneof::bytes_filter::Kind::Prefix(
+                                super::super::__buffa::oneof::filter::Kind::Prefix(
                                     ::buffa::view::bytes_from_source(__buffa_src, v),
                                 )
                             }
-                            super::super::__buffa::view::oneof::bytes_filter::Kind::Regex(
+                            super::super::__buffa::view::oneof::filter::Kind::Regex(
                                 v,
                             ) => {
-                                super::super::__buffa::oneof::bytes_filter::Kind::Regex(
+                                super::super::__buffa::oneof::filter::Kind::Regex(
                                     v.to_string(),
                                 )
                             }
@@ -1399,7 +1395,7 @@ pub mod __buffa {
                 }
             }
         }
-        impl<'a> ::buffa::ViewEncode<'a> for BytesFilterView<'a> {
+        impl<'a> ::buffa::ViewEncode<'a> for FilterView<'a> {
             #[allow(clippy::needless_borrow, clippy::let_and_return)]
             fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
                 #[allow(unused_imports)]
@@ -1407,19 +1403,13 @@ pub mod __buffa {
                 let mut size = 0u32;
                 if let ::core::option::Option::Some(ref v) = self.kind {
                     match v {
-                        super::super::__buffa::view::oneof::bytes_filter::Kind::Exact(
-                            x,
-                        ) => {
+                        super::super::__buffa::view::oneof::filter::Kind::Exact(x) => {
                             size += 1u32 + ::buffa::types::bytes_encoded_len(x) as u32;
                         }
-                        super::super::__buffa::view::oneof::bytes_filter::Kind::Prefix(
-                            x,
-                        ) => {
+                        super::super::__buffa::view::oneof::filter::Kind::Prefix(x) => {
                             size += 1u32 + ::buffa::types::bytes_encoded_len(x) as u32;
                         }
-                        super::super::__buffa::view::oneof::bytes_filter::Kind::Regex(
-                            x,
-                        ) => {
+                        super::super::__buffa::view::oneof::filter::Kind::Regex(x) => {
                             size += 1u32 + ::buffa::types::string_encoded_len(x) as u32;
                         }
                     }
@@ -1437,9 +1427,7 @@ pub mod __buffa {
                 use ::buffa::Enumeration as _;
                 if let ::core::option::Option::Some(ref v) = self.kind {
                     match v {
-                        super::super::__buffa::view::oneof::bytes_filter::Kind::Exact(
-                            x,
-                        ) => {
+                        super::super::__buffa::view::oneof::filter::Kind::Exact(x) => {
                             ::buffa::encoding::Tag::new(
                                     1u32,
                                     ::buffa::encoding::WireType::LengthDelimited,
@@ -1447,9 +1435,7 @@ pub mod __buffa {
                                 .encode(buf);
                             ::buffa::types::encode_bytes(x, buf);
                         }
-                        super::super::__buffa::view::oneof::bytes_filter::Kind::Prefix(
-                            x,
-                        ) => {
+                        super::super::__buffa::view::oneof::filter::Kind::Prefix(x) => {
                             ::buffa::encoding::Tag::new(
                                     2u32,
                                     ::buffa::encoding::WireType::LengthDelimited,
@@ -1457,9 +1443,7 @@ pub mod __buffa {
                                 .encode(buf);
                             ::buffa::types::encode_bytes(x, buf);
                         }
-                        super::super::__buffa::view::oneof::bytes_filter::Kind::Regex(
-                            x,
-                        ) => {
+                        super::super::__buffa::view::oneof::filter::Kind::Regex(x) => {
                             ::buffa::encoding::Tag::new(
                                     3u32,
                                     ::buffa::encoding::WireType::LengthDelimited,
@@ -1483,7 +1467,7 @@ pub mod __buffa {
         /// fields depends on default-omission rules; serializers that require
         /// known map lengths (e.g. `bincode`) will return a runtime error.
         /// Use the owned message type for those formats.
-        impl<'__a> ::serde::Serialize for BytesFilterView<'__a> {
+        impl<'__a> ::serde::Serialize for FilterView<'__a> {
             fn serialize<__S: ::serde::Serializer>(
                 &self,
                 __s: __S,
@@ -1492,9 +1476,7 @@ pub mod __buffa {
                 let mut __map = __s.serialize_map(::core::option::Option::None)?;
                 if let ::core::option::Option::Some(ref __ov) = self.kind {
                     match __ov {
-                        super::super::__buffa::view::oneof::bytes_filter::Kind::Exact(
-                            v,
-                        ) => {
+                        super::super::__buffa::view::oneof::filter::Kind::Exact(v) => {
                             struct _W<'__x>(&'__x [u8]);
                             impl ::serde::Serialize for _W<'_> {
                                 fn serialize<__S: ::serde::Serializer>(
@@ -1506,9 +1488,7 @@ pub mod __buffa {
                             }
                             __map.serialize_entry("exact", &_W(v))?;
                         }
-                        super::super::__buffa::view::oneof::bytes_filter::Kind::Prefix(
-                            v,
-                        ) => {
+                        super::super::__buffa::view::oneof::filter::Kind::Prefix(v) => {
                             struct _W<'__x>(&'__x [u8]);
                             impl ::serde::Serialize for _W<'_> {
                                 fn serialize<__S: ::serde::Serializer>(
@@ -1520,9 +1500,7 @@ pub mod __buffa {
                             }
                             __map.serialize_entry("prefix", &_W(v))?;
                         }
-                        super::super::__buffa::view::oneof::bytes_filter::Kind::Regex(
-                            v,
-                        ) => {
+                        super::super::__buffa::view::oneof::filter::Kind::Regex(v) => {
                             __map.serialize_entry("regex", v)?;
                         }
                     }
@@ -1530,26 +1508,26 @@ pub mod __buffa {
                 __map.end()
             }
         }
-        impl<'a> ::buffa::MessageName for BytesFilterView<'a> {
+        impl<'a> ::buffa::MessageName for FilterView<'a> {
             const PACKAGE: &'static str = "common.kv.v1";
-            const NAME: &'static str = "BytesFilter";
-            const FULL_NAME: &'static str = "common.kv.v1.BytesFilter";
-            const TYPE_URL: &'static str = "type.googleapis.com/common.kv.v1.BytesFilter";
+            const NAME: &'static str = "Filter";
+            const FULL_NAME: &'static str = "common.kv.v1.Filter";
+            const TYPE_URL: &'static str = "type.googleapis.com/common.kv.v1.Filter";
         }
-        impl<'v> ::buffa::DefaultViewInstance for BytesFilterView<'v> {
+        impl<'v> ::buffa::DefaultViewInstance for FilterView<'v> {
             fn default_view_instance<'a>() -> &'a Self
             where
                 Self: 'a,
             {
-                static VALUE: ::buffa::__private::OnceBox<BytesFilterView<'static>> = ::buffa::__private::OnceBox::new();
+                static VALUE: ::buffa::__private::OnceBox<FilterView<'static>> = ::buffa::__private::OnceBox::new();
                 VALUE
                     .get_or_init(|| ::buffa::alloc::boxed::Box::new(
-                        <BytesFilterView<'static>>::default(),
+                        <FilterView<'static>>::default(),
                     ))
             }
         }
-        impl ::buffa::ViewReborrow for BytesFilterView<'static> {
-            type Reborrowed<'b> = BytesFilterView<'b>;
+        impl ::buffa::ViewReborrow for FilterView<'static> {
+            type Reborrowed<'b> = FilterView<'b>;
             fn reborrow<'b>(this: &'b Self) -> &'b Self::Reborrowed<'b> {
                 this
             }
@@ -1557,7 +1535,7 @@ pub mod __buffa {
         pub mod oneof {
             #[allow(unused_imports)]
             use super::*;
-            pub mod bytes_filter {
+            pub mod filter {
                 #[allow(unused_imports)]
                 use super::*;
                 #[derive(Clone, Debug)]
@@ -1572,7 +1550,7 @@ pub mod __buffa {
     pub mod oneof {
         #[allow(unused_imports)]
         use super::*;
-        pub mod bytes_filter {
+        pub mod filter {
             #[allow(unused_imports)]
             use super::*;
             #[derive(Clone, PartialEq, Debug)]
@@ -1627,6 +1605,6 @@ pub mod __buffa {
 #[doc(inline)]
 pub use self::__buffa::view::EntryView;
 #[doc(inline)]
-pub use self::__buffa::view::MatchKeyView;
+pub use self::__buffa::view::SelectorView;
 #[doc(inline)]
-pub use self::__buffa::view::BytesFilterView;
+pub use self::__buffa::view::FilterView;
