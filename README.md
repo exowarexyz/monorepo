@@ -19,8 +19,8 @@ _Primitives are designed for production use. If you find an exploit, please refe
 
 _Components are designed for production use. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a component)._
 
-* **log**: Append to and stream an ordered sequence of writes.
-* **store**: Persist immutable artifacts (built on **log**).
+* **log**: Order and stream arbitrary data.
+* **store**: Query immutable data.
 
 _The interface for all components is specified in [Protobuf](https://buf.build/exowarexyz/monorepo)._
 
