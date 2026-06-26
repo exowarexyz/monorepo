@@ -13,7 +13,7 @@ inputs:
       - ../../proto/qmdb/v1/key_range.proto
       - ../../proto/qmdb/v1/operation_log.proto
       - ../../proto/qmdb/v1/current_operation.proto
-      - ../../proto/common/kv/v1/kv.proto
+      - ../../proto/common/v1/kv.proto
   - module: buf.build/bufbuild/protovalidate
     paths:
       - buf/validate/validate.proto

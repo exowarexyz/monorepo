@@ -4,7 +4,7 @@ package qmdb.v1;
 
 import "buf/validate/validate.proto";
 import "qmdb/v1/proof.proto";
-import "common/kv/v1/kv.proto";
+import "common/v1/kv.proto";
 
 // Historical operation-log proof service over a QMDB backend.
 //

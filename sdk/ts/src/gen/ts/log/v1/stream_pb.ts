@@ -5,15 +5,15 @@
 import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv1";
 import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv1";
 import { file_buf_validate_validate } from "../../buf/validate/validate_pb.js";
-import type { BytesFilter, KvEntry, MatchKey } from "../../common/kv/v1/kv_pb.js";
-import { file_common_kv_v1_kv } from "../../common/kv/v1/kv_pb.js";
+import type { BytesFilter, Entry, MatchKey } from "../../common/v1/kv_pb.js";
+import { file_common_v1_kv } from "../../common/v1/kv_pb.js";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
  * Describes the file log/v1/stream.proto.
  */
 export const file_log_v1_stream: GenFile = /*@__PURE__*/
-  fileDesc("ChNsb2cvdjEvc3RyZWFtLnByb3RvEg1sb2cuc3RyZWFtLnYxIsQBChBTdWJzY3JpYmVSZXF1ZXN0EjYKCm1hdGNoX2tleXMYASADKAsyFi5jb21tb24ua3YudjEuTWF0Y2hLZXlCCrpIB5IBBAgBEBASOgoNdmFsdWVfZmlsdGVycxgCIAMoCzIZLmNvbW1vbi5rdi52MS5CeXRlc0ZpbHRlckIIukgFkgECEBASIgoVc2luY2Vfc2VxdWVuY2VfbnVtYmVyGAMgASgESACIAQFCGAoWX3NpbmNlX3NlcXVlbmNlX251bWJlciIlCgpHZXRSZXF1ZXN0EhcKD3NlcXVlbmNlX251bWJlchgBIAEoBCJUChFTdWJzY3JpYmVSZXNwb25zZRIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQSJgoHZW50cmllcxgCIAMoCzIVLmNvbW1vbi5rdi52MS5LdkVudHJ5Ik4KC0dldFJlc3BvbnNlEhcKD3NlcXVlbmNlX251bWJlchgBIAEoBBImCgdlbnRyaWVzGAIgAygLMhUuY29tbW9uLmt2LnYxLkt2RW50cnkymQEKB1NlcnZpY2USUAoJU3Vic2NyaWJlEh8ubG9nLnN0cmVhbS52MS5TdWJzY3JpYmVSZXF1ZXN0GiAubG9nLnN0cmVhbS52MS5TdWJzY3JpYmVSZXNwb25zZTABEjwKA0dldBIZLmxvZy5zdHJlYW0udjEuR2V0UmVxdWVzdBoaLmxvZy5zdHJlYW0udjEuR2V0UmVzcG9uc2ViBnByb3RvMw", [file_buf_validate_validate, file_common_kv_v1_kv]);
+  fileDesc("ChNsb2cvdjEvc3RyZWFtLnByb3RvEg1sb2cuc3RyZWFtLnYxIsQBChBTdWJzY3JpYmVSZXF1ZXN0EjYKCm1hdGNoX2tleXMYASADKAsyFi5jb21tb24ua3YudjEuTWF0Y2hLZXlCCrpIB5IBBAgBEBASOgoNdmFsdWVfZmlsdGVycxgCIAMoCzIZLmNvbW1vbi5rdi52MS5CeXRlc0ZpbHRlckIIukgFkgECEBASIgoVc2luY2Vfc2VxdWVuY2VfbnVtYmVyGAMgASgESACIAQFCGAoWX3NpbmNlX3NlcXVlbmNlX251bWJlciIlCgpHZXRSZXF1ZXN0EhcKD3NlcXVlbmNlX251bWJlchgBIAEoBCJSChFTdWJzY3JpYmVSZXNwb25zZRIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQSJAoHZW50cmllcxgCIAMoCzITLmNvbW1vbi5rdi52MS5FbnRyeSJMCgtHZXRSZXNwb25zZRIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQSJAoHZW50cmllcxgCIAMoCzITLmNvbW1vbi5rdi52MS5FbnRyeTKZAQoHU2VydmljZRJQCglTdWJzY3JpYmUSHy5sb2cuc3RyZWFtLnYxLlN1YnNjcmliZVJlcXVlc3QaIC5sb2cuc3RyZWFtLnYxLlN1YnNjcmliZVJlc3BvbnNlMAESPAoDR2V0EhkubG9nLnN0cmVhbS52MS5HZXRSZXF1ZXN0GhoubG9nLnN0cmVhbS52MS5HZXRSZXNwb25zZWIGcHJvdG8z", [file_buf_validate_validate, file_common_v1_kv]);
 
 /**
  * Live (and optionally replayed) subscription request.
@@ -97,9 +97,9 @@ export type SubscribeResponse = Message<"log.stream.v1.SubscribeResponse"> & {
   sequenceNumber: bigint;
 
   /**
-   * @generated from field: repeated common.kv.v1.KvEntry entries = 2;
+   * @generated from field: repeated common.kv.v1.Entry entries = 2;
    */
-  entries: KvEntry[];
+  entries: Entry[];
 };
 
 /**
@@ -122,9 +122,9 @@ export type GetResponse = Message<"log.stream.v1.GetResponse"> & {
   sequenceNumber: bigint;
 
   /**
-   * @generated from field: repeated common.kv.v1.KvEntry entries = 2;
+   * @generated from field: repeated common.kv.v1.Entry entries = 2;
    */
-  entries: KvEntry[];
+  entries: Entry[];
 };
 
 /**

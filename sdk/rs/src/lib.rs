@@ -1418,7 +1418,7 @@ impl StoreClient {
                     MAX_KEY_LEN
                 )));
             }
-            proto_kvs.push(exoware_proto::common::KvEntry {
+            proto_kvs.push(exoware_proto::common::Entry {
                 key: key.to_vec(),
                 value: Bytes::copy_from_slice(value),
                 ..Default::default()
@@ -1438,7 +1438,7 @@ impl StoreClient {
                     MAX_KEY_LEN
                 )));
             }
-            proto_kvs.push(exoware_proto::common::KvEntry {
+            proto_kvs.push(exoware_proto::common::Entry {
                 key: key.to_vec(),
                 value: value.clone(),
                 ..Default::default()
@@ -1447,7 +1447,7 @@ impl StoreClient {
         self.send_put(proto_kvs).await
     }
 
-    async fn send_put(&self, kvs: Vec<exoware_proto::common::KvEntry>) -> Result<u64, ClientError> {
+    async fn send_put(&self, kvs: Vec<exoware_proto::common::Entry>) -> Result<u64, ClientError> {
         let config =
             store_connect_client_config(self.ingest_uri.clone(), self.connect_request_compression);
         let client = IngestServiceClient::new(self.connect_http.clone(), config);

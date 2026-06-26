@@ -14,7 +14,7 @@ use std::thread;
 
 use buffa::Message;
 use bytes::Bytes;
-use exoware_sdk::common::kv::v1::KvEntry;
+use exoware_sdk::common::kv::v1::Entry;
 use exoware_sdk::keys::KeyCodec;
 use exoware_sdk::log::stream::v1::GetResponse as StreamGetResponse;
 use exoware_sdk::match_key::compile_payload_regex;
@@ -995,7 +995,7 @@ fn encode_log_value(sequence: u64, requests: &[WriteRequest]) -> Option<Vec<u8>>
     let entries = requests
         .iter()
         .flat_map(|request| {
-            request.kvs.iter().map(|(key, value)| KvEntry {
+            request.kvs.iter().map(|(key, value)| Entry {
                 key: key.to_vec(),
                 value: value.clone(),
                 ..Default::default()
@@ -1050,7 +1050,7 @@ mod tests {
     fn encoded_log_entry(sequence: u64, key: &'static [u8], value: &'static [u8]) -> Vec<u8> {
         StreamGetResponse {
             sequence_number: sequence,
-            entries: vec![KvEntry {
+            entries: vec![Entry {
                 key: key.to_vec(),
                 value: Bytes::from_static(value),
                 ..Default::default()

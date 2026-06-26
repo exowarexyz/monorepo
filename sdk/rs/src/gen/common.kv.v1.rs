@@ -8,7 +8,7 @@
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
-pub struct KvEntry {
+pub struct Entry {
     /// Field 1: `key`
     #[serde(
         rename = "key",
@@ -27,34 +27,34 @@ pub struct KvEntry {
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
-impl ::core::fmt::Debug for KvEntry {
+impl ::core::fmt::Debug for Entry {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("KvEntry")
+        f.debug_struct("Entry")
             .field("key", &self.key)
             .field("value", &self.value)
             .finish()
     }
 }
-impl KvEntry {
+impl Entry {
     /// Protobuf type URL for this message, for use with `Any::pack` and
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/common.kv.v1.KvEntry";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/common.kv.v1.Entry";
 }
-impl ::buffa::DefaultInstance for KvEntry {
+impl ::buffa::DefaultInstance for Entry {
     fn default_instance() -> &'static Self {
-        static VALUE: ::buffa::__private::OnceBox<KvEntry> = ::buffa::__private::OnceBox::new();
+        static VALUE: ::buffa::__private::OnceBox<Entry> = ::buffa::__private::OnceBox::new();
         VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
     }
 }
-impl ::buffa::MessageName for KvEntry {
+impl ::buffa::MessageName for Entry {
     const PACKAGE: &'static str = "common.kv.v1";
-    const NAME: &'static str = "KvEntry";
-    const FULL_NAME: &'static str = "common.kv.v1.KvEntry";
-    const TYPE_URL: &'static str = "type.googleapis.com/common.kv.v1.KvEntry";
+    const NAME: &'static str = "Entry";
+    const FULL_NAME: &'static str = "common.kv.v1.Entry";
+    const TYPE_URL: &'static str = "type.googleapis.com/common.kv.v1.Entry";
 }
-impl ::buffa::Message for KvEntry {
+impl ::buffa::Message for Entry {
     /// Returns the total encoded size in bytes.
     ///
     /// The result is a `u32`; the protobuf specification requires all
@@ -143,8 +143,8 @@ impl ::buffa::Message for KvEntry {
         self.__buffa_unknown_fields.clear();
     }
 }
-impl ::buffa::ExtensionSet for KvEntry {
-    const PROTO_FQN: &'static str = "common.kv.v1.KvEntry";
+impl ::buffa::ExtensionSet for Entry {
+    const PROTO_FQN: &'static str = "common.kv.v1.Entry";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -152,7 +152,7 @@ impl ::buffa::ExtensionSet for KvEntry {
         &mut self.__buffa_unknown_fields
     }
 }
-impl ::buffa::json_helpers::ProtoElemJson for KvEntry {
+impl ::buffa::json_helpers::ProtoElemJson for Entry {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
         s: S,
@@ -166,10 +166,10 @@ impl ::buffa::json_helpers::ProtoElemJson for KvEntry {
     }
 }
 #[doc(hidden)]
-pub const __KV_ENTRY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/common.kv.v1.KvEntry",
-    to_json: ::buffa::type_registry::any_to_json::<KvEntry>,
-    from_json: ::buffa::type_registry::any_from_json::<KvEntry>,
+pub const __ENTRY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/common.kv.v1.Entry",
+    to_json: ::buffa::type_registry::any_to_json::<Entry>,
+    from_json: ::buffa::type_registry::any_from_json::<Entry>,
     is_wkt: false,
 };
 /// Identifies a subset of keys by their `KeyCodec` family (reserved_bits +
@@ -727,14 +727,14 @@ pub mod __buffa {
         /// Keys must be between 0 and 254 bytes (inclusive) anywhere this message is
         /// used for ingestion.
         #[derive(Clone, Debug, Default)]
-        pub struct KvEntryView<'a> {
+        pub struct EntryView<'a> {
             /// Field 1: `key`
             pub key: &'a [u8],
             /// Field 2: `value`
             pub value: &'a [u8],
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
-        impl<'a> KvEntryView<'a> {
+        impl<'a> EntryView<'a> {
             /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
             ///
             /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
@@ -807,8 +807,8 @@ pub mod __buffa {
                 ::core::result::Result::Ok(())
             }
         }
-        impl<'a> ::buffa::MessageView<'a> for KvEntryView<'a> {
-            type Owned = super::super::KvEntry;
+        impl<'a> ::buffa::MessageView<'a> for EntryView<'a> {
+            type Owned = super::super::Entry;
             fn decode_view(
                 buf: &'a [u8],
             ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
@@ -820,18 +820,18 @@ pub mod __buffa {
             ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
                 Self::_decode_depth(buf, depth)
             }
-            fn to_owned_message(&self) -> super::super::KvEntry {
+            fn to_owned_message(&self) -> super::super::Entry {
                 self.to_owned_from_source(None)
             }
             #[allow(clippy::useless_conversion, clippy::needless_update)]
             fn to_owned_from_source(
                 &self,
                 __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
-            ) -> super::super::KvEntry {
+            ) -> super::super::Entry {
                 #[allow(unused_imports)]
                 use ::buffa::alloc::string::ToString as _;
                 let _ = __buffa_src;
-                super::super::KvEntry {
+                super::super::Entry {
                     key: (self.key).to_vec(),
                     value: ::buffa::view::bytes_from_source(__buffa_src, self.value),
                     __buffa_unknown_fields: self
@@ -843,7 +843,7 @@ pub mod __buffa {
                 }
             }
         }
-        impl<'a> ::buffa::ViewEncode<'a> for KvEntryView<'a> {
+        impl<'a> ::buffa::ViewEncode<'a> for EntryView<'a> {
             #[allow(clippy::needless_borrow, clippy::let_and_return)]
             fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
                 #[allow(unused_imports)]
@@ -896,7 +896,7 @@ pub mod __buffa {
         /// fields depends on default-omission rules; serializers that require
         /// known map lengths (e.g. `bincode`) will return a runtime error.
         /// Use the owned message type for those formats.
-        impl<'__a> ::serde::Serialize for KvEntryView<'__a> {
+        impl<'__a> ::serde::Serialize for EntryView<'__a> {
             fn serialize<__S: ::serde::Serializer>(
                 &self,
                 __s: __S,
@@ -930,26 +930,26 @@ pub mod __buffa {
                 __map.end()
             }
         }
-        impl<'a> ::buffa::MessageName for KvEntryView<'a> {
+        impl<'a> ::buffa::MessageName for EntryView<'a> {
             const PACKAGE: &'static str = "common.kv.v1";
-            const NAME: &'static str = "KvEntry";
-            const FULL_NAME: &'static str = "common.kv.v1.KvEntry";
-            const TYPE_URL: &'static str = "type.googleapis.com/common.kv.v1.KvEntry";
+            const NAME: &'static str = "Entry";
+            const FULL_NAME: &'static str = "common.kv.v1.Entry";
+            const TYPE_URL: &'static str = "type.googleapis.com/common.kv.v1.Entry";
         }
-        impl<'v> ::buffa::DefaultViewInstance for KvEntryView<'v> {
+        impl<'v> ::buffa::DefaultViewInstance for EntryView<'v> {
             fn default_view_instance<'a>() -> &'a Self
             where
                 Self: 'a,
             {
-                static VALUE: ::buffa::__private::OnceBox<KvEntryView<'static>> = ::buffa::__private::OnceBox::new();
+                static VALUE: ::buffa::__private::OnceBox<EntryView<'static>> = ::buffa::__private::OnceBox::new();
                 VALUE
                     .get_or_init(|| ::buffa::alloc::boxed::Box::new(
-                        <KvEntryView<'static>>::default(),
+                        <EntryView<'static>>::default(),
                     ))
             }
         }
-        impl ::buffa::ViewReborrow for KvEntryView<'static> {
-            type Reborrowed<'b> = KvEntryView<'b>;
+        impl ::buffa::ViewReborrow for EntryView<'static> {
+            type Reborrowed<'b> = EntryView<'b>;
             fn reborrow<'b>(this: &'b Self) -> &'b Self::Reborrowed<'b> {
                 this
             }
@@ -1625,7 +1625,7 @@ pub mod __buffa {
     }
 }
 #[doc(inline)]
-pub use self::__buffa::view::KvEntryView;
+pub use self::__buffa::view::EntryView;
 #[doc(inline)]
 pub use self::__buffa::view::MatchKeyView;
 #[doc(inline)]

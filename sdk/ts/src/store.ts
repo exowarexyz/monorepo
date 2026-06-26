@@ -7,10 +7,10 @@ import { PruneRequestSchema } from './gen/ts/store/v1/compact_pb.js';
 import type { Policy } from './gen/ts/store/v1/compact_pb.js';
 import {
     BytesFilterSchema,
-    KvEntrySchema,
+    EntrySchema,
     MatchKeySchema,
-} from './gen/ts/common/kv/v1/kv_pb.js';
-import type { MatchKey } from './gen/ts/common/kv/v1/kv_pb.js';
+} from './gen/ts/common/v1/kv_pb.js';
+import type { MatchKey } from './gen/ts/common/v1/kv_pb.js';
 import { ErrorInfoSchema } from './gen/ts/google/rpc/error_details_pb.js';
 import { PutRequestSchema } from './gen/ts/log/v1/ingest_pb.js';
 import {
@@ -991,7 +991,7 @@ export class StoreClient {
     async set(key: Uint8Array, value: Uint8Array | Buffer): Promise<bigint> {
         const req = create(PutRequestSchema, {
             kvs: [
-                create(KvEntrySchema, {
+                create(EntrySchema, {
                     key: this.encodeStoreKey(key),
                     value: toUint8Array(value),
                 }),
@@ -1008,7 +1008,7 @@ export class StoreClient {
     async setMany(kvs: { key: Uint8Array; value: Uint8Array | Buffer }[]): Promise<bigint> {
         const req = create(PutRequestSchema, {
             kvs: kvs.map((kv) =>
-                create(KvEntrySchema, {
+                create(EntrySchema, {
                     key: this.encodeStoreKey(kv.key),
                     value: toUint8Array(kv.value),
                 }),
@@ -1025,7 +1025,7 @@ export class StoreClient {
     async putPrepared(batch: StoreWriteBatch): Promise<bigint> {
         const req = create(PutRequestSchema, {
             kvs: batch.entries().map((kv) =>
-                create(KvEntrySchema, {
+                create(EntrySchema, {
                     key: kv.key,
                     value: kv.value,
                 }),

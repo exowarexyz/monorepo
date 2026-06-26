@@ -3,7 +3,7 @@ syntax = "proto3";
 package store.compact.v1;
 
 import "buf/validate/validate.proto";
-import "common/kv/v1/kv.proto";
+import "common/v1/kv.proto";
 
 // Prune policy graph and admin RPC (served by the compaction worker).
 

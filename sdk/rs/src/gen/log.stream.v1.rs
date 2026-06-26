@@ -408,7 +408,7 @@ pub struct SubscribeResponse {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
-    pub entries: ::buffa::alloc::vec::Vec<super::super::super::common::kv::v1::KvEntry>,
+    pub entries: ::buffa::alloc::vec::Vec<super::super::super::common::kv::v1::Entry>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -585,7 +585,7 @@ pub struct GetResponse {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
-    pub entries: ::buffa::alloc::vec::Vec<super::super::super::common::kv::v1::KvEntry>,
+    pub entries: ::buffa::alloc::vec::Vec<super::super::super::common::kv::v1::Entry>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -1284,7 +1284,7 @@ pub mod __buffa {
             /// Field 2: `entries`
             pub entries: ::buffa::RepeatedView<
                 'a,
-                super::super::super::super::super::common::kv::v1::__buffa::view::KvEntryView<
+                super::super::super::super::super::common::kv::v1::__buffa::view::EntryView<
                     'a,
                 >,
             >,
@@ -1356,7 +1356,7 @@ pub mod __buffa {
                             let sub = ::buffa::types::borrow_bytes(&mut cur)?;
                             view.entries
                                 .push(
-                                    super::super::super::super::super::common::kv::v1::__buffa::view::KvEntryView::_decode_depth(
+                                    super::super::super::super::super::common::kv::v1::__buffa::view::EntryView::_decode_depth(
                                         sub,
                                         depth - 1,
                                     )?,
@@ -1535,7 +1535,7 @@ pub mod __buffa {
             /// Field 2: `entries`
             pub entries: ::buffa::RepeatedView<
                 'a,
-                super::super::super::super::super::common::kv::v1::__buffa::view::KvEntryView<
+                super::super::super::super::super::common::kv::v1::__buffa::view::EntryView<
                     'a,
                 >,
             >,
@@ -1607,7 +1607,7 @@ pub mod __buffa {
                             let sub = ::buffa::types::borrow_bytes(&mut cur)?;
                             view.entries
                                 .push(
-                                    super::super::super::super::super::common::kv::v1::__buffa::view::KvEntryView::_decode_depth(
+                                    super::super::super::super::super::common::kv::v1::__buffa::view::EntryView::_decode_depth(
                                         sub,
                                         depth - 1,
                                     )?,

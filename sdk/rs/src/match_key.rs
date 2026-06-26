@@ -12,7 +12,7 @@ use regex::bytes::Regex;
 use crate::kv_codec::Utf8;
 
 /// Identifies a subset of keys by `KeyCodec` family + payload regex. Matches
-/// the `common.kv.v1.MatchKey` wire shape (see `proto/common/kv/v1/common.proto`).
+/// the `common.kv.v1.MatchKey` wire shape (see `proto/common/v1/kv.proto`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MatchKey {
     pub reserved_bits: u8,

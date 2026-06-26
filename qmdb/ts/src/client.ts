@@ -37,7 +37,7 @@ import {
 import {
   BytesFilterSchema,
   type BytesFilter,
-} from './generated/proto/common/kv/v1/kv_pb.js';
+} from './generated/proto/common/v1/kv_pb.js';
 import initWasm, {
   decode_historical_multi_proof_operations,
   encode_vec_key,

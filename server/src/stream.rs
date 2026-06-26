@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use connectrpc::ConnectError;
-use exoware_sdk::common::KvEntry;
+use exoware_sdk::common::Entry;
 use exoware_sdk::keys::KeyCodec;
 use exoware_sdk::match_key::compile_payload_regex;
 use exoware_sdk::stream_filter::{validate_filter, CompiledBytesFilters, StreamFilter};
@@ -67,7 +67,7 @@ pub(crate) fn compile_matchers(filter: &StreamFilter) -> Result<CompiledMatchers
 }
 
 /// Apply a compiled filter to a batch. First-match-wins per entry.
-pub(crate) fn apply_filter(matchers: &CompiledMatchers, kvs: &[KvEntry]) -> Vec<KvEntry> {
+pub(crate) fn apply_filter(matchers: &CompiledMatchers, kvs: &[Entry]) -> Vec<Entry> {
     let mut out = Vec::with_capacity(kvs.len());
     'outer: for kv in kvs {
         let v = kv.value.as_ref();
@@ -189,8 +189,8 @@ mod tests {
         Bytes::copy_from_slice(key.as_ref())
     }
 
-    fn kv(family: u8, payload: &[u8], value: &'static [u8]) -> KvEntry {
-        KvEntry {
+    fn kv(family: u8, payload: &[u8], value: &'static [u8]) -> Entry {
+        Entry {
             key: key(family, payload).to_vec(),
             value: Bytes::from_static(value),
             ..Default::default()

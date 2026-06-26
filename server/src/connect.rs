@@ -11,7 +11,7 @@ use bytes::Bytes;
 use connectrpc::{
     Chain, ConnectError, ConnectRpcService, Limits, PreEncoded, RequestContext as Context,
 };
-use exoware_proto::common::KvEntry;
+use exoware_proto::common::Entry;
 use exoware_proto::compact::{
     PruneResponse, Service as CompactApi, ServiceServer as CompactServiceServer,
 };
@@ -111,7 +111,7 @@ where
 
             let mut chunk = Vec::with_capacity(batch.rows.len());
             for (key, value) in batch.rows {
-                chunk.push(KvEntry {
+                chunk.push(Entry {
                     key: key.into(),
                     value,
                     ..Default::default()
@@ -1614,7 +1614,7 @@ mod tests {
         value_len: usize,
     ) -> buffa::view::OwnedView<exoware_proto::log::ingest::v1::PutRequestView<'static>> {
         let bytes = exoware_proto::ingest::PutRequest {
-            kvs: vec![exoware_proto::common::KvEntry {
+            kvs: vec![exoware_proto::common::Entry {
                 key: b"k".to_vec(),
                 value: Bytes::from(vec![1u8; value_len]),
                 ..Default::default()

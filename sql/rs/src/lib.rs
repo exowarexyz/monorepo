@@ -62,7 +62,7 @@ mod tests {
     use axum::Router;
     use bytes::Bytes;
     use connectrpc::{Chain, ConnectError, ConnectRpcService, RequestContext as Context};
-    use exoware_sdk::common::kv::v1::KvEntry as ProtoKvEntry;
+    use exoware_sdk::common::kv::v1::Entry as ProtoEntry;
     use exoware_sdk::connect_compression_registry;
     use exoware_sdk::kv_codec::{eval_expr, expr_needs_value};
     use exoware_sdk::log::ingest::v1::{
@@ -276,7 +276,7 @@ mod tests {
         ProtoRangeFrame {
             results: results
                 .into_iter()
-                .map(|(key, value)| ProtoKvEntry {
+                .map(|(key, value)| ProtoEntry {
                     key: key.to_vec(),
                     value: value.into(),
                     ..Default::default()
@@ -411,9 +411,9 @@ mod tests {
                 RangeMode::Forward => Box::new(range_iter),
                 RangeMode::Reverse => Box::new(range_iter.rev()),
             };
-            let mut results: Vec<ProtoKvEntry> = Vec::new();
+            let mut results: Vec<ProtoEntry> = Vec::new();
             for (key, value) in iter.take(limit) {
-                results.push(ProtoKvEntry {
+                results.push(ProtoEntry {
                     key: key.to_vec(),
                     value: value.clone(),
                     ..Default::default()

@@ -126,7 +126,7 @@ pub fn validate_put_request(
             [],
         ));
     }
-    // buf.validate: KvEntry.key bytes.max_len = 254
+    // buf.validate: Entry.key bytes.max_len = 254
     for (index, kv) in request.kvs.iter().enumerate() {
         validate_key_field(INGEST_ERROR_DOMAIN, &format!("kvs[{index}].key"), kv.key)?;
         validate_value_field(
@@ -271,7 +271,7 @@ mod tests {
     fn put_request_with_oversized_key() -> Vec<u8> {
         use buffa::Message;
         let req = exoware_proto::ingest::PutRequest {
-            kvs: vec![exoware_proto::common::KvEntry {
+            kvs: vec![exoware_proto::common::Entry {
                 key: vec![0u8; 255],
                 value: Bytes::from_static(&[1]),
                 ..Default::default()
@@ -284,7 +284,7 @@ mod tests {
     fn put_request_with_oversized_value() -> Vec<u8> {
         use buffa::Message;
         let req = exoware_proto::ingest::PutRequest {
-            kvs: vec![exoware_proto::common::KvEntry {
+            kvs: vec![exoware_proto::common::Entry {
                 key: vec![0u8; 10],
                 value: Bytes::from(vec![1u8; DEFAULT_MAX_VALUE_LEN + 1]),
                 ..Default::default()
@@ -297,7 +297,7 @@ mod tests {
     fn valid_put_request_with_value_len(value_len: usize) -> Vec<u8> {
         use buffa::Message;
         let req = exoware_proto::ingest::PutRequest {
-            kvs: vec![exoware_proto::common::KvEntry {
+            kvs: vec![exoware_proto::common::Entry {
                 key: vec![0u8; 10],
                 value: Bytes::from(vec![1u8; value_len]),
                 ..Default::default()

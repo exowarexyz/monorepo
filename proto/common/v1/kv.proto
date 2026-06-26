@@ -9,7 +9,7 @@ import "buf/validate/validate.proto";
 //
 // Keys must be between 0 and 254 bytes (inclusive) anywhere this message is
 // used for ingestion.
-message KvEntry {
+message Entry {
   bytes key = 1 [(buf.validate.field).bytes.max_len = 254];
   bytes value = 2;
 }

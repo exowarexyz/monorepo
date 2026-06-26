@@ -8,7 +8,7 @@ use std::future::Future;
 
 use buffa::Message;
 use bytes::Bytes;
-use exoware_sdk::common::kv::v1::KvEntry;
+use exoware_sdk::common::kv::v1::Entry;
 use exoware_sdk::log::stream::v1::GetResponse as StreamGetResponse;
 use exoware_sdk::prune_policy::PrunePolicyDocument;
 
@@ -117,7 +117,7 @@ impl LogBatch {
             sequence_number,
             entries: kvs
                 .into_iter()
-                .map(|(key, value)| KvEntry {
+                .map(|(key, value)| Entry {
                     key: key.to_vec(),
                     value,
                     ..Default::default()
