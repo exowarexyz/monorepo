@@ -12,7 +12,7 @@ use commonware_storage::merkle::{mmr, Location, Proof};
 use commonware_storage::qmdb::keyless::variable::{Db as Keyless, Operation as KeylessOperation};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{KeylessClient, KeylessWriter};
-use exoware_sdk::StoreClient;
+use exoware_sdk::{PrefixedStoreClient, StoreClient};
 
 use common::retry;
 
@@ -28,11 +28,11 @@ type TestKeylessClient = KeylessClient<mmr::Family, commonware_cryptography::Sha
 type TestKeylessWriter = KeylessWriter<mmr::Family, commonware_cryptography::Sha256, Vec<u8>>;
 
 fn fresh_reader(c: StoreClient) -> TestKeylessClient {
-    TestKeylessClient::from_client(c, ((0..=10000).into(), ()))
+    TestKeylessClient::new(PrefixedStoreClient::empty(c), ((0..=10000).into(), ()))
 }
 
 fn fresh_writer(c: StoreClient) -> TestKeylessWriter {
-    TestKeylessWriter::fresh(c)
+    TestKeylessWriter::fresh(PrefixedStoreClient::empty(c))
 }
 
 /// Reference Commonware keyless DB fed the same ops the writer will upload.
@@ -443,7 +443,7 @@ async fn local_proof_resumes_from_existing_store_state() {
             &local_ops_two,
         )
         .expect("writer state from local proof");
-        let writer = TestKeylessWriter::new(client.clone(), state);
+        let writer = TestKeylessWriter::new(PrefixedStoreClient::empty(client.clone()), state);
         let remainder = &local_ops_final[local_ops_two.len()..];
         let receipt = common::commit_keyless_upload(&client, &writer, remainder)
             .await

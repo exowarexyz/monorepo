@@ -18,7 +18,7 @@ use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
     recover_boundary_state, CurrentBoundaryState, OrderedClient, OrderedWriter, MAX_OPERATION_SIZE,
 };
-use exoware_sdk::StoreClient;
+use exoware_sdk::{PrefixedStoreClient, StoreClient};
 
 use common::retry;
 
@@ -100,11 +100,11 @@ fn update_row_cfg() -> (
 }
 
 fn fresh_reader(c: StoreClient) -> TestReader {
-    TestReader::from_client(c, op_cfg(), update_row_cfg())
+    TestReader::new(PrefixedStoreClient::empty(c), op_cfg(), update_row_cfg())
 }
 
 fn fresh_writer(c: StoreClient) -> TestWriter {
-    TestWriter::fresh(c)
+    TestWriter::fresh(PrefixedStoreClient::empty(c))
 }
 
 struct LocalReference {

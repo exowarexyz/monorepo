@@ -16,7 +16,7 @@ use commonware_storage::qmdb::any::unordered::variable::Operation as UnorderedQm
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{UnorderedClient, UnorderedWriter, MAX_OPERATION_SIZE};
-use exoware_sdk::StoreClient;
+use exoware_sdk::{PrefixedStoreClient, StoreClient};
 
 use common::retry;
 
@@ -43,11 +43,11 @@ fn op_cfg() -> <UnorderedBatchOperation as commonware_codec::Read>::Cfg {
 }
 
 fn fresh_reader(c: StoreClient) -> TestReader {
-    TestReader::from_client(c, op_cfg())
+    TestReader::new(PrefixedStoreClient::empty(c), op_cfg())
 }
 
 fn fresh_writer(c: StoreClient) -> TestWriter {
-    TestWriter::fresh(c)
+    TestWriter::fresh(PrefixedStoreClient::empty(c))
 }
 
 struct LocalReference {

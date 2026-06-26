@@ -18,7 +18,7 @@ use commonware_storage::qmdb::immutable::variable::{
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use exoware_qmdb::{ImmutableClient, ImmutableWriter};
-use exoware_sdk::StoreClient;
+use exoware_sdk::{PrefixedStoreClient, StoreClient};
 
 use common::retry;
 
@@ -53,11 +53,14 @@ type FixedTestImmutableClient = ImmutableClient<
 >;
 
 fn fresh_immutable(c: StoreClient) -> TestImmutableClient {
-    TestImmutableClient::from_client(c, ((), ((0..=10000).into(), ())))
+    TestImmutableClient::new(
+        PrefixedStoreClient::empty(c),
+        ((), ((0..=10000).into(), ())),
+    )
 }
 
 fn fresh_fixed_immutable(c: StoreClient) -> FixedTestImmutableClient {
-    FixedTestImmutableClient::from_client(c, ())
+    FixedTestImmutableClient::new(PrefixedStoreClient::empty(c), ())
 }
 
 type TestImmutableWriter =
@@ -71,11 +74,11 @@ type FixedTestImmutableWriter = ImmutableWriter<
 >;
 
 fn fresh_writer(c: StoreClient) -> TestImmutableWriter {
-    TestImmutableWriter::fresh(c)
+    TestImmutableWriter::fresh(PrefixedStoreClient::empty(c))
 }
 
 fn fresh_fixed_writer(c: StoreClient) -> FixedTestImmutableWriter {
-    FixedTestImmutableWriter::fresh(c)
+    FixedTestImmutableWriter::fresh(PrefixedStoreClient::empty(c))
 }
 
 struct LocalReference {

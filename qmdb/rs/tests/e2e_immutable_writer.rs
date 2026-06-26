@@ -15,7 +15,7 @@ use commonware_storage::qmdb::immutable::variable::{
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use exoware_qmdb::{ImmutableClient, ImmutableWriter};
-use exoware_sdk::StoreClient;
+use exoware_sdk::{PrefixedStoreClient, StoreClient};
 
 use common::retry;
 
@@ -35,11 +35,14 @@ type TestReader = ImmutableClient<mmr::Family, commonware_cryptography::Sha256, 
 type TestWriter = ImmutableWriter<mmr::Family, commonware_cryptography::Sha256, K, V>;
 
 fn fresh_reader(c: StoreClient) -> TestReader {
-    TestReader::from_client(c, ((), ((0..=10000).into(), ())))
+    TestReader::new(
+        PrefixedStoreClient::empty(c),
+        ((), ((0..=10000).into(), ())),
+    )
 }
 
 fn fresh_writer(c: StoreClient) -> TestWriter {
-    TestWriter::fresh(c)
+    TestWriter::fresh(PrefixedStoreClient::empty(c))
 }
 
 struct LocalReference {

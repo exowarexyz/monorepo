@@ -35,7 +35,7 @@ use exoware_qmdb::{
     OrderedConnectClient, OrderedWriter, QmdbError, VerifiedKeyLookup, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::StoreClient;
+use exoware_sdk::{PrefixedStoreClient, StoreClient};
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
@@ -264,7 +264,7 @@ async fn build_grafted_boundary_local_batch() -> LocalBatch {
 
 async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
     let writer: OrderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
-        OrderedWriter::fresh(client.clone());
+        OrderedWriter::fresh(PrefixedStoreClient::empty(client.clone()));
     common::commit_ordered_upload(client, &writer, &batch.operations, &batch.current_boundary)
         .await
         .expect("commit upload");
@@ -386,8 +386,8 @@ fn tamper_get_many_response(mut response: ProtoGetManyResponse) -> ProtoGetManyR
 async fn ordered_connect_get_returns_current_key_value_proof() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
-    let ordered_client = Arc::new(TestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(TestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         op_cfg(),
         update_row_cfg(),
     ));
@@ -417,10 +417,13 @@ async fn ordered_connect_get_returns_current_key_value_proof() {
 async fn ordered_get_after_grafted_boundary_returns_current_key_value_proof() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
     let local = build_grafted_boundary_local_batch().await;
-    let ordered_client =
-        TestOrderedClient::from_client(store_client.clone(), op_cfg(), update_row_cfg());
+    let ordered_client = TestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
+        op_cfg(),
+        update_row_cfg(),
+    );
     let writer: OrderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
-        OrderedWriter::fresh(store_client.clone());
+        OrderedWriter::fresh(PrefixedStoreClient::empty(store_client.clone()));
     common::commit_ordered_upload(
         &store_client,
         &writer,
@@ -445,8 +448,8 @@ async fn ordered_get_after_grafted_boundary_returns_current_key_value_proof() {
 async fn ordered_connect_get_many_returns_current_key_lookup_proofs() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
-    let ordered_client = Arc::new(TestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(TestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         op_cfg(),
         update_row_cfg(),
     ));
@@ -491,8 +494,8 @@ async fn ordered_connect_get_many_returns_current_key_lookup_proofs() {
 async fn ordered_connect_get_many_returns_miss_proofs_and_rejects_duplicates() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
-    let ordered_client = Arc::new(TestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(TestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         op_cfg(),
         update_row_cfg(),
     ));
@@ -537,8 +540,8 @@ async fn ordered_connect_get_many_returns_miss_proofs_and_rejects_duplicates() {
 async fn ordered_connect_get_range_verifies_complete_empty_and_partial_pages() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
-    let ordered_client = Arc::new(TestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(TestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         op_cfg(),
         update_row_cfg(),
     ));
@@ -610,8 +613,8 @@ async fn ordered_connect_client_rejects_get_range_boundary_omission() {
     let local = build_local_batch().await;
     commit_upload(&store_client, &local).await;
 
-    let ordered_client = Arc::new(TestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(TestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         op_cfg(),
         update_row_cfg(),
     ));
@@ -683,8 +686,8 @@ async fn ordered_connect_client_rejects_empty_unbounded_get_range_before_next_ke
     let local = build_local_batch().await;
     commit_upload(&store_client, &local).await;
 
-    let ordered_client = Arc::new(TestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(TestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         op_cfg(),
         update_row_cfg(),
     ));
@@ -760,8 +763,8 @@ async fn ordered_connect_client_rejects_invalid_get_proof() {
     let local = build_local_batch().await;
     commit_upload(&store_client, &local).await;
 
-    let ordered_client = Arc::new(TestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(TestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         op_cfg(),
         update_row_cfg(),
     ));
@@ -822,8 +825,8 @@ async fn ordered_connect_client_rejects_invalid_get_many_proof() {
     let local = build_local_batch().await;
     commit_upload(&store_client, &local).await;
 
-    let ordered_client = Arc::new(TestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(TestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         op_cfg(),
         update_row_cfg(),
     ));
@@ -884,8 +887,8 @@ async fn ordered_connect_client_rejects_get_many_proof_for_different_key() {
     let local = build_local_batch().await;
     commit_upload(&store_client, &local).await;
 
-    let ordered_client = Arc::new(TestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(TestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         op_cfg(),
         update_row_cfg(),
     ));

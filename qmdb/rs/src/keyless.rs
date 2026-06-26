@@ -9,7 +9,7 @@ use commonware_storage::{
         keyless,
     },
 };
-use exoware_sdk::{Namespace, PrefixedStoreClient, SerializableReadSession, StoreClient};
+use exoware_sdk::{PrefixedStoreClient, SerializableReadSession};
 
 use crate::auth::AuthenticatedBackendNamespace;
 use crate::auth::{
@@ -59,21 +59,8 @@ where
     E: ValueEncoding<Value = V>,
     keyless::Operation<F, E>: Encode + Decode + Clone,
 {
-    pub fn new(url: &str, op_cfg: <keyless::Operation<F, E> as CodecRead>::Cfg) -> Self {
-        Self::from_client(StoreClient::new(url), op_cfg)
-    }
-
-    /// Read client over the canonical [`Namespace::Qmdb`] keyspace (matches the
-    /// writer default). Use [`Self::from_prefixed`] for a co-located QMDB log.
-    pub fn from_client(
-        client: StoreClient,
-        op_cfg: <keyless::Operation<F, E> as CodecRead>::Cfg,
-    ) -> Self {
-        Self::from_prefixed(client.for_namespace(Namespace::Qmdb), op_cfg)
-    }
-
-    /// Read client over a caller-chosen namespace.
-    pub fn from_prefixed(
+    /// Read client over `client`'s namespace prefix.
+    pub fn new(
         client: PrefixedStoreClient,
         op_cfg: <keyless::Operation<F, E> as CodecRead>::Cfg,
     ) -> Self {

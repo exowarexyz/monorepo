@@ -32,6 +32,7 @@ use exoware_qmdb::{
     KeylessWriter, OrderedClient, OrderedWriter, UnorderedClient, UnorderedWriter, WriterState,
     MAX_OPERATION_SIZE,
 };
+use exoware_sdk::PrefixedStoreClient;
 
 type Digest = commonware_cryptography::sha256::Digest;
 
@@ -48,12 +49,15 @@ async fn mirror_keyless_from_local() {
         b"gamma".to_vec(),
     ]])
     .await;
-    let writer: KeylessWriter<mmr::Family, Sha256, Vec<u8>> = KeylessWriter::fresh(client.clone());
+    let writer: KeylessWriter<mmr::Family, Sha256, Vec<u8>> =
+        KeylessWriter::fresh(PrefixedStoreClient::empty(client.clone()));
     common::commit_keyless_upload(&client, &writer, &ops1)
         .await
         .expect("upload 1");
-    let reader: KeylessClient<mmr::Family, Sha256, Vec<u8>> =
-        KeylessClient::from_client(client.clone(), ((0..=MAX_OPERATION_SIZE).into(), ()));
+    let reader: KeylessClient<mmr::Family, Sha256, Vec<u8>> = KeylessClient::new(
+        PrefixedStoreClient::empty(client.clone()),
+        ((0..=MAX_OPERATION_SIZE).into(), ()),
+    );
     assert_eq!(
         reader.root_at(latest1).await.expect("root_at 1"),
         root1,
@@ -74,7 +78,7 @@ async fn mirror_keyless_from_local() {
     )
     .expect("writer state");
     let writer2: KeylessWriter<mmr::Family, Sha256, Vec<u8>> =
-        KeylessWriter::new(client.clone(), state);
+        KeylessWriter::new(PrefixedStoreClient::empty(client.clone()), state);
     let delta = &ops_total[ops1.len()..];
     common::commit_keyless_upload(&client, &writer2, delta)
         .await
@@ -150,18 +154,17 @@ async fn mirror_unordered_from_local() {
     ]])
     .await;
     let writer: UnorderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>> =
-        UnorderedWriter::fresh(client.clone());
+        UnorderedWriter::fresh(PrefixedStoreClient::empty(client.clone()));
     common::commit_unordered_upload(&client, &writer, &ops1)
         .await
         .expect("upload 1");
-    let reader: UnorderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>> =
-        UnorderedClient::from_client(
-            client.clone(),
-            (
-                ((0..=MAX_OPERATION_SIZE).into(), ()),
-                ((0..=MAX_OPERATION_SIZE).into(), ()),
-            ),
-        );
+    let reader: UnorderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>> = UnorderedClient::new(
+        PrefixedStoreClient::empty(client.clone()),
+        (
+            ((0..=MAX_OPERATION_SIZE).into(), ()),
+            ((0..=MAX_OPERATION_SIZE).into(), ()),
+        ),
+    );
     assert_eq!(
         reader.root_at(latest1).await.expect("root_at 1"),
         root1,
@@ -187,7 +190,7 @@ async fn mirror_unordered_from_local() {
     )
     .expect("writer state");
     let writer2: UnorderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>> =
-        UnorderedWriter::new(client.clone(), state);
+        UnorderedWriter::new(PrefixedStoreClient::empty(client.clone()), state);
     let delta = &ops_total[ops1.len()..];
     common::commit_unordered_upload(&client, &writer2, delta)
         .await
@@ -271,12 +274,14 @@ async fn mirror_immutable_from_local() {
     ]])
     .await;
     let writer: ImmutableWriter<mmr::Family, Sha256, ImmK, Vec<u8>> =
-        ImmutableWriter::fresh(client.clone());
+        ImmutableWriter::fresh(PrefixedStoreClient::empty(client.clone()));
     common::commit_immutable_upload(&client, &writer, &ops1)
         .await
         .expect("upload 1");
-    let reader: ImmutableClient<mmr::Family, Sha256, ImmK, Vec<u8>> =
-        ImmutableClient::from_client(client.clone(), ((), ((0..=MAX_OPERATION_SIZE).into(), ())));
+    let reader: ImmutableClient<mmr::Family, Sha256, ImmK, Vec<u8>> = ImmutableClient::new(
+        PrefixedStoreClient::empty(client.clone()),
+        ((), ((0..=MAX_OPERATION_SIZE).into(), ())),
+    );
     assert_eq!(
         reader.root_at(latest1).await.expect("root_at 1"),
         root1,
@@ -299,7 +304,7 @@ async fn mirror_immutable_from_local() {
     )
     .expect("writer state");
     let writer2: ImmutableWriter<mmr::Family, Sha256, ImmK, Vec<u8>> =
-        ImmutableWriter::new(client.clone(), state);
+        ImmutableWriter::new(PrefixedStoreClient::empty(client.clone()), state);
     let delta = &ops_total[ops1.len()..];
     common::commit_immutable_upload(&client, &writer2, delta)
         .await
@@ -435,23 +440,22 @@ async fn mirror_ordered_from_local() {
     )
     .await;
     let writer: OrderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
-        OrderedWriter::fresh(client.clone());
+        OrderedWriter::fresh(PrefixedStoreClient::empty(client.clone()));
     common::commit_ordered_upload(&client, &writer, &ops1, &boundary1)
         .await
         .expect("upload 1");
 
-    let reader: OrderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
-        OrderedClient::from_client(
-            client.clone(),
-            (
-                ((0..=MAX_OPERATION_SIZE).into(), ()),
-                ((0..=MAX_OPERATION_SIZE).into(), ()),
-            ),
-            (
-                ((0..=MAX_OPERATION_SIZE).into(), ()),
-                ((0..=MAX_OPERATION_SIZE).into(), ()),
-            ),
-        );
+    let reader: OrderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> = OrderedClient::new(
+        PrefixedStoreClient::empty(client.clone()),
+        (
+            ((0..=MAX_OPERATION_SIZE).into(), ()),
+            ((0..=MAX_OPERATION_SIZE).into(), ()),
+        ),
+        (
+            ((0..=MAX_OPERATION_SIZE).into(), ()),
+            ((0..=MAX_OPERATION_SIZE).into(), ()),
+        ),
+    );
     assert_eq!(
         reader.current_root_at(latest1).await.expect("root_at 1"),
         root1,
@@ -479,7 +483,7 @@ async fn mirror_ordered_from_local() {
     )
     .expect("writer state");
     let writer2: OrderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
-        OrderedWriter::new(client.clone(), state);
+        OrderedWriter::new(PrefixedStoreClient::empty(client.clone()), state);
     let delta_ops = &ops_total[ops1.len()..];
     common::commit_ordered_upload(&client, &writer2, delta_ops, &boundary_delta)
         .await

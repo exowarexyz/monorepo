@@ -21,9 +21,9 @@ use exoware_sdk::proto::PreferZstdHttpClient;
 use exoware_sdk::selector::Selector;
 use exoware_sdk::stream_filter::StreamFilter;
 use exoware_sdk::{
-    Namespace, PrefixedStoreClient, RetryConfig, StoreBatchPublication, StoreBatchUpload,
-    StoreClient, StoreKeyPrefix, StorePublicationFrontierWriter, StoreWriteBatch,
-    StreamSubscription, StreamSubscriptionFrame,
+    PrefixedStoreClient, RetryConfig, StoreBatchPublication, StoreBatchUpload, StoreClient,
+    StoreKeyPrefix, StorePublicationFrontierWriter, StoreWriteBatch, StreamSubscription,
+    StreamSubscriptionFrame,
 };
 use exoware_sql::proto::sql::v1::{
     cell, ServiceClient as SqlServiceClient, SubscribeRequest as SqlSubscribeRequest,
@@ -145,11 +145,11 @@ async fn next_frame(
 }
 
 fn keyless_reader(client: PrefixedStoreClient) -> QmdbReader {
-    QmdbReader::from_prefixed(client, ((0..=10000).into(), ()))
+    QmdbReader::new(client, ((0..=10000).into(), ()))
 }
 
 fn keyless_writer(client: PrefixedStoreClient) -> QmdbWriter {
-    QmdbWriter::from_prefixed(client, WriterState::empty())
+    QmdbWriter::new(client, WriterState::empty())
 }
 
 async fn commit_qmdb_upload(
@@ -347,8 +347,8 @@ async fn raw_prefixes_support_atomic_batch_fetch_range_and_stream() {
 #[tokio::test]
 async fn sql_schemas_are_isolated_by_store_prefix() {
     let (_dir, _server, base) = local_store_client().await;
-    let schema_a = make_sql_schema(base.prefixed(Namespace::Sql.sub(0)));
-    let schema_b = make_sql_schema(base.prefixed(Namespace::Sql.sub(1)));
+    let schema_a = make_sql_schema(base.prefixed(StoreKeyPrefix::new(4, 0).unwrap()));
+    let schema_b = make_sql_schema(base.prefixed(StoreKeyPrefix::new(4, 1).unwrap()));
 
     let mut writer_a = schema_a.batch_writer();
     writer_a
@@ -368,11 +368,11 @@ async fn sql_schemas_are_isolated_by_store_prefix() {
     assert!(seq_b.expect("flush b") > 0);
 
     assert_eq!(
-        query_sql_items(base.prefixed(Namespace::Sql.sub(0))).await,
+        query_sql_items(base.prefixed(StoreKeyPrefix::new(4, 0).unwrap())).await,
         (vec![1, 2], vec![100, 200])
     );
     assert_eq!(
-        query_sql_items(base.prefixed(Namespace::Sql.sub(1))).await,
+        query_sql_items(base.prefixed(StoreKeyPrefix::new(4, 1).unwrap())).await,
         (vec![1, 3], vec![1000, 3000])
     );
 }
@@ -380,8 +380,8 @@ async fn sql_schemas_are_isolated_by_store_prefix() {
 #[tokio::test]
 async fn sql_streaming_is_isolated_by_store_prefix() {
     let (_dir, _server, base) = local_store_client().await;
-    let client_a = base.prefixed(Namespace::Sql.sub(0));
-    let client_b = base.prefixed(Namespace::Sql.sub(1));
+    let client_a = base.prefixed(StoreKeyPrefix::new(4, 0).unwrap());
+    let client_b = base.prefixed(StoreKeyPrefix::new(4, 1).unwrap());
     let (_sql_server_a, sql_url_a) = spawn_sql_service(make_sql_schema(client_a.clone())).await;
     let (_sql_server_b, sql_url_b) = spawn_sql_service(make_sql_schema(client_b.clone())).await;
     let sql_a = sql_rpc_client(&sql_url_a);
@@ -449,7 +449,7 @@ async fn sql_streaming_is_isolated_by_store_prefix() {
 }
 
 fn make_sql_schema(client: PrefixedStoreClient) -> KvSchema {
-    KvSchema::from_prefixed(client)
+    KvSchema::new(client)
         .table(
             "items",
             vec![
@@ -483,8 +483,8 @@ async fn query_sql_items(client: PrefixedStoreClient) -> (Vec<i64>, Vec<i64>) {
 #[tokio::test]
 async fn prefixed_qmdb_writers_handle_concurrent_inflight_batches_per_instance() {
     let (_dir, _server, base) = local_store_client().await;
-    let client_a = base.prefixed(Namespace::Qmdb.sub(0));
-    let client_b = base.prefixed(Namespace::Qmdb.sub(1));
+    let client_a = base.prefixed(StoreKeyPrefix::new(4, 4).unwrap());
+    let client_b = base.prefixed(StoreKeyPrefix::new(4, 5).unwrap());
     let writer_a = Arc::new(keyless_writer(client_a.clone()));
     let writer_b = Arc::new(keyless_writer(client_b.clone()));
 
@@ -567,8 +567,8 @@ async fn prefixed_qmdb_writers_handle_concurrent_inflight_batches_per_instance()
 #[tokio::test]
 async fn prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_receipts() {
     let (_dir, _server, base) = local_store_client().await;
-    let sql_client = base.for_namespace(Namespace::Sql);
-    let qmdb_client = base.for_namespace(Namespace::Qmdb);
+    let sql_client = base.prefixed(StoreKeyPrefix::new(4, 0).unwrap());
+    let qmdb_client = base.prefixed(StoreKeyPrefix::new(4, 4).unwrap());
     let mut sql_writer = make_sql_schema(sql_client.clone()).batch_writer();
     sql_writer
         .insert("items", vec![CellValue::Int64(42), CellValue::Int64(4200)])
@@ -679,8 +679,8 @@ async fn prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_receipts(
 #[tokio::test]
 async fn qmdb_streaming_is_isolated_by_store_prefix() {
     let (_dir, _server, base) = local_store_client().await;
-    let client_a = base.prefixed(Namespace::Qmdb.sub(0));
-    let client_b = base.prefixed(Namespace::Qmdb.sub(1));
+    let client_a = base.prefixed(StoreKeyPrefix::new(4, 4).unwrap());
+    let client_b = base.prefixed(StoreKeyPrefix::new(4, 5).unwrap());
     let (_qmdb_server_a, qmdb_url_a) = spawn_qmdb_service(client_a.clone()).await;
     let (_qmdb_server_b, qmdb_url_b) = spawn_qmdb_service(client_b.clone()).await;
     let qmdb_a = qmdb_rpc_client(&qmdb_url_a);

@@ -24,7 +24,7 @@ use exoware_qmdb::{
     ordered_connect_stack, recover_boundary_state, CurrentBoundaryState, OrderedClient,
     OrderedWriter, MAX_OPERATION_SIZE,
 };
-use exoware_sdk::{Namespace, PrefixedStoreClient, StoreBatchUpload, StoreClient};
+use exoware_sdk::{PrefixedStoreClient, StoreBatchUpload, StoreClient, StoreKeyPrefix};
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
@@ -158,7 +158,7 @@ async fn run(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client = Arc::new(
         OrderedClient::<DemoFamily, Sha256, Vec<u8>, Vec<u8>, N>::new(
-            store_url,
+            StoreClient::new(store_url).prefixed(StoreKeyPrefix::identity()),
             op_cfg(),
             update_row_cfg(),
         ),
@@ -193,8 +193,8 @@ async fn seed(
         "starting seed"
     );
 
-    let store = StoreClient::new(store_url);
-    let reader = OrderedClient::<DemoFamily, Sha256, Vec<u8>, Vec<u8>, N>::from_client(
+    let store = StoreClient::new(store_url).prefixed(StoreKeyPrefix::identity());
+    let reader = OrderedClient::<DemoFamily, Sha256, Vec<u8>, Vec<u8>, N>::new(
         store.clone(),
         op_cfg(),
         update_row_cfg(),
@@ -342,13 +342,7 @@ async fn seed(
                 let boundary = boundary_from_local_db(&db, previous_slice, &cumulative_ops).await;
                 let delta = &cumulative_ops[previous_ops.len()..];
 
-                commit_ordered_upload(
-                    &store.for_namespace(Namespace::Qmdb),
-                    &writer,
-                    delta,
-                    &boundary,
-                )
-                .await;
+                commit_ordered_upload(&store, &writer, delta, &boundary).await;
 
                 let root = reader.current_root_at(latest).await.expect("current root");
                 println!("tip={} root=0x{}", *latest, hex::encode(root.encode()),);

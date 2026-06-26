@@ -19,6 +19,7 @@ use commonware_storage::qmdb::any::value::FixedEncoding;
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{UnorderedClient, UnorderedWriter, MAX_OPERATION_SIZE};
+use exoware_sdk::PrefixedStoreClient;
 
 type Digest = commonware_cryptography::sha256::Digest;
 type BatchProof = Proof<mmr::Family, Digest>;
@@ -198,12 +199,12 @@ async fn unordered_round_trip() {
     let local = build_local_db().await;
 
     let writer: UnorderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>> =
-        UnorderedWriter::fresh(client.clone());
+        UnorderedWriter::fresh(PrefixedStoreClient::empty(client.clone()));
     common::commit_unordered_upload(&client, &writer, &local.operations)
         .await
         .expect("commit upload");
 
-    let c = TestUnorderedClient::from_client(client.clone(), op_cfg());
+    let c = TestUnorderedClient::new(PrefixedStoreClient::empty(client.clone()), op_cfg());
     let watermark = c.writer_location_watermark().await.expect("watermark");
     assert_eq!(watermark, Some(local.latest_location));
 
@@ -240,12 +241,12 @@ async fn unordered_fixed_round_trip() {
     let local = build_fixed_local_db().await;
 
     let writer: UnorderedWriter<mmr::Family, Sha256, Digest, Digest, FixedEncoding<Digest>> =
-        UnorderedWriter::fresh(client.clone());
+        UnorderedWriter::fresh(PrefixedStoreClient::empty(client.clone()));
     common::commit_unordered_upload(&client, &writer, &local.operations)
         .await
         .expect("commit fixed upload");
 
-    let c = FixedTestUnorderedClient::from_client(client.clone(), ());
+    let c = FixedTestUnorderedClient::new(PrefixedStoreClient::empty(client.clone()), ());
     let watermark = c.writer_location_watermark().await.expect("watermark");
     assert_eq!(watermark, Some(local.latest_location));
 

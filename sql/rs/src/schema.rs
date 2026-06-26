@@ -14,7 +14,7 @@ use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, TableType};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
 use exoware_sdk::kv_codec::decode_stored_row;
-use exoware_sdk::{Namespace, PrefixedStoreClient, StoreClient};
+use exoware_sdk::PrefixedStoreClient;
 
 use crate::aggregate::KvAggregatePushdownRule;
 use crate::codec::*;
@@ -44,17 +44,10 @@ pub struct KvSchema {
 }
 
 impl KvSchema {
-    /// Build a schema over the canonical [`Namespace::Sql`] keyspace — the safe
-    /// default when the Store is co-tenanted with simplex/qmdb, so SQL's
-    /// prefix-bounded scans can't observe another namespace's keys.
-    pub fn new(client: StoreClient) -> Self {
-        Self::from_prefixed(client.for_namespace(Namespace::Sql))
-    }
-
-    /// Build a schema over a caller-chosen namespace (e.g. multiple `KvSchema`
-    /// instances in one Store). The caller must pick a slot disjoint from every
-    /// co-tenant.
-    pub fn from_prefixed(client: PrefixedStoreClient) -> Self {
+    /// Build a schema over `client`'s namespace prefix. When the Store is
+    /// co-tenanted, the caller must pick a prefix disjoint from every co-tenant
+    /// so SQL's prefix-bounded scans can't observe another's keys.
+    pub fn new(client: PrefixedStoreClient) -> Self {
         Self {
             client,
             tables: Vec::new(),

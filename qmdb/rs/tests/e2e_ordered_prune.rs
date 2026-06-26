@@ -29,6 +29,7 @@ use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
     recover_boundary_state, CurrentBoundaryState, OrderedClient, OrderedWriter, MAX_OPERATION_SIZE,
 };
+use exoware_sdk::PrefixedStoreClient;
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
@@ -236,19 +237,18 @@ async fn mirror_ordered_prune_past_chunk_zero() {
     // `load_bitmap_chunk` must fold that bit to 0 for the root recomputation
     // to match.
     let writer: OrderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
-        OrderedWriter::fresh(client.clone());
-    let reader: OrderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
-        OrderedClient::from_client(
-            client.clone(),
-            (
-                ((0..=MAX_OPERATION_SIZE).into(), ()),
-                ((0..=MAX_OPERATION_SIZE).into(), ()),
-            ),
-            (
-                ((0..=MAX_OPERATION_SIZE).into(), ()),
-                ((0..=MAX_OPERATION_SIZE).into(), ()),
-            ),
-        );
+        OrderedWriter::fresh(PrefixedStoreClient::empty(client.clone()));
+    let reader: OrderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> = OrderedClient::new(
+        PrefixedStoreClient::empty(client.clone()),
+        (
+            ((0..=MAX_OPERATION_SIZE).into(), ()),
+            ((0..=MAX_OPERATION_SIZE).into(), ()),
+        ),
+        (
+            ((0..=MAX_OPERATION_SIZE).into(), ()),
+            ((0..=MAX_OPERATION_SIZE).into(), ()),
+        ),
+    );
 
     for outcome in &batches {
         common::commit_ordered_upload(&client, &writer, &outcome.delta_ops, &outcome.boundary)
