@@ -398,7 +398,7 @@ impl PrefixedStoreClient {
                 let scope = match &policy.scope {
                     PolicyScope::Keys(scope) => {
                         let mut scope = scope.clone();
-                        scope.match_key = self.prefix.prefix_match_key(&scope.match_key)?;
+                        scope.selector = self.prefix.prefix_selector(&scope.selector)?;
                         PolicyScope::Keys(scope)
                     }
                     PolicyScope::Sequence => PolicyScope::Sequence,
@@ -416,13 +416,13 @@ impl PrefixedStoreClient {
         &self,
         filter: crate::stream_filter::StreamFilter,
     ) -> Result<crate::stream_filter::StreamFilter, ClientError> {
-        let match_keys = filter
-            .match_keys
+        let selectors = filter
+            .selectors
             .iter()
-            .map(|mk| self.prefix.prefix_stream_match_key(mk))
+            .map(|mk| self.prefix.prefix_stream_selector(mk))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(crate::stream_filter::StreamFilter {
-            match_keys,
+            selectors,
             value_filters: filter.value_filters,
         })
     }
@@ -1998,10 +1998,10 @@ impl StoreClient {
     ) -> Result<StreamSubscription, ClientError> {
         crate::stream_filter::validate_filter(&filter)
             .map_err(|e| ClientError::WireFormat(e.to_string()))?;
-        let match_keys = filter
-            .match_keys
+        let selectors = filter
+            .selectors
             .into_iter()
-            .map(|mk| exoware_proto::store::common::v1::MatchKey {
+            .map(|mk| exoware_proto::common::kv::v1::Selector {
                 reserved_bits: u32::from(mk.reserved_bits),
                 prefix: u32::from(mk.prefix),
                 payload_regex: mk.payload_regex.0,
@@ -2012,21 +2012,21 @@ impl StoreClient {
             .value_filters
             .into_iter()
             .map(|vf| {
-                use crate::stream_filter::BytesFilter;
-                use exoware_proto::store::common::v1::bytes_filter::Kind as ProtoKind;
+                use crate::stream_filter::Filter;
+                use exoware_proto::common::kv::v1::filter::Kind as ProtoKind;
                 let kind = match vf {
-                    BytesFilter::Exact(bytes) => ProtoKind::Exact(bytes),
-                    BytesFilter::Prefix(bytes) => ProtoKind::Prefix(bytes),
-                    BytesFilter::Regex(pattern) => ProtoKind::Regex(pattern),
+                    Filter::Exact(bytes) => ProtoKind::Exact(bytes),
+                    Filter::Prefix(bytes) => ProtoKind::Prefix(bytes),
+                    Filter::Regex(pattern) => ProtoKind::Regex(pattern),
                 };
-                exoware_proto::store::common::v1::BytesFilter {
+                exoware_proto::common::kv::v1::Filter {
                     kind: Some(kind),
                     ..Default::default()
                 }
             })
             .collect();
-        let request = exoware_proto::store::stream::v1::SubscribeRequest {
-            match_keys,
+        let request = exoware_proto::log::stream::v1::SubscribeRequest {
+            selectors,
             value_filters,
             since_sequence_number,
             ..Default::default()
@@ -2034,7 +2034,7 @@ impl StoreClient {
         let config =
             store_connect_client_config(self.stream_uri.clone(), self.connect_request_compression);
         let client =
-            exoware_proto::store::stream::v1::ServiceClient::new(self.connect_http.clone(), config);
+            exoware_proto::log::stream::v1::ServiceClient::new(self.connect_http.clone(), config);
         let stream = client
             .subscribe(request)
             .await
@@ -2053,13 +2053,13 @@ impl StoreClient {
     async fn stream_get_physical(
         &self,
         sequence_number: u64,
-    ) -> Result<Option<exoware_proto::store::stream::v1::GetResponse>, ClientError> {
+    ) -> Result<Option<exoware_proto::log::stream::v1::GetResponse>, ClientError> {
         let config =
             store_connect_client_config(self.stream_uri.clone(), self.connect_request_compression);
         let client =
-            exoware_proto::store::stream::v1::ServiceClient::new(self.connect_http.clone(), config);
+            exoware_proto::log::stream::v1::ServiceClient::new(self.connect_http.clone(), config);
         match client
-            .get(exoware_proto::store::stream::v1::GetRequest {
+            .get(exoware_proto::log::stream::v1::GetRequest {
                 sequence_number,
                 ..Default::default()
             })

@@ -25,7 +25,7 @@ use exoware_proto::store::query::v1::{
 };
 use exoware_sdk as exoware_proto;
 use exoware_sdk::keys::Key;
-use exoware_sdk::StoreClient;
+use exoware_sdk::{StoreClient, StoreKeyPrefix};
 use exoware_sql::{CellValue, IndexSpec, KvSchema, TableColumnConfig};
 use futures::stream;
 use tokio::runtime::Runtime;
@@ -278,7 +278,7 @@ fn bench_exoware_sql_end_to_end_index_scan(c: &mut Criterion) {
 
     let base_url = format!("http://{addr}");
     let client = StoreClient::new(&base_url);
-    let schema = KvSchema::new(client.clone())
+    let schema = KvSchema::new(client.prefixed(StoreKeyPrefix::identity()))
         .table(
             "orders",
             vec![
