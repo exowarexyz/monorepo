@@ -51,7 +51,7 @@ async fn mirror_keyless_from_local() {
     .await;
     let writer: KeylessWriter<mmr::Family, Sha256, Vec<u8>> =
         KeylessWriter::fresh(PrefixedStoreClient::empty(client.clone()));
-    common::commit_keyless_upload(&client, &writer, &ops1)
+    common::commit_keyless_upload(&writer, &ops1)
         .await
         .expect("upload 1");
     let reader: KeylessClient<mmr::Family, Sha256, Vec<u8>> = KeylessClient::new(
@@ -80,7 +80,7 @@ async fn mirror_keyless_from_local() {
     let writer2: KeylessWriter<mmr::Family, Sha256, Vec<u8>> =
         KeylessWriter::new(PrefixedStoreClient::empty(client.clone()), state);
     let delta = &ops_total[ops1.len()..];
-    common::commit_keyless_upload(&client, &writer2, delta)
+    common::commit_keyless_upload(&writer2, delta)
         .await
         .expect("upload 2");
     assert_eq!(
@@ -155,7 +155,7 @@ async fn mirror_unordered_from_local() {
     .await;
     let writer: UnorderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>> =
         UnorderedWriter::fresh(PrefixedStoreClient::empty(client.clone()));
-    common::commit_unordered_upload(&client, &writer, &ops1)
+    common::commit_unordered_upload(&writer, &ops1)
         .await
         .expect("upload 1");
     let reader: UnorderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>> = UnorderedClient::new(
@@ -192,7 +192,7 @@ async fn mirror_unordered_from_local() {
     let writer2: UnorderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>> =
         UnorderedWriter::new(PrefixedStoreClient::empty(client.clone()), state);
     let delta = &ops_total[ops1.len()..];
-    common::commit_unordered_upload(&client, &writer2, delta)
+    common::commit_unordered_upload(&writer2, delta)
         .await
         .expect("upload 2");
     assert_eq!(
@@ -275,7 +275,7 @@ async fn mirror_immutable_from_local() {
     .await;
     let writer: ImmutableWriter<mmr::Family, Sha256, ImmK, Vec<u8>> =
         ImmutableWriter::fresh(PrefixedStoreClient::empty(client.clone()));
-    common::commit_immutable_upload(&client, &writer, &ops1)
+    common::commit_immutable_upload(&writer, &ops1)
         .await
         .expect("upload 1");
     let reader: ImmutableClient<mmr::Family, Sha256, ImmK, Vec<u8>> = ImmutableClient::new(
@@ -306,7 +306,7 @@ async fn mirror_immutable_from_local() {
     let writer2: ImmutableWriter<mmr::Family, Sha256, ImmK, Vec<u8>> =
         ImmutableWriter::new(PrefixedStoreClient::empty(client.clone()), state);
     let delta = &ops_total[ops1.len()..];
-    common::commit_immutable_upload(&client, &writer2, delta)
+    common::commit_immutable_upload(&writer2, delta)
         .await
         .expect("upload 2");
     assert_eq!(
@@ -441,7 +441,7 @@ async fn mirror_ordered_from_local() {
     .await;
     let writer: OrderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
         OrderedWriter::fresh(PrefixedStoreClient::empty(client.clone()));
-    common::commit_ordered_upload(&client, &writer, &ops1, &boundary1)
+    common::commit_ordered_upload(&writer, &ops1, &boundary1)
         .await
         .expect("upload 1");
 
@@ -485,7 +485,7 @@ async fn mirror_ordered_from_local() {
     let writer2: OrderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
         OrderedWriter::new(PrefixedStoreClient::empty(client.clone()), state);
     let delta_ops = &ops_total[ops1.len()..];
-    common::commit_ordered_upload(&client, &writer2, delta_ops, &boundary_delta)
+    common::commit_ordered_upload(&writer2, delta_ops, &boundary_delta)
         .await
         .expect("upload 2");
     assert_eq!(

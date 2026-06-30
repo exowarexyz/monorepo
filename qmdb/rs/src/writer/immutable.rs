@@ -279,10 +279,7 @@ where
         let Some(prepared) = self.prepare_flush().await? else {
             return Ok(None);
         };
-        Ok(Some(
-            self.commit_publication(self.client.client(), prepared)
-                .await?,
-        ))
+        Ok(Some(self.commit_publication(prepared).await?))
     }
 
     pub async fn flush(&self) -> Result<(), QmdbError> {
@@ -317,6 +314,10 @@ where
     type Prepared = super::PreparedUpload<F>;
     type Receipt = UploadReceipt<F>;
     type Error = QmdbError;
+
+    fn store_client(&self) -> &PrefixedStoreClient {
+        &self.client
+    }
 
     fn stage_upload(
         &self,
@@ -373,6 +374,10 @@ where
     type PreparedPublication = super::PreparedWatermark<F>;
     type PublicationReceipt = PublishedCheckpoint<F>;
     type Error = QmdbError;
+
+    fn store_client(&self) -> &PrefixedStoreClient {
+        &self.client
+    }
 
     fn stage_publication(
         &self,

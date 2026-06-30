@@ -123,7 +123,7 @@ fn latest_inactivity_floor(ops: &[BatchOperation]) -> Location<mmr::Family> {
 async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
     let writer: KeylessWriter<mmr::Family, commonware_cryptography::Sha256, Vec<u8>> =
         KeylessWriter::fresh(PrefixedStoreClient::empty(client.clone()));
-    common::commit_keyless_upload(client, &writer, &batch.operations)
+    common::commit_keyless_upload(&writer, &batch.operations)
         .await
         .expect("commit upload");
 }

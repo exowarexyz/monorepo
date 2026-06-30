@@ -196,7 +196,7 @@ where
     let local = build_local_db::<F>().await;
 
     let writer = fresh_writer::<F>(client.clone());
-    common::commit_keyless_upload(&client, &writer, &local.operations)
+    common::commit_keyless_upload(&writer, &local.operations)
         .await
         .expect("commit upload");
 
@@ -267,7 +267,7 @@ async fn keyless_fixed_round_trip() {
     let local = build_fixed_local_db::<mmr::Family>().await;
 
     let writer = fresh_fixed_writer::<mmr::Family>(client.clone());
-    common::commit_keyless_upload(&client, &writer, &local.operations)
+    common::commit_keyless_upload(&writer, &local.operations)
         .await
         .expect("commit fixed upload");
 

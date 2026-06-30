@@ -143,7 +143,7 @@ async fn sequential_upload_matches_local_root() {
     );
 
     let writer = fresh_writer(client.clone());
-    let receipt = common::commit_immutable_upload(&client, &writer, &local.operations)
+    let receipt = common::commit_immutable_upload(&writer, &local.operations)
         .await
         .expect("upload");
     assert_eq!(receipt.latest_location, local.latest_location);
@@ -190,13 +190,10 @@ async fn pipelined_batches_require_flush_to_catch_up_watermark() {
     let w1 = writer.clone();
     let w2 = writer.clone();
     let w3 = writer.clone();
-    let c1 = client.clone();
-    let c2 = client.clone();
-    let c3 = client.clone();
     let (r1, r2, r3) = tokio::join!(
-        async move { common::commit_immutable_upload(&c1, &w1, &o1).await },
-        async move { common::commit_immutable_upload(&c2, &w2, &o2).await },
-        async move { common::commit_immutable_upload(&c3, &w3, &o3).await }
+        async move { common::commit_immutable_upload(&w1, &o1).await },
+        async move { common::commit_immutable_upload(&w2, &o2).await },
+        async move { common::commit_immutable_upload(&w3, &o3).await }
     );
     let _ = r1.expect("b1");
     let _ = r2.expect("b2");

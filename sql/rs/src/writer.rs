@@ -168,9 +168,7 @@ impl BatchWriter {
         let Some(prepared) = self.prepare_flush()? else {
             return Ok(None);
         };
-        Ok(Some(
-            self.commit_upload(self.client.client(), prepared).await?,
-        ))
+        Ok(Some(self.commit_upload(prepared).await?))
     }
 
     pub fn prepare_flush(&mut self) -> DataFusionResult<Option<PreparedBatch>> {
@@ -239,6 +237,10 @@ impl StoreBatchUpload for BatchWriter {
     type Prepared = PreparedBatch;
     type Receipt = BatchReceipt;
     type Error = DataFusionError;
+
+    fn store_client(&self) -> &PrefixedStoreClient {
+        &self.client
+    }
 
     fn stage_upload(
         &self,

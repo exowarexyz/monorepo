@@ -934,6 +934,8 @@ pub trait StoreBatchUpload {
     type Receipt: Send;
     type Error: std::fmt::Display + Send;
 
+    fn store_client(&self) -> &PrefixedStoreClient;
+
     fn stage_upload(
         &self,
         prepared: &mut Self::Prepared,
@@ -962,7 +964,6 @@ pub trait StoreBatchUpload {
 
     fn commit_upload<'a>(
         &'a self,
-        client: &'a StoreClient,
         prepared: Self::Prepared,
     ) -> BoxFuture<'a, Result<Self::Receipt, Self::Error>>
     where
@@ -979,7 +980,7 @@ pub trait StoreBatchUpload {
                 self.mark_upload_failed(prepared, message).await;
                 return Err(err);
             }
-            match batch.commit(client).await {
+            match batch.commit(self.store_client().client()).await {
                 Ok(sequence_number) => {
                     Ok(self.mark_upload_persisted(prepared, sequence_number).await)
                 }
@@ -1004,6 +1005,10 @@ pub trait StoreBatchPublication {
     type PreparedPublication: Send;
     type PublicationReceipt: Send;
     type Error: std::fmt::Display + Send;
+
+    /// The namespaced client this writer stages and commits through. See
+    /// [`StoreBatchUpload::store_client`].
+    fn store_client(&self) -> &PrefixedStoreClient;
 
     fn stage_publication(
         &self,
@@ -1036,7 +1041,6 @@ pub trait StoreBatchPublication {
 
     fn commit_publication<'a>(
         &'a self,
-        client: &'a StoreClient,
         prepared: Self::PreparedPublication,
     ) -> BoxFuture<'a, Result<Self::PublicationReceipt, Self::Error>>
     where
@@ -1052,7 +1056,7 @@ pub trait StoreBatchPublication {
                 self.mark_publication_failed(prepared, message).await;
                 return Err(err);
             }
-            match batch.commit(client).await {
+            match batch.commit(self.store_client().client()).await {
                 Ok(sequence_number) => Ok(self
                     .mark_publication_persisted(prepared, sequence_number)
                     .await),

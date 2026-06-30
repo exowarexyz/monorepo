@@ -109,7 +109,7 @@ where
 {
     let writer: TestOrderedWriter<F> =
         TestOrderedWriter::fresh(PrefixedStoreClient::empty(client.clone()));
-    common::commit_ordered_upload(client, &writer, &local.operations, &local.current_boundary)
+    common::commit_ordered_upload(&writer, &local.operations, &local.current_boundary)
         .await
         .expect("commit upload");
 }
@@ -561,7 +561,7 @@ async fn ordered_mmb_multi_peak_grafted_chunk_round_trip() {
 
     let writer: OrderedWriter<mmb::Family, Sha256, Vec<u8>, Vec<u8>, N> =
         OrderedWriter::fresh(PrefixedStoreClient::empty(client.clone()));
-    common::commit_ordered_upload(&client, &writer, &local.operations, &local.current_boundary)
+    common::commit_ordered_upload(&writer, &local.operations, &local.current_boundary)
         .await
         .expect("commit upload");
 
@@ -689,7 +689,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
     let writer: TestOrderedWriter<F> =
         TestOrderedWriter::fresh(PrefixedStoreClient::empty(client.clone()));
     for (delta, boundary) in &uploads {
-        common::commit_ordered_upload(&client, &writer, delta, boundary)
+        common::commit_ordered_upload(&writer, delta, boundary)
             .await
             .expect("commit upload");
     }
@@ -837,7 +837,7 @@ async fn ordered_mmb_persistent_interleaved_seed_batches_keep_current_proofs_ver
                         let boundary =
                             boundary_from_local_db(&db, previous_slice, &cumulative_ops).await;
                         let delta = cumulative_ops[previous_ops.len()..].to_vec();
-                        common::commit_ordered_upload(&store, &writer, &delta, &boundary)
+                        common::commit_ordered_upload(&writer, &delta, &boundary)
                             .await
                             .expect("commit upload");
                         previous_ops = cumulative_ops;
@@ -890,7 +890,7 @@ async fn ordered_fixed_round_trip() {
 
     let writer: FixedTestOrderedWriter<mmr::Family> =
         FixedTestOrderedWriter::fresh(PrefixedStoreClient::empty(client.clone()));
-    common::commit_ordered_upload(&client, &writer, &local.operations, &local.current_boundary)
+    common::commit_ordered_upload(&writer, &local.operations, &local.current_boundary)
         .await
         .expect("commit fixed upload");
 

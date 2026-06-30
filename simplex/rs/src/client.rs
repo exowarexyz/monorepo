@@ -201,7 +201,7 @@ impl SimplexClient {
         B: Block,
     {
         let prepared = self.prepare_header(header);
-        self.commit_upload(self.client.client(), prepared).await
+        self.commit_upload(prepared).await
     }
 
     pub async fn upload_block<B>(
@@ -213,7 +213,7 @@ impl SimplexClient {
         B: Block,
     {
         let prepared = self.prepare_block(header, body);
-        self.commit_upload(self.client.client(), prepared).await
+        self.commit_upload(prepared).await
     }
 
     pub async fn upload_notarized<B, S, D>(
@@ -226,7 +226,7 @@ impl SimplexClient {
         D: Digest,
     {
         let prepared = self.prepare_notarized(notarized)?;
-        self.commit_upload(self.client.client(), prepared).await
+        self.commit_upload(prepared).await
     }
 
     pub async fn upload_finalized<B, S, D>(
@@ -239,7 +239,7 @@ impl SimplexClient {
         D: Digest,
     {
         let prepared = self.prepare_finalized(finalized)?;
-        self.commit_upload(self.client.client(), prepared).await
+        self.commit_upload(prepared).await
     }
 
     pub async fn get_header_raw<D: Digest>(
@@ -389,6 +389,10 @@ impl StoreBatchUpload for SimplexClient {
     type Prepared = PreparedUpload;
     type Receipt = UploadReceipt;
     type Error = SimplexError;
+
+    fn store_client(&self) -> &PrefixedStoreClient {
+        &self.client
+    }
 
     fn stage_upload(
         &self,

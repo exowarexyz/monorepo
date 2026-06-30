@@ -200,7 +200,7 @@ async fn unordered_round_trip() {
 
     let writer: UnorderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>> =
         UnorderedWriter::fresh(PrefixedStoreClient::empty(client.clone()));
-    common::commit_unordered_upload(&client, &writer, &local.operations)
+    common::commit_unordered_upload(&writer, &local.operations)
         .await
         .expect("commit upload");
 
@@ -242,7 +242,7 @@ async fn unordered_fixed_round_trip() {
 
     let writer: UnorderedWriter<mmr::Family, Sha256, Digest, Digest, FixedEncoding<Digest>> =
         UnorderedWriter::fresh(PrefixedStoreClient::empty(client.clone()));
-    common::commit_unordered_upload(&client, &writer, &local.operations)
+    common::commit_unordered_upload(&writer, &local.operations)
         .await
         .expect("commit fixed upload");
 

@@ -204,7 +204,7 @@ async fn immutable_round_trip() {
     let local = build_local_db().await;
 
     let writer = fresh_writer(client.clone());
-    common::commit_immutable_upload(&client, &writer, &local.operations)
+    common::commit_immutable_upload(&writer, &local.operations)
         .await
         .expect("commit upload");
 
@@ -246,7 +246,7 @@ async fn immutable_fixed_round_trip() {
     let local = build_fixed_local_db().await;
 
     let writer = fresh_fixed_writer(client.clone());
-    common::commit_immutable_upload(&client, &writer, &local.operations)
+    common::commit_immutable_upload(&writer, &local.operations)
         .await
         .expect("commit fixed upload");
 

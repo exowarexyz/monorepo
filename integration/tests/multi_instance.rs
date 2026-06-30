@@ -153,12 +153,11 @@ fn keyless_writer(client: PrefixedStoreClient) -> QmdbWriter {
 }
 
 async fn commit_qmdb_upload(
-    commit_client: &PrefixedStoreClient,
     writer: &QmdbWriter,
     ops: &[QmdbOp],
 ) -> Result<exoware_qmdb::UploadReceipt<QmdbFamily>, QmdbError> {
     let prepared = writer.prepare_upload(ops).await?;
-    writer.commit_upload(commit_client.client(), prepared).await
+    writer.commit_upload(prepared).await
 }
 
 fn qops(label: &str, batch: usize) -> Vec<QmdbOp> {
@@ -191,7 +190,6 @@ where
 }
 
 async fn drive_qmdb_writer(
-    writer_client: PrefixedStoreClient,
     writer: Arc<QmdbWriter>,
     batches: Vec<Vec<QmdbOp>>,
 ) -> (Vec<QmdbOp>, Vec<exoware_qmdb::UploadReceipt<QmdbFamily>>) {
@@ -199,8 +197,7 @@ async fn drive_qmdb_writer(
     let mut in_flight = FuturesUnordered::new();
     for batch in batches {
         let writer = writer.clone();
-        let client = writer_client.clone();
-        in_flight.push(async move { commit_qmdb_upload(&client, &writer, &batch).await });
+        in_flight.push(async move { commit_qmdb_upload(&writer, &batch).await });
     }
     let mut receipts = Vec::new();
     while let Some(result) = in_flight.next().await {
@@ -494,8 +491,8 @@ async fn prefixed_qmdb_writers_handle_concurrent_inflight_batches_per_instance()
     let total_b: usize = batches_b.iter().map(Vec::len).sum();
 
     let ((expected_a, receipts_a), (expected_b, receipts_b)) = tokio::join!(
-        drive_qmdb_writer(client_a.clone(), writer_a, batches_a),
-        drive_qmdb_writer(client_b.clone(), writer_b, batches_b)
+        drive_qmdb_writer(writer_a, batches_a),
+        drive_qmdb_writer(writer_b, batches_b)
     );
     assert!(
         receipts_a
@@ -698,7 +695,7 @@ async fn qmdb_streaming_is_isolated_by_store_prefix() {
 
     let ops_b = qops("stream-b", 0);
     let writer_b = keyless_writer(client_b.clone());
-    commit_qmdb_upload(&client_b, &writer_b, &ops_b)
+    commit_qmdb_upload(&writer_b, &ops_b)
         .await
         .expect("upload b stream");
     let root_b = keyless_reader(client_b.clone())
@@ -732,7 +729,7 @@ async fn qmdb_streaming_is_isolated_by_store_prefix() {
 
     let ops_a = qops("stream-a", 0);
     let writer_a = keyless_writer(client_a.clone());
-    commit_qmdb_upload(&client_a, &writer_a, &ops_a)
+    commit_qmdb_upload(&writer_a, &ops_a)
         .await
         .expect("upload a stream");
     let root_a = keyless_reader(client_a.clone())

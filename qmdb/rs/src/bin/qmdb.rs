@@ -24,7 +24,7 @@ use exoware_qmdb::{
     ordered_connect_stack, recover_boundary_state, CurrentBoundaryState, OrderedClient,
     OrderedWriter, MAX_OPERATION_SIZE,
 };
-use exoware_sdk::{PrefixedStoreClient, StoreBatchUpload, StoreClient, StoreKeyPrefix};
+use exoware_sdk::{StoreBatchUpload, StoreClient, StoreKeyPrefix};
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
@@ -70,16 +70,12 @@ async fn health() -> &'static str {
 }
 
 async fn commit_ordered_upload(
-    client: &PrefixedStoreClient,
     writer: &OrderedWriter<DemoFamily, Sha256, Vec<u8>, Vec<u8>, N>,
     ops: &[QmdbOperation<DemoFamily, Vec<u8>, Vec<u8>>],
     boundary: &CurrentBoundaryState<commonware_cryptography::sha256::Digest, N, DemoFamily>,
 ) {
     let prepared = writer.prepare_upload(ops, boundary).await.expect("prepare");
-    writer
-        .commit_upload(client.client(), prepared)
-        .await
-        .expect("commit upload");
+    writer.commit_upload(prepared).await.expect("commit upload");
 }
 
 fn op_cfg() -> <QmdbOperation<DemoFamily, Vec<u8>, Vec<u8>> as commonware_codec::Read>::Cfg {
@@ -342,7 +338,7 @@ async fn seed(
                 let boundary = boundary_from_local_db(&db, previous_slice, &cumulative_ops).await;
                 let delta = &cumulative_ops[previous_ops.len()..];
 
-                commit_ordered_upload(&store, &writer, delta, &boundary).await;
+                commit_ordered_upload(&writer, delta, &boundary).await;
 
                 let root = reader.current_root_at(latest).await.expect("current root");
                 println!("tip={} root=0x{}", *latest, hex::encode(root.encode()),);

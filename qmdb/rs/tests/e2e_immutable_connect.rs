@@ -127,7 +127,7 @@ async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
         FixedBytes<32>,
         Vec<u8>,
     > = ImmutableWriter::fresh(PrefixedStoreClient::empty(client.clone()));
-    common::commit_immutable_upload(client, &writer, &batch.operations)
+    common::commit_immutable_upload(&writer, &batch.operations)
         .await
         .expect("commit upload");
 }

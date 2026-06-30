@@ -151,7 +151,7 @@ async fn sequential_upload_matches_local_root() {
     // This proves the writer produces the same root as the local DB when
     // given the same ops.
     let writer = fresh_writer(client.clone());
-    let receipt = common::commit_keyless_upload(&client, &writer, &writer_ops)
+    let receipt = common::commit_keyless_upload(&writer, &writer_ops)
         .await
         .expect("upload");
     assert_eq!(receipt.latest_location, latest);
@@ -206,7 +206,7 @@ async fn multiple_sequential_batches_each_publish_watermarks_in_band() {
 
     let writer = fresh_writer(client.clone());
 
-    let r1 = common::commit_keyless_upload(&client, &writer, &batch_ops[0])
+    let r1 = common::commit_keyless_upload(&writer, &batch_ops[0])
         .await
         .expect("b1");
     assert_eq!(
@@ -214,7 +214,7 @@ async fn multiple_sequential_batches_each_publish_watermarks_in_band() {
             .map(|checkpoint| checkpoint.location),
         Some(Location::<mmr::Family>::new(3))
     );
-    let r2 = common::commit_keyless_upload(&client, &writer, &batch_ops[1])
+    let r2 = common::commit_keyless_upload(&writer, &batch_ops[1])
         .await
         .expect("b2");
     assert_eq!(
@@ -222,7 +222,7 @@ async fn multiple_sequential_batches_each_publish_watermarks_in_band() {
             .map(|checkpoint| checkpoint.location),
         Some(Location::<mmr::Family>::new(5))
     );
-    let r3 = common::commit_keyless_upload(&client, &writer, &batch_ops[2])
+    let r3 = common::commit_keyless_upload(&writer, &batch_ops[2])
         .await
         .expect("b3");
     assert_eq!(
@@ -275,14 +275,11 @@ async fn pipelined_batches_require_flush_to_catch_up_watermark() {
     let w1 = writer.clone();
     let w2 = writer.clone();
     let w3 = writer.clone();
-    let c1 = client.clone();
-    let c2 = client.clone();
-    let c3 = client.clone();
 
     let (r1, r2, r3) = tokio::join!(
-        async move { common::commit_keyless_upload(&c1, &w1, &o1).await },
-        async move { common::commit_keyless_upload(&c2, &w2, &o2).await },
-        async move { common::commit_keyless_upload(&c3, &w3, &o3).await }
+        async move { common::commit_keyless_upload(&w1, &o1).await },
+        async move { common::commit_keyless_upload(&w2, &o2).await },
+        async move { common::commit_keyless_upload(&w3, &o3).await }
     );
     let r1 = r1.expect("b1");
     let r2 = r2.expect("b2");
@@ -358,9 +355,8 @@ async fn bounded_pipeline_advances_watermark_via_contiguous_acks() {
             }
         }
         let w = writer.clone();
-        let c = client.clone();
         in_flight.push(Box::pin(async move {
-            common::commit_keyless_upload(&c, &w, &batch).await
+            common::commit_keyless_upload(&w, &batch).await
         }));
     }
     while let Some(r) = in_flight.next().await {
@@ -414,7 +410,7 @@ async fn local_proof_resumes_from_existing_store_state() {
     // First "session": upload two ops and flush.
     {
         let writer = fresh_writer(client.clone());
-        let receipt = common::commit_keyless_upload(&client, &writer, &local_ops_two)
+        let receipt = common::commit_keyless_upload(&writer, &local_ops_two)
             .await
             .expect("upload 1");
         assert_eq!(receipt.latest_location, latest_two);
@@ -445,7 +441,7 @@ async fn local_proof_resumes_from_existing_store_state() {
         .expect("writer state from local proof");
         let writer = TestKeylessWriter::new(PrefixedStoreClient::empty(client.clone()), state);
         let remainder = &local_ops_final[local_ops_two.len()..];
-        let receipt = common::commit_keyless_upload(&client, &writer, remainder)
+        let receipt = common::commit_keyless_upload(&writer, remainder)
             .await
             .expect("upload 2");
         assert_eq!(receipt.latest_location, latest_final);

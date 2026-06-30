@@ -315,7 +315,7 @@ async fn prepared_uploads_can_share_one_store_batch() {
     prepared.extend(simplex.prepare_finalized(&second).expect("second"));
 
     let receipt = simplex
-        .commit_upload(simplex.store_client().client(), prepared)
+        .commit_upload(prepared)
         .await
         .expect("commit combined");
     assert_eq!(receipt.summary.headers, 2);
