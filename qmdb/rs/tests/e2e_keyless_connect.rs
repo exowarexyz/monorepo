@@ -26,7 +26,7 @@ use exoware_qmdb::{
 };
 use exoware_sdk::common::kv::v1::{filter as proto_filter, Filter as ProtoFilter};
 use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::StoreClient;
+use exoware_sdk::{PrefixedStoreClient, StoreClient};
 
 type Digest = commonware_cryptography::sha256::Digest;
 type LocalDb = Keyless<
@@ -122,8 +122,8 @@ fn latest_inactivity_floor(ops: &[BatchOperation]) -> Location<mmr::Family> {
 
 async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
     let writer: KeylessWriter<mmr::Family, commonware_cryptography::Sha256, Vec<u8>> =
-        KeylessWriter::empty(client.clone());
-    common::commit_keyless_upload(client, &writer, &batch.operations)
+        KeylessWriter::fresh(PrefixedStoreClient::empty(client.clone()));
+    common::commit_keyless_upload(&writer, &batch.operations)
         .await
         .expect("commit upload");
 }
@@ -136,8 +136,8 @@ async fn keyless_connect_subscribe_emits_verifiable_multi_proof() {
         *local.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
-    let keyless_client = Arc::new(TestKeylessClient::from_client(
-        store_client.clone(),
+    let keyless_client = Arc::new(TestKeylessClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         ((0..=10000).into(), ()),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
@@ -182,8 +182,8 @@ async fn keyless_connect_get_operation_range_returns_verifiable_proof() {
     );
     commit_upload(&store_client, &local).await;
 
-    let keyless_client = Arc::new(TestKeylessClient::from_client(
-        store_client.clone(),
+    let keyless_client = Arc::new(TestKeylessClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         ((0..=10000).into(), ()),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
@@ -216,8 +216,8 @@ async fn keyless_operation_log_sync_resolver_fetches_api_batches() {
     let local = build_local_batch().await;
     commit_upload(&store_client, &local).await;
 
-    let keyless_client = Arc::new(TestKeylessClient::from_client(
-        store_client.clone(),
+    let keyless_client = Arc::new(TestKeylessClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         ((0..=10000).into(), ()),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
@@ -266,8 +266,8 @@ async fn keyless_commonware_glue_state_sync_uses_operation_log_resolver() {
     );
     commit_upload(&store_client, &local).await;
 
-    let keyless_client = Arc::new(TestKeylessClient::from_client(
-        store_client.clone(),
+    let keyless_client = Arc::new(TestKeylessClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         ((0..=10000).into(), ()),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
@@ -388,8 +388,8 @@ async fn keyless_connect_client_rejects_invalid_streamed_proof() {
     );
     commit_upload(&store_client, &local).await;
 
-    let keyless_client = Arc::new(TestKeylessClient::from_client(
-        store_client.clone(),
+    let keyless_client = Arc::new(TestKeylessClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         ((0..=10000).into(), ()),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
@@ -453,8 +453,8 @@ async fn keyless_connect_subscribe_filters_by_value_regex() {
         *local.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
-    let keyless_client = Arc::new(TestKeylessClient::from_client(
-        store_client.clone(),
+    let keyless_client = Arc::new(TestKeylessClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         ((0..=10000).into(), ()),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
@@ -506,8 +506,8 @@ async fn keyless_connect_subscribe_rejects_key_filters() {
         *local.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
-    let keyless_client = Arc::new(TestKeylessClient::from_client(
-        store_client.clone(),
+    let keyless_client = Arc::new(TestKeylessClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         ((0..=10000).into(), ()),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;

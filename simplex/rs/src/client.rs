@@ -3,7 +3,7 @@ use commonware_codec::{Decode, Encode};
 use commonware_consensus::{Block, Viewable};
 use commonware_cryptography::{certificate, Digest};
 use exoware_sdk::keys::Key;
-use exoware_sdk::{ClientError, RangeMode, StoreBatchUpload, StoreClient, StoreWriteBatch};
+use exoware_sdk::{ClientError, PrefixedStoreClient, RangeMode, StoreBatchUpload, StoreWriteBatch};
 use futures::future::BoxFuture;
 
 use crate::error::SimplexError;
@@ -71,23 +71,20 @@ impl PreparedUpload {
 /// - finalized `{ proof, header }` bytes by header height
 #[derive(Clone, Debug)]
 pub struct SimplexClient {
-    client: StoreClient,
+    client: PrefixedStoreClient,
 }
 
 impl SimplexClient {
-    pub fn new(store_url: &str) -> Self {
-        Self::from_client(StoreClient::new(store_url))
-    }
-
-    pub fn from_client(client: StoreClient) -> Self {
+    /// Build a client over `client`'s namespace prefix.
+    pub fn new(client: PrefixedStoreClient) -> Self {
         Self { client }
     }
 
-    pub fn store_client(&self) -> &StoreClient {
+    pub fn store_client(&self) -> &PrefixedStoreClient {
         &self.client
     }
 
-    pub fn into_store_client(self) -> StoreClient {
+    pub fn into_store_client(self) -> PrefixedStoreClient {
         self.client
     }
 
@@ -181,7 +178,7 @@ impl SimplexClient {
             return Err(SimplexError::EmptyUpload);
         }
         for entry in prepared.entries() {
-            batch.push(&self.client, &entry.key, entry.value.clone())?;
+            batch.push(self.client.key_prefix(), &entry.key, entry.value.clone())?;
         }
         Ok(())
     }
@@ -204,7 +201,7 @@ impl SimplexClient {
         B: Block,
     {
         let prepared = self.prepare_header(header);
-        self.commit_upload(&self.client, prepared).await
+        self.commit_upload(prepared).await
     }
 
     pub async fn upload_block<B>(
@@ -216,7 +213,7 @@ impl SimplexClient {
         B: Block,
     {
         let prepared = self.prepare_block(header, body);
-        self.commit_upload(&self.client, prepared).await
+        self.commit_upload(prepared).await
     }
 
     pub async fn upload_notarized<B, S, D>(
@@ -229,7 +226,7 @@ impl SimplexClient {
         D: Digest,
     {
         let prepared = self.prepare_notarized(notarized)?;
-        self.commit_upload(&self.client, prepared).await
+        self.commit_upload(prepared).await
     }
 
     pub async fn upload_finalized<B, S, D>(
@@ -242,7 +239,7 @@ impl SimplexClient {
         D: Digest,
     {
         let prepared = self.prepare_finalized(finalized)?;
-        self.commit_upload(&self.client, prepared).await
+        self.commit_upload(prepared).await
     }
 
     pub async fn get_header_raw<D: Digest>(
@@ -392,6 +389,10 @@ impl StoreBatchUpload for SimplexClient {
     type Prepared = PreparedUpload;
     type Receipt = UploadReceipt;
     type Error = SimplexError;
+
+    fn store_client(&self) -> &PrefixedStoreClient {
+        &self.client
+    }
 
     fn stage_upload(
         &self,

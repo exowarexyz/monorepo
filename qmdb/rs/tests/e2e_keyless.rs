@@ -15,7 +15,7 @@ use commonware_storage::qmdb::keyless::fixed::{
 use commonware_storage::qmdb::keyless::variable::{Db as Keyless, Operation as KeylessOperation};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{KeylessClient, KeylessWriter};
-use exoware_sdk::StoreClient;
+use exoware_sdk::{PrefixedStoreClient, StoreClient};
 
 use common::retry;
 
@@ -43,22 +43,22 @@ type FixedTestKeylessWriter<F> =
     KeylessWriter<F, commonware_cryptography::Sha256, Digest, FixedEncoding<Digest>>;
 
 fn fresh_keyless<F: Graftable>(c: StoreClient) -> TestKeylessClient<F> {
-    TestKeylessClient::from_client(c, ((0..=10000).into(), ()))
+    TestKeylessClient::new(PrefixedStoreClient::empty(c), ((0..=10000).into(), ()))
 }
 
 fn fresh_writer<F: Family>(c: StoreClient) -> TestKeylessWriter<F> {
-    TestKeylessWriter::empty(c)
+    TestKeylessWriter::fresh(PrefixedStoreClient::empty(c))
 }
 
 fn fresh_fixed_keyless<F: Graftable>(c: StoreClient) -> FixedTestKeylessClient<F>
 where
     FixedKeylessOperation<F, Digest>: commonware_codec::Read<Cfg = ()>,
 {
-    FixedTestKeylessClient::from_client(c, ())
+    FixedTestKeylessClient::new(PrefixedStoreClient::empty(c), ())
 }
 
 fn fresh_fixed_writer<F: Family>(c: StoreClient) -> FixedTestKeylessWriter<F> {
-    FixedTestKeylessWriter::empty(c)
+    FixedTestKeylessWriter::fresh(PrefixedStoreClient::empty(c))
 }
 
 struct LocalReference<F: Family> {
@@ -196,7 +196,7 @@ where
     let local = build_local_db::<F>().await;
 
     let writer = fresh_writer::<F>(client.clone());
-    common::commit_keyless_upload(&client, &writer, &local.operations)
+    common::commit_keyless_upload(&writer, &local.operations)
         .await
         .expect("commit upload");
 
@@ -267,7 +267,7 @@ async fn keyless_fixed_round_trip() {
     let local = build_fixed_local_db::<mmr::Family>().await;
 
     let writer = fresh_fixed_writer::<mmr::Family>(client.clone());
-    common::commit_keyless_upload(&client, &writer, &local.operations)
+    common::commit_keyless_upload(&writer, &local.operations)
         .await
         .expect("commit fixed upload");
 

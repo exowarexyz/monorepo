@@ -22,7 +22,7 @@ use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::MAX_OPERATION_SIZE;
 use exoware_qmdb::{recover_boundary_state, CurrentBoundaryState, OrderedClient, OrderedWriter};
-use exoware_sdk::StoreClient;
+use exoware_sdk::{PrefixedStoreClient, StoreClient};
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
@@ -107,8 +107,9 @@ where
     BatchOperation<F>:
         commonware_codec::Codec + commonware_codec::Encode + commonware_codec::Decode,
 {
-    let writer: TestOrderedWriter<F> = TestOrderedWriter::empty(client.clone());
-    common::commit_ordered_upload(client, &writer, &local.operations, &local.current_boundary)
+    let writer: TestOrderedWriter<F> =
+        TestOrderedWriter::fresh(PrefixedStoreClient::empty(client.clone()));
+    common::commit_ordered_upload(&writer, &local.operations, &local.current_boundary)
         .await
         .expect("commit upload");
 }
@@ -466,8 +467,8 @@ async fn ordered_round_trip() {
 
     mirror_local(&client, &local).await;
 
-    let c = TestOrderedClient::<mmr::Family>::from_client(
-        client.clone(),
+    let c = TestOrderedClient::<mmr::Family>::new(
+        PrefixedStoreClient::empty(client.clone()),
         op_cfg::<mmr::Family>(),
         update_row_cfg(),
     );
@@ -508,8 +509,8 @@ async fn ordered_mmb_round_trip() {
 
     mirror_local(&client, &local).await;
 
-    let c = TestOrderedClient::<mmb::Family>::from_client(
-        client.clone(),
+    let c = TestOrderedClient::<mmb::Family>::new(
+        PrefixedStoreClient::empty(client.clone()),
         op_cfg::<mmb::Family>(),
         update_row_cfg(),
     );
@@ -559,13 +560,16 @@ async fn ordered_mmb_multi_peak_grafted_chunk_round_trip() {
     );
 
     let writer: OrderedWriter<mmb::Family, Sha256, Vec<u8>, Vec<u8>, N> =
-        OrderedWriter::empty(client.clone());
-    common::commit_ordered_upload(&client, &writer, &local.operations, &local.current_boundary)
+        OrderedWriter::fresh(PrefixedStoreClient::empty(client.clone()));
+    common::commit_ordered_upload(&writer, &local.operations, &local.current_boundary)
         .await
         .expect("commit upload");
 
-    let c: OrderedClient<mmb::Family, Sha256, Vec<u8>, Vec<u8>, N> =
-        OrderedClient::from_client(client.clone(), op_cfg::<mmb::Family>(), update_row_cfg());
+    let c: OrderedClient<mmb::Family, Sha256, Vec<u8>, Vec<u8>, N> = OrderedClient::new(
+        PrefixedStoreClient::empty(client.clone()),
+        op_cfg::<mmb::Family>(),
+        update_row_cfg(),
+    );
     let current = c
         .current_operation_range_proof(
             local.latest_location,
@@ -682,15 +686,19 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
         .await
         .expect("join");
 
-    let writer: TestOrderedWriter<F> = TestOrderedWriter::empty(client.clone());
+    let writer: TestOrderedWriter<F> =
+        TestOrderedWriter::fresh(PrefixedStoreClient::empty(client.clone()));
     for (delta, boundary) in &uploads {
-        common::commit_ordered_upload(&client, &writer, delta, boundary)
+        common::commit_ordered_upload(&writer, delta, boundary)
             .await
             .expect("commit upload");
     }
 
-    let c: TestOrderedClient<F> =
-        OrderedClient::from_client(client.clone(), op_cfg::<F>(), update_row_cfg());
+    let c: TestOrderedClient<F> = OrderedClient::new(
+        PrefixedStoreClient::empty(client.clone()),
+        op_cfg::<F>(),
+        update_row_cfg(),
+    );
     let key_proof = c
         .key_value_proof_at(latest_location, latest_key.as_slice())
         .await
@@ -775,7 +783,9 @@ async fn ordered_mmb_persistent_interleaved_seed_batches_keep_current_proofs_ver
                     let mut db: LocalDb<mmb::Family> = LocalQmdbDb::init(context.child("db"), cfg)
                         .await
                         .expect("init");
-                    let writer = TestOrderedWriter::<mmb::Family>::empty(store.clone());
+                    let writer = TestOrderedWriter::<mmb::Family>::fresh(
+                        PrefixedStoreClient::empty(store.clone()),
+                    );
                     let mut previous_ops = Vec::<BatchOperation<mmb::Family>>::new();
                     let mut counter = 0u64;
 
@@ -827,7 +837,7 @@ async fn ordered_mmb_persistent_interleaved_seed_batches_keep_current_proofs_ver
                         let boundary =
                             boundary_from_local_db(&db, previous_slice, &cumulative_ops).await;
                         let delta = cumulative_ops[previous_ops.len()..].to_vec();
-                        common::commit_ordered_upload(&store, &writer, &delta, &boundary)
+                        common::commit_ordered_upload(&writer, &delta, &boundary)
                             .await
                             .expect("commit upload");
                         previous_ops = cumulative_ops;
@@ -843,8 +853,11 @@ async fn ordered_mmb_persistent_interleaved_seed_batches_keep_current_proofs_ver
         .await
         .expect("join");
 
-    let c: TestOrderedClient<mmb::Family> =
-        OrderedClient::from_client(client.clone(), op_cfg::<mmb::Family>(), update_row_cfg());
+    let c: TestOrderedClient<mmb::Family> = OrderedClient::new(
+        PrefixedStoreClient::empty(client.clone()),
+        op_cfg::<mmb::Family>(),
+        update_row_cfg(),
+    );
     assert_eq!(
         c.current_root_at(latest_location)
             .await
@@ -875,13 +888,14 @@ async fn ordered_fixed_round_trip() {
     let (_dir, _server, client) = common::local_store_client().await;
     let local = build_fixed_local_db::<mmr::Family>().await;
 
-    let writer: FixedTestOrderedWriter<mmr::Family> = FixedTestOrderedWriter::empty(client.clone());
-    common::commit_ordered_upload(&client, &writer, &local.operations, &local.current_boundary)
+    let writer: FixedTestOrderedWriter<mmr::Family> =
+        FixedTestOrderedWriter::fresh(PrefixedStoreClient::empty(client.clone()));
+    common::commit_ordered_upload(&writer, &local.operations, &local.current_boundary)
         .await
         .expect("commit fixed upload");
 
-    let c = FixedTestOrderedClient::<mmr::Family>::from_client(
-        client.clone(),
+    let c = FixedTestOrderedClient::<mmr::Family>::new(
+        PrefixedStoreClient::empty(client.clone()),
         (),
         fixed_update_row_cfg(),
     );
@@ -942,8 +956,8 @@ async fn current_root_at() {
 
     mirror_local(&client, &local).await;
 
-    let c = TestOrderedClient::<mmr::Family>::from_client(
-        client.clone(),
+    let c = TestOrderedClient::<mmr::Family>::new(
+        PrefixedStoreClient::empty(client.clone()),
         op_cfg::<mmr::Family>(),
         update_row_cfg(),
     );
@@ -961,8 +975,8 @@ async fn current_operation_range_proof() {
 
     mirror_local(&client, &local).await;
 
-    let c = TestOrderedClient::<mmr::Family>::from_client(
-        client.clone(),
+    let c = TestOrderedClient::<mmr::Family>::new(
+        PrefixedStoreClient::empty(client.clone()),
         op_cfg::<mmr::Family>(),
         update_row_cfg(),
     );
@@ -984,8 +998,8 @@ async fn key_value_proof() {
 
     mirror_local(&client, &local).await;
 
-    let c = TestOrderedClient::<mmr::Family>::from_client(
-        client.clone(),
+    let c = TestOrderedClient::<mmr::Family>::new(
+        PrefixedStoreClient::empty(client.clone()),
         op_cfg::<mmr::Family>(),
         update_row_cfg(),
     );
@@ -1009,8 +1023,8 @@ async fn multi_proof() {
 
     mirror_local(&client, &local).await;
 
-    let c = TestOrderedClient::<mmr::Family>::from_client(
-        client.clone(),
+    let c = TestOrderedClient::<mmr::Family>::new(
+        PrefixedStoreClient::empty(client.clone()),
         op_cfg::<mmr::Family>(),
         update_row_cfg(),
     );

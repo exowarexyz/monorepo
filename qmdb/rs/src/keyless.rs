@@ -9,7 +9,7 @@ use commonware_storage::{
         keyless,
     },
 };
-use exoware_sdk::{SerializableReadSession, StoreClient};
+use exoware_sdk::{PrefixedStoreClient, SerializableReadSession};
 
 use crate::auth::AuthenticatedBackendNamespace;
 use crate::auth::{
@@ -32,7 +32,7 @@ pub struct KeylessClient<
 > where
     keyless::Operation<F, E>: CodecRead,
 {
-    client: StoreClient,
+    client: PrefixedStoreClient,
     op_cfg: <keyless::Operation<F, E> as CodecRead>::Cfg,
     _marker: PhantomData<(F, H, E)>,
 }
@@ -59,12 +59,9 @@ where
     E: ValueEncoding<Value = V>,
     keyless::Operation<F, E>: Encode + Decode + Clone,
 {
-    pub fn new(url: &str, op_cfg: <keyless::Operation<F, E> as CodecRead>::Cfg) -> Self {
-        Self::from_client(StoreClient::new(url), op_cfg)
-    }
-
-    pub fn from_client(
-        client: StoreClient,
+    /// Read client over `client`'s namespace prefix.
+    pub fn new(
+        client: PrefixedStoreClient,
         op_cfg: <keyless::Operation<F, E> as CodecRead>::Cfg,
     ) -> Self {
         Self {
@@ -74,7 +71,7 @@ where
         }
     }
 
-    pub(crate) fn store_client(&self) -> &StoreClient {
+    pub(crate) fn store_client(&self) -> &PrefixedStoreClient {
         &self.client
     }
 

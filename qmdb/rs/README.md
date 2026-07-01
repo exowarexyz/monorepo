@@ -517,7 +517,7 @@ let writer: Arc<KeylessWriter<mmr::Family, Sha256, Vec<u8>>> =
 
 // Sequential single-instance usage still goes through an explicit Store batch.
 let prepared = writer.prepare_upload(&batch_ops).await?;
-let receipt = writer.commit_upload(&client, prepared).await?;
+let receipt = writer.commit_upload(prepared).await?;
 
 // Pipelined usage — prepare/commit concurrent Store batches up to a bounded depth.
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -527,10 +527,9 @@ for batch in batches {
         in_flight.next().await.unwrap()?;
     }
     let w = writer.clone();
-    let c = client.clone();
     in_flight.push(Box::pin(async move {
         let prepared = w.prepare_upload(&batch).await?;
-        w.commit_upload(&c, prepared).await
+        w.commit_upload(prepared).await
     }));
 }
 while let Some(r) = in_flight.next().await { r?; }

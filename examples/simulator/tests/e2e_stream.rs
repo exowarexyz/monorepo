@@ -6,10 +6,10 @@ use exoware_sdk::kv_codec::Utf8;
 use exoware_sdk::prune_policy::{PolicyScope, PrunePolicy, RetainPolicy};
 use exoware_sdk::selector::Selector;
 use exoware_sdk::stream_filter::StreamFilter;
-use exoware_sdk::{RetryConfig, StoreClient};
+use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreClient};
 use tempfile::tempdir;
 
-async fn spawn_client() -> (tokio::task::JoinHandle<()>, StoreClient) {
+async fn spawn_client() -> (tokio::task::JoinHandle<()>, PrefixedStoreClient) {
     let dir = tempdir().expect("tempdir");
     let dir_path = dir.path().to_owned();
     let _dir = dir;
@@ -21,7 +21,7 @@ async fn spawn_client() -> (tokio::task::JoinHandle<()>, StoreClient) {
         .retry_config(RetryConfig::disabled())
         .build()
         .expect("build client");
-    (handle, client)
+    (handle, PrefixedStoreClient::empty(client))
 }
 
 fn key(family: u16, payload: &[u8]) -> Key {

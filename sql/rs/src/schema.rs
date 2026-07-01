@@ -14,7 +14,7 @@ use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, TableType};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
 use exoware_sdk::kv_codec::decode_stored_row;
-use exoware_sdk::StoreClient;
+use exoware_sdk::PrefixedStoreClient;
 
 use crate::aggregate::KvAggregatePushdownRule;
 use crate::codec::*;
@@ -26,7 +26,7 @@ use crate::writer::*;
 pub(crate) fn register_kv_table(
     ctx: &SessionContext,
     table_name: &str,
-    client: StoreClient,
+    client: PrefixedStoreClient,
     config: KvTableConfig,
 ) -> DataFusionResult<()> {
     let table = Arc::new(
@@ -38,13 +38,16 @@ pub(crate) fn register_kv_table(
 }
 
 pub struct KvSchema {
-    client: StoreClient,
+    client: PrefixedStoreClient,
     tables: Vec<(String, KvTableConfig)>,
     next_prefix: u8,
 }
 
 impl KvSchema {
-    pub fn new(client: StoreClient) -> Self {
+    /// Build a schema over `client`'s namespace prefix. When the Store is
+    /// co-tenanted, the caller must pick a prefix disjoint from every co-tenant
+    /// so SQL's prefix-bounded scans can't observe another's keys.
+    pub fn new(client: PrefixedStoreClient) -> Self {
         Self {
             client,
             tables: Vec::new(),
@@ -120,7 +123,7 @@ impl KvSchema {
         self.tables.len()
     }
 
-    pub(crate) fn client(&self) -> &StoreClient {
+    pub(crate) fn client(&self) -> &PrefixedStoreClient {
         &self.client
     }
 

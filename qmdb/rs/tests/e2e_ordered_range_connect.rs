@@ -37,7 +37,7 @@ use exoware_qmdb::{
 };
 use exoware_sdk::common::kv::v1::{filter as proto_filter, Filter as ProtoFilter};
 use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::StoreClient;
+use exoware_sdk::{PrefixedStoreClient, StoreClient};
 
 const N: usize = 32;
 const MIN_MMB_OPERATIONS: usize = 10;
@@ -478,16 +478,16 @@ async fn build_mmb_growing_local_batch() -> MmbGrowingLocalBatch {
 
 async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
     let writer: OrderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
-        OrderedWriter::empty(client.clone());
-    common::commit_ordered_upload(client, &writer, &batch.operations, &batch.current_boundary)
+        OrderedWriter::fresh(PrefixedStoreClient::empty(client.clone()));
+    common::commit_ordered_upload(&writer, &batch.operations, &batch.current_boundary)
         .await
         .expect("commit upload");
 }
 
 async fn commit_mmb_upload(client: &StoreClient, batch: &MmbLocalBatch) {
     let writer: OrderedWriter<mmb::Family, Sha256, Vec<u8>, Vec<u8>, N> =
-        OrderedWriter::empty(client.clone());
-    common::commit_ordered_upload(client, &writer, &batch.operations, &batch.current_boundary)
+        OrderedWriter::fresh(PrefixedStoreClient::empty(client.clone()));
+    common::commit_ordered_upload(&writer, &batch.operations, &batch.current_boundary)
         .await
         .expect("commit upload");
 }
@@ -498,8 +498,8 @@ async fn ordered_current_operation_range_connect_emits_verifiable_proof() {
     let local = build_local_batch().await;
     commit_upload(&store_client, &local).await;
 
-    let ordered_client = Arc::new(TestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(TestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         op_cfg(),
         update_row_cfg(),
     ));
@@ -536,8 +536,8 @@ async fn ordered_current_state_sync_from_connect_api_reconstructs_current_db() {
     let local = build_local_batch().await;
     commit_upload(&store_client, &local).await;
 
-    let ordered_client = Arc::new(TestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(TestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         op_cfg(),
         update_row_cfg(),
     ));
@@ -620,8 +620,8 @@ async fn ordered_mmb_current_state_sync_from_nonzero_connect_api_reconstructs_cu
     let expected_alpha = latest_mmb_value_for_key(&local.operations[start_index..], b"alpha");
     commit_mmb_upload(&store_client, &local).await;
 
-    let ordered_client = Arc::new(MmbTestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(MmbTestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         mmb_op_cfg(),
         update_row_cfg(),
     ));
@@ -692,8 +692,8 @@ async fn ordered_mmb_sync_resolvers_return_pinned_nodes_for_nonzero_fetches() {
     );
     commit_mmb_upload(&store_client, &local).await;
 
-    let ordered_client = Arc::new(MmbTestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(MmbTestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         mmb_op_cfg(),
         update_row_cfg(),
     ));
@@ -778,8 +778,8 @@ async fn ordered_mmb_operation_range_client_rejects_missing_nonzero_pinned_nodes
     );
     commit_mmb_upload(&store_client, &local).await;
 
-    let ordered_client = Arc::new(MmbTestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(MmbTestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         mmb_op_cfg(),
         update_row_cfg(),
     ));
@@ -846,8 +846,8 @@ async fn ordered_mmb_operation_range_client_rejects_extra_nonzero_pinned_node() 
     );
     commit_mmb_upload(&store_client, &local).await;
 
-    let ordered_client = Arc::new(MmbTestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(MmbTestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         mmb_op_cfg(),
         update_row_cfg(),
     ));
@@ -897,8 +897,8 @@ async fn ordered_mmb_operation_range_client_rejects_zero_start_pinned_nodes() {
     let local = build_mmb_local_batch().await;
     commit_mmb_upload(&store_client, &local).await;
 
-    let ordered_client = Arc::new(MmbTestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(MmbTestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         mmb_op_cfg(),
         update_row_cfg(),
     ));
@@ -950,8 +950,8 @@ async fn ordered_operation_range_connect_uses_current_root_witness() {
     let local = build_local_batch().await;
     commit_upload(&store_client, &local).await;
 
-    let ordered_client = Arc::new(TestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(TestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         op_cfg(),
         update_row_cfg(),
     ));
@@ -1079,8 +1079,8 @@ async fn ordered_range_connect_subscribe_emits_verifiable_range_proof() {
         *local.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
-    let ordered_client = Arc::new(TestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(TestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         op_cfg(),
         update_row_cfg(),
     ));
@@ -1121,8 +1121,8 @@ async fn ordered_range_connect_client_rejects_invalid_streamed_proof() {
     let local = build_local_batch().await;
     commit_upload(&store_client, &local).await;
 
-    let ordered_client = Arc::new(TestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(TestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         op_cfg(),
         update_row_cfg(),
     ));
@@ -1169,8 +1169,8 @@ async fn ordered_range_connect_client_rejects_invalid_streamed_proof() {
 async fn ordered_range_connect_subscribe_emits_multi_proof_for_matching_keys() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
-    let ordered_client = Arc::new(TestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(TestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         op_cfg(),
         update_row_cfg(),
     ));
@@ -1212,8 +1212,8 @@ async fn ordered_mmb_range_connect_subscribe_verifies_range_and_multi_proofs() {
         *local.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
-    let ordered_client = Arc::new(MmbTestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(MmbTestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         mmb_op_cfg(),
         update_row_cfg(),
     ));
@@ -1283,8 +1283,8 @@ async fn ordered_mmb_operation_log_any_sync_from_connect_api_reconstructs_any_db
     let expected_alpha = latest_mmb_value_for_key(&local.operations, b"alpha");
     commit_mmb_upload(&store_client, &local).await;
 
-    let ordered_client = Arc::new(MmbTestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(MmbTestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         mmb_op_cfg(),
         update_row_cfg(),
     ));
@@ -1356,8 +1356,8 @@ async fn ordered_mmb_operation_log_any_sync_from_nonzero_connect_api_reconstruct
     let expected_alpha = latest_mmb_value_for_key(&local.operations[start_index..], b"alpha");
     commit_mmb_upload(&store_client, &local).await;
 
-    let ordered_client = Arc::new(MmbTestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(MmbTestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         mmb_op_cfg(),
         update_row_cfg(),
     ));
@@ -1447,8 +1447,8 @@ async fn ordered_mmb_operation_log_any_sync_accepts_target_update_from_growing_b
         latest_mmb_value_for_key(&local.updated.operations[start_index..], b"alpha");
     commit_mmb_upload(&store_client, &local.initial).await;
 
-    let ordered_client = Arc::new(MmbTestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(MmbTestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         mmb_op_cfg(),
         update_row_cfg(),
     ));
@@ -1539,8 +1539,8 @@ async fn ordered_mmb_operation_log_any_sync_accepts_target_update_from_growing_b
 async fn ordered_range_connect_subscribe_replays_since_cursor() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
-    let ordered_client = Arc::new(TestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(TestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         op_cfg(),
         update_row_cfg(),
     ));
@@ -1576,8 +1576,8 @@ async fn ordered_range_connect_subscribe_replays_since_cursor() {
 async fn ordered_range_connect_subscribe_matches_prefix_and_regex_filters() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
-    let ordered_client = Arc::new(TestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(TestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         op_cfg(),
         update_row_cfg(),
     ));
@@ -1632,8 +1632,8 @@ async fn ordered_range_connect_subscribe_matches_prefix_and_regex_filters() {
 async fn ordered_range_connect_subscribe_filters_by_value_regex_without_key() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
-    let ordered_client = Arc::new(TestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(TestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         op_cfg(),
         update_row_cfg(),
     ));
@@ -1672,8 +1672,8 @@ async fn ordered_range_connect_subscribe_filters_by_value_regex_without_key() {
 async fn ordered_range_connect_subscribe_intersects_key_and_value_filters() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
-    let ordered_client = Arc::new(TestOrderedClient::from_client(
-        store_client.clone(),
+    let ordered_client = Arc::new(TestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         op_cfg(),
         update_row_cfg(),
     ));

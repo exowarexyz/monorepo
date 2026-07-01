@@ -20,7 +20,7 @@ use commonware_storage::{
 };
 use commonware_utils::bitmap::Readable as BitmapReadable;
 use exoware_sdk::keys::Key;
-use exoware_sdk::{RangeMode, SerializableReadSession, StoreClient};
+use exoware_sdk::{PrefixedStoreClient, RangeMode, SerializableReadSession};
 
 use crate::codec::{
     bitmap_chunk_bits, chunk_index_for_location, clear_below_floor,
@@ -113,7 +113,7 @@ pub struct OrderedClient<
 > where
     ordered::Operation<F, K, E>: commonware_codec::Read,
 {
-    client: StoreClient,
+    client: PrefixedStoreClient,
     op_cfg: <ordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
     update_row_cfg: (K::Cfg, V::Cfg),
     _marker: PhantomData<(F, H, K, E)>,
@@ -191,16 +191,9 @@ where
         }
     }
 
+    /// Read client over `client`'s namespace prefix.
     pub fn new(
-        url: &str,
-        op_cfg: <ordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
-        update_row_cfg: (K::Cfg, V::Cfg),
-    ) -> Self {
-        Self::from_client(StoreClient::new(url), op_cfg, update_row_cfg)
-    }
-
-    pub fn from_client(
-        client: StoreClient,
+        client: PrefixedStoreClient,
         op_cfg: <ordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
         update_row_cfg: (K::Cfg, V::Cfg),
     ) -> Self {
@@ -278,7 +271,7 @@ where
         self.core().query_many_at(keys, max_location, self).await
     }
 
-    pub(crate) fn store_client(&self) -> &StoreClient {
+    pub(crate) fn store_client(&self) -> &PrefixedStoreClient {
         &self.client
     }
 

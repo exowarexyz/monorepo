@@ -32,7 +32,7 @@ use exoware_sdk::kv_codec::{
     canonicalize_reduced_group_values, encode_reduced_group_key, KvExpr, KvFieldKind, KvFieldRef,
     KvPredicate, KvPredicateCheck, KvPredicateConstraint, KvReducedValue,
 };
-use exoware_sdk::{SerializableReadSession, StoreClient};
+use exoware_sdk::{PrefixedStoreClient, SerializableReadSession};
 use futures::SinkExt;
 
 use crate::diagnostics::*;
@@ -138,7 +138,7 @@ pub(crate) struct AggregateGroupPlan {
 
 #[derive(Debug, Clone)]
 pub(crate) struct AggregatePushdownSpec {
-    pub(crate) client: StoreClient,
+    pub(crate) client: PrefixedStoreClient,
     pub(crate) group_plans: Vec<AggregateGroupPlan>,
     pub(crate) seed_job: Option<AggregateReduceJob>,
     pub(crate) aggregate_jobs: Vec<CombinedAggregateJob>,

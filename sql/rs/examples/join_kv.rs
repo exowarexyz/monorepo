@@ -2,7 +2,7 @@ use datafusion::arrow::datatypes::DataType;
 use datafusion::arrow::util::pretty::print_batches;
 use datafusion::common::Result as DataFusionResult;
 use datafusion::prelude::SessionContext;
-use exoware_sdk::StoreClient;
+use exoware_sdk::{StoreClient, StoreKeyPrefix};
 use exoware_sql::{IndexSpec, KvSchema, TableColumnConfig};
 
 #[tokio::main]
@@ -12,7 +12,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = StoreClient::new(&base_url);
     let ctx = SessionContext::new();
 
-    KvSchema::new(client)
+    KvSchema::new(client.prefixed(StoreKeyPrefix::identity()))
         .table(
             "customers",
             vec![

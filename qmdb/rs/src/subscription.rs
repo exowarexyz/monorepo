@@ -4,7 +4,7 @@ use commonware_storage::merkle::{Family, Location};
 use exoware_sdk::keys::Key;
 use exoware_sdk::selector::Selector;
 use exoware_sdk::stream_filter::StreamFilter;
-use exoware_sdk::{StoreClient, StreamSubscription};
+use exoware_sdk::{PrefixedStoreClient, StreamSubscription};
 
 use crate::auth::{
     decode_auth_operation_location, decode_auth_presence_location, decode_auth_watermark_location,
@@ -43,7 +43,7 @@ impl<F: Family> RowClassifier<F> {
 }
 
 pub(crate) async fn open_store_subscription(
-    client: &StoreClient,
+    client: &PrefixedStoreClient,
     filter: StreamFilter,
     since: Option<u64>,
 ) -> Result<StreamSubscription, QmdbError> {

@@ -11,7 +11,7 @@ use commonware_storage::{
     },
 };
 use commonware_utils::Array;
-use exoware_sdk::{SerializableReadSession, StoreClient};
+use exoware_sdk::{PrefixedStoreClient, SerializableReadSession};
 
 use crate::auth::AuthenticatedBackendNamespace;
 use crate::auth::{
@@ -37,7 +37,7 @@ pub struct ImmutableClient<
 > where
     immutable::Operation<F, K, E>: CodecRead,
 {
-    client: StoreClient,
+    client: PrefixedStoreClient,
     operation_cfg: <immutable::Operation<F, K, E> as CodecRead>::Cfg,
     _marker: PhantomData<(F, H, K, E)>,
 }
@@ -65,15 +65,9 @@ where
     E: ValueEncoding<Value = V>,
     immutable::Operation<F, K, E>: Encode + Decode + Clone,
 {
+    /// Read client over `client`'s namespace prefix.
     pub fn new(
-        url: &str,
-        operation_cfg: <immutable::Operation<F, K, E> as CodecRead>::Cfg,
-    ) -> Self {
-        Self::from_client(StoreClient::new(url), operation_cfg)
-    }
-
-    pub fn from_client(
-        client: StoreClient,
+        client: PrefixedStoreClient,
         operation_cfg: <immutable::Operation<F, K, E> as CodecRead>::Cfg,
     ) -> Self {
         Self {
@@ -83,7 +77,7 @@ where
         }
     }
 
-    pub(crate) fn store_client(&self) -> &StoreClient {
+    pub(crate) fn store_client(&self) -> &PrefixedStoreClient {
         &self.client
     }
 

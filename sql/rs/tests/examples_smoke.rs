@@ -4,6 +4,7 @@ use datafusion::arrow::array::{Int64Array, StringArray, UInt64Array};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::common::ScalarValue;
 use datafusion::prelude::SessionContext;
+use exoware_sdk::PrefixedStoreClient;
 use exoware_sql::{default_orders_index_specs, CellValue, IndexSpec, KvSchema, TableColumnConfig};
 
 fn collect_i64_rows(
@@ -101,7 +102,7 @@ async fn orders_example_queries_work_end_to_end() {
     let (_dir, _server, client) = common::local_store_client().await;
     let ctx = SessionContext::new();
 
-    KvSchema::new(client)
+    KvSchema::new(PrefixedStoreClient::empty(client))
         .orders_table("orders_kv", default_orders_index_specs())
         .expect("orders schema")
         .register_all(&ctx)
@@ -182,7 +183,7 @@ async fn join_example_queries_work_end_to_end() {
     let (_dir, _server, client) = common::local_store_client().await;
     let ctx = SessionContext::new();
 
-    KvSchema::new(client)
+    KvSchema::new(PrefixedStoreClient::empty(client))
         .table(
             "customers",
             vec![
@@ -292,7 +293,7 @@ async fn versioned_example_queries_work_end_to_end() {
     let ctx = SessionContext::new();
     let writer_client = client.clone();
 
-    let schema = KvSchema::new(client)
+    let schema = KvSchema::new(PrefixedStoreClient::empty(client))
         .table_versioned(
             "documents",
             vec![
@@ -312,7 +313,7 @@ async fn versioned_example_queries_work_end_to_end() {
     let doc_id_hex = "d0c1aabbccddeeff0011223344556677";
     let doc_id = hex::decode(doc_id_hex).expect("doc_id hex");
 
-    let mut batch = KvSchema::new(writer_client)
+    let mut batch = KvSchema::new(PrefixedStoreClient::empty(writer_client))
         .table_versioned(
             "documents",
             vec![
@@ -412,7 +413,7 @@ async fn fixed_binary_example_filters_work_end_to_end() {
     let ctx = SessionContext::new();
     let writer_client = client.clone();
 
-    let schema = KvSchema::new(client)
+    let schema = KvSchema::new(PrefixedStoreClient::empty(client))
         .table(
             "wallets",
             vec![
@@ -443,7 +444,7 @@ async fn fixed_binary_example_filters_work_end_to_end() {
 
     schema.register_all(&ctx).expect("register");
 
-    let mut batch = KvSchema::new(writer_client)
+    let mut batch = KvSchema::new(PrefixedStoreClient::empty(writer_client))
         .table(
             "wallets",
             vec![

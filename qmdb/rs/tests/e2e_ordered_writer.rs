@@ -18,7 +18,7 @@ use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
     recover_boundary_state, CurrentBoundaryState, OrderedClient, OrderedWriter, MAX_OPERATION_SIZE,
 };
-use exoware_sdk::StoreClient;
+use exoware_sdk::{PrefixedStoreClient, StoreClient};
 
 use common::retry;
 
@@ -100,11 +100,11 @@ fn update_row_cfg() -> (
 }
 
 fn fresh_reader(c: StoreClient) -> TestReader {
-    TestReader::from_client(c, op_cfg(), update_row_cfg())
+    TestReader::new(PrefixedStoreClient::empty(c), op_cfg(), update_row_cfg())
 }
 
 fn fresh_writer(c: StoreClient) -> TestWriter {
-    TestWriter::empty(c)
+    TestWriter::fresh(PrefixedStoreClient::empty(c))
 }
 
 struct LocalReference {
@@ -185,7 +185,7 @@ async fn sequential_upload_matches_local_root() {
 
     let writer = fresh_writer(client.clone());
     let receipt =
-        common::commit_ordered_upload(&client, &writer, &local.operations, &local.current_boundary)
+        common::commit_ordered_upload(&writer, &local.operations, &local.current_boundary)
             .await
             .expect("upload");
     assert_eq!(receipt.latest_location, local.latest_location);
@@ -238,13 +238,10 @@ async fn pipelined_batches_require_flush_to_catch_up_watermark() {
     let w1 = writer.clone();
     let w2 = writer.clone();
     let w3 = writer.clone();
-    let c1 = client.clone();
-    let c2 = client.clone();
-    let c3 = client.clone();
     let (r1, r2, r3) = tokio::join!(
-        async move { common::commit_ordered_upload(&c1, &w1, &ops1, &after1.current_boundary).await },
-        async move { common::commit_ordered_upload(&c2, &w2, &ops2, &after2.current_boundary).await },
-        async move { common::commit_ordered_upload(&c3, &w3, &ops3, &after3.current_boundary).await }
+        async move { common::commit_ordered_upload(&w1, &ops1, &after1.current_boundary).await },
+        async move { common::commit_ordered_upload(&w2, &ops2, &after2.current_boundary).await },
+        async move { common::commit_ordered_upload(&w3, &ops3, &after3.current_boundary).await }
     );
     let _ = r1.expect("b1");
     let _ = r2.expect("b2");

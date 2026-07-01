@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use datafusion::arrow::datatypes::{i256, DataType, Field, Schema, SchemaRef, TimeUnit};
 use exoware_sdk::keys::{Key, KeyCodec};
-use exoware_sdk::StoreClient;
+use exoware_sdk::PrefixedStoreClient;
 
 use crate::codec::{primary_key_codec, secondary_index_codec};
 
@@ -578,13 +578,13 @@ pub(crate) struct IndexPlan {
 
 #[derive(Debug, Clone)]
 pub(crate) struct KvTable {
-    pub(crate) client: StoreClient,
+    pub(crate) client: PrefixedStoreClient,
     pub(crate) model: Arc<TableModel>,
     pub(crate) index_specs: Arc<Vec<ResolvedIndexSpec>>,
 }
 
 impl KvTable {
-    pub(crate) fn new(client: StoreClient, config: KvTableConfig) -> Result<Self, String> {
+    pub(crate) fn new(client: PrefixedStoreClient, config: KvTableConfig) -> Result<Self, String> {
         let model = Arc::new(TableModel::from_config(&config)?);
         let index_specs = Arc::new(model.resolve_index_specs(&config.index_specs)?);
         Ok(Self {

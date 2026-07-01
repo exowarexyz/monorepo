@@ -172,7 +172,6 @@ where
 
 #[allow(dead_code)]
 pub async fn commit_keyless_upload<F, H, V, E>(
-    commit_client: &StoreClient,
     writer: &KeylessWriter<F, H, V, E>,
     ops: &[keyless::Operation<F, E>],
 ) -> Result<UploadReceipt<F>, QmdbError>
@@ -184,12 +183,11 @@ where
     keyless::Operation<F, E>: Encode,
 {
     let prepared = writer.prepare_upload(ops).await?;
-    writer.commit_upload(commit_client, prepared).await
+    writer.commit_upload(prepared).await
 }
 
 #[allow(dead_code)]
 pub async fn commit_unordered_upload<F, H, K, V, E>(
-    commit_client: &StoreClient,
     writer: &UnorderedWriter<F, H, K, V, E>,
     ops: &[unordered::Operation<F, K, E>],
 ) -> Result<UploadReceipt<F>, QmdbError>
@@ -203,12 +201,11 @@ where
     unordered::Operation<F, K, E>: Encode,
 {
     let prepared = writer.prepare_upload(ops).await?;
-    writer.commit_upload(commit_client, prepared).await
+    writer.commit_upload(prepared).await
 }
 
 #[allow(dead_code)]
 pub async fn commit_unordered_current_upload<F, H, K, V, const N: usize, E>(
-    commit_client: &StoreClient,
     writer: &UnorderedWriter<F, H, K, V, E>,
     ops: &[unordered::Operation<F, K, E>],
     current_boundary: &CurrentBoundaryState<H::Digest, N, F>,
@@ -223,12 +220,11 @@ where
     unordered::Operation<F, K, E>: Encode,
 {
     let prepared = writer.prepare_current_upload(ops, current_boundary).await?;
-    writer.commit_upload(commit_client, prepared).await
+    writer.commit_upload(prepared).await
 }
 
 #[allow(dead_code)]
 pub async fn commit_ordered_upload<F, H, K, V, const N: usize, E>(
-    commit_client: &StoreClient,
     writer: &OrderedWriter<F, H, K, V, N, E>,
     ops: &[ordered::Operation<F, K, E>],
     current_boundary: &CurrentBoundaryState<H::Digest, N, F>,
@@ -243,12 +239,11 @@ where
     ordered::Operation<F, K, E>: Encode + Decode,
 {
     let prepared = writer.prepare_upload(ops, current_boundary).await?;
-    writer.commit_upload(commit_client, prepared).await
+    writer.commit_upload(prepared).await
 }
 
 #[allow(dead_code)]
 pub async fn commit_immutable_upload<F, H, K, V, E>(
-    commit_client: &StoreClient,
     writer: &ImmutableWriter<F, H, K, V, E>,
     ops: &[immutable::Operation<F, K, E>],
 ) -> Result<UploadReceipt<F>, QmdbError>
@@ -263,7 +258,7 @@ where
     immutable::Operation<F, K, E>: Encode + Decode + Clone,
 {
     let prepared = writer.prepare_upload(ops).await?;
-    writer.commit_upload(commit_client, prepared).await
+    writer.commit_upload(prepared).await
 }
 
 #[allow(dead_code)]

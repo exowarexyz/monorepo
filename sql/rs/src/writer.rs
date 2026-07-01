@@ -22,7 +22,7 @@ use exoware_sdk::keys::Key;
 #[cfg(test)]
 use exoware_sdk::kv_codec::decode_stored_row;
 use exoware_sdk::kv_codec::{StoredRow, StoredValue};
-use exoware_sdk::{StoreBatchUpload, StoreClient, StoreWriteBatch};
+use exoware_sdk::{PrefixedStoreClient, StoreBatchUpload, StoreWriteBatch};
 use futures::{future::BoxFuture, TryStreamExt};
 
 use crate::builder::archived_non_pk_value_is_valid;
@@ -61,7 +61,7 @@ impl TableWriter {
 
 #[derive(Debug)]
 pub struct BatchWriter {
-    client: StoreClient,
+    client: PrefixedStoreClient,
     tables: HashMap<String, TableWriter>,
     next_request_id: u64,
     failed_prepared: Mutex<Vec<PreparedBatch>>,
@@ -100,7 +100,10 @@ pub struct BatchReceipt {
 }
 
 impl BatchWriter {
-    pub(crate) fn new(client: StoreClient, table_configs: &[(String, KvTableConfig)]) -> Self {
+    pub(crate) fn new(
+        client: PrefixedStoreClient,
+        table_configs: &[(String, KvTableConfig)],
+    ) -> Self {
         let mut tables = HashMap::new();
         for (name, config) in table_configs {
             let model = Arc::new(
@@ -165,7 +168,7 @@ impl BatchWriter {
         let Some(prepared) = self.prepare_flush()? else {
             return Ok(None);
         };
-        Ok(Some(self.commit_upload(&self.client, prepared).await?))
+        Ok(Some(self.commit_upload(prepared).await?))
     }
 
     pub fn prepare_flush(&mut self) -> DataFusionResult<Option<PreparedBatch>> {
@@ -192,7 +195,7 @@ impl BatchWriter {
     ) -> DataFusionResult<()> {
         for (key, value) in prepared.keys.iter().zip(prepared.values.iter()) {
             batch
-                .push(&self.client, key, value)
+                .push(self.client.key_prefix(), key, value)
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
         }
         Ok(())
@@ -235,6 +238,10 @@ impl StoreBatchUpload for BatchWriter {
     type Receipt = BatchReceipt;
     type Error = DataFusionError;
 
+    fn store_client(&self) -> &PrefixedStoreClient {
+        &self.client
+    }
+
     fn stage_upload(
         &self,
         prepared: &mut Self::Prepared,
@@ -276,7 +283,7 @@ impl StoreBatchUpload for BatchWriter {
 
 #[derive(Debug)]
 pub(crate) struct KvIngestSink {
-    pub(crate) client: StoreClient,
+    pub(crate) client: PrefixedStoreClient,
     pub(crate) schema: SchemaRef,
     pub(crate) model: Arc<TableModel>,
     pub(crate) index_specs: Arc<Vec<ResolvedIndexSpec>>,
@@ -284,7 +291,7 @@ pub(crate) struct KvIngestSink {
 
 impl KvIngestSink {
     pub(crate) fn new(
-        client: StoreClient,
+        client: PrefixedStoreClient,
         schema: SchemaRef,
         model: Arc<TableModel>,
         index_specs: Arc<Vec<ResolvedIndexSpec>>,
@@ -950,7 +957,7 @@ pub(crate) fn list_value_at(
 }
 
 pub(crate) async fn flush_ingest_batch(
-    client: &StoreClient,
+    client: &PrefixedStoreClient,
     keys: &mut Vec<Key>,
     values: &mut Vec<Bytes>,
 ) -> DataFusionResult<u64> {
@@ -960,11 +967,11 @@ pub(crate) async fn flush_ingest_batch(
     let mut batch = StoreWriteBatch::new();
     for (key, value) in keys.iter().zip(values.iter()) {
         batch
-            .push(client, key, value)
+            .push(client.key_prefix(), key, value)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
     }
     let token = batch
-        .commit(client)
+        .commit(client.client())
         .await
         .map_err(|e| DataFusionError::External(Box::new(e)))?;
     keys.clear();
@@ -975,12 +982,16 @@ pub(crate) async fn flush_ingest_batch(
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
+    use exoware_sdk::StoreClient;
 
     use super::*;
 
     #[test]
     fn store_batch_upload_stage_preserves_rows_for_failed_retry() {
-        let writer = BatchWriter::new(StoreClient::new("http://127.0.0.1:1"), &[]);
+        let writer = BatchWriter::new(
+            PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:1")),
+            &[],
+        );
         let mut prepared = PreparedBatch {
             request_id: 7,
             entry_count: 2,

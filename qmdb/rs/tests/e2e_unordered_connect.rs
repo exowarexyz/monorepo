@@ -31,7 +31,7 @@ use exoware_qmdb::{
     QmdbError, UnorderedClient, UnorderedConnectClient, UnorderedWriter, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::StoreClient;
+use exoware_sdk::{PrefixedStoreClient, StoreClient};
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
@@ -431,25 +431,24 @@ async fn build_fixed_local_batch() -> FixedLocalBatch {
 
 async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
     let writer: UnorderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>> =
-        UnorderedWriter::empty(client.clone());
-    common::commit_unordered_upload(client, &writer, &batch.operations)
+        UnorderedWriter::fresh(PrefixedStoreClient::empty(client.clone()));
+    common::commit_unordered_upload(&writer, &batch.operations)
         .await
         .expect("commit upload");
 }
 
 async fn commit_mmb_upload(client: &StoreClient, batch: &MmbLocalBatch) {
     let writer: UnorderedWriter<mmb::Family, Sha256, Vec<u8>, Vec<u8>> =
-        UnorderedWriter::empty(client.clone());
-    common::commit_unordered_upload(client, &writer, &batch.operations)
+        UnorderedWriter::fresh(PrefixedStoreClient::empty(client.clone()));
+    common::commit_unordered_upload(&writer, &batch.operations)
         .await
         .expect("commit upload");
 }
 
 async fn commit_fixed_upload(client: &StoreClient, batch: &FixedLocalBatch) {
     let writer: UnorderedWriter<mmr::Family, Sha256, Digest, Vec<u8>> =
-        UnorderedWriter::empty(client.clone());
+        UnorderedWriter::fresh(PrefixedStoreClient::empty(client.clone()));
     common::commit_unordered_current_upload::<_, _, _, _, N, _>(
-        client,
         &writer,
         &batch.operations,
         &batch.current_boundary,
@@ -481,7 +480,10 @@ fn latest_fixed_operation_for_key(
 #[tokio::test]
 async fn unordered_range_stack_does_not_expose_key_lookup_or_ordered_range_services() {
     let (_dir, _store_server, store_client) = common::local_store_client().await;
-    let unordered_client = Arc::new(TestUnorderedClient::from_client(store_client, op_cfg()));
+    let unordered_client = Arc::new(TestUnorderedClient::new(
+        PrefixedStoreClient::empty(store_client),
+        op_cfg(),
+    ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_range_server(unordered_client).await;
 
     let err = key_lookup_rpc_client(&qmdb_url)
@@ -512,7 +514,10 @@ async fn unordered_connect_get_operation_range_returns_verifiable_proof() {
     let local = build_local_batch().await;
     commit_upload(&store_client, &local).await;
 
-    let unordered_client = Arc::new(TestUnorderedClient::from_client(store_client, op_cfg()));
+    let unordered_client = Arc::new(TestUnorderedClient::new(
+        PrefixedStoreClient::empty(store_client),
+        op_cfg(),
+    ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_range_server(unordered_client).await;
     let client = validated_client(&qmdb_url);
 
@@ -543,8 +548,8 @@ async fn unordered_connect_get_many_returns_present_key_proofs() {
     let local = build_fixed_local_batch().await;
     commit_fixed_upload(&store_client, &local).await;
 
-    let unordered_client = Arc::new(FixedTestUnorderedClient::from_client(
-        store_client,
+    let unordered_client = Arc::new(FixedTestUnorderedClient::new(
+        PrefixedStoreClient::empty(store_client),
         fixed_op_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_full_server(unordered_client).await;
@@ -593,8 +598,8 @@ async fn unordered_current_operation_range_connect_returns_verifiable_proof() {
     let local = build_fixed_local_batch().await;
     commit_fixed_upload(&store_client, &local).await;
 
-    let unordered_client = Arc::new(FixedTestUnorderedClient::from_client(
-        store_client,
+    let unordered_client = Arc::new(FixedTestUnorderedClient::new(
+        PrefixedStoreClient::empty(store_client),
         fixed_op_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_full_server(unordered_client).await;
@@ -631,8 +636,8 @@ async fn unordered_connect_omits_missing_and_rejects_duplicate_range_and_stale_r
     let local = build_fixed_local_batch().await;
     commit_fixed_upload(&store_client, &local).await;
 
-    let unordered_client = Arc::new(FixedTestUnorderedClient::from_client(
-        store_client,
+    let unordered_client = Arc::new(FixedTestUnorderedClient::new(
+        PrefixedStoreClient::empty(store_client),
         fixed_op_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_full_server(unordered_client).await;
@@ -704,8 +709,8 @@ async fn unordered_connect_subscribe_emits_verifiable_range_proof() {
         *local.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
-    let unordered_client = Arc::new(TestUnorderedClient::from_client(
-        store_client.clone(),
+    let unordered_client = Arc::new(TestUnorderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         op_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_range_server(unordered_client).await;
@@ -747,8 +752,8 @@ async fn unordered_mmb_connect_subscribe_emits_verifiable_range_proof() {
         *local.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
-    let unordered_client = Arc::new(MmbTestUnorderedClient::from_client(
-        store_client.clone(),
+    let unordered_client = Arc::new(MmbTestUnorderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         mmb_op_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_range_server(unordered_client).await;
@@ -788,8 +793,8 @@ async fn unordered_connect_client_rejects_invalid_streamed_proof() {
     let local = build_local_batch().await;
     commit_upload(&store_client, &local).await;
 
-    let unordered_client = Arc::new(TestUnorderedClient::from_client(
-        store_client.clone(),
+    let unordered_client = Arc::new(TestUnorderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         op_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_range_server(unordered_client).await;
