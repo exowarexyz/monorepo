@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use exoware_sdk::keys::{Key, KeyCodec};
+use exoware_sdk::keys::{Key, KeyPrefix};
 use exoware_sdk::kv_codec::{eval_predicate, KvPredicate, KvPredicateCheck, StoredRow};
 
 use crate::aggregate::{
@@ -44,7 +44,7 @@ pub(crate) struct EncodedIndexPredicateCheck {
 
 #[derive(Clone)]
 pub(crate) struct EncodedIndexPredicatePlan {
-    pub(crate) codec: KeyCodec,
+    pub(crate) codec: KeyPrefix,
     pub(crate) checks: Vec<EncodedIndexPredicateCheck>,
     pub(crate) impossible: bool,
 }
@@ -54,14 +54,15 @@ impl EncodedIndexPredicatePlan {
         if self.impossible {
             return false;
         }
+        let Ok(payload) = self.codec.strip(key) else {
+            return false;
+        };
         for check in &self.checks {
-            let Ok(field) = self
-                .codec
-                .read_payload(key, check.payload_offset, check.width)
+            let Some(field) = payload.get(check.payload_offset..check.payload_offset + check.width)
             else {
                 return false;
             };
-            if !matches_encoded_constraint(&field, &check.constraint) {
+            if !matches_encoded_constraint(field, &check.constraint) {
                 return false;
             }
         }
@@ -212,7 +213,7 @@ impl ScanAccessPlan {
             || model.primary_key_kinds.contains(&ColumnKind::Utf8)
         {
             return IndexPredicatePlan::Encoded(EncodedIndexPredicatePlan {
-                codec: spec.codec,
+                codec: spec.codec.clone(),
                 checks: Vec::new(),
                 impossible: false,
             });
@@ -233,7 +234,7 @@ impl ScanAccessPlan {
         }
 
         let mut plan = EncodedIndexPredicatePlan {
-            codec: spec.codec,
+            codec: spec.codec.clone(),
             checks: Vec::new(),
             impossible: false,
         };

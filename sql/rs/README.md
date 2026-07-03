@@ -463,38 +463,38 @@ an `IN` list.
 
 ## Key layout
 
-`exoware-sql` now uses codec-backed bit-packed prefixes rather than a whole leading
-byte for key kind metadata.
+`exoware-sql` uses a uniform two-byte family prefix `[table_prefix, discriminator]`
+for key kind metadata. `discriminator = 0x00` is the primary-row family; a
+secondary index in slot `s` uses `discriminator = s + 1` (`0x01..=0xFF`).
 
 Current layout:
 
 - Base row / primary key:
-  - reserved prefix bits: `[table_id(4)][kind=0(1)]`
-  - remaining bits: ordered primary-key payload bytes
+  - family prefix: `[table_prefix][0x00]`
+  - remaining bytes: ordered primary-key payload bytes
 - Secondary index:
-  - reserved prefix bits: `[table_id(4)][kind=1(1)][index_id(4)]`
-  - remaining bits: ordered index payload bytes, then ordered primary-key bytes
+  - family prefix: `[table_prefix][index_id]`
+  - remaining bytes: ordered index payload bytes, then ordered primary-key bytes
 
-This leaves room for payload entropy in the 12-bit partition prefix instead of
-spending the whole prefix on metadata:
-
-- primary keys contribute 7 payload bits to the 12-bit partition prefix
-- secondary index keys contribute 3 payload bits to the 12-bit partition prefix
+Every family is the same length, so all families are pairwise disjoint. The
+primary family (`0x00`) sorts before all indexes of the same table, and the
+table byte is the major sort order.
 
 Logical structure:
 
-- Base row: `[prefix_bits][pk_col_1][pk_col_2]...[zero_pad]`
-- Secondary index: `[prefix_bits][idx_cols...][pk_cols...][zero_pad]`
+- Base row: `[table_prefix][0x00][pk_col_1][pk_col_2]...`
+- Secondary index: `[table_prefix][index_id][idx_cols...][pk_cols...]`
 
 ### Current codec limits
 
-The current bit budget is intentionally compact and supports:
+The layout supports:
 
-- up to 16 tables per `KvSchema`
-- up to 15 secondary indexes per table
+- up to 256 tables per `KvSchema`
+- up to 255 secondary indexes per table
 
-If you need a larger table or index budget, adjust the codec bit allocation in
-`exoware-sql` rather than depending on the current raw prefix shape.
+These use the full one-byte-each capacity of the two-byte family prefix (a table
+byte plus a discriminator byte holding one primary family and 255 index slots).
+To go beyond this, extend the family prefix.
 
 ## Covering indexes (performance-critical)
 

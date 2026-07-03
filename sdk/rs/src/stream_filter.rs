@@ -1,8 +1,8 @@
 //! Validated filter for `log.stream.v1.Subscribe`.
 //!
 //! The filter is a list of `Selector`s with OR semantics: a row is delivered
-//! if any selector's (reserved_bits, prefix) selects its family AND its
-//! payload_regex matches the key's payload bytes. The list is capped at 16 to
+//! if any selector's byte prefix selects its family AND its payload_regex
+//! matches the key's payload bytes. The list is capped at 16 to
 //! keep server-side regex compile cost predictable. When `value_filters` is
 //! non-empty, rows that pass the key filter must also satisfy any one
 //! `Filter` in the value list (OR within the value list; AND between key
@@ -14,7 +14,7 @@ use anyhow::ensure;
 use bytes::Bytes;
 use regex::bytes::Regex;
 
-use crate::keys::KeyCodec;
+use crate::keys::KeyPrefix;
 use crate::selector::Selector;
 
 pub const MAX_SELECTORS_PER_FILTER: usize = 16;
@@ -103,15 +103,8 @@ pub fn validate_filter(filter: &StreamFilter) -> anyhow::Result<()> {
         "stream filter capped at {MAX_VALUE_FILTERS_PER_FILTER} value_filters"
     );
     for selector in &filter.selectors {
-        // Panics on invalid (reserved_bits, prefix); translate to Err.
-        std::panic::catch_unwind(|| KeyCodec::new(selector.reserved_bits, selector.prefix))
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "invalid (reserved_bits={}, prefix={}) — see KeyCodec::new",
-                    selector.reserved_bits,
-                    selector.prefix
-                )
-            })?;
+        KeyPrefix::new(selector.prefix.clone())
+            .map_err(|e| anyhow::anyhow!("invalid selector prefix: {e}"))?;
         ensure!(
             !selector.payload_regex.trim().is_empty(),
             "selector payload_regex must not be empty"
@@ -133,10 +126,9 @@ mod tests {
     use super::*;
     use crate::kv_codec::Utf8;
 
-    fn selector(prefix: u16) -> Selector {
+    fn selector(prefix: u8) -> Selector {
         Selector {
-            reserved_bits: 4,
-            prefix,
+            prefix: Bytes::copy_from_slice(&[prefix]),
             payload_regex: Utf8::from("(?s).*"),
         }
     }
@@ -162,7 +154,7 @@ mod tests {
     #[test]
     fn rejects_too_many() {
         let f = StreamFilter {
-            selectors: (0..(MAX_SELECTORS_PER_FILTER as u16 + 1))
+            selectors: (0..(MAX_SELECTORS_PER_FILTER as u8 + 1))
                 .map(selector)
                 .collect(),
             value_filters: vec![],
@@ -174,8 +166,7 @@ mod tests {
     fn rejects_empty_regex() {
         let f = StreamFilter {
             selectors: vec![Selector {
-                reserved_bits: 4,
-                prefix: 1,
+                prefix: Bytes::copy_from_slice(&[1]),
                 payload_regex: Utf8::from(""),
             }],
             value_filters: vec![],

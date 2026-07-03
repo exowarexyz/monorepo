@@ -2,20 +2,30 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::{i256, DataType, Field, Schema, SchemaRef, TimeUnit};
-use exoware_sdk::keys::{Key, KeyCodec};
+use exoware_sdk::keys::{Key, KeyPrefix};
 use exoware_sdk::PrefixedStoreClient;
 
-use crate::codec::{primary_key_codec, secondary_index_codec};
+use crate::codec::{primary_key_prefix, secondary_index_prefix};
 
-pub(crate) const TABLE_PREFIX_BITS: u8 = 4;
-pub(crate) const KEY_KIND_BITS: u8 = 1;
-pub(crate) const PRIMARY_RESERVED_BITS: u8 = TABLE_PREFIX_BITS + KEY_KIND_BITS;
-pub(crate) const INDEX_SLOT_BITS: u8 = 4;
-pub(crate) const INDEX_FAMILY_BITS: u8 = TABLE_PREFIX_BITS + KEY_KIND_BITS + INDEX_SLOT_BITS;
-pub(crate) const PRIMARY_KEY_BIT_OFFSET: usize = PRIMARY_RESERVED_BITS as usize;
-pub(crate) const INDEX_KEY_BIT_OFFSET: usize = INDEX_FAMILY_BITS as usize;
-pub(crate) const MAX_TABLES: usize = 1usize << TABLE_PREFIX_BITS;
-pub(crate) const MAX_INDEX_SPECS: usize = (1usize << INDEX_SLOT_BITS) - 1;
+/// Every table/index family is named by a fixed two-byte prefix
+/// `[table_prefix, discriminator]`: discriminator `0x00` is the primary-row
+/// family and `0x01..=0xFF` names secondary index slot `discriminator - 1`.
+/// Equal-length prefixes keep all families pairwise disjoint, and the primary
+/// discriminator (`0`) sorts below every index of the same table.
+pub(crate) const FAMILY_PREFIX_LEN: usize = 2;
+/// Discriminator byte for a table's primary-row family.
+pub(crate) const PRIMARY_FAMILY_DISCRIMINATOR: u8 = 0x00;
+/// Byte offset of the first payload byte within a primary/index key, measured
+/// from the store-stripped key (i.e. after the family prefix). Both families
+/// share the same two-byte prefix, so both offsets are `FAMILY_PREFIX_LEN`.
+pub(crate) const PRIMARY_KEY_BYTE_OFFSET: usize = FAMILY_PREFIX_LEN;
+pub(crate) const INDEX_KEY_BYTE_OFFSET: usize = FAMILY_PREFIX_LEN;
+/// Capacity caps for the two-byte family prefix. The table byte and the
+/// discriminator byte each occupy a full byte, giving up to 256 tables and 255
+/// secondary index slots (discriminator `0x00` is reserved for the primary
+/// family).
+pub(crate) const MAX_TABLES: usize = 256;
+pub(crate) const MAX_INDEX_SPECS: usize = 255;
 pub(crate) const STRING_KEY_INLINE_LIMIT: usize = 15;
 pub(crate) const STRING_KEY_TERMINATOR: u8 = 0x00;
 pub(crate) const STRING_KEY_ESCAPE_PREFIX: u8 = 0x01;
@@ -309,7 +319,7 @@ impl KvTableConfig {
             }
             total_pk_width += kind.key_width();
         }
-        if total_pk_width > primary_key_codec(table_prefix)?.payload_capacity_bytes() {
+        if total_pk_width > primary_key_prefix(table_prefix)?.max_payload_len() {
             return Err(format!(
                 "composite primary key is too wide ({total_pk_width} bytes) for codec payload"
             ));
@@ -352,7 +362,7 @@ pub(crate) struct ResolvedColumn {
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedIndexSpec {
     pub(crate) id: u8,
-    pub(crate) codec: KeyCodec,
+    pub(crate) codec: KeyPrefix,
     pub(crate) name: String,
     pub(crate) layout: IndexLayout,
     pub(crate) key_columns: Vec<usize>,
@@ -363,7 +373,7 @@ pub(crate) struct ResolvedIndexSpec {
 #[derive(Debug, Clone)]
 pub(crate) struct TableModel {
     pub(crate) table_prefix: u8,
-    pub(crate) primary_key_codec: KeyCodec,
+    pub(crate) primary_key_prefix: KeyPrefix,
     pub(crate) schema: SchemaRef,
     pub(crate) columns: Vec<ResolvedColumn>,
     pub(crate) columns_by_name: HashMap<String, usize>,
@@ -403,7 +413,7 @@ impl TableModel {
 
         Ok(Self {
             table_prefix: config.table_prefix,
-            primary_key_codec: primary_key_codec(config.table_prefix)?,
+            primary_key_prefix: primary_key_prefix(config.table_prefix)?,
             schema,
             columns,
             columns_by_name,
@@ -492,8 +502,8 @@ impl TableModel {
                     value_column_mask[col_idx] = true;
                 }
             }
-            let codec = secondary_index_codec(self.table_prefix, id)?;
-            if key_columns_width + self.primary_key_width > codec.payload_capacity_bytes() {
+            let prefix = secondary_index_prefix(self.table_prefix, id)?;
+            if key_columns_width + self.primary_key_width > prefix.max_payload_len() {
                 return Err(format!(
                     "index '{}' key layout too wide for codec payload",
                     spec.name
@@ -502,7 +512,7 @@ impl TableModel {
 
             out.push(ResolvedIndexSpec {
                 id,
-                codec,
+                codec: prefix,
                 name: spec.name.clone(),
                 layout: spec.layout,
                 key_columns,

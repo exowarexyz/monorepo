@@ -1426,7 +1426,7 @@ pub mod policy_retain {
     #[doc(inline)]
     pub use super::__buffa::view::oneof::policy_retain::Kind as KindView;
 }
-/// User-key-space scope: scan a KeyCodec family by `selector`, partition
+/// User-key-space scope: scan a key-prefix family by `selector`, partition
 /// matched keys into `group_by` groups, order within each group by
 /// `order_by`, then apply `retain` to decide which keys to delete.
 #[derive(Clone, PartialEq, Default)]
@@ -2125,7 +2125,7 @@ pub mod policy {
 #[serde(default)]
 pub struct PruneRequest {
     /// One or more prune policies to apply. At least one is required. UserKeys
-    /// policies must not share the same (reserved_bits, prefix) pair.
+    /// policies must not share the same key prefix.
     ///
     /// Field 1: `policies`
     #[serde(
@@ -4014,7 +4014,7 @@ pub mod __buffa {
                 this
             }
         }
-        /// User-key-space scope: scan a KeyCodec family by `selector`, partition
+        /// User-key-space scope: scan a key-prefix family by `selector`, partition
         /// matched keys into `group_by` groups, order within each group by
         /// `order_by`, then apply `retain` to decide which keys to delete.
         #[derive(Clone, Debug, Default)]
@@ -4892,7 +4892,7 @@ pub mod __buffa {
         #[derive(Clone, Debug, Default)]
         pub struct PruneRequestView<'a> {
             /// One or more prune policies to apply. At least one is required. UserKeys
-            /// policies must not share the same (reserved_bits, prefix) pair.
+            /// policies must not share the same key prefix.
             ///
             /// Field 1: `policies`
             pub policies: ::buffa::RepeatedView<

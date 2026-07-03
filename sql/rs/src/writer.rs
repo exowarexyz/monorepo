@@ -193,9 +193,10 @@ impl BatchWriter {
         prepared: &PreparedBatch,
         batch: &mut StoreWriteBatch,
     ) -> DataFusionResult<()> {
+        let key_prefix = self.client.key_prefix();
         for (key, value) in prepared.keys.iter().zip(prepared.values.iter()) {
             batch
-                .push(self.client.key_prefix(), key, value)
+                .push(&key_prefix, key, value)
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
         }
         Ok(())
@@ -965,9 +966,10 @@ pub(crate) async fn flush_ingest_batch(
         return Ok(0);
     }
     let mut batch = StoreWriteBatch::new();
+    let key_prefix = client.key_prefix();
     for (key, value) in keys.iter().zip(values.iter()) {
         batch
-            .push(client.key_prefix(), key, value)
+            .push(&key_prefix, key, value)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
     }
     let token = batch

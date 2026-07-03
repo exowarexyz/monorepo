@@ -47,7 +47,7 @@ mod tests {
     use datafusion::physical_plan::limit::GlobalLimitExec;
     use datafusion::physical_plan::ExecutionPlan;
     use datafusion::prelude::SessionContext;
-    use exoware_sdk::keys::{Key, KeyCodec};
+    use exoware_sdk::keys::{Key, KeyPrefix};
     use exoware_sdk::kv_codec::{
         canonicalize_reduced_group_values, decode_stored_row, encode_reduced_group_key,
         eval_predicate, KvReducedValue, StoredRow,
@@ -109,27 +109,28 @@ mod tests {
         TableModel::from_config(&config).unwrap()
     }
 
-    fn codec_payload(codec: KeyCodec, key: &Key, offset: usize, len: usize) -> Vec<u8> {
-        codec.read_payload(key, offset, len).expect("codec payload")
+    fn codec_payload(prefix: &KeyPrefix, key: &Key, offset: usize, len: usize) -> Vec<u8> {
+        let payload = prefix.strip(key).expect("codec payload");
+        payload[offset..offset + len].to_vec()
     }
 
     fn primary_payload(model: &TableModel, key: &Key, offset: usize, len: usize) -> Vec<u8> {
-        codec_payload(model.primary_key_codec, key, offset, len)
+        codec_payload(&model.primary_key_prefix, key, offset, len)
     }
 
     fn index_payload(spec: &ResolvedIndexSpec, key: &Key, offset: usize, len: usize) -> Vec<u8> {
-        codec_payload(spec.codec, key, offset, len)
+        codec_payload(&spec.codec, key, offset, len)
     }
 
     fn matches_primary_key(table_prefix: u8, key: &Key) -> bool {
-        primary_key_codec(table_prefix)
-            .expect("primary codec")
+        primary_key_prefix(table_prefix)
+            .expect("primary prefix")
             .matches(key)
     }
 
     fn matches_secondary_index_key(table_prefix: u8, index_id: u8, key: &Key) -> bool {
-        secondary_index_codec(table_prefix, index_id)
-            .expect("secondary codec")
+        secondary_index_prefix(table_prefix, index_id)
+            .expect("secondary prefix")
             .matches(key)
     }
 
@@ -2274,7 +2275,8 @@ mod tests {
             "lower bound must not exceed upper bound (was wrapping via as i32)"
         );
 
-        let encoded_lower = specs[0].codec.read_payload_exact::<4>(&start, 0).unwrap();
+        let lower_payload = specs[0].codec.strip(&start).unwrap();
+        let encoded_lower: [u8; 4] = lower_payload[..4].try_into().unwrap();
         let decoded_lower = decode_i32_ordered(encoded_lower);
         assert_eq!(
             decoded_lower,
@@ -2527,7 +2529,7 @@ mod tests {
     }
 
     #[test]
-    fn codec_layout_exposes_payload_bits_under_reserved_family_bits() {
+    fn codec_layout_places_payload_bytes_after_family_prefix() {
         let config = KvTableConfig::new(
             0,
             vec![
@@ -2544,14 +2546,11 @@ mod tests {
             .unwrap()
             .remove(0);
 
-        let mut current_primary = HashSet::new();
-        let mut current_secondary = HashSet::new();
+        let primary_prefix = primary_key_prefix(model.table_prefix).unwrap();
+        let index_prefix = secondary_index_prefix(model.table_prefix, spec.id).unwrap();
 
-        fn first_twelve_bits_of_key(key: &[u8]) -> u16 {
-            let first = u16::from(*key.first().unwrap_or(&0));
-            let second = u16::from(*key.get(1).unwrap_or(&0));
-            (first << 4) | (second >> 4)
-        }
+        let mut primary_payload_bytes = HashSet::new();
+        let mut secondary_payload_bytes = HashSet::new();
 
         for first_byte in 0u8..=255 {
             let mut id = vec![0u8; 16];
@@ -2560,8 +2559,11 @@ mod tests {
             bucket[0] = first_byte;
 
             let pk = CellValue::FixedBinary(id.clone());
-            let current_pk = encode_primary_key(model.table_prefix, &[&pk], &model).unwrap();
-            current_primary.insert(first_twelve_bits_of_key(&current_pk));
+            let primary = encode_primary_key(model.table_prefix, &[&pk], &model).unwrap();
+            // The family prefix bytes are fixed; the payload begins byte-aligned
+            // immediately after them.
+            assert_eq!(&primary[..2], primary_prefix.as_bytes().as_ref());
+            primary_payload_bytes.insert(primary[2]);
 
             let row = KvRow {
                 values: vec![
@@ -2569,18 +2571,16 @@ mod tests {
                     CellValue::FixedBinary(bucket.clone()),
                 ],
             };
-            let current_index =
+            let index =
                 encode_secondary_index_key(model.table_prefix, &spec, &model, &row).unwrap();
-            current_secondary.insert(first_twelve_bits_of_key(&current_index));
+            assert_eq!(&index[..2], index_prefix.as_bytes().as_ref());
+            secondary_payload_bytes.insert(index[2]);
         }
 
-        // Primary keys reserve 5 high bits for family, leaving 7 payload bits in the first
-        // 12 bits of the physical key. Varying one payload byte therefore spans 2^7 values.
-        assert_eq!(current_primary.len(), 128);
-
-        // Secondary index keys reserve 9 high bits for family, leaving 3 payload bits in the
-        // first 12 bits. Varying one payload byte therefore spans 2^3 values.
-        assert_eq!(current_secondary.len(), 8);
+        // Both families use a byte-aligned two-byte prefix, so varying the first
+        // payload byte spans all 256 values in the byte right after the prefix.
+        assert_eq!(primary_payload_bytes.len(), 256);
+        assert_eq!(secondary_payload_bytes.len(), 256);
     }
 
     #[test]
@@ -3119,7 +3119,7 @@ mod tests {
         )
         .unwrap();
         let model = TableModel::from_config(&config).unwrap();
-        let capacity = model.primary_key_codec.payload_capacity_bytes();
+        let capacity = model.primary_key_prefix.max_payload_len();
         let a = "a".repeat(capacity - 10);
         let b = "b".repeat(10);
         let a_width = encode_string_variable(&a).expect("a should encode").len();
@@ -4080,7 +4080,7 @@ mod tests {
             &model,
             &upper,
             24,
-            model.primary_key_codec.payload_capacity_bytes() - 24
+            model.primary_key_prefix.max_payload_len() - 24
         )
         .iter()
         .all(|&b| b == 0xFF));
@@ -4172,7 +4172,7 @@ mod tests {
                 &model,
                 &range.end,
                 model.primary_key_width,
-                model.primary_key_codec.payload_capacity_bytes() - model.primary_key_width
+                model.primary_key_prefix.max_payload_len() - model.primary_key_width
             )
             .iter()
             .all(|&b| b == 0xFF),
@@ -4221,7 +4221,7 @@ mod tests {
                 &model,
                 &range.end,
                 16,
-                model.primary_key_codec.payload_capacity_bytes() - 16
+                model.primary_key_prefix.max_payload_len() - 16
             )
             .iter()
             .all(|&b| b == 0xFF),
@@ -4635,7 +4635,7 @@ mod tests {
         )
         .unwrap();
         let model = TableModel::from_config(&config).unwrap();
-        let max_payload = model.primary_key_codec.payload_capacity_bytes();
+        let max_payload = model.primary_key_prefix.max_payload_len();
         let max_value = "a".repeat(max_payload - 1);
         let overflow_value = "a".repeat(max_payload);
 
@@ -4663,7 +4663,7 @@ mod tests {
             &model,
         )
         .expect_err("UTF-8 PK exceeding codec payload should be rejected");
-        assert!(err.contains("primary key payload exceeds codec payload capacity 253 bytes"));
+        assert!(err.contains("primary key payload exceeds codec payload capacity 252 bytes"));
     }
 
     #[test]
@@ -4733,7 +4733,7 @@ mod tests {
         let model = TableModel::from_config(&config).unwrap();
         let specs = model.resolve_index_specs(&config.index_specs).unwrap();
         let spec = &specs[0];
-        let max_payload = spec.codec.payload_capacity_bytes();
+        let max_payload = spec.codec.max_payload_len();
         let max_tag = "t".to_string();
         let max_id = "i".repeat(max_payload - encode_string_variable(&max_tag).unwrap().len() - 1);
         let overflow_id = format!("{max_id}x");
@@ -4789,7 +4789,7 @@ mod tests {
         let model = TableModel::from_config(&config).unwrap();
         let specs = model.resolve_index_specs(&config.index_specs).unwrap();
         let spec = &specs[0];
-        let max_payload = spec.codec.payload_capacity_bytes();
+        let max_payload = spec.codec.max_payload_len();
         let max_tag = "t".to_string();
         let max_id = "i".repeat(max_payload - encode_string_variable(&max_tag).unwrap().len() - 1);
         let overflow_id = format!("{max_id}x");
@@ -5408,11 +5408,11 @@ mod tests {
         }
 
         let resume_payload = model
-            .primary_key_codec
-            .read_payload(&resume_key, 0, model.primary_key_width)
+            .primary_key_prefix
+            .strip(&resume_key)
             .expect("resume payload");
-        let wrong_prefix = secondary_index_codec(model.table_prefix, 1)
-            .expect("secondary codec")
+        let wrong_prefix = secondary_index_prefix(model.table_prefix, 1)
+            .expect("secondary prefix")
             .encode(&resume_payload)
             .expect("wrong prefix key");
         let err = backfill_schema
@@ -6797,9 +6797,9 @@ mod tests {
         schema.register_all(&ctx).expect("register");
 
         let oversized = "a".repeat(
-            primary_key_codec(0)
-                .expect("primary-key codec")
-                .payload_capacity_bytes(),
+            primary_key_prefix(0)
+                .expect("primary-key prefix")
+                .max_payload_len(),
         );
         let sql = format!("SELECT id FROM items WHERE id = '{oversized}'");
 

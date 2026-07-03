@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use exoware_sdk::keys::{Key, KeyCodec};
+use exoware_sdk::keys::{Key, KeyPrefix};
 use exoware_sdk::kv_codec::Utf8;
 use exoware_sdk::prune_policy::{PolicyScope, PrunePolicy, RetainPolicy};
 use exoware_sdk::selector::Selector;
@@ -19,15 +19,16 @@ async fn spawn_client() -> PrefixedStoreClient {
     PrefixedStoreClient::empty(client)
 }
 
-fn key(family: u16, payload: &[u8]) -> Key {
-    KeyCodec::new(4, family).encode(payload).expect("encode")
+fn key(family: u8, payload: &[u8]) -> Key {
+    KeyPrefix::from_byte(family)
+        .encode(payload)
+        .expect("encode")
 }
 
-fn filter(family: u16) -> StreamFilter {
+fn filter(family: u8) -> StreamFilter {
     StreamFilter {
         selectors: vec![Selector {
-            reserved_bits: 4,
-            prefix: family,
+            prefix: Bytes::from(vec![family]),
             payload_regex: Utf8::from("(?s).*"),
         }],
         value_filters: vec![],
@@ -112,13 +113,11 @@ async fn multiple_selectors_delivered_once_per_put() {
     let f = StreamFilter {
         selectors: vec![
             Selector {
-                reserved_bits: 4,
-                prefix: 1,
+                prefix: Bytes::from(vec![1]),
                 payload_regex: Utf8::from("(?s).*"),
             },
             Selector {
-                reserved_bits: 4,
-                prefix: 2,
+                prefix: Bytes::from(vec![2]),
                 payload_regex: Utf8::from("(?s).*"),
             },
         ],
@@ -421,8 +420,7 @@ async fn value_filter_restricts_to_matching_values() {
     let client = spawn_client().await;
     let f = StreamFilter {
         selectors: vec![Selector {
-            reserved_bits: 4,
-            prefix: 1,
+            prefix: Bytes::from(vec![1]),
             payload_regex: Utf8::from("(?s).*"),
         }],
         value_filters: vec![Filter::Regex("^keep.*$".into())],

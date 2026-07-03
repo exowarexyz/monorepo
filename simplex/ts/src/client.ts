@@ -648,8 +648,7 @@ function u64FromKey(key: Uint8Array): bigint {
 
 function streamMatchKind(kind: SimplexRecordKind) {
   return {
-    reservedBits: 16,
-    prefix: (FORMAT_VERSION << 8) | kind,
+    prefix: new Uint8Array([FORMAT_VERSION, kind]),
     payloadRegex: STREAM_PAYLOAD_REGEX,
   };
 }

@@ -34,8 +34,6 @@ import {
     SubscribeRequestSchema,
 } from './gen/ts/log/v1/stream_pb.js';
 
-const STREAM_SERVER_PAYLOAD_REGEX = '(?s-u).*';
-
 type DetailObserver = (detail: Detail) => void;
 
 export { TraversalMode };
@@ -72,98 +70,20 @@ export interface StoreBatch {
 
 const MAX_KEY_LEN = 254;
 
-function prefixMask(bits: number): number {
-    if (!Number.isInteger(bits) || bits < 0 || bits > 16) {
-        throw new RangeError(`reservedBits must be an integer in [0, 16], got ${bits}`);
-    }
-    return bits === 0 ? 0 : (1 << bits) - 1;
-}
-
-function validatePrefix(reservedBits: number, prefix: number): void {
-    const mask = prefixMask(reservedBits);
-    if (!Number.isInteger(prefix) || prefix < 0 || prefix > mask) {
-        throw new RangeError(`prefix ${prefix} does not fit in ${reservedBits} reserved bits`);
-    }
-}
-
-function minKeyLenForPayload(reservedBits: number, payloadLen: number): number {
-    return Math.ceil((reservedBits + payloadLen * 8) / 8);
-}
-
-function payloadCapacityForKeyLen(reservedBits: number, keyLen: number): number {
-    return Math.floor((keyLen * 8 - reservedBits) / 8);
-}
-
-function readBitBe(bytes: Uint8Array, bitIdx: number): boolean {
-    const byteIdx = Math.floor(bitIdx / 8);
-    const bitInByte = 7 - (bitIdx % 8);
-    return byteIdx < bytes.length && ((bytes[byteIdx] >> bitInByte) & 1) !== 0;
-}
-
-function writeBitBe(bytes: Uint8Array, bitIdx: number, value: boolean): void {
-    const byteIdx = Math.floor(bitIdx / 8);
-    const bitInByte = 7 - (bitIdx % 8);
-    const mask = 1 << bitInByte;
-    if (value) {
-        bytes[byteIdx] |= mask;
-    } else {
-        bytes[byteIdx] &= ~mask;
-    }
-}
-
-function writePrefixBits(bytes: Uint8Array, reservedBits: number, prefix: number): void {
-    for (let bitIdx = 0; bitIdx < reservedBits; bitIdx++) {
-        const shift = reservedBits - 1 - bitIdx;
-        writeBitBe(bytes, bitIdx, ((prefix >> shift) & 1) !== 0);
-    }
-}
-
-function readPrefixBits(bytes: Uint8Array, reservedBits: number): number {
-    let prefix = 0;
-    for (let bitIdx = 0; bitIdx < reservedBits; bitIdx++) {
-        prefix <<= 1;
-        if (readBitBe(bytes, bitIdx)) {
-            prefix |= 1;
-        }
-    }
-    return prefix;
-}
-
-function writeBitsFromBytes(
-    dst: Uint8Array,
-    dstBitOffset: number,
-    src: Uint8Array,
-    bitLen: number,
-): void {
-    for (let bitIdx = 0; bitIdx < bitLen; bitIdx++) {
-        writeBitBe(dst, dstBitOffset + bitIdx, readBitBe(src, bitIdx));
-    }
-}
-
-function readBitsToBytes(
-    src: Uint8Array,
-    srcBitOffset: number,
-    dst: Uint8Array,
-    bitLen: number,
-): void {
-    dst.fill(0);
-    for (let bitIdx = 0; bitIdx < bitLen; bitIdx++) {
-        writeBitBe(dst, bitIdx, readBitBe(src, srcBitOffset + bitIdx));
-    }
-}
-
 export class StoreKeyPrefix {
-    public readonly reservedBits: number;
-    public readonly prefix: number;
+    public readonly prefix: Uint8Array;
 
-    constructor(reservedBits: number, prefix: number) {
-        validatePrefix(reservedBits, prefix);
-        this.reservedBits = reservedBits;
+    constructor(prefix: Uint8Array) {
+        if (prefix.length > MAX_KEY_LEN) {
+            throw new RangeError(
+                `store key prefix length ${prefix.length} exceeds ${MAX_KEY_LEN}`,
+            );
+        }
         this.prefix = prefix;
     }
 
     maxLogicalKeyLen(): number {
-        return Math.floor((MAX_KEY_LEN * 8 - this.reservedBits) / 8);
+        return MAX_KEY_LEN - this.prefix.length;
     }
 
     encodeKey(key: Uint8Array): Uint8Array {
@@ -173,10 +93,9 @@ export class StoreKeyPrefix {
                 `logical key length ${key.length} exceeds prefixed capacity ${maxPayloadLen}`,
             );
         }
-        const totalLen = minKeyLenForPayload(this.reservedBits, key.length);
-        const out = new Uint8Array(totalLen);
-        writePrefixBits(out, this.reservedBits, this.prefix);
-        writeBitsFromBytes(out, this.reservedBits, key, key.length * 8);
+        const out = new Uint8Array(this.prefix.length + key.length);
+        out.set(this.prefix, 0);
+        out.set(key, this.prefix.length);
         return out;
     }
 
@@ -184,25 +103,26 @@ export class StoreKeyPrefix {
         if (!this.matches(key)) {
             throw new RangeError('key does not belong to this store prefix');
         }
-        const payloadLen = payloadCapacityForKeyLen(this.reservedBits, key.length);
-        const out = new Uint8Array(payloadLen);
-        readBitsToBytes(key, this.reservedBits, out, payloadLen * 8);
-        return out;
+        return key.subarray(this.prefix.length);
     }
 
     matches(key: Uint8Array): boolean {
-        return (
-            key.length >= Math.ceil(this.reservedBits / 8) &&
-            readPrefixBits(key, this.reservedBits) === this.prefix
-        );
+        if (key.length < this.prefix.length) {
+            return false;
+        }
+        for (let i = 0; i < this.prefix.length; i++) {
+            if (key[i] !== this.prefix[i]) {
+                return false;
+            }
+        }
+        return true;
     }
 
     prefixBounds(): { start: Uint8Array; end: Uint8Array } {
-        const start = new Uint8Array(Math.ceil(this.reservedBits / 8));
-        writePrefixBits(start, this.reservedBits, this.prefix);
+        const start = this.prefix.slice();
         const end = new Uint8Array(MAX_KEY_LEN);
         end.fill(0xff);
-        writePrefixBits(end, this.reservedBits, this.prefix);
+        end.set(this.prefix, 0);
         return { start, end };
     }
 
@@ -213,7 +133,7 @@ export class StoreKeyPrefix {
             physicalEnd = this.prefixBounds().end;
         } else {
             const maxLen = this.maxLogicalKeyLen();
-            physicalEnd = this.encodeKey(end.length > maxLen ? end.slice(0, maxLen) : end);
+            physicalEnd = this.encodeKey(end.length > maxLen ? end.subarray(0, maxLen) : end);
         }
         return { start: physicalStart, end: physicalEnd };
     }
@@ -222,27 +142,20 @@ export class StoreKeyPrefix {
         return this.prefixSelectorWithRegex(selector, selector.payloadRegex ?? '');
     }
 
-    prefixStreamSelector(selector: MessageInitShape<typeof SelectorSchema>): Selector {
-        return this.prefixSelectorWithRegex(selector, STREAM_SERVER_PAYLOAD_REGEX);
-    }
-
     private prefixSelectorWithRegex(
         selector: MessageInitShape<typeof SelectorSchema>,
         payloadRegex: string,
     ): Selector {
-        const logicalReservedBits = selector.reservedBits ?? 0;
-        const logicalPrefix = selector.prefix ?? 0;
-        validatePrefix(logicalReservedBits, logicalPrefix);
-        const reservedBits = this.reservedBits + logicalReservedBits;
-        if (reservedBits > 16) {
+        const logicalPrefix = selector.prefix ?? new Uint8Array();
+        const prefix = new Uint8Array(this.prefix.length + logicalPrefix.length);
+        prefix.set(this.prefix, 0);
+        prefix.set(logicalPrefix, this.prefix.length);
+        if (prefix.length > MAX_KEY_LEN) {
             throw new RangeError(
-                `combined reserved bits exceed 16: ${this.reservedBits} + ${logicalReservedBits}`,
+                `combined key prefix length ${prefix.length} exceeds ${MAX_KEY_LEN}`,
             );
         }
-        const prefix = (this.prefix << logicalReservedBits) | logicalPrefix;
-        validatePrefix(reservedBits, prefix);
         return create(SelectorSchema, {
-            reservedBits,
             prefix,
             payloadRegex,
         });
@@ -372,7 +285,6 @@ function toStoreBatch(
         entries: { key: Uint8Array; value: Uint8Array }[];
     },
     prefix?: StoreKeyPrefix,
-    logicalFilter?: ClientStreamFilter,
 ): StoreBatch {
     return {
         sequenceNumber: response.sequenceNumber,
@@ -386,7 +298,7 @@ function toStoreBatch(
                     value: entry.value,
                 },
             ];
-        }).filter((entry) => !logicalFilter || logicalFilter.matches(entry.key)),
+        }),
     };
 }
 
@@ -417,102 +329,21 @@ function prefixSubscribeFilters(
     if (!prefix) return filters;
     return {
         ...filters,
-        selectors: filters.selectors.map((selector) => prefix.prefixStreamSelector(selector)),
+        selectors: filters.selectors.map((selector) => prefix.prefixSelector(selector)),
     };
 }
 
-function bytesToBinaryString(bytes: Uint8Array): string {
-    let out = '';
-    for (const byte of bytes) {
-        out += String.fromCharCode(byte);
-    }
-    return out;
-}
-
-function compileRustBytesRegex(pattern: string): RegExp {
-    if (pattern.trim() === '') {
-        throw new RangeError('regex filter must not be empty');
-    }
-    let source = pattern;
-    let flags = '';
-    const inlineFlags = source.match(/^\(\?([A-Za-z-]+)\)/);
-    if (inlineFlags) {
-        const [enabled] = inlineFlags.slice(1);
-        let disabling = false;
-        for (const flag of enabled) {
-            if (flag === '-') {
-                disabling = true;
-                continue;
-            }
-            if (flag === 's' || flag === 'i' || flag === 'm') {
-                if (disabling) {
-                    flags = flags.replace(flag, '');
-                } else if (!flags.includes(flag)) {
-                    flags += flag;
-                }
-                continue;
-            }
-            if (flag === 'u') {
-                continue;
-            }
-            throw new RangeError(`unsupported regex flag '${flag}' in '${pattern}'`);
-        }
-        source = source.slice(inlineFlags[0].length);
-    }
-    source = source.replace(/\(\?P<([A-Za-z_][A-Za-z0-9_]*)>/g, '(?<$1>');
-    try {
-        return new RegExp(source, flags);
-    } catch (e) {
-        throw new RangeError(`invalid regex '${pattern}': ${e instanceof Error ? e.message : e}`);
-    }
-}
-
-class ClientKeyMatcher {
-    private readonly regex: RegExp;
-
-    constructor(private readonly selector: Selector) {
-        validatePrefix(selector.reservedBits, selector.prefix);
-        this.regex = compileRustBytesRegex(selector.payloadRegex);
-    }
-
-    matches(key: Uint8Array): boolean {
-        if (key.length < Math.ceil(this.selector.reservedBits / 8)) {
-            return false;
-        }
-        if (readPrefixBits(key, this.selector.reservedBits) !== this.selector.prefix) {
-            return false;
-        }
-        const payloadLen = payloadCapacityForKeyLen(this.selector.reservedBits, key.length);
-        const payload = new Uint8Array(payloadLen);
-        readBitsToBytes(key, this.selector.reservedBits, payload, payloadLen * 8);
-        this.regex.lastIndex = 0;
-        return this.regex.test(bytesToBinaryString(payload));
-    }
-}
-
-class ClientStreamFilter {
-    private readonly keyMatchers: ClientKeyMatcher[];
-
-    constructor(filters: SubscribeFilters) {
-        this.keyMatchers = filters.selectors.map(
-            (selector) => new ClientKeyMatcher(create(SelectorSchema, selector)),
-        );
-    }
-
-    matches(key: Uint8Array): boolean {
-        return this.keyMatchers.some((matcher) => matcher.matches(key));
-    }
-}
-
-function shiftBitOffset(bitOffset: number, prefixBits: number): number {
-    const shifted = bitOffset + prefixBits;
+function shiftOffset(offset: number, shift: number, unit: 'byte' | 'bit'): number {
+    const shifted = offset + shift;
     if (shifted > 0xffff) {
-        throw new RangeError(`key bit offset ${bitOffset} plus prefix bits ${prefixBits} exceeds u16`);
+        throw new RangeError(
+            `key ${unit} offset ${offset} plus prefix ${unit}s ${shift} exceeds u16`,
+        );
     }
     return shifted;
 }
 
-function prefixFieldRef(field: KvFieldRef, prefixBits: number): KvFieldRef {
+function prefixFieldRef(field: KvFieldRef, prefixBytes: number): KvFieldRef {
     switch (field.field.case) {
         case 'key':
             return {
@@ -521,7 +352,7 @@ function prefixFieldRef(field: KvFieldRef, prefixBits: number): KvFieldRef {
                     case: 'key',
                     value: {
                         ...field.field.value,
-                        bitOffset: shiftBitOffset(field.field.value.bitOffset, prefixBits),
+                        byteOffset: shiftOffset(field.field.value.byteOffset, prefixBytes, 'byte'),
                     },
                 },
             } as KvFieldRef;
@@ -532,7 +363,7 @@ function prefixFieldRef(field: KvFieldRef, prefixBits: number): KvFieldRef {
                     case: 'zOrderKey',
                     value: {
                         ...field.field.value,
-                        bitOffset: shiftBitOffset(field.field.value.bitOffset, prefixBits),
+                        bitOffset: shiftOffset(field.field.value.bitOffset, prefixBytes * 8, 'bit'),
                     },
                 },
             } as KvFieldRef;
@@ -542,14 +373,14 @@ function prefixFieldRef(field: KvFieldRef, prefixBits: number): KvFieldRef {
     }
 }
 
-function prefixExpr(expr: KvExpr, prefixBits: number): KvExpr {
+function prefixExpr(expr: KvExpr, prefixBytes: number): KvExpr {
     switch (expr.expr.case) {
         case 'field':
             return {
                 ...expr,
                 expr: {
                     case: 'field',
-                    value: prefixFieldRef(expr.expr.value, prefixBits),
+                    value: prefixFieldRef(expr.expr.value, prefixBytes),
                 },
             } as KvExpr;
         case 'add':
@@ -563,10 +394,10 @@ function prefixExpr(expr: KvExpr, prefixBits: number): KvExpr {
                     value: {
                         ...expr.expr.value,
                         left: expr.expr.value.left
-                            ? prefixExpr(expr.expr.value.left, prefixBits)
+                            ? prefixExpr(expr.expr.value.left, prefixBytes)
                             : undefined,
                         right: expr.expr.value.right
-                            ? prefixExpr(expr.expr.value.right, prefixBits)
+                            ? prefixExpr(expr.expr.value.right, prefixBytes)
                             : undefined,
                     },
                 },
@@ -577,7 +408,7 @@ function prefixExpr(expr: KvExpr, prefixBits: number): KvExpr {
                 ...expr,
                 expr: {
                     case: expr.expr.case,
-                    value: prefixExpr(expr.expr.value, prefixBits),
+                    value: prefixExpr(expr.expr.value, prefixBytes),
                 },
             } as KvExpr;
         case 'literal':
@@ -586,30 +417,31 @@ function prefixExpr(expr: KvExpr, prefixBits: number): KvExpr {
     }
 }
 
-function prefixPredicate(predicate: KvPredicate, prefixBits: number): KvPredicate {
+function prefixPredicate(predicate: KvPredicate, prefixBytes: number): KvPredicate {
     return {
         ...predicate,
         checks: predicate.checks.map((check) => ({
             ...check,
-            field: check.field ? prefixFieldRef(check.field, prefixBits) : undefined,
+            field: check.field ? prefixFieldRef(check.field, prefixBytes) : undefined,
         })),
     } as KvPredicate;
 }
 
-function prefixReducer(reducer: RangeReducerSpec, prefixBits: number): RangeReducerSpec {
+function prefixReducer(reducer: RangeReducerSpec, prefixBytes: number): RangeReducerSpec {
     return {
         ...reducer,
-        expr: reducer.expr ? prefixExpr(reducer.expr, prefixBits) : undefined,
+        expr: reducer.expr ? prefixExpr(reducer.expr, prefixBytes) : undefined,
     } as RangeReducerSpec;
 }
 
 function prefixReduceParams(params: ReduceParams, prefix?: StoreKeyPrefix): ReduceParams {
     if (!prefix) return params;
+    const prefixBytes = prefix.prefix.length;
     return {
         ...params,
-        reducers: params.reducers.map((reducer) => prefixReducer(reducer, prefix.reservedBits)),
-        groupBy: params.groupBy.map((expr) => prefixExpr(expr, prefix.reservedBits)),
-        filter: params.filter ? prefixPredicate(params.filter, prefix.reservedBits) : undefined,
+        reducers: params.reducers.map((reducer) => prefixReducer(reducer, prefixBytes)),
+        groupBy: params.groupBy.map((expr) => prefixExpr(expr, prefixBytes)),
+        filter: params.filter ? prefixPredicate(params.filter, prefixBytes) : undefined,
     } as ReduceParams;
 }
 
@@ -778,7 +610,6 @@ async function* performSubscribe(
     prefix?: StoreKeyPrefix,
     options?: CallOptions,
 ): AsyncIterable<StoreBatch> {
-    const logicalFilter = prefix ? new ClientStreamFilter(filters) : undefined;
     const prefixed = prefixSubscribeFilters(filters, prefix);
     const req = create(SubscribeRequestSchema, {
         selectors: prefixed.selectors,
@@ -790,7 +621,7 @@ async function* performSubscribe(
     try {
         const stream = client.stream.subscribe(req, options);
         for await (const frame of stream) {
-            const batch = toStoreBatch(frame, prefix, logicalFilter);
+            const batch = toStoreBatch(frame, prefix);
             if (batch.entries.length === 0) {
                 continue;
             }

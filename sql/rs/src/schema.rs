@@ -246,7 +246,7 @@ impl KvSchema {
         let mut cursor = options
             .start_from_primary_key
             .unwrap_or_else(|| full_range.start.clone());
-        if !model.primary_key_codec.matches(&cursor) {
+        if !model.primary_key_prefix.matches(&cursor) {
             return Err(DataFusionError::Execution(
                 "index backfill start_from_primary_key must use this table's primary-key prefix"
                     .to_string(),

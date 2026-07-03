@@ -54,8 +54,8 @@ enum KvFieldKind {
 message KvFieldRef {
   // A field extracted from the key bytes at a fixed bit offset.
   message KeyField {
-    // Bit offset into the key payload where this field starts.
-    uint32 bit_offset = 1;
+    // Byte offset into the key payload where this field starts.
+    uint32 byte_offset = 1;
     // Scalar type used to decode the field bytes.
     KvFieldKind kind = 2;
     // Length in bytes when `kind` is `FIXED_SIZE_BINARY`; ignored otherwise.

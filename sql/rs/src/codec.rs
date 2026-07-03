@@ -1,26 +1,24 @@
 use datafusion::arrow::datatypes::i256;
 use datafusion::common::{DataFusionError, Result as DataFusionResult};
-use exoware_sdk::keys::{Key, KeyCodec, KeyMut};
+use exoware_sdk::keys::{Key, KeyPrefix};
 use exoware_sdk::kv_codec::{interleave_ordered_key_fields, StoredRow, StoredValue};
 
 use crate::builder::archived_non_pk_value_is_valid;
 use crate::types::*;
 use crate::writer::decode_list_element_archived;
 
-pub(crate) fn primary_key_codec(table_prefix: u8) -> Result<KeyCodec, String> {
+pub(crate) fn primary_key_prefix(table_prefix: u8) -> Result<KeyPrefix, String> {
     if usize::from(table_prefix) >= MAX_TABLES {
         return Err(format!(
             "table prefix {table_prefix} exceeds max {} for codec layout",
             MAX_TABLES - 1
         ));
     }
-    Ok(KeyCodec::new(
-        PRIMARY_RESERVED_BITS,
-        u16::from(table_prefix) << KEY_KIND_BITS,
-    ))
+    KeyPrefix::new(vec![table_prefix, PRIMARY_FAMILY_DISCRIMINATOR])
+        .map_err(|e| format!("failed to build primary key prefix: {e}"))
 }
 
-pub(crate) fn secondary_index_codec(table_prefix: u8, index_id: u8) -> Result<KeyCodec, String> {
+pub(crate) fn secondary_index_prefix(table_prefix: u8, index_id: u8) -> Result<KeyPrefix, String> {
     if usize::from(table_prefix) >= MAX_TABLES {
         return Err(format!(
             "table prefix {table_prefix} exceeds max {} for codec layout",
@@ -33,25 +31,16 @@ pub(crate) fn secondary_index_codec(table_prefix: u8, index_id: u8) -> Result<Ke
             MAX_INDEX_SPECS
         ));
     }
-    let family = (u16::from(table_prefix) << (KEY_KIND_BITS + INDEX_SLOT_BITS))
-        | (1u16 << INDEX_SLOT_BITS)
-        | u16::from(index_id);
-    Ok(KeyCodec::new(INDEX_FAMILY_BITS, family))
-}
-
-pub(crate) fn allocate_codec_key(codec: KeyCodec, payload_len: usize) -> Result<KeyMut, String> {
-    let total_len = codec.min_key_len_for_payload(payload_len);
-    codec
-        .new_key_with_len(total_len)
-        .map_err(|e| format!("failed to allocate codec key: {e}"))
+    KeyPrefix::new(vec![table_prefix, index_id])
+        .map_err(|e| format!("failed to build secondary index prefix: {e}"))
 }
 
 pub(crate) fn ensure_codec_payload_fits(
-    codec: KeyCodec,
+    prefix: &KeyPrefix,
     payload_len: usize,
     context: &str,
 ) -> Result<(), String> {
-    let max_payload_len = codec.payload_capacity_bytes();
+    let max_payload_len = prefix.max_payload_len();
     if payload_len > max_payload_len {
         return Err(format!(
             "{context} exceeds codec payload capacity {max_payload_len} bytes"
@@ -61,8 +50,9 @@ pub(crate) fn ensure_codec_payload_fits(
 }
 
 pub(crate) fn primary_key_prefix_range(table_prefix: u8) -> KeyRange {
-    let codec = primary_key_codec(table_prefix).expect("table prefix should fit primary key codec");
-    let (start, end) = codec.prefix_bounds();
+    let prefix =
+        primary_key_prefix(table_prefix).expect("table prefix should fit primary key prefix");
+    let (start, end) = prefix.bounds();
     KeyRange { start, end }
 }
 
@@ -290,24 +280,22 @@ pub(crate) fn decode_cell_from_ordered_key_bytes(
     })
 }
 
+/// Decode one ordered-key cell from a prefix-stripped `payload` slice starting
+/// at `payload_offset`, returning the value and the number of payload bytes it
+/// consumed. Returns `None` on a truncated or malformed payload rather than
+/// panicking.
 pub(crate) fn decode_cell_from_codec_payload_with_len(
-    codec: KeyCodec,
-    key: &Key,
+    payload: &[u8],
     payload_offset: usize,
     kind: ColumnKind,
 ) -> Option<(CellValue, usize)> {
     match kind {
         ColumnKind::Utf8 => {
-            let mut bytes = Vec::new();
+            let slice = payload.get(payload_offset..)?;
             let mut idx = 0usize;
             let mut escaped = false;
             loop {
-                let byte = codec
-                    .read_payload(key, payload_offset + idx, 1)
-                    .ok()?
-                    .into_iter()
-                    .next()?;
-                bytes.push(byte);
+                let byte = *slice.get(idx)?;
                 idx += 1;
                 if escaped {
                     escaped = false;
@@ -321,13 +309,12 @@ pub(crate) fn decode_cell_from_codec_payload_with_len(
                     break;
                 }
             }
-            decode_cell_from_ordered_key_bytes(&bytes, kind).map(|cell| (cell, bytes.len()))
+            decode_cell_from_ordered_key_bytes(&slice[..idx], kind).map(|cell| (cell, idx))
         }
         _ => {
-            let bytes = codec
-                .read_payload(key, payload_offset, kind.key_width())
-                .ok()?;
-            decode_cell_from_ordered_key_bytes(&bytes, kind).map(|cell| (cell, kind.key_width()))
+            let width = kind.key_width();
+            let bytes = payload.get(payload_offset..payload_offset.checked_add(width)?)?;
+            decode_cell_from_ordered_key_bytes(bytes, kind).map(|cell| (cell, width))
         }
     }
 }
@@ -340,24 +327,16 @@ pub(crate) fn encode_primary_key(
     if table_prefix != model.table_prefix {
         return Err("table prefix does not match model".to_string());
     }
-    let codec = model.primary_key_codec;
-    let payload_len = pk_values
-        .iter()
-        .zip(model.primary_key_kinds.iter())
-        .try_fold(0usize, |acc, (val, kind)| {
-            encode_cell_into_ordered_key_bytes(val, *kind).map(|encoded| acc + encoded.len())
-        })?;
-    ensure_codec_payload_fits(codec, payload_len, "primary key payload")?;
-    let mut key = allocate_codec_key(codec, payload_len)?;
-    let mut payload_offset = 0usize;
+    let prefix = &model.primary_key_prefix;
+    let mut payload = Vec::new();
     for (val, kind) in pk_values.iter().zip(model.primary_key_kinds.iter()) {
         let encoded = encode_cell_into_ordered_key_bytes(val, *kind)?;
-        codec
-            .write_payload(&mut key, payload_offset, &encoded)
-            .map_err(|e| format!("failed to write codec payload: {e}"))?;
-        payload_offset += encoded.len();
+        payload.extend_from_slice(&encoded);
     }
-    Ok(key.freeze())
+    ensure_codec_payload_fits(prefix, payload.len(), "primary key payload")?;
+    prefix
+        .encode(&payload)
+        .map_err(|e| format!("failed to encode primary key: {e}"))
 }
 
 pub(crate) fn encode_primary_key_from_row(
@@ -378,33 +357,22 @@ pub(crate) fn encode_primary_key_bound(
     if table_prefix != model.table_prefix {
         return Err("table prefix does not match model".to_string());
     }
-    let codec = model.primary_key_codec;
-    let encoded_parts = pk_values
-        .iter()
-        .zip(model.primary_key_kinds.iter())
-        .map(|(val, kind)| encode_cell_into_ordered_key_bytes(val, *kind))
-        .collect::<Result<Vec<_>, _>>()?;
-    let encoded_width = encoded_parts.iter().map(|part| part.len()).sum::<usize>();
-    let payload_len = if upper_tail {
-        codec.payload_capacity_bytes()
-    } else {
-        model.primary_key_width.max(encoded_width)
-    };
-    let mut key = allocate_codec_key(codec, payload_len)?;
-    let mut payload_offset = 0usize;
-    for encoded in &encoded_parts {
-        codec
-            .write_payload(&mut key, payload_offset, encoded)
-            .map_err(|e| format!("failed to write codec payload: {e}"))?;
-        payload_offset += encoded.len();
+    let prefix = &model.primary_key_prefix;
+    let mut payload = Vec::new();
+    for (val, kind) in pk_values.iter().zip(model.primary_key_kinds.iter()) {
+        payload.extend_from_slice(&encode_cell_into_ordered_key_bytes(val, *kind)?);
     }
     if upper_tail {
-        let remaining = codec.payload_capacity_bytes().saturating_sub(encoded_width);
-        codec
-            .fill_payload(&mut key, encoded_width, remaining, 0xFF)
-            .map_err(|e| format!("failed to fill codec payload: {e}"))?;
+        // Upper bound: pad the encoded fields with 0xFF out to the family's
+        // payload capacity so the bound is `prefix ++ fields ++ 0xFF-to-MAX`.
+        payload.resize(prefix.max_payload_len().max(payload.len()), 0xFF);
+    } else {
+        // Lower bound: pad with 0x00 to the fixed primary-key width.
+        payload.resize(model.primary_key_width.max(payload.len()), 0x00);
     }
-    Ok(key.freeze())
+    prefix
+        .encode(&payload)
+        .map_err(|e| format!("failed to encode primary key bound: {e}"))
 }
 
 #[cfg(test)]
@@ -413,18 +381,15 @@ pub(crate) fn decode_primary_key(
     key: &Key,
     model: &TableModel,
 ) -> Option<Vec<CellValue>> {
-    if table_prefix != model.table_prefix || !model.primary_key_codec.matches(key) {
+    if table_prefix != model.table_prefix {
         return None;
     }
+    let payload = model.primary_key_prefix.strip(key).ok()?;
     let mut values = Vec::with_capacity(model.primary_key_kinds.len());
     let mut payload_offset = 0usize;
     for kind in &model.primary_key_kinds {
-        let (val, consumed) = decode_cell_from_codec_payload_with_len(
-            model.primary_key_codec,
-            key,
-            payload_offset,
-            *kind,
-        )?;
+        let (val, consumed) =
+            decode_cell_from_codec_payload_with_len(&payload, payload_offset, *kind)?;
         payload_offset += consumed;
         values.push(val);
     }
@@ -437,7 +402,7 @@ pub(crate) fn decode_primary_key_selected(
     model: &TableModel,
     required_pk_mask: &[bool],
 ) -> Option<Vec<CellValue>> {
-    if table_prefix != model.table_prefix || !model.primary_key_codec.matches(key) {
+    if table_prefix != model.table_prefix || !model.primary_key_prefix.matches(key) {
         return None;
     }
     if !required_pk_mask.iter().any(|required| *required) {
@@ -446,15 +411,12 @@ pub(crate) fn decode_primary_key_selected(
     if required_pk_mask.len() != model.primary_key_kinds.len() {
         return None;
     }
+    let payload = model.primary_key_prefix.strip(key).ok()?;
     let mut values = vec![CellValue::Null; model.primary_key_kinds.len()];
     let mut payload_offset = 0usize;
     for (pk_pos, kind) in model.primary_key_kinds.iter().enumerate() {
-        let (cell, consumed) = decode_cell_from_codec_payload_with_len(
-            model.primary_key_codec,
-            key,
-            payload_offset,
-            *kind,
-        )?;
+        let (cell, consumed) =
+            decode_cell_from_codec_payload_with_len(&payload, payload_offset, *kind)?;
         if required_pk_mask[pk_pos] {
             values[pk_pos] = cell;
         }
@@ -472,8 +434,7 @@ pub(crate) fn encode_secondary_index_key(
     if table_prefix != model.table_prefix {
         return Err("table prefix does not match model".to_string());
     }
-    let codec = spec.codec;
-    let mut payload_offset = 0usize;
+    let prefix = &spec.codec;
     let encoded_index_fields = spec
         .key_columns
         .iter()
@@ -483,43 +444,26 @@ pub(crate) fn encode_secondary_index_key(
                 .map_err(|e| format!("index '{}' column '{}': {e}", spec.name, col.name))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let encoded_index_key = match spec.layout {
+    let mut payload = match spec.layout {
         IndexLayout::Lexicographic => encoded_index_fields.concat(),
         IndexLayout::ZOrder => interleave_ordered_key_fields(&encoded_index_fields),
     };
-    let pk_payload_len = model
-        .primary_key_indices
-        .iter()
-        .zip(model.primary_key_kinds.iter())
-        .try_fold(0usize, |acc, (&pk_idx, &pk_kind)| {
-            encode_cell_into_ordered_key_bytes(row.value_at(pk_idx), pk_kind)
-                .map(|encoded| acc + encoded.len())
-        })?;
-    let total_payload_len = encoded_index_key.len() + pk_payload_len;
-    ensure_codec_payload_fits(
-        codec,
-        total_payload_len,
-        &format!("index '{}' payload", spec.name),
-    )?;
-    let mut key = allocate_codec_key(codec, total_payload_len)?;
-    codec
-        .write_payload(&mut key, payload_offset, &encoded_index_key)
-        .map_err(|e| format!("failed to write codec payload: {e}"))?;
-    payload_offset += encoded_index_key.len();
-    debug_assert!(payload_offset <= codec.payload_capacity_bytes());
-
     for (&pk_idx, &pk_kind) in model
         .primary_key_indices
         .iter()
         .zip(model.primary_key_kinds.iter())
     {
         let encoded = encode_cell_into_ordered_key_bytes(row.value_at(pk_idx), pk_kind)?;
-        codec
-            .write_payload(&mut key, payload_offset, &encoded)
-            .map_err(|e| format!("failed to write codec payload: {e}"))?;
-        payload_offset += encoded.len();
+        payload.extend_from_slice(&encoded);
     }
-    Ok(key.freeze())
+    ensure_codec_payload_fits(
+        prefix,
+        payload.len(),
+        &format!("index '{}' payload", spec.name),
+    )?;
+    prefix
+        .encode(&payload)
+        .map_err(|e| format!("failed to encode index key: {e}"))
 }
 
 pub(crate) fn encode_secondary_index_key_from_parts(
@@ -545,60 +489,34 @@ pub(crate) fn encode_secondary_index_key_from_parts(
         ));
     }
 
-    let codec = spec.codec;
-    let mut payload_offset = 0usize;
+    let prefix = &spec.codec;
 
     let encoded_index_fields = spec
         .key_columns
         .iter()
         .map(|&col_idx| encode_index_column_from_parts(spec, model, col_idx, pk_values, archived))
         .collect::<DataFusionResult<Vec<_>>>()?;
-    let encoded_index_key = match spec.layout {
+    let mut payload = match spec.layout {
         IndexLayout::Lexicographic => encoded_index_fields.concat(),
         IndexLayout::ZOrder => interleave_ordered_key_fields(&encoded_index_fields),
     };
-    let pk_payload_len = model.primary_key_kinds.iter().enumerate().try_fold(
-        0usize,
-        |acc, (pk_pos, &pk_kind)| {
-            let value = pk_values.get(pk_pos).ok_or_else(|| {
-                DataFusionError::Execution(
-                    "missing primary key value while sizing index key".to_string(),
-                )
-            })?;
-            encode_cell_into_ordered_key_bytes(value, pk_kind)
-                .map(|encoded| acc + encoded.len())
-                .map_err(DataFusionError::Execution)
-        },
-    )?;
-    let total_payload_len = encoded_index_key.len() + pk_payload_len;
-    ensure_codec_payload_fits(
-        codec,
-        total_payload_len,
-        &format!("index '{}' payload", spec.name),
-    )
-    .map_err(DataFusionError::Execution)?;
-    let mut key =
-        allocate_codec_key(codec, total_payload_len).map_err(DataFusionError::Execution)?;
-    codec
-        .write_payload(&mut key, payload_offset, &encoded_index_key)
-        .map_err(|e| DataFusionError::Execution(format!("failed to write codec payload: {e}")))?;
-    payload_offset += encoded_index_key.len();
-    debug_assert!(payload_offset <= codec.payload_capacity_bytes());
-
     for (pk_pos, &pk_kind) in model.primary_key_kinds.iter().enumerate() {
         let value = pk_values.get(pk_pos).ok_or_else(|| {
             DataFusionError::Execution("missing primary key value while encoding index".to_string())
         })?;
         let encoded = encode_cell_into_ordered_key_bytes(value, pk_kind)
             .map_err(DataFusionError::Execution)?;
-        codec
-            .write_payload(&mut key, payload_offset, &encoded)
-            .map_err(|e| {
-                DataFusionError::Execution(format!("failed to write codec payload: {e}"))
-            })?;
-        payload_offset += encoded.len();
+        payload.extend_from_slice(&encoded);
     }
-    Ok(key.freeze())
+    ensure_codec_payload_fits(
+        prefix,
+        payload.len(),
+        &format!("index '{}' payload", spec.name),
+    )
+    .map_err(DataFusionError::Execution)?;
+    prefix
+        .encode(&payload)
+        .map_err(|e| DataFusionError::Execution(format!("failed to encode index key: {e}")))
 }
 
 pub(crate) fn encode_index_column_from_parts(
@@ -731,17 +649,15 @@ pub(crate) fn decode_secondary_index_key_with_masks(
     required_index_columns: Option<&[bool]>,
     required_pk_mask: Option<&[bool]>,
 ) -> Option<DecodedIndexEntry> {
-    if table_prefix != model.table_prefix || !spec.codec.matches(key) {
+    if table_prefix != model.table_prefix {
         return None;
     }
+    let payload = spec.codec.strip(key).ok()?;
     let mut decoded = DecodedIndexEntry::default();
     let zorder_fields = if spec.layout == IndexLayout::ZOrder {
-        let index_key_bytes = spec
-            .codec
-            .read_payload(key, 0, spec.key_columns_width)
-            .ok()?;
+        let index_key_bytes = payload.get(0..spec.key_columns_width)?;
         Some(exoware_sdk::kv_codec::deinterleave_ordered_key_fields(
-            &index_key_bytes,
+            index_key_bytes,
             &spec
                 .key_columns
                 .iter()
@@ -762,22 +678,20 @@ pub(crate) fn decode_secondary_index_key_with_masks(
             let cell = if let Some(fields) = &zorder_fields {
                 decode_cell_from_ordered_key_bytes(fields.get(key_pos)?, col.kind)?
             } else {
-                decode_cell_from_codec_payload_with_len(spec.codec, key, payload_offset, col.kind)?
-                    .0
+                decode_cell_from_codec_payload_with_len(&payload, payload_offset, col.kind)?.0
             };
             decoded.values.insert(*col_idx, cell);
         }
         if spec.layout == IndexLayout::Lexicographic {
             let consumed =
-                decode_cell_from_codec_payload_with_len(spec.codec, key, payload_offset, col.kind)?
-                    .1;
+                decode_cell_from_codec_payload_with_len(&payload, payload_offset, col.kind)?.1;
             payload_offset += consumed;
         }
     }
     if let Some(fields) = &zorder_fields {
         payload_offset = fields.iter().map(Vec::len).sum();
     }
-    debug_assert!(payload_offset <= spec.codec.payload_capacity_bytes());
+    debug_assert!(payload_offset <= spec.codec.max_payload_len());
     let decode_all_pk = required_pk_mask.is_none();
     let decode_some_pk = required_pk_mask
         .map(|mask: &[bool]| mask.iter().any(|required| *required))
@@ -796,7 +710,7 @@ pub(crate) fn decode_secondary_index_key_with_masks(
                 .unwrap_or(false)
         };
         let (val, consumed) =
-            decode_cell_from_codec_payload_with_len(spec.codec, key, payload_offset, *kind)?;
+            decode_cell_from_codec_payload_with_len(&payload, payload_offset, *kind)?;
         if should_decode {
             decoded.primary_key_values[pk_pos] = val.clone();
         }

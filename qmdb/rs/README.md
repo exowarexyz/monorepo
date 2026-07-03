@@ -106,7 +106,7 @@ operation/proof types.
 
 ## Stored key families
 
-The crate stores several store key families using `KeyCodec` prefixes:
+The crate stores several store key families, each under a one-byte `KeyPrefix`:
 
 - watermark rows
 - presence rows

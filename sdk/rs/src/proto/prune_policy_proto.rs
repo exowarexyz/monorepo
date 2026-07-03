@@ -16,14 +16,6 @@ use crate::store::compact::v1::{
 };
 use buffa::MessageView;
 
-fn u8_from_u32(field: &str, v: u32) -> Result<u8, String> {
-    u8::try_from(v).map_err(|_| format!("{field} must fit in u8 (got {v})"))
-}
-
-fn u16_from_u32(field: &str, v: u32) -> Result<u16, String> {
-    u16::try_from(v).map_err(|_| format!("{field} must fit in u16 (got {v})"))
-}
-
 fn usize_from_u64(field: &str, v: u64) -> Result<usize, String> {
     usize::try_from(v).map_err(|_| format!("{field} does not fit in usize (got {v})"))
 }
@@ -58,8 +50,7 @@ fn retain_from_proto(kind: &policy_retain::Kind) -> Result<RetainPolicy, String>
 
 fn selector_from_proto(mk: &ProtoSelector) -> Result<Selector, String> {
     Ok(Selector {
-        reserved_bits: u8_from_u32("selector.reserved_bits", mk.reserved_bits)?,
-        prefix: u16_from_u32("selector.prefix", mk.prefix)?,
+        prefix: mk.prefix.clone(),
         payload_regex: Utf8::from(mk.payload_regex.clone()),
     })
 }
@@ -136,8 +127,7 @@ pub fn prune_policies_to_proto(policies: &[PrunePolicy]) -> Vec<crate::store::co
 
 fn selector_to_proto(mk: &Selector) -> ProtoSelector {
     ProtoSelector {
-        reserved_bits: u32::from(mk.reserved_bits),
-        prefix: u32::from(mk.prefix),
+        prefix: mk.prefix.clone(),
         payload_regex: mk.payload_regex.0.clone(),
         ..Default::default()
     }
@@ -257,8 +247,7 @@ mod tests {
         let expected = PrunePolicy {
             scope: PolicyScope::Keys(KeysScope {
                 selector: Selector {
-                    reserved_bits: 4,
-                    prefix: 1,
+                    prefix: bytes::Bytes::copy_from_slice(&[1]),
                     payload_regex: Utf8::from("(?s)^(?P<logical>.*)-(?P<version>.{8})$"),
                 },
                 group_by: GroupBy {

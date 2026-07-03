@@ -1125,16 +1125,16 @@ pub mod kv_field_ref {
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct KeyField {
-        /// Bit offset into the key payload where this field starts.
+        /// Byte offset into the key payload where this field starts.
         ///
-        /// Field 1: `bit_offset`
+        /// Field 1: `byte_offset`
         #[serde(
-            rename = "bitOffset",
-            alias = "bit_offset",
+            rename = "byteOffset",
+            alias = "byte_offset",
             with = "::buffa::json_helpers::uint32",
             skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u32"
         )]
-        pub bit_offset: u32,
+        pub byte_offset: u32,
         /// Scalar type used to decode the field bytes.
         ///
         /// Field 2: `kind`
@@ -1161,7 +1161,7 @@ pub mod kv_field_ref {
     impl ::core::fmt::Debug for KeyField {
         fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
             f.debug_struct("KeyField")
-                .field("bit_offset", &self.bit_offset)
+                .field("byte_offset", &self.byte_offset)
                 .field("kind", &self.kind)
                 .field("fixed_size_binary_len", &self.fixed_size_binary_len)
                 .finish()
@@ -1197,9 +1197,10 @@ pub mod kv_field_ref {
             #[allow(unused_imports)]
             use ::buffa::Enumeration as _;
             let mut size = 0u32;
-            if self.bit_offset != 0u32 {
+            if self.byte_offset != 0u32 {
                 size
-                    += 1u32 + ::buffa::types::uint32_encoded_len(self.bit_offset) as u32;
+                    += 1u32
+                        + ::buffa::types::uint32_encoded_len(self.byte_offset) as u32;
             }
             {
                 let val = self.kind.to_i32();
@@ -1223,10 +1224,10 @@ pub mod kv_field_ref {
         ) {
             #[allow(unused_imports)]
             use ::buffa::Enumeration as _;
-            if self.bit_offset != 0u32 {
+            if self.byte_offset != 0u32 {
                 ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Varint)
                     .encode(buf);
-                ::buffa::types::encode_uint32(self.bit_offset, buf);
+                ::buffa::types::encode_uint32(self.byte_offset, buf);
             }
             {
                 let val = self.kind.to_i32();
@@ -1265,7 +1266,7 @@ pub mod kv_field_ref {
                             actual: tag.wire_type() as u8,
                         });
                     }
-                    self.bit_offset = ::buffa::types::decode_uint32(buf)?;
+                    self.byte_offset = ::buffa::types::decode_uint32(buf)?;
                 }
                 2u32 => {
                     if tag.wire_type() != ::buffa::encoding::WireType::Varint {
@@ -1297,7 +1298,7 @@ pub mod kv_field_ref {
             ::core::result::Result::Ok(())
         }
         fn clear(&mut self) {
-            self.bit_offset = 0u32;
+            self.byte_offset = 0u32;
             self.kind = ::buffa::EnumValue::from(0);
             self.fixed_size_binary_len = 0u32;
             self.__buffa_unknown_fields.clear();
@@ -10214,10 +10215,10 @@ pub mod __buffa {
             /// A field extracted from the key bytes at a fixed bit offset.
             #[derive(Clone, Debug, Default)]
             pub struct KeyFieldView<'a> {
-                /// Bit offset into the key payload where this field starts.
+                /// Byte offset into the key payload where this field starts.
                 ///
-                /// Field 1: `bit_offset`
-                pub bit_offset: u32,
+                /// Field 1: `byte_offset`
+                pub byte_offset: u32,
                 /// Scalar type used to decode the field bytes.
                 ///
                 /// Field 2: `kind`
@@ -10274,7 +10275,7 @@ pub mod __buffa {
                                         actual: tag.wire_type() as u8,
                                     });
                                 }
-                                view.bit_offset = ::buffa::types::decode_uint32(&mut cur)?;
+                                view.byte_offset = ::buffa::types::decode_uint32(&mut cur)?;
                             }
                             2u32 => {
                                 if tag.wire_type() != ::buffa::encoding::WireType::Varint {
@@ -10338,7 +10339,7 @@ pub mod __buffa {
                     use ::buffa::alloc::string::ToString as _;
                     let _ = __buffa_src;
                     super::super::super::kv_field_ref::KeyField {
-                        bit_offset: self.bit_offset,
+                        byte_offset: self.byte_offset,
                         kind: self.kind,
                         fixed_size_binary_len: self.fixed_size_binary_len,
                         __buffa_unknown_fields: self
@@ -10356,10 +10357,10 @@ pub mod __buffa {
                     #[allow(unused_imports)]
                     use ::buffa::Enumeration as _;
                     let mut size = 0u32;
-                    if self.bit_offset != 0u32 {
+                    if self.byte_offset != 0u32 {
                         size
                             += 1u32
-                                + ::buffa::types::uint32_encoded_len(self.bit_offset)
+                                + ::buffa::types::uint32_encoded_len(self.byte_offset)
                                     as u32;
                     }
                     {
@@ -10386,13 +10387,13 @@ pub mod __buffa {
                 ) {
                     #[allow(unused_imports)]
                     use ::buffa::Enumeration as _;
-                    if self.bit_offset != 0u32 {
+                    if self.byte_offset != 0u32 {
                         ::buffa::encoding::Tag::new(
                                 1u32,
                                 ::buffa::encoding::WireType::Varint,
                             )
                             .encode(buf);
-                        ::buffa::types::encode_uint32(self.bit_offset, buf);
+                        ::buffa::types::encode_uint32(self.byte_offset, buf);
                     }
                     {
                         let val = self.kind.to_i32();
@@ -10434,7 +10435,7 @@ pub mod __buffa {
                 ) -> ::core::result::Result<__S::Ok, __S::Error> {
                     use ::serde::ser::SerializeMap as _;
                     let mut __map = __s.serialize_map(::core::option::Option::None)?;
-                    if !::buffa::json_helpers::skip_if::is_zero_u32(&self.bit_offset) {
+                    if !::buffa::json_helpers::skip_if::is_zero_u32(&self.byte_offset) {
                         struct _W(u32);
                         impl ::serde::Serialize for _W {
                             fn serialize<__S: ::serde::Serializer>(
@@ -10444,7 +10445,7 @@ pub mod __buffa {
                                 ::buffa::json_helpers::uint32::serialize(&self.0, __s)
                             }
                         }
-                        __map.serialize_entry("bitOffset", &_W(self.bit_offset))?;
+                        __map.serialize_entry("byteOffset", &_W(self.byte_offset))?;
                     }
                     if !::buffa::json_helpers::skip_if::is_default_enum_value(
                         &self.kind,

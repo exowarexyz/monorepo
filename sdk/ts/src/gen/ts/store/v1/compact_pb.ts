@@ -196,7 +196,7 @@ export const PolicyRetainSchema: GenMessage<PolicyRetain> = /*@__PURE__*/
   messageDesc(file_store_v1_compact, 6);
 
 /**
- * User-key-space scope: scan a KeyCodec family by `selector`, partition
+ * User-key-space scope: scan a key-prefix family by `selector`, partition
  * matched keys into `group_by` groups, order within each group by
  * `order_by`, then apply `retain` to decide which keys to delete.
  *
@@ -295,7 +295,7 @@ export const PolicySchema: GenMessage<Policy> = /*@__PURE__*/
 export type PruneRequest = Message<"store.compact.v1.PruneRequest"> & {
   /**
    * One or more prune policies to apply. At least one is required. UserKeys
-   * policies must not share the same (reserved_bits, prefix) pair.
+   * policies must not share the same key prefix.
    *
    * @generated from field: repeated store.compact.v1.Policy policies = 1;
    */

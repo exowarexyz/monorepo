@@ -35,7 +35,7 @@ use exoware_proto::{
 };
 use exoware_sdk as exoware_proto;
 use exoware_sdk::common::kv::v1::filter::KindView as ProtoFilterKindView;
-use exoware_sdk::keys::Key;
+use exoware_sdk::keys::{Key, MAX_KEY_LEN};
 use exoware_sdk::selector::Selector;
 use futures::{stream as stream_util, Stream};
 use tokio::sync::Notify;
@@ -958,20 +958,14 @@ fn domain_filter_from_subscribe_view(
 ) -> Result<StreamFilter, ConnectError> {
     let mut selectors = Vec::with_capacity(req.selectors.len());
     for mk in req.selectors.iter() {
-        let reserved_bits = u8::try_from(mk.reserved_bits).map_err(|_| {
-            ConnectError::invalid_argument(format!(
-                "selector.reserved_bits {} does not fit in u8",
-                mk.reserved_bits
-            ))
-        })?;
-        let prefix = u16::try_from(mk.prefix).map_err(|_| {
-            ConnectError::invalid_argument(format!(
-                "selector.prefix {} does not fit in u16",
-                mk.prefix
-            ))
-        })?;
+        let prefix = Bytes::copy_from_slice(mk.prefix);
+        if prefix.len() > MAX_KEY_LEN {
+            return Err(ConnectError::invalid_argument(format!(
+                "selector.prefix length {} exceeds maximum of {MAX_KEY_LEN}",
+                prefix.len()
+            )));
+        }
         selectors.push(Selector {
-            reserved_bits,
             prefix,
             payload_regex: exoware_sdk::kv_codec::Utf8::from(mk.payload_regex),
         });
@@ -1232,7 +1226,7 @@ mod tests {
         policy, policy_retain, Policy as ProtoPolicy, PolicyRetain, PruneRequest, PruneRequestView,
         RetainKeepLatest,
     };
-    use exoware_sdk::keys::KeyCodec;
+    use exoware_sdk::keys::KeyPrefix;
     use exoware_sdk::kv_codec::KvReducedValue;
     use exoware_sdk::prune_policy::{PrunePolicyDocument, PRUNE_POLICY_DOCUMENT_VERSION};
     use exoware_sdk::{decode_connect_error, to_domain_reduce_response};
@@ -1243,8 +1237,7 @@ mod tests {
         StreamNotification, StreamNotifier,
     };
 
-    const TEST_RESERVED_BITS: u8 = 4;
-    const TEST_PREFIX: u16 = 1;
+    const TEST_PREFIX: u8 = 1;
 
     #[derive(Clone)]
     struct PublishDuringReplay {
@@ -1577,12 +1570,10 @@ mod tests {
     }
 
     fn matching_kv(payload: &[u8], value: &[u8]) -> (Bytes, Bytes) {
-        let codec = KeyCodec::new(TEST_RESERVED_BITS, TEST_PREFIX);
-        let key = codec.encode(payload).expect("encode key");
-        (
-            Bytes::copy_from_slice(key.as_ref()),
-            Bytes::copy_from_slice(value),
-        )
+        let key = KeyPrefix::from_byte(TEST_PREFIX)
+            .encode(payload)
+            .expect("encode key");
+        (key, Bytes::copy_from_slice(value))
     }
 
     fn numeric_query_extra(name: &str, value: f64) -> QueryExtra {
@@ -1595,8 +1586,7 @@ mod tests {
     fn subscribe_request_bytes(since_sequence_number: Option<u64>) -> Vec<u8> {
         SubscribeRequest {
             selectors: vec![ProtoSelector {
-                reserved_bits: u32::from(TEST_RESERVED_BITS),
-                prefix: u32::from(TEST_PREFIX),
+                prefix: Bytes::from(vec![TEST_PREFIX]),
                 payload_regex: "(?s).*".to_string(),
                 ..Default::default()
             }],

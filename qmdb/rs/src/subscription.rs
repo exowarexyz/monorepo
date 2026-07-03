@@ -8,11 +8,12 @@ use exoware_sdk::{PrefixedStoreClient, StreamSubscription};
 
 use crate::auth::{
     decode_auth_operation_location, decode_auth_presence_location, decode_auth_watermark_location,
-    AuthenticatedBackendNamespace, AUTH_OPERATION_CODEC, AUTH_PRESENCE_CODEC, AUTH_WATERMARK_CODEC,
+    AuthenticatedBackendNamespace, AUTH_OPERATION_PREFIX, AUTH_PRESENCE_PREFIX,
+    AUTH_WATERMARK_PREFIX,
 };
 use crate::codec::{
     decode_operation_location_key, decode_presence_location, decode_watermark_location, OP_FAMILY,
-    PRESENCE_FAMILY, RESERVED_BITS, WATERMARK_FAMILY,
+    PRESENCE_FAMILY, WATERMARK_FAMILY,
 };
 use crate::QmdbError;
 
@@ -61,11 +62,12 @@ pub(crate) async fn open_store_subscription(
 pub(crate) fn classify_and_filter<F: Family>(
     namespace: Option<AuthenticatedBackendNamespace>,
 ) -> (RowClassifier<F>, StreamFilter) {
-    use exoware_sdk::keys::{Key as StoreKey, KeyCodec};
+    use bytes::Bytes;
+    use exoware_sdk::keys::{Key as StoreKey, KeyPrefix};
     use exoware_sdk::kv_codec::Utf8;
 
     struct RowRule<F: Family> {
-        codec: KeyCodec,
+        prefix: KeyPrefix,
         family: RowFamily,
         decode: Arc<dyn Fn(&StoreKey) -> Option<Location<F>> + Send + Sync>,
     }
@@ -74,52 +76,52 @@ pub(crate) fn classify_and_filter<F: Family>(
         None => {
             let compiled: [RowRule<F>; 3] = [
                 RowRule {
-                    codec: KeyCodec::new(RESERVED_BITS, OP_FAMILY),
+                    prefix: KeyPrefix::from_byte(OP_FAMILY),
                     family: RowFamily::Op,
                     decode: Arc::new(|key| decode_operation_location_key::<F>(key).ok()),
                 },
                 RowRule {
-                    codec: KeyCodec::new(RESERVED_BITS, PRESENCE_FAMILY),
+                    prefix: KeyPrefix::from_byte(PRESENCE_FAMILY),
                     family: RowFamily::Presence,
                     decode: Arc::new(|key| decode_presence_location::<F>(key).ok()),
                 },
                 RowRule {
-                    codec: KeyCodec::new(RESERVED_BITS, WATERMARK_FAMILY),
+                    prefix: KeyPrefix::from_byte(WATERMARK_FAMILY),
                     family: RowFamily::Watermark,
                     decode: Arc::new(|key| decode_watermark_location::<F>(key).ok()),
                 },
             ];
             (
                 compiled,
-                OP_FAMILY,
-                PRESENCE_FAMILY,
-                WATERMARK_FAMILY,
+                Bytes::copy_from_slice(&[OP_FAMILY]),
+                Bytes::copy_from_slice(&[PRESENCE_FAMILY]),
+                Bytes::copy_from_slice(&[WATERMARK_FAMILY]),
                 "(?s-u)^.{8}$".to_string(),
             )
         }
         Some(ns) => {
             let compiled: [RowRule<F>; 3] = [
                 RowRule {
-                    codec: AUTH_OPERATION_CODEC,
+                    prefix: AUTH_OPERATION_PREFIX,
                     family: RowFamily::Op,
                     decode: Arc::new(move |key| decode_auth_operation_location::<F>(ns, key).ok()),
                 },
                 RowRule {
-                    codec: AUTH_PRESENCE_CODEC,
+                    prefix: AUTH_PRESENCE_PREFIX,
                     family: RowFamily::Presence,
                     decode: Arc::new(move |key| decode_auth_presence_location::<F>(ns, key).ok()),
                 },
                 RowRule {
-                    codec: AUTH_WATERMARK_CODEC,
+                    prefix: AUTH_WATERMARK_PREFIX,
                     family: RowFamily::Watermark,
                     decode: Arc::new(move |key| decode_auth_watermark_location::<F>(ns, key).ok()),
                 },
             ];
             (
                 compiled,
-                AUTH_OPERATION_CODEC.prefix(),
-                AUTH_PRESENCE_CODEC.prefix(),
-                AUTH_WATERMARK_CODEC.prefix(),
+                AUTH_OPERATION_PREFIX.as_bytes().clone(),
+                AUTH_PRESENCE_PREFIX.as_bytes().clone(),
+                AUTH_WATERMARK_PREFIX.as_bytes().clone(),
                 format!(r"(?s-u)^\x{:02X}.{{8}}$", ns.tag()),
             )
         }
@@ -127,7 +129,7 @@ pub(crate) fn classify_and_filter<F: Family>(
 
     let classify = RowClassifier::new(move |key: &StoreKey, _value: &[u8]| {
         for rule in &compiled {
-            if rule.codec.matches(key) {
+            if rule.prefix.matches(key) {
                 return (rule.decode)(key).map(|location| (rule.family, location));
             }
         }
@@ -137,17 +139,14 @@ pub(crate) fn classify_and_filter<F: Family>(
     let filter = StreamFilter {
         selectors: vec![
             Selector {
-                reserved_bits: RESERVED_BITS,
                 prefix: op_prefix,
                 payload_regex: Utf8::from(payload_regex.as_str()),
             },
             Selector {
-                reserved_bits: RESERVED_BITS,
                 prefix: presence_prefix,
                 payload_regex: Utf8::from(payload_regex.as_str()),
             },
             Selector {
-                reserved_bits: RESERVED_BITS,
                 prefix: watermark_prefix,
                 payload_regex: Utf8::from(payload_regex.as_str()),
             },

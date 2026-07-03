@@ -11,7 +11,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file common/v1/kv.proto.
  */
 export const file_common_v1_kv: GenFile = /*@__PURE__*/
-  fileDesc("ChJjb21tb24vdjEva3YucHJvdG8SDGNvbW1vbi5rdi52MSItCgVFbnRyeRIVCgNrZXkYASABKAxCCLpIBXoDGP4BEg0KBXZhbHVlGAIgASgMIkgKCFNlbGVjdG9yEhUKDXJlc2VydmVkX2JpdHMYASABKA0SDgoGcHJlZml4GAIgASgNEhUKDXBheWxvYWRfcmVnZXgYAyABKAkiRAoGRmlsdGVyEg8KBWV4YWN0GAEgASgMSAASEAoGcHJlZml4GAIgASgMSAASDwoFcmVnZXgYAyABKAlIAEIGCgRraW5kYgZwcm90bzM", [file_buf_validate_validate]);
+  fileDesc("ChJjb21tb24vdjEva3YucHJvdG8SDGNvbW1vbi5rdi52MSItCgVFbnRyeRIVCgNrZXkYASABKAxCCLpIBXoDGP4BEg0KBXZhbHVlGAIgASgMIlAKCFNlbGVjdG9yEhgKBnByZWZpeBgCIAEoDEIIukgFegMY/gESFQoNcGF5bG9hZF9yZWdleBgDIAEoCUoECAEQAlINcmVzZXJ2ZWRfYml0cyJECgZGaWx0ZXISDwoFZXhhY3QYASABKAxIABIQCgZwcmVmaXgYAiABKAxIABIPCgVyZWdleBgDIAEoCUgAQgYKBGtpbmRiBnByb3RvMw", [file_buf_validate_validate]);
 
 /**
  * A raw key-value pair shared by store APIs that move complete rows without
@@ -42,11 +42,10 @@ export const EntrySchema: GenMessage<Entry> = /*@__PURE__*/
   messageDesc(file_common_v1_kv, 0);
 
 /**
- * Identifies a subset of keys by their `KeyCodec` family (reserved_bits +
- * prefix) and a byte regex over the payload portion of each key (bytes after
- * the reserved/prefix header). Shared across `store.compact.v1` prune
- * policies, `log.stream.v1` subscriptions, and any future filter-by-key
- * surface so that one domain type is used end-to-end.
+ * Identifies a subset of keys by a byte prefix and a byte regex over the
+ * payload portion of each key (the bytes after the prefix). Shared across
+ * `store.compact.v1` prune policies, `log.stream.v1` subscriptions, and any
+ * future filter-by-key surface so that one domain type is used end-to-end.
  *
  * Named capture groups referenced by callers (e.g. `PolicyGroupBy` /
  * `PolicyOrderBy`) must exist in `payload_regex`.
@@ -55,20 +54,13 @@ export const EntrySchema: GenMessage<Entry> = /*@__PURE__*/
  */
 export type Selector = Message<"common.kv.v1.Selector"> & {
   /**
-   * Number of high bits in the key reserved for internal routing. Together
-   * with `prefix`, this selects the `KeyCodec` family to scan.
+   * Byte prefix identifying the key family; the payload is the remainder of
+   * the key. May be empty (matches all keys). Namespace composition is
+   * prefix concatenation.
    *
-   * @generated from field: uint32 reserved_bits = 1;
+   * @generated from field: bytes prefix = 2;
    */
-  reservedBits: number;
-
-  /**
-   * Key family prefix. Combined with `reserved_bits` to derive the scan range
-   * via `KeyCodec::prefix_bounds`.
-   *
-   * @generated from field: uint32 prefix = 2;
-   */
-  prefix: number;
+  prefix: Uint8Array;
 
   /**
    * Regex applied to the payload portion of each key. Must be non-empty.
@@ -88,7 +80,7 @@ export const SelectorSchema: GenMessage<Selector> = /*@__PURE__*/
 /**
  * Matches an uninterpreted byte string by exact value, prefix, or full-string
  * regex. Used for filtering both decoded logical keys and operation values in
- * APIs that operate above the store-row `KeyCodec` layer.
+ * APIs that operate above the store-row key-prefix layer.
  *
  * @generated from message common.kv.v1.Filter
  */

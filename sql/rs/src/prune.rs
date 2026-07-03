@@ -4,8 +4,7 @@ use exoware_sdk::prune_policy::{
 };
 use exoware_sdk::selector::Selector;
 
-use crate::codec::primary_key_codec;
-use crate::types::PRIMARY_RESERVED_BITS;
+use crate::codec::primary_key_prefix;
 
 const VERSION_WIDTH_BYTES: usize = 8;
 const ORDERED_UTF8_REGEX: &str = r"(?:\x01[\x00-\x02]|[^\x00\x01\xFF])*\x00";
@@ -20,22 +19,21 @@ fn keep_latest_versions_with_regex(
     if count == 0 {
         return Err("keep_latest_versions count must be > 0".to_string());
     }
-    let codec = primary_key_codec(table_prefix)?;
+    let prefix = primary_key_prefix(table_prefix)?;
     let required_bytes = min_entity_bytes
         .checked_add(VERSION_WIDTH_BYTES)
         .ok_or_else(|| "entity width overflowed when adding version width".to_string())?;
-    if required_bytes > codec.payload_capacity_bytes() {
+    if required_bytes > prefix.max_payload_len() {
         return Err(format!(
             "entity width {min_entity_bytes} plus version width {VERSION_WIDTH_BYTES} exceeds primary key payload capacity {}",
-            codec.payload_capacity_bytes()
+            prefix.max_payload_len()
         ));
     }
 
     Ok(PrunePolicy {
         scope: PolicyScope::Keys(KeysScope {
             selector: Selector {
-                reserved_bits: PRIMARY_RESERVED_BITS,
-                prefix: codec.prefix(),
+                prefix: prefix.as_bytes().clone(),
                 payload_regex,
             },
             group_by: GroupBy {
@@ -107,8 +105,7 @@ mod tests {
     fn keep_latest_versions_builds_expected_policy_for_fixed_width_entity() {
         let policy = keep_latest_versions(3, 32, 1).expect("policy");
         let scope = keys_scope(&policy);
-        assert_eq!(scope.selector.reserved_bits, 5);
-        assert_eq!(scope.selector.prefix, 6);
+        assert_eq!(&scope.selector.prefix[..], &[3u8, 0]);
         assert_eq!(
             scope.selector.payload_regex,
             r"(?s-u)^(?P<entity>.{32})(?P<version>.{8})$"
@@ -142,8 +139,7 @@ mod tests {
     fn keep_latest_versions_utf8_builds_expected_policy() {
         let policy = keep_latest_versions_utf8(3, 1).expect("policy");
         let scope = keys_scope(&policy);
-        assert_eq!(scope.selector.reserved_bits, 5);
-        assert_eq!(scope.selector.prefix, 6);
+        assert_eq!(&scope.selector.prefix[..], &[3u8, 0]);
         assert_eq!(
             scope.selector.payload_regex,
             format!(r"(?s-u)^(?P<entity>{ORDERED_UTF8_REGEX})(?P<version>.{{8}})$")
@@ -183,16 +179,14 @@ mod tests {
             encode_primary_key(3, &[&short_entity, &CellValue::UInt64(1)], &model).expect("key");
         let long_key =
             encode_primary_key(3, &[&long_entity, &CellValue::UInt64(2)], &model).expect("key");
-        let codec = model.primary_key_codec;
+        let prefix = &model.primary_key_prefix;
 
         for key in [&short_key, &long_key] {
-            let payload = codec
-                .read_payload(key, 0, codec.payload_capacity_bytes_for_key_len(key.len()))
-                .expect("payload");
+            let payload = prefix.strip(key).expect("payload");
             let captures = regex.captures(&payload).expect("captures");
             assert_eq!(
                 captures.get(0).expect("full match").as_bytes(),
-                payload.as_slice()
+                payload.as_ref()
             );
             assert_eq!(
                 captures.name("version").expect("version").as_bytes().len(),

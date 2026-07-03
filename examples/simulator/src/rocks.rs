@@ -32,7 +32,7 @@ use std::thread;
 use buffa::{Message, MessageView};
 use bytes::Bytes;
 use exoware_sdk::common::kv::v1::Entry;
-use exoware_sdk::keys::KeyCodec;
+use exoware_sdk::keys::KeyPrefix;
 use exoware_sdk::log::stream::v1::{
     GetResponse as StreamGetResponse, GetResponseView as StreamGetResponseView,
 };
@@ -1002,11 +1002,12 @@ impl RocksStore {
         scope: &KeysScope,
         retain: &RetainPolicy,
     ) -> Result<(), String> {
-        let codec = KeyCodec::new(scope.selector.reserved_bits, scope.selector.prefix);
+        let prefix =
+            KeyPrefix::new(scope.selector.prefix.clone()).map_err(|e| format!("policy: {e}"))?;
         let regex = compile_payload_regex(&scope.selector.payload_regex)
             .map_err(|e| format!("policy: {e}"))?;
 
-        let (start, end) = codec.prefix_bounds();
+        let (start, end) = prefix.bounds();
         let mut rows = RocksRangeScanState::new(self.db.clone(), start, end, usize::MAX, true);
         let mut groups: BTreeMap<Vec<u8>, Vec<KeyEntry>> = BTreeMap::new();
 
@@ -1017,11 +1018,7 @@ impl RocksStore {
             }
 
             for (key, _value) in batch {
-                if !codec.matches(&key) {
-                    continue;
-                }
-                let payload_len = codec.payload_capacity_bytes_for_key_len(key.len());
-                let payload = match codec.read_payload(&key, 0, payload_len) {
+                let payload = match prefix.strip(&key) {
                     Ok(payload) => payload,
                     Err(_) => continue,
                 };

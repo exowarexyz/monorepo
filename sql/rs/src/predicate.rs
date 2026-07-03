@@ -9,6 +9,17 @@ use exoware_sdk::kv_codec::{interleave_ordered_key_fields, StoredValue};
 use crate::codec::*;
 use crate::types::*;
 
+/// Copy `src` into a pre-sized index-bound payload at `offset`, erroring
+/// instead of panicking if the reserved slot cannot hold it.
+fn write_index_bound_bytes(dst: &mut [u8], offset: usize, src: &[u8]) -> Result<(), String> {
+    let end = offset
+        .checked_add(src.len())
+        .filter(|end| *end <= dst.len())
+        .ok_or_else(|| "index bound field exceeds payload capacity".to_string())?;
+    dst[offset..end].copy_from_slice(src);
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum PredicateConstraint {
     StringEq(String),
@@ -164,7 +175,7 @@ fn primary_key_prefix_width_fits(
 ) -> bool {
     prefix_encoded_width
         .checked_add(value_encoded_width)
-        .is_some_and(|width| width <= model.primary_key_codec.payload_capacity_bytes())
+        .is_some_and(|width| width <= model.primary_key_prefix.max_payload_len())
 }
 
 pub(crate) fn primary_key_range_constraint_for_prefix(
@@ -1267,13 +1278,13 @@ impl QueryPredicate {
         constrained_prefix_len: usize,
         upper: bool,
     ) -> Result<Key, String> {
-        let codec = spec.codec;
+        let prefix = &spec.codec;
         let payload_len = if upper {
-            codec.payload_capacity_bytes()
+            prefix.max_payload_len()
         } else {
             spec.key_columns_width + model.primary_key_width
         };
-        let mut key = allocate_codec_key(codec, payload_len)?;
+        let mut key = vec![0u8; payload_len];
         let mut offset = 0usize;
         for (idx, col_idx) in spec.key_columns.iter().copied().enumerate() {
             let col = model.column(col_idx);
@@ -1291,9 +1302,7 @@ impl QueryPredicate {
                     } else {
                         vec![STRING_KEY_TERMINATOR]
                     };
-                    codec
-                        .write_payload(&mut key, offset, &bytes)
-                        .map_err(|e| format!("failed to write codec payload: {e}"))?;
+                    write_index_bound_bytes(&mut key, offset, &bytes)?;
                     offset += bytes.len();
                 }
                 ColumnKind::Boolean => {
@@ -1306,9 +1315,7 @@ impl QueryPredicate {
                     } else {
                         upper
                     };
-                    codec
-                        .write_payload(&mut key, offset, &[u8::from(value)])
-                        .map_err(|e| format!("failed to write codec payload: {e}"))?;
+                    write_index_bound_bytes(&mut key, offset, &[u8::from(value)])?;
                     offset += 1;
                 }
                 ColumnKind::Int64 => {
@@ -1328,9 +1335,7 @@ impl QueryPredicate {
                     } else {
                         i64::MIN
                     };
-                    codec
-                        .write_payload(&mut key, offset, &encode_i64_ordered(value))
-                        .map_err(|e| format!("failed to write codec payload: {e}"))?;
+                    write_index_bound_bytes(&mut key, offset, &encode_i64_ordered(value))?;
                     offset += 8;
                 }
                 ColumnKind::Float64 => {
@@ -1350,9 +1355,7 @@ impl QueryPredicate {
                     } else {
                         f64::NEG_INFINITY
                     };
-                    codec
-                        .write_payload(&mut key, offset, &encode_f64_ordered(value))
-                        .map_err(|e| format!("failed to write codec payload: {e}"))?;
+                    write_index_bound_bytes(&mut key, offset, &encode_f64_ordered(value))?;
                     offset += 8;
                 }
                 ColumnKind::Date32 => {
@@ -1373,9 +1376,7 @@ impl QueryPredicate {
                         i32::MIN as i64
                     };
                     let value = raw.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-                    codec
-                        .write_payload(&mut key, offset, &encode_i32_ordered(value))
-                        .map_err(|e| format!("failed to write codec payload: {e}"))?;
+                    write_index_bound_bytes(&mut key, offset, &encode_i32_ordered(value))?;
                     offset += 4;
                 }
                 ColumnKind::Date64 => {
@@ -1395,9 +1396,7 @@ impl QueryPredicate {
                     } else {
                         i64::MIN
                     };
-                    codec
-                        .write_payload(&mut key, offset, &encode_i64_ordered(value))
-                        .map_err(|e| format!("failed to write codec payload: {e}"))?;
+                    write_index_bound_bytes(&mut key, offset, &encode_i64_ordered(value))?;
                     offset += 8;
                 }
                 ColumnKind::Timestamp => {
@@ -1417,9 +1416,7 @@ impl QueryPredicate {
                     } else {
                         i64::MIN
                     };
-                    codec
-                        .write_payload(&mut key, offset, &encode_i64_ordered(value))
-                        .map_err(|e| format!("failed to write codec payload: {e}"))?;
+                    write_index_bound_bytes(&mut key, offset, &encode_i64_ordered(value))?;
                     offset += 8;
                 }
                 ColumnKind::Decimal128 => {
@@ -1442,9 +1439,7 @@ impl QueryPredicate {
                     } else {
                         i128::MIN
                     };
-                    codec
-                        .write_payload(&mut key, offset, &encode_i128_ordered(value))
-                        .map_err(|e| format!("failed to write codec payload: {e}"))?;
+                    write_index_bound_bytes(&mut key, offset, &encode_i128_ordered(value))?;
                     offset += 16;
                 }
                 ColumnKind::UInt64 => {
@@ -1460,9 +1455,7 @@ impl QueryPredicate {
                     } else {
                         0
                     };
-                    codec
-                        .write_payload(&mut key, offset, &value.to_be_bytes())
-                        .map_err(|e| format!("failed to write codec payload: {e}"))?;
+                    write_index_bound_bytes(&mut key, offset, &value.to_be_bytes())?;
                     offset += 8;
                 }
                 ColumnKind::Decimal256 => {
@@ -1485,9 +1478,7 @@ impl QueryPredicate {
                     } else {
                         i256::MIN
                     };
-                    codec
-                        .write_payload(&mut key, offset, &encode_i256_ordered(value))
-                        .map_err(|e| format!("failed to write codec payload: {e}"))?;
+                    write_index_bound_bytes(&mut key, offset, &encode_i256_ordered(value))?;
                     offset += 32;
                 }
                 ColumnKind::FixedSizeBinary(n) => {
@@ -1506,13 +1497,9 @@ impl QueryPredicate {
                                 col.name, n
                             ));
                         }
-                        codec
-                            .write_payload(&mut key, offset, data)
-                            .map_err(|e| format!("failed to write codec payload: {e}"))?;
+                        write_index_bound_bytes(&mut key, offset, data)?;
                     } else if upper {
-                        codec
-                            .fill_payload(&mut key, offset, n, 0xFF)
-                            .map_err(|e| format!("failed to fill codec payload: {e}"))?;
+                        key[offset..offset + n].fill(0xFF);
                     }
                     offset += n;
                 }
@@ -1533,37 +1520,30 @@ impl QueryPredicate {
                     } else {
                         pk_min.unwrap_or(i64::MIN)
                     };
-                    codec
-                        .write_payload(&mut key, offset, &encode_i64_ordered(pk_bound))
-                        .map_err(|e| format!("failed to write codec payload: {e}"))?;
+                    write_index_bound_bytes(&mut key, offset, &encode_i64_ordered(pk_bound))?;
                     offset += 8;
                 }
                 ColumnKind::UInt64 => {
                     let (lower, upper_bound) = self.uint64_bounds(pk_idx);
                     let pk_bound = if upper { upper_bound } else { lower };
-                    codec
-                        .write_payload(&mut key, offset, &pk_bound.to_be_bytes())
-                        .map_err(|e| format!("failed to write codec payload: {e}"))?;
+                    write_index_bound_bytes(&mut key, offset, &pk_bound.to_be_bytes())?;
                     offset += 8;
                 }
                 _ => {
                     let w = pk_kind.key_width();
                     if upper {
-                        codec
-                            .fill_payload(&mut key, offset, w, 0xFF)
-                            .map_err(|e| format!("failed to fill codec payload: {e}"))?;
+                        key[offset..offset + w].fill(0xFF);
                     }
                     offset += w;
                 }
             }
         }
         if upper {
-            let remaining = codec.payload_capacity_bytes().saturating_sub(offset);
-            codec
-                .fill_payload(&mut key, offset, remaining, 0xFF)
-                .map_err(|e| format!("failed to fill codec payload: {e}"))?;
+            key[offset..].fill(0xFF);
         }
-        Ok(key.freeze())
+        prefix
+            .encode(&key)
+            .map_err(|e| format!("failed to encode index bound key: {e}"))
     }
 
     pub(crate) fn encode_zorder_index_bound_key(
@@ -1573,13 +1553,13 @@ impl QueryPredicate {
         spec: &ResolvedIndexSpec,
         upper: bool,
     ) -> Result<Key, String> {
-        let codec = spec.codec;
+        let prefix = &spec.codec;
         let payload_len = if upper {
-            codec.payload_capacity_bytes()
+            prefix.max_payload_len()
         } else {
             spec.key_columns_width + model.primary_key_width
         };
-        let mut key = allocate_codec_key(codec, payload_len)?;
+        let mut key = vec![0u8; payload_len];
         let mut encoded_fields = Vec::with_capacity(spec.key_columns.len());
         for &col_idx in &spec.key_columns {
             let col = model.column(col_idx);
@@ -1588,9 +1568,7 @@ impl QueryPredicate {
         }
         let interleaved = interleave_ordered_key_fields(&encoded_fields);
         let mut offset = 0usize;
-        codec
-            .write_payload(&mut key, offset, &interleaved)
-            .map_err(|e| format!("failed to write codec payload: {e}"))?;
+        write_index_bound_bytes(&mut key, offset, &interleaved)?;
         offset += interleaved.len();
         debug_assert_eq!(offset, spec.key_columns_width);
         for (&pk_idx, &pk_kind) in model
@@ -1606,37 +1584,30 @@ impl QueryPredicate {
                     } else {
                         pk_min.unwrap_or(i64::MIN)
                     };
-                    codec
-                        .write_payload(&mut key, offset, &encode_i64_ordered(pk_bound))
-                        .map_err(|e| format!("failed to write codec payload: {e}"))?;
+                    write_index_bound_bytes(&mut key, offset, &encode_i64_ordered(pk_bound))?;
                     offset += 8;
                 }
                 ColumnKind::UInt64 => {
                     let (lower, upper_bound) = self.uint64_bounds(pk_idx);
                     let pk_bound = if upper { upper_bound } else { lower };
-                    codec
-                        .write_payload(&mut key, offset, &pk_bound.to_be_bytes())
-                        .map_err(|e| format!("failed to write codec payload: {e}"))?;
+                    write_index_bound_bytes(&mut key, offset, &pk_bound.to_be_bytes())?;
                     offset += 8;
                 }
                 _ => {
                     let w = pk_kind.key_width();
                     if upper {
-                        codec
-                            .fill_payload(&mut key, offset, w, 0xFF)
-                            .map_err(|e| format!("failed to fill codec payload: {e}"))?;
+                        key[offset..offset + w].fill(0xFF);
                     }
                     offset += w;
                 }
             }
         }
         if upper {
-            let remaining = codec.payload_capacity_bytes().saturating_sub(offset);
-            codec
-                .fill_payload(&mut key, offset, remaining, 0xFF)
-                .map_err(|e| format!("failed to fill codec payload: {e}"))?;
+            key[offset..].fill(0xFF);
         }
-        Ok(key.freeze())
+        prefix
+            .encode(&key)
+            .map_err(|e| format!("failed to encode index bound key: {e}"))
     }
 
     pub(crate) fn ordered_index_bound_bytes_for_column(

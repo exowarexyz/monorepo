@@ -172,11 +172,10 @@ pub const __ENTRY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type
     from_json: ::buffa::type_registry::any_from_json::<Entry>,
     is_wkt: false,
 };
-/// Identifies a subset of keys by their `KeyCodec` family (reserved_bits +
-/// prefix) and a byte regex over the payload portion of each key (bytes after
-/// the reserved/prefix header). Shared across `store.compact.v1` prune
-/// policies, `log.stream.v1` subscriptions, and any future filter-by-key
-/// surface so that one domain type is used end-to-end.
+/// Identifies a subset of keys by a byte prefix and a byte regex over the
+/// payload portion of each key (the bytes after the prefix). Shared across
+/// `store.compact.v1` prune policies, `log.stream.v1` subscriptions, and any
+/// future filter-by-key surface so that one domain type is used end-to-end.
 ///
 /// Named capture groups referenced by callers (e.g. `PolicyGroupBy` /
 /// `PolicyOrderBy`) must exist in `payload_regex`.
@@ -184,27 +183,17 @@ pub const __ENTRY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct Selector {
-    /// Number of high bits in the key reserved for internal routing. Together
-    /// with `prefix`, this selects the `KeyCodec` family to scan.
-    ///
-    /// Field 1: `reserved_bits`
-    #[serde(
-        rename = "reservedBits",
-        alias = "reserved_bits",
-        with = "::buffa::json_helpers::uint32",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u32"
-    )]
-    pub reserved_bits: u32,
-    /// Key family prefix. Combined with `reserved_bits` to derive the scan range
-    /// via `KeyCodec::prefix_bounds`.
+    /// Byte prefix identifying the key family; the payload is the remainder of
+    /// the key. May be empty (matches all keys). Namespace composition is
+    /// prefix concatenation.
     ///
     /// Field 2: `prefix`
     #[serde(
         rename = "prefix",
-        with = "::buffa::json_helpers::uint32",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u32"
+        with = "::buffa::json_helpers::bytes",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
-    pub prefix: u32,
+    pub prefix: ::buffa::bytes::Bytes,
     /// Regex applied to the payload portion of each key. Must be non-empty.
     ///
     /// Field 3: `payload_regex`
@@ -222,7 +211,6 @@ pub struct Selector {
 impl ::core::fmt::Debug for Selector {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         f.debug_struct("Selector")
-            .field("reserved_bits", &self.reserved_bits)
             .field("prefix", &self.prefix)
             .field("payload_regex", &self.payload_regex)
             .finish()
@@ -258,11 +246,8 @@ impl ::buffa::Message for Selector {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
-        if self.reserved_bits != 0u32 {
-            size += 1u32 + ::buffa::types::uint32_encoded_len(self.reserved_bits) as u32;
-        }
-        if self.prefix != 0u32 {
-            size += 1u32 + ::buffa::types::uint32_encoded_len(self.prefix) as u32;
+        if !self.prefix.is_empty() {
+            size += 1u32 + ::buffa::types::bytes_encoded_len(&self.prefix) as u32;
         }
         if !self.payload_regex.is_empty() {
             size
@@ -278,15 +263,13 @@ impl ::buffa::Message for Selector {
     ) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if self.reserved_bits != 0u32 {
-            ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Varint)
+        if !self.prefix.is_empty() {
+            ::buffa::encoding::Tag::new(
+                    2u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
                 .encode(buf);
-            ::buffa::types::encode_uint32(self.reserved_bits, buf);
-        }
-        if self.prefix != 0u32 {
-            ::buffa::encoding::Tag::new(2u32, ::buffa::encoding::WireType::Varint)
-                .encode(buf);
-            ::buffa::types::encode_uint32(self.prefix, buf);
+            ::buffa::types::encode_bytes(&self.prefix, buf);
         }
         if !self.payload_regex.is_empty() {
             ::buffa::encoding::Tag::new(
@@ -309,25 +292,15 @@ impl ::buffa::Message for Selector {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         match tag.field_number() {
-            1u32 => {
-                if tag.wire_type() != ::buffa::encoding::WireType::Varint {
-                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                        field_number: 1u32,
-                        expected: 0u8,
-                        actual: tag.wire_type() as u8,
-                    });
-                }
-                self.reserved_bits = ::buffa::types::decode_uint32(buf)?;
-            }
             2u32 => {
-                if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                     return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
                         field_number: 2u32,
-                        expected: 0u8,
+                        expected: 2u8,
                         actual: tag.wire_type() as u8,
                     });
                 }
-                self.prefix = ::buffa::types::decode_uint32(buf)?;
+                self.prefix = ::buffa::types::decode_bytes_to_bytes(buf)?;
             }
             3u32 => {
                 if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
@@ -347,8 +320,7 @@ impl ::buffa::Message for Selector {
         ::core::result::Result::Ok(())
     }
     fn clear(&mut self) {
-        self.reserved_bits = 0u32;
-        self.prefix = 0u32;
+        self.prefix = ::buffa::bytes::Bytes::new();
         self.payload_regex.clear();
         self.__buffa_unknown_fields.clear();
     }
@@ -384,7 +356,7 @@ pub const __SELECTOR_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::t
 };
 /// Matches an uninterpreted byte string by exact value, prefix, or full-string
 /// regex. Used for filtering both decoded logical keys and operation values in
-/// APIs that operate above the store-row `KeyCodec` layer.
+/// APIs that operate above the store-row key-prefix layer.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize)]
 #[serde(default)]
@@ -950,26 +922,21 @@ pub mod __buffa {
                 this
             }
         }
-        /// Identifies a subset of keys by their `KeyCodec` family (reserved_bits +
-        /// prefix) and a byte regex over the payload portion of each key (bytes after
-        /// the reserved/prefix header). Shared across `store.compact.v1` prune
-        /// policies, `log.stream.v1` subscriptions, and any future filter-by-key
-        /// surface so that one domain type is used end-to-end.
+        /// Identifies a subset of keys by a byte prefix and a byte regex over the
+        /// payload portion of each key (the bytes after the prefix). Shared across
+        /// `store.compact.v1` prune policies, `log.stream.v1` subscriptions, and any
+        /// future filter-by-key surface so that one domain type is used end-to-end.
         ///
         /// Named capture groups referenced by callers (e.g. `PolicyGroupBy` /
         /// `PolicyOrderBy`) must exist in `payload_regex`.
         #[derive(Clone, Debug, Default)]
         pub struct SelectorView<'a> {
-            /// Number of high bits in the key reserved for internal routing. Together
-            /// with `prefix`, this selects the `KeyCodec` family to scan.
-            ///
-            /// Field 1: `reserved_bits`
-            pub reserved_bits: u32,
-            /// Key family prefix. Combined with `reserved_bits` to derive the scan range
-            /// via `KeyCodec::prefix_bounds`.
+            /// Byte prefix identifying the key family; the payload is the remainder of
+            /// the key. May be empty (matches all keys). Namespace composition is
+            /// prefix concatenation.
             ///
             /// Field 2: `prefix`
-            pub prefix: u32,
+            pub prefix: &'a [u8],
             /// Regex applied to the payload portion of each key. Must be non-empty.
             ///
             /// Field 3: `payload_regex`
@@ -1014,27 +981,17 @@ pub mod __buffa {
                     let before_tag = cur;
                     let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
                     match tag.field_number() {
-                        1u32 => {
-                            if tag.wire_type() != ::buffa::encoding::WireType::Varint {
-                                return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                                    field_number: 1u32,
-                                    expected: 0u8,
-                                    actual: tag.wire_type() as u8,
-                                });
-                            }
-                            view.reserved_bits = ::buffa::types::decode_uint32(
-                                &mut cur,
-                            )?;
-                        }
                         2u32 => {
-                            if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                            if tag.wire_type()
+                                != ::buffa::encoding::WireType::LengthDelimited
+                            {
                                 return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
                                     field_number: 2u32,
-                                    expected: 0u8,
+                                    expected: 2u8,
                                     actual: tag.wire_type() as u8,
                                 });
                             }
-                            view.prefix = ::buffa::types::decode_uint32(&mut cur)?;
+                            view.prefix = ::buffa::types::borrow_bytes(&mut cur)?;
                         }
                         3u32 => {
                             if tag.wire_type()
@@ -1084,8 +1041,7 @@ pub mod __buffa {
                 use ::buffa::alloc::string::ToString as _;
                 let _ = __buffa_src;
                 super::super::Selector {
-                    reserved_bits: self.reserved_bits,
-                    prefix: self.prefix,
+                    prefix: ::buffa::view::bytes_from_source(__buffa_src, self.prefix),
                     payload_regex: self.payload_regex.to_string(),
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields
@@ -1102,15 +1058,9 @@ pub mod __buffa {
                 #[allow(unused_imports)]
                 use ::buffa::Enumeration as _;
                 let mut size = 0u32;
-                if self.reserved_bits != 0u32 {
+                if !self.prefix.is_empty() {
                     size
-                        += 1u32
-                            + ::buffa::types::uint32_encoded_len(self.reserved_bits)
-                                as u32;
-                }
-                if self.prefix != 0u32 {
-                    size
-                        += 1u32 + ::buffa::types::uint32_encoded_len(self.prefix) as u32;
+                        += 1u32 + ::buffa::types::bytes_encoded_len(&self.prefix) as u32;
                 }
                 if !self.payload_regex.is_empty() {
                     size
@@ -1129,21 +1079,13 @@ pub mod __buffa {
             ) {
                 #[allow(unused_imports)]
                 use ::buffa::Enumeration as _;
-                if self.reserved_bits != 0u32 {
-                    ::buffa::encoding::Tag::new(
-                            1u32,
-                            ::buffa::encoding::WireType::Varint,
-                        )
-                        .encode(buf);
-                    ::buffa::types::encode_uint32(self.reserved_bits, buf);
-                }
-                if self.prefix != 0u32 {
+                if !self.prefix.is_empty() {
                     ::buffa::encoding::Tag::new(
                             2u32,
-                            ::buffa::encoding::WireType::Varint,
+                            ::buffa::encoding::WireType::LengthDelimited,
                         )
                         .encode(buf);
-                    ::buffa::types::encode_uint32(self.prefix, buf);
+                    ::buffa::types::encode_bytes(&self.prefix, buf);
                 }
                 if !self.payload_regex.is_empty() {
                     ::buffa::encoding::Tag::new(
@@ -1174,26 +1116,14 @@ pub mod __buffa {
             ) -> ::core::result::Result<__S::Ok, __S::Error> {
                 use ::serde::ser::SerializeMap as _;
                 let mut __map = __s.serialize_map(::core::option::Option::None)?;
-                if !::buffa::json_helpers::skip_if::is_zero_u32(&self.reserved_bits) {
-                    struct _W(u32);
-                    impl ::serde::Serialize for _W {
+                if !::buffa::json_helpers::skip_if::is_empty_bytes(self.prefix) {
+                    struct _W<'__x>(&'__x [u8]);
+                    impl ::serde::Serialize for _W<'_> {
                         fn serialize<__S: ::serde::Serializer>(
                             &self,
                             __s: __S,
                         ) -> ::core::result::Result<__S::Ok, __S::Error> {
-                            ::buffa::json_helpers::uint32::serialize(&self.0, __s)
-                        }
-                    }
-                    __map.serialize_entry("reservedBits", &_W(self.reserved_bits))?;
-                }
-                if !::buffa::json_helpers::skip_if::is_zero_u32(&self.prefix) {
-                    struct _W(u32);
-                    impl ::serde::Serialize for _W {
-                        fn serialize<__S: ::serde::Serializer>(
-                            &self,
-                            __s: __S,
-                        ) -> ::core::result::Result<__S::Ok, __S::Error> {
-                            ::buffa::json_helpers::uint32::serialize(&self.0, __s)
+                            ::buffa::json_helpers::bytes::serialize(self.0, __s)
                         }
                     }
                     __map.serialize_entry("prefix", &_W(self.prefix))?;
@@ -1230,7 +1160,7 @@ pub mod __buffa {
         }
         /// Matches an uninterpreted byte string by exact value, prefix, or full-string
         /// regex. Used for filtering both decoded logical keys and operation values in
-        /// APIs that operate above the store-row `KeyCodec` layer.
+        /// APIs that operate above the store-row key-prefix layer.
         #[derive(Clone, Debug, Default)]
         pub struct FilterView<'a> {
             pub kind: ::core::option::Option<

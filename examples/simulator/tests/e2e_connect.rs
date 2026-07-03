@@ -7,7 +7,7 @@ use exoware_sdk::compact::{
     PolicyOrderEncoding, PolicyRetain, PruneRequest, RetainGreaterThan, RetainKeepLatest,
     ServiceClient as CompactServiceClient,
 };
-use exoware_sdk::keys::{Key, KeyCodec};
+use exoware_sdk::keys::{Key, KeyPrefix};
 use exoware_sdk::kv_codec::{
     KvExpr, KvFieldKind, KvFieldRef, KvReducedValue, StoredRow, StoredValue,
 };
@@ -253,10 +253,10 @@ async fn reduce_sum_int64() {
 async fn prune_drop_all_removes_keys() {
     let (client, url) = spawn_client().await;
 
-    let codec = KeyCodec::new(4, 1);
-    let ka = codec.encode(b"aaa").expect("encode key a");
-    let kb = codec.encode(b"bbb").expect("encode key b");
-    let kc = codec.encode(b"ccc").expect("encode key c");
+    let prefix = KeyPrefix::from_byte(1);
+    let ka = prefix.encode(b"aaa").expect("encode key a");
+    let kb = prefix.encode(b"bbb").expect("encode key b");
+    let kc = prefix.encode(b"ccc").expect("encode key c");
     client
         .ingest()
         .put(&[(&ka, b"va"), (&kb, b"vb"), (&kc, b"vc")])
@@ -275,8 +275,7 @@ async fn prune_drop_all_removes_keys() {
             policies: vec![Policy {
                 scope: Some(policy::Scope::Keys(Box::new(ProtoKeysScope {
                     selector: Some(ProtoSelector {
-                        reserved_bits: 4,
-                        prefix: 1,
+                        prefix: Bytes::from(vec![1]),
                         payload_regex: "(?s-u)^.*$".to_string(),
                         ..Default::default()
                     })
@@ -406,15 +405,15 @@ async fn get_with_min_sequence_number() {
 async fn prune_keep_latest_retains_newest() {
     let (client, url) = spawn_client().await;
 
-    let codec = KeyCodec::new(4, 2);
-    // Keys: prefix(4bits,family=2) + logical(3 bytes) + \x00\x00 + version(8 bytes big-endian u64)
+    let prefix = KeyPrefix::from_byte(2);
+    // Keys: prefix(family=2) + logical(3 bytes) + \x00\x00 + version(8 bytes big-endian u64)
     // This matches the regex: ^(?P<logical>.{3})\x00\x00(?P<version>.{8})$
     let make_key = |logical: &[u8; 3], version: u64| -> Key {
         let mut payload = Vec::with_capacity(3 + 2 + 8);
         payload.extend_from_slice(logical);
         payload.extend_from_slice(&[0x00, 0x00]);
         payload.extend_from_slice(&version.to_be_bytes());
-        codec.encode(&payload).expect("encode key")
+        prefix.encode(&payload).expect("encode key")
     };
 
     let k_a1 = make_key(b"aaa", 1);
@@ -442,8 +441,7 @@ async fn prune_keep_latest_retains_newest() {
             policies: vec![Policy {
                 scope: Some(policy::Scope::Keys(Box::new(ProtoKeysScope {
                     selector: Some(ProtoSelector {
-                        reserved_bits: 4,
-                        prefix: 2,
+                        prefix: Bytes::from(vec![2]),
                         payload_regex: "(?s-u)^(?P<logical>.{3})\\x00\\x00(?P<version>.{8})$"
                             .to_string(),
                         ..Default::default()
@@ -554,7 +552,7 @@ async fn reduce_count_min_max_field() {
 #[tokio::test]
 async fn reduce_grouped_count() {
     let (client, _url) = spawn_client().await;
-    let codec = KeyCodec::new(4, 1);
+    let prefix = KeyPrefix::from_byte(1);
     let encode_row = |v: i64| -> Vec<u8> {
         StoredRow {
             values: vec![Some(StoredValue::Int64(v))],
@@ -562,9 +560,9 @@ async fn reduce_grouped_count() {
         .encode()
         .to_vec()
     };
-    let ka1 = codec.encode(b"a\x01").expect("encode");
-    let ka2 = codec.encode(b"a\x02").expect("encode");
-    let kb1 = codec.encode(b"b\x01").expect("encode");
+    let ka1 = prefix.encode(b"a\x01").expect("encode");
+    let ka2 = prefix.encode(b"a\x02").expect("encode");
+    let kb1 = prefix.encode(b"b\x01").expect("encode");
 
     client
         .ingest()
@@ -582,7 +580,7 @@ async fn reduce_grouped_count() {
             expr: None,
         }],
         group_by: vec![KvExpr::Field(KvFieldRef::Key {
-            bit_offset: 4 + 1,
+            byte_offset: 1,
             kind: KvFieldKind::FixedSizeBinary(1),
         })],
         filter: None,
@@ -601,9 +599,9 @@ async fn reduce_grouped_count() {
 async fn store_client_prune_drop_all() {
     let (client, _url) = spawn_client().await;
 
-    let codec = KeyCodec::new(4, 5);
-    let ka = codec.encode(b"pa").expect("encode");
-    let kb = codec.encode(b"pb").expect("encode");
+    let prefix = KeyPrefix::from_byte(5);
+    let ka = prefix.encode(b"pa").expect("encode");
+    let kb = prefix.encode(b"pb").expect("encode");
     client
         .ingest()
         .put(&[(&ka, b"v1"), (&kb, b"v2")])
@@ -616,8 +614,7 @@ async fn store_client_prune_drop_all() {
         .prune(&[prune_policy::PrunePolicy {
             scope: prune_policy::PolicyScope::Keys(prune_policy::KeysScope {
                 selector: DomainSelector {
-                    reserved_bits: 4,
-                    prefix: 5,
+                    prefix: Bytes::from(vec![5]),
                     payload_regex: ".*".into(),
                 },
                 group_by: prune_policy::GroupBy::default(),
@@ -638,12 +635,12 @@ async fn store_client_prune_drop_all() {
 async fn prune_greater_than_retains_above_threshold() {
     let (client, url) = spawn_client().await;
 
-    let codec = KeyCodec::new(4, 3);
+    let prefix = KeyPrefix::from_byte(3);
     let make_key = |logical: &[u8; 2], version: u64| -> Key {
         let mut payload = Vec::with_capacity(2 + 8);
         payload.extend_from_slice(logical);
         payload.extend_from_slice(&version.to_be_bytes());
-        codec.encode(&payload).expect("encode")
+        prefix.encode(&payload).expect("encode")
     };
 
     let k_a10 = make_key(b"aa", 10);
@@ -665,8 +662,7 @@ async fn prune_greater_than_retains_above_threshold() {
             policies: vec![Policy {
                 scope: Some(policy::Scope::Keys(Box::new(ProtoKeysScope {
                     selector: Some(ProtoSelector {
-                        reserved_bits: 4,
-                        prefix: 3,
+                        prefix: Bytes::from(vec![3]),
                         payload_regex: "(?s-u)^(?P<logical>.{2})(?P<version>.{8})$".to_string(),
                         ..Default::default()
                     })

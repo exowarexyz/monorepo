@@ -17,10 +17,6 @@ function parseOptionalBigInt(value: string) {
   return BigInt(trimmed);
 }
 
-function maxPrefixForReservedBits(reservedBits: number): number {
-  return reservedBits === 0 ? 0 : 2 ** reservedBits - 1;
-}
-
 function renderBatch(batch: StoreBatch) {
   return (
     <div className="result fade-in">
@@ -56,8 +52,7 @@ export function LogPanel({
   const [batchSequenceNumber, setBatchSequenceNumber] = useState('');
   const [batchResult, setBatchResult] = useState<StoreBatch | null>(null);
   const [batchNotFound, setBatchNotFound] = useState(false);
-  const [streamReservedBits, setStreamReservedBits] = useState('0');
-  const [streamPrefix, setStreamPrefix] = useState('0');
+  const [streamPrefix, setStreamPrefix] = useState('');
   const [streamPayloadRegex, setStreamPayloadRegex] = useState('(?s-u)^.*$');
   const [streamValueRegex, setStreamValueRegex] = useState('');
   const [streamSinceSequenceNumber, setStreamSinceSequenceNumber] = useState('');
@@ -65,11 +60,7 @@ export function LogPanel({
   const [isGettingBatch, setIsGettingBatch] = useState(false);
   const [isSubscribing, setIsSubscribing] = useState(false);
   const streamAbortRef = useRef<AbortController | null>(null);
-  const reservedBitsForMax = Number.parseInt(streamReservedBits || '0', 10);
-  const maxStreamPrefix =
-    Number.isInteger(reservedBitsForMax) && reservedBitsForMax >= 0 && reservedBitsForMax <= 16
-      ? maxPrefixForReservedBits(reservedBitsForMax)
-      : 65535;
+  const enc = new TextEncoder();
 
   useEffect(() => {
     return () => {
@@ -113,16 +104,8 @@ export function LogPanel({
     }
 
     try {
-      const reservedBits = Number.parseInt(streamReservedBits || '0', 10);
-      const prefix = Number.parseInt(streamPrefix || '0', 10);
+      const prefix = enc.encode(streamPrefix);
 
-      if (!Number.isInteger(reservedBits) || reservedBits < 0 || reservedBits > 16) {
-        throw new Error('Reserved bits must be an integer between 0 and 16');
-      }
-      const maxPrefix = maxPrefixForReservedBits(reservedBits);
-      if (!Number.isInteger(prefix) || prefix < 0 || prefix > maxPrefix) {
-        throw new Error(`Prefix must be an integer between 0 and ${maxPrefix}`);
-      }
       if (!streamPayloadRegex.trim()) {
         throw new Error('Payload regex is required');
       }
@@ -135,7 +118,6 @@ export function LogPanel({
       streamAbortRef.current = controller;
       const sinceSequenceNumber = parseOptionalBigInt(streamSinceSequenceNumber);
       const selector = {
-        reservedBits,
         prefix,
         payloadRegex: streamPayloadRegex.trim(),
       };
@@ -237,23 +219,11 @@ export function LogPanel({
         </p>
         <div className="form-row">
           <div className="form-group">
-            <label htmlFor="log-stream-reserved-bits">Reserved Bits</label>
-            <input
-              id="log-stream-reserved-bits"
-              type="number"
-              min="0"
-              max="16"
-              value={streamReservedBits}
-              onChange={(event) => setStreamReservedBits(event.target.value)}
-            />
-          </div>
-          <div className="form-group">
-            <label htmlFor="log-stream-prefix">Prefix</label>
+            <label htmlFor="log-stream-prefix">Prefix (key)</label>
             <input
               id="log-stream-prefix"
-              type="number"
-              min="0"
-              max={maxStreamPrefix}
+              type="text"
+              placeholder="e.g. orders/"
               value={streamPrefix}
               onChange={(event) => setStreamPrefix(event.target.value)}
             />

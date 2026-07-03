@@ -27,7 +27,7 @@ use crate::codec::{
     decode_current_boundary_metadata, decode_update_index_value_present, decode_update_location,
     decode_update_raw_key, encode_chunk_key, encode_current_meta_key, encode_operation_key,
     encode_ops_root_witness_key, encode_update_key, merkle_size_for_watermark,
-    CurrentBoundaryMetadata, UPDATE_CODEC,
+    CurrentBoundaryMetadata, UPDATE_PREFIX,
 };
 use crate::connect::OperationKv;
 use crate::core::HistoricalOpsClientCore;
@@ -784,7 +784,7 @@ where
         watermark: Location<F>,
     ) -> Result<Vec<ActiveOrderedOperation<F, K, V, E>>, QmdbError> {
         let inactivity_floor = self.load_inactivity_floor_at(session, watermark).await?;
-        let (start, end) = UPDATE_CODEC.prefix_bounds();
+        let (start, end) = UPDATE_PREFIX.bounds();
         let mut rows = session.range_stream(&start, &end, usize::MAX, 1024).await?;
         let mut latest = BTreeMap::<Vec<u8>, (Location<F>, bool)>::new();
         while let Some(chunk) = rows.next_chunk().await? {

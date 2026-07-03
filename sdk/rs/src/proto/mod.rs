@@ -395,9 +395,9 @@ fn to_domain_expr(expr: &query::KvExpr) -> Result<KvExpr, String> {
 
 fn to_proto_field_ref(field: KvFieldRef) -> query::KvFieldRef {
     let field = match field {
-        KvFieldRef::Key { bit_offset, kind } => {
+        KvFieldRef::Key { byte_offset, kind } => {
             query::kv_field_ref::Field::Key(Box::new(query::kv_field_ref::KeyField {
-                bit_offset: u32::from(bit_offset),
+                byte_offset: u32::from(byte_offset),
                 kind: proto_field_kind(&kind).into(),
                 fixed_size_binary_len: fixed_size_binary_len(&kind),
                 ..Default::default()
@@ -437,8 +437,8 @@ fn to_proto_field_ref(field: KvFieldRef) -> query::KvFieldRef {
 fn to_domain_field_ref(field: &query::KvFieldRef) -> Result<KvFieldRef, String> {
     match field.field.as_ref() {
         Some(query::kv_field_ref::Field::Key(key)) => Ok(KvFieldRef::Key {
-            bit_offset: u16::try_from(key.bit_offset)
-                .map_err(|_| format!("bit_offset {} does not fit in u16", key.bit_offset))?,
+            byte_offset: u16::try_from(key.byte_offset)
+                .map_err(|_| format!("byte_offset {} does not fit in u16", key.byte_offset))?,
             kind: domain_field_kind(key.kind, key.fixed_size_binary_len)?,
         }),
         Some(query::kv_field_ref::Field::ZOrderKey(key)) => Ok(KvFieldRef::ZOrderKey {
@@ -885,8 +885,8 @@ fn to_domain_expr_from_view(expr: &query::KvExprView<'_>) -> Result<KvExpr, Stri
 fn to_domain_field_ref_from_view(field: &query::KvFieldRefView<'_>) -> Result<KvFieldRef, String> {
     match field.field.as_ref() {
         Some(query::kv_field_ref::FieldView::Key(key)) => Ok(KvFieldRef::Key {
-            bit_offset: u16::try_from(key.bit_offset)
-                .map_err(|_| format!("bit_offset {} does not fit in u16", key.bit_offset))?,
+            byte_offset: u16::try_from(key.byte_offset)
+                .map_err(|_| format!("byte_offset {} does not fit in u16", key.byte_offset))?,
             kind: domain_field_kind(key.kind, key.fixed_size_binary_len)?,
         }),
         Some(query::kv_field_ref::FieldView::ZOrderKey(key)) => Ok(KvFieldRef::ZOrderKey {

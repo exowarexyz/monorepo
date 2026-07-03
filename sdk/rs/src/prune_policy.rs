@@ -5,7 +5,7 @@ use commonware_codec::{
 };
 use std::collections::HashSet;
 
-use crate::keys::KeyCodec;
+use crate::keys::KeyPrefix;
 use crate::kv_codec::Utf8;
 use crate::selector::{compile_payload_regex, Selector};
 
@@ -310,7 +310,7 @@ pub fn validate_policy(policy: &PrunePolicy) -> anyhow::Result<()> {
 }
 
 fn validate_user_keys_scope(scope: &KeysScope) -> anyhow::Result<()> {
-    KeyCodec::new(scope.selector.reserved_bits, scope.selector.prefix);
+    KeyPrefix::new(scope.selector.prefix.clone()).context("invalid selector prefix")?;
     let regex = compile_payload_regex(&scope.selector.payload_regex)?;
     validate_capture_groups(
         &regex,
@@ -372,9 +372,8 @@ pub fn ensure_unique_policy_families(policies: &[PrunePolicy]) -> anyhow::Result
         match &policy.scope {
             PolicyScope::Keys(scope) => {
                 ensure!(
-                    user_families.insert((scope.selector.reserved_bits, scope.selector.prefix)),
-                    "duplicate compaction prune policy for reserved_bits={} family={}",
-                    scope.selector.reserved_bits,
+                    user_families.insert(scope.selector.prefix.clone()),
+                    "duplicate compaction prune policy for key prefix {:?}",
                     scope.selector.prefix
                 );
             }
@@ -450,13 +449,13 @@ mod tests {
         PRUNE_POLICY_CONTROL_KEY,
     };
     use crate::kv_codec::Utf8;
+    use bytes::Bytes;
 
     fn sample_policy() -> PrunePolicy {
         PrunePolicy {
             scope: PolicyScope::Keys(KeysScope {
                 selector: Selector {
-                    reserved_bits: 4,
-                    prefix: 1,
+                    prefix: Bytes::copy_from_slice(&[1]),
                     payload_regex: Utf8::from(
                         "(?s-u)^(?P<logical>(?:\\x00\\xFF|[^\\x00])*)\\x00\\x00(?P<version>.{8})$",
                     ),
@@ -505,8 +504,7 @@ mod tests {
             policies: vec![PrunePolicy {
                 scope: PolicyScope::Keys(KeysScope {
                     selector: Selector {
-                        reserved_bits: 4,
-                        prefix: 1,
+                        prefix: Bytes::copy_from_slice(&[1]),
                         payload_regex: Utf8::from(
                             "(?s-u)^(?P<logical>(?:\\x00\\xFF|[^\\x00])*)\\x00\\x00(?P<version>.{8})$",
                         ),
@@ -534,8 +532,7 @@ mod tests {
             policies: vec![PrunePolicy {
                 scope: PolicyScope::Keys(KeysScope {
                     selector: Selector {
-                        reserved_bits: 4,
-                        prefix: 1,
+                        prefix: Bytes::copy_from_slice(&[1]),
                         payload_regex: Utf8::from("(?s)^(?P<logical>.+)$"),
                     },
                     group_by: GroupBy {
@@ -555,6 +552,26 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("unknown capture group"));
+    }
+
+    #[test]
+    fn oversized_selector_prefix_returns_error() {
+        let doc = PrunePolicyDocument {
+            version: 1,
+            policies: vec![PrunePolicy {
+                scope: PolicyScope::Keys(KeysScope {
+                    selector: Selector {
+                        prefix: Bytes::from(vec![0u8; crate::keys::MAX_KEY_LEN + 1]),
+                        payload_regex: Utf8::from("(?s)^(?P<logical>.+)$"),
+                    },
+                    group_by: GroupBy::default(),
+                    order_by: None,
+                }),
+                retain: RetainPolicy::DropAll,
+            }],
+        };
+        let err = encode_policy_document(&doc).expect_err("oversized prefix");
+        assert!(err.to_string().contains("invalid selector prefix"));
     }
 
     #[test]

@@ -229,7 +229,7 @@ where
         prepared: &mut super::PreparedUpload<F>,
         batch: &mut StoreWriteBatch,
     ) -> Result<(), QmdbError> {
-        super::stage_rows(self.client.key_prefix(), batch, prepared.rows.drain(..))
+        super::stage_rows(&self.client.key_prefix(), batch, prepared.rows.drain(..))
     }
 
     pub async fn mark_upload_persisted(
@@ -291,7 +291,7 @@ where
         prepared: &super::PreparedWatermark<F>,
         batch: &mut StoreWriteBatch,
     ) -> Result<(), QmdbError> {
-        super::stage_watermark(self.client.key_prefix(), batch, prepared)
+        super::stage_watermark(&self.client.key_prefix(), batch, prepared)
     }
 
     pub async fn mark_flush_persisted(
