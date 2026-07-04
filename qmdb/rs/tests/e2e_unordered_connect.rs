@@ -179,11 +179,7 @@ async fn boundary_from_local_current_db(
     db: &LocalCurrentDb,
     operations: &[FixedBatchOperation],
 ) -> CurrentBoundaryState<Digest, N, mmr::Family> {
-    let ops_root_hasher = commonware_storage::qmdb::hasher::<Sha256>();
-    let ops_root_witness = db
-        .ops_root_witness(&ops_root_hasher)
-        .await
-        .expect("ops root witness");
+    let ops_root_witness = db.ops_root_witness().await.expect("ops root witness");
     recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
         None,
         operations,
@@ -191,11 +187,8 @@ async fn boundary_from_local_current_db(
         0,
         ops_root_witness,
         |location| async move {
-            let hasher = commonware_storage::qmdb::hasher::<Sha256>();
-            let (proof, mut proof_ops, mut chunks) = db
-                .range_proof(&hasher, location, NZU64!(1))
-                .await
-                .map_err(|error| {
+            let (proof, mut proof_ops, mut chunks) =
+                db.range_proof(location, NZU64!(1)).await.map_err(|error| {
                     exoware_qmdb::QmdbError::CorruptData(format!(
                         "local current unordered range proof at {location}: {error}"
                     ))
@@ -253,7 +246,7 @@ async fn build_local_batch() -> LocalBatch {
                 };
                 db.apply_batch(finalized).await.expect("apply");
 
-                let latest = db.bounds().await.end - 1;
+                let latest = db.bounds().end - 1;
                 let n = NonZeroU64::new(*latest + 1).unwrap();
                 let (_proof, cumulative): (BatchProof, Vec<BatchOperation>) = db
                     .historical_proof(latest + 1, Location::new(0), n)
@@ -332,7 +325,7 @@ async fn build_mmb_local_batch() -> MmbLocalBatch {
                 };
                 db.apply_batch(finalized).await.expect("apply");
 
-                let latest = db.bounds().await.end - 1;
+                let latest = db.bounds().end - 1;
                 let n = NonZeroU64::new(*latest + 1).unwrap();
                 let (_proof, cumulative): (MmbBatchProof, Vec<MmbBatchOperation>) = db
                     .historical_proof(latest + 1, Location::new(0), n)
@@ -404,7 +397,7 @@ async fn build_fixed_local_batch() -> FixedLocalBatch {
             };
             db.apply_batch(finalized).await.expect("apply");
 
-            let latest = db.bounds().await.end - 1;
+            let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
             let (_proof, ops): (BatchProof, Vec<FixedBatchOperation>) = db
                 .ops_historical_proof(latest + 1, Location::new(0), n)

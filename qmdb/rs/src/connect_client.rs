@@ -1126,8 +1126,7 @@ where
             "failed to decode current sync ops-root witness: {err}"
         ))
     })?;
-    let hasher = commonware_storage::qmdb::hasher::<H>();
-    if !witness.verify(&hasher, &ops_root, current_root) {
+    if !witness.verify::<H>(&ops_root, current_root) {
         return Err(QmdbError::CorruptData(
             "current sync ops-root witness failed verification".to_string(),
         ));
@@ -1164,8 +1163,7 @@ where
                         "failed to decode historical ops-root witness: {err}"
                     ))
                 })?;
-            let hasher = commonware_storage::qmdb::hasher::<H>();
-            if !witness.verify(&hasher, &ops_root, expected_root) {
+            if !witness.verify::<H>(&ops_root, expected_root) {
                 return Err(QmdbError::ProofVerification {
                     kind: crate::ProofKind::BatchMulti,
                 });
@@ -1215,8 +1213,7 @@ where
         Proof::<F, H::Digest>::decode_cfg(proto.proof.as_ref(), &max_digests).map_err(|err| {
             QmdbError::CorruptData(format!("failed to decode historical multi proof: {err}"))
         })?;
-    let hasher = commonware_storage::qmdb::hasher::<H>();
-    if !verify_multi_proof(&hasher, &proof, &operations, &target_root) {
+    if !verify_multi_proof::<H, _, _>(&proof, &operations, &target_root) {
         return Err(QmdbError::ProofVerification { kind });
     }
     Ok((*root, operations))
@@ -1265,9 +1262,7 @@ where
             decode_digest::<H::Digest>(bytes.as_ref(), "historical operation range pinned node")
         })
         .collect::<Result<Vec<_>, QmdbError>>()?;
-    let hasher = commonware_storage::qmdb::hasher::<H>();
-    if !verify_proof_and_pinned_nodes(
-        &hasher,
+    if !verify_proof_and_pinned_nodes::<H, _, _>(
         &proof,
         start,
         &decoded_operations,
@@ -1342,8 +1337,7 @@ where
             })
         })
         .collect::<Result<Vec<_>, QmdbError>>()?;
-    let hasher = commonware_storage::qmdb::hasher::<H>();
-    if !proof.verify(&hasher, start, &decoded_operations, &chunks, root) {
+    if !proof.verify::<H, _, N>(start, &decoded_operations, &chunks, root) {
         return Err(QmdbError::ProofVerification {
             kind: crate::ProofKind::CurrentRange,
         });
@@ -1460,8 +1454,7 @@ where
             .map_err(|err| {
             QmdbError::CorruptData(format!("failed to decode unordered current proof: {err}"))
         })?;
-    let hasher = commonware_storage::qmdb::hasher::<H>();
-    if !proof.verify(&hasher, operation.clone(), root) {
+    if !proof.verify::<H, _>(operation.clone(), root) {
         return Err(QmdbError::ProofVerification {
             kind: crate::ProofKind::CurrentKeyValue,
         });

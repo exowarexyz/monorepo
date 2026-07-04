@@ -94,6 +94,7 @@ pub fn any_variable_config<C>(
             items_per_section,
         ),
         translator: TwoCap,
+        init_cache_size: None,
     }
 }
 
@@ -124,6 +125,7 @@ pub fn ordered_variable_config<C>(
         ),
         grafted_metadata_partition: format!("{prefix}-grafted-metadata"),
         translator: TwoCap,
+        init_cache_size: None,
     }
 }
 
@@ -138,6 +140,7 @@ pub fn immutable_variable_config<C>(
         merkle_config: merkle_config(prefix, page_cache.clone()),
         log: variable_journal_config(prefix, page_cache, codec_config, items_per_section),
         translator: TwoCap,
+        init_cache_size: None,
     }
 }
 

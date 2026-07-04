@@ -63,11 +63,7 @@ where
     F: Graftable,
     BatchOperation<F>: commonware_codec::Codec,
 {
-    let ops_root_hasher = commonware_storage::qmdb::hasher::<Sha256>();
-    let ops_root_witness = db
-        .ops_root_witness(&ops_root_hasher)
-        .await
-        .expect("ops root witness");
+    let ops_root_witness = db.ops_root_witness().await.expect("ops root witness");
     recover_boundary_state::<F, Sha256, _, N, _, _>(
         previous_operations,
         operations,
@@ -75,11 +71,8 @@ where
         0,
         ops_root_witness,
         |location| async move {
-            let hasher = commonware_storage::qmdb::hasher::<Sha256>();
-            let (proof, mut proof_ops, mut chunks) = db
-                .range_proof(&hasher, location, NZU64!(1))
-                .await
-                .map_err(|error| {
+            let (proof, mut proof_ops, mut chunks) =
+                db.range_proof(location, NZU64!(1)).await.map_err(|error| {
                     exoware_qmdb::QmdbError::CorruptData(format!(
                         "local current range proof at {location}: {error}"
                     ))
@@ -123,11 +116,7 @@ where
     F: Graftable,
     FixedBatchOperation<F>: commonware_codec::CodecFixed<Cfg = ()> + Send + Sync,
 {
-    let ops_root_hasher = commonware_storage::qmdb::hasher::<Sha256>();
-    let ops_root_witness = db
-        .ops_root_witness(&ops_root_hasher)
-        .await
-        .expect("fixed ops root witness");
+    let ops_root_witness = db.ops_root_witness().await.expect("fixed ops root witness");
     recover_boundary_state::<F, Sha256, _, N, _, _>(
         previous_operations,
         operations,
@@ -135,11 +124,8 @@ where
         0,
         ops_root_witness,
         |location| async move {
-            let hasher = commonware_storage::qmdb::hasher::<Sha256>();
-            let (proof, mut proof_ops, mut chunks) = db
-                .range_proof(&hasher, location, NZU64!(1))
-                .await
-                .map_err(|error| {
+            let (proof, mut proof_ops, mut chunks) =
+                db.range_proof(location, NZU64!(1)).await.map_err(|error| {
                     exoware_qmdb::QmdbError::CorruptData(format!(
                         "local fixed current range proof at {location}: {error}"
                     ))
@@ -232,7 +218,7 @@ where
             };
             db.apply_batch(finalized).await.expect("apply");
 
-            let latest = db.bounds().await.end - 1;
+            let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
             let (_proof, ops): (Proof<F, Digest>, Vec<BatchOperation<F>>) = db
                 .ops_historical_proof(latest + 1, Location::<F>::new(0), n)
@@ -284,11 +270,7 @@ where
     F: Graftable,
     BatchOperation<F>: commonware_codec::Codec,
 {
-    let ops_root_hasher = commonware_storage::qmdb::hasher::<Sha256>();
-    let ops_root_witness = db
-        .ops_root_witness(&ops_root_hasher)
-        .await
-        .expect("ops root witness");
+    let ops_root_witness = db.ops_root_witness().await.expect("ops root witness");
     recover_boundary_state::<F, Sha256, _, M, _, _>(
         previous_operations,
         operations,
@@ -296,11 +278,8 @@ where
         0,
         ops_root_witness,
         |location| async move {
-            let hasher = commonware_storage::qmdb::hasher::<Sha256>();
-            let (proof, mut proof_ops, mut chunks) = db
-                .range_proof(&hasher, location, NZU64!(1))
-                .await
-                .map_err(|error| {
+            let (proof, mut proof_ops, mut chunks) =
+                db.range_proof(location, NZU64!(1)).await.map_err(|error| {
                     exoware_qmdb::QmdbError::CorruptData(format!(
                         "local current range proof at {location}: {error}"
                     ))
@@ -363,7 +342,7 @@ where
             };
             db.apply_batch(finalized).await.expect("apply");
 
-            let latest = db.bounds().await.end - 1;
+            let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
             let (_proof, ops): (Proof<F, Digest>, Vec<BatchOperation<F>>) = db
                 .ops_historical_proof(latest + 1, Location::<F>::new(0), n)
@@ -405,6 +384,7 @@ where
                 },
                 grafted_metadata_partition: "ordered_fixed_grafted_metadata".to_string(),
                 translator: TwoCap,
+                init_cache_size: None,
             };
             let mut db: FixedLocalDb<F> = FixedLocalDb::init(context.child("ordered_fixed"), cfg)
                 .await
@@ -426,7 +406,7 @@ where
             };
             db.apply_batch(finalized).await.expect("apply fixed");
 
-            let latest = db.bounds().await.end - 1;
+            let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
             let (_proof, ops): (Proof<F, Digest>, Vec<FixedBatchOperation<F>>) = db
                 .ops_historical_proof(latest + 1, Location::<F>::new(0), n)
@@ -652,7 +632,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
                     };
                     db.apply_batch(finalized).await.expect("apply");
 
-                    let latest = db.bounds().await.end - 1;
+                    let latest = db.bounds().end - 1;
                     let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");
                     let (_proof, cumulative_ops) = db
                         .ops_historical_proof(latest + 1, Location::<F>::new(0), count)
@@ -670,7 +650,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
                     previous_ops = cumulative_ops;
                 }
 
-                let latest_location = db.bounds().await.end - 1;
+                let latest_location = db.bounds().end - 1;
                 let latest_key = format!("k-{:08x}", counter - 3).into_bytes();
                 let expected_root = db.root();
                 db.destroy().await.expect("destroy");
@@ -811,7 +791,7 @@ async fn ordered_mmb_persistent_interleaved_seed_batches_keep_current_proofs_ver
                         db.apply_batch(finalized).await.expect("apply");
                         db.sync().await.expect("sync");
 
-                        let latest = db.bounds().await.end - 1;
+                        let latest = db.bounds().end - 1;
                         let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");
                         let (proof, cumulative_ops) = db
                             .ops_historical_proof(
@@ -821,9 +801,7 @@ async fn ordered_mmb_persistent_interleaved_seed_batches_keep_current_proofs_ver
                             )
                             .await
                             .expect("historical proof");
-                        let hasher = commonware_storage::qmdb::hasher::<Sha256>();
-                        assert!(commonware_storage::qmdb::verify_proof(
-                            &hasher,
+                        assert!(commonware_storage::qmdb::verify_proof::<Sha256, _, _>(
                             &proof,
                             Location::<mmb::Family>::new(0),
                             &cumulative_ops,
@@ -843,7 +821,7 @@ async fn ordered_mmb_persistent_interleaved_seed_batches_keep_current_proofs_ver
                         previous_ops = cumulative_ops;
                     }
 
-                    let latest_location = db.bounds().await.end - 1;
+                    let latest_location = db.bounds().end - 1;
                     let expected_root = db.root();
                     let expected_ops_root = db.ops_root();
                     db.sync().await.expect("sync");

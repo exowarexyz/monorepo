@@ -70,11 +70,7 @@ async fn boundary_from_db(
     previous_ops: Option<&[BatchOp]>,
     operations: &[BatchOp],
 ) -> CurrentBoundaryState<Digest, N, mmr::Family> {
-    let ops_root_hasher = commonware_storage::qmdb::hasher::<Sha256>();
-    let ops_root_witness = db
-        .ops_root_witness(&ops_root_hasher)
-        .await
-        .expect("ops root witness");
+    let ops_root_witness = db.ops_root_witness().await.expect("ops root witness");
     recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
         previous_ops,
         operations,
@@ -82,11 +78,8 @@ async fn boundary_from_db(
         *db.sync_boundary() / ((N as u64) * 8),
         ops_root_witness,
         |location| async move {
-            let hasher = commonware_storage::qmdb::hasher::<Sha256>();
-            let (proof, mut proof_ops, mut chunks) = db
-                .range_proof(&hasher, location, NZU64!(1))
-                .await
-                .map_err(|e| {
+            let (proof, mut proof_ops, mut chunks) =
+                db.range_proof(location, NZU64!(1)).await.map_err(|e| {
                     exoware_qmdb::QmdbError::CorruptData(format!(
                         "local current range proof at {location}: {e}"
                     ))
@@ -166,7 +159,7 @@ async fn mirror_ordered_prune_past_chunk_zero() {
                         .await
                         .expect("prune current");
 
-                    let latest = db.bounds().await.end - 1;
+                    let latest = db.bounds().end - 1;
                     let total = NonZeroU64::new(*latest + 1).expect("non-zero");
                     let (_proof, cumulative) = db
                         .ops_historical_proof(latest + 1, Location::<mmr::Family>::new(0), total)
@@ -201,9 +194,8 @@ async fn mirror_ordered_prune_past_chunk_zero() {
                 // failure mode `current::Db` exhibits once the inactivity floor
                 // crosses the first chunk boundary.
                 let chunk_zero_pruned = {
-                    let hasher = commonware_storage::qmdb::hasher::<Sha256>();
                     match db
-                        .range_proof(&hasher, Location::<mmr::Family>::new(0), NZU64!(1))
+                        .range_proof(Location::<mmr::Family>::new(0), NZU64!(1))
                         .await
                     {
                         Err(e) => e.to_string().contains("operation pruned"),

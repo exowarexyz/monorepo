@@ -113,11 +113,7 @@ async fn boundary_from_local_db(
     previous_operations: Option<&[BatchOperation]>,
     operations: &[BatchOperation],
 ) -> CurrentBoundaryState<Digest, N, mmr::Family> {
-    let ops_root_hasher = commonware_storage::qmdb::hasher::<Sha256>();
-    let ops_root_witness = db
-        .ops_root_witness(&ops_root_hasher)
-        .await
-        .expect("ops root witness");
+    let ops_root_witness = db.ops_root_witness().await.expect("ops root witness");
     recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
         previous_operations,
         operations,
@@ -125,11 +121,8 @@ async fn boundary_from_local_db(
         0,
         ops_root_witness,
         |location| async move {
-            let hasher = commonware_storage::qmdb::hasher::<Sha256>();
-            let (proof, mut proof_ops, mut chunks) = db
-                .range_proof(&hasher, location, NZU64!(1))
-                .await
-                .map_err(|error| {
+            let (proof, mut proof_ops, mut chunks) =
+                db.range_proof(location, NZU64!(1)).await.map_err(|error| {
                     exoware_qmdb::QmdbError::CorruptData(format!(
                         "local current range proof at {location}: {error}"
                     ))
@@ -236,7 +229,7 @@ async fn build_local_batch() -> LocalBatch {
                 };
                 db.apply_batch(finalized).await.expect("apply");
 
-                let latest = db.bounds().await.end - 1;
+                let latest = db.bounds().end - 1;
                 let n = NonZeroU64::new(*latest + 1).unwrap();
                 let (_proof, cumulative): (BatchProof, Vec<BatchOperation>) = db
                     .ops_historical_proof(latest + 1, Location::new(0), n)
@@ -271,11 +264,7 @@ async fn boundary_from_mmb_local_db(
     db: &MmbLocalDb,
     operations: &[MmbBatchOperation],
 ) -> CurrentBoundaryState<Digest, N, mmb::Family> {
-    let ops_root_hasher = commonware_storage::qmdb::hasher::<Sha256>();
-    let ops_root_witness = db
-        .ops_root_witness(&ops_root_hasher)
-        .await
-        .expect("ops root witness");
+    let ops_root_witness = db.ops_root_witness().await.expect("ops root witness");
     recover_boundary_state::<mmb::Family, Sha256, _, N, _, _>(
         None,
         operations,
@@ -283,11 +272,8 @@ async fn boundary_from_mmb_local_db(
         0,
         ops_root_witness,
         |location| async move {
-            let hasher = commonware_storage::qmdb::hasher::<Sha256>();
-            let (proof, mut proof_ops, mut chunks) = db
-                .range_proof(&hasher, location, NZU64!(1))
-                .await
-                .map_err(|error| {
+            let (proof, mut proof_ops, mut chunks) =
+                db.range_proof(location, NZU64!(1)).await.map_err(|error| {
                     exoware_qmdb::QmdbError::CorruptData(format!(
                         "local current range proof at {location}: {error}"
                     ))
@@ -356,7 +342,7 @@ async fn build_mmb_local_batch() -> MmbLocalBatch {
                 };
                 db.apply_batch(finalized).await.expect("apply");
 
-                let latest = db.bounds().await.end - 1;
+                let latest = db.bounds().end - 1;
                 let n = NonZeroU64::new(*latest + 1).unwrap();
                 let (_proof, cumulative): (MmbBatchProof, Vec<MmbBatchOperation>) = db
                     .ops_historical_proof(latest + 1, Location::new(0), n)
@@ -425,7 +411,7 @@ async fn build_mmb_growing_local_batch() -> MmbGrowingLocalBatch {
                 };
                 db.apply_batch(finalized).await.expect("apply");
 
-                let latest = db.bounds().await.end - 1;
+                let latest = db.bounds().end - 1;
                 let n = NonZeroU64::new(*latest + 1).unwrap();
                 let (_proof, cumulative): (MmbBatchProof, Vec<MmbBatchOperation>) = db
                     .ops_historical_proof(latest + 1, Location::new(0), n)
@@ -666,7 +652,7 @@ async fn ordered_mmb_current_state_sync_from_nonzero_connect_api_reconstructs_cu
             .expect("sync current db from nonzero MMB API");
 
             assert_eq!(db.root(), expected_current_root);
-            let bounds = db.bounds().await;
+            let bounds = db.bounds();
             assert_eq!(bounds.start, start);
             assert_eq!(bounds.end, op_count);
             assert_eq!(
@@ -1401,7 +1387,7 @@ async fn ordered_mmb_operation_log_any_sync_from_nonzero_connect_api_reconstruct
             .expect("sync any db from nonzero MMB API");
 
             assert_eq!(db.root(), target_root);
-            let bounds = db.bounds().await;
+            let bounds = db.bounds();
             assert_eq!(bounds.start, start);
             assert_eq!(bounds.end, op_count);
             assert_eq!(
@@ -1501,7 +1487,7 @@ async fn ordered_mmb_operation_log_any_sync_accepts_target_update_from_growing_b
                 db.get(&b"alpha".to_vec()).await.expect("get alpha"),
                 sync_expected_alpha
             );
-            let bounds = db.bounds().await;
+            let bounds = db.bounds();
             assert_eq!(bounds.start, start);
             assert_eq!(bounds.end, updated_op_count);
             db.destroy().await.expect("destroy synced db");

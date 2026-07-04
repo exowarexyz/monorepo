@@ -109,11 +109,7 @@ async fn boundary_from_local_db(
     previous_operations: Option<&[QmdbOperation<DemoFamily, Vec<u8>, Vec<u8>>]>,
     operations: &[QmdbOperation<DemoFamily, Vec<u8>, Vec<u8>>],
 ) -> CurrentBoundaryState<commonware_cryptography::sha256::Digest, N, DemoFamily> {
-    let ops_root_hasher = commonware_storage::qmdb::hasher::<Sha256>();
-    let ops_root_witness = db
-        .ops_root_witness(&ops_root_hasher)
-        .await
-        .expect("ops root witness");
+    let ops_root_witness = db.ops_root_witness().await.expect("ops root witness");
     recover_boundary_state::<DemoFamily, Sha256, _, N, _, _>(
         previous_operations,
         operations,
@@ -121,11 +117,8 @@ async fn boundary_from_local_db(
         0,
         ops_root_witness,
         |location| async move {
-            let hasher = commonware_storage::qmdb::hasher::<Sha256>();
-            let (proof, mut proof_ops, mut chunks) = db
-                .range_proof(&hasher, location, NZU64!(1))
-                .await
-                .map_err(|error| {
+            let (proof, mut proof_ops, mut chunks) =
+                db.range_proof(location, NZU64!(1)).await.map_err(|error| {
                     exoware_qmdb::QmdbError::CorruptData(format!(
                         "local current range proof at {location}: {error}"
                     ))
@@ -224,6 +217,7 @@ async fn seed(
                 },
                 grafted_metadata_partition: "mmb-grafted-metadata".into(),
                 translator: TwoCap,
+                init_cache_size: None,
             };
             let mut db = LocalQmdbDb::<
                 DemoFamily,
@@ -240,7 +234,7 @@ async fn seed(
 
             // `LocalQmdbDb::init` seeds location 0 with a genesis CommitFloor,
             // so `bounds.end == 1` means no seed batches have run yet.
-            let bounds = db.bounds().await;
+            let bounds = db.bounds();
             let (mut previous_ops, mut counter, writer) = if *bounds.end <= 1 {
                 info!("starting from empty local DB");
                 let writer =
@@ -324,7 +318,7 @@ async fn seed(
                 db.apply_batch(finalized).await.expect("apply batch");
                 db.sync().await.expect("sync local ordered db");
 
-                let latest = db.bounds().await.end - 1;
+                let latest = db.bounds().end - 1;
                 let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");
                 let (_proof, cumulative_ops) = db
                     .ops_historical_proof(latest + 1, Location::<DemoFamily>::new(0), count)

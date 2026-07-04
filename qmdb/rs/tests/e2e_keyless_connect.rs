@@ -88,11 +88,11 @@ async fn build_local_batch() -> LocalBatch {
             db.apply_batch(finalized).await.expect("apply");
             let finalized = {
                 let batch = db.new_batch().append(b"third-value".to_vec());
-                batch.merkleize(&db, None::<Vec<u8>>, db.bounds().await.end - 1)
+                batch.merkleize(&db, None::<Vec<u8>>, db.bounds().end - 1)
             };
             db.apply_batch(finalized).await.expect("apply second");
 
-            let latest = db.bounds().await.end - 1;
+            let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
             let (_proof, ops) = db
                 .historical_proof(latest + 1, Location::new(0), n)
@@ -338,7 +338,7 @@ async fn keyless_commonware_glue_state_sync_uses_operation_log_resolver() {
             .expect("commonware glue state sync");
 
             assert_eq!(synced.root(), local.root);
-            let bounds = synced.bounds().await;
+            let bounds = synced.bounds();
             assert_eq!(bounds.start, start);
             assert_eq!(bounds.end, op_count);
             for (location, expected) in expected_values {

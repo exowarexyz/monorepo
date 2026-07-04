@@ -1231,9 +1231,7 @@ where
             size: merkle_size_for_watermark(watermark)?,
             _marker: PhantomData,
         };
-        let hasher = commonware_storage::qmdb::hasher::<H>();
-        RangeProof::new(
-            &hasher,
+        RangeProof::new::<H, _, N>(
             &status,
             &storage,
             inactivity_floor,
@@ -1267,9 +1265,7 @@ where
             size: merkle_size_for_watermark(watermark)?,
             _marker: PhantomData,
         };
-        let hasher = commonware_storage::qmdb::hasher::<H>();
-        OperationProof::new(
-            &hasher,
+        OperationProof::new::<H, _>(
             &status,
             &storage,
             inactivity_floor,

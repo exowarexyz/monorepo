@@ -69,11 +69,11 @@ async fn build_local_reference(batches: Vec<Vec<(K, V)>>) -> LocalReference {
                     for (k, v) in batch_writes {
                         batch = batch.set(k.clone(), v.clone());
                     }
-                    batch.merkleize(&db, None::<Vec<u8>>, db.bounds().await.end - 1)
+                    batch.merkleize(&db, None::<Vec<u8>>, db.bounds().end - 1)
                 };
                 db.apply_batch(finalized).await.expect("apply");
             }
-            let latest = db.bounds().await.end - 1;
+            let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
             let (_proof, ops) = db
                 .historical_proof(latest + 1, Location::<mmr::Family>::new(0), n)

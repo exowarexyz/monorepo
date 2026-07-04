@@ -124,7 +124,7 @@ async fn build_local_db() -> LocalReference {
             };
             db.apply_batch(finalized).await.expect("apply");
 
-            let latest = db.bounds().await.end - 1;
+            let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
             let (_proof, ops) = db
                 .historical_proof(latest + 1, Location::<mmr::Family>::new(0), n)
@@ -160,6 +160,7 @@ async fn build_fixed_local_db() -> FixedLocalReference {
                     write_buffer: NZUsize!(1024),
                 },
                 translator: TwoCap,
+                init_cache_size: None,
             };
             let mut db: FixedLocalDb = FixedLocalDb::init(context.child("immutable_fixed"), cfg)
                 .await
@@ -176,7 +177,7 @@ async fn build_fixed_local_db() -> FixedLocalReference {
             };
             db.apply_batch(finalized).await.expect("apply fixed");
 
-            let latest = db.bounds().await.end - 1;
+            let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
             let (_proof, ops) = db
                 .historical_proof(latest + 1, Location::<mmr::Family>::new(0), n)
