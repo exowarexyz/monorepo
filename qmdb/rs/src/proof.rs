@@ -125,8 +125,7 @@ where
     ordered::Operation<F, K, E>: Encode,
 {
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
-        let hasher = commonware_storage::qmdb::hasher::<H>();
-        verify_multi_proof(&hasher, &self.proof, &self.operations, &self.root)
+        verify_multi_proof::<H, _, _>(&self.proof, &self.operations, &self.root)
     }
 }
 
@@ -331,8 +330,7 @@ where
     E: ValueEncoding,
     ordered::Operation<F, K, E>: Codec,
 {
-    let hasher = commonware_storage::qmdb::hasher::<H>();
-    OrderedVerifierDb::<F, K, E, H, N>::verify_key_value_proof(&hasher, key, value, proof, root)
+    OrderedVerifierDb::<F, K, E, H, N>::verify_key_value_proof(key, value, proof, root)
 }
 
 pub(crate) fn verify_ordered_exclusion_proof<F, H, K, E, const N: usize>(
@@ -347,8 +345,7 @@ where
     E: ValueEncoding,
     ordered::Operation<F, K, E>: Codec,
 {
-    let hasher = commonware_storage::qmdb::hasher::<H>();
-    OrderedVerifierDb::<F, K, E, H, N>::verify_exclusion_proof(&hasher, key, proof, root)
+    OrderedVerifierDb::<F, K, E, H, N>::verify_exclusion_proof(key, proof, root)
 }
 
 impl<
@@ -495,9 +492,8 @@ where
         if !matches!(self.operation, unordered::Operation::Update(_)) {
             return false;
         }
-        let hasher = commonware_storage::qmdb::hasher::<H>();
         self.proof
-            .verify(&hasher, self.operation.clone(), &self.root)
+            .verify::<H, _>(self.operation.clone(), &self.root)
     }
 }
 
@@ -696,9 +692,7 @@ where
     Op: Codec,
 {
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
-        let hasher = commonware_storage::qmdb::hasher::<H>();
-        self.proof.verify(
-            &hasher,
+        self.proof.verify::<H, _, N>(
             self.start_location,
             &self.operations,
             &self.chunks,

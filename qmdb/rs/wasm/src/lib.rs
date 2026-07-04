@@ -161,7 +161,6 @@ fn get_bit_from_chunk(chunk: &[u8], bit: u64, chunk_bits: u64) -> bool {
 
 fn verify_current_range<F, H, O>(
     proof: &RangeProof<F, H::Digest>,
-    root_hasher: &merkle::hasher::Standard<H>,
     config: &CurrentProofConfig,
     start_loc: Location<F>,
     ops: &[O],
@@ -220,7 +219,6 @@ where
         start_chunk,
         chunk_refs,
         graftable_chunks,
-        root_hasher.root_bagging(),
     );
 
     if has_partial_chunk {
@@ -267,7 +265,7 @@ where
         pending_chunk_digest: proof.pending_chunk_digest.clone(),
         partial_chunk,
     };
-    let reconstructed = witness.root(root_hasher, &proof.ops_root);
+    let reconstructed = witness.root::<H>(&proof.ops_root);
     if reconstructed != *root {
         return Err("current proof failed verification".to_string());
     }
@@ -323,8 +321,7 @@ where
             )?;
             let witness = OpsRootWitness::<F, H::Digest>::decode(ops_root_witness)
                 .map_err(|err| format!("failed to decode historical ops-root witness: {err}"))?;
-            let hasher = commonware_storage::qmdb::hasher::<H>();
-            if !witness.verify(&hasher, &ops_root, expected_root) {
+            if !witness.verify::<H>(&ops_root, expected_root) {
                 return Err("historical ops-root witness failed verification".to_string());
             }
             Ok(ops_root)
@@ -356,8 +353,7 @@ where
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
     let proof = merkle::Proof::<F, H::Digest>::decode_cfg(proto.proof.as_ref(), &max_digests)
         .map_err(|err| format!("failed to decode historical multi proof: {err}"))?;
-    let hasher = commonware_storage::qmdb::hasher::<H>();
-    if !verify_multi_proof(&hasher, &proof, &operations, &target_root) {
+    if !verify_multi_proof::<H, _, _>(&proof, &operations, &target_root) {
         return Err("historical multi proof failed verification".to_string());
     }
     Ok((*root, operations))
@@ -390,8 +386,7 @@ where
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
     let proof = merkle::Proof::<F, H::Digest>::decode_cfg(proto.proof.as_ref(), &max_digests)
         .map_err(|err| format!("failed to decode historical multi proof: {err}"))?;
-    let hasher = commonware_storage::qmdb::hasher::<H>();
-    if !verify_multi_proof(&hasher, &proof, &operations, &ops_root) {
+    if !verify_multi_proof::<H, _, _>(&proof, &operations, &ops_root) {
         return Err("historical multi proof failed verification".to_string());
     }
     if proto.ops_root_witness.is_empty() {
@@ -401,8 +396,7 @@ where
         OpsRootWitness::<F, H::Digest>::decode(proto.ops_root_witness.as_ref()).map_err(|err| {
             format!("failed to decode historical multi proof ops-root witness: {err}")
         })?;
-    let hasher = commonware_storage::qmdb::hasher::<H>();
-    Ok((witness.root(&hasher, &ops_root), operations))
+    Ok((witness.root::<H>(&ops_root), operations))
 }
 
 fn decode_multi_operations_from_proto<F>(
@@ -498,9 +492,7 @@ where
             )
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let hasher = commonware_storage::qmdb::hasher::<H>();
-    if !verify_proof_and_pinned_nodes(
-        &hasher,
+    if !verify_proof_and_pinned_nodes::<H, _, _>(
         &proof,
         start,
         &ordered_operations,
@@ -565,9 +557,7 @@ where
             )
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let hasher = commonware_storage::qmdb::hasher::<H>();
-    if !verify_proof_and_pinned_nodes(
-        &hasher,
+    if !verify_proof_and_pinned_nodes::<H, _, _>(
         &proof,
         start,
         &raw_operations,
@@ -634,16 +624,7 @@ where
         .iter()
         .map(|bytes| bytes.to_vec())
         .collect::<Vec<_>>();
-    let hasher = commonware_storage::qmdb::hasher::<H>();
-    verify_current_range::<F, H, _>(
-        &proof,
-        &hasher,
-        config,
-        start,
-        &ordered_operations,
-        &chunks,
-        root,
-    )?;
+    verify_current_range::<F, H, _>(&proof, config, start, &ordered_operations, &chunks, root)?;
     Ok(operations)
 }
 
@@ -749,10 +730,8 @@ where
     if !get_bit_from_chunk(&proof.chunk, *proof.loc, config.chunk_bits) {
         return Err("current operation proof is inactive".to_string());
     }
-    let hasher = commonware_storage::qmdb::hasher::<H>();
     verify_current_range::<F, H, _>(
         &proof.range_proof,
-        &hasher,
         config,
         proof.loc,
         std::slice::from_ref(operation),
@@ -2421,8 +2400,7 @@ mod tests {
             pending_chunk_digest: Some(Sha256::fill(0x22)),
             partial_chunk: Some((13, Sha256::fill(0x33))),
         };
-        let hasher = commonware_storage::qmdb::hasher::<Sha256>();
-        let current_root = witness.root(&hasher, &ops_root);
+        let current_root = witness.root::<Sha256>(&ops_root);
         proto.ops_root_witness = witness.encode();
 
         let (root, verified) =

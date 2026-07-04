@@ -54,9 +54,7 @@ where
             "missing operation at location {location} in current boundary input"
         ))
     })?;
-    let hasher = commonware_storage::qmdb::hasher::<H>();
-    let digests = verify_proof_and_extract_digests(
-        &hasher,
+    let digests = verify_proof_and_extract_digests::<_, _, H, _, N>(
         &proof,
         location,
         std::slice::from_ref(operation),

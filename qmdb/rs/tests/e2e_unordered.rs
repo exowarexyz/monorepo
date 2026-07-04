@@ -141,6 +141,7 @@ async fn build_fixed_local_db() -> FixedLocalReference {
                     write_buffer: NZUsize!(1024),
                 },
                 translator: TwoCap,
+                init_cache_size: None,
             };
             let mut db: FixedLocalDb = FixedLocalDb::init(context.child("unordered_fixed"), cfg)
                 .await
