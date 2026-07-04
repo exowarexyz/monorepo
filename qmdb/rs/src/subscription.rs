@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use commonware_storage::merkle::{Family, Location};
 use exoware_sdk::keys::Key;
-use exoware_sdk::match_key::MatchKey;
+use exoware_sdk::selector::Selector;
 use exoware_sdk::stream_filter::StreamFilter;
-use exoware_sdk::{StoreClient, StreamSubscription};
+use exoware_sdk::{PrefixedStoreClient, StreamSubscription};
 
 use crate::auth::{
     decode_auth_operation_location, decode_auth_presence_location, decode_auth_watermark_location,
@@ -43,7 +43,7 @@ impl<F: Family> RowClassifier<F> {
 }
 
 pub(crate) async fn open_store_subscription(
-    client: &StoreClient,
+    client: &PrefixedStoreClient,
     filter: StreamFilter,
     since: Option<u64>,
 ) -> Result<StreamSubscription, QmdbError> {
@@ -135,18 +135,18 @@ pub(crate) fn classify_and_filter<F: Family>(
     });
 
     let filter = StreamFilter {
-        match_keys: vec![
-            MatchKey {
+        selectors: vec![
+            Selector {
                 reserved_bits: RESERVED_BITS,
                 prefix: op_prefix,
                 payload_regex: Utf8::from(payload_regex.as_str()),
             },
-            MatchKey {
+            Selector {
                 reserved_bits: RESERVED_BITS,
                 prefix: presence_prefix,
                 payload_regex: Utf8::from(payload_regex.as_str()),
             },
-            MatchKey {
+            Selector {
                 reserved_bits: RESERVED_BITS,
                 prefix: watermark_prefix,
                 payload_regex: Utf8::from(payload_regex.as_str()),

@@ -58,6 +58,13 @@
   border-color: #d4d4d4;
 }
 
+.primary-panels {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 32rem), 1fr));
+  gap: 2rem;
+  align-items: start;
+}
+
 .card h2 {
   font-size: 1.5rem;
   font-weight: 600;

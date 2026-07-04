@@ -24,7 +24,7 @@ use commonware_utils::{
     vec::NonEmptyVec,
     Acknowledgement as _, NZUsize, NZU16, NZU64,
 };
-use exoware_sdk::{RetryConfig, StoreBatchUpload, StoreClient};
+use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreBatchUpload, StoreClient};
 use exoware_simplex::{Finalized, MarshalResolver, Notarized, SimplexClient};
 use rand::{rngs::StdRng, SeedableRng};
 
@@ -229,7 +229,7 @@ fn finalized(block: TestBlock, schemes: &[Scheme]) -> Finalized<TestBlock, Schem
 #[tokio::test]
 async fn uploads_and_reads_notarized_and_finalized_blocks() {
     let (_dir, _handle, store) = local_store_client().await;
-    let simplex = SimplexClient::from_client(store);
+    let simplex = SimplexClient::new(PrefixedStoreClient::empty(store));
     let schemes = schemes();
 
     let block1 = TestBlock::new(1, b"notarized");
@@ -305,7 +305,7 @@ async fn uploads_and_reads_notarized_and_finalized_blocks() {
 #[tokio::test]
 async fn prepared_uploads_can_share_one_store_batch() {
     let (_dir, _handle, store) = local_store_client().await;
-    let simplex = SimplexClient::from_client(store.clone());
+    let simplex = SimplexClient::new(PrefixedStoreClient::empty(store.clone()));
     let schemes = schemes();
 
     let first = finalized(TestBlock::new(10, b"first"), &schemes);
@@ -315,7 +315,7 @@ async fn prepared_uploads_can_share_one_store_batch() {
     prepared.extend(simplex.prepare_finalized(&second).expect("second"));
 
     let receipt = simplex
-        .commit_upload(&store, prepared)
+        .commit_upload(prepared)
         .await
         .expect("commit combined");
     assert_eq!(receipt.summary.headers, 2);
@@ -337,7 +337,7 @@ async fn marshal_resolver_sinks_finalized_chain_from_simplex_api() {
     const BLOCKS_TO_PROCESS: u64 = 5;
 
     let (_dir, _handle, store) = local_store_client().await;
-    let simplex = SimplexClient::from_client(store);
+    let simplex = SimplexClient::new(PrefixedStoreClient::empty(store));
     let schemes = schemes();
 
     let genesis = TestBlock::new(0, b"genesis");

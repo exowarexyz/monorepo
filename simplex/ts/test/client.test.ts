@@ -575,7 +575,7 @@ test('streams and verifies certificate entries', async () => {
   }
 
   assert.deepEqual(capturedFilters, {
-    matchKeys: [
+    selectors: [
       { reservedBits: 16, prefix: 0x0020, payloadRegex: '(?s-u).*' },
       { reservedBits: 16, prefix: 0x0030, payloadRegex: '(?s-u).*' },
       { reservedBits: 16, prefix: 0x0031, payloadRegex: '(?s-u).*' },

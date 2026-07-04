@@ -42,9 +42,9 @@ use datafusion::datasource::MemTable;
 use datafusion::prelude::SessionContext;
 use exoware_sdk::keys::Key;
 use exoware_sdk::kv_codec::{decode_stored_row, Utf8};
-use exoware_sdk::match_key::MatchKey;
+use exoware_sdk::selector::Selector;
 use exoware_sdk::stream_filter::StreamFilter;
-use exoware_sdk::{StoreClient, StreamSubscription};
+use exoware_sdk::{PrefixedStoreClient, StreamSubscription};
 use futures::future::BoxFuture;
 use futures::stream::Stream;
 use futures::FutureExt;
@@ -68,7 +68,7 @@ struct TableStream {
     model: Arc<TableModel>,
     schema: SchemaRef,
     access_plan: Arc<ScanAccessPlan>,
-    match_key: MatchKey,
+    selector: Selector,
     indexes: Arc<Vec<ResolvedIndexSpec>>,
 }
 
@@ -81,7 +81,7 @@ impl TableStream {
             &QueryPredicate::default(),
         ));
         let prefix = u16::from(model.table_prefix) << KEY_KIND_BITS;
-        let match_key = MatchKey {
+        let selector = Selector {
             reserved_bits: PRIMARY_RESERVED_BITS,
             prefix,
             payload_regex: Utf8::from("(?s-u).*"),
@@ -90,7 +90,7 @@ impl TableStream {
             schema: model.schema.clone(),
             access_plan,
             model,
-            match_key,
+            selector,
             indexes: Arc::new(indexes),
         }
     }
@@ -131,7 +131,7 @@ pub struct SqlServer {
     // Registration order, preserved for the `Tables` RPC so clients see
     // tables in the same order the operator declared them.
     table_names: Vec<String>,
-    store: StoreClient,
+    store: PrefixedStoreClient,
 }
 
 impl SqlServer {
@@ -280,7 +280,7 @@ impl Service for SqlConnect {
             let stream = server.stream(&table_name)?.clone();
 
             let filter = StreamFilter {
-                match_keys: vec![stream.match_key.clone()],
+                selectors: vec![stream.selector.clone()],
                 value_filters: vec![],
             };
             let sub = server

@@ -11,7 +11,7 @@ use commonware_storage::qmdb::{
 };
 use exoware_sdk::keys::Key;
 use exoware_sdk::{
-    StoreBatchPublication, StoreBatchUpload, StoreClient, StorePublicationFrontierWriter,
+    PrefixedStoreClient, StoreBatchPublication, StoreBatchUpload, StorePublicationFrontierWriter,
     StoreWriteBatch,
 };
 use futures::future::BoxFuture;
@@ -158,7 +158,7 @@ pub struct KeylessWriter<
     V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > {
-    client: StoreClient,
+    client: PrefixedStoreClient,
     core: WriterCore<H::Digest, F>,
     _marker: PhantomData<(F, E)>,
 }
@@ -171,8 +171,9 @@ where
     E: ValueEncoding<Value = V>,
     keyless::Operation<F, E>: Encode,
 {
-    /// Construct a writer from caller-supplied frontier state. No store I/O.
-    pub fn new(client: StoreClient, state: WriterState<H::Digest, F>) -> Self {
+    /// Construct a writer over `client`'s namespace prefix from caller-supplied
+    /// frontier state (no store I/O).
+    pub fn new(client: PrefixedStoreClient, state: WriterState<H::Digest, F>) -> Self {
         Self {
             client,
             core: WriterCore::from_cache(Cache::from_writer_state(state)),
@@ -180,7 +181,9 @@ where
         }
     }
 
-    pub fn empty(client: StoreClient) -> Self {
+    /// Construct a fresh writer over `client`'s namespace prefix with empty
+    /// frontier state (no prior published checkpoint).
+    pub fn fresh(client: PrefixedStoreClient) -> Self {
         Self::new(client, WriterState::empty())
     }
 
@@ -226,7 +229,7 @@ where
         prepared: &mut super::PreparedUpload<F>,
         batch: &mut StoreWriteBatch,
     ) -> Result<(), QmdbError> {
-        super::stage_rows(&self.client, batch, prepared.rows.drain(..))
+        super::stage_rows(self.client.key_prefix(), batch, prepared.rows.drain(..))
     }
 
     pub async fn mark_upload_persisted(
@@ -288,7 +291,7 @@ where
         prepared: &super::PreparedWatermark<F>,
         batch: &mut StoreWriteBatch,
     ) -> Result<(), QmdbError> {
-        super::stage_watermark(&self.client, batch, prepared)
+        super::stage_watermark(self.client.key_prefix(), batch, prepared)
     }
 
     pub async fn mark_flush_persisted(
@@ -310,7 +313,7 @@ where
         let Some(prepared) = self.prepare_flush().await? else {
             return Ok(None);
         };
-        Ok(Some(self.commit_publication(&self.client, prepared).await?))
+        Ok(Some(self.commit_publication(prepared).await?))
     }
 
     pub async fn flush(&self) -> Result<(), QmdbError> {
@@ -341,6 +344,10 @@ where
     type Prepared = super::PreparedUpload<F>;
     type Receipt = UploadReceipt<F>;
     type Error = QmdbError;
+
+    fn store_client(&self) -> &PrefixedStoreClient {
+        &self.client
+    }
 
     fn stage_upload(
         &self,
@@ -394,6 +401,10 @@ where
     type PreparedPublication = super::PreparedWatermark<F>;
     type PublicationReceipt = PublishedCheckpoint<F>;
     type Error = QmdbError;
+
+    fn store_client(&self) -> &PrefixedStoreClient {
+        &self.client
+    }
 
     fn stage_publication(
         &self,

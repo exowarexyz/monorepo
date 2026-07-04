@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::{routing::get, Router};
 use clap::{Parser, Subcommand};
-use exoware_sdk::StoreClient;
+use exoware_sdk::{StoreClient, StoreKeyPrefix};
 use exoware_sql::{default_orders_index_specs, sql_connect_stack, KvSchema, SqlServer};
 use tower_http::cors::CorsLayer;
 use tracing::info;
@@ -42,7 +42,7 @@ async fn health() -> &'static str {
 fn build_server(
     store_url: &str,
 ) -> Result<Arc<SqlServer>, Box<dyn std::error::Error + Send + Sync>> {
-    let client = StoreClient::new(store_url);
+    let client = StoreClient::new(store_url).prefixed(StoreKeyPrefix::identity());
     let schema = KvSchema::new(client)
         .orders_table(TABLE_NAME, default_orders_index_specs())
         .map_err(|e| format!("configure schema: {e}"))?;

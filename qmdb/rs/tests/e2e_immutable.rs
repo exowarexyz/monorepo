@@ -18,7 +18,7 @@ use commonware_storage::qmdb::immutable::variable::{
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use exoware_qmdb::{ImmutableClient, ImmutableWriter};
-use exoware_sdk::StoreClient;
+use exoware_sdk::{PrefixedStoreClient, StoreClient};
 
 use common::retry;
 
@@ -53,11 +53,14 @@ type FixedTestImmutableClient = ImmutableClient<
 >;
 
 fn fresh_immutable(c: StoreClient) -> TestImmutableClient {
-    TestImmutableClient::from_client(c, ((), ((0..=10000).into(), ())))
+    TestImmutableClient::new(
+        PrefixedStoreClient::empty(c),
+        ((), ((0..=10000).into(), ())),
+    )
 }
 
 fn fresh_fixed_immutable(c: StoreClient) -> FixedTestImmutableClient {
-    FixedTestImmutableClient::from_client(c, ())
+    FixedTestImmutableClient::new(PrefixedStoreClient::empty(c), ())
 }
 
 type TestImmutableWriter =
@@ -71,11 +74,11 @@ type FixedTestImmutableWriter = ImmutableWriter<
 >;
 
 fn fresh_writer(c: StoreClient) -> TestImmutableWriter {
-    TestImmutableWriter::empty(c)
+    TestImmutableWriter::fresh(PrefixedStoreClient::empty(c))
 }
 
 fn fresh_fixed_writer(c: StoreClient) -> FixedTestImmutableWriter {
-    FixedTestImmutableWriter::empty(c)
+    FixedTestImmutableWriter::fresh(PrefixedStoreClient::empty(c))
 }
 
 struct LocalReference {
@@ -201,7 +204,7 @@ async fn immutable_round_trip() {
     let local = build_local_db().await;
 
     let writer = fresh_writer(client.clone());
-    common::commit_immutable_upload(&client, &writer, &local.operations)
+    common::commit_immutable_upload(&writer, &local.operations)
         .await
         .expect("commit upload");
 
@@ -243,7 +246,7 @@ async fn immutable_fixed_round_trip() {
     let local = build_fixed_local_db().await;
 
     let writer = fresh_fixed_writer(client.clone());
-    common::commit_immutable_upload(&client, &writer, &local.operations)
+    common::commit_immutable_upload(&writer, &local.operations)
         .await
         .expect("commit fixed upload");
 

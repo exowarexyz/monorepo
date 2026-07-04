@@ -1,11 +1,11 @@
-//! Validated filter for `store.stream.v1.Subscribe`.
+//! Validated filter for `log.stream.v1.Subscribe`.
 //!
-//! The filter is a list of `MatchKey`s with OR semantics: a row is delivered
-//! if any match_key's (reserved_bits, prefix) selects its family AND its
+//! The filter is a list of `Selector`s with OR semantics: a row is delivered
+//! if any selector's (reserved_bits, prefix) selects its family AND its
 //! payload_regex matches the key's payload bytes. The list is capped at 16 to
 //! keep server-side regex compile cost predictable. When `value_filters` is
 //! non-empty, rows that pass the key filter must also satisfy any one
-//! `BytesFilter` in the value list (OR within the value list; AND between key
+//! `Filter` in the value list (OR within the value list; AND between key
 //! and value filters).
 
 use std::collections::BTreeSet;
@@ -15,15 +15,15 @@ use bytes::Bytes;
 use regex::bytes::Regex;
 
 use crate::keys::KeyCodec;
-use crate::match_key::MatchKey;
+use crate::selector::Selector;
 
-pub const MAX_MATCH_KEYS_PER_FILTER: usize = 16;
+pub const MAX_SELECTORS_PER_FILTER: usize = 16;
 pub const MAX_VALUE_FILTERS_PER_FILTER: usize = 16;
 
 /// Matches a row's raw value bytes by exact match, prefix, or regex. Wire
-/// shape mirrors `store.common.v1.BytesFilter`.
+/// shape mirrors `common.kv.v1.Filter`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum BytesFilter {
+pub enum Filter {
     Exact(Bytes),
     Prefix(Bytes),
     Regex(String),
@@ -31,25 +31,25 @@ pub enum BytesFilter {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamFilter {
-    pub match_keys: Vec<MatchKey>,
-    pub value_filters: Vec<BytesFilter>,
+    pub selectors: Vec<Selector>,
+    pub value_filters: Vec<Filter>,
 }
 
-/// A compiled bundle of `BytesFilter`s ready to evaluate against a byte
+/// A compiled bundle of `Filter`s ready to evaluate against a byte
 /// slice. OR semantics: `matches` returns true when any contained filter
 /// matches the input. An empty bundle matches nothing; callers should model
 /// "no filter configured" as `Option::None` and skip the match.
 #[derive(Clone, Debug)]
-pub struct CompiledBytesFilters {
+pub struct CompiledFilters {
     exacts: BTreeSet<Bytes>,
     prefixes: Vec<Bytes>,
     regexes: Vec<Regex>,
 }
 
-impl CompiledBytesFilters {
-    /// Compile filters from the domain `BytesFilter` representation. Returns
+impl CompiledFilters {
+    /// Compile filters from the domain `Filter` representation. Returns
     /// `Ok(None)` when the input is empty (caller should skip matching).
-    pub fn compile(filters: &[BytesFilter]) -> Result<Option<Self>, String> {
+    pub fn compile(filters: &[Filter]) -> Result<Option<Self>, String> {
         if filters.is_empty() {
             return Ok(None);
         }
@@ -58,11 +58,11 @@ impl CompiledBytesFilters {
         let mut regexes = Vec::new();
         for filter in filters {
             match filter {
-                BytesFilter::Exact(bytes) => {
+                Filter::Exact(bytes) => {
                     exacts.insert(bytes.clone());
                 }
-                BytesFilter::Prefix(bytes) => prefixes.push(bytes.clone()),
-                BytesFilter::Regex(pattern) => {
+                Filter::Prefix(bytes) => prefixes.push(bytes.clone()),
+                Filter::Regex(pattern) => {
                     if pattern.trim().is_empty() {
                         return Err("regex filter must not be empty".to_string());
                     }
@@ -91,37 +91,38 @@ impl CompiledBytesFilters {
 /// Does NOT compile the regex — the server compiles once per subscribe.
 pub fn validate_filter(filter: &StreamFilter) -> anyhow::Result<()> {
     ensure!(
-        !filter.match_keys.is_empty(),
-        "stream filter must contain at least one match_key"
+        !filter.selectors.is_empty(),
+        "stream filter must contain at least one selector"
     );
     ensure!(
-        filter.match_keys.len() <= MAX_MATCH_KEYS_PER_FILTER,
-        "stream filter capped at {MAX_MATCH_KEYS_PER_FILTER} match_keys"
+        filter.selectors.len() <= MAX_SELECTORS_PER_FILTER,
+        "stream filter capped at {MAX_SELECTORS_PER_FILTER} selectors"
     );
     ensure!(
         filter.value_filters.len() <= MAX_VALUE_FILTERS_PER_FILTER,
         "stream filter capped at {MAX_VALUE_FILTERS_PER_FILTER} value_filters"
     );
-    for mk in &filter.match_keys {
+    for selector in &filter.selectors {
         // Panics on invalid (reserved_bits, prefix); translate to Err.
-        std::panic::catch_unwind(|| KeyCodec::new(mk.reserved_bits, mk.prefix)).map_err(|_| {
-            anyhow::anyhow!(
-                "invalid (reserved_bits={}, prefix={}) — see KeyCodec::new",
-                mk.reserved_bits,
-                mk.prefix
-            )
-        })?;
+        std::panic::catch_unwind(|| KeyCodec::new(selector.reserved_bits, selector.prefix))
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "invalid (reserved_bits={}, prefix={}) — see KeyCodec::new",
+                    selector.reserved_bits,
+                    selector.prefix
+                )
+            })?;
         ensure!(
-            !mk.payload_regex.trim().is_empty(),
-            "match_key payload_regex must not be empty"
+            !selector.payload_regex.trim().is_empty(),
+            "selector payload_regex must not be empty"
         );
     }
     for vf in &filter.value_filters {
         match vf {
-            BytesFilter::Regex(r) => {
+            Filter::Regex(r) => {
                 ensure!(!r.trim().is_empty(), "value_filter regex must not be empty")
             }
-            BytesFilter::Exact(_) | BytesFilter::Prefix(_) => {}
+            Filter::Exact(_) | Filter::Prefix(_) => {}
         }
     }
     Ok(())
@@ -132,8 +133,8 @@ mod tests {
     use super::*;
     use crate::kv_codec::Utf8;
 
-    fn mk(prefix: u16) -> MatchKey {
-        MatchKey {
+    fn selector(prefix: u16) -> Selector {
+        Selector {
             reserved_bits: 4,
             prefix,
             payload_regex: Utf8::from("(?s).*"),
@@ -141,9 +142,9 @@ mod tests {
     }
 
     #[test]
-    fn accepts_one_match_key() {
+    fn accepts_one_selector() {
         let f = StreamFilter {
-            match_keys: vec![mk(1)],
+            selectors: vec![selector(1)],
             value_filters: vec![],
         };
         validate_filter(&f).unwrap();
@@ -152,7 +153,7 @@ mod tests {
     #[test]
     fn rejects_empty() {
         let f = StreamFilter {
-            match_keys: vec![],
+            selectors: vec![],
             value_filters: vec![],
         };
         assert!(validate_filter(&f).is_err());
@@ -161,8 +162,8 @@ mod tests {
     #[test]
     fn rejects_too_many() {
         let f = StreamFilter {
-            match_keys: (0..(MAX_MATCH_KEYS_PER_FILTER as u16 + 1))
-                .map(mk)
+            selectors: (0..(MAX_SELECTORS_PER_FILTER as u16 + 1))
+                .map(selector)
                 .collect(),
             value_filters: vec![],
         };
@@ -172,7 +173,7 @@ mod tests {
     #[test]
     fn rejects_empty_regex() {
         let f = StreamFilter {
-            match_keys: vec![MatchKey {
+            selectors: vec![Selector {
                 reserved_bits: 4,
                 prefix: 1,
                 payload_regex: Utf8::from(""),

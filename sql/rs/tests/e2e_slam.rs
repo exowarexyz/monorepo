@@ -6,6 +6,7 @@ use datafusion::arrow::array::Int64Array;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::common::ScalarValue;
 use datafusion::prelude::SessionContext;
+use exoware_sdk::PrefixedStoreClient;
 use exoware_sql::{CellValue, IndexSpec, KvSchema, TableColumnConfig};
 
 #[tokio::test]
@@ -13,7 +14,7 @@ async fn sql_full_pipeline_insert_and_query() {
     let (_dir, _server, write_client) = common::local_store_client().await;
     let read_client = write_client.clone();
 
-    let write_schema = KvSchema::new(write_client)
+    let write_schema = KvSchema::new(PrefixedStoreClient::empty(write_client))
         .table(
             "slam_orders",
             vec![
@@ -54,7 +55,7 @@ async fn sql_full_pipeline_insert_and_query() {
     }
     let min_sequence = writer.flush().await.expect("flush batch");
     assert!(min_sequence > 0);
-    let read_schema = KvSchema::new(read_client)
+    let read_schema = KvSchema::new(PrefixedStoreClient::empty(read_client))
         .table(
             "slam_orders",
             vec![

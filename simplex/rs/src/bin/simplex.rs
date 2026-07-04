@@ -19,7 +19,7 @@ use commonware_cryptography::{
 use commonware_math::algebra::Random;
 use commonware_parallel::Sequential;
 use commonware_utils::{ordered::Set, N3f1};
-use exoware_sdk::StoreWriteBatch;
+use exoware_sdk::{StoreClient, StoreKeyPrefix, StoreWriteBatch};
 use exoware_simplex::{encode_block_data, keys, Finalized, Notarized, SimplexClient};
 use rand::{rngs::StdRng, SeedableRng};
 use tracing::info;
@@ -223,33 +223,34 @@ async fn upload_certificates(
     let block = encode_block_data(&finalized.header, body);
     let notarized_bytes = notarized.encode();
     let finalized_bytes = finalized.encode();
+    let prefix = client.store_client().key_prefix();
     let mut batch = StoreWriteBatch::new();
     batch.push(
-        client.store_client(),
+        prefix,
         &keys::header_by_digest(&finalized.header.digest()),
         header,
     )?;
     batch.push(
-        client.store_client(),
+        prefix,
         &keys::block_by_digest(&finalized.header.digest()),
         block,
     )?;
     batch.push(
-        client.store_client(),
+        prefix,
         &keys::notarization_by_view(notarized.proof.view()),
         notarized_bytes,
     )?;
     batch.push(
-        client.store_client(),
+        prefix,
         &keys::finalization_by_view(finalized.proof.view()),
         finalized_bytes.clone(),
     )?;
     batch.push(
-        client.store_client(),
+        prefix,
         &keys::finalized_by_height(finalized.header.height()),
         finalized_bytes,
     )?;
-    Ok(batch.commit(client.store_client()).await?)
+    Ok(batch.commit(client.store_client().client()).await?)
 }
 
 async fn seed(
@@ -259,7 +260,8 @@ async fn seed(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!(store_url, interval_secs, "starting simplex seed");
 
-    let client = SimplexClient::new(store_url);
+    let client =
+        SimplexClient::new(StoreClient::new(store_url).prefixed(StoreKeyPrefix::identity()));
     let schemes = demo_schemes();
     let verification_material = schemes[0].identity().encode().to_vec();
     let leader = schemes

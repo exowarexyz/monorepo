@@ -12,9 +12,9 @@
 
 pub mod keys;
 pub mod kv_codec;
-pub mod match_key;
 pub mod proto;
 pub mod prune_policy;
+pub mod selector;
 pub mod stream_filter;
 pub use keys::{Key, KeyCodec, KeyCodecError, KeyMut, KeyValidationError, Value, MAX_KEY_LEN};
 pub use proto::*;
@@ -25,10 +25,10 @@ use connectrpc::client::{ClientConfig, ServerStream as ConnectServerStream};
 use connectrpc::{ConnectError, ErrorCode};
 use exoware_proto::compact::ServiceClient as CompactServiceClient;
 use exoware_proto::ingest::ServiceClient as IngestServiceClient;
+use exoware_proto::log::ingest::v1::PutRequest as ProtoPutRequest;
 use exoware_proto::query as proto_query;
 use exoware_proto::query::ServiceClient as QueryServiceClient;
 use exoware_proto::store::compact::v1::PruneRequest as ProtoPruneRequest;
-use exoware_proto::store::ingest::v1::PutRequest as ProtoPutRequest;
 use exoware_proto::store::query::v1::{
     GetManyRequest as ProtoGetManyRequest, GetRequest as ProtoGetRequest,
     RangeRequest as ProtoRangeRequest, ReduceRequest as ProtoWireReduceRequest,
@@ -228,6 +228,15 @@ impl StoreKeyPrefix {
         })
     }
 
+    /// The zero-width identity prefix: reserves no bits and maps every logical
+    /// key to itself, so encode/decode/range/match are all no-ops and keys pass
+    /// through un-namespaced.
+    pub const fn identity() -> Self {
+        Self {
+            codec: KeyCodec::new(0, 0),
+        }
+    }
+
     #[inline]
     pub fn reserved_bits(self) -> u8 {
         self.codec.reserved_bits()
@@ -281,53 +290,585 @@ impl StoreKeyPrefix {
         Ok((start, end))
     }
 
-    fn prefix_match_key(
+    fn prefix_selector(
         self,
-        match_key: &crate::match_key::MatchKey,
-    ) -> Result<crate::match_key::MatchKey, StoreKeyPrefixError> {
-        self.prefix_match_key_with_regex(match_key, match_key.payload_regex.clone())
+        selector: &crate::selector::Selector,
+    ) -> Result<crate::selector::Selector, StoreKeyPrefixError> {
+        self.prefix_selector_with_regex(selector, selector.payload_regex.clone())
     }
 
-    fn prefix_stream_match_key(
+    fn prefix_stream_selector(
         self,
-        match_key: &crate::match_key::MatchKey,
-    ) -> Result<crate::match_key::MatchKey, StoreKeyPrefixError> {
-        self.prefix_match_key_with_regex(match_key, crate::kv_codec::Utf8::from("(?s-u).*"))
+        selector: &crate::selector::Selector,
+    ) -> Result<crate::selector::Selector, StoreKeyPrefixError> {
+        self.prefix_selector_with_regex(selector, crate::kv_codec::Utf8::from("(?s-u).*"))
     }
 
-    fn prefix_match_key_with_regex(
+    fn prefix_selector_with_regex(
         self,
-        match_key: &crate::match_key::MatchKey,
+        selector: &crate::selector::Selector,
         payload_regex: crate::kv_codec::Utf8,
-    ) -> Result<crate::match_key::MatchKey, StoreKeyPrefixError> {
-        validate_prefix_bits(match_key.reserved_bits, match_key.prefix)?;
+    ) -> Result<crate::selector::Selector, StoreKeyPrefixError> {
+        validate_prefix_bits(selector.reserved_bits, selector.prefix)?;
         let reserved_bits = self
             .reserved_bits()
-            .checked_add(match_key.reserved_bits)
+            .checked_add(selector.reserved_bits)
             .ok_or(StoreKeyPrefixError::CombinedReservedBitsTooLarge {
                 prefix_bits: self.reserved_bits(),
-                logical_bits: match_key.reserved_bits,
+                logical_bits: selector.reserved_bits,
             })?;
         if reserved_bits > 16 {
             return Err(StoreKeyPrefixError::CombinedReservedBitsTooLarge {
                 prefix_bits: self.reserved_bits(),
-                logical_bits: match_key.reserved_bits,
+                logical_bits: selector.reserved_bits,
             });
         }
 
-        let prefix = (u32::from(self.prefix()) << u32::from(match_key.reserved_bits))
-            | u32::from(match_key.prefix);
+        let prefix = (u32::from(self.prefix()) << u32::from(selector.reserved_bits))
+            | u32::from(selector.prefix);
         let prefix = u16::try_from(prefix).map_err(|_| StoreKeyPrefixError::PrefixTooLarge {
             reserved_bits,
             prefix: u16::MAX,
         })?;
         validate_prefix_bits(reserved_bits, prefix)?;
-        Ok(crate::match_key::MatchKey {
+        Ok(crate::selector::Selector {
             reserved_bits,
             prefix,
             payload_regex,
         })
     }
+}
+
+/// A physical [`StoreClient`] paired with a [`StoreKeyPrefix`] that namespaces
+/// every key on the wire. The prefix can be the zero-width
+/// [`StoreKeyPrefix::identity`], representing the un-namespaced case.
+#[derive(Clone, Debug)]
+pub struct PrefixedStoreClient {
+    client: StoreClient,
+    prefix: StoreKeyPrefix,
+}
+
+impl PrefixedStoreClient {
+    /// Pair a physical client with an explicit namespace prefix.
+    pub fn new(client: StoreClient, prefix: StoreKeyPrefix) -> Self {
+        Self { client, prefix }
+    }
+
+    /// Pair a physical client with the zero-width [`StoreKeyPrefix::identity`],
+    /// so keys pass through untranslated.
+    pub fn empty(client: StoreClient) -> Self {
+        Self::new(client, StoreKeyPrefix::identity())
+    }
+
+    /// The configured key prefix.
+    pub fn key_prefix(&self) -> StoreKeyPrefix {
+        self.prefix
+    }
+
+    /// Borrow the underlying physical transport. Operations performed directly
+    /// on it are *not* namespaced; prefer the methods on this type.
+    pub fn client(&self) -> &StoreClient {
+        &self.client
+    }
+
+    // --- key translation -----------------------------------------------------
+
+    /// Encode a logical key as it will appear in the physical Store.
+    pub fn encode_store_key(&self, key: &Key) -> Result<Key, ClientError> {
+        Ok(self.prefix.encode_key(key)?)
+    }
+
+    /// Decode a physical Store key into this client's logical keyspace.
+    pub fn decode_store_key(&self, key: &Key) -> Result<Key, ClientError> {
+        Ok(self.prefix.decode_key(key)?)
+    }
+
+    fn encode_store_range(&self, start: &Key, end: &Key) -> Result<(Key, Key), ClientError> {
+        Ok(self.prefix.encode_range(start, end)?)
+    }
+
+    fn prefix_prune_policies(
+        &self,
+        policies: &[crate::prune_policy::PrunePolicy],
+    ) -> Result<Vec<crate::prune_policy::PrunePolicy>, ClientError> {
+        policies
+            .iter()
+            .map(|policy| {
+                use crate::prune_policy::{PolicyScope, PrunePolicy};
+                let scope = match &policy.scope {
+                    PolicyScope::Keys(scope) => {
+                        let mut scope = scope.clone();
+                        scope.selector = self.prefix.prefix_selector(&scope.selector)?;
+                        PolicyScope::Keys(scope)
+                    }
+                    PolicyScope::Sequence => PolicyScope::Sequence,
+                };
+                Ok(PrunePolicy {
+                    scope,
+                    retain: policy.retain.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, StoreKeyPrefixError>>()
+            .map_err(ClientError::from)
+    }
+
+    fn prefix_stream_filter(
+        &self,
+        filter: crate::stream_filter::StreamFilter,
+    ) -> Result<crate::stream_filter::StreamFilter, ClientError> {
+        let selectors = filter
+            .selectors
+            .iter()
+            .map(|mk| self.prefix.prefix_stream_selector(mk))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(crate::stream_filter::StreamFilter {
+            selectors,
+            value_filters: filter.value_filters,
+        })
+    }
+
+    fn prefix_reduce_request(
+        &self,
+        request: &DomainRangeReduceRequest,
+    ) -> Result<DomainRangeReduceRequest, ClientError> {
+        let mut request = request.clone();
+        shift_reduce_request_key_offsets(self.prefix.reserved_bits(), &mut request)?;
+        Ok(request)
+    }
+
+    // --- service-grouped accessors -------------------------------------------
+
+    /// Typed access to the `store.ingest.v1` service.
+    pub fn ingest(&self) -> Ingest<'_> {
+        Ingest { c: self }
+    }
+
+    /// Typed access to the `store.query.v1` service.
+    pub fn query(&self) -> Query<'_> {
+        Query { c: self }
+    }
+
+    /// Typed access to the `store.compact.v1` service.
+    pub fn compact(&self) -> Compact<'_> {
+        Compact { c: self }
+    }
+
+    /// Typed access to the `store.stream.v1` service.
+    pub fn stream(&self) -> Stream<'_> {
+        Stream { c: self }
+    }
+
+    /// Create an unseeded serializable read session over this namespace.
+    pub fn create_session(&self) -> SerializableReadSession {
+        self.create_session_with_sequence(0)
+    }
+
+    /// Create a serializable read session pinned to at least `sequence`.
+    pub fn create_session_with_sequence(&self, sequence: u64) -> SerializableReadSession {
+        SerializableReadSession {
+            client: self.clone(),
+            state: Arc::new(SessionState {
+                sequence: Arc::new(AtomicU64::new(sequence)),
+                init_gate: tokio::sync::Mutex::new(()),
+            }),
+        }
+    }
+
+    // --- writes --------------------------------------------------------------
+
+    pub(crate) async fn put(&self, kvs: &[(&Key, &[u8])]) -> Result<u64, ClientError> {
+        let keys = kvs
+            .iter()
+            .map(|(key, _)| self.encode_store_key(key))
+            .collect::<Result<Vec<_>, _>>()?;
+        let prefixed: Vec<(&Key, &[u8])> = keys
+            .iter()
+            .zip(kvs.iter())
+            .map(|(key, (_, value))| (key, *value))
+            .collect();
+        self.client.put_physical(&prefixed).await
+    }
+
+    // --- reads ---------------------------------------------------------------
+
+    pub(crate) async fn send_get(
+        &self,
+        key: &Key,
+        min_sequence_number: Option<u64>,
+    ) -> Result<
+        (
+            exoware_proto::query::GetResponse,
+            Option<proto_query::Detail>,
+        ),
+        ClientError,
+    > {
+        self.client
+            .send_get(&self.encode_store_key(key)?, min_sequence_number)
+            .await
+    }
+
+    pub(crate) async fn get(&self, key: &Key) -> Result<Option<Bytes>, ClientError> {
+        self.client.get(&self.encode_store_key(key)?).await
+    }
+
+    pub(crate) async fn get_with_min_sequence_number(
+        &self,
+        key: &Key,
+        min_sequence_number: u64,
+    ) -> Result<Option<Bytes>, ClientError> {
+        self.client
+            .get_with_min_sequence_number(&self.encode_store_key(key)?, min_sequence_number)
+            .await
+    }
+
+    pub(crate) async fn get_many(
+        &self,
+        keys: &[&Key],
+        batch_size: u32,
+    ) -> Result<GetManyStream, ClientError> {
+        self.get_many_internal(keys, batch_size, None, None).await
+    }
+
+    pub(crate) async fn get_many_with_min_sequence_number(
+        &self,
+        keys: &[&Key],
+        batch_size: u32,
+        min_sequence_number: u64,
+    ) -> Result<GetManyStream, ClientError> {
+        self.get_many_internal(keys, batch_size, Some(min_sequence_number), None)
+            .await
+    }
+
+    pub(crate) async fn get_many_internal(
+        &self,
+        keys: &[&Key],
+        batch_size: u32,
+        min_sequence_number: Option<u64>,
+        observed_sequence: Option<Arc<AtomicU64>>,
+    ) -> Result<GetManyStream, ClientError> {
+        let mut proto_keys: Vec<Vec<u8>> = Vec::with_capacity(keys.len());
+        for key in keys {
+            let encoded = self.encode_store_key(key)?;
+            if !is_valid_key_size(encoded.len()) {
+                return Err(ClientError::WireFormat(format!(
+                    "key length {} is outside valid store key range ({}..={})",
+                    encoded.len(),
+                    keys::MIN_KEY_LEN,
+                    MAX_KEY_LEN
+                )));
+            }
+            proto_keys.push(encoded.to_vec());
+        }
+        let mut stream = self
+            .client
+            .get_many_internal(
+                proto_keys,
+                batch_size,
+                min_sequence_number,
+                observed_sequence,
+            )
+            .await?;
+        stream.key_prefix = Some(self.prefix);
+        Ok(stream)
+    }
+
+    pub(crate) async fn range(
+        &self,
+        start: &Key,
+        end: &Key,
+        limit: usize,
+    ) -> Result<Vec<(Key, Bytes)>, ClientError> {
+        self.range_internal(start, end, limit, RangeMode::Forward, None)
+            .await
+    }
+
+    pub(crate) async fn range_with_mode(
+        &self,
+        start: &Key,
+        end: &Key,
+        limit: usize,
+        mode: RangeMode,
+    ) -> Result<Vec<(Key, Bytes)>, ClientError> {
+        self.range_internal(start, end, limit, mode, None).await
+    }
+
+    pub(crate) async fn range_with_min_sequence_number(
+        &self,
+        start: &Key,
+        end: &Key,
+        limit: usize,
+        min_sequence_number: u64,
+    ) -> Result<Vec<(Key, Bytes)>, ClientError> {
+        self.range_internal(
+            start,
+            end,
+            limit,
+            RangeMode::Forward,
+            Some(min_sequence_number),
+        )
+        .await
+    }
+
+    pub(crate) async fn range_with_mode_and_min_sequence_number(
+        &self,
+        start: &Key,
+        end: &Key,
+        limit: usize,
+        mode: RangeMode,
+        min_sequence_number: u64,
+    ) -> Result<Vec<(Key, Bytes)>, ClientError> {
+        self.range_internal(start, end, limit, mode, Some(min_sequence_number))
+            .await
+    }
+
+    async fn range_internal(
+        &self,
+        start: &Key,
+        end: &Key,
+        limit: usize,
+        mode: RangeMode,
+        min_sequence_number: Option<u64>,
+    ) -> Result<Vec<(Key, Bytes)>, ClientError> {
+        self.range_stream_internal(
+            start,
+            end,
+            limit,
+            limit.max(1),
+            mode,
+            RangeStreamReadOptions {
+                min_sequence_number,
+                observed_sequence: None,
+            },
+        )
+        .await?
+        .collect()
+        .await
+    }
+
+    pub(crate) async fn range_stream(
+        &self,
+        start: &Key,
+        end: &Key,
+        limit: usize,
+        batch_size: usize,
+    ) -> Result<RangeStream, ClientError> {
+        self.range_stream_internal(
+            start,
+            end,
+            limit,
+            batch_size,
+            RangeMode::Forward,
+            RangeStreamReadOptions::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn range_stream_with_mode(
+        &self,
+        start: &Key,
+        end: &Key,
+        limit: usize,
+        batch_size: usize,
+        mode: RangeMode,
+    ) -> Result<RangeStream, ClientError> {
+        self.range_stream_internal(start, end, limit, batch_size, mode, Default::default())
+            .await
+    }
+
+    pub(crate) async fn range_stream_with_min_sequence_number(
+        &self,
+        start: &Key,
+        end: &Key,
+        limit: usize,
+        batch_size: usize,
+        min_sequence_number: u64,
+    ) -> Result<RangeStream, ClientError> {
+        self.range_stream_internal(
+            start,
+            end,
+            limit,
+            batch_size,
+            RangeMode::Forward,
+            RangeStreamReadOptions {
+                min_sequence_number: Some(min_sequence_number),
+                observed_sequence: None,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn range_stream_with_mode_and_min_sequence_number(
+        &self,
+        start: &Key,
+        end: &Key,
+        limit: usize,
+        batch_size: usize,
+        mode: RangeMode,
+        min_sequence_number: u64,
+    ) -> Result<RangeStream, ClientError> {
+        self.range_stream_internal(
+            start,
+            end,
+            limit,
+            batch_size,
+            mode,
+            RangeStreamReadOptions {
+                min_sequence_number: Some(min_sequence_number),
+                observed_sequence: None,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn range_stream_internal(
+        &self,
+        start: &Key,
+        end: &Key,
+        limit: usize,
+        batch_size: usize,
+        mode: RangeMode,
+        options: RangeStreamReadOptions,
+    ) -> Result<RangeStream, ClientError> {
+        let (start, end) = self.encode_store_range(start, end)?;
+        let mut stream = self
+            .client
+            .range_stream_internal(&start, &end, limit, batch_size, mode, options)
+            .await?;
+        stream.key_prefix = Some(self.prefix);
+        Ok(stream)
+    }
+
+    pub(crate) async fn range_reduce(
+        &self,
+        start: &Key,
+        end: &Key,
+        request: &DomainRangeReduceRequest,
+    ) -> Result<Vec<Option<KvReducedValue>>, ClientError> {
+        let (response, _) = self
+            .range_reduce_response_internal(start, end, request, None)
+            .await?;
+        scalar_reduce_results(response)
+    }
+
+    pub(crate) async fn range_reduce_with_min_sequence_number(
+        &self,
+        start: &Key,
+        end: &Key,
+        request: &DomainRangeReduceRequest,
+        min_sequence_number: u64,
+    ) -> Result<Vec<Option<KvReducedValue>>, ClientError> {
+        let (response, _) = self
+            .range_reduce_response_internal(start, end, request, Some(min_sequence_number))
+            .await?;
+        scalar_reduce_results(response)
+    }
+
+    pub(crate) async fn range_reduce_response(
+        &self,
+        start: &Key,
+        end: &Key,
+        request: &DomainRangeReduceRequest,
+    ) -> Result<exoware_proto::query::ReduceResponse, ClientError> {
+        let (body, _) = self
+            .range_reduce_response_internal(start, end, request, None)
+            .await?;
+        Ok(body)
+    }
+
+    pub(crate) async fn range_reduce_response_with_min_sequence_number(
+        &self,
+        start: &Key,
+        end: &Key,
+        request: &DomainRangeReduceRequest,
+        min_sequence_number: u64,
+    ) -> Result<exoware_proto::query::ReduceResponse, ClientError> {
+        let (body, _) = self
+            .range_reduce_response_internal(start, end, request, Some(min_sequence_number))
+            .await?;
+        Ok(body)
+    }
+
+    pub(crate) async fn range_reduce_response_internal(
+        &self,
+        start: &Key,
+        end: &Key,
+        request: &DomainRangeReduceRequest,
+        min_sequence_number: Option<u64>,
+    ) -> Result<
+        (
+            exoware_proto::query::ReduceResponse,
+            Option<proto_query::Detail>,
+        ),
+        ClientError,
+    > {
+        let (start, end) = self.encode_store_range(start, end)?;
+        let request = self.prefix_reduce_request(request)?;
+        self.client
+            .range_reduce_response_internal(&start, &end, &request, min_sequence_number)
+            .await
+    }
+
+    pub(crate) async fn prune(
+        &self,
+        policies: &[crate::prune_policy::PrunePolicy],
+    ) -> Result<(), ClientError> {
+        let policies = self.prefix_prune_policies(policies)?;
+        self.client.prune(&policies).await
+    }
+
+    pub(crate) async fn subscribe(
+        &self,
+        filter: crate::stream_filter::StreamFilter,
+        since_sequence_number: Option<u64>,
+    ) -> Result<StreamSubscription, ClientError> {
+        // The physical match keys are broadened (payload regex widened) to span
+        // the bit-shifted payload, so always re-apply the caller's predicate
+        // client-side via the compiled logical filter.
+        let logical_filter = Some(ClientStreamFilter::compile(&filter)?);
+        let filter = self.prefix_stream_filter(filter)?;
+        let mut sub = self
+            .client
+            .subscribe_physical(filter, since_sequence_number)
+            .await?;
+        sub.key_prefix = Some(self.prefix);
+        sub.logical_filter = logical_filter;
+        Ok(sub)
+    }
+
+    pub(crate) async fn stream_get(
+        &self,
+        sequence_number: u64,
+    ) -> Result<Option<Vec<(Key, Bytes)>>, ClientError> {
+        let Some(owned) = self.client.stream_get_physical(sequence_number).await? else {
+            return Ok(None);
+        };
+        let mut out = Vec::with_capacity(owned.entries.len());
+        for entry in owned.entries {
+            let key = Bytes::from(entry.key);
+            if !self.prefix.codec.matches(&key) {
+                continue;
+            }
+            out.push((self.decode_store_key(&key)?, entry.value));
+        }
+        Ok(Some(out))
+    }
+}
+
+/// Extract scalar (ungrouped) reduce results from a wire response.
+fn scalar_reduce_results(
+    response: exoware_proto::query::ReduceResponse,
+) -> Result<Vec<Option<KvReducedValue>>, ClientError> {
+    let decoded = proto_to_domain_reduce_response(response).map_err(ClientError::WireFormat)?;
+    if !decoded.groups.is_empty() {
+        return Err(ClientError::WireFormat(
+            "grouped range reduction response returned for scalar request".to_string(),
+        ));
+    }
+    Ok(decoded
+        .results
+        .iter()
+        .map(|result| result.value.clone())
+        .collect())
 }
 
 /// A physical Store write batch assembled from one or more logical clients.
@@ -363,14 +904,12 @@ impl StoreWriteBatch {
 
     pub fn push(
         &mut self,
-        client: &StoreClient,
+        prefix: StoreKeyPrefix,
         key: &Key,
         value: impl IntoStoreWriteValue,
     ) -> Result<&mut Self, ClientError> {
-        self.entries.push((
-            client.encode_store_key(key)?,
-            value.into_store_write_value(),
-        ));
+        self.entries
+            .push((prefix.encode_key(key)?, value.into_store_write_value()));
         Ok(self)
     }
 
@@ -394,6 +933,8 @@ pub trait StoreBatchUpload {
     type Prepared: Send;
     type Receipt: Send;
     type Error: std::fmt::Display + Send;
+
+    fn store_client(&self) -> &PrefixedStoreClient;
 
     fn stage_upload(
         &self,
@@ -423,7 +964,6 @@ pub trait StoreBatchUpload {
 
     fn commit_upload<'a>(
         &'a self,
-        client: &'a StoreClient,
         prepared: Self::Prepared,
     ) -> BoxFuture<'a, Result<Self::Receipt, Self::Error>>
     where
@@ -440,7 +980,7 @@ pub trait StoreBatchUpload {
                 self.mark_upload_failed(prepared, message).await;
                 return Err(err);
             }
-            match batch.commit(client).await {
+            match batch.commit(self.store_client().client()).await {
                 Ok(sequence_number) => {
                     Ok(self.mark_upload_persisted(prepared, sequence_number).await)
                 }
@@ -465,6 +1005,10 @@ pub trait StoreBatchPublication {
     type PreparedPublication: Send;
     type PublicationReceipt: Send;
     type Error: std::fmt::Display + Send;
+
+    /// The namespaced client this writer stages and commits through. See
+    /// [`StoreBatchUpload::store_client`].
+    fn store_client(&self) -> &PrefixedStoreClient;
 
     fn stage_publication(
         &self,
@@ -497,7 +1041,6 @@ pub trait StoreBatchPublication {
 
     fn commit_publication<'a>(
         &'a self,
-        client: &'a StoreClient,
         prepared: Self::PreparedPublication,
     ) -> BoxFuture<'a, Result<Self::PublicationReceipt, Self::Error>>
     where
@@ -513,7 +1056,7 @@ pub trait StoreBatchPublication {
                 self.mark_publication_failed(prepared, message).await;
                 return Err(err);
             }
-            match batch.commit(client).await {
+            match batch.commit(self.store_client().client()).await {
                 Ok(sequence_number) => Ok(self
                     .mark_publication_persisted(prepared, sequence_number)
                     .await),
@@ -856,7 +1399,7 @@ fn validate_prefix_bits(reserved_bits: u8, prefix: u16) -> Result<(), StoreKeyPr
 }
 
 /// One delivered (key, value) row from a stream subscription. The client
-/// reapplies its own filter if it needs to know which match_key matched —
+/// reapplies its own filter if it needs to know which selector matched —
 /// the wire frame doesn't carry the index.
 #[derive(Clone, Debug)]
 pub struct StreamSubscriptionEntry {
@@ -876,7 +1419,7 @@ pub struct StreamSubscriptionFrame {
 pub struct StreamSubscription {
     stream: ConnectServerStream<
         hyper::body::Incoming,
-        exoware_proto::store::stream::v1::SubscribeResponseView<'static>,
+        exoware_proto::log::stream::v1::SubscribeResponseView<'static>,
     >,
     key_prefix: Option<StoreKeyPrefix>,
     logical_filter: Option<ClientStreamFilter>,
@@ -946,7 +1489,7 @@ struct ClientKeyMatcher {
 #[derive(Clone)]
 struct ClientStreamFilter {
     keys: Vec<ClientKeyMatcher>,
-    values: Option<crate::stream_filter::CompiledBytesFilters>,
+    values: Option<crate::stream_filter::CompiledFilters>,
 }
 
 impl ClientStreamFilter {
@@ -954,10 +1497,10 @@ impl ClientStreamFilter {
         crate::stream_filter::validate_filter(filter)
             .map_err(|e| ClientError::WireFormat(e.to_string()))?;
         let keys = filter
-            .match_keys
+            .selectors
             .iter()
             .map(|mk| {
-                let regex = crate::match_key::compile_payload_regex(&mk.payload_regex)
+                let regex = crate::selector::compile_payload_regex(&mk.payload_regex)
                     .map_err(|e| ClientError::WireFormat(e.to_string()))?;
                 Ok(ClientKeyMatcher {
                     codec: KeyCodec::new(mk.reserved_bits, mk.prefix),
@@ -965,7 +1508,7 @@ impl ClientStreamFilter {
                 })
             })
             .collect::<Result<Vec<_>, ClientError>>()?;
-        let values = crate::stream_filter::CompiledBytesFilters::compile(&filter.value_filters)
+        let values = crate::stream_filter::CompiledFilters::compile(&filter.value_filters)
             .map_err(ClientError::WireFormat)?;
         Ok(Self { keys, values })
     }
@@ -991,12 +1534,12 @@ impl ClientStreamFilter {
     }
 }
 
-/// Inspect a Connect error for `store.stream.BATCH_EVICTED` / `BATCH_NOT_FOUND`
+/// Inspect a Connect error for `log.stream.BATCH_EVICTED` / `BATCH_NOT_FOUND`
 /// `ErrorInfo` details. Used by `get_batch` to collapse both into `Ok(None)`.
 fn is_batch_missing_error(err: &ConnectError) -> bool {
     match proto_decode_connect_error(err) {
         Ok(decoded) => decoded.error_info.is_some_and(|info| {
-            info.domain == "store.stream"
+            info.domain == "log.stream"
                 && matches!(info.reason.as_str(), "BATCH_EVICTED" | "BATCH_NOT_FOUND")
         }),
         Err(_) => false,
@@ -1099,7 +1642,6 @@ pub struct StoreClientBuilder {
     query_url: Option<String>,
     compact_url: Option<String>,
     stream_url: Option<String>,
-    key_prefix: Option<StoreKeyPrefix>,
     retry_config: RetryConfig,
     connect_request_compression: ConnectRequestCompression,
 }
@@ -1122,7 +1664,7 @@ impl StoreClientBuilder {
         self
     }
 
-    /// Base URL for the ingest service (`store.ingest.v1.Service`).
+    /// Base URL for the ingest service (`log.ingest.v1.Service`).
     pub fn ingest_url(mut self, url: &str) -> Self {
         self.ingest_url = Some(trim_connect_base(url));
         self
@@ -1140,15 +1682,9 @@ impl StoreClientBuilder {
         self
     }
 
-    /// Base URL for the stream service (`store.stream.v1.Service`).
+    /// Base URL for the stream service (`log.stream.v1.Service`).
     pub fn stream_url(mut self, url: &str) -> Self {
         self.stream_url = Some(trim_connect_base(url));
-        self
-    }
-
-    /// Client-side key namespace applied to all user-key operations.
-    pub fn key_prefix(mut self, prefix: StoreKeyPrefix) -> Self {
-        self.key_prefix = Some(prefix);
         self
     }
 
@@ -1210,7 +1746,6 @@ impl StoreClientBuilder {
             connect_http: ProtoPreferZstdHttpClient::plaintext(),
             retry_config: self.retry_config,
             connect_request_compression: self.connect_request_compression,
-            key_prefix: self.key_prefix,
         })
     }
 }
@@ -1228,7 +1763,6 @@ pub struct StoreClient {
     connect_http: ProtoPreferZstdHttpClient,
     retry_config: RetryConfig,
     connect_request_compression: ConnectRequestCompression,
-    key_prefix: Option<StoreKeyPrefix>,
 }
 
 /// A session that enforces monotonic read consistency via a fixed `min_sequence_number` floor.
@@ -1247,7 +1781,7 @@ pub struct StoreClient {
 /// read, the session is pinned once the first detail-bearing chunk is consumed.
 #[derive(Clone, Debug)]
 pub struct SerializableReadSession {
-    client: StoreClient,
+    client: PrefixedStoreClient,
     state: Arc<SessionState>,
 }
 
@@ -1288,46 +1822,10 @@ impl StoreClient {
             .expect("url sets all service URLs")
     }
 
-    /// Return this client's configured Store key prefix, if any.
-    pub fn key_prefix(&self) -> Option<StoreKeyPrefix> {
-        self.key_prefix
-    }
-
-    /// Clone this client with a client-side Store key prefix.
-    pub fn with_key_prefix(&self, prefix: StoreKeyPrefix) -> Self {
-        let mut out = self.clone();
-        out.key_prefix = Some(prefix);
-        out
-    }
-
-    /// Clone this client without client-side key prefixing.
-    pub fn without_key_prefix(&self) -> Self {
-        let mut out = self.clone();
-        out.key_prefix = None;
-        out
-    }
-
-    /// Encode a logical key as it will appear in the physical Store.
-    pub fn encode_store_key(&self, key: &Key) -> Result<Key, ClientError> {
-        match self.key_prefix {
-            Some(prefix) => Ok(prefix.encode_key(key)?),
-            None => Ok(key.clone()),
-        }
-    }
-
-    /// Decode a physical Store key into this client's logical keyspace.
-    pub fn decode_store_key(&self, key: &Key) -> Result<Key, ClientError> {
-        match self.key_prefix {
-            Some(prefix) => Ok(prefix.decode_key(key)?),
-            None => Ok(key.clone()),
-        }
-    }
-
-    fn encode_store_range(&self, start: &Key, end: &Key) -> Result<(Key, Key), ClientError> {
-        match self.key_prefix {
-            Some(prefix) => Ok(prefix.encode_range(start, end)?),
-            None => Ok((start.clone(), end.clone())),
-        }
+    /// Pair this physical client with `prefix`, yielding the logical
+    /// [`PrefixedStoreClient`] that namespaces every operation.
+    pub fn prefixed(&self, prefix: StoreKeyPrefix) -> PrefixedStoreClient {
+        PrefixedStoreClient::new(self.clone(), prefix)
     }
 
     /// Outgoing Connect request body compression (see [`ConnectRequestCompression`]).
@@ -1341,73 +1839,13 @@ impl StoreClient {
         proto_decode_connect_error(err)
     }
 
-    /// Create an unseeded serializable read session.
-    ///
-    /// The first successful unary read fixes the session's sequence floor from
-    /// the server response. Streamed query reads fix that floor once a
-    /// detail-bearing chunk is consumed.
-    pub fn create_session(&self) -> SerializableReadSession {
-        self.create_session_with_sequence(0)
-    }
-
-    /// Create a serializable read session pinned to at least `sequence`.
-    ///
-    /// This is intended for stream-driven read paths that already observed a
-    /// concrete store batch sequence and need follow-up query/proof reads to
-    /// see at least that sequence.
-    pub fn create_session_with_sequence(&self, sequence: u64) -> SerializableReadSession {
-        SerializableReadSession {
-            client: self.clone(),
-            state: Arc::new(SessionState {
-                sequence: Arc::new(AtomicU64::new(sequence)),
-                init_gate: tokio::sync::Mutex::new(()),
-            }),
-        }
-    }
-
-    /// Typed access to the `store.ingest.v1` service.
-    pub fn ingest(&self) -> Ingest<'_> {
-        Ingest { c: self }
-    }
-
-    /// Typed access to the `store.query.v1` service.
-    pub fn query(&self) -> Query<'_> {
-        Query { c: self }
-    }
-
-    /// Typed access to the `store.compact.v1` service.
-    pub fn compact(&self) -> Compact<'_> {
-        Compact { c: self }
-    }
-
-    /// Typed access to the `store.stream.v1` service.
-    pub fn stream(&self) -> Stream<'_> {
-        Stream { c: self }
-    }
-
     /// Submit a KV batch via Connect `Put`.
     ///
     /// On success returns the **store sequence number** from the response. Use it for immediate
     /// `get_with_min_sequence_number` / range calls or to seed
-    /// [`Self::create_session_with_sequence`].
+    /// [`PrefixedStoreClient::create_session_with_sequence`].
     /// If the request succeeds, the server accepts the full batch (count is `kvs.len()`).
-    pub(crate) async fn put(&self, kvs: &[(&Key, &[u8])]) -> Result<u64, ClientError> {
-        if self.key_prefix.is_none() {
-            return self.put_physical(kvs).await;
-        }
-        let mut keys = Vec::with_capacity(kvs.len());
-        for (key, _) in kvs {
-            keys.push(self.encode_store_key(key)?);
-        }
-        let prefixed: Vec<(&Key, &[u8])> = keys
-            .iter()
-            .zip(kvs.iter())
-            .map(|(key, (_, value))| (key, *value))
-            .collect();
-        self.put_physical(&prefixed).await
-    }
-
-    async fn put_physical(&self, kvs: &[(&Key, &[u8])]) -> Result<u64, ClientError> {
+    pub(crate) async fn put_physical(&self, kvs: &[(&Key, &[u8])]) -> Result<u64, ClientError> {
         let mut proto_kvs = Vec::with_capacity(kvs.len());
         for (key, value) in kvs {
             if !is_valid_key_size(key.len()) {
@@ -1418,7 +1856,7 @@ impl StoreClient {
                     MAX_KEY_LEN
                 )));
             }
-            proto_kvs.push(exoware_proto::common::KvEntry {
+            proto_kvs.push(exoware_proto::common::Entry {
                 key: key.to_vec(),
                 value: Bytes::copy_from_slice(value),
                 ..Default::default()
@@ -1438,7 +1876,7 @@ impl StoreClient {
                     MAX_KEY_LEN
                 )));
             }
-            proto_kvs.push(exoware_proto::common::KvEntry {
+            proto_kvs.push(exoware_proto::common::Entry {
                 key: key.to_vec(),
                 value: value.clone(),
                 ..Default::default()
@@ -1447,7 +1885,7 @@ impl StoreClient {
         self.send_put(proto_kvs).await
     }
 
-    async fn send_put(&self, kvs: Vec<exoware_proto::common::KvEntry>) -> Result<u64, ClientError> {
+    async fn send_put(&self, kvs: Vec<exoware_proto::common::Entry>) -> Result<u64, ClientError> {
         let config =
             store_connect_client_config(self.ingest_uri.clone(), self.connect_request_compression);
         let client = IngestServiceClient::new(self.connect_http.clone(), config);
@@ -1484,52 +1922,19 @@ impl StoreClient {
         Ok(response.value)
     }
 
-    pub(crate) async fn get_many(
+    /// Physical `get_many` over already-encoded wire keys. The
+    /// [`PrefixedStoreClient`] wrapper encodes + validates and attaches the
+    /// prefix to the returned stream for decoding.
+    pub(crate) async fn get_many_internal(
         &self,
-        keys: &[&Key],
-        batch_size: u32,
-    ) -> Result<GetManyStream, ClientError> {
-        self.get_many_internal(keys, batch_size, None, None).await
-    }
-
-    pub(crate) async fn get_many_with_min_sequence_number(
-        &self,
-        keys: &[&Key],
-        batch_size: u32,
-        min_sequence_number: u64,
-    ) -> Result<GetManyStream, ClientError> {
-        self.get_many_internal(keys, batch_size, Some(min_sequence_number), None)
-            .await
-    }
-
-    async fn get_many_internal(
-        &self,
-        keys: &[&Key],
+        proto_keys: Vec<Vec<u8>>,
         batch_size: u32,
         min_sequence_number: Option<u64>,
         observed_sequence: Option<Arc<AtomicU64>>,
     ) -> Result<GetManyStream, ClientError> {
-        for key in keys {
-            if !is_valid_key_size(key.len()) {
-                return Err(ClientError::WireFormat(format!(
-                    "key length {} is outside valid store key range ({}..={})",
-                    key.len(),
-                    keys::MIN_KEY_LEN,
-                    MAX_KEY_LEN
-                )));
-            }
-        }
-
         let config =
             store_connect_client_config(self.query_uri.clone(), self.connect_request_compression);
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
-        let proto_keys: Vec<Vec<u8>> = keys
-            .iter()
-            .map(|k| match self.key_prefix {
-                Some(_) => self.encode_store_key(k).map(|key| key.to_vec()),
-                None => Ok(k.to_vec()),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
         let effective_min = self.normalize_min_sequence_number(min_sequence_number);
         let max_attempts = self.retry_config.max_attempts.max(1);
         let mut attempt = 1usize;
@@ -1544,11 +1949,8 @@ impl StoreClient {
                 .await
             {
                 Ok(stream) => {
-                    let mut gms = GetManyStream::from_connect_stream(
-                        stream,
-                        observed_sequence.clone(),
-                        self.key_prefix,
-                    );
+                    let mut gms =
+                        GetManyStream::from_connect_stream(stream, observed_sequence.clone(), None);
                     if let Err(err) = gms.prefetch_first_frame().await {
                         if attempt < max_attempts && is_retryable_error(&err) {
                             let delay = retry_delay_for_error(&err, attempt, self.retry_config);
@@ -1573,203 +1975,6 @@ impl StoreClient {
         }
     }
 
-    /// Key range is inclusive: `start <= key <= end` when `end` is non-empty; empty `end` is
-    /// unbounded above (matches `store.query.v1.RangeRequest`).
-    pub(crate) async fn range(
-        &self,
-        start: &Key,
-        end: &Key,
-        limit: usize,
-    ) -> Result<Vec<(Key, Bytes)>, ClientError> {
-        self.range_internal(start, end, limit, RangeMode::Forward, None)
-            .await
-    }
-
-    /// See [`StoreClient::range`] for `end` semantics.
-    pub(crate) async fn range_with_mode(
-        &self,
-        start: &Key,
-        end: &Key,
-        limit: usize,
-        mode: RangeMode,
-    ) -> Result<Vec<(Key, Bytes)>, ClientError> {
-        self.range_internal(start, end, limit, mode, None).await
-    }
-
-    pub(crate) async fn range_with_min_sequence_number(
-        &self,
-        start: &Key,
-        end: &Key,
-        limit: usize,
-        min_sequence_number: u64,
-    ) -> Result<Vec<(Key, Bytes)>, ClientError> {
-        self.range_internal(
-            start,
-            end,
-            limit,
-            RangeMode::Forward,
-            Some(min_sequence_number),
-        )
-        .await
-    }
-
-    pub(crate) async fn range_with_mode_and_min_sequence_number(
-        &self,
-        start: &Key,
-        end: &Key,
-        limit: usize,
-        mode: RangeMode,
-        min_sequence_number: u64,
-    ) -> Result<Vec<(Key, Bytes)>, ClientError> {
-        self.range_internal(start, end, limit, mode, Some(min_sequence_number))
-            .await
-    }
-
-    pub(crate) async fn range_stream(
-        &self,
-        start: &Key,
-        end: &Key,
-        limit: usize,
-        batch_size: usize,
-    ) -> Result<RangeStream, ClientError> {
-        self.range_stream_internal(
-            start,
-            end,
-            limit,
-            batch_size,
-            RangeMode::Forward,
-            RangeStreamReadOptions::default(),
-        )
-        .await
-    }
-
-    pub(crate) async fn range_stream_with_mode(
-        &self,
-        start: &Key,
-        end: &Key,
-        limit: usize,
-        batch_size: usize,
-        mode: RangeMode,
-    ) -> Result<RangeStream, ClientError> {
-        self.range_stream_internal(start, end, limit, batch_size, mode, Default::default())
-            .await
-    }
-
-    pub(crate) async fn range_stream_with_min_sequence_number(
-        &self,
-        start: &Key,
-        end: &Key,
-        limit: usize,
-        batch_size: usize,
-        min_sequence_number: u64,
-    ) -> Result<RangeStream, ClientError> {
-        self.range_stream_internal(
-            start,
-            end,
-            limit,
-            batch_size,
-            RangeMode::Forward,
-            RangeStreamReadOptions {
-                min_sequence_number: Some(min_sequence_number),
-                observed_sequence: None,
-            },
-        )
-        .await
-    }
-
-    pub(crate) async fn range_stream_with_mode_and_min_sequence_number(
-        &self,
-        start: &Key,
-        end: &Key,
-        limit: usize,
-        batch_size: usize,
-        mode: RangeMode,
-        min_sequence_number: u64,
-    ) -> Result<RangeStream, ClientError> {
-        self.range_stream_internal(
-            start,
-            end,
-            limit,
-            batch_size,
-            mode,
-            RangeStreamReadOptions {
-                min_sequence_number: Some(min_sequence_number),
-                observed_sequence: None,
-            },
-        )
-        .await
-    }
-
-    pub(crate) async fn range_reduce(
-        &self,
-        start: &Key,
-        end: &Key,
-        request: &DomainRangeReduceRequest,
-    ) -> Result<Vec<Option<KvReducedValue>>, ClientError> {
-        let (response, _) = self
-            .range_reduce_response_internal(start, end, request, None)
-            .await?;
-        let decoded = proto_to_domain_reduce_response(response).map_err(ClientError::WireFormat)?;
-        if !decoded.groups.is_empty() {
-            return Err(ClientError::WireFormat(
-                "grouped range reduction response returned for scalar request".to_string(),
-            ));
-        }
-        Ok(decoded
-            .results
-            .iter()
-            .map(|result| result.value.clone())
-            .collect())
-    }
-
-    pub(crate) async fn range_reduce_with_min_sequence_number(
-        &self,
-        start: &Key,
-        end: &Key,
-        request: &DomainRangeReduceRequest,
-        min_sequence_number: u64,
-    ) -> Result<Vec<Option<KvReducedValue>>, ClientError> {
-        let (response, _) = self
-            .range_reduce_response_internal(start, end, request, Some(min_sequence_number))
-            .await?;
-        let decoded = proto_to_domain_reduce_response(response).map_err(ClientError::WireFormat)?;
-        if !decoded.groups.is_empty() {
-            return Err(ClientError::WireFormat(
-                "grouped range reduction response returned for scalar request".to_string(),
-            ));
-        }
-        Ok(decoded
-            .results
-            .iter()
-            .map(|result| result.value.clone())
-            .collect())
-    }
-
-    pub(crate) async fn range_reduce_response(
-        &self,
-        start: &Key,
-        end: &Key,
-        request: &DomainRangeReduceRequest,
-    ) -> Result<exoware_proto::query::ReduceResponse, ClientError> {
-        let (body, _) = self
-            .range_reduce_response_internal(start, end, request, None)
-            .await?;
-        Ok(body)
-    }
-
-    pub(crate) async fn range_reduce_response_with_min_sequence_number(
-        &self,
-        start: &Key,
-        end: &Key,
-        request: &DomainRangeReduceRequest,
-        min_sequence_number: u64,
-    ) -> Result<exoware_proto::query::ReduceResponse, ClientError> {
-        let (body, _) = self
-            .range_reduce_response_internal(start, end, request, Some(min_sequence_number))
-            .await?;
-        Ok(body)
-    }
-
     pub(crate) async fn prune(
         &self,
         policies: &[crate::prune_policy::PrunePolicy],
@@ -1777,15 +1982,102 @@ impl StoreClient {
         let config =
             store_connect_client_config(self.compact_uri.clone(), self.connect_request_compression);
         let client = CompactServiceClient::new(self.connect_http.clone(), config);
-        let policies = self.prefix_prune_policies(policies)?;
         client
             .prune(ProtoPruneRequest {
-                policies: exoware_proto::prune_policies_to_proto(&policies),
+                policies: exoware_proto::prune_policies_to_proto(policies),
                 ..Default::default()
             })
             .await
             .map_err(client_error_from_connect)?;
         Ok(())
+    }
+
+    /// Open a physical subscription over an already-encoded `filter`. The
+    /// returned [`StreamSubscription`] carries no prefix; the logical
+    /// [`PrefixedStoreClient`] wrapper attaches one for decoding.
+    async fn subscribe_physical(
+        &self,
+        filter: crate::stream_filter::StreamFilter,
+        since_sequence_number: Option<u64>,
+    ) -> Result<StreamSubscription, ClientError> {
+        crate::stream_filter::validate_filter(&filter)
+            .map_err(|e| ClientError::WireFormat(e.to_string()))?;
+        let selectors = filter
+            .selectors
+            .into_iter()
+            .map(|mk| exoware_proto::common::kv::v1::Selector {
+                reserved_bits: u32::from(mk.reserved_bits),
+                prefix: u32::from(mk.prefix),
+                payload_regex: mk.payload_regex.0,
+                ..Default::default()
+            })
+            .collect();
+        let value_filters = filter
+            .value_filters
+            .into_iter()
+            .map(|vf| {
+                use crate::stream_filter::Filter;
+                use exoware_proto::common::kv::v1::filter::Kind as ProtoKind;
+                let kind = match vf {
+                    Filter::Exact(bytes) => ProtoKind::Exact(bytes),
+                    Filter::Prefix(bytes) => ProtoKind::Prefix(bytes),
+                    Filter::Regex(pattern) => ProtoKind::Regex(pattern),
+                };
+                exoware_proto::common::kv::v1::Filter {
+                    kind: Some(kind),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let request = exoware_proto::log::stream::v1::SubscribeRequest {
+            selectors,
+            value_filters,
+            since_sequence_number,
+            ..Default::default()
+        };
+        let config =
+            store_connect_client_config(self.stream_uri.clone(), self.connect_request_compression);
+        let client =
+            exoware_proto::log::stream::v1::ServiceClient::new(self.connect_http.clone(), config);
+        let stream = client
+            .subscribe(request)
+            .await
+            .map_err(client_error_from_connect)?;
+        Ok(StreamSubscription {
+            stream,
+            key_prefix: None,
+            logical_filter: None,
+        })
+    }
+
+    /// Fetch a batch by sequence number, returning the raw owned response
+    /// (physical keys, no decode). `None` collapses the server's
+    /// `BATCH_EVICTED` / `BATCH_NOT_FOUND` errors. The [`PrefixedStoreClient`]
+    /// wrapper consumes the entries in one pass to filter + decode.
+    async fn stream_get_physical(
+        &self,
+        sequence_number: u64,
+    ) -> Result<Option<exoware_proto::log::stream::v1::GetResponse>, ClientError> {
+        let config =
+            store_connect_client_config(self.stream_uri.clone(), self.connect_request_compression);
+        let client =
+            exoware_proto::log::stream::v1::ServiceClient::new(self.connect_http.clone(), config);
+        match client
+            .get(exoware_proto::log::stream::v1::GetRequest {
+                sequence_number,
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(resp) => Ok(Some(resp.into_owned())),
+            Err(err) => {
+                if is_batch_missing_error(&err) {
+                    Ok(None)
+                } else {
+                    Err(client_error_from_connect(err))
+                }
+            }
+        }
     }
 
     pub async fn health(&self) -> Result<bool, ClientError> {
@@ -1829,7 +2121,6 @@ impl StoreClient {
                 MAX_KEY_LEN
             )));
         }
-        let key = self.encode_store_key(key)?;
 
         let config =
             store_connect_client_config(self.query_uri.clone(), self.connect_request_compression);
@@ -1865,30 +2156,6 @@ impl StoreClient {
         self.send_get(key, min_sequence_number).await
     }
 
-    async fn range_internal(
-        &self,
-        start: &Key,
-        end: &Key,
-        limit: usize,
-        mode: RangeMode,
-        min_sequence_number: Option<u64>,
-    ) -> Result<Vec<(Key, Bytes)>, ClientError> {
-        let stream = self
-            .range_stream_internal(
-                start,
-                end,
-                limit,
-                limit.max(1),
-                mode,
-                RangeStreamReadOptions {
-                    min_sequence_number,
-                    observed_sequence: None,
-                },
-            )
-            .await?;
-        stream.collect().await
-    }
-
     async fn range_stream_internal(
         &self,
         start: &Key,
@@ -1908,7 +2175,6 @@ impl StoreClient {
                 "batch_size must be positive".to_string(),
             ));
         }
-        let (start, end) = self.encode_store_range(start, end)?;
 
         let config =
             store_connect_client_config(self.query_uri.clone(), self.connect_request_compression);
@@ -1952,11 +2218,8 @@ impl StoreClient {
                 }
             };
 
-            let mut stream = RangeStream::from_connect_stream(
-                response,
-                options.observed_sequence.clone(),
-                self.key_prefix,
-            );
+            let mut stream =
+                RangeStream::from_connect_stream(response, options.observed_sequence.clone(), None);
             if let Err(err) = stream.prefetch_first_frame().await {
                 if attempt < max_attempts && is_retryable_error(&err) {
                     let delay = retry_delay_for_error(&err, attempt, self.retry_config);
@@ -1993,9 +2256,7 @@ impl StoreClient {
         let config =
             store_connect_client_config(self.query_uri.clone(), self.connect_request_compression);
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
-        let (start, end) = self.encode_store_range(start, end)?;
-        let request = self.prefix_reduce_request(request)?;
-        let proto_params = proto_to_proto_reduce_params(request);
+        let proto_params = proto_to_proto_reduce_params(request.clone());
         let min_sequence_number = self.normalize_min_sequence_number(min_sequence_number);
         let response = self
             .send_with_retry(|| async {
@@ -2013,64 +2274,6 @@ impl StoreClient {
         let owned = response.into_owned();
         let detail = owned.detail.as_option().cloned();
         Ok((owned, detail))
-    }
-
-    fn prefix_prune_policies(
-        &self,
-        policies: &[crate::prune_policy::PrunePolicy],
-    ) -> Result<Vec<crate::prune_policy::PrunePolicy>, ClientError> {
-        let Some(prefix) = self.key_prefix else {
-            return Ok(policies.to_vec());
-        };
-        policies
-            .iter()
-            .map(|policy| {
-                use crate::prune_policy::{PolicyScope, PrunePolicy};
-                let scope = match &policy.scope {
-                    PolicyScope::Keys(scope) => {
-                        let mut scope = scope.clone();
-                        scope.match_key = prefix.prefix_match_key(&scope.match_key)?;
-                        PolicyScope::Keys(scope)
-                    }
-                    PolicyScope::Sequence => PolicyScope::Sequence,
-                };
-                Ok(PrunePolicy {
-                    scope,
-                    retain: policy.retain.clone(),
-                })
-            })
-            .collect::<Result<Vec<_>, StoreKeyPrefixError>>()
-            .map_err(ClientError::from)
-    }
-
-    fn prefix_stream_filter(
-        &self,
-        filter: crate::stream_filter::StreamFilter,
-    ) -> Result<crate::stream_filter::StreamFilter, ClientError> {
-        let Some(prefix) = self.key_prefix else {
-            return Ok(filter);
-        };
-        let match_keys = filter
-            .match_keys
-            .iter()
-            .map(|mk| prefix.prefix_stream_match_key(mk))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(crate::stream_filter::StreamFilter {
-            match_keys,
-            value_filters: filter.value_filters,
-        })
-    }
-
-    fn prefix_reduce_request(
-        &self,
-        request: &DomainRangeReduceRequest,
-    ) -> Result<DomainRangeReduceRequest, ClientError> {
-        let Some(prefix) = self.key_prefix else {
-            return Ok(request.clone());
-        };
-        let mut request = request.clone();
-        shift_reduce_request_key_offsets(prefix.reserved_bits(), &mut request)?;
-        Ok(request)
     }
 
     async fn send_with_retry<F, Fut, T>(&self, mut make_request: F) -> Result<T, ClientError>
@@ -2163,22 +2366,22 @@ fn shift_field_ref_key_offset(
 
 #[derive(Clone, Copy, Debug)]
 pub struct Ingest<'a> {
-    c: &'a StoreClient,
+    c: &'a PrefixedStoreClient,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct Query<'a> {
-    c: &'a StoreClient,
+    c: &'a PrefixedStoreClient,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct Compact<'a> {
-    c: &'a StoreClient,
+    c: &'a PrefixedStoreClient,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct Stream<'a> {
-    c: &'a StoreClient,
+    c: &'a PrefixedStoreClient,
 }
 
 impl<'a> Ingest<'a> {
@@ -2189,7 +2392,7 @@ impl<'a> Ingest<'a> {
     /// Submit a [`StoreWriteBatch`] that has already been encoded into the
     /// physical Store keyspace.
     pub async fn put_prepared(&self, batch: &StoreWriteBatch) -> Result<u64, ClientError> {
-        batch.commit(self.c).await
+        batch.commit(self.c.client()).await
     }
 }
 
@@ -2393,7 +2596,7 @@ impl<'a> Compact<'a> {
 }
 
 impl<'a> Stream<'a> {
-    /// `store.stream.v1.Service.Subscribe` — see `StreamSubscription::next`
+    /// `log.stream.v1.Service.Subscribe` — see `StreamSubscription::next`
     /// for consuming delivered frames. `since_sequence_number = None` starts
     /// live from the next Put; `Some(N)` replays retained batches before
     /// transitioning to live. An evicted `since` returns a
@@ -2403,109 +2606,16 @@ impl<'a> Stream<'a> {
         filter: crate::stream_filter::StreamFilter,
         since_sequence_number: Option<u64>,
     ) -> Result<StreamSubscription, ClientError> {
-        let logical_filter = self
-            .c
-            .key_prefix
-            .is_some()
-            .then(|| ClientStreamFilter::compile(&filter))
-            .transpose()?;
-        let filter = self.c.prefix_stream_filter(filter)?;
-        crate::stream_filter::validate_filter(&filter)
-            .map_err(|e| ClientError::WireFormat(e.to_string()))?;
-        let match_keys = filter
-            .match_keys
-            .into_iter()
-            .map(|mk| exoware_proto::store::common::v1::MatchKey {
-                reserved_bits: u32::from(mk.reserved_bits),
-                prefix: u32::from(mk.prefix),
-                payload_regex: mk.payload_regex.0,
-                ..Default::default()
-            })
-            .collect();
-        let value_filters = filter
-            .value_filters
-            .into_iter()
-            .map(|vf| {
-                use crate::stream_filter::BytesFilter;
-                use exoware_proto::store::common::v1::bytes_filter::Kind as ProtoKind;
-                let kind = match vf {
-                    BytesFilter::Exact(bytes) => ProtoKind::Exact(bytes),
-                    BytesFilter::Prefix(bytes) => ProtoKind::Prefix(bytes),
-                    BytesFilter::Regex(pattern) => ProtoKind::Regex(pattern),
-                };
-                exoware_proto::store::common::v1::BytesFilter {
-                    kind: Some(kind),
-                    ..Default::default()
-                }
-            })
-            .collect();
-        let request = exoware_proto::store::stream::v1::SubscribeRequest {
-            match_keys,
-            value_filters,
-            since_sequence_number,
-            ..Default::default()
-        };
-        let config = store_connect_client_config(
-            self.c.stream_uri.clone(),
-            self.c.connect_request_compression,
-        );
-        let client = exoware_proto::store::stream::v1::ServiceClient::new(
-            self.c.connect_http.clone(),
-            config,
-        );
-        let stream = client
-            .subscribe(request)
-            .await
-            .map_err(client_error_from_connect)?;
-        Ok(StreamSubscription {
-            stream,
-            key_prefix: self.c.key_prefix,
-            logical_filter,
-        })
+        self.c.subscribe(filter, since_sequence_number).await
     }
 
-    /// `store.stream.v1.Service.Get` — `Ok(None)` collapses the server's
+    /// `log.stream.v1.Service.Get` — `Ok(None)` collapses the server's
     /// `BATCH_EVICTED` / `BATCH_NOT_FOUND` error details.
     pub async fn get(
         &self,
         sequence_number: u64,
     ) -> Result<Option<Vec<(Key, Bytes)>>, ClientError> {
-        let config = store_connect_client_config(
-            self.c.stream_uri.clone(),
-            self.c.connect_request_compression,
-        );
-        let client = exoware_proto::store::stream::v1::ServiceClient::new(
-            self.c.connect_http.clone(),
-            config,
-        );
-        match client
-            .get(exoware_proto::store::stream::v1::GetRequest {
-                sequence_number,
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(resp) => {
-                let owned = resp.into_owned();
-                let mut entries = Vec::with_capacity(owned.entries.len());
-                for entry in owned.entries {
-                    let key = Bytes::from(entry.key);
-                    match self.c.key_prefix {
-                        Some(prefix) if !prefix.codec.matches(&key) => {}
-                        Some(prefix) => entries.push((prefix.decode_key(&key)?, entry.value)),
-                        None => entries.push((key, entry.value)),
-                    }
-                }
-                Ok(Some(entries))
-            }
-            Err(err) => {
-                if is_batch_missing_error(&err) {
-                    Ok(None)
-                } else {
-                    Err(client_error_from_connect(err))
-                }
-            }
-        }
+        self.c.stream_get(sequence_number).await
     }
 }
 
@@ -2513,7 +2623,7 @@ impl SerializableReadSession {
     /// Fixed sequence floor for this session, if one has been established yet.
     ///
     /// Fresh sessions start with `None` unless created via
-    /// [`StoreClient::create_session_with_sequence`]. A first streamed query
+    /// [`PrefixedStoreClient::create_session_with_sequence`]. A first streamed query
     /// read (`get_many`, `range_stream`) sets this once a detail-bearing chunk
     /// is consumed.
     pub fn fixed_sequence(&self) -> Option<u64> {
@@ -2911,7 +3021,7 @@ mod tests {
 
     #[test]
     fn create_session_starts_unseeded() {
-        let client = StoreClient::new("http://localhost:10000/");
+        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000/"));
         let session = client.create_session();
         assert_eq!(session.fixed_sequence(), None);
     }
@@ -2974,7 +3084,7 @@ mod tests {
 
     #[test]
     fn create_session_with_sequence_pins_explicit_floor() {
-        let client = StoreClient::new("http://localhost:10000/");
+        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000/"));
         let session = client.create_session_with_sequence(27);
         assert_eq!(session.fixed_sequence(), Some(27));
     }
@@ -2986,6 +3096,52 @@ mod tests {
         let physical = prefix.encode_key(&logical).unwrap();
         assert!(prefix.codec.matches(&physical));
         assert_eq!(prefix.decode_key(&physical).unwrap(), logical);
+    }
+
+    #[test]
+    fn uniform_width_prefixes_are_pairwise_disjoint() {
+        // Six leaf prefixes sharing one uniform reserved width.
+        let all = [
+            StoreKeyPrefix::new(4, 0).unwrap(),
+            StoreKeyPrefix::new(4, 1).unwrap(),
+            StoreKeyPrefix::new(4, 2).unwrap(),
+            StoreKeyPrefix::new(4, 3).unwrap(),
+            StoreKeyPrefix::new(4, 4).unwrap(),
+            StoreKeyPrefix::new(4, 5).unwrap(),
+        ];
+        // A key encoded under one prefix never matches another's codec — so a
+        // prefix-bounded range scan in one can't observe another's keys (this is
+        // the bug being fixed). Uniform width ⇒ no prefix is a bit-prefix of
+        // another.
+        let logical = Bytes::from_static(b"\x00\x10whatever-block-meta-or-op-log-key");
+        for (i, pa) in all.iter().enumerate() {
+            let physical = pa.encode_key(&logical).unwrap();
+            assert!(pa.codec.matches(&physical));
+            assert_eq!(pa.decode_key(&physical).unwrap(), logical);
+            for (j, pb) in all.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                assert!(
+                    !pb.codec.matches(&physical),
+                    "prefix {j} matched a key encoded under prefix {i}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prefixed_store_client_always_carries_its_prefix() {
+        let base = StoreClient::new("http://localhost:8090");
+        let prefix = StoreKeyPrefix::new(4, 0).unwrap();
+        let client = base.prefixed(prefix);
+        assert_eq!(client.key_prefix(), prefix);
+        // The logical client encodes through its prefix.
+        let logical = Bytes::from_static(b"row");
+        assert_eq!(
+            client.encode_store_key(&logical).unwrap(),
+            prefix.encode_key(&logical).unwrap(),
+        );
     }
 
     #[test]
@@ -3004,28 +3160,28 @@ mod tests {
     }
 
     #[test]
-    fn store_key_prefix_rewrites_match_key_family() {
+    fn store_key_prefix_rewrites_selector_family() {
         let prefix = StoreKeyPrefix::new(3, 0b101).unwrap();
-        let logical = crate::match_key::MatchKey {
+        let logical = crate::selector::Selector {
             reserved_bits: 4,
             prefix: 0b0110,
             payload_regex: crate::kv_codec::Utf8::from("(?s).*"),
         };
-        let physical = prefix.prefix_match_key(&logical).unwrap();
+        let physical = prefix.prefix_selector(&logical).unwrap();
         assert_eq!(physical.reserved_bits, 7);
         assert_eq!(physical.prefix, 0b101_0110);
         assert_eq!(physical.payload_regex, logical.payload_regex);
     }
 
     #[test]
-    fn store_key_prefix_broadens_stream_match_key_payload_regex() {
+    fn store_key_prefix_broadens_stream_selector_payload_regex() {
         let prefix = StoreKeyPrefix::new(3, 0b101).unwrap();
-        let logical = crate::match_key::MatchKey {
+        let logical = crate::selector::Selector {
             reserved_bits: 4,
             prefix: 0b0110,
             payload_regex: crate::kv_codec::Utf8::from("(?s).*"),
         };
-        let physical = prefix.prefix_stream_match_key(&logical).unwrap();
+        let physical = prefix.prefix_stream_selector(&logical).unwrap();
         assert_eq!(physical.reserved_bits, 7);
         assert_eq!(physical.prefix, 0b101_0110);
         assert_eq!(&*physical.payload_regex, "(?s-u).*");
@@ -3035,9 +3191,9 @@ mod tests {
     fn prefixed_reduce_request_shifts_key_field_offsets() {
         let client = StoreClient::builder()
             .url("http://localhost:10000")
-            .key_prefix(StoreKeyPrefix::new(5, 0b10101).unwrap())
             .build()
-            .unwrap();
+            .unwrap()
+            .prefixed(StoreKeyPrefix::new(5, 0b10101).unwrap());
         let request = DomainRangeReduceRequest {
             reducers: vec![crate::RangeReducerSpec {
                 op: crate::RangeReduceOp::SumField,
@@ -3084,22 +3240,22 @@ mod tests {
     #[test]
     fn store_write_batch_uses_each_clients_prefix() {
         let base = StoreClient::new("http://localhost:10000");
-        let a = base.with_key_prefix(StoreKeyPrefix::new(4, 1).unwrap());
-        let b = base.with_key_prefix(StoreKeyPrefix::new(4, 2).unwrap());
+        let a = base.prefixed(StoreKeyPrefix::new(4, 1).unwrap());
+        let b = base.prefixed(StoreKeyPrefix::new(4, 2).unwrap());
         let key_a = Bytes::from_static(b"a");
         let key_b = Bytes::from_static(b"b");
 
         let mut batch = StoreWriteBatch::new();
-        batch.push(&a, &key_a, b"va").unwrap();
-        batch.push(&b, &key_b, b"vb").unwrap();
+        batch.push(a.key_prefix(), &key_a, b"va").unwrap();
+        batch.push(b.key_prefix(), &key_b, b"vb").unwrap();
 
         assert_eq!(
             batch.entries[0].0,
-            a.key_prefix().unwrap().encode_key(&key_a).unwrap()
+            a.key_prefix().encode_key(&key_a).unwrap()
         );
         assert_eq!(
             batch.entries[1].0,
-            b.key_prefix().unwrap().encode_key(&key_b).unwrap()
+            b.key_prefix().encode_key(&key_b).unwrap()
         );
     }
 

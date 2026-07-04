@@ -988,7 +988,7 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
   ): AsyncIterable<SimplexStreamBatch<RawSimplexStreamEntry>> {
     const stream = this.store.subscribe(
       {
-        matchKeys: normalizeKinds(kinds).map(streamMatchKind),
+        selectors: normalizeKinds(kinds).map(streamMatchKind),
         ...(options.sinceSequenceNumber !== undefined
           ? { sinceSequenceNumber: options.sinceSequenceNumber }
           : {}),

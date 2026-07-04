@@ -135,7 +135,7 @@ mod tests {
             ),
             ErrorInfo {
                 reason: "INVALID_KEY".to_string(),
-                domain: "store.ingest".to_string(),
+                domain: "log.ingest".to_string(),
                 metadata: [("max_key_len".to_string(), "254".to_string())]
                     .into_iter()
                     .collect(),

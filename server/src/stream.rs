@@ -1,4 +1,4 @@
-//! Live stream coordination for `store.stream.v1`.
+//! Live stream coordination for `log.stream.v1`.
 //!
 //! A [`StreamNotifier`] tracks the highest published batch sequence and wakes
 //! subscribers. Each subscriber then pulls batches from the log at its own
@@ -14,15 +14,15 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use connectrpc::ConnectError;
-use exoware_sdk::common::KvEntry;
+use exoware_sdk::common::Entry;
 use exoware_sdk::keys::KeyCodec;
-use exoware_sdk::match_key::compile_payload_regex;
-use exoware_sdk::stream_filter::{validate_filter, CompiledBytesFilters, StreamFilter};
+use exoware_sdk::selector::compile_payload_regex;
+use exoware_sdk::stream_filter::{validate_filter, CompiledFilters, StreamFilter};
 use regex::bytes::Regex;
 use tokio::sync::Notify;
 
 /// `ErrorInfo.domain` used for all stream-service errors.
-pub const STREAM_ERROR_DOMAIN: &str = "store.stream";
+pub const STREAM_ERROR_DOMAIN: &str = "log.stream";
 /// `ErrorInfo.reason` when a `since_sequence_number` or `Get(seq)` references a
 /// batch that has been pruned from the log.
 pub const REASON_BATCH_EVICTED: &str = "BATCH_EVICTED";
@@ -41,7 +41,7 @@ pub(crate) struct CompiledKeyMatcher {
 #[derive(Clone)]
 pub(crate) struct CompiledMatchers {
     pub keys: Vec<CompiledKeyMatcher>,
-    pub values: Option<CompiledBytesFilters>,
+    pub values: Option<CompiledFilters>,
 }
 
 /// Validate and compile a `StreamFilter`. Shared between replay and live
@@ -50,7 +50,7 @@ pub(crate) struct CompiledMatchers {
 pub(crate) fn compile_matchers(filter: &StreamFilter) -> Result<CompiledMatchers, ConnectError> {
     validate_filter(filter).map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
     let keys = filter
-        .match_keys
+        .selectors
         .iter()
         .map(|mk| {
             let regex = compile_payload_regex(&mk.payload_regex)
@@ -61,13 +61,13 @@ pub(crate) fn compile_matchers(filter: &StreamFilter) -> Result<CompiledMatchers
             })
         })
         .collect::<Result<Vec<_>, ConnectError>>()?;
-    let values = CompiledBytesFilters::compile(&filter.value_filters)
+    let values = CompiledFilters::compile(&filter.value_filters)
         .map_err(|e| ConnectError::invalid_argument(format!("invalid value_filter: {e}")))?;
     Ok(CompiledMatchers { keys, values })
 }
 
 /// Apply a compiled filter to a batch. First-match-wins per entry.
-pub(crate) fn apply_filter(matchers: &CompiledMatchers, kvs: &[KvEntry]) -> Vec<KvEntry> {
+pub(crate) fn apply_filter(matchers: &CompiledMatchers, kvs: &[Entry]) -> Vec<Entry> {
     let mut out = Vec::with_capacity(kvs.len());
     'outer: for kv in kvs {
         let v = kv.value.as_ref();
@@ -154,12 +154,12 @@ impl StreamNotifier for StreamHub {
 mod tests {
     use super::*;
     use exoware_sdk::kv_codec::Utf8;
-    use exoware_sdk::match_key::MatchKey;
-    use exoware_sdk::stream_filter::BytesFilter;
+    use exoware_sdk::selector::Selector;
+    use exoware_sdk::stream_filter::Filter;
 
     fn filter(prefix: u16, regex: &str) -> StreamFilter {
         StreamFilter {
-            match_keys: vec![MatchKey {
+            selectors: vec![Selector {
                 reserved_bits: 4,
                 prefix,
                 payload_regex: Utf8::from(regex),
@@ -168,13 +168,9 @@ mod tests {
         }
     }
 
-    fn filter_with_values(
-        prefix: u16,
-        regex: &str,
-        value_filters: Vec<BytesFilter>,
-    ) -> StreamFilter {
+    fn filter_with_values(prefix: u16, regex: &str, value_filters: Vec<Filter>) -> StreamFilter {
         StreamFilter {
-            match_keys: vec![MatchKey {
+            selectors: vec![Selector {
                 reserved_bits: 4,
                 prefix,
                 payload_regex: Utf8::from(regex),
@@ -189,8 +185,8 @@ mod tests {
         Bytes::copy_from_slice(key.as_ref())
     }
 
-    fn kv(family: u8, payload: &[u8], value: &'static [u8]) -> KvEntry {
-        KvEntry {
+    fn kv(family: u8, payload: &[u8], value: &'static [u8]) -> Entry {
+        Entry {
             key: key(family, payload).to_vec(),
             value: Bytes::from_static(value),
             ..Default::default()
@@ -226,7 +222,7 @@ mod tests {
     #[test]
     fn subscribe_rejects_invalid_filter() {
         let bad = StreamFilter {
-            match_keys: vec![],
+            selectors: vec![],
             value_filters: vec![],
         };
         assert!(compile_matchers(&bad).is_err());
@@ -237,7 +233,7 @@ mod tests {
         let matchers = compile_matchers(&filter_with_values(
             1,
             "(?s).*",
-            vec![BytesFilter::Regex("^keep$".into())],
+            vec![Filter::Regex("^keep$".into())],
         ))
         .unwrap();
         let kvs = vec![kv(1, b"a", b"keep"), kv(1, b"b", b"drop")];
@@ -251,7 +247,7 @@ mod tests {
         let matchers = compile_matchers(&filter_with_values(
             1,
             "(?s).*",
-            vec![BytesFilter::Exact(Bytes::from_static(b"target"))],
+            vec![Filter::Exact(Bytes::from_static(b"target"))],
         ))
         .unwrap();
         let kvs = vec![kv(1, b"a", b"target"), kv(1, b"b", b"other")];

@@ -23,7 +23,7 @@ use exoware_qmdb::{
     OperationLogSubscribeProof, QmdbError,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::StoreClient;
+use exoware_sdk::{PrefixedStoreClient, StoreClient};
 
 type Digest = commonware_cryptography::sha256::Digest;
 type LocalDb = Immutable<
@@ -126,8 +126,8 @@ async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
         commonware_cryptography::Sha256,
         FixedBytes<32>,
         Vec<u8>,
-    > = ImmutableWriter::empty(client.clone());
-    common::commit_immutable_upload(client, &writer, &batch.operations)
+    > = ImmutableWriter::fresh(PrefixedStoreClient::empty(client.clone()));
+    common::commit_immutable_upload(&writer, &batch.operations)
         .await
         .expect("commit upload");
 }
@@ -140,8 +140,8 @@ async fn immutable_connect_subscribe_emits_verifiable_multi_proof() {
         *local.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
-    let immutable_client = Arc::new(TestImmutableClient::from_client(
-        store_client.clone(),
+    let immutable_client = Arc::new(TestImmutableClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         ((), ((0..=10000).into(), ())),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(immutable_client).await;
@@ -186,8 +186,8 @@ async fn immutable_connect_get_operation_range_returns_verifiable_proof() {
     );
     commit_upload(&store_client, &local).await;
 
-    let immutable_client = Arc::new(TestImmutableClient::from_client(
-        store_client.clone(),
+    let immutable_client = Arc::new(TestImmutableClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         ((), ((0..=10000).into(), ())),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(immutable_client).await;
@@ -224,8 +224,8 @@ async fn immutable_connect_client_rejects_invalid_streamed_proof() {
     );
     commit_upload(&store_client, &local).await;
 
-    let immutable_client = Arc::new(TestImmutableClient::from_client(
-        store_client.clone(),
+    let immutable_client = Arc::new(TestImmutableClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
         ((), ((0..=10000).into(), ())),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(immutable_client).await;

@@ -38,7 +38,8 @@ Explore the Exoware API.
 
 ## Features
 
-- **Store:** set and get key-value pairs, and run range queries.
+- **Log:** Order and stream arbitrary data.
+- **Store:** Query immutable data.
 - **Ordered QMDB** (optional, requires `VITE_QMDB_URL`): current/historical
   proofs and live subscribe streaming.
 - **Simplex** (optional, requires `VITE_SIMPLEX_URL`): read and subscribe to

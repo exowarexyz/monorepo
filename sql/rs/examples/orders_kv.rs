@@ -1,7 +1,7 @@
 use datafusion::arrow::util::pretty::print_batches;
 use datafusion::common::Result as DataFusionResult;
 use datafusion::prelude::SessionContext;
-use exoware_sdk::StoreClient;
+use exoware_sdk::{StoreClient, StoreKeyPrefix};
 use exoware_sql::{default_orders_index_specs, KvSchema};
 
 #[tokio::main]
@@ -12,7 +12,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = SessionContext::new();
     let index_specs = default_orders_index_specs();
 
-    KvSchema::new(client)
+    KvSchema::new(client.prefixed(StoreKeyPrefix::identity()))
         .orders_table("orders_kv", index_specs)
         .map_err(datafusion::common::DataFusionError::Execution)?
         .register_all(&ctx)?;

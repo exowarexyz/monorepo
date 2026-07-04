@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use commonware_codec::Encode;
 use connectrpc::client::ClientConfig;
-use exoware_sdk::common::MatchKey as ProtoMatchKey;
+use exoware_sdk::common::Selector as ProtoSelector;
 use exoware_sdk::compact::{
     policy, policy_retain, KeysScope as ProtoKeysScope, Policy, PolicyGroupBy, PolicyOrderBy,
     PolicyOrderEncoding, PolicyRetain, PruneRequest, RetainGreaterThan, RetainKeepLatest,
@@ -11,15 +11,15 @@ use exoware_sdk::keys::{Key, KeyCodec};
 use exoware_sdk::kv_codec::{
     KvExpr, KvFieldKind, KvFieldRef, KvReducedValue, StoredRow, StoredValue,
 };
-use exoware_sdk::match_key::MatchKey as DomainMatchKey;
 use exoware_sdk::prune_policy;
+use exoware_sdk::selector::Selector as DomainSelector;
 use exoware_sdk::{
-    connect_compression_registry, PreferZstdHttpClient, RangeMode, RangeReduceOp,
-    RangeReduceRequest, RangeReducerSpec, RetryConfig, StoreClient,
+    connect_compression_registry, PreferZstdHttpClient, PrefixedStoreClient, RangeMode,
+    RangeReduceOp, RangeReduceRequest, RangeReducerSpec, RetryConfig, StoreClient,
 };
 use tempfile::tempdir;
 
-async fn spawn_client() -> (tokio::task::JoinHandle<()>, StoreClient, String) {
+async fn spawn_client() -> (tokio::task::JoinHandle<()>, PrefixedStoreClient, String) {
     let dir = tempdir().expect("tempdir");
     let dir_path = dir.path().to_owned();
     let _dir = dir;
@@ -31,7 +31,7 @@ async fn spawn_client() -> (tokio::task::JoinHandle<()>, StoreClient, String) {
         .retry_config(RetryConfig::disabled())
         .build()
         .expect("build client");
-    (handle, client, url)
+    (handle, PrefixedStoreClient::empty(client), url)
 }
 
 fn key(b: &[u8]) -> Key {
@@ -279,7 +279,7 @@ async fn prune_drop_all_removes_keys() {
         .prune(PruneRequest {
             policies: vec![Policy {
                 scope: Some(policy::Scope::Keys(Box::new(ProtoKeysScope {
-                    match_key: Some(ProtoMatchKey {
+                    selector: Some(ProtoSelector {
                         reserved_bits: 4,
                         prefix: 1,
                         payload_regex: "(?s-u)^.*$".to_string(),
@@ -333,7 +333,7 @@ async fn create_session_with_sequence_reads_at_or_above_floor() {
 #[tokio::test]
 async fn health_endpoint() {
     let (_h, client, _url) = spawn_client().await;
-    assert!(client.health().await.expect("health"));
+    assert!(client.client().health().await.expect("health"));
 }
 
 // -- batch put multiple keys --
@@ -446,7 +446,7 @@ async fn prune_keep_latest_retains_newest() {
         .prune(PruneRequest {
             policies: vec![Policy {
                 scope: Some(policy::Scope::Keys(Box::new(ProtoKeysScope {
-                    match_key: Some(ProtoMatchKey {
+                    selector: Some(ProtoSelector {
                         reserved_bits: 4,
                         prefix: 2,
                         payload_regex: "(?s-u)^(?P<logical>.{3})\\x00\\x00(?P<version>.{8})$"
@@ -620,7 +620,7 @@ async fn store_client_prune_drop_all() {
         .compact()
         .prune(&[prune_policy::PrunePolicy {
             scope: prune_policy::PolicyScope::Keys(prune_policy::KeysScope {
-                match_key: DomainMatchKey {
+                selector: DomainSelector {
                     reserved_bits: 4,
                     prefix: 5,
                     payload_regex: ".*".into(),
@@ -669,7 +669,7 @@ async fn prune_greater_than_retains_above_threshold() {
         .prune(PruneRequest {
             policies: vec![Policy {
                 scope: Some(policy::Scope::Keys(Box::new(ProtoKeysScope {
-                    match_key: Some(ProtoMatchKey {
+                    selector: Some(ProtoSelector {
                         reserved_bits: 4,
                         prefix: 3,
                         payload_regex: "(?s-u)^(?P<logical>.{2})(?P<version>.{8})$".to_string(),

@@ -16,7 +16,7 @@ use commonware_storage::qmdb::any::unordered::variable::Operation as UnorderedQm
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{UnorderedClient, UnorderedWriter, MAX_OPERATION_SIZE};
-use exoware_sdk::StoreClient;
+use exoware_sdk::{PrefixedStoreClient, StoreClient};
 
 use common::retry;
 
@@ -43,11 +43,11 @@ fn op_cfg() -> <UnorderedBatchOperation as commonware_codec::Read>::Cfg {
 }
 
 fn fresh_reader(c: StoreClient) -> TestReader {
-    TestReader::from_client(c, op_cfg())
+    TestReader::new(PrefixedStoreClient::empty(c), op_cfg())
 }
 
 fn fresh_writer(c: StoreClient) -> TestWriter {
-    TestWriter::empty(c)
+    TestWriter::fresh(PrefixedStoreClient::empty(c))
 }
 
 struct LocalReference {
@@ -117,7 +117,7 @@ async fn sequential_upload_matches_local_root() {
     .await;
 
     let writer = fresh_writer(client.clone());
-    let receipt = common::commit_unordered_upload(&client, &writer, &local.operations)
+    let receipt = common::commit_unordered_upload(&writer, &local.operations)
         .await
         .expect("upload");
     assert_eq!(receipt.latest_location, local.latest_location);
@@ -159,13 +159,10 @@ async fn pipelined_batches_require_flush_to_catch_up_watermark() {
     let w1 = writer.clone();
     let w2 = writer.clone();
     let w3 = writer.clone();
-    let c1 = client.clone();
-    let c2 = client.clone();
-    let c3 = client.clone();
     let (r1, r2, r3) = tokio::join!(
-        async move { common::commit_unordered_upload(&c1, &w1, &o1).await },
-        async move { common::commit_unordered_upload(&c2, &w2, &o2).await },
-        async move { common::commit_unordered_upload(&c3, &w3, &o3).await }
+        async move { common::commit_unordered_upload(&w1, &o1).await },
+        async move { common::commit_unordered_upload(&w2, &o2).await },
+        async move { common::commit_unordered_upload(&w3, &o3).await }
     );
     let _ = r1.expect("b1");
     let _ = r2.expect("b2");

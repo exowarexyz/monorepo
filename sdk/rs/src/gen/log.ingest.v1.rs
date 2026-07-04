@@ -13,7 +13,7 @@ pub struct PutRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
-    pub kvs: ::buffa::alloc::vec::Vec<super::super::common::v1::KvEntry>,
+    pub kvs: ::buffa::alloc::vec::Vec<super::super::super::common::kv::v1::Entry>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -28,7 +28,7 @@ impl PutRequest {
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.ingest.v1.PutRequest";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/log.ingest.v1.PutRequest";
 }
 impl ::buffa::DefaultInstance for PutRequest {
     fn default_instance() -> &'static Self {
@@ -37,10 +37,10 @@ impl ::buffa::DefaultInstance for PutRequest {
     }
 }
 impl ::buffa::MessageName for PutRequest {
-    const PACKAGE: &'static str = "store.ingest.v1";
+    const PACKAGE: &'static str = "log.ingest.v1";
     const NAME: &'static str = "PutRequest";
-    const FULL_NAME: &'static str = "store.ingest.v1.PutRequest";
-    const TYPE_URL: &'static str = "type.googleapis.com/store.ingest.v1.PutRequest";
+    const FULL_NAME: &'static str = "log.ingest.v1.PutRequest";
+    const TYPE_URL: &'static str = "type.googleapis.com/log.ingest.v1.PutRequest";
 }
 impl ::buffa::Message for PutRequest {
     /// Returns the total encoded size in bytes.
@@ -118,7 +118,7 @@ impl ::buffa::Message for PutRequest {
     }
 }
 impl ::buffa::ExtensionSet for PutRequest {
-    const PROTO_FQN: &'static str = "store.ingest.v1.PutRequest";
+    const PROTO_FQN: &'static str = "log.ingest.v1.PutRequest";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -141,7 +141,7 @@ impl ::buffa::json_helpers::ProtoElemJson for PutRequest {
 }
 #[doc(hidden)]
 pub const __PUT_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.ingest.v1.PutRequest",
+    type_url: "type.googleapis.com/log.ingest.v1.PutRequest",
     to_json: ::buffa::type_registry::any_to_json::<PutRequest>,
     from_json: ::buffa::type_registry::any_from_json::<PutRequest>,
     is_wkt: false,
@@ -179,7 +179,7 @@ impl PutResponse {
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.ingest.v1.PutResponse";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/log.ingest.v1.PutResponse";
 }
 impl ::buffa::DefaultInstance for PutResponse {
     fn default_instance() -> &'static Self {
@@ -188,10 +188,10 @@ impl ::buffa::DefaultInstance for PutResponse {
     }
 }
 impl ::buffa::MessageName for PutResponse {
-    const PACKAGE: &'static str = "store.ingest.v1";
+    const PACKAGE: &'static str = "log.ingest.v1";
     const NAME: &'static str = "PutResponse";
-    const FULL_NAME: &'static str = "store.ingest.v1.PutResponse";
-    const TYPE_URL: &'static str = "type.googleapis.com/store.ingest.v1.PutResponse";
+    const FULL_NAME: &'static str = "log.ingest.v1.PutResponse";
+    const TYPE_URL: &'static str = "type.googleapis.com/log.ingest.v1.PutResponse";
 }
 impl ::buffa::Message for PutResponse {
     /// Returns the total encoded size in bytes.
@@ -260,7 +260,7 @@ impl ::buffa::Message for PutResponse {
     }
 }
 impl ::buffa::ExtensionSet for PutResponse {
-    const PROTO_FQN: &'static str = "store.ingest.v1.PutResponse";
+    const PROTO_FQN: &'static str = "log.ingest.v1.PutResponse";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -283,7 +283,7 @@ impl ::buffa::json_helpers::ProtoElemJson for PutResponse {
 }
 #[doc(hidden)]
 pub const __PUT_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.ingest.v1.PutResponse",
+    type_url: "type.googleapis.com/log.ingest.v1.PutResponse",
     to_json: ::buffa::type_registry::any_to_json::<PutResponse>,
     from_json: ::buffa::type_registry::any_from_json::<PutResponse>,
     is_wkt: false,
@@ -313,7 +313,9 @@ pub mod __buffa {
             /// Field 1: `kvs`
             pub kvs: ::buffa::RepeatedView<
                 'a,
-                super::super::super::super::common::v1::__buffa::view::KvEntryView<'a>,
+                super::super::super::super::super::common::kv::v1::__buffa::view::EntryView<
+                    'a,
+                >,
             >,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
@@ -371,7 +373,7 @@ pub mod __buffa {
                             let sub = ::buffa::types::borrow_bytes(&mut cur)?;
                             view.kvs
                                 .push(
-                                    super::super::super::super::common::v1::__buffa::view::KvEntryView::_decode_depth(
+                                    super::super::super::super::super::common::kv::v1::__buffa::view::EntryView::_decode_depth(
                                         sub,
                                         depth - 1,
                                     )?,
@@ -489,10 +491,10 @@ pub mod __buffa {
             }
         }
         impl<'a> ::buffa::MessageName for PutRequestView<'a> {
-            const PACKAGE: &'static str = "store.ingest.v1";
+            const PACKAGE: &'static str = "log.ingest.v1";
             const NAME: &'static str = "PutRequest";
-            const FULL_NAME: &'static str = "store.ingest.v1.PutRequest";
-            const TYPE_URL: &'static str = "type.googleapis.com/store.ingest.v1.PutRequest";
+            const FULL_NAME: &'static str = "log.ingest.v1.PutRequest";
+            const TYPE_URL: &'static str = "type.googleapis.com/log.ingest.v1.PutRequest";
         }
         impl<'v> ::buffa::DefaultViewInstance for PutRequestView<'v> {
             fn default_view_instance<'a>() -> &'a Self
@@ -687,10 +689,10 @@ pub mod __buffa {
             }
         }
         impl<'a> ::buffa::MessageName for PutResponseView<'a> {
-            const PACKAGE: &'static str = "store.ingest.v1";
+            const PACKAGE: &'static str = "log.ingest.v1";
             const NAME: &'static str = "PutResponse";
-            const FULL_NAME: &'static str = "store.ingest.v1.PutResponse";
-            const TYPE_URL: &'static str = "type.googleapis.com/store.ingest.v1.PutResponse";
+            const FULL_NAME: &'static str = "log.ingest.v1.PutResponse";
+            const TYPE_URL: &'static str = "type.googleapis.com/log.ingest.v1.PutResponse";
         }
         impl<'v> ::buffa::DefaultViewInstance for PutResponseView<'v> {
             fn default_view_instance<'a>() -> &'a Self
@@ -743,13 +745,13 @@ for ::buffa::view::OwnedView<__buffa::view::PutResponseView<'static>> {
     }
 }
 /// Full service name for this service.
-pub const SERVICE_SERVICE_NAME: &str = "store.ingest.v1.Service";
+pub const SERVICE_SERVICE_NAME: &str = "log.ingest.v1.Service";
 /// Static [`Spec`](::connectrpc::Spec) for the server-side `Put` RPC.
 ///
 /// The dispatcher surfaces this on
 /// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
 pub const SERVICE_PUT_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
-        "/store.ingest.v1.Service/Put",
+        "/log.ingest.v1.Service/Put",
         ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
@@ -891,7 +893,7 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
         &self,
         path: &str,
     ) -> Option<::connectrpc::dispatcher::codegen::MethodDescriptor> {
-        let method = path.strip_prefix("store.ingest.v1.Service/")?;
+        let method = path.strip_prefix("log.ingest.v1.Service/")?;
         match method {
             "Put" => {
                 Some(
@@ -909,7 +911,7 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
         request: ::connectrpc::Payload,
         format: ::connectrpc::CodecFormat,
     ) -> ::connectrpc::dispatcher::codegen::UnaryResult {
-        let Some(method) = path.strip_prefix("store.ingest.v1.Service/") else {
+        let Some(method) = path.strip_prefix("log.ingest.v1.Service/") else {
             return ::connectrpc::dispatcher::codegen::unimplemented_unary(path);
         };
         let _ = (&ctx, &request, &format);
@@ -933,7 +935,7 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
         request: ::buffa::bytes::Bytes,
         format: ::connectrpc::CodecFormat,
     ) -> ::connectrpc::dispatcher::codegen::StreamingResult {
-        let Some(method) = path.strip_prefix("store.ingest.v1.Service/") else {
+        let Some(method) = path.strip_prefix("log.ingest.v1.Service/") else {
             return ::connectrpc::dispatcher::codegen::unimplemented_streaming(path);
         };
         let _ = (&ctx, &request, &format);
@@ -948,7 +950,7 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
         requests: ::connectrpc::dispatcher::codegen::RequestStream,
         format: ::connectrpc::CodecFormat,
     ) -> ::connectrpc::dispatcher::codegen::UnaryResult {
-        let Some(method) = path.strip_prefix("store.ingest.v1.Service/") else {
+        let Some(method) = path.strip_prefix("log.ingest.v1.Service/") else {
             return ::connectrpc::dispatcher::codegen::unimplemented_unary(path);
         };
         let _ = (&ctx, &requests, &format);
@@ -963,7 +965,7 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
         requests: ::connectrpc::dispatcher::codegen::RequestStream,
         format: ::connectrpc::CodecFormat,
     ) -> ::connectrpc::dispatcher::codegen::StreamingResult {
-        let Some(method) = path.strip_prefix("store.ingest.v1.Service/") else {
+        let Some(method) = path.strip_prefix("log.ingest.v1.Service/") else {
             return ::connectrpc::dispatcher::codegen::unimplemented_streaming(path);
         };
         let _ = (&ctx, &requests, &format);
@@ -1043,7 +1045,7 @@ where
     pub fn config_mut(&mut self) -> &mut ::connectrpc::client::ClientConfig {
         &mut self.config
     }
-    /// Call the Put RPC. Sends a request to /store.ingest.v1.Service/Put.
+    /// Call the Put RPC. Sends a request to /log.ingest.v1.Service/Put.
     pub async fn put(
         &self,
         request: PutRequest,
