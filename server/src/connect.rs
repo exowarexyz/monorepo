@@ -439,11 +439,15 @@ where
     }
 
     fn consistency_not_ready_error(&self, required: u64, current: u64) -> ConnectError {
+        // Engines may acknowledge writes before their read view covers them (e.g. the simulator
+        // applies key/value rows in the background), so a fenced read racing its own write is
+        // expected to land here briefly. Suggest a short retry delay: catch-up is typically
+        // milliseconds, and clients honoring this hint would otherwise stall far longer.
         let err = with_retry_info_detail(
             ConnectError::aborted("minimum consistency token is not yet visible"),
             RetryInfo {
                 retry_delay: Some(buffa_types::google::protobuf::Duration::from(
-                    std::time::Duration::from_secs(1),
+                    std::time::Duration::from_millis(50),
                 ))
                 .into(),
                 ..Default::default()

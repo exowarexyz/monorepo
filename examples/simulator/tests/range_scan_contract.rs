@@ -15,8 +15,16 @@ fn block_on<T>(future: impl Future<Output = T>) -> T {
         .block_on(future)
 }
 
+/// Writes a batch and waits for the background apply so subsequent reads observe it.
 fn put_batch(store: &RocksStore, kvs: Vec<(Bytes, Bytes)>) -> u64 {
-    block_on(store.put_batch(kvs)).expect("put_batch")
+    block_on(async {
+        let sequence = Ingest::put_batch(store, kvs).await.expect("put_batch");
+        store
+            .wait_for_applied(sequence)
+            .await
+            .expect("wait for apply");
+        sequence
+    })
 }
 
 fn seed_abc(store: &RocksStore) {

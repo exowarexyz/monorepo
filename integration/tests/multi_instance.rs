@@ -144,6 +144,25 @@ async fn next_frame(
         .and_then(|result| result.expect("stream frame"))
 }
 
+/// The simulator acknowledges ingest once the write is durable in its replay log and applies
+/// key/value rows in the background. Wait until reads cover `sequence` before asserting on
+/// unfenced read-side state.
+async fn sync_reads_to(client: &PrefixedStoreClient, sequence: u64) {
+    let probe = Key::from(Bytes::from_static(b"read-sync-probe"));
+    for _ in 0..400 {
+        if client
+            .query()
+            .get_with_min_sequence_number(&probe, sequence)
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("reads did not catch up to sequence {sequence}");
+}
+
 fn keyless_reader(client: PrefixedStoreClient) -> QmdbReader {
     QmdbReader::new(client, ((0..=10000).into(), ()))
 }
@@ -288,6 +307,7 @@ async fn raw_prefixes_support_atomic_batch_fetch_range_and_stream() {
         .commit(&base)
         .await
         .expect("commit cross-prefix batch");
+    sync_reads_to(&unprefixed, sequence).await;
 
     assert_eq!(
         a.query().get(&shared).await.expect("get a").as_deref(),
@@ -361,8 +381,11 @@ async fn sql_schemas_are_isolated_by_store_prefix() {
         .expect("insert b3");
 
     let (seq_a, seq_b) = tokio::join!(writer_a.flush(), writer_b.flush());
-    assert!(seq_a.expect("flush a") > 0);
-    assert!(seq_b.expect("flush b") > 0);
+    let seq_a = seq_a.expect("flush a");
+    let seq_b = seq_b.expect("flush b");
+    assert!(seq_a > 0);
+    assert!(seq_b > 0);
+    sync_reads_to(&PrefixedStoreClient::empty(base.clone()), seq_a.max(seq_b)).await;
 
     assert_eq!(
         query_sql_items(base.prefixed(StoreKeyPrefix::new(4, 0).unwrap())).await,
@@ -654,6 +677,7 @@ async fn prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_receipts(
         Some(checkpoint)
     );
 
+    sync_reads_to(&sql_client, sequence).await;
     assert_eq!(query_sql_items(sql_client).await, (vec![42], vec![4200]));
     let expected_qmdb: Vec<QmdbOp> = ops1.into_iter().chain(ops2.into_iter()).collect();
     let reader = keyless_reader(qmdb_client);
@@ -695,9 +719,10 @@ async fn qmdb_streaming_is_isolated_by_store_prefix() {
 
     let ops_b = qops("stream-b", 0);
     let writer_b = keyless_writer(client_b.clone());
-    commit_qmdb_upload(&writer_b, &ops_b)
+    let receipt_b = commit_qmdb_upload(&writer_b, &ops_b)
         .await
         .expect("upload b stream");
+    sync_reads_to(&client_b, receipt_b.store_sequence_number).await;
     let root_b = keyless_reader(client_b.clone())
         .root_at(QmdbLocation::new((ops_b.len() - 1) as u64))
         .await
@@ -729,9 +754,10 @@ async fn qmdb_streaming_is_isolated_by_store_prefix() {
 
     let ops_a = qops("stream-a", 0);
     let writer_a = keyless_writer(client_a.clone());
-    commit_qmdb_upload(&writer_a, &ops_a)
+    let receipt_a = commit_qmdb_upload(&writer_a, &ops_a)
         .await
         .expect("upload a stream");
+    sync_reads_to(&client_a, receipt_a.store_sequence_number).await;
     let root_a = keyless_reader(client_a.clone())
         .root_at(QmdbLocation::new((ops_a.len() - 1) as u64))
         .await

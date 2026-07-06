@@ -37,8 +37,16 @@ fn versioned_key(logical: &[u8], version: u64) -> Bytes {
     Bytes::copy_from_slice(codec().encode(&payload).expect("encode key").as_ref())
 }
 
+/// Writes a batch and waits for the background apply so subsequent reads observe it.
 fn put_batch(store: &RocksStore, kvs: Vec<(Bytes, Bytes)>) -> u64 {
-    block_on(store.put_batch(kvs)).expect("put_batch")
+    block_on(async {
+        let sequence = Ingest::put_batch(store, kvs).await.expect("put_batch");
+        store
+            .wait_for_applied(sequence)
+            .await
+            .expect("wait for apply");
+        sequence
+    })
 }
 
 fn get_value(store: &RocksStore, key: &Bytes) -> Option<Bytes> {
