@@ -7,10 +7,17 @@
 //! # Write pipeline
 //!
 //! Ingest acknowledges a write once its replay-log row and the sequence frontier are durable
-//! (a synced RocksDB write covering the `log` and `meta` column families). The current-state
-//! key/value rows are applied afterwards by a background thread with the RocksDB WAL disabled:
-//! the replay log already is the write-ahead log for the default column family, so key/value
-//! rows never need to be fsync'd on the ingest critical path.
+//! (a synced RocksDB write covering the `log` and `meta` column families). How the current-state
+//! key/value rows land depends on the wave's payload size:
+//!
+//! - Waves whose key/value payload is at most [`INLINE_APPLY_MAX_BATCH_BYTES`] ride the synced
+//!   commit batch directly ("inline apply"). Duplicating a few kilobytes into the WAL costs less
+//!   than a second RocksDB write-group cycle, so small-value workloads keep the single-write
+//!   profile of the pre-decoupled store.
+//! - Larger waves are applied afterwards by a background thread with the RocksDB WAL disabled:
+//!   the replay log already is the write-ahead log for the default column family, so large
+//!   key/value payloads never make a second trip through the WAL and never extend the fsync on
+//!   the ingest critical path.
 //!
 //! Two frontiers result. The *logged* frontier is returned to writers and drives the stream
 //! service (which reads the `log` column family directly). The *applied* frontier is what
@@ -19,13 +26,26 @@
 //!
 //! # Crash recovery
 //!
-//! Every key/value apply batch also advances an applied-frontier marker in the `kv_meta` column
-//! family. Both column families skip the WAL and the database opens with atomic flush enabled,
-//! so the marker recovered after a crash never runs ahead of the recovered key/value rows. On
-//! open, replay-log rows between the recovered marker and the logged frontier are re-applied
-//! (idempotent last-writer-wins puts) before the store serves traffic. Sequence pruning flushes
-//! the key/value column families first and never deletes rows at or above the applied frontier,
-//! so the replay source for this recovery cannot be pruned away.
+//! An applied-frontier marker in the `kv_meta` column family records how far the durable
+//! key/value state is known to reach; on open, replay-log rows between the recovered marker and
+//! the logged frontier are re-applied (idempotent, sequence-ordered last-writer-wins puts)
+//! before the store serves traffic. The marker may under-claim — replay then re-applies rows
+//! whose effects already survived — but must never over-claim. Two mechanisms keep that
+//! invariant:
+//!
+//! - The marker is only written by no-WAL batches (background applies, replay, prune, and the
+//!   apply thread's shutdown handoff), and every such batch carries the key/value rows it
+//!   claims. The default and `kv_meta` column families both skip the WAL and the database opens
+//!   with atomic flush enabled, so their durable states are always cut at the same write-batch
+//!   boundary: a recovered marker cannot claim no-WAL rows the default column family lost.
+//! - Inline-applied rows travel through the synced WAL, so they are recoverable whether or not
+//!   any marker covers them. Inline waves advance the in-memory frontier immediately but leave
+//!   the durable marker behind; the apply thread persists a catch-up marker every
+//!   [`APPLY_MARKER_STRIDE_SEQUENCES`] sequences to bound how much a crash replays.
+//!
+//! Sequence pruning persists the applied marker and flushes the key/value column families
+//! before deleting log rows, and never deletes rows at or above the applied frontier, so the
+//! replay source for this recovery cannot be pruned away.
 
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BTreeMap;
@@ -64,6 +84,15 @@ const KV_APPLIED_KEY: &[u8] = b"applied";
 const LOG_BATCH_KEY_LEN: usize = 8;
 const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
 const DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
+/// Waves whose key/value payload fits in this many bytes are applied inline in the synced
+/// commit batch: duplicating a small payload into the WAL is cheaper than the extra RocksDB
+/// write-group cycle (and cross-thread handoff) a separate no-WAL apply write costs. Larger
+/// payloads skip the WAL via the background apply thread, where avoiding the second copy wins.
+const INLINE_APPLY_MAX_BATCH_BYTES: usize = 16 * 1024;
+/// How far (in sequence numbers) the durable applied marker may trail the in-memory applied
+/// frontier before the apply thread persists a catch-up marker. Inline-applied waves are
+/// WAL-durable without a marker, so this only bounds how much log a crash reopen replays.
+const APPLY_MARKER_STRIDE_SEQUENCES: u64 = 4096;
 /// Committed waves the apply thread may buffer before commit blocks handing off more work.
 const APPLY_QUEUE_WAVES: usize = 4;
 const APPLY_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(10);
@@ -326,6 +355,9 @@ struct PreparedWrite {
     batch_bytes: usize,
     /// Assignment epoch; `commit` rejects a group whose epoch an earlier failure has superseded.
     epoch: u64,
+    /// Whether the key/value rows ride `batch` itself (small payload) instead of the background
+    /// no-WAL apply write.
+    inline_kv: bool,
 }
 
 /// Key/value rows of one durably committed wave, handed to the background apply thread.
@@ -549,6 +581,7 @@ fn prepare_queued_write(
                 batch: Err(error),
                 batch_bytes: 0,
                 epoch,
+                inline_kv: false,
             };
             return Ok((group, disconnected));
         }
@@ -633,16 +666,18 @@ fn commit_group(
 
     let requests = group.writes.len();
     let batch_bytes = group.batch_bytes;
+    let inline_kv = group.inline_kv;
     match write_prepared_group(db, group) {
         Ok((writes, last_sequence)) => {
             logged.store(last_sequence, Ordering::Release);
             debug!(
                 requests,
                 batch_bytes,
+                inline_kv,
                 sequence = last_sequence,
                 "committed log batch"
             );
-            let work = complete_assigned_writes(writes);
+            let work = complete_assigned_writes(writes, inline_kv);
             (last_sequence, Some(work))
         }
         Err((writes, error)) => {
@@ -659,6 +694,10 @@ fn commit_group(
 /// coalescing queued waves and publishing the applied frontier queries gate on. A failed write is
 /// retried with backoff: the rows are already durable in the replay log, so the only alternatives
 /// are catching up in-process or catching up via replay on the next open.
+///
+/// Marker-only work (from inline waves, whose rows are already WAL-durable) skips the RocksDB
+/// write until the durable marker trails the frontier by [`APPLY_MARKER_STRIDE_SEQUENCES`], so
+/// steady small-value load costs no extra write calls while crash replay stays bounded.
 fn run_apply(
     db: Arc<DB>,
     applied: Arc<AtomicU64>,
@@ -667,16 +706,33 @@ fn run_apply(
     receiver: mpsc::Receiver<ApplyWork>,
     max_batch_bytes: usize,
 ) {
+    let mut marker = applied.load(Ordering::Acquire);
     while let Ok(first) = receiver.recv() {
         let (work, disconnected) = coalesce_apply_work(&receiver, first, max_batch_bytes);
-        if !write_apply_work_with_retry(&db, &work, &stopping) {
-            return;
+        let lag = work.last_sequence.saturating_sub(marker);
+        if !work.kvs.is_empty() || lag >= APPLY_MARKER_STRIDE_SEQUENCES {
+            if !write_apply_work_with_retry(&db, &work, &stopping) {
+                return;
+            }
+            marker = work.last_sequence;
         }
         applied.store(work.last_sequence, Ordering::Release);
         let _ = applied_watch.send(work.last_sequence);
         if disconnected {
-            return;
+            break;
         }
+    }
+    // Clean shutdown: catch the durable marker up to the frontier so RocksDB's flush-on-close
+    // (no-WAL data is flushed on close by default) leaves the next open nothing to replay.
+    // Skipping this is safe — the marker would just under-claim — but replaying inline waves
+    // that are already WAL-durable on every clean reopen is wasted work.
+    let frontier = applied.load(Ordering::Acquire);
+    if frontier > marker {
+        let work = ApplyWork {
+            last_sequence: frontier,
+            kvs: Vec::new(),
+        };
+        let _ = write_apply_work_with_retry(&db, &work, &stopping);
     }
 }
 
@@ -850,12 +906,26 @@ fn finalize_prepared_write(
     if let Some(write) = writes.last() {
         append_sequence_meta(db, &mut batch, write.sequence);
     }
+    let kv_bytes: usize = writes
+        .iter()
+        .flat_map(|write| write.request.kvs.iter())
+        .map(|(key, value)| key.len() + value.len())
+        .sum();
+    let inline_kv = kv_bytes <= INLINE_APPLY_MAX_BATCH_BYTES;
+    if inline_kv {
+        for write in &writes {
+            for (key, value) in &write.request.kvs {
+                batch.put(key.as_ref(), value.as_ref());
+            }
+        }
+    }
     let batch_bytes = batch.size_in_bytes();
     PreparedWrite {
         writes,
         batch: Ok(batch),
         batch_bytes,
         epoch,
+        inline_kv,
     }
 }
 
@@ -920,8 +990,10 @@ fn fail_assigned_writes(writes: Vec<AssignedWrite>, error: String) {
 }
 
 /// Resolves every assigned write with its own committed sequence number and collects the wave's
-/// key/value rows (in assignment order) for the apply thread.
-fn complete_assigned_writes(writes: Vec<AssignedWrite>) -> ApplyWork {
+/// key/value rows (in assignment order) for the apply thread. An inline wave already wrote its
+/// rows in the commit batch, so its work carries only the frontier for the apply thread's
+/// in-order bookkeeping.
+fn complete_assigned_writes(writes: Vec<AssignedWrite>, inline_kv: bool) -> ApplyWork {
     let mut work = ApplyWork {
         last_sequence: 0,
         kvs: Vec::new(),
@@ -930,7 +1002,9 @@ fn complete_assigned_writes(writes: Vec<AssignedWrite>) -> ApplyWork {
         let AssignedWrite { sequence, request } = write;
         let WriteRequest { mut kvs, response } = request;
         work.last_sequence = sequence;
-        work.kvs.append(&mut kvs);
+        if !inline_kv {
+            work.kvs.append(&mut kvs);
+        }
         let _ = response.send(Ok(sequence));
     }
     work
@@ -1115,13 +1189,19 @@ impl RocksStore {
         Ok(())
     }
 
-    /// Deletes replay-log batches with sequence numbers below `cutoff_exclusive`. Flushes the
-    /// no-WAL column families first so the durable applied frontier covers every deleted row;
-    /// otherwise a crash could need pruned rows to rebuild the current key/value state.
+    /// Deletes replay-log batches with sequence numbers below `cutoff_exclusive`. Persists the
+    /// applied marker and flushes the no-WAL column families first so the durable applied
+    /// frontier covers every deleted row; otherwise a crash could need pruned rows to rebuild
+    /// the current key/value state. (Inline waves advance the in-memory frontier without
+    /// touching the durable marker, so the marker must be caught up here before it can vouch
+    /// for the rows the delete removes. A concurrent background apply can only race in an
+    /// older marker value, which under-claims and is therefore safe.)
     fn prune_log(&self, cutoff_exclusive: u64) -> Result<(), String> {
         if cutoff_exclusive == 0 {
             return Ok(());
         }
+        let applied = self.applied.load(Ordering::Acquire);
+        write_kv_batch(&self.db, build_apply_batch(&self.db, &[], applied))?;
         flush_kv_cfs(&self.db)?;
         let cf = self.log_cf();
         self.db
@@ -1428,6 +1508,7 @@ mod tests {
                 batch: Err(error.to_string()),
                 batch_bytes: 0,
                 epoch,
+                inline_kv: false,
             },
             receivers,
         )
@@ -1520,6 +1601,7 @@ mod tests {
                     batch: Err(error),
                     batch_bytes: 0,
                     epoch,
+                    inline_kv: false,
                 };
             }
             prepared.push(write);
@@ -1987,6 +2069,12 @@ mod tests {
         assert_eq!(value.as_deref(), Some(b"v".as_slice()));
     }
 
+    /// A value larger than the inline-apply cap, forcing a wave through the deferred no-WAL
+    /// apply path (the only path whose un-flushed key/value state a crash can lose).
+    fn oversized_value(fill: u8) -> Bytes {
+        Bytes::from(vec![fill; INLINE_APPLY_MAX_BATCH_BYTES + 1])
+    }
+
     /// Rewinds the durable applied marker and removes the key/value rows it no longer covers,
     /// modeling a crash that lost un-flushed no-WAL state while the synced log survived.
     fn lose_applied_kv_state(store: &RocksStore, marker: u64, lost_keys: &[&[u8]]) {
@@ -2006,14 +2094,16 @@ mod tests {
     #[tokio::test]
     async fn open_replays_log_rows_the_kv_state_lost() {
         let dir = tempdir().expect("tempdir");
+        let rows: Vec<(&[u8], Bytes)> = vec![
+            (b"a", oversized_value(b'1')),
+            (b"b", oversized_value(b'2')),
+            (b"c", oversized_value(b'3')),
+        ];
         {
             let store = RocksStore::open(dir.path(), None).expect("open db");
-            for (key, value) in [(b"a", b"1"), (b"b", b"2"), (b"c", b"3")] {
+            for (key, value) in &rows {
                 store
-                    .put_batch(vec![(
-                        Bytes::copy_from_slice(key),
-                        Bytes::copy_from_slice(value),
-                    )])
+                    .put_batch(vec![(Bytes::copy_from_slice(key), value.clone())])
                     .await
                     .expect("put");
             }
@@ -2023,10 +2113,10 @@ mod tests {
 
         let store = RocksStore::open(dir.path(), None).expect("reopen db");
         assert_eq!(store.current_sequence(), 3);
-        for (key, value) in [(b"a", b"1"), (b"b", b"2"), (b"c", b"3")] {
+        for (key, value) in &rows {
             assert_eq!(
                 store.db.get(key).expect("get").as_deref(),
-                Some(value.as_slice()),
+                Some(value.as_ref()),
                 "row {} must be restored by replay",
                 String::from_utf8_lossy(key),
             );
@@ -2036,13 +2126,14 @@ mod tests {
     #[tokio::test]
     async fn open_replays_across_log_gaps() {
         let dir = tempdir().expect("tempdir");
+        let value = oversized_value(b'v');
         {
             let store = RocksStore::open(dir.path(), None).expect("open db");
             // An empty batch consumes sequence 1 without writing a log row.
             let first = store.put_batch(Vec::new()).await.expect("empty put");
             assert_eq!(first, 1);
             let second = store
-                .put_batch(vec![(Bytes::from_static(b"k"), Bytes::from_static(b"v"))])
+                .put_batch(vec![(Bytes::from_static(b"k"), value.clone())])
                 .await
                 .expect("put");
             assert_eq!(second, 2);
@@ -2054,9 +2145,109 @@ mod tests {
         assert_eq!(store.current_sequence(), 2);
         assert_eq!(
             store.db.get(b"k").expect("get").as_deref(),
-            Some(b"v".as_slice())
+            Some(value.as_ref())
         );
         assert!(store.get_batch(1).await.expect("get").is_none());
+    }
+
+    #[tokio::test]
+    async fn small_wave_applies_inline_with_the_synced_commit() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let epoch = AtomicU64::new(0);
+
+        let (write, result) = assigned_write_with_response(1, b"a", b"1");
+        let group = prepared_write(&store.db, 0, vec![write]);
+        assert!(group.inline_kv, "a tiny payload must ride the commit batch");
+
+        // Commit WITHOUT running any apply work: the row must already be readable because the
+        // synced commit batch carried it, and the handed-off work must be marker-only.
+        let (committed, work) = commit_group(&store.db, &store.logged, &epoch, 0, group);
+        assert_eq!(committed, 1);
+        assert_eq!(result.await.expect("response"), Ok(1));
+        let work = work.expect("commit must hand off frontier bookkeeping");
+        assert_eq!(work.last_sequence, 1);
+        assert!(work.kvs.is_empty(), "inline rows must not be re-applied");
+        assert_eq!(store.db.get(b"a").expect("get").as_deref(), Some(&b"1"[..]));
+    }
+
+    #[tokio::test]
+    async fn large_wave_defers_kv_rows_to_the_background_apply() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let epoch = AtomicU64::new(0);
+
+        let value: &'static [u8] =
+            Box::leak(vec![7u8; INLINE_APPLY_MAX_BATCH_BYTES + 1].into_boxed_slice());
+        let (write, result) = assigned_write_with_response(1, b"big", value);
+        let group = prepared_write(&store.db, 0, vec![write]);
+        assert!(!group.inline_kv, "an oversized payload must defer");
+
+        let (committed, work) = commit_group(&store.db, &store.logged, &epoch, 0, group);
+        assert_eq!(committed, 1);
+        assert_eq!(result.await.expect("response"), Ok(1));
+        let work = work.expect("commit must hand off the kv rows");
+        assert_eq!(work.kvs.len(), 1);
+        assert!(
+            store.db.get(b"big").expect("get").is_none(),
+            "deferred rows are not visible until the apply write lands",
+        );
+
+        apply_work_for_test(&store, work);
+        assert_eq!(store.db.get(b"big").expect("get").as_deref(), Some(value));
+    }
+
+    #[tokio::test]
+    async fn open_replays_inline_waves_the_durable_marker_does_not_cover() {
+        let dir = tempdir().expect("tempdir");
+        {
+            let store = RocksStore::open(dir.path(), None).expect("open db");
+            for (key, value) in [(b"a", b"1"), (b"b", b"2")] {
+                store
+                    .put_batch(vec![(
+                        Bytes::copy_from_slice(key),
+                        Bytes::copy_from_slice(value),
+                    )])
+                    .await
+                    .expect("put");
+            }
+            store.wait_for_applied(2).await.expect("applied");
+        }
+
+        // With the store closed (a clean close catches the marker up), rewind the marker and
+        // drop the rows out-of-band: replay from an under-claiming marker must restore inline
+        // waves from their replay-log rows just like deferred ones.
+        {
+            let mut options = Options::default();
+            options.create_if_missing(false);
+            let db = DB::open_cf(
+                &options,
+                dir.path(),
+                [
+                    rocksdb::DEFAULT_COLUMN_FAMILY_NAME,
+                    META_CF,
+                    LOG_CF,
+                    KV_META_CF,
+                ],
+            )
+            .expect("open raw db");
+            let kv_meta_cf = db.cf_handle(KV_META_CF).expect("kv_meta CF");
+            db.put_cf(kv_meta_cf, KV_APPLIED_KEY, 0u64.to_le_bytes())
+                .expect("rewind applied marker");
+            db.delete(b"a").expect("drop kv row");
+            db.delete(b"b").expect("drop kv row");
+        }
+
+        let store = RocksStore::open(dir.path(), None).expect("reopen db");
+        assert_eq!(store.current_sequence(), 2);
+        for (key, value) in [(b"a", b"1"), (b"b", b"2")] {
+            assert_eq!(
+                store.db.get(key).expect("get").as_deref(),
+                Some(value.as_slice()),
+                "row {} must be restored by replay",
+                String::from_utf8_lossy(key),
+            );
+        }
     }
 
     #[tokio::test]
