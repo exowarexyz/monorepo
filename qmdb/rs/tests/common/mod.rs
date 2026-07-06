@@ -6,6 +6,7 @@ use std::num::NonZeroU64;
 use std::time::Duration;
 
 use axum::{routing::get, Router};
+use bytes::Bytes;
 use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Sequential;
@@ -33,8 +34,9 @@ use exoware_qmdb::{
     CurrentBoundaryState, ImmutableWriter, KeylessWriter, OrderedWriter, QmdbError,
     UnorderedWriter, UploadReceipt,
 };
+use exoware_sdk::keys::Key as StoreKey;
 use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::{StoreBatchUpload, StoreClient};
+use exoware_sdk::{PrefixedStoreClient, StoreBatchUpload, StoreClient};
 
 #[allow(dead_code)]
 pub fn merkle_config(prefix: &str, page_cache: CacheRef) -> MerkleConfig<Sequential> {
@@ -154,6 +156,26 @@ pub async fn local_store_client() -> (tempfile::TempDir, tokio::task::JoinHandle
     (dir, jh, client)
 }
 
+/// The simulator acknowledges ingest once the write is durable in its replay
+/// log and applies key/value rows in the background. Wait until reads cover
+/// `sequence` before issuing unfenced read-side queries (proofs, watermarks).
+#[allow(dead_code)]
+pub async fn sync_reads_to(client: &PrefixedStoreClient, sequence: u64) {
+    let probe = StoreKey::from(Bytes::from_static(b"read-sync-probe"));
+    for _ in 0..400 {
+        if client
+            .query()
+            .get_with_min_sequence_number(&probe, sequence)
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("reads did not catch up to sequence {sequence}");
+}
+
 #[allow(dead_code)]
 pub async fn retry<F, Fut, T>(f: F, label: &str) -> T
 where
@@ -186,7 +208,13 @@ where
     keyless::Operation<F, E>: Encode,
 {
     let prepared = writer.prepare_upload(ops).await?;
-    writer.commit_upload(prepared).await
+    let receipt = writer.commit_upload(prepared).await?;
+    sync_reads_to(
+        StoreBatchUpload::store_client(writer),
+        receipt.store_sequence_number,
+    )
+    .await;
+    Ok(receipt)
 }
 
 #[allow(dead_code)]
@@ -204,7 +232,13 @@ where
     unordered::Operation<F, K, E>: Encode,
 {
     let prepared = writer.prepare_upload(ops).await?;
-    writer.commit_upload(prepared).await
+    let receipt = writer.commit_upload(prepared).await?;
+    sync_reads_to(
+        StoreBatchUpload::store_client(writer),
+        receipt.store_sequence_number,
+    )
+    .await;
+    Ok(receipt)
 }
 
 #[allow(dead_code)]
@@ -223,7 +257,13 @@ where
     unordered::Operation<F, K, E>: Encode,
 {
     let prepared = writer.prepare_current_upload(ops, current_boundary).await?;
-    writer.commit_upload(prepared).await
+    let receipt = writer.commit_upload(prepared).await?;
+    sync_reads_to(
+        StoreBatchUpload::store_client(writer),
+        receipt.store_sequence_number,
+    )
+    .await;
+    Ok(receipt)
 }
 
 #[allow(dead_code)]
@@ -242,7 +282,13 @@ where
     ordered::Operation<F, K, E>: Encode + Decode,
 {
     let prepared = writer.prepare_upload(ops, current_boundary).await?;
-    writer.commit_upload(prepared).await
+    let receipt = writer.commit_upload(prepared).await?;
+    sync_reads_to(
+        StoreBatchUpload::store_client(writer),
+        receipt.store_sequence_number,
+    )
+    .await;
+    Ok(receipt)
 }
 
 #[allow(dead_code)]
@@ -261,7 +307,13 @@ where
     immutable::Operation<F, K, E>: Encode + Decode + Clone,
 {
     let prepared = writer.prepare_upload(ops).await?;
-    writer.commit_upload(prepared).await
+    let receipt = writer.commit_upload(prepared).await?;
+    sync_reads_to(
+        StoreBatchUpload::store_client(writer),
+        receipt.store_sequence_number,
+    )
+    .await;
+    Ok(receipt)
 }
 
 #[allow(dead_code)]
