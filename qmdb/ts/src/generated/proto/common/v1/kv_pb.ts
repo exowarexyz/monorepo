@@ -11,7 +11,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file common/v1/kv.proto.
  */
 export const file_common_v1_kv: GenFile = /*@__PURE__*/
-  fileDesc("ChJjb21tb24vdjEva3YucHJvdG8SDGNvbW1vbi5rdi52MSItCgVFbnRyeRIVCgNrZXkYASABKAxCCLpIBXoDGP4BEg0KBXZhbHVlGAIgASgMIlAKCFNlbGVjdG9yEhgKBnByZWZpeBgCIAEoDEIIukgFegMY/gESFQoNcGF5bG9hZF9yZWdleBgDIAEoCUoECAEQAlINcmVzZXJ2ZWRfYml0cyJECgZGaWx0ZXISDwoFZXhhY3QYASABKAxIABIQCgZwcmVmaXgYAiABKAxIABIPCgVyZWdleBgDIAEoCUgAQgYKBGtpbmRiBnByb3RvMw", [file_buf_validate_validate]);
+  fileDesc("ChJjb21tb24vdjEva3YucHJvdG8SDGNvbW1vbi5rdi52MSItCgVFbnRyeRIVCgNrZXkYASABKAxCCLpIBXoDGP4BEg0KBXZhbHVlGAIgASgMIjsKCFNlbGVjdG9yEhgKBnByZWZpeBgBIAEoDEIIukgFegMY/gESFQoNcGF5bG9hZF9yZWdleBgCIAEoCSJECgZGaWx0ZXISDwoFZXhhY3QYASABKAxIABIQCgZwcmVmaXgYAiABKAxIABIPCgVyZWdleBgDIAEoCUgAQgYKBGtpbmRiBnByb3RvMw", [file_buf_validate_validate]);
 
 /**
  * A raw key-value pair shared by store APIs that move complete rows without
@@ -58,14 +58,14 @@ export type Selector = Message<"common.kv.v1.Selector"> & {
    * the key. May be empty (matches all keys). Namespace composition is
    * prefix concatenation.
    *
-   * @generated from field: bytes prefix = 2;
+   * @generated from field: bytes prefix = 1;
    */
   prefix: Uint8Array;
 
   /**
    * Regex applied to the payload portion of each key. Must be non-empty.
    *
-   * @generated from field: string payload_regex = 3;
+   * @generated from field: string payload_regex = 2;
    */
   payloadRegex: string;
 };

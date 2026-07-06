@@ -22,14 +22,12 @@ message Entry {
 // Named capture groups referenced by callers (e.g. `PolicyGroupBy` /
 // `PolicyOrderBy`) must exist in `payload_regex`.
 message Selector {
-  reserved 1;
-  reserved "reserved_bits";
   // Byte prefix identifying the key family; the payload is the remainder of
   // the key. May be empty (matches all keys). Namespace composition is
   // prefix concatenation.
-  bytes prefix = 2 [(buf.validate.field).bytes.max_len = 254];
+  bytes prefix = 1 [(buf.validate.field).bytes.max_len = 254];
   // Regex applied to the payload portion of each key. Must be non-empty.
-  string payload_regex = 3;
+  string payload_regex = 2;
 }
 
 // Matches an uninterpreted byte string by exact value, prefix, or full-string

@@ -7710,7 +7710,7 @@ pub const __GET_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa
 pub struct GetResponse {
     /// The value associated with the key; absent when the key does not exist.
     ///
-    /// Field 2: `value`
+    /// Field 1: `value`
     #[serde(
         rename = "value",
         with = "::buffa::json_helpers::opt_bytes",
@@ -7719,7 +7719,7 @@ pub struct GetResponse {
     pub value: ::core::option::Option<::buffa::bytes::Bytes>,
     /// Query sequence and server-defined metadata for this lookup.
     ///
-    /// Field 3: `detail`
+    /// Field 2: `detail`
     #[serde(
         rename = "detail",
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
@@ -7799,7 +7799,7 @@ impl ::buffa::Message for GetResponse {
         use ::buffa::Enumeration as _;
         if let Some(ref v) = self.value {
             ::buffa::encoding::Tag::new(
-                    2u32,
+                    1u32,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )
                 .encode(buf);
@@ -7807,7 +7807,7 @@ impl ::buffa::Message for GetResponse {
         }
         if self.detail.is_set() {
             ::buffa::encoding::Tag::new(
-                    3u32,
+                    2u32,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )
                 .encode(buf);
@@ -7827,10 +7827,10 @@ impl ::buffa::Message for GetResponse {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         match tag.field_number() {
-            2u32 => {
+            1u32 => {
                 if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                     return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                        field_number: 2u32,
+                        field_number: 1u32,
                         expected: 2u8,
                         actual: tag.wire_type() as u8,
                     });
@@ -7839,10 +7839,10 @@ impl ::buffa::Message for GetResponse {
                     ::buffa::types::decode_bytes_to_bytes(buf)?,
                 );
             }
-            3u32 => {
+            2u32 => {
                 if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                     return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                        field_number: 3u32,
+                        field_number: 2u32,
                         expected: 2u8,
                         actual: tag.wire_type() as u8,
                     });
@@ -18119,11 +18119,11 @@ pub mod __buffa {
         pub struct GetResponseView<'a> {
             /// The value associated with the key; absent when the key does not exist.
             ///
-            /// Field 2: `value`
+            /// Field 1: `value`
             pub value: ::core::option::Option<&'a [u8]>,
             /// Query sequence and server-defined metadata for this lookup.
             ///
-            /// Field 3: `detail`
+            /// Field 2: `detail`
             pub detail: ::buffa::MessageFieldView<
                 super::super::__buffa::view::DetailView<'a>,
             >,
@@ -18167,24 +18167,24 @@ pub mod __buffa {
                     let before_tag = cur;
                     let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
                     match tag.field_number() {
-                        2u32 => {
+                        1u32 => {
                             if tag.wire_type()
                                 != ::buffa::encoding::WireType::LengthDelimited
                             {
                                 return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                                    field_number: 2u32,
+                                    field_number: 1u32,
                                     expected: 2u8,
                                     actual: tag.wire_type() as u8,
                                 });
                             }
                             view.value = Some(::buffa::types::borrow_bytes(&mut cur)?);
                         }
-                        3u32 => {
+                        2u32 => {
                             if tag.wire_type()
                                 != ::buffa::encoding::WireType::LengthDelimited
                             {
                                 return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                                    field_number: 3u32,
+                                    field_number: 2u32,
                                     expected: 2u8,
                                     actual: tag.wire_type() as u8,
                                 });
@@ -18291,7 +18291,7 @@ pub mod __buffa {
                 use ::buffa::Enumeration as _;
                 if let Some(ref v) = self.value {
                     ::buffa::encoding::Tag::new(
-                            2u32,
+                            1u32,
                             ::buffa::encoding::WireType::LengthDelimited,
                         )
                         .encode(buf);
@@ -18299,7 +18299,7 @@ pub mod __buffa {
                 }
                 if self.detail.is_set() {
                     ::buffa::encoding::Tag::new(
-                            3u32,
+                            2u32,
                             ::buffa::encoding::WireType::LengthDelimited,
                         )
                         .encode(buf);

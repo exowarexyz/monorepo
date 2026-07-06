@@ -351,11 +351,10 @@ message GetRequest {
 
 // Point lookup response.
 message GetResponse {
-  reserved 1;
   // The value associated with the key; absent when the key does not exist.
-  optional bytes value = 2;
+  optional bytes value = 1;
   // Query sequence and server-defined metadata for this lookup.
-  Detail detail = 3;
+  Detail detail = 2;
 }
 
 // GetMany performs batch point lookups. Results stream back as frames, each

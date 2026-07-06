@@ -7,12 +7,6 @@ use bytes::{Bytes, BytesMut};
 /// field, so the largest valid key is 254 bytes.
 pub const MAX_KEY_LEN: usize = 254;
 
-/// Maximum key scratch width retained for stack buffers and legacy callers.
-///
-/// This is no longer a fixed physical key width. It is simply the largest
-/// valid key length in bytes.
-pub const KEY_SIZE: usize = MAX_KEY_LEN;
-
 /// Minimum physical key length in bytes.
 pub const MIN_KEY_LEN: usize = 0;
 

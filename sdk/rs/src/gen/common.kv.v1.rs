@@ -187,7 +187,7 @@ pub struct Selector {
     /// the key. May be empty (matches all keys). Namespace composition is
     /// prefix concatenation.
     ///
-    /// Field 2: `prefix`
+    /// Field 1: `prefix`
     #[serde(
         rename = "prefix",
         with = "::buffa::json_helpers::bytes",
@@ -196,7 +196,7 @@ pub struct Selector {
     pub prefix: ::buffa::bytes::Bytes,
     /// Regex applied to the payload portion of each key. Must be non-empty.
     ///
-    /// Field 3: `payload_regex`
+    /// Field 2: `payload_regex`
     #[serde(
         rename = "payloadRegex",
         alias = "payload_regex",
@@ -265,7 +265,7 @@ impl ::buffa::Message for Selector {
         use ::buffa::Enumeration as _;
         if !self.prefix.is_empty() {
             ::buffa::encoding::Tag::new(
-                    2u32,
+                    1u32,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )
                 .encode(buf);
@@ -273,7 +273,7 @@ impl ::buffa::Message for Selector {
         }
         if !self.payload_regex.is_empty() {
             ::buffa::encoding::Tag::new(
-                    3u32,
+                    2u32,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )
                 .encode(buf);
@@ -292,20 +292,20 @@ impl ::buffa::Message for Selector {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         match tag.field_number() {
-            2u32 => {
+            1u32 => {
                 if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                     return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                        field_number: 2u32,
+                        field_number: 1u32,
                         expected: 2u8,
                         actual: tag.wire_type() as u8,
                     });
                 }
                 self.prefix = ::buffa::types::decode_bytes_to_bytes(buf)?;
             }
-            3u32 => {
+            2u32 => {
                 if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                     return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                        field_number: 3u32,
+                        field_number: 2u32,
                         expected: 2u8,
                         actual: tag.wire_type() as u8,
                     });
@@ -935,11 +935,11 @@ pub mod __buffa {
             /// the key. May be empty (matches all keys). Namespace composition is
             /// prefix concatenation.
             ///
-            /// Field 2: `prefix`
+            /// Field 1: `prefix`
             pub prefix: &'a [u8],
             /// Regex applied to the payload portion of each key. Must be non-empty.
             ///
-            /// Field 3: `payload_regex`
+            /// Field 2: `payload_regex`
             pub payload_regex: &'a str,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
@@ -981,24 +981,24 @@ pub mod __buffa {
                     let before_tag = cur;
                     let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
                     match tag.field_number() {
-                        2u32 => {
+                        1u32 => {
                             if tag.wire_type()
                                 != ::buffa::encoding::WireType::LengthDelimited
                             {
                                 return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                                    field_number: 2u32,
+                                    field_number: 1u32,
                                     expected: 2u8,
                                     actual: tag.wire_type() as u8,
                                 });
                             }
                             view.prefix = ::buffa::types::borrow_bytes(&mut cur)?;
                         }
-                        3u32 => {
+                        2u32 => {
                             if tag.wire_type()
                                 != ::buffa::encoding::WireType::LengthDelimited
                             {
                                 return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                                    field_number: 3u32,
+                                    field_number: 2u32,
                                     expected: 2u8,
                                     actual: tag.wire_type() as u8,
                                 });
@@ -1081,7 +1081,7 @@ pub mod __buffa {
                 use ::buffa::Enumeration as _;
                 if !self.prefix.is_empty() {
                     ::buffa::encoding::Tag::new(
-                            2u32,
+                            1u32,
                             ::buffa::encoding::WireType::LengthDelimited,
                         )
                         .encode(buf);
@@ -1089,7 +1089,7 @@ pub mod __buffa {
                 }
                 if !self.payload_regex.is_empty() {
                     ::buffa::encoding::Tag::new(
-                            3u32,
+                            2u32,
                             ::buffa::encoding::WireType::LengthDelimited,
                         )
                         .encode(buf);
