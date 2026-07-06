@@ -402,15 +402,24 @@ impl Writer {
         let epoch = Arc::new(AtomicU64::new(0));
         let stopping = Arc::new(AtomicBool::new(false));
 
+        let applied_watch = Arc::new(applied_watch);
+        // Highest sequence the durable applied marker covers. Open leaves the marker at the
+        // logged frontier (replay catches it up), which is also `logged`'s value right now.
+        let durable_marker = Arc::new(AtomicU64::new(logged.load(Ordering::Acquire)));
+
         let apply_db = db.clone();
+        let apply_applied = applied.clone();
+        let apply_watch = applied_watch.clone();
+        let apply_marker = durable_marker.clone();
         let apply_stopping = stopping.clone();
         let apply = thread::Builder::new()
             .name("simulator-rocks-apply".to_string())
             .spawn(move || {
                 run_apply(
                     apply_db,
-                    applied,
-                    applied_watch,
+                    apply_applied,
+                    apply_watch,
+                    apply_marker,
                     apply_stopping,
                     apply_receiver,
                     max_commit_batch_bytes,
@@ -427,6 +436,9 @@ impl Writer {
                 run_commit(
                     commit_db,
                     commit_logged,
+                    applied,
+                    applied_watch,
+                    durable_marker,
                     commit_epoch,
                     group_receiver,
                     apply_sender,
@@ -619,25 +631,64 @@ fn forward_group(sender: &mpsc::SyncSender<PreparedWrite>, group: PreparedWrite)
 /// forwarding key/value rows to `apply` after each success. A group whose epoch was superseded by
 /// an earlier failure is rejected without being written; a failing group bumps the epoch so its
 /// frontier (and every later group assigned under it) is abandoned and re-allocated by `prepare`.
+///
+/// An inline wave (rows already in the synced batch) whose predecessors are all applied advances
+/// the applied frontier right here instead of round-tripping marker-only work through the apply
+/// thread: at high wave rates the channel send and thread wakeup are measurable, and skipping
+/// them keeps the small-value hot path identical to a coupled writer. The handoff is still taken
+/// when `apply` is behind (frontier order must follow sequence order) or when the durable marker
+/// needs a stride catch-up.
+#[allow(clippy::too_many_arguments)]
 fn run_commit(
     db: Arc<DB>,
     logged: Arc<AtomicU64>,
+    applied: Arc<AtomicU64>,
+    applied_watch: Arc<watch::Sender<u64>>,
+    durable_marker: Arc<AtomicU64>,
     epoch: Arc<AtomicU64>,
     receiver: mpsc::Receiver<PreparedWrite>,
     apply_sender: mpsc::SyncSender<ApplyWork>,
 ) {
     let mut committed = logged.load(Ordering::Acquire);
     while let Ok(group) = receiver.recv() {
+        let previous = committed;
         let (next_committed, work) = commit_group(&db, &logged, &epoch, committed, group);
         committed = next_committed;
-        if let Some(work) = work {
-            if apply_sender.send(work).is_err() {
-                // The acknowledged rows are durable in the replay log; the next open replays
-                // them into the current-state column family.
-                error!("rocks apply worker stopped; key/value rows deferred to reopen replay");
-            }
+        let Some(work) = work else {
+            continue;
+        };
+        // `applied` can never exceed `previous` here (this wave's work has not been handed
+        // off yet), so equality means every earlier wave is fully applied and the queue is
+        // drained: frontier order is preserved if we advance it directly.
+        let caught_up = applied.load(Ordering::Acquire) == previous;
+        let marker_lag = work
+            .last_sequence
+            .saturating_sub(durable_marker.load(Ordering::Acquire));
+        if work.kvs.is_empty() && caught_up && marker_lag < APPLY_MARKER_STRIDE_SEQUENCES {
+            advance_applied(&applied, &applied_watch, work.last_sequence);
+            continue;
+        }
+        if apply_sender.send(work).is_err() {
+            // The acknowledged rows are durable in the replay log; the next open replays
+            // them into the current-state column family.
+            error!("rocks apply worker stopped; key/value rows deferred to reopen replay");
         }
     }
+}
+
+/// Advances the applied frontier monotonically and wakes `wait_for_applied` watchers. Both the
+/// commit thread (inline fast path) and the apply thread publish through this, so a slower
+/// bookkeeping wave can never rewind a frontier a faster path already advanced.
+fn advance_applied(applied: &AtomicU64, applied_watch: &watch::Sender<u64>, sequence: u64) {
+    applied.fetch_max(sequence, Ordering::AcqRel);
+    applied_watch.send_if_modified(|current| {
+        if sequence > *current {
+            *current = sequence;
+            true
+        } else {
+            false
+        }
+    });
 }
 
 /// Commits one group, returning the durable log frontier afterwards (unchanged on rejection or
@@ -697,16 +748,18 @@ fn commit_group(
 ///
 /// Marker-only work (from inline waves, whose rows are already WAL-durable) skips the RocksDB
 /// write until the durable marker trails the frontier by [`APPLY_MARKER_STRIDE_SEQUENCES`], so
-/// steady small-value load costs no extra write calls while crash replay stays bounded.
+/// an inline wave that reaches this thread costs no extra write call while crash replay stays
+/// bounded.
 fn run_apply(
     db: Arc<DB>,
     applied: Arc<AtomicU64>,
-    applied_watch: watch::Sender<u64>,
+    applied_watch: Arc<watch::Sender<u64>>,
+    durable_marker: Arc<AtomicU64>,
     stopping: Arc<AtomicBool>,
     receiver: mpsc::Receiver<ApplyWork>,
     max_batch_bytes: usize,
 ) {
-    let mut marker = applied.load(Ordering::Acquire);
+    let mut marker = durable_marker.load(Ordering::Acquire);
     while let Ok(first) = receiver.recv() {
         let (work, disconnected) = coalesce_apply_work(&receiver, first, max_batch_bytes);
         let lag = work.last_sequence.saturating_sub(marker);
@@ -715,9 +768,9 @@ fn run_apply(
                 return;
             }
             marker = work.last_sequence;
+            durable_marker.store(marker, Ordering::Release);
         }
-        applied.store(work.last_sequence, Ordering::Release);
-        let _ = applied_watch.send(work.last_sequence);
+        advance_applied(&applied, &applied_watch, work.last_sequence);
         if disconnected {
             break;
         }
@@ -725,7 +778,8 @@ fn run_apply(
     // Clean shutdown: catch the durable marker up to the frontier so RocksDB's flush-on-close
     // (no-WAL data is flushed on close by default) leaves the next open nothing to replay.
     // Skipping this is safe — the marker would just under-claim — but replaying inline waves
-    // that are already WAL-durable on every clean reopen is wasted work.
+    // that are already WAL-durable on every clean reopen is wasted work. The commit thread has
+    // exited by the time the channel disconnects, so `applied` is final here.
     let frontier = applied.load(Ordering::Acquire);
     if frontier > marker {
         let work = ApplyWork {
