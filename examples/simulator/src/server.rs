@@ -4,7 +4,7 @@
 //! flat files (fsync per upload, off the shared commit path), sequence numbers are assigned by
 //! renaming those files with one directory fsync per wave, and a WAL-less RocksDB instance is
 //! populated asynchronously to serve reads. This roughly triples large-batch ingest throughput
-//! over the ordered WAL-backed pipeline and cuts ack latency by ~4x (see
+//! over the ordered WAL-backed pipeline and cuts ack latency by ~3x (see
 //! `benches/ingest_load.rs`). The ordered [`crate::RocksStore`] remains available as a library
 //! type for callers that need strict same-key ordering between state and log.
 
