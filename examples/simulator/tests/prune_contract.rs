@@ -293,6 +293,37 @@ fn pruned_state_survives_reopen() {
 }
 
 #[test]
+fn sequence_survives_reopen_after_drop_all_prune() {
+    let dir = tempdir().expect("tempdir");
+    let last = {
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        put_batch(
+            &store,
+            vec![(versioned_key(b"row", 1), Bytes::from_static(b"v1"))],
+        );
+        let last = put_batch(
+            &store,
+            vec![(versioned_key(b"row", 2), Bytes::from_static(b"v2"))],
+        );
+        apply_prune(&store, &[sequence_policy(RetainPolicy::DropAll)]);
+        assert!(block_on(store.oldest_retained_batch())
+            .expect("oldest")
+            .is_none());
+        last
+    };
+
+    // Every log row is gone, so the floor written atomically with the tombstone is the only
+    // record of the frontier; without it a reopen would re-issue acked sequence numbers.
+    let store = RocksStore::open(dir.path(), None).expect("reopen db");
+    assert_eq!(store.current_sequence(), last);
+    let next = put_batch(
+        &store,
+        vec![(versioned_key(b"row", 3), Bytes::from_static(b"v3"))],
+    );
+    assert_eq!(next, last + 1);
+}
+
+#[test]
 fn key_pruned_state_survives_reopen_when_versions_share_a_batch() {
     let dir = tempdir().expect("tempdir");
     let (v1, v2, v3) = {

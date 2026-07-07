@@ -1,8 +1,8 @@
 //! Naive reference storage for local development: user keys and values are written as-is to
-//! RocksDB. A `meta` column family stores the monotonically increasing sequence number for RPCs.
-//! A separate `log` column family keeps per-sequence-number batch payloads so the stream service
-//! can serve replay and point lookups. Batch-log pruning is driven exclusively by the compact
-//! service's `Sequence` scope.
+//! RocksDB. A `meta` column family holds the state-floor row (see below). A separate `log`
+//! column family keeps per-sequence-number batch payloads so the stream service can serve
+//! replay and point lookups. Batch-log pruning is driven exclusively by the compact service's
+//! `Sequence` scope.
 //!
 //! Both structures are written as SST files and ingested, bypassing the WAL and the memtables
 //! entirely: `prepare` stages one sorted state file and one log file per commit group, and
@@ -15,13 +15,17 @@
 //! written only by pruning — atomically with the log range tombstone or the pruned state keys —
 //! so a store recovers by reading one meta row, one file listing, and replaying at most one
 //! group.
+//!
+//! Any write failure in the pipeline is fatal: once a group's log rows are durable it cannot be
+//! rolled back (its sequence numbers must never be re-issued), so the writer panics and the next
+//! open rolls the store forward instead of any in-process recovery.
 
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc};
 use std::thread;
 
 use buffa::MessageView;
@@ -35,6 +39,7 @@ use exoware_sdk::selector::compile_payload_regex;
 use exoware_server::{
     Ingest, Log, LogBatch, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence,
 };
+use parking_lot::Mutex;
 use rayon::slice::ParallelSliceMut;
 use regex::bytes::Regex;
 use rocksdb::{
@@ -297,14 +302,13 @@ fn keys_to_delete(
     }
 }
 
-/// Sequence frontiers shared by the store and its writer stages.
+/// Sequence frontier shared by the store and its writer stages.
 struct Frontiers {
-    /// Highest sequence readers may observe: log rows and state rows both ingested.
+    /// Highest sequence readers may observe: log rows and state rows both ingested. The durable
+    /// frontier (highest sequence whose log rows are durable) is not tracked in-process — it
+    /// only runs ahead of `published` while a group's state ingestion is in flight, and is
+    /// re-derived at open from the retained log rows and the state-floor meta row.
     published: AtomicU64,
-    /// Highest sequence whose log rows are durable. Runs ahead of `published` only while a
-    /// group's state ingestion is in flight; re-derived at open from the retained log rows and
-    /// the state-floor meta row.
-    durable: AtomicU64,
     /// Serializes prunes (so the persisted state floor never moves backward) and orders state
     /// visibility against floor reads: `commit` ingests and publishes each group's state under
     /// this lock, so a prune that loads `published` under it sees a frontier covering every row
@@ -313,10 +317,9 @@ struct Frontiers {
 }
 
 impl Frontiers {
-    fn new(durable: u64) -> Self {
+    fn new(published: u64) -> Self {
         Self {
-            published: AtomicU64::new(durable),
-            durable: AtomicU64::new(durable),
+            published: AtomicU64::new(published),
             persist: Mutex::new(()),
         }
     }
@@ -346,10 +349,7 @@ struct StagedFiles {
 /// One commit group covering a contiguous run of assigned sequence numbers.
 struct PreparedWrite {
     writes: Vec<AssignedWrite>,
-    /// The group's staged SST files, or the error that aborted staging them.
-    staged: Result<StagedFiles, String>,
-    /// Assignment epoch; `commit` rejects a group whose epoch an earlier failure has superseded.
-    epoch: u64,
+    staged: StagedFiles,
 }
 
 struct Writer {
@@ -360,14 +360,19 @@ struct Writer {
 
 impl Writer {
     /// Starts the two-stage write pipeline. `prepare` drains queued requests up to the
-    /// configured byte cap, assigns a contiguous sequence number to each, and stages each wave's
-    /// log and state SST files (including their data syncs); `commit` ingests the log file, then
-    /// the state file, publishes the frontier, and resolves the requests. The stages overlap, so
-    /// one group's files are being staged while the previous group's are being ingested.
+    /// configured byte cap, assigns a contiguous sequence number to each (continuing from
+    /// `next`, the frontier derived at open), and stages each wave's log and state SST files
+    /// (including their data syncs); `commit` ingests the log file, then the state file,
+    /// publishes the frontier, and resolves the requests. The stages overlap, so one group's
+    /// files are being staged while the previous group's are being ingested. Any write failure
+    /// in either stage is fatal (the worker panics): the log rows alone define durability, so
+    /// the next open re-derives the frontier and repairs at most the last group — sequence
+    /// numbers never need to be reclaimed in-process.
     fn start(
         db: Arc<DB>,
         ingest_dir: PathBuf,
         frontiers: Arc<Frontiers>,
+        next: u64,
         write_pipeline: RocksWritePipelineConfig,
     ) -> Self {
         let (request_sender, request_receiver) = mpsc::channel();
@@ -376,16 +381,9 @@ impl Writer {
         let (group_sender, group_receiver) = mpsc::sync_channel(0);
         let max_commit_batch_bytes = write_pipeline.max_commit_batch_bytes.get();
 
-        // Bumped by `commit` whenever a group fails. That rejects the in-flight groups assigned
-        // under the failed frontier and signals `prepare` to re-sync its counter to the durable
-        // sequence, re-allocating the abandoned numbers.
-        let epoch = Arc::new(AtomicU64::new(0));
-
-        let commit_frontiers = frontiers.clone();
-        let commit_epoch = epoch.clone();
         let commit = thread::Builder::new()
             .name("simulator-rocks-commit".to_string())
-            .spawn(move || run_commit(db, commit_frontiers, commit_epoch, group_receiver))
+            .spawn(move || run_commit(db, frontiers, group_receiver))
             .expect("failed to spawn RocksDB commit worker");
 
         let prepare = thread::Builder::new()
@@ -393,8 +391,7 @@ impl Writer {
             .spawn(move || {
                 run_prepare(
                     ingest_dir,
-                    frontiers,
-                    epoch,
+                    next,
                     request_receiver,
                     group_sender,
                     max_commit_batch_bytes,
@@ -441,50 +438,25 @@ impl Drop for Writer {
 }
 
 /// Drains each byte-bounded wave of queued requests, assigns contiguous sequence numbers, stages
-/// the wave's SST files, and hands the group to `commit`. After a commit failure bumps the epoch,
-/// the next wave re-syncs `next` to the durable frontier so the abandoned sequence numbers are
-/// re-allocated.
+/// the wave's SST files, and hands the group to `commit`. Exits when the request channel closes
+/// (store drop); panics if `commit` died, since that only happens on a fatal write error.
 fn run_prepare(
     ingest_dir: PathBuf,
-    frontiers: Arc<Frontiers>,
-    epoch: Arc<AtomicU64>,
+    mut next: u64,
     receiver: mpsc::Receiver<WriteRequest>,
     sender: mpsc::SyncSender<PreparedWrite>,
     max_commit_batch_bytes: usize,
 ) {
-    let mut next = frontiers.durable.load(Ordering::Acquire);
-    let mut seen_epoch = epoch.load(Ordering::Acquire);
-
     while let Ok(first) = receiver.recv() {
-        let current_epoch = epoch.load(Ordering::Acquire);
-        if current_epoch != seen_epoch {
-            // A commit failed: nothing past the durable frontier persisted, so the failed
-            // numbers can be reclaimed.
-            seen_epoch = current_epoch;
-            next = frontiers.durable.load(Ordering::Acquire);
-        }
-
-        let (group, disconnected) = match prepare_queued_write(
-            &ingest_dir,
-            &receiver,
-            first,
-            next,
-            max_commit_batch_bytes,
-            seen_epoch,
-        ) {
-            Ok(prepared) => prepared,
-            Err((requests, error)) => {
-                fail_requests(requests, error);
-                continue;
-            }
-        };
+        let (group, disconnected) =
+            prepare_queued_write(&ingest_dir, &receiver, first, next, max_commit_batch_bytes);
         next = group
             .writes
             .last()
             .expect("groups are never empty")
             .sequence;
-        if !forward_group(&sender, group) {
-            break;
+        if sender.send(group).is_err() {
+            panic!("rocks commit worker died");
         }
 
         if disconnected {
@@ -502,8 +474,7 @@ fn prepare_queued_write(
     first: WriteRequest,
     from: u64,
     max_batch_bytes: usize,
-    epoch: u64,
-) -> Result<(PreparedWrite, bool), (Vec<WriteRequest>, String)> {
+) -> (PreparedWrite, bool) {
     let mut writes = Vec::with_capacity(64);
     let mut staged_bytes = 0usize;
     let mut next = from;
@@ -511,15 +482,9 @@ fn prepare_queued_write(
     let mut disconnected = false;
 
     loop {
-        next = match next.checked_add(1) {
-            Some(next) => next,
-            None => {
-                return Err((
-                    vec![request],
-                    "rocks sequence number overflowed".to_string(),
-                ));
-            }
-        };
+        next = next
+            .checked_add(1)
+            .expect("rocks sequence number overflowed");
         // Payload counted twice: once as state rows and once inside the encoded log row.
         staged_bytes += 2 * request
             .kvs
@@ -544,46 +509,33 @@ fn prepare_queued_write(
         }
     }
 
-    let staged = stage_group_files(ingest_dir, &writes, epoch);
-    let group = PreparedWrite {
-        writes,
-        staged,
-        epoch,
-    };
-    Ok((group, disconnected))
+    let staged = stage_group_files(ingest_dir, &writes);
+    (PreparedWrite { writes, staged }, disconnected)
 }
 
 /// Writes and syncs one commit group's two SST files: the replay-log rows (already in ascending
 /// sequence order) and the current-state rows (sorted by key in parallel, keeping the last write
 /// per key). The two files are built concurrently; ingestion later links them into their column
 /// families, so each payload byte reaches the disk exactly once, in its final resting place.
-fn stage_group_files(
-    ingest_dir: &Path,
-    writes: &[AssignedWrite],
-    epoch: u64,
-) -> Result<StagedFiles, String> {
+/// A staging failure is fatal; leftover files are removed by the next open.
+fn stage_group_files(ingest_dir: &Path, writes: &[AssignedWrite]) -> StagedFiles {
     let first = writes.first().expect("groups are never empty").sequence;
     let last = writes.last().expect("groups are never empty").sequence;
-    let log_path = ingest_dir.join(format!("log-{first:020}-{last:020}-e{epoch}.sst"));
-    let state_path = ingest_dir.join(format!("state-{first:020}-{last:020}-e{epoch}.sst"));
+    let log_path = ingest_dir.join(format!("log-{first:020}-{last:020}.sst"));
+    let state_path = ingest_dir.join(format!("state-{first:020}-{last:020}.sst"));
 
     let (log_result, state_result) = rayon::join(
         || stage_log_file(&log_path, writes),
         || stage_state_file(&state_path, writes),
     );
-    let staged = match (log_result, state_result) {
-        (Ok(log_bytes), Ok(state_bytes)) => Ok(StagedFiles {
-            log: log_path.clone(),
-            state: state_path.clone(),
-            staged_bytes: log_bytes + state_bytes,
-        }),
-        (log, state) => Err(log.err().or(state.err()).expect("one side failed")),
-    };
-    if staged.is_err() {
-        let _ = std::fs::remove_file(&log_path);
-        let _ = std::fs::remove_file(&state_path);
+    let log_bytes = log_result.unwrap_or_else(|error| panic!("failed to stage log SST: {error}"));
+    let state_bytes =
+        state_result.unwrap_or_else(|error| panic!("failed to stage state SST: {error}"));
+    StagedFiles {
+        log: log_path,
+        state: state_path,
+        staged_bytes: log_bytes + state_bytes,
     }
-    staged
 }
 
 /// Options for staged SST files. Uncompressed: compressing on the ingest path would trade ack
@@ -642,84 +594,24 @@ fn stage_state_file(path: &Path, writes: &[AssignedWrite]) -> Result<usize, Stri
     Ok(bytes)
 }
 
-/// Sends one group to `commit`, returning false if it has stopped.
-fn forward_group(sender: &mpsc::SyncSender<PreparedWrite>, group: PreparedWrite) -> bool {
-    if let Err(error) = sender.send(group) {
-        fail_assigned_writes(error.0.writes, "rocks commit worker stopped".to_string());
-        return false;
-    }
-    true
-}
-
-/// Commits prepared groups one at a time: log ingestion, state ingestion, publish, ack. Stops on
-/// the first partial commit (log durable, state not), since publishing anything later would
-/// advertise completeness the state cannot back; a restart repairs the partial group from its
-/// log file. A group whose epoch was superseded by an earlier failure is rejected without being
-/// written; a failing group bumps the epoch so its frontier (and every later group assigned
-/// under it) is abandoned and re-allocated by `prepare`.
-fn run_commit(
-    db: Arc<DB>,
-    frontiers: Arc<Frontiers>,
-    epoch: Arc<AtomicU64>,
-    receiver: mpsc::Receiver<PreparedWrite>,
-) {
+/// Commits prepared groups one at a time — log ingestion, state ingestion, publish, ack — until
+/// the group channel closes (store drop). Any write failure panics inside `commit_group`.
+fn run_commit(db: Arc<DB>, frontiers: Arc<Frontiers>, receiver: mpsc::Receiver<PreparedWrite>) {
     while let Ok(group) = receiver.recv() {
-        if commit_group(&db, &frontiers, &epoch, group) == CommitOutcome::Poisoned {
-            // Exiting closes the group channel, so prepare fails all later waves.
-            break;
-        }
+        commit_group(&db, &frontiers, group);
     }
-}
-
-#[derive(Debug, Eq, PartialEq)]
-enum CommitOutcome {
-    /// The group was committed and published, or cleanly rejected/failed (nothing durable).
-    Continue,
-    /// The group's log rows are durable but its state ingestion failed: the frontier must freeze
-    /// below the group until a restart replays its log file.
-    Poisoned,
 }
 
 /// Commits one group: ingests its log file (durability), then its state file (visibility), then
-/// publishes the frontier and resolves the requests.
-fn commit_group(
-    db: &DB,
-    frontiers: &Frontiers,
-    epoch: &AtomicU64,
-    group: PreparedWrite,
-) -> CommitOutcome {
+/// publishes the frontier and resolves the requests. Any write failure is fatal (panic): once
+/// the log rows are durable the group cannot be rolled back (its sequences must not be
+/// re-issued), and the next open rolls it forward by replaying the log file — so nothing is ever
+/// reclaimed or retried in-process. The panic drops the group's response channels, so waiting
+/// callers observe an error even though the group may resurface after the restart repair — an
+/// accepted at-least-once ambiguity of this severe error path.
+fn commit_group(db: &DB, frontiers: &Frontiers, group: PreparedWrite) {
     debug_assert!(!group.writes.is_empty(), "groups are never empty");
-    let PreparedWrite {
-        writes,
-        staged,
-        epoch: group_epoch,
-    } = group;
-    if group_epoch != epoch.load(Ordering::Acquire) {
-        // This group was assigned under a frontier an earlier commit failure has since abandoned
-        // (prepare can stage one wave ahead before it observes the bump). Rejecting it keeps the
-        // durable log gap-free; the requests never reached the DB, so the caller is told to
-        // retry, which re-allocates them fresh sequence numbers under the current epoch. Checked
-        // before the staging result so a stale group's own staging failure cannot bump the epoch
-        // again and spuriously reject the wave prepare has already re-synced.
-        if let Ok(staged) = &staged {
-            let _ = std::fs::remove_file(&staged.log);
-            let _ = std::fs::remove_file(&staged.state);
-        }
-        fail_assigned_writes(
-            writes,
-            "rocks write batch superseded by an earlier failure, retry".to_string(),
-        );
-        return CommitOutcome::Continue;
-    }
-    let staged = match staged {
-        Ok(staged) => staged,
-        Err(error) => {
-            epoch.fetch_add(1, Ordering::AcqRel);
-            fail_assigned_writes(writes, error);
-            return CommitOutcome::Continue;
-        }
-    };
-
+    let PreparedWrite { writes, staged } = group;
     let requests = writes.len();
     let last_sequence = writes
         .last()
@@ -728,31 +620,13 @@ fn commit_group(
 
     // Log first: its rows define durability, and an ingested state file without its log rows
     // could leave keys in the store that were never part of a sequenced batch.
-    if let Err(error) = ingest_staged_file(db, LOG_CF, &staged.log) {
-        // Nothing is durable (ingestion is atomic), so the numbers can be reclaimed: bump the
-        // epoch so in-flight groups are rejected and `prepare` re-syncs to the durable frontier.
-        let _ = std::fs::remove_file(&staged.state);
-        epoch.fetch_add(1, Ordering::AcqRel);
-        fail_assigned_writes(writes, error);
-        return CommitOutcome::Continue;
-    }
-    // Release so `prepare` re-syncs against a frontier whose log rows are already durable.
-    frontiers.durable.store(last_sequence, Ordering::Release);
+    ingest_staged_file(db, LOG_CF, &staged.log);
 
     // Ingest and publish under the floor lock: a prune loads the published frontier as its
     // state floor under the same lock, so no scan-visible state row can outrun the frontier
     // covering it (a key prune must never delete a row the floor does not cover).
-    let publish_guard = frontiers
-        .persist
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Err(error) = ingest_staged_file(db, rocksdb::DEFAULT_COLUMN_FAMILY_NAME, &staged.state) {
-        // The log rows are durable but the state rows are not: the frontier freezes below this
-        // group so reads stay complete below the advertised sequence, and a restart repairs the
-        // state by replaying the group's log file.
-        fail_assigned_writes(writes, error);
-        return CommitOutcome::Poisoned;
-    }
+    let publish_guard = frontiers.persist.lock();
+    ingest_staged_file(db, rocksdb::DEFAULT_COLUMN_FAMILY_NAME, &staged.state);
 
     // Release so `current_sequence` readers only observe frontiers whose rows are readable.
     frontiers.published.store(last_sequence, Ordering::Release);
@@ -764,20 +638,22 @@ fn commit_group(
         "committed write batch"
     );
     complete_assigned_writes(writes);
-    CommitOutcome::Continue
 }
 
 /// Ingests one staged SST file into `cf`. Ingestion links the file into the column family and
-/// syncs the manifest, so the rows are durable and readable once this returns.
-fn ingest_staged_file(db: &DB, cf: &str, path: &Path) -> Result<(), String> {
-    let cf = db.cf_handle(cf).expect("CFs exist (created on open)");
+/// syncs the manifest, so the rows are durable and readable once this returns. Failure is fatal:
+/// see `commit_group`.
+fn ingest_staged_file(db: &DB, cf: &str, path: &Path) {
+    let handle = db.cf_handle(cf).expect("CFs exist (created on open)");
     let mut ingest_options = IngestExternalFileOptions::default();
     ingest_options.set_move_files(true);
-    if let Err(error) = db.ingest_external_file_cf_opts(cf, &ingest_options, vec![path]) {
-        let _ = std::fs::remove_file(path);
-        return Err(error.to_string());
-    }
-    Ok(())
+    db.ingest_external_file_cf_opts(handle, &ingest_options, vec![path])
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to ingest staged SST {} into {cf}: {error}",
+                path.display()
+            )
+        });
 }
 
 /// Writes a batch with sync enabled, used for the meta row that defines the durable floor.
@@ -881,20 +757,6 @@ fn replay_last_log_file(db: &DB, floor: u64) -> Result<(), String> {
         write_synced_batch(db, batch)?;
     }
     Ok(())
-}
-
-/// Sends the same assignment failure to every request in a wave.
-fn fail_requests(requests: Vec<WriteRequest>, error: String) {
-    for request in requests {
-        let _ = request.response.send(Err(error.clone()));
-    }
-}
-
-/// Fails every assigned write with the same error.
-fn fail_assigned_writes(writes: Vec<AssignedWrite>, error: String) {
-    for write in writes {
-        let _ = write.request.response.send(Err(error.clone()));
-    }
 }
 
 /// Resolves every assigned write with its own committed sequence number.
@@ -1004,6 +866,7 @@ impl RocksStore {
             db.clone(),
             ingest_dir,
             frontiers.clone(),
+            seq,
             write_pipeline,
         ));
         Ok(Self {
@@ -1027,15 +890,6 @@ impl RocksStore {
             .expect("meta CF must exist (created on open)")
     }
 
-    /// Serializes prunes: each loads the monotonic published frontier and persists it as the
-    /// state floor under this lock, so the floor never moves backward.
-    fn lock_persisted_floor(&self) -> Result<std::sync::MutexGuard<'_, ()>, String> {
-        self.frontiers
-            .persist
-            .lock()
-            .map_err(|e| format!("rocks prune lock poisoned: {e}"))
-    }
-
     /// Reads the current value for one default-column-family key.
     fn get_raw(&self, key: &[u8]) -> Result<Option<Vec<u8>>, rocksdb::Error> {
         self.db.get(key)
@@ -1050,7 +904,7 @@ impl RocksStore {
             return Ok(());
         }
 
-        let _guard = self.lock_persisted_floor()?;
+        let _guard = self.frontiers.persist.lock();
         let mut batch = rocksdb::WriteBatch::default();
         batch.put_cf(
             self.meta_cf(),
@@ -1071,7 +925,7 @@ impl RocksStore {
         if cutoff_exclusive == 0 {
             return Ok(());
         }
-        let _guard = self.lock_persisted_floor()?;
+        let _guard = self.frontiers.persist.lock();
         let cf = self.log_cf();
 
         // One synced, atomic batch: the range tombstone that logically deletes the rows, and the
@@ -1427,34 +1281,10 @@ mod tests {
         .encode_to_vec()
     }
 
-    /// Builds a group whose staging already failed, modeling a build failure for a contiguous
-    /// run of assigned sequence numbers tagged with `epoch`.
-    fn failing_group(
-        epoch: u64,
-        entries: &[(u64, &'static [u8], &'static [u8])],
-        error: &str,
-    ) -> (PreparedWrite, Vec<oneshot::Receiver<Result<u64, String>>>) {
-        let mut writes = Vec::new();
-        let mut receivers = Vec::new();
-        for (sequence, key, value) in entries {
-            let (write, receiver) = assigned_write_with_response(*sequence, key, value);
-            writes.push(write);
-            receivers.push(receiver);
-        }
-        (
-            PreparedWrite {
-                writes,
-                staged: Err(error.to_string()),
-                epoch,
-            },
-            receivers,
-        )
-    }
-
-    /// Commits one group through the commit stage, returning the durable frontier afterwards.
-    fn commit_and_apply(store: &RocksStore, epoch: &AtomicU64, group: PreparedWrite) -> u64 {
-        commit_group(&store.db, &store.frontiers, epoch, group);
-        store.frontiers.durable.load(Ordering::Acquire)
+    /// Commits one group through the commit stage, returning the published frontier afterwards.
+    fn commit_and_apply(store: &RocksStore, group: PreparedWrite) -> u64 {
+        commit_group(&store.db, &store.frontiers, group);
+        store.frontiers.published.load(Ordering::Acquire)
     }
 
     fn assigned_write(sequence: u64, key: &'static [u8], value: &'static [u8]) -> AssignedWrite {
@@ -1479,14 +1309,10 @@ mod tests {
         )
     }
 
-    fn prepared_write(store: &RocksStore, epoch: u64, writes: Vec<AssignedWrite>) -> PreparedWrite {
+    fn prepared_write(store: &RocksStore, writes: Vec<AssignedWrite>) -> PreparedWrite {
         let ingest_dir = store.db.path().join(LOG_INGEST_DIR);
-        let staged = stage_group_files(&ingest_dir, &writes, epoch);
-        PreparedWrite {
-            writes,
-            staged,
-            epoch,
-        }
+        let staged = stage_group_files(&ingest_dir, &writes);
+        PreparedWrite { writes, staged }
     }
 
     #[test]
@@ -1551,23 +1377,17 @@ mod tests {
         drop(sender);
 
         let first = receiver.recv().expect("first request");
-        let (group, disconnected) = match prepare_queued_write(
+        let (group, disconnected) = prepare_queued_write(
             dir.path(),
             &receiver,
             first,
             0,
             DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES,
-            7,
-        ) {
-            Ok(prepared) => prepared,
-            Err((_, error)) => panic!("{error}"),
-        };
+        );
         assert_eq!(group.writes.len(), 3);
-        let staged = group.staged.expect("staged files");
-        assert!(staged.log.exists());
-        assert!(staged.state.exists());
-        assert!(staged.staged_bytes > 0);
-        assert_eq!(group.epoch, 7);
+        assert!(group.staged.log.exists());
+        assert!(group.staged.state.exists());
+        assert!(group.staged.staged_bytes > 0);
         assert!(disconnected);
     }
 
@@ -1581,16 +1401,10 @@ mod tests {
         drop(sender);
 
         let first = receiver.recv().expect("first request");
-        let (group, disconnected) =
-            match prepare_queued_write(dir.path(), &receiver, first, 0, 1, 7) {
-                Ok(prepared) => prepared,
-                Err((_, error)) => panic!("{error}"),
-            };
+        let (group, disconnected) = prepare_queued_write(dir.path(), &receiver, first, 0, 1);
 
         assert_eq!(group.writes.len(), 1);
         assert_eq!(group.writes[0].request.kvs[0].0.as_ref(), b"a");
-        assert!(group.staged.is_ok());
-        assert_eq!(group.epoch, 7);
         assert!(!disconnected);
         assert_eq!(
             receiver
@@ -1603,179 +1417,17 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn forward_group_fails_request_when_commit_stopped() {
+    /// A missing staged file makes ingestion fail, which is fatal: the group cannot be rolled
+    /// back once any of it is durable, and the next open repairs whatever the dead writer left.
+    #[test]
+    #[should_panic(expected = "failed to ingest staged SST")]
+    fn write_errors_are_fatal() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
-        let (group_sender, group_receiver) = mpsc::sync_channel(0);
-        drop(group_receiver);
 
-        let (write, result) = assigned_write_with_response(1, b"a", b"1");
-        let group = prepared_write(&store, 0, vec![write]);
-        let forwarded = forward_group(&group_sender, group);
-
-        assert!(!forwarded);
-        let error = result
-            .await
-            .expect("request should receive an explicit worker error")
-            .expect_err("request should fail");
-        assert_eq!(error, "rocks commit worker stopped");
-    }
-
-    #[tokio::test]
-    async fn failed_group_supersedes_epoch_and_frees_sequence_numbers() {
-        let dir = tempdir().expect("tempdir");
-        let store = RocksStore::open(dir.path(), None).expect("open db");
-        let epoch = AtomicU64::new(0);
-
-        // A group that cannot commit (modeled with an already-failed batch) at sequences 1 and 2.
-        let (group, receivers) = failing_group(0, &[(1, b"a", b"1"), (2, b"b", b"2")], "disk full");
-        let committed = commit_and_apply(&store, &epoch, group);
-
-        // Nothing was published, and the epoch advanced so the abandoned numbers can be re-used.
-        assert_eq!(committed, 0);
-        assert_eq!(store.current_sequence(), 0);
-        assert_eq!(epoch.load(Ordering::Acquire), 1);
-        for receiver in receivers {
-            assert_eq!(
-                receiver.await.expect("response"),
-                Err("disk full".to_string())
-            );
-        }
-
-        // The next epoch re-allocates sequences 1 and 2 to fresh requests, which commit cleanly.
-        let (write_x, result_x) = assigned_write_with_response(1, b"x", b"24");
-        let (write_y, result_y) = assigned_write_with_response(2, b"y", b"25");
-        let group = prepared_write(&store, 1, vec![write_x, write_y]);
-        let committed = commit_and_apply(&store, &epoch, group);
-
-        assert_eq!(committed, 2);
-        assert_eq!(store.current_sequence(), 2);
-        assert_eq!(result_x.await.expect("response"), Ok(1));
-        assert_eq!(result_y.await.expect("response"), Ok(2));
-        assert_eq!(
-            batch_entries(store.get_batch(1).await.expect("get").expect("retained")),
-            vec![(Bytes::from_static(b"x"), Bytes::from_static(b"24"))]
-        );
-        assert_eq!(
-            batch_entries(store.get_batch(2).await.expect("get").expect("retained")),
-            vec![(Bytes::from_static(b"y"), Bytes::from_static(b"25"))]
-        );
-    }
-
-    #[tokio::test]
-    async fn superseded_epoch_group_is_rejected_without_write() {
-        let dir = tempdir().expect("tempdir");
-        let store = RocksStore::open(dir.path(), None).expect("open db");
-        // The current epoch is 1: an earlier failure already superseded epoch 0.
-        let epoch = AtomicU64::new(1);
-
-        let (write, result) = assigned_write_with_response(1, b"a", b"1");
-        let group = prepared_write(&store, 0, vec![write]);
-        let committed = commit_and_apply(&store, &epoch, group);
-
-        assert_eq!(committed, 0);
-        assert_eq!(store.current_sequence(), 0);
-        assert_eq!(epoch.load(Ordering::Acquire), 1);
-        assert_eq!(
-            result.await.expect("response"),
-            Err("rocks write batch superseded by an earlier failure, retry".to_string())
-        );
-        assert!(store.get_batch(1).await.expect("get").is_none());
-    }
-
-    #[tokio::test]
-    async fn stale_group_with_staging_error_does_not_bump_epoch() {
-        let dir = tempdir().expect("tempdir");
-        let store = RocksStore::open(dir.path(), None).expect("open db");
-        // The current epoch is 1: an earlier failure already superseded epoch 0.
-        let epoch = AtomicU64::new(1);
-
-        let (group, receivers) = failing_group(0, &[(1, b"a", b"1")], "disk full");
-        let committed = commit_and_apply(&store, &epoch, group);
-
-        // The stale group is rejected as superseded; its own staging error must not bump the
-        // epoch again, which would spuriously reject the wave prepare re-synced under epoch 1.
-        assert_eq!(committed, 0);
-        assert_eq!(epoch.load(Ordering::Acquire), 1);
-        for receiver in receivers {
-            assert_eq!(
-                receiver.await.expect("response"),
-                Err("rocks write batch superseded by an earlier failure, retry".to_string())
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn writer_reallocates_sequence_numbers_after_failed_batch() {
-        let dir = tempdir().expect("tempdir");
-        let store = RocksStore::open(dir.path(), None).expect("open db");
-        let epoch = AtomicU64::new(5);
-
-        // Two successive failures both abandon sequence 1 without ever consuming it.
-        for attempt in [b"first" as &[u8], b"second"] {
-            let current = epoch.load(Ordering::Acquire);
-            let (group, receivers) = failing_group(current, &[(1, b"k", b"v")], "boom");
-            let committed = commit_and_apply(&store, &epoch, group);
-            assert_eq!(
-                committed, 0,
-                "attempt {attempt:?} must not advance the frontier"
-            );
-            assert_eq!(epoch.load(Ordering::Acquire), current + 1);
-            for receiver in receivers {
-                assert_eq!(receiver.await.expect("response"), Err("boom".to_string()));
-            }
-        }
-
-        // The first durable write still takes sequence 1.
-        let current = epoch.load(Ordering::Acquire);
-        let (write, result) = assigned_write_with_response(1, b"k", b"v");
-        let group = prepared_write(&store, current, vec![write]);
-        let committed = commit_and_apply(&store, &epoch, group);
-        assert_eq!(committed, 1);
-        assert_eq!(result.await.expect("response"), Ok(1));
-        assert_eq!(store.current_sequence(), 1);
-    }
-
-    #[tokio::test]
-    async fn reused_sequence_overwrites_abandoned_log_row() {
-        let dir = tempdir().expect("tempdir");
-        let store = RocksStore::open(dir.path(), None).expect("open db");
-        let epoch = AtomicU64::new(0);
-
-        // Model an abandoned sequence index: the durable frontier is still 0, but a row
-        // already exists at the next log key and must be replaced by the successful retry.
-        store
-            .db
-            .put_cf(
-                store.log_cf(),
-                sequence_log_key(1),
-                encoded_log_entry(1, b"k", b"stale"),
-            )
-            .expect("seed abandoned log row");
-        // Rows above the visible frontier are unreadable, so the abandoned row cannot leak.
-        assert!(store.get_batch(1).await.expect("get").is_none());
-
-        let (failed, receivers) = failing_group(0, &[(1, b"k", b"failed")], "boom");
-        let committed = commit_and_apply(&store, &epoch, failed);
-        assert_eq!(committed, 0);
-        assert_eq!(store.current_sequence(), 0);
-        assert_eq!(epoch.load(Ordering::Acquire), 1);
-        for receiver in receivers {
-            assert_eq!(receiver.await.expect("response"), Err("boom".to_string()));
-        }
-
-        let (write, result) = assigned_write_with_response(1, b"k", b"new");
-        let group = prepared_write(&store, 1, vec![write]);
-        let committed = commit_and_apply(&store, &epoch, group);
-
-        assert_eq!(committed, 1);
-        assert_eq!(result.await.expect("response"), Ok(1));
-        assert_eq!(store.current_sequence(), 1);
-        assert_eq!(
-            batch_entries(store.get_batch(1).await.expect("get").expect("retained")),
-            vec![(Bytes::from_static(b"k"), Bytes::from_static(b"new"))]
-        );
+        let group = prepared_write(&store, vec![assigned_write(1, b"a", b"1")]);
+        std::fs::remove_file(&group.staged.state).expect("sabotage staged state file");
+        commit_and_apply(&store, group);
     }
 
     /// One multi-megabyte batch, sized to exercise multi-block ingested log SSTs.
@@ -1960,10 +1612,8 @@ mod tests {
     async fn prepared_write_preserves_contiguous_sequence_logs() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
-        let epoch = AtomicU64::new(0);
         let prepared = prepared_write(
             &store,
-            0,
             vec![
                 assigned_write(1, b"a", b"1"),
                 assigned_write(2, b"b", b"2"),
@@ -1972,8 +1622,7 @@ mod tests {
         );
 
         assert_eq!(prepared.writes.len(), 3);
-        assert!(prepared.staged.is_ok());
-        let committed = commit_and_apply(&store, &epoch, prepared);
+        let committed = commit_and_apply(&store, prepared);
         assert_eq!(committed, 3);
 
         assert_eq!(store.current_sequence(), 3);
@@ -2032,6 +1681,38 @@ mod tests {
             }
         }
         assert_eq!(logged_keys, (0u8..32).collect::<BTreeSet<_>>());
+    }
+
+    #[tokio::test]
+    async fn sequence_prune_spares_log_rows_above_published_frontier() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        // A durable log row whose group never published (its state ingestion was in flight at a
+        // crash): pruning must spare it — it is the repair replay's input at the next open.
+        store
+            .db
+            .put_cf(
+                store.log_cf(),
+                sequence_log_key(1),
+                encoded_log_entry(1, b"k", b"v"),
+            )
+            .expect("seed log row");
+
+        store
+            .apply_prune_policies(PrunePolicyDocument {
+                version: exoware_sdk::prune_policy::PRUNE_POLICY_DOCUMENT_VERSION,
+                policies: vec![exoware_sdk::prune_policy::PrunePolicy {
+                    scope: PolicyScope::Sequence,
+                    retain: RetainPolicy::DropAll,
+                }],
+            })
+            .expect("prune");
+
+        let survivors = store
+            .db
+            .iterator_cf(store.log_cf(), IteratorMode::Start)
+            .count();
+        assert_eq!(survivors, 1, "unpublished log row must survive the prune");
     }
 
     #[tokio::test]

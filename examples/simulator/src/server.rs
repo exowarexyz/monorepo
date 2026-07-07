@@ -9,7 +9,8 @@ use axum::{routing::get, Router};
 use bytes::Bytes;
 use exoware_sdk::prune_policy::PrunePolicyDocument;
 use exoware_server::{
-    connect_stack, AppState, Ingest, Log, LogBatch, Prune, Query, QueryExtra, Sequence,
+    connect_stack, AppState, Ingest, Log, LogBatch, Prune, Query, QueryExtra, RangeScan,
+    RangeScanBatch, Sequence,
 };
 use tower_http::cors::CorsLayer;
 use tracing::info;
@@ -45,15 +46,29 @@ pub async fn run(
     Ok(())
 }
 
-/// Store engine that keeps `guard` (the test's tempdir) alive until the engine itself is
-/// dropped. Server and connection tasks all hold engine clones and are torn down in arbitrary
-/// order when a test runtime shuts down; owning the guard here — declared after the store, so it
-/// drops last — guarantees the data directory outlives every store handle. Deleting the
-/// directory under a live store cannot corrupt anything, but it makes the final close stall on
-/// RocksDB's background-error recovery loop.
+/// Store engine that keeps `guard` (the test's tempdir) alive until the engine — and every
+/// range-scan cursor it hands out, which pins the DB independently — is dropped. Server and
+/// connection tasks all hold engine clones and are torn down in arbitrary order when a test
+/// runtime shuts down; owning the guard here (declared after the store, so it drops last, and
+/// cloned into each cursor) keeps the data directory alive for as long as any store handle or
+/// open cursor. Deleting the directory under a live store cannot corrupt anything, but it makes
+/// the final close stall on RocksDB's background-error recovery loop.
 struct GuardedStore<G> {
     store: RocksStore,
-    _guard: G,
+    _guard: Arc<G>,
+}
+
+/// Range-scan cursor that carries the tempdir guard: connection tasks hold the cursor (not the
+/// engine) in their response streams, and the cursor's iterator pins the DB.
+struct GuardedRangeScan<G> {
+    inner: RocksRangeScanCursor,
+    _guard: Arc<G>,
+}
+
+impl<G: Send + Sync + 'static> RangeScan for GuardedRangeScan<G> {
+    async fn next_batch(&mut self, max_items: usize) -> Result<RangeScanBatch, String> {
+        self.inner.next_batch(max_items).await
+    }
 }
 
 impl<G: Send + Sync + 'static> Sequence for GuardedStore<G> {
@@ -69,7 +84,7 @@ impl<G: Send + Sync + 'static> Ingest for GuardedStore<G> {
 }
 
 impl<G: Send + Sync + 'static> Query for GuardedStore<G> {
-    type RangeScan = RocksRangeScanCursor;
+    type RangeScan = GuardedRangeScan<G>;
 
     async fn get(&self, key: Bytes) -> Result<(Option<Bytes>, QueryExtra), String> {
         self.store.get(key).await
@@ -82,7 +97,10 @@ impl<G: Send + Sync + 'static> Query for GuardedStore<G> {
         limit: usize,
         forward: bool,
     ) -> Result<Self::RangeScan, String> {
-        self.store.range_scan(start, end, limit, forward).await
+        Ok(GuardedRangeScan {
+            inner: self.store.range_scan(start, end, limit, forward).await?,
+            _guard: self._guard.clone(),
+        })
     }
 
     async fn get_many(
@@ -120,7 +138,7 @@ pub async fn spawn_for_test(
 ) -> Result<(tokio::task::JoinHandle<()>, String), Box<dyn std::error::Error + Send + Sync>> {
     let engine = Arc::new(GuardedStore {
         store: RocksStore::open(data_dir, None)?,
-        _guard: guard,
+        _guard: Arc::new(guard),
     });
     let state = AppState::new(engine);
     let connect = connect_stack(state);
