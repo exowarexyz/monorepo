@@ -134,7 +134,7 @@ async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
 
 #[tokio::test]
 async fn immutable_connect_subscribe_emits_verifiable_multi_proof() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let (_store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
     assert!(
         *local.inactivity_floor > 0,
@@ -178,7 +178,7 @@ async fn immutable_connect_subscribe_emits_verifiable_multi_proof() {
 
 #[tokio::test]
 async fn immutable_connect_get_operation_range_returns_verifiable_proof() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let (_store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
     assert!(
         *local.inactivity_floor > 0,
@@ -216,7 +216,7 @@ async fn immutable_connect_get_operation_range_returns_verifiable_proof() {
 
 #[tokio::test]
 async fn immutable_connect_client_rejects_invalid_streamed_proof() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let (_store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
     assert!(
         *local.inactivity_floor > 0,

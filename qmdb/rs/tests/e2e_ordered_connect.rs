@@ -377,7 +377,7 @@ fn tamper_get_many_response(mut response: ProtoGetManyResponse) -> ProtoGetManyR
 
 #[tokio::test]
 async fn ordered_connect_get_returns_current_key_value_proof() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let (_store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
     let ordered_client = Arc::new(TestOrderedClient::new(
         PrefixedStoreClient::empty(store_client.clone()),
@@ -408,7 +408,7 @@ async fn ordered_connect_get_returns_current_key_value_proof() {
 
 #[tokio::test]
 async fn ordered_get_after_grafted_boundary_returns_current_key_value_proof() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let (_store_server, store_client) = common::local_store_client().await;
     let local = build_grafted_boundary_local_batch().await;
     let ordered_client = TestOrderedClient::new(
         PrefixedStoreClient::empty(store_client.clone()),
@@ -434,7 +434,7 @@ async fn ordered_get_after_grafted_boundary_returns_current_key_value_proof() {
 
 #[tokio::test]
 async fn ordered_connect_get_many_returns_current_key_lookup_proofs() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let (_store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
     let ordered_client = Arc::new(TestOrderedClient::new(
         PrefixedStoreClient::empty(store_client.clone()),
@@ -480,7 +480,7 @@ async fn ordered_connect_get_many_returns_current_key_lookup_proofs() {
 
 #[tokio::test]
 async fn ordered_connect_get_many_returns_miss_proofs_and_rejects_duplicates() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let (_store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
     let ordered_client = Arc::new(TestOrderedClient::new(
         PrefixedStoreClient::empty(store_client.clone()),
@@ -526,7 +526,7 @@ async fn ordered_connect_get_many_returns_miss_proofs_and_rejects_duplicates() {
 
 #[tokio::test]
 async fn ordered_connect_get_range_verifies_complete_empty_and_partial_pages() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let (_store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
     let ordered_client = Arc::new(TestOrderedClient::new(
         PrefixedStoreClient::empty(store_client.clone()),
@@ -597,7 +597,7 @@ async fn ordered_connect_get_range_verifies_complete_empty_and_partial_pages() {
 
 #[tokio::test]
 async fn ordered_connect_client_rejects_get_range_boundary_omission() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let (_store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
     commit_upload(&store_client, &local).await;
 
@@ -670,7 +670,7 @@ async fn ordered_connect_client_rejects_get_range_boundary_omission() {
 
 #[tokio::test]
 async fn ordered_connect_client_rejects_empty_unbounded_get_range_before_next_key() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let (_store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
     commit_upload(&store_client, &local).await;
 
@@ -747,7 +747,7 @@ async fn ordered_connect_client_rejects_empty_unbounded_get_range_before_next_ke
 
 #[tokio::test]
 async fn ordered_connect_client_rejects_invalid_get_proof() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let (_store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
     commit_upload(&store_client, &local).await;
 
@@ -809,7 +809,7 @@ async fn ordered_connect_client_rejects_invalid_get_proof() {
 
 #[tokio::test]
 async fn ordered_connect_client_rejects_invalid_get_many_proof() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let (_store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
     commit_upload(&store_client, &local).await;
 
@@ -871,7 +871,7 @@ async fn ordered_connect_client_rejects_invalid_get_many_proof() {
 
 #[tokio::test]
 async fn ordered_connect_client_rejects_get_many_proof_for_different_key() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let (_store_server, store_client) = common::local_store_client().await;
     let local = build_local_batch().await;
     commit_upload(&store_client, &local).await;
 

@@ -40,7 +40,7 @@ type Digest = commonware_cryptography::sha256::Digest;
 
 #[tokio::test]
 async fn mirror_keyless_from_local() {
-    let (_dir, _server, client) = common::local_store_client().await;
+    let (_server, client) = common::local_store_client().await;
 
     // Session 1: apply one batch locally, mirror.
     let (ops1, proof1, latest1, root1) = run_keyless_local(vec![vec![
@@ -146,7 +146,7 @@ type UnorderedOp =
 
 #[tokio::test]
 async fn mirror_unordered_from_local() {
-    let (_dir, _server, client) = common::local_store_client().await;
+    let (_server, client) = common::local_store_client().await;
 
     let (ops1, proof1, latest1, root1) = run_unordered_local(vec![vec![
         (b"alpha".to_vec(), Some(b"one".to_vec())),
@@ -266,7 +266,7 @@ type ImmK = FixedBytes<32>;
 
 #[tokio::test]
 async fn mirror_immutable_from_local() {
-    let (_dir, _server, client) = common::local_store_client().await;
+    let (_server, client) = common::local_store_client().await;
 
     let (ops1, proof1, latest1, root1) = run_immutable_local(vec![vec![
         (FixedBytes::new([0x11; 32]), b"one".to_vec()),
@@ -422,7 +422,7 @@ async fn ordered_boundary_from_local_db(
 
 #[tokio::test]
 async fn mirror_ordered_from_local() {
-    let (_dir, _server, client) = common::local_store_client().await;
+    let (_server, client) = common::local_store_client().await;
 
     let (ops1, proof1, latest1, root1, boundary1) = run_ordered_local(
         vec![vec![

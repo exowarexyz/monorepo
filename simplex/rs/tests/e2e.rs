@@ -180,9 +180,12 @@ impl CertifiableBlock for TestBlock {
     }
 }
 
-async fn local_store_client() -> (tempfile::TempDir, tokio::task::JoinHandle<()>, StoreClient) {
+/// Keep `_server` alive for the whole test; the store's tempdir lives inside the server task so
+/// it cannot be deleted while the store is still running.
+async fn local_store_client() -> (tokio::task::JoinHandle<()>, StoreClient) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (handle, url) = exoware_simulator::spawn_for_test(dir.path())
+    let path = dir.path().to_path_buf();
+    let (handle, url) = exoware_simulator::spawn_for_test(&path, dir)
         .await
         .expect("spawn simulator");
     let client = StoreClient::builder()
@@ -190,7 +193,7 @@ async fn local_store_client() -> (tempfile::TempDir, tokio::task::JoinHandle<()>
         .retry_config(RetryConfig::disabled())
         .build()
         .expect("store client");
-    (dir, handle, client)
+    (handle, client)
 }
 
 fn schemes() -> Vec<Scheme> {
@@ -228,7 +231,7 @@ fn finalized(block: TestBlock, schemes: &[Scheme]) -> Finalized<TestBlock, Schem
 
 #[tokio::test]
 async fn uploads_and_reads_notarized_and_finalized_blocks() {
-    let (_dir, _handle, store) = local_store_client().await;
+    let (_handle, store) = local_store_client().await;
     let simplex = SimplexClient::new(PrefixedStoreClient::empty(store));
     let schemes = schemes();
 
@@ -304,7 +307,7 @@ async fn uploads_and_reads_notarized_and_finalized_blocks() {
 
 #[tokio::test]
 async fn prepared_uploads_can_share_one_store_batch() {
-    let (_dir, _handle, store) = local_store_client().await;
+    let (_handle, store) = local_store_client().await;
     let simplex = SimplexClient::new(PrefixedStoreClient::empty(store.clone()));
     let schemes = schemes();
 
@@ -336,7 +339,7 @@ async fn prepared_uploads_can_share_one_store_batch() {
 async fn marshal_resolver_sinks_finalized_chain_from_simplex_api() {
     const BLOCKS_TO_PROCESS: u64 = 5;
 
-    let (_dir, _handle, store) = local_store_client().await;
+    let (_handle, store) = local_store_client().await;
     let simplex = SimplexClient::new(PrefixedStoreClient::empty(store));
     let schemes = schemes();
 

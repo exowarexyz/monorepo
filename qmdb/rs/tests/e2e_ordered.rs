@@ -442,7 +442,7 @@ where
 
 #[tokio::test]
 async fn ordered_round_trip() {
-    let (_dir, _server, client) = common::local_store_client().await;
+    let (_server, client) = common::local_store_client().await;
     let local = build_local_db::<mmr::Family>().await;
 
     mirror_local(&client, &local).await;
@@ -484,7 +484,7 @@ async fn ordered_round_trip() {
 
 #[tokio::test]
 async fn ordered_mmb_round_trip() {
-    let (_dir, _server, client) = common::local_store_client().await;
+    let (_server, client) = common::local_store_client().await;
     let local = build_local_db::<mmb::Family>().await;
 
     mirror_local(&client, &local).await;
@@ -532,7 +532,7 @@ async fn ordered_mmb_round_trip() {
 
 #[tokio::test]
 async fn ordered_mmb_multi_peak_grafted_chunk_round_trip() {
-    let (_dir, _server, client) = common::local_store_client().await;
+    let (_server, client) = common::local_store_client().await;
     let local = build_local_db_with_write_count::<mmb::Family, N>("ordered_mmb_grafted", 767).await;
     assert!(
         local.current_boundary.grafted_nodes.len() >= 2,
@@ -582,7 +582,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
     BatchOperation<F>:
         commonware_codec::Codec + commonware_codec::Encode + commonware_codec::Decode + Clone,
 {
-    let (_dir, _server, client) = common::local_store_client().await;
+    let (_server, client) = common::local_store_client().await;
     let (uploads, latest_location, latest_key, expected_root, expected_active) =
         tokio::task::spawn_blocking(move || {
             cw_tokio::Runner::default().start(|context| async move {
@@ -743,7 +743,7 @@ async fn ordered_mmb_incremental_seed_batches_keep_current_proofs_verifiable() {
 
 #[tokio::test]
 async fn ordered_mmb_persistent_interleaved_seed_batches_keep_current_proofs_verifiable() {
-    let (_dir, _server, client) = common::local_store_client().await;
+    let (_server, client) = common::local_store_client().await;
     let storage_dir = tempfile::tempdir().expect("tempdir");
     let storage_path = storage_dir.path().to_owned();
     let store = client.clone();
@@ -863,7 +863,7 @@ async fn ordered_mmr_incremental_seed_batches_keep_current_proofs_verifiable() {
 
 #[tokio::test]
 async fn ordered_fixed_round_trip() {
-    let (_dir, _server, client) = common::local_store_client().await;
+    let (_server, client) = common::local_store_client().await;
     let local = build_fixed_local_db::<mmr::Family>().await;
 
     let writer: FixedTestOrderedWriter<mmr::Family> =
@@ -929,7 +929,7 @@ async fn ordered_fixed_round_trip() {
 
 #[tokio::test]
 async fn current_root_at() {
-    let (_dir, _server, client) = common::local_store_client().await;
+    let (_server, client) = common::local_store_client().await;
     let local = build_local_db::<mmr::Family>().await;
 
     mirror_local(&client, &local).await;
@@ -948,7 +948,7 @@ async fn current_root_at() {
 
 #[tokio::test]
 async fn current_operation_range_proof() {
-    let (_dir, _server, client) = common::local_store_client().await;
+    let (_server, client) = common::local_store_client().await;
     let local = build_local_db::<mmr::Family>().await;
 
     mirror_local(&client, &local).await;
@@ -971,7 +971,7 @@ async fn current_operation_range_proof() {
 
 #[tokio::test]
 async fn key_value_proof() {
-    let (_dir, _server, client) = common::local_store_client().await;
+    let (_server, client) = common::local_store_client().await;
     let local = build_local_db::<mmr::Family>().await;
 
     mirror_local(&client, &local).await;
@@ -996,7 +996,7 @@ async fn key_value_proof() {
 
 #[tokio::test]
 async fn multi_proof() {
-    let (_dir, _server, client) = common::local_store_client().await;
+    let (_server, client) = common::local_store_client().await;
     let local = build_local_db::<mmr::Family>().await;
 
     mirror_local(&client, &local).await;

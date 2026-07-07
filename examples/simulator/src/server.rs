@@ -6,11 +6,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{routing::get, Router};
+use bytes::Bytes;
+use exoware_sdk::prune_policy::PrunePolicyDocument;
+use exoware_server::{
+    connect_stack, AppState, Ingest, Log, LogBatch, Prune, Query, QueryExtra, Sequence,
+};
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
-use exoware_server::{connect_stack, AppState};
-
+use crate::rocks::RocksRangeScanCursor;
 use crate::RocksStore;
 
 pub const CMD: &str = "server";
@@ -41,11 +45,83 @@ pub async fn run(
     Ok(())
 }
 
+/// Store engine that keeps `guard` (the test's tempdir) alive until the engine itself is
+/// dropped. Server and connection tasks all hold engine clones and are torn down in arbitrary
+/// order when a test runtime shuts down; owning the guard here — declared after the store, so it
+/// drops last — guarantees the data directory outlives every store handle. Deleting the
+/// directory under a live store cannot corrupt anything, but it makes the final close stall on
+/// RocksDB's background-error recovery loop.
+struct GuardedStore<G> {
+    store: RocksStore,
+    _guard: G,
+}
+
+impl<G: Send + Sync + 'static> Sequence for GuardedStore<G> {
+    fn current_sequence(&self) -> u64 {
+        self.store.current_sequence()
+    }
+}
+
+impl<G: Send + Sync + 'static> Ingest for GuardedStore<G> {
+    async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, String> {
+        self.store.put_batch(kvs).await
+    }
+}
+
+impl<G: Send + Sync + 'static> Query for GuardedStore<G> {
+    type RangeScan = RocksRangeScanCursor;
+
+    async fn get(&self, key: Bytes) -> Result<(Option<Bytes>, QueryExtra), String> {
+        self.store.get(key).await
+    }
+
+    async fn range_scan(
+        &self,
+        start: Bytes,
+        end: Bytes,
+        limit: usize,
+        forward: bool,
+    ) -> Result<Self::RangeScan, String> {
+        self.store.range_scan(start, end, limit, forward).await
+    }
+
+    async fn get_many(
+        &self,
+        keys: Vec<Bytes>,
+    ) -> Result<(Vec<(Bytes, Option<Bytes>)>, QueryExtra), String> {
+        self.store.get_many(keys).await
+    }
+}
+
+impl<G: Send + Sync + 'static> Prune for GuardedStore<G> {
+    async fn apply_prune_policies(&self, document: PrunePolicyDocument) -> Result<(), String> {
+        self.store.apply_prune_policies(document).await
+    }
+}
+
+impl<G: Send + Sync + 'static> Log for GuardedStore<G> {
+    async fn get_batch(&self, sequence_number: u64) -> Result<Option<LogBatch>, String> {
+        self.store.get_batch(sequence_number).await
+    }
+
+    async fn oldest_retained_batch(&self) -> Result<Option<u64>, String> {
+        self.store.oldest_retained_batch().await
+    }
+}
+
 /// Used by integration tests: bind an ephemeral port and return the base URL.
+///
+/// `guard` (typically the `TempDir` owning `data_dir`) lives inside the engine and is dropped
+/// after the store closes, so the data directory stays alive for as long as any engine handle
+/// does — however the test runtime tears its tasks down.
 pub async fn spawn_for_test(
     data_dir: &Path,
+    guard: impl Send + Sync + 'static,
 ) -> Result<(tokio::task::JoinHandle<()>, String), Box<dyn std::error::Error + Send + Sync>> {
-    let engine = Arc::new(RocksStore::open(data_dir, None)?);
+    let engine = Arc::new(GuardedStore {
+        store: RocksStore::open(data_dir, None)?,
+        _guard: guard,
+    });
     let state = AppState::new(engine);
     let connect = connect_stack(state);
     let app = Router::new()

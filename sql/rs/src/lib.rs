@@ -8495,18 +8495,13 @@ mod tests {
 
     mod e2e {
         use super::*;
-        use axum::{routing::get, Router};
         use datafusion::prelude::SessionContext;
         use exoware_sdk::StoreClient;
-        use exoware_server::{connect_stack, AppState};
-        use exoware_simulator::RocksStore;
         use tempfile::tempdir;
 
         struct TestServers {
             ingest_url: String,
             query_url: String,
-            /// Keeps the store's data directory alive for the whole test.
-            _dir: tempfile::TempDir,
         }
 
         impl TestServers {
@@ -8524,34 +8519,15 @@ mod tests {
 
         async fn spawn_e2e_servers() -> TestServers {
             let dir = tempdir().expect("tempdir");
-            let db = RocksStore::open(dir.path(), None).expect("db");
-            let state = AppState::new(std::sync::Arc::new(db));
-            let connect = connect_stack(state);
-            let app = Router::new()
-                .route("/health", get(|| async { "ok" }))
-                .fallback_service(connect);
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            let path = dir.path().to_path_buf();
+            // The tempdir guard lives inside the spawned store so it outlives every handle.
+            let (_handle, url) = exoware_simulator::spawn_for_test(&path, dir)
                 .await
-                .expect("bind");
-            let url = format!("http://{}", listener.local_addr().unwrap());
-            tokio::spawn(async move {
-                axum::serve(listener, app).await.expect("serve");
-            });
-            for _ in 0..200 {
-                if reqwest::get(format!("{url}/health"))
-                    .await
-                    .ok()
-                    .is_some_and(|r| r.status().is_success())
-                {
-                    return TestServers {
-                        ingest_url: url.clone(),
-                        query_url: url,
-                        _dir: dir,
-                    };
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                .expect("spawn simulator");
+            TestServers {
+                ingest_url: url.clone(),
+                query_url: url,
             }
-            panic!("e2e simulator did not become ready");
         }
 
         #[tokio::test]

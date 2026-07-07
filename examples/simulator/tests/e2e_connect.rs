@@ -19,15 +19,12 @@ use exoware_sdk::{
 };
 use tempfile::tempdir;
 
-/// The tempdir guard rides along with the join handle so the store's data
-/// directory outlives the test instead of being deleted under the server.
-async fn spawn_client() -> (
-    (tokio::task::JoinHandle<()>, tempfile::TempDir),
-    PrefixedStoreClient,
-    String,
-) {
+/// The tempdir guard moves into the server task, which holds the store until
+/// runtime teardown, so the data directory is never deleted under the store.
+async fn spawn_client() -> (tokio::task::JoinHandle<()>, PrefixedStoreClient, String) {
     let dir = tempdir().expect("tempdir");
-    let (handle, url) = exoware_simulator::spawn_for_test(dir.path())
+    let path = dir.path().to_path_buf();
+    let (handle, url) = exoware_simulator::spawn_for_test(&path, dir)
         .await
         .expect("spawn_for_test");
     let client = StoreClient::builder()
@@ -35,7 +32,7 @@ async fn spawn_client() -> (
         .retry_config(RetryConfig::disabled())
         .build()
         .expect("build client");
-    ((handle, dir), PrefixedStoreClient::empty(client), url)
+    (handle, PrefixedStoreClient::empty(client), url)
 }
 
 fn key(b: &[u8]) -> Key {

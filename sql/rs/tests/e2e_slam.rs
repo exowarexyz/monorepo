@@ -11,7 +11,7 @@ use exoware_sql::{CellValue, IndexSpec, KvSchema, TableColumnConfig};
 
 #[tokio::test]
 async fn sql_full_pipeline_insert_and_query() {
-    let (_dir, _server, write_client) = common::local_store_client().await;
+    let (_server, write_client) = common::local_store_client().await;
     let read_client = write_client.clone();
 
     let write_schema = KvSchema::new(PrefixedStoreClient::empty(write_client))
