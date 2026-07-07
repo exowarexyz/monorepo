@@ -28,10 +28,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 
-use buffa::MessageView;
+use buffa::{Message, MessageView};
 use bytes::Bytes;
+use exoware_sdk::common::kv::v1::Entry;
 use exoware_sdk::keys::KeyCodec;
-use exoware_sdk::log::stream::v1::GetResponseView as StreamGetResponseView;
+use exoware_sdk::log::stream::v1::{
+    GetResponse as StreamGetResponse, GetResponseView as StreamGetResponseView,
+};
 use exoware_sdk::prune_policy::{
     KeysScope, OrderEncoding, PolicyScope, PrunePolicyDocument, RetainPolicy,
 };
@@ -1186,79 +1189,21 @@ fn sequence_from_log_key(key: &[u8]) -> Result<u64, String> {
     Ok(u64::from_be_bytes(raw))
 }
 
-/// `log.stream.v1.GetResponse.sequence_number` (varint).
-const LOG_VALUE_SEQUENCE_TAG: u8 = 0x08;
-/// `log.stream.v1.GetResponse.entries` (length-delimited).
-const LOG_VALUE_ENTRY_TAG: u8 = 0x12;
-/// `common.kv.v1.Entry.key` (length-delimited).
-const LOG_ENTRY_KEY_TAG: u8 = 0x0a;
-/// `common.kv.v1.Entry.value` (length-delimited).
-const LOG_ENTRY_VALUE_TAG: u8 = 0x12;
-
-/// Number of bytes a value occupies as a protobuf varint.
-fn varint_len(value: u64) -> usize {
-    (63 - (value | 1).leading_zeros() as usize) / 7 + 1
-}
-
-/// Appends a protobuf varint to `buf`.
-fn put_varint(buf: &mut Vec<u8>, mut value: u64) {
-    while value >= 0x80 {
-        buf.push(value as u8 | 0x80);
-        value >>= 7;
-    }
-    buf.push(value as u8);
-}
-
-/// Encoded size of one `common.kv.v1.Entry` body. Empty fields are omitted,
-/// matching the generated encoder.
-fn encoded_entry_body_len(key: &[u8], value: &[u8]) -> usize {
-    let mut len = 0;
-    if !key.is_empty() {
-        len += 1 + varint_len(key.len() as u64) + key.len();
-    }
-    if !value.is_empty() {
-        len += 1 + varint_len(value.len() as u64) + value.len();
-    }
-    len
-}
-
 /// Encodes the replay payload for one sequence's key/value rows.
-///
-/// Writes the `log.stream.v1.GetResponse` wire format directly from the borrowed
-/// key/value slices so a large batch is encoded with a single presized allocation
-/// instead of one owned `Entry` per row. `log_value_matches_generated_encoder`
-/// pins byte-for-byte equality with the generated encoder.
 fn encode_log_value(sequence: u64, kvs: &[(Bytes, Bytes)]) -> Vec<u8> {
-    let mut total = 0;
-    for (key, value) in kvs {
-        let body_len = encoded_entry_body_len(key, value);
-        total += 1 + varint_len(body_len as u64) + body_len;
+    StreamGetResponse {
+        sequence_number: sequence,
+        entries: kvs
+            .iter()
+            .map(|(key, value)| Entry {
+                key: key.to_vec(),
+                value: value.clone(),
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
     }
-    if sequence != 0 {
-        total += 1 + varint_len(sequence);
-    }
-
-    let mut buf = Vec::with_capacity(total);
-    if sequence != 0 {
-        buf.push(LOG_VALUE_SEQUENCE_TAG);
-        put_varint(&mut buf, sequence);
-    }
-    for (key, value) in kvs {
-        buf.push(LOG_VALUE_ENTRY_TAG);
-        put_varint(&mut buf, encoded_entry_body_len(key, value) as u64);
-        if !key.is_empty() {
-            buf.push(LOG_ENTRY_KEY_TAG);
-            put_varint(&mut buf, key.len() as u64);
-            buf.extend_from_slice(key);
-        }
-        if !value.is_empty() {
-            buf.push(LOG_ENTRY_VALUE_TAG);
-            put_varint(&mut buf, value.len() as u64);
-            buf.extend_from_slice(value);
-        }
-    }
-    assert_eq!(buf.len(), total);
-    buf
+    .encode_to_vec()
 }
 
 #[cfg(test)]
@@ -1266,9 +1211,6 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
-    use buffa::Message;
-    use exoware_sdk::common::kv::v1::Entry;
-    use exoware_sdk::log::stream::v1::GetResponse as StreamGetResponse;
     use exoware_server::{Ingest, Log, Sequence};
     use tempfile::tempdir;
 
@@ -1337,47 +1279,6 @@ mod tests {
         let ingest_dir = store.db.path().join(LOG_INGEST_DIR);
         let staged = stage_group_files(&ingest_dir, &writes);
         PreparedWrite { writes, staged }
-    }
-
-    #[test]
-    fn log_value_matches_generated_encoder() {
-        let cases: Vec<(u64, Vec<(Bytes, Bytes)>)> = vec![
-            (
-                1,
-                vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))],
-            ),
-            // Empty keys/values and multi-byte varint lengths.
-            (
-                u64::MAX,
-                vec![
-                    (Bytes::new(), Bytes::from_static(b"value-for-empty-key")),
-                    (Bytes::from_static(b"empty-value"), Bytes::new()),
-                    (Bytes::new(), Bytes::new()),
-                    (Bytes::from(vec![7u8; 200]), Bytes::from(vec![9u8; 20_000])),
-                ],
-            ),
-        ];
-
-        for (sequence, kvs) in cases {
-            let expected = StreamGetResponse {
-                sequence_number: sequence,
-                entries: kvs
-                    .iter()
-                    .map(|(key, value)| Entry {
-                        key: key.to_vec(),
-                        value: value.clone(),
-                        ..Default::default()
-                    })
-                    .collect(),
-                ..Default::default()
-            }
-            .encode_to_vec();
-            assert_eq!(
-                encode_log_value(sequence, &kvs),
-                expected,
-                "sequence {sequence}"
-            );
-        }
     }
 
     #[test]
