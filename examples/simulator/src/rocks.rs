@@ -344,11 +344,12 @@ struct Writer {
 
 impl Writer {
     /// Starts the three-stage write pipeline. `prepare` drains queued requests up to the
-    /// configured byte cap, assigns a contiguous sequence number to each, and builds one log
-    /// batch plus one state batch per wave; `commit` syncs each log batch, publishing the durable
-    /// frontier; `apply` inserts the state rows without a WAL, advances the visible frontier, and
-    /// resolves the requests. The stages overlap, so while one group is being fsync'd the next is
-    /// being built and the previous group's state rows are being applied.
+    /// configured byte cap, assigns a contiguous sequence number to each, and builds each wave's
+    /// state batch and encoded log rows; `commit` makes each group's log rows durable (synced
+    /// batch or ingested SST), publishing the durable frontier; `apply` inserts the state rows
+    /// without a WAL, advances the visible frontier, and resolves the requests. The stages
+    /// overlap, so while one group is being fsync'd the next is being built and the previous
+    /// group's state rows are being applied.
     fn start(
         db: Arc<DB>,
         ingest_dir: PathBuf,
@@ -970,7 +971,8 @@ fn complete_assigned_writes(writes: Vec<AssignedWrite>) {
 /// Application-level write pipeline options used by [`RocksStore::open`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RocksWritePipelineConfig {
-    /// Soft maximum RocksDB `WriteBatch` size before cutting a prepared commit group.
+    /// Soft maximum combined size (state rows plus encoded log rows) before cutting a prepared
+    /// commit group.
     pub max_commit_batch_bytes: NonZeroUsize,
 }
 
@@ -1239,8 +1241,8 @@ impl Sequence for RocksStore {
     }
 }
 
-// Ingest uses a dedicated writer thread so blocking RocksDB writes do not occupy Tokio workers.
-// The writer folds already-queued requests into one RocksDB batch while preserving a contiguous
+// Ingest uses dedicated writer threads so blocking RocksDB writes do not occupy Tokio workers.
+// The writer folds already-queued requests into one commit group while preserving a contiguous
 // sequence number and replay-log row for each request.
 impl Ingest for RocksStore {
     async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, String> {
