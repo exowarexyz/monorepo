@@ -16,6 +16,7 @@ buffa = { workspace = true }
 bytes = { workspace = true }
 exoware-sdk = { workspace = true }
 exoware-server = { workspace = true }
+rayon = { workspace = true }
 reqwest = { workspace = true }
 regex = { workspace = true }
 rocksdb = { workspace = true }

@@ -2726,6 +2726,7 @@ dependencies = [
  "exoware-sdk",
  "exoware-server",
  "http",
+ "rayon",
  "regex",
  "reqwest",
  "rocksdb",
