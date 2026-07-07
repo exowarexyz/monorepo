@@ -28,12 +28,11 @@
 //!   log can disagree with the materialized state for racing same-key writers.
 //! - Data rows become visible to point/range reads as soon as the unsynced write lands (before
 //!   their sequence number is published). The ordered store has the same window, just narrower.
-//! - A crash can leave staged batches whose data write survived (via a later WAL sync) but whose
-//!   sequence assignment did not. [`UnorderedRocksStore::open`] adopts these orphans by assigning
-//!   them fresh sequence numbers, restoring the "no data without a sequence" invariant. A caller
-//!   that never received an ack may therefore observe its write published after a restart.
+//! - A crash (or a failed sequence assignment) can leave junk behind: data rows and staged
+//!   payloads whose write survived but whose sequence assignment never happened. These batches
+//!   were never acked and never published, so the sequence contract holds; the junk is simply
+//!   never referenced. No recovery/garbage-collection pass is attempted.
 
-use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -47,13 +46,15 @@ use exoware_sdk::common::kv::v1::Entry;
 use exoware_sdk::log::stream::v1::GetResponse as StreamGetResponse;
 use exoware_sdk::prune_policy::{PolicyScope, PrunePolicyDocument, RetainPolicy};
 use exoware_server::{Ingest, Log, LogBatch, Prune, Query, QueryExtra, Sequence};
-use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, IteratorMode, Options, WriteOptions, DB};
+use rocksdb::{
+    ColumnFamily, ColumnFamilyDescriptor, FlushOptions, IteratorMode, Options, WriteOptions, DB,
+};
 use tokio::sync::oneshot;
 use tracing::debug;
 
 use crate::rocks::{
-    collect_key_prune_deletes, sequence_log_key, RocksRangeScanCursor, LOG_CF, META_CF,
-    SEQ_META_KEY,
+    collect_key_prune_deletes, sequence_log_key, CommitDurability, RocksRangeScanCursor, LOG_CF,
+    META_CF, SEQ_META_KEY,
 };
 
 const STAGED_CF: &str = "staged";
@@ -74,11 +75,18 @@ struct Sequencer {
 }
 
 impl Sequencer {
-    fn start(db: Arc<DB>, sequence: Arc<AtomicU64>, max_tickets_per_commit: usize) -> Self {
+    fn start(
+        db: Arc<DB>,
+        sequence: Arc<AtomicU64>,
+        max_tickets_per_commit: usize,
+        durability: CommitDurability,
+    ) -> Self {
         let (sender, receiver) = mpsc::channel();
         let handle = thread::Builder::new()
             .name("simulator-rocks-sequencer".to_string())
-            .spawn(move || run_sequencer(db, sequence, receiver, max_tickets_per_commit))
+            .spawn(move || {
+                run_sequencer(db, sequence, receiver, max_tickets_per_commit, durability)
+            })
             .expect("failed to spawn RocksDB sequencer");
         Self {
             sender: Mutex::new(Some(sender)),
@@ -111,12 +119,13 @@ impl Drop for Sequencer {
 }
 
 /// Drains waves of completed tickets, assigns contiguous sequence numbers in completion order,
-/// and publishes each wave with one small synced write.
+/// and publishes each wave with one small synced write (or a WAL-less write plus atomic flush).
 fn run_sequencer(
     db: Arc<DB>,
     sequence: Arc<AtomicU64>,
     receiver: mpsc::Receiver<Ticket>,
     max_tickets_per_commit: usize,
+    durability: CommitDurability,
 ) {
     while let Ok(first) = receiver.recv() {
         let mut tickets = vec![first];
@@ -126,16 +135,27 @@ fn run_sequencer(
                 Err(_) => break,
             }
         }
-        commit_tickets(&db, &sequence, tickets);
+        commit_tickets(&db, &sequence, tickets, durability);
     }
 }
 
-/// Assigns sequence numbers to one wave and commits the pointer rows + frontier with a synced
-/// write. On success the frontier is published and each caller receives its sequence number.
-fn commit_tickets(db: &DB, sequence: &AtomicU64, tickets: Vec<Ticket>) {
+/// Assigns sequence numbers to one wave and commits the pointer rows + frontier. On success the
+/// frontier is published and each caller receives its sequence number.
+///
+/// With [`CommitDurability::SyncWal`] the pointer batch is written with `sync=true`: syncing the
+/// shared WAL also persists the (already written, unsynced) phase-1 data of every ticket in the
+/// wave. With [`CommitDurability::NoWalFlush`] nothing has touched the WAL; the pointer batch is
+/// written WAL-less and one atomic flush of all column families makes the wave durable. Each
+/// ticket's phase-1 write happened before it was submitted, so the flush covers the whole wave.
+fn commit_tickets(
+    db: &DB,
+    sequence: &AtomicU64,
+    tickets: Vec<Ticket>,
+    durability: CommitDurability,
+) {
     let base = sequence.load(Ordering::Acquire);
     let Some(last) = base.checked_add(tickets.len() as u64) else {
-        fail_tickets(db, tickets, "rocks sequence number overflowed".to_string());
+        fail_tickets(tickets, "rocks sequence number overflowed".to_string());
         return;
     };
 
@@ -155,8 +175,19 @@ fn commit_tickets(db: &DB, sequence: &AtomicU64, tickets: Vec<Ticket>) {
     batch.put_cf(meta_cf, SEQ_META_KEY, last.to_le_bytes());
 
     let mut options = WriteOptions::default();
-    options.set_sync(true);
-    match db.write_opt(batch, &options) {
+    let result = match durability {
+        CommitDurability::SyncWal => {
+            options.set_sync(true);
+            db.write_opt(batch, &options).map_err(|e| e.to_string())
+        }
+        CommitDurability::NoWalFlush => {
+            options.disable_wal(true);
+            db.write_opt(batch, &options)
+                .map_err(|e| e.to_string())
+                .and_then(|()| flush_all_cfs(db))
+        }
+    };
+    match result {
         Ok(()) => {
             // Release so `current_sequence` readers only observe rows that are already durable.
             sequence.store(last, Ordering::Release);
@@ -169,23 +200,37 @@ fn commit_tickets(db: &DB, sequence: &AtomicU64, tickets: Vec<Ticket>) {
                 let _ = ticket.response.send(Ok(base + offset as u64 + 1));
             }
         }
-        Err(e) => fail_tickets(db, tickets, e.to_string()),
+        Err(e) => fail_tickets(tickets, e),
     }
 }
 
-/// Fails every ticket in a wave and best-effort deletes their staged rows so a later restart does
-/// not adopt batches whose callers were already told the write failed.
-fn fail_tickets(db: &DB, tickets: Vec<Ticket>, error: String) {
+/// Atomically flushes every column family so all rows beneath the new frontier are durable as
+/// SST files. Requires the DB to be opened with `set_atomic_flush(true)`.
+fn flush_all_cfs(db: &DB) -> Result<(), String> {
+    let default_cf = db
+        .cf_handle(rocksdb::DEFAULT_COLUMN_FAMILY_NAME)
+        .expect("default CF must exist");
+    let meta_cf = db
+        .cf_handle(META_CF)
+        .expect("meta CF must exist (created on open)");
+    let log_cf = db
+        .cf_handle(LOG_CF)
+        .expect("log CF must exist (created on open)");
     let staged_cf = db
         .cf_handle(STAGED_CF)
         .expect("staged CF must exist (created on open)");
-    let mut cleanup = rocksdb::WriteBatch::default();
-    for ticket in &tickets {
-        if ticket.staged {
-            cleanup.delete_cf(staged_cf, ticket.id);
-        }
-    }
-    let _ = db.write(cleanup);
+    let mut flush_options = FlushOptions::default();
+    flush_options.set_wait(true);
+    db.flush_cfs_opt(
+        &[&default_cf, &meta_cf, &log_cf, &staged_cf],
+        &flush_options,
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Fails every ticket in a wave. Their data and staged rows are left behind as unreferenced junk:
+/// no sequence number ever points at them, so they are invisible to the log and harmless.
+fn fail_tickets(tickets: Vec<Ticket>, error: String) {
     for ticket in tickets {
         let _ = ticket.response.send(Err(error.clone()));
     }
@@ -205,6 +250,8 @@ pub struct UnorderedRocksConfig {
     pub staged_cf_options: Options,
     /// Maximum tickets folded into one synced sequence-assignment write.
     pub max_tickets_per_commit: NonZeroUsize,
+    /// How each sequence-assignment wave is made durable before its callers are acked.
+    pub durability: CommitDurability,
 }
 
 impl Default for UnorderedRocksConfig {
@@ -217,6 +264,7 @@ impl Default for UnorderedRocksConfig {
             staged_cf_options: Options::default(),
             max_tickets_per_commit: NonZeroUsize::new(DEFAULT_MAX_TICKETS_PER_COMMIT)
                 .expect("default ticket commit limit must be nonzero"),
+            durability: CommitDurability::default(),
         }
     }
 }
@@ -232,6 +280,7 @@ pub struct UnorderedRocksStore {
     sequencer: Arc<Sequencer>,
     boot_nonce: u64,
     ticket_counter: Arc<AtomicU64>,
+    durability: CommitDurability,
 }
 
 impl UnorderedRocksStore {
@@ -245,10 +294,17 @@ impl UnorderedRocksStore {
             log_cf_options,
             staged_cf_options,
             max_tickets_per_commit,
+            durability,
         } = config.unwrap_or_default();
 
         db_options.create_if_missing(true);
         db_options.create_missing_column_families(true);
+        if durability == CommitDurability::NoWalFlush {
+            // WAL-less durability publishes a frontier only after flushing all CFs; the flush
+            // must be atomic across CFs or a crash could persist the meta frontier without the
+            // data, log, and staged rows beneath it.
+            db_options.set_atomic_flush(true);
+        }
 
         let db = Arc::new(DB::open_cf_descriptors(
             &db_options,
@@ -266,17 +322,19 @@ impl UnorderedRocksStore {
         let meta_cf = db
             .cf_handle(META_CF)
             .expect("meta CF must exist (created on open)");
-        let mut seq = match db.get_cf(meta_cf, SEQ_META_KEY)? {
+        // Staged batches that survived a crash without a sequence assignment are left in place:
+        // they were never acked or published, so ignoring them preserves the sequence contract.
+        let seq = match db.get_cf(meta_cf, SEQ_META_KEY)? {
             Some(bytes) if bytes.len() == 8 => u64::from_le_bytes(bytes.try_into().unwrap()),
             _ => 0,
         };
-        seq = adopt_orphaned_batches(&db, seq)?;
 
         let sequence = Arc::new(AtomicU64::new(seq));
         let sequencer = Arc::new(Sequencer::start(
             db.clone(),
             sequence.clone(),
             max_tickets_per_commit.get(),
+            durability,
         ));
         let boot_nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -288,6 +346,7 @@ impl UnorderedRocksStore {
             sequencer,
             boot_nonce,
             ticket_counter: Arc::new(AtomicU64::new(0)),
+            durability,
         })
     }
 
@@ -374,50 +433,6 @@ impl UnorderedRocksStore {
     }
 }
 
-/// Assigns sequence numbers (with one synced write) to staged batches that have no pointer row.
-/// Phase-1 writes are atomic, so a surviving staged row implies its data rows survived with it;
-/// adopting the batch restores the invariant that all queryable data sits beneath the frontier.
-fn adopt_orphaned_batches(db: &Arc<DB>, mut seq: u64) -> Result<u64, rocksdb::Error> {
-    let log_cf = db
-        .cf_handle(LOG_CF)
-        .expect("log CF must exist (created on open)");
-    let staged_cf = db
-        .cf_handle(STAGED_CF)
-        .expect("staged CF must exist (created on open)");
-    let meta_cf = db
-        .cf_handle(META_CF)
-        .expect("meta CF must exist (created on open)");
-
-    let mut assigned = HashSet::new();
-    for item in db.iterator_cf(log_cf, IteratorMode::Start) {
-        let (_, ticket) = item?;
-        assigned.insert(ticket.to_vec());
-    }
-
-    let mut batch = rocksdb::WriteBatch::default();
-    let mut adopted = 0usize;
-    for item in db.iterator_cf(staged_cf, IteratorMode::Start) {
-        let (ticket, _) = item?;
-        if assigned.contains(ticket.as_ref()) {
-            continue;
-        }
-        seq = seq
-            .checked_add(1)
-            .expect("rocks sequence number overflowed during recovery");
-        batch.put_cf(log_cf, sequence_log_key(seq), ticket.as_ref());
-        adopted += 1;
-    }
-    if adopted == 0 {
-        return Ok(seq);
-    }
-    batch.put_cf(meta_cf, SEQ_META_KEY, seq.to_le_bytes());
-    let mut options = WriteOptions::default();
-    options.set_sync(true);
-    db.write_opt(batch, &options)?;
-    debug!(adopted, sequence = seq, "adopted orphaned staged batches");
-    Ok(seq)
-}
-
 /// Encodes the staged replay payload: a `log.stream.v1.GetResponse` with the sequence number
 /// left unset (it is unknown until assignment). Returns `None` when there is nothing to log.
 fn encode_staged_value(kvs: &[(Bytes, Bytes)]) -> Option<Vec<u8>> {
@@ -471,9 +486,11 @@ impl Ingest for UnorderedRocksStore {
         let staged_value = encode_staged_value(&kvs);
         let staged = staged_value.is_some();
 
-        // Phase 1: unsynced, WAL-backed write of the data rows plus the staged payload. Runs on
-        // the blocking pool so concurrent callers reach RocksDB's write groups in parallel.
+        // Phase 1: unsynced write of the data rows plus the staged payload (WAL-backed under
+        // SyncWal, WAL-less under NoWalFlush). Runs on the blocking pool so concurrent callers
+        // reach RocksDB's write groups in parallel.
         let db = self.db.clone();
+        let durability = self.durability;
         tokio::task::spawn_blocking(move || {
             let mut batch = rocksdb::WriteBatch::default();
             for (k, v) in &kvs {
@@ -485,7 +502,9 @@ impl Ingest for UnorderedRocksStore {
                     .expect("staged CF must exist (created on open)");
                 batch.put_cf(staged_cf, ticket, staged_value);
             }
-            db.write(batch).map_err(|e| e.to_string())
+            let mut options = WriteOptions::default();
+            options.disable_wal(durability == CommitDurability::NoWalFlush);
+            db.write_opt(batch, &options).map_err(|e| e.to_string())
         })
         .await
         .map_err(|e| format!("rocks data write task failed: {e}"))??;
@@ -722,8 +741,56 @@ mod tests {
         assert_eq!(s3, 3);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn no_wal_flush_store_persists_across_reopen() {
+        let config = || UnorderedRocksConfig {
+            durability: CommitDurability::NoWalFlush,
+            ..Default::default()
+        };
+        let dir = tempdir().expect("tempdir");
+        {
+            let store = UnorderedRocksStore::open(dir.path(), Some(config())).expect("open db");
+            let mut puts = Vec::new();
+            for i in 0u8..16 {
+                let store = store.clone();
+                puts.push(tokio::spawn(async move {
+                    store
+                        .put_batch(vec![(Bytes::from(vec![i]), Bytes::from(vec![i + 1]))])
+                        .await
+                        .expect("put")
+                }));
+            }
+            let mut sequences = BTreeSet::new();
+            for put in puts {
+                sequences.insert(put.await.expect("put task"));
+            }
+            assert_eq!(sequences, (1..=16).collect::<BTreeSet<_>>());
+        }
+
+        // Durability came from the per-wave atomic flush, not the (disabled) WAL.
+        let reopened = UnorderedRocksStore::open(dir.path(), Some(config())).expect("reopen db");
+        assert_eq!(reopened.current_sequence(), 16);
+        let mut logged_keys = BTreeSet::new();
+        for sequence in 1..=16 {
+            let batch = reopened
+                .get_batch(sequence)
+                .await
+                .expect("get batch")
+                .expect("batch retained");
+            for (key, value) in batch_entries(batch) {
+                assert_eq!(value.as_ref(), &[key[0] + 1]);
+                assert_eq!(
+                    reopened.get(key.clone()).await.expect("get").0,
+                    Some(value.clone())
+                );
+                logged_keys.insert(key[0]);
+            }
+        }
+        assert_eq!(logged_keys, (0u8..16).collect::<BTreeSet<_>>());
+    }
+
     #[tokio::test]
-    async fn open_adopts_orphaned_staged_batches() {
+    async fn open_ignores_orphaned_staged_batches() {
         let dir = tempdir().expect("tempdir");
         {
             let store = UnorderedRocksStore::open(dir.path(), None).expect("open db");
@@ -745,22 +812,19 @@ mod tests {
             store.db.write(batch).expect("seed orphan");
         }
 
+        // The orphan is junk: the frontier stays where the last ack left it, no sequence number
+        // points at the staged row, and a new write simply takes the next number.
         let reopened = UnorderedRocksStore::open(dir.path(), None).expect("reopen db");
-        assert_eq!(reopened.current_sequence(), 2);
+        assert_eq!(reopened.current_sequence(), 1);
+        let s2 = reopened
+            .put_batch(vec![(Bytes::from_static(b"b"), Bytes::from_static(b"2"))])
+            .await
+            .expect("put");
+        assert_eq!(s2, 2);
         assert_eq!(
-            batch_entries(
-                reopened
-                    .get_batch(2)
-                    .await
-                    .expect("get")
-                    .expect("adopted batch retained")
-            ),
-            vec![(Bytes::from_static(b"orphan"), Bytes::from_static(b"o"))]
+            batch_entries(reopened.get_batch(2).await.expect("get").expect("retained")),
+            vec![(Bytes::from_static(b"b"), Bytes::from_static(b"2"))]
         );
-        // Re-opening again must not adopt the same batch twice.
-        drop(reopened);
-        let reopened = UnorderedRocksStore::open(dir.path(), None).expect("reopen db again");
-        assert_eq!(reopened.current_sequence(), 2);
     }
 
     #[tokio::test]

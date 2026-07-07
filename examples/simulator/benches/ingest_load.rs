@@ -3,10 +3,13 @@
 //! Modes:
 //! - `ordered`: the production [`exoware_simulator::RocksStore`] write pipeline (contiguous
 //!   sequence numbers assigned before a single synced commit per group).
+//! - `ordered-nowal`: same pipeline with `CommitDurability::NoWalFlush` (WAL disabled; each
+//!   commit group is made durable by one atomic memtable flush instead of a WAL fsync).
 //! - `unordered`: the experimental [`exoware_simulator::UnorderedRocksStore`] pipeline
 //!   (concurrent unsynced data writes, sequence numbers assigned after by a tiny synced write).
-//! - `unordered-uw`: same store with RocksDB's `unordered_write=true`, which relaxes RocksDB's
-//!   internal write ordering to admit more memtable concurrency.
+//! - `unordered-nowal`: unordered pipeline with `CommitDurability::NoWalFlush`.
+//! - `unordered-uw`: unordered pipeline with RocksDB's `unordered_write=true`, which relaxes
+//!   RocksDB's internal write ordering to admit more memtable concurrency.
 //! - `raw-nosync`: concurrent RocksDB writes without sync, sequence numbers, or a batch log.
 //!   Upper bound for what the disk + RocksDB can do with zero ordering or durability work.
 //! - `raw-sync`: concurrent RocksDB writes with `sync=true` on every write (RocksDB group
@@ -14,8 +17,17 @@
 //!
 //! Usage (all flags optional):
 //!   cargo bench -p exoware-simulator --bench ingest_load -- \
-//!     [--modes ordered,unordered,unordered-uw,raw-nosync,raw-sync] [--concurrency 1,8,64,256] \
-//!     [--value-sizes 128,1024,16384] [--kvs-per-put 1] [--measure-secs 5] [--warmup-secs 1]
+//!     [--modes ordered,ordered-nowal,unordered,unordered-nowal,unordered-uw,raw-nosync,raw-sync] \
+//!     [--concurrency 1,8,64,256] [--value-sizes 128,1024,16384] [--kvs-per-put 1] \
+//!     [--measure-secs 5] [--warmup-secs 1]
+//!
+//! Large-batch ingest (the primary production shape, 250k+ keys per put):
+//!   cargo bench -p exoware-simulator --bench ingest_load -- \
+//!     --modes ordered,ordered-nowal,unordered,unordered-nowal,raw-nosync \
+//!     --concurrency 1,4 --value-sizes 128 --kvs-per-put 250000 --measure-secs 20
+//!
+//! `--tuned` sizes RocksDB for bulk ingest (512 MiB write buffers, 8 background jobs, relaxed
+//! L0 stall thresholds) to separate pipeline costs from stock-option write stalls.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -23,13 +35,18 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use exoware_server::Ingest;
-use exoware_simulator::{RocksStore, UnorderedRocksConfig, UnorderedRocksStore};
+use exoware_simulator::{
+    CommitDurability, RocksConfig, RocksStore, RocksWritePipelineConfig, UnorderedRocksConfig,
+    UnorderedRocksStore,
+};
 use tempfile::tempdir;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Ordered,
+    OrderedNoWal,
     Unordered,
+    UnorderedNoWal,
     UnorderedUw,
     RawNoSync,
     RawSync,
@@ -39,7 +56,9 @@ impl Mode {
     fn parse(s: &str) -> Option<Self> {
         match s {
             "ordered" => Some(Self::Ordered),
+            "ordered-nowal" => Some(Self::OrderedNoWal),
             "unordered" => Some(Self::Unordered),
+            "unordered-nowal" => Some(Self::UnorderedNoWal),
             "unordered-uw" => Some(Self::UnorderedUw),
             "raw-nosync" => Some(Self::RawNoSync),
             "raw-sync" => Some(Self::RawSync),
@@ -50,7 +69,9 @@ impl Mode {
     fn name(&self) -> &'static str {
         match self {
             Self::Ordered => "ordered",
+            Self::OrderedNoWal => "ordered-nowal",
             Self::Unordered => "unordered",
+            Self::UnorderedNoWal => "unordered-nowal",
             Self::UnorderedUw => "unordered-uw",
             Self::RawNoSync => "raw-nosync",
             Self::RawSync => "raw-sync",
@@ -97,6 +118,24 @@ struct CellConfig {
     kvs_per_put: usize,
     warmup: Duration,
     measure: Duration,
+    tuned: bool,
+}
+
+/// Bulk-ingest RocksDB options: large write buffers so flushes are infrequent and well-sized,
+/// more background jobs so flush/compaction keeps up, and relaxed L0 stall thresholds so the
+/// pipelines under test are measured instead of stock-option write stalls.
+fn tuned_db_options() -> rocksdb::Options {
+    let mut options = rocksdb::Options::default();
+    options.set_write_buffer_size(512 * 1024 * 1024);
+    options.set_max_write_buffer_number(4);
+    options.set_max_background_jobs(8);
+    options.set_level_zero_slowdown_writes_trigger(40);
+    options.set_level_zero_stop_writes_trigger(60);
+    options
+}
+
+fn tuned_cf_options() -> rocksdb::Options {
+    tuned_db_options()
 }
 
 struct CellResult {
@@ -115,18 +154,60 @@ fn percentile(sorted_us: &[u64], p: f64) -> f64 {
 
 async fn run_cell(config: &CellConfig) -> CellResult {
     let dir = tempdir().expect("tempdir");
+    let ordered_config = |durability: CommitDurability| {
+        let mut ordered = RocksConfig {
+            write_pipeline: RocksWritePipelineConfig {
+                durability,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        if config.tuned {
+            ordered.db_options = tuned_db_options();
+            ordered.default_cf_options = tuned_cf_options();
+        }
+        ordered
+    };
+    let unordered_config = |durability: CommitDurability| {
+        let mut unordered = UnorderedRocksConfig {
+            durability,
+            ..Default::default()
+        };
+        if config.tuned {
+            unordered.db_options = tuned_db_options();
+            unordered.default_cf_options = tuned_cf_options();
+            unordered.staged_cf_options = tuned_cf_options();
+        }
+        unordered
+    };
     let engine = match config.mode {
-        Mode::Ordered => Engine::Ordered(RocksStore::open(dir.path(), None).expect("open")),
+        Mode::Ordered => {
+            let config = ordered_config(CommitDurability::SyncWal);
+            Engine::Ordered(RocksStore::open(dir.path(), Some(config)).expect("open"))
+        }
+        Mode::OrderedNoWal => {
+            let config = ordered_config(CommitDurability::NoWalFlush);
+            Engine::Ordered(RocksStore::open(dir.path(), Some(config)).expect("open"))
+        }
         Mode::Unordered => {
-            Engine::Unordered(UnorderedRocksStore::open(dir.path(), None).expect("open"))
+            let config = unordered_config(CommitDurability::SyncWal);
+            Engine::Unordered(UnorderedRocksStore::open(dir.path(), Some(config)).expect("open"))
+        }
+        Mode::UnorderedNoWal => {
+            let config = unordered_config(CommitDurability::NoWalFlush);
+            Engine::Unordered(UnorderedRocksStore::open(dir.path(), Some(config)).expect("open"))
         }
         Mode::UnorderedUw => {
-            let mut config = UnorderedRocksConfig::default();
+            let mut config = unordered_config(CommitDurability::SyncWal);
             config.db_options.set_unordered_write(true);
             Engine::Unordered(UnorderedRocksStore::open(dir.path(), Some(config)).expect("open"))
         }
         Mode::RawNoSync | Mode::RawSync => {
-            let mut options = rocksdb::Options::default();
+            let mut options = if config.tuned {
+                tuned_db_options()
+            } else {
+                rocksdb::Options::default()
+            };
             options.create_if_missing(true);
             Engine::Raw {
                 db: Arc::new(rocksdb::DB::open(&options, dir.path()).expect("open")),
@@ -217,6 +298,7 @@ fn main() {
     let mut kvs_per_put = 1usize;
     let mut measure_secs = 5u64;
     let mut warmup_secs = 1u64;
+    let mut tuned = false;
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -249,6 +331,7 @@ fn main() {
                 i += 1;
                 warmup_secs = args[i].parse().expect("warmup secs");
             }
+            "--tuned" => tuned = true,
             // `cargo bench` passes --bench through to the harness; ignore it.
             "--bench" => {}
             other => panic!("unknown argument: {other}"),
@@ -275,6 +358,7 @@ fn main() {
                     kvs_per_put,
                     warmup: Duration::from_secs(warmup_secs),
                     measure: Duration::from_secs(measure_secs),
+                    tuned,
                 };
                 let result = runtime.block_on(run_cell(&config));
                 let seconds = result.elapsed.as_secs_f64();

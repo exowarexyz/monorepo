@@ -26,8 +26,8 @@ use exoware_server::{
 };
 use regex::bytes::Regex;
 use rocksdb::{
-    ColumnFamily, ColumnFamilyDescriptor, DBIterator, Direction, IteratorMode, Options,
-    WriteOptions, DB,
+    ColumnFamily, ColumnFamilyDescriptor, DBIterator, Direction, FlushOptions, IteratorMode,
+    Options, WriteOptions, DB,
 };
 use tokio::sync::oneshot;
 use tracing::debug;
@@ -381,9 +381,18 @@ impl Writer {
         let commit_db = db.clone();
         let commit_sequence = sequence.clone();
         let commit_epoch = epoch.clone();
+        let durability = write_pipeline.durability;
         let commit = thread::Builder::new()
             .name("simulator-rocks-commit".to_string())
-            .spawn(move || run_commit(commit_db, commit_sequence, commit_epoch, group_receiver))
+            .spawn(move || {
+                run_commit(
+                    commit_db,
+                    commit_sequence,
+                    commit_epoch,
+                    group_receiver,
+                    durability,
+                )
+            })
             .expect("failed to spawn RocksDB commit worker");
 
         let prepare = thread::Builder::new()
@@ -571,10 +580,11 @@ fn run_commit(
     sequence: Arc<AtomicU64>,
     epoch: Arc<AtomicU64>,
     receiver: mpsc::Receiver<PreparedWrite>,
+    durability: CommitDurability,
 ) {
     let mut committed = sequence.load(Ordering::Acquire);
     while let Ok(group) = receiver.recv() {
-        committed = commit_group(&db, &sequence, &epoch, committed, group);
+        committed = commit_group(&db, &sequence, &epoch, committed, group, durability);
     }
 }
 
@@ -585,6 +595,7 @@ fn commit_group(
     epoch: &AtomicU64,
     committed: u64,
     group: PreparedWrite,
+    durability: CommitDurability,
 ) -> u64 {
     if group.writes.is_empty() {
         return committed;
@@ -603,7 +614,7 @@ fn commit_group(
 
     let requests = group.writes.len();
     let batch_bytes = group.batch_bytes;
-    match write_prepared_group(db, group) {
+    match write_prepared_group(db, group, durability) {
         Ok((writes, last_sequence)) => {
             // Release so `current_sequence` readers only observe rows that are already durable.
             sequence.store(last_sequence, Ordering::Release);
@@ -626,11 +637,13 @@ fn commit_group(
     }
 }
 
-/// Commits one prepared group with a single synced write. Returns the group's writes alongside its
-/// last sequence number on success, or the writes and the error on failure.
+/// Commits one prepared group with a single synced write (or a WAL-less write plus atomic flush).
+/// Returns the group's writes alongside its last sequence number on success, or the writes and the
+/// error on failure.
 fn write_prepared_group(
     db: &DB,
     group: PreparedWrite,
+    durability: CommitDurability,
 ) -> Result<(Vec<AssignedWrite>, u64), (Vec<AssignedWrite>, String)> {
     let PreparedWrite { writes, batch, .. } = group;
     let last_sequence = match writes.last() {
@@ -641,7 +654,11 @@ fn write_prepared_group(
         Ok(batch) => batch,
         Err(error) => return Err((writes, error)),
     };
-    match write_sequence_batch(db, batch) {
+    let result = match durability {
+        CommitDurability::SyncWal => write_sequence_batch(db, batch),
+        CommitDurability::NoWalFlush => write_sequence_batch_no_wal(db, batch),
+    };
+    match result {
         Ok(()) => Ok((writes, last_sequence)),
         Err(error) => Err((writes, error)),
     }
@@ -715,6 +732,36 @@ fn write_sequence_batch(db: &DB, batch: rocksdb::WriteBatch) -> Result<(), Strin
         .map_err(|e| e.to_string())
 }
 
+/// Writes a sequence batch without the WAL, then atomically flushes every column family the batch
+/// touched so the group is durable (as SST files) before its sequence numbers are published.
+///
+/// Requires the DB to be opened with `set_atomic_flush(true)`: the tri-CF flush must land as one
+/// unit or a crash could persist the meta frontier without the data/log rows beneath it.
+fn write_sequence_batch_no_wal(db: &DB, batch: rocksdb::WriteBatch) -> Result<(), String> {
+    let mut write_options = WriteOptions::default();
+    write_options.disable_wal(true);
+    db.write_opt(batch, &write_options)
+        .map_err(|e| e.to_string())?;
+    flush_all_cfs(db)
+}
+
+/// Atomically flushes the default, meta, and log column families.
+fn flush_all_cfs(db: &DB) -> Result<(), String> {
+    let meta_cf = db
+        .cf_handle(META_CF)
+        .expect("meta CF must exist (created on open)");
+    let log_cf = db
+        .cf_handle(LOG_CF)
+        .expect("log CF must exist (created on open)");
+    let default_cf = db
+        .cf_handle(rocksdb::DEFAULT_COLUMN_FAMILY_NAME)
+        .expect("default CF must exist");
+    let mut flush_options = FlushOptions::default();
+    flush_options.set_wait(true);
+    db.flush_cfs_opt(&[&default_cf, &meta_cf, &log_cf], &flush_options)
+        .map_err(|e| e.to_string())
+}
+
 /// Sends the same assignment failure to every request in a wave.
 fn fail_requests(requests: Vec<WriteRequest>, error: String) {
     for request in requests {
@@ -736,11 +783,29 @@ fn complete_assigned_writes(writes: Vec<AssignedWrite>) {
     }
 }
 
+/// How a committed group is made durable before its sequence numbers are published.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CommitDurability {
+    /// WAL-backed writes, fsync'd once per commit group (default).
+    #[default]
+    SyncWal,
+    /// WAL-less writes made durable by an atomic memtable flush per commit group.
+    ///
+    /// Every payload byte skips the WAL, halving the bytes that must reach the disk before an
+    /// ack; the ack barrier becomes one L0 file per column family per commit group instead of a
+    /// WAL fsync. Only sensible for large-batch ingest (hundreds of thousands of keys per put),
+    /// where each flush produces well-sized files. Under small-batch load it degrades into a
+    /// storm of tiny L0 files and compaction debt.
+    NoWalFlush,
+}
+
 /// Application-level write pipeline options used by [`RocksStore::open`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RocksWritePipelineConfig {
     /// Soft maximum RocksDB `WriteBatch` size before cutting a prepared commit group.
     pub max_commit_batch_bytes: NonZeroUsize,
+    /// How each commit group is made durable before its callers are acked.
+    pub durability: CommitDurability,
 }
 
 impl Default for RocksWritePipelineConfig {
@@ -748,6 +813,7 @@ impl Default for RocksWritePipelineConfig {
         Self {
             max_commit_batch_bytes: NonZeroUsize::new(DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES)
                 .expect("default commit batch byte limit must be nonzero"),
+            durability: CommitDurability::default(),
         }
     }
 }
@@ -790,6 +856,12 @@ impl RocksStore {
 
         db_options.create_if_missing(true);
         db_options.create_missing_column_families(true);
+        if write_pipeline.durability == CommitDurability::NoWalFlush {
+            // WAL-less durability publishes a frontier only after flushing all CFs touched by the
+            // commit group; the flush must be atomic across CFs or a crash could persist the meta
+            // frontier without the rows beneath it.
+            db_options.set_atomic_flush(true);
+        }
 
         let cf_default =
             ColumnFamilyDescriptor::new(rocksdb::DEFAULT_COLUMN_FAMILY_NAME, default_cf_options);
@@ -1160,6 +1232,7 @@ mod tests {
             RocksWritePipelineConfig {
                 max_commit_batch_bytes: NonZeroUsize::new(DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES,)
                     .expect("nonzero"),
+                durability: CommitDurability::SyncWal,
             }
         );
         assert_eq!(
@@ -1258,7 +1331,14 @@ mod tests {
 
         // A group that cannot commit (modeled with an already-failed batch) at sequences 1 and 2.
         let (group, receivers) = failing_group(0, &[(1, b"a", b"1"), (2, b"b", b"2")], "disk full");
-        let committed = commit_group(&store.db, &store.sequence, &epoch, 0, group);
+        let committed = commit_group(
+            &store.db,
+            &store.sequence,
+            &epoch,
+            0,
+            group,
+            CommitDurability::SyncWal,
+        );
 
         // Nothing was published, and the epoch advanced so the abandoned numbers can be re-used.
         assert_eq!(committed, 0);
@@ -1275,7 +1355,14 @@ mod tests {
         let (write_x, result_x) = assigned_write_with_response(1, b"x", b"24");
         let (write_y, result_y) = assigned_write_with_response(2, b"y", b"25");
         let group = prepared_write(&store.db, 1, vec![write_x, write_y]);
-        let committed = commit_group(&store.db, &store.sequence, &epoch, committed, group);
+        let committed = commit_group(
+            &store.db,
+            &store.sequence,
+            &epoch,
+            committed,
+            group,
+            CommitDurability::SyncWal,
+        );
 
         assert_eq!(committed, 2);
         assert_eq!(store.current_sequence(), 2);
@@ -1300,7 +1387,14 @@ mod tests {
 
         let (write, result) = assigned_write_with_response(1, b"a", b"1");
         let group = prepared_write(&store.db, 0, vec![write]);
-        let committed = commit_group(&store.db, &store.sequence, &epoch, 0, group);
+        let committed = commit_group(
+            &store.db,
+            &store.sequence,
+            &epoch,
+            0,
+            group,
+            CommitDurability::SyncWal,
+        );
 
         assert_eq!(committed, 0);
         assert_eq!(store.current_sequence(), 0);
@@ -1322,7 +1416,14 @@ mod tests {
         for attempt in [b"first" as &[u8], b"second"] {
             let current = epoch.load(Ordering::Acquire);
             let (group, receivers) = failing_group(current, &[(1, b"k", b"v")], "boom");
-            let committed = commit_group(&store.db, &store.sequence, &epoch, 0, group);
+            let committed = commit_group(
+                &store.db,
+                &store.sequence,
+                &epoch,
+                0,
+                group,
+                CommitDurability::SyncWal,
+            );
             assert_eq!(
                 committed, 0,
                 "attempt {attempt:?} must not advance the frontier"
@@ -1337,7 +1438,14 @@ mod tests {
         let current = epoch.load(Ordering::Acquire);
         let (write, result) = assigned_write_with_response(1, b"k", b"v");
         let group = prepared_write(&store.db, current, vec![write]);
-        let committed = commit_group(&store.db, &store.sequence, &epoch, 0, group);
+        let committed = commit_group(
+            &store.db,
+            &store.sequence,
+            &epoch,
+            0,
+            group,
+            CommitDurability::SyncWal,
+        );
         assert_eq!(committed, 1);
         assert_eq!(result.await.expect("response"), Ok(1));
         assert_eq!(store.current_sequence(), 1);
@@ -1365,7 +1473,14 @@ mod tests {
         );
 
         let (failed, receivers) = failing_group(0, &[(1, b"k", b"failed")], "boom");
-        let committed = commit_group(&store.db, &store.sequence, &epoch, 0, failed);
+        let committed = commit_group(
+            &store.db,
+            &store.sequence,
+            &epoch,
+            0,
+            failed,
+            CommitDurability::SyncWal,
+        );
         assert_eq!(committed, 0);
         assert_eq!(store.current_sequence(), 0);
         assert_eq!(epoch.load(Ordering::Acquire), 1);
@@ -1375,7 +1490,14 @@ mod tests {
 
         let (write, result) = assigned_write_with_response(1, b"k", b"new");
         let group = prepared_write(&store.db, 1, vec![write]);
-        let committed = commit_group(&store.db, &store.sequence, &epoch, committed, group);
+        let committed = commit_group(
+            &store.db,
+            &store.sequence,
+            &epoch,
+            committed,
+            group,
+            CommitDurability::SyncWal,
+        );
 
         assert_eq!(committed, 1);
         assert_eq!(result.await.expect("response"), Ok(1));
@@ -1394,6 +1516,7 @@ mod tests {
             Some(RocksConfig {
                 write_pipeline: RocksWritePipelineConfig {
                     max_commit_batch_bytes: NonZeroUsize::new(1).expect("nonzero"),
+                    durability: CommitDurability::SyncWal,
                 },
                 ..Default::default()
             }),
@@ -1406,6 +1529,58 @@ mod tests {
             .expect("put");
         assert_eq!(sequence, 1);
         assert_eq!(store.current_sequence(), 1);
+    }
+
+    #[tokio::test]
+    async fn no_wal_flush_store_persists_across_reopen() {
+        let config = || RocksConfig {
+            write_pipeline: RocksWritePipelineConfig {
+                durability: CommitDurability::NoWalFlush,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let dir = tempdir().expect("tempdir");
+        {
+            let store = RocksStore::open(dir.path(), Some(config())).expect("open db");
+            let s1 = store
+                .put_batch(vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))])
+                .await
+                .expect("put");
+            let s2 = store
+                .put_batch(vec![(Bytes::from_static(b"b"), Bytes::from_static(b"2"))])
+                .await
+                .expect("put");
+            assert_eq!(s1, 1);
+            assert_eq!(s2, 2);
+        }
+
+        // Durability came from the per-commit atomic flush, not the (disabled) WAL.
+        let reopened = RocksStore::open(dir.path(), Some(config())).expect("reopen db");
+        assert_eq!(reopened.current_sequence(), 2);
+        assert_eq!(
+            reopened.db.get(b"a").expect("get a").as_deref(),
+            Some(&b"1"[..])
+        );
+        assert_eq!(
+            reopened.db.get(b"b").expect("get b").as_deref(),
+            Some(&b"2"[..])
+        );
+        assert_eq!(
+            batch_entries(
+                reopened
+                    .get_batch(2)
+                    .await
+                    .expect("get batch")
+                    .expect("retained")
+            ),
+            vec![(Bytes::from_static(b"b"), Bytes::from_static(b"2"))]
+        );
+        let s3 = reopened
+            .put_batch(vec![(Bytes::from_static(b"c"), Bytes::from_static(b"3"))])
+            .await
+            .expect("put");
+        assert_eq!(s3, 3);
     }
 
     #[tokio::test]
@@ -1480,7 +1655,14 @@ mod tests {
 
         assert_eq!(prepared.writes.len(), 3);
         assert!(prepared.batch_bytes > 0);
-        let committed = commit_group(&store.db, &store.sequence, &epoch, 0, prepared);
+        let committed = commit_group(
+            &store.db,
+            &store.sequence,
+            &epoch,
+            0,
+            prepared,
+            CommitDurability::SyncWal,
+        );
         assert_eq!(committed, 3);
 
         assert_eq!(store.current_sequence(), 3);
