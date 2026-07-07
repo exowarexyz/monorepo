@@ -38,5 +38,5 @@ name = "simulator"
 path = "src/main.rs"
 
 [[bench]]
-name = "ingest_throughput"
+name = "ingest"
 harness = false

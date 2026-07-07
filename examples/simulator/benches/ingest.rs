@@ -8,7 +8,7 @@
 //! Run with:
 //!
 //! ```bash
-//! cargo bench -p exoware-simulator --bench ingest_throughput
+//! cargo bench -p exoware-simulator --bench ingest
 //! ```
 //!
 //! Environment overrides: `BENCH_BATCHES`, `BENCH_KEYS_PER_BATCH`,

@@ -304,10 +304,13 @@ fn keys_to_delete(
 
 /// Sequence frontier shared by the store and its writer stages.
 struct Frontiers {
-    /// Highest sequence readers may observe: log rows and state rows both ingested. The durable
-    /// frontier (highest sequence whose log rows are durable) is not tracked in-process — it
-    /// only runs ahead of `published` while a group's state ingestion is in flight, and is
-    /// re-derived at open from the retained log rows and the state-floor meta row.
+    /// Highest sequence whose log rows and state rows are both ingested; gates every
+    /// sequence-addressed read (`current_sequence`, `get_batch`, `oldest_retained_batch`).
+    /// Point reads of current state are deliberately ungated: state may lead this frontier by
+    /// the one group being published, but never lags it. The durable frontier (highest sequence
+    /// whose log rows are durable) is not tracked in-process — it only runs ahead of `published`
+    /// while a group's state ingestion is in flight, and is re-derived at open from the retained
+    /// log rows and the state-floor meta row.
     published: AtomicU64,
     /// Serializes prunes (so the persisted state floor never moves backward) and orders state
     /// visibility against floor reads: `commit` ingests and publishes each group's state under
@@ -371,6 +374,7 @@ impl Writer {
     fn start(
         db: Arc<DB>,
         ingest_dir: PathBuf,
+        staging_pool: rayon::ThreadPool,
         frontiers: Arc<Frontiers>,
         next: u64,
         write_pipeline: RocksWritePipelineConfig,
@@ -391,6 +395,7 @@ impl Writer {
             .spawn(move || {
                 run_prepare(
                     ingest_dir,
+                    staging_pool,
                     next,
                     request_receiver,
                     group_sender,
@@ -442,14 +447,21 @@ impl Drop for Writer {
 /// (store drop); panics if `commit` died, since that only happens on a fatal write error.
 fn run_prepare(
     ingest_dir: PathBuf,
+    staging_pool: rayon::ThreadPool,
     mut next: u64,
     receiver: mpsc::Receiver<WriteRequest>,
     sender: mpsc::SyncSender<PreparedWrite>,
     max_commit_batch_bytes: usize,
 ) {
     while let Ok(first) = receiver.recv() {
-        let (group, disconnected) =
-            prepare_queued_write(&ingest_dir, &receiver, first, next, max_commit_batch_bytes);
+        let (group, disconnected) = prepare_queued_write(
+            &ingest_dir,
+            &staging_pool,
+            &receiver,
+            first,
+            next,
+            max_commit_batch_bytes,
+        );
         next = group
             .writes
             .last()
@@ -470,6 +482,7 @@ fn run_prepare(
 /// crosses the cap stays in the wave so a single large request can still make progress.
 fn prepare_queued_write(
     ingest_dir: &Path,
+    staging_pool: &rayon::ThreadPool,
     receiver: &mpsc::Receiver<WriteRequest>,
     first: WriteRequest,
     from: u64,
@@ -509,15 +522,16 @@ fn prepare_queued_write(
         }
     }
 
-    let staged = stage_group_files(ingest_dir, &writes);
+    let staged = staging_pool.install(|| stage_group_files(ingest_dir, &writes));
     (PreparedWrite { writes, staged }, disconnected)
 }
 
 /// Writes and syncs one commit group's two SST files: the replay-log rows (already in ascending
 /// sequence order) and the current-state rows (sorted by key in parallel, keeping the last write
-/// per key). The two files are built concurrently; ingestion later links them into their column
-/// families, so each payload byte reaches the disk exactly once, in its final resting place.
-/// A staging failure is fatal; leftover files are removed by the next open.
+/// per key). The two files are built concurrently on the caller's rayon pool (the store's
+/// staging pool, sized by [`RocksWritePipelineConfig::staging_threads`]); ingestion later links
+/// them into their column families, so each payload byte reaches the disk exactly once, in its
+/// final resting place. A staging failure is fatal; leftover files are removed by the next open.
 fn stage_group_files(ingest_dir: &Path, writes: &[AssignedWrite]) -> StagedFiles {
     let first = writes.first().expect("groups are never empty").sequence;
     let last = writes.last().expect("groups are never empty").sequence;
@@ -718,6 +732,11 @@ fn read_state_floor(db: &DB) -> Result<u64, String> {
 /// the one that ends at the durable frontier — which is idempotent because those rows are the
 /// newest writes for their keys. Rows at or below `floor` are skipped: their state is already
 /// authoritative, and key pruning may have deleted rows a replay would resurrect.
+///
+/// Bounding the replay by the last file's start key assumes log-CF file boundaries stay aligned
+/// with commit groups. That holds under stock options: ingested log files land at the bottom
+/// level (their sequence ranges never overlap) where automatic compaction never rewrites them
+/// (verified against the bundled RocksDB's level-selection and compaction-trigger sources).
 fn replay_last_log_file(db: &DB, floor: u64) -> Result<(), String> {
     let last_file_start = db
         .live_files()
@@ -772,6 +791,9 @@ pub struct RocksWritePipelineConfig {
     /// Soft maximum combined size (state rows plus encoded log rows) before cutting a prepared
     /// commit group.
     pub max_commit_batch_bytes: NonZeroUsize,
+    /// Threads in the pool that sorts and stages each commit group's SST files — CPU work on
+    /// the ack path. Defaults to the machine's available parallelism.
+    pub staging_threads: NonZeroUsize,
 }
 
 impl Default for RocksWritePipelineConfig {
@@ -779,12 +801,22 @@ impl Default for RocksWritePipelineConfig {
         Self {
             max_commit_batch_bytes: NonZeroUsize::new(DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES)
                 .expect("default commit batch byte limit must be nonzero"),
+            staging_threads: available_parallelism(),
         }
     }
 }
 
+/// The machine's available parallelism, defaulting to two when it cannot be queried.
+fn available_parallelism() -> NonZeroUsize {
+    thread::available_parallelism().unwrap_or_else(|_| NonZeroUsize::new(2).expect("nonzero"))
+}
+
 /// RocksDB engine and application-level write pipeline options used by [`RocksStore::open`].
 pub struct RocksConfig {
+    /// Background jobs RocksDB may run concurrently: flushes and the compactions that must keep
+    /// merging the overlapping ingested state SSTs. Applied on top of `db_options` at open.
+    /// Defaults to the machine's available parallelism.
+    pub background_jobs: NonZeroUsize,
     /// Database-wide options.
     pub db_options: Options,
     /// Options for the default column family, which stores the current key-value state.
@@ -798,19 +830,13 @@ pub struct RocksConfig {
 }
 
 impl Default for RocksConfig {
-    /// Stock RocksDB options, plus background parallelism sized to the machine: commits ingest
-    /// overlapping state SSTs that compactions must keep merging. Memtables are off the hot
-    /// path (only the open-time replay and prune deletes write them), so they stay at stock
-    /// defaults.
+    /// Stock RocksDB options, with background jobs defaulting to the machine's available cores.
+    /// Memtables are off the hot path (only the open-time replay and prune deletes write
+    /// them), so they stay at stock defaults.
     fn default() -> Self {
-        let cores = thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(2) as i32;
-        let mut db_options = Options::default();
-        db_options.increase_parallelism(cores);
-
         Self {
-            db_options,
+            background_jobs: available_parallelism(),
+            db_options: Options::default(),
             default_cf_options: Options::default(),
             meta_cf_options: Options::default(),
             log_cf_options: Options::default(),
@@ -836,6 +862,7 @@ impl RocksStore {
     /// the durable sequence even after a crash between a group's log and state ingestions.
     pub fn open(path: &Path, config: Option<RocksConfig>) -> Result<Self, String> {
         let RocksConfig {
+            background_jobs,
             mut db_options,
             default_cf_options,
             meta_cf_options,
@@ -845,6 +872,12 @@ impl RocksStore {
 
         db_options.create_if_missing(true);
         db_options.create_missing_column_families(true);
+        db_options.increase_parallelism(background_jobs.get() as i32);
+        let staging_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(write_pipeline.staging_threads.get())
+            .thread_name(|i| format!("simulator-rocks-stage-{i}"))
+            .build()
+            .map_err(|e| format!("failed to build SST staging thread pool: {e}"))?;
 
         let cf_default =
             ColumnFamilyDescriptor::new(rocksdb::DEFAULT_COLUMN_FAMILY_NAME, default_cf_options);
@@ -865,6 +898,7 @@ impl RocksStore {
         let writer = Arc::new(Writer::start(
             db.clone(),
             ingest_dir,
+            staging_pool,
             frontiers.clone(),
             seq,
             write_pipeline,
@@ -1315,6 +1349,13 @@ mod tests {
         PreparedWrite { writes, staged }
     }
 
+    fn staging_pool() -> rayon::ThreadPool {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("build staging pool")
+    }
+
     #[test]
     fn log_value_matches_generated_encoder() {
         let cases: Vec<(u64, Vec<(Bytes, Bytes)>)> = vec![
@@ -1379,6 +1420,7 @@ mod tests {
         let first = receiver.recv().expect("first request");
         let (group, disconnected) = prepare_queued_write(
             dir.path(),
+            &staging_pool(),
             &receiver,
             first,
             0,
@@ -1401,7 +1443,8 @@ mod tests {
         drop(sender);
 
         let first = receiver.recv().expect("first request");
-        let (group, disconnected) = prepare_queued_write(dir.path(), &receiver, first, 0, 1);
+        let (group, disconnected) =
+            prepare_queued_write(dir.path(), &staging_pool(), &receiver, first, 0, 1);
 
         assert_eq!(group.writes.len(), 1);
         assert_eq!(group.writes[0].request.kvs[0].0.as_ref(), b"a");
@@ -1587,13 +1630,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rocks_store_accepts_configured_write_pipeline() {
+    async fn rocks_store_accepts_custom_config() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(
             dir.path(),
             Some(RocksConfig {
+                background_jobs: NonZeroUsize::new(1).expect("nonzero"),
                 write_pipeline: RocksWritePipelineConfig {
                     max_commit_batch_bytes: NonZeroUsize::new(1).expect("nonzero"),
+                    staging_threads: NonZeroUsize::new(1).expect("nonzero"),
                 },
                 ..Default::default()
             }),
