@@ -8505,6 +8505,8 @@ mod tests {
         struct TestServers {
             ingest_url: String,
             query_url: String,
+            /// Keeps the store's data directory alive for the whole test.
+            _dir: tempfile::TempDir,
         }
 
         impl TestServers {
@@ -8544,6 +8546,7 @@ mod tests {
                     return TestServers {
                         ingest_url: url.clone(),
                         query_url: url,
+                        _dir: dir,
                     };
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
