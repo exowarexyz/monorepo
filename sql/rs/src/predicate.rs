@@ -20,6 +20,24 @@ fn write_index_bound_bytes(dst: &mut [u8], offset: usize, src: &[u8]) -> Result<
     Ok(())
 }
 
+/// Fill `n` bytes of a pre-sized index-bound payload at `offset` with `value`,
+/// erroring instead of panicking if the reserved slot cannot hold it. Mirrors
+/// [`write_index_bound_bytes`]; restores the error-not-panic contract for the
+/// upper-bound padding fills.
+fn fill_index_bound_bytes(
+    dst: &mut [u8],
+    offset: usize,
+    n: usize,
+    value: u8,
+) -> Result<(), String> {
+    let end = offset
+        .checked_add(n)
+        .filter(|end| *end <= dst.len())
+        .ok_or_else(|| "index bound fill exceeds payload capacity".to_string())?;
+    dst[offset..end].fill(value);
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum PredicateConstraint {
     StringEq(String),
@@ -1499,7 +1517,7 @@ impl QueryPredicate {
                         }
                         write_index_bound_bytes(&mut key, offset, data)?;
                     } else if upper {
-                        key[offset..offset + n].fill(0xFF);
+                        fill_index_bound_bytes(&mut key, offset, n, 0xFF)?;
                     }
                     offset += n;
                 }
@@ -1532,13 +1550,14 @@ impl QueryPredicate {
                 _ => {
                     let w = pk_kind.key_width();
                     if upper {
-                        key[offset..offset + w].fill(0xFF);
+                        fill_index_bound_bytes(&mut key, offset, w, 0xFF)?;
                     }
                     offset += w;
                 }
             }
         }
         if upper {
+            // offset <= key.len() is guaranteed here (all prior writes/fills are bounds-checked), so this fill-to-end cannot overflow.
             key[offset..].fill(0xFF);
         }
         prefix
@@ -1596,13 +1615,14 @@ impl QueryPredicate {
                 _ => {
                     let w = pk_kind.key_width();
                     if upper {
-                        key[offset..offset + w].fill(0xFF);
+                        fill_index_bound_bytes(&mut key, offset, w, 0xFF)?;
                     }
                     offset += w;
                 }
             }
         }
         if upper {
+            // offset <= key.len() is guaranteed here (all prior writes/fills are bounds-checked), so this fill-to-end cannot overflow.
             key[offset..].fill(0xFF);
         }
         prefix

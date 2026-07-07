@@ -2286,6 +2286,96 @@ mod tests {
     }
 
     #[test]
+    fn overlong_utf8_index_prefix_errors_instead_of_panicking() {
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("s", DataType::Utf8, false),
+                TableColumnConfig::new("b", DataType::FixedSizeBinary(16), false),
+                TableColumnConfig::new("pk", DataType::Int64, false),
+            ],
+            vec!["pk".to_string()],
+            vec![IndexSpec::new("s_b", vec!["s".to_string(), "b".to_string()]).unwrap()],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let specs = model.resolve_index_specs(&config.index_specs).unwrap();
+
+        // A ~245-char equality on the leading Utf8 index column advances the
+        // encoder offset past the reserved slot for the FixedSizeBinary column.
+        // This exact scenario panicked at predicate.rs:1502 before the fix; it
+        // must now return Err for BOTH bounds instead of indexing out of range.
+        let s_idx = *model.columns_by_name.get("s").unwrap();
+        let mut pred = QueryPredicate::default();
+        pred.constraints
+            .insert(s_idx, PredicateConstraint::StringEq("a".repeat(245)));
+        assert!(pred
+            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .is_err());
+        assert!(pred
+            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, false)
+            .is_err());
+    }
+
+    #[test]
+    fn overlong_utf8_index_prefix_with_fixed_pk_errors() {
+        // A FixedSizeBinary column is an accepted primary key at the schema
+        // layer, so this exercises the primary-key `_` arm fill: an overlong
+        // Utf8 leading index column pushes the offset past the reserved PK slot.
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("s", DataType::Utf8, false),
+                TableColumnConfig::new("pk", DataType::FixedSizeBinary(16), false),
+            ],
+            vec!["pk".to_string()],
+            vec![IndexSpec::new("s_idx", vec!["s".to_string()]).unwrap()],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let specs = model.resolve_index_specs(&config.index_specs).unwrap();
+
+        let s_idx = *model.columns_by_name.get("s").unwrap();
+        let mut pred = QueryPredicate::default();
+        pred.constraints
+            .insert(s_idx, PredicateConstraint::StringEq("a".repeat(245)));
+        assert!(pred
+            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .is_err());
+    }
+
+    #[test]
+    fn short_utf8_index_prefix_still_produces_valid_bounds() {
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("s", DataType::Utf8, false),
+                TableColumnConfig::new("b", DataType::FixedSizeBinary(16), false),
+                TableColumnConfig::new("pk", DataType::Int64, false),
+            ],
+            vec!["pk".to_string()],
+            vec![IndexSpec::new("s_b", vec!["s".to_string(), "b".to_string()]).unwrap()],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let specs = model.resolve_index_specs(&config.index_specs).unwrap();
+
+        // A normal short constraint must still produce valid bounds: proves the
+        // fill-capacity fix did not break the happy path.
+        let s_idx = *model.columns_by_name.get("s").unwrap();
+        let mut pred = QueryPredicate::default();
+        pred.constraints
+            .insert(s_idx, PredicateConstraint::StringEq("hello".to_string()));
+        let start = pred
+            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, false)
+            .expect("lower bound should encode");
+        let end = pred
+            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .expect("upper bound should encode");
+        assert!(start <= end, "lower bound must not exceed upper bound");
+    }
+
+    #[test]
     fn timestamp_nanos_gt_uses_floor_division() {
         let micros = timestamp_scalar_to_micros_for_op(
             &ScalarValue::TimestampNanosecond(Some(-1500), None),
