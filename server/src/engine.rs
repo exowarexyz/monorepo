@@ -174,6 +174,15 @@ pub trait Log: Sequence {
     /// empty. Surfaced in `BATCH_EVICTED` error details so clients know where
     /// to resume from.
     fn oldest_retained_batch(&self) -> impl Future<Output = Result<Option<u64>, String>> + Send;
+
+    /// Highest sequence number durably appended to this log. Defaults to the
+    /// process's visible sequence frontier; engines whose key/value state
+    /// trails the log (e.g. background apply) must override this so stream
+    /// RPCs classify missing batches against the log frontier, not the
+    /// key/value one.
+    fn log_sequence(&self) -> u64 {
+        self.current_sequence()
+    }
 }
 
 /// Compatibility facade for backends that serve every store capability.

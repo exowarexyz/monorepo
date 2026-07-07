@@ -1455,6 +1455,14 @@ impl Log for RocksStore {
             }
         }
     }
+
+    fn log_sequence(&self) -> u64 {
+        // The logged frontier, not the applied one `current_sequence` reports: stream RPCs
+        // classify missing batches against what the log durably contains, and every sequence
+        // at or below `logged` was acknowledged (its row exists unless the batch was empty or
+        // pruned — both "evicted", never "not found").
+        self.logged.load(Ordering::Acquire)
+    }
 }
 
 /// Encodes a sequence number as a log-CF key that preserves numeric order in RocksDB.

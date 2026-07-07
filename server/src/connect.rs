@@ -1082,8 +1082,11 @@ where
                 batch.into_response_bytes(),
             )),
             None => {
-                let current = self.state.log.current_sequence();
-                // Distinguish "never existed" (seq > current) vs "evicted".
+                // Classify against the log frontier: with a decoupled engine the key/value
+                // frontier (`current_sequence`) can trail sequences that are already durably
+                // logged, and an acknowledged empty batch in that window must report
+                // "evicted", not "never existed".
+                let current = self.state.log.log_sequence();
                 if seq > current {
                     Err(self.batch_not_found_error())
                 } else {
@@ -1260,6 +1263,8 @@ mod tests {
     #[derive(Default)]
     struct FakeEngineState {
         current_sequence: u64,
+        /// Log frontier when it runs ahead of `current_sequence` (decoupled apply).
+        log_sequence: Option<u64>,
         batches: BTreeMap<u64, Option<Vec<(Bytes, Bytes)>>>,
         oldest_retained: Option<u64>,
         publish_on_get_batch: Option<PublishDuringReplay>,
@@ -1327,6 +1332,10 @@ mod tests {
 
         fn set_oldest_retained(&self, oldest_retained: Option<u64>) {
             self.state.lock().expect("lock").oldest_retained = oldest_retained;
+        }
+
+        fn set_log_sequence(&self, sequence_number: u64) {
+            self.state.lock().expect("lock").log_sequence = Some(sequence_number);
         }
 
         fn publish_live(
@@ -1480,6 +1489,11 @@ mod tests {
                 .lock()
                 .map(|state| state.oldest_retained)
                 .map_err(|e| e.to_string())
+        }
+
+        fn log_sequence(&self) -> u64 {
+            let state = self.state.lock().expect("lock");
+            state.log_sequence.unwrap_or(state.current_sequence)
         }
     }
 
@@ -2156,6 +2170,52 @@ mod tests {
                 .expect("stream should terminate")
                 .is_none(),
             "stream must terminate after surfacing the replay hole",
+        );
+    }
+
+    /// Fetches one batch through the stream `Get` RPC handler.
+    async fn get_batch_response<B: Log>(
+        connect: &StreamConnect<B>,
+        sequence_number: u64,
+    ) -> connectrpc::ServiceResult<PreEncoded<StreamGetResponse>> {
+        let bytes = exoware_proto::log::stream::v1::GetRequest {
+            sequence_number,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let request = buffa::view::OwnedView::<GetRequestView<'static>>::decode(bytes.into())
+            .expect("decode get request");
+        StreamApi::get(connect, Context::default(), request).await
+    }
+
+    #[tokio::test]
+    async fn get_batch_classifies_against_log_frontier_not_applied() {
+        // A decoupled engine: key/value state applied through 3, log durable through 10.
+        // Sequence 7 was acknowledged but has no log row (an empty batch), so it must be
+        // reported as evicted — "not found" is reserved for sequences beyond the log.
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(3);
+        engine.set_log_sequence(10);
+        engine.set_oldest_retained(Some(2));
+
+        let connect = StreamConnect::new(AppState::new(engine));
+
+        let evicted = get_batch_response(&connect, 7)
+            .await
+            .expect_err("logged-but-missing batch must error");
+        let decoded = decode_connect_error(&evicted).expect("decode connect error");
+        assert_eq!(
+            decoded.error_info.expect("error info").reason,
+            crate::stream::REASON_BATCH_EVICTED,
+        );
+
+        let not_found = get_batch_response(&connect, 11)
+            .await
+            .expect_err("beyond-log batch must error");
+        let decoded = decode_connect_error(&not_found).expect("decode connect error");
+        assert_eq!(
+            decoded.error_info.expect("error info").reason,
+            crate::stream::REASON_BATCH_NOT_FOUND,
         );
     }
 
