@@ -361,8 +361,9 @@ struct Writer {
 
 impl Writer {
     /// Starts the two-stage write pipeline. `prepare` drains queued requests up to the
-    /// configured byte cap, assigns a contiguous sequence number to each (continuing from
-    /// `next`, the frontier derived at open), and stages each wave's log and state SST files
+    /// configured byte cap, assigns a contiguous sequence number to each (continuing from the
+    /// published frontier, which is exactly the frontier derived at open since nothing has
+    /// committed yet), and stages each wave's log and state SST files
     /// (including their data syncs); `commit` ingests the log file, then the state file,
     /// publishes the frontier, and resolves the requests. The stages overlap, so one group's
     /// files are being staged while the previous group's are being ingested. Any write failure
@@ -373,9 +374,9 @@ impl Writer {
         db: Arc<DB>,
         ingest_dir: PathBuf,
         frontiers: Arc<Frontiers>,
-        next: u64,
         write_pipeline: RocksWritePipelineConfig,
     ) -> Self {
+        let next = frontiers.published.load(Ordering::Acquire);
         let (request_sender, request_receiver) = mpsc::channel();
         // Rendezvous so `prepare` runs at most one wave ahead of `commit`: it hands off a staged
         // group, then stages the next while `commit` ingests this one.
@@ -879,7 +880,6 @@ impl RocksStore {
             db.clone(),
             ingest_dir,
             frontiers.clone(),
-            seq,
             write_pipeline,
         ));
         Ok(Self {
