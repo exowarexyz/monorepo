@@ -692,8 +692,7 @@ fn run_apply(
         apply_committed_write(&db, &sequence, &mut poisoned, committed);
     }
     if poisoned.is_none() {
-        if let Err(error) = advance_state_flushed(&db, &flushed, sequence.load(Ordering::Acquire))
-        {
+        if let Err(error) = advance_state_flushed(&db, &flushed, sequence.load(Ordering::Acquire)) {
             debug!(error = %error, "failed to flush state rows on writer shutdown");
         }
     }
@@ -941,7 +940,7 @@ fn replay_state_from_log(db: &DB, from_exclusive: u64, to_inclusive: u64) -> Res
             write_state_batch(db, std::mem::take(&mut batch))?;
         }
     }
-    if batch.len() > 0 {
+    if !batch.is_empty() {
         write_state_batch(db, batch)?;
     }
     Ok(())
@@ -1583,8 +1582,12 @@ mod tests {
 
     #[test]
     fn log_value_matches_generated_encoder() {
-        let cases: Vec<(u64, Vec<Vec<(Bytes, Bytes)>>)> = vec![
-            (1, vec![vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))]]),
+        type RequestKvs = Vec<Vec<(Bytes, Bytes)>>;
+        let cases: Vec<(u64, RequestKvs)> = vec![
+            (
+                1,
+                vec![vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))]],
+            ),
             // Coalesced requests, empty keys/values, and multi-byte varint lengths.
             (
                 u64::MAX,
@@ -1594,10 +1597,7 @@ mod tests {
                         (Bytes::from_static(b"empty-value"), Bytes::new()),
                         (Bytes::new(), Bytes::new()),
                     ],
-                    vec![(
-                        Bytes::from(vec![7u8; 200]),
-                        Bytes::from(vec![9u8; 20_000]),
-                    )],
+                    vec![(Bytes::from(vec![7u8; 200]), Bytes::from(vec![9u8; 20_000]))],
                 ],
             ),
         ];
