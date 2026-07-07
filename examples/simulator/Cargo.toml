@@ -14,6 +14,7 @@ documentation = "https://docs.rs/exoware-simulator"
 axum = { workspace = true }
 buffa = { workspace = true }
 bytes = { workspace = true }
+crc32fast = "1"
 exoware-sdk = { workspace = true }
 exoware-server = { workspace = true }
 reqwest = { workspace = true }

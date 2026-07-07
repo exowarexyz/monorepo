@@ -14,6 +14,12 @@
 //!   Upper bound for what the disk + RocksDB can do with zero ordering or durability work.
 //! - `raw-sync`: concurrent RocksDB writes with `sync=true` on every write (RocksDB group
 //!   commit only). Shows what naive per-request fsync costs.
+//! - `flatfile`: the real [`exoware_simulator::FlatFileRocksStore`] engine. Each upload is
+//!   written and fsynced to its own checksummed flat file (parallel durability, no shared log);
+//!   a sequencer assigns sequence numbers by renaming files and fsyncing the directory once per
+//!   wave; applier threads populate RocksDB (WAL disabled) from a bounded in-memory queue.
+//! - `flatfile-nodb`: prototype of the same ack path with the RocksDB apply skipped; isolates
+//!   the durability path (file write + fsync + rename + dir fsync) as the design's ceiling.
 //!
 //! Usage (all flags optional):
 //!   cargo bench -p exoware-simulator --bench ingest_load -- \
@@ -29,15 +35,19 @@
 //! `--tuned` sizes RocksDB for bulk ingest (512 MiB write buffers, 8 background jobs, relaxed
 //! L0 stall thresholds) to separate pipeline costs from stock-option write stalls.
 
+use std::fs::File;
+use std::io::Write;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use exoware_server::Ingest;
 use exoware_simulator::{
-    CommitDurability, RocksConfig, RocksStore, RocksWritePipelineConfig, UnorderedRocksConfig,
-    UnorderedRocksStore,
+    CommitDurability, FlatFileConfig, FlatFileRocksStore, RocksConfig, RocksStore,
+    RocksWritePipelineConfig, UnorderedRocksConfig, UnorderedRocksStore,
 };
 use tempfile::tempdir;
 
@@ -50,6 +60,8 @@ enum Mode {
     UnorderedUw,
     RawNoSync,
     RawSync,
+    FlatFile,
+    FlatFileNoDb,
 }
 
 impl Mode {
@@ -62,6 +74,8 @@ impl Mode {
             "unordered-uw" => Some(Self::UnorderedUw),
             "raw-nosync" => Some(Self::RawNoSync),
             "raw-sync" => Some(Self::RawSync),
+            "flatfile" => Some(Self::FlatFile),
+            "flatfile-nodb" => Some(Self::FlatFileNoDb),
             _ => None,
         }
     }
@@ -75,6 +89,8 @@ impl Mode {
             Self::UnorderedUw => "unordered-uw",
             Self::RawNoSync => "raw-nosync",
             Self::RawSync => "raw-sync",
+            Self::FlatFile => "flatfile",
+            Self::FlatFileNoDb => "flatfile-nodb",
         }
     }
 }
@@ -85,6 +101,8 @@ enum Engine {
     Ordered(RocksStore),
     Unordered(UnorderedRocksStore),
     Raw { db: Arc<rocksdb::DB>, sync: bool },
+    FlatFile(FlatFileRocksStore),
+    FlatAck(Arc<FlatAckPipeline>),
 }
 
 impl Engine {
@@ -107,6 +125,135 @@ impl Engine {
                 .await
                 .map_err(|e| e.to_string())?
             }
+            Self::FlatFile(store) => store.put_batch(kvs).await.map(|_| ()),
+            Self::FlatAck(pipeline) => pipeline.put_batch(kvs).await.map(|_| ()),
+        }
+    }
+}
+
+/// Max tickets sequenced (renamed + acked) per directory fsync.
+const FLAT_MAX_WAVE: usize = 4096;
+
+/// A durable (written + fsynced) flat file waiting for its sequence number.
+struct FlatAckTicket {
+    tmp_path: PathBuf,
+    ack: tokio::sync::oneshot::Sender<u64>,
+}
+
+/// Ack-path-only prototype of the flat-file design: checksummed file write + fsync per upload,
+/// then a sequencer that renames a wave of files and fsyncs the directory once before acking.
+/// No RocksDB apply happens (files are deleted at sequencing time), so this isolates the
+/// durability path as the design's ceiling.
+struct FlatAckPipeline {
+    staging: PathBuf,
+    next_id: AtomicU64,
+    sender: Mutex<Option<mpsc::Sender<FlatAckTicket>>>,
+    sequencer: Mutex<Option<thread::JoinHandle<()>>>,
+}
+
+impl FlatAckPipeline {
+    fn open(root: &std::path::Path) -> Arc<Self> {
+        let staging = root.join("staging");
+        std::fs::create_dir_all(&staging).expect("create staging dir");
+        let (tx, rx) = mpsc::channel::<FlatAckTicket>();
+        let sequencer_staging = staging.clone();
+        let sequencer_handle = thread::Builder::new()
+            .name("bench-flat-sequencer".to_string())
+            .spawn(move || run_flat_ack_sequencer(sequencer_staging, rx))
+            .expect("spawn sequencer");
+        Arc::new(Self {
+            staging,
+            next_id: AtomicU64::new(0),
+            sender: Mutex::new(Some(tx)),
+            sequencer: Mutex::new(Some(sequencer_handle)),
+        })
+    }
+
+    async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, String> {
+        // Phase 1 (parallel across callers): durable, checksummed flat file under a temp name.
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let tmp_path = self.staging.join(format!("{id:020}.tmp"));
+        let write_path = tmp_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut payload_len = 4usize;
+            for (k, v) in &kvs {
+                payload_len += 8 + k.len() + v.len();
+            }
+            let mut buf = Vec::with_capacity(payload_len + 4);
+            buf.extend_from_slice(&(kvs.len() as u32).to_le_bytes());
+            for (k, v) in &kvs {
+                buf.extend_from_slice(&(k.len() as u32).to_le_bytes());
+                buf.extend_from_slice(&(v.len() as u32).to_le_bytes());
+                buf.extend_from_slice(k.as_ref());
+                buf.extend_from_slice(v.as_ref());
+            }
+            let crc = crc32fast::hash(&buf);
+            buf.extend_from_slice(&crc.to_le_bytes());
+            let mut file = File::create(&write_path).map_err(|e| e.to_string())?;
+            file.write_all(&buf).map_err(|e| e.to_string())?;
+            file.sync_all().map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+
+        // Phase 2: wait for the sequencer to rename the file to its sequence number.
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        self.sender
+            .lock()
+            .map_err(|e| e.to_string())?
+            .as_ref()
+            .ok_or_else(|| "sequencer stopped".to_string())?
+            .send(FlatAckTicket {
+                tmp_path,
+                ack: ack_tx,
+            })
+            .map_err(|_| "sequencer stopped".to_string())?;
+        ack_rx
+            .await
+            .map_err(|_| "sequencer dropped ack".to_string())
+    }
+}
+
+impl Drop for FlatAckPipeline {
+    fn drop(&mut self) {
+        if let Ok(mut sender) = self.sender.lock() {
+            sender.take();
+        }
+        if let Ok(mut handle) = self.sequencer.lock() {
+            if let Some(handle) = handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+}
+
+fn run_flat_ack_sequencer(staging: PathBuf, receiver: mpsc::Receiver<FlatAckTicket>) {
+    let dir_handle = File::open(&staging).expect("open staging dir");
+    let mut next_seq = 1u64;
+    while let Ok(first) = receiver.recv() {
+        let mut wave = vec![first];
+        while wave.len() < FLAT_MAX_WAVE {
+            match receiver.try_recv() {
+                Ok(ticket) => wave.push(ticket),
+                Err(_) => break,
+            }
+        }
+
+        // Assign sequence numbers by renaming within the staging directory, then make the whole
+        // wave's renames durable with one directory fsync before acking anyone.
+        let mut sequenced = Vec::with_capacity(wave.len());
+        for ticket in wave {
+            let seq = next_seq;
+            next_seq += 1;
+            let seq_path = staging.join(format!("{seq:020}.seq"));
+            std::fs::rename(&ticket.tmp_path, &seq_path).expect("rename to sequence");
+            sequenced.push((seq, seq_path, ticket));
+        }
+        dir_handle.sync_all().expect("fsync staging dir");
+
+        for (seq, seq_path, ticket) in sequenced {
+            let _ = ticket.ack.send(seq);
+            let _ = std::fs::remove_file(&seq_path);
         }
     }
 }
@@ -214,6 +361,16 @@ async fn run_cell(config: &CellConfig) -> CellResult {
                 sync: config.mode == Mode::RawSync,
             }
         }
+        Mode::FlatFile => {
+            let mut flat = FlatFileConfig::default();
+            if config.tuned {
+                flat.db_options = tuned_db_options();
+                flat.default_cf_options = tuned_cf_options();
+                flat.log_cf_options = tuned_cf_options();
+            }
+            Engine::FlatFile(FlatFileRocksStore::open(dir.path(), Some(flat)).expect("open"))
+        }
+        Mode::FlatFileNoDb => Engine::FlatAck(FlatAckPipeline::open(dir.path())),
     };
 
     let recording = Arc::new(AtomicBool::new(false));

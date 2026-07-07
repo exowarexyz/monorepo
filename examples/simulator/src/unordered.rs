@@ -438,7 +438,7 @@ impl UnorderedRocksStore {
 
 /// Encodes the staged replay payload: a `log.stream.v1.GetResponse` with the sequence number
 /// left unset (it is unknown until assignment). Returns `None` when there is nothing to log.
-fn encode_staged_value(kvs: &[(Bytes, Bytes)]) -> Option<Vec<u8>> {
+pub(crate) fn encode_staged_value(kvs: &[(Bytes, Bytes)]) -> Option<Vec<u8>> {
     if kvs.is_empty() {
         return None;
     }
@@ -462,7 +462,7 @@ fn encode_staged_value(kvs: &[(Bytes, Bytes)]) -> Option<Vec<u8>> {
 /// Builds the wire bytes of a `GetResponse` with `sequence_number` set by prefixing the staged
 /// (sequence-less) encoding with the field-1 varint. Field 1 is always encoded first by the
 /// generator, so this is equivalent to re-encoding the message with the sequence filled in.
-fn staged_value_with_sequence(sequence: u64, staged: &[u8]) -> Vec<u8> {
+pub(crate) fn staged_value_with_sequence(sequence: u64, staged: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(staged.len() + 11);
     if sequence != 0 {
         bytes.push(0x08); // field 1, varint wire type

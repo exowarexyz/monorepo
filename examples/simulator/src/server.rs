@@ -1,9 +1,10 @@
 //! HTTP server entrypoints.
 //!
-//! The server runs on [`UnorderedRocksStore`] with [`CommitDurability::NoWalFlush`]: data is
-//! written to RocksDB concurrently without a WAL, and sequence numbers are assigned after the
-//! fact by a sequencer whose atomic memtable flush is the durability barrier for each ack. This
-//! roughly doubles large-batch ingest throughput over the ordered WAL-backed pipeline (see
+//! The server runs on [`FlatFileRocksStore`]: uploads become durable as parallel checksummed
+//! flat files (fsync per upload, off the shared commit path), sequence numbers are assigned by
+//! renaming those files with one directory fsync per wave, and a WAL-less RocksDB instance is
+//! populated asynchronously to serve reads. This roughly triples large-batch ingest throughput
+//! over the ordered WAL-backed pipeline and cuts ack latency by ~4x (see
 //! `benches/ingest_load.rs`). The ordered [`crate::RocksStore`] remains available as a library
 //! type for callers that need strict same-key ordering between state and log.
 
@@ -18,8 +19,7 @@ use tracing::info;
 
 use exoware_server::{connect_stack, AppState};
 
-use crate::rocks::CommitDurability;
-use crate::unordered::{UnorderedRocksConfig, UnorderedRocksStore};
+use crate::flatfile::FlatFileRocksStore;
 
 pub const CMD: &str = "server";
 pub const RUN_CMD: &str = "run";
@@ -28,15 +28,9 @@ async fn health() -> &'static str {
     "ok"
 }
 
-/// Opens the simulator's engine: unordered ingest with WAL-less, flush-backed durability.
-fn open_engine(directory: &Path) -> Result<UnorderedRocksStore, rocksdb::Error> {
-    UnorderedRocksStore::open(
-        directory,
-        Some(UnorderedRocksConfig {
-            durability: CommitDurability::NoWalFlush,
-            ..Default::default()
-        }),
-    )
+/// Opens the simulator's engine: flat-file staged ingest with async WAL-less RocksDB apply.
+fn open_engine(directory: &Path) -> Result<FlatFileRocksStore, String> {
+    FlatFileRocksStore::open(directory, None)
 }
 
 /// Run the store simulator until the process is interrupted.

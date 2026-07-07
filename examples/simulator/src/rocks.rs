@@ -746,7 +746,7 @@ fn write_sequence_batch_no_wal(db: &DB, batch: rocksdb::WriteBatch) -> Result<()
 }
 
 /// Atomically flushes the default, meta, and log column families.
-fn flush_all_cfs(db: &DB) -> Result<(), String> {
+pub(crate) fn flush_all_cfs(db: &DB) -> Result<(), String> {
     let meta_cf = db
         .cf_handle(META_CF)
         .expect("meta CF must exist (created on open)");

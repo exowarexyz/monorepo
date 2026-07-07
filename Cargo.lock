@@ -2723,6 +2723,7 @@ dependencies = [
  "clap",
  "commonware-codec",
  "connectrpc",
+ "crc32fast",
  "exoware-sdk",
  "exoware-server",
  "http",
