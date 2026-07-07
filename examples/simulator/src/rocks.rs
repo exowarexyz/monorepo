@@ -4,17 +4,18 @@
 //! can serve replay and point lookups. Batch-log pruning is driven exclusively by the compact
 //! service's `Sequence` scope.
 //!
-//! Durability is anchored on the replay log: each commit group writes its log rows plus the
-//! durable-sequence meta row in one synced batch, then the current-state rows are applied without
-//! a WAL and the visible sequence frontier advances. The state rows are recovered from the log,
-//! so `open` replays retained log rows above the persisted state-flushed watermark, and pruning
-//! flushes the default column family (advancing that watermark) before deleting log rows it may
-//! otherwise still need for recovery.
+//! Durability is anchored on the replay log: each commit group makes its log rows plus the
+//! durable-sequence meta row durable first (one synced batch for small groups; an ingested SST
+//! file followed by a synced meta write for large ones), then the current-state rows are applied
+//! without a WAL and the visible sequence frontier advances. The state rows are recovered from
+//! the log, so `open` replays retained log rows above the persisted state-flushed watermark, and
+//! pruning flushes the default column family (advancing that watermark) before deleting log rows
+//! it may otherwise still need for recovery.
 
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -32,8 +33,8 @@ use exoware_server::{
 };
 use regex::bytes::Regex;
 use rocksdb::{
-    ColumnFamily, ColumnFamilyDescriptor, DBIterator, Direction, IteratorMode, Options,
-    WriteOptions, DB,
+    ColumnFamily, ColumnFamilyDescriptor, DBCompressionType, DBIterator, Direction,
+    IngestExternalFileOptions, IteratorMode, Options, SstFileWriter, WriteOptions, DB,
 };
 use tokio::sync::oneshot;
 use tracing::debug;
@@ -48,6 +49,13 @@ const LOG_CF: &str = "log";
 const LOG_BATCH_KEY_LEN: usize = 8;
 const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
 const DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
+/// Directory under the store path where log SST files are staged before ingestion.
+const LOG_INGEST_DIR: &str = "ingest";
+/// Minimum accumulated log payload before a commit group's log rows are written as an ingested
+/// SST file instead of a WAL-backed batch. Ingested rows reach the disk once, while WAL-backed
+/// rows are written twice (WAL now, SST on flush), so large groups ingest and small groups keep
+/// the cheaper single-fsync WAL commit.
+const LOG_INGEST_MIN_BYTES: usize = 4 * 1024 * 1024;
 type RocksIterItem = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
 
 /// Owns the DB handle for a RocksDB iterator that is moved through blocking tasks.
@@ -298,14 +306,24 @@ struct AssignedWrite {
     request: WriteRequest,
 }
 
+/// How one commit group's replay-log rows (and the durable-sequence meta row) reach the disk.
+/// Either way the log alone defines durability; the state rows are recoverable from it.
+enum PreparedLog {
+    /// Log rows plus the meta row in one WAL-backed batch, committed atomically by one synced
+    /// write. Used for small groups, where a single fsync beats the ingestion overhead.
+    Batch(rocksdb::WriteBatch),
+    /// Encoded log rows (ascending sequence order) written as one SST file and ingested directly
+    /// into the log column family, followed by a synced meta write. Large payloads reach the disk
+    /// once instead of twice (WAL now, SST again on flush), and being ingested at the bottom
+    /// level they are never rewritten by compaction.
+    Ingest(Vec<(u64, Vec<u8>)>),
+}
+
 /// One commit group covering a contiguous run of assigned sequence numbers.
 struct PreparedWrite {
     writes: Vec<AssignedWrite>,
-    /// Replay-log rows plus the durable-sequence meta row, committed atomically by one synced
-    /// write. This batch alone defines durability; the state rows are recoverable from it.
-    log_batch: Result<rocksdb::WriteBatch, String>,
-    /// Current-state rows for the same sequences, applied without a WAL once the log batch is
-    /// durable.
+    log: Result<PreparedLog, String>,
+    /// Current-state rows for the same sequences, applied without a WAL once the log is durable.
     state_batch: rocksdb::WriteBatch,
     batch_bytes: usize,
     /// Assignment epoch; `commit` rejects a group whose epoch an earlier failure has superseded.
@@ -333,6 +351,7 @@ impl Writer {
     /// being built and the previous group's state rows are being applied.
     fn start(
         db: Arc<DB>,
+        ingest_dir: PathBuf,
         sequence: Arc<AtomicU64>,
         durable: Arc<AtomicU64>,
         flushed: Arc<AtomicU64>,
@@ -366,6 +385,7 @@ impl Writer {
             .spawn(move || {
                 run_commit(
                     commit_db,
+                    ingest_dir,
                     commit_durable,
                     commit_epoch,
                     group_receiver,
@@ -499,9 +519,9 @@ fn prepare_queued_write(
     epoch: u64,
 ) -> Result<(PreparedWrite, bool), (Vec<WriteRequest>, String)> {
     let mut writes = Vec::with_capacity(64);
-    let capacity = write_batch_capacity(&first);
-    let mut state_batch = rocksdb::WriteBatch::with_capacity_bytes(capacity);
-    let mut log_batch = rocksdb::WriteBatch::with_capacity_bytes(capacity);
+    let mut state_batch = rocksdb::WriteBatch::with_capacity_bytes(write_batch_capacity(&first));
+    let mut log_rows: Vec<(u64, Vec<u8>)> = Vec::new();
+    let mut log_bytes = 0usize;
     let mut next = from;
     let mut request = first;
     let mut disconnected = false;
@@ -520,11 +540,13 @@ fn prepare_queued_write(
             sequence: next,
             request,
         };
-        append_assigned_write(db, &mut state_batch, &mut log_batch, &write);
+        append_state_entries(&mut state_batch, std::slice::from_ref(&write.request));
+        if let Some(value) = encode_log_value(next, std::slice::from_ref(&write.request)) {
+            log_bytes += LOG_BATCH_KEY_LEN + value.len();
+            log_rows.push((next, value));
+        }
         writes.push(write);
-        if state_batch.size_in_bytes() + log_batch.size_in_bytes() >= max_batch_bytes
-            || next == u64::MAX
-        {
+        if state_batch.size_in_bytes() + log_bytes >= max_batch_bytes || next == u64::MAX {
             break;
         }
 
@@ -539,7 +561,7 @@ fn prepare_queued_write(
     }
 
     Ok((
-        finalize_prepared_write(db, writes, state_batch, log_batch, epoch),
+        finalize_prepared_write(db, writes, state_batch, log_rows, log_bytes, epoch),
         disconnected,
     ))
 }
@@ -559,13 +581,14 @@ fn forward_group(sender: &mpsc::SyncSender<PreparedWrite>, group: PreparedWrite)
 /// frontier (and every later group assigned under it) is abandoned and re-allocated by `prepare`.
 fn run_commit(
     db: Arc<DB>,
+    ingest_dir: PathBuf,
     durable: Arc<AtomicU64>,
     epoch: Arc<AtomicU64>,
     receiver: mpsc::Receiver<PreparedWrite>,
     committed_sender: mpsc::SyncSender<CommittedWrite>,
 ) {
     while let Ok(group) = receiver.recv() {
-        let Some(committed) = commit_group(&db, &durable, &epoch, group) else {
+        let Some(committed) = commit_group(&db, &ingest_dir, &durable, &epoch, group) else {
             continue;
         };
         if let Err(error) = committed_sender.send(committed) {
@@ -577,10 +600,11 @@ fn run_commit(
     }
 }
 
-/// Commits one group's log batch, returning the group for state application on success. Returns
+/// Commits one group's log rows, returning the group for state application on success. Returns
 /// `None` when the group is empty, rejected, or failed (with its requests already resolved).
 fn commit_group(
     db: &DB,
+    ingest_dir: &Path,
     durable: &AtomicU64,
     epoch: &AtomicU64,
     group: PreparedWrite,
@@ -601,9 +625,10 @@ fn commit_group(
     }
 
     let requests = group.writes.len();
+    let group_epoch = group.epoch;
     let PreparedWrite {
         writes,
-        log_batch,
+        log,
         state_batch,
         batch_bytes,
         ..
@@ -612,15 +637,21 @@ fn commit_group(
         .last()
         .expect("non-empty group has a last write")
         .sequence;
-    let log_batch = match log_batch {
-        Ok(log_batch) => log_batch,
+    let log = match log {
+        Ok(log) => log,
         Err(error) => {
             epoch.fetch_add(1, Ordering::AcqRel);
             fail_assigned_writes(writes, error);
             return None;
         }
     };
-    match write_sequence_batch(db, log_batch) {
+    let committed = match log {
+        PreparedLog::Batch(log_batch) => write_sequence_batch(db, log_batch),
+        PreparedLog::Ingest(log_rows) => {
+            ingest_log_rows(db, ingest_dir, log_rows, last_sequence, group_epoch)
+        }
+    };
+    match committed {
         Ok(()) => {
             // Release so `prepare` re-syncs against a frontier whose log rows are already synced.
             durable.store(last_sequence, Ordering::Release);
@@ -703,31 +734,33 @@ fn finalize_prepared_write(
     db: &DB,
     writes: Vec<AssignedWrite>,
     state_batch: rocksdb::WriteBatch,
-    mut log_batch: rocksdb::WriteBatch,
+    log_rows: Vec<(u64, Vec<u8>)>,
+    log_bytes: usize,
     epoch: u64,
 ) -> PreparedWrite {
-    if let Some(write) = writes.last() {
-        append_sequence_meta(db, &mut log_batch, write.sequence);
-    }
-    let batch_bytes = state_batch.size_in_bytes() + log_batch.size_in_bytes();
+    let batch_bytes = state_batch.size_in_bytes() + log_bytes;
+    let log = if log_bytes >= LOG_INGEST_MIN_BYTES {
+        PreparedLog::Ingest(log_rows)
+    } else {
+        let log_cf = db
+            .cf_handle(LOG_CF)
+            .expect("log CF must exist (created on open)");
+        let mut log_batch = rocksdb::WriteBatch::with_capacity_bytes(log_bytes + 64);
+        for (sequence, value) in log_rows {
+            log_batch.put_cf(log_cf, sequence_log_key(sequence), value);
+        }
+        if let Some(write) = writes.last() {
+            append_sequence_meta(db, &mut log_batch, write.sequence);
+        }
+        PreparedLog::Batch(log_batch)
+    };
     PreparedWrite {
         writes,
-        log_batch: Ok(log_batch),
+        log: Ok(log),
         state_batch,
         batch_bytes,
         epoch,
     }
-}
-
-fn append_assigned_write(
-    db: &DB,
-    state_batch: &mut rocksdb::WriteBatch,
-    log_batch: &mut rocksdb::WriteBatch,
-    write: &AssignedWrite,
-) {
-    let requests = std::slice::from_ref(&write.request);
-    append_state_entries(state_batch, requests);
-    append_log_entry(db, log_batch, write.sequence, requests);
 }
 
 /// Appends the current-state rows for one sequence to the state batch.
@@ -736,21 +769,6 @@ fn append_state_entries(state_batch: &mut rocksdb::WriteBatch, requests: &[Write
         for (k, v) in &request.kvs {
             state_batch.put(k.as_ref(), v.as_ref());
         }
-    }
-}
-
-/// Appends one sequence's replay-log row to the log batch.
-fn append_log_entry(
-    db: &DB,
-    log_batch: &mut rocksdb::WriteBatch,
-    sequence: u64,
-    requests: &[WriteRequest],
-) {
-    let log_cf = db
-        .cf_handle(LOG_CF)
-        .expect("log CF must exist (created on open)");
-    if let Some(log_value) = encode_log_value(sequence, requests) {
-        log_batch.put_cf(log_cf, sequence_log_key(sequence), log_value);
     }
 }
 
@@ -767,6 +785,55 @@ fn write_sequence_batch(db: &DB, batch: rocksdb::WriteBatch) -> Result<(), Strin
     write_options.set_sync(true);
     db.write_opt(batch, &write_options)
         .map_err(|e| e.to_string())
+}
+
+/// Commits one group's log rows by writing them as an SST file, ingesting it into the log column
+/// family, and then durably advancing the sequence meta row. Ingestion syncs the file and the
+/// manifest, so the rows are durable before the meta write publishes them; if the meta write is
+/// lost, the orphaned rows sit above the durable frontier where `get_batch` cannot see them and
+/// `open` deletes them.
+fn ingest_log_rows(
+    db: &DB,
+    ingest_dir: &Path,
+    log_rows: Vec<(u64, Vec<u8>)>,
+    last_sequence: u64,
+    epoch: u64,
+) -> Result<(), String> {
+    let first = log_rows
+        .first()
+        .expect("ingested log groups are never empty")
+        .0;
+    // Leftover files from failed ingestions are deleted when the store reopens, and epochs make
+    // re-allocated sequence numbers unambiguous within one writer's lifetime.
+    let path = ingest_dir.join(format!("log-{first:020}-{last_sequence:020}-e{epoch}.sst"));
+
+    // Uncompressed for parity with the WAL-backed path (WAL payloads are not compressed either);
+    // compressing on the commit path would trade ack latency for bytes.
+    let mut options = Options::default();
+    options.set_compression_type(DBCompressionType::None);
+    let mut writer = SstFileWriter::create(&options);
+    writer.open(&path).map_err(|e| e.to_string())?;
+    for (sequence, value) in &log_rows {
+        writer
+            .put(sequence_log_key(*sequence), value)
+            .map_err(|e| e.to_string())?;
+    }
+    // `finish` syncs the file before it is linked into the DB.
+    writer.finish().map_err(|e| e.to_string())?;
+
+    let log_cf = db
+        .cf_handle(LOG_CF)
+        .expect("log CF must exist (created on open)");
+    let mut ingest_options = IngestExternalFileOptions::default();
+    ingest_options.set_move_files(true);
+    if let Err(error) = db.ingest_external_file_cf_opts(log_cf, &ingest_options, vec![&path]) {
+        let _ = std::fs::remove_file(&path);
+        return Err(error.to_string());
+    }
+
+    let mut meta_batch = rocksdb::WriteBatch::default();
+    append_sequence_meta(db, &mut meta_batch, last_sequence);
+    write_sequence_batch(db, meta_batch)
 }
 
 /// Writes current-state rows without a WAL: durability comes from the already-synced log batch,
@@ -798,6 +865,43 @@ fn advance_state_flushed(db: &DB, flushed: &AtomicU64, target: u64) -> Result<()
     write_sequence_batch(db, batch)?;
     flushed.fetch_max(target, Ordering::AcqRel);
     Ok(())
+}
+
+/// Creates the SST staging directory and deletes files a crashed ingestion left behind. Staged
+/// files are only ever moved into the DB by ingestion, so anything still here was never visible.
+fn prepare_ingest_dir(store_path: &Path) -> Result<PathBuf, String> {
+    let ingest_dir = store_path.join(LOG_INGEST_DIR);
+    std::fs::create_dir_all(&ingest_dir)
+        .map_err(|e| format!("failed to create log ingest directory: {e}"))?;
+    for entry in std::fs::read_dir(&ingest_dir)
+        .map_err(|e| format!("failed to read log ingest directory: {e}"))?
+    {
+        let entry = entry.map_err(|e| format!("failed to read log ingest directory: {e}"))?;
+        std::fs::remove_file(entry.path())
+            .map_err(|e| format!("failed to remove staged log file: {e}"))?;
+    }
+    Ok(ingest_dir)
+}
+
+/// Deletes log rows above the durable frontier. A crash between an SST ingestion and its meta
+/// write can leave rows whose sequences were never published; those numbers will be re-allocated,
+/// so the abandoned rows must not resurface.
+fn remove_log_rows_above(db: &DB, durable: u64) -> Result<(), String> {
+    let log_cf = db
+        .cf_handle(LOG_CF)
+        .expect("log CF must exist (created on open)");
+    if durable == u64::MAX {
+        return Ok(());
+    }
+    let start = sequence_log_key(durable + 1);
+    let mut stale = db.iterator_cf(log_cf, IteratorMode::From(&start, Direction::Forward));
+    if stale.next().is_none() {
+        return Ok(());
+    }
+    db.delete_range_cf(log_cf, start, sequence_log_key(u64::MAX))
+        .map_err(|e| e.to_string())?;
+    db.delete_cf(log_cf, sequence_log_key(u64::MAX))
+        .map_err(|e| e.to_string())
 }
 
 /// Reads a little-endian u64 sequence value from the meta column family, defaulting to zero.
@@ -881,7 +985,6 @@ impl Default for RocksWritePipelineConfig {
 }
 
 /// RocksDB engine and application-level write pipeline options used by [`RocksStore::open`].
-#[derive(Default)]
 pub struct RocksConfig {
     /// Database-wide options.
     pub db_options: Options,
@@ -893,6 +996,40 @@ pub struct RocksConfig {
     pub log_cf_options: Options,
     /// Options for the application-level ingest write pipeline.
     pub write_pipeline: RocksWritePipelineConfig,
+}
+
+impl Default for RocksConfig {
+    /// RocksDB options tuned for the simulator's ingest profile (hundreds of thousands of keys
+    /// per batch) instead of stock RocksDB defaults.
+    fn default() -> Self {
+        let cores = thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2) as i32;
+        let mut db_options = Options::default();
+        db_options.increase_parallelism(cores);
+
+        // Smaller, more numerous state memtables keep skiplist inserts shallow and shift work to
+        // background flushes.
+        let mut default_cf_options = Options::default();
+        default_cf_options.set_write_buffer_size(32 * 1024 * 1024);
+        default_cf_options.set_max_write_buffer_number(4);
+
+        // Replay-log values are large (one blob per ingest batch) and immutable until pruned.
+        // Storing them in blob files keeps log-CF compactions rewriting only the 8-byte keys and
+        // blob references instead of re-copying every batch payload.
+        let mut log_cf_options = Options::default();
+        log_cf_options.set_enable_blob_files(true);
+        log_cf_options.set_min_blob_size(4096);
+        log_cf_options.set_enable_blob_gc(true);
+
+        Self {
+            db_options,
+            default_cf_options,
+            meta_cf_options: Options::default(),
+            log_cf_options,
+            write_pipeline: RocksWritePipelineConfig::default(),
+        }
+    }
 }
 
 /// Minimal RocksDB-backed store for the simulator: batch writes plus a global sequence u64
@@ -933,6 +1070,9 @@ impl RocksStore {
         let seq = read_meta_sequence(&db, SEQ_META_KEY)?;
         let flushed_seq = read_meta_sequence(&db, STATE_FLUSHED_META_KEY)?;
 
+        let ingest_dir = prepare_ingest_dir(path)?;
+        remove_log_rows_above(&db, seq)?;
+
         let flushed = Arc::new(AtomicU64::new(flushed_seq));
         if flushed_seq < seq {
             replay_state_from_log(&db, flushed_seq, seq)?;
@@ -943,6 +1083,7 @@ impl RocksStore {
         let durable = Arc::new(AtomicU64::new(seq));
         let writer = Arc::new(Writer::start(
             db.clone(),
+            ingest_dir,
             sequence.clone(),
             durable,
             flushed.clone(),
@@ -1157,6 +1298,11 @@ impl Prune for RocksStore {
 
 impl Log for RocksStore {
     async fn get_batch(&self, sequence_number: u64) -> Result<Option<LogBatch>, String> {
+        // Serve only published batches: rows above the visible frontier are still being
+        // committed (or were abandoned by a crash) and must not be observable early.
+        if sequence_number > self.sequence.load(Ordering::Acquire) {
+            return Ok(None);
+        }
         let store = self.clone();
         let cf = store.log_cf();
         let sequence_key = sequence_log_key(sequence_number);
@@ -1349,7 +1495,7 @@ mod tests {
         (
             PreparedWrite {
                 writes,
-                log_batch: Err(error.to_string()),
+                log: Err(error.to_string()),
                 state_batch: rocksdb::WriteBatch::default(),
                 batch_bytes: 0,
                 epoch,
@@ -1366,7 +1512,8 @@ mod tests {
         epoch: &AtomicU64,
         group: PreparedWrite,
     ) -> u64 {
-        if let Some(committed) = commit_group(&store.db, durable, epoch, group) {
+        let ingest_dir = store.db.path().join(LOG_INGEST_DIR);
+        if let Some(committed) = commit_group(&store.db, &ingest_dir, durable, epoch, group) {
             apply_committed_write(&store.db, &store.sequence, &mut None, committed);
         }
         durable.load(Ordering::Acquire)
@@ -1384,7 +1531,12 @@ mod tests {
         let mut state_batch = rocksdb::WriteBatch::default();
         let mut log_batch = rocksdb::WriteBatch::default();
         append_state_entries(&mut state_batch, requests);
-        append_log_entry(db, &mut log_batch, next, requests);
+        if let Some(value) = encode_log_value(next, requests) {
+            let log_cf = db
+                .cf_handle(LOG_CF)
+                .expect("log CF must exist (created on open)");
+            log_batch.put_cf(log_cf, sequence_log_key(next), value);
+        }
         append_sequence_meta(db, &mut log_batch, next);
         write_sequence_batch(db, log_batch)?;
         write_state_batch(db, state_batch)?;
@@ -1416,11 +1568,17 @@ mod tests {
 
     fn prepared_write(db: &DB, epoch: u64, writes: Vec<AssignedWrite>) -> PreparedWrite {
         let mut state_batch = rocksdb::WriteBatch::default();
-        let mut log_batch = rocksdb::WriteBatch::default();
+        let mut log_rows = Vec::new();
+        let mut log_bytes = 0;
         for write in &writes {
-            append_assigned_write(db, &mut state_batch, &mut log_batch, write);
+            let requests = std::slice::from_ref(&write.request);
+            append_state_entries(&mut state_batch, requests);
+            if let Some(value) = encode_log_value(write.sequence, requests) {
+                log_bytes += LOG_BATCH_KEY_LEN + value.len();
+                log_rows.push((write.sequence, value));
+            }
         }
-        finalize_prepared_write(db, writes, state_batch, log_batch, epoch)
+        finalize_prepared_write(db, writes, state_batch, log_rows, log_bytes, epoch)
     }
 
     #[test]
@@ -1516,7 +1674,7 @@ mod tests {
             Err((_, error)) => panic!("{error}"),
         };
         assert_eq!(group.writes.len(), 3);
-        assert!(group.log_batch.is_ok());
+        assert!(group.log.is_ok());
         assert!(group.batch_bytes > 0);
         assert_eq!(group.epoch, 7);
         assert!(disconnected);
@@ -1541,7 +1699,7 @@ mod tests {
 
         assert_eq!(group.writes.len(), 1);
         assert_eq!(group.writes[0].request.kvs[0].0.as_ref(), b"a");
-        assert!(group.log_batch.is_ok());
+        assert!(group.log.is_ok());
         assert!(group.batch_bytes >= 1);
         assert_eq!(group.epoch, 7);
         assert!(!disconnected);
@@ -1688,10 +1846,8 @@ mod tests {
                 encoded_log_entry(1, b"k", b"stale"),
             )
             .expect("seed abandoned log row");
-        assert_eq!(
-            batch_entries(store.get_batch(1).await.expect("get").expect("retained")),
-            vec![(Bytes::from_static(b"k"), Bytes::from_static(b"stale"))]
-        );
+        // Rows above the visible frontier are unreadable, so the abandoned row cannot leak.
+        assert!(store.get_batch(1).await.expect("get").is_none());
 
         let (failed, receivers) = failing_group(0, &[(1, b"k", b"failed")], "boom");
         let committed = commit_and_apply(&store, &durable, &epoch, failed);
@@ -1712,6 +1868,68 @@ mod tests {
         assert_eq!(
             batch_entries(store.get_batch(1).await.expect("get").expect("retained")),
             vec![(Bytes::from_static(b"k"), Bytes::from_static(b"new"))]
+        );
+    }
+
+    /// One batch large enough to commit through the SST-ingestion path instead of a WAL batch.
+    fn large_batch(tag: u8) -> Vec<(Bytes, Bytes)> {
+        (0..(LOG_INGEST_MIN_BYTES / 4096 + 16))
+            .map(|i| {
+                let mut key = vec![tag];
+                key.extend_from_slice(&(i as u64).to_be_bytes());
+                (Bytes::from(key), Bytes::from(vec![tag; 4096]))
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn large_batches_commit_through_ingestion_and_survive_reopen() {
+        let dir = tempdir().expect("tempdir");
+        let (first, second) = {
+            let store = RocksStore::open(dir.path(), None).expect("open db");
+            let first = store.put_batch(large_batch(1)).await.expect("put");
+            let second = store.put_batch(large_batch(2)).await.expect("put");
+            assert_eq!(store.current_sequence(), second);
+
+            let batch = store
+                .get_batch(first)
+                .await
+                .expect("get batch")
+                .expect("batch retained");
+            assert_eq!(batch_entries(batch), large_batch(1));
+            (first, second)
+        };
+
+        let store = RocksStore::open(dir.path(), None).expect("reopen db");
+        assert_eq!(store.current_sequence(), second);
+        for (sequence, tag) in [(first, 1u8), (second, 2u8)] {
+            let batch = store
+                .get_batch(sequence)
+                .await
+                .expect("get batch")
+                .expect("batch retained");
+            assert_eq!(batch_entries(batch), large_batch(tag));
+        }
+        assert_eq!(
+            store.get_raw(&[1u8, 0, 0, 0, 0, 0, 0, 0, 0]).expect("get"),
+            Some(vec![1u8; 4096])
+        );
+
+        // Sequence pruning drops the ingested rows like any other log rows.
+        store
+            .apply_prune_policies(PrunePolicyDocument {
+                version: exoware_sdk::prune_policy::PRUNE_POLICY_DOCUMENT_VERSION,
+                policies: vec![exoware_sdk::prune_policy::PrunePolicy {
+                    scope: PolicyScope::Sequence,
+                    retain: RetainPolicy::KeepLatest { count: 1 },
+                }],
+            })
+            .expect("prune");
+        assert!(store.get_batch(first).await.expect("get").is_none());
+        assert!(store.get_batch(second).await.expect("get").is_some());
+        assert_eq!(
+            store.oldest_retained_batch().await.expect("oldest"),
+            Some(second)
         );
     }
 
