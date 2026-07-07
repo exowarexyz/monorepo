@@ -1,4 +1,11 @@
 //! HTTP server entrypoints.
+//!
+//! The server runs on [`UnorderedRocksStore`] with [`CommitDurability::NoWalFlush`]: data is
+//! written to RocksDB concurrently without a WAL, and sequence numbers are assigned after the
+//! fact by a sequencer whose atomic memtable flush is the durability barrier for each ack. This
+//! roughly doubles large-batch ingest throughput over the ordered WAL-backed pipeline (see
+//! `benches/ingest_load.rs`). The ordered [`crate::RocksStore`] remains available as a library
+//! type for callers that need strict same-key ordering between state and log.
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -11,7 +18,8 @@ use tracing::info;
 
 use exoware_server::{connect_stack, AppState};
 
-use crate::RocksStore;
+use crate::rocks::CommitDurability;
+use crate::unordered::{UnorderedRocksConfig, UnorderedRocksStore};
 
 pub const CMD: &str = "server";
 pub const RUN_CMD: &str = "run";
@@ -20,12 +28,23 @@ async fn health() -> &'static str {
     "ok"
 }
 
+/// Opens the simulator's engine: unordered ingest with WAL-less, flush-backed durability.
+fn open_engine(directory: &Path) -> Result<UnorderedRocksStore, rocksdb::Error> {
+    UnorderedRocksStore::open(
+        directory,
+        Some(UnorderedRocksConfig {
+            durability: CommitDurability::NoWalFlush,
+            ..Default::default()
+        }),
+    )
+}
+
 /// Run the store simulator until the process is interrupted.
 pub async fn run(
     directory: &std::path::Path,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let engine = Arc::new(RocksStore::open(directory, None)?);
+    let engine = Arc::new(open_engine(directory)?);
     let state = AppState::new(engine);
     let connect = connect_stack(state);
 
@@ -45,7 +64,7 @@ pub async fn run(
 pub async fn spawn_for_test(
     data_dir: &Path,
 ) -> Result<(tokio::task::JoinHandle<()>, String), Box<dyn std::error::Error + Send + Sync>> {
-    let engine = Arc::new(RocksStore::open(data_dir, None)?);
+    let engine = Arc::new(open_engine(data_dir)?);
     let state = AppState::new(engine);
     let connect = connect_stack(state);
     let app = Router::new()

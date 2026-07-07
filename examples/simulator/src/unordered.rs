@@ -21,17 +21,20 @@
 //! every batch at or beneath it is durable and queryable, so `min_sequence_number` reads and
 //! stream replay behave exactly as with the ordered store.
 //!
-//! Known semantic differences from the ordered pipeline (acceptable for an investigation
-//! prototype; see PR description for discussion):
+//! Known semantic differences from the ordered pipeline (acceptable for the simulator; see the
+//! PR description for discussion):
 //! - Two concurrent `put_batch` calls that write the *same key* may be applied to the
 //!   current-state CF in a different order than their assigned sequence numbers, so replaying the
 //!   log can disagree with the materialized state for racing same-key writers.
 //! - Data rows become visible to point/range reads as soon as the unsynced write lands (before
 //!   their sequence number is published). The ordered store has the same window, just narrower.
-//! - A crash (or a failed sequence assignment) can leave junk behind: data rows and staged
-//!   payloads whose write survived but whose sequence assignment never happened. These batches
-//!   were never acked and never published, so the sequence contract holds; the junk is simply
-//!   never referenced. No recovery/garbage-collection pass is attempted.
+//! - **Unsequenced keys**: a batch whose phase-1 write lands but whose sequence assignment never
+//!   completes (crash, failed pointer write) leaves its keys in the current state without any
+//!   sequence number referencing them. Such keys are readable by point/range queries but never
+//!   appear in the log or on a stream: replaying the log does not reproduce them. The caller was
+//!   never acked, so if it retries, the retry overwrites the same keys under a real sequence
+//!   number and the anomaly heals; if it never retries, the junk keys simply persist. No
+//!   recovery/garbage-collection pass is attempted.
 
 use std::num::NonZeroUsize;
 use std::path::Path;

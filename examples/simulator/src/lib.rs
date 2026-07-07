@@ -1,4 +1,9 @@
 //! In-process store API simulator (naive RocksDB).
+//!
+//! The server (`run` / `spawn_for_test`) uses [`UnorderedRocksStore`] with
+//! [`CommitDurability::NoWalFlush`]: concurrent WAL-less data writes with sequence numbers
+//! assigned after the fact, made durable per commit wave by one atomic memtable flush. The
+//! ordered [`RocksStore`] pipeline remains available as a library type.
 
 pub mod rocks;
 pub mod server;
