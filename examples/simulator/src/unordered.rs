@@ -346,7 +346,8 @@ impl UnorderedRocksStore {
         for policy in &document.policies {
             match &policy.scope {
                 PolicyScope::Keys(scope) => {
-                    let deletes = collect_key_prune_deletes(self.db.clone(), scope, &policy.retain)?;
+                    let deletes =
+                        collect_key_prune_deletes(self.db.clone(), scope, &policy.retain)?;
                     self.delete_keys(&deletes).map_err(|e| e.to_string())?;
                 }
                 PolicyScope::Sequence => {
@@ -654,7 +655,10 @@ mod tests {
             batch_entries(store.get_batch(2).await.expect("get").expect("retained")),
             vec![(Bytes::from_static(b"b"), Bytes::from_static(b"2"))]
         );
-        assert_eq!(store.oldest_retained_batch().await.expect("oldest"), Some(1));
+        assert_eq!(
+            store.oldest_retained_batch().await.expect("oldest"),
+            Some(1)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -732,11 +736,9 @@ mod tests {
             // pointer row or frontier update.
             let staged_cf = store.staged_cf();
             let orphan_ticket = [0xEEu8; TICKET_LEN];
-            let staged_value = encode_staged_value(&[(
-                Bytes::from_static(b"orphan"),
-                Bytes::from_static(b"o"),
-            )])
-            .expect("staged value");
+            let staged_value =
+                encode_staged_value(&[(Bytes::from_static(b"orphan"), Bytes::from_static(b"o"))])
+                    .expect("staged value");
             let mut batch = rocksdb::WriteBatch::default();
             batch.put(b"orphan", b"o");
             batch.put_cf(staged_cf, orphan_ticket, staged_value);
@@ -777,7 +779,10 @@ mod tests {
         assert!(store.get_batch(1).await.expect("get").is_none());
         assert!(store.get_batch(2).await.expect("get").is_none());
         assert!(store.get_batch(3).await.expect("get").is_some());
-        assert_eq!(store.oldest_retained_batch().await.expect("oldest"), Some(3));
+        assert_eq!(
+            store.oldest_retained_batch().await.expect("oldest"),
+            Some(3)
+        );
         // Staged payloads for pruned batches must be gone too.
         let staged_rows = store
             .db

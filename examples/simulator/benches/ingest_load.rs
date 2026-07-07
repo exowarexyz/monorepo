@@ -5,6 +5,8 @@
 //!   sequence numbers assigned before a single synced commit per group).
 //! - `unordered`: the experimental [`exoware_simulator::UnorderedRocksStore`] pipeline
 //!   (concurrent unsynced data writes, sequence numbers assigned after by a tiny synced write).
+//! - `unordered-uw`: same store with RocksDB's `unordered_write=true`, which relaxes RocksDB's
+//!   internal write ordering to admit more memtable concurrency.
 //! - `raw-nosync`: concurrent RocksDB writes without sync, sequence numbers, or a batch log.
 //!   Upper bound for what the disk + RocksDB can do with zero ordering or durability work.
 //! - `raw-sync`: concurrent RocksDB writes with `sync=true` on every write (RocksDB group
@@ -12,7 +14,7 @@
 //!
 //! Usage (all flags optional):
 //!   cargo bench -p exoware-simulator --bench ingest_load -- \
-//!     [--modes ordered,unordered,raw-nosync,raw-sync] [--concurrency 1,8,64,256] \
+//!     [--modes ordered,unordered,unordered-uw,raw-nosync,raw-sync] [--concurrency 1,8,64,256] \
 //!     [--value-sizes 128,1024,16384] [--kvs-per-put 1] [--measure-secs 5] [--warmup-secs 1]
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -21,13 +23,14 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use exoware_server::Ingest;
-use exoware_simulator::{RocksStore, UnorderedRocksStore};
+use exoware_simulator::{RocksStore, UnorderedRocksConfig, UnorderedRocksStore};
 use tempfile::tempdir;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Ordered,
     Unordered,
+    UnorderedUw,
     RawNoSync,
     RawSync,
 }
@@ -37,6 +40,7 @@ impl Mode {
         match s {
             "ordered" => Some(Self::Ordered),
             "unordered" => Some(Self::Unordered),
+            "unordered-uw" => Some(Self::UnorderedUw),
             "raw-nosync" => Some(Self::RawNoSync),
             "raw-sync" => Some(Self::RawSync),
             _ => None,
@@ -47,6 +51,7 @@ impl Mode {
         match self {
             Self::Ordered => "ordered",
             Self::Unordered => "unordered",
+            Self::UnorderedUw => "unordered-uw",
             Self::RawNoSync => "raw-nosync",
             Self::RawSync => "raw-sync",
         }
@@ -114,6 +119,11 @@ async fn run_cell(config: &CellConfig) -> CellResult {
         Mode::Ordered => Engine::Ordered(RocksStore::open(dir.path(), None).expect("open")),
         Mode::Unordered => {
             Engine::Unordered(UnorderedRocksStore::open(dir.path(), None).expect("open"))
+        }
+        Mode::UnorderedUw => {
+            let mut config = UnorderedRocksConfig::default();
+            config.db_options.set_unordered_write(true);
+            Engine::Unordered(UnorderedRocksStore::open(dir.path(), Some(config)).expect("open"))
         }
         Mode::RawNoSync | Mode::RawSync => {
             let mut options = rocksdb::Options::default();
@@ -195,7 +205,13 @@ where
 }
 
 fn main() {
-    let mut modes = vec![Mode::Ordered, Mode::Unordered, Mode::RawNoSync, Mode::RawSync];
+    let mut modes = vec![
+        Mode::Ordered,
+        Mode::Unordered,
+        Mode::UnorderedUw,
+        Mode::RawNoSync,
+        Mode::RawSync,
+    ];
     let mut concurrency = vec![1usize, 8, 64, 256];
     let mut value_sizes = vec![128usize, 1024, 16384];
     let mut kvs_per_put = 1usize;
@@ -263,8 +279,8 @@ fn main() {
                 let result = runtime.block_on(run_cell(&config));
                 let seconds = result.elapsed.as_secs_f64();
                 let puts_per_sec = result.puts as f64 / seconds;
-                let mib_per_sec = puts_per_sec * (kvs_per_put * (value_size + 20)) as f64
-                    / (1024.0 * 1024.0);
+                let mib_per_sec =
+                    puts_per_sec * (kvs_per_put * (value_size + 20)) as f64 / (1024.0 * 1024.0);
                 println!(
                     "{:<11} {:>5} {:>7} {:>4} | {:>9.0} {:>9.1} | {:>8.2} {:>8.2} {:>8.2} {:>9.2}",
                     mode.name(),

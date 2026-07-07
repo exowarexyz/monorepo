@@ -286,8 +286,8 @@ pub(crate) fn collect_key_prune_deletes(
     retain: &RetainPolicy,
 ) -> Result<Vec<Bytes>, String> {
     let codec = KeyCodec::new(scope.selector.reserved_bits, scope.selector.prefix);
-    let regex = compile_payload_regex(&scope.selector.payload_regex)
-        .map_err(|e| format!("policy: {e}"))?;
+    let regex =
+        compile_payload_regex(&scope.selector.payload_regex).map_err(|e| format!("policy: {e}"))?;
 
     let (start, end) = codec.prefix_bounds();
     let mut rows = RocksRangeScanState::new(db, start, end, usize::MAX, true);
