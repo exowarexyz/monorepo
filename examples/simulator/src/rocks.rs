@@ -11,9 +11,9 @@
 //! only then publishes and acks. The two ingestions are not atomic, but the window is one group
 //! wide: a crash between them leaves the log durable and the state missing for at most the last
 //! group, which `open` repairs by replaying the rows of the last retained log file before the
-//! store serves reads. The sequence meta row is persisted only before pruning deletes log rows,
-//! so an unpruned store recovers by reading one meta row, one file listing, and replaying at
-//! most one group.
+//! store serves reads. The sequence meta row is written only by pruning, atomically with the
+//! range tombstone (deleting log rows must not regress the derived frontier), so a store
+//! recovers by reading one meta row, one file listing, and replaying at most one group.
 
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BTreeMap;
@@ -45,8 +45,8 @@ use tracing::debug;
 
 const META_CF: &str = "meta";
 /// Durable-sequence floor. The frontier at open is the maximum of this row and the highest
-/// retained log row; it is only persisted before pruning deletes log rows — commits never write
-/// it.
+/// retained log row; it is only written atomically with a prune's range tombstone (deleting log
+/// rows must not regress the derived frontier) — commits never write it.
 const SEQ_META_KEY: &[u8] = b"sequence";
 const LOG_CF: &str = "log";
 const LOG_BATCH_KEY_LEN: usize = 8;
@@ -302,18 +302,15 @@ struct Frontiers {
     /// group's state ingestion is in flight; re-derived at open from the retained log rows and
     /// the sequence meta row.
     durable: AtomicU64,
-    /// Highest durable-sequence value written to the meta row, so redundant persists are free.
-    persisted_durable: AtomicU64,
-    /// Serializes floor persistence so the meta row never moves backward.
+    /// Serializes log pruning so the persisted durable-sequence floor never moves backward.
     persist: Mutex<()>,
 }
 
 impl Frontiers {
-    fn new(durable: u64, persisted_durable: u64) -> Self {
+    fn new(durable: u64) -> Self {
         Self {
             published: AtomicU64::new(durable),
             durable: AtomicU64::new(durable),
-            persisted_durable: AtomicU64::new(persisted_durable),
             persist: Mutex::new(()),
         }
     }
@@ -782,30 +779,6 @@ fn write_synced_batch(db: &DB, batch: rocksdb::WriteBatch) -> Result<(), String>
         .map_err(|e| e.to_string())
 }
 
-/// Persists the durable-sequence floor with one synced meta write, so a later log prune cannot
-/// regress the frontier `open` re-derives from retained rows. The lock keeps concurrent callers
-/// from persisting stale, lower values over newer ones.
-fn persist_durable_floor(db: &DB, frontiers: &Frontiers) -> Result<(), String> {
-    let _guard = frontiers
-        .persist
-        .lock()
-        .map_err(|e| format!("rocks frontier persist lock poisoned: {e}"))?;
-    let durable = frontiers.durable.load(Ordering::Acquire);
-    if frontiers.persisted_durable.load(Ordering::Acquire) >= durable {
-        return Ok(());
-    }
-    let meta_cf = db
-        .cf_handle(META_CF)
-        .expect("meta CF must exist (created on open)");
-    let mut batch = rocksdb::WriteBatch::default();
-    batch.put_cf(meta_cf, SEQ_META_KEY, durable.to_le_bytes());
-    write_synced_batch(db, batch)?;
-    frontiers
-        .persisted_durable
-        .fetch_max(durable, Ordering::AcqRel);
-    Ok(())
-}
-
 /// Creates the SST staging directory and deletes files a crashed ingestion left behind. Staged
 /// files are only ever moved into the DB by ingestion, so anything still here was never visible.
 fn prepare_ingest_dir(store_path: &Path) -> Result<PathBuf, String> {
@@ -1010,7 +983,7 @@ impl RocksStore {
         let ingest_dir = prepare_ingest_dir(path)?;
         replay_last_log_file(&db)?;
 
-        let frontiers = Arc::new(Frontiers::new(seq, meta_seq));
+        let frontiers = Arc::new(Frontiers::new(seq));
         let writer = Arc::new(Writer::start(
             db.clone(),
             ingest_dir,
@@ -1055,21 +1028,38 @@ impl RocksStore {
         if cutoff_exclusive == 0 {
             return Ok(());
         }
+        // Serializes concurrent prunes: `durable` is monotonic, so ordering the loads and writes
+        // keeps the persisted floor from ever moving backward.
+        let _guard = self
+            .frontiers
+            .persist
+            .lock()
+            .map_err(|e| format!("rocks prune lock poisoned: {e}"))?;
         let cf = self.log_cf();
+        let meta_cf = self
+            .db
+            .cf_handle(META_CF)
+            .expect("meta CF must exist (created on open)");
+
+        // One synced, atomic batch: the range tombstone that logically deletes the rows, and the
+        // durable-sequence floor that keeps `open` from re-deriving a regressed frontier once
+        // those rows are gone. Nothing is deleted unless the floor covering it is durable.
+        let durable = self.frontiers.durable.load(Ordering::Acquire);
+        let mut batch = rocksdb::WriteBatch::default();
+        batch.put_cf(meta_cf, SEQ_META_KEY, durable.to_le_bytes());
+        batch.delete_range_cf(cf, sequence_log_key(0), sequence_log_key(cutoff_exclusive));
+        write_synced_batch(&self.db, batch)?;
+
         // Unlink the ingested SST files that sit entirely below the cutoff (the common case,
         // since each file covers one commit group's contiguous sequence range). This reclaims
-        // their space immediately, without compaction ever reading the massive log payloads.
+        // their space immediately, without compaction ever reading the massive log payloads;
+        // rows in a file straddling the cutoff stay covered by the tombstone above.
         self.db
             .delete_file_in_range_cf(
                 cf,
                 sequence_log_key(0),
                 sequence_log_key(cutoff_exclusive - 1),
             )
-            .map_err(|e| e.to_string())?;
-        // Cover the leftovers — rows in a file straddling the cutoff and any L0 stragglers —
-        // with a range tombstone so they are logically gone right away.
-        self.db
-            .delete_range_cf(cf, sequence_log_key(0), sequence_log_key(cutoff_exclusive))
             .map_err(|e| e.to_string())
     }
 
@@ -1144,9 +1134,6 @@ impl RocksStore {
     /// Computes the replay-log cutoff for a sequence policy and prunes only log rows.
     fn apply_sequence_prune_policy(&self, retain: &RetainPolicy) -> Result<(), String> {
         let current = self.frontiers.published.load(Ordering::Acquire);
-        // `open` re-derives the durable frontier from the retained rows, so the floor must be
-        // durable (synced meta write) before any row or file is deleted.
-        persist_durable_floor(&self.db, &self.frontiers)?;
         let cutoff_exclusive = match retain {
             RetainPolicy::KeepLatest { count } => {
                 let count = *count as u64;
