@@ -19,8 +19,8 @@ use exoware_sdk::{
 };
 use tempfile::tempdir;
 
-/// The tempdir guard moves into the server task, which holds the store until
-/// runtime teardown, so the data directory is never deleted under the store.
+/// The tempdir guard moves into the store engine, which every server and connection task
+/// holds, so the data directory is never deleted under the store however tasks are torn down.
 async fn spawn_client() -> (tokio::task::JoinHandle<()>, PrefixedStoreClient, String) {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().to_path_buf();

@@ -180,8 +180,8 @@ impl CertifiableBlock for TestBlock {
     }
 }
 
-/// Keep `_server` alive for the whole test; the store's tempdir lives inside the server task so
-/// it cannot be deleted while the store is still running.
+/// Keep `_server` alive for the whole test; the store's tempdir lives inside the store engine
+/// so it cannot be deleted while the store is still running.
 async fn local_store_client() -> (tokio::task::JoinHandle<()>, StoreClient) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().to_path_buf();

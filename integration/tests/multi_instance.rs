@@ -39,8 +39,8 @@ type QmdbReader = KeylessClient<QmdbFamily, Sha256, Vec<u8>>;
 type QmdbWriter = KeylessWriter<QmdbFamily, Sha256, Vec<u8>>;
 type QmdbConnectClient = OperationLogClient<PreferZstdHttpClient, QmdbFamily, Sha256, QmdbOp>;
 
-/// The store's tempdir lives inside the server task so it cannot be deleted while the store is
-/// still running.
+/// The store's tempdir lives inside the store engine so it cannot be deleted while the store
+/// is still running, however the runtime tears its tasks down.
 async fn local_store_client() -> (tokio::task::JoinHandle<()>, StoreClient) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().to_path_buf();

@@ -7,13 +7,14 @@
 //! Both structures are written as SST files and ingested, bypassing the WAL and the memtables
 //! entirely: `prepare` stages one sorted state file and one log file per commit group, and
 //! `commit` ingests the log file first (its rows alone define durability — `open` derives the
-//! frontier from the highest retained row and the sequence meta row), then the state file, and
-//! only then publishes and acks. The two ingestions are not atomic, but the window is one group
-//! wide: a crash between them leaves the log durable and the state missing for at most the last
-//! group, which `open` repairs by replaying the rows of the last retained log file before the
-//! store serves reads. The sequence meta row is written only by pruning, atomically with the
-//! range tombstone (deleting log rows must not regress the derived frontier), so a store
-//! recovers by reading one meta row, one file listing, and replaying at most one group.
+//! frontier from the highest retained row and the state-floor meta row), then the state file,
+//! and only then publishes and acks. The two ingestions are not atomic, but the window is one
+//! group wide: a crash between them leaves the log durable and the state missing for at most the
+//! last group, which `open` repairs by replaying the retained log rows above the state floor
+//! within the last retained log file, before the store serves reads. The floor meta row is
+//! written only by pruning — atomically with the log range tombstone or the pruned state keys —
+//! so a store recovers by reading one meta row, one file listing, and replaying at most one
+//! group.
 
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BTreeMap;
@@ -44,9 +45,11 @@ use tokio::sync::oneshot;
 use tracing::debug;
 
 const META_CF: &str = "meta";
-/// Durable-sequence floor. The frontier at open is the maximum of this row and the highest
-/// retained log row; it is only written atomically with a prune's range tombstone (deleting log
-/// rows must not regress the derived frontier) — commits never write it.
+/// State floor: the published frontier at the time of the last prune. The state below it is
+/// authoritative — log rows at or below it are never replayed at open (replaying them could
+/// resurrect key-pruned rows), and the frontier at open is the maximum of this row and the
+/// highest retained log row (deleting log rows must not regress the derived frontier). Only
+/// pruning writes it, atomically with its deletes — commits never do.
 const SEQ_META_KEY: &[u8] = b"sequence";
 const LOG_CF: &str = "log";
 const LOG_BATCH_KEY_LEN: usize = 8;
@@ -300,9 +303,12 @@ struct Frontiers {
     published: AtomicU64,
     /// Highest sequence whose log rows are durable. Runs ahead of `published` only while a
     /// group's state ingestion is in flight; re-derived at open from the retained log rows and
-    /// the sequence meta row.
+    /// the state-floor meta row.
     durable: AtomicU64,
-    /// Serializes log pruning so the persisted durable-sequence floor never moves backward.
+    /// Serializes prunes (so the persisted state floor never moves backward) and orders state
+    /// visibility against floor reads: `commit` ingests and publishes each group's state under
+    /// this lock, so a prune that loads `published` under it sees a frontier covering every row
+    /// its scan could have observed.
     persist: Mutex<()>,
 }
 
@@ -347,8 +353,9 @@ struct PreparedWrite {
 }
 
 struct Writer {
-    sender: Mutex<Option<mpsc::Sender<WriteRequest>>>,
-    handles: Mutex<Vec<thread::JoinHandle<()>>>,
+    /// `None` only during `Drop`, which closes the channel before joining the workers.
+    sender: Option<mpsc::Sender<WriteRequest>>,
+    handles: Vec<thread::JoinHandle<()>>,
 }
 
 impl Writer {
@@ -396,8 +403,8 @@ impl Writer {
             .expect("failed to spawn RocksDB prepare worker");
 
         Self {
-            sender: Mutex::new(Some(request_sender)),
-            handles: Mutex::new(vec![prepare, commit]),
+            sender: Some(request_sender),
+            handles: vec![prepare, commit],
         }
     }
 
@@ -410,14 +417,9 @@ impl Writer {
             return Err("cannot ingest an empty batch".to_string());
         }
         let (response, result) = oneshot::channel();
-        let sender = self
-            .sender
-            .lock()
-            .map_err(|e| format!("rocks writer lock poisoned: {e}"))?
+        self.sender
             .as_ref()
-            .cloned()
-            .ok_or_else(|| "rocks writer stopped".to_string())?;
-        sender
+            .expect("sender lives until drop")
             .send(WriteRequest { kvs, response })
             .map_err(|_| "rocks writer stopped".to_string())?;
         result
@@ -431,13 +433,9 @@ impl Drop for Writer {
         // Closing the request channel lets `prepare` drain and exit, which drops the group
         // channel and stops `commit`; joining keeps background RocksDB writers from outliving
         // the store.
-        if let Ok(mut sender) = self.sender.lock() {
-            sender.take();
-        }
-        if let Ok(mut handles) = self.handles.lock() {
-            for handle in handles.drain(..) {
-                let _ = handle.join();
-            }
+        self.sender.take();
+        for handle in self.handles.drain(..) {
+            let _ = handle.join();
         }
     }
 }
@@ -480,9 +478,11 @@ fn run_prepare(
                 continue;
             }
         };
-        if let Some(last) = group.writes.last() {
-            next = last.sequence;
-        }
+        next = group
+            .writes
+            .last()
+            .expect("groups are never empty")
+            .sequence;
         if !forward_group(&sender, group) {
             break;
         }
@@ -601,8 +601,7 @@ fn stage_log_file(path: &Path, writes: &[AssignedWrite]) -> Result<usize, String
     writer.open(path).map_err(|e| e.to_string())?;
     let mut bytes = 0;
     for write in writes {
-        let value = encode_log_value(write.sequence, std::slice::from_ref(&write.request))
-            .expect("requests always carry rows (empty batches are rejected on entry)");
+        let value = encode_log_value(write.sequence, &write.request.kvs);
         bytes += LOG_BATCH_KEY_LEN + value.len();
         writer
             .put(sequence_log_key(write.sequence), &value)
@@ -689,14 +688,29 @@ fn commit_group(
     epoch: &AtomicU64,
     group: PreparedWrite,
 ) -> CommitOutcome {
-    if group.writes.is_empty() {
-        return CommitOutcome::Continue;
-    }
+    debug_assert!(!group.writes.is_empty(), "groups are never empty");
     let PreparedWrite {
         writes,
         staged,
         epoch: group_epoch,
     } = group;
+    if group_epoch != epoch.load(Ordering::Acquire) {
+        // This group was assigned under a frontier an earlier commit failure has since abandoned
+        // (prepare can stage one wave ahead before it observes the bump). Rejecting it keeps the
+        // durable log gap-free; the requests never reached the DB, so the caller is told to
+        // retry, which re-allocates them fresh sequence numbers under the current epoch. Checked
+        // before the staging result so a stale group's own staging failure cannot bump the epoch
+        // again and spuriously reject the wave prepare has already re-synced.
+        if let Ok(staged) = &staged {
+            let _ = std::fs::remove_file(&staged.log);
+            let _ = std::fs::remove_file(&staged.state);
+        }
+        fail_assigned_writes(
+            writes,
+            "rocks write batch superseded by an earlier failure, retry".to_string(),
+        );
+        return CommitOutcome::Continue;
+    }
     let staged = match staged {
         Ok(staged) => staged,
         Err(error) => {
@@ -705,19 +719,6 @@ fn commit_group(
             return CommitOutcome::Continue;
         }
     };
-    if group_epoch != epoch.load(Ordering::Acquire) {
-        // This group was assigned under a frontier an earlier commit failure has since abandoned
-        // (prepare can stage one wave ahead before it observes the bump). Rejecting it keeps the
-        // durable log gap-free; the requests never reached the DB, so the caller is told to
-        // retry, which re-allocates them fresh sequence numbers under the current epoch.
-        let _ = std::fs::remove_file(&staged.log);
-        let _ = std::fs::remove_file(&staged.state);
-        fail_assigned_writes(
-            writes,
-            "rocks write batch superseded by an earlier failure, retry".to_string(),
-        );
-        return CommitOutcome::Continue;
-    }
 
     let requests = writes.len();
     let last_sequence = writes
@@ -738,6 +739,13 @@ fn commit_group(
     // Release so `prepare` re-syncs against a frontier whose log rows are already durable.
     frontiers.durable.store(last_sequence, Ordering::Release);
 
+    // Ingest and publish under the floor lock: a prune loads the published frontier as its
+    // state floor under the same lock, so no scan-visible state row can outrun the frontier
+    // covering it (a key prune must never delete a row the floor does not cover).
+    let publish_guard = frontiers
+        .persist
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Err(error) = ingest_staged_file(db, rocksdb::DEFAULT_COLUMN_FAMILY_NAME, &staged.state) {
         // The log rows are durable but the state rows are not: the frontier freezes below this
         // group so reads stay complete below the advertised sequence, and a restart repairs the
@@ -748,6 +756,7 @@ fn commit_group(
 
     // Release so `current_sequence` readers only observe frontiers whose rows are readable.
     frontiers.published.store(last_sequence, Ordering::Release);
+    drop(publish_guard);
     debug!(
         requests,
         staged_bytes = staged.staged_bytes,
@@ -797,8 +806,8 @@ fn prepare_ingest_dir(store_path: &Path) -> Result<PathBuf, String> {
 
 /// Returns the sequence of the highest retained log row, or zero when the log is empty. Rows are
 /// only ever ingested by sequential, atomic commits, so the highest retained row is a lower bound
-/// on the durable frontier (pruning persists the sequence meta row before deleting rows, so the
-/// meta row covers whatever was pruned).
+/// on the durable frontier (pruning persists the state floor atomically with its deletes, so the
+/// floor covers whatever was pruned).
 fn highest_log_row(db: &DB) -> Result<u64, String> {
     let log_cf = db
         .cf_handle(LOG_CF)
@@ -812,12 +821,15 @@ fn highest_log_row(db: &DB) -> Result<u64, String> {
     }
 }
 
-/// Reads a little-endian u64 sequence value from the meta column family, defaulting to zero.
-fn read_meta_sequence(db: &DB, key: &[u8]) -> Result<u64, String> {
+/// Reads the state-floor meta row, defaulting to zero when no prune has written it yet.
+fn read_state_floor(db: &DB) -> Result<u64, String> {
     let meta_cf = db
         .cf_handle(META_CF)
         .expect("meta CF must exist (created on open)");
-    match db.get_cf(meta_cf, key).map_err(|e| e.to_string())? {
+    match db
+        .get_cf(meta_cf, SEQ_META_KEY)
+        .map_err(|e| e.to_string())?
+    {
         Some(bytes) if bytes.len() == 8 => Ok(u64::from_le_bytes(bytes.try_into().unwrap())),
         _ => Ok(0),
     }
@@ -826,10 +838,11 @@ fn read_meta_sequence(db: &DB, key: &[u8]) -> Result<u64, String> {
 /// Repairs the current state after a crash that hit between a group's two ingestions: the log
 /// file is durable but the state file may be missing, and only for the last committed group
 /// (commit ingests strictly in order and publishes before starting the next group). Re-applies
-/// every row of the last retained log file — the group whose state might be missing is always
+/// the rows of the last retained log file — the group whose state might be missing is always
 /// the one that ends at the durable frontier — which is idempotent because those rows are the
-/// newest writes for their keys.
-fn replay_last_log_file(db: &DB) -> Result<(), String> {
+/// newest writes for their keys. Rows at or below `floor` are skipped: their state is already
+/// authoritative, and key pruning may have deleted rows a replay would resurrect.
+fn replay_last_log_file(db: &DB, floor: u64) -> Result<(), String> {
     let last_file_start = db
         .live_files()
         .map_err(|e| e.to_string())?
@@ -842,6 +855,11 @@ fn replay_last_log_file(db: &DB) -> Result<(), String> {
     let Some(start) = last_file_start else {
         return Ok(());
     };
+    let Some(above_floor) = floor.checked_add(1) else {
+        // The floor covers every representable sequence; nothing can need replay.
+        return Ok(());
+    };
+    let start = start.max(above_floor);
 
     let log_cf = db
         .cf_handle(LOG_CF)
@@ -858,7 +876,9 @@ fn replay_last_log_file(db: &DB) -> Result<(), String> {
         }
     }
     if !batch.is_empty() {
-        db.write(batch).map_err(|e| e.to_string())?;
+        // Synced: once a later commit moves the last-file replay bound past this group, a
+        // repair lost to power loss would never be re-run.
+        write_synced_batch(db, batch)?;
     }
     Ok(())
 }
@@ -916,8 +936,10 @@ pub struct RocksConfig {
 }
 
 impl Default for RocksConfig {
-    /// RocksDB options tuned for the simulator's ingest profile (hundreds of thousands of keys
-    /// per batch) instead of stock RocksDB defaults.
+    /// Stock RocksDB options, plus background parallelism sized to the machine: commits ingest
+    /// overlapping state SSTs that compactions must keep merging. Memtables are off the hot
+    /// path (only the open-time replay and prune deletes write them), so they stay at stock
+    /// defaults.
     fn default() -> Self {
         let cores = thread::available_parallelism()
             .map(|n| n.get())
@@ -925,15 +947,9 @@ impl Default for RocksConfig {
         let mut db_options = Options::default();
         db_options.increase_parallelism(cores);
 
-        // Smaller, more numerous state memtables keep skiplist inserts shallow and shift work to
-        // background flushes.
-        let mut default_cf_options = Options::default();
-        default_cf_options.set_write_buffer_size(32 * 1024 * 1024);
-        default_cf_options.set_max_write_buffer_number(4);
-
         Self {
             db_options,
-            default_cf_options,
+            default_cf_options: Options::default(),
             meta_cf_options: Options::default(),
             log_cf_options: Options::default(),
             write_pipeline: RocksWritePipelineConfig::default(),
@@ -953,9 +969,9 @@ pub struct RocksStore {
 impl RocksStore {
     /// Open the store with stock RocksDB defaults, unless `config` overrides
     /// the database and column-family options. Re-derives the durable frontier from the retained
-    /// log rows and the sequence meta row, then replays the last retained log file into the
-    /// default column family so the current state is complete below the durable sequence even
-    /// after a crash between a group's log and state ingestions.
+    /// log rows and the state-floor meta row, then replays the last retained log file's rows
+    /// above the floor into the default column family so the current state is complete below
+    /// the durable sequence even after a crash between a group's log and state ingestions.
     pub fn open(path: &Path, config: Option<RocksConfig>) -> Result<Self, String> {
         let RocksConfig {
             mut db_options,
@@ -976,12 +992,12 @@ impl RocksStore {
             DB::open_cf_descriptors(&db_options, path, vec![cf_default, cf_meta, cf_log])
                 .map_err(|e| e.to_string())?,
         );
-        // Commits do not write the sequence meta row; the log rows are the durable record.
-        let meta_seq = read_meta_sequence(&db, SEQ_META_KEY)?;
-        let seq = meta_seq.max(highest_log_row(&db)?);
+        // Commits do not write the state-floor meta row; the log rows are the durable record.
+        let floor = read_state_floor(&db)?;
+        let seq = floor.max(highest_log_row(&db)?);
 
         let ingest_dir = prepare_ingest_dir(path)?;
-        replay_last_log_file(&db)?;
+        replay_last_log_file(&db, floor)?;
 
         let frontiers = Arc::new(Frontiers::new(seq));
         let writer = Arc::new(Writer::start(
@@ -1004,23 +1020,50 @@ impl RocksStore {
             .expect("log CF must exist (created on open)")
     }
 
+    /// Returns the meta column-family handle created during open.
+    fn meta_cf(&self) -> &ColumnFamily {
+        self.db
+            .cf_handle(META_CF)
+            .expect("meta CF must exist (created on open)")
+    }
+
+    /// Serializes prunes: each loads the monotonic published frontier and persists it as the
+    /// state floor under this lock, so the floor never moves backward.
+    fn lock_persisted_floor(&self) -> Result<std::sync::MutexGuard<'_, ()>, String> {
+        self.frontiers
+            .persist
+            .lock()
+            .map_err(|e| format!("rocks prune lock poisoned: {e}"))
+    }
+
     /// Reads the current value for one default-column-family key.
     fn get_raw(&self, key: &[u8]) -> Result<Option<Vec<u8>>, rocksdb::Error> {
         self.db.get(key)
     }
 
-    /// Deletes current rows without touching sequence metadata or the replay log.
-    fn delete_keys(&self, keys: &[Bytes]) -> Result<(), rocksdb::Error> {
+    /// Deletes key-pruned current rows, atomically raising the state floor to the published
+    /// frontier in the same synced batch. Every deleted row's log entry sits at or below that
+    /// floor, so the replay at the next open cannot resurrect it — and the sync makes an acked
+    /// prune durable.
+    fn delete_keys(&self, keys: &[Bytes]) -> Result<(), String> {
         if keys.is_empty() {
             return Ok(());
         }
 
+        let _guard = self.lock_persisted_floor()?;
         let mut batch = rocksdb::WriteBatch::default();
+        batch.put_cf(
+            self.meta_cf(),
+            SEQ_META_KEY,
+            self.frontiers
+                .published
+                .load(Ordering::Acquire)
+                .to_le_bytes(),
+        );
         for k in keys {
             batch.delete(k.as_ref());
         }
-        self.db.write(batch)?;
-        Ok(())
+        write_synced_batch(&self.db, batch)
     }
 
     /// Deletes replay-log batches with sequence numbers below `cutoff_exclusive`.
@@ -1028,25 +1071,16 @@ impl RocksStore {
         if cutoff_exclusive == 0 {
             return Ok(());
         }
-        // Serializes concurrent prunes: `durable` is monotonic, so ordering the loads and writes
-        // keeps the persisted floor from ever moving backward.
-        let _guard = self
-            .frontiers
-            .persist
-            .lock()
-            .map_err(|e| format!("rocks prune lock poisoned: {e}"))?;
+        let _guard = self.lock_persisted_floor()?;
         let cf = self.log_cf();
-        let meta_cf = self
-            .db
-            .cf_handle(META_CF)
-            .expect("meta CF must exist (created on open)");
 
         // One synced, atomic batch: the range tombstone that logically deletes the rows, and the
-        // durable-sequence floor that keeps `open` from re-deriving a regressed frontier once
-        // those rows are gone. Nothing is deleted unless the floor covering it is durable.
-        let durable = self.frontiers.durable.load(Ordering::Acquire);
+        // state floor that keeps `open` from re-deriving a regressed frontier once those rows
+        // are gone. The published frontier covers every pruned row (the cutoff is capped at
+        // published + 1), and everything at or below it is durable and applied to the state.
+        let published = self.frontiers.published.load(Ordering::Acquire);
         let mut batch = rocksdb::WriteBatch::default();
-        batch.put_cf(meta_cf, SEQ_META_KEY, durable.to_le_bytes());
+        batch.put_cf(self.meta_cf(), SEQ_META_KEY, published.to_le_bytes());
         batch.delete_range_cf(cf, sequence_log_key(0), sequence_log_key(cutoff_exclusive));
         write_synced_batch(&self.db, batch)?;
 
@@ -1128,7 +1162,7 @@ impl RocksStore {
         for (_group_key, entries) in groups {
             all_deletes.extend(keys_to_delete(entries, scope, retain)?);
         }
-        self.delete_keys(&all_deletes).map_err(|e| e.to_string())
+        self.delete_keys(&all_deletes)
     }
 
     /// Computes the replay-log cutoff for a sequence policy and prunes only log rows.
@@ -1206,10 +1240,14 @@ impl Query for RocksStore {
     }
 }
 
+// Pruning scans the full selector range and issues synced writes, so it runs on the blocking
+// pool instead of occupying a Tokio worker.
 impl Prune for RocksStore {
     async fn apply_prune_policies(&self, document: PrunePolicyDocument) -> Result<(), String> {
         let store = self.clone();
-        store.apply_prune_policies(document)
+        tokio::task::spawn_blocking(move || store.apply_prune_policies(document))
+            .await
+            .map_err(|e| format!("prune task failed: {e}"))?
     }
 }
 
@@ -1242,7 +1280,14 @@ impl Log for RocksStore {
             None => Ok(None),
             Some(item) => {
                 let (key, _) = item.map_err(|e| e.to_string())?;
-                Ok(Some(sequence_from_log_key(key.as_ref())?))
+                let sequence = sequence_from_log_key(key.as_ref())?;
+                // Gate on the published frontier like `get_batch`: never advertise an oldest
+                // batch that `get_batch` would then hide (log rows can outrun the published
+                // frontier while a group's state ingestion is in flight or has failed).
+                if sequence > self.frontiers.published.load(Ordering::Acquire) {
+                    return Ok(None);
+                }
+                Ok(Some(sequence))
             }
         }
     }
@@ -1299,24 +1344,17 @@ fn encoded_entry_body_len(key: &[u8], value: &[u8]) -> usize {
     len
 }
 
-/// Encodes the replay payload for every key/value row folded into one sequence.
+/// Encodes the replay payload for one sequence's key/value rows.
 ///
 /// Writes the `log.stream.v1.GetResponse` wire format directly from the borrowed
 /// key/value slices so a large batch is encoded with a single presized allocation
 /// instead of one owned `Entry` per row. `log_value_matches_generated_encoder`
 /// pins byte-for-byte equality with the generated encoder.
-fn encode_log_value(sequence: u64, requests: &[WriteRequest]) -> Option<Vec<u8>> {
+fn encode_log_value(sequence: u64, kvs: &[(Bytes, Bytes)]) -> Vec<u8> {
     let mut total = 0;
-    let mut entries = 0usize;
-    for request in requests {
-        entries += request.kvs.len();
-        for (key, value) in &request.kvs {
-            let body_len = encoded_entry_body_len(key, value);
-            total += 1 + varint_len(body_len as u64) + body_len;
-        }
-    }
-    if entries == 0 {
-        return None;
+    for (key, value) in kvs {
+        let body_len = encoded_entry_body_len(key, value);
+        total += 1 + varint_len(body_len as u64) + body_len;
     }
     if sequence != 0 {
         total += 1 + varint_len(sequence);
@@ -1327,24 +1365,22 @@ fn encode_log_value(sequence: u64, requests: &[WriteRequest]) -> Option<Vec<u8>>
         buf.push(LOG_VALUE_SEQUENCE_TAG);
         put_varint(&mut buf, sequence);
     }
-    for request in requests {
-        for (key, value) in &request.kvs {
-            buf.push(LOG_VALUE_ENTRY_TAG);
-            put_varint(&mut buf, encoded_entry_body_len(key, value) as u64);
-            if !key.is_empty() {
-                buf.push(LOG_ENTRY_KEY_TAG);
-                put_varint(&mut buf, key.len() as u64);
-                buf.extend_from_slice(key);
-            }
-            if !value.is_empty() {
-                buf.push(LOG_ENTRY_VALUE_TAG);
-                put_varint(&mut buf, value.len() as u64);
-                buf.extend_from_slice(value);
-            }
+    for (key, value) in kvs {
+        buf.push(LOG_VALUE_ENTRY_TAG);
+        put_varint(&mut buf, encoded_entry_body_len(key, value) as u64);
+        if !key.is_empty() {
+            buf.push(LOG_ENTRY_KEY_TAG);
+            put_varint(&mut buf, key.len() as u64);
+            buf.extend_from_slice(key);
+        }
+        if !value.is_empty() {
+            buf.push(LOG_ENTRY_VALUE_TAG);
+            put_varint(&mut buf, value.len() as u64);
+            buf.extend_from_slice(value);
         }
     }
     debug_assert_eq!(buf.len(), total);
-    Some(buf)
+    buf
 }
 
 #[cfg(test)]
@@ -1357,13 +1393,6 @@ mod tests {
     use exoware_sdk::log::stream::v1::GetResponse as StreamGetResponse;
     use exoware_server::{Ingest, Log, Sequence};
     use tempfile::tempdir;
-
-    fn append_sequence_meta(db: &DB, batch: &mut rocksdb::WriteBatch, sequence: u64) {
-        let meta_cf = db
-            .cf_handle(META_CF)
-            .expect("meta CF must exist (created on open)");
-        batch.put_cf(meta_cf, SEQ_META_KEY, sequence.to_le_bytes());
-    }
 
     fn write_request(key: &'static [u8]) -> WriteRequest {
         let (response, _result) = oneshot::channel();
@@ -1379,10 +1408,6 @@ mod tests {
             .into_iter()
             .map(|entry| (Bytes::from(entry.key), entry.value))
             .collect()
-    }
-
-    fn decode_log_entries(value: &[u8]) -> Vec<(Bytes, Bytes)> {
-        response_entries(StreamGetResponse::decode_from_slice(value).expect("decode log value"))
     }
 
     fn batch_entries(batch: LogBatch) -> Vec<(Bytes, Bytes)> {
@@ -1432,35 +1457,6 @@ mod tests {
         store.frontiers.durable.load(Ordering::Acquire)
     }
 
-    fn commit_sequence_requests(
-        db: &DB,
-        sequence: &AtomicU64,
-        requests: &[WriteRequest],
-    ) -> Result<u64, String> {
-        let next = sequence
-            .load(Ordering::Acquire)
-            .checked_add(1)
-            .ok_or_else(|| "rocks sequence number overflowed".to_string())?;
-        let mut state_batch = rocksdb::WriteBatch::default();
-        let mut log_batch = rocksdb::WriteBatch::default();
-        for request in requests {
-            for (k, v) in &request.kvs {
-                state_batch.put(k.as_ref(), v.as_ref());
-            }
-        }
-        if let Some(value) = encode_log_value(next, requests) {
-            let log_cf = db
-                .cf_handle(LOG_CF)
-                .expect("log CF must exist (created on open)");
-            log_batch.put_cf(log_cf, sequence_log_key(next), value);
-        }
-        append_sequence_meta(db, &mut log_batch, next);
-        write_synced_batch(db, log_batch)?;
-        db.write(state_batch).map_err(|e| e.to_string())?;
-        sequence.store(next, Ordering::Release);
-        Ok(next)
-    }
-
     fn assigned_write(sequence: u64, key: &'static [u8], value: &'static [u8]) -> AssignedWrite {
         assigned_write_with_response(sequence, key, value).0
     }
@@ -1495,72 +1491,53 @@ mod tests {
 
     #[test]
     fn log_value_matches_generated_encoder() {
-        type RequestKvs = Vec<Vec<(Bytes, Bytes)>>;
-        let cases: Vec<(u64, RequestKvs)> = vec![
+        let cases: Vec<(u64, Vec<(Bytes, Bytes)>)> = vec![
             (
                 1,
-                vec![vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))]],
+                vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))],
             ),
-            // Coalesced requests, empty keys/values, and multi-byte varint lengths.
+            // Empty keys/values and multi-byte varint lengths.
             (
                 u64::MAX,
                 vec![
-                    vec![
-                        (Bytes::new(), Bytes::from_static(b"value-for-empty-key")),
-                        (Bytes::from_static(b"empty-value"), Bytes::new()),
-                        (Bytes::new(), Bytes::new()),
-                    ],
-                    vec![(Bytes::from(vec![7u8; 200]), Bytes::from(vec![9u8; 20_000]))],
+                    (Bytes::new(), Bytes::from_static(b"value-for-empty-key")),
+                    (Bytes::from_static(b"empty-value"), Bytes::new()),
+                    (Bytes::new(), Bytes::new()),
+                    (Bytes::from(vec![7u8; 200]), Bytes::from(vec![9u8; 20_000])),
                 ],
             ),
         ];
 
-        for (sequence, kvs_per_request) in cases {
-            let requests = kvs_per_request
-                .into_iter()
-                .map(|kvs| WriteRequest {
-                    kvs,
-                    response: oneshot::channel().0,
-                })
-                .collect::<Vec<_>>();
+        for (sequence, kvs) in cases {
             let expected = StreamGetResponse {
                 sequence_number: sequence,
-                entries: requests
+                entries: kvs
                     .iter()
-                    .flat_map(|request| {
-                        request.kvs.iter().map(|(key, value)| Entry {
-                            key: key.to_vec(),
-                            value: value.clone(),
-                            ..Default::default()
-                        })
+                    .map(|(key, value)| Entry {
+                        key: key.to_vec(),
+                        value: value.clone(),
+                        ..Default::default()
                     })
                     .collect(),
                 ..Default::default()
             }
             .encode_to_vec();
-            let encoded = encode_log_value(sequence, &requests).expect("encode");
-            assert_eq!(encoded, expected, "sequence {sequence}");
+            assert_eq!(
+                encode_log_value(sequence, &kvs),
+                expected,
+                "sequence {sequence}"
+            );
         }
-
-        let empty = WriteRequest {
-            kvs: Vec::new(),
-            response: oneshot::channel().0,
-        };
-        assert!(encode_log_value(3, std::slice::from_ref(&empty)).is_none());
     }
 
     #[test]
-    fn rocks_config_defaults_preserve_write_pipeline_profile() {
+    fn rocks_config_default_pins_commit_batch_cap() {
         assert_eq!(
-            RocksWritePipelineConfig::default(),
-            RocksWritePipelineConfig {
-                max_commit_batch_bytes: NonZeroUsize::new(DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES,)
-                    .expect("nonzero"),
-            }
-        );
-        assert_eq!(
-            RocksConfig::default().write_pipeline,
-            RocksWritePipelineConfig::default()
+            RocksConfig::default()
+                .write_pipeline
+                .max_commit_batch_bytes
+                .get(),
+            16 * 1024 * 1024
         );
     }
 
@@ -1705,6 +1682,28 @@ mod tests {
             Err("rocks write batch superseded by an earlier failure, retry".to_string())
         );
         assert!(store.get_batch(1).await.expect("get").is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_group_with_staging_error_does_not_bump_epoch() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        // The current epoch is 1: an earlier failure already superseded epoch 0.
+        let epoch = AtomicU64::new(1);
+
+        let (group, receivers) = failing_group(0, &[(1, b"a", b"1")], "disk full");
+        let committed = commit_and_apply(&store, &epoch, group);
+
+        // The stale group is rejected as superseded; its own staging error must not bump the
+        // epoch again, which would spuriously reject the wave prepare re-synced under epoch 1.
+        assert_eq!(committed, 0);
+        assert_eq!(epoch.load(Ordering::Acquire), 1);
+        for receiver in receivers {
+            assert_eq!(
+                receiver.await.expect("response"),
+                Err("rocks write batch superseded by an earlier failure, retry".to_string())
+            );
+        }
     }
 
     #[tokio::test]
@@ -1916,7 +1915,7 @@ mod tests {
                 "key {key:?}"
             );
         }
-        // A second reopen skips the replay because the watermark advanced with a flush.
+        // A second reopen replays again (the floor only advances on prune); idempotent.
         drop(store);
         let store = RocksStore::open(dir.path(), None).expect("reopen db again");
         assert_eq!(store.current_sequence(), 3);
@@ -1955,61 +1954,6 @@ mod tests {
             .expect("put");
         assert_eq!(sequence, 1);
         assert_eq!(store.current_sequence(), 1);
-    }
-
-    #[tokio::test]
-    async fn single_sequence_write_logs_all_requests() {
-        let dir = tempdir().expect("tempdir");
-        let store = RocksStore::open(dir.path(), None).expect("open db");
-        let (response_a, _rx_a) = oneshot::channel();
-        let (response_b, _rx_b) = oneshot::channel();
-        let requests = vec![
-            WriteRequest {
-                kvs: vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))],
-                response: response_a,
-            },
-            WriteRequest {
-                kvs: vec![
-                    (Bytes::from_static(b"b"), Bytes::from_static(b"2")),
-                    (Bytes::from_static(b"c"), Bytes::from_static(b"3")),
-                ],
-                response: response_b,
-            },
-        ];
-
-        let sequence = commit_sequence_requests(&store.db, &store.frontiers.published, &requests)
-            .expect("write");
-        assert_eq!(sequence, 1);
-        assert_eq!(store.current_sequence(), 1);
-        let log_cf = store.log_cf();
-        let log_rows = store
-            .db
-            .iterator_cf(log_cf, IteratorMode::Start)
-            .collect::<Result<Vec<_>, _>>()
-            .expect("read log rows");
-        assert_eq!(log_rows.len(), 1);
-        assert_eq!(log_rows[0].0.as_ref(), sequence_log_key(sequence));
-        assert_eq!(
-            decode_log_entries(log_rows[0].1.as_ref()),
-            vec![
-                (Bytes::from_static(b"a"), Bytes::from_static(b"1")),
-                (Bytes::from_static(b"b"), Bytes::from_static(b"2")),
-                (Bytes::from_static(b"c"), Bytes::from_static(b"3")),
-            ]
-        );
-        let batch = store
-            .get_batch(sequence)
-            .await
-            .expect("get batch")
-            .expect("batch retained");
-        assert_eq!(
-            batch_entries(batch),
-            vec![
-                (Bytes::from_static(b"a"), Bytes::from_static(b"1")),
-                (Bytes::from_static(b"b"), Bytes::from_static(b"2")),
-                (Bytes::from_static(b"c"), Bytes::from_static(b"3")),
-            ]
-        );
     }
 
     #[tokio::test]
@@ -2088,6 +2032,25 @@ mod tests {
             }
         }
         assert_eq!(logged_keys, (0u8..32).collect::<BTreeSet<_>>());
+    }
+
+    #[tokio::test]
+    async fn oldest_retained_batch_hides_rows_above_published_frontier() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        store
+            .db
+            .put_cf(
+                store.log_cf(),
+                sequence_log_key(1),
+                encoded_log_entry(1, b"k", b"v"),
+            )
+            .expect("seed log row");
+
+        // The row's group never published (e.g. its state ingestion is still in flight), so it
+        // must stay invisible to both the point read and the oldest-retained probe.
+        assert!(store.get_batch(1).await.expect("get").is_none());
+        assert_eq!(store.oldest_retained_batch().await.expect("oldest"), None);
     }
 
     #[tokio::test]

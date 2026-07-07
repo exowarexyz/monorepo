@@ -277,7 +277,7 @@ fn pruned_state_survives_reopen() {
         (v1, v2, v3, retained_sequence)
     };
 
-    // Reopening (which replays retained log rows above the flushed watermark) must not
+    // Reopening (which replays retained log rows above the state floor) must not
     // resurrect pruned current keys or pruned log rows.
     let store = RocksStore::open(dir.path(), None).expect("reopen db");
     assert_eq!(store.current_sequence(), retained_sequence);
@@ -290,6 +290,41 @@ fn pruned_state_survives_reopen() {
     assert!(block_on(store.get_batch(retained_sequence))
         .expect("get batch")
         .is_some());
+}
+
+#[test]
+fn key_pruned_state_survives_reopen_when_versions_share_a_batch() {
+    let dir = tempdir().expect("tempdir");
+    let (v1, v2, v3) = {
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let v1 = versioned_key(b"row", 1);
+        let v2 = versioned_key(b"row", 2);
+        let v3 = versioned_key(b"row", 3);
+        // All versions land in one batch, so one retained log row holds the pruned keys.
+        put_batch(
+            &store,
+            vec![
+                (v1.clone(), Bytes::from_static(b"v1")),
+                (v2.clone(), Bytes::from_static(b"v2")),
+                (v3.clone(), Bytes::from_static(b"v3")),
+            ],
+        );
+
+        apply_prune(
+            &store,
+            &[version_policy(RetainPolicy::KeepLatest { count: 1 })],
+        );
+        assert!(get_value(&store, &v1).is_none());
+        assert!(get_value(&store, &v2).is_none());
+        (v1, v2, v3)
+    };
+
+    // Reopening replays retained log rows; that replay must not resurrect key-pruned rows
+    // whose log entries are still retained.
+    let store = RocksStore::open(dir.path(), None).expect("reopen db");
+    assert!(get_value(&store, &v1).is_none());
+    assert!(get_value(&store, &v2).is_none());
+    assert_eq!(get_value(&store, &v3).as_deref(), Some(b"v3".as_slice()));
 }
 
 #[test]
