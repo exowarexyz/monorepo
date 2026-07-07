@@ -3,6 +3,13 @@
 //! A separate `log` column family keeps per-sequence-number batch payloads so the stream service
 //! can serve replay and point lookups. Batch-log pruning is driven exclusively by the compact
 //! service's `Sequence` scope.
+//!
+//! Durability is anchored on the replay log: each commit group writes its log rows plus the
+//! durable-sequence meta row in one synced batch, then the current-state rows are applied without
+//! a WAL and the visible sequence frontier advances. The state rows are recovered from the log,
+//! so `open` replays retained log rows above the persisted state-flushed watermark, and pruning
+//! flushes the default column family (advancing that watermark) before deleting log rows it may
+//! otherwise still need for recovery.
 
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BTreeMap;
@@ -12,8 +19,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
+use buffa::MessageView;
 use bytes::Bytes;
 use exoware_sdk::keys::KeyCodec;
+use exoware_sdk::log::stream::v1::GetResponseView as StreamGetResponseView;
 use exoware_sdk::prune_policy::{
     KeysScope, OrderEncoding, PolicyScope, PrunePolicyDocument, RetainPolicy,
 };
@@ -31,6 +40,10 @@ use tracing::debug;
 
 const META_CF: &str = "meta";
 const SEQ_META_KEY: &[u8] = b"sequence";
+/// Highest sequence whose current-state rows are durable in the default column family (flushed to
+/// SSTs). Recovery replays retained log rows above this watermark to rebuild the state rows that
+/// were applied without a WAL.
+const STATE_FLUSHED_META_KEY: &[u8] = b"state_flushed_sequence";
 const LOG_CF: &str = "log";
 const LOG_BATCH_KEY_LEN: usize = 8;
 const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
@@ -285,14 +298,25 @@ struct AssignedWrite {
     request: WriteRequest,
 }
 
-/// One RocksDB `WriteBatch` covering a contiguous run of assigned sequence numbers, committed
-/// atomically by a single synced write.
+/// One commit group covering a contiguous run of assigned sequence numbers.
 struct PreparedWrite {
     writes: Vec<AssignedWrite>,
-    batch: Result<rocksdb::WriteBatch, String>,
+    /// Replay-log rows plus the durable-sequence meta row, committed atomically by one synced
+    /// write. This batch alone defines durability; the state rows are recoverable from it.
+    log_batch: Result<rocksdb::WriteBatch, String>,
+    /// Current-state rows for the same sequences, applied without a WAL once the log batch is
+    /// durable.
+    state_batch: rocksdb::WriteBatch,
     batch_bytes: usize,
     /// Assignment epoch; `commit` rejects a group whose epoch an earlier failure has superseded.
     epoch: u64,
+}
+
+/// A group whose log batch is durable and whose state rows still have to be applied.
+struct CommittedWrite {
+    writes: Vec<AssignedWrite>,
+    state_batch: rocksdb::WriteBatch,
+    last_sequence: u64,
 }
 
 struct Writer {
@@ -301,19 +325,25 @@ struct Writer {
 }
 
 impl Writer {
-    /// Starts the two-stage write pipeline. `prepare` drains queued requests up to the configured
-    /// byte cap, assigns a contiguous sequence number to each, and builds a size-capped
-    /// `WriteBatch`; `commit` syncs each group and resolves its requests. Keeping `commit` on its
-    /// own thread lets `prepare` build the next wave while the current one is being fsync'd.
+    /// Starts the three-stage write pipeline. `prepare` drains queued requests up to the
+    /// configured byte cap, assigns a contiguous sequence number to each, and builds one log
+    /// batch plus one state batch per wave; `commit` syncs each log batch, publishing the durable
+    /// frontier; `apply` inserts the state rows without a WAL, advances the visible frontier, and
+    /// resolves the requests. The stages overlap, so while one group is being fsync'd the next is
+    /// being built and the previous group's state rows are being applied.
     fn start(
         db: Arc<DB>,
         sequence: Arc<AtomicU64>,
+        durable: Arc<AtomicU64>,
+        flushed: Arc<AtomicU64>,
         write_pipeline: RocksWritePipelineConfig,
     ) -> Self {
         let (request_sender, request_receiver) = mpsc::channel();
         // Rendezvous so `prepare` runs at most one wave ahead of `commit`: it hands off a built
         // group, then builds the next while `commit` syncs this one.
         let (group_sender, group_receiver) = mpsc::sync_channel(0);
+        // Allow `commit` to fsync the next group while `apply` inserts this group's state rows.
+        let (committed_sender, committed_receiver) = mpsc::sync_channel(1);
         let max_commit_batch_bytes = write_pipeline.max_commit_batch_bytes.get();
 
         // Bumped by `commit` whenever a group fails. That rejects the in-flight groups assigned
@@ -321,12 +351,27 @@ impl Writer {
         // sequence, re-allocating the abandoned numbers.
         let epoch = Arc::new(AtomicU64::new(0));
 
+        let apply_db = db.clone();
+        let apply_sequence = sequence.clone();
+        let apply = thread::Builder::new()
+            .name("simulator-rocks-apply".to_string())
+            .spawn(move || run_apply(apply_db, apply_sequence, flushed, committed_receiver))
+            .expect("failed to spawn RocksDB apply worker");
+
         let commit_db = db.clone();
-        let commit_sequence = sequence.clone();
+        let commit_durable = durable.clone();
         let commit_epoch = epoch.clone();
         let commit = thread::Builder::new()
             .name("simulator-rocks-commit".to_string())
-            .spawn(move || run_commit(commit_db, commit_sequence, commit_epoch, group_receiver))
+            .spawn(move || {
+                run_commit(
+                    commit_db,
+                    commit_durable,
+                    commit_epoch,
+                    group_receiver,
+                    committed_sender,
+                )
+            })
             .expect("failed to spawn RocksDB commit worker");
 
         let prepare = thread::Builder::new()
@@ -334,7 +379,7 @@ impl Writer {
             .spawn(move || {
                 run_prepare(
                     db,
-                    sequence,
+                    durable,
                     epoch,
                     request_receiver,
                     group_sender,
@@ -345,7 +390,7 @@ impl Writer {
 
         Self {
             sender: Mutex::new(Some(request_sender)),
-            handles: Mutex::new(vec![prepare, commit]),
+            handles: Mutex::new(vec![prepare, commit, apply]),
         }
     }
 
@@ -371,7 +416,8 @@ impl Writer {
 impl Drop for Writer {
     fn drop(&mut self) {
         // Closing the request channel lets `prepare` drain and exit, which drops the group channel
-        // and stops `commit`; joining keeps background RocksDB writers from outliving the store.
+        // and stops `commit`, which in turn stops `apply` after it drains the committed groups;
+        // joining keeps background RocksDB writers from outliving the store.
         if let Ok(mut sender) = self.sender.lock() {
             sender.take();
         }
@@ -389,22 +435,22 @@ impl Drop for Writer {
 /// re-allocated.
 fn run_prepare(
     db: Arc<DB>,
-    sequence: Arc<AtomicU64>,
+    durable: Arc<AtomicU64>,
     epoch: Arc<AtomicU64>,
     receiver: mpsc::Receiver<WriteRequest>,
     sender: mpsc::SyncSender<PreparedWrite>,
     max_commit_batch_bytes: usize,
 ) {
-    let mut next = sequence.load(Ordering::Acquire);
+    let mut next = durable.load(Ordering::Acquire);
     let mut seen_epoch = epoch.load(Ordering::Acquire);
 
     while let Ok(first) = receiver.recv() {
         let current_epoch = epoch.load(Ordering::Acquire);
         if current_epoch != seen_epoch {
-            // A commit failed: each group commits atomically so nothing past the durable frontier
-            // persisted, and the failed numbers can be reclaimed.
+            // A commit failed: each log batch commits atomically so nothing past the durable
+            // frontier persisted, and the failed numbers can be reclaimed.
             seen_epoch = current_epoch;
-            next = sequence.load(Ordering::Acquire);
+            next = durable.load(Ordering::Acquire);
         }
 
         let (group, disconnected) = match prepare_queued_write(
@@ -434,8 +480,15 @@ fn run_prepare(
     }
 }
 
+/// Estimated RocksDB `WriteBatch` size for one request's rows: payload plus per-record framing.
+/// Presizing the batch avoids repeated grow-and-copy cycles while appending large requests.
+fn write_batch_capacity(request: &WriteRequest) -> usize {
+    let payload: usize = request.kvs.iter().map(|(k, v)| k.len() + v.len()).sum();
+    payload + request.kvs.len() * 16 + 64
+}
+
 /// Builds one prepared write from requests already queued behind `first` without waiting for new
-/// arrivals, stopping once the accumulated RocksDB batch reaches the soft byte cap. The request
+/// arrivals, stopping once the accumulated RocksDB batches reach the soft byte cap. The request
 /// that crosses the cap stays in the wave so a single large request can still make progress.
 fn prepare_queued_write(
     db: &DB,
@@ -446,7 +499,9 @@ fn prepare_queued_write(
     epoch: u64,
 ) -> Result<(PreparedWrite, bool), (Vec<WriteRequest>, String)> {
     let mut writes = Vec::with_capacity(64);
-    let mut batch = rocksdb::WriteBatch::default();
+    let capacity = write_batch_capacity(&first);
+    let mut state_batch = rocksdb::WriteBatch::with_capacity_bytes(capacity);
+    let mut log_batch = rocksdb::WriteBatch::with_capacity_bytes(capacity);
     let mut next = from;
     let mut request = first;
     let mut disconnected = false;
@@ -465,18 +520,11 @@ fn prepare_queued_write(
             sequence: next,
             request,
         };
-        if let Err(error) = append_assigned_write_batch(db, &mut batch, &write) {
-            writes.push(write);
-            let group = PreparedWrite {
-                writes,
-                batch: Err(error),
-                batch_bytes: 0,
-                epoch,
-            };
-            return Ok((group, disconnected));
-        }
+        append_assigned_write(db, &mut state_batch, &mut log_batch, &write);
         writes.push(write);
-        if batch.size_in_bytes() >= max_batch_bytes || next == u64::MAX {
+        if state_batch.size_in_bytes() + log_batch.size_in_bytes() >= max_batch_bytes
+            || next == u64::MAX
+        {
             break;
         }
 
@@ -491,7 +539,7 @@ fn prepare_queued_write(
     }
 
     Ok((
-        finalize_prepared_write(db, writes, batch, epoch),
+        finalize_prepared_write(db, writes, state_batch, log_batch, epoch),
         disconnected,
     ))
 }
@@ -505,32 +553,40 @@ fn forward_group(sender: &mpsc::SyncSender<PreparedWrite>, group: PreparedWrite)
     true
 }
 
-/// Commits prepared groups one at a time with a synced write, publishing the durable frontier after
-/// each success. A group whose epoch was superseded by an earlier failure is rejected without being
-/// written; a failing group bumps the epoch so its frontier (and every later group assigned under
-/// it) is abandoned and re-allocated by `prepare`.
+/// Commits prepared groups one at a time with a synced log write, publishing the durable frontier
+/// after each success and handing the group to `apply`. A group whose epoch was superseded by an
+/// earlier failure is rejected without being written; a failing group bumps the epoch so its
+/// frontier (and every later group assigned under it) is abandoned and re-allocated by `prepare`.
 fn run_commit(
     db: Arc<DB>,
-    sequence: Arc<AtomicU64>,
+    durable: Arc<AtomicU64>,
     epoch: Arc<AtomicU64>,
     receiver: mpsc::Receiver<PreparedWrite>,
+    committed_sender: mpsc::SyncSender<CommittedWrite>,
 ) {
-    let mut committed = sequence.load(Ordering::Acquire);
     while let Ok(group) = receiver.recv() {
-        committed = commit_group(&db, &sequence, &epoch, committed, group);
+        let Some(committed) = commit_group(&db, &durable, &epoch, group) else {
+            continue;
+        };
+        if let Err(error) = committed_sender.send(committed) {
+            // The log batch is durable but the state rows can no longer be applied in this
+            // process; recovery replays them on the next open, so the callers only lose the ack.
+            fail_assigned_writes(error.0.writes, "rocks apply worker stopped".to_string());
+            break;
+        }
     }
 }
 
-/// Commits one group, returning the durable frontier afterwards (unchanged on rejection or failure).
+/// Commits one group's log batch, returning the group for state application on success. Returns
+/// `None` when the group is empty, rejected, or failed (with its requests already resolved).
 fn commit_group(
     db: &DB,
-    sequence: &AtomicU64,
+    durable: &AtomicU64,
     epoch: &AtomicU64,
-    committed: u64,
     group: PreparedWrite,
-) -> u64 {
+) -> Option<CommittedWrite> {
     if group.writes.is_empty() {
-        return committed;
+        return None;
     }
     if group.epoch != epoch.load(Ordering::Acquire) {
         // This group was assigned under a frontier an earlier commit failure has since abandoned
@@ -541,106 +597,161 @@ fn commit_group(
             group.writes,
             "rocks write batch superseded by an earlier failure, retry".to_string(),
         );
-        return committed;
+        return None;
     }
 
     let requests = group.writes.len();
-    let batch_bytes = group.batch_bytes;
-    match write_prepared_group(db, group) {
-        Ok((writes, last_sequence)) => {
-            // Release so `current_sequence` readers only observe rows that are already durable.
-            sequence.store(last_sequence, Ordering::Release);
+    let PreparedWrite {
+        writes,
+        log_batch,
+        state_batch,
+        batch_bytes,
+        ..
+    } = group;
+    let last_sequence = writes
+        .last()
+        .expect("non-empty group has a last write")
+        .sequence;
+    let log_batch = match log_batch {
+        Ok(log_batch) => log_batch,
+        Err(error) => {
+            epoch.fetch_add(1, Ordering::AcqRel);
+            fail_assigned_writes(writes, error);
+            return None;
+        }
+    };
+    match write_sequence_batch(db, log_batch) {
+        Ok(()) => {
+            // Release so `prepare` re-syncs against a frontier whose log rows are already synced.
+            durable.store(last_sequence, Ordering::Release);
             debug!(
                 requests,
                 batch_bytes,
                 sequence = last_sequence,
                 "committed write batch"
             );
-            complete_assigned_writes(writes);
-            last_sequence
+            Some(CommittedWrite {
+                writes,
+                state_batch,
+                last_sequence,
+            })
         }
-        Err((writes, error)) => {
+        Err(error) => {
             // Bump before failing: any in-flight group sharing the failed epoch is then rejected,
-            // and `prepare` re-syncs to `committed`, leaving the abandoned numbers for reuse.
+            // and `prepare` re-syncs to the durable frontier, leaving the abandoned numbers for
+            // reuse.
             epoch.fetch_add(1, Ordering::AcqRel);
             fail_assigned_writes(writes, error);
-            committed
+            None
         }
     }
 }
 
-/// Commits one prepared group with a single synced write. Returns the group's writes alongside its
-/// last sequence number on success, or the writes and the error on failure.
-fn write_prepared_group(
+/// Applies committed state batches in commit order, advancing the visible frontier and resolving
+/// requests after each group's rows are readable. On loop exit the applied rows are flushed so a
+/// clean reopen can skip the recovery replay.
+fn run_apply(
+    db: Arc<DB>,
+    sequence: Arc<AtomicU64>,
+    flushed: Arc<AtomicU64>,
+    receiver: mpsc::Receiver<CommittedWrite>,
+) {
+    let mut poisoned = None;
+    while let Ok(committed) = receiver.recv() {
+        apply_committed_write(&db, &sequence, &mut poisoned, committed);
+    }
+    if poisoned.is_none() {
+        if let Err(error) = advance_state_flushed(&db, &flushed, sequence.load(Ordering::Acquire))
+        {
+            debug!(error = %error, "failed to flush state rows on writer shutdown");
+        }
+    }
+}
+
+/// Applies one committed group's state rows and publishes its frontier. A failed state write
+/// poisons the stage: the frontier freezes below the missing rows (later groups are only failed,
+/// never published), so reads stay complete below the advertised sequence until a restart replays
+/// the durable log.
+fn apply_committed_write(
     db: &DB,
-    group: PreparedWrite,
-) -> Result<(Vec<AssignedWrite>, u64), (Vec<AssignedWrite>, String)> {
-    let PreparedWrite { writes, batch, .. } = group;
-    let last_sequence = match writes.last() {
-        Some(write) => write.sequence,
-        None => return Ok((writes, 0)),
-    };
-    let batch = match batch {
-        Ok(batch) => batch,
-        Err(error) => return Err((writes, error)),
-    };
-    match write_sequence_batch(db, batch) {
-        Ok(()) => Ok((writes, last_sequence)),
-        Err(error) => Err((writes, error)),
+    sequence: &AtomicU64,
+    poisoned: &mut Option<String>,
+    committed: CommittedWrite,
+) {
+    if let Some(error) = poisoned.as_ref() {
+        fail_assigned_writes(
+            committed.writes,
+            format!("rocks state apply previously failed: {error}"),
+        );
+        return;
+    }
+    match write_state_batch(db, committed.state_batch) {
+        Ok(()) => {
+            // Release so `current_sequence` readers only observe frontiers whose rows are already
+            // readable (and, via the log commit, durable).
+            sequence.store(committed.last_sequence, Ordering::Release);
+            complete_assigned_writes(committed.writes);
+        }
+        Err(error) => {
+            fail_assigned_writes(committed.writes, error.clone());
+            *poisoned = Some(error);
+        }
     }
 }
 
 fn finalize_prepared_write(
     db: &DB,
     writes: Vec<AssignedWrite>,
-    mut batch: rocksdb::WriteBatch,
+    state_batch: rocksdb::WriteBatch,
+    mut log_batch: rocksdb::WriteBatch,
     epoch: u64,
 ) -> PreparedWrite {
     if let Some(write) = writes.last() {
-        append_sequence_meta(db, &mut batch, write.sequence);
+        append_sequence_meta(db, &mut log_batch, write.sequence);
     }
-    let batch_bytes = batch.size_in_bytes();
+    let batch_bytes = state_batch.size_in_bytes() + log_batch.size_in_bytes();
     PreparedWrite {
         writes,
-        batch: Ok(batch),
+        log_batch: Ok(log_batch),
+        state_batch,
         batch_bytes,
         epoch,
     }
 }
 
-fn append_assigned_write_batch(
+fn append_assigned_write(
     db: &DB,
-    batch: &mut rocksdb::WriteBatch,
+    state_batch: &mut rocksdb::WriteBatch,
+    log_batch: &mut rocksdb::WriteBatch,
     write: &AssignedWrite,
-) -> Result<(), String> {
-    append_sequence_entries(
-        db,
-        batch,
-        write.sequence,
-        std::slice::from_ref(&write.request),
-    )
+) {
+    let requests = std::slice::from_ref(&write.request);
+    append_state_entries(state_batch, requests);
+    append_log_entry(db, log_batch, write.sequence, requests);
 }
 
-/// Appends one sequence's current-state rows plus its replay-log row to `batch`.
-fn append_sequence_entries(
+/// Appends the current-state rows for one sequence to the state batch.
+fn append_state_entries(state_batch: &mut rocksdb::WriteBatch, requests: &[WriteRequest]) {
+    for request in requests {
+        for (k, v) in &request.kvs {
+            state_batch.put(k.as_ref(), v.as_ref());
+        }
+    }
+}
+
+/// Appends one sequence's replay-log row to the log batch.
+fn append_log_entry(
     db: &DB,
-    batch: &mut rocksdb::WriteBatch,
+    log_batch: &mut rocksdb::WriteBatch,
     sequence: u64,
     requests: &[WriteRequest],
-) -> Result<(), String> {
+) {
     let log_cf = db
         .cf_handle(LOG_CF)
         .expect("log CF must exist (created on open)");
-
-    for request in requests {
-        for (k, v) in &request.kvs {
-            batch.put(k.as_ref(), v.as_ref());
-        }
-    }
     if let Some(log_value) = encode_log_value(sequence, requests) {
-        batch.put_cf(log_cf, sequence_log_key(sequence), log_value);
+        log_batch.put_cf(log_cf, sequence_log_key(sequence), log_value);
     }
-    Ok(())
 }
 
 fn append_sequence_meta(db: &DB, batch: &mut rocksdb::WriteBatch, sequence: u64) {
@@ -650,12 +761,86 @@ fn append_sequence_meta(db: &DB, batch: &mut rocksdb::WriteBatch, sequence: u64)
     batch.put_cf(meta_cf, SEQ_META_KEY, sequence.to_le_bytes());
 }
 
-/// Writes a sequence batch with sync enabled because it defines the stream log high-water mark.
+/// Writes a log batch with sync enabled because it defines the durable high-water mark.
 fn write_sequence_batch(db: &DB, batch: rocksdb::WriteBatch) -> Result<(), String> {
     let mut write_options = WriteOptions::default();
     write_options.set_sync(true);
     db.write_opt(batch, &write_options)
         .map_err(|e| e.to_string())
+}
+
+/// Writes current-state rows without a WAL: durability comes from the already-synced log batch,
+/// which `open` replays above the state-flushed watermark after a crash.
+fn write_state_batch(db: &DB, batch: rocksdb::WriteBatch) -> Result<(), String> {
+    let mut write_options = WriteOptions::default();
+    write_options.disable_wal(true);
+    db.write_opt(batch, &write_options)
+        .map_err(|e| e.to_string())
+}
+
+/// Makes every state row at or below `target` durable in the default column family, then persists
+/// and mirrors the watermark. Recovery replays retained log rows above this watermark, so it must
+/// only advance after the flush completes.
+fn advance_state_flushed(db: &DB, flushed: &AtomicU64, target: u64) -> Result<(), String> {
+    if flushed.load(Ordering::Acquire) >= target {
+        return Ok(());
+    }
+    let default_cf = db
+        .cf_handle(rocksdb::DEFAULT_COLUMN_FAMILY_NAME)
+        .expect("default CF must exist (created on open)");
+    db.flush_cf(default_cf).map_err(|e| e.to_string())?;
+
+    let meta_cf = db
+        .cf_handle(META_CF)
+        .expect("meta CF must exist (created on open)");
+    let mut batch = rocksdb::WriteBatch::default();
+    batch.put_cf(meta_cf, STATE_FLUSHED_META_KEY, target.to_le_bytes());
+    write_sequence_batch(db, batch)?;
+    flushed.fetch_max(target, Ordering::AcqRel);
+    Ok(())
+}
+
+/// Reads a little-endian u64 sequence value from the meta column family, defaulting to zero.
+fn read_meta_sequence(db: &DB, key: &[u8]) -> Result<u64, String> {
+    let meta_cf = db
+        .cf_handle(META_CF)
+        .expect("meta CF must exist (created on open)");
+    match db.get_cf(meta_cf, key).map_err(|e| e.to_string())? {
+        Some(bytes) if bytes.len() == 8 => Ok(u64::from_le_bytes(bytes.try_into().unwrap())),
+        _ => Ok(0),
+    }
+}
+
+/// Re-applies the retained log rows in `(from_exclusive, to_inclusive]` to the default column
+/// family. State rows are written without a WAL, so after a crash the rows above the flushed
+/// watermark only exist in the log; replaying them in sequence order (last writer wins) rebuilds
+/// the exact current state. Rows already covered by an earlier flush may have been pruned and are
+/// simply absent from the iteration.
+fn replay_state_from_log(db: &DB, from_exclusive: u64, to_inclusive: u64) -> Result<(), String> {
+    let log_cf = db
+        .cf_handle(LOG_CF)
+        .expect("log CF must exist (created on open)");
+    let start = sequence_log_key(from_exclusive.saturating_add(1));
+    let mut batch = rocksdb::WriteBatch::default();
+    for item in db.iterator_cf(log_cf, IteratorMode::From(&start, Direction::Forward)) {
+        let (key, value) = item.map_err(|e| e.to_string())?;
+        let sequence = sequence_from_log_key(key.as_ref())?;
+        if sequence > to_inclusive {
+            break;
+        }
+        let response = StreamGetResponseView::decode_view(value.as_ref())
+            .map_err(|e| format!("corrupt log row for sequence {sequence}: {e}"))?;
+        for entry in response.entries.iter() {
+            batch.put(entry.key, entry.value);
+        }
+        if batch.size_in_bytes() >= DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES {
+            write_state_batch(db, std::mem::take(&mut batch))?;
+        }
+    }
+    if batch.len() > 0 {
+        write_state_batch(db, batch)?;
+    }
+    Ok(())
 }
 
 /// Sends the same assignment failure to every request in a wave.
@@ -716,13 +901,16 @@ pub struct RocksConfig {
 pub struct RocksStore {
     db: Arc<DB>,
     sequence: Arc<AtomicU64>,
+    flushed: Arc<AtomicU64>,
     writer: Arc<Writer>,
 }
 
 impl RocksStore {
     /// Open the store with stock RocksDB defaults, unless `config` overrides
-    /// the database and column-family options.
-    pub fn open(path: &Path, config: Option<RocksConfig>) -> Result<Self, rocksdb::Error> {
+    /// the database and column-family options. Replays retained log rows above the state-flushed
+    /// watermark into the default column family so the current state is complete below the
+    /// durable sequence even after a crash that lost un-flushed (WAL-less) state rows.
+    pub fn open(path: &Path, config: Option<RocksConfig>) -> Result<Self, String> {
         let RocksConfig {
             mut db_options,
             default_cf_options,
@@ -738,23 +926,32 @@ impl RocksStore {
             ColumnFamilyDescriptor::new(rocksdb::DEFAULT_COLUMN_FAMILY_NAME, default_cf_options);
         let cf_meta = ColumnFamilyDescriptor::new(META_CF, meta_cf_options);
         let cf_log = ColumnFamilyDescriptor::new(LOG_CF, log_cf_options);
-        let db = Arc::new(DB::open_cf_descriptors(
-            &db_options,
-            path,
-            vec![cf_default, cf_meta, cf_log],
-        )?);
-        let meta_cf = db
-            .cf_handle(META_CF)
-            .expect("meta CF must exist (created on open)");
-        let seq = match db.get_cf(meta_cf, SEQ_META_KEY)? {
-            Some(bytes) if bytes.len() == 8 => u64::from_le_bytes(bytes.try_into().unwrap()),
-            _ => 0,
-        };
+        let db = Arc::new(
+            DB::open_cf_descriptors(&db_options, path, vec![cf_default, cf_meta, cf_log])
+                .map_err(|e| e.to_string())?,
+        );
+        let seq = read_meta_sequence(&db, SEQ_META_KEY)?;
+        let flushed_seq = read_meta_sequence(&db, STATE_FLUSHED_META_KEY)?;
+
+        let flushed = Arc::new(AtomicU64::new(flushed_seq));
+        if flushed_seq < seq {
+            replay_state_from_log(&db, flushed_seq, seq)?;
+            advance_state_flushed(&db, &flushed, seq)?;
+        }
+
         let sequence = Arc::new(AtomicU64::new(seq));
-        let writer = Arc::new(Writer::start(db.clone(), sequence.clone(), write_pipeline));
+        let durable = Arc::new(AtomicU64::new(seq));
+        let writer = Arc::new(Writer::start(
+            db.clone(),
+            sequence.clone(),
+            durable,
+            flushed.clone(),
+            write_pipeline,
+        ));
         Ok(Self {
             db,
             sequence,
+            flushed,
             writer,
         })
     }
@@ -861,12 +1058,24 @@ impl RocksStore {
         for (_group_key, entries) in groups {
             all_deletes.extend(keys_to_delete(entries, scope, retain)?);
         }
-        self.delete_keys(&all_deletes).map_err(|e| e.to_string())
+        self.delete_keys(&all_deletes).map_err(|e| e.to_string())?;
+        // Flush so a crash-recovery replay (which starts above the watermark) cannot re-apply the
+        // puts of keys this policy just deleted.
+        advance_state_flushed(
+            &self.db,
+            &self.flushed,
+            self.sequence.load(Ordering::Acquire),
+        )
     }
 
     /// Computes the replay-log cutoff for a sequence policy and prunes only log rows.
     fn apply_sequence_prune_policy(&self, retain: &RetainPolicy) -> Result<(), String> {
         let current = self.sequence.load(Ordering::Acquire);
+        // Log rows below the cutoff may still be needed to rebuild WAL-less state rows after a
+        // crash. Flushing first makes those state rows durable, so deleting their log rows is
+        // safe; the watermark write precedes the range delete in the WAL, preserving that order
+        // across a crash.
+        advance_state_flushed(&self.db, &self.flushed, current)?;
         let cutoff_exclusive = match retain {
             RetainPolicy::KeepLatest { count } => {
                 let count = *count as u64;
@@ -876,6 +1085,10 @@ impl RocksStore {
             RetainPolicy::GreaterThanOrEqual { threshold } => *threshold,
             RetainPolicy::DropAll => current.saturating_add(1),
         };
+        // Never delete log rows above the flushed watermark: sequences committed but not yet
+        // visible may still need them to rebuild their WAL-less state rows after a crash.
+        let cutoff_exclusive =
+            cutoff_exclusive.min(self.flushed.load(Ordering::Acquire).saturating_add(1));
         self.prune_log(cutoff_exclusive)
     }
 }
@@ -1119,7 +1332,7 @@ mod tests {
         .encode_to_vec()
     }
 
-    /// Builds a group whose batch is already an error, modeling a build/commit failure for a
+    /// Builds a group whose log batch is already an error, modeling a build/commit failure for a
     /// contiguous run of assigned sequence numbers tagged with `epoch`.
     fn failing_group(
         epoch: u64,
@@ -1136,12 +1349,27 @@ mod tests {
         (
             PreparedWrite {
                 writes,
-                batch: Err(error.to_string()),
+                log_batch: Err(error.to_string()),
+                state_batch: rocksdb::WriteBatch::default(),
                 batch_bytes: 0,
                 epoch,
             },
             receivers,
         )
+    }
+
+    /// Commits one group and applies its state rows, mirroring the commit and apply stages.
+    /// Returns the durable frontier afterwards.
+    fn commit_and_apply(
+        store: &RocksStore,
+        durable: &AtomicU64,
+        epoch: &AtomicU64,
+        group: PreparedWrite,
+    ) -> u64 {
+        if let Some(committed) = commit_group(&store.db, durable, epoch, group) {
+            apply_committed_write(&store.db, &store.sequence, &mut None, committed);
+        }
+        durable.load(Ordering::Acquire)
     }
 
     fn commit_sequence_requests(
@@ -1153,10 +1381,13 @@ mod tests {
             .load(Ordering::Acquire)
             .checked_add(1)
             .ok_or_else(|| "rocks sequence number overflowed".to_string())?;
-        let mut batch = rocksdb::WriteBatch::default();
-        append_sequence_entries(db, &mut batch, next, requests)?;
-        append_sequence_meta(db, &mut batch, next);
-        write_sequence_batch(db, batch)?;
+        let mut state_batch = rocksdb::WriteBatch::default();
+        let mut log_batch = rocksdb::WriteBatch::default();
+        append_state_entries(&mut state_batch, requests);
+        append_log_entry(db, &mut log_batch, next, requests);
+        append_sequence_meta(db, &mut log_batch, next);
+        write_sequence_batch(db, log_batch)?;
+        write_state_batch(db, state_batch)?;
         sequence.store(next, Ordering::Release);
         Ok(next)
     }
@@ -1184,21 +1415,12 @@ mod tests {
     }
 
     fn prepared_write(db: &DB, epoch: u64, writes: Vec<AssignedWrite>) -> PreparedWrite {
-        let mut prepared = Vec::with_capacity(writes.len());
-        let mut batch = rocksdb::WriteBatch::default();
-        for write in writes {
-            if let Err(error) = append_assigned_write_batch(db, &mut batch, &write) {
-                prepared.push(write);
-                return PreparedWrite {
-                    writes: prepared,
-                    batch: Err(error),
-                    batch_bytes: 0,
-                    epoch,
-                };
-            }
-            prepared.push(write);
+        let mut state_batch = rocksdb::WriteBatch::default();
+        let mut log_batch = rocksdb::WriteBatch::default();
+        for write in &writes {
+            append_assigned_write(db, &mut state_batch, &mut log_batch, write);
         }
-        finalize_prepared_write(db, prepared, batch, epoch)
+        finalize_prepared_write(db, writes, state_batch, log_batch, epoch)
     }
 
     #[test]
@@ -1294,7 +1516,7 @@ mod tests {
             Err((_, error)) => panic!("{error}"),
         };
         assert_eq!(group.writes.len(), 3);
-        assert!(group.batch.is_ok());
+        assert!(group.log_batch.is_ok());
         assert!(group.batch_bytes > 0);
         assert_eq!(group.epoch, 7);
         assert!(disconnected);
@@ -1319,7 +1541,7 @@ mod tests {
 
         assert_eq!(group.writes.len(), 1);
         assert_eq!(group.writes[0].request.kvs[0].0.as_ref(), b"a");
-        assert!(group.batch.is_ok());
+        assert!(group.log_batch.is_ok());
         assert!(group.batch_bytes >= 1);
         assert_eq!(group.epoch, 7);
         assert!(!disconnected);
@@ -1357,11 +1579,12 @@ mod tests {
     async fn failed_group_supersedes_epoch_and_frees_sequence_numbers() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
+        let durable = AtomicU64::new(0);
         let epoch = AtomicU64::new(0);
 
         // A group that cannot commit (modeled with an already-failed batch) at sequences 1 and 2.
         let (group, receivers) = failing_group(0, &[(1, b"a", b"1"), (2, b"b", b"2")], "disk full");
-        let committed = commit_group(&store.db, &store.sequence, &epoch, 0, group);
+        let committed = commit_and_apply(&store, &durable, &epoch, group);
 
         // Nothing was published, and the epoch advanced so the abandoned numbers can be re-used.
         assert_eq!(committed, 0);
@@ -1378,7 +1601,7 @@ mod tests {
         let (write_x, result_x) = assigned_write_with_response(1, b"x", b"24");
         let (write_y, result_y) = assigned_write_with_response(2, b"y", b"25");
         let group = prepared_write(&store.db, 1, vec![write_x, write_y]);
-        let committed = commit_group(&store.db, &store.sequence, &epoch, committed, group);
+        let committed = commit_and_apply(&store, &durable, &epoch, group);
 
         assert_eq!(committed, 2);
         assert_eq!(store.current_sequence(), 2);
@@ -1398,12 +1621,13 @@ mod tests {
     async fn superseded_epoch_group_is_rejected_without_write() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
+        let durable = AtomicU64::new(0);
         // The current epoch is 1: an earlier failure already superseded epoch 0.
         let epoch = AtomicU64::new(1);
 
         let (write, result) = assigned_write_with_response(1, b"a", b"1");
         let group = prepared_write(&store.db, 0, vec![write]);
-        let committed = commit_group(&store.db, &store.sequence, &epoch, 0, group);
+        let committed = commit_and_apply(&store, &durable, &epoch, group);
 
         assert_eq!(committed, 0);
         assert_eq!(store.current_sequence(), 0);
@@ -1419,13 +1643,14 @@ mod tests {
     async fn writer_reallocates_sequence_numbers_after_failed_batch() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
+        let durable = AtomicU64::new(0);
         let epoch = AtomicU64::new(5);
 
         // Two successive failures both abandon sequence 1 without ever consuming it.
         for attempt in [b"first" as &[u8], b"second"] {
             let current = epoch.load(Ordering::Acquire);
             let (group, receivers) = failing_group(current, &[(1, b"k", b"v")], "boom");
-            let committed = commit_group(&store.db, &store.sequence, &epoch, 0, group);
+            let committed = commit_and_apply(&store, &durable, &epoch, group);
             assert_eq!(
                 committed, 0,
                 "attempt {attempt:?} must not advance the frontier"
@@ -1440,7 +1665,7 @@ mod tests {
         let current = epoch.load(Ordering::Acquire);
         let (write, result) = assigned_write_with_response(1, b"k", b"v");
         let group = prepared_write(&store.db, current, vec![write]);
-        let committed = commit_group(&store.db, &store.sequence, &epoch, 0, group);
+        let committed = commit_and_apply(&store, &durable, &epoch, group);
         assert_eq!(committed, 1);
         assert_eq!(result.await.expect("response"), Ok(1));
         assert_eq!(store.current_sequence(), 1);
@@ -1450,6 +1675,7 @@ mod tests {
     async fn reused_sequence_overwrites_abandoned_log_row() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
+        let durable = AtomicU64::new(0);
         let epoch = AtomicU64::new(0);
 
         // Model an abandoned sequence index: the durable frontier is still 0, but a row
@@ -1468,7 +1694,7 @@ mod tests {
         );
 
         let (failed, receivers) = failing_group(0, &[(1, b"k", b"failed")], "boom");
-        let committed = commit_group(&store.db, &store.sequence, &epoch, 0, failed);
+        let committed = commit_and_apply(&store, &durable, &epoch, failed);
         assert_eq!(committed, 0);
         assert_eq!(store.current_sequence(), 0);
         assert_eq!(epoch.load(Ordering::Acquire), 1);
@@ -1478,7 +1704,7 @@ mod tests {
 
         let (write, result) = assigned_write_with_response(1, b"k", b"new");
         let group = prepared_write(&store.db, 1, vec![write]);
-        let committed = commit_group(&store.db, &store.sequence, &epoch, committed, group);
+        let committed = commit_and_apply(&store, &durable, &epoch, group);
 
         assert_eq!(committed, 1);
         assert_eq!(result.await.expect("response"), Ok(1));
@@ -1486,6 +1712,74 @@ mod tests {
         assert_eq!(
             batch_entries(store.get_batch(1).await.expect("get").expect("retained")),
             vec![(Bytes::from_static(b"k"), Bytes::from_static(b"new"))]
+        );
+    }
+
+    #[tokio::test]
+    async fn reopen_replays_log_rows_missing_from_state() {
+        let dir = tempdir().expect("tempdir");
+        {
+            let store = RocksStore::open(dir.path(), None).expect("open db");
+            store
+                .put_batch(vec![(Bytes::from_static(b"k1"), Bytes::from_static(b"v1"))])
+                .await
+                .expect("put");
+
+            // Simulate a crash that lost the WAL-less state rows for sequences 2 and 3 but kept
+            // the synced log batches: append the log rows and durable-sequence meta directly,
+            // bypassing the state apply stage.
+            let mut log_batch = rocksdb::WriteBatch::default();
+            log_batch.put_cf(
+                store.log_cf(),
+                sequence_log_key(2),
+                encoded_log_entry(2, b"k2", b"v2-stale"),
+            );
+            log_batch.put_cf(
+                store.log_cf(),
+                sequence_log_key(3),
+                StreamGetResponse {
+                    sequence_number: 3,
+                    entries: vec![
+                        Entry {
+                            key: b"k2".to_vec(),
+                            value: Bytes::from_static(b"v2"),
+                            ..Default::default()
+                        },
+                        Entry {
+                            key: b"k3".to_vec(),
+                            value: Bytes::from_static(b"v3"),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            );
+            append_sequence_meta(&store.db, &mut log_batch, 3);
+            write_sequence_batch(&store.db, log_batch).expect("write log rows");
+        }
+
+        let store = RocksStore::open(dir.path(), None).expect("reopen db");
+        assert_eq!(store.current_sequence(), 3);
+        // Replay applied the missing rows in sequence order: last writer wins for k2.
+        for (key, value) in [
+            (b"k1" as &[u8], b"v1" as &[u8]),
+            (b"k2", b"v2"),
+            (b"k3", b"v3"),
+        ] {
+            assert_eq!(
+                store.get_raw(key).expect("get").as_deref(),
+                Some(value),
+                "key {key:?}"
+            );
+        }
+        // A second reopen skips the replay because the watermark advanced with a flush.
+        drop(store);
+        let store = RocksStore::open(dir.path(), None).expect("reopen db again");
+        assert_eq!(store.current_sequence(), 3);
+        assert_eq!(
+            store.get_raw(b"k2").expect("get").as_deref(),
+            Some(b"v2" as &[u8])
         );
     }
 
@@ -1570,6 +1864,7 @@ mod tests {
     async fn prepared_write_preserves_contiguous_sequence_logs() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
+        let durable = AtomicU64::new(0);
         let epoch = AtomicU64::new(0);
         let prepared = prepared_write(
             &store.db,
@@ -1583,7 +1878,7 @@ mod tests {
 
         assert_eq!(prepared.writes.len(), 3);
         assert!(prepared.batch_bytes > 0);
-        let committed = commit_group(&store.db, &store.sequence, &epoch, 0, prepared);
+        let committed = commit_and_apply(&store, &durable, &epoch, prepared);
         assert_eq!(committed, 3);
 
         assert_eq!(store.current_sequence(), 3);

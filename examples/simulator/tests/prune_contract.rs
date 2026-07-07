@@ -256,6 +256,43 @@ fn sequence_scope_prunes_log_without_advancing_sequence() {
 }
 
 #[test]
+fn pruned_state_survives_reopen() {
+    let dir = tempdir().expect("tempdir");
+    let (v1, v2, v3, retained_sequence) = {
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let v1 = versioned_key(b"row", 1);
+        let v2 = versioned_key(b"row", 2);
+        let v3 = versioned_key(b"row", 3);
+        put_batch(&store, vec![(v1.clone(), Bytes::from_static(b"v1"))]);
+        put_batch(&store, vec![(v2.clone(), Bytes::from_static(b"v2"))]);
+        let retained_sequence = put_batch(&store, vec![(v3.clone(), Bytes::from_static(b"v3"))]);
+
+        apply_prune(
+            &store,
+            &[
+                version_policy(RetainPolicy::KeepLatest { count: 1 }),
+                sequence_policy(RetainPolicy::KeepLatest { count: 1 }),
+            ],
+        );
+        (v1, v2, v3, retained_sequence)
+    };
+
+    // Reopening (which replays retained log rows above the flushed watermark) must not
+    // resurrect pruned current keys or pruned log rows.
+    let store = RocksStore::open(dir.path(), None).expect("reopen db");
+    assert_eq!(store.current_sequence(), retained_sequence);
+    assert!(get_value(&store, &v1).is_none());
+    assert!(get_value(&store, &v2).is_none());
+    assert_eq!(get_value(&store, &v3).as_deref(), Some(b"v3".as_slice()));
+    assert!(block_on(store.get_batch(retained_sequence - 1))
+        .expect("get batch")
+        .is_none());
+    assert!(block_on(store.get_batch(retained_sequence))
+        .expect("get batch")
+        .is_some());
+}
+
+#[test]
 fn overlapping_prune_policies_apply_in_input_order() {
     let sequence_then_keys_dir = tempdir().expect("tempdir");
     let sequence_then_keys =
