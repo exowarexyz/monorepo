@@ -581,7 +581,8 @@ fn stage_log_file(path: &Path, writes: &[AssignedWrite]) -> Result<usize, String
 /// Stages the current-state SST: the group's rows sorted by key, with the last write per key
 /// winning (across coalesced requests, in sequence order).
 fn stage_state_file(path: &Path, writes: &[AssignedWrite]) -> Result<usize, String> {
-    let mut rows: Vec<(&Bytes, &Bytes)> = Vec::new();
+    let mut rows: Vec<(&Bytes, &Bytes)> =
+        Vec::with_capacity(writes.iter().map(|write| write.request.kvs.len()).sum());
     for write in writes {
         for (key, value) in &write.request.kvs {
             rows.push((key, value));

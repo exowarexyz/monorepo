@@ -65,6 +65,20 @@ async fn main() -> std::process::ExitCode {
     };
     tracing_subscriber::fmt().with_max_level(level).init();
 
+    // Store write errors are fatal by design: a panicked writer thread can never accept writes
+    // again, so exit instead of serving reads from a store that silently fails every put. A
+    // restart rolls the store forward from its log. Request-handler panics are unaffected.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default_hook(info);
+        if std::thread::current()
+            .name()
+            .is_some_and(|name| name.starts_with("simulator-rocks-"))
+        {
+            std::process::exit(1);
+        }
+    }));
+
     if let Some(server_matches) = matches.subcommand_matches(server::CMD) {
         match server_matches.subcommand() {
             Some((server::RUN_CMD, m)) => {
