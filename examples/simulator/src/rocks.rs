@@ -53,20 +53,12 @@ use tracing::debug;
 
 const STATE_CF: &str = rocksdb::DEFAULT_COLUMN_FAMILY_NAME;
 const META_CF: &str = "meta";
-/// State floor: the published frontier at the time of the last prune. The state below it is
-/// authoritative — log rows at or below it are never replayed at open (replaying them could
-/// resurrect key-pruned rows), and the frontier at open is the maximum of this row and the
-/// highest retained log row (deleting log rows must not regress the derived frontier). Only
-/// pruning writes it, atomically with its deletes — commits never do.
 const SEQ_META_KEY: &[u8] = b"sequence";
 const LOG_CF: &str = "log";
 const LOG_BATCH_KEY_LEN: usize = 8;
 const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
 const DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
-/// Directory under the store path where SST files are staged before ingestion.
 const LOG_INGEST_DIR: &str = "ingest";
-/// Name prefix for the store's writer threads, whose panics are fatal by design. The binary's
-/// panic hook matches on it to turn a writer panic into a process exit.
 pub const WRITER_THREAD_PREFIX: &str = "simulator-rocks-";
 type RocksIterItem = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
 
