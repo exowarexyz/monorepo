@@ -1103,6 +1103,18 @@ impl RocksStore {
             return Ok(());
         }
         let cf = self.log_cf();
+        // Unlink the ingested SST files that sit entirely below the cutoff (the common case,
+        // since each file covers one commit group's contiguous sequence range). This reclaims
+        // their space immediately, without compaction ever reading the massive log payloads.
+        self.db
+            .delete_file_in_range_cf(
+                cf,
+                sequence_log_key(0),
+                sequence_log_key(cutoff_exclusive - 1),
+            )
+            .map_err(|e| e.to_string())?;
+        // Cover the leftovers — rows in a file straddling the cutoff and any L0 stragglers —
+        // with a range tombstone so they are logically gone right away.
         self.db
             .delete_range_cf(cf, sequence_log_key(0), sequence_log_key(cutoff_exclusive))
             .map_err(|e| e.to_string())
@@ -1184,8 +1196,8 @@ impl RocksStore {
         let current = self.frontiers.published.load(Ordering::Acquire);
         // Log rows below the cutoff may still be needed to rebuild WAL-less state rows after a
         // crash, and `open` re-derives the durable frontier from the retained rows, so both
-        // frontiers must be persisted (with a state flush) before rows are deleted; the meta
-        // write precedes the range delete in the WAL, preserving that order across a crash.
+        // frontiers must be durable (synced meta write, after a state flush) before any row or
+        // file is deleted.
         persist_frontiers(&self.db, &self.frontiers)?;
         let cutoff_exclusive = match retain {
             RetainPolicy::KeepLatest { count } => {
@@ -1895,7 +1907,9 @@ mod tests {
             Some(vec![1u8; 4096])
         );
 
-        // Sequence pruning drops the ingested rows like any other log rows.
+        // Sequence pruning drops the ingested rows like any other log rows, and unlinks the
+        // pruned batches' SST files outright instead of leaving them for compaction.
+        let log_files_before = live_log_files(&store);
         store
             .apply_prune_policies(PrunePolicyDocument {
                 version: exoware_sdk::prune_policy::PRUNE_POLICY_DOCUMENT_VERSION,
@@ -1911,6 +1925,20 @@ mod tests {
             store.oldest_retained_batch().await.expect("oldest"),
             Some(second)
         );
+        let log_files_after = live_log_files(&store);
+        assert_eq!(log_files_before, 2, "one ingested file per batch");
+        assert_eq!(log_files_after, 1, "pruned batch's file is unlinked");
+    }
+
+    /// Number of live SST files backing the log column family.
+    fn live_log_files(store: &RocksStore) -> usize {
+        store
+            .db
+            .live_files()
+            .expect("live files")
+            .into_iter()
+            .filter(|file| file.column_family_name == LOG_CF)
+            .count()
     }
 
     #[tokio::test]
