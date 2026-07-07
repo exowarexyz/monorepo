@@ -51,6 +51,7 @@ use rocksdb::{
 use tokio::sync::oneshot;
 use tracing::debug;
 
+const STATE_CF: &str = rocksdb::DEFAULT_COLUMN_FAMILY_NAME;
 const META_CF: &str = "meta";
 /// State floor: the published frontier at the time of the last prune. The state below it is
 /// authoritative — log rows at or below it are never replayed at open (replaying them could
@@ -648,7 +649,7 @@ fn commit_group(db: &DB, frontiers: &Frontiers, group: PreparedWrite) {
     // state floor under the same lock, so no scan-visible state row can outrun the frontier
     // covering it (a key prune must never delete a row the floor does not cover).
     let publish_guard = frontiers.persist.lock();
-    ingest_staged_file(db, rocksdb::DEFAULT_COLUMN_FAMILY_NAME, &staged.state);
+    ingest_staged_file(db, STATE_CF, &staged.state);
 
     // Release so `current_sequence` readers only observe frontiers whose rows are readable.
     frontiers.published.store(last_sequence, Ordering::Release);
@@ -740,11 +741,6 @@ fn read_state_floor(db: &DB) -> Result<u64, String> {
 /// the one that ends at the durable frontier — which is idempotent because those rows are the
 /// newest writes for their keys. Rows at or below `floor` are skipped: their state is already
 /// authoritative, and key pruning may have deleted rows a replay would resurrect.
-///
-/// Bounding the replay by the last file's start key assumes log-CF file boundaries stay aligned
-/// with commit groups. That holds under stock options: ingested log files land at the bottom
-/// level (their sequence ranges never overlap) where automatic compaction never rewrites them
-/// (verified against the bundled RocksDB's level-selection and compaction-trigger sources).
 fn replay_last_log_file(db: &DB, floor: u64) -> Result<(), String> {
     let last_file_start = db
         .live_files()
@@ -816,18 +812,19 @@ fn available_parallelism() -> NonZeroUsize {
 }
 
 /// RocksDB engine and application-level write pipeline options used by [`RocksStore::open`].
+///
+/// Column-family options are deliberately not configurable — the store's correctness leans on
+/// stock CF behavior: staged state SSTs and range-scan bounds assume bytewise key order, crash
+/// repair depends on log-CF file boundaries staying aligned with commit groups (see
+/// `replay_last_log_file`), and rows must never be dropped by a caller-supplied compaction
+/// filter or TTL (acked writes must stay readable, the meta CF's state-floor row must persist,
+/// and the repair replay would nondeterministically resurrect expired state rows).
 pub struct RocksConfig {
     /// Database-wide options. The default raises RocksDB's background-job budget (flushes and
     /// the compactions that must keep merging the overlapping ingested state SSTs) from the
     /// stock 2 to the machine's available parallelism; a caller replacing `db_options`
     /// replaces that choice too — open applies these options as-is.
     pub db_options: Options,
-    /// Options for the default column family, which stores the current key-value state.
-    pub default_cf_options: Options,
-    /// Options for the metadata column family.
-    pub meta_cf_options: Options,
-    /// Options for the sequence log column family.
-    pub log_cf_options: Options,
     /// Options for the application-level ingest write pipeline.
     pub write_pipeline: RocksWritePipelineConfig,
 }
@@ -841,9 +838,6 @@ impl Default for RocksConfig {
         db_options.increase_parallelism(available_parallelism().get() as i32);
         Self {
             db_options,
-            default_cf_options: Options::default(),
-            meta_cf_options: Options::default(),
-            log_cf_options: Options::default(),
             write_pipeline: RocksWritePipelineConfig::default(),
         }
     }
@@ -859,29 +853,26 @@ pub struct RocksStore {
 }
 
 impl RocksStore {
-    /// Open the store with stock RocksDB defaults, unless `config` overrides
-    /// the database and column-family options. Re-derives the durable frontier from the retained
+    /// Open the store with default options, unless `config` overrides the database or
+    /// write-pipeline options (column families always run stock options — see [`RocksConfig`]).
+    /// Re-derives the durable frontier from the retained
     /// log rows and the state-floor meta row, then replays the last retained log file's rows
     /// above the floor into the default column family so the current state is complete below
     /// the durable sequence even after a crash between a group's log and state ingestions.
     pub fn open(path: &Path, config: Option<RocksConfig>) -> Result<Self, String> {
         let RocksConfig {
             mut db_options,
-            default_cf_options,
-            meta_cf_options,
-            log_cf_options,
             write_pipeline,
         } = config.unwrap_or_default();
 
         db_options.create_if_missing(true);
         db_options.create_missing_column_families(true);
 
-        let cf_default =
-            ColumnFamilyDescriptor::new(rocksdb::DEFAULT_COLUMN_FAMILY_NAME, default_cf_options);
-        let cf_meta = ColumnFamilyDescriptor::new(META_CF, meta_cf_options);
-        let cf_log = ColumnFamilyDescriptor::new(LOG_CF, log_cf_options);
+        let cf_state = ColumnFamilyDescriptor::new(STATE_CF, Options::default());
+        let cf_meta = ColumnFamilyDescriptor::new(META_CF, Options::default());
+        let cf_log = ColumnFamilyDescriptor::new(LOG_CF, Options::default());
         let db = Arc::new(
-            DB::open_cf_descriptors(&db_options, path, vec![cf_default, cf_meta, cf_log])
+            DB::open_cf_descriptors(&db_options, path, vec![cf_state, cf_meta, cf_log])
                 .map_err(|e| e.to_string())?,
         );
         // Commits do not write the state-floor meta row; the log rows are the durable record.
