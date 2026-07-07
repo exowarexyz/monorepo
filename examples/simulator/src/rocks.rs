@@ -10,7 +10,7 @@
 //! (a synced RocksDB write covering the `log` and `meta` column families). How the current-state
 //! key/value rows land depends on the wave's payload size:
 //!
-//! - Waves whose key/value payload is at most [`INLINE_APPLY_MAX_BATCH_BYTES`] ride the synced
+//! - Waves whose key/value payload is at most `INLINE_APPLY_MAX_BATCH_BYTES` ride the synced
 //!   commit batch directly ("inline apply"). Duplicating a few kilobytes into the WAL costs less
 //!   than a second RocksDB write-group cycle, so small-value workloads keep the single-write
 //!   profile of the pre-decoupled store.
@@ -41,7 +41,7 @@
 //! - Inline-applied rows travel through the synced WAL, so they are recoverable whether or not
 //!   any marker covers them. Inline waves advance the in-memory frontier immediately but leave
 //!   the durable marker behind; the apply thread persists a catch-up marker every
-//!   [`APPLY_MARKER_STRIDE_SEQUENCES`] sequences to bound how much a crash replays.
+//!   `APPLY_MARKER_STRIDE_SEQUENCES` sequences to bound how much a crash replays.
 //!
 //! Sequence pruning persists the applied marker and flushes the key/value column families
 //! before deleting log rows, and never deletes rows at or above the applied frontier, so the
