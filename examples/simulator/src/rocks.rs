@@ -32,10 +32,10 @@ use rocksdb::{
 use tokio::sync::oneshot;
 use tracing::debug;
 
-const META_CF: &str = "meta";
-const SEQ_META_KEY: &[u8] = b"sequence";
-const LOG_CF: &str = "log";
-const LOG_BATCH_KEY_LEN: usize = 8;
+pub(crate) const META_CF: &str = "meta";
+pub(crate) const SEQ_META_KEY: &[u8] = b"sequence";
+pub(crate) const LOG_CF: &str = "log";
+pub(crate) const LOG_BATCH_KEY_LEN: usize = 8;
 const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
 const DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
 type RocksIterItem = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
@@ -63,7 +63,7 @@ impl OwnedRocksIterator {
     }
 }
 
-struct RocksRangeScanState {
+pub(crate) struct RocksRangeScanState {
     iterator: OwnedRocksIterator,
     start: Bytes,
     end: Bytes,
@@ -75,7 +75,7 @@ struct RocksRangeScanState {
 
 impl RocksRangeScanState {
     /// Creates an iterator positioned at the first row that may belong to the requested range.
-    fn new(db: Arc<DB>, start: Bytes, end: Bytes, limit: usize, forward: bool) -> Self {
+    pub(crate) fn new(db: Arc<DB>, start: Bytes, end: Bytes, limit: usize, forward: bool) -> Self {
         let mode = if forward {
             IteratorMode::From(start.as_ref(), Direction::Forward)
         } else if end.is_empty() {
@@ -95,7 +95,7 @@ impl RocksRangeScanState {
     }
 
     /// Reads one page from the existing RocksDB iterator and stops at the range or item limit.
-    fn next_batch(&mut self, max_items: usize) -> Result<Vec<(Bytes, Bytes)>, String> {
+    pub(crate) fn next_batch(&mut self, max_items: usize) -> Result<Vec<(Bytes, Bytes)>, String> {
         if max_items == 0 || self.done {
             return Ok(Vec::new());
         }
@@ -143,7 +143,7 @@ pub struct RocksRangeScanCursor {
 
 impl RocksRangeScanCursor {
     /// Stores scan state in an `Option` so it can be moved into `spawn_blocking` per page.
-    fn new(db: Arc<DB>, start: Bytes, end: Bytes, limit: usize, forward: bool) -> Self {
+    pub(crate) fn new(db: Arc<DB>, start: Bytes, end: Bytes, limit: usize, forward: bool) -> Self {
         Self {
             state: Some(RocksRangeScanState::new(db, start, end, limit, forward)),
         }
@@ -169,7 +169,7 @@ impl RangeScan for RocksRangeScanCursor {
     }
 }
 
-struct KeyEntry {
+pub(crate) struct KeyEntry {
     key: Bytes,
     order_value: Vec<u8>,
 }
@@ -276,6 +276,60 @@ fn keys_to_delete(
         }
         RetainPolicy::DropAll => Ok(entries.iter().map(|e| e.key.clone()).collect()),
     }
+}
+
+/// Scans matching current keys in bounded chunks, groups them, and returns non-retained keys.
+/// Shared by the ordered and unordered stores' key-scoped prune policies.
+pub(crate) fn collect_key_prune_deletes(
+    db: Arc<DB>,
+    scope: &KeysScope,
+    retain: &RetainPolicy,
+) -> Result<Vec<Bytes>, String> {
+    let codec = KeyCodec::new(scope.selector.reserved_bits, scope.selector.prefix);
+    let regex = compile_payload_regex(&scope.selector.payload_regex)
+        .map_err(|e| format!("policy: {e}"))?;
+
+    let (start, end) = codec.prefix_bounds();
+    let mut rows = RocksRangeScanState::new(db, start, end, usize::MAX, true);
+    let mut groups: BTreeMap<Vec<u8>, Vec<KeyEntry>> = BTreeMap::new();
+
+    loop {
+        let batch = rows.next_batch(PRUNE_SCAN_BATCH_SIZE)?;
+        if batch.is_empty() {
+            break;
+        }
+
+        for (key, _value) in batch {
+            if !codec.matches(&key) {
+                continue;
+            }
+            let payload_len = codec.payload_capacity_bytes_for_key_len(key.len());
+            let payload = match codec.read_payload(&key, 0, payload_len) {
+                Ok(payload) => payload,
+                Err(_) => continue,
+            };
+            if !regex.is_match(&payload) {
+                continue;
+            }
+
+            let group_key = match extract_group_key(&payload, &regex, scope) {
+                Some(group_key) => group_key,
+                None => continue,
+            };
+            let order_value = extract_order_value(&payload, &regex, scope).unwrap_or_default();
+
+            groups
+                .entry(group_key)
+                .or_default()
+                .push(KeyEntry { key, order_value });
+        }
+    }
+
+    let mut all_deletes = Vec::new();
+    for (_group_key, entries) in groups {
+        all_deletes.extend(keys_to_delete(entries, scope, retain)?);
+    }
+    Ok(all_deletes)
 }
 
 struct WriteRequest {
@@ -820,50 +874,7 @@ impl RocksStore {
         scope: &KeysScope,
         retain: &RetainPolicy,
     ) -> Result<(), String> {
-        let codec = KeyCodec::new(scope.selector.reserved_bits, scope.selector.prefix);
-        let regex = compile_payload_regex(&scope.selector.payload_regex)
-            .map_err(|e| format!("policy: {e}"))?;
-
-        let (start, end) = codec.prefix_bounds();
-        let mut rows = RocksRangeScanState::new(self.db.clone(), start, end, usize::MAX, true);
-        let mut groups: BTreeMap<Vec<u8>, Vec<KeyEntry>> = BTreeMap::new();
-
-        loop {
-            let batch = rows.next_batch(PRUNE_SCAN_BATCH_SIZE)?;
-            if batch.is_empty() {
-                break;
-            }
-
-            for (key, _value) in batch {
-                if !codec.matches(&key) {
-                    continue;
-                }
-                let payload_len = codec.payload_capacity_bytes_for_key_len(key.len());
-                let payload = match codec.read_payload(&key, 0, payload_len) {
-                    Ok(payload) => payload,
-                    Err(_) => continue,
-                };
-                if !regex.is_match(&payload) {
-                    continue;
-                }
-
-                let group_key = match extract_group_key(&payload, &regex, scope) {
-                    Some(group_key) => group_key,
-                    None => continue,
-                };
-                let order_value = extract_order_value(&payload, &regex, scope).unwrap_or_default();
-
-                groups
-                    .entry(group_key)
-                    .or_default()
-                    .push(KeyEntry { key, order_value });
-            }
-        }
-
-        let mut all_deletes = Vec::new();
-        for (_group_key, entries) in groups {
-            all_deletes.extend(keys_to_delete(entries, scope, retain)?);
-        }
+        let all_deletes = collect_key_prune_deletes(self.db.clone(), scope, retain)?;
         self.delete_keys(&all_deletes).map_err(|e| e.to_string())
     }
 
@@ -976,12 +987,12 @@ impl Log for RocksStore {
 }
 
 /// Encodes a sequence number as a log-CF key that preserves numeric order in RocksDB.
-fn sequence_log_key(sequence: u64) -> [u8; LOG_BATCH_KEY_LEN] {
+pub(crate) fn sequence_log_key(sequence: u64) -> [u8; LOG_BATCH_KEY_LEN] {
     sequence.to_be_bytes()
 }
 
 /// Decodes a log-CF key back into the sequence number it indexes.
-fn sequence_from_log_key(key: &[u8]) -> Result<u64, String> {
+pub(crate) fn sequence_from_log_key(key: &[u8]) -> Result<u64, String> {
     if key.len() != LOG_BATCH_KEY_LEN {
         return Err(format!("log CF key has unexpected length {}", key.len()));
     }

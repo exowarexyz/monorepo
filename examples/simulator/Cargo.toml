@@ -34,3 +34,7 @@ tempfile = { workspace = true }
 [[bin]]
 name = "simulator"
 path = "src/main.rs"
+
+[[bench]]
+name = "ingest_load"
+harness = false
