@@ -388,7 +388,7 @@ pub(crate) fn encode_primary_key_bound(
     let payload_len = if upper_tail {
         codec.payload_capacity_bytes()
     } else {
-        model.primary_key_width.max(encoded_width)
+        encoded_width
     };
     let mut key = allocate_codec_key(codec, payload_len)?;
     let mut payload_offset = 0usize;

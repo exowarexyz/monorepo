@@ -1268,12 +1268,7 @@ impl QueryPredicate {
         upper: bool,
     ) -> Result<Key, String> {
         let codec = spec.codec;
-        let payload_len = if upper {
-            codec.payload_capacity_bytes()
-        } else {
-            spec.key_columns_width + model.primary_key_width
-        };
-        let mut key = allocate_codec_key(codec, payload_len)?;
+        let mut key = allocate_codec_key(codec, codec.payload_capacity_bytes())?;
         let mut offset = 0usize;
         for (idx, col_idx) in spec.key_columns.iter().copied().enumerate() {
             let col = model.column(col_idx);
@@ -1547,6 +1542,11 @@ impl QueryPredicate {
                     offset += 8;
                 }
                 _ => {
+                    if !upper && pk_kind.fixed_key_width().is_none() {
+                        // Padding past a variable-width pk's stored encoding
+                        // would sort the lower bound above matching entries.
+                        break;
+                    }
                     let w = pk_kind.key_width();
                     if upper {
                         codec
@@ -1562,8 +1562,15 @@ impl QueryPredicate {
             codec
                 .fill_payload(&mut key, offset, remaining, 0xFF)
                 .map_err(|e| format!("failed to fill codec payload: {e}"))?;
+            return Ok(key.freeze());
         }
-        Ok(key.freeze())
+        let scratch = key.freeze();
+        let payload = codec
+            .read_payload(&scratch, 0, offset)
+            .map_err(|e| format!("failed to read codec payload: {e}"))?;
+        codec
+            .encode(&payload)
+            .map_err(|e| format!("failed to encode codec key: {e}"))
     }
 
     pub(crate) fn encode_zorder_index_bound_key(
@@ -1574,12 +1581,7 @@ impl QueryPredicate {
         upper: bool,
     ) -> Result<Key, String> {
         let codec = spec.codec;
-        let payload_len = if upper {
-            codec.payload_capacity_bytes()
-        } else {
-            spec.key_columns_width + model.primary_key_width
-        };
-        let mut key = allocate_codec_key(codec, payload_len)?;
+        let mut key = allocate_codec_key(codec, codec.payload_capacity_bytes())?;
         let mut encoded_fields = Vec::with_capacity(spec.key_columns.len());
         for &col_idx in &spec.key_columns {
             let col = model.column(col_idx);
@@ -1620,6 +1622,11 @@ impl QueryPredicate {
                     offset += 8;
                 }
                 _ => {
+                    if !upper && pk_kind.fixed_key_width().is_none() {
+                        // Padding past a variable-width pk's stored encoding
+                        // would sort the lower bound above matching entries.
+                        break;
+                    }
                     let w = pk_kind.key_width();
                     if upper {
                         codec
@@ -1635,8 +1642,17 @@ impl QueryPredicate {
             codec
                 .fill_payload(&mut key, offset, remaining, 0xFF)
                 .map_err(|e| format!("failed to fill codec payload: {e}"))?;
+            return Ok(key.freeze());
         }
-        Ok(key.freeze())
+        // Re-encode the lower bound at its exact written length so trailing
+        // scratch bytes never pad the bound above shorter stored keys.
+        let scratch = key.freeze();
+        let payload = codec
+            .read_payload(&scratch, 0, offset)
+            .map_err(|e| format!("failed to read codec payload: {e}"))?;
+        codec
+            .encode(&payload)
+            .map_err(|e| format!("failed to encode codec key: {e}"))
     }
 
     pub(crate) fn ordered_index_bound_bytes_for_column(
