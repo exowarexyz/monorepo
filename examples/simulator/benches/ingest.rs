@@ -106,9 +106,9 @@ async fn run_concurrent(
 
 fn main() {
     let batches = env_usize("BENCH_BATCHES", 16);
-    let keys_per_batch = env_usize("BENCH_KEYS_PER_BATCH", 250_000);
+    let keys_per_batch = env_usize("BENCH_KEYS_PER_BATCH", 250_000).max(1);
     let value_len = env_usize("BENCH_VALUE_LEN", 128);
-    let writers = env_usize("BENCH_WRITERS", 4);
+    let writers = env_usize("BENCH_WRITERS", 4).max(1);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

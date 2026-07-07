@@ -636,7 +636,12 @@ fn commit_group(db: &DB, frontiers: &Frontiers, group: PreparedWrite) {
         .sequence;
 
     // Log first: its rows define durability, and an ingested state file without its log rows
-    // could leave keys in the store that were never part of a sequenced batch.
+    // could leave keys in the store that were never part of a sequenced batch. This runs outside
+    // the floor lock, which is safe against a concurrent prune: every sequence in this file is
+    // above the published frontier (publish happens below, only after the state ingestion),
+    // while a prune's log deletes are capped at a published frontier it loaded earlier — so the
+    // prune's tombstone and file unlink are always disjoint from the file being ingested, and
+    // RocksDB serializes the metadata edits themselves.
     ingest_staged_file(db, LOG_CF, &staged.log);
 
     // Ingest and publish under the floor lock: a prune loads the published frontier as its
@@ -812,11 +817,10 @@ fn available_parallelism() -> NonZeroUsize {
 
 /// RocksDB engine and application-level write pipeline options used by [`RocksStore::open`].
 pub struct RocksConfig {
-    /// Background jobs RocksDB may run concurrently: flushes and the compactions that must keep
-    /// merging the overlapping ingested state SSTs. Applied on top of `db_options` at open.
-    /// Defaults to the machine's available parallelism.
-    pub background_jobs: NonZeroUsize,
-    /// Database-wide options.
+    /// Database-wide options. The default raises RocksDB's background-job budget (flushes and
+    /// the compactions that must keep merging the overlapping ingested state SSTs) from the
+    /// stock 2 to the machine's available parallelism; a caller replacing `db_options`
+    /// replaces that choice too — open applies these options as-is.
     pub db_options: Options,
     /// Options for the default column family, which stores the current key-value state.
     pub default_cf_options: Options,
@@ -829,13 +833,14 @@ pub struct RocksConfig {
 }
 
 impl Default for RocksConfig {
-    /// Stock RocksDB options, with background jobs defaulting to the machine's available cores.
-    /// Memtables are off the hot path (only the open-time replay and prune deletes write
+    /// Stock RocksDB options, with the background-job budget raised to the machine's available
+    /// cores. Memtables are off the hot path (only the open-time replay and prune deletes write
     /// them), so they stay at stock defaults.
     fn default() -> Self {
+        let mut db_options = Options::default();
+        db_options.increase_parallelism(available_parallelism().get() as i32);
         Self {
-            background_jobs: available_parallelism(),
-            db_options: Options::default(),
+            db_options,
             default_cf_options: Options::default(),
             meta_cf_options: Options::default(),
             log_cf_options: Options::default(),
@@ -861,7 +866,6 @@ impl RocksStore {
     /// the durable sequence even after a crash between a group's log and state ingestions.
     pub fn open(path: &Path, config: Option<RocksConfig>) -> Result<Self, String> {
         let RocksConfig {
-            background_jobs,
             mut db_options,
             default_cf_options,
             meta_cf_options,
@@ -871,7 +875,6 @@ impl RocksStore {
 
         db_options.create_if_missing(true);
         db_options.create_missing_column_families(true);
-        db_options.increase_parallelism(background_jobs.get() as i32);
 
         let cf_default =
             ColumnFamilyDescriptor::new(rocksdb::DEFAULT_COLUMN_FAMILY_NAME, default_cf_options);
@@ -959,6 +962,10 @@ impl RocksStore {
         // state floor that keeps `open` from re-deriving a regressed frontier once those rows
         // are gone. The published frontier covers every pruned row (the cutoff is capped at
         // published + 1), and everything at or below it is durable and applied to the state.
+        // That cap is also what makes this safe against `commit`'s concurrent, lock-free log
+        // ingestion: an in-flight group's rows all sit above every published frontier this
+        // prune could have loaded, so neither the tombstone nor the file unlink below can touch
+        // them (and `delete_file_in_range_cf` only drops files entirely inside its range).
         let published = self.frontiers.published.load(Ordering::Acquire);
         let mut batch = rocksdb::WriteBatch::default();
         batch.put_cf(self.meta_cf(), SEQ_META_KEY, published.to_le_bytes());
@@ -1517,7 +1524,6 @@ mod tests {
         let store = RocksStore::open(
             dir.path(),
             Some(RocksConfig {
-                background_jobs: NonZeroUsize::new(1).expect("nonzero"),
                 write_pipeline: RocksWritePipelineConfig {
                     max_commit_batch_bytes: NonZeroUsize::new(1).expect("nonzero"),
                 },
