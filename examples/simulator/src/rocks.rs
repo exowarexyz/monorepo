@@ -61,6 +61,9 @@ const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
 const DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
 /// Directory under the store path where SST files are staged before ingestion.
 const LOG_INGEST_DIR: &str = "ingest";
+/// Name prefix for the store's writer threads, whose panics are fatal by design. The binary's
+/// panic hook matches on it to turn a writer panic into a process exit.
+pub const WRITER_THREAD_PREFIX: &str = "simulator-rocks-";
 type RocksIterItem = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
 
 /// Owns the DB handle for a RocksDB iterator that is moved through blocking tasks.
@@ -384,12 +387,12 @@ impl Writer {
         let max_commit_batch_bytes = write_pipeline.max_commit_batch_bytes.get();
 
         let commit = thread::Builder::new()
-            .name("simulator-rocks-commit".to_string())
+            .name(format!("{WRITER_THREAD_PREFIX}commit"))
             .spawn(move || run_commit(db, frontiers, group_receiver))
             .expect("failed to spawn RocksDB commit worker");
 
         let prepare = thread::Builder::new()
-            .name("simulator-rocks-prepare".to_string())
+            .name(format!("{WRITER_THREAD_PREFIX}prepare"))
             .spawn(move || {
                 run_prepare(
                     ingest_dir,
@@ -529,7 +532,7 @@ fn stage_group_files(ingest_dir: &Path, writes: &[AssignedWrite]) -> StagedFiles
 
     let (log_result, state_result) = thread::scope(|scope| {
         let state = thread::Builder::new()
-            .name("simulator-rocks-stage".to_string())
+            .name(format!("{WRITER_THREAD_PREFIX}stage"))
             .spawn_scoped(scope, || stage_state_file(&state_path, writes))
             .expect("failed to spawn SST staging thread");
         let log_result = stage_log_file(&log_path, writes);
