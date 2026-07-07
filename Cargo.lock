@@ -2727,7 +2727,6 @@ dependencies = [
  "exoware-server",
  "http",
  "parking_lot",
- "rayon",
  "regex",
  "reqwest",
  "rocksdb",

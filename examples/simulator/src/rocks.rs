@@ -40,7 +40,6 @@ use exoware_server::{
     Ingest, Log, LogBatch, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence,
 };
 use parking_lot::Mutex;
-use rayon::slice::ParallelSliceMut;
 use regex::bytes::Regex;
 use rocksdb::{
     ColumnFamily, ColumnFamilyDescriptor, DBCompressionType, DBIterator, Direction,
@@ -374,7 +373,6 @@ impl Writer {
     fn start(
         db: Arc<DB>,
         ingest_dir: PathBuf,
-        staging_pool: rayon::ThreadPool,
         frontiers: Arc<Frontiers>,
         next: u64,
         write_pipeline: RocksWritePipelineConfig,
@@ -395,7 +393,6 @@ impl Writer {
             .spawn(move || {
                 run_prepare(
                     ingest_dir,
-                    staging_pool,
                     next,
                     request_receiver,
                     group_sender,
@@ -447,21 +444,14 @@ impl Drop for Writer {
 /// (store drop); panics if `commit` died, since that only happens on a fatal write error.
 fn run_prepare(
     ingest_dir: PathBuf,
-    staging_pool: rayon::ThreadPool,
     mut next: u64,
     receiver: mpsc::Receiver<WriteRequest>,
     sender: mpsc::SyncSender<PreparedWrite>,
     max_commit_batch_bytes: usize,
 ) {
     while let Ok(first) = receiver.recv() {
-        let (group, disconnected) = prepare_queued_write(
-            &ingest_dir,
-            &staging_pool,
-            &receiver,
-            first,
-            next,
-            max_commit_batch_bytes,
-        );
+        let (group, disconnected) =
+            prepare_queued_write(&ingest_dir, &receiver, first, next, max_commit_batch_bytes);
         next = group
             .writes
             .last()
@@ -482,7 +472,6 @@ fn run_prepare(
 /// crosses the cap stays in the wave so a single large request can still make progress.
 fn prepare_queued_write(
     ingest_dir: &Path,
-    staging_pool: &rayon::ThreadPool,
     receiver: &mpsc::Receiver<WriteRequest>,
     first: WriteRequest,
     from: u64,
@@ -522,26 +511,33 @@ fn prepare_queued_write(
         }
     }
 
-    let staged = staging_pool.install(|| stage_group_files(ingest_dir, &writes));
+    let staged = stage_group_files(ingest_dir, &writes);
     (PreparedWrite { writes, staged }, disconnected)
 }
 
 /// Writes and syncs one commit group's two SST files: the replay-log rows (already in ascending
-/// sequence order) and the current-state rows (sorted by key in parallel, keeping the last write
-/// per key). The two files are built concurrently on the caller's rayon pool (the store's
-/// staging pool, sized by [`RocksWritePipelineConfig::staging_threads`]); ingestion later links
-/// them into their column families, so each payload byte reaches the disk exactly once, in its
-/// final resting place. A staging failure is fatal; leftover files are removed by the next open.
+/// sequence order) and the current-state rows (sorted by key, keeping the last write per key).
+/// The two files are built concurrently — the state file on a scoped thread while this thread
+/// writes the log file. Ingestion later links them into their column families, so each payload
+/// byte reaches the disk exactly once, in its final resting place. A staging failure is fatal;
+/// leftover files are removed by the next open.
 fn stage_group_files(ingest_dir: &Path, writes: &[AssignedWrite]) -> StagedFiles {
     let first = writes.first().expect("groups are never empty").sequence;
     let last = writes.last().expect("groups are never empty").sequence;
     let log_path = ingest_dir.join(format!("log-{first:020}-{last:020}.sst"));
     let state_path = ingest_dir.join(format!("state-{first:020}-{last:020}.sst"));
 
-    let (log_result, state_result) = rayon::join(
-        || stage_log_file(&log_path, writes),
-        || stage_state_file(&state_path, writes),
-    );
+    let (log_result, state_result) = thread::scope(|scope| {
+        let state = thread::Builder::new()
+            .name("simulator-rocks-stage".to_string())
+            .spawn_scoped(scope, || stage_state_file(&state_path, writes))
+            .expect("failed to spawn SST staging thread");
+        let log_result = stage_log_file(&log_path, writes);
+        (
+            log_result,
+            state.join().expect("state staging thread panicked"),
+        )
+    });
     let log_bytes = log_result.unwrap_or_else(|error| panic!("failed to stage log SST: {error}"));
     let state_bytes =
         state_result.unwrap_or_else(|error| panic!("failed to stage state SST: {error}"));
@@ -588,8 +584,8 @@ fn stage_state_file(path: &Path, writes: &[AssignedWrite]) -> Result<usize, Stri
             rows.push((key, value));
         }
     }
-    // Stable parallel sort: equal keys keep arrival order, so the last occurrence is the newest.
-    rows.par_sort_by(|a, b| a.0.cmp(b.0));
+    // Stable sort: equal keys keep arrival order, so the last occurrence is the newest.
+    rows.sort_by(|a, b| a.0.cmp(b.0));
 
     let options = staging_options();
     let mut writer = SstFileWriter::create(&options);
@@ -625,7 +621,7 @@ fn run_commit(db: Arc<DB>, frontiers: Arc<Frontiers>, receiver: mpsc::Receiver<P
 /// callers observe an error even though the group may resurface after the restart repair — an
 /// accepted at-least-once ambiguity of this severe error path.
 fn commit_group(db: &DB, frontiers: &Frontiers, group: PreparedWrite) {
-    debug_assert!(!group.writes.is_empty(), "groups are never empty");
+    assert!(!group.writes.is_empty(), "groups are never empty");
     let PreparedWrite { writes, staged } = group;
     let requests = writes.len();
     let last_sequence = writes
@@ -792,9 +788,6 @@ pub struct RocksWritePipelineConfig {
     /// Soft maximum combined size (state rows plus encoded log rows) before cutting a prepared
     /// commit group.
     pub max_commit_batch_bytes: NonZeroUsize,
-    /// Threads in the pool that sorts and stages each commit group's SST files — CPU work on
-    /// the ack path. Defaults to the machine's available parallelism.
-    pub staging_threads: NonZeroUsize,
 }
 
 impl Default for RocksWritePipelineConfig {
@@ -802,7 +795,6 @@ impl Default for RocksWritePipelineConfig {
         Self {
             max_commit_batch_bytes: NonZeroUsize::new(DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES)
                 .expect("default commit batch byte limit must be nonzero"),
-            staging_threads: available_parallelism(),
         }
     }
 }
@@ -874,11 +866,6 @@ impl RocksStore {
         db_options.create_if_missing(true);
         db_options.create_missing_column_families(true);
         db_options.increase_parallelism(background_jobs.get() as i32);
-        let staging_pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(write_pipeline.staging_threads.get())
-            .thread_name(|i| format!("simulator-rocks-stage-{i}"))
-            .build()
-            .map_err(|e| format!("failed to build SST staging thread pool: {e}"))?;
 
         let cf_default =
             ColumnFamilyDescriptor::new(rocksdb::DEFAULT_COLUMN_FAMILY_NAME, default_cf_options);
@@ -899,7 +886,6 @@ impl RocksStore {
         let writer = Arc::new(Writer::start(
             db.clone(),
             ingest_dir,
-            staging_pool,
             frontiers.clone(),
             seq,
             write_pipeline,
@@ -1268,7 +1254,7 @@ fn encode_log_value(sequence: u64, kvs: &[(Bytes, Bytes)]) -> Vec<u8> {
             buf.extend_from_slice(value);
         }
     }
-    debug_assert_eq!(buf.len(), total);
+    assert_eq!(buf.len(), total);
     buf
 }
 
@@ -1350,13 +1336,6 @@ mod tests {
         PreparedWrite { writes, staged }
     }
 
-    fn staging_pool() -> rayon::ThreadPool {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(1)
-            .build()
-            .expect("build staging pool")
-    }
-
     #[test]
     fn log_value_matches_generated_encoder() {
         let cases: Vec<(u64, Vec<(Bytes, Bytes)>)> = vec![
@@ -1421,7 +1400,6 @@ mod tests {
         let first = receiver.recv().expect("first request");
         let (group, disconnected) = prepare_queued_write(
             dir.path(),
-            &staging_pool(),
             &receiver,
             first,
             0,
@@ -1444,8 +1422,7 @@ mod tests {
         drop(sender);
 
         let first = receiver.recv().expect("first request");
-        let (group, disconnected) =
-            prepare_queued_write(dir.path(), &staging_pool(), &receiver, first, 0, 1);
+        let (group, disconnected) = prepare_queued_write(dir.path(), &receiver, first, 0, 1);
 
         assert_eq!(group.writes.len(), 1);
         assert_eq!(group.writes[0].request.kvs[0].0.as_ref(), b"a");
@@ -1639,7 +1616,6 @@ mod tests {
                 background_jobs: NonZeroUsize::new(1).expect("nonzero"),
                 write_pipeline: RocksWritePipelineConfig {
                     max_commit_batch_bytes: NonZeroUsize::new(1).expect("nonzero"),
-                    staging_threads: NonZeroUsize::new(1).expect("nonzero"),
                 },
                 ..Default::default()
             }),

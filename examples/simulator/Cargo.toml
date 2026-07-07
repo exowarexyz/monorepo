@@ -17,7 +17,6 @@ bytes = { workspace = true }
 exoware-sdk = { workspace = true }
 exoware-server = { workspace = true }
 parking_lot = { workspace = true }
-rayon = { workspace = true }
 reqwest = { workspace = true }
 regex = { workspace = true }
 rocksdb = { workspace = true }
