@@ -2,9 +2,7 @@ use bytes::{Bytes, BytesMut};
 
 /// Maximum physical key length in bytes.
 ///
-/// The storage stack is intentionally non-backwards-compatible with prior
-/// fixed-width key formats. All keys must now fit in a single `u8` length
-/// field, so the largest valid key is 254 bytes.
+/// All key lengths must fit in a `u8` so the largest valid key is 254 bytes.
 pub const MAX_KEY_LEN: usize = 254;
 
 /// Minimum physical key length in bytes.
@@ -128,6 +126,12 @@ impl Prefix {
     /// this is a refcount-only clone of `key` (no bytes copied).
     pub fn encode_key(&self, key: &Key) -> Result<Key, PrefixError> {
         if self.0.is_empty() {
+            if key.len() > MAX_KEY_LEN {
+                return Err(PrefixError::KeyTooLong {
+                    len: key.len(),
+                    max: MAX_KEY_LEN,
+                });
+            }
             return Ok(key.clone());
         }
         self.encode(key)
@@ -397,6 +401,17 @@ mod tests {
         let payload = vec![0u8; prefix.max_payload_len() + 1];
         let err = prefix.encode(&payload).expect_err("key should not fit");
         assert!(matches!(err, PrefixError::KeyTooLong { .. }));
+    }
+
+    #[test]
+    fn empty_prefix_encode_key_rejects_oversized_key() {
+        let prefix = Prefix::empty();
+        let key = Bytes::from(vec![0u8; MAX_KEY_LEN + 1]);
+        let err = prefix.encode_key(&key).expect_err("key should not fit");
+        assert!(matches!(err, PrefixError::KeyTooLong { .. }));
+        // A key exactly at the bound still round-trips as a zero-copy clone.
+        let key = Bytes::from(vec![0u8; MAX_KEY_LEN]);
+        assert_eq!(prefix.encode_key(&key).expect("fits"), key);
     }
 
     #[test]
