@@ -19,7 +19,6 @@ use commonware_cryptography::{
 use commonware_parallel::Sequential;
 use commonware_utils::ordered::{BiMap, Set};
 use core::hash::Hash;
-use rand::rngs::OsRng;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -87,7 +86,8 @@ where
     let mut reader = bytes;
     let proof = Notarization::<S, D>::read_cfg(&mut reader, &scheme.certificate_codec_config())
         .map_err(|err| format!("failed to decode notarized artifact: {err}"))?;
-    if !proof.verify(&mut OsRng, &scheme, &Sequential) {
+    let mut rng = rand::rng();
+    if !proof.verify(&mut rng, &scheme, &Sequential) {
         return Err("notarization certificate verification failed".to_string());
     }
     let header = read_header(reader, "notarized artifact")?;
@@ -114,7 +114,8 @@ where
     let mut reader = bytes;
     let proof = Finalization::<S, D>::read_cfg(&mut reader, &scheme.certificate_codec_config())
         .map_err(|err| format!("failed to decode finalized artifact: {err}"))?;
-    if !proof.verify(&mut OsRng, &scheme, &Sequential) {
+    let mut rng = rand::rng();
+    if !proof.verify(&mut rng, &scheme, &Sequential) {
         return Err("finalization certificate verification failed".to_string());
     }
     let header = read_header(reader, "finalized artifact")?;
@@ -513,7 +514,7 @@ mod tests {
 
     fn identities<R>(rng: &mut R) -> (Vec<ed25519::PrivateKey>, Set<ed25519::PublicKey>)
     where
-        R: rand::RngCore + rand::CryptoRng,
+        R: rand::Rng + rand::CryptoRng,
     {
         let private_keys: Vec<_> = (0..4)
             .map(|_| ed25519::PrivateKey::random(&mut *rng))
