@@ -463,38 +463,32 @@ an `IN` list.
 
 ## Key layout
 
-`exoware-sql` uses a uniform two-byte family prefix `[table_prefix, discriminator]`
-for key kind metadata. `discriminator = 0x00` is the primary-row family; a
-secondary index in slot `s` uses `discriminator = s + 1` (`0x01..=0xFF`).
+`exoware-sql` packs key kind metadata into a single bit-packed leading
+byte.
 
-Current layout:
+Layout:
 
 - Base row / primary key:
-  - family prefix: `[table_prefix][0x00]`
-  - remaining bytes: ordered primary-key payload bytes
+  - reserved prefix bits: `[table_id(4)][discriminator=0(4)]`
+  - remaining bits: ordered primary-key payload bytes
 - Secondary index:
-  - family prefix: `[table_prefix][index_id]`
-  - remaining bytes: ordered index payload bytes, then ordered primary-key bytes
-
-Every family is the same length, so all families are pairwise disjoint. The
-primary family (`0x00`) sorts before all indexes of the same table, and the
-table byte is the major sort order.
+  - reserved prefix bits: `[table_id(4)][index_id(4)]`
+  - remaining bits: ordered index payload bytes, then ordered primary-key bytes
 
 Logical structure:
 
-- Base row: `[table_prefix][0x00][pk_col_1][pk_col_2]...`
-- Secondary index: `[table_prefix][index_id][idx_cols...][pk_cols...]`
+- Base row: `[prefix_bits][pk_col_1][pk_col_2]...`
+- Secondary index: `[prefix_bits][idx_cols...][pk_cols...]`
 
 ### Current codec limits
 
-The layout supports:
+The current bit budget is intentionally compact and supports:
 
-- up to 256 tables per `KvSchema`
-- up to 255 secondary indexes per table
+- up to 16 tables per `KvSchema`
+- up to 15 secondary indexes per table
 
-These use the full one-byte-each capacity of the two-byte family prefix (a table
-byte plus a discriminator byte holding one primary family and 255 index slots).
-To go beyond this, extend the family prefix.
+If you need a larger table or index budget, adjust the codec bit allocation in
+`exoware-sql` rather than depending on the current raw prefix shape.
 
 ## Covering indexes (performance-critical)
 

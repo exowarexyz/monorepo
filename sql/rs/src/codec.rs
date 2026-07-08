@@ -7,6 +7,13 @@ use crate::builder::archived_non_pk_value_is_valid;
 use crate::types::*;
 use crate::writer::decode_list_element_archived;
 
+/// Pack table prefix (high nibble) and family discriminator (low nibble)
+/// into the one-byte family prefix. Callers validate both fit in 4 bits.
+pub(crate) fn family_byte(table_prefix: u8, discriminator: u8) -> u8 {
+    debug_assert!(table_prefix < 0x10 && discriminator < 0x10);
+    (table_prefix << 4) | discriminator
+}
+
 pub(crate) fn primary_key_prefix(table_prefix: u8) -> Result<KeyPrefix, String> {
     if usize::from(table_prefix) >= MAX_TABLES {
         return Err(format!(
@@ -14,7 +21,7 @@ pub(crate) fn primary_key_prefix(table_prefix: u8) -> Result<KeyPrefix, String> 
             MAX_TABLES - 1
         ));
     }
-    KeyPrefix::new(vec![table_prefix, PRIMARY_FAMILY_DISCRIMINATOR])
+    KeyPrefix::new(vec![family_byte(table_prefix, PRIMARY_FAMILY_DISCRIMINATOR)])
         .map_err(|e| format!("failed to build primary key prefix: {e}"))
 }
 
@@ -31,7 +38,7 @@ pub(crate) fn secondary_index_prefix(table_prefix: u8, index_id: u8) -> Result<K
             MAX_INDEX_SPECS
         ));
     }
-    KeyPrefix::new(vec![table_prefix, index_id])
+    KeyPrefix::new(vec![family_byte(table_prefix, index_id)])
         .map_err(|e| format!("failed to build secondary index prefix: {e}"))
 }
 

@@ -7,25 +7,28 @@ use exoware_sdk::PrefixedStoreClient;
 
 use crate::codec::{primary_key_prefix, secondary_index_prefix};
 
-/// Every table/index family is named by a fixed two-byte prefix
-/// `[table_prefix, discriminator]`: discriminator `0x00` is the primary-row
-/// family and `0x01..=0xFF` names secondary index slot `discriminator - 1`.
-/// Equal-length prefixes keep all families pairwise disjoint, and the primary
-/// discriminator (`0`) sorts below every index of the same table.
-pub(crate) const FAMILY_PREFIX_LEN: usize = 2;
-/// Discriminator byte for a table's primary-row family.
+/// Every table/index family is named by a single packed byte
+/// `(table_prefix << 4) | discriminator`: the high nibble is the table prefix
+/// and the low nibble is the family discriminator. Discriminator `0x0` is the
+/// primary-row family and `0x1..=0xF` names secondary index slot
+/// `discriminator - 1`. All families of table `t` occupy the contiguous byte
+/// range `[t << 4, (t << 4) | 0xF]`; these ranges are pairwise disjoint within
+/// and across tables, and the primary discriminator (`0`) sorts below every
+/// index family of the same table.
+pub(crate) const FAMILY_PREFIX_LEN: usize = 1;
+/// Discriminator nibble for a table's primary-row family.
 pub(crate) const PRIMARY_FAMILY_DISCRIMINATOR: u8 = 0x00;
 /// Byte offset of the first payload byte within a primary/index key, measured
 /// from the store-stripped key (i.e. after the family prefix). Both families
-/// share the same two-byte prefix, so both offsets are `FAMILY_PREFIX_LEN`.
+/// share the same one-byte prefix, so both offsets are `FAMILY_PREFIX_LEN`.
 pub(crate) const PRIMARY_KEY_BYTE_OFFSET: usize = FAMILY_PREFIX_LEN;
 pub(crate) const INDEX_KEY_BYTE_OFFSET: usize = FAMILY_PREFIX_LEN;
-/// Capacity caps for the two-byte family prefix. The table byte and the
-/// discriminator byte each occupy a full byte, giving up to 256 tables and 255
-/// secondary index slots (discriminator `0x00` is reserved for the primary
-/// family).
-pub(crate) const MAX_TABLES: usize = 256;
-pub(crate) const MAX_INDEX_SPECS: usize = 255;
+/// Capacity caps for the packed one-byte family prefix. The table prefix
+/// occupies the high nibble and the discriminator the low nibble, giving up to
+/// 16 tables and 15 secondary index slots (discriminator `0x0` is reserved for
+/// the primary family).
+pub(crate) const MAX_TABLES: usize = 16;
+pub(crate) const MAX_INDEX_SPECS: usize = 15;
 pub(crate) const STRING_KEY_INLINE_LIMIT: usize = 15;
 pub(crate) const STRING_KEY_TERMINATOR: u8 = 0x00;
 pub(crate) const STRING_KEY_ESCAPE_PREFIX: u8 = 0x01;

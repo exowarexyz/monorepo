@@ -86,8 +86,8 @@ pub fn keep_latest_versions_utf8(table_prefix: u8, count: usize) -> Result<Prune
 #[cfg(test)]
 mod tests {
     use super::{keep_latest_versions, keep_latest_versions_utf8, ORDERED_UTF8_REGEX};
-    use crate::codec::encode_primary_key;
-    use crate::types::{KvTableConfig, TableColumnConfig, TableModel};
+    use crate::codec::{encode_primary_key, family_byte};
+    use crate::types::{KvTableConfig, TableColumnConfig, TableModel, PRIMARY_FAMILY_DISCRIMINATOR};
     use crate::CellValue;
     use datafusion::arrow::datatypes::DataType;
     use exoware_sdk::kv_codec::Utf8;
@@ -105,7 +105,10 @@ mod tests {
     fn keep_latest_versions_builds_expected_policy_for_fixed_width_entity() {
         let policy = keep_latest_versions(3, 32, 1).expect("policy");
         let scope = keys_scope(&policy);
-        assert_eq!(&scope.selector.prefix[..], &[3u8, 0]);
+        assert_eq!(
+            &scope.selector.prefix[..],
+            &[family_byte(3, PRIMARY_FAMILY_DISCRIMINATOR)]
+        );
         assert_eq!(
             scope.selector.payload_regex,
             r"(?s-u)^(?P<entity>.{32})(?P<version>.{8})$"
@@ -139,7 +142,10 @@ mod tests {
     fn keep_latest_versions_utf8_builds_expected_policy() {
         let policy = keep_latest_versions_utf8(3, 1).expect("policy");
         let scope = keys_scope(&policy);
-        assert_eq!(&scope.selector.prefix[..], &[3u8, 0]);
+        assert_eq!(
+            &scope.selector.prefix[..],
+            &[family_byte(3, PRIMARY_FAMILY_DISCRIMINATOR)]
+        );
         assert_eq!(
             scope.selector.payload_regex,
             format!(r"(?s-u)^(?P<entity>{ORDERED_UTF8_REGEX})(?P<version>.{{8}})$")

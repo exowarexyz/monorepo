@@ -2652,8 +2652,8 @@ mod tests {
             let primary = encode_primary_key(model.table_prefix, &[&pk], &model).unwrap();
             // The family prefix bytes are fixed; the payload begins byte-aligned
             // immediately after them.
-            assert_eq!(&primary[..2], primary_prefix.as_bytes().as_ref());
-            primary_payload_bytes.insert(primary[2]);
+            assert_eq!(&primary[..FAMILY_PREFIX_LEN], primary_prefix.as_bytes().as_ref());
+            primary_payload_bytes.insert(primary[FAMILY_PREFIX_LEN]);
 
             let row = KvRow {
                 values: vec![
@@ -2663,12 +2663,13 @@ mod tests {
             };
             let index =
                 encode_secondary_index_key(model.table_prefix, &spec, &model, &row).unwrap();
-            assert_eq!(&index[..2], index_prefix.as_bytes().as_ref());
-            secondary_payload_bytes.insert(index[2]);
+            assert_eq!(&index[..FAMILY_PREFIX_LEN], index_prefix.as_bytes().as_ref());
+            secondary_payload_bytes.insert(index[FAMILY_PREFIX_LEN]);
         }
 
-        // Both families use a byte-aligned two-byte prefix, so varying the first
-        // payload byte spans all 256 values in the byte right after the prefix.
+        // Both families use a byte-aligned one-byte packed family prefix, so
+        // varying the first payload byte spans all 256 values in the byte right
+        // after the prefix.
         assert_eq!(primary_payload_bytes.len(), 256);
         assert_eq!(secondary_payload_bytes.len(), 256);
     }
@@ -4753,7 +4754,7 @@ mod tests {
             &model,
         )
         .expect_err("UTF-8 PK exceeding codec payload should be rejected");
-        assert!(err.contains("primary key payload exceeds codec payload capacity 252 bytes"));
+        assert!(err.contains("primary key payload exceeds codec payload capacity 253 bytes"));
     }
 
     #[test]
@@ -4861,7 +4862,7 @@ mod tests {
             },
         )
         .expect_err("secondary key exceeding max payload should be rejected");
-        assert!(err.contains("index 'tag_idx' payload exceeds codec payload capacity 252 bytes"));
+        assert!(err.contains("index 'tag_idx' payload exceeds codec payload capacity 253 bytes"));
     }
 
     #[test]
@@ -4912,7 +4913,7 @@ mod tests {
         .expect_err("backfill path overflow should be rejected");
         assert!(err
             .to_string()
-            .contains("index 'tag_idx' payload exceeds codec payload capacity 252 bytes"));
+            .contains("index 'tag_idx' payload exceeds codec payload capacity 253 bytes"));
     }
 
     #[test]
