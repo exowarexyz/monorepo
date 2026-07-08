@@ -133,7 +133,7 @@ fn split_upload_batches(
 // a no-op.
 #[tokio::test]
 async fn sequential_upload_matches_local_root() {
-    let (_server, client) = common::local_store_client().await;
+    let client = common::local_store_client().await;
     let batches = vec![
         vec![b"alpha".to_vec(), b"beta".to_vec()],
         vec![b"gamma".to_vec()],
@@ -191,7 +191,7 @@ async fn sequential_upload_matches_local_root() {
 // Every batch's watermark lands in-band (pipeline always empty on entry).
 #[tokio::test]
 async fn multiple_sequential_batches_each_publish_watermarks_in_band() {
-    let (_server, client) = common::local_store_client().await;
+    let client = common::local_store_client().await;
     let (local_root, _proof, local_ops, latest) = build_local_reference(vec![
         vec![b"a".to_vec(), b"b".to_vec()],
         vec![b"c".to_vec()],
@@ -248,7 +248,7 @@ async fn multiple_sequential_batches_each_publish_watermarks_in_band() {
 // the tail so readers see the full prefix.
 #[tokio::test]
 async fn pipelined_batches_require_flush_to_catch_up_watermark() {
-    let (_server, client) = common::local_store_client().await;
+    let client = common::local_store_client().await;
     // Local DB adds a Commit op per batch, so 3 batches of 2 Appends produce
     // 9 total ops (indices 0..=8). Split the writer's view into the same
     // batch boundaries.
@@ -325,7 +325,7 @@ async fn bounded_pipeline_advances_watermark_via_contiguous_acks() {
     const MAX_INFLIGHT: usize = 4;
     const BATCHES: usize = 20;
 
-    let (_server, client) = common::local_store_client().await;
+    let client = common::local_store_client().await;
     let batch_values: Vec<Vec<Vec<u8>>> = (0..BATCHES)
         .map(|i| vec![format!("v{i}").into_bytes()])
         .collect();
@@ -397,7 +397,7 @@ async fn bounded_pipeline_advances_watermark_via_contiguous_acks() {
 // wrote some batches).
 #[tokio::test]
 async fn local_proof_resumes_from_existing_store_state() {
-    let (_server, client) = common::local_store_client().await;
+    let client = common::local_store_client().await;
     let (local_root_after_two, proof_two, local_ops_two, latest_two) =
         build_local_reference(vec![vec![b"g".to_vec(), b"h".to_vec()]]).await;
     let (local_root_final, _proof_final, local_ops_final, latest_final) =

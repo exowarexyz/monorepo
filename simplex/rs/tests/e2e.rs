@@ -180,20 +180,16 @@ impl CertifiableBlock for TestBlock {
     }
 }
 
-/// Keep `_server` alive for the whole test; the store's tempdir lives inside the store engine
-/// so it cannot be deleted while the store is still running.
-async fn local_store_client() -> (tokio::task::JoinHandle<()>, StoreClient) {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().to_path_buf();
-    let (handle, url) = exoware_simulator::spawn_for_test(&path, dir)
+/// Spawns a local simulator and returns a client for it.
+async fn local_store_client() -> StoreClient {
+    let (_task, url) = exoware_simulator::test_spawn()
         .await
         .expect("spawn simulator");
-    let client = StoreClient::builder()
+    StoreClient::builder()
         .url(&url)
         .retry_config(RetryConfig::disabled())
         .build()
-        .expect("store client");
-    (handle, client)
+        .expect("store client")
 }
 
 fn schemes() -> Vec<Scheme> {
@@ -231,7 +227,7 @@ fn finalized(block: TestBlock, schemes: &[Scheme]) -> Finalized<TestBlock, Schem
 
 #[tokio::test]
 async fn uploads_and_reads_notarized_and_finalized_blocks() {
-    let (_handle, store) = local_store_client().await;
+    let store = local_store_client().await;
     let simplex = SimplexClient::new(PrefixedStoreClient::empty(store));
     let schemes = schemes();
 
@@ -307,7 +303,7 @@ async fn uploads_and_reads_notarized_and_finalized_blocks() {
 
 #[tokio::test]
 async fn prepared_uploads_can_share_one_store_batch() {
-    let (_handle, store) = local_store_client().await;
+    let store = local_store_client().await;
     let simplex = SimplexClient::new(PrefixedStoreClient::empty(store.clone()));
     let schemes = schemes();
 
@@ -339,7 +335,7 @@ async fn prepared_uploads_can_share_one_store_batch() {
 async fn marshal_resolver_sinks_finalized_chain_from_simplex_api() {
     const BLOCKS_TO_PROCESS: u64 = 5;
 
-    let (_handle, store) = local_store_client().await;
+    let store = local_store_client().await;
     let simplex = SimplexClient::new(PrefixedStoreClient::empty(store));
     let schemes = schemes();
 

@@ -17,22 +17,16 @@ use exoware_sdk::{
     connect_compression_registry, PreferZstdHttpClient, PrefixedStoreClient, RangeMode,
     RangeReduceOp, RangeReduceRequest, RangeReducerSpec, RetryConfig, StoreClient,
 };
-use tempfile::tempdir;
 
-/// The tempdir guard moves into the store engine, which every server and connection task
-/// holds, so the data directory is never deleted under the store however tasks are torn down.
-async fn spawn_client() -> (tokio::task::JoinHandle<()>, PrefixedStoreClient, String) {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().to_path_buf();
-    let (handle, url) = exoware_simulator::spawn_for_test(&path, dir)
-        .await
-        .expect("spawn_for_test");
+/// Spawns a local simulator and returns a client for it plus the base URL.
+async fn spawn_client() -> (PrefixedStoreClient, String) {
+    let (_task, url) = exoware_simulator::test_spawn().await.expect("test_spawn");
     let client = StoreClient::builder()
         .url(&url)
         .retry_config(RetryConfig::disabled())
         .build()
         .expect("build client");
-    (handle, PrefixedStoreClient::empty(client), url)
+    (PrefixedStoreClient::empty(client), url)
 }
 
 fn key(b: &[u8]) -> Key {
@@ -43,7 +37,7 @@ fn key(b: &[u8]) -> Key {
 
 #[tokio::test]
 async fn put_and_get_round_trip() {
-    let (_h, client, _url) = spawn_client().await;
+    let (client, _url) = spawn_client().await;
     let k = key(b"hello");
     let v = b"world";
     let seq = client.ingest().put(&[(&k, v)]).await.expect("put");
@@ -55,14 +49,14 @@ async fn put_and_get_round_trip() {
 
 #[tokio::test]
 async fn get_missing_key_returns_none() {
-    let (_h, client, _url) = spawn_client().await;
+    let (client, _url) = spawn_client().await;
     let got = client.query().get(&key(b"nope")).await.expect("get");
     assert!(got.is_none());
 }
 
 #[tokio::test]
 async fn put_overwrites_value() {
-    let (_h, client, _url) = spawn_client().await;
+    let (client, _url) = spawn_client().await;
     let k = key(b"k");
     client.ingest().put(&[(&k, b"v1")]).await.expect("put1");
     let seq2 = client.ingest().put(&[(&k, b"v2")]).await.expect("put2");
@@ -78,7 +72,7 @@ async fn put_overwrites_value() {
 
 #[tokio::test]
 async fn get_many_returns_found_and_missing() {
-    let (_h, client, _url) = spawn_client().await;
+    let (client, _url) = spawn_client().await;
     let ka = key(b"a");
     let kb = key(b"b");
     let kc = key(b"c");
@@ -103,7 +97,7 @@ async fn get_many_returns_found_and_missing() {
 
 #[tokio::test]
 async fn range_forward() {
-    let (_h, client, _url) = spawn_client().await;
+    let (client, _url) = spawn_client().await;
     let ka = key(b"ra");
     let kb = key(b"rb");
     let kc = key(b"rc");
@@ -124,7 +118,7 @@ async fn range_forward() {
 
 #[tokio::test]
 async fn range_reverse() {
-    let (_h, client, _url) = spawn_client().await;
+    let (client, _url) = spawn_client().await;
     let ka = key(b"sa");
     let kb = key(b"sb");
     let kc = key(b"sc");
@@ -145,7 +139,7 @@ async fn range_reverse() {
 
 #[tokio::test]
 async fn range_with_limit() {
-    let (_h, client, _url) = spawn_client().await;
+    let (client, _url) = spawn_client().await;
     let ka = key(b"la");
     let kb = key(b"lb");
     let kc = key(b"lc");
@@ -167,7 +161,7 @@ async fn range_with_limit() {
 
 #[tokio::test]
 async fn range_empty_result() {
-    let (_h, client, _url) = spawn_client().await;
+    let (client, _url) = spawn_client().await;
     let rows = client
         .query()
         .range(&key(b"zzz_no"), &key(b"zzz_nz"), 100)
@@ -180,7 +174,7 @@ async fn range_empty_result() {
 
 #[tokio::test]
 async fn reduce_count_all() {
-    let (_h, client, _url) = spawn_client().await;
+    let (client, _url) = spawn_client().await;
     let ka = key(b"ca");
     let kb = key(b"cb");
     let kc = key(b"cc");
@@ -211,7 +205,7 @@ async fn reduce_count_all() {
 
 #[tokio::test]
 async fn reduce_sum_int64() {
-    let (_h, client, _url) = spawn_client().await;
+    let (client, _url) = spawn_client().await;
     let ka = key(b"ua");
     let kb = key(b"ub");
     let kc = key(b"uc");
@@ -257,7 +251,7 @@ async fn reduce_sum_int64() {
 
 #[tokio::test]
 async fn prune_drop_all_removes_keys() {
-    let (_h, client, url) = spawn_client().await;
+    let (client, url) = spawn_client().await;
 
     let codec = KeyCodec::new(4, 1);
     let ka = codec.encode(b"aaa").expect("encode key a");
@@ -317,7 +311,7 @@ async fn prune_drop_all_removes_keys() {
 
 #[tokio::test]
 async fn create_session_with_sequence_reads_at_or_above_floor() {
-    let (_h, client, _url) = spawn_client().await;
+    let (client, _url) = spawn_client().await;
     let k1 = key(b"s1");
     let k2 = key(b"s2");
     let seq1 = client.ingest().put(&[(&k1, b"v1")]).await.expect("put1");
@@ -333,7 +327,7 @@ async fn create_session_with_sequence_reads_at_or_above_floor() {
 
 #[tokio::test]
 async fn health_endpoint() {
-    let (_h, client, _url) = spawn_client().await;
+    let (client, _url) = spawn_client().await;
     assert!(client.client().health().await.expect("health"));
 }
 
@@ -341,7 +335,7 @@ async fn health_endpoint() {
 
 #[tokio::test]
 async fn put_batch_multiple_keys() {
-    let (_h, client, _url) = spawn_client().await;
+    let (client, _url) = spawn_client().await;
     let ka = key(b"ba");
     let kb = key(b"bb");
     let kc = key(b"bc");
@@ -369,7 +363,7 @@ async fn put_batch_multiple_keys() {
 
 #[tokio::test]
 async fn range_stream_collects_all() {
-    let (_h, client, _url) = spawn_client().await;
+    let (client, _url) = spawn_client().await;
     let ka = key(b"xa");
     let kb = key(b"xb");
     let kc = key(b"xc");
@@ -395,7 +389,7 @@ async fn range_stream_collects_all() {
 
 #[tokio::test]
 async fn get_with_min_sequence_number() {
-    let (_h, client, _url) = spawn_client().await;
+    let (client, _url) = spawn_client().await;
     let k = key(b"msn");
     let seq = client.ingest().put(&[(&k, b"val")]).await.expect("put");
     let got = client
@@ -410,7 +404,7 @@ async fn get_with_min_sequence_number() {
 
 #[tokio::test]
 async fn prune_keep_latest_retains_newest() {
-    let (_h, client, url) = spawn_client().await;
+    let (client, url) = spawn_client().await;
 
     let codec = KeyCodec::new(4, 2);
     // Keys: prefix(4bits,family=2) + logical(3 bytes) + \x00\x00 + version(8 bytes big-endian u64)
@@ -503,7 +497,7 @@ async fn prune_keep_latest_retains_newest() {
 
 #[tokio::test]
 async fn reduce_count_min_max_field() {
-    let (_h, client, _url) = spawn_client().await;
+    let (client, _url) = spawn_client().await;
     let encode_row = |v: i64| -> Vec<u8> {
         StoredRow {
             values: vec![Some(StoredValue::Int64(v))],
@@ -559,7 +553,7 @@ async fn reduce_count_min_max_field() {
 
 #[tokio::test]
 async fn reduce_grouped_count() {
-    let (_h, client, _url) = spawn_client().await;
+    let (client, _url) = spawn_client().await;
     let codec = KeyCodec::new(4, 1);
     let encode_row = |v: i64| -> Vec<u8> {
         StoredRow {
@@ -605,7 +599,7 @@ async fn reduce_grouped_count() {
 
 #[tokio::test]
 async fn store_client_prune_drop_all() {
-    let (_h, client, _url) = spawn_client().await;
+    let (client, _url) = spawn_client().await;
 
     let codec = KeyCodec::new(4, 5);
     let ka = codec.encode(b"pa").expect("encode");
@@ -642,7 +636,7 @@ async fn store_client_prune_drop_all() {
 
 #[tokio::test]
 async fn prune_greater_than_retains_above_threshold() {
-    let (_h, client, url) = spawn_client().await;
+    let (client, url) = spawn_client().await;
 
     let codec = KeyCodec::new(4, 3);
     let make_key = |logical: &[u8; 2], version: u64| -> Key {

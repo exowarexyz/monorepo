@@ -70,19 +70,8 @@ fn report(label: &str, keys: usize, payload_bytes: usize, elapsed_secs: f64) {
     );
 }
 
-async fn run_serial(store: Arc<RocksStore>, batches: Vec<Vec<(Bytes, Bytes)>>) -> f64 {
-    let start = Instant::now();
-    for batch in batches {
-        store.put_batch(batch).await.expect("put batch");
-    }
-    start.elapsed().as_secs_f64()
-}
-
-async fn run_concurrent(
-    store: Arc<RocksStore>,
-    batches: Vec<Vec<(Bytes, Bytes)>>,
-    writers: usize,
-) -> f64 {
+/// Writes every batch through `writers` concurrent tasks; one writer is the serial mode.
+async fn run(store: Arc<RocksStore>, batches: Vec<Vec<(Bytes, Bytes)>>, writers: usize) -> f64 {
     let mut queues: Vec<Vec<Vec<(Bytes, Bytes)>>> = (0..writers).map(|_| Vec::new()).collect();
     for (index, batch) in batches.into_iter().enumerate() {
         queues[index % writers].push(batch);
@@ -128,11 +117,11 @@ fn main() {
         let payload = batch_payload_bytes(&data);
         let keys = batches * keys_per_batch;
 
-        let elapsed = if concurrent {
-            runtime.block_on(run_concurrent(store.clone(), data, writers))
-        } else {
-            runtime.block_on(run_serial(store.clone(), data))
-        };
+        let elapsed = runtime.block_on(run(
+            store.clone(),
+            data,
+            if concurrent { writers } else { 1 },
+        ));
         report(label, keys, payload, elapsed);
         drop(store);
     }

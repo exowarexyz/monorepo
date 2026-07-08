@@ -1,18 +1,18 @@
 //! Naive reference storage for local development: user keys and values are written as-is to
 //! RocksDB. A `meta` column family holds the state-floor row, and a `log` column family keeps
-//! one row per commit group — the exact `log.stream.v1.GetResponse` bytes the stream service
+//! one row per commit group: the exact `log.stream.v1.GetResponse` bytes the stream service
 //! serves for that sequence, loaded on demand. Everything is addressed by key: recovery and
 //! pruning never assume which SST files rows live in, so RocksDB is free to place and compact
 //! them however it likes.
 //!
 //! Writes bypass the WAL and the memtables: `prepare` coalesces queued requests into a commit
 //! group that shares one sequence number and stages the group's log row and sorted state rows
-//! as two SST files (built in parallel), while `commit` ingests the previous group — the log
+//! as two SST files (built in parallel), while `commit` ingests the previous group: the log
 //! file first (the durable row alone defines the group; `open` derives the frontier from the
 //! highest retained row and the state-floor meta row), then the state file, then publish and
 //! ack. Ingestion is atomic and strictly ordered, so a crash never leaves a partial batch and
 //! at most the newest group can be missing its state ingestion; `open` repairs that by
-//! re-applying the newest retained log row (idempotent — its rows are the newest writes for
+//! re-applying the newest retained log row (idempotent: its rows are the newest writes for
 //! their keys). The floor meta row is written only by pruning, synced, atomically with its
 //! deletes: it marks state the replay must never touch (re-applying key-pruned rows would
 //! resurrect them) and keeps a fully-pruned log from regressing the frontier.
@@ -56,6 +56,7 @@ const STATE_CF: &str = rocksdb::DEFAULT_COLUMN_FAMILY_NAME;
 const META_CF: &str = "meta";
 const SEQ_META_KEY: &[u8] = b"sequence";
 const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
+const PRUNE_DELETE_CHUNK_KEYS: usize = 4096;
 const DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
 const LOG_INGEST_DIR: &str = "ingest";
 const LOG_CF: &str = "log";
@@ -63,19 +64,44 @@ const LOG_BATCH_KEY_LEN: usize = 8;
 pub const WRITER_THREAD_PREFIX: &str = "simulator-rocks-";
 type RocksIterItem = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
 
+/// A resource dropped strictly after the database has closed (see [`Database`]).
+type Closer = Box<dyn std::any::Any + Send + Sync>;
+
+/// The open RocksDB handle plus everything that must outlive it.
+///
+/// Every holder of the database (store clones, the writer threads, open range-scan cursors,
+/// in-flight blocking reads) shares one `Arc<Database>`, so the database closes exactly when
+/// the last holder drops, wherever that happens. A closer attached at open drops strictly
+/// after the database (fields drop in declaration order).
+struct Database {
+    db: DB,
+    /// Dropped only after `db`: any resource that must outlive the open database. For a
+    /// store opened with [`RocksStore::open_owned`], this is the owner whose drop deletes
+    /// the data directory (for example a `tempfile::TempDir`).
+    _closer: Option<Closer>,
+}
+
+impl std::ops::Deref for Database {
+    type Target = DB;
+
+    fn deref(&self) -> &DB {
+        &self.db
+    }
+}
+
 /// Owns the DB handle for a RocksDB iterator that is moved through blocking tasks.
 struct OwnedRocksIterator {
     iter: DBIterator<'static>,
-    _db: Arc<DB>,
+    _db: Arc<Database>,
 }
 
 impl OwnedRocksIterator {
     /// Creates a RocksDB iterator whose borrowed DB handle is kept alive by the wrapper.
-    fn new(db: Arc<DB>, mode: IteratorMode<'_>) -> Self {
+    fn new(db: Arc<Database>, mode: IteratorMode<'_>) -> Self {
         // SAFETY: `iter` is dropped before `db` because fields are dropped in
         // declaration order. The RocksDB iterator therefore cannot outlive the
         // Arc-owned DB it borrows.
-        let db_ref: &'static DB = unsafe { &*Arc::as_ptr(&db) };
+        let db_ref: &'static DB = unsafe { &(*Arc::as_ptr(&db)).db };
         let iter = db_ref.iterator(mode);
         Self { iter, _db: db }
     }
@@ -98,7 +124,7 @@ struct RocksRangeScanState {
 
 impl RocksRangeScanState {
     /// Creates an iterator positioned at the first row that may belong to the requested range.
-    fn new(db: Arc<DB>, start: Bytes, end: Bytes, limit: usize, forward: bool) -> Self {
+    fn new(db: Arc<Database>, start: Bytes, end: Bytes, limit: usize, forward: bool) -> Self {
         let mode = if forward {
             IteratorMode::From(start.as_ref(), Direction::Forward)
         } else if end.is_empty() {
@@ -166,7 +192,7 @@ pub struct RocksRangeScanCursor {
 
 impl RocksRangeScanCursor {
     /// Stores scan state in an `Option` so it can be moved into `spawn_blocking` per page.
-    fn new(db: Arc<DB>, start: Bytes, end: Bytes, limit: usize, forward: bool) -> Self {
+    fn new(db: Arc<Database>, start: Bytes, end: Bytes, limit: usize, forward: bool) -> Self {
         Self {
             state: Some(RocksRangeScanState::new(db, start, end, limit, forward)),
         }
@@ -307,7 +333,7 @@ struct Frontiers {
     /// sequence-addressed read (`current_sequence`, `get_batch`, `oldest_retained_batch`).
     /// Point reads of current state are deliberately ungated: state may lead this frontier by
     /// the one group being published, but never lags it. The durable frontier (highest sequence
-    /// whose log row is durable) is not tracked in-process — it only runs ahead of `published`
+    /// whose log row is durable) is not tracked in-process: it only runs ahead of `published`
     /// while a group's state ingestion is in flight, and is re-derived at open from the
     /// retained log rows and the state-floor meta row.
     published: AtomicU64,
@@ -358,13 +384,13 @@ impl Writer {
     /// nothing has committed yet) and stages the group's log and state SSTs in parallel;
     /// `commit` ingests the log file, then the state file, publishes the frontier, and
     /// resolves the requests. The stages overlap, so one group is staged while
-    /// the previous commits — and `commit` ingests strictly in order, so a crash still leaves
+    /// the previous commits. `commit` still ingests strictly in order, so a crash leaves
     /// at most the newest ingested group without its state. Any write failure in either stage
     /// is fatal (the worker panics): the durable log row alone defines the group, so the next
-    /// open re-derives the frontier and replays the rows above the floor — sequence numbers
+    /// open re-derives the frontier and replays the rows above the floor. Sequence numbers
     /// never need to be reclaimed in-process.
     fn start(
-        db: Arc<DB>,
+        db: Arc<Database>,
         ingest_dir: PathBuf,
         frontiers: Arc<Frontiers>,
         write_pipeline: RocksWritePipelineConfig,
@@ -455,9 +481,13 @@ fn run_prepare(
     }
 }
 
-/// Commits staged groups one at a time — log ingestion, state ingestion, publish, ack — until
+/// Commits staged groups one at a time (log ingestion, state ingestion, publish, ack) until
 /// the group channel closes (store drop). Any write failure panics inside `commit_group`.
-fn run_commit(db: Arc<DB>, frontiers: Arc<Frontiers>, receiver: mpsc::Receiver<PreparedWrite>) {
+fn run_commit(
+    db: Arc<Database>,
+    frontiers: Arc<Frontiers>,
+    receiver: mpsc::Receiver<PreparedWrite>,
+) {
     while let Ok(group) = receiver.recv() {
         commit_group(&db, &frontiers, group);
     }
@@ -506,7 +536,7 @@ fn stage_queued_write(
         }
     }
 
-    // Stage the group's two SST files in parallel — the single-row log SST on this thread, the
+    // Stage the group's two SST files in parallel: the single-row log SST on this thread, the
     // sorted state SST on a scoped thread. Ingestion later links them into their column
     // families, so each payload byte reaches the disk exactly once, in its final resting place.
     // A staging failure is fatal; leftover staged files are removed by the next open.
@@ -585,9 +615,9 @@ fn stage_state_file(path: &Path, rows: &[(Bytes, Bytes)]) -> Result<usize, Strin
 /// Commits one group: ingests its log row (durability), then its state file (visibility), then
 /// publishes the frontier and resolves the requests. Any write failure is fatal (panic): once
 /// the log row is durable the group cannot be rolled back (its sequence must not be
-/// re-issued), and the next open rolls it forward by replaying the row — so nothing is ever
+/// re-issued), and the next open rolls it forward by replaying the row, so nothing is ever
 /// reclaimed or retried in-process. The panic drops the group's response channels, so waiting
-/// callers observe an error even though the group may resurface after the restart repair — an
+/// callers observe an error even though the group may resurface after the restart repair, an
 /// accepted at-least-once ambiguity of this severe error path.
 fn commit_group(db: &DB, frontiers: &Frontiers, group: PreparedWrite) {
     assert!(!group.requests.is_empty(), "groups are never empty");
@@ -718,8 +748,8 @@ fn read_state_floor(db: &DB) -> Result<u64, String> {
 }
 
 /// Re-applies the newest retained log row to the state column family. `commit` ingests
-/// strictly in order — a group's log row lands before its state, and the next group's row only
-/// after that state — so every older group's state is already durably ingested and at most the
+/// strictly in order (a group's log row lands before its state, and the next group's row only
+/// after that state), so every older group's state is already durably ingested and at most the
 /// newest group can be missing it; re-applying is idempotent because the row's entries are the
 /// newest writes for their keys. A row at or below `floor` is never replayed: its state is
 /// authoritative, and key pruning may have deleted rows a replay would resurrect. Ingestion is
@@ -765,63 +795,68 @@ impl Default for RocksWritePipelineConfig {
     }
 }
 
-/// The machine's available parallelism, defaulting to two when it cannot be queried.
-fn available_parallelism() -> NonZeroUsize {
-    thread::available_parallelism().unwrap_or_else(|_| NonZeroUsize::new(2).expect("nonzero"))
-}
-
 /// RocksDB engine and application-level write pipeline options used by [`RocksStore::open`].
 ///
-/// Column-family options are deliberately not configurable — the store's correctness leans on
-/// the CF options `open` chooses: staged state SSTs and range-scan bounds assume bytewise key
+/// Column-family options are deliberately not configurable because the store's correctness
+/// leans on the CF options `open` chooses: staged state SSTs and range-scan bounds assume bytewise key
 /// order, and rows must never be dropped by a caller-supplied compaction filter or TTL (acked
 /// writes must stay readable, the meta CF's state-floor row must persist, and the repair
 /// replay would nondeterministically resurrect expired state rows).
+#[derive(Default)]
 pub struct RocksConfig {
-    /// Database-wide options. The default raises RocksDB's background-job budget (flushes and
-    /// the compactions that must keep merging the overlapping ingested state SSTs) from the
-    /// stock 2 to the machine's available parallelism; a caller replacing `db_options`
-    /// replaces that choice too — open applies these options as-is.
+    /// Database-wide options, applied as-is (stock defaults). Two knobs matter under sustained
+    /// ingest: `max_background_jobs` (stock RocksDB fixes it at 2, and compactions must keep
+    /// merging the overlapping ingested state SSTs) and `max_open_files` (stock RocksDB keeps
+    /// every touched table file open forever, and ingest creates one log and one state SST per
+    /// commit group).
     pub db_options: Options,
     /// Options for the application-level ingest write pipeline.
     pub write_pipeline: RocksWritePipelineConfig,
-}
-
-impl Default for RocksConfig {
-    /// Stock RocksDB options, with the background-job budget raised to the machine's available
-    /// cores. Memtables are off the hot path (only the open-time replay and prune deletes write
-    /// them), so they stay at stock defaults.
-    fn default() -> Self {
-        let mut db_options = Options::default();
-        db_options.increase_parallelism(available_parallelism().get() as i32);
-        // Ingest links one log and one state SST per commit group into the DB, and stock
-        // RocksDB (max_open_files = -1) keeps every touched file's reader open forever. Bound
-        // the table-reader cache so cold reads pay a reopen instead of the process exhausting
-        // file descriptors.
-        db_options.set_max_open_files(4096);
-        Self {
-            db_options,
-            write_pipeline: RocksWritePipelineConfig::default(),
-        }
-    }
 }
 
 /// Minimal RocksDB-backed store for the simulator: batch writes plus a global sequence u64
 /// plus a per-sequence log.
 #[derive(Clone)]
 pub struct RocksStore {
-    db: Arc<DB>,
+    db: Arc<Database>,
     frontiers: Arc<Frontiers>,
     writer: Arc<Writer>,
 }
 
 impl RocksStore {
     /// Open the store with default options, unless `config` overrides the database or
-    /// write-pipeline options (column families always run stock options — see [`RocksConfig`]).
+    /// write-pipeline options. Column families always run stock options (see [`RocksConfig`]).
     /// Re-derives the durable frontier from the retained log rows and the state-floor meta row,
     /// then re-applies the newest log row to the state column family so the current state is
     /// complete below the durable sequence even after a crash mid-commit.
+    ///
+    /// The caller keeps the directory at `path` alive until every handle to the store (clones,
+    /// open cursors, in-flight operations) has dropped. [`RocksStore::open_owned`] hands that
+    /// ordering to the store instead.
     pub fn open(path: &Path, config: Option<RocksConfig>) -> Result<Self, String> {
+        Self::open_database(path, config, None)
+    }
+
+    /// Open a store that owns its data directory: `directory` is dropped strictly after the
+    /// database has fully closed. Every store clone, open cursor, and in-flight operation
+    /// keeps the database open, and the last of them releases the directory wherever it
+    /// drops, so a directory whose drop has effects (for example `tempfile::TempDir`,
+    /// which deletes it) can never be torn down under a live database.
+    pub fn open_owned<D>(directory: D, config: Option<RocksConfig>) -> Result<Self, String>
+    where
+        D: AsRef<Path> + Send + Sync + 'static,
+    {
+        let path = directory.as_ref().to_path_buf();
+        Self::open_database(&path, config, Some(Box::new(directory)))
+    }
+
+    /// Shared open path: see [`RocksStore::open`] for the recovery contract and
+    /// [`RocksStore::open_owned`] for the directory-ownership contract.
+    fn open_database(
+        path: &Path,
+        config: Option<RocksConfig>,
+        closer: Option<Closer>,
+    ) -> Result<Self, String> {
         let RocksConfig {
             mut db_options,
             write_pipeline,
@@ -833,10 +868,12 @@ impl RocksStore {
         let cf_state = ColumnFamilyDescriptor::new(STATE_CF, Options::default());
         let cf_meta = ColumnFamilyDescriptor::new(META_CF, Options::default());
         let cf_log = ColumnFamilyDescriptor::new(LOG_CF, Options::default());
-        let db = Arc::new(
-            DB::open_cf_descriptors(&db_options, path, vec![cf_state, cf_meta, cf_log])
-                .map_err(|e| e.to_string())?,
-        );
+        let db = DB::open_cf_descriptors(&db_options, path, vec![cf_state, cf_meta, cf_log])
+            .map_err(|e| e.to_string())?;
+        let db = Arc::new(Database {
+            db,
+            _closer: closer,
+        });
 
         let ingest_dir = prepare_ingest_dir(path)?;
         // Commits do not write the state-floor meta row; the log rows are the durable record.
@@ -877,29 +914,45 @@ impl RocksStore {
         self.db.get(key)
     }
 
-    /// Deletes key-pruned current rows, atomically raising the state floor to the published
-    /// frontier in the same synced batch. Every deleted row's log entry sits at or below that
-    /// floor, so the replay at the next open cannot resurrect it — and the sync makes an acked
-    /// prune durable.
+    /// Deletes key-pruned current rows. The state floor is raised to the published frontier
+    /// first (synced, under the publish lock), so every deleted row's log entry sits at or
+    /// below a durable floor and the replay at the next open cannot resurrect it. The deletes
+    /// themselves are applied in bounded chunks outside the lock (all covered by the
+    /// just-persisted floor), so a large prune never stalls commit acks; the final chunk is
+    /// synced, which flushes the whole run and makes an acked prune durable. A crash between
+    /// chunks leaves rows the next prune pass re-deletes.
     fn delete_keys(&self, keys: &[Bytes]) -> Result<(), String> {
         if keys.is_empty() {
             return Ok(());
         }
 
-        let _guard = self.frontiers.persist.lock();
-        let mut batch = rocksdb::WriteBatch::default();
-        batch.put_cf(
-            self.meta_cf(),
-            SEQ_META_KEY,
-            self.frontiers
-                .published
-                .load(Ordering::Acquire)
-                .to_le_bytes(),
-        );
-        for k in keys {
-            batch.delete(k.as_ref());
+        {
+            let _guard = self.frontiers.persist.lock();
+            let mut batch = rocksdb::WriteBatch::default();
+            batch.put_cf(
+                self.meta_cf(),
+                SEQ_META_KEY,
+                self.frontiers
+                    .published
+                    .load(Ordering::Acquire)
+                    .to_le_bytes(),
+            );
+            write_synced_batch(&self.db, batch)?;
         }
-        write_synced_batch(&self.db, batch)
+
+        let mut chunks = keys.chunks(PRUNE_DELETE_CHUNK_KEYS).peekable();
+        while let Some(chunk) = chunks.next() {
+            let mut batch = rocksdb::WriteBatch::default();
+            for k in chunk {
+                batch.delete(k.as_ref());
+            }
+            if chunks.peek().is_none() {
+                write_synced_batch(&self.db, batch)?;
+            } else {
+                self.db.write(batch).map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(())
     }
 
     /// Deletes replay-log rows with sequence numbers below `cutoff_exclusive`.
@@ -1049,8 +1102,13 @@ impl Query for RocksStore {
         limit: usize,
         forward: bool,
     ) -> Result<Self::RangeScan, String> {
-        let db = self.db.clone();
-        Ok(RocksRangeScanCursor::new(db, start, end, limit, forward))
+        Ok(RocksRangeScanCursor::new(
+            self.db.clone(),
+            start,
+            end,
+            limit,
+            forward,
+        ))
     }
 
     async fn get_many(
@@ -1205,6 +1263,34 @@ mod tests {
             DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES,
         );
         group
+    }
+
+    #[test]
+    fn owned_directory_outlives_every_database_holder() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().to_path_buf();
+        let store = RocksStore::open_owned(dir, None).expect("open owned store");
+
+        // A cursor keeps the database, and therefore the owned directory, alive after every
+        // store handle is gone.
+        let cursor = RocksRangeScanCursor::new(
+            store.db.clone(),
+            Bytes::new(),
+            Bytes::new(),
+            usize::MAX,
+            true,
+        );
+        drop(store);
+        assert!(
+            path.exists(),
+            "directory must survive while a cursor still holds the database"
+        );
+
+        drop(cursor);
+        assert!(
+            !path.exists(),
+            "directory must be deleted once the last database holder drops"
+        );
     }
 
     #[test]
@@ -1368,7 +1454,7 @@ mod tests {
 
             // Simulate a crash that lost the WAL-less state rows for sequence 2 (the group
             // whose commit was interrupted) but kept its durable log row: write it directly,
-            // bypassing the state apply stage and the floor advance — the reopened store must
+            // bypassing the state apply stage and the floor advance. The reopened store must
             // re-derive the durable frontier from the retained rows alone, exactly as after a
             // crash that also lost the unsynced floor advance.
             let payload = StreamGetResponse {
@@ -1546,7 +1632,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
         // A durable log row whose group never published (its state ingestion was in flight at
-        // a crash): pruning must spare it — it is the repair replay's input at the next open.
+        // a crash): pruning must spare it. It is the repair replay's input at the next open.
         seed_log_row(&store, 1, &encoded_log_entry(1, b"k", b"v"));
 
         store

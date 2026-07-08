@@ -201,7 +201,7 @@ async fn build_fixed_local_db() -> FixedLocalReference {
 
 #[tokio::test]
 async fn immutable_round_trip() {
-    let (_server, client) = common::local_store_client().await;
+    let client = common::local_store_client().await;
     let local = build_local_db().await;
 
     let writer = fresh_writer(client.clone());
@@ -243,7 +243,7 @@ async fn immutable_round_trip() {
 
 #[tokio::test]
 async fn immutable_fixed_round_trip() {
-    let (_server, client) = common::local_store_client().await;
+    let client = common::local_store_client().await;
     let local = build_fixed_local_db().await;
 
     let writer = fresh_fixed_writer(client.clone());

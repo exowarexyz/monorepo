@@ -109,7 +109,7 @@ async fn build_local_reference(batches: Vec<WriteBatch>) -> LocalReference {
 
 #[tokio::test]
 async fn sequential_upload_matches_local_root() {
-    let (_server, client) = common::local_store_client().await;
+    let client = common::local_store_client().await;
     let local = build_local_reference(vec![vec![
         (b"alpha".to_vec(), Some(b"one".to_vec())),
         (b"beta".to_vec(), Some(b"two".to_vec())),
@@ -142,7 +142,7 @@ async fn sequential_upload_matches_local_root() {
 
 #[tokio::test]
 async fn pipelined_batches_require_flush_to_catch_up_watermark() {
-    let (_server, client) = common::local_store_client().await;
+    let client = common::local_store_client().await;
     let b1 = vec![(b"a".to_vec(), Some(b"1".to_vec()))];
     let b2 = vec![(b"b".to_vec(), Some(b"2".to_vec()))];
     let b3 = vec![(b"c".to_vec(), Some(b"3".to_vec()))];

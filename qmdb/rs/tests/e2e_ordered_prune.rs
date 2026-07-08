@@ -103,7 +103,7 @@ async fn boundary_from_db(
 
 #[tokio::test]
 async fn mirror_ordered_prune_past_chunk_zero() {
-    let (_server, client) = common::local_store_client().await;
+    let client = common::local_store_client().await;
 
     // Phase 1 (blocking tokio runtime): drive the local QMDB through BATCHES
     // batches, capturing each batch's delta, root, and boundary delta. The

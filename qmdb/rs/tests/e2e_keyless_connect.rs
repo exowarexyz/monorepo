@@ -130,7 +130,7 @@ async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
 
 #[tokio::test]
 async fn keyless_connect_subscribe_emits_verifiable_multi_proof() {
-    let (_store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_local_batch().await;
     assert!(
         *local.inactivity_floor > 0,
@@ -174,7 +174,7 @@ async fn keyless_connect_subscribe_emits_verifiable_multi_proof() {
 
 #[tokio::test]
 async fn keyless_connect_get_operation_range_returns_verifiable_proof() {
-    let (_store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_local_batch().await;
     assert!(
         *local.inactivity_floor > 0,
@@ -212,7 +212,7 @@ async fn keyless_connect_get_operation_range_returns_verifiable_proof() {
 
 #[tokio::test]
 async fn keyless_operation_log_sync_resolver_fetches_api_batches() {
-    let (_store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_local_batch().await;
     commit_upload(&store_client, &local).await;
 
@@ -258,7 +258,7 @@ async fn keyless_operation_log_sync_resolver_fetches_api_batches() {
 
 #[tokio::test]
 async fn keyless_commonware_glue_state_sync_uses_operation_log_resolver() {
-    let (_store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_local_batch().await;
     assert!(
         *local.inactivity_floor > 0,
@@ -380,7 +380,7 @@ async fn keyless_operation_log_sync_resolver_observes_cancelled_fetch() {
 
 #[tokio::test]
 async fn keyless_connect_client_rejects_invalid_streamed_proof() {
-    let (_store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_local_batch().await;
     assert!(
         *local.inactivity_floor > 0,
@@ -447,7 +447,7 @@ fn match_regex(regex: &str) -> ProtoFilter {
 
 #[tokio::test]
 async fn keyless_connect_subscribe_filters_by_value_regex() {
-    let (_store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_local_batch().await;
     assert!(
         *local.inactivity_floor > 0,
@@ -500,7 +500,7 @@ async fn keyless_connect_subscribe_filters_by_value_regex() {
 
 #[tokio::test]
 async fn keyless_connect_subscribe_rejects_key_filters() {
-    let (_store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_local_batch().await;
     assert!(
         *local.inactivity_floor > 0,

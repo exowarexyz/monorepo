@@ -8497,7 +8497,6 @@ mod tests {
         use super::*;
         use datafusion::prelude::SessionContext;
         use exoware_sdk::StoreClient;
-        use tempfile::tempdir;
 
         struct TestServers {
             ingest_url: String,
@@ -8518,10 +8517,7 @@ mod tests {
         }
 
         async fn spawn_e2e_servers() -> TestServers {
-            let dir = tempdir().expect("tempdir");
-            let path = dir.path().to_path_buf();
-            // The tempdir guard lives inside the spawned store so it outlives every handle.
-            let (_handle, url) = exoware_simulator::spawn_for_test(&path, dir)
+            let (_task, url) = exoware_simulator::test_spawn()
                 .await
                 .expect("spawn simulator");
             TestServers {

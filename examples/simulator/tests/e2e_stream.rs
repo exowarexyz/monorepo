@@ -7,22 +7,16 @@ use exoware_sdk::prune_policy::{PolicyScope, PrunePolicy, RetainPolicy};
 use exoware_sdk::selector::Selector;
 use exoware_sdk::stream_filter::StreamFilter;
 use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreClient};
-use tempfile::tempdir;
 
-/// The tempdir guard moves into the store engine, which every server and connection task
-/// holds, so the data directory is never deleted under the store however tasks are torn down.
-async fn spawn_client() -> (tokio::task::JoinHandle<()>, PrefixedStoreClient) {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().to_path_buf();
-    let (handle, url) = exoware_simulator::spawn_for_test(&path, dir)
-        .await
-        .expect("spawn_for_test");
+/// Spawns a local simulator and returns a client for it.
+async fn spawn_client() -> PrefixedStoreClient {
+    let (_task, url) = exoware_simulator::test_spawn().await.expect("test_spawn");
     let client = StoreClient::builder()
         .url(&url)
         .retry_config(RetryConfig::disabled())
         .build()
         .expect("build client");
-    (handle, PrefixedStoreClient::empty(client))
+    PrefixedStoreClient::empty(client)
 }
 
 fn key(family: u16, payload: &[u8]) -> Key {
@@ -68,7 +62,7 @@ async fn next_with_timeout(
 
 #[tokio::test]
 async fn live_subscribe_delivers_matching_entries() {
-    let (_h, client) = spawn_client().await;
+    let client = spawn_client().await;
     let mut sub = client
         .stream()
         .subscribe(filter(1), None)
@@ -92,7 +86,7 @@ async fn live_subscribe_delivers_matching_entries() {
 
 #[tokio::test]
 async fn non_matching_put_yields_no_frame() {
-    let (_h, client) = spawn_client().await;
+    let client = spawn_client().await;
     let mut sub = client
         .stream()
         .subscribe(filter(1), None)
@@ -114,7 +108,7 @@ async fn non_matching_put_yields_no_frame() {
 
 #[tokio::test]
 async fn multiple_selectors_delivered_once_per_put() {
-    let (_h, client) = spawn_client().await;
+    let client = spawn_client().await;
     let f = StreamFilter {
         selectors: vec![
             Selector {
@@ -153,7 +147,7 @@ async fn multiple_selectors_delivered_once_per_put() {
 
 #[tokio::test]
 async fn two_puts_yield_two_distinct_frames() {
-    let (_h, client) = spawn_client().await;
+    let client = spawn_client().await;
     let mut sub = client
         .stream()
         .subscribe(filter(1), None)
@@ -183,7 +177,7 @@ async fn two_puts_yield_two_distinct_frames() {
 
 #[tokio::test]
 async fn replay_since_delivers_retained_batches_then_live() {
-    let (_h, client) = spawn_client().await;
+    let client = spawn_client().await;
     let mut seen_seqs = Vec::new();
     for i in 0..5u8 {
         let seq = client
@@ -227,7 +221,7 @@ async fn replay_since_delivers_retained_batches_then_live() {
 
 #[tokio::test]
 async fn replay_past_end_delivers_only_live() {
-    let (_h, client) = spawn_client().await;
+    let client = spawn_client().await;
     let current = client
         .ingest()
         .put(&[(&key(1, b"seed"), b"v")])
@@ -258,7 +252,7 @@ async fn replay_past_end_delivers_only_live() {
 
 #[tokio::test]
 async fn replay_miss_after_prune_returns_batch_evicted() {
-    let (_h, client) = spawn_client().await;
+    let client = spawn_client().await;
     for i in 0..20u8 {
         client
             .ingest()
@@ -294,7 +288,7 @@ async fn replay_miss_after_prune_returns_batch_evicted() {
 
 #[tokio::test]
 async fn get_batch_returns_whole_batch_unfiltered() {
-    let (_h, client) = spawn_client().await;
+    let client = spawn_client().await;
     let ka = key(1, b"a");
     let kb = key(2, b"b");
     let seq = client
@@ -319,7 +313,7 @@ async fn get_batch_returns_whole_batch_unfiltered() {
 
 #[tokio::test]
 async fn get_batch_missing_seq_returns_none() {
-    let (_h, client) = spawn_client().await;
+    let client = spawn_client().await;
     client
         .ingest()
         .put(&[(&key(1, b"a"), b"1")])
@@ -335,7 +329,7 @@ async fn get_batch_missing_seq_returns_none() {
 
 #[tokio::test]
 async fn get_batch_after_drop_all_returns_none() {
-    let (_h, client) = spawn_client().await;
+    let client = spawn_client().await;
     let seq = client
         .ingest()
         .put(&[(&key(1, b"a"), b"1")])
@@ -353,7 +347,7 @@ async fn get_batch_after_drop_all_returns_none() {
 
 #[tokio::test]
 async fn get_batch_after_keep_latest_evicts_old_but_keeps_new() {
-    let (_h, client) = spawn_client().await;
+    let client = spawn_client().await;
     let mut seqs = Vec::new();
     for i in 0..20u8 {
         let s = client
@@ -386,7 +380,7 @@ async fn get_batch_after_keep_latest_evicts_old_but_keeps_new() {
 
 #[tokio::test]
 async fn slow_subscriber_drops_without_blocking_ingest() {
-    let (_h, client) = spawn_client().await;
+    let client = spawn_client().await;
     // Open subscription but never drain it. Internal cap = 256 frames.
     let _sub = client
         .stream()
@@ -424,7 +418,7 @@ async fn slow_subscriber_drops_without_blocking_ingest() {
 #[tokio::test]
 async fn value_filter_restricts_to_matching_values() {
     use exoware_sdk::stream_filter::Filter;
-    let (_h, client) = spawn_client().await;
+    let client = spawn_client().await;
     let f = StreamFilter {
         selectors: vec![Selector {
             reserved_bits: 4,
