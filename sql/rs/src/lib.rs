@@ -8495,12 +8495,8 @@ mod tests {
 
     mod e2e {
         use super::*;
-        use axum::{routing::get, Router};
         use datafusion::prelude::SessionContext;
         use exoware_sdk::StoreClient;
-        use exoware_server::{connect_stack, AppState};
-        use exoware_simulator::RocksStore;
-        use tempfile::tempdir;
 
         struct TestServers {
             ingest_url: String,
@@ -8521,34 +8517,13 @@ mod tests {
         }
 
         async fn spawn_e2e_servers() -> TestServers {
-            let dir = tempdir().expect("tempdir");
-            let db = RocksStore::open(dir.path(), None).expect("db");
-            let state = AppState::new(std::sync::Arc::new(db));
-            let connect = connect_stack(state);
-            let app = Router::new()
-                .route("/health", get(|| async { "ok" }))
-                .fallback_service(connect);
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            let (_task, url) = exoware_simulator::open_temp()
                 .await
-                .expect("bind");
-            let url = format!("http://{}", listener.local_addr().unwrap());
-            tokio::spawn(async move {
-                axum::serve(listener, app).await.expect("serve");
-            });
-            for _ in 0..200 {
-                if reqwest::get(format!("{url}/health"))
-                    .await
-                    .ok()
-                    .is_some_and(|r| r.status().is_success())
-                {
-                    return TestServers {
-                        ingest_url: url.clone(),
-                        query_url: url,
-                    };
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                .expect("spawn simulator");
+            TestServers {
+                ingest_url: url.clone(),
+                query_url: url,
             }
-            panic!("e2e simulator did not become ready");
         }
 
         #[tokio::test]

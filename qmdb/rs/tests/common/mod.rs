@@ -144,14 +144,12 @@ pub fn immutable_variable_config<C>(
     }
 }
 
-/// Keep `_dir` and `_server` alive for the whole test.
-pub async fn local_store_client() -> (tempfile::TempDir, tokio::task::JoinHandle<()>, StoreClient) {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (jh, url) = exoware_simulator::spawn_for_test(dir.path())
+/// Spawns a local simulator and returns a client for it.
+pub async fn local_store_client() -> StoreClient {
+    let (_task, url) = exoware_simulator::open_temp()
         .await
         .expect("spawn simulator");
-    let client = StoreClient::new(&url);
-    (dir, jh, client)
+    StoreClient::new(&url)
 }
 
 #[allow(dead_code)]

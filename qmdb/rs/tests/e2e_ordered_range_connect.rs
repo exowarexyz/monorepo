@@ -480,7 +480,7 @@ async fn commit_mmb_upload(client: &StoreClient, batch: &MmbLocalBatch) {
 
 #[tokio::test]
 async fn ordered_current_operation_range_connect_emits_verifiable_proof() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_local_batch().await;
     commit_upload(&store_client, &local).await;
 
@@ -518,7 +518,7 @@ async fn ordered_current_operation_range_connect_emits_verifiable_proof() {
 
 #[tokio::test]
 async fn ordered_current_state_sync_from_connect_api_reconstructs_current_db() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_local_batch().await;
     commit_upload(&store_client, &local).await;
 
@@ -585,7 +585,7 @@ async fn ordered_current_state_sync_from_connect_api_reconstructs_current_db() {
 async fn ordered_mmb_current_state_sync_from_nonzero_connect_api_reconstructs_current_db() {
     const FETCH_BATCH_SIZE: u64 = 3;
 
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_mmb_local_batch().await;
     let start = Location::<mmb::Family>::new(1);
     let start_index = usize::try_from(*start).expect("start fits usize");
@@ -668,7 +668,7 @@ async fn ordered_mmb_current_state_sync_from_nonzero_connect_api_reconstructs_cu
 
 #[tokio::test]
 async fn ordered_mmb_sync_resolvers_return_pinned_nodes_for_nonzero_fetches() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_mmb_local_batch().await;
     let start = Location::<mmb::Family>::new(3);
     assert!(*start > 0, "regression must exercise a nonzero lower bound");
@@ -755,7 +755,7 @@ async fn ordered_mmb_sync_resolvers_return_pinned_nodes_for_nonzero_fetches() {
 
 #[tokio::test]
 async fn ordered_mmb_operation_range_client_rejects_missing_nonzero_pinned_nodes() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_mmb_local_batch().await;
     let start = Location::<mmb::Family>::new(3);
     assert!(
@@ -823,7 +823,7 @@ async fn ordered_mmb_operation_range_client_rejects_missing_nonzero_pinned_nodes
 
 #[tokio::test]
 async fn ordered_mmb_operation_range_client_rejects_extra_nonzero_pinned_node() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_mmb_local_batch().await;
     let start = Location::<mmb::Family>::new(3);
     assert!(
@@ -879,7 +879,7 @@ async fn ordered_mmb_operation_range_client_rejects_extra_nonzero_pinned_node() 
 
 #[tokio::test]
 async fn ordered_mmb_operation_range_client_rejects_zero_start_pinned_nodes() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_mmb_local_batch().await;
     commit_mmb_upload(&store_client, &local).await;
 
@@ -932,7 +932,7 @@ async fn ordered_mmb_operation_range_client_rejects_zero_start_pinned_nodes() {
 
 #[tokio::test]
 async fn ordered_operation_range_connect_uses_current_root_witness() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_local_batch().await;
     commit_upload(&store_client, &local).await;
 
@@ -1059,7 +1059,7 @@ fn latest_mmb_value_for_key(operations: &[MmbBatchOperation], key: &[u8]) -> Opt
 
 #[tokio::test]
 async fn ordered_range_connect_subscribe_emits_verifiable_range_proof() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_local_batch().await;
     assert!(
         *local.inactivity_floor > 0,
@@ -1103,7 +1103,7 @@ async fn ordered_range_connect_subscribe_emits_verifiable_range_proof() {
 
 #[tokio::test]
 async fn ordered_range_connect_client_rejects_invalid_streamed_proof() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_local_batch().await;
     commit_upload(&store_client, &local).await;
 
@@ -1153,7 +1153,7 @@ async fn ordered_range_connect_client_rejects_invalid_streamed_proof() {
 
 #[tokio::test]
 async fn ordered_range_connect_subscribe_emits_multi_proof_for_matching_keys() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_local_batch().await;
     let ordered_client = Arc::new(TestOrderedClient::new(
         PrefixedStoreClient::empty(store_client.clone()),
@@ -1192,7 +1192,7 @@ async fn ordered_range_connect_subscribe_emits_multi_proof_for_matching_keys() {
 
 #[tokio::test]
 async fn ordered_mmb_range_connect_subscribe_verifies_range_and_multi_proofs() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_mmb_local_batch().await;
     assert!(
         *local.inactivity_floor > 0,
@@ -1260,7 +1260,7 @@ async fn ordered_mmb_range_connect_subscribe_verifies_range_and_multi_proofs() {
 async fn ordered_mmb_operation_log_any_sync_from_connect_api_reconstructs_any_db() {
     const FETCH_BATCH_SIZE: u64 = 3;
 
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_mmb_local_batch().await;
     assert!(
         local.operations.len() as u64 > FETCH_BATCH_SIZE * 2,
@@ -1326,7 +1326,7 @@ async fn ordered_mmb_operation_log_any_sync_from_connect_api_reconstructs_any_db
 async fn ordered_mmb_operation_log_any_sync_from_nonzero_connect_api_reconstructs_any_db() {
     const FETCH_BATCH_SIZE: u64 = 3;
 
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_mmb_local_batch().await;
     let start = Location::<mmb::Family>::new(3);
     let start_index = usize::try_from(*start).expect("start fits usize");
@@ -1405,7 +1405,7 @@ async fn ordered_mmb_operation_log_any_sync_from_nonzero_connect_api_reconstruct
 async fn ordered_mmb_operation_log_any_sync_accepts_target_update_from_growing_backend() {
     const FETCH_BATCH_SIZE: u64 = 3;
 
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_mmb_growing_local_batch().await;
     let start = Location::<mmb::Family>::new(1);
     let start_index = usize::try_from(*start).expect("start fits usize");
@@ -1523,7 +1523,7 @@ async fn ordered_mmb_operation_log_any_sync_accepts_target_update_from_growing_b
 
 #[tokio::test]
 async fn ordered_range_connect_subscribe_replays_since_cursor() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_local_batch().await;
     let ordered_client = Arc::new(TestOrderedClient::new(
         PrefixedStoreClient::empty(store_client.clone()),
@@ -1560,7 +1560,7 @@ async fn ordered_range_connect_subscribe_replays_since_cursor() {
 
 #[tokio::test]
 async fn ordered_range_connect_subscribe_matches_prefix_and_regex_filters() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_local_batch().await;
     let ordered_client = Arc::new(TestOrderedClient::new(
         PrefixedStoreClient::empty(store_client.clone()),
@@ -1616,7 +1616,7 @@ async fn ordered_range_connect_subscribe_matches_prefix_and_regex_filters() {
 
 #[tokio::test]
 async fn ordered_range_connect_subscribe_filters_by_value_regex_without_key() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_local_batch().await;
     let ordered_client = Arc::new(TestOrderedClient::new(
         PrefixedStoreClient::empty(store_client.clone()),
@@ -1656,7 +1656,7 @@ async fn ordered_range_connect_subscribe_filters_by_value_regex_without_key() {
 
 #[tokio::test]
 async fn ordered_range_connect_subscribe_intersects_key_and_value_filters() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_local_batch().await;
     let ordered_client = Arc::new(TestOrderedClient::new(
         PrefixedStoreClient::empty(store_client.clone()),

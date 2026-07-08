@@ -131,7 +131,7 @@ fn split_upload_batches(
 
 #[tokio::test]
 async fn sequential_upload_matches_local_root() {
-    let (_dir, _server, client) = common::local_store_client().await;
+    let client = common::local_store_client().await;
     let local = build_local_reference(vec![
         vec![(FixedBytes::new([0x11; 32]), b"alpha".to_vec())],
         vec![(FixedBytes::new([0x22; 32]), b"beta".to_vec())],
@@ -168,7 +168,7 @@ async fn sequential_upload_matches_local_root() {
 
 #[tokio::test]
 async fn pipelined_batches_require_flush_to_catch_up_watermark() {
-    let (_dir, _server, client) = common::local_store_client().await;
+    let client = common::local_store_client().await;
     let local = build_local_reference(vec![
         vec![(FixedBytes::new([0x01; 32]), b"a".to_vec())],
         vec![(FixedBytes::new([0x02; 32]), b"b".to_vec())],

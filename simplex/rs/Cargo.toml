@@ -40,4 +40,3 @@ commonware-cryptography = { workspace = true, features = ["mocks"] }
 commonware-p2p = { workspace = true }
 commonware-storage = { workspace = true }
 exoware-simulator = { path = "../../examples/simulator" }
-tempfile = { workspace = true }

@@ -6,10 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{routing::get, Router};
+use exoware_server::{connect_stack, AppState};
 use tower_http::cors::CorsLayer;
 use tracing::info;
-
-use exoware_server::{connect_stack, AppState};
 
 use crate::RocksStore;
 
@@ -22,7 +21,7 @@ async fn health() -> &'static str {
 
 /// Run the store simulator until the process is interrupted.
 pub async fn run(
-    directory: &std::path::Path,
+    directory: &Path,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let engine = Arc::new(RocksStore::open(directory, None)?);
@@ -42,10 +41,13 @@ pub async fn run(
 }
 
 /// Used by integration tests: bind an ephemeral port and return the base URL.
-pub async fn spawn_for_test(
-    data_dir: &Path,
+///
+/// The server runs on a temporary data directory owned by the store
+/// ([`RocksStore::open_owned`]), deleted only after the database has fully closed.
+pub async fn open_temp(
 ) -> Result<(tokio::task::JoinHandle<()>, String), Box<dyn std::error::Error + Send + Sync>> {
-    let engine = Arc::new(RocksStore::open(data_dir, None)?);
+    let data_dir = tempfile::tempdir()?;
+    let engine = Arc::new(RocksStore::open_owned(data_dir, None)?);
     let state = AppState::new(engine);
     let connect = connect_stack(state);
     let app = Router::new()

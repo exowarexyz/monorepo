@@ -20,5 +20,4 @@ exoware-simulator = { path = "../examples/simulator" }
 exoware-sql = { workspace = true }
 futures = { workspace = true }
 reqwest = { workspace = true }
-tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

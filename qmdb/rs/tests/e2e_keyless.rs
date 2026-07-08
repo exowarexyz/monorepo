@@ -192,7 +192,7 @@ where
     KeylessOperation<F, Vec<u8>>:
         commonware_codec::Codec<Cfg = <Vec<u8> as commonware_codec::Read>::Cfg> + Clone + PartialEq,
 {
-    let (_dir, _server, client) = common::local_store_client().await;
+    let client = common::local_store_client().await;
     let local = build_local_db::<F>().await;
 
     let writer = fresh_writer::<F>(client.clone());
@@ -263,7 +263,7 @@ where
 
 #[tokio::test]
 async fn keyless_fixed_round_trip() {
-    let (_dir, _server, client) = common::local_store_client().await;
+    let client = common::local_store_client().await;
     let local = build_fixed_local_db::<mmr::Family>().await;
 
     let writer = fresh_fixed_writer::<mmr::Family>(client.clone());

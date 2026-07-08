@@ -196,7 +196,7 @@ async fn build_fixed_local_db() -> FixedLocalReference {
 
 #[tokio::test]
 async fn unordered_round_trip() {
-    let (_dir, _server, client) = common::local_store_client().await;
+    let client = common::local_store_client().await;
     let local = build_local_db().await;
 
     let writer: UnorderedWriter<mmr::Family, Sha256, Vec<u8>, Vec<u8>> =
@@ -238,7 +238,7 @@ async fn unordered_round_trip() {
 
 #[tokio::test]
 async fn unordered_fixed_round_trip() {
-    let (_dir, _server, client) = common::local_store_client().await;
+    let client = common::local_store_client().await;
     let local = build_fixed_local_db().await;
 
     let writer: UnorderedWriter<mmr::Family, Sha256, Digest, Digest, FixedEncoding<Digest>> =

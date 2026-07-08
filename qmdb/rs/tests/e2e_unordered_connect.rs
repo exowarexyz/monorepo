@@ -472,7 +472,7 @@ fn latest_fixed_operation_for_key(
 
 #[tokio::test]
 async fn unordered_range_stack_does_not_expose_key_lookup_or_ordered_range_services() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let unordered_client = Arc::new(TestUnorderedClient::new(
         PrefixedStoreClient::empty(store_client),
         op_cfg(),
@@ -503,7 +503,7 @@ async fn unordered_range_stack_does_not_expose_key_lookup_or_ordered_range_servi
 
 #[tokio::test]
 async fn unordered_connect_get_operation_range_returns_verifiable_proof() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_local_batch().await;
     commit_upload(&store_client, &local).await;
 
@@ -537,7 +537,7 @@ async fn unordered_connect_get_operation_range_returns_verifiable_proof() {
 
 #[tokio::test]
 async fn unordered_connect_get_many_returns_present_key_proofs() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_fixed_local_batch().await;
     commit_fixed_upload(&store_client, &local).await;
 
@@ -587,7 +587,7 @@ async fn unordered_connect_get_many_returns_present_key_proofs() {
 
 #[tokio::test]
 async fn unordered_current_operation_range_connect_returns_verifiable_proof() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_fixed_local_batch().await;
     commit_fixed_upload(&store_client, &local).await;
 
@@ -625,7 +625,7 @@ async fn unordered_current_operation_range_connect_returns_verifiable_proof() {
 
 #[tokio::test]
 async fn unordered_connect_omits_missing_and_rejects_duplicate_range_and_stale_root() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_fixed_local_batch().await;
     commit_fixed_upload(&store_client, &local).await;
 
@@ -696,7 +696,7 @@ async fn unordered_connect_omits_missing_and_rejects_duplicate_range_and_stale_r
 
 #[tokio::test]
 async fn unordered_connect_subscribe_emits_verifiable_range_proof() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_local_batch().await;
     assert!(
         *local.inactivity_floor > 0,
@@ -739,7 +739,7 @@ async fn unordered_connect_subscribe_emits_verifiable_range_proof() {
 
 #[tokio::test]
 async fn unordered_mmb_connect_subscribe_emits_verifiable_range_proof() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_mmb_local_batch().await;
     assert!(
         *local.inactivity_floor > 0,
@@ -782,7 +782,7 @@ async fn unordered_mmb_connect_subscribe_emits_verifiable_range_proof() {
 
 #[tokio::test]
 async fn unordered_connect_client_rejects_invalid_streamed_proof() {
-    let (_dir, _store_server, store_client) = common::local_store_client().await;
+    let store_client = common::local_store_client().await;
     let local = build_local_batch().await;
     commit_upload(&store_client, &local).await;
 

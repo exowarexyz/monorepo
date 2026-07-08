@@ -39,17 +39,16 @@ type QmdbReader = KeylessClient<QmdbFamily, Sha256, Vec<u8>>;
 type QmdbWriter = KeylessWriter<QmdbFamily, Sha256, Vec<u8>>;
 type QmdbConnectClient = OperationLogClient<PreferZstdHttpClient, QmdbFamily, Sha256, QmdbOp>;
 
-async fn local_store_client() -> (tempfile::TempDir, tokio::task::JoinHandle<()>, StoreClient) {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (handle, url) = exoware_simulator::spawn_for_test(dir.path())
+/// Spawns a local simulator and returns a client for it.
+async fn local_store_client() -> StoreClient {
+    let (_task, url) = exoware_simulator::open_temp()
         .await
         .expect("spawn simulator");
-    let client = StoreClient::builder()
+    StoreClient::builder()
         .url(&url)
         .retry_config(RetryConfig::disabled())
         .build()
-        .expect("build store client");
-    (dir, handle, client)
+        .expect("build store client")
 }
 
 async fn health() -> &'static str {
@@ -255,7 +254,7 @@ fn collect_int64_column(
 
 #[tokio::test]
 async fn raw_prefixes_support_atomic_batch_fetch_range_and_stream() {
-    let (_dir, _server, base) = local_store_client().await;
+    let base = local_store_client().await;
     let a = base.prefixed(store_prefix(1));
     let b = base.prefixed(store_prefix(2));
     let unprefixed = PrefixedStoreClient::empty(base.clone());
@@ -343,7 +342,7 @@ async fn raw_prefixes_support_atomic_batch_fetch_range_and_stream() {
 
 #[tokio::test]
 async fn sql_schemas_are_isolated_by_store_prefix() {
-    let (_dir, _server, base) = local_store_client().await;
+    let base = local_store_client().await;
     let schema_a = make_sql_schema(base.prefixed(StoreKeyPrefix::new(4, 0).unwrap()));
     let schema_b = make_sql_schema(base.prefixed(StoreKeyPrefix::new(4, 1).unwrap()));
 
@@ -376,7 +375,7 @@ async fn sql_schemas_are_isolated_by_store_prefix() {
 
 #[tokio::test]
 async fn sql_streaming_is_isolated_by_store_prefix() {
-    let (_dir, _server, base) = local_store_client().await;
+    let base = local_store_client().await;
     let client_a = base.prefixed(StoreKeyPrefix::new(4, 0).unwrap());
     let client_b = base.prefixed(StoreKeyPrefix::new(4, 1).unwrap());
     let (_sql_server_a, sql_url_a) = spawn_sql_service(make_sql_schema(client_a.clone())).await;
@@ -479,7 +478,7 @@ async fn query_sql_items(client: PrefixedStoreClient) -> (Vec<i64>, Vec<i64>) {
 
 #[tokio::test]
 async fn prefixed_qmdb_writers_handle_concurrent_inflight_batches_per_instance() {
-    let (_dir, _server, base) = local_store_client().await;
+    let base = local_store_client().await;
     let client_a = base.prefixed(StoreKeyPrefix::new(4, 4).unwrap());
     let client_b = base.prefixed(StoreKeyPrefix::new(4, 5).unwrap());
     let writer_a = Arc::new(keyless_writer(client_a.clone()));
@@ -563,7 +562,7 @@ async fn prefixed_qmdb_writers_handle_concurrent_inflight_batches_per_instance()
 
 #[tokio::test]
 async fn prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_receipts() {
-    let (_dir, _server, base) = local_store_client().await;
+    let base = local_store_client().await;
     let sql_client = base.prefixed(StoreKeyPrefix::new(4, 0).unwrap());
     let qmdb_client = base.prefixed(StoreKeyPrefix::new(4, 4).unwrap());
     let mut sql_writer = make_sql_schema(sql_client.clone()).batch_writer();
@@ -675,7 +674,7 @@ async fn prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_receipts(
 
 #[tokio::test]
 async fn qmdb_streaming_is_isolated_by_store_prefix() {
-    let (_dir, _server, base) = local_store_client().await;
+    let base = local_store_client().await;
     let client_a = base.prefixed(StoreKeyPrefix::new(4, 4).unwrap());
     let client_b = base.prefixed(StoreKeyPrefix::new(4, 5).unwrap());
     let (_qmdb_server_a, qmdb_url_a) = spawn_qmdb_service(client_a.clone()).await;

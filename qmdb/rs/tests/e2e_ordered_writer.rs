@@ -166,7 +166,7 @@ async fn build_local_reference(
 
 #[tokio::test]
 async fn sequential_upload_matches_local_root() {
-    let (_dir, _server, client) = common::local_store_client().await;
+    let client = common::local_store_client().await;
     let local = build_local_reference(
         vec![vec![
             (b"alpha".to_vec(), Some(b"one".to_vec())),
@@ -206,7 +206,7 @@ async fn sequential_upload_matches_local_root() {
 // local DBs side-by-side to extract the per-batch CurrentBoundaryState.
 #[tokio::test]
 async fn pipelined_batches_require_flush_to_catch_up_watermark() {
-    let (_dir, _server, client) = common::local_store_client().await;
+    let client = common::local_store_client().await;
 
     // Build three cumulative reference snapshots so we can pull a
     // current-boundary delta at each batch boundary from the local current DB.
