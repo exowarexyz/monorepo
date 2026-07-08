@@ -10,13 +10,12 @@
 //! as two SST files (built in parallel), while `commit` ingests the previous group — the log
 //! file first (the durable row alone defines the group; `open` derives the frontier from the
 //! highest retained row and the state-floor meta row), then the state file, then publish and
-//! ack. Ingestion
-//! is atomic, so a crash never leaves a partial batch — at worst the newest groups' state
-//! ingestions are missing, and `open` repairs that by re-applying the retained log rows above
-//! the state floor. The floor advances whenever state is provably authoritative: an unsynced
-//! meta-row write after every commit, a synced one from prunes (atomic with their deletes),
-//! and a synced one parking it at the frontier on clean shutdown — so an unremarkable reopen
-//! replays nothing and a crash replays only the trailing groups above the last durable floor.
+//! ack. Ingestion is atomic and strictly ordered, so a crash never leaves a partial batch and
+//! at most the newest group can be missing its state ingestion; `open` repairs that by
+//! re-applying the newest retained log row (idempotent — its rows are the newest writes for
+//! their keys). The floor meta row is written only by pruning, synced, atomically with its
+//! deletes: it marks state the replay must never touch (re-applying key-pruned rows would
+//! resurrect them) and keeps a fully-pruned log from regressing the frontier.
 //!
 //! Any write failure in the pipeline is fatal: once a group's log row is durable it cannot be
 //! rolled back (its sequence number must never be re-issued), so the writer panics and the next
@@ -350,9 +349,6 @@ struct Writer {
     /// `None` only during `Drop`, which closes the channel before joining the workers.
     sender: Option<mpsc::Sender<WriteRequest>>,
     handles: Vec<thread::JoinHandle<()>>,
-    /// For parking the floor at the published frontier on clean shutdown (see `Drop`).
-    db: Arc<DB>,
-    frontiers: Arc<Frontiers>,
 }
 
 impl Writer {
@@ -360,8 +356,8 @@ impl Writer {
     /// configured byte cap into a commit group that shares one sequence number (continuing
     /// from the published frontier, which is exactly the frontier derived at open since
     /// nothing has committed yet) and stages the group's log and state SSTs in parallel;
-    /// `commit` ingests the log file, then the state file, publishes the frontier, advances
-    /// the floor, and resolves the requests. The stages overlap, so one group is staged while
+    /// `commit` ingests the log file, then the state file, publishes the frontier, and
+    /// resolves the requests. The stages overlap, so one group is staged while
     /// the previous commits — and `commit` ingests strictly in order, so a crash still leaves
     /// at most the newest ingested group without its state. Any write failure in either stage
     /// is fatal (the worker panics): the durable log row alone defines the group, so the next
@@ -380,11 +376,9 @@ impl Writer {
         let (group_sender, group_receiver) = mpsc::sync_channel(0);
         let max_commit_batch_bytes = write_pipeline.max_commit_batch_bytes.get();
 
-        let commit_db = db.clone();
-        let commit_frontiers = frontiers.clone();
         let commit = thread::Builder::new()
             .name(format!("{WRITER_THREAD_PREFIX}commit"))
-            .spawn(move || run_commit(commit_db, commit_frontiers, group_receiver))
+            .spawn(move || run_commit(db, frontiers, group_receiver))
             .expect("failed to spawn RocksDB commit worker");
 
         let prepare = thread::Builder::new()
@@ -403,8 +397,6 @@ impl Writer {
         Self {
             sender: Some(request_sender),
             handles: vec![prepare, commit],
-            db,
-            frontiers,
         }
     }
 
@@ -436,24 +428,6 @@ impl Drop for Writer {
         for handle in self.handles.drain(..) {
             let _ = handle.join();
         }
-        // Park the floor at the published frontier, synced: every published group's state is
-        // durable and authoritative, so the next open has nothing to replay after a clean
-        // shutdown even if the per-commit (unsynced) floor advances were lost.
-        let _guard = self.frontiers.persist.lock();
-        let mut batch = rocksdb::WriteBatch::default();
-        let meta_cf = self
-            .db
-            .cf_handle(META_CF)
-            .expect("meta CF must exist (created on open)");
-        batch.put_cf(
-            meta_cf,
-            SEQ_META_KEY,
-            self.frontiers
-                .published
-                .load(Ordering::Acquire)
-                .to_le_bytes(),
-        );
-        let _ = write_synced_batch(&self.db, batch);
     }
 }
 
@@ -481,9 +455,8 @@ fn run_prepare(
     }
 }
 
-/// Commits staged groups one at a time — log ingestion, state ingestion, publish, floor
-/// advance, ack — until the group channel closes (store drop). Any write failure panics inside
-/// `commit_group`.
+/// Commits staged groups one at a time — log ingestion, state ingestion, publish, ack — until
+/// the group channel closes (store drop). Any write failure panics inside `commit_group`.
 fn run_commit(db: Arc<DB>, frontiers: Arc<Frontiers>, receiver: mpsc::Receiver<PreparedWrite>) {
     while let Ok(group) = receiver.recv() {
         commit_group(&db, &frontiers, group);
@@ -610,12 +583,12 @@ fn stage_state_file(path: &Path, rows: &[(Bytes, Bytes)]) -> Result<usize, Strin
 }
 
 /// Commits one group: ingests its log row (durability), then its state file (visibility), then
-/// publishes the frontier, advances the floor, and resolves the requests. Any write failure is
-/// fatal (panic): once the log row is durable the group cannot be rolled back (its sequence
-/// must not be re-issued), and the next open rolls it forward by replaying the row — so
-/// nothing is ever reclaimed or retried in-process. The panic drops the group's response
-/// channels, so waiting callers observe an error even though the group may resurface after the
-/// restart repair — an accepted at-least-once ambiguity of this severe error path.
+/// publishes the frontier and resolves the requests. Any write failure is fatal (panic): once
+/// the log row is durable the group cannot be rolled back (its sequence must not be
+/// re-issued), and the next open rolls it forward by replaying the row — so nothing is ever
+/// reclaimed or retried in-process. The panic drops the group's response channels, so waiting
+/// callers observe an error even though the group may resurface after the restart repair — an
+/// accepted at-least-once ambiguity of this severe error path.
 fn commit_group(db: &DB, frontiers: &Frontiers, group: PreparedWrite) {
     assert!(!group.requests.is_empty(), "groups are never empty");
     let PreparedWrite {
@@ -641,17 +614,6 @@ fn commit_group(db: &DB, frontiers: &Frontiers, group: PreparedWrite) {
 
     // Release so `current_sequence` readers only observe frontiers whose rows are readable.
     frontiers.published.store(sequence, Ordering::Release);
-
-    // Advance the floor while still under the lock — unsynced, a memtable write: the group's
-    // state is durably ingested, so a crash from here on replays at most the groups whose
-    // floor advance was lost. Prunes and clean shutdown persist the floor synced.
-    let mut floor = rocksdb::WriteBatch::default();
-    let meta_cf = db
-        .cf_handle(META_CF)
-        .expect("meta CF must exist (created on open)");
-    floor.put_cf(meta_cf, SEQ_META_KEY, sequence.to_le_bytes());
-    db.write(floor)
-        .unwrap_or_else(|error| panic!("failed to advance state floor: {error}"));
     drop(publish_guard);
     debug!(
         requests = requests.len(),
@@ -734,7 +696,9 @@ fn highest_log_row(db: &DB) -> Result<u64, String> {
     }
 }
 
-/// Reads the state-floor meta row, defaulting to zero when no prune has written it yet.
+/// Reads the state-floor meta row, defaulting to zero when no prune has written it yet. A
+/// malformed row is corruption and fails the open: silently treating it as zero would let the
+/// replay resurrect key-pruned rows.
 fn read_state_floor(db: &DB) -> Result<u64, String> {
     let meta_cf = db
         .cf_handle(META_CF)
@@ -743,43 +707,44 @@ fn read_state_floor(db: &DB) -> Result<u64, String> {
         .get_cf(meta_cf, SEQ_META_KEY)
         .map_err(|e| e.to_string())?
     {
-        Some(bytes) if bytes.len() == 8 => Ok(u64::from_le_bytes(bytes.try_into().unwrap())),
-        _ => Ok(0),
+        Some(bytes) => {
+            let bytes: [u8; 8] = bytes
+                .try_into()
+                .map_err(|_| "corrupt state-floor meta row".to_string())?;
+            Ok(u64::from_le_bytes(bytes))
+        }
+        None => Ok(0),
     }
 }
 
-/// Re-applies retained log rows above the state floor to the state column family. Only the
-/// trailing groups can be missing state (the writer commits strictly in order, and the floor
-/// advances with every commit), so this reads at most the few newest rows in practice; it is
-/// idempotent because a group's rows are the newest writes for their keys and are applied in
-/// ascending sequence order. Rows at or below `floor` are never replayed: their state is
+/// Re-applies the newest retained log row to the state column family. `commit` ingests
+/// strictly in order — a group's log row lands before its state, and the next group's row only
+/// after that state — so every older group's state is already durably ingested and at most the
+/// newest group can be missing it; re-applying is idempotent because the row's entries are the
+/// newest writes for their keys. A row at or below `floor` is never replayed: its state is
 /// authoritative, and key pruning may have deleted rows a replay would resurrect. Ingestion is
 /// atomic, so no partial row can exist; a row that fails to decode is real corruption and
 /// fails the open.
-fn replay_log_above_floor(db: &DB, floor: u64) -> Result<(), String> {
-    let Some(start) = floor.checked_add(1) else {
-        // The floor covers every representable sequence; nothing can need replay.
-        return Ok(());
-    };
+fn replay_newest_log_row(db: &DB, floor: u64) -> Result<(), String> {
     let log_cf = db
         .cf_handle(LOG_CF)
         .expect("log CF must exist (created on open)");
-    let mut batch = rocksdb::WriteBatch::default();
-    let from = sequence_log_key(start);
-    for item in db.iterator_cf(log_cf, IteratorMode::From(&from, Direction::Forward)) {
-        let (key, value) = item.map_err(|e| e.to_string())?;
-        let sequence = sequence_from_log_key(key.as_ref())?;
-        let response = StreamGetResponseView::decode_view(value.as_ref())
-            .map_err(|e| format!("corrupt log row for sequence {sequence}: {e}"))?;
-        for entry in response.entries.iter() {
-            batch.put(entry.key, entry.value);
-        }
-    }
-    if batch.is_empty() {
+    let Some(item) = db.iterator_cf(log_cf, IteratorMode::End).next() else {
+        return Ok(());
+    };
+    let (key, value) = item.map_err(|e| e.to_string())?;
+    let sequence = sequence_from_log_key(key.as_ref())?;
+    if sequence <= floor {
         return Ok(());
     }
-    // Synced: once a later floor advance moves the replay bound past these groups, a repair
-    // lost to power loss would never be re-run.
+    let response = StreamGetResponseView::decode_view(value.as_ref())
+        .map_err(|e| format!("corrupt log row for sequence {sequence}: {e}"))?;
+    let mut batch = rocksdb::WriteBatch::default();
+    for entry in response.entries.iter() {
+        batch.put(entry.key, entry.value);
+    }
+    // Synced: once a later commit moves the newest row past this group, a repair lost to power
+    // loss would never be re-run.
     write_synced_batch(db, batch)
 }
 
@@ -854,9 +819,8 @@ impl RocksStore {
     /// Open the store with default options, unless `config` overrides the database or
     /// write-pipeline options (column families always run stock options — see [`RocksConfig`]).
     /// Re-derives the durable frontier from the retained log rows and the state-floor meta row,
-    /// then re-applies the log rows above the floor to the state column family so the current
-    /// state is complete below the durable sequence even after a crash mid-commit (a no-op
-    /// after a clean shutdown, which parks the floor at the frontier).
+    /// then re-applies the newest log row to the state column family so the current state is
+    /// complete below the durable sequence even after a crash mid-commit.
     pub fn open(path: &Path, config: Option<RocksConfig>) -> Result<Self, String> {
         let RocksConfig {
             mut db_options,
@@ -875,9 +839,10 @@ impl RocksStore {
         );
 
         let ingest_dir = prepare_ingest_dir(path)?;
+        // Commits do not write the state-floor meta row; the log rows are the durable record.
         let floor = read_state_floor(&db)?;
         let seq = floor.max(highest_log_row(&db)?);
-        replay_log_above_floor(&db, floor)?;
+        replay_newest_log_row(&db, floor)?;
 
         let frontiers = Arc::new(Frontiers::new(seq));
         let writer = Arc::new(Writer::start(
@@ -1445,7 +1410,7 @@ mod tests {
                 "key {key:?}"
             );
         }
-        // A second reopen has nothing to repair: the first clean close parked the floor.
+        // A second reopen replays again (the floor only advances on prune); idempotent.
         drop(store);
         let store = RocksStore::open(dir.path(), None).expect("reopen db again");
         assert_eq!(store.current_sequence(), 2);
