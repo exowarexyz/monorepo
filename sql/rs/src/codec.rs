@@ -21,8 +21,11 @@ pub(crate) fn primary_key_prefix(table_prefix: u8) -> Result<Prefix, String> {
             MAX_TABLES - 1
         ));
     }
-    Prefix::new(vec![family_byte(table_prefix, PRIMARY_FAMILY_DISCRIMINATOR)])
-        .map_err(|e| format!("failed to build primary key prefix: {e}"))
+    Prefix::new(vec![family_byte(
+        table_prefix,
+        PRIMARY_FAMILY_DISCRIMINATOR,
+    )])
+    .map_err(|e| format!("failed to build primary key prefix: {e}"))
 }
 
 pub(crate) fn secondary_index_prefix(table_prefix: u8, index_id: u8) -> Result<Prefix, String> {

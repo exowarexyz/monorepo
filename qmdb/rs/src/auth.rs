@@ -7,8 +7,8 @@ use exoware_sdk::{RangeMode, SerializableReadSession};
 
 use crate::codec::{
     decode_digest, encode_ordered_update_payload, encode_update_index_value,
-    ensure_encoded_value_size, merkle_size_for_watermark, validate_ordered_key_bytes,
-    NODE_PREFIX, OPERATION_PREFIX, ORDERED_KEY_TERMINATOR_LEN, PRESENCE_PREFIX, UPDATE_PREFIX,
+    ensure_encoded_value_size, merkle_size_for_watermark, validate_ordered_key_bytes, NODE_PREFIX,
+    OPERATION_PREFIX, ORDERED_KEY_TERMINATOR_LEN, PRESENCE_PREFIX, UPDATE_PREFIX,
     UPDATE_VERSION_LEN, WATERMARK_PREFIX,
 };
 use crate::error::QmdbError;
@@ -108,8 +108,7 @@ pub(crate) fn encode_auth_immutable_update_key<F: Family>(
     raw_key: &[u8],
     location: Location<F>,
 ) -> Result<Key, QmdbError> {
-    let mut payload =
-        encode_ordered_update_payload(&UPDATE_PREFIX, raw_key, UPDATE_VERSION_LEN)?;
+    let mut payload = encode_ordered_update_payload(&UPDATE_PREFIX, raw_key, UPDATE_VERSION_LEN)?;
     payload.extend_from_slice(&location.as_u64().to_be_bytes());
     Ok(UPDATE_PREFIX
         .encode(&payload)
@@ -432,36 +431,21 @@ pub(crate) fn decode_auth_operation_location<F: Family>(
     namespace: AuthenticatedBackendNamespace,
     key: &Key,
 ) -> Result<Location<F>, QmdbError> {
-    decode_auth_location_field(
-        &OPERATION_PREFIX,
-        namespace,
-        key,
-        "authenticated operation",
-    )
+    decode_auth_location_field(&OPERATION_PREFIX, namespace, key, "authenticated operation")
 }
 
 pub(crate) fn decode_auth_watermark_location<F: Family>(
     namespace: AuthenticatedBackendNamespace,
     key: &Key,
 ) -> Result<Location<F>, QmdbError> {
-    decode_auth_location_field(
-        &WATERMARK_PREFIX,
-        namespace,
-        key,
-        "authenticated watermark",
-    )
+    decode_auth_location_field(&WATERMARK_PREFIX, namespace, key, "authenticated watermark")
 }
 
 pub(crate) fn decode_auth_presence_location<F: Family>(
     namespace: AuthenticatedBackendNamespace,
     key: &Key,
 ) -> Result<Location<F>, QmdbError> {
-    decode_auth_location_field(
-        &PRESENCE_PREFIX,
-        namespace,
-        key,
-        "authenticated presence",
-    )
+    decode_auth_location_field(&PRESENCE_PREFIX, namespace, key, "authenticated presence")
 }
 
 #[cfg(test)]

@@ -20,9 +20,7 @@ async fn spawn_client() -> PrefixedStoreClient {
 }
 
 fn key(family: u8, payload: &[u8]) -> Key {
-    Prefix::from_byte(family)
-        .encode(payload)
-        .expect("encode")
+    Prefix::from_byte(family).encode(payload).expect("encode")
 }
 
 fn filter(family: u8) -> StreamFilter {

@@ -6,7 +6,6 @@ use exoware_sdk::keys::{Key, Prefix};
 use crate::error::QmdbError;
 use crate::MAX_OPERATION_SIZE;
 
-
 // A family byte encodes *row semantics* (what kind of row this is), not which
 // instance or backend it belongs to. The same semantic row therefore uses the
 // same family byte across ALL backend variants (ordered, unordered, immutable,
@@ -42,8 +41,7 @@ pub(crate) const NODE_PREFIX: Prefix = Prefix::from_static(&[NODE_FAMILY]);
 pub(crate) const CURRENT_META_PREFIX: Prefix = Prefix::from_static(&[CURRENT_META_FAMILY]);
 pub(crate) const GRAFTED_NODE_PREFIX: Prefix = Prefix::from_static(&[GRAFTED_NODE_FAMILY]);
 pub(crate) const CHUNK_PREFIX: Prefix = Prefix::from_static(&[CHUNK_FAMILY]);
-pub(crate) const OPS_ROOT_WITNESS_PREFIX: Prefix =
-    Prefix::from_static(&[OPS_ROOT_WITNESS_FAMILY]);
+pub(crate) const OPS_ROOT_WITNESS_PREFIX: Prefix = Prefix::from_static(&[OPS_ROOT_WITNESS_FAMILY]);
 
 pub(crate) const fn bitmap_chunk_bits<const N: usize>() -> u64 {
     (N as u64) * 8

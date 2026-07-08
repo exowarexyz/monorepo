@@ -16,7 +16,7 @@ pub mod proto;
 pub mod prune_policy;
 pub mod selector;
 pub mod stream_filter;
-pub use keys::{Key, KeyMut, Prefix, PrefixError, KeyValidationError, Value, MAX_KEY_LEN};
+pub use keys::{Key, KeyMut, KeyValidationError, Prefix, PrefixError, Value, MAX_KEY_LEN};
 pub use proto::*;
 extern crate self as exoware_proto;
 

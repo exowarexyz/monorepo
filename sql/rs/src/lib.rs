@@ -2652,7 +2652,10 @@ mod tests {
             let primary = encode_primary_key(model.table_prefix, &[&pk], &model).unwrap();
             // The family prefix bytes are fixed; the payload begins byte-aligned
             // immediately after them.
-            assert_eq!(&primary[..FAMILY_PREFIX_LEN], primary_prefix.as_bytes().as_ref());
+            assert_eq!(
+                &primary[..FAMILY_PREFIX_LEN],
+                primary_prefix.as_bytes().as_ref()
+            );
             primary_payload_bytes.insert(primary[FAMILY_PREFIX_LEN]);
 
             let row = KvRow {
@@ -2663,7 +2666,10 @@ mod tests {
             };
             let index =
                 encode_secondary_index_key(model.table_prefix, &spec, &model, &row).unwrap();
-            assert_eq!(&index[..FAMILY_PREFIX_LEN], index_prefix.as_bytes().as_ref());
+            assert_eq!(
+                &index[..FAMILY_PREFIX_LEN],
+                index_prefix.as_bytes().as_ref()
+            );
             secondary_payload_bytes.insert(index[FAMILY_PREFIX_LEN]);
         }
 

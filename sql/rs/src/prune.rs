@@ -87,7 +87,9 @@ pub fn keep_latest_versions_utf8(table_prefix: u8, count: usize) -> Result<Prune
 mod tests {
     use super::{keep_latest_versions, keep_latest_versions_utf8, ORDERED_UTF8_REGEX};
     use crate::codec::{encode_primary_key, family_byte};
-    use crate::types::{KvTableConfig, TableColumnConfig, TableModel, PRIMARY_FAMILY_DISCRIMINATOR};
+    use crate::types::{
+        KvTableConfig, TableColumnConfig, TableModel, PRIMARY_FAMILY_DISCRIMINATOR,
+    };
     use crate::CellValue;
     use datafusion::arrow::datatypes::DataType;
     use exoware_sdk::kv_codec::Utf8;
