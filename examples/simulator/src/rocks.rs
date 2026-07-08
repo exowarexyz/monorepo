@@ -797,12 +797,6 @@ impl Default for RocksWritePipelineConfig {
 }
 
 /// RocksDB engine and application-level write pipeline options used by [`RocksStore::open`].
-///
-/// Column-family options are deliberately not configurable because the store's correctness
-/// leans on the CF options `open` chooses: staged state SSTs and range-scan bounds assume bytewise key
-/// order, and rows must never be dropped by a caller-supplied compaction filter or TTL (acked
-/// writes must stay readable, the meta CF's state-floor row must persist, and the repair
-/// replay would nondeterministically resurrect expired state rows).
 #[derive(Default)]
 pub struct RocksConfig {
     /// Database-wide options, applied as-is (stock defaults). Two knobs matter under sustained
