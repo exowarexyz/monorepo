@@ -331,6 +331,7 @@ fn key_pruned_state_survives_reopen_when_versions_share_a_batch() {
         let v1 = versioned_key(b"row", 1);
         let v2 = versioned_key(b"row", 2);
         let v3 = versioned_key(b"row", 3);
+
         // All versions land in one batch, so one retained log row holds the pruned keys.
         put_batch(
             &store,

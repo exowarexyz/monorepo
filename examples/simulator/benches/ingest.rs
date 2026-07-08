@@ -36,6 +36,7 @@ fn build_batch(batch_index: usize, keys_per_batch: usize, value_len: usize) -> V
         key.extend_from_slice(b"bench/");
         key.extend_from_slice(&(batch_index as u64).to_be_bytes());
         key.extend_from_slice(&(i as u64).to_be_bytes());
+
         // Mix the tail so keys are not fully sequential in memcmp order.
         let mixed = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
         key.extend_from_slice(&mixed.to_be_bytes());

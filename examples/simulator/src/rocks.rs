@@ -397,6 +397,7 @@ impl Writer {
     ) -> Self {
         let next = frontiers.published.load(Ordering::Acquire);
         let (request_sender, request_receiver) = mpsc::channel();
+
         // Rendezvous so `prepare` runs at most one wave ahead of `commit`: it hands off a
         // staged group, then stages the next while `commit` ingests this one.
         let (group_sender, group_receiver) = mpsc::sync_channel(0);
@@ -579,6 +580,7 @@ fn stage_log_file(path: &Path, sequence: u64, rows: &[(Bytes, Bytes)]) -> Result
     writer
         .put(sequence_log_key(sequence), &payload)
         .map_err(|e| e.to_string())?;
+
     // `finish` syncs the file before it is linked into the DB.
     writer.finish().map_err(|e| e.to_string())?;
     Ok(LOG_BATCH_KEY_LEN + payload.len())
@@ -590,6 +592,7 @@ fn stage_log_file(path: &Path, sequence: u64, rows: &[(Bytes, Bytes)]) -> Result
 /// compaction per the CF options.
 fn stage_state_file(path: &Path, rows: &[(Bytes, Bytes)]) -> Result<usize, String> {
     let mut rows: Vec<(&Bytes, &Bytes)> = rows.iter().map(|(key, value)| (key, value)).collect();
+
     // Stable sort: equal keys keep arrival order, so the last occurrence is the newest.
     rows.sort_by(|a, b| a.0.cmp(b.0));
 
@@ -607,6 +610,7 @@ fn stage_state_file(path: &Path, rows: &[(Bytes, Bytes)]) -> Result<usize, Strin
             .put(key.as_ref(), value.as_ref())
             .map_err(|e| e.to_string())?;
     }
+
     // `finish` syncs the file before it is linked into the DB.
     writer.finish().map_err(|e| e.to_string())?;
     Ok(bytes)
@@ -773,6 +777,7 @@ fn replay_newest_log_row(db: &DB, floor: u64) -> Result<(), String> {
     for entry in response.entries.iter() {
         batch.put(entry.key, entry.value);
     }
+
     // Synced: once a later commit moves the newest row past this group, a repair lost to power
     // loss would never be re-run.
     write_synced_batch(db, batch)
@@ -876,6 +881,7 @@ impl RocksStore {
         });
 
         let ingest_dir = prepare_ingest_dir(path)?;
+
         // Commits do not write the state-floor meta row; the log rows are the durable record.
         let floor = read_state_floor(&db)?;
         let seq = floor.max(highest_log_row(&db)?);
@@ -1061,6 +1067,7 @@ impl RocksStore {
             RetainPolicy::GreaterThanOrEqual { threshold } => *threshold,
             RetainPolicy::DropAll => current.saturating_add(1),
         };
+
         // Never delete log rows above the published frontier: a group whose log ingestion
         // committed but whose state ingestion did not still needs its rows for the repair replay
         // at the next open.
@@ -1166,6 +1173,7 @@ impl Log for RocksStore {
             Some(item) => {
                 let (key, _) = item.map_err(|e| e.to_string())?;
                 let sequence = sequence_from_log_key(key.as_ref())?;
+
                 // Gate on the published frontier like `get_batch`: never advertise an oldest
                 // batch that `get_batch` would then hide (a log row can outrun the published
                 // frontier while its group's state ingestion is in flight or has failed).
@@ -1484,6 +1492,7 @@ mod tests {
 
         let store = RocksStore::open(dir.path(), None).expect("reopen db");
         assert_eq!(store.current_sequence(), 2);
+
         // Replay applied the missing rows in arrival order: last writer wins for k2.
         for (key, value) in [
             (b"k1" as &[u8], b"v1" as &[u8]),
@@ -1496,6 +1505,7 @@ mod tests {
                 "key {key:?}"
             );
         }
+
         // A second reopen replays again (the floor only advances on prune); idempotent.
         drop(store);
         let store = RocksStore::open(dir.path(), None).expect("reopen db again");
@@ -1631,6 +1641,7 @@ mod tests {
     async fn sequence_prune_spares_log_rows_above_published_frontier() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
+
         // A durable log row whose group never published (its state ingestion was in flight at
         // a crash): pruning must spare it. It is the repair replay's input at the next open.
         seed_log_row(&store, 1, &encoded_log_entry(1, b"k", b"v"));
