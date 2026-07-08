@@ -2564,7 +2564,6 @@ dependencies = [
  "exoware-sql",
  "futures",
  "reqwest",
- "tempfile",
  "tokio",
 ]
 
@@ -2689,7 +2688,6 @@ dependencies = [
  "futures",
  "hex",
  "rand 0.8.6",
- "tempfile",
  "thiserror",
  "tokio",
  "tracing",
@@ -2762,7 +2760,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "tempfile",
  "thiserror",
  "tokio",
  "tower-http 0.5.2",

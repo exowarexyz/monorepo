@@ -45,7 +45,6 @@ exoware-server = { workspace = true }
 futures = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
-tempfile = { workspace = true }
 
 [[bench]]
 name = "read_path_perf"

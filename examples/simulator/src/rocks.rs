@@ -13,8 +13,8 @@
 //! ack. Ingestion is atomic and strictly ordered, so a crash never leaves a partial batch and
 //! at most the newest group can be missing its state ingestion; `open` repairs that by
 //! re-applying the newest retained log row (idempotent: its rows are the newest writes for
-//! their keys). The floor meta row is written only by pruning, synced, atomically with its
-//! deletes: it marks state the replay must never touch (re-applying key-pruned rows would
+//! their keys). The floor meta row is written only by pruning and is durable by the time a
+//! prune acks: it marks state the replay must never touch (re-applying key-pruned rows would
 //! resurrect them) and keeps a fully-pruned log from regressing the frontier.
 //!
 //! Any write failure in the pipeline is fatal: once a group's log row is durable it cannot be
@@ -337,10 +337,11 @@ struct Frontiers {
     /// while a group's state ingestion is in flight, and is re-derived at open from the
     /// retained log rows and the state-floor meta row.
     published: AtomicU64,
-    /// Serializes prunes (so the persisted state floor never moves backward) and orders state
-    /// visibility against floor reads: `commit` ingests and publishes each group's state under
-    /// this lock, so a prune that loads `published` under it sees a frontier covering every row
-    /// its scan could have observed.
+    /// Serializes floor persists (so the persisted state floor never moves backward even
+    /// though whole prunes run concurrently) and orders state visibility against floor reads:
+    /// `commit` ingests and publishes each group's state under this lock, so a prune that
+    /// loads `published` under it sees a frontier covering every row its scan could have
+    /// observed.
     persist: Mutex<()>,
 }
 
@@ -687,8 +688,12 @@ fn write_synced_batch(db: &DB, batch: rocksdb::WriteBatch) -> Result<(), String>
         .map_err(|e| e.to_string())
 }
 
-/// Creates the SST staging directory and deletes files a crashed writer left behind. Staged
-/// files are only ever consumed by `commit`, so anything still here was never visible.
+/// Creates the SST staging directory and deletes files a crashed writer left behind. A
+/// leftover can exist even for an ingested group: move-ingestion hard-links the staged file
+/// into the database and unlinks the original afterward, so a crash in between leaves the
+/// original behind while its rows are already visible. Deleting leftovers is safe either way
+/// because the database owns its own link to every ingested file. Nothing here decides
+/// whether a group committed: the retained log rows alone do.
 fn prepare_ingest_dir(store_path: &Path) -> Result<PathBuf, String> {
     let ingest_dir = store_path.join(LOG_INGEST_DIR);
     std::fs::create_dir_all(&ingest_dir)
@@ -718,23 +723,6 @@ fn sequence_from_log_key(key: &[u8]) -> Result<u64, String> {
     Ok(u64::from_be_bytes(raw))
 }
 
-/// Returns the sequence of the highest retained log row, or zero when the log is empty. Rows
-/// are only ever ingested by sequential, atomic commits, so the highest retained row is a lower
-/// bound on the durable frontier (pruning persists the state floor atomically with its deletes,
-/// so the floor covers whatever was pruned).
-fn highest_log_row(db: &DB) -> Result<u64, String> {
-    let log_cf = db
-        .cf_handle(LOG_CF)
-        .expect("log CF must exist (created on open)");
-    match db.iterator_cf(log_cf, IteratorMode::End).next() {
-        None => Ok(0),
-        Some(item) => {
-            let (key, _) = item.map_err(|e| e.to_string())?;
-            sequence_from_log_key(key.as_ref())
-        }
-    }
-}
-
 /// Reads the state-floor meta row, defaulting to zero when no prune has written it yet. A
 /// malformed row is corruption and fails the open: silently treating it as zero would let the
 /// replay resurrect key-pruned rows.
@@ -756,25 +744,27 @@ fn read_state_floor(db: &DB) -> Result<u64, String> {
     }
 }
 
-/// Re-applies the newest retained log row to the state column family. `commit` ingests
-/// strictly in order (a group's log row lands before its state, and the next group's row only
-/// after that state), so every older group's state is already durably ingested and at most the
+/// Re-applies the newest retained log row to the state column family and returns its sequence
+/// (zero when the log is empty). Rows are only ever ingested by sequential, atomic commits, so
+/// the returned sequence is a lower bound on the durable frontier. `commit` ingests strictly
+/// in order (a group's log row lands before its state, and the next group's row only after
+/// that state), so every older group's state is already durably ingested and at most the
 /// newest group can be missing it; re-applying is idempotent because the row's entries are the
 /// newest writes for their keys. A row at or below `floor` is never replayed: its state is
 /// authoritative, and key pruning may have deleted rows a replay would resurrect. Ingestion is
 /// atomic, so no partial row can exist; a row that fails to decode is real corruption and
 /// fails the open.
-fn replay_newest_log_row(db: &DB, floor: u64) -> Result<(), String> {
+fn replay_newest_log_row(db: &DB, floor: u64) -> Result<u64, String> {
     let log_cf = db
         .cf_handle(LOG_CF)
         .expect("log CF must exist (created on open)");
     let Some(item) = db.iterator_cf(log_cf, IteratorMode::End).next() else {
-        return Ok(());
+        return Ok(0);
     };
     let (key, value) = item.map_err(|e| e.to_string())?;
     let sequence = sequence_from_log_key(key.as_ref())?;
     if sequence <= floor {
-        return Ok(());
+        return Ok(sequence);
     }
     let response = StreamGetResponseView::decode_view(value.as_ref())
         .map_err(|e| format!("corrupt log row for sequence {sequence}: {e}"))?;
@@ -785,7 +775,8 @@ fn replay_newest_log_row(db: &DB, floor: u64) -> Result<(), String> {
 
     // Synced: once a later commit moves the newest row past this group, a repair lost to power
     // loss would never be re-run.
-    write_synced_batch(db, batch)
+    write_synced_batch(db, batch)?;
+    Ok(sequence)
 }
 
 /// Application-level write pipeline options used by [`RocksStore::open`].
@@ -828,9 +819,13 @@ pub struct RocksConfig {
 /// plus a per-sequence log.
 #[derive(Clone)]
 pub struct RocksStore {
+    /// Declared before `db` so the last store drop joins the writer threads before releasing
+    /// its database handle: the prepare thread stages files inside the data directory without
+    /// holding [`Database`], so it must never outlive the handles that keep the directory
+    /// alive.
+    writer: Arc<Writer>,
     db: Arc<Database>,
     frontiers: Arc<Frontiers>,
-    writer: Arc<Writer>,
 }
 
 impl RocksStore {
@@ -889,8 +884,7 @@ impl RocksStore {
 
         // Commits do not write the state-floor meta row; the log rows are the durable record.
         let floor = read_state_floor(&db)?;
-        let seq = floor.max(highest_log_row(&db)?);
-        replay_newest_log_row(&db, floor)?;
+        let seq = floor.max(replay_newest_log_row(&db, floor)?);
 
         let frontiers = Arc::new(Frontiers::new(seq));
         let writer = Arc::new(Writer::start(
@@ -925,32 +919,33 @@ impl RocksStore {
         self.db.get(key)
     }
 
-    /// Deletes key-pruned current rows. The state floor is raised to the published frontier
-    /// first (synced, under the publish lock), so every deleted row's log entry sits at or
-    /// below a durable floor and the replay at the next open cannot resurrect it. The deletes
-    /// themselves are applied in bounded chunks outside the lock (all covered by the
-    /// just-persisted floor), so a large prune never stalls commit acks; the final chunk is
-    /// synced, which flushes the whole run and makes an acked prune durable. A crash between
-    /// chunks leaves rows the next prune pass re-deletes.
+    /// Raises the durable state floor to the published frontier, marking every published row
+    /// as state the open-time replay must never re-apply. Loaded and written under the
+    /// publish lock, so the floor covers every row a prune's scan could have observed (a
+    /// group's state becomes scan-visible only under the same lock hold that publishes it)
+    /// and concurrent raises never regress it. Unsynced: the floor only has to be durable by
+    /// the time the prune acks, and the caller's final synced write flushes it.
+    fn raise_state_floor(&self) -> Result<(), String> {
+        let _guard = self.frontiers.persist.lock();
+        let mut batch = rocksdb::WriteBatch::default();
+        batch.put_cf(
+            self.meta_cf(),
+            SEQ_META_KEY,
+            self.frontiers
+                .published
+                .load(Ordering::Acquire)
+                .to_le_bytes(),
+        );
+        self.db.write(batch).map_err(|e| e.to_string())
+    }
+
+    /// Deletes current rows in bounded chunks, entirely off the publish lock: keys are
+    /// write-once, so a concurrent commit only ever adds new keys, never a row this delete
+    /// targets. Chunking keeps any single batch from monopolizing the RocksDB write path
+    /// that `commit`'s ingestions briefly pause and wait behind. The final chunk is synced,
+    /// which flushes the whole run; a crash between chunks loses whole batches atomically,
+    /// leaving rows the next prune pass re-deletes.
     fn delete_keys(&self, keys: &[Bytes]) -> Result<(), String> {
-        if keys.is_empty() {
-            return Ok(());
-        }
-
-        {
-            let _guard = self.frontiers.persist.lock();
-            let mut batch = rocksdb::WriteBatch::default();
-            batch.put_cf(
-                self.meta_cf(),
-                SEQ_META_KEY,
-                self.frontiers
-                    .published
-                    .load(Ordering::Acquire)
-                    .to_le_bytes(),
-            );
-            write_synced_batch(&self.db, batch)?;
-        }
-
         let mut chunks = keys.chunks(PRUNE_DELETE_CHUNK_KEYS).peekable();
         while let Some(chunk) = chunks.next() {
             let mut batch = rocksdb::WriteBatch::default();
@@ -976,8 +971,8 @@ impl RocksStore {
         // One synced, atomic batch: the range tombstone that deletes the rows, and the state
         // floor that keeps `open` from re-deriving a regressed frontier once they are gone.
         // The published frontier covers every pruned row (the cutoff is capped at
-        // published + 1), and everything at or below it is durable and applied to the state —
-        // which also makes this safe against the writer's concurrent, lock-free log ingestion:
+        // published + 1), and everything at or below it is durable and applied to the state.
+        // That also makes this safe against the writer's concurrent, lock-free log ingestion:
         // an in-flight group's row sits above every published frontier this prune could have
         // loaded. Space is reclaimed by ordinary compaction; nothing assumes which SST files
         // hold the rows.
@@ -1057,6 +1052,13 @@ impl RocksStore {
         for (_group_key, entries) in groups {
             all_deletes.extend(keys_to_delete(entries, scope, retain)?);
         }
+        if all_deletes.is_empty() {
+            return Ok(());
+        }
+
+        // The floor is raised before the deletes so the final synced chunk makes it durable
+        // by ack: an acked prune must never be undone by the newest-log-row replay at reopen.
+        self.raise_state_floor()?;
         self.delete_keys(&all_deletes)
     }
 

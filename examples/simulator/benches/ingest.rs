@@ -21,6 +21,10 @@ use bytes::Bytes;
 use exoware_server::Ingest;
 use exoware_simulator::RocksStore;
 
+// Match the simulator binary's allocator so bench numbers reflect the deployed configuration.
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)
         .ok()
@@ -95,7 +99,7 @@ async fn run(store: Arc<RocksStore>, batches: Vec<Vec<(Bytes, Bytes)>>, writers:
 }
 
 fn main() {
-    let batches = env_usize("BENCH_BATCHES", 16);
+    let batches = env_usize("BENCH_BATCHES", 16).max(1);
     let keys_per_batch = env_usize("BENCH_KEYS_PER_BATCH", 250_000).max(1);
     let value_len = env_usize("BENCH_VALUE_LEN", 128);
     let writers = env_usize("BENCH_WRITERS", 4).max(1);
