@@ -8,12 +8,11 @@ use exoware_sdk::{PrefixedStoreClient, StreamSubscription};
 
 use crate::auth::{
     decode_auth_operation_location, decode_auth_presence_location, decode_auth_watermark_location,
-    AuthenticatedBackendNamespace, AUTH_OPERATION_PREFIX, AUTH_PRESENCE_PREFIX,
-    AUTH_WATERMARK_PREFIX,
+    AuthenticatedBackendNamespace,
 };
 use crate::codec::{
-    decode_operation_location_key, decode_presence_location, decode_watermark_location, OP_FAMILY,
-    PRESENCE_FAMILY, WATERMARK_FAMILY,
+    decode_operation_location_key, decode_presence_location, decode_watermark_location,
+    OPERATION_PREFIX, PRESENCE_PREFIX, WATERMARK_PREFIX,
 };
 use crate::QmdbError;
 
@@ -62,7 +61,6 @@ pub(crate) async fn open_store_subscription(
 pub(crate) fn classify_and_filter<F: Family>(
     namespace: Option<AuthenticatedBackendNamespace>,
 ) -> (RowClassifier<F>, StreamFilter) {
-    use bytes::Bytes;
     use exoware_sdk::keys::{Key as StoreKey, Prefix};
     use exoware_sdk::kv_codec::Utf8;
 
@@ -72,58 +70,55 @@ pub(crate) fn classify_and_filter<F: Family>(
         decode: Arc<dyn Fn(&StoreKey) -> Option<Location<F>> + Send + Sync>,
     }
 
-    let (compiled, op_prefix, presence_prefix, watermark_prefix, payload_regex) = match namespace {
+    // The family byte encodes row semantics and is shared across every backend
+    // variant, so the Op / Presence / Watermark stream-filter prefixes are
+    // identical for the merkleized and authenticated backends. Only the
+    // per-namespace payload layout (payload_regex) and the namespace-aware row
+    // decoders still differ, so those stay inside the match.
+    let op_prefix = OPERATION_PREFIX.as_bytes().clone();
+    let presence_prefix = PRESENCE_PREFIX.as_bytes().clone();
+    let watermark_prefix = WATERMARK_PREFIX.as_bytes().clone();
+
+    let (compiled, payload_regex) = match namespace {
         None => {
             let compiled: [RowRule<F>; 3] = [
                 RowRule {
-                    prefix: Prefix::from_byte(OP_FAMILY),
+                    prefix: OPERATION_PREFIX,
                     family: RowFamily::Op,
                     decode: Arc::new(|key| decode_operation_location_key::<F>(key).ok()),
                 },
                 RowRule {
-                    prefix: Prefix::from_byte(PRESENCE_FAMILY),
+                    prefix: PRESENCE_PREFIX,
                     family: RowFamily::Presence,
                     decode: Arc::new(|key| decode_presence_location::<F>(key).ok()),
                 },
                 RowRule {
-                    prefix: Prefix::from_byte(WATERMARK_FAMILY),
+                    prefix: WATERMARK_PREFIX,
                     family: RowFamily::Watermark,
                     decode: Arc::new(|key| decode_watermark_location::<F>(key).ok()),
                 },
             ];
-            (
-                compiled,
-                Bytes::copy_from_slice(&[OP_FAMILY]),
-                Bytes::copy_from_slice(&[PRESENCE_FAMILY]),
-                Bytes::copy_from_slice(&[WATERMARK_FAMILY]),
-                "(?s-u)^.{8}$".to_string(),
-            )
+            (compiled, "(?s-u)^.{8}$".to_string())
         }
         Some(ns) => {
             let compiled: [RowRule<F>; 3] = [
                 RowRule {
-                    prefix: AUTH_OPERATION_PREFIX,
+                    prefix: OPERATION_PREFIX,
                     family: RowFamily::Op,
                     decode: Arc::new(move |key| decode_auth_operation_location::<F>(ns, key).ok()),
                 },
                 RowRule {
-                    prefix: AUTH_PRESENCE_PREFIX,
+                    prefix: PRESENCE_PREFIX,
                     family: RowFamily::Presence,
                     decode: Arc::new(move |key| decode_auth_presence_location::<F>(ns, key).ok()),
                 },
                 RowRule {
-                    prefix: AUTH_WATERMARK_PREFIX,
+                    prefix: WATERMARK_PREFIX,
                     family: RowFamily::Watermark,
                     decode: Arc::new(move |key| decode_auth_watermark_location::<F>(ns, key).ok()),
                 },
             ];
-            (
-                compiled,
-                AUTH_OPERATION_PREFIX.as_bytes().clone(),
-                AUTH_PRESENCE_PREFIX.as_bytes().clone(),
-                AUTH_WATERMARK_PREFIX.as_bytes().clone(),
-                format!(r"(?s-u)^\x{:02X}.{{8}}$", ns.tag()),
-            )
+            (compiled, format!(r"(?s-u)^\x{:02X}.{{8}}$", ns.tag()))
         }
     };
 

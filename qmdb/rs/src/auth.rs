@@ -8,7 +8,8 @@ use exoware_sdk::{RangeMode, SerializableReadSession};
 use crate::codec::{
     decode_digest, encode_ordered_update_payload, encode_update_index_value,
     ensure_encoded_value_size, merkle_size_for_watermark, validate_ordered_key_bytes,
-    ORDERED_KEY_TERMINATOR_LEN, UPDATE_VERSION_LEN,
+    NODE_PREFIX, OPERATION_PREFIX, ORDERED_KEY_TERMINATOR_LEN, PRESENCE_PREFIX, UPDATE_PREFIX,
+    UPDATE_VERSION_LEN, WATERMARK_PREFIX,
 };
 use crate::error::QmdbError;
 
@@ -24,20 +25,7 @@ impl AuthenticatedBackendNamespace {
     }
 }
 
-const AUTH_OP_FAMILY: u8 = 0x9;
-const AUTH_NODE_FAMILY: u8 = 0xA;
-const AUTH_WATERMARK_FAMILY: u8 = 0xB;
-const AUTH_INDEX_FAMILY: u8 = 0xC;
-const AUTH_IMMUTABLE_UPDATE_FAMILY: u8 = 0xD;
 const AUTH_NAMESPACE_LEN: usize = 1;
-
-pub(crate) const AUTH_OPERATION_PREFIX: Prefix = Prefix::from_static(&[AUTH_OP_FAMILY]);
-pub(crate) const AUTH_NODE_PREFIX: Prefix = Prefix::from_static(&[AUTH_NODE_FAMILY]);
-pub(crate) const AUTH_WATERMARK_PREFIX: Prefix =
-    Prefix::from_static(&[AUTH_WATERMARK_FAMILY]);
-pub(crate) const AUTH_PRESENCE_PREFIX: Prefix = Prefix::from_static(&[AUTH_INDEX_FAMILY]);
-pub(crate) const AUTH_IMMUTABLE_UPDATE_PREFIX: Prefix =
-    Prefix::from_static(&[AUTH_IMMUTABLE_UPDATE_FAMILY]);
 
 pub(crate) fn auth_namespace_bounds(
     prefix: &Prefix,
@@ -92,28 +80,28 @@ pub(crate) fn encode_auth_operation_key<F: Family>(
     namespace: AuthenticatedBackendNamespace,
     location: Location<F>,
 ) -> Key {
-    encode_auth_namespaced_key(&AUTH_OPERATION_PREFIX, namespace.tag(), location.as_u64())
+    encode_auth_namespaced_key(&OPERATION_PREFIX, namespace.tag(), location.as_u64())
 }
 
 pub(crate) fn encode_auth_node_key<F: Family>(
     namespace: AuthenticatedBackendNamespace,
     position: Position<F>,
 ) -> Key {
-    encode_auth_namespaced_key(&AUTH_NODE_PREFIX, namespace.tag(), position.as_u64())
+    encode_auth_namespaced_key(&NODE_PREFIX, namespace.tag(), position.as_u64())
 }
 
 pub(crate) fn encode_auth_watermark_key<F: Family>(
     namespace: AuthenticatedBackendNamespace,
     location: Location<F>,
 ) -> Key {
-    encode_auth_namespaced_key(&AUTH_WATERMARK_PREFIX, namespace.tag(), location.as_u64())
+    encode_auth_namespaced_key(&WATERMARK_PREFIX, namespace.tag(), location.as_u64())
 }
 
 pub(crate) fn encode_auth_presence_key<F: Family>(
     namespace: AuthenticatedBackendNamespace,
     location: Location<F>,
 ) -> Key {
-    encode_auth_namespaced_key(&AUTH_PRESENCE_PREFIX, namespace.tag(), location.as_u64())
+    encode_auth_namespaced_key(&PRESENCE_PREFIX, namespace.tag(), location.as_u64())
 }
 
 pub(crate) fn encode_auth_immutable_update_key<F: Family>(
@@ -121,9 +109,9 @@ pub(crate) fn encode_auth_immutable_update_key<F: Family>(
     location: Location<F>,
 ) -> Result<Key, QmdbError> {
     let mut payload =
-        encode_ordered_update_payload(&AUTH_IMMUTABLE_UPDATE_PREFIX, raw_key, UPDATE_VERSION_LEN)?;
+        encode_ordered_update_payload(&UPDATE_PREFIX, raw_key, UPDATE_VERSION_LEN)?;
     payload.extend_from_slice(&location.as_u64().to_be_bytes());
-    Ok(AUTH_IMMUTABLE_UPDATE_PREFIX
+    Ok(UPDATE_PREFIX
         .encode(&payload)
         .expect("authenticated immutable update key length should fit"))
 }
@@ -131,7 +119,7 @@ pub(crate) fn encode_auth_immutable_update_key<F: Family>(
 pub(crate) fn decode_auth_immutable_update_location<F: Family>(
     key: &Key,
 ) -> Result<Location<F>, QmdbError> {
-    let payload = AUTH_IMMUTABLE_UPDATE_PREFIX.strip(key).map_err(|_| {
+    let payload = UPDATE_PREFIX.strip(key).map_err(|_| {
         QmdbError::CorruptData("authenticated immutable update key prefix mismatch".to_string())
     })?;
     if payload.len() < ORDERED_KEY_TERMINATOR_LEN + UPDATE_VERSION_LEN {
@@ -170,7 +158,7 @@ pub(crate) async fn read_latest_auth_watermark<F: Family>(
     session: &SerializableReadSession,
     namespace: AuthenticatedBackendNamespace,
 ) -> Result<Option<Location<F>>, QmdbError> {
-    let (start, end) = auth_namespace_bounds(&AUTH_WATERMARK_PREFIX, namespace);
+    let (start, end) = auth_namespace_bounds(&WATERMARK_PREFIX, namespace);
     let rows = session
         .range_with_mode(&start, &end, 1, RangeMode::Reverse)
         .await?;
@@ -445,7 +433,7 @@ pub(crate) fn decode_auth_operation_location<F: Family>(
     key: &Key,
 ) -> Result<Location<F>, QmdbError> {
     decode_auth_location_field(
-        &AUTH_OPERATION_PREFIX,
+        &OPERATION_PREFIX,
         namespace,
         key,
         "authenticated operation",
@@ -457,7 +445,7 @@ pub(crate) fn decode_auth_watermark_location<F: Family>(
     key: &Key,
 ) -> Result<Location<F>, QmdbError> {
     decode_auth_location_field(
-        &AUTH_WATERMARK_PREFIX,
+        &WATERMARK_PREFIX,
         namespace,
         key,
         "authenticated watermark",
@@ -469,7 +457,7 @@ pub(crate) fn decode_auth_presence_location<F: Family>(
     key: &Key,
 ) -> Result<Location<F>, QmdbError> {
     decode_auth_location_field(
-        &AUTH_PRESENCE_PREFIX,
+        &PRESENCE_PREFIX,
         namespace,
         key,
         "authenticated presence",

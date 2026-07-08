@@ -6,6 +6,14 @@ use exoware_sdk::keys::{Key, Prefix};
 use crate::error::QmdbError;
 use crate::MAX_OPERATION_SIZE;
 
+
+// A family byte encodes *row semantics* (what kind of row this is), not which
+// instance or backend it belongs to. The same semantic row therefore uses the
+// same family byte across ALL backend variants (ordered, unordered, immutable,
+// keyless). Instance identity lives solely in the outer Store
+// namespace (the SDK `StoreKeyPrefix`); a single raw Store keyspace must never
+// be shared across multiple QMDB backends or instances, so reusing family bytes
+// across variants is safe.
 pub(crate) const UPDATE_FAMILY: u8 = 0x1;
 pub(crate) const PRESENCE_FAMILY: u8 = 0x2;
 pub(crate) const WATERMARK_FAMILY: u8 = 0x3;
