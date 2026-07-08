@@ -1248,9 +1248,11 @@ mod tests {
                 TableColumnConfig::new("value", DataType::Int64, false),
             ],
             vec!["name".to_string()],
-            vec![IndexSpec::z_order("xy_z", vec!["x".to_string(), "y".to_string()])
-                .expect("valid")
-                .with_cover_columns(vec!["value".to_string()])],
+            vec![
+                IndexSpec::z_order("xy_z", vec!["x".to_string(), "y".to_string()])
+                    .expect("valid")
+                    .with_cover_columns(vec!["value".to_string()]),
+            ],
         )
         .expect("valid config");
         let model = TableModel::from_config(&config).expect("model");
@@ -3058,9 +3060,7 @@ mod tests {
                 TableColumnConfig::new("region", DataType::Utf8, false),
             ],
             vec!["id".to_string()],
-            vec![
-                IndexSpec::z_order("xr_z", vec!["x".to_string(), "region".to_string()]).unwrap(),
-            ],
+            vec![IndexSpec::z_order("xr_z", vec!["x".to_string(), "region".to_string()]).unwrap()],
         )
         .unwrap();
         let model = TableModel::from_config(&config).unwrap();
@@ -3081,7 +3081,9 @@ mod tests {
         )
         .unwrap();
         let lex_model = TableModel::from_config(&lex_config).unwrap();
-        assert!(lex_model.resolve_index_specs(&lex_config.index_specs).is_ok());
+        assert!(lex_model
+            .resolve_index_specs(&lex_config.index_specs)
+            .is_ok());
     }
 
     #[test]
@@ -4335,7 +4337,13 @@ mod tests {
         let model = TableModel::from_config(&config).unwrap();
         let name_idx = *model.columns_by_name.get("name").unwrap();
 
-        for name in ["alice", "", "a", "exactly15chars!", "longer-than-sixteen-bytes"] {
+        for name in [
+            "alice",
+            "",
+            "a",
+            "exactly15chars!",
+            "longer-than-sixteen-bytes",
+        ] {
             let value = CellValue::Utf8(name.to_string());
             let stored = encode_primary_key(0, &[&value], &model).expect("stored key encodes");
 
@@ -4343,7 +4351,11 @@ mod tests {
             pred.constraints
                 .insert(name_idx, PredicateConstraint::StringEq(name.to_string()));
             let ranges = pred.primary_key_ranges(&model).unwrap();
-            assert_eq!(ranges.len(), 1, "point query on '{name}' must yield one range");
+            assert_eq!(
+                ranges.len(),
+                1,
+                "point query on '{name}' must yield one range"
+            );
             assert!(
                 ranges[0].start <= stored,
                 "lower bound must not exceed stored key for '{name}'"
@@ -6177,9 +6189,7 @@ mod tests {
 
         for table in ["orders_nc", "orders_cov"] {
             let df = ctx
-                .sql(&format!(
-                    "SELECT amount FROM {table} WHERE region = 'us'"
-                ))
+                .sql(&format!("SELECT amount FROM {table} WHERE region = 'us'"))
                 .await
                 .expect("plan");
             let batches = df.collect().await.expect("collect");
