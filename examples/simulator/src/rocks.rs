@@ -436,9 +436,14 @@ impl Writer {
             return Err("cannot ingest an empty batch".to_string());
         }
         let (response, result) = oneshot::channel();
+
+        // The sender is `None` only inside `Writer::drop`, which cannot overlap a live call:
+        // dropping the writer requires exclusive access, and every in-flight `put_batch`
+        // holds a borrow through the store's `Arc<Writer>`. A writer whose workers are gone
+        // is the closed-channel case, surfaced as an error by `send` below.
         self.sender
             .as_ref()
-            .expect("sender lives until drop")
+            .expect("sender is None only during drop, which cannot overlap a call")
             .send(WriteRequest { kvs, response })
             .map_err(|_| "rocks writer stopped".to_string())?;
         result
@@ -1299,6 +1304,36 @@ mod tests {
             !path.exists(),
             "directory must be deleted once the last database holder drops"
         );
+    }
+
+    /// A drop-order canary: reopening the path only succeeds once the previous database
+    /// instance has released its `LOCK` file.
+    struct ReopenOnDrop {
+        path: PathBuf,
+    }
+
+    impl Drop for ReopenOnDrop {
+        fn drop(&mut self) {
+            DB::open(&Options::default(), &self.path)
+                .expect("closer must drop only after the database has closed");
+        }
+    }
+
+    #[test]
+    fn closer_drops_only_after_database_closes() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("db");
+        let mut options = Options::default();
+        options.create_if_missing(true);
+        let db = DB::open(&options, &path).expect("open db");
+
+        // Struct fields drop in declaration order, so `db` drops (and releases its `LOCK`
+        // file) before the canary closer runs. If the order ever flipped, the reopen inside
+        // the closer would fail against the still-held lock.
+        drop(Database {
+            db,
+            _closer: Some(Box::new(ReopenOnDrop { path: path.clone() })),
+        });
     }
 
     #[test]
