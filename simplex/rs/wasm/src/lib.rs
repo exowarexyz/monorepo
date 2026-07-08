@@ -86,8 +86,7 @@ where
     let mut reader = bytes;
     let proof = Notarization::<S, D>::read_cfg(&mut reader, &scheme.certificate_codec_config())
         .map_err(|err| format!("failed to decode notarized artifact: {err}"))?;
-    let mut rng = rand::rng();
-    if !proof.verify(&mut rng, &scheme, &Sequential) {
+    if !proof.verify(&mut rand::rng(), &scheme, &Sequential) {
         return Err("notarization certificate verification failed".to_string());
     }
     let header = read_header(reader, "notarized artifact")?;
@@ -114,8 +113,7 @@ where
     let mut reader = bytes;
     let proof = Finalization::<S, D>::read_cfg(&mut reader, &scheme.certificate_codec_config())
         .map_err(|err| format!("failed to decode finalized artifact: {err}"))?;
-    let mut rng = rand::rng();
-    if !proof.verify(&mut rng, &scheme, &Sequential) {
+    if !proof.verify(&mut rand::rng(), &scheme, &Sequential) {
         return Err("finalization certificate verification failed".to_string());
     }
     let header = read_header(reader, "finalized artifact")?;
