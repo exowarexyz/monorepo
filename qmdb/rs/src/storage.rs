@@ -21,7 +21,7 @@ pub(crate) struct KvMerkleStorage<'a, F: Family, D: Digest> {
 impl<F: Family, D: Digest> MerkleStorage<F> for KvMerkleStorage<'_, F, D> {
     type Digest = D;
 
-    async fn size(&self) -> Position<F> {
+    fn size(&self) -> Position<F> {
         self.size
     }
 
@@ -57,7 +57,7 @@ pub(crate) struct KvCurrentStorage<'a, F: Graftable, D: Digest, const N: usize> 
 impl<F: Graftable, D: Digest, const N: usize> MerkleStorage<F> for KvCurrentStorage<'_, F, D, N> {
     type Digest = D;
 
-    async fn size(&self) -> Position<F> {
+    fn size(&self) -> Position<F> {
         self.size
     }
 
@@ -138,7 +138,7 @@ pub(crate) struct AuthKvMerkleStorage<'a, F: Family, D: Digest> {
 impl<F: Family, D: Digest> MerkleStorage<F> for AuthKvMerkleStorage<'_, F, D> {
     type Digest = D;
 
-    async fn size(&self) -> Position<F> {
+    fn size(&self) -> Position<F> {
         self.size
     }
 
