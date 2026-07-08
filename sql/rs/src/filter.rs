@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use exoware_sdk::keys::{Key, KeyPrefix};
+use exoware_sdk::keys::{Key, Prefix};
 use exoware_sdk::kv_codec::{eval_predicate, KvPredicate, KvPredicateCheck, StoredRow};
 
 use crate::aggregate::{
@@ -44,7 +44,7 @@ pub(crate) struct EncodedIndexPredicateCheck {
 
 #[derive(Clone)]
 pub(crate) struct EncodedIndexPredicatePlan {
-    pub(crate) codec: KeyPrefix,
+    pub(crate) codec: Prefix,
     pub(crate) checks: Vec<EncodedIndexPredicateCheck>,
     pub(crate) impossible: bool,
 }

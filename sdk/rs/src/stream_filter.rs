@@ -14,7 +14,7 @@ use anyhow::ensure;
 use bytes::Bytes;
 use regex::bytes::Regex;
 
-use crate::keys::KeyPrefix;
+use crate::keys::Prefix;
 use crate::selector::Selector;
 
 pub const MAX_SELECTORS_PER_FILTER: usize = 16;
@@ -103,7 +103,7 @@ pub fn validate_filter(filter: &StreamFilter) -> anyhow::Result<()> {
         "stream filter capped at {MAX_VALUE_FILTERS_PER_FILTER} value_filters"
     );
     for selector in &filter.selectors {
-        KeyPrefix::new(selector.prefix.clone())
+        Prefix::new(selector.prefix.clone())
             .map_err(|e| anyhow::anyhow!("invalid selector prefix: {e}"))?;
         ensure!(
             !selector.payload_regex.trim().is_empty(),

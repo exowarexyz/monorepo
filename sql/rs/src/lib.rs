@@ -47,7 +47,7 @@ mod tests {
     use datafusion::physical_plan::limit::GlobalLimitExec;
     use datafusion::physical_plan::ExecutionPlan;
     use datafusion::prelude::SessionContext;
-    use exoware_sdk::keys::{Key, KeyPrefix};
+    use exoware_sdk::keys::{Key, Prefix};
     use exoware_sdk::kv_codec::{
         canonicalize_reduced_group_values, decode_stored_row, encode_reduced_group_key,
         eval_predicate, KvReducedValue, StoredRow,
@@ -109,7 +109,7 @@ mod tests {
         TableModel::from_config(&config).unwrap()
     }
 
-    fn codec_payload(prefix: &KeyPrefix, key: &Key, offset: usize, len: usize) -> Vec<u8> {
+    fn codec_payload(prefix: &Prefix, key: &Key, offset: usize, len: usize) -> Vec<u8> {
         let payload = prefix.strip(key).expect("codec payload");
         payload[offset..offset + len].to_vec()
     }

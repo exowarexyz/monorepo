@@ -16,7 +16,7 @@ pub mod proto;
 pub mod prune_policy;
 pub mod selector;
 pub mod stream_filter;
-pub use keys::{Key, KeyMut, KeyPrefix, KeyPrefixError, KeyValidationError, Value, MAX_KEY_LEN};
+pub use keys::{Key, KeyMut, Prefix, PrefixError, KeyValidationError, Value, MAX_KEY_LEN};
 pub use proto::*;
 extern crate self as exoware_proto;
 
@@ -162,7 +162,7 @@ pub enum ClientError {
     #[error("RPC error ({0})")]
     Rpc(Box<ConnectError>),
     #[error("store key prefix error: {0}")]
-    KeyPrefix(#[from] StoreKeyPrefixError),
+    Prefix(#[from] StoreKeyPrefixError),
     #[error("invalid key length: expected {expected}, got {got}")]
     InvalidKeyLength { expected: usize, got: usize },
     #[error("wire format error: {0}")]
@@ -199,7 +199,7 @@ pub enum StoreKeyPrefixError {
     #[error("key offset {offset} plus store prefix shift {shift} exceeds u16")]
     KeyOffsetOverflow { offset: u16, shift: u16 },
     #[error("key prefix error: {0}")]
-    KeyPrefix(#[from] KeyPrefixError),
+    Prefix(#[from] PrefixError),
 }
 
 /// A client-side namespace layered over raw Store keys.
@@ -211,13 +211,13 @@ pub enum StoreKeyPrefixError {
 /// returned keys back before callers see them.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct StoreKeyPrefix {
-    inner: KeyPrefix,
+    inner: Prefix,
 }
 
 impl StoreKeyPrefix {
     pub fn new(prefix: impl Into<Bytes>) -> Result<Self, StoreKeyPrefixError> {
         Ok(Self {
-            inner: KeyPrefix::new(prefix)?,
+            inner: Prefix::new(prefix)?,
         })
     }
 
@@ -226,7 +226,7 @@ impl StoreKeyPrefix {
     /// un-namespaced.
     pub const fn identity() -> Self {
         Self {
-            inner: KeyPrefix::empty(),
+            inner: Prefix::empty(),
         }
     }
 
@@ -3126,7 +3126,7 @@ mod tests {
         assert_eq!(merged.prefix.as_ref(), &[0x05, 0x06, 0x07]);
 
         // Reconstruct the codec EXACTLY as apply_key_prune_policy does.
-        let codec = KeyPrefix::new(merged.prefix.clone()).unwrap();
+        let codec = Prefix::new(merged.prefix.clone()).unwrap();
 
         // Round-trip a real key through the reconstructed codec.
         let payload = [0xAA, 0xBB, 0xCC];
@@ -3146,7 +3146,7 @@ mod tests {
         assert!(start <= key && key <= end);
 
         // A key under a DIFFERENT merged prefix must not match this codec.
-        let sibling = KeyPrefix::new(vec![0x05, 0x06, 0x08])
+        let sibling = Prefix::new(vec![0x05, 0x06, 0x08])
             .unwrap()
             .encode(&[0x11])
             .unwrap();

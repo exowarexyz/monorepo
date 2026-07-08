@@ -63,11 +63,11 @@ pub(crate) fn classify_and_filter<F: Family>(
     namespace: Option<AuthenticatedBackendNamespace>,
 ) -> (RowClassifier<F>, StreamFilter) {
     use bytes::Bytes;
-    use exoware_sdk::keys::{Key as StoreKey, KeyPrefix};
+    use exoware_sdk::keys::{Key as StoreKey, Prefix};
     use exoware_sdk::kv_codec::Utf8;
 
     struct RowRule<F: Family> {
-        prefix: KeyPrefix,
+        prefix: Prefix,
         family: RowFamily,
         decode: Arc<dyn Fn(&StoreKey) -> Option<Location<F>> + Send + Sync>,
     }
@@ -76,17 +76,17 @@ pub(crate) fn classify_and_filter<F: Family>(
         None => {
             let compiled: [RowRule<F>; 3] = [
                 RowRule {
-                    prefix: KeyPrefix::from_byte(OP_FAMILY),
+                    prefix: Prefix::from_byte(OP_FAMILY),
                     family: RowFamily::Op,
                     decode: Arc::new(|key| decode_operation_location_key::<F>(key).ok()),
                 },
                 RowRule {
-                    prefix: KeyPrefix::from_byte(PRESENCE_FAMILY),
+                    prefix: Prefix::from_byte(PRESENCE_FAMILY),
                     family: RowFamily::Presence,
                     decode: Arc::new(|key| decode_presence_location::<F>(key).ok()),
                 },
                 RowRule {
-                    prefix: KeyPrefix::from_byte(WATERMARK_FAMILY),
+                    prefix: Prefix::from_byte(WATERMARK_FAMILY),
                     family: RowFamily::Watermark,
                     decode: Arc::new(|key| decode_watermark_location::<F>(key).ok()),
                 },

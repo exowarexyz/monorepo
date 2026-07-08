@@ -1226,7 +1226,7 @@ mod tests {
         policy, policy_retain, Policy as ProtoPolicy, PolicyRetain, PruneRequest, PruneRequestView,
         RetainKeepLatest,
     };
-    use exoware_sdk::keys::KeyPrefix;
+    use exoware_sdk::keys::Prefix;
     use exoware_sdk::kv_codec::KvReducedValue;
     use exoware_sdk::prune_policy::{PrunePolicyDocument, PRUNE_POLICY_DOCUMENT_VERSION};
     use exoware_sdk::{decode_connect_error, to_domain_reduce_response};
@@ -1570,7 +1570,7 @@ mod tests {
     }
 
     fn matching_kv(payload: &[u8], value: &[u8]) -> (Bytes, Bytes) {
-        let key = KeyPrefix::from_byte(TEST_PREFIX)
+        let key = Prefix::from_byte(TEST_PREFIX)
             .encode(payload)
             .expect("encode key");
         (key, Bytes::copy_from_slice(value))

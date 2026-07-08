@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::{i256, DataType, Field, Schema, SchemaRef, TimeUnit};
-use exoware_sdk::keys::{Key, KeyPrefix};
+use exoware_sdk::keys::{Key, Prefix};
 use exoware_sdk::PrefixedStoreClient;
 
 use crate::codec::{primary_key_prefix, secondary_index_prefix};
@@ -365,7 +365,7 @@ pub(crate) struct ResolvedColumn {
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedIndexSpec {
     pub(crate) id: u8,
-    pub(crate) codec: KeyPrefix,
+    pub(crate) codec: Prefix,
     pub(crate) name: String,
     pub(crate) layout: IndexLayout,
     pub(crate) key_columns: Vec<usize>,
@@ -376,7 +376,7 @@ pub(crate) struct ResolvedIndexSpec {
 #[derive(Debug, Clone)]
 pub(crate) struct TableModel {
     pub(crate) table_prefix: u8,
-    pub(crate) primary_key_prefix: KeyPrefix,
+    pub(crate) primary_key_prefix: Prefix,
     pub(crate) schema: SchemaRef,
     pub(crate) columns: Vec<ResolvedColumn>,
     pub(crate) columns_by_name: HashMap<String, usize>,

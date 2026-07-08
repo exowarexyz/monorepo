@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use exoware_sdk::keys::{Key, KeyPrefix};
+use exoware_sdk::keys::{Key, Prefix};
 use exoware_sdk::kv_codec::Utf8;
 use exoware_sdk::prune_policy::{PolicyScope, PrunePolicy, RetainPolicy};
 use exoware_sdk::selector::Selector;
@@ -20,7 +20,7 @@ async fn spawn_client() -> PrefixedStoreClient {
 }
 
 fn key(family: u8, payload: &[u8]) -> Key {
-    KeyPrefix::from_byte(family)
+    Prefix::from_byte(family)
         .encode(payload)
         .expect("encode")
 }

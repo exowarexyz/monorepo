@@ -1,7 +1,7 @@
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
 use commonware_storage::merkle::{Family, Location, Position};
-use exoware_sdk::keys::{Key, KeyPrefix};
+use exoware_sdk::keys::{Key, Prefix};
 
 use crate::error::QmdbError;
 use crate::MAX_OPERATION_SIZE;
@@ -26,16 +26,16 @@ pub(crate) const ORDERED_KEY_ESCAPE_BYTE: u8 = 0x00;
 pub(crate) const ORDERED_KEY_ZERO_ESCAPE: u8 = 0xFF;
 pub(crate) const ORDERED_KEY_TERMINATOR_LEN: usize = 2;
 
-pub(crate) const UPDATE_PREFIX: KeyPrefix = KeyPrefix::from_static(&[UPDATE_FAMILY]);
-pub(crate) const PRESENCE_PREFIX: KeyPrefix = KeyPrefix::from_static(&[PRESENCE_FAMILY]);
-pub(crate) const WATERMARK_PREFIX: KeyPrefix = KeyPrefix::from_static(&[WATERMARK_FAMILY]);
-pub(crate) const OPERATION_PREFIX: KeyPrefix = KeyPrefix::from_static(&[OP_FAMILY]);
-pub(crate) const NODE_PREFIX: KeyPrefix = KeyPrefix::from_static(&[NODE_FAMILY]);
-pub(crate) const CURRENT_META_PREFIX: KeyPrefix = KeyPrefix::from_static(&[CURRENT_META_FAMILY]);
-pub(crate) const GRAFTED_NODE_PREFIX: KeyPrefix = KeyPrefix::from_static(&[GRAFTED_NODE_FAMILY]);
-pub(crate) const CHUNK_PREFIX: KeyPrefix = KeyPrefix::from_static(&[CHUNK_FAMILY]);
-pub(crate) const OPS_ROOT_WITNESS_PREFIX: KeyPrefix =
-    KeyPrefix::from_static(&[OPS_ROOT_WITNESS_FAMILY]);
+pub(crate) const UPDATE_PREFIX: Prefix = Prefix::from_static(&[UPDATE_FAMILY]);
+pub(crate) const PRESENCE_PREFIX: Prefix = Prefix::from_static(&[PRESENCE_FAMILY]);
+pub(crate) const WATERMARK_PREFIX: Prefix = Prefix::from_static(&[WATERMARK_FAMILY]);
+pub(crate) const OPERATION_PREFIX: Prefix = Prefix::from_static(&[OP_FAMILY]);
+pub(crate) const NODE_PREFIX: Prefix = Prefix::from_static(&[NODE_FAMILY]);
+pub(crate) const CURRENT_META_PREFIX: Prefix = Prefix::from_static(&[CURRENT_META_FAMILY]);
+pub(crate) const GRAFTED_NODE_PREFIX: Prefix = Prefix::from_static(&[GRAFTED_NODE_FAMILY]);
+pub(crate) const CHUNK_PREFIX: Prefix = Prefix::from_static(&[CHUNK_FAMILY]);
+pub(crate) const OPS_ROOT_WITNESS_PREFIX: Prefix =
+    Prefix::from_static(&[OPS_ROOT_WITNESS_FAMILY]);
 
 pub(crate) const fn bitmap_chunk_bits<const N: usize>() -> u64 {
     (N as u64) * 8
@@ -200,7 +200,7 @@ pub(crate) fn decode_ordered_key_bytes(bytes: &[u8]) -> Result<Vec<u8>, QmdbErro
 }
 
 pub(crate) fn encode_ordered_update_payload(
-    prefix: &KeyPrefix,
+    prefix: &Prefix,
     raw_key: &[u8],
     fixed_suffix_len: usize,
 ) -> Result<Vec<u8>, QmdbError> {

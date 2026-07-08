@@ -2,7 +2,7 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Hasher;
 use commonware_storage::merkle::{hasher::Hasher as MerkleHasher, Family, Location, Position};
 use commonware_utils::Array;
-use exoware_sdk::keys::{Key, KeyPrefix};
+use exoware_sdk::keys::{Key, Prefix};
 use exoware_sdk::{RangeMode, SerializableReadSession};
 
 use crate::codec::{
@@ -31,16 +31,16 @@ const AUTH_INDEX_FAMILY: u8 = 0xC;
 const AUTH_IMMUTABLE_UPDATE_FAMILY: u8 = 0xD;
 const AUTH_NAMESPACE_LEN: usize = 1;
 
-pub(crate) const AUTH_OPERATION_PREFIX: KeyPrefix = KeyPrefix::from_static(&[AUTH_OP_FAMILY]);
-pub(crate) const AUTH_NODE_PREFIX: KeyPrefix = KeyPrefix::from_static(&[AUTH_NODE_FAMILY]);
-pub(crate) const AUTH_WATERMARK_PREFIX: KeyPrefix =
-    KeyPrefix::from_static(&[AUTH_WATERMARK_FAMILY]);
-pub(crate) const AUTH_PRESENCE_PREFIX: KeyPrefix = KeyPrefix::from_static(&[AUTH_INDEX_FAMILY]);
-pub(crate) const AUTH_IMMUTABLE_UPDATE_PREFIX: KeyPrefix =
-    KeyPrefix::from_static(&[AUTH_IMMUTABLE_UPDATE_FAMILY]);
+pub(crate) const AUTH_OPERATION_PREFIX: Prefix = Prefix::from_static(&[AUTH_OP_FAMILY]);
+pub(crate) const AUTH_NODE_PREFIX: Prefix = Prefix::from_static(&[AUTH_NODE_FAMILY]);
+pub(crate) const AUTH_WATERMARK_PREFIX: Prefix =
+    Prefix::from_static(&[AUTH_WATERMARK_FAMILY]);
+pub(crate) const AUTH_PRESENCE_PREFIX: Prefix = Prefix::from_static(&[AUTH_INDEX_FAMILY]);
+pub(crate) const AUTH_IMMUTABLE_UPDATE_PREFIX: Prefix =
+    Prefix::from_static(&[AUTH_IMMUTABLE_UPDATE_FAMILY]);
 
 pub(crate) fn auth_namespace_bounds(
-    prefix: &KeyPrefix,
+    prefix: &Prefix,
     namespace: AuthenticatedBackendNamespace,
 ) -> (Key, Key) {
     let tail_len = 8usize;
@@ -58,7 +58,7 @@ pub(crate) fn auth_namespace_bounds(
 }
 
 pub(crate) fn ensure_auth_namespace(
-    prefix: &KeyPrefix,
+    prefix: &Prefix,
     namespace: AuthenticatedBackendNamespace,
     key: &Key,
     label: &str,
@@ -79,7 +79,7 @@ pub(crate) fn ensure_auth_namespace(
 }
 
 /// Build a `[namespace tag] ++ 8-byte big-endian value` auth-family key.
-fn encode_auth_namespaced_key(prefix: &KeyPrefix, tag: u8, value: u64) -> Key {
+fn encode_auth_namespaced_key(prefix: &Prefix, tag: u8, value: u64) -> Key {
     let mut payload = [0u8; AUTH_NAMESPACE_LEN + 8];
     payload[0] = tag;
     payload[AUTH_NAMESPACE_LEN..].copy_from_slice(&value.to_be_bytes());
@@ -422,7 +422,7 @@ pub(crate) async fn load_auth_operation_bytes_range<F: Family>(
 }
 
 fn decode_auth_location_field<F: Family>(
-    prefix: &KeyPrefix,
+    prefix: &Prefix,
     namespace: AuthenticatedBackendNamespace,
     key: &Key,
     label: &str,

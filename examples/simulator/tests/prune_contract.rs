@@ -3,7 +3,7 @@
 use std::future::Future;
 
 use bytes::Bytes;
-use exoware_sdk::keys::KeyPrefix;
+use exoware_sdk::keys::Prefix;
 use exoware_sdk::kv_codec::Utf8;
 use exoware_sdk::prune_policy::{
     GroupBy, KeysScope, OrderBy, OrderEncoding, PolicyScope, PrunePolicy, PrunePolicyDocument,
@@ -24,8 +24,8 @@ fn block_on<T>(future: impl Future<Output = T>) -> T {
         .block_on(future)
 }
 
-fn prefix() -> KeyPrefix {
-    KeyPrefix::from_byte(TEST_PREFIX)
+fn prefix() -> Prefix {
+    Prefix::from_byte(TEST_PREFIX)
 }
 
 fn versioned_key(logical: &[u8], version: u64) -> Bytes {

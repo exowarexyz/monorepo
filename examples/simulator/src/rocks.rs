@@ -32,7 +32,7 @@ use std::thread;
 use buffa::{Message, MessageView};
 use bytes::Bytes;
 use exoware_sdk::common::kv::v1::Entry;
-use exoware_sdk::keys::KeyPrefix;
+use exoware_sdk::keys::Prefix;
 use exoware_sdk::log::stream::v1::{
     GetResponse as StreamGetResponse, GetResponseView as StreamGetResponseView,
 };
@@ -1003,7 +1003,7 @@ impl RocksStore {
         retain: &RetainPolicy,
     ) -> Result<(), String> {
         let prefix =
-            KeyPrefix::new(scope.selector.prefix.clone()).map_err(|e| format!("policy: {e}"))?;
+            Prefix::new(scope.selector.prefix.clone()).map_err(|e| format!("policy: {e}"))?;
         let regex = compile_payload_regex(&scope.selector.payload_regex)
             .map_err(|e| format!("policy: {e}"))?;
 

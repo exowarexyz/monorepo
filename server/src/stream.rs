@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use connectrpc::ConnectError;
 use exoware_sdk::common::Entry;
-use exoware_sdk::keys::KeyPrefix;
+use exoware_sdk::keys::Prefix;
 use exoware_sdk::selector::compile_payload_regex;
 use exoware_sdk::stream_filter::{validate_filter, CompiledFilters, StreamFilter};
 use regex::bytes::Regex;
@@ -33,7 +33,7 @@ pub const METADATA_OLDEST_RETAINED: &str = "oldest_retained";
 
 #[derive(Clone)]
 pub(crate) struct CompiledKeyMatcher {
-    prefix: KeyPrefix,
+    prefix: Prefix,
     regex: Regex,
 }
 
@@ -54,7 +54,7 @@ pub(crate) fn compile_matchers(filter: &StreamFilter) -> Result<CompiledMatchers
         .map(|mk| {
             let regex = compile_payload_regex(&mk.payload_regex)
                 .map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
-            let prefix = KeyPrefix::new(mk.prefix.clone())
+            let prefix = Prefix::new(mk.prefix.clone())
                 .map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
             Ok(CompiledKeyMatcher { prefix, regex })
         })
@@ -174,7 +174,7 @@ mod tests {
     }
 
     fn key(family: u8, payload: &[u8]) -> Key {
-        KeyPrefix::from_byte(family).encode(payload).unwrap()
+        Prefix::from_byte(family).encode(payload).unwrap()
     }
 
     fn kv(family: u8, payload: &[u8], value: &'static [u8]) -> Entry {

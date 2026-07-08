@@ -1,6 +1,6 @@
 use datafusion::arrow::datatypes::i256;
 use datafusion::common::{DataFusionError, Result as DataFusionResult};
-use exoware_sdk::keys::{Key, KeyPrefix};
+use exoware_sdk::keys::{Key, Prefix};
 use exoware_sdk::kv_codec::{interleave_ordered_key_fields, StoredRow, StoredValue};
 
 use crate::builder::archived_non_pk_value_is_valid;
@@ -14,18 +14,18 @@ pub(crate) fn family_byte(table_prefix: u8, discriminator: u8) -> u8 {
     (table_prefix << 4) | discriminator
 }
 
-pub(crate) fn primary_key_prefix(table_prefix: u8) -> Result<KeyPrefix, String> {
+pub(crate) fn primary_key_prefix(table_prefix: u8) -> Result<Prefix, String> {
     if usize::from(table_prefix) >= MAX_TABLES {
         return Err(format!(
             "table prefix {table_prefix} exceeds max {} for codec layout",
             MAX_TABLES - 1
         ));
     }
-    KeyPrefix::new(vec![family_byte(table_prefix, PRIMARY_FAMILY_DISCRIMINATOR)])
+    Prefix::new(vec![family_byte(table_prefix, PRIMARY_FAMILY_DISCRIMINATOR)])
         .map_err(|e| format!("failed to build primary key prefix: {e}"))
 }
 
-pub(crate) fn secondary_index_prefix(table_prefix: u8, index_id: u8) -> Result<KeyPrefix, String> {
+pub(crate) fn secondary_index_prefix(table_prefix: u8, index_id: u8) -> Result<Prefix, String> {
     if usize::from(table_prefix) >= MAX_TABLES {
         return Err(format!(
             "table prefix {table_prefix} exceeds max {} for codec layout",
@@ -38,12 +38,12 @@ pub(crate) fn secondary_index_prefix(table_prefix: u8, index_id: u8) -> Result<K
             MAX_INDEX_SPECS
         ));
     }
-    KeyPrefix::new(vec![family_byte(table_prefix, index_id)])
+    Prefix::new(vec![family_byte(table_prefix, index_id)])
         .map_err(|e| format!("failed to build secondary index prefix: {e}"))
 }
 
 pub(crate) fn ensure_codec_payload_fits(
-    prefix: &KeyPrefix,
+    prefix: &Prefix,
     payload_len: usize,
     context: &str,
 ) -> Result<(), String> {

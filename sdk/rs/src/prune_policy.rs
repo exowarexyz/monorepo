@@ -5,7 +5,7 @@ use commonware_codec::{
 };
 use std::collections::HashSet;
 
-use crate::keys::KeyPrefix;
+use crate::keys::Prefix;
 use crate::kv_codec::Utf8;
 use crate::selector::{compile_payload_regex, Selector};
 
@@ -310,7 +310,7 @@ pub fn validate_policy(policy: &PrunePolicy) -> anyhow::Result<()> {
 }
 
 fn validate_user_keys_scope(scope: &KeysScope) -> anyhow::Result<()> {
-    KeyPrefix::new(scope.selector.prefix.clone()).context("invalid selector prefix")?;
+    Prefix::new(scope.selector.prefix.clone()).context("invalid selector prefix")?;
     let regex = compile_payload_regex(&scope.selector.payload_regex)?;
     validate_capture_groups(
         &regex,

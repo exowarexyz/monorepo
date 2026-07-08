@@ -30,9 +30,9 @@ pub enum KeyValidationError {
     TooLong { len: usize, max: usize },
 }
 
-/// Errors returned by [`KeyPrefix`].
+/// Errors returned by [`Prefix`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum KeyPrefixError {
+pub enum PrefixError {
     #[error("prefix length {len} exceeds max {max}")]
     PrefixTooLong { len: usize, max: usize },
     #[error("key length {len} exceeds max {max}")]
@@ -46,14 +46,14 @@ pub enum KeyPrefixError {
 /// namespaces is byte concatenation, which is always associative and
 /// unambiguous.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub struct KeyPrefix(Bytes);
+pub struct Prefix(Bytes);
 
-impl KeyPrefix {
+impl Prefix {
     /// Build a prefix from bytes. Fails when longer than [`MAX_KEY_LEN`].
-    pub fn new(prefix: impl Into<Bytes>) -> Result<Self, KeyPrefixError> {
+    pub fn new(prefix: impl Into<Bytes>) -> Result<Self, PrefixError> {
         let prefix = prefix.into();
         if prefix.len() > MAX_KEY_LEN {
-            return Err(KeyPrefixError::PrefixTooLong {
+            return Err(PrefixError::PrefixTooLong {
                 len: prefix.len(),
                 max: MAX_KEY_LEN,
             });
@@ -68,7 +68,7 @@ impl KeyPrefix {
     }
 
     /// Const constructor for static family prefixes, letting callers keep
-    /// `const FAMILY: KeyPrefix`. Fails to compile if `prefix` is longer than
+    /// `const FAMILY: Prefix`. Fails to compile if `prefix` is longer than
     /// [`MAX_KEY_LEN`].
     pub const fn from_static(prefix: &'static [u8]) -> Self {
         assert!(prefix.len() <= MAX_KEY_LEN, "prefix exceeds MAX_KEY_LEN");
@@ -105,12 +105,12 @@ impl KeyPrefix {
     }
 
     /// Concatenate this prefix with `payload` to form a physical key. Fails
-    /// with [`KeyPrefixError::KeyTooLong`] if the result exceeds
+    /// with [`PrefixError::KeyTooLong`] if the result exceeds
     /// [`MAX_KEY_LEN`].
-    pub fn encode(&self, payload: &[u8]) -> Result<Key, KeyPrefixError> {
+    pub fn encode(&self, payload: &[u8]) -> Result<Key, PrefixError> {
         let total = self.0.len() + payload.len();
         if total > MAX_KEY_LEN {
-            return Err(KeyPrefixError::KeyTooLong {
+            return Err(PrefixError::KeyTooLong {
                 len: total,
                 max: MAX_KEY_LEN,
             });
@@ -126,7 +126,7 @@ impl KeyPrefix {
 
     /// Prepend this prefix to an existing [`Key`]. When the prefix is empty
     /// this is a refcount-only clone of `key` (no bytes copied).
-    pub fn encode_key(&self, key: &Key) -> Result<Key, KeyPrefixError> {
+    pub fn encode_key(&self, key: &Key) -> Result<Key, PrefixError> {
         if self.0.is_empty() {
             return Ok(key.clone());
         }
@@ -141,11 +141,11 @@ impl KeyPrefix {
 
     /// Strip the prefix from `key`, returning the payload as a zero-copy slice
     /// of the same backing storage. Fails with
-    /// [`KeyPrefixError::PrefixMismatch`] when `key` does not start with this
+    /// [`PrefixError::PrefixMismatch`] when `key` does not start with this
     /// prefix.
-    pub fn strip(&self, key: &Key) -> Result<Key, KeyPrefixError> {
+    pub fn strip(&self, key: &Key) -> Result<Key, PrefixError> {
         if !self.matches(key) {
-            return Err(KeyPrefixError::PrefixMismatch);
+            return Err(PrefixError::PrefixMismatch);
         }
         Ok(key.slice(self.0.len()..))
     }
@@ -163,10 +163,10 @@ impl KeyPrefix {
 
     /// Compose two prefixes by concatenation. Always valid and associative;
     /// fails only if the concatenation exceeds [`MAX_KEY_LEN`].
-    pub fn join(&self, other: &KeyPrefix) -> Result<KeyPrefix, KeyPrefixError> {
+    pub fn join(&self, other: &Prefix) -> Result<Prefix, PrefixError> {
         let total = self.0.len() + other.0.len();
         if total > MAX_KEY_LEN {
-            return Err(KeyPrefixError::PrefixTooLong {
+            return Err(PrefixError::PrefixTooLong {
                 len: total,
                 max: MAX_KEY_LEN,
             });
@@ -180,7 +180,7 @@ impl KeyPrefix {
         let mut buf = BytesMut::with_capacity(total);
         buf.extend_from_slice(&self.0);
         buf.extend_from_slice(&other.0);
-        Ok(KeyPrefix(buf.freeze()))
+        Ok(Prefix(buf.freeze()))
     }
 }
 
@@ -293,7 +293,7 @@ mod tests {
 
     #[test]
     fn key_prefix_encode_strip_round_trip() {
-        let prefix = KeyPrefix::from_byte(0x05);
+        let prefix = Prefix::from_byte(0x05);
         let key = prefix.encode(&[0xAB, 0xCD]).expect("encoded key");
         assert_eq!(&key[..], &[0x05, 0xAB, 0xCD]);
         assert_eq!(
@@ -304,7 +304,7 @@ mod tests {
 
     #[test]
     fn key_prefix_preserves_payload_order_within_prefix() {
-        let prefix = KeyPrefix::from_byte(0x03);
+        let prefix = Prefix::from_byte(0x03);
         let lower = prefix.encode(&[0x10, 0x00]).expect("lower key");
         let mid = prefix.encode(&[0x10, 0x01]).expect("mid key");
         let upper = prefix.encode(&[0x20, 0x00]).expect("upper key");
@@ -314,7 +314,7 @@ mod tests {
 
     #[test]
     fn key_prefix_bounds_cover_only_one_prefix() {
-        let prefix = KeyPrefix::from_byte(0x0A);
+        let prefix = Prefix::from_byte(0x0A);
         let (start, end) = prefix.bounds();
         let key = prefix.encode(&[0x11, 0x22]).expect("prefix key");
         assert!(prefix.matches(&start));
@@ -323,7 +323,7 @@ mod tests {
         assert!(start <= key && key <= end);
 
         // A same-length distinct prefix is disjoint from this one.
-        let other = KeyPrefix::from_byte(0x0B)
+        let other = Prefix::from_byte(0x0B)
             .encode(&[0x11, 0x22])
             .expect("other key");
         assert!(!prefix.matches(&other));
@@ -333,9 +333,9 @@ mod tests {
 
     #[test]
     fn key_prefix_join_is_associative_and_composes_layers() {
-        let a = KeyPrefix::from_byte(0x0A);
-        let b = KeyPrefix::from_byte(0x0B);
-        let c = KeyPrefix::from_byte(0x0C);
+        let a = Prefix::from_byte(0x0A);
+        let b = Prefix::from_byte(0x0B);
+        let c = Prefix::from_byte(0x0C);
 
         // Concatenation is associative.
         let left = a.join(&b).unwrap().join(&c).unwrap();
@@ -387,16 +387,16 @@ mod tests {
 
     #[test]
     fn key_prefix_rejects_oversized_prefix() {
-        let err = KeyPrefix::new(vec![0u8; MAX_KEY_LEN + 1]).expect_err("prefix should not fit");
-        assert!(matches!(err, KeyPrefixError::PrefixTooLong { .. }));
+        let err = Prefix::new(vec![0u8; MAX_KEY_LEN + 1]).expect_err("prefix should not fit");
+        assert!(matches!(err, PrefixError::PrefixTooLong { .. }));
     }
 
     #[test]
     fn key_prefix_rejects_oversized_key() {
-        let prefix = KeyPrefix::from_byte(0x01);
+        let prefix = Prefix::from_byte(0x01);
         let payload = vec![0u8; prefix.max_payload_len() + 1];
         let err = prefix.encode(&payload).expect_err("key should not fit");
-        assert!(matches!(err, KeyPrefixError::KeyTooLong { .. }));
+        assert!(matches!(err, PrefixError::KeyTooLong { .. }));
     }
 
     #[test]
