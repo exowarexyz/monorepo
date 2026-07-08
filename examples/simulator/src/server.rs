@@ -44,7 +44,7 @@ pub async fn run(
 ///
 /// The server runs on a temporary data directory owned by the store
 /// ([`RocksStore::open_owned`]), deleted only after the database has fully closed.
-pub async fn test_spawn(
+pub async fn open_temp(
 ) -> Result<(tokio::task::JoinHandle<()>, String), Box<dyn std::error::Error + Send + Sync>> {
     let data_dir = tempfile::tempdir()?;
     let engine = Arc::new(RocksStore::open_owned(data_dir, None)?);

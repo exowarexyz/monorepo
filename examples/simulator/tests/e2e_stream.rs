@@ -10,7 +10,7 @@ use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreClient};
 
 /// Spawns a local simulator and returns a client for it.
 async fn spawn_client() -> PrefixedStoreClient {
-    let (_task, url) = exoware_simulator::test_spawn().await.expect("test_spawn");
+    let (_task, url) = exoware_simulator::open_temp().await.expect("open_temp");
     let client = StoreClient::builder()
         .url(&url)
         .retry_config(RetryConfig::disabled())

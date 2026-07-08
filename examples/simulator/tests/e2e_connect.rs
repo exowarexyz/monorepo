@@ -20,7 +20,7 @@ use exoware_sdk::{
 
 /// Spawns a local simulator and returns a client for it plus the base URL.
 async fn spawn_client() -> (PrefixedStoreClient, String) {
-    let (_task, url) = exoware_simulator::test_spawn().await.expect("test_spawn");
+    let (_task, url) = exoware_simulator::open_temp().await.expect("open_temp");
     let client = StoreClient::builder()
         .url(&url)
         .retry_config(RetryConfig::disabled())

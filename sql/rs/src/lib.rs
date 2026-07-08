@@ -8517,7 +8517,7 @@ mod tests {
         }
 
         async fn spawn_e2e_servers() -> TestServers {
-            let (_task, url) = exoware_simulator::test_spawn()
+            let (_task, url) = exoware_simulator::open_temp()
                 .await
                 .expect("spawn simulator");
             TestServers {

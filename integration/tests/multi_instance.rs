@@ -41,7 +41,7 @@ type QmdbConnectClient = OperationLogClient<PreferZstdHttpClient, QmdbFamily, Sh
 
 /// Spawns a local simulator and returns a client for it.
 async fn local_store_client() -> StoreClient {
-    let (_task, url) = exoware_simulator::test_spawn()
+    let (_task, url) = exoware_simulator::open_temp()
         .await
         .expect("spawn simulator");
     StoreClient::builder()
