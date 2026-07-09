@@ -194,8 +194,6 @@ impl ClientError {
 pub enum StoreKeyPrefixError {
     #[error("key does not belong to this store prefix")]
     PrefixMismatch,
-    #[error("combined prefix length {len} exceeds max {max}")]
-    CombinedPrefixTooLong { len: usize, max: usize },
     #[error("key offset {offset} plus store prefix shift {shift} exceeds u16")]
     KeyOffsetOverflow { offset: u16, shift: u16 },
     #[error("key prefix error: {0}")]
@@ -289,27 +287,10 @@ impl StoreKeyPrefix {
         &self,
         selector: &crate::selector::Selector,
     ) -> Result<crate::selector::Selector, StoreKeyPrefixError> {
-        self.prefix_selector_with_regex(selector, selector.payload_regex.clone())
-    }
-
-    fn prefix_selector_with_regex(
-        &self,
-        selector: &crate::selector::Selector,
-        payload_regex: crate::kv_codec::Utf8,
-    ) -> Result<crate::selector::Selector, StoreKeyPrefixError> {
-        let combined_len = self.inner.len() + selector.prefix.len();
-        if combined_len > MAX_KEY_LEN {
-            return Err(StoreKeyPrefixError::CombinedPrefixTooLong {
-                len: combined_len,
-                max: MAX_KEY_LEN,
-            });
-        }
-        let mut prefix = Vec::with_capacity(combined_len);
-        prefix.extend_from_slice(self.inner.as_bytes());
-        prefix.extend_from_slice(&selector.prefix);
+        let prefix = self.inner.join(&Prefix::new(selector.prefix.clone())?)?;
         Ok(crate::selector::Selector {
-            prefix: Bytes::from(prefix),
-            payload_regex,
+            prefix: prefix.as_bytes().clone(),
+            payload_regex: selector.payload_regex.clone(),
         })
     }
 }
@@ -3036,7 +3017,7 @@ mod tests {
             StoreKeyPrefix::new(vec![4]).unwrap(),
             StoreKeyPrefix::new(vec![5]).unwrap(),
         ];
-        // A key encoded under one prefix never matches another's prefix — so a
+        // A key encoded under one prefix never matches another's prefix, so a
         // prefix-bounded range scan in one can't observe another's keys (this is
         // the bug being fixed). Same-length prefixes are pairwise disjoint.
         let logical = Bytes::from_static(b"\x00\x10whatever-block-meta-or-op-log-key");

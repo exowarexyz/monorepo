@@ -3,7 +3,7 @@
 //! [`SqlServer`] builds a DataFusion session over a [`KvSchema`] and exposes:
 //! - [`Service::query`] unary SQL against that session.
 //! - [`Service::subscribe`] streaming: for every atomic ingest batch that
-//!   touches a registered table's primary-key codec family, decode its rows
+//!   touches a registered table's primary-key family, decode its rows
 //!   and re-run the subscriber's SQL `WHERE` predicate against just those
 //!   rows. Each matching batch produces one [`SubscribeResponse`] carrying
 //!   only the rows that satisfied the predicate.

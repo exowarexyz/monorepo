@@ -74,9 +74,8 @@ async fn main() -> std::process::ExitCode {
     // every put. A restart rolls the store forward from its log. `abort` rather than `exit`:
     // exit-time teardown runs while tokio workers and RocksDB background threads are still
     // live and can hang. The kill must stay scoped to the writer threads (not fire on every
-    // panic): the request path relies on contained panics (subscribe-filter validation
-    // catches a `KeyCodec` panic to reject bad client input), so an unconditional abort would
-    // let a malformed request kill the process.
+    // panic): a panic on a request-serving thread is contained by tokio and fails only that
+    // request, so an unconditional abort would let a single bad request kill the process.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         default_hook(info);

@@ -1296,7 +1296,7 @@ impl QueryPredicate {
         constrained_prefix_len: usize,
         upper: bool,
     ) -> Result<Key, String> {
-        let prefix = &spec.codec;
+        let prefix = &spec.prefix;
         let payload_len = if upper {
             prefix.max_payload_len()
         } else {
@@ -1572,7 +1572,7 @@ impl QueryPredicate {
         spec: &ResolvedIndexSpec,
         upper: bool,
     ) -> Result<Key, String> {
-        let prefix = &spec.codec;
+        let prefix = &spec.prefix;
         let payload_len = if upper {
             prefix.max_payload_len()
         } else {

@@ -12,7 +12,7 @@ import "sql/v1/stream.proto";
 // the server, not the wire). Each RPC names one of those tables.
 service Service {
   // Re-run a SQL WHERE predicate against every incoming batch that touches
-  // `table`'s primary-key codec family. Emits one `SubscribeResponse` per
+  // `table`'s primary-key family. Emits one `SubscribeResponse` per
   // matched batch containing just the rows that satisfied the predicate.
   rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
 

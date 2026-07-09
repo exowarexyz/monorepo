@@ -280,7 +280,7 @@ impl KvTableConfig {
     ) -> Result<Self, String> {
         if usize::from(table_prefix) >= MAX_TABLES {
             return Err(format!(
-                "table prefix {table_prefix} exceeds max {} for codec layout",
+                "table prefix {table_prefix} exceeds max {} for key layout",
                 MAX_TABLES - 1
             ));
         }
@@ -324,7 +324,7 @@ impl KvTableConfig {
         }
         if total_pk_width > primary_key_prefix(table_prefix)?.max_payload_len() {
             return Err(format!(
-                "composite primary key is too wide ({total_pk_width} bytes) for codec payload"
+                "composite primary key is too wide ({total_pk_width} bytes) for key payload"
             ));
         }
 
@@ -365,7 +365,7 @@ pub(crate) struct ResolvedColumn {
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedIndexSpec {
     pub(crate) id: u8,
-    pub(crate) codec: Prefix,
+    pub(crate) prefix: Prefix,
     pub(crate) name: String,
     pub(crate) layout: IndexLayout,
     pub(crate) key_columns: Vec<usize>,
@@ -450,11 +450,11 @@ impl TableModel {
             }
 
             let id = u8::try_from(idx + 1).map_err(|_| {
-                format!("too many index specs for codec layout (max {MAX_INDEX_SPECS})")
+                format!("too many index specs for key layout (max {MAX_INDEX_SPECS})")
             })?;
             if usize::from(id) > MAX_INDEX_SPECS {
                 return Err(format!(
-                    "too many index specs for codec layout (max {MAX_INDEX_SPECS})"
+                    "too many index specs for key layout (max {MAX_INDEX_SPECS})"
                 ));
             }
             let mut key_columns = Vec::with_capacity(spec.key_columns.len());
@@ -508,14 +508,14 @@ impl TableModel {
             let prefix = secondary_index_prefix(self.table_prefix, id)?;
             if key_columns_width + self.primary_key_width > prefix.max_payload_len() {
                 return Err(format!(
-                    "index '{}' key layout too wide for codec payload",
+                    "index '{}' key layout too wide for key payload",
                     spec.name
                 ));
             }
 
             out.push(ResolvedIndexSpec {
                 id,
-                codec: prefix,
+                prefix,
                 name: spec.name.clone(),
                 layout: spec.layout,
                 key_columns,

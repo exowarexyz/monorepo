@@ -348,7 +348,7 @@ mod tests {
         assert_eq!(left.as_bytes().as_ref(), &[0x0A, 0x0B, 0x0C]);
 
         // Encoding layer-by-layer and via the joined prefix produce identical
-        // keys — the composition case that the old bit-padding codec corrupted.
+        // keys, the composition case that the old bit-padding codec corrupted.
         let payload = [0x11u8, 0x22, 0x33];
         let joined = a.join(&b).unwrap();
         let layered = a.encode(&b.encode(&payload).unwrap()).unwrap();

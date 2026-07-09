@@ -138,14 +138,10 @@ export class StoreKeyPrefix {
         return { start: physicalStart, end: physicalEnd };
     }
 
+    // The selector's payloadRegex is forwarded verbatim and compiled
+    // server-side by Rust's regex crate, so JS-only syntax (lookaround,
+    // backreferences) is rejected by the server.
     prefixSelector(selector: MessageInitShape<typeof SelectorSchema>): Selector {
-        return this.prefixSelectorWithRegex(selector, selector.payloadRegex ?? '');
-    }
-
-    private prefixSelectorWithRegex(
-        selector: MessageInitShape<typeof SelectorSchema>,
-        payloadRegex: string,
-    ): Selector {
         const logicalPrefix = selector.prefix ?? new Uint8Array();
         const prefix = new Uint8Array(this.prefix.length + logicalPrefix.length);
         prefix.set(this.prefix, 0);
@@ -157,7 +153,7 @@ export class StoreKeyPrefix {
         }
         return create(SelectorSchema, {
             prefix,
-            payloadRegex,
+            payloadRegex: selector.payloadRegex ?? '',
         });
     }
 }

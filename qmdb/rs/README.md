@@ -136,8 +136,8 @@ This makes historical "latest update for key at or below watermark" lookups fast
 Authenticated backends (immutable and keyless) store their rows under these same
 shared families. Their operation, node, watermark, and presence rows reserve the
 first payload byte for a backend namespace tag: `1` for immutable, `2` for
-keyless. The immutable backend also writes keyed historical update rows — its
-index for `get_at` lookups — using exactly the key layout described above and no
+keyless. The immutable backend also writes keyed historical update rows (its
+index for `get_at` lookups) using exactly the key layout described above and no
 namespace tag: the keyless backend stores no rows in this family, so it needs
 none.
 

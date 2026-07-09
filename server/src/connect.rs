@@ -35,7 +35,7 @@ use exoware_proto::{
 };
 use exoware_sdk as exoware_proto;
 use exoware_sdk::common::kv::v1::filter::KindView as ProtoFilterKindView;
-use exoware_sdk::keys::{Key, MAX_KEY_LEN};
+use exoware_sdk::keys::Key;
 use exoware_sdk::selector::Selector;
 use futures::{stream as stream_util, Stream};
 use tokio::sync::Notify;
@@ -958,15 +958,10 @@ fn domain_filter_from_subscribe_view(
 ) -> Result<StreamFilter, ConnectError> {
     let mut selectors = Vec::with_capacity(req.selectors.len());
     for mk in req.selectors.iter() {
-        let prefix = Bytes::copy_from_slice(mk.prefix);
-        if prefix.len() > MAX_KEY_LEN {
-            return Err(ConnectError::invalid_argument(format!(
-                "selector.prefix length {} exceeds maximum of {MAX_KEY_LEN}",
-                prefix.len()
-            )));
-        }
+        // Prefix length is validated when compile_matchers runs the shared
+        // stream_filter::validate_filter over the assembled filter.
         selectors.push(Selector {
-            prefix,
+            prefix: Bytes::copy_from_slice(mk.prefix),
             payload_regex: exoware_sdk::kv_codec::Utf8::from(mk.payload_regex),
         });
     }

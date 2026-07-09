@@ -109,17 +109,17 @@ mod tests {
         TableModel::from_config(&config).unwrap()
     }
 
-    fn codec_payload(prefix: &Prefix, key: &Key, offset: usize, len: usize) -> Vec<u8> {
-        let payload = prefix.strip(key).expect("codec payload");
+    fn key_payload(prefix: &Prefix, key: &Key, offset: usize, len: usize) -> Vec<u8> {
+        let payload = prefix.strip(key).expect("key payload");
         payload[offset..offset + len].to_vec()
     }
 
     fn primary_payload(model: &TableModel, key: &Key, offset: usize, len: usize) -> Vec<u8> {
-        codec_payload(&model.primary_key_prefix, key, offset, len)
+        key_payload(&model.primary_key_prefix, key, offset, len)
     }
 
     fn index_payload(spec: &ResolvedIndexSpec, key: &Key, offset: usize, len: usize) -> Vec<u8> {
-        codec_payload(&spec.codec, key, offset, len)
+        key_payload(&spec.prefix, key, offset, len)
     }
 
     fn matches_primary_key(table_prefix: u8, key: &Key) -> bool {
@@ -2275,7 +2275,7 @@ mod tests {
             "lower bound must not exceed upper bound (was wrapping via as i32)"
         );
 
-        let lower_payload = specs[0].codec.strip(&start).unwrap();
+        let lower_payload = specs[0].prefix.strip(&start).unwrap();
         let encoded_lower: [u8; 4] = lower_payload[..4].try_into().unwrap();
         let decoded_lower = decode_i32_ordered(encoded_lower);
         assert_eq!(
@@ -2738,9 +2738,9 @@ mod tests {
             Ok(_) => panic!("overflow table should be rejected"),
             Err(err) => assert!(
                 err.contains(&format!(
-                    "too many tables for codec layout (max {MAX_TABLES})"
+                    "too many tables for key layout (max {MAX_TABLES})"
                 )),
-                "overflow table should be rejected with codec-capacity error"
+                "overflow table should be rejected with key-layout error"
             ),
         }
     }
@@ -4723,7 +4723,7 @@ mod tests {
     }
 
     #[test]
-    fn utf8_primary_key_encodes_at_max_codec_payload_and_rejects_overflow() {
+    fn utf8_primary_key_encodes_at_max_key_payload_and_rejects_overflow() {
         let config = KvTableConfig::new(
             0,
             vec![TableColumnConfig::new("id", DataType::Utf8, false)],
@@ -4759,8 +4759,8 @@ mod tests {
             },
             &model,
         )
-        .expect_err("UTF-8 PK exceeding codec payload should be rejected");
-        assert!(err.contains("primary key payload exceeds codec payload capacity 253 bytes"));
+        .expect_err("UTF-8 PK exceeding key payload should be rejected");
+        assert!(err.contains("failed to encode primary key: key length 255 exceeds max 254"));
     }
 
     #[test]
@@ -4830,7 +4830,7 @@ mod tests {
         let model = TableModel::from_config(&config).unwrap();
         let specs = model.resolve_index_specs(&config.index_specs).unwrap();
         let spec = &specs[0];
-        let max_payload = spec.codec.max_payload_len();
+        let max_payload = spec.prefix.max_payload_len();
         let max_tag = "t".to_string();
         let max_id = "i".repeat(max_payload - encode_string_variable(&max_tag).unwrap().len() - 1);
         let overflow_id = format!("{max_id}x");
@@ -4868,7 +4868,9 @@ mod tests {
             },
         )
         .expect_err("secondary key exceeding max payload should be rejected");
-        assert!(err.contains("index 'tag_idx' payload exceeds codec payload capacity 253 bytes"));
+        assert!(
+            err.contains("failed to encode index 'tag_idx' key: key length 255 exceeds max 254")
+        );
     }
 
     #[test]
@@ -4886,7 +4888,7 @@ mod tests {
         let model = TableModel::from_config(&config).unwrap();
         let specs = model.resolve_index_specs(&config.index_specs).unwrap();
         let spec = &specs[0];
-        let max_payload = spec.codec.max_payload_len();
+        let max_payload = spec.prefix.max_payload_len();
         let max_tag = "t".to_string();
         let max_id = "i".repeat(max_payload - encode_string_variable(&max_tag).unwrap().len() - 1);
         let overflow_id = format!("{max_id}x");
@@ -4919,7 +4921,7 @@ mod tests {
         .expect_err("backfill path overflow should be rejected");
         assert!(err
             .to_string()
-            .contains("index 'tag_idx' payload exceeds codec payload capacity 253 bytes"));
+            .contains("failed to encode index 'tag_idx' key: key length 255 exceeds max 254"));
     }
 
     #[test]

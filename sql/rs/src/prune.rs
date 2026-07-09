@@ -52,7 +52,7 @@ fn keep_latest_versions_with_regex(
 /// in a `exoware-sql` versioned primary-key family with a fixed-width entity key.
 ///
 /// The policy assumes the key layout created by `KvSchema::table_versioned`:
-/// `[entity bytes][u64_be version]` under the table's primary key codec family.
+/// `[entity bytes][u64_be version]` under the table's primary-key family.
 pub fn keep_latest_versions(
     table_prefix: u8,
     entity_key_width: usize,

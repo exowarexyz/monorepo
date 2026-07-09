@@ -63,9 +63,7 @@ impl KvSchema {
         index_specs: Vec<IndexSpec>,
     ) -> Result<Self, String> {
         if self.tables.len() >= MAX_TABLES {
-            return Err(format!(
-                "too many tables for codec layout (max {MAX_TABLES})"
-            ));
+            return Err(format!("too many tables for key layout (max {MAX_TABLES})"));
         }
         let prefix = self.next_prefix;
         let config = KvTableConfig::new(prefix, columns, primary_key_columns, index_specs)?;

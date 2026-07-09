@@ -6,10 +6,9 @@ use exoware_sdk::keys::{Key, Prefix};
 use exoware_sdk::{RangeMode, SerializableReadSession};
 
 use crate::codec::{
-    decode_digest, encode_ordered_update_payload, encode_update_index_value,
-    ensure_encoded_value_size, merkle_size_for_watermark, validate_ordered_key_bytes, NODE_PREFIX,
-    OPERATION_PREFIX, ORDERED_KEY_TERMINATOR_LEN, PRESENCE_PREFIX, UPDATE_PREFIX,
-    UPDATE_VERSION_LEN, WATERMARK_PREFIX,
+    decode_digest, decode_location_bytes, encode_update_index_value, encode_update_key,
+    ensure_encoded_value_size, merkle_size_for_watermark, NODE_PREFIX, OPERATION_PREFIX,
+    PRESENCE_PREFIX, WATERMARK_PREFIX,
 };
 use crate::error::QmdbError;
 
@@ -45,12 +44,14 @@ pub(crate) fn auth_namespace_bounds(
     (start, end)
 }
 
+/// Strip `prefix` from `key`, verify the namespace tag, and return the
+/// stripped payload (tag byte included).
 pub(crate) fn ensure_auth_namespace(
     prefix: &Prefix,
     namespace: AuthenticatedBackendNamespace,
     key: &Key,
     label: &str,
-) -> Result<(), QmdbError> {
+) -> Result<Key, QmdbError> {
     let payload = prefix
         .strip(key)
         .map_err(|_| QmdbError::CorruptData(format!("{label} key prefix mismatch")))?;
@@ -63,7 +64,7 @@ pub(crate) fn ensure_auth_namespace(
             namespace.tag()
         )));
     }
-    Ok(())
+    Ok(payload)
 }
 
 /// Build a `[namespace tag] ++ 8-byte big-endian value` auth-family key.
@@ -104,46 +105,13 @@ pub(crate) fn encode_auth_presence_key<F: Family>(
     encode_auth_namespaced_key(&PRESENCE_PREFIX, namespace.tag(), location.as_u64())
 }
 
-pub(crate) fn encode_auth_immutable_update_key<F: Family>(
-    raw_key: &[u8],
-    location: Location<F>,
-) -> Result<Key, QmdbError> {
-    let mut payload = encode_ordered_update_payload(&UPDATE_PREFIX, raw_key, UPDATE_VERSION_LEN)?;
-    payload.extend_from_slice(&location.as_u64().to_be_bytes());
-    Ok(UPDATE_PREFIX
-        .encode(&payload)
-        .expect("authenticated immutable update key length should fit"))
-}
-
-pub(crate) fn decode_auth_immutable_update_location<F: Family>(
-    key: &Key,
-) -> Result<Location<F>, QmdbError> {
-    let payload = UPDATE_PREFIX.strip(key).map_err(|_| {
-        QmdbError::CorruptData("authenticated immutable update key prefix mismatch".to_string())
-    })?;
-    if payload.len() < ORDERED_KEY_TERMINATOR_LEN + UPDATE_VERSION_LEN {
-        return Err(QmdbError::CorruptData(
-            "authenticated immutable update payload shorter than minimum layout".to_string(),
-        ));
-    }
-    let ordered_len = payload.len() - UPDATE_VERSION_LEN;
-    validate_ordered_key_bytes(
-        &payload[..ordered_len],
-        "authenticated immutable update key",
-    )?;
-    let bytes: [u8; 8] = payload[ordered_len..]
-        .try_into()
-        .expect("authenticated immutable update location is exactly 8 bytes");
-    Ok(Location::new(u64::from_be_bytes(bytes)))
-}
-
 pub(crate) async fn load_latest_auth_immutable_update_row<F: Family>(
     session: &SerializableReadSession,
     watermark: Location<F>,
     key: &[u8],
 ) -> Result<Option<(Key, Vec<u8>)>, QmdbError> {
-    let start = encode_auth_immutable_update_key(key, Location::<F>::new(0))?;
-    let end = encode_auth_immutable_update_key(key, watermark)?;
+    let start = encode_update_key(key, Location::<F>::new(0))?;
+    let end = encode_update_key(key, watermark)?;
     let rows = session
         .range_with_mode(&start, &end, 1, RangeMode::Reverse)
         .await?;
@@ -271,7 +239,7 @@ where
         if let ImmutableOperation::Set(key, _) = operation {
             keyed_operation_count += 1;
             aux_rows.push((
-                encode_auth_immutable_update_key(key.as_ref(), location)?,
+                encode_update_key(key.as_ref(), location)?,
                 encode_update_index_value(true),
             ));
         }
@@ -414,17 +382,11 @@ fn decode_auth_location_field<F: Family>(
     key: &Key,
     label: &str,
 ) -> Result<Location<F>, QmdbError> {
-    ensure_auth_namespace(prefix, namespace, key, label)?;
-    let payload = prefix
-        .strip(key)
-        .map_err(|_| QmdbError::CorruptData(format!("{label} key prefix mismatch")))?;
-    let bytes: [u8; 8] = payload
-        .get(AUTH_NAMESPACE_LEN..AUTH_NAMESPACE_LEN + 8)
-        .and_then(|slice| slice.try_into().ok())
-        .ok_or_else(|| {
-            QmdbError::CorruptData(format!("cannot decode {label} location: short key"))
-        })?;
-    Ok(Location::new(u64::from_be_bytes(bytes)))
+    let payload = ensure_auth_namespace(prefix, namespace, key, label)?;
+    Ok(Location::new(decode_location_bytes(
+        &payload[AUTH_NAMESPACE_LEN..],
+        format_args!("{label} location"),
+    )?))
 }
 
 pub(crate) fn decode_auth_operation_location<F: Family>(
@@ -477,9 +439,8 @@ mod tests {
 
         assert_eq!(prepared.keyed_operation_count, 1);
 
-        let update_key =
-            encode_auth_immutable_update_key(key.as_ref(), Location::<mmr::Family>::new(0))
-                .expect("encode update key");
+        let update_key = encode_update_key(key.as_ref(), Location::<mmr::Family>::new(0))
+            .expect("encode update key");
         let (_, row_value) = prepared
             .aux_rows
             .iter()

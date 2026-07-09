@@ -1,11 +1,10 @@
-use bytes::Bytes;
 use exoware_sdk::kv_codec::Utf8;
 use exoware_sdk::prune_policy::{
     GroupBy, KeysScope, OrderBy, OrderEncoding, PolicyScope, PrunePolicy, RetainPolicy,
 };
 use exoware_sdk::selector::Selector;
 
-use crate::codec::UPDATE_FAMILY;
+use crate::codec::UPDATE_PREFIX;
 
 fn update_payload_regex() -> Utf8 {
     Utf8::from("(?s-u)^(?P<logical>(?:\\x00\\xFF|[^\\x00])*)\\x00\\x00(?P<version>.{8})$")
@@ -14,7 +13,7 @@ fn update_payload_regex() -> Utf8 {
 fn base_keys_scope() -> KeysScope {
     KeysScope {
         selector: Selector {
-            prefix: Bytes::copy_from_slice(&[UPDATE_FAMILY]),
+            prefix: UPDATE_PREFIX.as_bytes().clone(),
             payload_regex: update_payload_regex(),
         },
         group_by: GroupBy {
