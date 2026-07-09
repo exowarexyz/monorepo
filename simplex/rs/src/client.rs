@@ -179,7 +179,7 @@ impl SimplexClient {
         }
         let prefix = self.client.key_prefix();
         for entry in prepared.entries() {
-            batch.push(&prefix, &entry.key, entry.value.clone())?;
+            batch.push(prefix, &entry.key, entry.value.clone())?;
         }
         Ok(())
     }

@@ -30,18 +30,10 @@ pub(crate) fn auth_namespace_bounds(
     prefix: &Prefix,
     namespace: AuthenticatedBackendNamespace,
 ) -> (Key, Key) {
-    let tail_len = 8usize;
-    let mut start_payload = vec![0u8; AUTH_NAMESPACE_LEN + tail_len];
-    start_payload[0] = namespace.tag();
-    let mut end_payload = vec![0xFFu8; AUTH_NAMESPACE_LEN + tail_len];
-    end_payload[0] = namespace.tag();
-    let start = prefix
-        .encode(&start_payload)
-        .expect("authenticated namespace start key length should fit");
-    let end = prefix
-        .encode(&end_payload)
-        .expect("authenticated namespace end key length should fit");
-    (start, end)
+    (
+        encode_auth_namespaced_key(prefix, namespace.tag(), 0),
+        encode_auth_namespaced_key(prefix, namespace.tag(), u64::MAX),
+    )
 }
 
 /// Strip `prefix` from `key`, verify the namespace tag, and return the

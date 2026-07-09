@@ -79,7 +79,8 @@ export class StoreKeyPrefix {
                 `store key prefix length ${prefix.length} exceeds ${MAX_KEY_LEN}`,
             );
         }
-        this.prefix = prefix;
+        // Copy so the namespace cannot alias a caller-owned mutable buffer.
+        this.prefix = prefix.slice();
     }
 
     maxLogicalKeyLen(): number {
@@ -103,7 +104,8 @@ export class StoreKeyPrefix {
         if (!this.matches(key)) {
             throw new RangeError('key does not belong to this store prefix');
         }
-        return key.subarray(this.prefix.length);
+        // Copy so decoded keys do not alias the shared transport frame.
+        return key.slice(this.prefix.length);
     }
 
     matches(key: Uint8Array): boolean {

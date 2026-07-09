@@ -229,7 +229,9 @@ pub(crate) fn encode_update_key<F: Family>(
     Ok(key.freeze())
 }
 
-pub(crate) fn decode_update_location<F: Family>(key: &Key) -> Result<Location<F>, QmdbError> {
+/// Strip the update-family prefix and split the payload at the fixed-width
+/// location suffix, returning the payload plus the ordered-key region length.
+fn split_update_payload(key: &Key) -> Result<(Key, usize), QmdbError> {
     let payload = UPDATE_PREFIX
         .strip(key)
         .map_err(|_| QmdbError::CorruptData("update key prefix mismatch".to_string()))?;
@@ -239,6 +241,11 @@ pub(crate) fn decode_update_location<F: Family>(key: &Key) -> Result<Location<F>
         ));
     }
     let ordered_len = payload.len() - UPDATE_VERSION_LEN;
+    Ok((payload, ordered_len))
+}
+
+pub(crate) fn decode_update_location<F: Family>(key: &Key) -> Result<Location<F>, QmdbError> {
+    let (payload, ordered_len) = split_update_payload(key)?;
     validate_ordered_key_bytes(&payload[..ordered_len], "update key")?;
     Ok(Location::new(decode_location_bytes(
         &payload[ordered_len..],
@@ -247,15 +254,7 @@ pub(crate) fn decode_update_location<F: Family>(key: &Key) -> Result<Location<F>
 }
 
 pub(crate) fn decode_update_raw_key(key: &Key) -> Result<Vec<u8>, QmdbError> {
-    let payload = UPDATE_PREFIX
-        .strip(key)
-        .map_err(|_| QmdbError::CorruptData("update key prefix mismatch".to_string()))?;
-    if payload.len() < ORDERED_KEY_TERMINATOR_LEN + UPDATE_VERSION_LEN {
-        return Err(QmdbError::CorruptData(
-            "update key payload shorter than minimum layout".to_string(),
-        ));
-    }
-    let ordered_len = payload.len() - UPDATE_VERSION_LEN;
+    let (payload, ordered_len) = split_update_payload(key)?;
     decode_ordered_key_bytes(&payload[..ordered_len])
 }
 

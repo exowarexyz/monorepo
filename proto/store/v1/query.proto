@@ -52,7 +52,7 @@ enum KvFieldKind {
 // Reference to a typed field inside a stored key or value. Used by KvExpr
 // and KvPredicateCheck to locate the data to evaluate.
 message KvFieldRef {
-  // A field extracted from the key bytes at a fixed bit offset.
+  // A field extracted from the key bytes at a fixed byte offset.
   message KeyField {
     // Byte offset into the key payload where this field starts.
     uint32 byte_offset = 1;

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use datafusion::arrow::datatypes::i256;
 use datafusion::common::{DataFusionError, Result as DataFusionResult, ScalarValue};
 use datafusion::logical_expr::{Expr, Operator};
-use exoware_sdk::keys::Key;
+use exoware_sdk::keys::{Key, Prefix};
 use exoware_sdk::kv_codec::{interleave_ordered_key_fields, StoredValue};
 
 use crate::codec::*;
@@ -1487,43 +1487,7 @@ impl QueryPredicate {
             }
         }
 
-        for (&pk_idx, &pk_kind) in model
-            .primary_key_indices
-            .iter()
-            .zip(model.primary_key_kinds.iter())
-        {
-            match pk_kind {
-                ColumnKind::Int64 => {
-                    let (pk_min, pk_max) = self.int_bounds(pk_idx);
-                    let pk_bound = if upper {
-                        pk_max.unwrap_or(i64::MAX)
-                    } else {
-                        pk_min.unwrap_or(i64::MIN)
-                    };
-                    key.extend_from_slice(&encode_i64_ordered(pk_bound));
-                }
-                ColumnKind::UInt64 => {
-                    let (lower, upper_bound) = self.uint64_bounds(pk_idx);
-                    let pk_bound = if upper { upper_bound } else { lower };
-                    key.extend_from_slice(&pk_bound.to_be_bytes());
-                }
-                // A Utf8 primary key is variable width: its floor is a bare
-                // terminator (a zero-filled width-estimate slot would sort
-                // above a row whose key string is empty), and a single 0xFF
-                // byte tops every escaped string encoding.
-                ColumnKind::Utf8 => key.push(if upper { 0xFF } else { STRING_KEY_TERMINATOR }),
-                _ => {
-                    let w = pk_kind.key_width();
-                    key.resize(key.len() + w, if upper { 0xFF } else { 0x00 });
-                }
-            }
-        }
-        if upper && key.len() < prefix.max_payload_len() {
-            key.resize(prefix.max_payload_len(), 0xFF);
-        }
-        prefix
-            .encode(&key)
-            .map_err(|e| format!("failed to encode index bound key: {e}"))
+        self.finish_index_bound_key(model, prefix, key, upper)
     }
 
     pub(crate) fn encode_zorder_index_bound_key(
@@ -1551,6 +1515,20 @@ impl QueryPredicate {
         let interleaved = interleave_ordered_key_fields(&encoded_fields);
         key.extend_from_slice(&interleaved);
         debug_assert_eq!(key.len(), spec.key_columns_width);
+        self.finish_index_bound_key(model, prefix, key, upper)
+    }
+
+    /// Append the primary-key suffix bounds to a partially built index-bound
+    /// payload, pad an upper bound to full capacity with 0xFF, and encode the
+    /// finished key. Shared by the lexicographic and z-order bound encoders so
+    /// the pk-suffix layout cannot drift between them.
+    fn finish_index_bound_key(
+        &self,
+        model: &TableModel,
+        prefix: &Prefix,
+        mut key: Vec<u8>,
+        upper: bool,
+    ) -> Result<Key, String> {
         for (&pk_idx, &pk_kind) in model
             .primary_key_indices
             .iter()

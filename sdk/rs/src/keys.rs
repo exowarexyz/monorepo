@@ -66,8 +66,8 @@ impl Prefix {
     }
 
     /// Const constructor for static family prefixes, letting callers keep
-    /// `const FAMILY: Prefix`. Fails to compile if `prefix` is longer than
-    /// [`MAX_KEY_LEN`].
+    /// `const FAMILY: Prefix`. Panics when `prefix` is longer than
+    /// [`MAX_KEY_LEN`]; in a const context the panic surfaces at compile time.
     pub const fn from_static(prefix: &'static [u8]) -> Self {
         assert!(prefix.len() <= MAX_KEY_LEN, "prefix exceeds MAX_KEY_LEN");
         Self(Bytes::from_static(prefix))

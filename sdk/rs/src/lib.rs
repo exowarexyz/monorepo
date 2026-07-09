@@ -317,8 +317,8 @@ impl PrefixedStoreClient {
     }
 
     /// The configured key prefix.
-    pub fn key_prefix(&self) -> StoreKeyPrefix {
-        self.prefix.clone()
+    pub fn key_prefix(&self) -> &StoreKeyPrefix {
+        &self.prefix
     }
 
     /// Borrow the underlying physical transport. Operations performed directly
@@ -3035,7 +3035,7 @@ mod tests {
         let base = StoreClient::new("http://localhost:8090");
         let prefix = StoreKeyPrefix::new(vec![0]).unwrap();
         let client = base.prefixed(prefix.clone());
-        assert_eq!(client.key_prefix(), prefix);
+        assert_eq!(client.key_prefix(), &prefix);
         // The logical client encodes through its prefix.
         let logical = Bytes::from_static(b"row");
         assert_eq!(
@@ -3215,8 +3215,8 @@ mod tests {
         let key_b = Bytes::from_static(b"b");
 
         let mut batch = StoreWriteBatch::new();
-        batch.push(&a.key_prefix(), &key_a, b"va").unwrap();
-        batch.push(&b.key_prefix(), &key_b, b"vb").unwrap();
+        batch.push(a.key_prefix(), &key_a, b"va").unwrap();
+        batch.push(b.key_prefix(), &key_b, b"vb").unwrap();
 
         assert_eq!(
             batch.entries[0].0,

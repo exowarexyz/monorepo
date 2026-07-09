@@ -17,6 +17,25 @@ function parseOptionalBigInt(value: string) {
   return BigInt(trimmed);
 }
 
+const textEncoder = new TextEncoder();
+
+// Store keys are raw bytes and many families use control bytes a text input
+// cannot express, so a `0x` prefix switches the input to hex.
+function parsePrefixInput(input: string): Uint8Array {
+  if (input.startsWith('0x') || input.startsWith('0X')) {
+    const hex = input.slice(2);
+    if (hex.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(hex)) {
+      throw new Error('Hex prefix must be an even number of hex digits after 0x');
+    }
+    const out = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < out.length; i++) {
+      out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    }
+    return out;
+  }
+  return textEncoder.encode(input);
+}
+
 function renderBatch(batch: StoreBatch) {
   return (
     <div className="result fade-in">
@@ -60,7 +79,6 @@ export function LogPanel({
   const [isGettingBatch, setIsGettingBatch] = useState(false);
   const [isSubscribing, setIsSubscribing] = useState(false);
   const streamAbortRef = useRef<AbortController | null>(null);
-  const enc = new TextEncoder();
 
   useEffect(() => {
     return () => {
@@ -104,7 +122,7 @@ export function LogPanel({
     }
 
     try {
-      const prefix = enc.encode(streamPrefix);
+      const prefix = parsePrefixInput(streamPrefix);
 
       if (!streamPayloadRegex.trim()) {
         throw new Error('Payload regex is required');
@@ -223,7 +241,7 @@ export function LogPanel({
             <input
               id="log-stream-prefix"
               type="text"
-              placeholder="e.g. orders/"
+              placeholder="e.g. orders/ or 0x01 for binary"
               value={streamPrefix}
               onChange={(event) => setStreamPrefix(event.target.value)}
             />
