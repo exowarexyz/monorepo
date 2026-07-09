@@ -358,10 +358,10 @@ pub(crate) fn encode_primary_key_bound(
         // Upper bound: pad the encoded fields with 0xFF out to the family's
         // payload capacity so the bound is `prefix ++ fields ++ 0xFF-to-MAX`.
         payload.resize(prefix.max_payload_len().max(payload.len()), 0xFF);
-    } else {
-        // Lower bound: pad with 0x00 to the fixed primary-key width.
-        payload.resize(model.primary_key_width.max(payload.len()), 0x00);
     }
+    // Lower bound: exactly the encoded prefix. Padding to the fixed
+    // primary-key width would sort the bound above variable-width stored keys
+    // that encode shorter (e.g. a Utf8 pk below the reserved slot width).
     prefix
         .encode(&payload)
         .map_err(|e| format!("failed to encode primary key bound: {e}"))

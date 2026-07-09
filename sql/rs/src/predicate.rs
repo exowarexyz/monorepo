@@ -9,22 +9,6 @@ use exoware_sdk::kv_codec::{interleave_ordered_key_fields, StoredValue};
 use crate::codec::*;
 use crate::types::*;
 
-/// Reserve `len` bytes at `offset` in a pre-sized index-bound payload,
-/// erroring instead of panicking if the slot cannot hold them.
-fn index_bound_slice(dst: &mut [u8], offset: usize, len: usize) -> Result<&mut [u8], String> {
-    let end = offset
-        .checked_add(len)
-        .filter(|end| *end <= dst.len())
-        .ok_or_else(|| "index bound field exceeds payload capacity".to_string())?;
-    Ok(&mut dst[offset..end])
-}
-
-/// Copy `src` into a pre-sized index-bound payload at `offset`.
-fn write_index_bound_bytes(dst: &mut [u8], offset: usize, src: &[u8]) -> Result<(), String> {
-    index_bound_slice(dst, offset, src.len())?.copy_from_slice(src);
-    Ok(())
-}
-
 #[derive(Debug, Clone)]
 pub(crate) enum PredicateConstraint {
     StringEq(String),
@@ -1284,13 +1268,14 @@ impl QueryPredicate {
         upper: bool,
     ) -> Result<Key, String> {
         let prefix = &spec.prefix;
-        let payload_len = if upper {
-            prefix.max_payload_len()
-        } else {
-            spec.key_columns_width + model.primary_key_width
-        };
-        let mut key = vec![0u8; payload_len];
-        let mut offset = 0usize;
+        // Bounds are appended field by field, mirroring how
+        // encode_secondary_index_key lays rows out; prefix.encode enforces the
+        // only real limit (MAX_KEY_LEN) at the end. Pre-sizing from schema
+        // width estimates breaks on Utf8 fields, whose constraint encodings
+        // are wider or narrower than the estimate: wider overflowed the slot,
+        // and narrower left zero padding that sorted the lower bound above
+        // rows sitting exactly on it.
+        let mut key = Vec::with_capacity(prefix.max_payload_len());
         for (idx, col_idx) in spec.key_columns.iter().copied().enumerate() {
             let col = model.column(col_idx);
             let use_constraint = idx < constrained_prefix_len;
@@ -1307,8 +1292,7 @@ impl QueryPredicate {
                     } else {
                         vec![STRING_KEY_TERMINATOR]
                     };
-                    write_index_bound_bytes(&mut key, offset, &bytes)?;
-                    offset += bytes.len();
+                    key.extend_from_slice(&bytes);
                 }
                 ColumnKind::Boolean => {
                     let value = if use_constraint {
@@ -1320,8 +1304,7 @@ impl QueryPredicate {
                     } else {
                         upper
                     };
-                    write_index_bound_bytes(&mut key, offset, &[u8::from(value)])?;
-                    offset += 1;
+                    key.push(u8::from(value));
                 }
                 ColumnKind::Int64 => {
                     let value = if use_constraint {
@@ -1340,8 +1323,7 @@ impl QueryPredicate {
                     } else {
                         i64::MIN
                     };
-                    write_index_bound_bytes(&mut key, offset, &encode_i64_ordered(value))?;
-                    offset += 8;
+                    key.extend_from_slice(&encode_i64_ordered(value));
                 }
                 ColumnKind::Float64 => {
                     let value = if use_constraint {
@@ -1360,8 +1342,7 @@ impl QueryPredicate {
                     } else {
                         f64::NEG_INFINITY
                     };
-                    write_index_bound_bytes(&mut key, offset, &encode_f64_ordered(value))?;
-                    offset += 8;
+                    key.extend_from_slice(&encode_f64_ordered(value));
                 }
                 ColumnKind::Date32 => {
                     let raw = if use_constraint {
@@ -1381,8 +1362,7 @@ impl QueryPredicate {
                         i32::MIN as i64
                     };
                     let value = raw.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-                    write_index_bound_bytes(&mut key, offset, &encode_i32_ordered(value))?;
-                    offset += 4;
+                    key.extend_from_slice(&encode_i32_ordered(value));
                 }
                 ColumnKind::Date64 => {
                     let value = if use_constraint {
@@ -1401,8 +1381,7 @@ impl QueryPredicate {
                     } else {
                         i64::MIN
                     };
-                    write_index_bound_bytes(&mut key, offset, &encode_i64_ordered(value))?;
-                    offset += 8;
+                    key.extend_from_slice(&encode_i64_ordered(value));
                 }
                 ColumnKind::Timestamp => {
                     let value = if use_constraint {
@@ -1421,8 +1400,7 @@ impl QueryPredicate {
                     } else {
                         i64::MIN
                     };
-                    write_index_bound_bytes(&mut key, offset, &encode_i64_ordered(value))?;
-                    offset += 8;
+                    key.extend_from_slice(&encode_i64_ordered(value));
                 }
                 ColumnKind::Decimal128 => {
                     let value = if use_constraint {
@@ -1444,8 +1422,7 @@ impl QueryPredicate {
                     } else {
                         i128::MIN
                     };
-                    write_index_bound_bytes(&mut key, offset, &encode_i128_ordered(value))?;
-                    offset += 16;
+                    key.extend_from_slice(&encode_i128_ordered(value));
                 }
                 ColumnKind::UInt64 => {
                     let value = if use_constraint {
@@ -1460,8 +1437,7 @@ impl QueryPredicate {
                     } else {
                         0
                     };
-                    write_index_bound_bytes(&mut key, offset, &value.to_be_bytes())?;
-                    offset += 8;
+                    key.extend_from_slice(&value.to_be_bytes());
                 }
                 ColumnKind::Decimal256 => {
                     let value = if use_constraint {
@@ -1483,8 +1459,7 @@ impl QueryPredicate {
                     } else {
                         i256::MIN
                     };
-                    write_index_bound_bytes(&mut key, offset, &encode_i256_ordered(value))?;
-                    offset += 32;
+                    key.extend_from_slice(&encode_i256_ordered(value));
                 }
                 ColumnKind::FixedSizeBinary(n) => {
                     if use_constraint {
@@ -1502,11 +1477,11 @@ impl QueryPredicate {
                                 col.name, n
                             ));
                         }
-                        write_index_bound_bytes(&mut key, offset, data)?;
-                    } else if upper {
-                        index_bound_slice(&mut key, offset, n)?.fill(0xFF);
+                        key.extend_from_slice(data);
+                        key.resize(key.len() + (n - data.len()), 0x00);
+                    } else {
+                        key.resize(key.len() + n, if upper { 0xFF } else { 0x00 });
                     }
-                    offset += n;
                 }
                 ColumnKind::List(_) => unreachable!("list columns cannot be indexed"),
             }
@@ -1525,27 +1500,26 @@ impl QueryPredicate {
                     } else {
                         pk_min.unwrap_or(i64::MIN)
                     };
-                    write_index_bound_bytes(&mut key, offset, &encode_i64_ordered(pk_bound))?;
-                    offset += 8;
+                    key.extend_from_slice(&encode_i64_ordered(pk_bound));
                 }
                 ColumnKind::UInt64 => {
                     let (lower, upper_bound) = self.uint64_bounds(pk_idx);
                     let pk_bound = if upper { upper_bound } else { lower };
-                    write_index_bound_bytes(&mut key, offset, &pk_bound.to_be_bytes())?;
-                    offset += 8;
+                    key.extend_from_slice(&pk_bound.to_be_bytes());
                 }
+                // A Utf8 primary key is variable width: its floor is a bare
+                // terminator (a zero-filled width-estimate slot would sort
+                // above a row whose key string is empty), and a single 0xFF
+                // byte tops every escaped string encoding.
+                ColumnKind::Utf8 => key.push(if upper { 0xFF } else { STRING_KEY_TERMINATOR }),
                 _ => {
                     let w = pk_kind.key_width();
-                    if upper {
-                        index_bound_slice(&mut key, offset, w)?.fill(0xFF);
-                    }
-                    offset += w;
+                    key.resize(key.len() + w, if upper { 0xFF } else { 0x00 });
                 }
             }
         }
-        if upper {
-            // offset <= key.len() is guaranteed here (all prior writes/fills are bounds-checked), so this fill-to-end cannot overflow.
-            key[offset..].fill(0xFF);
+        if upper && key.len() < prefix.max_payload_len() {
+            key.resize(prefix.max_payload_len(), 0xFF);
         }
         prefix
             .encode(&key)
@@ -1560,12 +1534,14 @@ impl QueryPredicate {
         upper: bool,
     ) -> Result<Key, String> {
         let prefix = &spec.prefix;
-        let payload_len = if upper {
-            prefix.max_payload_len()
-        } else {
-            spec.key_columns_width + model.primary_key_width
-        };
-        let mut key = vec![0u8; payload_len];
+        // Bounds are appended field by field, mirroring how
+        // encode_secondary_index_key lays rows out; prefix.encode enforces the
+        // only real limit (MAX_KEY_LEN) at the end. Pre-sizing from schema
+        // width estimates breaks on Utf8 fields, whose constraint encodings
+        // are wider or narrower than the estimate: wider overflowed the slot,
+        // and narrower left zero padding that sorted the lower bound above
+        // rows sitting exactly on it.
+        let mut key = Vec::with_capacity(prefix.max_payload_len());
         let mut encoded_fields = Vec::with_capacity(spec.key_columns.len());
         for &col_idx in &spec.key_columns {
             let col = model.column(col_idx);
@@ -1573,10 +1549,8 @@ impl QueryPredicate {
             encoded_fields.push(bytes);
         }
         let interleaved = interleave_ordered_key_fields(&encoded_fields);
-        let mut offset = 0usize;
-        write_index_bound_bytes(&mut key, offset, &interleaved)?;
-        offset += interleaved.len();
-        debug_assert_eq!(offset, spec.key_columns_width);
+        key.extend_from_slice(&interleaved);
+        debug_assert_eq!(key.len(), spec.key_columns_width);
         for (&pk_idx, &pk_kind) in model
             .primary_key_indices
             .iter()
@@ -1590,27 +1564,26 @@ impl QueryPredicate {
                     } else {
                         pk_min.unwrap_or(i64::MIN)
                     };
-                    write_index_bound_bytes(&mut key, offset, &encode_i64_ordered(pk_bound))?;
-                    offset += 8;
+                    key.extend_from_slice(&encode_i64_ordered(pk_bound));
                 }
                 ColumnKind::UInt64 => {
                     let (lower, upper_bound) = self.uint64_bounds(pk_idx);
                     let pk_bound = if upper { upper_bound } else { lower };
-                    write_index_bound_bytes(&mut key, offset, &pk_bound.to_be_bytes())?;
-                    offset += 8;
+                    key.extend_from_slice(&pk_bound.to_be_bytes());
                 }
+                // A Utf8 primary key is variable width: its floor is a bare
+                // terminator (a zero-filled width-estimate slot would sort
+                // above a row whose key string is empty), and a single 0xFF
+                // byte tops every escaped string encoding.
+                ColumnKind::Utf8 => key.push(if upper { 0xFF } else { STRING_KEY_TERMINATOR }),
                 _ => {
                     let w = pk_kind.key_width();
-                    if upper {
-                        index_bound_slice(&mut key, offset, w)?.fill(0xFF);
-                    }
-                    offset += w;
+                    key.resize(key.len() + w, if upper { 0xFF } else { 0x00 });
                 }
             }
         }
-        if upper {
-            // offset <= key.len() is guaranteed here (all prior writes/fills are bounds-checked), so this fill-to-end cannot overflow.
-            key[offset..].fill(0xFF);
+        if upper && key.len() < prefix.max_payload_len() {
+            key.resize(prefix.max_payload_len(), 0xFF);
         }
         prefix
             .encode(&key)

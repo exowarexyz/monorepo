@@ -480,6 +480,20 @@ impl TableModel {
                         spec.name, col_name
                     ));
                 }
+                // Z-order stored keys interleave the actual encoded bytes, but
+                // decode and bound construction assume the reserved fixed key
+                // width, so a variable-width z-order key column silently
+                // matches no rows.
+                if spec.layout == IndexLayout::ZOrder
+                    && self.columns[col_idx].kind.fixed_key_width().is_none()
+                {
+                    return Err(format!(
+                        "index '{}' z-order key column '{}' must have a \
+                         fixed-width kind; variable-width kinds (e.g. Utf8) \
+                         cannot be used in z-order index keys",
+                        spec.name, col_name
+                    ));
+                }
                 key_columns.push(col_idx);
                 key_columns_width += self.columns[col_idx].kind.key_width();
                 if !self.is_pk_column(col_idx) {
