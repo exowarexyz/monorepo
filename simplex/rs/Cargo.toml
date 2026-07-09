@@ -28,7 +28,6 @@ commonware-utils = { workspace = true }
 exoware-sdk = { workspace = true }
 futures = { workspace = true }
 hex = { workspace = true }
-rand = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }

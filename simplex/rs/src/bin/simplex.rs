@@ -18,10 +18,9 @@ use commonware_cryptography::{
 };
 use commonware_math::algebra::Random;
 use commonware_parallel::Sequential;
-use commonware_utils::{ordered::Set, N3f1};
+use commonware_utils::{ordered::Set, N3f1, TestRng};
 use exoware_sdk::{StoreClient, StoreKeyPrefix, StoreWriteBatch};
 use exoware_simplex::{encode_block_data, keys, Finalized, Notarized, SimplexClient};
-use rand::{rngs::StdRng, SeedableRng};
 use tracing::info;
 
 const DEMO_NAMESPACE: &[u8] = b"_EXOWARE_SIMPLEX_DEMO";
@@ -161,7 +160,7 @@ impl CertifiableBlock for DemoBlock {
 }
 
 fn demo_schemes() -> Vec<Scheme> {
-    let mut rng = StdRng::seed_from_u64(DEMO_FIXTURE_SEED);
+    let mut rng = TestRng::new(DEMO_FIXTURE_SEED);
     let private_keys: Vec<_> = (0..DEMO_PARTICIPANTS)
         .map(|_| ed25519::PrivateKey::random(&mut rng))
         .collect();

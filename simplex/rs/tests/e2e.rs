@@ -22,11 +22,10 @@ use commonware_utils::{
     channel::{oneshot, oneshot::Sender as OneshotSender},
     sync::Mutex,
     vec::NonEmptyVec,
-    Acknowledgement as _, NZUsize, NZU16, NZU64,
+    Acknowledgement as _, NZUsize, TestRng, NZU16, NZU64,
 };
 use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreBatchUpload, StoreClient};
 use exoware_simplex::{Finalized, MarshalResolver, Notarized, SimplexClient};
-use rand::{rngs::StdRng, SeedableRng};
 
 const NAMESPACE: &[u8] = b"_EXOWARE_SIMPLEX_TEST";
 
@@ -193,7 +192,7 @@ async fn local_store_client() -> StoreClient {
 }
 
 fn schemes() -> Vec<Scheme> {
-    let mut rng = StdRng::seed_from_u64(7);
+    let mut rng = TestRng::new(7);
     let Fixture { schemes, .. } =
         commonware_consensus::simplex::scheme::ed25519::fixture(&mut rng, NAMESPACE, 4);
     schemes

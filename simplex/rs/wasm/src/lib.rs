@@ -17,7 +17,10 @@ use commonware_cryptography::{
     ed25519, secp256r1, sha256, transcript, Digest, PublicKey,
 };
 use commonware_parallel::Sequential;
-use commonware_utils::ordered::{BiMap, Set};
+use commonware_utils::{
+    ordered::{BiMap, Set},
+    sys_rng,
+};
 use core::hash::Hash;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
@@ -86,7 +89,7 @@ where
     let mut reader = bytes;
     let proof = Notarization::<S, D>::read_cfg(&mut reader, &scheme.certificate_codec_config())
         .map_err(|err| format!("failed to decode notarized artifact: {err}"))?;
-    if !proof.verify(&mut rand::rng(), &scheme, &Sequential) {
+    if !proof.verify(&mut sys_rng(), &scheme, &Sequential) {
         return Err("notarization certificate verification failed".to_string());
     }
     let header = read_header(reader, "notarized artifact")?;
@@ -113,7 +116,7 @@ where
     let mut reader = bytes;
     let proof = Finalization::<S, D>::read_cfg(&mut reader, &scheme.certificate_codec_config())
         .map_err(|err| format!("failed to decode finalized artifact: {err}"))?;
-    if !proof.verify(&mut rand::rng(), &scheme, &Sequential) {
+    if !proof.verify(&mut sys_rng(), &scheme, &Sequential) {
         return Err("finalization certificate verification failed".to_string());
     }
     let header = read_header(reader, "finalized artifact")?;
@@ -400,8 +403,7 @@ mod tests {
         Blake3, Digest, Hasher, Sha256, Signer as _,
     };
     use commonware_math::algebra::Random;
-    use commonware_utils::TryCollect;
-    use rand::{rngs::StdRng, SeedableRng};
+    use commonware_utils::{TestRng, TryCollect};
 
     const DEMO_NAMESPACE: &[u8] = b"_EXOWARE_SIMPLEX_DEMO";
 
@@ -435,7 +437,7 @@ mod tests {
         let seed = header.iter().fold(0u64, |acc, byte| {
             acc.wrapping_mul(257).wrapping_add(u64::from(*byte))
         });
-        let mut rng = StdRng::seed_from_u64(seed);
+        let mut rng = TestRng::new(seed);
         Commitment::random(&mut rng)
     }
 
@@ -526,7 +528,7 @@ mod tests {
     }
 
     fn ed25519_fixture() -> (Vec<simplex_ed25519::Scheme>, Vec<u8>) {
-        let mut rng = StdRng::seed_from_u64(1);
+        let mut rng = TestRng::new(1);
         let (private_keys, participants) = identities(&mut rng);
         let schemes = private_keys
             .into_iter()
@@ -539,7 +541,7 @@ mod tests {
     }
 
     fn secp256r1_fixture() -> (Vec<simplex_secp256r1::Scheme<ed25519::PublicKey>>, Vec<u8>) {
-        let mut rng = StdRng::seed_from_u64(2);
+        let mut rng = TestRng::new(2);
         let (_identity_keys, participants) = identities(&mut rng);
         let secp_private_keys: Vec<_> = (0..participants.len())
             .map(|_| secp256r1::standard::PrivateKey::random(&mut rng))
@@ -570,7 +572,7 @@ mod tests {
 
     fn secp256r1_identity_fixture() -> (Vec<simplex_secp256r1::Scheme<Secp256r1PublicKey>>, Vec<u8>)
     {
-        let mut rng = StdRng::seed_from_u64(6);
+        let mut rng = TestRng::new(6);
         let private_keys: Vec<_> = (0..4)
             .map(|_| secp256r1::standard::PrivateKey::random(&mut rng))
             .collect();
@@ -605,7 +607,7 @@ mod tests {
     where
         V: Variant,
     {
-        let mut rng = StdRng::seed_from_u64(3);
+        let mut rng = TestRng::new(3);
         let (_identity_keys, participants) = identities(&mut rng);
         let bls_private_keys: Vec<_> = (0..participants.len())
             .map(|_| Private::random(&mut rng))
@@ -637,7 +639,7 @@ mod tests {
     where
         V: Variant,
     {
-        let mut rng = StdRng::seed_from_u64(4);
+        let mut rng = TestRng::new(4);
         let fixture: Fixture<_> = threshold_standard::fixture::<V, _>(&mut rng, DEMO_NAMESPACE, 4);
         let material = fixture.schemes[0].identity().encode().to_vec();
         (fixture.schemes, material)
@@ -647,7 +649,7 @@ mod tests {
     where
         V: Variant,
     {
-        let mut rng = StdRng::seed_from_u64(5);
+        let mut rng = TestRng::new(5);
         let fixture: Fixture<_> = threshold_vrf::fixture::<V, _>(&mut rng, DEMO_NAMESPACE, 4);
         let material = fixture.schemes[0].identity().encode().to_vec();
         (fixture.schemes, material)
