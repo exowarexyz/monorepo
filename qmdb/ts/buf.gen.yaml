@@ -14,6 +14,6 @@ inputs:
       - ../../proto/qmdb/v1/operation_log.proto
       - ../../proto/qmdb/v1/current_operation.proto
       - ../../proto/common/v1/kv.proto
-  - module: buf.build/bufbuild/protovalidate
+  - module: buf.build/bufbuild/protovalidate:80ab13bee0bf4272b6161a72bf7034e0
     paths:
       - buf/validate/validate.proto

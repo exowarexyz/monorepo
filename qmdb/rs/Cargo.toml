@@ -48,7 +48,6 @@ commonware-runtime = { workspace = true }
 exoware-simulator = { path = "../../examples/simulator" }
 exoware-server = { workspace = true }
 hex = { workspace = true }
-rand = { workspace = true }
 reqwest = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

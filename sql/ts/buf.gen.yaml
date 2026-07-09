@@ -13,6 +13,6 @@ inputs:
       - ../../proto/sql/v1/query.proto
       - ../../proto/sql/v1/stream.proto
       - ../../proto/sql/v1/service.proto
-  - module: buf.build/bufbuild/protovalidate
+  - module: buf.build/bufbuild/protovalidate:80ab13bee0bf4272b6161a72bf7034e0
     paths:
       - buf/validate/validate.proto
