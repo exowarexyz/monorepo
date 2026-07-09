@@ -9,32 +9,19 @@ use exoware_sdk::kv_codec::{interleave_ordered_key_fields, StoredValue};
 use crate::codec::*;
 use crate::types::*;
 
-/// Copy `src` into a pre-sized index-bound payload at `offset`, erroring
-/// instead of panicking if the reserved slot cannot hold it.
-fn write_index_bound_bytes(dst: &mut [u8], offset: usize, src: &[u8]) -> Result<(), String> {
+/// Reserve `len` bytes at `offset` in a pre-sized index-bound payload,
+/// erroring instead of panicking if the slot cannot hold them.
+fn index_bound_slice(dst: &mut [u8], offset: usize, len: usize) -> Result<&mut [u8], String> {
     let end = offset
-        .checked_add(src.len())
+        .checked_add(len)
         .filter(|end| *end <= dst.len())
         .ok_or_else(|| "index bound field exceeds payload capacity".to_string())?;
-    dst[offset..end].copy_from_slice(src);
-    Ok(())
+    Ok(&mut dst[offset..end])
 }
 
-/// Fill `n` bytes of a pre-sized index-bound payload at `offset` with `value`,
-/// erroring instead of panicking if the reserved slot cannot hold it. Mirrors
-/// [`write_index_bound_bytes`]; restores the error-not-panic contract for the
-/// upper-bound padding fills.
-fn fill_index_bound_bytes(
-    dst: &mut [u8],
-    offset: usize,
-    n: usize,
-    value: u8,
-) -> Result<(), String> {
-    let end = offset
-        .checked_add(n)
-        .filter(|end| *end <= dst.len())
-        .ok_or_else(|| "index bound fill exceeds payload capacity".to_string())?;
-    dst[offset..end].fill(value);
+/// Copy `src` into a pre-sized index-bound payload at `offset`.
+fn write_index_bound_bytes(dst: &mut [u8], offset: usize, src: &[u8]) -> Result<(), String> {
+    index_bound_slice(dst, offset, src.len())?.copy_from_slice(src);
     Ok(())
 }
 
@@ -1517,7 +1504,7 @@ impl QueryPredicate {
                         }
                         write_index_bound_bytes(&mut key, offset, data)?;
                     } else if upper {
-                        fill_index_bound_bytes(&mut key, offset, n, 0xFF)?;
+                        index_bound_slice(&mut key, offset, n)?.fill(0xFF);
                     }
                     offset += n;
                 }
@@ -1550,7 +1537,7 @@ impl QueryPredicate {
                 _ => {
                     let w = pk_kind.key_width();
                     if upper {
-                        fill_index_bound_bytes(&mut key, offset, w, 0xFF)?;
+                        index_bound_slice(&mut key, offset, w)?.fill(0xFF);
                     }
                     offset += w;
                 }
@@ -1615,7 +1602,7 @@ impl QueryPredicate {
                 _ => {
                     let w = pk_kind.key_width();
                     if upper {
-                        fill_index_bound_bytes(&mut key, offset, w, 0xFF)?;
+                        index_bound_slice(&mut key, offset, w)?.fill(0xFF);
                     }
                     offset += w;
                 }

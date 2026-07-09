@@ -362,7 +362,7 @@ impl KvSchema {
             let next_cursor = if last_key >= full_range.end {
                 None
             } else {
-                next_key(&last_key)
+                exoware_sdk::keys::next_key(&last_key)
             };
             if !pending_keys.is_empty() {
                 flush_ingest_batch(&self.client, &mut pending_keys, &mut pending_values).await?;

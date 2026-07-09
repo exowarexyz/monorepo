@@ -74,10 +74,9 @@ pub(crate) fn apply_filter(matchers: &CompiledMatchers, kvs: &[Entry]) -> Vec<En
             continue;
         }
         for matcher in &matchers.keys {
-            if !matcher.prefix.matches(&kv.key) {
+            let Some(payload) = matcher.prefix.strip_slice(&kv.key) else {
                 continue;
-            }
-            let payload = &kv.key[matcher.prefix.as_bytes().len()..];
+            };
             if matcher.regex.is_match(payload) {
                 out.push(kv.clone());
                 continue 'outer;

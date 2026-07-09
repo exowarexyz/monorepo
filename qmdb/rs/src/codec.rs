@@ -1,7 +1,7 @@
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
 use commonware_storage::merkle::{Family, Location, Position};
-use exoware_sdk::keys::{Key, Prefix};
+use exoware_sdk::keys::{Key, KeyMut, Prefix};
 
 use crate::error::QmdbError;
 use crate::MAX_OPERATION_SIZE;
@@ -208,14 +208,13 @@ pub(crate) fn decode_ordered_key_bytes(bytes: &[u8]) -> Result<Vec<u8>, QmdbErro
     Ok(out)
 }
 
-pub(crate) fn encode_ordered_update_payload(
-    prefix: &Prefix,
+pub(crate) fn encode_update_key<F: Family>(
     raw_key: &[u8],
-    fixed_suffix_len: usize,
-) -> Result<Vec<u8>, QmdbError> {
+    location: Location<F>,
+) -> Result<Key, QmdbError> {
     let encoded = encode_ordered_key_bytes(raw_key);
-    let payload_len = encoded.len() + fixed_suffix_len;
-    let max = prefix.max_payload_len();
+    let payload_len = encoded.len() + UPDATE_VERSION_LEN;
+    let max = UPDATE_PREFIX.max_payload_len();
     if payload_len > max {
         return Err(QmdbError::SortableKeyTooLarge {
             raw_len: raw_key.len(),
@@ -223,18 +222,11 @@ pub(crate) fn encode_ordered_update_payload(
             max,
         });
     }
-    Ok(encoded)
-}
-
-pub(crate) fn encode_update_key<F: Family>(
-    raw_key: &[u8],
-    location: Location<F>,
-) -> Result<Key, QmdbError> {
-    let mut payload = encode_ordered_update_payload(&UPDATE_PREFIX, raw_key, UPDATE_VERSION_LEN)?;
-    payload.extend_from_slice(&location.as_u64().to_be_bytes());
-    Ok(UPDATE_PREFIX
-        .encode(&payload)
-        .expect("update key length should fit"))
+    let mut key = KeyMut::with_capacity(UPDATE_PREFIX.len() + payload_len);
+    key.extend_from_slice(UPDATE_PREFIX.as_bytes());
+    key.extend_from_slice(&encoded);
+    key.extend_from_slice(&location.as_u64().to_be_bytes());
+    Ok(key.freeze())
 }
 
 pub(crate) fn decode_update_location<F: Family>(key: &Key) -> Result<Location<F>, QmdbError> {
@@ -248,10 +240,10 @@ pub(crate) fn decode_update_location<F: Family>(key: &Key) -> Result<Location<F>
     }
     let ordered_len = payload.len() - UPDATE_VERSION_LEN;
     validate_ordered_key_bytes(&payload[..ordered_len], "update key")?;
-    let bytes: [u8; 8] = payload[ordered_len..]
-        .try_into()
-        .expect("update location is exactly 8 bytes");
-    Ok(Location::new(u64::from_be_bytes(bytes)))
+    Ok(Location::new(decode_location_bytes(
+        &payload[ordered_len..],
+        "update location",
+    )?))
 }
 
 pub(crate) fn decode_update_raw_key(key: &Key) -> Result<Vec<u8>, QmdbError> {
@@ -298,14 +290,24 @@ pub(crate) fn encode_watermark_key<F: Family>(location: Location<F>) -> Key {
         .expect("watermark key length should fit")
 }
 
-pub(crate) fn decode_watermark_location<F: Family>(key: &Key) -> Result<Location<F>, QmdbError> {
-    let payload = WATERMARK_PREFIX
+/// Strip `prefix` from `key` and decode the payload as a big-endian `u64`
+/// location, labelling both failure modes with `label`.
+fn decode_prefixed_location<F: Family>(
+    prefix: &Prefix,
+    key: &Key,
+    label: &str,
+) -> Result<Location<F>, QmdbError> {
+    let payload = prefix
         .strip(key)
-        .map_err(|_| QmdbError::CorruptData("watermark key prefix mismatch".to_string()))?;
+        .map_err(|_| QmdbError::CorruptData(format!("{label} key prefix mismatch")))?;
     Ok(Location::new(decode_location_bytes(
         &payload,
-        "watermark location",
+        format_args!("{label} location"),
     )?))
+}
+
+pub(crate) fn decode_watermark_location<F: Family>(key: &Key) -> Result<Location<F>, QmdbError> {
+    decode_prefixed_location(&WATERMARK_PREFIX, key, "watermark")
 }
 
 pub(crate) fn encode_operation_key<F: Family>(location: Location<F>) -> Key {
@@ -390,23 +392,11 @@ pub(crate) fn clear_below_floor<F: Family, const N: usize>(
 pub(crate) fn decode_operation_location_key<F: Family>(
     key: &Key,
 ) -> Result<Location<F>, QmdbError> {
-    let payload = OPERATION_PREFIX
-        .strip(key)
-        .map_err(|_| QmdbError::CorruptData("operation key prefix mismatch".to_string()))?;
-    Ok(Location::new(decode_location_bytes(
-        &payload,
-        "operation location",
-    )?))
+    decode_prefixed_location(&OPERATION_PREFIX, key, "operation")
 }
 
 pub(crate) fn decode_presence_location<F: Family>(key: &Key) -> Result<Location<F>, QmdbError> {
-    let payload = PRESENCE_PREFIX
-        .strip(key)
-        .map_err(|_| QmdbError::CorruptData("presence key prefix mismatch".to_string()))?;
-    Ok(Location::new(decode_location_bytes(
-        &payload,
-        "presence location",
-    )?))
+    decode_prefixed_location(&PRESENCE_PREFIX, key, "presence")
 }
 
 #[cfg(test)]

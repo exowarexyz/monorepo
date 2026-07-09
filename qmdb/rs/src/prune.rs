@@ -6,15 +6,13 @@ use exoware_sdk::selector::Selector;
 
 use crate::codec::UPDATE_PREFIX;
 
-fn update_payload_regex() -> Utf8 {
-    Utf8::from("(?s-u)^(?P<logical>(?:\\x00\\xFF|[^\\x00])*)\\x00\\x00(?P<version>.{8})$")
-}
-
 fn base_keys_scope() -> KeysScope {
     KeysScope {
         selector: Selector {
             prefix: UPDATE_PREFIX.as_bytes().clone(),
-            payload_regex: update_payload_regex(),
+            payload_regex: Utf8::from(
+                "(?s-u)^(?P<logical>(?:\\x00\\xFF|[^\\x00])*)\\x00\\x00(?P<version>.{8})$",
+            ),
         },
         group_by: GroupBy {
             capture_groups: vec![Utf8::from("logical")],

@@ -2178,19 +2178,12 @@ fn shift_reduce_request_key_offsets(
 ) -> Result<(), StoreKeyPrefixError> {
     // A byte-aligned store prefix shifts every key field past its bytes.
     // `KeyField` offsets are byte-granular, so they shift by the whole prefix
-    // length in bytes; `ZOrderKey` offsets remain bit-granular, so they shift by
-    // `prefix_len * 8` bits.
-    let shift_bytes =
-        u16::try_from(prefix_len).map_err(|_| StoreKeyPrefixError::KeyOffsetOverflow {
-            offset: 0,
-            shift: u16::MAX,
-        })?;
-    let shift_bits = u16::try_from(prefix_len.saturating_mul(8)).map_err(|_| {
-        StoreKeyPrefixError::KeyOffsetOverflow {
-            offset: 0,
-            shift: u16::MAX,
-        }
-    })?;
+    // length in bytes; `ZOrderKey` offsets remain bit-granular, so they shift
+    // by `prefix_len * 8` bits. `prefix_len` comes from a validated
+    // `StoreKeyPrefix`, so both shifts fit u16 (`MAX_KEY_LEN * 8` = 2032).
+    debug_assert!(prefix_len <= MAX_KEY_LEN);
+    let shift_bytes = prefix_len as u16;
+    let shift_bits = shift_bytes * 8;
     for reducer in &mut request.reducers {
         if let Some(expr) = &mut reducer.expr {
             shift_expr_key_offsets(shift_bytes, shift_bits, expr)?;
