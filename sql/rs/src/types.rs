@@ -2,20 +2,33 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::{i256, DataType, Field, Schema, SchemaRef, TimeUnit};
-use exoware_sdk::keys::{Key, KeyCodec};
+use exoware_sdk::keys::{Key, Prefix};
 use exoware_sdk::PrefixedStoreClient;
 
-use crate::codec::{primary_key_codec, secondary_index_codec};
+use crate::codec::{primary_key_prefix, secondary_index_prefix};
 
-pub(crate) const TABLE_PREFIX_BITS: u8 = 4;
-pub(crate) const KEY_KIND_BITS: u8 = 1;
-pub(crate) const PRIMARY_RESERVED_BITS: u8 = TABLE_PREFIX_BITS + KEY_KIND_BITS;
-pub(crate) const INDEX_SLOT_BITS: u8 = 4;
-pub(crate) const INDEX_FAMILY_BITS: u8 = TABLE_PREFIX_BITS + KEY_KIND_BITS + INDEX_SLOT_BITS;
-pub(crate) const PRIMARY_KEY_BIT_OFFSET: usize = PRIMARY_RESERVED_BITS as usize;
-pub(crate) const INDEX_KEY_BIT_OFFSET: usize = INDEX_FAMILY_BITS as usize;
-pub(crate) const MAX_TABLES: usize = 1usize << TABLE_PREFIX_BITS;
-pub(crate) const MAX_INDEX_SPECS: usize = (1usize << INDEX_SLOT_BITS) - 1;
+/// Every table/index family is named by a single packed byte
+/// `(table_prefix << 4) | discriminator`: the high nibble is the table prefix
+/// and the low nibble is the family discriminator. Discriminator `0x0` is the
+/// primary-row family and `0x1..=0xF` names secondary index slot
+/// `discriminator - 1`. All families of table `t` occupy the contiguous byte
+/// range `[t << 4, (t << 4) | 0xF]`; these ranges are pairwise disjoint within
+/// and across tables, and the primary discriminator (`0`) sorts below every
+/// index family of the same table.
+pub(crate) const FAMILY_PREFIX_LEN: usize = 1;
+/// Discriminator nibble for a table's primary-row family.
+pub(crate) const PRIMARY_FAMILY_DISCRIMINATOR: u8 = 0x00;
+/// Byte offset of the first payload byte within a primary/index key, measured
+/// from the store-stripped key (i.e. after the family prefix). Both families
+/// share the same one-byte prefix, so both offsets are `FAMILY_PREFIX_LEN`.
+pub(crate) const PRIMARY_KEY_BYTE_OFFSET: usize = FAMILY_PREFIX_LEN;
+pub(crate) const INDEX_KEY_BYTE_OFFSET: usize = FAMILY_PREFIX_LEN;
+/// Capacity caps for the packed one-byte family prefix. The table prefix
+/// occupies the high nibble and the discriminator the low nibble, giving up to
+/// 16 tables and 15 secondary index slots (discriminator `0x0` is reserved for
+/// the primary family).
+pub(crate) const MAX_TABLES: usize = 16;
+pub(crate) const MAX_INDEX_SPECS: usize = 15;
 pub(crate) const STRING_KEY_INLINE_LIMIT: usize = 15;
 pub(crate) const STRING_KEY_TERMINATOR: u8 = 0x00;
 pub(crate) const STRING_KEY_ESCAPE_PREFIX: u8 = 0x01;
@@ -267,7 +280,7 @@ impl KvTableConfig {
     ) -> Result<Self, String> {
         if usize::from(table_prefix) >= MAX_TABLES {
             return Err(format!(
-                "table prefix {table_prefix} exceeds max {} for codec layout",
+                "table prefix {table_prefix} exceeds max {} for key layout",
                 MAX_TABLES - 1
             ));
         }
@@ -309,9 +322,9 @@ impl KvTableConfig {
             }
             total_pk_width += kind.key_width();
         }
-        if total_pk_width > primary_key_codec(table_prefix)?.payload_capacity_bytes() {
+        if total_pk_width > primary_key_prefix(table_prefix)?.max_payload_len() {
             return Err(format!(
-                "composite primary key is too wide ({total_pk_width} bytes) for codec payload"
+                "composite primary key is too wide ({total_pk_width} bytes) for key payload"
             ));
         }
 
@@ -352,7 +365,7 @@ pub(crate) struct ResolvedColumn {
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedIndexSpec {
     pub(crate) id: u8,
-    pub(crate) codec: KeyCodec,
+    pub(crate) prefix: Prefix,
     pub(crate) name: String,
     pub(crate) layout: IndexLayout,
     pub(crate) key_columns: Vec<usize>,
@@ -363,7 +376,7 @@ pub(crate) struct ResolvedIndexSpec {
 #[derive(Debug, Clone)]
 pub(crate) struct TableModel {
     pub(crate) table_prefix: u8,
-    pub(crate) primary_key_codec: KeyCodec,
+    pub(crate) primary_key_prefix: Prefix,
     pub(crate) schema: SchemaRef,
     pub(crate) columns: Vec<ResolvedColumn>,
     pub(crate) columns_by_name: HashMap<String, usize>,
@@ -403,7 +416,7 @@ impl TableModel {
 
         Ok(Self {
             table_prefix: config.table_prefix,
-            primary_key_codec: primary_key_codec(config.table_prefix)?,
+            primary_key_prefix: primary_key_prefix(config.table_prefix)?,
             schema,
             columns,
             columns_by_name,
@@ -437,11 +450,11 @@ impl TableModel {
             }
 
             let id = u8::try_from(idx + 1).map_err(|_| {
-                format!("too many index specs for codec layout (max {MAX_INDEX_SPECS})")
+                format!("too many index specs for key layout (max {MAX_INDEX_SPECS})")
             })?;
             if usize::from(id) > MAX_INDEX_SPECS {
                 return Err(format!(
-                    "too many index specs for codec layout (max {MAX_INDEX_SPECS})"
+                    "too many index specs for key layout (max {MAX_INDEX_SPECS})"
                 ));
             }
             let mut key_columns = Vec::with_capacity(spec.key_columns.len());
@@ -464,6 +477,20 @@ impl TableModel {
                     return Err(format!(
                         "index '{}' references nullable column '{}'; \
                          nullable columns cannot be used in index keys",
+                        spec.name, col_name
+                    ));
+                }
+                // Z-order stored keys interleave the actual encoded bytes, but
+                // decode and bound construction assume the reserved fixed key
+                // width, so a variable-width z-order key column silently
+                // matches no rows.
+                if spec.layout == IndexLayout::ZOrder
+                    && self.columns[col_idx].kind.fixed_key_width().is_none()
+                {
+                    return Err(format!(
+                        "index '{}' z-order key column '{}' must have a \
+                         fixed-width kind; variable-width kinds (e.g. Utf8) \
+                         cannot be used in z-order index keys",
                         spec.name, col_name
                     ));
                 }
@@ -492,17 +519,17 @@ impl TableModel {
                     value_column_mask[col_idx] = true;
                 }
             }
-            let codec = secondary_index_codec(self.table_prefix, id)?;
-            if key_columns_width + self.primary_key_width > codec.payload_capacity_bytes() {
+            let prefix = secondary_index_prefix(self.table_prefix, id)?;
+            if key_columns_width + self.primary_key_width > prefix.max_payload_len() {
                 return Err(format!(
-                    "index '{}' key layout too wide for codec payload",
+                    "index '{}' key layout too wide for key payload",
                     spec.name
                 ));
             }
 
             out.push(ResolvedIndexSpec {
                 id,
-                codec,
+                prefix,
                 name: spec.name.clone(),
                 layout: spec.layout,
                 key_columns,

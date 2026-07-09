@@ -19,7 +19,7 @@ use crate::codec::{
     decode_watermark_location, encode_chunk_key, encode_current_meta_key, encode_grafted_node_key,
     encode_node_key, encode_operation_key, encode_ops_root_witness_key, encode_presence_key,
     encode_update_index_value, encode_update_key, encode_watermark_key, ensure_encoded_value_size,
-    merkle_size_for_watermark, CurrentBoundaryMetadata, WATERMARK_CODEC,
+    merkle_size_for_watermark, CurrentBoundaryMetadata, WATERMARK_PREFIX,
 };
 use crate::error::QmdbError;
 use crate::VersionedValue;
@@ -106,7 +106,7 @@ impl<'a, F: Family, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, F
         &self,
         session: &SerializableReadSession,
     ) -> Result<Option<Location<F>>, QmdbError> {
-        let (start, end) = WATERMARK_CODEC.prefix_bounds();
+        let (start, end) = WATERMARK_PREFIX.bounds();
         let rows = session
             .range_with_mode(&start, &end, 1, RangeMode::Reverse)
             .await?;

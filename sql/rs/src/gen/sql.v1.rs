@@ -7262,7 +7262,7 @@ pub const SERVICE_TABLES_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
 #[allow(clippy::type_complexity)]
 pub trait Service: Send + Sync + 'static {
     /// Re-run a SQL WHERE predicate against every incoming batch that touches
-    /// `table`'s primary-key codec family. Emits one `SubscribeResponse` per
+    /// `table`'s primary-key family. Emits one `SubscribeResponse` per
     /// matched batch containing just the rows that satisfied the predicate.
     fn subscribe(
         &self,

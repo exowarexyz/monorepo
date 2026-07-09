@@ -16,7 +16,7 @@ pub mod proto;
 pub mod prune_policy;
 pub mod selector;
 pub mod stream_filter;
-pub use keys::{Key, KeyCodec, KeyCodecError, KeyMut, KeyValidationError, Value, MAX_KEY_LEN};
+pub use keys::{Key, KeyMut, KeyValidationError, Prefix, PrefixError, Value, MAX_KEY_LEN};
 pub use proto::*;
 extern crate self as exoware_proto;
 
@@ -162,7 +162,7 @@ pub enum ClientError {
     #[error("RPC error ({0})")]
     Rpc(Box<ConnectError>),
     #[error("store key prefix error: {0}")]
-    KeyPrefix(#[from] StoreKeyPrefixError),
+    Prefix(#[from] StoreKeyPrefixError),
     #[error("invalid key length: expected {expected}, got {got}")]
     InvalidKeyLength { expected: usize, got: usize },
     #[error("wire format error: {0}")]
@@ -192,79 +192,73 @@ impl ClientError {
 /// into the prefixed physical keyspace.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum StoreKeyPrefixError {
-    #[error("reserved_bits {reserved_bits} exceeds 16")]
-    ReservedBitsTooLarge { reserved_bits: u8 },
-    #[error("prefix {prefix} does not fit in {reserved_bits} reserved bits")]
-    PrefixTooLarge { reserved_bits: u8, prefix: u16 },
-    #[error(
-        "combined reserved bits exceed 16: store prefix bits {prefix_bits} + logical bits {logical_bits}"
-    )]
-    CombinedReservedBitsTooLarge { prefix_bits: u8, logical_bits: u8 },
     #[error("key does not belong to this store prefix")]
     PrefixMismatch,
-    #[error("key bit offset {offset} plus store prefix bits {prefix_bits} exceeds u16")]
-    BitOffsetOverflow { offset: u16, prefix_bits: u8 },
-    #[error("key codec error: {0}")]
-    Codec(#[from] KeyCodecError),
+    #[error("key offset {offset} plus store prefix shift {shift} exceeds u16")]
+    KeyOffsetOverflow { offset: u16, shift: u16 },
+    #[error("key prefix error: {0}")]
+    Prefix(#[from] PrefixError),
 }
 
 /// A client-side namespace layered over raw Store keys.
 ///
-/// The prefix consumes a small number of high bits in the physical Store key
-/// and stores the caller's logical key in the remaining payload bits. QMDB,
-/// SQL, and other higher-level instances continue to build their own logical
-/// keys as before; a prefixed [`StoreClient`] maps those keys on the wire and
-/// maps returned keys back before callers see them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// The prefix prepends a fixed byte string to each physical Store key and
+/// stores the caller's logical key in the remaining bytes. QMDB, SQL, and
+/// other higher-level instances continue to build their own logical keys as
+/// before; a prefixed [`StoreClient`] maps those keys on the wire and maps
+/// returned keys back before callers see them.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct StoreKeyPrefix {
-    codec: KeyCodec,
+    inner: Prefix,
 }
 
 impl StoreKeyPrefix {
-    pub fn new(reserved_bits: u8, prefix: u16) -> Result<Self, StoreKeyPrefixError> {
-        validate_prefix_bits(reserved_bits, prefix)?;
+    pub fn new(prefix: impl Into<Bytes>) -> Result<Self, StoreKeyPrefixError> {
         Ok(Self {
-            codec: KeyCodec::new(reserved_bits, prefix),
+            inner: Prefix::new(prefix)?,
         })
     }
 
-    /// The zero-width identity prefix: reserves no bits and maps every logical
-    /// key to itself, so encode/decode/range/match are all no-ops and keys pass
-    /// through un-namespaced.
+    /// The zero-width identity prefix: maps every logical key to itself, so
+    /// encode/decode/range/match are all no-ops and keys pass through
+    /// un-namespaced.
     pub const fn identity() -> Self {
         Self {
-            codec: KeyCodec::new(0, 0),
+            inner: Prefix::empty(),
         }
     }
 
+    /// The raw prefix bytes.
     #[inline]
-    pub fn reserved_bits(self) -> u8 {
-        self.codec.reserved_bits()
+    pub fn prefix(&self) -> &Bytes {
+        self.inner.as_bytes()
     }
 
+    /// True when `key` starts with this prefix. The identity prefix matches
+    /// every key.
     #[inline]
-    pub fn prefix(self) -> u16 {
-        self.codec.prefix()
+    pub fn matches(&self, key: &[u8]) -> bool {
+        self.inner.matches(key)
     }
 
     /// Maximum logical key bytes available under this prefix.
     #[inline]
-    pub fn max_logical_key_len(self) -> usize {
-        self.codec.max_payload_capacity_bytes()
+    pub fn max_logical_key_len(&self) -> usize {
+        self.inner.max_payload_len()
     }
 
-    /// Encode a logical key into the physical Store keyspace.
-    pub fn encode_key(self, key: &Key) -> Result<Key, StoreKeyPrefixError> {
-        Ok(self.codec.encode(key)?)
+    /// Encode a logical key into the physical Store keyspace. The identity
+    /// prefix returns a refcount-only clone of `key`.
+    pub fn encode_key(&self, key: &Key) -> Result<Key, StoreKeyPrefixError> {
+        Ok(self.inner.encode_key(key)?)
     }
 
-    /// Decode a physical Store key back into the logical keyspace.
-    pub fn decode_key(self, key: &Key) -> Result<Key, StoreKeyPrefixError> {
-        if !self.codec.matches(key) {
-            return Err(StoreKeyPrefixError::PrefixMismatch);
-        }
-        let payload_len = self.codec.payload_capacity_bytes_for_key_len(key.len());
-        Ok(Bytes::from(self.codec.read_payload(key, 0, payload_len)?))
+    /// Decode a physical Store key back into the logical keyspace as a
+    /// zero-copy slice of `key`'s backing storage.
+    pub fn decode_key(&self, key: &Key) -> Result<Key, StoreKeyPrefixError> {
+        self.inner
+            .strip(key)
+            .map_err(|_| StoreKeyPrefixError::PrefixMismatch)
     }
 
     /// Encode an inclusive logical range into the physical Store keyspace.
@@ -272,69 +266,31 @@ impl StoreKeyPrefix {
     /// Empty `end` means unbounded in the logical keyspace and is narrowed to
     /// this prefix's physical upper bound. Long logical upper bounds are
     /// clamped to the maximum logical key length representable under this
-    /// prefix; this preserves scans over existing `KeyCodec::prefix_bounds`
-    /// ranges, whose upper bound is intentionally `MAX_KEY_LEN` bytes.
-    pub fn encode_range(self, start: &Key, end: &Key) -> Result<(Key, Key), StoreKeyPrefixError> {
+    /// prefix; this keeps scans over full-width prefix bounds (whose upper
+    /// bound is intentionally `MAX_KEY_LEN` bytes) working.
+    pub fn encode_range(&self, start: &Key, end: &Key) -> Result<(Key, Key), StoreKeyPrefixError> {
         let start = self.encode_key(start)?;
         let end = if end.is_empty() {
-            self.codec.prefix_bounds().1
+            self.inner.bounds().1
         } else {
             let max_len = self.max_logical_key_len();
-            let end = if end.len() > max_len {
-                Bytes::copy_from_slice(&end[..max_len])
+            if end.len() > max_len {
+                self.encode_key(&end.slice(..max_len))?
             } else {
-                Bytes::copy_from_slice(end)
-            };
-            self.encode_key(&end)?
+                self.encode_key(end)?
+            }
         };
         Ok((start, end))
     }
 
     fn prefix_selector(
-        self,
+        &self,
         selector: &crate::selector::Selector,
     ) -> Result<crate::selector::Selector, StoreKeyPrefixError> {
-        self.prefix_selector_with_regex(selector, selector.payload_regex.clone())
-    }
-
-    fn prefix_stream_selector(
-        self,
-        selector: &crate::selector::Selector,
-    ) -> Result<crate::selector::Selector, StoreKeyPrefixError> {
-        self.prefix_selector_with_regex(selector, crate::kv_codec::Utf8::from("(?s-u).*"))
-    }
-
-    fn prefix_selector_with_regex(
-        self,
-        selector: &crate::selector::Selector,
-        payload_regex: crate::kv_codec::Utf8,
-    ) -> Result<crate::selector::Selector, StoreKeyPrefixError> {
-        validate_prefix_bits(selector.reserved_bits, selector.prefix)?;
-        let reserved_bits = self
-            .reserved_bits()
-            .checked_add(selector.reserved_bits)
-            .ok_or(StoreKeyPrefixError::CombinedReservedBitsTooLarge {
-                prefix_bits: self.reserved_bits(),
-                logical_bits: selector.reserved_bits,
-            })?;
-        if reserved_bits > 16 {
-            return Err(StoreKeyPrefixError::CombinedReservedBitsTooLarge {
-                prefix_bits: self.reserved_bits(),
-                logical_bits: selector.reserved_bits,
-            });
-        }
-
-        let prefix = (u32::from(self.prefix()) << u32::from(selector.reserved_bits))
-            | u32::from(selector.prefix);
-        let prefix = u16::try_from(prefix).map_err(|_| StoreKeyPrefixError::PrefixTooLarge {
-            reserved_bits,
-            prefix: u16::MAX,
-        })?;
-        validate_prefix_bits(reserved_bits, prefix)?;
+        let prefix = self.inner.join(&Prefix::new(selector.prefix.clone())?)?;
         Ok(crate::selector::Selector {
-            reserved_bits,
-            prefix,
-            payload_regex,
+            prefix: prefix.as_bytes().clone(),
+            payload_regex: selector.payload_regex.clone(),
         })
     }
 }
@@ -361,8 +317,8 @@ impl PrefixedStoreClient {
     }
 
     /// The configured key prefix.
-    pub fn key_prefix(&self) -> StoreKeyPrefix {
-        self.prefix
+    pub fn key_prefix(&self) -> &StoreKeyPrefix {
+        &self.prefix
     }
 
     /// Borrow the underlying physical transport. Operations performed directly
@@ -419,7 +375,7 @@ impl PrefixedStoreClient {
         let selectors = filter
             .selectors
             .iter()
-            .map(|mk| self.prefix.prefix_stream_selector(mk))
+            .map(|mk| self.prefix.prefix_selector(mk))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(crate::stream_filter::StreamFilter {
             selectors,
@@ -432,7 +388,7 @@ impl PrefixedStoreClient {
         request: &DomainRangeReduceRequest,
     ) -> Result<DomainRangeReduceRequest, ClientError> {
         let mut request = request.clone();
-        shift_reduce_request_key_offsets(self.prefix.reserved_bits(), &mut request)?;
+        shift_reduce_request_key_offsets(self.prefix.prefix().len(), &mut request)?;
         Ok(request)
     }
 
@@ -568,7 +524,7 @@ impl PrefixedStoreClient {
                 observed_sequence,
             )
             .await?;
-        stream.key_prefix = Some(self.prefix);
+        stream.key_prefix = Some(self.prefix.clone());
         Ok(stream)
     }
 
@@ -734,7 +690,7 @@ impl PrefixedStoreClient {
             .client
             .range_stream_internal(&start, &end, limit, batch_size, mode, options)
             .await?;
-        stream.key_prefix = Some(self.prefix);
+        stream.key_prefix = Some(self.prefix.clone());
         Ok(stream)
     }
 
@@ -821,17 +777,15 @@ impl PrefixedStoreClient {
         filter: crate::stream_filter::StreamFilter,
         since_sequence_number: Option<u64>,
     ) -> Result<StreamSubscription, ClientError> {
-        // The physical match keys are broadened (payload regex widened) to span
-        // the bit-shifted payload, so always re-apply the caller's predicate
-        // client-side via the compiled logical filter.
-        let logical_filter = Some(ClientStreamFilter::compile(&filter)?);
+        // Byte-aligned payloads let the server apply the caller's payload_regex
+        // exactly against the post-prefix payload, so there is no client-side
+        // re-filter: the prefix only namespaces keys on the wire.
         let filter = self.prefix_stream_filter(filter)?;
         let mut sub = self
             .client
             .subscribe_physical(filter, since_sequence_number)
             .await?;
-        sub.key_prefix = Some(self.prefix);
-        sub.logical_filter = logical_filter;
+        sub.key_prefix = Some(self.prefix.clone());
         Ok(sub)
     }
 
@@ -845,7 +799,7 @@ impl PrefixedStoreClient {
         let mut out = Vec::with_capacity(owned.entries.len());
         for entry in owned.entries {
             let key = Bytes::from(entry.key);
-            if !self.prefix.codec.matches(&key) {
+            if !self.prefix.matches(&key) {
                 continue;
             }
             out.push((self.decode_store_key(&key)?, entry.value));
@@ -904,7 +858,7 @@ impl StoreWriteBatch {
 
     pub fn push(
         &mut self,
-        prefix: StoreKeyPrefix,
+        prefix: &StoreKeyPrefix,
         key: &Key,
         value: impl IntoStoreWriteValue,
     ) -> Result<&mut Self, ClientError> {
@@ -1228,13 +1182,13 @@ impl RangeStream {
             }
 
             let mut out = Vec::with_capacity(n);
-            for entry in &frame.results {
-                let key = Bytes::copy_from_slice(&entry.key);
-                let key = match self.key_prefix {
+            for entry in frame.results {
+                let key = Bytes::from(entry.key);
+                let key = match &self.key_prefix {
                     Some(prefix) => prefix.decode_key(&key)?,
                     None => key,
                 };
-                out.push((key, Bytes::copy_from_slice(&entry.value)));
+                out.push((key, entry.value));
             }
             self.rows_seen += n;
             return Ok(Some(RangeChunk { rows: out, detail }));
@@ -1333,14 +1287,13 @@ impl GetManyStream {
             }
 
             let mut out = Vec::with_capacity(n);
-            for entry in &frame.results {
-                let key = Bytes::copy_from_slice(&entry.key);
-                let key = match self.key_prefix {
+            for entry in frame.results {
+                let key = Bytes::from(entry.key);
+                let key = match &self.key_prefix {
                     Some(prefix) => prefix.decode_key(&key)?,
                     None => key,
                 };
-                let value = entry.value.as_ref().map(|v| Bytes::copy_from_slice(v));
-                out.push((key, value));
+                out.push((key, entry.value));
             }
             return Ok(Some(GetManyChunk {
                 entries: out,
@@ -1371,33 +1324,6 @@ impl RangeMode {
     }
 }
 
-#[inline]
-fn key_prefix_mask(bits: u8) -> Result<u16, StoreKeyPrefixError> {
-    if bits > 16 {
-        return Err(StoreKeyPrefixError::ReservedBitsTooLarge {
-            reserved_bits: bits,
-        });
-    }
-    Ok(if bits == 0 {
-        0
-    } else if bits == 16 {
-        u16::MAX
-    } else {
-        (1u16 << bits) - 1
-    })
-}
-
-fn validate_prefix_bits(reserved_bits: u8, prefix: u16) -> Result<(), StoreKeyPrefixError> {
-    let mask = key_prefix_mask(reserved_bits)?;
-    if prefix > mask {
-        return Err(StoreKeyPrefixError::PrefixTooLarge {
-            reserved_bits,
-            prefix,
-        });
-    }
-    Ok(())
-}
-
 /// One delivered (key, value) row from a stream subscription. The client
 /// reapplies its own filter if it needs to know which selector matched —
 /// the wire frame doesn't carry the index.
@@ -1422,7 +1348,6 @@ pub struct StreamSubscription {
         exoware_proto::log::stream::v1::SubscribeResponseView<'static>,
     >,
     key_prefix: Option<StoreKeyPrefix>,
-    logical_filter: Option<ClientStreamFilter>,
 }
 
 impl std::fmt::Debug for StreamSubscription {
@@ -1446,18 +1371,14 @@ impl StreamSubscription {
                     let mut entries = Vec::with_capacity(owned.entries.len());
                     for entry in owned.entries {
                         let key = Bytes::from(entry.key);
-                        let key = match self.key_prefix {
+                        let key = match &self.key_prefix {
                             Some(prefix) => prefix.decode_key(&key)?,
                             None => key,
                         };
-                        let value = entry.value;
-                        if self
-                            .logical_filter
-                            .as_ref()
-                            .is_none_or(|filter| filter.matches(&key, value.as_ref()))
-                        {
-                            entries.push(StreamSubscriptionEntry { key, value });
-                        }
+                        entries.push(StreamSubscriptionEntry {
+                            key,
+                            value: entry.value,
+                        });
                     }
                     if entries.is_empty() {
                         continue;
@@ -1477,60 +1398,6 @@ impl StreamSubscription {
                 }
             }
         }
-    }
-}
-
-#[derive(Clone)]
-struct ClientKeyMatcher {
-    codec: KeyCodec,
-    regex: regex::bytes::Regex,
-}
-
-#[derive(Clone)]
-struct ClientStreamFilter {
-    keys: Vec<ClientKeyMatcher>,
-    values: Option<crate::stream_filter::CompiledFilters>,
-}
-
-impl ClientStreamFilter {
-    fn compile(filter: &crate::stream_filter::StreamFilter) -> Result<Self, ClientError> {
-        crate::stream_filter::validate_filter(filter)
-            .map_err(|e| ClientError::WireFormat(e.to_string()))?;
-        let keys = filter
-            .selectors
-            .iter()
-            .map(|mk| {
-                let regex = crate::selector::compile_payload_regex(&mk.payload_regex)
-                    .map_err(|e| ClientError::WireFormat(e.to_string()))?;
-                Ok(ClientKeyMatcher {
-                    codec: KeyCodec::new(mk.reserved_bits, mk.prefix),
-                    regex,
-                })
-            })
-            .collect::<Result<Vec<_>, ClientError>>()?;
-        let values = crate::stream_filter::CompiledFilters::compile(&filter.value_filters)
-            .map_err(ClientError::WireFormat)?;
-        Ok(Self { keys, values })
-    }
-
-    fn matches(&self, key: &Key, value: &[u8]) -> bool {
-        if !self
-            .values
-            .as_ref()
-            .is_none_or(|filter| filter.matches(value))
-        {
-            return false;
-        }
-        self.keys.iter().any(|matcher| {
-            if !matcher.codec.matches(key) {
-                return false;
-            }
-            let payload_len = matcher.codec.payload_capacity_bytes_for_key_len(key.len());
-            matcher
-                .codec
-                .read_payload(key, 0, payload_len)
-                .is_ok_and(|payload| matcher.regex.is_match(&payload))
-        })
     }
 }
 
@@ -2006,8 +1873,7 @@ impl StoreClient {
             .selectors
             .into_iter()
             .map(|mk| exoware_proto::common::kv::v1::Selector {
-                reserved_bits: u32::from(mk.reserved_bits),
-                prefix: u32::from(mk.prefix),
+                prefix: mk.prefix,
                 payload_regex: mk.payload_regex.0,
                 ..Default::default()
             })
@@ -2046,7 +1912,6 @@ impl StoreClient {
         Ok(StreamSubscription {
             stream,
             key_prefix: None,
-            logical_filter: None,
         })
     }
 
@@ -2308,52 +2173,74 @@ impl StoreClient {
 }
 
 fn shift_reduce_request_key_offsets(
-    prefix_bits: u8,
+    prefix_len: usize,
     request: &mut DomainRangeReduceRequest,
 ) -> Result<(), StoreKeyPrefixError> {
+    // A byte-aligned store prefix shifts every key field past its bytes.
+    // `KeyField` offsets are byte-granular, so they shift by the whole prefix
+    // length in bytes; `ZOrderKey` offsets remain bit-granular, so they shift
+    // by `prefix_len * 8` bits. `prefix_len` comes from a validated
+    // `StoreKeyPrefix`, so both shifts fit u16 (`MAX_KEY_LEN * 8` = 2032).
+    debug_assert!(prefix_len <= MAX_KEY_LEN);
+    let shift_bytes = prefix_len as u16;
+    let shift_bits = shift_bytes * 8;
     for reducer in &mut request.reducers {
         if let Some(expr) = &mut reducer.expr {
-            shift_expr_key_offsets(prefix_bits, expr)?;
+            shift_expr_key_offsets(shift_bytes, shift_bits, expr)?;
         }
     }
     for expr in &mut request.group_by {
-        shift_expr_key_offsets(prefix_bits, expr)?;
+        shift_expr_key_offsets(shift_bytes, shift_bits, expr)?;
     }
     if let Some(filter) = &mut request.filter {
         for check in &mut filter.checks {
-            shift_field_ref_key_offset(prefix_bits, &mut check.field)?;
+            shift_field_ref_key_offset(shift_bytes, shift_bits, &mut check.field)?;
         }
     }
     Ok(())
 }
 
-fn shift_expr_key_offsets(prefix_bits: u8, expr: &mut KvExpr) -> Result<(), StoreKeyPrefixError> {
+fn shift_expr_key_offsets(
+    shift_bytes: u16,
+    shift_bits: u16,
+    expr: &mut KvExpr,
+) -> Result<(), StoreKeyPrefixError> {
     match expr {
-        KvExpr::Field(field) => shift_field_ref_key_offset(prefix_bits, field),
+        KvExpr::Field(field) => shift_field_ref_key_offset(shift_bytes, shift_bits, field),
         KvExpr::Literal(_) => Ok(()),
         KvExpr::Add(left, right)
         | KvExpr::Sub(left, right)
         | KvExpr::Mul(left, right)
         | KvExpr::Div(left, right) => {
-            shift_expr_key_offsets(prefix_bits, left)?;
-            shift_expr_key_offsets(prefix_bits, right)
+            shift_expr_key_offsets(shift_bytes, shift_bits, left)?;
+            shift_expr_key_offsets(shift_bytes, shift_bits, right)
         }
         KvExpr::Lower(inner) | KvExpr::DateTruncDay(inner) => {
-            shift_expr_key_offsets(prefix_bits, inner)
+            shift_expr_key_offsets(shift_bytes, shift_bits, inner)
         }
     }
 }
 
 fn shift_field_ref_key_offset(
-    prefix_bits: u8,
+    shift_bytes: u16,
+    shift_bits: u16,
     field: &mut KvFieldRef,
 ) -> Result<(), StoreKeyPrefixError> {
     match field {
-        KvFieldRef::Key { bit_offset, .. } | KvFieldRef::ZOrderKey { bit_offset, .. } => {
-            *bit_offset = bit_offset.checked_add(u16::from(prefix_bits)).ok_or(
-                StoreKeyPrefixError::BitOffsetOverflow {
+        KvFieldRef::Key { byte_offset, .. } => {
+            *byte_offset = byte_offset.checked_add(shift_bytes).ok_or(
+                StoreKeyPrefixError::KeyOffsetOverflow {
+                    offset: *byte_offset,
+                    shift: shift_bytes,
+                },
+            )?;
+            Ok(())
+        }
+        KvFieldRef::ZOrderKey { bit_offset, .. } => {
+            *bit_offset = bit_offset.checked_add(shift_bits).ok_or(
+                StoreKeyPrefixError::KeyOffsetOverflow {
                     offset: *bit_offset,
-                    prefix_bits,
+                    shift: shift_bits,
                 },
             )?;
             Ok(())
@@ -2657,7 +2544,9 @@ impl SerializableReadSession {
         keys: &[&Key],
         batch_size: u32,
     ) -> Result<GetManyStream, ClientError> {
-        let keys_owned: Vec<Key> = keys.iter().map(|k| Bytes::copy_from_slice(k)).collect();
+        // `Key` is `Bytes`; cloning shares the backing buffer (refcount bump)
+        // instead of deep-copying each key.
+        let keys_owned: Vec<Key> = keys.iter().map(|k| (**k).clone()).collect();
         let seeded_client = self.client.clone();
         let unseeded_client = self.client.clone();
         let keys_seeded = keys_owned.clone();
@@ -3091,39 +2980,50 @@ mod tests {
 
     #[test]
     fn store_key_prefix_round_trips_logical_keys() {
-        let prefix = StoreKeyPrefix::new(4, 0xA).unwrap();
+        let prefix = StoreKeyPrefix::new(vec![0x0A]).unwrap();
         let logical = Bytes::from_static(b"hello");
         let physical = prefix.encode_key(&logical).unwrap();
-        assert!(prefix.codec.matches(&physical));
+        assert!(prefix.matches(&physical));
         assert_eq!(prefix.decode_key(&physical).unwrap(), logical);
     }
 
     #[test]
+    fn identity_prefix_encode_decode_are_zero_copy() {
+        let prefix = StoreKeyPrefix::identity();
+        let logical = Bytes::from_static(b"passthrough-key");
+        let physical = prefix.encode_key(&logical).unwrap();
+        // The identity prefix copies no key bytes: encode/decode share backing.
+        assert_eq!(physical.as_ptr(), logical.as_ptr());
+        let decoded = prefix.decode_key(&physical).unwrap();
+        assert_eq!(decoded.as_ptr(), logical.as_ptr());
+        assert_eq!(decoded, logical);
+    }
+
+    #[test]
     fn uniform_width_prefixes_are_pairwise_disjoint() {
-        // Six leaf prefixes sharing one uniform reserved width.
+        // Six leaf prefixes sharing one uniform (1-byte) width.
         let all = [
-            StoreKeyPrefix::new(4, 0).unwrap(),
-            StoreKeyPrefix::new(4, 1).unwrap(),
-            StoreKeyPrefix::new(4, 2).unwrap(),
-            StoreKeyPrefix::new(4, 3).unwrap(),
-            StoreKeyPrefix::new(4, 4).unwrap(),
-            StoreKeyPrefix::new(4, 5).unwrap(),
+            StoreKeyPrefix::new(vec![0]).unwrap(),
+            StoreKeyPrefix::new(vec![1]).unwrap(),
+            StoreKeyPrefix::new(vec![2]).unwrap(),
+            StoreKeyPrefix::new(vec![3]).unwrap(),
+            StoreKeyPrefix::new(vec![4]).unwrap(),
+            StoreKeyPrefix::new(vec![5]).unwrap(),
         ];
-        // A key encoded under one prefix never matches another's codec — so a
+        // A key encoded under one prefix never matches another's prefix, so a
         // prefix-bounded range scan in one can't observe another's keys (this is
-        // the bug being fixed). Uniform width ⇒ no prefix is a bit-prefix of
-        // another.
+        // the bug being fixed). Same-length prefixes are pairwise disjoint.
         let logical = Bytes::from_static(b"\x00\x10whatever-block-meta-or-op-log-key");
         for (i, pa) in all.iter().enumerate() {
             let physical = pa.encode_key(&logical).unwrap();
-            assert!(pa.codec.matches(&physical));
+            assert!(pa.matches(&physical));
             assert_eq!(pa.decode_key(&physical).unwrap(), logical);
             for (j, pb) in all.iter().enumerate() {
                 if i == j {
                     continue;
                 }
                 assert!(
-                    !pb.codec.matches(&physical),
+                    !pb.matches(&physical),
                     "prefix {j} matched a key encoded under prefix {i}",
                 );
             }
@@ -3133,9 +3033,9 @@ mod tests {
     #[test]
     fn prefixed_store_client_always_carries_its_prefix() {
         let base = StoreClient::new("http://localhost:8090");
-        let prefix = StoreKeyPrefix::new(4, 0).unwrap();
-        let client = base.prefixed(prefix);
-        assert_eq!(client.key_prefix(), prefix);
+        let prefix = StoreKeyPrefix::new(vec![0]).unwrap();
+        let client = base.prefixed(prefix.clone());
+        assert_eq!(client.key_prefix(), &prefix);
         // The logical client encodes through its prefix.
         let logical = Bytes::from_static(b"row");
         assert_eq!(
@@ -3146,45 +3046,110 @@ mod tests {
 
     #[test]
     fn store_key_prefix_clamps_long_logical_range_upper_bound() {
-        let prefix = StoreKeyPrefix::new(4, 0x2).unwrap();
-        let logical_codec = KeyCodec::new(4, 0x7);
-        let (logical_start, logical_end) = logical_codec.prefix_bounds();
+        let prefix = StoreKeyPrefix::new(vec![0x02]).unwrap();
+        // A full-width logical upper bound (MAX_KEY_LEN bytes of 0xFF), as an
+        // un-prefixed scan's inclusive end would be.
+        let logical_start = Bytes::new();
+        let logical_end = Bytes::from(vec![0xFFu8; MAX_KEY_LEN]);
         assert_eq!(logical_end.len(), MAX_KEY_LEN);
 
         let (physical_start, physical_end) =
             prefix.encode_range(&logical_start, &logical_end).unwrap();
-        assert!(prefix.codec.matches(&physical_start));
-        assert!(prefix.codec.matches(&physical_end));
+        assert!(prefix.matches(&physical_start));
+        assert!(prefix.matches(&physical_end));
+        // The logical end clamps to max_logical_key_len (253) before prefixing,
+        // so the physical end is exactly MAX_KEY_LEN bytes.
+        assert_eq!(prefix.max_logical_key_len(), MAX_KEY_LEN - 1);
         assert_eq!(physical_end.len(), MAX_KEY_LEN);
         assert_eq!(prefix.decode_key(&physical_start).unwrap(), logical_start);
     }
 
     #[test]
     fn store_key_prefix_rewrites_selector_family() {
-        let prefix = StoreKeyPrefix::new(3, 0b101).unwrap();
+        let prefix = StoreKeyPrefix::new(vec![0x05]).unwrap();
         let logical = crate::selector::Selector {
-            reserved_bits: 4,
-            prefix: 0b0110,
+            prefix: Bytes::copy_from_slice(&[0x06]),
             payload_regex: crate::kv_codec::Utf8::from("(?s).*"),
         };
         let physical = prefix.prefix_selector(&logical).unwrap();
-        assert_eq!(physical.reserved_bits, 7);
-        assert_eq!(physical.prefix, 0b101_0110);
+        assert_eq!(physical.prefix.as_ref(), &[0x05, 0x06]);
         assert_eq!(physical.payload_regex, logical.payload_regex);
     }
 
     #[test]
-    fn store_key_prefix_broadens_stream_selector_payload_regex() {
-        let prefix = StoreKeyPrefix::new(3, 0b101).unwrap();
+    fn store_key_prefix_composed_selector_reconstructs_and_strips_cleanly() {
+        // Reproduces the selector-merge -> reconstruct-codec path that the old
+        // bit-padding KeyCodec corrupted: a store namespace prefix is composed
+        // onto a logical selector's prefix, and then a codec is rebuilt FROM the
+        // merged selector prefix and used to strip keys. Under the old bit-packed
+        // codec, composing two sub-byte prefixes and reconstructing a codec left a
+        // spurious trailing 0x00 in the stripped payload; the byte-prefix design
+        // must strip cleanly.
+
+        // Multi-byte store namespace so the payload offset shift (= prefix length)
+        // is genuinely exercised.
+        let prefix = StoreKeyPrefix::new(vec![0x05, 0x06]).unwrap();
         let logical = crate::selector::Selector {
-            reserved_bits: 4,
-            prefix: 0b0110,
+            prefix: Bytes::copy_from_slice(&[0x07]),
             payload_regex: crate::kv_codec::Utf8::from("(?s).*"),
         };
-        let physical = prefix.prefix_stream_selector(&logical).unwrap();
-        assert_eq!(physical.reserved_bits, 7);
-        assert_eq!(physical.prefix, 0b101_0110);
-        assert_eq!(&*physical.payload_regex, "(?s-u).*");
+
+        // Compose via the real SDK merge path (byte-concatenates the store prefix
+        // onto the selector prefix).
+        let merged = prefix.prefix_selector(&logical).unwrap();
+        assert_eq!(merged.prefix.as_ref(), &[0x05, 0x06, 0x07]);
+
+        // Reconstruct the codec EXACTLY as apply_key_prune_policy does.
+        let codec = Prefix::new(merged.prefix.clone()).unwrap();
+
+        // Round-trip a real key through the reconstructed codec.
+        let payload = [0xAA, 0xBB, 0xCC];
+        let key = codec.encode(&payload).unwrap();
+        assert_eq!(key.as_ref(), &[0x05, 0x06, 0x07, 0xAA, 0xBB, 0xCC]);
+        assert!(codec.matches(&key));
+        // The assertion the old codec would fail: the stripped payload is exactly
+        // the original bytes, with no trailing spurious 0x00 from 8-bit padding.
+        assert_eq!(
+            codec.strip(&key).unwrap(),
+            Bytes::copy_from_slice(&[0xAA, 0xBB, 0xCC])
+        );
+
+        // The scan bounds bracket the key. bounds() are inclusive on both ends:
+        // start is the bare prefix, end is the prefix padded with 0xFF.
+        let (start, end) = codec.bounds();
+        assert!(start <= key && key <= end);
+
+        // A key under a DIFFERENT merged prefix must not match this codec.
+        let sibling = Prefix::new(vec![0x05, 0x06, 0x08])
+            .unwrap()
+            .encode(&[0x11])
+            .unwrap();
+        assert!(!codec.matches(&sibling));
+    }
+
+    #[test]
+    fn store_key_prefix_stream_filter_passes_payload_regex_through() {
+        // The stream path no longer broadens the payload regex: byte-aligned
+        // payloads let the server apply the caller's real regex to the
+        // post-prefix payload, so it must pass through unchanged.
+        let client = StoreClient::builder()
+            .url("http://localhost:10000")
+            .build()
+            .unwrap()
+            .prefixed(StoreKeyPrefix::new(vec![0x05]).unwrap());
+        let filter = crate::stream_filter::StreamFilter {
+            selectors: vec![crate::selector::Selector {
+                prefix: Bytes::copy_from_slice(&[0x06]),
+                payload_regex: crate::kv_codec::Utf8::from("(?s)foo.*"),
+            }],
+            value_filters: vec![],
+        };
+        let physical = client.prefix_stream_filter(filter.clone()).unwrap();
+        assert_eq!(physical.selectors[0].prefix.as_ref(), &[0x05, 0x06]);
+        assert_eq!(
+            physical.selectors[0].payload_regex,
+            filter.selectors[0].payload_regex
+        );
     }
 
     #[test]
@@ -3193,12 +3158,12 @@ mod tests {
             .url("http://localhost:10000")
             .build()
             .unwrap()
-            .prefixed(StoreKeyPrefix::new(5, 0b10101).unwrap());
+            .prefixed(StoreKeyPrefix::new(vec![0x01, 0x02, 0x03]).unwrap());
         let request = DomainRangeReduceRequest {
             reducers: vec![crate::RangeReducerSpec {
                 op: crate::RangeReduceOp::SumField,
                 expr: Some(KvExpr::Field(KvFieldRef::Key {
-                    bit_offset: 9,
+                    byte_offset: 9,
                     kind: KvFieldKind::UInt64,
                 })),
             }],
@@ -3225,23 +3190,27 @@ mod tests {
         };
 
         let shifted = client.prefix_reduce_request(&request).unwrap();
-        let Some(KvExpr::Field(KvFieldRef::Key { bit_offset, .. })) =
+        let Some(KvExpr::Field(KvFieldRef::Key { byte_offset, .. })) =
             shifted.reducers[0].expr.as_ref()
         else {
             panic!("expected key field reducer");
         };
-        assert_eq!(*bit_offset, 14);
+        // KeyField offsets are byte-granular: a 3-byte prefix shifts by 3 bytes,
+        // so 9 -> 12.
+        assert_eq!(*byte_offset, 12);
         let KvExpr::Field(KvFieldRef::ZOrderKey { bit_offset, .. }) = &shifted.group_by[0] else {
             panic!("expected z-order group field");
         };
-        assert_eq!(*bit_offset, 17);
+        // Z-order offsets stay bit-granular: a 3-byte prefix shifts by 3*8 = 24
+        // bits, so 12 -> 36.
+        assert_eq!(*bit_offset, 36);
     }
 
     #[test]
     fn store_write_batch_uses_each_clients_prefix() {
         let base = StoreClient::new("http://localhost:10000");
-        let a = base.prefixed(StoreKeyPrefix::new(4, 1).unwrap());
-        let b = base.prefixed(StoreKeyPrefix::new(4, 2).unwrap());
+        let a = base.prefixed(StoreKeyPrefix::new(vec![1]).unwrap());
+        let b = base.prefixed(StoreKeyPrefix::new(vec![2]).unwrap());
         let key_a = Bytes::from_static(b"a");
         let key_b = Bytes::from_static(b"b");
 

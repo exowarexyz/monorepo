@@ -5,7 +5,7 @@ use commonware_codec::{
 };
 use std::collections::HashSet;
 
-use crate::keys::KeyCodec;
+use crate::keys::Prefix;
 use crate::kv_codec::Utf8;
 use crate::selector::{compile_payload_regex, Selector};
 
@@ -310,7 +310,7 @@ pub fn validate_policy(policy: &PrunePolicy) -> anyhow::Result<()> {
 }
 
 fn validate_user_keys_scope(scope: &KeysScope) -> anyhow::Result<()> {
-    KeyCodec::new(scope.selector.reserved_bits, scope.selector.prefix);
+    Prefix::new(scope.selector.prefix.clone()).context("invalid selector prefix")?;
     let regex = compile_payload_regex(&scope.selector.payload_regex)?;
     validate_capture_groups(
         &regex,
@@ -366,17 +366,22 @@ fn validate_retain_for_scope(policy: &PrunePolicy) -> anyhow::Result<()> {
 }
 
 pub fn ensure_unique_policy_families(policies: &[PrunePolicy]) -> anyhow::Result<()> {
-    let mut user_families = HashSet::new();
+    let mut user_prefixes: Vec<&[u8]> = Vec::new();
     let mut sequence_seen = false;
     for policy in policies {
         match &policy.scope {
             PolicyScope::Keys(scope) => {
-                ensure!(
-                    user_families.insert((scope.selector.reserved_bits, scope.selector.prefix)),
-                    "duplicate compaction prune policy for reserved_bits={} family={}",
-                    scope.selector.reserved_bits,
-                    scope.selector.prefix
-                );
+                // Nested prefixes select overlapping physical key ranges, so
+                // two policies could disagree about the same rows. Reject any
+                // pair where one prefix extends the other (equality included).
+                let prefix: &[u8] = &scope.selector.prefix;
+                for seen in &user_prefixes {
+                    ensure!(
+                        !seen.starts_with(prefix) && !prefix.starts_with(seen),
+                        "overlapping compaction prune policies for key prefixes {seen:?} and {prefix:?}"
+                    );
+                }
+                user_prefixes.push(prefix);
             }
             PolicyScope::Sequence => {
                 ensure!(
@@ -450,13 +455,13 @@ mod tests {
         PRUNE_POLICY_CONTROL_KEY,
     };
     use crate::kv_codec::Utf8;
+    use bytes::Bytes;
 
     fn sample_policy() -> PrunePolicy {
         PrunePolicy {
             scope: PolicyScope::Keys(KeysScope {
                 selector: Selector {
-                    reserved_bits: 4,
-                    prefix: 1,
+                    prefix: Bytes::copy_from_slice(&[1]),
                     payload_regex: Utf8::from(
                         "(?s-u)^(?P<logical>(?:\\x00\\xFF|[^\\x00])*)\\x00\\x00(?P<version>.{8})$",
                     ),
@@ -478,6 +483,26 @@ mod tests {
             version: 1,
             policies: vec![sample_policy()],
         }
+    }
+
+    #[test]
+    fn nested_selector_prefixes_rejected() {
+        let mut nested = sample_policy();
+        let PolicyScope::Keys(scope) = &mut nested.scope else {
+            unreachable!("sample policy uses Keys scope");
+        };
+        scope.selector.prefix = Bytes::copy_from_slice(&[1, 2]);
+        let err = super::ensure_unique_policy_families(&[sample_policy(), nested])
+            .expect_err("nested prefixes overlap");
+        assert!(err.to_string().contains("overlapping compaction"));
+
+        let disjoint = sample_policy();
+        let mut other = sample_policy();
+        let PolicyScope::Keys(scope) = &mut other.scope else {
+            unreachable!("sample policy uses Keys scope");
+        };
+        scope.selector.prefix = Bytes::copy_from_slice(&[2]);
+        super::ensure_unique_policy_families(&[disjoint, other]).expect("disjoint prefixes");
     }
 
     #[test]
@@ -505,8 +530,7 @@ mod tests {
             policies: vec![PrunePolicy {
                 scope: PolicyScope::Keys(KeysScope {
                     selector: Selector {
-                        reserved_bits: 4,
-                        prefix: 1,
+                        prefix: Bytes::copy_from_slice(&[1]),
                         payload_regex: Utf8::from(
                             "(?s-u)^(?P<logical>(?:\\x00\\xFF|[^\\x00])*)\\x00\\x00(?P<version>.{8})$",
                         ),
@@ -534,8 +558,7 @@ mod tests {
             policies: vec![PrunePolicy {
                 scope: PolicyScope::Keys(KeysScope {
                     selector: Selector {
-                        reserved_bits: 4,
-                        prefix: 1,
+                        prefix: Bytes::copy_from_slice(&[1]),
                         payload_regex: Utf8::from("(?s)^(?P<logical>.+)$"),
                     },
                     group_by: GroupBy {
@@ -555,6 +578,26 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("unknown capture group"));
+    }
+
+    #[test]
+    fn oversized_selector_prefix_returns_error() {
+        let doc = PrunePolicyDocument {
+            version: 1,
+            policies: vec![PrunePolicy {
+                scope: PolicyScope::Keys(KeysScope {
+                    selector: Selector {
+                        prefix: Bytes::from(vec![0u8; crate::keys::MAX_KEY_LEN + 1]),
+                        payload_regex: Utf8::from("(?s)^(?P<logical>.+)$"),
+                    },
+                    group_by: GroupBy::default(),
+                    order_by: None,
+                }),
+                retain: RetainPolicy::DropAll,
+            }],
+        };
+        let err = encode_policy_document(&doc).expect_err("oversized prefix");
+        assert!(err.to_string().contains("invalid selector prefix"));
     }
 
     #[test]

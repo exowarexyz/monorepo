@@ -10,9 +10,9 @@ SQL engine backed by the Exoware API.
 
 `exoware-sql` is library-first: register `KvSchema` tables against a [`StoreClient`](https://docs.rs/exoware-sdk), then run SQL.
 
-All table registration goes through `KvSchema`, which auto-assigns compact
-codec prefixes so multiple tables can coexist on a single KV store while still
-letting the first 12 bits of encoded keys carry real payload. DataFusion
+All table registration goes through `KvSchema`, which auto-assigns each table
+a one-byte key prefix (table id in the high nibble, key family in the low
+nibble) so multiple tables can coexist on a single KV store. DataFusion
 handles JOINs natively once tables are registered.
 
 To run multiple independent SQL schemas, or SQL alongside QMDB, on one Store,
@@ -463,28 +463,22 @@ an `IN` list.
 
 ## Key layout
 
-`exoware-sql` now uses codec-backed bit-packed prefixes rather than a whole leading
-byte for key kind metadata.
+`exoware-sql` packs key kind metadata into a single bit-packed leading
+byte.
 
-Current layout:
+Layout:
 
 - Base row / primary key:
-  - reserved prefix bits: `[table_id(4)][kind=0(1)]`
+  - reserved prefix bits: `[table_id(4)][discriminator=0(4)]`
   - remaining bits: ordered primary-key payload bytes
 - Secondary index:
-  - reserved prefix bits: `[table_id(4)][kind=1(1)][index_id(4)]`
+  - reserved prefix bits: `[table_id(4)][index_id(4)]`
   - remaining bits: ordered index payload bytes, then ordered primary-key bytes
-
-This leaves room for payload entropy in the 12-bit partition prefix instead of
-spending the whole prefix on metadata:
-
-- primary keys contribute 7 payload bits to the 12-bit partition prefix
-- secondary index keys contribute 3 payload bits to the 12-bit partition prefix
 
 Logical structure:
 
-- Base row: `[prefix_bits][pk_col_1][pk_col_2]...[zero_pad]`
-- Secondary index: `[prefix_bits][idx_cols...][pk_cols...][zero_pad]`
+- Base row: `[prefix_bits][pk_col_1][pk_col_2]...`
+- Secondary index: `[prefix_bits][idx_cols...][pk_cols...]`
 
 ### Current codec limits
 

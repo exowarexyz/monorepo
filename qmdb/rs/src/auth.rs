@@ -2,13 +2,13 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Hasher;
 use commonware_storage::merkle::{hasher::Hasher as MerkleHasher, Family, Location, Position};
 use commonware_utils::Array;
-use exoware_sdk::keys::{Key, KeyCodec};
+use exoware_sdk::keys::{Key, Prefix};
 use exoware_sdk::{RangeMode, SerializableReadSession};
 
 use crate::codec::{
-    decode_digest, encode_ordered_update_payload, encode_update_index_value,
-    ensure_encoded_value_size, merkle_size_for_watermark, validate_ordered_key_bytes,
-    ORDERED_KEY_TERMINATOR_LEN, RESERVED_BITS, UPDATE_VERSION_LEN,
+    decode_digest, decode_location_bytes, encode_update_index_value, encode_update_key,
+    ensure_encoded_value_size, merkle_size_for_watermark, NODE_PREFIX, OPERATION_PREFIX,
+    PRESENCE_PREFIX, WATERMARK_PREFIX,
 };
 use crate::error::QmdbError;
 
@@ -24,208 +24,77 @@ impl AuthenticatedBackendNamespace {
     }
 }
 
-const AUTH_OP_FAMILY: u16 = 0x9;
-const AUTH_NODE_FAMILY: u16 = 0xA;
-const AUTH_WATERMARK_FAMILY: u16 = 0xB;
-const AUTH_INDEX_FAMILY: u16 = 0xC;
-const AUTH_IMMUTABLE_UPDATE_FAMILY: u16 = 0xD;
 const AUTH_NAMESPACE_LEN: usize = 1;
 
-pub(crate) const AUTH_OPERATION_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, AUTH_OP_FAMILY);
-pub(crate) const AUTH_NODE_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, AUTH_NODE_FAMILY);
-pub(crate) const AUTH_WATERMARK_CODEC: KeyCodec =
-    KeyCodec::new(RESERVED_BITS, AUTH_WATERMARK_FAMILY);
-pub(crate) const AUTH_PRESENCE_CODEC: KeyCodec = KeyCodec::new(RESERVED_BITS, AUTH_INDEX_FAMILY);
-pub(crate) const AUTH_IMMUTABLE_UPDATE_CODEC: KeyCodec =
-    KeyCodec::new(RESERVED_BITS, AUTH_IMMUTABLE_UPDATE_FAMILY);
-
 pub(crate) fn auth_namespace_bounds(
-    codec: KeyCodec,
+    prefix: &Prefix,
     namespace: AuthenticatedBackendNamespace,
 ) -> (Key, Key) {
-    let tail_len = 8usize;
-    let total_len = codec.min_key_len_for_payload(AUTH_NAMESPACE_LEN + tail_len);
-    let mut start = codec
-        .new_key_with_len(total_len)
-        .expect("authenticated namespace start key length should fit");
-    let mut end = codec
-        .new_key_with_len(total_len)
-        .expect("authenticated namespace end key length should fit");
-    codec
-        .write_payload(&mut start, 0, &[namespace.tag()])
-        .expect("authenticated namespace tag fits");
-    codec
-        .write_payload(&mut end, 0, &[namespace.tag()])
-        .expect("authenticated namespace tag fits");
-    codec
-        .fill_payload(&mut start, AUTH_NAMESPACE_LEN, tail_len, 0)
-        .expect("authenticated start tail fits");
-    codec
-        .fill_payload(&mut end, AUTH_NAMESPACE_LEN, tail_len, 0xFF)
-        .expect("authenticated end tail fits");
-    (start.freeze(), end.freeze())
+    (
+        encode_auth_namespaced_key(prefix, namespace.tag(), 0),
+        encode_auth_namespaced_key(prefix, namespace.tag(), u64::MAX),
+    )
 }
 
+/// Strip `prefix` from `key`, verify the namespace tag, and return the
+/// stripped payload (tag byte included).
 pub(crate) fn ensure_auth_namespace(
-    codec: KeyCodec,
+    prefix: &Prefix,
     namespace: AuthenticatedBackendNamespace,
     key: &Key,
     label: &str,
-) -> Result<(), QmdbError> {
-    if !codec.matches(key) {
-        return Err(QmdbError::CorruptData(format!(
-            "{label} key prefix mismatch"
-        )));
-    }
-    let actual = codec
-        .read_payload_exact::<1>(key, 0)
-        .map_err(|e| QmdbError::CorruptData(format!("cannot decode {label} namespace: {e}")))?[0];
+) -> Result<Key, QmdbError> {
+    let payload = prefix
+        .strip(key)
+        .map_err(|_| QmdbError::CorruptData(format!("{label} key prefix mismatch")))?;
+    let actual = *payload.first().ok_or_else(|| {
+        QmdbError::CorruptData(format!("cannot decode {label} namespace: short key"))
+    })?;
     if actual != namespace.tag() {
         return Err(QmdbError::CorruptData(format!(
             "{label} namespace mismatch: expected {}, got {actual}",
             namespace.tag()
         )));
     }
-    Ok(())
+    Ok(payload)
+}
+
+/// Build a `[namespace tag] ++ 8-byte big-endian value` auth-family key.
+fn encode_auth_namespaced_key(prefix: &Prefix, tag: u8, value: u64) -> Key {
+    let mut payload = [0u8; AUTH_NAMESPACE_LEN + 8];
+    payload[0] = tag;
+    payload[AUTH_NAMESPACE_LEN..].copy_from_slice(&value.to_be_bytes());
+    prefix
+        .encode(&payload)
+        .expect("authenticated namespaced key length should fit")
 }
 
 pub(crate) fn encode_auth_operation_key<F: Family>(
     namespace: AuthenticatedBackendNamespace,
     location: Location<F>,
 ) -> Key {
-    let codec = AUTH_OPERATION_CODEC;
-    let mut key = codec
-        .new_key_with_len(codec.min_key_len_for_payload(AUTH_NAMESPACE_LEN + 8))
-        .expect("authenticated operation key length should fit");
-    codec
-        .write_payload(&mut key, 0, &[namespace.tag()])
-        .expect("authenticated operation namespace fits");
-    codec
-        .write_payload(
-            &mut key,
-            AUTH_NAMESPACE_LEN,
-            &location.as_u64().to_be_bytes(),
-        )
-        .expect("authenticated operation location fits");
-    key.freeze()
+    encode_auth_namespaced_key(&OPERATION_PREFIX, namespace.tag(), location.as_u64())
 }
 
 pub(crate) fn encode_auth_node_key<F: Family>(
     namespace: AuthenticatedBackendNamespace,
     position: Position<F>,
 ) -> Key {
-    let codec = AUTH_NODE_CODEC;
-    let mut key = codec
-        .new_key_with_len(codec.min_key_len_for_payload(AUTH_NAMESPACE_LEN + 8))
-        .expect("authenticated node key length should fit");
-    codec
-        .write_payload(&mut key, 0, &[namespace.tag()])
-        .expect("authenticated node namespace fits");
-    codec
-        .write_payload(
-            &mut key,
-            AUTH_NAMESPACE_LEN,
-            &position.as_u64().to_be_bytes(),
-        )
-        .expect("authenticated node position fits");
-    key.freeze()
+    encode_auth_namespaced_key(&NODE_PREFIX, namespace.tag(), position.as_u64())
 }
 
 pub(crate) fn encode_auth_watermark_key<F: Family>(
     namespace: AuthenticatedBackendNamespace,
     location: Location<F>,
 ) -> Key {
-    let codec = AUTH_WATERMARK_CODEC;
-    let mut key = codec
-        .new_key_with_len(codec.min_key_len_for_payload(AUTH_NAMESPACE_LEN + 8))
-        .expect("authenticated watermark key length should fit");
-    codec
-        .write_payload(&mut key, 0, &[namespace.tag()])
-        .expect("authenticated watermark namespace fits");
-    codec
-        .write_payload(
-            &mut key,
-            AUTH_NAMESPACE_LEN,
-            &location.as_u64().to_be_bytes(),
-        )
-        .expect("authenticated watermark fits");
-    key.freeze()
+    encode_auth_namespaced_key(&WATERMARK_PREFIX, namespace.tag(), location.as_u64())
 }
 
 pub(crate) fn encode_auth_presence_key<F: Family>(
     namespace: AuthenticatedBackendNamespace,
     location: Location<F>,
 ) -> Key {
-    let codec = AUTH_PRESENCE_CODEC;
-    let mut key = codec
-        .new_key_with_len(codec.min_key_len_for_payload(AUTH_NAMESPACE_LEN + 8))
-        .expect("authenticated presence key length should fit");
-    codec
-        .write_payload(&mut key, 0, &[namespace.tag()])
-        .expect("authenticated presence namespace fits");
-    codec
-        .write_payload(
-            &mut key,
-            AUTH_NAMESPACE_LEN,
-            &location.as_u64().to_be_bytes(),
-        )
-        .expect("authenticated presence location fits");
-    key.freeze()
-}
-
-pub(crate) fn encode_auth_immutable_update_key<F: Family>(
-    raw_key: &[u8],
-    location: Location<F>,
-) -> Result<Key, QmdbError> {
-    let codec = AUTH_IMMUTABLE_UPDATE_CODEC;
-    let ordered_key = encode_ordered_update_payload(codec, raw_key, UPDATE_VERSION_LEN)?;
-    let total_len = codec.min_key_len_for_payload(ordered_key.len() + UPDATE_VERSION_LEN);
-    let mut key = codec
-        .new_key_with_len(total_len)
-        .expect("authenticated immutable update key length should fit");
-    codec
-        .write_payload(&mut key, 0, &ordered_key)
-        .expect("authenticated immutable update key bytes fit");
-    codec
-        .write_payload(
-            &mut key,
-            ordered_key.len(),
-            &location.as_u64().to_be_bytes(),
-        )
-        .expect("authenticated immutable update location fits");
-    Ok(key.freeze())
-}
-
-pub(crate) fn decode_auth_immutable_update_location<F: Family>(
-    key: &Key,
-) -> Result<Location<F>, QmdbError> {
-    let codec = AUTH_IMMUTABLE_UPDATE_CODEC;
-    if !codec.matches(key) {
-        return Err(QmdbError::CorruptData(
-            "authenticated immutable update key prefix mismatch".to_string(),
-        ));
-    }
-    let payload_capacity = codec.payload_capacity_bytes_for_key_len(key.len());
-    if payload_capacity < ORDERED_KEY_TERMINATOR_LEN + UPDATE_VERSION_LEN {
-        return Err(QmdbError::CorruptData(
-            "authenticated immutable update payload shorter than minimum layout".to_string(),
-        ));
-    }
-    let ordered_len = payload_capacity - UPDATE_VERSION_LEN;
-    let ordered_key = codec.read_payload(key, 0, ordered_len).map_err(|e| {
-        QmdbError::CorruptData(format!(
-            "cannot decode authenticated immutable update key bytes: {e}"
-        ))
-    })?;
-    validate_ordered_key_bytes(&ordered_key, "authenticated immutable update key")?;
-    let bytes = codec
-        .read_payload_exact::<8>(key, ordered_len)
-        .map_err(|e| {
-            QmdbError::CorruptData(format!(
-                "cannot decode authenticated immutable update location: {e}"
-            ))
-        })?;
-    Ok(Location::new(u64::from_be_bytes(bytes)))
+    encode_auth_namespaced_key(&PRESENCE_PREFIX, namespace.tag(), location.as_u64())
 }
 
 pub(crate) async fn load_latest_auth_immutable_update_row<F: Family>(
@@ -233,8 +102,8 @@ pub(crate) async fn load_latest_auth_immutable_update_row<F: Family>(
     watermark: Location<F>,
     key: &[u8],
 ) -> Result<Option<(Key, Vec<u8>)>, QmdbError> {
-    let start = encode_auth_immutable_update_key(key, Location::<F>::new(0))?;
-    let end = encode_auth_immutable_update_key(key, watermark)?;
+    let start = encode_update_key(key, Location::<F>::new(0))?;
+    let end = encode_update_key(key, watermark)?;
     let rows = session
         .range_with_mode(&start, &end, 1, RangeMode::Reverse)
         .await?;
@@ -248,7 +117,7 @@ pub(crate) async fn read_latest_auth_watermark<F: Family>(
     session: &SerializableReadSession,
     namespace: AuthenticatedBackendNamespace,
 ) -> Result<Option<Location<F>>, QmdbError> {
-    let (start, end) = auth_namespace_bounds(AUTH_WATERMARK_CODEC, namespace);
+    let (start, end) = auth_namespace_bounds(&WATERMARK_PREFIX, namespace);
     let rows = session
         .range_with_mode(&start, &end, 1, RangeMode::Reverse)
         .await?;
@@ -362,7 +231,7 @@ where
         if let ImmutableOperation::Set(key, _) = operation {
             keyed_operation_count += 1;
             aux_rows.push((
-                encode_auth_immutable_update_key(key.as_ref(), location)?,
+                encode_update_key(key.as_ref(), location)?,
                 encode_update_index_value(true),
             ));
         }
@@ -500,52 +369,37 @@ pub(crate) async fn load_auth_operation_bytes_range<F: Family>(
 }
 
 fn decode_auth_location_field<F: Family>(
-    codec: KeyCodec,
+    prefix: &Prefix,
     namespace: AuthenticatedBackendNamespace,
     key: &Key,
     label: &str,
 ) -> Result<Location<F>, QmdbError> {
-    ensure_auth_namespace(codec, namespace, key, label)?;
-    let bytes = codec
-        .read_payload_exact::<8>(key, AUTH_NAMESPACE_LEN)
-        .map_err(|e| QmdbError::CorruptData(format!("cannot decode {label} location: {e}")))?;
-    Ok(Location::new(u64::from_be_bytes(bytes)))
+    let payload = ensure_auth_namespace(prefix, namespace, key, label)?;
+    Ok(Location::new(decode_location_bytes(
+        &payload[AUTH_NAMESPACE_LEN..],
+        format_args!("{label} location"),
+    )?))
 }
 
 pub(crate) fn decode_auth_operation_location<F: Family>(
     namespace: AuthenticatedBackendNamespace,
     key: &Key,
 ) -> Result<Location<F>, QmdbError> {
-    decode_auth_location_field(
-        AUTH_OPERATION_CODEC,
-        namespace,
-        key,
-        "authenticated operation",
-    )
+    decode_auth_location_field(&OPERATION_PREFIX, namespace, key, "authenticated operation")
 }
 
 pub(crate) fn decode_auth_watermark_location<F: Family>(
     namespace: AuthenticatedBackendNamespace,
     key: &Key,
 ) -> Result<Location<F>, QmdbError> {
-    decode_auth_location_field(
-        AUTH_WATERMARK_CODEC,
-        namespace,
-        key,
-        "authenticated watermark",
-    )
+    decode_auth_location_field(&WATERMARK_PREFIX, namespace, key, "authenticated watermark")
 }
 
 pub(crate) fn decode_auth_presence_location<F: Family>(
     namespace: AuthenticatedBackendNamespace,
     key: &Key,
 ) -> Result<Location<F>, QmdbError> {
-    decode_auth_location_field(
-        AUTH_PRESENCE_CODEC,
-        namespace,
-        key,
-        "authenticated presence",
-    )
+    decode_auth_location_field(&PRESENCE_PREFIX, namespace, key, "authenticated presence")
 }
 
 #[cfg(test)]
@@ -577,9 +431,8 @@ mod tests {
 
         assert_eq!(prepared.keyed_operation_count, 1);
 
-        let update_key =
-            encode_auth_immutable_update_key(key.as_ref(), Location::<mmr::Family>::new(0))
-                .expect("encode update key");
+        let update_key = encode_update_key(key.as_ref(), Location::<mmr::Family>::new(0))
+            .expect("encode update key");
         let (_, row_value) = prepared
             .aux_rows
             .iter()

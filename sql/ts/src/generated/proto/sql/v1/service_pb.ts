@@ -28,7 +28,7 @@ export const file_sql_v1_service: GenFile = /*@__PURE__*/
 export const Service: GenService<{
   /**
    * Re-run a SQL WHERE predicate against every incoming batch that touches
-   * `table`'s primary-key codec family. Emits one `SubscribeResponse` per
+   * `table`'s primary-key family. Emits one `SubscribeResponse` per
    * matched batch containing just the rows that satisfied the predicate.
    *
    * @generated from rpc sql.v1.Service.Subscribe

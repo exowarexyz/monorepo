@@ -18,6 +18,9 @@ use exoware_qmdb::{
 use exoware_sdk::keys::Key;
 use exoware_sdk::kv_codec::Utf8;
 use exoware_sdk::proto::PreferZstdHttpClient;
+use exoware_sdk::prune_policy::{
+    GroupBy, KeysScope, OrderBy, OrderEncoding, PolicyScope, PrunePolicy, RetainPolicy,
+};
 use exoware_sdk::selector::Selector;
 use exoware_sdk::stream_filter::StreamFilter;
 use exoware_sdk::{
@@ -118,15 +121,14 @@ fn qmdb_rpc_client(base: &str) -> QmdbConnectClient {
     QmdbConnectClient::plaintext(base, ((0..=10000).into(), ()))
 }
 
-fn store_prefix(prefix: u16) -> StoreKeyPrefix {
-    StoreKeyPrefix::new(4, prefix).expect("valid integration prefix")
+fn store_prefix(prefix: u8) -> StoreKeyPrefix {
+    StoreKeyPrefix::new(vec![prefix]).expect("valid integration prefix")
 }
 
 fn all_logical_keys_filter() -> StreamFilter {
     StreamFilter {
         selectors: vec![Selector {
-            reserved_bits: 0,
-            prefix: 0,
+            prefix: Bytes::new(),
             payload_regex: Utf8::from("(?s-u).*"),
         }],
         value_filters: vec![],
@@ -343,8 +345,8 @@ async fn raw_prefixes_support_atomic_batch_fetch_range_and_stream() {
 #[tokio::test]
 async fn sql_schemas_are_isolated_by_store_prefix() {
     let base = local_store_client().await;
-    let schema_a = make_sql_schema(base.prefixed(StoreKeyPrefix::new(4, 0).unwrap()));
-    let schema_b = make_sql_schema(base.prefixed(StoreKeyPrefix::new(4, 1).unwrap()));
+    let schema_a = make_sql_schema(base.prefixed(store_prefix(0)));
+    let schema_b = make_sql_schema(base.prefixed(store_prefix(1)));
 
     let mut writer_a = schema_a.batch_writer();
     writer_a
@@ -364,11 +366,11 @@ async fn sql_schemas_are_isolated_by_store_prefix() {
     assert!(seq_b.expect("flush b") > 0);
 
     assert_eq!(
-        query_sql_items(base.prefixed(StoreKeyPrefix::new(4, 0).unwrap())).await,
+        query_sql_items(base.prefixed(store_prefix(0))).await,
         (vec![1, 2], vec![100, 200])
     );
     assert_eq!(
-        query_sql_items(base.prefixed(StoreKeyPrefix::new(4, 1).unwrap())).await,
+        query_sql_items(base.prefixed(store_prefix(1))).await,
         (vec![1, 3], vec![1000, 3000])
     );
 }
@@ -376,8 +378,8 @@ async fn sql_schemas_are_isolated_by_store_prefix() {
 #[tokio::test]
 async fn sql_streaming_is_isolated_by_store_prefix() {
     let base = local_store_client().await;
-    let client_a = base.prefixed(StoreKeyPrefix::new(4, 0).unwrap());
-    let client_b = base.prefixed(StoreKeyPrefix::new(4, 1).unwrap());
+    let client_a = base.prefixed(store_prefix(0));
+    let client_b = base.prefixed(store_prefix(1));
     let (_sql_server_a, sql_url_a) = spawn_sql_service(make_sql_schema(client_a.clone())).await;
     let (_sql_server_b, sql_url_b) = spawn_sql_service(make_sql_schema(client_b.clone())).await;
     let sql_a = sql_rpc_client(&sql_url_a);
@@ -479,8 +481,8 @@ async fn query_sql_items(client: PrefixedStoreClient) -> (Vec<i64>, Vec<i64>) {
 #[tokio::test]
 async fn prefixed_qmdb_writers_handle_concurrent_inflight_batches_per_instance() {
     let base = local_store_client().await;
-    let client_a = base.prefixed(StoreKeyPrefix::new(4, 4).unwrap());
-    let client_b = base.prefixed(StoreKeyPrefix::new(4, 5).unwrap());
+    let client_a = base.prefixed(store_prefix(4));
+    let client_b = base.prefixed(store_prefix(5));
     let writer_a = Arc::new(keyless_writer(client_a.clone()));
     let writer_b = Arc::new(keyless_writer(client_b.clone()));
 
@@ -563,8 +565,8 @@ async fn prefixed_qmdb_writers_handle_concurrent_inflight_batches_per_instance()
 #[tokio::test]
 async fn prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_receipts() {
     let base = local_store_client().await;
-    let sql_client = base.prefixed(StoreKeyPrefix::new(4, 0).unwrap());
-    let qmdb_client = base.prefixed(StoreKeyPrefix::new(4, 4).unwrap());
+    let sql_client = base.prefixed(store_prefix(0));
+    let qmdb_client = base.prefixed(store_prefix(4));
     let mut sql_writer = make_sql_schema(sql_client.clone()).batch_writer();
     sql_writer
         .insert("items", vec![CellValue::Int64(42), CellValue::Int64(4200)])
@@ -675,8 +677,8 @@ async fn prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_receipts(
 #[tokio::test]
 async fn qmdb_streaming_is_isolated_by_store_prefix() {
     let base = local_store_client().await;
-    let client_a = base.prefixed(StoreKeyPrefix::new(4, 4).unwrap());
-    let client_b = base.prefixed(StoreKeyPrefix::new(4, 5).unwrap());
+    let client_a = base.prefixed(store_prefix(4));
+    let client_b = base.prefixed(store_prefix(5));
     let (_qmdb_server_a, qmdb_url_a) = spawn_qmdb_service(client_a.clone()).await;
     let (_qmdb_server_b, qmdb_url_b) = spawn_qmdb_service(client_b.clone()).await;
     let qmdb_a = qmdb_rpc_client(&qmdb_url_a);
@@ -747,4 +749,120 @@ async fn qmdb_streaming_is_isolated_by_store_prefix() {
     assert!(frame_a.resume_sequence_number > 0);
     assert_eq!(frame_a.operations, expected_qmdb_frame(&ops_a));
     assert_ne!(frame_a.root, frame_b.root);
+}
+
+#[tokio::test]
+async fn prefixed_prune_composes_selector_and_prunes_cleanly() {
+    // Regression test for prefix composition
+
+    // The SDK composes the store prefix
+    // onto the logical selector (prefix_prune_policies), and the store
+    // reconstructs a codec from the MERGED selector (apply_key_prune_policy) and
+    // strips.
+    let base = local_store_client().await;
+    let client = base.prefixed(StoreKeyPrefix::new(vec![0x05, 0x06]).unwrap());
+
+    // LOGICAL keys carry the logical family prefix 0x07 and the versioned-payload
+    // layout used by prune_contract.rs. These are the LOGICAL keys handed to the
+    // prefixed client; the client prepends the [0x05, 0x06] store prefix itself,
+    // so physical keys become [0x05, 0x06, 0x07, ...].
+    let logical_key = |name: &[u8], version: u64| -> Key {
+        let mut key = Vec::new();
+        key.push(0x07);
+        key.extend_from_slice(name);
+        key.extend_from_slice(&[0x00, 0x00]);
+        key.extend_from_slice(&version.to_be_bytes());
+        Bytes::from(key)
+    };
+
+    let row_v1 = logical_key(b"row", 1);
+    let row_v2 = logical_key(b"row", 2);
+    let row_v3 = logical_key(b"row", 3);
+    let alt_v7 = logical_key(b"alt", 7);
+    let alt_v8 = logical_key(b"alt", 8);
+
+    let mut batch = StoreWriteBatch::new();
+    for (key, value) in [
+        (&row_v1, b"row-v1".as_slice()),
+        (&row_v2, b"row-v2".as_slice()),
+        (&row_v3, b"row-v3".as_slice()),
+        (&alt_v7, b"alt-v7".as_slice()),
+        (&alt_v8, b"alt-v8".as_slice()),
+    ] {
+        batch
+            .push(client.key_prefix(), key, value)
+            .expect("push versioned key");
+    }
+    batch.commit(&base).await.expect("commit versioned keys");
+
+    // The LOGICAL prune policy's selector.prefix is the logical family [0x07],
+    // NOT the composed bytes. Scope/group_by/order_by/retain mirror
+    // prune_contract.rs's version_policy_with_encoding.
+    let policy = PrunePolicy {
+        scope: PolicyScope::Keys(KeysScope {
+            selector: Selector {
+                prefix: Bytes::from(vec![0x07]),
+                payload_regex: Utf8::from(
+                    "(?s-u)^(?P<logical>(?:\\x00\\xFF|[^\\x00])*)\\x00\\x00(?P<version>.{8})$",
+                ),
+            },
+            group_by: GroupBy {
+                capture_groups: vec![Utf8::from("logical")],
+            },
+            order_by: Some(OrderBy {
+                capture_group: Utf8::from("version"),
+                encoding: OrderEncoding::U64Be,
+            }),
+        }),
+        retain: RetainPolicy::KeepLatest { count: 1 },
+    };
+
+    // The crux: the prefixed client composes [0x05, 0x06] onto the [0x07] logical
+    // selector, producing merged physical prefix [0x05, 0x06, 0x07]
+    // (prefix_prune_policies), and the server reconstructs a codec from the merged
+    // selector and strips.
+    client.compact().prune(&[policy]).await.expect("prune");
+
+    // Verified through the prefixed client (which strips the store prefix
+    // transparently). Because KeepLatest grouping depends on the server stripping
+    // the COMPOSED prefix and the payload_regex parsing logical/version, a spurious
+    // trailing byte (the old bit-codec bug) would break grouping and the wrong rows
+    // would survive -- so exact KeepLatest correctness proves the merge + strip +
+    // regex all work through the real composed path.
+    assert!(client
+        .query()
+        .get(&row_v1)
+        .await
+        .expect("get row v1")
+        .is_none());
+    assert!(client
+        .query()
+        .get(&row_v2)
+        .await
+        .expect("get row v2")
+        .is_none());
+    assert!(client
+        .query()
+        .get(&alt_v7)
+        .await
+        .expect("get alt v7")
+        .is_none());
+    assert_eq!(
+        client
+            .query()
+            .get(&row_v3)
+            .await
+            .expect("get row v3")
+            .as_deref(),
+        Some(b"row-v3".as_slice())
+    );
+    assert_eq!(
+        client
+            .query()
+            .get(&alt_v8)
+            .await
+            .expect("get alt v8")
+            .as_deref(),
+        Some(b"alt-v8".as_slice())
+    );
 }

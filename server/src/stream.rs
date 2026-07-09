@@ -12,10 +12,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use bytes::Bytes;
 use connectrpc::ConnectError;
 use exoware_sdk::common::Entry;
-use exoware_sdk::keys::KeyCodec;
+use exoware_sdk::keys::Prefix;
 use exoware_sdk::selector::compile_payload_regex;
 use exoware_sdk::stream_filter::{validate_filter, CompiledFilters, StreamFilter};
 use regex::bytes::Regex;
@@ -34,7 +33,7 @@ pub const METADATA_OLDEST_RETAINED: &str = "oldest_retained";
 
 #[derive(Clone)]
 pub(crate) struct CompiledKeyMatcher {
-    codec: KeyCodec,
+    prefix: Prefix,
     regex: Regex,
 }
 
@@ -55,10 +54,9 @@ pub(crate) fn compile_matchers(filter: &StreamFilter) -> Result<CompiledMatchers
         .map(|mk| {
             let regex = compile_payload_regex(&mk.payload_regex)
                 .map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
-            Ok(CompiledKeyMatcher {
-                codec: KeyCodec::new(mk.reserved_bits, mk.prefix),
-                regex,
-            })
+            let prefix = Prefix::new(mk.prefix.clone())
+                .map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
+            Ok(CompiledKeyMatcher { prefix, regex })
         })
         .collect::<Result<Vec<_>, ConnectError>>()?;
     let values = CompiledFilters::compile(&filter.value_filters)
@@ -75,16 +73,11 @@ pub(crate) fn apply_filter(matchers: &CompiledMatchers, kvs: &[Entry]) -> Vec<En
         if !value_ok {
             continue;
         }
-        let k = Bytes::copy_from_slice(&kv.key);
         for matcher in &matchers.keys {
-            if !matcher.codec.matches(&k) {
-                continue;
-            }
-            let payload_len = matcher.codec.payload_capacity_bytes_for_key_len(k.len());
-            let Ok(payload) = matcher.codec.read_payload(&k, 0, payload_len) else {
+            let Some(payload) = matcher.prefix.strip_slice(&kv.key) else {
                 continue;
             };
-            if matcher.regex.is_match(&payload) {
+            if matcher.regex.is_match(payload) {
                 out.push(kv.clone());
                 continue 'outer;
             }
@@ -153,36 +146,34 @@ impl StreamNotifier for StreamHub {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+    use exoware_sdk::keys::Key;
     use exoware_sdk::kv_codec::Utf8;
     use exoware_sdk::selector::Selector;
     use exoware_sdk::stream_filter::Filter;
 
-    fn filter(prefix: u16, regex: &str) -> StreamFilter {
+    fn filter(prefix: u8, regex: &str) -> StreamFilter {
         StreamFilter {
             selectors: vec![Selector {
-                reserved_bits: 4,
-                prefix,
+                prefix: Bytes::from(vec![prefix]),
                 payload_regex: Utf8::from(regex),
             }],
             value_filters: vec![],
         }
     }
 
-    fn filter_with_values(prefix: u16, regex: &str, value_filters: Vec<Filter>) -> StreamFilter {
+    fn filter_with_values(prefix: u8, regex: &str, value_filters: Vec<Filter>) -> StreamFilter {
         StreamFilter {
             selectors: vec![Selector {
-                reserved_bits: 4,
-                prefix,
+                prefix: Bytes::from(vec![prefix]),
                 payload_regex: Utf8::from(regex),
             }],
             value_filters,
         }
     }
 
-    fn key(family: u8, payload: &[u8]) -> Bytes {
-        let codec = KeyCodec::new(4, u16::from(family));
-        let key = codec.encode(payload).unwrap();
-        Bytes::copy_from_slice(key.as_ref())
+    fn key(family: u8, payload: &[u8]) -> Key {
+        Prefix::from_byte(family).encode(payload).unwrap()
     }
 
     fn kv(family: u8, payload: &[u8], value: &'static [u8]) -> Entry {

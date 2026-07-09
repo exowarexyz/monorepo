@@ -2,16 +2,8 @@ use bytes::{Bytes, BytesMut};
 
 /// Maximum physical key length in bytes.
 ///
-/// The storage stack is intentionally non-backwards-compatible with prior
-/// fixed-width key formats. All keys must now fit in a single `u8` length
-/// field, so the largest valid key is 254 bytes.
+/// All key lengths must fit in a `u8` so the largest valid key is 254 bytes.
 pub const MAX_KEY_LEN: usize = 254;
-
-/// Maximum key scratch width retained for stack buffers and legacy callers.
-///
-/// This is no longer a fixed physical key width. It is simply the largest
-/// valid key length in bytes.
-pub const KEY_SIZE: usize = MAX_KEY_LEN;
 
 /// Minimum physical key length in bytes.
 pub const MIN_KEY_LEN: usize = 0;
@@ -22,7 +14,7 @@ pub const MIN_KEY_LEN: usize = 0;
 /// [`bytes::Bytes::slice_ref`]) without copying.
 pub type Key = Bytes;
 
-/// Mutable buffer used while constructing a key with [`KeyCodec`]. Freeze to [`Key`] with
+/// Mutable buffer used while constructing a key. Freeze to [`Key`] with
 /// [`Bytes::from`] / [`BytesMut::freeze`] when done mutating.
 pub type KeyMut = BytesMut;
 
@@ -36,260 +28,168 @@ pub enum KeyValidationError {
     TooLong { len: usize, max: usize },
 }
 
-/// Errors returned by [`KeyCodec`].
+/// Errors returned by [`Prefix`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum KeyCodecError {
-    #[error("key length {len} is outside valid range [{min}, {max}]")]
-    InvalidKeyLength { len: usize, min: usize, max: usize },
-    #[error("payload length {payload_len} exceeds codec capacity {max_payload_len}")]
-    PayloadTooLarge {
-        payload_len: usize,
-        max_payload_len: usize,
-    },
-    #[error("payload range offset={offset} len={len} exceeds codec capacity {max_payload_len}")]
-    PayloadRangeOutOfBounds {
-        offset: usize,
-        len: usize,
-        max_payload_len: usize,
-    },
-    #[error("key does not match this codec prefix")]
+pub enum PrefixError {
+    #[error("prefix length {len} exceeds max {max}")]
+    PrefixTooLong { len: usize, max: usize },
+    #[error("key length {len} exceeds max {max}")]
+    KeyTooLong { len: usize, max: usize },
+    #[error("key does not match this prefix")]
     PrefixMismatch,
 }
 
-/// Bit-packed key layout: a small prefix id in the leading reserved bits, payload in the remainder.
-///
-/// For example, with 4 reserved bits the first nibble selects the prefix and the rest of the key
-/// carries the encoded logical payload.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct KeyCodec {
-    reserved_bits: u8,
-    prefix: u16,
-}
+/// Key namespace prefix. A key belongs to the prefix iff it
+/// starts with these bytes; the payload is everything after them. Composing
+/// namespaces is byte concatenation, which is always associative and
+/// unambiguous.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Prefix(Bytes);
 
-impl KeyCodec {
-    /// Build a codec with `reserved_bits` high bits reserved for `prefix`.
-    pub const fn new(reserved_bits: u8, prefix: u16) -> Self {
-        assert!(reserved_bits <= 16, "reserved bits must be <= 16");
-        let max_prefix = prefix_bit_mask(reserved_bits);
-        assert!(prefix <= max_prefix, "prefix does not fit in reserved bits");
-        Self {
-            reserved_bits,
-            prefix,
-        }
-    }
-
-    /// The number of reserved high bits at the start of the key.
-    #[inline]
-    pub const fn reserved_bits(self) -> u8 {
-        self.reserved_bits
-    }
-
-    /// Family id stored in the reserved high bits.
-    #[inline]
-    pub const fn prefix(self) -> u16 {
-        self.prefix
-    }
-
-    /// Minimum key length in bytes needed to store this codec's reserved bits.
-    #[inline]
-    pub const fn min_key_len(self) -> usize {
-        (self.reserved_bits as usize).div_ceil(8)
-    }
-
-    /// Maximum logical payload bytes that can ever fit under this codec.
-    #[inline]
-    pub const fn max_payload_capacity_bytes(self) -> usize {
-        ((MAX_KEY_LEN * 8) - self.reserved_bits as usize) / 8
-    }
-
-    /// Maximum logical payload bytes that fit under this codec.
-    ///
-    /// This reflects the global physical key cap rather than a per-key fixed
-    /// width. Families that need an exact key length should use
-    /// [`Self::payload_capacity_bytes_for_key_len`].
-    #[inline]
-    pub const fn payload_capacity_bytes(self) -> usize {
-        self.max_payload_capacity_bytes()
-    }
-
-    /// Maximum logical payload bytes that fit in a key of `key_len` bytes.
-    #[inline]
-    pub const fn payload_capacity_bytes_for_key_len(self, key_len: usize) -> usize {
-        ((key_len * 8).saturating_sub(self.reserved_bits as usize)) / 8
-    }
-
-    /// Smallest physical key length that can store `payload_len` bytes.
-    #[inline]
-    pub const fn min_key_len_for_payload(self, payload_len: usize) -> usize {
-        (self.reserved_bits as usize + payload_len * 8).div_ceil(8)
-    }
-
-    /// Absolute bit offset for a payload byte offset within the physical key.
-    #[inline]
-    pub const fn payload_bit_offset(self, payload_byte_offset: usize) -> usize {
-        self.reserved_bits as usize + (payload_byte_offset * 8)
-    }
-
-    /// Create a zero-filled key buffer with the prefix id written in the reserved bits.
-    pub fn new_key_with_len(self, total_bytes: usize) -> Result<KeyMut, KeyCodecError> {
-        self.validate_key_len(total_bytes)?;
-        let mut key = BytesMut::with_capacity(total_bytes);
-        key.resize(total_bytes, 0);
-        write_prefix_bits(&mut key, self.reserved_bits, self.prefix);
-        Ok(key)
-    }
-
-    /// Create the shortest zero-filled key for this prefix.
-    pub fn new_key(self) -> Key {
-        Bytes::from(
-            self.new_key_with_len(self.min_key_len())
-                .expect("minimum codec key length must always be valid"),
-        )
-    }
-
-    /// Encode an entire logical payload into a physical key.
-    pub fn encode(self, payload: &[u8]) -> Result<Key, KeyCodecError> {
-        let max_payload_len = self.max_payload_capacity_bytes();
-        if payload.len() > max_payload_len {
-            return Err(KeyCodecError::PayloadTooLarge {
-                payload_len: payload.len(),
-                max_payload_len,
-            });
-        }
-        let mut key = self.new_key_with_len(self.min_key_len_for_payload(payload.len()))?;
-        self.write_payload(&mut key, 0, payload)?;
-        Ok(key.freeze())
-    }
-
-    /// Decode `payload_len` bytes from a key that belongs to this codec.
-    pub fn decode(self, key: &Key, payload_len: usize) -> Result<Vec<u8>, KeyCodecError> {
-        if !self.matches(key) {
-            return Err(KeyCodecError::PrefixMismatch);
-        }
-        self.read_payload(key, 0, payload_len)
-    }
-
-    /// Write logical payload bytes at a byte offset within the shifted payload.
-    pub fn write_payload(
-        self,
-        key: &mut KeyMut,
-        payload_byte_offset: usize,
-        bytes: &[u8],
-    ) -> Result<(), KeyCodecError> {
-        self.ensure_payload_range(key.len(), payload_byte_offset, bytes.len())?;
-        let start_bit = self.payload_bit_offset(payload_byte_offset);
-        write_bits_from_bytes(key, start_bit, bytes, bytes.len() * 8);
-        Ok(())
-    }
-
-    /// Fill a payload byte range with a repeated byte value.
-    pub fn fill_payload(
-        self,
-        key: &mut KeyMut,
-        payload_byte_offset: usize,
-        len: usize,
-        value: u8,
-    ) -> Result<(), KeyCodecError> {
-        self.ensure_payload_range(key.len(), payload_byte_offset, len)?;
-        if len == 0 {
-            return Ok(());
-        }
-        self.write_payload(key, payload_byte_offset, &vec![value; len])
-    }
-
-    /// Read logical payload bytes at a byte offset within the shifted payload.
-    pub fn read_payload(
-        self,
-        key: &Key,
-        payload_byte_offset: usize,
-        len: usize,
-    ) -> Result<Vec<u8>, KeyCodecError> {
-        self.ensure_payload_range(key.len(), payload_byte_offset, len)?;
-        let start_bit = self.payload_bit_offset(payload_byte_offset);
-        let mut out = vec![0u8; len];
-        read_bits_to_bytes(key, start_bit, &mut out, len * 8);
-        Ok(out)
-    }
-
-    /// Read an exact-size payload slice into an array.
-    pub fn read_payload_exact<const N: usize>(
-        self,
-        key: &Key,
-        payload_byte_offset: usize,
-    ) -> Result<[u8; N], KeyCodecError> {
-        let bytes = self.read_payload(key, payload_byte_offset, N)?;
-        let mut out = [0u8; N];
-        out.copy_from_slice(&bytes);
-        Ok(out)
-    }
-
-    /// Copy payload bytes from one codec-managed key into another.
-    pub fn copy_payload(
-        self,
-        src: &Key,
-        src_payload_byte_offset: usize,
-        dst: &mut KeyMut,
-        dst_payload_byte_offset: usize,
-        len: usize,
-    ) -> Result<(), KeyCodecError> {
-        let bytes = self.read_payload(src, src_payload_byte_offset, len)?;
-        self.write_payload(dst, dst_payload_byte_offset, &bytes)
-    }
-
-    /// True when the key belongs to this codec prefix.
-    #[inline]
-    pub fn matches(self, key: &Key) -> bool {
-        key.len() >= self.min_key_len() && read_prefix_bits(key, self.reserved_bits) == self.prefix
-    }
-
-    /// Inclusive lower and upper bounds for keys in this prefix with a fixed byte length.
-    pub fn prefix_bounds_for_len(self, total_bytes: usize) -> Result<(Key, Key), KeyCodecError> {
-        self.validate_key_len(total_bytes)?;
-        let mut start = vec![0u8; total_bytes];
-        let mut end = vec![0xFFu8; total_bytes];
-        write_prefix_bits(&mut start, self.reserved_bits, self.prefix);
-        write_prefix_bits(&mut end, self.reserved_bits, self.prefix);
-        Ok((Bytes::from(start), Bytes::from(end)))
-    }
-
-    /// Inclusive lower and upper bounds for this prefix across the full supported key-length domain.
-    pub fn prefix_bounds(self) -> (Key, Key) {
-        let start = Bytes::from(
-            self.new_key_with_len(self.min_key_len())
-                .expect("minimum codec key length must always be valid"),
-        );
-        let mut end = vec![0xFFu8; MAX_KEY_LEN];
-        write_prefix_bits(&mut end, self.reserved_bits, self.prefix);
-        (start, Bytes::from(end))
-    }
-
-    fn validate_key_len(self, len: usize) -> Result<(), KeyCodecError> {
-        if !(MIN_KEY_LEN..=MAX_KEY_LEN).contains(&len) || len < self.min_key_len() {
-            return Err(KeyCodecError::InvalidKeyLength {
-                len,
-                min: self.min_key_len(),
+impl Prefix {
+    /// Build a prefix from bytes. Fails when longer than [`MAX_KEY_LEN`].
+    pub fn new(prefix: impl Into<Bytes>) -> Result<Self, PrefixError> {
+        let prefix = prefix.into();
+        if prefix.len() > MAX_KEY_LEN {
+            return Err(PrefixError::PrefixTooLong {
+                len: prefix.len(),
                 max: MAX_KEY_LEN,
             });
         }
-        Ok(())
+        Ok(Self(prefix))
     }
 
-    fn ensure_payload_range(
-        self,
-        key_len: usize,
-        offset: usize,
-        len: usize,
-    ) -> Result<(), KeyCodecError> {
-        self.validate_key_len(key_len)?;
-        let max_payload_len = self.payload_capacity_bytes_for_key_len(key_len);
-        if offset.saturating_add(len) > max_payload_len {
-            return Err(KeyCodecError::PayloadRangeOutOfBounds {
-                offset,
-                len,
-                max_payload_len,
+    /// The empty prefix: the composition identity. It matches every key and
+    /// passes payloads through unchanged.
+    pub const fn empty() -> Self {
+        Self(Bytes::new())
+    }
+
+    /// Const constructor for static family prefixes, letting callers keep
+    /// `const FAMILY: Prefix`. Panics when `prefix` is longer than
+    /// [`MAX_KEY_LEN`]; in a const context the panic surfaces at compile time.
+    pub const fn from_static(prefix: &'static [u8]) -> Self {
+        assert!(prefix.len() <= MAX_KEY_LEN, "prefix exceeds MAX_KEY_LEN");
+        Self(Bytes::from_static(prefix))
+    }
+
+    /// One-byte family prefix.
+    pub fn from_byte(b: u8) -> Self {
+        Self(Bytes::copy_from_slice(&[b]))
+    }
+
+    /// The raw prefix bytes.
+    #[inline]
+    pub fn as_bytes(&self) -> &Bytes {
+        &self.0
+    }
+
+    /// Length of the prefix in bytes.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// True when this is the empty (identity) prefix.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Maximum payload length that still yields a key within [`MAX_KEY_LEN`].
+    #[inline]
+    pub fn max_payload_len(&self) -> usize {
+        MAX_KEY_LEN - self.0.len()
+    }
+
+    /// Concatenate this prefix with `payload` to form a physical key. Fails
+    /// with [`PrefixError::KeyTooLong`] if the result exceeds
+    /// [`MAX_KEY_LEN`].
+    pub fn encode(&self, payload: &[u8]) -> Result<Key, PrefixError> {
+        let total = self.0.len() + payload.len();
+        if total > MAX_KEY_LEN {
+            return Err(PrefixError::KeyTooLong {
+                len: total,
+                max: MAX_KEY_LEN,
             });
         }
-        Ok(())
+        let mut key = BytesMut::with_capacity(total);
+        key.extend_from_slice(&self.0);
+        key.extend_from_slice(payload);
+        Ok(key.freeze())
+    }
+
+    /// Prepend this prefix to an existing [`Key`]. When the prefix is empty
+    /// this is a refcount-only clone of `key` (no bytes copied).
+    pub fn encode_key(&self, key: &Key) -> Result<Key, PrefixError> {
+        if self.0.is_empty() {
+            if key.len() > MAX_KEY_LEN {
+                return Err(PrefixError::KeyTooLong {
+                    len: key.len(),
+                    max: MAX_KEY_LEN,
+                });
+            }
+            return Ok(key.clone());
+        }
+        self.encode(key)
+    }
+
+    /// True when `key` belongs to this prefix. The empty prefix matches all.
+    #[inline]
+    pub fn matches(&self, key: &[u8]) -> bool {
+        key.starts_with(&self.0)
+    }
+
+    /// Strip the prefix from a borrowed key slice, returning the payload
+    /// slice, or `None` when `key` does not start with this prefix. The
+    /// zero-copy [`Prefix::strip`] is preferable when the key is a [`Key`].
+    #[inline]
+    pub fn strip_slice<'a>(&self, key: &'a [u8]) -> Option<&'a [u8]> {
+        key.strip_prefix(self.0.as_ref())
+    }
+
+    /// Strip the prefix from `key`, returning the payload as a zero-copy slice
+    /// of the same backing storage. Fails with
+    /// [`PrefixError::PrefixMismatch`] when `key` does not start with this
+    /// prefix.
+    pub fn strip(&self, key: &Key) -> Result<Key, PrefixError> {
+        if !self.matches(key) {
+            return Err(PrefixError::PrefixMismatch);
+        }
+        Ok(key.slice(self.0.len()..))
+    }
+
+    /// Inclusive lower and upper bounds spanning every key under this prefix:
+    /// the prefix itself, and the prefix followed by `0xFF` padding to
+    /// [`MAX_KEY_LEN`].
+    pub fn bounds(&self) -> (Key, Key) {
+        let start = self.0.clone();
+        let mut end = Vec::with_capacity(MAX_KEY_LEN);
+        end.extend_from_slice(&self.0);
+        end.resize(MAX_KEY_LEN, 0xFF);
+        (start, Bytes::from(end))
+    }
+
+    /// Compose two prefixes by concatenation. Always valid and associative;
+    /// fails only if the concatenation exceeds [`MAX_KEY_LEN`].
+    pub fn join(&self, other: &Prefix) -> Result<Prefix, PrefixError> {
+        let total = self.0.len() + other.0.len();
+        if total > MAX_KEY_LEN {
+            return Err(PrefixError::PrefixTooLong {
+                len: total,
+                max: MAX_KEY_LEN,
+            });
+        }
+        if self.0.is_empty() {
+            return Ok(other.clone());
+        }
+        if other.0.is_empty() {
+            return Ok(self.clone());
+        }
+        let mut buf = BytesMut::with_capacity(total);
+        buf.extend_from_slice(&self.0);
+        buf.extend_from_slice(&other.0);
+        Ok(Prefix(buf.freeze()))
     }
 }
 
@@ -333,80 +233,6 @@ pub fn next_key(key: &Key) -> Option<Key> {
         }
     }
     None
-}
-
-#[inline]
-const fn prefix_bit_mask(bits: u8) -> u16 {
-    if bits == 0 {
-        0
-    } else if bits >= 16 {
-        u16::MAX
-    } else {
-        (1u16 << bits) - 1
-    }
-}
-
-fn write_prefix_bits(key: &mut [u8], reserved_bits: u8, prefix: u16) {
-    for bit_idx in 0..reserved_bits as usize {
-        let shift = reserved_bits as usize - 1 - bit_idx;
-        let value = ((prefix >> shift) & 1) != 0;
-        write_bit_be(key, bit_idx, value);
-    }
-}
-
-fn read_prefix_bits(key: &Key, reserved_bits: u8) -> u16 {
-    let mut prefix = 0u16;
-    for bit_idx in 0..reserved_bits as usize {
-        prefix <<= 1;
-        if read_bit_be(key, bit_idx) {
-            prefix |= 1;
-        }
-    }
-    prefix
-}
-
-pub(crate) fn write_bits_from_bytes(
-    dst: &mut [u8],
-    dst_bit_offset: usize,
-    src: &[u8],
-    bit_len: usize,
-) {
-    if bit_len == 0 {
-        return;
-    }
-
-    if bit_len.is_multiple_of(8) {
-        let byte_len = bit_len / 8;
-        let byte_offset = dst_bit_offset / 8;
-        let bit_shift = dst_bit_offset % 8;
-        if byte_len <= src.len() {
-            if let Some(end) = byte_offset.checked_add(byte_len) {
-                if bit_shift == 0 && end <= dst.len() {
-                    dst[byte_offset..end].copy_from_slice(&src[..byte_len]);
-                    return;
-                }
-
-                if bit_shift != 0 && end < dst.len() {
-                    let head_bits = 8 - bit_shift;
-                    let head_mask = ((1u16 << head_bits) - 1) as u8;
-                    let tail_mask = !head_mask;
-                    for (idx, byte) in src.iter().take(byte_len).enumerate() {
-                        let dst_idx = byte_offset + idx;
-                        dst[dst_idx] =
-                            (dst[dst_idx] & !head_mask) | ((*byte >> bit_shift) & head_mask);
-                        dst[dst_idx + 1] =
-                            (dst[dst_idx + 1] & !tail_mask) | ((*byte << head_bits) & tail_mask);
-                    }
-                    return;
-                }
-            }
-        }
-    }
-
-    for bit_idx in 0..bit_len {
-        let value = read_bit_be(src, bit_idx);
-        write_bit_be(dst, dst_bit_offset + bit_idx, value);
-    }
 }
 
 pub(crate) fn read_bits_to_bytes(
@@ -470,132 +296,75 @@ pub(crate) fn write_bit_be(bytes: &mut [u8], bit_idx: usize, value: bool) {
     }
 }
 
-/// Target block size for each tier.
-pub fn target_block_size(tier: u8) -> usize {
-    const KB: usize = 1024;
-    const MB: usize = 1024 * KB;
-    const GB: usize = 1024 * MB;
-    match tier {
-        0 => 64 * MB,
-        1 => 128 * MB,
-        2 => 256 * MB,
-        3 => 512 * MB,
-        4 => GB,
-        5 => 2 * GB,
-        _ => 2 * GB,
-    }
-}
-
-/// Sub-block size: fixed at 64KB uncompressed across all tiers.
-///
-/// We compress sub-blocks from this fixed logical size so every decoded chunk
-/// has a small, known upper bound. That keeps compaction and other merge/decode
-/// paths incremental instead of materializing huge blocks in memory, which
-/// avoids OOM risk. It also limits waste on point lookups: a cache miss fetches
-/// and decompresses only one small slice instead of an entire large block,
-/// improving cache granularity. Range scans still coalesce adjacent sub-blocks
-/// into larger range GETs, so we keep fine-grained point reads without forcing
-/// one network request per sub-block on sequential reads.
-pub const SUB_BLOCK_SIZE: usize = 64 * 1024;
-
-/// Bloom filter bits per key by tier.
-pub fn bloom_bits_per_key(tier: u8) -> Option<u32> {
-    match tier {
-        0 => Some(14),
-        1..=3 => Some(10),
-        _ => None, // T4-T5: no bloom
-    }
-}
-
-/// Compute tier from block age.
-pub fn compute_tier(age: chrono::Duration) -> u8 {
-    if age < chrono::Duration::hours(4) {
-        0
-    } else if age < chrono::Duration::hours(12) {
-        1
-    } else if age < chrono::Duration::hours(36) {
-        2
-    } else if age < chrono::Duration::days(4) {
-        3
-    } else if age < chrono::Duration::days(30) {
-        4
-    } else {
-        5
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn key_codec_uses_4_reserved_bits_plus_payload() {
-        let codec = KeyCodec::new(4, 0x5);
-        let key = codec.encode(&[0xAB, 0xCD]).expect("encoded key");
-        assert_eq!(key[0], 0x5A);
-        assert_eq!(key[1], 0xBC);
+    fn key_prefix_encode_strip_round_trip() {
+        let prefix = Prefix::from_byte(0x05);
+        let key = prefix.encode(&[0xAB, 0xCD]).expect("encoded key");
+        assert_eq!(&key[..], &[0x05, 0xAB, 0xCD]);
         assert_eq!(
-            codec.decode(&key, 2).expect("decoded payload"),
-            vec![0xAB, 0xCD]
+            prefix.strip(&key).expect("payload"),
+            Bytes::from_static(&[0xAB, 0xCD])
         );
     }
 
     #[test]
-    fn key_codec_preserves_payload_order_within_prefix() {
-        let codec = KeyCodec::new(4, 0x3);
-        let lower = codec.encode(&[0x10, 0x00]).expect("lower key");
-        let mid = codec.encode(&[0x10, 0x01]).expect("mid key");
-        let upper = codec.encode(&[0x20, 0x00]).expect("upper key");
+    fn key_prefix_preserves_payload_order_within_prefix() {
+        let prefix = Prefix::from_byte(0x03);
+        let lower = prefix.encode(&[0x10, 0x00]).expect("lower key");
+        let mid = prefix.encode(&[0x10, 0x01]).expect("mid key");
+        let upper = prefix.encode(&[0x20, 0x00]).expect("upper key");
         assert!(lower < mid);
         assert!(mid < upper);
     }
 
     #[test]
-    fn key_codec_prefix_bounds_cover_only_one_prefix() {
-        let codec = KeyCodec::new(4, 0xA);
-        let (start, end) = codec.prefix_bounds();
-        let key = codec.encode(&[0x11, 0x22]).expect("prefix key");
-        assert!(codec.matches(&start));
-        assert!(codec.matches(&end));
-        assert!(codec.matches(&key));
+    fn key_prefix_bounds_cover_only_one_prefix() {
+        let prefix = Prefix::from_byte(0x0A);
+        let (start, end) = prefix.bounds();
+        let key = prefix.encode(&[0x11, 0x22]).expect("prefix key");
+        assert!(prefix.matches(&start));
+        assert!(prefix.matches(&end));
+        assert!(prefix.matches(&key));
         assert!(start <= key && key <= end);
 
-        let other = KeyCodec::new(4, 0xB)
+        // A same-length distinct prefix is disjoint from this one.
+        let other = Prefix::from_byte(0x0B)
             .encode(&[0x11, 0x22])
             .expect("other key");
-        assert!(!codec.matches(&other));
+        assert!(!prefix.matches(&other));
         assert!(other > end || other < start);
         assert!(start <= end);
     }
 
     #[test]
-    fn key_codec_reads_and_writes_payload_at_byte_offsets() {
-        let codec = KeyCodec::new(3, 0b101);
-        let mut key = codec.new_key_with_len(4).expect("new key");
-        codec
-            .write_payload(&mut key, 0, &[0xDE, 0xAD])
-            .expect("write head");
-        codec
-            .write_payload(&mut key, 2, &[0xBE])
-            .expect("write tail");
-        assert_eq!(
-            codec
-                .read_payload(&key.freeze(), 0, 3)
-                .expect("read payload"),
-            vec![0xDE, 0xAD, 0xBE]
-        );
-    }
+    fn key_prefix_join_is_associative_and_composes_layers() {
+        let a = Prefix::from_byte(0x0A);
+        let b = Prefix::from_byte(0x0B);
+        let c = Prefix::from_byte(0x0C);
 
-    fn write_bits_from_bytes_naive(
-        dst: &mut [u8],
-        dst_bit_offset: usize,
-        src: &[u8],
-        bit_len: usize,
-    ) {
-        for bit_idx in 0..bit_len {
-            let value = read_bit_be(src, bit_idx);
-            write_bit_be(dst, dst_bit_offset + bit_idx, value);
-        }
+        // Concatenation is associative.
+        let left = a.join(&b).unwrap().join(&c).unwrap();
+        let right = a.join(&b.join(&c).unwrap()).unwrap();
+        assert_eq!(left, right);
+        assert_eq!(left.as_bytes().as_ref(), &[0x0A, 0x0B, 0x0C]);
+
+        // Encoding layer-by-layer and via the joined prefix produce identical
+        // keys, the composition case that the old bit-padding codec corrupted.
+        let payload = [0x11u8, 0x22, 0x33];
+        let joined = a.join(&b).unwrap();
+        let layered = a.encode(&b.encode(&payload).unwrap()).unwrap();
+        let combined = joined.encode(&payload).unwrap();
+        assert_eq!(layered, combined);
+
+        // Stripping unwinds symmetrically, layer-by-layer or via the join.
+        let expected = Bytes::copy_from_slice(&payload);
+        assert_eq!(joined.strip(&combined).unwrap(), expected);
+        let outer = a.strip(&layered).unwrap();
+        assert_eq!(b.strip(&outer).unwrap(), expected);
     }
 
     fn read_bits_to_bytes_naive(src: &[u8], src_bit_offset: usize, dst: &mut [u8], bit_len: usize) {
@@ -603,25 +372,6 @@ mod tests {
         for bit_idx in 0..bit_len {
             let value = read_bit_be(src, src_bit_offset + bit_idx);
             write_bit_be(dst, bit_idx, value);
-        }
-    }
-
-    #[test]
-    fn write_bits_from_bytes_matches_bit_by_bit_copy() {
-        let src: Vec<u8> = (0..16)
-            .map(|idx| (idx as u8).wrapping_mul(37).wrapping_add(11))
-            .collect();
-        for dst_bit_offset in 0..16 {
-            for bit_len in 0..=src.len() * 8 {
-                let mut expected = vec![0xA5; 24];
-                let mut actual = expected.clone();
-                write_bits_from_bytes_naive(&mut expected, dst_bit_offset, &src, bit_len);
-                write_bits_from_bytes(&mut actual, dst_bit_offset, &src, bit_len);
-                assert_eq!(
-                    actual, expected,
-                    "dst_bit_offset={dst_bit_offset} bit_len={bit_len}"
-                );
-            }
         }
     }
 
@@ -645,17 +395,28 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "prefix does not fit in reserved bits")]
-    fn key_codec_rejects_out_of_range_prefix() {
-        KeyCodec::new(3, 0b1000);
+    fn key_prefix_rejects_oversized_prefix() {
+        let err = Prefix::new(vec![0u8; MAX_KEY_LEN + 1]).expect_err("prefix should not fit");
+        assert!(matches!(err, PrefixError::PrefixTooLong { .. }));
     }
 
     #[test]
-    fn key_codec_rejects_oversized_payload() {
-        let codec = KeyCodec::new(4, 0);
-        let payload = vec![0u8; codec.max_payload_capacity_bytes() + 1];
-        let err = codec.encode(&payload).expect_err("payload should not fit");
-        assert!(matches!(err, KeyCodecError::PayloadTooLarge { .. }));
+    fn key_prefix_rejects_oversized_key() {
+        let prefix = Prefix::from_byte(0x01);
+        let payload = vec![0u8; prefix.max_payload_len() + 1];
+        let err = prefix.encode(&payload).expect_err("key should not fit");
+        assert!(matches!(err, PrefixError::KeyTooLong { .. }));
+    }
+
+    #[test]
+    fn empty_prefix_encode_key_rejects_oversized_key() {
+        let prefix = Prefix::empty();
+        let key = Bytes::from(vec![0u8; MAX_KEY_LEN + 1]);
+        let err = prefix.encode_key(&key).expect_err("key should not fit");
+        assert!(matches!(err, PrefixError::KeyTooLong { .. }));
+        // A key exactly at the bound still round-trips as a zero-copy clone.
+        let key = Bytes::from(vec![0u8; MAX_KEY_LEN]);
+        assert_eq!(prefix.encode_key(&key).expect("fits"), key);
     }
 
     #[test]
@@ -682,15 +443,5 @@ mod tests {
         assert!(validate_key_size(0).is_ok());
         assert!(validate_key_size(MAX_KEY_LEN).is_ok());
         assert!(validate_key_size(MAX_KEY_LEN + 1).is_err());
-    }
-
-    #[test]
-    fn tier_assignment() {
-        assert_eq!(compute_tier(chrono::Duration::minutes(30)), 0);
-        assert_eq!(compute_tier(chrono::Duration::hours(6)), 1);
-        assert_eq!(compute_tier(chrono::Duration::hours(24)), 2);
-        assert_eq!(compute_tier(chrono::Duration::days(3)), 3);
-        assert_eq!(compute_tier(chrono::Duration::days(15)), 4);
-        assert_eq!(compute_tier(chrono::Duration::days(60)), 5);
     }
 }

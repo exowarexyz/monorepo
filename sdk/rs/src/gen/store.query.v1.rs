@@ -1120,21 +1120,21 @@ pub const __KV_FIELD_REF_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buff
 pub mod kv_field_ref {
     #[allow(unused_imports)]
     use super::*;
-    /// A field extracted from the key bytes at a fixed bit offset.
+    /// A field extracted from the key bytes at a fixed byte offset.
     #[derive(Clone, PartialEq, Default)]
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
     pub struct KeyField {
-        /// Bit offset into the key payload where this field starts.
+        /// Byte offset into the key payload where this field starts.
         ///
-        /// Field 1: `bit_offset`
+        /// Field 1: `byte_offset`
         #[serde(
-            rename = "bitOffset",
-            alias = "bit_offset",
+            rename = "byteOffset",
+            alias = "byte_offset",
             with = "::buffa::json_helpers::uint32",
             skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u32"
         )]
-        pub bit_offset: u32,
+        pub byte_offset: u32,
         /// Scalar type used to decode the field bytes.
         ///
         /// Field 2: `kind`
@@ -1161,7 +1161,7 @@ pub mod kv_field_ref {
     impl ::core::fmt::Debug for KeyField {
         fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
             f.debug_struct("KeyField")
-                .field("bit_offset", &self.bit_offset)
+                .field("byte_offset", &self.byte_offset)
                 .field("kind", &self.kind)
                 .field("fixed_size_binary_len", &self.fixed_size_binary_len)
                 .finish()
@@ -1197,9 +1197,10 @@ pub mod kv_field_ref {
             #[allow(unused_imports)]
             use ::buffa::Enumeration as _;
             let mut size = 0u32;
-            if self.bit_offset != 0u32 {
+            if self.byte_offset != 0u32 {
                 size
-                    += 1u32 + ::buffa::types::uint32_encoded_len(self.bit_offset) as u32;
+                    += 1u32
+                        + ::buffa::types::uint32_encoded_len(self.byte_offset) as u32;
             }
             {
                 let val = self.kind.to_i32();
@@ -1223,10 +1224,10 @@ pub mod kv_field_ref {
         ) {
             #[allow(unused_imports)]
             use ::buffa::Enumeration as _;
-            if self.bit_offset != 0u32 {
+            if self.byte_offset != 0u32 {
                 ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Varint)
                     .encode(buf);
-                ::buffa::types::encode_uint32(self.bit_offset, buf);
+                ::buffa::types::encode_uint32(self.byte_offset, buf);
             }
             {
                 let val = self.kind.to_i32();
@@ -1265,7 +1266,7 @@ pub mod kv_field_ref {
                             actual: tag.wire_type() as u8,
                         });
                     }
-                    self.bit_offset = ::buffa::types::decode_uint32(buf)?;
+                    self.byte_offset = ::buffa::types::decode_uint32(buf)?;
                 }
                 2u32 => {
                     if tag.wire_type() != ::buffa::encoding::WireType::Varint {
@@ -1297,7 +1298,7 @@ pub mod kv_field_ref {
             ::core::result::Result::Ok(())
         }
         fn clear(&mut self) {
-            self.bit_offset = 0u32;
+            self.byte_offset = 0u32;
             self.kind = ::buffa::EnumValue::from(0);
             self.fixed_size_binary_len = 0u32;
             self.__buffa_unknown_fields.clear();
@@ -7709,7 +7710,7 @@ pub const __GET_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa
 pub struct GetResponse {
     /// The value associated with the key; absent when the key does not exist.
     ///
-    /// Field 2: `value`
+    /// Field 1: `value`
     #[serde(
         rename = "value",
         with = "::buffa::json_helpers::opt_bytes",
@@ -7718,7 +7719,7 @@ pub struct GetResponse {
     pub value: ::core::option::Option<::buffa::bytes::Bytes>,
     /// Query sequence and server-defined metadata for this lookup.
     ///
-    /// Field 3: `detail`
+    /// Field 2: `detail`
     #[serde(
         rename = "detail",
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
@@ -7798,7 +7799,7 @@ impl ::buffa::Message for GetResponse {
         use ::buffa::Enumeration as _;
         if let Some(ref v) = self.value {
             ::buffa::encoding::Tag::new(
-                    2u32,
+                    1u32,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )
                 .encode(buf);
@@ -7806,7 +7807,7 @@ impl ::buffa::Message for GetResponse {
         }
         if self.detail.is_set() {
             ::buffa::encoding::Tag::new(
-                    3u32,
+                    2u32,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )
                 .encode(buf);
@@ -7826,10 +7827,10 @@ impl ::buffa::Message for GetResponse {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         match tag.field_number() {
-            2u32 => {
+            1u32 => {
                 if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                     return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                        field_number: 2u32,
+                        field_number: 1u32,
                         expected: 2u8,
                         actual: tag.wire_type() as u8,
                     });
@@ -7838,10 +7839,10 @@ impl ::buffa::Message for GetResponse {
                     ::buffa::types::decode_bytes_to_bytes(buf)?,
                 );
             }
-            3u32 => {
+            2u32 => {
                 if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
                     return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                        field_number: 3u32,
+                        field_number: 2u32,
                         expected: 2u8,
                         actual: tag.wire_type() as u8,
                     });
@@ -10211,13 +10212,13 @@ pub mod __buffa {
         pub mod kv_field_ref {
             #[allow(unused_imports)]
             use super::*;
-            /// A field extracted from the key bytes at a fixed bit offset.
+            /// A field extracted from the key bytes at a fixed byte offset.
             #[derive(Clone, Debug, Default)]
             pub struct KeyFieldView<'a> {
-                /// Bit offset into the key payload where this field starts.
+                /// Byte offset into the key payload where this field starts.
                 ///
-                /// Field 1: `bit_offset`
-                pub bit_offset: u32,
+                /// Field 1: `byte_offset`
+                pub byte_offset: u32,
                 /// Scalar type used to decode the field bytes.
                 ///
                 /// Field 2: `kind`
@@ -10274,7 +10275,7 @@ pub mod __buffa {
                                         actual: tag.wire_type() as u8,
                                     });
                                 }
-                                view.bit_offset = ::buffa::types::decode_uint32(&mut cur)?;
+                                view.byte_offset = ::buffa::types::decode_uint32(&mut cur)?;
                             }
                             2u32 => {
                                 if tag.wire_type() != ::buffa::encoding::WireType::Varint {
@@ -10338,7 +10339,7 @@ pub mod __buffa {
                     use ::buffa::alloc::string::ToString as _;
                     let _ = __buffa_src;
                     super::super::super::kv_field_ref::KeyField {
-                        bit_offset: self.bit_offset,
+                        byte_offset: self.byte_offset,
                         kind: self.kind,
                         fixed_size_binary_len: self.fixed_size_binary_len,
                         __buffa_unknown_fields: self
@@ -10356,10 +10357,10 @@ pub mod __buffa {
                     #[allow(unused_imports)]
                     use ::buffa::Enumeration as _;
                     let mut size = 0u32;
-                    if self.bit_offset != 0u32 {
+                    if self.byte_offset != 0u32 {
                         size
                             += 1u32
-                                + ::buffa::types::uint32_encoded_len(self.bit_offset)
+                                + ::buffa::types::uint32_encoded_len(self.byte_offset)
                                     as u32;
                     }
                     {
@@ -10386,13 +10387,13 @@ pub mod __buffa {
                 ) {
                     #[allow(unused_imports)]
                     use ::buffa::Enumeration as _;
-                    if self.bit_offset != 0u32 {
+                    if self.byte_offset != 0u32 {
                         ::buffa::encoding::Tag::new(
                                 1u32,
                                 ::buffa::encoding::WireType::Varint,
                             )
                             .encode(buf);
-                        ::buffa::types::encode_uint32(self.bit_offset, buf);
+                        ::buffa::types::encode_uint32(self.byte_offset, buf);
                     }
                     {
                         let val = self.kind.to_i32();
@@ -10434,7 +10435,7 @@ pub mod __buffa {
                 ) -> ::core::result::Result<__S::Ok, __S::Error> {
                     use ::serde::ser::SerializeMap as _;
                     let mut __map = __s.serialize_map(::core::option::Option::None)?;
-                    if !::buffa::json_helpers::skip_if::is_zero_u32(&self.bit_offset) {
+                    if !::buffa::json_helpers::skip_if::is_zero_u32(&self.byte_offset) {
                         struct _W(u32);
                         impl ::serde::Serialize for _W {
                             fn serialize<__S: ::serde::Serializer>(
@@ -10444,7 +10445,7 @@ pub mod __buffa {
                                 ::buffa::json_helpers::uint32::serialize(&self.0, __s)
                             }
                         }
-                        __map.serialize_entry("bitOffset", &_W(self.bit_offset))?;
+                        __map.serialize_entry("byteOffset", &_W(self.byte_offset))?;
                     }
                     if !::buffa::json_helpers::skip_if::is_default_enum_value(
                         &self.kind,
@@ -18118,11 +18119,11 @@ pub mod __buffa {
         pub struct GetResponseView<'a> {
             /// The value associated with the key; absent when the key does not exist.
             ///
-            /// Field 2: `value`
+            /// Field 1: `value`
             pub value: ::core::option::Option<&'a [u8]>,
             /// Query sequence and server-defined metadata for this lookup.
             ///
-            /// Field 3: `detail`
+            /// Field 2: `detail`
             pub detail: ::buffa::MessageFieldView<
                 super::super::__buffa::view::DetailView<'a>,
             >,
@@ -18166,24 +18167,24 @@ pub mod __buffa {
                     let before_tag = cur;
                     let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
                     match tag.field_number() {
-                        2u32 => {
+                        1u32 => {
                             if tag.wire_type()
                                 != ::buffa::encoding::WireType::LengthDelimited
                             {
                                 return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                                    field_number: 2u32,
+                                    field_number: 1u32,
                                     expected: 2u8,
                                     actual: tag.wire_type() as u8,
                                 });
                             }
                             view.value = Some(::buffa::types::borrow_bytes(&mut cur)?);
                         }
-                        3u32 => {
+                        2u32 => {
                             if tag.wire_type()
                                 != ::buffa::encoding::WireType::LengthDelimited
                             {
                                 return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                                    field_number: 3u32,
+                                    field_number: 2u32,
                                     expected: 2u8,
                                     actual: tag.wire_type() as u8,
                                 });
@@ -18290,7 +18291,7 @@ pub mod __buffa {
                 use ::buffa::Enumeration as _;
                 if let Some(ref v) = self.value {
                     ::buffa::encoding::Tag::new(
-                            2u32,
+                            1u32,
                             ::buffa::encoding::WireType::LengthDelimited,
                         )
                         .encode(buf);
@@ -18298,7 +18299,7 @@ pub mod __buffa {
                 }
                 if self.detail.is_set() {
                     ::buffa::encoding::Tag::new(
-                            3u32,
+                            2u32,
                             ::buffa::encoding::WireType::LengthDelimited,
                         )
                         .encode(buf);

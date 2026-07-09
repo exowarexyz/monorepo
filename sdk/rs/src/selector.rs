@@ -1,45 +1,48 @@
-//! Shared key-filter shape: `(reserved_bits, prefix, payload_regex)`.
+//! Shared key-filter shape: `(prefix, payload_regex)`.
 //!
 //! Used by both `prune_policy` (compact service) and `stream_filter` (stream
 //! service) so one domain type round-trips through the `common.kv.v1.Selector`
 //! proto message and one regex compiler handles validation everywhere.
 
 use anyhow::{ensure, Context};
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use bytes::{Buf, BufMut, Bytes};
+use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
 use regex::bytes::Regex;
 
+use crate::keys::MAX_KEY_LEN;
 use crate::kv_codec::Utf8;
 
-/// Identifies a subset of keys by `KeyCodec` family + payload regex. Matches
-/// the `common.kv.v1.Selector` wire shape (see `proto/common/v1/kv.proto`).
+/// Identifies a subset of keys by a byte prefix + payload regex. Matches the
+/// `common.kv.v1.Selector` wire shape (see `proto/common/v1/kv.proto`). A key
+/// belongs to the selector's family iff it starts with `prefix`; the payload
+/// (the key bytes after `prefix`) is matched against `payload_regex`. An empty
+/// `prefix` matches all keys.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Selector {
-    pub reserved_bits: u8,
-    pub prefix: u16,
+    pub prefix: Bytes,
     pub payload_regex: Utf8,
 }
 
 impl Write for Selector {
     fn write(&self, buf: &mut impl BufMut) {
-        self.reserved_bits.write(buf);
-        self.prefix.write(buf);
+        self.prefix.as_ref().write(buf);
         self.payload_regex.write(buf);
     }
 }
 
 impl EncodeSize for Selector {
     fn encode_size(&self) -> usize {
-        u8::SIZE + u16::SIZE + self.payload_regex.encode_size()
+        self.prefix.as_ref().encode_size() + self.payload_regex.encode_size()
     }
 }
 
 impl Read for Selector {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let range: RangeCfg<usize> = (..=MAX_KEY_LEN).into();
+        let prefix = Vec::<u8>::read_cfg(buf, &(range, ()))?;
         Ok(Selector {
-            reserved_bits: u8::read(buf)?,
-            prefix: u16::read(buf)?,
+            prefix: Bytes::from(prefix),
             payload_regex: Utf8::read(buf)?,
         })
     }

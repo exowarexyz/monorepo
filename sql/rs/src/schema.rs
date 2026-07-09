@@ -63,9 +63,7 @@ impl KvSchema {
         index_specs: Vec<IndexSpec>,
     ) -> Result<Self, String> {
         if self.tables.len() >= MAX_TABLES {
-            return Err(format!(
-                "too many tables for codec layout (max {MAX_TABLES})"
-            ));
+            return Err(format!("too many tables for key layout (max {MAX_TABLES})"));
         }
         let prefix = self.next_prefix;
         let config = KvTableConfig::new(prefix, columns, primary_key_columns, index_specs)?;
@@ -246,7 +244,7 @@ impl KvSchema {
         let mut cursor = options
             .start_from_primary_key
             .unwrap_or_else(|| full_range.start.clone());
-        if !model.primary_key_codec.matches(&cursor) {
+        if !model.primary_key_prefix.matches(&cursor) {
             return Err(DataFusionError::Execution(
                 "index backfill start_from_primary_key must use this table's primary-key prefix"
                     .to_string(),
@@ -364,7 +362,7 @@ impl KvSchema {
             let next_cursor = if last_key >= full_range.end {
                 None
             } else {
-                next_key(&last_key)
+                exoware_sdk::keys::next_key(&last_key)
             };
             if !pending_keys.is_empty() {
                 flush_ingest_batch(&self.client, &mut pending_keys, &mut pending_values).await?;

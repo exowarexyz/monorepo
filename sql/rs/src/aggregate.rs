@@ -2063,13 +2063,13 @@ pub(crate) fn compile_reduce_expr(
 
 pub(crate) fn base_row_field_ref(col_idx: usize, model: &TableModel) -> Option<KvFieldRef> {
     if let Some(pk_pos) = model.pk_position(col_idx) {
-        let bit_offset = PRIMARY_KEY_BIT_OFFSET
+        let byte_offset = PRIMARY_KEY_BYTE_OFFSET
             + model.primary_key_kinds[..pk_pos]
                 .iter()
-                .map(|kind| kind.key_width() * 8)
+                .map(|kind| kind.key_width())
                 .sum::<usize>();
         Some(KvFieldRef::Key {
-            bit_offset: u16::try_from(bit_offset).ok()?,
+            byte_offset: u16::try_from(byte_offset).ok()?,
             kind: kv_field_kind(model.column(col_idx).kind)?,
         })
     } else {
@@ -2086,14 +2086,14 @@ pub(crate) fn pk_field_ref_for_secondary_index(
     model: &TableModel,
     spec: &ResolvedIndexSpec,
 ) -> Option<KvFieldRef> {
-    let bit_offset = INDEX_KEY_BIT_OFFSET
-        + spec.key_columns_width * 8
+    let byte_offset = INDEX_KEY_BYTE_OFFSET
+        + spec.key_columns_width
         + model.primary_key_kinds[..pk_pos]
             .iter()
-            .map(|kind| kind.key_width() * 8)
+            .map(|kind| kind.key_width())
             .sum::<usize>();
     Some(KvFieldRef::Key {
-        bit_offset: u16::try_from(bit_offset).ok()?,
+        byte_offset: u16::try_from(byte_offset).ok()?,
         kind: kv_field_kind(*model.primary_key_kinds.get(pk_pos)?)?,
     })
 }
@@ -2110,18 +2110,18 @@ pub(crate) fn index_row_field_ref(
     {
         return match spec.layout {
             IndexLayout::Lexicographic => {
-                let bit_offset = INDEX_KEY_BIT_OFFSET
+                let byte_offset = INDEX_KEY_BYTE_OFFSET
                     + spec.key_columns[..pos]
                         .iter()
-                        .map(|idx| model.column(*idx).kind.key_width() * 8)
+                        .map(|idx| model.column(*idx).kind.key_width())
                         .sum::<usize>();
                 Some(KvFieldRef::Key {
-                    bit_offset: u16::try_from(bit_offset).ok()?,
+                    byte_offset: u16::try_from(byte_offset).ok()?,
                     kind: kv_field_kind(model.column(col_idx).kind)?,
                 })
             }
             IndexLayout::ZOrder => Some(KvFieldRef::ZOrderKey {
-                bit_offset: u16::try_from(INDEX_KEY_BIT_OFFSET).ok()?,
+                bit_offset: u16::try_from(INDEX_KEY_BYTE_OFFSET * 8).ok()?,
                 field_position: u8::try_from(pos).ok()?,
                 field_widths: spec
                     .key_columns

@@ -106,7 +106,7 @@ operation/proof types.
 
 ## Stored key families
 
-The crate stores several store key families using `KeyCodec` prefixes:
+The crate stores several store key families, each under a one-byte `Prefix`:
 
 - watermark rows
 - presence rows
@@ -115,15 +115,16 @@ The crate stores several store key families using `KeyCodec` prefixes:
 - historical ops Merkle node rows
 - current bitmap chunk delta rows
 - current grafted-node delta rows
+- current boundary metadata rows
 - current operation-root witness rows
 
-These family IDs are scoped by the SDK `StoreKeyPrefix` / Store namespace. They
-are not globally unique across every QMDB backend or instance; for example, the
-current operation-root witness family and authenticated operation family use the
-same numeric family prefix. That is valid only when different QMDB backends or
-instances are placed under distinct outer Store prefixes. Do not share one raw
-Store keyspace across multiple QMDB backends or instances without that SDK
-prefix/namespace.
+A family byte encodes row semantics, not instance identity, so the same family
+byte is shared across every backend variant (ordered, unordered, immutable,
+keyless) by design: the same kind of row always uses the same byte. Independent
+instances are kept apart by the SDK `StoreKeyPrefix` / Store namespace that wraps
+these keys, so construct each client or writer from the `StoreKeyPrefix` / Store
+namespace it should own; that outer namespace is how separate instances coexist
+on one Store.
 
 The update-row family is keyed by:
 
@@ -131,6 +132,14 @@ The update-row family is keyed by:
 - global operation location
 
 This makes historical "latest update for key at or below watermark" lookups fast.
+
+Authenticated backends (immutable and keyless) store their rows under these same
+shared families. Their operation, node, watermark, and presence rows reserve the
+first payload byte for a backend namespace tag: `1` for immutable, `2` for
+keyless. The immutable backend also writes keyed historical update rows (its
+index for `get_at` lookups) using exactly the key layout described above and no
+namespace tag: the keyless backend stores no rows in this family, so it needs
+none.
 
 ### Compaction prune-policy helpers
 
@@ -147,34 +156,6 @@ actual update-key layout:
   - raw `0x00` is escaped as `0x00 0xFF`
   - end-of-key is encoded as `0x00 0x00`
 - trailing big-endian `Location`
-
-Authenticated backends use separate namespaced families:
-
-- `AUTH_OP_FAMILY`
-- `AUTH_NODE_FAMILY`
-- `AUTH_WATERMARK_FAMILY`
-- `AUTH_INDEX_FAMILY`
-
-For immutable keyed reads there is one additional family:
-
-- `AUTH_IMMUTABLE_UPDATE_FAMILY`
-
-The authenticated op/node/watermark/presence families reserve the first payload
-byte for the backend namespace tag:
-
-- `1` => immutable
-- `2` => keyless
-
-The immutable keyed-update family uses the same ordered prefix-free key /
-location layout as the ordered QMDB update-row family, but under its own
-authenticated prefix. This keeps immutable `get_at(key, watermark)` efficient:
-read the latest keyed row with `location <= watermark`, then load exactly that
-operation location to recover the typed value.
-
-Run multiple QMDB instances on one Store by constructing each QMDB client or
-writer from the intended SDK `StoreKeyPrefix` / Store namespace. The row format
-intentionally relies on that outer namespace instead of embedding the Merkle
-family in every QMDB row key.
 
 ## Historical proof path
 

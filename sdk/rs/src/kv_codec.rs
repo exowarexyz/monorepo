@@ -100,7 +100,7 @@ pub enum KvFieldKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KvFieldRef {
     Key {
-        bit_offset: u16,
+        byte_offset: u16,
         kind: KvFieldKind,
     },
     ZOrderKey {
@@ -446,8 +446,8 @@ pub fn extract_field(
     field: &KvFieldRef,
 ) -> Result<Option<KvReducedValue>, String> {
     match field {
-        KvFieldRef::Key { bit_offset, kind } => {
-            extract_key_field(key, usize::from(*bit_offset), *kind)
+        KvFieldRef::Key { byte_offset, kind } => {
+            extract_key_field(key, usize::from(*byte_offset), *kind)
                 .map(Some)
                 .ok_or_else(|| "invalid key field".to_string())
         }
@@ -646,8 +646,8 @@ fn extract_expr_field(
 ) -> Result<Option<KvReducedValue>, String> {
     match (field, archived) {
         (field, Some(archived)) => extract_field(key, archived, field),
-        (KvFieldRef::Key { bit_offset, kind }, None) => {
-            extract_key_field(key, usize::from(*bit_offset), *kind)
+        (KvFieldRef::Key { byte_offset, kind }, None) => {
+            extract_key_field(key, usize::from(*byte_offset), *kind)
                 .map(Some)
                 .ok_or_else(|| "invalid key field".to_string())
         }
@@ -769,12 +769,13 @@ pub fn deinterleave_ordered_key_fields(
 
 pub fn extract_key_field(
     key: &Key,
-    bit_offset: usize,
+    byte_offset: usize,
     kind: KvFieldKind,
 ) -> Option<KvReducedValue> {
     let width = key_field_width(kind);
-    let bytes = extract_key_bytes(key, bit_offset, width)?;
-    decode_ordered_key_field_bytes(&bytes, kind)
+    let end = byte_offset.checked_add(width)?;
+    let bytes = key.get(byte_offset..end)?;
+    decode_ordered_key_field_bytes(bytes, kind)
 }
 
 pub fn extract_zorder_key_field(
@@ -1084,7 +1085,7 @@ mod tests {
         let mut key = vec![0u8; MAX_KEY_LEN];
         key[4..8].copy_from_slice(b"west");
         let key = Key::from(key);
-        let value = extract_key_field(&key, 32, KvFieldKind::Utf8).expect("utf8 field");
+        let value = extract_key_field(&key, 4, KvFieldKind::Utf8).expect("utf8 field");
         assert_eq!(value, KvReducedValue::Utf8("west".to_string()));
     }
 
@@ -1094,7 +1095,7 @@ mod tests {
         let encoded = ((-42i64 as u64) ^ 0x8000_0000_0000_0000).to_be_bytes();
         key[8..16].copy_from_slice(&encoded);
         let key = Key::from(key);
-        let value = extract_key_field(&key, 64, KvFieldKind::Int64).expect("int64 field");
+        let value = extract_key_field(&key, 8, KvFieldKind::Int64).expect("int64 field");
         assert_eq!(value, KvReducedValue::Int64(-42));
     }
 

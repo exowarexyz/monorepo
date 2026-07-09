@@ -3,7 +3,7 @@
 //! [`SqlServer`] builds a DataFusion session over a [`KvSchema`] and exposes:
 //! - [`Service::query`] unary SQL against that session.
 //! - [`Service::subscribe`] streaming: for every atomic ingest batch that
-//!   touches a registered table's primary-key codec family, decode its rows
+//!   touches a registered table's primary-key family, decode its rows
 //!   and re-run the subscriber's SQL `WHERE` predicate against just those
 //!   rows. Each matching batch produces one [`SubscribeResponse`] carrying
 //!   only the rows that satisfied the predicate.
@@ -54,9 +54,7 @@ use crate::codec::decode_primary_key_selected;
 use crate::filter::ScanAccessPlan;
 use crate::predicate::QueryPredicate;
 use crate::schema::KvSchema;
-use crate::types::{
-    IndexLayout, ResolvedIndexSpec, TableModel, KEY_KIND_BITS, PRIMARY_RESERVED_BITS,
-};
+use crate::types::{IndexLayout, ResolvedIndexSpec, TableModel};
 
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
 
@@ -80,10 +78,8 @@ impl TableStream {
             &projection,
             &QueryPredicate::default(),
         ));
-        let prefix = u16::from(model.table_prefix) << KEY_KIND_BITS;
         let selector = Selector {
-            reserved_bits: PRIMARY_RESERVED_BITS,
-            prefix,
+            prefix: model.primary_key_prefix.as_bytes().clone(),
             payload_regex: Utf8::from("(?s-u).*"),
         };
         Self {
@@ -98,7 +94,7 @@ impl TableStream {
     fn decode_batch(&self, entries: &[(Key, Bytes)]) -> DataFusionResult<RecordBatch> {
         let mut builder = ProjectedBatchBuilder::from_access_plan(&self.model, &self.access_plan);
         for (key, value) in entries {
-            if !self.model.primary_key_codec.matches(key) {
+            if !self.model.primary_key_prefix.matches(key) {
                 continue;
             }
             let Some(pk_values) = decode_primary_key_selected(

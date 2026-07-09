@@ -86,7 +86,7 @@ impl<F: Family> PreparedWatermark<F> {
 }
 
 pub(crate) fn stage_rows<I, K, V>(
-    prefix: StoreKeyPrefix,
+    prefix: &StoreKeyPrefix,
     batch: &mut StoreWriteBatch,
     rows: I,
 ) -> Result<(), QmdbError>
@@ -105,7 +105,7 @@ where
 }
 
 pub(crate) fn stage_watermark(
-    prefix: StoreKeyPrefix,
+    prefix: &StoreKeyPrefix,
     batch: &mut StoreWriteBatch,
     watermark: &PreparedWatermark<impl Family>,
 ) -> Result<(), QmdbError> {

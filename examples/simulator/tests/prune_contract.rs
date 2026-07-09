@@ -3,7 +3,7 @@
 use std::future::Future;
 
 use bytes::Bytes;
-use exoware_sdk::keys::KeyCodec;
+use exoware_sdk::keys::Prefix;
 use exoware_sdk::kv_codec::Utf8;
 use exoware_sdk::prune_policy::{
     GroupBy, KeysScope, OrderBy, OrderEncoding, PolicyScope, PrunePolicy, PrunePolicyDocument,
@@ -14,8 +14,7 @@ use exoware_server::{Ingest, Log, Prune, Query, Sequence};
 use exoware_simulator::RocksStore;
 use tempfile::tempdir;
 
-const TEST_RESERVED_BITS: u8 = 4;
-const TEST_PREFIX: u16 = 1;
+const TEST_PREFIX: u8 = 1;
 
 fn block_on<T>(future: impl Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()
@@ -25,8 +24,8 @@ fn block_on<T>(future: impl Future<Output = T>) -> T {
         .block_on(future)
 }
 
-fn codec() -> KeyCodec {
-    KeyCodec::new(TEST_RESERVED_BITS, TEST_PREFIX)
+fn prefix() -> Prefix {
+    Prefix::from_byte(TEST_PREFIX)
 }
 
 fn versioned_key(logical: &[u8], version: u64) -> Bytes {
@@ -34,7 +33,7 @@ fn versioned_key(logical: &[u8], version: u64) -> Bytes {
     payload.extend_from_slice(logical);
     payload.extend_from_slice(b"\0\0");
     payload.extend_from_slice(&version.to_be_bytes());
-    Bytes::copy_from_slice(codec().encode(&payload).expect("encode key").as_ref())
+    prefix().encode(&payload).expect("encode key")
 }
 
 fn put_batch(store: &RocksStore, kvs: Vec<(Bytes, Bytes)>) -> u64 {
@@ -64,8 +63,7 @@ fn version_policy_with_encoding(retain: RetainPolicy, encoding: OrderEncoding) -
     PrunePolicy {
         scope: PolicyScope::Keys(KeysScope {
             selector: Selector {
-                reserved_bits: TEST_RESERVED_BITS,
-                prefix: TEST_PREFIX,
+                prefix: Bytes::from(vec![TEST_PREFIX]),
                 payload_regex: Utf8::from(
                     "(?s-u)^(?P<logical>(?:\\x00\\xFF|[^\\x00])*)\\x00\\x00(?P<version>.{8})$",
                 ),

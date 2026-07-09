@@ -39,8 +39,7 @@ function encodeStoredRowInt64(value: bigint): Uint8Array {
 
 function makeStreamSelector(prefix: string) {
     return create(SelectorSchema, {
-        reservedBits: 0,
-        prefix: 0,
+        prefix: new Uint8Array(),
         payloadRegex: `(?s-u)^${prefix}.*$`,
     });
 }
@@ -195,8 +194,8 @@ describe('Exoware TS SDK', () => {
 
         it('should isolate prefixed stores and commit a cross-prefix batch', async () => {
             const base = client.store();
-            const a = client.store(new StoreKeyPrefix(4, 1));
-            const b = client.store(new StoreKeyPrefix(4, 2));
+            const a = client.store(new StoreKeyPrefix(new Uint8Array([1])));
+            const b = client.store(new StoreKeyPrefix(new Uint8Array([2])));
             const encoder = new TextEncoder();
             const key = encoder.encode('prefixed-store-shared-key');
 
@@ -225,8 +224,8 @@ describe('Exoware TS SDK', () => {
             expect(Buffer.from(batchA!.entries[0].value)).toEqual(Buffer.from('value-a'));
         });
 
-        it('should subscribe to logical regex matches for non-byte-aligned prefixes', async () => {
-            const store = client.store(new StoreKeyPrefix(4, 3));
+        it('should subscribe to logical regex matches under a byte store prefix', async () => {
+            const store = client.store(new StoreKeyPrefix(new Uint8Array([3])));
             const encoder = new TextEncoder();
             const missKey = encoder.encode('prefixed-stream-miss');
             const hitKey = encoder.encode('prefixed-stream-hit');
@@ -237,8 +236,7 @@ describe('Exoware TS SDK', () => {
                 .subscribe({
                     selectors: [
                         create(SelectorSchema, {
-                            reservedBits: 0,
-                            prefix: 0,
+                            prefix: new Uint8Array(),
                             payloadRegex: '(?s-u)^prefixed-stream-hit$',
                         }),
                     ],
@@ -502,8 +500,7 @@ describe('Exoware TS SDK', () => {
                     case: 'keys',
                     value: create(KeysScopeSchema, {
                         selector: create(SelectorSchema, {
-                            reservedBits: 0,
-                            prefix: 0,
+                            prefix: new Uint8Array(),
                             payloadRegex:
                                 '(?s-u)^prune-test-(?P<group>[a-z]+)\\x00\\x00(?P<version>.{8})$',
                         }),
