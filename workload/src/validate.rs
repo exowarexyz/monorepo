@@ -12,12 +12,13 @@
 //!     --url http://localhost:10000 \
 //!     --keys 100
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, ensure, Context};
 use clap::ValueEnum;
 use connectrpc::ErrorCode;
-use exoware_sdk::keys::Key;
+use exoware_sdk::keys::{next_key, Key, MAX_KEY_LEN};
 use exoware_sdk::kv_codec::KvReducedValue;
 use exoware_sdk::{ClientError, RangeMode, StoreClient};
 use exoware_sdk::{RangeReduceOp, RangeReduceRequest, RangeReducerSpec};
@@ -174,7 +175,7 @@ impl TryFrom<Args> for Config {
 struct RangePlan {
     start_idx: usize,
     end_idx: usize,
-    limit: usize,
+    page_size: usize,
 }
 
 #[derive(Debug)]
@@ -191,6 +192,147 @@ enum RangeScanError {
     Transient(anyhow::Error),
     /// Permanent correctness failures that should fail fast.
     Permanent(anyhow::Error),
+}
+
+/// Outcome of one filtered pass over an inclusive key window.
+#[derive(Debug)]
+enum WindowScan {
+    /// Every expected row appeared in order with the expected value.
+    Complete,
+    /// The window ended before every expected row appeared; retry until the
+    /// caller's visibility deadline.
+    MissingRows { matched: usize, detail: String },
+    /// An own row contradicted the expected sequence: out of order, duplicated,
+    /// or holding the wrong value.
+    Mismatch { detail: String },
+}
+
+/// Largest key strictly less than `key`: the reverse-pagination mirror of
+/// [`next_key`]. Only the empty key has no predecessor.
+fn prev_key(key: &Key) -> Option<Key> {
+    let (&last, head) = key.as_ref().split_last()?;
+
+    // A trailing 0x00 has an immediate predecessor in its own prefix; any other
+    // last byte decrements and pads to the maximum key length with 0xFF.
+    let mut prev = head.to_vec();
+    if last != 0 {
+        prev.push(last - 1);
+        prev.resize(MAX_KEY_LEN, u8::MAX);
+    }
+    Some(Key::from(prev))
+}
+
+/// Pages through the inclusive window `[lo, hi]` in `mode` order and checks that
+/// the rows selected by `is_own` are exactly `expected`, already in traversal
+/// order.
+///
+/// Generated keys are spread across the whole physical key range, so on a shared
+/// store every window interleaves rows from other namespaces and runs; rows this
+/// check does not own are skipped rather than failing the match.
+#[allow(clippy::too_many_arguments)]
+async fn scan_window_for_expected(
+    client: &StoreClient,
+    lo: &Key,
+    hi: &Key,
+    mode: RangeMode,
+    page_size: usize,
+    min_sequence_number: u64,
+    expected: &[&Record],
+    is_own: impl Fn(&Key) -> bool,
+) -> Result<WindowScan, RangeScanError> {
+    let mut window_lo = lo.clone();
+    let mut window_hi = hi.clone();
+    let mut matched = 0usize;
+
+    loop {
+        let rows = client
+            .query()
+            .range_with_mode_and_min_sequence_number(
+                &window_lo,
+                &window_hi,
+                page_size,
+                mode,
+                min_sequence_number,
+            )
+            .await
+            .map_err(|err| {
+                if is_transient_query_error(&err) {
+                    RangeScanError::Transient(anyhow!(err))
+                } else {
+                    RangeScanError::Permanent(anyhow!(err))
+                }
+            })?;
+
+        // Ordering must hold for every returned row, foreign rows included, and
+        // equality in either direction means a duplicated key.
+        let unsorted = match mode {
+            RangeMode::Forward => rows.windows(2).any(|pair| pair[0].0 >= pair[1].0),
+            RangeMode::Reverse => rows.windows(2).any(|pair| pair[0].0 <= pair[1].0),
+        };
+        if unsorted {
+            return Err(RangeScanError::Permanent(anyhow!(
+                "{mode:?} range page returned unsorted or duplicated keys"
+            )));
+        }
+
+        for (key, value) in &rows {
+            if !is_own(key) {
+                continue;
+            }
+            let Some(record) = expected.get(matched) else {
+                return Ok(WindowScan::Mismatch {
+                    detail: format!(
+                        "row mismatch: own key {} appeared after all {} expected rows matched",
+                        hex_encode(key),
+                        expected.len()
+                    ),
+                });
+            };
+            if *key != record.key {
+                return Ok(WindowScan::Mismatch {
+                    detail: format!(
+                        "row mismatch at position {matched}: expected key {}, got {}",
+                        hex_encode(&record.key),
+                        hex_encode(key)
+                    ),
+                });
+            }
+            if value.as_ref() != record.value.as_slice() {
+                return Ok(WindowScan::Mismatch {
+                    detail: format!("value mismatch for key {}", hex_encode(key)),
+                });
+            }
+            matched += 1;
+        }
+
+        if matched >= expected.len() {
+            return Ok(WindowScan::Complete);
+        }
+
+        if rows.len() < page_size {
+            return Ok(WindowScan::MissingRows {
+                matched,
+                detail: format!(
+                    "window exhausted with {matched} of {} expected rows visible",
+                    expected.len()
+                ),
+            });
+        }
+
+        // Advance past this page's extreme row; the page is non-empty because a
+        // short page (including an empty one) returned above.
+        let boundary = &rows.last().expect("page checked non-empty").0;
+        let advanced = match mode {
+            RangeMode::Forward => next_key(boundary).map(|next| window_lo = next),
+            RangeMode::Reverse => prev_key(boundary).map(|prev| window_hi = prev),
+        };
+        if advanced.is_none() {
+            return Ok(WindowScan::MissingRows {
+                matched,
+                detail: "reached the edge of the key domain before all expected rows".to_string(),
+            });
+        }
+    }
 }
 
 pub async fn run(args: Args) -> anyhow::Result<()> {
@@ -532,6 +674,7 @@ async fn run_overlap_ledger_verify_mode(
         client,
         &sorted_records,
         RangeMode::Forward,
+        cli.range_page_size,
         ledger.sequence_number,
         timeout,
         poll_interval,
@@ -542,6 +685,7 @@ async fn run_overlap_ledger_verify_mode(
         client,
         &sorted_records,
         RangeMode::Reverse,
+        cli.range_page_size,
         ledger.sequence_number,
         timeout,
         poll_interval,
@@ -657,10 +801,12 @@ fn build_overlap_records(
     Ok(records)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn wait_for_exact_range_match(
     client: &StoreClient,
     expected_records: &[Record],
     mode: RangeMode,
+    page_size: usize,
     min_sequence_number: u64,
     timeout: Duration,
     poll_interval: Duration,
@@ -672,74 +818,57 @@ async fn wait_for_exact_range_match(
     let last = expected_records
         .last()
         .context("expected_records must not be empty for exact range match")?;
-    let limit = expected_records.len().saturating_add(1);
     // Reverse scans return rows highest-key-first, so compare against the reversed expectation.
     let expected_order: Vec<&Record> = match mode {
         RangeMode::Forward => expected_records.iter().collect(),
         RangeMode::Reverse => expected_records.iter().rev().collect(),
     };
+
+    // Only rows carrying confirmed ledger keys participate in the match: the
+    // window interleaves other namespaces' rows on a shared store, plus this
+    // writer's final append when it landed without an acknowledgment before
+    // shutdown.
+    let own_keys: HashSet<Key> = expected_records
+        .iter()
+        .map(|record| record.key.clone())
+        .collect();
+    let is_own = |key: &Key| own_keys.contains(key);
     let deadline = Instant::now() + timeout;
     let mut attempt = 0u64;
 
     loop {
         attempt = attempt.saturating_add(1);
-        let range_result = client
-            .query()
-            .range_with_mode_and_min_sequence_number(
-                &first.key,
-                &last.key,
-                limit,
-                mode,
-                min_sequence_number,
-            )
-            .await;
-        let detail = match range_result {
-            Ok(rows) => {
-                if rows.len() != expected_records.len() {
-                    format!(
-                        "{mode:?} range returned {} rows, expected {}",
-                        rows.len(),
-                        expected_records.len()
-                    )
-                } else {
-                    let mut mismatch = None;
-                    for (idx, ((actual_key, actual_value), expected)) in
-                        rows.iter().zip(expected_order.iter().copied()).enumerate()
-                    {
-                        if actual_key != &expected.key {
-                            mismatch = Some(format!(
-                                "{mode:?} row {idx} key mismatch: expected {}, got {}",
-                                hex_encode(&expected.key),
-                                hex_encode(actual_key)
-                            ));
-                            break;
-                        }
-                        if actual_value.as_ref() != expected.value.as_slice() {
-                            mismatch = Some(format!(
-                                "{mode:?} row {idx} value mismatch for key {}",
-                                hex_encode(&expected.key)
-                            ));
-                            break;
-                        }
-                    }
-                    if let Some(detail) = mismatch {
-                        detail
-                    } else {
-                        tracing::info!(
-                            query_url = %query_url,
-                            mode = ?mode,
-                            attempts = attempt,
-                            rows = rows.len(),
-                            "Exact overlap-ledger range match succeeded"
-                        );
-                        return Ok(());
-                    }
-                }
+        let scan = scan_window_for_expected(
+            client,
+            &first.key,
+            &last.key,
+            mode,
+            page_size,
+            min_sequence_number,
+            &expected_order,
+            is_own,
+        )
+        .await;
+        let detail = match scan {
+            Ok(WindowScan::Complete) => {
+                tracing::info!(
+                    query_url = %query_url,
+                    mode = ?mode,
+                    attempts = attempt,
+                    rows = expected_order.len(),
+                    "Exact overlap-ledger range match succeeded"
+                );
+                return Ok(());
             }
-            Err(err) if is_transient_query_error(&err) => {
+            Ok(WindowScan::MissingRows { matched, detail }) => format!(
+                "{mode:?} range match saw {matched} of {} confirmed rows: {detail}",
+                expected_order.len()
+            ),
+            Ok(WindowScan::Mismatch { detail }) => format!("{mode:?} range {detail}"),
+            Err(RangeScanError::Transient(err)) => {
                 format!("{mode:?} transient range error: {err}")
             }
-            Err(err) => {
+            Err(RangeScanError::Permanent(err)) => {
                 return Err(err).with_context(|| {
                     format!("exact {mode:?} overlap-ledger range query failed against {query_url}")
                 });
@@ -808,17 +937,23 @@ async fn wait_for_reduce_count_match(
                         );
                     }
                 };
-                if actual == expected_count {
+                // Spread keys interleave other namespaces' rows (and possibly the
+                // writer's unacknowledged final append) inside the confirmed window,
+                // so the distinct-key count is only a floor here. Per-key
+                // correctness is owned by the exact range match; this keeps the
+                // reduce pipeline exercised end to end.
+                if actual >= expected_count {
                     tracing::info!(
                         query_url = %query_url,
                         attempts = attempt,
+                        actual_count = actual,
                         expected_count,
-                        "Range reduction matched expected distinct-key count"
+                        "Range reduction reached expected distinct-key floor"
                     );
                     return Ok(());
                 }
                 format!(
-                    "range reduce count returned {}, expected {}",
+                    "range reduce count returned {}, expected at least {}",
                     actual, expected_count
                 )
             }
@@ -1153,102 +1288,102 @@ async fn scan_visible_prefix_via_range(
             detail: "no keys requested".to_string(),
         });
     }
-    let end_key = keyspace
-        .inserted_key(total_keys - 1)
-        .map_err(RangeScanError::Permanent)?;
-    let mut next_start = keyspace
-        .inserted_key(0)
-        .map_err(RangeScanError::Permanent)?;
-    let mut expected_index = 0u64;
+
+    // Spread keys cover the whole physical key range, so the scan walks that
+    // entire range and matches rows against the expected keys in their
+    // lexicographic (not logical-index) order, streamed to keep memory flat at
+    // any key count. Rows that fail the exact inserted-key round-trip belong to
+    // other runs sharing the store and are skipped.
+    let mut next_start = Key::from(vec![0u8; keyspace.key_len]);
+    // An empty end key means unbounded above (see `StoreClient::range`).
+    let unbounded_end = Key::new();
+    let mut expected_order = Keyspace::inserted_indices_in_key_order(total_keys).peekable();
+    let mut visible = 0u64;
     let mut pages_scanned = 0u64;
 
     loop {
         let rows = client
             .query()
-            .range_with_min_sequence_number(&next_start, &end_key, page_size, min_sequence_number)
+            .range_with_min_sequence_number(
+                &next_start,
+                &unbounded_end,
+                page_size,
+                min_sequence_number,
+            )
             .await
             .map_err(|err| RangeScanError::Transient(anyhow!(err)))?;
         pages_scanned += 1;
 
-        if rows.is_empty() {
-            return Ok(RangeVisibilityScan {
-                contiguous_visible: expected_index,
-                pages_scanned,
-                complete: false,
-                detail: "range returned empty page before full visibility".to_string(),
-            });
-        }
-
-        for (row_idx, (actual_key, actual_value)) in rows.iter().enumerate() {
-            if expected_index >= total_keys {
-                return Err(RangeScanError::Permanent(anyhow!(
-                    "range returned extra rows beyond expected key count (pages_scanned={}, row_idx={})",
-                    pages_scanned,
-                    row_idx
-                )));
+        for (actual_key, actual_value) in &rows {
+            let Some(index) = keyspace.inserted_index_of(actual_key) else {
+                continue;
+            };
+            if index >= total_keys {
+                continue;
             }
-            let expected_key = keyspace
-                .inserted_key(expected_index)
-                .map_err(RangeScanError::Permanent)?;
-            if actual_key != &expected_key {
+            let Some(expected_index) = expected_order.peek().copied() else {
+                break;
+            };
+            if index != expected_index {
+                let expected_key = keyspace
+                    .inserted_key(expected_index)
+                    .map_err(RangeScanError::Permanent)?;
                 return Ok(RangeVisibilityScan {
-                    contiguous_visible: expected_index,
+                    contiguous_visible: visible,
                     pages_scanned,
                     complete: false,
                     detail: format!(
-                        "first mismatch at expected index {}: expected key {}, got {}",
-                        expected_index,
+                        "expected sorted key {} (index {}) was absent before own row {} (index {})",
                         hex_encode(&expected_key),
-                        hex_encode(actual_key)
+                        expected_index,
+                        hex_encode(actual_key),
+                        index
                     ),
                 });
             }
-            let expected_value = value_for_index(namespace, expected_index, value_size);
+            let expected_value = value_for_index(namespace, index, value_size);
             if actual_value.as_ref() != expected_value.as_slice() {
                 return Err(RangeScanError::Permanent(anyhow!(
                     "value mismatch at index {} for key {}",
-                    expected_index,
+                    index,
                     hex_encode(actual_key)
                 )));
             }
-            expected_index += 1;
+            expected_order.next();
+            visible += 1;
         }
 
-        if expected_index >= total_keys {
+        if visible >= total_keys {
             return Ok(RangeVisibilityScan {
-                contiguous_visible: expected_index,
+                contiguous_visible: visible,
                 pages_scanned,
                 complete: true,
-                detail: "full sequence verified".to_string(),
+                detail: "full sorted key sequence verified".to_string(),
             });
         }
 
         if rows.len() < page_size {
             return Ok(RangeVisibilityScan {
-                contiguous_visible: expected_index,
+                contiguous_visible: visible,
                 pages_scanned,
                 complete: false,
                 detail: format!(
-                    "short range page (rows={}) before all keys visible",
-                    rows.len()
+                    "range window exhausted with {} of {} sorted keys visible",
+                    visible, total_keys
                 ),
             });
         }
 
-        let Some(last_key) = rows.last().map(|(key, _)| key.clone()) else {
-            return Err(RangeScanError::Permanent(anyhow!(
-                "range page unexpectedly empty after non-empty check"
-            )));
-        };
-        let Some(next_key) = Keyspace::next_lex_key(&last_key) else {
+        let boundary = &rows.last().expect("page checked non-empty").0;
+        let Some(advanced) = next_key(boundary) else {
             return Ok(RangeVisibilityScan {
-                contiguous_visible: expected_index,
+                contiguous_visible: visible,
                 pages_scanned,
                 complete: false,
-                detail: "reached lexicographic key ceiling before full visibility".to_string(),
+                detail: "reached the maximum possible key before full visibility".to_string(),
             });
         };
-        next_start = next_key;
+        next_start = advanced;
     }
 }
 
@@ -1403,6 +1538,14 @@ async fn run_range_samples(
         samples = range_plans.len(),
         "Running pseudorandomized forward/reverse range subsection samples"
     );
+    // Every sampled window interleaves foreign rows on a shared store, so each
+    // subsection is verified with a paginated scan that skips rows outside this
+    // run instead of a single limit-bounded query.
+    let own_keys: HashSet<Key> = sorted_records
+        .iter()
+        .map(|record| record.key.clone())
+        .collect();
+    let is_own = |key: &Key| own_keys.contains(key);
     let deadline = Instant::now() + timeout;
     for (sample_idx, plan) in range_plans.iter().enumerate() {
         let checks = build_range_subsection_checks(*plan, sample_idx as u64);
@@ -1410,25 +1553,49 @@ async fn run_range_samples(
             let mut pending_rows = 0usize;
             let mut pending_checks = 0usize;
             let mut pending_transient_errors = 0usize;
+            let mut last_pending_detail: Option<String> = None;
             let mut last_transient_error: Option<String> = None;
             for (check_idx, check) in checks.iter().enumerate() {
-                let start = &sorted_records[check.plan.start_idx].key;
-                let end = &sorted_records[check.plan.end_idx].key;
+                let lo = &sorted_records[check.plan.start_idx].key;
+                let hi = &sorted_records[check.plan.end_idx].key;
                 let expected =
                     expected_range_slice_for_mode(sorted_records, check.plan, check.mode);
-                let range_result = client
-                    .query()
-                    .range_with_mode_and_min_sequence_number(
-                        start,
-                        end,
-                        check.plan.limit,
-                        check.mode,
-                        min_sequence_number,
-                    )
-                    .await;
-                let actual = match range_result {
-                    Ok(rows) => rows,
-                    Err(err) if is_transient_query_error(&err) => {
+                let scan = scan_window_for_expected(
+                    client,
+                    lo,
+                    hi,
+                    check.mode,
+                    check.plan.page_size,
+                    min_sequence_number,
+                    &expected,
+                    is_own,
+                )
+                .await;
+                match scan {
+                    Ok(WindowScan::Complete) => {}
+                    // These reads carry the write phase's sequence floor, so a
+                    // conformant backend already exposes every written key to range
+                    // queries. Missing rows are tolerated as retry headroom; an own
+                    // row with the wrong position or value is a real fault.
+                    Ok(WindowScan::MissingRows { matched, detail }) => {
+                        pending_checks += 1;
+                        pending_rows += expected.len() - matched;
+                        last_pending_detail = Some(format!(
+                            "{:?} range sample {} subsection {}: {}",
+                            check.mode, sample_idx, check_idx, detail
+                        ));
+                    }
+                    Ok(WindowScan::Mismatch { detail }) => {
+                        bail!(
+                            "{:?} range sample {} subsection {} on {}: {}",
+                            check.mode,
+                            sample_idx,
+                            check_idx,
+                            query_url,
+                            detail
+                        );
+                    }
+                    Err(RangeScanError::Transient(err)) => {
                         pending_checks += 1;
                         pending_rows += expected.len();
                         pending_transient_errors += 1;
@@ -1436,82 +1603,14 @@ async fn run_range_samples(
                             "{:?} range sample {} subsection {} transient error: {}",
                             check.mode, sample_idx, check_idx, err
                         ));
-                        continue;
                     }
-                    Err(err) => {
+                    Err(RangeScanError::Permanent(err)) => {
                         return Err(err).with_context(|| {
                             format!(
                                 "{:?} range request failed for sample {}, subsection {}",
                                 check.mode, sample_idx, check_idx
                             )
                         });
-                    }
-                };
-
-                if check.mode == RangeMode::Forward
-                    && actual.windows(2).any(|window| window[0].0 > window[1].0)
-                {
-                    bail!(
-                        "forward range sample {} subsection {} on {} returned unsorted keys",
-                        sample_idx,
-                        check_idx,
-                        query_url
-                    );
-                }
-                if check.mode == RangeMode::Reverse
-                    && actual.windows(2).any(|window| window[0].0 < window[1].0)
-                {
-                    bail!(
-                        "reverse range sample {} subsection {} on {} returned unsorted keys",
-                        sample_idx,
-                        check_idx,
-                        query_url,
-                    );
-                }
-
-                // These reads carry the write phase's sequence floor, so a conformant backend
-                // already exposes every written key to range queries. A short page is tolerated
-                // as retry headroom; a full page with the wrong rows is a real fault (handled below).
-                if actual.len() < expected.len() {
-                    pending_checks += 1;
-                    pending_rows += expected.len() - actual.len();
-                    continue;
-                }
-
-                if actual.len() != expected.len() {
-                    bail!(
-                        "{:?} range sample {} subsection {} on {} returned {} rows, expected {}",
-                        check.mode,
-                        sample_idx,
-                        check_idx,
-                        query_url,
-                        actual.len(),
-                        expected.len()
-                    );
-                }
-
-                for (pos, (actual_pair, expected_record)) in
-                    actual.iter().zip(expected.iter()).enumerate()
-                {
-                    if actual_pair.0 != expected_record.key {
-                        bail!(
-                            "{:?} range sample {} subsection {} on {} mismatched key at row {}",
-                            check.mode,
-                            sample_idx,
-                            check_idx,
-                            query_url,
-                            pos
-                        );
-                    }
-                    if actual_pair.1.as_ref() != expected_record.value.as_slice() {
-                        bail!(
-                            "{:?} range sample {} subsection {} on {} mismatched value for key {}",
-                            check.mode,
-                            sample_idx,
-                            check_idx,
-                            query_url,
-                            hex_encode(&expected_record.key)
-                        );
                     }
                 }
             }
@@ -1522,12 +1621,13 @@ async fn run_range_samples(
 
             if Instant::now() >= deadline {
                 bail!(
-                    "range visibility timeout on {} for sample {}: {} pending subsection checks, {} rows still missing, transient_query_errors={}, last_transient_error={}",
+                    "range visibility timeout on {} for sample {}: {} pending subsection checks, {} rows still missing, transient_query_errors={}, last_detail={}, last_transient_error={}",
                     query_url,
                     sample_idx,
                     pending_checks,
                     pending_rows,
                     pending_transient_errors,
+                    last_pending_detail.as_deref().unwrap_or("none"),
                     last_transient_error.as_deref().unwrap_or("none")
                 );
             }
@@ -1537,6 +1637,7 @@ async fn run_range_samples(
                 pending_checks,
                 pending_rows,
                 pending_transient_errors,
+                pending_detail = %last_pending_detail.as_deref().unwrap_or("none"),
                 transient_error = %last_transient_error.as_deref().unwrap_or("none"),
                 "Range visibility retry"
             );
@@ -1588,29 +1689,27 @@ fn build_range_plans(
         let start_idx = rng.gen_range(0..total_records);
         let end_idx = rng.gen_range(start_idx..total_records);
         let window = end_idx - start_idx + 1;
-        let limit_cap = window.min(max_range_limit.max(1));
-        let limit = rng.gen_range(1..=limit_cap);
+        // Varying the page size exercises limit truncation and pagination on
+        // windows both smaller and larger than one page.
+        let page_cap = window.min(max_range_limit.max(1));
+        let page_size = rng.gen_range(1..=page_cap);
         plans.push(RangePlan {
             start_idx,
             end_idx,
-            limit,
+            page_size,
         });
     }
     plans
 }
 
 fn expected_range_slice(records: &[Record], plan: RangePlan) -> Vec<&Record> {
-    records[plan.start_idx..=plan.end_idx]
-        .iter()
-        .take(plan.limit)
-        .collect()
+    records[plan.start_idx..=plan.end_idx].iter().collect()
 }
 
 fn expected_reverse_range_slice(records: &[Record], plan: RangePlan) -> Vec<&Record> {
     records[plan.start_idx..=plan.end_idx]
         .iter()
         .rev()
-        .take(plan.limit)
         .collect()
 }
 
@@ -1637,7 +1736,10 @@ fn build_range_subsection_checks(plan: RangePlan, sample_seed: u64) -> Vec<Range
     let step = window.div_ceil(subsection_count);
 
     let mut rng = StdRng::seed_from_u64(mix64(
-        sample_seed ^ (plan.start_idx as u64) ^ ((plan.end_idx as u64) << 24) ^ (plan.limit as u64),
+        sample_seed
+            ^ (plan.start_idx as u64)
+            ^ ((plan.end_idx as u64) << 24)
+            ^ (plan.page_size as u64),
     ));
 
     let mut subsections = Vec::new();
@@ -1645,11 +1747,11 @@ fn build_range_subsection_checks(plan: RangePlan, sample_seed: u64) -> Vec<Range
     while start_idx <= plan.end_idx {
         let end_idx = (start_idx + step - 1).min(plan.end_idx);
         let sub_window = end_idx - start_idx + 1;
-        let limit = rng.gen_range(1..=sub_window.min(plan.limit.max(1)));
+        let page_size = rng.gen_range(1..=sub_window.min(plan.page_size.max(1)));
         subsections.push(RangePlan {
             start_idx,
             end_idx,
-            limit,
+            page_size,
         });
         if end_idx == plan.end_idx {
             break;
@@ -1699,22 +1801,22 @@ mod tests {
     }
 
     #[test]
-    fn range_plans_stay_in_bounds_and_respect_limit() {
+    fn range_plans_stay_in_bounds_and_cap_page_size() {
         let mut rng = StdRng::seed_from_u64(1);
         let plans = build_range_plans(50, 25, 7, &mut rng);
         assert_eq!(plans.len(), 25);
         for plan in plans {
             assert!(plan.start_idx <= plan.end_idx);
             assert!(plan.end_idx < 50);
-            assert!(plan.limit >= 1);
-            assert!(plan.limit <= 7);
+            assert!(plan.page_size >= 1);
+            assert!(plan.page_size <= 7);
             let window = plan.end_idx - plan.start_idx + 1;
-            assert!(plan.limit <= window);
+            assert!(plan.page_size <= window);
         }
     }
 
     #[test]
-    fn expected_range_slice_applies_limit() {
+    fn expected_range_slice_covers_full_window() {
         let keyspace = Keyspace::from_u64_namespace(55, DEFAULT_KEY_LEN).unwrap();
         let records = (0..10)
             .map(|i| Record {
@@ -1727,16 +1829,16 @@ mod tests {
             RangePlan {
                 start_idx: 2,
                 end_idx: 7,
-                limit: 3,
+                page_size: 3,
             },
         );
-        assert_eq!(slice.len(), 3);
+        assert_eq!(slice.len(), 6);
         assert_eq!(slice[0].key, records[2].key);
-        assert_eq!(slice[2].key, records[4].key);
+        assert_eq!(slice[5].key, records[7].key);
     }
 
     #[test]
-    fn expected_reverse_range_slice_applies_limit() {
+    fn expected_reverse_range_slice_covers_full_window() {
         let keyspace = Keyspace::from_u64_namespace(55, DEFAULT_KEY_LEN).unwrap();
         let records = (0..10)
             .map(|i| Record {
@@ -1749,12 +1851,28 @@ mod tests {
             RangePlan {
                 start_idx: 2,
                 end_idx: 7,
-                limit: 3,
+                page_size: 3,
             },
         );
-        assert_eq!(slice.len(), 3);
+        assert_eq!(slice.len(), 6);
         assert_eq!(slice[0].key, records[7].key);
-        assert_eq!(slice[2].key, records[5].key);
+        assert_eq!(slice[5].key, records[2].key);
+    }
+
+    #[test]
+    fn prev_key_mirrors_next_key() {
+        for bytes in [
+            vec![0x12, 0x34],
+            vec![0x12, 0x00],
+            vec![0x00],
+            vec![0xFF; MAX_KEY_LEN],
+        ] {
+            let key = Key::from(bytes);
+            let prev = prev_key(&key).expect("non-empty keys have predecessors");
+            assert!(prev < key);
+            assert_eq!(next_key(&prev).expect("prev is below the maximum key"), key);
+        }
+        assert!(prev_key(&Key::new()).is_none());
     }
 
     #[test]
@@ -1762,7 +1880,7 @@ mod tests {
         let plan = RangePlan {
             start_idx: 10,
             end_idx: 89,
-            limit: 25,
+            page_size: 25,
         };
         let checks = build_range_subsection_checks(plan, 42);
         assert!(checks.len() >= 4);
@@ -1774,10 +1892,10 @@ mod tests {
         assert!(checks.iter().all(|c| c.plan.start_idx >= plan.start_idx));
         assert!(checks.iter().all(|c| c.plan.end_idx <= plan.end_idx));
         assert!(checks.iter().all(|c| c.plan.start_idx <= c.plan.end_idx));
-        assert!(checks.iter().all(|c| c.plan.limit >= 1));
+        assert!(checks.iter().all(|c| c.plan.page_size >= 1));
         assert!(checks
             .iter()
-            .all(|c| c.plan.limit <= (c.plan.end_idx - c.plan.start_idx + 1)));
+            .all(|c| c.plan.page_size <= (c.plan.end_idx - c.plan.start_idx + 1)));
     }
 
     fn sample_config(value_size: usize) -> Config {

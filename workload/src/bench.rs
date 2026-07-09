@@ -338,8 +338,17 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
                         }
                     }
                     Operation::Scan { start, end, limit } => {
-                        let start_key = keyspace.inserted_key(start)?;
-                        let end_key = keyspace.inserted_key(end)?;
+                        // Index-hashed key placement leaves the two endpoint keys in
+                        // arbitrary lexicographic order, so sort them into a valid window.
+                        let (start_key, end_key) = {
+                            let a = keyspace.inserted_key(start)?;
+                            let b = keyspace.inserted_key(end)?;
+                            if a <= b {
+                                (a, b)
+                            } else {
+                                (b, a)
+                            }
+                        };
                         let request_start = Instant::now();
                         let result = client.query().range(&start_key, &end_key, limit).await;
                         latencies.record_scan(request_start.elapsed());

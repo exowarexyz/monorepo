@@ -64,7 +64,8 @@ pub struct WorkloadSpec {
 pub enum Operation {
     /// Point read of an inserted logical key index.
     Read { index: u64 },
-    /// Inclusive range scan over inserted logical key indexes.
+    /// Inclusive range scan between the keys of two inserted logical indexes;
+    /// the executor orders the endpoint keys lexicographically.
     Scan { start: u64, end: u64, limit: usize },
     /// Ingest write; the executor assigns the next concrete write index.
     Write,

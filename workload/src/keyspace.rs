@@ -9,11 +9,12 @@ use crate::deterministic::{mix64, GOLDEN_RATIO_64};
 pub const DEFAULT_KEY_LEN: usize = 48;
 
 /// Version of the deterministic key layout used by workload reports.
-pub const KEYSPACE_LAYOUT_VERSION: u16 = 1;
+pub const KEYSPACE_LAYOUT_VERSION: u16 = 2;
 
 // Keep inserted and intentionally-missing keys in disjoint key domains.
 const INSERTED_KEY_DOMAIN: u8 = 0x10;
 const MISSING_KEY_DOMAIN: u8 = 0xF0;
+const ENTROPY_BYTES: usize = 1;
 const NAMESPACE_LEN_BYTES: usize = 1;
 const DOMAIN_BYTES: usize = 1;
 const INDEX_BYTES: usize = 8;
@@ -30,11 +31,17 @@ pub fn default_run_namespace() -> u64 {
 
 /// Deterministic workload key generator.
 ///
-/// The workload schema uses namespaces to isolate runs and domains to keep
-/// inserted keys disjoint from keys that should be missing.
+/// Every key opens with an entropy byte derived from the logical index, so a
+/// run's keys spread across the entire physical key range instead of sharing a
+/// fixed prefix and stores that shard on leading key bits see load on every
+/// shard. The rest of the key carries the run's identity: namespaces isolate
+/// runs, domains keep inserted keys disjoint from intentionally-missing ones,
+/// and the big-endian index makes every key reproducible from
+/// (namespace, index).
 ///
-/// Keys sort by namespace, domain, then numeric index. The suffix is filled with
-/// deterministic mixed bytes so configurable key lengths do not leave an all-zero tail.
+/// The spread means a run's keys do not form a contiguous lexicographic block:
+/// key order does not follow index order, and any key range bounded by a run's
+/// keys interleaves whatever else the store holds.
 #[derive(Clone, Debug)]
 pub struct Keyspace {
     pub namespace: Vec<u8>,
@@ -75,19 +82,37 @@ impl Keyspace {
         self.key(index, MISSING_KEY_DOMAIN)
     }
 
-    /// Returns the next lexicographic key after the provided raw key bytes.
-    pub fn next_lex_key(key: &Key) -> Option<Key> {
-        let mut next = key.as_ref().to_vec();
-        for idx in (0..next.len()).rev() {
-            if next[idx] != u8::MAX {
-                next[idx] += 1;
-                for byte in next.iter_mut().skip(idx + 1) {
-                    *byte = 0;
-                }
-                return Some(Key::from(next));
-            }
+    /// Returns the logical index that produced `key`, or `None` when `key` is
+    /// not exactly one of this keyspace's inserted keys.
+    ///
+    /// Spread keys share the physical key range with other namespaces and runs,
+    /// so range validation uses this to recognize its own rows and skip the rest.
+    pub fn inserted_index_of(&self, key: &Key) -> Option<u64> {
+        if key.len() != self.key_len {
+            return None;
         }
-        None
+        let index_start = ENTROPY_BYTES + NAMESPACE_LEN_BYTES + self.namespace.len() + DOMAIN_BYTES;
+        let index_bytes = key.as_ref().get(index_start..index_start + INDEX_BYTES)?;
+        let index = u64::from_be_bytes(index_bytes.try_into().expect("slice is INDEX_BYTES long"));
+
+        // Regenerating and comparing rejects everything that merely resembles an
+        // inserted key: other namespaces, the missing-key domain, or stale layouts.
+        let expected = self.inserted_key(index).ok()?;
+        (expected == *key).then_some(index)
+    }
+
+    /// Yields `0..total` reordered to match the lexicographic order of the keys
+    /// those indices produce.
+    ///
+    /// One keyspace's inserted keys differ only in the entropy byte and the
+    /// big-endian index, so key order is (entropy byte, index): walk the 256
+    /// entropy values in byte order and indices in numeric order within each.
+    /// The O(256 * total) rescan keeps memory flat so full-range validation can
+    /// stream expected keys at any key count.
+    pub fn inserted_indices_in_key_order(total: u64) -> impl Iterator<Item = u64> {
+        (0..=u8::MAX).flat_map(move |entropy| {
+            (0..total).filter(move |index| entropy_byte(*index) == entropy)
+        })
     }
 
     fn key(&self, index: u64, domain: u8) -> anyhow::Result<Key> {
@@ -96,11 +121,14 @@ impl Keyspace {
             "keyspace key_len is too small for namespace"
         );
 
-        // Layout: namespace length, namespace bytes, domain byte, big-endian index, suffix.
+        // Layout: entropy byte, namespace length, namespace bytes, domain byte,
+        // big-endian index, mixed suffix.
         let mut key = vec![0u8; self.key_len];
-        key[0] = self.namespace.len() as u8;
-        let namespace_start = NAMESPACE_LEN_BYTES;
+        key[0] = entropy_byte(index);
+
+        let namespace_start = ENTROPY_BYTES + NAMESPACE_LEN_BYTES;
         let namespace_end = namespace_start + self.namespace.len();
+        key[ENTROPY_BYTES] = self.namespace.len() as u8;
         key[namespace_start..namespace_end].copy_from_slice(&self.namespace);
 
         let domain_offset = namespace_end;
@@ -118,8 +146,17 @@ impl Keyspace {
     }
 }
 
+/// First physical byte of every generated key.
+///
+/// Deriving it from the logical index alone spreads keys uniformly across all
+/// leading-bit shards while keeping inserted and missing keys for the same
+/// index aligned and reproducible.
+fn entropy_byte(index: u64) -> u8 {
+    mix64(index) as u8
+}
+
 fn min_key_len(namespace_len: usize) -> usize {
-    NAMESPACE_LEN_BYTES + namespace_len + DOMAIN_BYTES + INDEX_BYTES
+    ENTROPY_BYTES + NAMESPACE_LEN_BYTES + namespace_len + DOMAIN_BYTES + INDEX_BYTES
 }
 
 fn fill_suffix(out: &mut [u8], mut seed: u64) {
@@ -145,6 +182,8 @@ fn namespace_hash(namespace: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     #[test]
@@ -153,19 +192,38 @@ mod tests {
     }
 
     #[test]
-    fn inserted_and_missing_keys_do_not_overlap() {
+    fn inserted_and_missing_domains_stay_disjoint() {
         let keyspace = Keyspace::new(b"test".to_vec(), DEFAULT_KEY_LEN).unwrap();
-        let inserted = keyspace.inserted_key(7).unwrap();
-        let missing = keyspace.missing_key(7).unwrap();
-        assert_ne!(inserted, missing);
+        let mut seen = HashSet::new();
+        for index in 0..64u64 {
+            let inserted = keyspace.inserted_key(index).unwrap();
+            let missing = keyspace.missing_key(index).unwrap();
+            assert_eq!(inserted[0], missing[0]);
+            assert!(seen.insert(inserted));
+            assert!(seen.insert(missing));
+        }
     }
 
     #[test]
-    fn inserted_keys_are_sorted_by_index() {
-        let keyspace = Keyspace::new(b"test".to_vec(), DEFAULT_KEY_LEN).unwrap();
-        let first = keyspace.inserted_key(1).unwrap();
-        let second = keyspace.inserted_key(2).unwrap();
-        assert!(first < second);
+    fn keys_are_reproducible_across_instances() {
+        let a = Keyspace::from_u64_namespace(42, DEFAULT_KEY_LEN).unwrap();
+        let b = Keyspace::from_u64_namespace(42, DEFAULT_KEY_LEN).unwrap();
+        for index in 0..16u64 {
+            assert_eq!(
+                a.inserted_key(index).unwrap(),
+                b.inserted_key(index).unwrap()
+            );
+            assert_eq!(a.missing_key(index).unwrap(), b.missing_key(index).unwrap());
+        }
+    }
+
+    #[test]
+    fn entropy_byte_spreads_keys_across_all_leading_buckets() {
+        let keyspace = Keyspace::unnamespaced(DEFAULT_KEY_LEN).unwrap();
+        let buckets: HashSet<u8> = (0..128u64)
+            .map(|index| keyspace.inserted_key(index).unwrap()[0] >> 5)
+            .collect();
+        assert_eq!(buckets.len(), 8);
     }
 
     #[test]
@@ -175,45 +233,56 @@ mod tests {
     }
 
     #[test]
-    fn next_lex_key_advances_last_byte() {
-        let key = Key::from(vec![0x00, 0x10]);
-        let next = Keyspace::next_lex_key(&key).expect("next key should exist");
-        assert_eq!(next.as_ref(), &[0x00, 0x11]);
-    }
-
-    #[test]
-    fn next_lex_key_carries_and_resets_suffix() {
-        let key = Key::from(vec![0x01, 0xFF]);
-        let next = Keyspace::next_lex_key(&key).expect("next key should exist");
-        assert_eq!(next.as_ref(), &[0x02, 0x00]);
-    }
-
-    #[test]
-    fn next_lex_key_none_when_actual_key_bytes_are_max() {
-        let key = Key::from(vec![u8::MAX; 3]);
-        assert!(Keyspace::next_lex_key(&key).is_none());
-    }
-
-    #[test]
-    fn u64_namespace_keys_are_sorted_by_index() {
-        let keyspace = Keyspace::from_u64_namespace(42, DEFAULT_KEY_LEN).unwrap();
-        assert!(keyspace.inserted_key(1).unwrap() < keyspace.inserted_key(2).unwrap());
-    }
-
-    #[test]
-    fn u64_namespaces_form_isolated_ranges() {
+    fn u64_namespaces_generate_disjoint_keys() {
         let keyspace_a = Keyspace::from_u64_namespace(100, DEFAULT_KEY_LEN).unwrap();
         let keyspace_b = Keyspace::from_u64_namespace(101, DEFAULT_KEY_LEN).unwrap();
-        let mut a = (0..8u64)
-            .map(|i| keyspace_a.inserted_key(i).unwrap())
-            .collect::<Vec<_>>();
-        let b = (0..8u64)
-            .map(|i| keyspace_b.inserted_key(i).unwrap())
-            .collect::<Vec<_>>();
-        a.sort_unstable();
-        let min_a = a.first().cloned().expect("min key for namespace A");
-        let max_a = a.last().cloned().expect("max key for namespace A");
+        let a: HashSet<Key> = (0..64u64)
+            .map(|index| keyspace_a.inserted_key(index).unwrap())
+            .collect();
 
-        assert!(b.iter().all(|key| *key < min_a || *key > max_a));
+        assert!((0..64u64).all(|index| !a.contains(&keyspace_b.inserted_key(index).unwrap())));
+    }
+
+    #[test]
+    fn inserted_indices_in_key_order_matches_key_sort() {
+        let keyspace = Keyspace::from_u64_namespace(42, DEFAULT_KEY_LEN).unwrap();
+        let total = 300u64;
+        let ordered: Vec<Key> = Keyspace::inserted_indices_in_key_order(total)
+            .map(|index| keyspace.inserted_key(index).unwrap())
+            .collect();
+
+        let mut sorted: Vec<Key> = (0..total)
+            .map(|index| keyspace.inserted_key(index).unwrap())
+            .collect();
+        sorted.sort_unstable();
+
+        assert_eq!(ordered, sorted);
+    }
+
+    #[test]
+    fn inserted_index_of_round_trips_and_rejects_foreign_keys() {
+        let keyspace = Keyspace::from_u64_namespace(7, DEFAULT_KEY_LEN).unwrap();
+        for index in [0u64, 1, 255, 1 << 40] {
+            let key = keyspace.inserted_key(index).unwrap();
+            assert_eq!(keyspace.inserted_index_of(&key), Some(index));
+        }
+
+        let missing = keyspace.missing_key(3).unwrap();
+        assert_eq!(keyspace.inserted_index_of(&missing), None);
+
+        let other_namespace = Keyspace::from_u64_namespace(8, DEFAULT_KEY_LEN)
+            .unwrap()
+            .inserted_key(3)
+            .unwrap();
+        assert_eq!(keyspace.inserted_index_of(&other_namespace), None);
+
+        let other_len = Keyspace::from_u64_namespace(7, 32)
+            .unwrap()
+            .inserted_key(3)
+            .unwrap();
+        assert_eq!(keyspace.inserted_index_of(&other_len), None);
+
+        let zeroes = Key::from(vec![0u8; DEFAULT_KEY_LEN]);
+        assert_eq!(keyspace.inserted_index_of(&zeroes), None);
     }
 }

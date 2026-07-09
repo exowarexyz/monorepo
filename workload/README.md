@@ -58,6 +58,8 @@ Benchmark JSON reports include the normalized config, seed, counters, and per-op
 
 `load` and `bench` use run-specific namespaces by default so independent runs do not reuse the same physical keys on persistent stores. Pass the same `--namespace` to both commands when a benchmark should read from a keyspace written by `load`.
 
+Generated keys open with a byte derived from the logical index, so a run's keys spread across the entire physical key range instead of sharing a fixed prefix. Namespaces still make keys unique per run, but a run's keys no longer form a contiguous block: range queries bounded by a run's keys interleave whatever else the store holds, which `validate` accounts for by skipping rows it does not own.
+
 `load`, `bench`, and `validate` accept `--value-size` (bytes, default 160) to control generated value size. Pass the same `--value-size` to `load` and a reading `bench` so writes appended during the benchmark match the loaded data.
 
 ## Benchmark Manifests
@@ -84,7 +86,7 @@ Benchmark JSON reports include the normalized config, seed, counters, and per-op
     },
     "key_len": 48,
     "value_size": 256,
-    "keyspace_layout_version": 1,
+    "keyspace_layout_version": 2,
     "value_generator_version": 1,
     "read_retry_attempts": 3
   },
