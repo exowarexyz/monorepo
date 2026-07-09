@@ -150,3 +150,89 @@ pub(crate) fn classify_and_filter<F: Family>(
     };
     (classify, filter)
 }
+
+#[cfg(test)]
+mod tests {
+    use commonware_storage::merkle::{mmr, Location};
+    use exoware_sdk::keys::Key;
+    use exoware_sdk::selector::compile_payload_regex;
+
+    use super::{classify_and_filter, RowFamily};
+    use crate::auth::{
+        encode_auth_operation_key, encode_auth_presence_key, encode_auth_watermark_key,
+        AuthenticatedBackendNamespace,
+    };
+    use crate::codec::{encode_operation_key, encode_presence_key, encode_watermark_key};
+
+    const LOCATIONS: [u64; 4] = [0, 1, 0x0102_0304_0506_0708, u64::MAX];
+
+    // The payload regexes re-state the codec's row layouts, and the server
+    // drops any row a selector fails to match, so pin them together: every
+    // Op / Presence / Watermark key the codec can produce must match its
+    // selector's regex in full and classify to the same family and location.
+    fn assert_rows_match_filter(namespace: Option<AuthenticatedBackendNamespace>) {
+        let (classifier, filter) = classify_and_filter::<mmr::Family>(namespace);
+        for location in LOCATIONS {
+            let loc = Location::new(location);
+            let rows: [(RowFamily, Key); 3] = match namespace {
+                None => [
+                    (RowFamily::Op, encode_operation_key(loc)),
+                    (RowFamily::Presence, encode_presence_key(loc)),
+                    (RowFamily::Watermark, encode_watermark_key(loc)),
+                ],
+                Some(ns) => [
+                    (RowFamily::Op, encode_auth_operation_key(ns, loc)),
+                    (RowFamily::Presence, encode_auth_presence_key(ns, loc)),
+                    (RowFamily::Watermark, encode_auth_watermark_key(ns, loc)),
+                ],
+            };
+            for (family, key) in rows {
+                let selector = filter
+                    .selectors
+                    .iter()
+                    .find(|s| key.starts_with(&s.prefix))
+                    .expect("row must carry a selector prefix");
+                let regex = compile_payload_regex(&selector.payload_regex).expect("regex");
+                let payload = &key[selector.prefix.len()..];
+                let captures = regex.captures(payload).unwrap_or_else(|| {
+                    panic!("regex must match {family:?} payload {payload:02X?}")
+                });
+                assert_eq!(captures.get(0).expect("full match").as_bytes(), payload);
+                assert_eq!(classifier.classify(&key, &[]), Some((family, loc)));
+            }
+        }
+    }
+
+    #[test]
+    fn plain_backend_selectors_match_their_row_payloads() {
+        assert_rows_match_filter(None);
+    }
+
+    #[test]
+    fn authenticated_backend_selectors_match_their_row_payloads() {
+        assert_rows_match_filter(Some(AuthenticatedBackendNamespace::Immutable));
+        assert_rows_match_filter(Some(AuthenticatedBackendNamespace::Keyless));
+    }
+
+    // Plain payloads are a bare 8-byte location; authenticated payloads
+    // prepend a namespace tag. Each selector shape must reject the others so a
+    // subscription never claims rows from a differently-shaped backend.
+    #[test]
+    fn selectors_reject_payloads_of_the_other_shape() {
+        let loc = Location::<mmr::Family>::new(7);
+        let (_, plain) = classify_and_filter::<mmr::Family>(None);
+        let (_, auth) =
+            classify_and_filter::<mmr::Family>(Some(AuthenticatedBackendNamespace::Immutable));
+        let plain_key = encode_operation_key(loc);
+        let immutable_key =
+            encode_auth_operation_key(AuthenticatedBackendNamespace::Immutable, loc);
+        let keyless_key = encode_auth_operation_key(AuthenticatedBackendNamespace::Keyless, loc);
+        let plain_regex = compile_payload_regex(&plain.selectors[0].payload_regex).expect("regex");
+        let auth_regex = compile_payload_regex(&auth.selectors[0].payload_regex).expect("regex");
+        assert!(plain_regex.is_match(&plain_key[1..]));
+        assert!(!plain_regex.is_match(&immutable_key[1..]));
+        assert!(auth_regex.is_match(&immutable_key[1..]));
+        assert!(!auth_regex.is_match(&keyless_key[1..]));
+        assert!(!auth_regex.is_match(&plain_key[1..]));
+    }
+}
