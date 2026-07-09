@@ -66,8 +66,8 @@ impl Prefix {
     }
 
     /// Const constructor for static family prefixes, letting callers keep
-    /// `const FAMILY: Prefix`. Fails to compile if `prefix` is longer than
-    /// [`MAX_KEY_LEN`].
+    /// `const FAMILY: Prefix`. Panics when `prefix` is longer than
+    /// [`MAX_KEY_LEN`]; in a const context the panic surfaces at compile time.
     pub const fn from_static(prefix: &'static [u8]) -> Self {
         assert!(prefix.len() <= MAX_KEY_LEN, "prefix exceeds MAX_KEY_LEN");
         Self(Bytes::from_static(prefix))
@@ -113,9 +113,6 @@ impl Prefix {
                 max: MAX_KEY_LEN,
             });
         }
-        if self.0.is_empty() {
-            return Ok(Bytes::copy_from_slice(payload));
-        }
         let mut key = BytesMut::with_capacity(total);
         key.extend_from_slice(&self.0);
         key.extend_from_slice(payload);
@@ -141,6 +138,14 @@ impl Prefix {
     #[inline]
     pub fn matches(&self, key: &[u8]) -> bool {
         key.starts_with(&self.0)
+    }
+
+    /// Strip the prefix from a borrowed key slice, returning the payload
+    /// slice, or `None` when `key` does not start with this prefix. The
+    /// zero-copy [`Prefix::strip`] is preferable when the key is a [`Key`].
+    #[inline]
+    pub fn strip_slice<'a>(&self, key: &'a [u8]) -> Option<&'a [u8]> {
+        key.strip_prefix(self.0.as_ref())
     }
 
     /// Strip the prefix from `key`, returning the payload as a zero-copy slice
@@ -348,7 +353,7 @@ mod tests {
         assert_eq!(left.as_bytes().as_ref(), &[0x0A, 0x0B, 0x0C]);
 
         // Encoding layer-by-layer and via the joined prefix produce identical
-        // keys — the composition case that the old bit-padding codec corrupted.
+        // keys, the composition case that the old bit-padding codec corrupted.
         let payload = [0x11u8, 0x22, 0x33];
         let joined = a.join(&b).unwrap();
         let layered = a.encode(&b.encode(&payload).unwrap()).unwrap();

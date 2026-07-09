@@ -79,7 +79,8 @@ export class StoreKeyPrefix {
                 `store key prefix length ${prefix.length} exceeds ${MAX_KEY_LEN}`,
             );
         }
-        this.prefix = prefix;
+        // Copy so the namespace cannot alias a caller-owned mutable buffer.
+        this.prefix = prefix.slice();
     }
 
     maxLogicalKeyLen(): number {
@@ -103,7 +104,8 @@ export class StoreKeyPrefix {
         if (!this.matches(key)) {
             throw new RangeError('key does not belong to this store prefix');
         }
-        return key.subarray(this.prefix.length);
+        // Copy so decoded keys do not alias the shared transport frame.
+        return key.slice(this.prefix.length);
     }
 
     matches(key: Uint8Array): boolean {
@@ -138,14 +140,10 @@ export class StoreKeyPrefix {
         return { start: physicalStart, end: physicalEnd };
     }
 
+    // The selector's payloadRegex is forwarded verbatim and compiled
+    // server-side by Rust's regex crate, so JS-only syntax (lookaround,
+    // backreferences) is rejected by the server.
     prefixSelector(selector: MessageInitShape<typeof SelectorSchema>): Selector {
-        return this.prefixSelectorWithRegex(selector, selector.payloadRegex ?? '');
-    }
-
-    private prefixSelectorWithRegex(
-        selector: MessageInitShape<typeof SelectorSchema>,
-        payloadRegex: string,
-    ): Selector {
         const logicalPrefix = selector.prefix ?? new Uint8Array();
         const prefix = new Uint8Array(this.prefix.length + logicalPrefix.length);
         prefix.set(this.prefix, 0);
@@ -157,7 +155,7 @@ export class StoreKeyPrefix {
         }
         return create(SelectorSchema, {
             prefix,
-            payloadRegex,
+            payloadRegex: selector.payloadRegex ?? '',
         });
     }
 }

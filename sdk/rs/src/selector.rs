@@ -39,14 +39,8 @@ impl EncodeSize for Selector {
 impl Read for Selector {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let range: RangeCfg<usize> = (..).into();
+        let range: RangeCfg<usize> = (..=MAX_KEY_LEN).into();
         let prefix = Vec::<u8>::read_cfg(buf, &(range, ()))?;
-        if prefix.len() > MAX_KEY_LEN {
-            return Err(CodecError::Invalid(
-                "Selector",
-                "prefix exceeds MAX_KEY_LEN",
-            ));
-        }
         Ok(Selector {
             prefix: Bytes::from(prefix),
             payload_regex: Utf8::read(buf)?,

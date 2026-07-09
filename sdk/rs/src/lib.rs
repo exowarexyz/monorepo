@@ -194,8 +194,6 @@ impl ClientError {
 pub enum StoreKeyPrefixError {
     #[error("key does not belong to this store prefix")]
     PrefixMismatch,
-    #[error("combined prefix length {len} exceeds max {max}")]
-    CombinedPrefixTooLong { len: usize, max: usize },
     #[error("key offset {offset} plus store prefix shift {shift} exceeds u16")]
     KeyOffsetOverflow { offset: u16, shift: u16 },
     #[error("key prefix error: {0}")]
@@ -289,27 +287,10 @@ impl StoreKeyPrefix {
         &self,
         selector: &crate::selector::Selector,
     ) -> Result<crate::selector::Selector, StoreKeyPrefixError> {
-        self.prefix_selector_with_regex(selector, selector.payload_regex.clone())
-    }
-
-    fn prefix_selector_with_regex(
-        &self,
-        selector: &crate::selector::Selector,
-        payload_regex: crate::kv_codec::Utf8,
-    ) -> Result<crate::selector::Selector, StoreKeyPrefixError> {
-        let combined_len = self.inner.len() + selector.prefix.len();
-        if combined_len > MAX_KEY_LEN {
-            return Err(StoreKeyPrefixError::CombinedPrefixTooLong {
-                len: combined_len,
-                max: MAX_KEY_LEN,
-            });
-        }
-        let mut prefix = Vec::with_capacity(combined_len);
-        prefix.extend_from_slice(self.inner.as_bytes());
-        prefix.extend_from_slice(&selector.prefix);
+        let prefix = self.inner.join(&Prefix::new(selector.prefix.clone())?)?;
         Ok(crate::selector::Selector {
-            prefix: Bytes::from(prefix),
-            payload_regex,
+            prefix: prefix.as_bytes().clone(),
+            payload_regex: selector.payload_regex.clone(),
         })
     }
 }
@@ -336,8 +317,8 @@ impl PrefixedStoreClient {
     }
 
     /// The configured key prefix.
-    pub fn key_prefix(&self) -> StoreKeyPrefix {
-        self.prefix.clone()
+    pub fn key_prefix(&self) -> &StoreKeyPrefix {
+        &self.prefix
     }
 
     /// Borrow the underlying physical transport. Operations performed directly
@@ -2197,19 +2178,12 @@ fn shift_reduce_request_key_offsets(
 ) -> Result<(), StoreKeyPrefixError> {
     // A byte-aligned store prefix shifts every key field past its bytes.
     // `KeyField` offsets are byte-granular, so they shift by the whole prefix
-    // length in bytes; `ZOrderKey` offsets remain bit-granular, so they shift by
-    // `prefix_len * 8` bits.
-    let shift_bytes =
-        u16::try_from(prefix_len).map_err(|_| StoreKeyPrefixError::KeyOffsetOverflow {
-            offset: 0,
-            shift: u16::MAX,
-        })?;
-    let shift_bits = u16::try_from(prefix_len.saturating_mul(8)).map_err(|_| {
-        StoreKeyPrefixError::KeyOffsetOverflow {
-            offset: 0,
-            shift: u16::MAX,
-        }
-    })?;
+    // length in bytes; `ZOrderKey` offsets remain bit-granular, so they shift
+    // by `prefix_len * 8` bits. `prefix_len` comes from a validated
+    // `StoreKeyPrefix`, so both shifts fit u16 (`MAX_KEY_LEN * 8` = 2032).
+    debug_assert!(prefix_len <= MAX_KEY_LEN);
+    let shift_bytes = prefix_len as u16;
+    let shift_bits = shift_bytes * 8;
     for reducer in &mut request.reducers {
         if let Some(expr) = &mut reducer.expr {
             shift_expr_key_offsets(shift_bytes, shift_bits, expr)?;
@@ -3036,7 +3010,7 @@ mod tests {
             StoreKeyPrefix::new(vec![4]).unwrap(),
             StoreKeyPrefix::new(vec![5]).unwrap(),
         ];
-        // A key encoded under one prefix never matches another's prefix — so a
+        // A key encoded under one prefix never matches another's prefix, so a
         // prefix-bounded range scan in one can't observe another's keys (this is
         // the bug being fixed). Same-length prefixes are pairwise disjoint.
         let logical = Bytes::from_static(b"\x00\x10whatever-block-meta-or-op-log-key");
@@ -3061,7 +3035,7 @@ mod tests {
         let base = StoreClient::new("http://localhost:8090");
         let prefix = StoreKeyPrefix::new(vec![0]).unwrap();
         let client = base.prefixed(prefix.clone());
-        assert_eq!(client.key_prefix(), prefix);
+        assert_eq!(client.key_prefix(), &prefix);
         // The logical client encodes through its prefix.
         let logical = Bytes::from_static(b"row");
         assert_eq!(
@@ -3241,8 +3215,8 @@ mod tests {
         let key_b = Bytes::from_static(b"b");
 
         let mut batch = StoreWriteBatch::new();
-        batch.push(&a.key_prefix(), &key_a, b"va").unwrap();
-        batch.push(&b.key_prefix(), &key_b, b"vb").unwrap();
+        batch.push(a.key_prefix(), &key_a, b"va").unwrap();
+        batch.push(b.key_prefix(), &key_b, b"vb").unwrap();
 
         assert_eq!(
             batch.entries[0].0,

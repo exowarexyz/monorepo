@@ -277,13 +277,13 @@ async fn raw_prefixes_support_atomic_batch_fetch_range_and_stream() {
     let only_a = Bytes::from_static(b"only-a");
     let mut batch = StoreWriteBatch::new();
     batch
-        .push(&a.key_prefix(), &shared, b"value-a")
+        .push(a.key_prefix(), &shared, b"value-a")
         .expect("push a shared");
     batch
-        .push(&b.key_prefix(), &shared, b"value-b")
+        .push(b.key_prefix(), &shared, b"value-b")
         .expect("push b shared");
     batch
-        .push(&a.key_prefix(), &only_a, b"value-a2")
+        .push(a.key_prefix(), &only_a, b"value-a2")
         .expect("push a only");
     let sequence = batch
         .commit(&base)
@@ -790,7 +790,7 @@ async fn prefixed_prune_composes_selector_and_prunes_cleanly() {
         (&alt_v8, b"alt-v8".as_slice()),
     ] {
         batch
-            .push(&client.key_prefix(), key, value)
+            .push(client.key_prefix(), key, value)
             .expect("push versioned key");
     }
     batch.commit(&base).await.expect("commit versioned keys");

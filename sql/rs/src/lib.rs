@@ -109,17 +109,17 @@ mod tests {
         TableModel::from_config(&config).unwrap()
     }
 
-    fn codec_payload(prefix: &Prefix, key: &Key, offset: usize, len: usize) -> Vec<u8> {
-        let payload = prefix.strip(key).expect("codec payload");
+    fn key_payload(prefix: &Prefix, key: &Key, offset: usize, len: usize) -> Vec<u8> {
+        let payload = prefix.strip(key).expect("key payload");
         payload[offset..offset + len].to_vec()
     }
 
     fn primary_payload(model: &TableModel, key: &Key, offset: usize, len: usize) -> Vec<u8> {
-        codec_payload(&model.primary_key_prefix, key, offset, len)
+        key_payload(&model.primary_key_prefix, key, offset, len)
     }
 
     fn index_payload(spec: &ResolvedIndexSpec, key: &Key, offset: usize, len: usize) -> Vec<u8> {
-        codec_payload(&spec.codec, key, offset, len)
+        key_payload(&spec.prefix, key, offset, len)
     }
 
     fn matches_primary_key(table_prefix: u8, key: &Key) -> bool {
@@ -2275,7 +2275,7 @@ mod tests {
             "lower bound must not exceed upper bound (was wrapping via as i32)"
         );
 
-        let lower_payload = specs[0].codec.strip(&start).unwrap();
+        let lower_payload = specs[0].prefix.strip(&start).unwrap();
         let encoded_lower: [u8; 4] = lower_payload[..4].try_into().unwrap();
         let decoded_lower = decode_i32_ordered(encoded_lower);
         assert_eq!(
@@ -2373,6 +2373,694 @@ mod tests {
             .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
             .expect("upper bound should encode");
         assert!(start <= end, "lower bound must not exceed upper bound");
+    }
+
+    // Index-bound keys must bracket every row the constraints admit. These
+    // three pin the cases the old pre-sized-buffer encoder got wrong: a lower
+    // bound zero-padded past a short string (excluded the row sitting exactly
+    // on the bound), a string equality wider than the 16-byte schema estimate
+    // (overflowed the buffer, silently discarding the index), and a
+    // variable-width Utf8 primary key (zero-padded past an empty string).
+    #[test]
+    fn index_lower_bound_includes_boundary_row() {
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("s", DataType::Utf8, false),
+                TableColumnConfig::new("id", DataType::Int64, false),
+            ],
+            vec!["id".to_string()],
+            vec![IndexSpec::new("s_idx", vec!["s".to_string()]).unwrap()],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let specs = model.resolve_index_specs(&config.index_specs).unwrap();
+
+        // Query shape: WHERE s = 'a' AND id >= 5.
+        let s_idx = *model.columns_by_name.get("s").unwrap();
+        let id_idx = *model.columns_by_name.get("id").unwrap();
+        let mut pred = QueryPredicate::default();
+        pred.constraints
+            .insert(s_idx, PredicateConstraint::StringEq("a".to_string()));
+        pred.constraints.insert(
+            id_idx,
+            PredicateConstraint::IntRange {
+                min: Some(5),
+                max: None,
+            },
+        );
+        let start = pred
+            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, false)
+            .expect("lower bound");
+        let end = pred
+            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .expect("upper bound");
+
+        // Index row for exactly (s = 'a', id = 5), as encode_secondary_index_key
+        // lays it out: escaped string + terminator, then ordered pk bytes.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&encode_string_variable("a").unwrap());
+        payload.extend_from_slice(&encode_i64_ordered(5));
+        let row_key = specs[0].prefix.encode(&payload).unwrap();
+
+        assert!(start <= end);
+        assert!(
+            row_key >= start && row_key <= end,
+            "boundary row must fall inside the index range"
+        );
+    }
+
+    #[test]
+    fn long_utf8_equality_produces_usable_index_bounds() {
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("s", DataType::Utf8, false),
+                TableColumnConfig::new("id", DataType::Int64, false),
+            ],
+            vec!["id".to_string()],
+            vec![IndexSpec::new("s_idx", vec!["s".to_string()]).unwrap()],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let specs = model.resolve_index_specs(&config.index_specs).unwrap();
+
+        // Longer than the 16-byte Utf8 width estimate but well within
+        // MAX_KEY_LEN; the old fixed-size buffer rejected this and the planner
+        // silently fell back to a full scan.
+        let needle = "a".repeat(30);
+        let s_idx = *model.columns_by_name.get("s").unwrap();
+        let mut pred = QueryPredicate::default();
+        pred.constraints
+            .insert(s_idx, PredicateConstraint::StringEq(needle.clone()));
+        let start = pred
+            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, false)
+            .expect("lower bound");
+        let end = pred
+            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .expect("upper bound");
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&encode_string_variable(&needle).unwrap());
+        payload.extend_from_slice(&encode_i64_ordered(7));
+        let row_key = specs[0].prefix.encode(&payload).unwrap();
+
+        assert!(start <= end);
+        assert!(row_key >= start && row_key <= end);
+    }
+
+    #[test]
+    fn index_lower_bound_includes_empty_utf8_pk_row() {
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("a", DataType::Int64, false),
+                TableColumnConfig::new("k", DataType::Utf8, false),
+            ],
+            vec!["k".to_string()],
+            vec![IndexSpec::new("a_idx", vec!["a".to_string()]).unwrap()],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let specs = model.resolve_index_specs(&config.index_specs).unwrap();
+
+        // Query shape: WHERE a = 5; the row's Utf8 pk is the empty string, so
+        // its index key ends in a bare terminator byte.
+        let a_idx = *model.columns_by_name.get("a").unwrap();
+        let mut pred = QueryPredicate::default();
+        pred.constraints.insert(
+            a_idx,
+            PredicateConstraint::IntRange {
+                min: Some(5),
+                max: Some(5),
+            },
+        );
+        let start = pred
+            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, false)
+            .expect("lower bound");
+        let end = pred
+            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .expect("upper bound");
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&encode_i64_ordered(5));
+        payload.extend_from_slice(&encode_string_variable("").unwrap());
+        let row_key = specs[0].prefix.encode(&payload).unwrap();
+
+        assert!(start <= end);
+        assert!(row_key >= start && row_key <= end);
+    }
+
+    #[test]
+    fn zorder_index_range_includes_short_utf8_pk_rows() {
+        // Regression: the z-order lower bound zero-padded the variable-width
+        // Utf8 pk suffix to its reserved key width (16). A stored entry whose
+        // pk encodes below that padding (the empty string encodes to a lone
+        // terminator byte) sorted below the bound and was missed.
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("name", DataType::Utf8, false),
+                TableColumnConfig::new("x", DataType::Int64, false),
+                TableColumnConfig::new("y", DataType::Int64, false),
+                TableColumnConfig::new("value", DataType::Int64, false),
+            ],
+            vec!["name".to_string()],
+            vec![
+                IndexSpec::z_order("xy_z", vec!["x".to_string(), "y".to_string()])
+                    .expect("valid")
+                    .with_cover_columns(vec!["value".to_string()]),
+            ],
+        )
+        .expect("valid config");
+        let model = TableModel::from_config(&config).expect("model");
+        let specs = model
+            .resolve_index_specs(&config.index_specs)
+            .expect("specs");
+        let x_idx = *model.columns_by_name.get("x").unwrap();
+        let y_idx = *model.columns_by_name.get("y").unwrap();
+
+        // Box query x=5, y=7.
+        let mut pred = QueryPredicate::default();
+        pred.constraints.insert(
+            x_idx,
+            PredicateConstraint::IntRange {
+                min: Some(5),
+                max: Some(5),
+            },
+        );
+        pred.constraints.insert(
+            y_idx,
+            PredicateConstraint::IntRange {
+                min: Some(7),
+                max: Some(7),
+            },
+        );
+        let ranges = pred
+            .expand_zorder_index_ranges(model.table_prefix, &model, &specs[0])
+            .expect("ranges");
+        assert_eq!(ranges.len(), 1);
+
+        // The empty string is the discriminating case: its encoding is the
+        // lexicographic minimum, so it is the pk that zero-padding excluded.
+        for name in ["", "bob"] {
+            let row = KvRow {
+                values: vec![
+                    CellValue::Utf8(name.to_string()),
+                    CellValue::Int64(5),
+                    CellValue::Int64(7),
+                    CellValue::Int64(100),
+                ],
+            };
+            let stored = encode_secondary_index_key(model.table_prefix, &specs[0], &model, &row)
+                .expect("stored");
+            assert!(
+                ranges[0].start <= stored && stored <= ranges[0].end,
+                "zorder range for x=5,y=7 must include stored entry with pk '{name}'"
+            );
+        }
+    }
+
+    #[test]
+    fn utf8_pk_behind_lex_index_range_includes_short_pk_rows() {
+        // Regression: for a lexicographic index whose TABLE pk is Utf8, the
+        // lower bound zero-padded the pk suffix to its reserved key width.
+        // A stored entry with the empty-string pk (minimal encoding) sorted
+        // below the bound and was missed.
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("name", DataType::Utf8, false),
+                TableColumnConfig::new("age", DataType::Int64, false),
+            ],
+            vec!["name".to_string()],
+            vec![IndexSpec::new("age_idx", vec!["age".to_string()]).unwrap()],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let specs = model.resolve_index_specs(&config.index_specs).unwrap();
+        let age_idx = *model.columns_by_name.get("age").unwrap();
+
+        let mut pred = QueryPredicate::default();
+        pred.constraints.insert(
+            age_idx,
+            PredicateConstraint::IntRange {
+                min: Some(5),
+                max: Some(5),
+            },
+        );
+        let start = pred
+            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, false)
+            .unwrap();
+        let end = pred
+            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .unwrap();
+
+        for name in ["", "bob"] {
+            let row = KvRow {
+                values: vec![CellValue::Utf8(name.to_string()), CellValue::Int64(5)],
+            };
+            let stored = encode_secondary_index_key(model.table_prefix, &specs[0], &model, &row)
+                .expect("stored index key encodes");
+            assert!(
+                start <= stored && stored <= end,
+                "index range for age=5 must include stored entry with pk '{name}'"
+            );
+        }
+    }
+
+    #[test]
+    fn multi_column_index_utf8_prefix_range_includes_min_suffix_rows() {
+        // Lexicographic index (a Utf8, b Int64) constrained on the Utf8
+        // prefix only: the lower bound must admit the minimal unconstrained
+        // suffix (b = i64::MIN encodes to all zeros) and minimal pk.
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", DataType::Int64, false),
+                TableColumnConfig::new("a", DataType::Utf8, false),
+                TableColumnConfig::new("b", DataType::Int64, false),
+            ],
+            vec!["id".to_string()],
+            vec![IndexSpec::new("ab_idx", vec!["a".to_string(), "b".to_string()]).unwrap()],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let specs = model.resolve_index_specs(&config.index_specs).unwrap();
+        let a_idx = *model.columns_by_name.get("a").unwrap();
+
+        let mut pred = QueryPredicate::default();
+        pred.constraints
+            .insert(a_idx, PredicateConstraint::StringEq("x".to_string()));
+        let start = pred
+            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, false)
+            .unwrap();
+        let end = pred
+            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .unwrap();
+
+        for (b, id) in [(i64::MIN, i64::MIN), (0, 0), (i64::MAX, i64::MAX)] {
+            let row = KvRow {
+                values: vec![
+                    CellValue::Int64(id),
+                    CellValue::Utf8("x".to_string()),
+                    CellValue::Int64(b),
+                ],
+            };
+            let stored = encode_secondary_index_key(model.table_prefix, &specs[0], &model, &row)
+                .expect("stored index key encodes");
+            assert!(
+                start <= stored && stored <= end,
+                "index range for a='x' must include stored entry with b={b}, id={id}"
+            );
+        }
+
+        let row = KvRow {
+            values: vec![
+                CellValue::Int64(0),
+                CellValue::Utf8("y".to_string()),
+                CellValue::Int64(0),
+            ],
+        };
+        let excluded = encode_secondary_index_key(model.table_prefix, &specs[0], &model, &row)
+            .expect("stored index key encodes");
+        assert!(
+            excluded > end,
+            "index range for a='x' must exclude entries for a='y'"
+        );
+    }
+
+    #[test]
+    fn variable_width_column_rejected_in_zorder_index() {
+        // Z-order stored keys interleave the actual encoded bytes, but decode
+        // and bound construction assume the reserved fixed key width, so a
+        // Utf8 z-order key column silently matches no rows (and trips a
+        // debug_assert in debug builds). Reject it at resolve time.
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", DataType::Int64, false),
+                TableColumnConfig::new("x", DataType::Int64, false),
+                TableColumnConfig::new("region", DataType::Utf8, false),
+            ],
+            vec!["id".to_string()],
+            vec![IndexSpec::z_order("xr_z", vec!["x".to_string(), "region".to_string()]).unwrap()],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let result = model.resolve_index_specs(&config.index_specs);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("z-order key column"));
+
+        // The same column in a lexicographic index stays valid.
+        let lex_config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", DataType::Int64, false),
+                TableColumnConfig::new("x", DataType::Int64, false),
+                TableColumnConfig::new("region", DataType::Utf8, false),
+            ],
+            vec!["id".to_string()],
+            vec![IndexSpec::new("r_idx", vec!["region".to_string()]).unwrap()],
+        )
+        .unwrap();
+        let lex_model = TableModel::from_config(&lex_config).unwrap();
+        assert!(lex_model
+            .resolve_index_specs(&lex_config.index_specs)
+            .is_ok());
+    }
+
+    #[test]
+    fn utf8_pk_point_query_range_includes_short_string_row() {
+        // Regression: the lower scan bound for a Utf8 primary key used to be
+        // zero-padded to the fixed PK width (16), sorting it above the
+        // variable-length stored key, so `WHERE name = 'alice'` returned
+        // no rows for any name shorter than 16 encoded bytes.
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("name", DataType::Utf8, false),
+                TableColumnConfig::new("age", DataType::Int64, false),
+            ],
+            vec!["name".to_string()],
+            vec![],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let name_idx = *model.columns_by_name.get("name").unwrap();
+
+        for name in [
+            "alice",
+            "",
+            "a",
+            "exactly15chars!",
+            "longer-than-sixteen-bytes",
+        ] {
+            let value = CellValue::Utf8(name.to_string());
+            let stored = encode_primary_key(0, &[&value], &model).expect("stored key encodes");
+
+            let mut pred = QueryPredicate::default();
+            pred.constraints
+                .insert(name_idx, PredicateConstraint::StringEq(name.to_string()));
+            let ranges = pred.primary_key_ranges(&model).unwrap();
+            assert_eq!(
+                ranges.len(),
+                1,
+                "point query on '{name}' must yield one range"
+            );
+            assert!(
+                ranges[0].start <= stored,
+                "lower bound must not exceed stored key for '{name}'"
+            );
+            assert!(
+                stored <= ranges[0].end,
+                "stored key must not exceed upper bound for '{name}'"
+            );
+            assert_eq!(
+                ranges[0].start, stored,
+                "point lower bound must equal the stored key for '{name}'"
+            );
+        }
+
+        // Prefix-freeness: the range for 'al' must not admit 'alice'.
+        let mut pred = QueryPredicate::default();
+        pred.constraints
+            .insert(name_idx, PredicateConstraint::StringEq("al".to_string()));
+        let ranges = pred.primary_key_ranges(&model).unwrap();
+        let alice = CellValue::Utf8("alice".to_string());
+        let alice_key = encode_primary_key(0, &[&alice], &model).expect("stored key encodes");
+        assert!(
+            alice_key > ranges[0].end,
+            "range for 'al' must exclude the stored key for 'alice'"
+        );
+    }
+
+    #[test]
+    fn utf8_pk_prefix_query_range_includes_composite_rows() {
+        // Composite PK (name Utf8, id Int64) constrained on name only: the
+        // range must admit every id, including i64::MIN, whose ordered
+        // encoding is all zeros and therefore sorts lowest.
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("name", DataType::Utf8, false),
+                TableColumnConfig::new("id", DataType::Int64, false),
+            ],
+            vec!["name".to_string(), "id".to_string()],
+            vec![],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let name_idx = *model.columns_by_name.get("name").unwrap();
+
+        let mut pred = QueryPredicate::default();
+        pred.constraints
+            .insert(name_idx, PredicateConstraint::StringEq("al".to_string()));
+        let ranges = pred.primary_key_ranges(&model).unwrap();
+        assert_eq!(ranges.len(), 1);
+
+        for id in [i64::MIN, 0, 42, i64::MAX] {
+            let name = CellValue::Utf8("al".to_string());
+            let id_value = CellValue::Int64(id);
+            let stored =
+                encode_primary_key(0, &[&name, &id_value], &model).expect("stored key encodes");
+            assert!(
+                ranges[0].start <= stored && stored <= ranges[0].end,
+                "range for name='al' must include stored key with id={id}"
+            );
+        }
+
+        let other = CellValue::Utf8("alx".to_string());
+        let id_value = CellValue::Int64(0);
+        let excluded =
+            encode_primary_key(0, &[&other, &id_value], &model).expect("stored key encodes");
+        assert!(
+            excluded > ranges[0].end,
+            "range for name='al' must exclude rows with name='alx'"
+        );
+    }
+
+    #[test]
+    fn utf8_index_point_query_range_includes_min_pk_row() {
+        // Regression: the secondary-index lower bound was allocated at the
+        // full fixed key width, leaving trailing zeros past the encoded
+        // content. A stored entry for a short Utf8 value whose pk suffix
+        // encodes to all zeros (id = i64::MIN) sorted below that bound and
+        // was missed.
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", DataType::Int64, false),
+                TableColumnConfig::new("region", DataType::Utf8, false),
+            ],
+            vec!["id".to_string()],
+            vec![IndexSpec::new("region_idx", vec!["region".to_string()]).unwrap()],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let specs = model.resolve_index_specs(&config.index_specs).unwrap();
+        let region_idx = *model.columns_by_name.get("region").unwrap();
+
+        let mut pred = QueryPredicate::default();
+        pred.constraints
+            .insert(region_idx, PredicateConstraint::StringEq("us".to_string()));
+        let start = pred
+            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, false)
+            .unwrap();
+        let end = pred
+            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .unwrap();
+
+        for id in [i64::MIN, 0, i64::MAX] {
+            let row = KvRow {
+                values: vec![CellValue::Int64(id), CellValue::Utf8("us".to_string())],
+            };
+            let stored = encode_secondary_index_key(model.table_prefix, &specs[0], &model, &row)
+                .expect("stored index key encodes");
+            assert!(
+                start <= stored && stored <= end,
+                "index range for region='us' must include stored entry with id={id}"
+            );
+        }
+
+        let row = KvRow {
+            values: vec![CellValue::Int64(0), CellValue::Utf8("ut".to_string())],
+        };
+        let excluded = encode_secondary_index_key(model.table_prefix, &specs[0], &model, &row)
+            .expect("stored index key encodes");
+        assert!(
+            excluded > end,
+            "index range for region='us' must exclude entries for region='ut'"
+        );
+    }
+
+    #[tokio::test]
+    async fn utf8_pk_point_query_returns_row() {
+        // Regression: `WHERE name = 'alice'` on a Utf8 primary key returned
+        // no rows because the lower scan bound was zero-padded past the
+        // variable-length stored key.
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state).await;
+        let client = StoreClient::new(&base_url);
+
+        let schema = KvSchema::new(PrefixedStoreClient::empty(client))
+            .table(
+                "users",
+                vec![
+                    TableColumnConfig::new("name", DataType::Utf8, false),
+                    TableColumnConfig::new("age", DataType::Int64, false),
+                ],
+                vec!["name".to_string()],
+                vec![],
+            )
+            .expect("schema");
+        let mut writer = schema.batch_writer();
+        for (name, age) in [("alice", 30i64), ("bob", 25), ("", 99)] {
+            writer
+                .insert(
+                    "users",
+                    vec![CellValue::Utf8(name.to_string()), CellValue::Int64(age)],
+                )
+                .expect("row");
+        }
+        writer.flush().await.expect("flush");
+
+        let ctx = SessionContext::new();
+        schema.register_all(&ctx).expect("register");
+
+        for (name, expected_age) in [("alice", 30i64), ("bob", 25), ("", 99)] {
+            let df = ctx
+                .sql(&format!("SELECT age FROM users WHERE name = '{name}'"))
+                .await
+                .expect("plan");
+            let batches = df.collect().await.expect("collect");
+            let ages: Vec<i64> = batches
+                .iter()
+                .flat_map(|b| {
+                    b.column(0)
+                        .as_any()
+                        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+                        .unwrap()
+                        .iter()
+                        .map(|v| v.unwrap())
+                })
+                .collect();
+            assert_eq!(
+                ages,
+                vec![expected_age],
+                "point query on name='{name}' must return exactly its row"
+            );
+        }
+
+        let df = ctx
+            .sql("SELECT age FROM users WHERE name = 'al'")
+            .await
+            .expect("plan");
+        let batches = df.collect().await.expect("collect");
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 0, "prefix of a stored name must match nothing");
+
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn utf8_index_point_query_returns_min_pk_row() {
+        // Regression: an index lookup on a short Utf8 value missed rows whose
+        // pk suffix encodes to all zeros (id = i64::MIN sorts lowest), because
+        // the lower bound was zero-padded past the stored entry. Exercises
+        // both index streams: non-covering (point lookup) and covering.
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state).await;
+        let client = StoreClient::new(&base_url);
+
+        let schema = KvSchema::new(PrefixedStoreClient::empty(client))
+            .table(
+                "orders_nc",
+                vec![
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("region", DataType::Utf8, false),
+                    TableColumnConfig::new("amount", DataType::Int64, false),
+                ],
+                vec!["id".to_string()],
+                vec![IndexSpec::new("region_idx", vec!["region".to_string()]).expect("valid")],
+            )
+            .expect("schema")
+            .table(
+                "orders_cov",
+                vec![
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("region", DataType::Utf8, false),
+                    TableColumnConfig::new("amount", DataType::Int64, false),
+                ],
+                vec!["id".to_string()],
+                vec![IndexSpec::new("region_idx", vec!["region".to_string()])
+                    .expect("valid")
+                    .with_cover_columns(vec!["amount".to_string()])],
+            )
+            .expect("schema");
+        let mut writer = schema.batch_writer();
+        for table in ["orders_nc", "orders_cov"] {
+            writer
+                .insert(
+                    table,
+                    vec![
+                        CellValue::Int64(i64::MIN),
+                        CellValue::Utf8("us".to_string()),
+                        CellValue::Int64(7),
+                    ],
+                )
+                .expect("row");
+            writer
+                .insert(
+                    table,
+                    vec![
+                        CellValue::Int64(1),
+                        CellValue::Utf8("eu".to_string()),
+                        CellValue::Int64(8),
+                    ],
+                )
+                .expect("row");
+        }
+        writer.flush().await.expect("flush");
+
+        let ctx = SessionContext::new();
+        schema.register_all(&ctx).expect("register");
+
+        for table in ["orders_nc", "orders_cov"] {
+            let df = ctx
+                .sql(&format!("SELECT amount FROM {table} WHERE region = 'us'"))
+                .await
+                .expect("plan");
+            let batches = df.collect().await.expect("collect");
+            let amounts: Vec<i64> = batches
+                .iter()
+                .flat_map(|b| {
+                    b.column(0)
+                        .as_any()
+                        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+                        .unwrap()
+                        .iter()
+                        .map(|v| v.unwrap())
+                })
+                .collect();
+            assert_eq!(
+                amounts,
+                vec![7],
+                "index lookup on {table} must return the id=i64::MIN row"
+            );
+        }
+
+        let _ = shutdown_tx.send(());
     }
 
     #[test]
@@ -2738,9 +3426,9 @@ mod tests {
             Ok(_) => panic!("overflow table should be rejected"),
             Err(err) => assert!(
                 err.contains(&format!(
-                    "too many tables for codec layout (max {MAX_TABLES})"
+                    "too many tables for key layout (max {MAX_TABLES})"
                 )),
-                "overflow table should be rejected with codec-capacity error"
+                "overflow table should be rejected with key-layout error"
             ),
         }
     }
@@ -4182,14 +4870,17 @@ mod tests {
         .iter()
         .all(|&b| b == 0xFF));
 
-        // Lower bound: trailing bytes should be 0x00
+        // Lower bound: exactly the encoded prefix
         let lower =
             encode_primary_key_bound(0, &[&entity], &model, false).expect("pk bound encodes");
         assert_eq!(primary_payload(&model, &lower, 0, 16), vec![0xAA; 16]);
         assert_eq!(
-            primary_payload(&model, &lower, 16, 8),
-            vec![0x00; 8],
-            "trailing PK column (version) must be 0x00 for lower bound"
+            lower,
+            model
+                .primary_key_prefix
+                .encode(&[0xAA; 16])
+                .expect("encode entity prefix"),
+            "lower bound must be exactly the encoded prefix"
         );
     }
 
@@ -4723,7 +5414,7 @@ mod tests {
     }
 
     #[test]
-    fn utf8_primary_key_encodes_at_max_codec_payload_and_rejects_overflow() {
+    fn utf8_primary_key_encodes_at_max_key_payload_and_rejects_overflow() {
         let config = KvTableConfig::new(
             0,
             vec![TableColumnConfig::new("id", DataType::Utf8, false)],
@@ -4759,8 +5450,8 @@ mod tests {
             },
             &model,
         )
-        .expect_err("UTF-8 PK exceeding codec payload should be rejected");
-        assert!(err.contains("primary key payload exceeds codec payload capacity 253 bytes"));
+        .expect_err("UTF-8 PK exceeding key payload should be rejected");
+        assert!(err.contains("failed to encode primary key: key length 255 exceeds max 254"));
     }
 
     #[test]
@@ -4830,7 +5521,7 @@ mod tests {
         let model = TableModel::from_config(&config).unwrap();
         let specs = model.resolve_index_specs(&config.index_specs).unwrap();
         let spec = &specs[0];
-        let max_payload = spec.codec.max_payload_len();
+        let max_payload = spec.prefix.max_payload_len();
         let max_tag = "t".to_string();
         let max_id = "i".repeat(max_payload - encode_string_variable(&max_tag).unwrap().len() - 1);
         let overflow_id = format!("{max_id}x");
@@ -4868,7 +5559,9 @@ mod tests {
             },
         )
         .expect_err("secondary key exceeding max payload should be rejected");
-        assert!(err.contains("index 'tag_idx' payload exceeds codec payload capacity 253 bytes"));
+        assert!(
+            err.contains("failed to encode index 'tag_idx' key: key length 255 exceeds max 254")
+        );
     }
 
     #[test]
@@ -4886,7 +5579,7 @@ mod tests {
         let model = TableModel::from_config(&config).unwrap();
         let specs = model.resolve_index_specs(&config.index_specs).unwrap();
         let spec = &specs[0];
-        let max_payload = spec.codec.max_payload_len();
+        let max_payload = spec.prefix.max_payload_len();
         let max_tag = "t".to_string();
         let max_id = "i".repeat(max_payload - encode_string_variable(&max_tag).unwrap().len() - 1);
         let overflow_id = format!("{max_id}x");
@@ -4919,7 +5612,7 @@ mod tests {
         .expect_err("backfill path overflow should be rejected");
         assert!(err
             .to_string()
-            .contains("index 'tag_idx' payload exceeds codec payload capacity 253 bytes"));
+            .contains("failed to encode index 'tag_idx' key: key length 255 exceeds max 254"));
     }
 
     #[test]

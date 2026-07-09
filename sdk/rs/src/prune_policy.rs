@@ -366,16 +366,22 @@ fn validate_retain_for_scope(policy: &PrunePolicy) -> anyhow::Result<()> {
 }
 
 pub fn ensure_unique_policy_families(policies: &[PrunePolicy]) -> anyhow::Result<()> {
-    let mut user_families = HashSet::new();
+    let mut user_prefixes: Vec<&[u8]> = Vec::new();
     let mut sequence_seen = false;
     for policy in policies {
         match &policy.scope {
             PolicyScope::Keys(scope) => {
-                ensure!(
-                    user_families.insert(scope.selector.prefix.clone()),
-                    "duplicate compaction prune policy for key prefix {:?}",
-                    scope.selector.prefix
-                );
+                // Nested prefixes select overlapping physical key ranges, so
+                // two policies could disagree about the same rows. Reject any
+                // pair where one prefix extends the other (equality included).
+                let prefix: &[u8] = &scope.selector.prefix;
+                for seen in &user_prefixes {
+                    ensure!(
+                        !seen.starts_with(prefix) && !prefix.starts_with(seen),
+                        "overlapping compaction prune policies for key prefixes {seen:?} and {prefix:?}"
+                    );
+                }
+                user_prefixes.push(prefix);
             }
             PolicyScope::Sequence => {
                 ensure!(
@@ -477,6 +483,26 @@ mod tests {
             version: 1,
             policies: vec![sample_policy()],
         }
+    }
+
+    #[test]
+    fn nested_selector_prefixes_rejected() {
+        let mut nested = sample_policy();
+        let PolicyScope::Keys(scope) = &mut nested.scope else {
+            unreachable!("sample policy uses Keys scope");
+        };
+        scope.selector.prefix = Bytes::copy_from_slice(&[1, 2]);
+        let err = super::ensure_unique_policy_families(&[sample_policy(), nested])
+            .expect_err("nested prefixes overlap");
+        assert!(err.to_string().contains("overlapping compaction"));
+
+        let disjoint = sample_policy();
+        let mut other = sample_policy();
+        let PolicyScope::Keys(scope) = &mut other.scope else {
+            unreachable!("sample policy uses Keys scope");
+        };
+        scope.selector.prefix = Bytes::copy_from_slice(&[2]);
+        super::ensure_unique_policy_families(&[disjoint, other]).expect("disjoint prefixes");
     }
 
     #[test]

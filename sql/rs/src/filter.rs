@@ -44,7 +44,7 @@ pub(crate) struct EncodedIndexPredicateCheck {
 
 #[derive(Clone)]
 pub(crate) struct EncodedIndexPredicatePlan {
-    pub(crate) codec: Prefix,
+    pub(crate) prefix: Prefix,
     pub(crate) checks: Vec<EncodedIndexPredicateCheck>,
     pub(crate) impossible: bool,
 }
@@ -54,7 +54,7 @@ impl EncodedIndexPredicatePlan {
         if self.impossible {
             return false;
         }
-        let Ok(payload) = self.codec.strip(key) else {
+        let Ok(payload) = self.prefix.strip(key) else {
             return false;
         };
         for check in &self.checks {
@@ -213,7 +213,7 @@ impl ScanAccessPlan {
             || model.primary_key_kinds.contains(&ColumnKind::Utf8)
         {
             return IndexPredicatePlan::Encoded(EncodedIndexPredicatePlan {
-                codec: spec.codec.clone(),
+                prefix: spec.prefix.clone(),
                 checks: Vec::new(),
                 impossible: false,
             });
@@ -234,7 +234,7 @@ impl ScanAccessPlan {
         }
 
         let mut plan = EncodedIndexPredicatePlan {
-            codec: spec.codec.clone(),
+            prefix: spec.prefix.clone(),
             checks: Vec::new(),
             impossible: false,
         };

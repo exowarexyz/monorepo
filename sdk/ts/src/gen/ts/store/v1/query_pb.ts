@@ -88,7 +88,7 @@ export const KvFieldRefSchema: GenMessage<KvFieldRef> = /*@__PURE__*/
   messageDesc(file_store_v1_query, 1);
 
 /**
- * A field extracted from the key bytes at a fixed bit offset.
+ * A field extracted from the key bytes at a fixed byte offset.
  *
  * @generated from message store.query.v1.KvFieldRef.KeyField
  */

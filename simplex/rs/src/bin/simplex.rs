@@ -226,27 +226,27 @@ async fn upload_certificates(
     let prefix = client.store_client().key_prefix();
     let mut batch = StoreWriteBatch::new();
     batch.push(
-        &prefix,
+        prefix,
         &keys::header_by_digest(&finalized.header.digest()),
         header,
     )?;
     batch.push(
-        &prefix,
+        prefix,
         &keys::block_by_digest(&finalized.header.digest()),
         block,
     )?;
     batch.push(
-        &prefix,
+        prefix,
         &keys::notarization_by_view(notarized.proof.view()),
         notarized_bytes,
     )?;
     batch.push(
-        &prefix,
+        prefix,
         &keys::finalization_by_view(finalized.proof.view()),
         finalized_bytes.clone(),
     )?;
     batch.push(
-        &prefix,
+        prefix,
         &keys::finalized_by_height(finalized.header.height()),
         finalized_bytes,
     )?;

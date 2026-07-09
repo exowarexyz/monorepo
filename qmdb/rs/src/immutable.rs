@@ -15,11 +15,11 @@ use exoware_sdk::{PrefixedStoreClient, SerializableReadSession};
 
 use crate::auth::AuthenticatedBackendNamespace;
 use crate::auth::{
-    auth_inactive_peaks, compute_auth_root, decode_auth_immutable_update_location,
-    load_auth_operation_at, load_auth_operation_bytes_range, load_latest_auth_immutable_update_row,
+    auth_inactive_peaks, compute_auth_root, load_auth_operation_at,
+    load_auth_operation_bytes_range, load_latest_auth_immutable_update_row,
     read_latest_auth_watermark, require_published_auth_watermark,
 };
-use crate::codec::merkle_size_for_watermark;
+use crate::codec::{decode_update_location, merkle_size_for_watermark};
 use crate::connect::OperationKv;
 use crate::core::retry_transient_post_ingest_query;
 use crate::error::QmdbError;
@@ -137,7 +137,7 @@ where
         else {
             return Ok(None);
         };
-        let location = decode_auth_immutable_update_location::<F>(&row_key)?;
+        let location = decode_update_location::<F>(&row_key)?;
         let operation = load_auth_operation_at::<F, immutable::Operation<F, K, E>>(
             &session,
             namespace,

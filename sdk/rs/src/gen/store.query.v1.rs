@@ -1120,7 +1120,7 @@ pub const __KV_FIELD_REF_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buff
 pub mod kv_field_ref {
     #[allow(unused_imports)]
     use super::*;
-    /// A field extracted from the key bytes at a fixed bit offset.
+    /// A field extracted from the key bytes at a fixed byte offset.
     #[derive(Clone, PartialEq, Default)]
     #[derive(::serde::Serialize, ::serde::Deserialize)]
     #[serde(default)]
@@ -10212,7 +10212,7 @@ pub mod __buffa {
         pub mod kv_field_ref {
             #[allow(unused_imports)]
             use super::*;
-            /// A field extracted from the key bytes at a fixed bit offset.
+            /// A field extracted from the key bytes at a fixed byte offset.
             #[derive(Clone, Debug, Default)]
             pub struct KeyFieldView<'a> {
                 /// Byte offset into the key payload where this field starts.

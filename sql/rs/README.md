@@ -10,9 +10,9 @@ SQL engine backed by the Exoware API.
 
 `exoware-sql` is library-first: register `KvSchema` tables against a [`StoreClient`](https://docs.rs/exoware-sdk), then run SQL.
 
-All table registration goes through `KvSchema`, which auto-assigns compact
-codec prefixes so multiple tables can coexist on a single KV store while still
-letting the first 12 bits of encoded keys carry real payload. DataFusion
+All table registration goes through `KvSchema`, which auto-assigns each table
+a one-byte key prefix (table id in the high nibble, key family in the low
+nibble) so multiple tables can coexist on a single KV store. DataFusion
 handles JOINs natively once tables are registered.
 
 To run multiple independent SQL schemas, or SQL alongside QMDB, on one Store,
