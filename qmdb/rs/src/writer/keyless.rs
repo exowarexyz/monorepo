@@ -16,16 +16,12 @@ use exoware_sdk::{
 };
 use futures::future::BoxFuture;
 
-use crate::auth::{
-    build_auth_upload_rows, encode_auth_node_key, encode_auth_watermark_key,
-    AuthenticatedBackendNamespace,
-};
+use crate::auth::build_auth_upload_rows;
+use crate::codec::{encode_node_key, encode_watermark_key};
 use crate::core::extend_merkle_from_peaks_with_inactive_peaks;
 use crate::error::QmdbError;
 use crate::writer::core::{Cache, WriterCore};
 use crate::{PublishedCheckpoint, UploadReceipt, WriterState};
-
-const NAMESPACE: AuthenticatedBackendNamespace = AuthenticatedBackendNamespace::Keyless;
 
 /// Deterministic output of a keyless row-build.
 #[derive(Clone, Debug)]
@@ -64,7 +60,7 @@ where
         return Err(QmdbError::EmptyBatch);
     }
     let encoded: Vec<Vec<u8>> = ops.iter().map(|op| op.encode().to_vec()).collect();
-    let prepared = build_auth_upload_rows(NAMESPACE, latest_location, encoded)?;
+    let prepared = build_auth_upload_rows(latest_location, encoded)?;
     let inactive_peaks = keyless_inactive_peaks(latest_location, ops)?;
     let ext = extend_merkle_from_peaks_with_inactive_peaks::<F, H, _>(
         peaks,
@@ -75,13 +71,10 @@ where
     let operation_count = prepared.operation_count;
     let mut rows = prepared.into_all_rows();
     for (pos, digest) in &ext.new_nodes {
-        rows.push((
-            encode_auth_node_key(NAMESPACE, *pos),
-            digest.as_ref().to_vec(),
-        ));
+        rows.push((encode_node_key(*pos), digest.as_ref().to_vec()));
     }
     if let Some(loc) = watermark_at {
-        rows.push((encode_auth_watermark_key(NAMESPACE, loc), Vec::new()));
+        rows.push((encode_watermark_key(loc), Vec::new()));
     }
     Ok(BuiltKeylessUpload {
         rows,
@@ -258,7 +251,7 @@ where
         };
         Ok(Some(super::PreparedWatermark::<F> {
             location: target,
-            row: (encode_auth_watermark_key(NAMESPACE, target), Vec::new()),
+            row: (encode_watermark_key(target), Vec::new()),
         }))
     }
 
@@ -282,7 +275,7 @@ where
         };
         Ok(Some(super::PreparedWatermark::<F> {
             location: target,
-            row: (encode_auth_watermark_key(NAMESPACE, target), Vec::new()),
+            row: (encode_watermark_key(target), Vec::new()),
         }))
     }
 

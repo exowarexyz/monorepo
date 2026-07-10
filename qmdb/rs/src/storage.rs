@@ -8,8 +8,6 @@ use commonware_storage::merkle::{
 use commonware_storage::qmdb::current::grafting;
 use exoware_sdk::{RangeMode, SerializableReadSession};
 
-use crate::auth::encode_auth_node_key;
-use crate::auth::AuthenticatedBackendNamespace;
 use crate::codec::{encode_grafted_node_key, encode_node_key};
 
 pub(crate) struct KvMerkleStorage<'a, F: Family, D: Digest> {
@@ -128,37 +126,3 @@ impl<F: Graftable, D: Digest, const N: usize> MerkleStorage<F> for KvCurrentStor
     }
 }
 
-pub(crate) struct AuthKvMerkleStorage<'a, F: Family, D: Digest> {
-    pub(crate) session: &'a SerializableReadSession,
-    pub(crate) namespace: AuthenticatedBackendNamespace,
-    pub(crate) size: Position<F>,
-    pub(crate) _marker: PhantomData<D>,
-}
-
-impl<F: Family, D: Digest> MerkleStorage<F> for AuthKvMerkleStorage<'_, F, D> {
-    type Digest = D;
-
-    fn size(&self) -> Position<F> {
-        self.size
-    }
-
-    async fn get_node(&self, position: Position<F>) -> Result<Option<D>, merkle::Error<F>> {
-        let key = encode_auth_node_key(self.namespace, position);
-        let bytes = self
-            .session
-            .get(&key)
-            .await
-            .map_err(|_| merkle::Error::DataCorrupted("exoware-qmdb node fetch failed"))?;
-        let Some(bytes) = bytes else {
-            return Ok(None);
-        };
-        if bytes.len() != D::SIZE {
-            return Err(merkle::Error::DataCorrupted(
-                "exoware-qmdb node digest has invalid length",
-            ));
-        }
-        let digest = D::decode(bytes.as_ref())
-            .map_err(|_| merkle::Error::DataCorrupted("exoware-qmdb node digest decode failed"))?;
-        Ok(Some(digest))
-    }
-}

@@ -11,7 +11,6 @@ use commonware_storage::{
 };
 use exoware_sdk::{PrefixedStoreClient, SerializableReadSession};
 
-use crate::auth::AuthenticatedBackendNamespace;
 use crate::auth::{
     auth_inactive_peaks, compute_auth_root, load_auth_operation_at,
     load_auth_operation_bytes_range, read_latest_auth_watermark, require_published_auth_watermark,
@@ -21,7 +20,7 @@ use crate::connect::OperationKv;
 use crate::core::retry_transient_post_ingest_query;
 use crate::error::QmdbError;
 use crate::proof::{OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange};
-use crate::storage::AuthKvMerkleStorage;
+use crate::storage::KvMerkleStorage;
 
 #[derive(Clone)]
 pub struct KeylessClient<
@@ -99,20 +98,16 @@ where
     pub async fn writer_location_watermark(&self) -> Result<Option<Location<F>>, QmdbError> {
         retry_transient_post_ingest_query(|| {
             let session = self.client.create_session();
-            async move {
-                read_latest_auth_watermark::<F>(&session, AuthenticatedBackendNamespace::Keyless)
-                    .await
-            }
+            async move { read_latest_auth_watermark::<F>(&session).await }
         })
         .await
     }
 
     pub async fn root_at(&self, watermark: Location<F>) -> Result<H::Digest, QmdbError> {
-        let namespace = AuthenticatedBackendNamespace::Keyless;
         let session = self.client.create_session();
-        require_published_auth_watermark(&session, namespace, watermark).await?;
+        require_published_auth_watermark(&session, watermark).await?;
         let inactive_peaks = self.inactive_peaks_at(&session, watermark).await?;
-        compute_auth_root::<F, H>(&session, namespace, watermark, inactive_peaks).await
+        compute_auth_root::<F, H>(&session, watermark, inactive_peaks).await
     }
 
     pub async fn get_at(
@@ -120,9 +115,8 @@ where
         location: Location<F>,
         watermark: Location<F>,
     ) -> Result<Option<V>, QmdbError> {
-        let namespace = AuthenticatedBackendNamespace::Keyless;
         let session = self.client.create_session();
-        require_published_auth_watermark(&session, namespace, watermark).await?;
+        require_published_auth_watermark(&session, watermark).await?;
         let count = watermark
             .checked_add(1)
             .ok_or_else(|| QmdbError::CorruptData("watermark overflow".to_string()))?;
@@ -132,13 +126,9 @@ where
                 count: count.as_u64(),
             });
         }
-        let operation = load_auth_operation_at::<F, keyless::Operation<F, E>>(
-            &session,
-            namespace,
-            location,
-            &self.op_cfg,
-        )
-        .await?;
+        let operation =
+            load_auth_operation_at::<F, keyless::Operation<F, E>>(&session, location, &self.op_cfg)
+                .await?;
         Ok(operation.into_value())
     }
 
@@ -164,20 +154,17 @@ where
         watermark: Location<F>,
         operations: Vec<(Location<F>, Vec<u8>)>,
     ) -> Result<RawBatchMultiProof<H::Digest, F>, QmdbError> {
-        let namespace = AuthenticatedBackendNamespace::Keyless;
         let session = self
             .client
             .create_session_with_sequence(read_floor_sequence);
-        require_published_auth_watermark(&session, namespace, watermark).await?;
-        let storage = AuthKvMerkleStorage::<F, H::Digest> {
+        require_published_auth_watermark(&session, watermark).await?;
+        let storage = KvMerkleStorage::<F, H::Digest> {
             session: &session,
-            namespace,
             size: merkle_size_for_watermark(watermark)?,
             _marker: PhantomData::<H::Digest>,
         };
         let inactive_peaks = self.inactive_peaks_at(&session, watermark).await?;
-        let root =
-            compute_auth_root::<F, H>(&session, namespace, watermark, inactive_peaks).await?;
+        let root = compute_auth_root::<F, H>(&session, watermark, inactive_peaks).await?;
         crate::proof::build_batch_multi_proof::<F, H, _>(
             &storage,
             watermark,
@@ -193,13 +180,9 @@ where
         session: &SerializableReadSession,
         watermark: Location<F>,
     ) -> Result<usize, QmdbError> {
-        let operation = load_auth_operation_at::<F, keyless::Operation<F, E>>(
-            session,
-            AuthenticatedBackendNamespace::Keyless,
-            watermark,
-            &self.op_cfg,
-        )
-        .await?;
+        let operation =
+            load_auth_operation_at::<F, keyless::Operation<F, E>>(session, watermark, &self.op_cfg)
+                .await?;
         let keyless::Operation::Commit(_, floor) = operation else {
             return Err(QmdbError::CorruptData(format!(
                 "keyless watermark {watermark} does not point at a Commit operation"
@@ -215,19 +198,17 @@ where
         start_location: Location<F>,
         max_locations: u32,
     ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
-        let namespace = AuthenticatedBackendNamespace::Keyless;
-        require_published_auth_watermark(session, namespace, watermark).await?;
+        require_published_auth_watermark(session, watermark).await?;
         let end = crate::proof::resolve_range_bounds(watermark, start_location, max_locations)?;
-        let storage = AuthKvMerkleStorage::<F, H::Digest> {
+        let storage = KvMerkleStorage::<F, H::Digest> {
             session,
-            namespace,
             size: merkle_size_for_watermark(watermark)?,
             _marker: PhantomData::<H::Digest>,
         };
         let inactive_peaks = self.inactive_peaks_at(session, watermark).await?;
-        let root = compute_auth_root::<F, H>(session, namespace, watermark, inactive_peaks).await?;
+        let root = compute_auth_root::<F, H>(session, watermark, inactive_peaks).await?;
         let encoded_operations =
-            load_auth_operation_bytes_range(session, namespace, start_location, end).await?;
+            load_auth_operation_bytes_range(session, start_location, end).await?;
         crate::proof::build_operation_range_checkpoint::<F, H, _>(
             &storage,
             watermark,

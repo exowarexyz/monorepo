@@ -37,7 +37,6 @@ use exoware_sdk::stream_filter::{CompiledFilters, Filter};
 use futures::future::BoxFuture;
 use futures::{FutureExt, Stream};
 
-use crate::auth::AuthenticatedBackendNamespace;
 use crate::proof::{
     CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
 };
@@ -252,7 +251,7 @@ where
     }
 
     fn classify_and_filter(&self) -> (RowClassifier<F>, exoware_sdk::stream_filter::StreamFilter) {
-        sub::classify_and_filter::<F>(None)
+        sub::classify_and_filter::<F>()
     }
 
     fn extract_operation_kv(
@@ -306,7 +305,7 @@ where
     }
 
     fn classify_and_filter(&self) -> (RowClassifier<F>, exoware_sdk::stream_filter::StreamFilter) {
-        sub::classify_and_filter::<F>(None)
+        sub::classify_and_filter::<F>()
     }
 
     fn extract_operation_kv(
@@ -367,7 +366,7 @@ where
     }
 
     fn classify_and_filter(&self) -> (RowClassifier<F>, exoware_sdk::stream_filter::StreamFilter) {
-        sub::classify_and_filter::<F>(Some(AuthenticatedBackendNamespace::Immutable))
+        sub::classify_and_filter::<F>()
     }
 
     fn extract_operation_kv(
@@ -421,7 +420,7 @@ where
     }
 
     fn classify_and_filter(&self) -> (RowClassifier<F>, exoware_sdk::stream_filter::StreamFilter) {
-        sub::classify_and_filter::<F>(Some(AuthenticatedBackendNamespace::Keyless))
+        sub::classify_and_filter::<F>()
     }
 
     fn extract_operation_kv(

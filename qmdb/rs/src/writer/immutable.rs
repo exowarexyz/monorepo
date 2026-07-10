@@ -18,16 +18,12 @@ use exoware_sdk::{
 };
 use futures::future::BoxFuture;
 
-use crate::auth::{
-    build_auth_immutable_upload_rows, encode_auth_node_key, encode_auth_watermark_key,
-    AuthenticatedBackendNamespace,
-};
+use crate::auth::build_auth_immutable_upload_rows;
+use crate::codec::{encode_node_key, encode_watermark_key};
 use crate::core::extend_merkle_from_peaks_with_inactive_peaks;
 use crate::error::QmdbError;
 use crate::writer::core::{Cache, WriterCore};
 use crate::{PublishedCheckpoint, UploadReceipt, WriterState};
-
-const NAMESPACE: AuthenticatedBackendNamespace = AuthenticatedBackendNamespace::Immutable;
 
 #[derive(Clone, Debug)]
 pub struct BuiltImmutableUpload<D, F: Family> {
@@ -70,13 +66,10 @@ where
     let keyed_operation_count = prepared.keyed_operation_count;
     let mut rows = prepared.into_all_rows();
     for (pos, digest) in &ext.new_nodes {
-        rows.push((
-            encode_auth_node_key(NAMESPACE, *pos),
-            digest.as_ref().to_vec(),
-        ));
+        rows.push((encode_node_key(*pos), digest.as_ref().to_vec()));
     }
     if let Some(loc) = watermark_at {
-        rows.push((encode_auth_watermark_key(NAMESPACE, loc), Vec::new()));
+        rows.push((encode_watermark_key(loc), Vec::new()));
     }
     Ok(BuiltImmutableUpload {
         rows,
@@ -224,7 +217,7 @@ where
         };
         Ok(Some(super::PreparedWatermark::<F> {
             location: target,
-            row: (encode_auth_watermark_key(NAMESPACE, target), Vec::new()),
+            row: (encode_watermark_key(target), Vec::new()),
         }))
     }
 
@@ -248,7 +241,7 @@ where
         };
         Ok(Some(super::PreparedWatermark::<F> {
             location: target,
-            row: (encode_auth_watermark_key(NAMESPACE, target), Vec::new()),
+            row: (encode_watermark_key(target), Vec::new()),
         }))
     }
 
