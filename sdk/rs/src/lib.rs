@@ -874,6 +874,11 @@ impl StoreWriteBatch {
         Ok(self)
     }
 
+    /// The staged physical entries, in staging order.
+    pub fn entries(&self) -> &[(Key, Bytes)] {
+        &self.entries
+    }
+
     pub async fn commit(&self, client: &StoreClient) -> Result<u64, ClientError> {
         client.put_prepared_physical(&self.entries).await
     }
@@ -3233,6 +3238,58 @@ mod tests {
             batch.entries[1].0,
             b.key_prefix().encode_key(&key_b).unwrap()
         );
+    }
+
+    #[test]
+    fn pushed_rows_round_trip_only_through_their_own_client() {
+        let base = StoreClient::new("http://localhost:10000");
+        let a = base.prefixed(StoreKeyPrefix::new(vec![1]).unwrap());
+        let b = base.prefixed(StoreKeyPrefix::new(vec![2]).unwrap());
+        let key = Bytes::from_static(b"shared-logical-key");
+
+        let mut batch = StoreWriteBatch::new();
+        batch.push(&a, &key, b"va").unwrap();
+        batch.push(&b, &key, b"vb").unwrap();
+
+        // The same logical key staged through two namespaces produces two
+        // distinct physical rows, in staging order.
+        let entries = batch.entries();
+        assert_eq!(entries.len(), 2);
+        assert_ne!(entries[0].0, entries[1].0);
+
+        // Each physical key decodes back through its own namespace and is
+        // rejected by the other.
+        assert_eq!(a.decode_store_key(&entries[0].0).unwrap(), key);
+        assert_eq!(b.decode_store_key(&entries[1].0).unwrap(), key);
+        assert!(a.decode_store_key(&entries[1].0).is_err());
+        assert!(b.decode_store_key(&entries[0].0).is_err());
+    }
+
+    #[test]
+    fn identity_prefix_stages_keys_verbatim() {
+        let base = StoreClient::new("http://localhost:10000");
+        let plain = PrefixedStoreClient::empty(base);
+        let key = Bytes::from_static(b"raw-key");
+
+        let mut batch = StoreWriteBatch::new();
+        batch.push(&plain, &key, b"v").unwrap();
+
+        assert_eq!(batch.entries()[0].0, key);
+    }
+
+    #[test]
+    fn push_rejects_keys_exceeding_prefixed_capacity() {
+        let base = StoreClient::new("http://localhost:10000");
+        let a = base.prefixed(StoreKeyPrefix::new(vec![1]).unwrap());
+        let max = a.key_prefix().max_logical_key_len();
+
+        let mut batch = StoreWriteBatch::new();
+        let at_capacity = Key::from(vec![7u8; max]);
+        batch.push(&a, &at_capacity, b"v").unwrap();
+
+        let oversize = Key::from(vec![7u8; max + 1]);
+        assert!(batch.push(&a, &oversize, b"v").is_err());
+        assert_eq!(batch.len(), 1);
     }
 
     fn hex_encode(data: &[u8]) -> String {

@@ -130,3 +130,35 @@ pub(crate) fn upload_receipt<F: Family>(
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use exoware_sdk::{StoreClient, StoreKeyPrefix};
+
+    /// Rows staged through a writer's client must land under that client's
+    /// namespace — the property the client-taking `push` API guarantees.
+    #[test]
+    fn stage_rows_encodes_under_the_clients_namespace() {
+        let client = StoreClient::new("http://localhost:10000")
+            .prefixed(StoreKeyPrefix::new(vec![0x07]).unwrap());
+        let other = StoreClient::new("http://localhost:10000")
+            .prefixed(StoreKeyPrefix::new(vec![0x08]).unwrap());
+
+        let rows = vec![
+            (Key::from_static(b"row-a"), b"va".to_vec()),
+            (Key::from_static(b"row-b"), b"vb".to_vec()),
+        ];
+        let logical: Vec<Key> = rows.iter().map(|(key, _)| key.clone()).collect();
+
+        let mut batch = StoreWriteBatch::new();
+        stage_rows(&client, &mut batch, rows).expect("stage rows");
+
+        assert_eq!(batch.entries().len(), logical.len());
+        for ((physical, _), expected) in batch.entries().iter().zip(&logical) {
+            assert!(client.key_prefix().matches(physical));
+            assert_eq!(&client.decode_store_key(physical).unwrap(), expected);
+            assert!(other.decode_store_key(physical).is_err());
+        }
+    }
+}
