@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::{ensure, Context};
-use exoware_sdk::{RetryConfig, StoreClient};
+use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreClient};
 
 const DEFAULT_INITIAL_BACKOFF_MS: u64 = 50;
 const DEFAULT_MAX_BACKOFF_MS: u64 = 1_000;
@@ -26,11 +26,11 @@ impl ClientConfig {
 }
 
 /// Constructs the SDK client used by load, bench, and validate commands.
-pub fn build_client(config: &ClientConfig) -> anyhow::Result<StoreClient> {
+pub fn build_client(config: &ClientConfig) -> anyhow::Result<PrefixedStoreClient> {
     // `ClientConfig` exposes public fields, so re-validate here to catch a config built without
     // `new`. The endpoint is already normalized by `new`, so it is passed through unchanged.
     validate_config(config)?;
-    Ok(StoreClient::builder()
+    let client = StoreClient::builder()
         .url(&config.endpoint)
         .retry_config(
             RetryConfig::standard()
@@ -38,7 +38,12 @@ pub fn build_client(config: &ClientConfig) -> anyhow::Result<StoreClient> {
                 .with_initial_backoff(Duration::from_millis(DEFAULT_INITIAL_BACKOFF_MS))
                 .with_max_backoff(Duration::from_millis(DEFAULT_MAX_BACKOFF_MS)),
         )
-        .build()?)
+        .build()?;
+
+    // Workload keys already embed a run namespace after a leading entropy byte so they remain
+    // spread across physical shards. The identity prefix exposes the public logical API without
+    // adding a fixed prefix that would defeat that distribution.
+    Ok(PrefixedStoreClient::empty(client))
 }
 
 fn validate_config(config: &ClientConfig) -> anyhow::Result<()> {

@@ -20,7 +20,7 @@ use clap::ValueEnum;
 use connectrpc::ErrorCode;
 use exoware_sdk::keys::{next_key, Key, MAX_KEY_LEN};
 use exoware_sdk::kv_codec::KvReducedValue;
-use exoware_sdk::{ClientError, RangeMode, StoreClient};
+use exoware_sdk::{ClientError, PrefixedStoreClient, RangeMode};
 use exoware_sdk::{RangeReduceOp, RangeReduceRequest, RangeReducerSpec};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -231,7 +231,7 @@ fn prev_key(key: &Key) -> Option<Key> {
 /// check does not own are skipped rather than failing the match.
 #[allow(clippy::too_many_arguments)]
 async fn scan_window_for_expected(
-    client: &StoreClient,
+    client: &PrefixedStoreClient,
     lo: &Key,
     hi: &Key,
     mode: RangeMode,
@@ -366,7 +366,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 
 async fn run_standard_validation(
     cli: &Config,
-    client: &StoreClient,
+    client: &PrefixedStoreClient,
     url: &str,
     timeout: Duration,
     poll_interval: Duration,
@@ -500,7 +500,7 @@ async fn run_standard_validation(
 
 async fn run_overlap_ledger_write_mode(
     cli: &Config,
-    client: &StoreClient,
+    client: &PrefixedStoreClient,
     url: &str,
     namespace: u64,
 ) -> anyhow::Result<()> {
@@ -638,7 +638,7 @@ async fn run_overlap_ledger_write_mode(
 
 async fn run_overlap_ledger_verify_mode(
     cli: &Config,
-    client: &StoreClient,
+    client: &PrefixedStoreClient,
     url: &str,
     timeout: Duration,
     poll_interval: Duration,
@@ -803,7 +803,7 @@ fn build_overlap_records(
 
 #[allow(clippy::too_many_arguments)]
 async fn wait_for_exact_range_match(
-    client: &StoreClient,
+    client: &PrefixedStoreClient,
     expected_records: &[Record],
     mode: RangeMode,
     page_size: usize,
@@ -888,7 +888,7 @@ async fn wait_for_exact_range_match(
 }
 
 async fn wait_for_reduce_count_match(
-    client: &StoreClient,
+    client: &PrefixedStoreClient,
     expected_records: &[Record],
     min_sequence_number: u64,
     timeout: Duration,
@@ -1009,7 +1009,7 @@ async fn overlap_shutdown_signal() {
 }
 
 async fn run_write_phase(
-    client: &StoreClient,
+    client: &PrefixedStoreClient,
     records: &[Record],
     batch_size: usize,
     namespace: u64,
@@ -1044,7 +1044,7 @@ async fn run_write_phase(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_write_phase_generated(
-    client: &StoreClient,
+    client: &PrefixedStoreClient,
     keyspace: &Keyspace,
     total_keys: u64,
     batch_size: usize,
@@ -1104,7 +1104,7 @@ fn is_transient_query_error(err: &ClientError) -> bool {
 }
 
 async fn wait_for_all_visible(
-    client: &StoreClient,
+    client: &PrefixedStoreClient,
     records: &[Record],
     min_sequence_number: u64,
     timeout: Duration,
@@ -1189,7 +1189,7 @@ async fn wait_for_all_visible(
 
 #[allow(clippy::too_many_arguments)]
 async fn wait_for_all_visible_via_range(
-    client: &StoreClient,
+    client: &PrefixedStoreClient,
     keyspace: &Keyspace,
     namespace: u64,
     total_keys: u64,
@@ -1272,7 +1272,7 @@ async fn wait_for_all_visible_via_range(
 }
 
 async fn scan_visible_prefix_via_range(
-    client: &StoreClient,
+    client: &PrefixedStoreClient,
     keyspace: &Keyspace,
     namespace: u64,
     total_keys: u64,
@@ -1388,7 +1388,7 @@ async fn scan_visible_prefix_via_range(
 }
 
 async fn run_point_samples(
-    client: &StoreClient,
+    client: &PrefixedStoreClient,
     records: &[Record],
     point_indices: &[usize],
     min_sequence_number: u64,
@@ -1460,7 +1460,7 @@ async fn run_point_samples(
 }
 
 async fn run_missing_samples(
-    client: &StoreClient,
+    client: &PrefixedStoreClient,
     keyspace: &Keyspace,
     missing_indices: &[u64],
     min_sequence_number: u64,
@@ -1525,7 +1525,7 @@ async fn run_missing_samples(
 }
 
 async fn run_range_samples(
-    client: &StoreClient,
+    client: &PrefixedStoreClient,
     sorted_records: &[Record],
     range_plans: &[RangePlan],
     min_sequence_number: u64,

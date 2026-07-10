@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::anyhow;
 use connectrpc::ErrorCode;
 use exoware_sdk::keys::Key;
-use exoware_sdk::{ClientError, StoreClient};
+use exoware_sdk::{ClientError, PrefixedStoreClient};
 
 /// Ingest error codes that can self-resolve, so retrying the same batch is worthwhile.
 pub(crate) fn is_transient_ingest_code(code: ErrorCode) -> bool {
@@ -28,7 +28,7 @@ pub(crate) struct IngestOutcome {
 /// surviving transient-retry count is returned so callers can report it. Permanent errors and
 /// exhausted retries return an error tagged with `label`.
 pub(crate) async fn ingest_with_retry(
-    client: &StoreClient,
+    client: &PrefixedStoreClient,
     refs: &[(&Key, &[u8])],
     attempts: usize,
     backoff: Duration,
