@@ -856,14 +856,21 @@ impl StoreWriteBatch {
         self.entries.reserve(additional);
     }
 
+    /// Stage a logical row under `client`'s namespace.
+    ///
+    /// The key is encoded as it is staged, so rows from several namespaces
+    /// can share one batch; [`Self::commit`] writes the encoded rows
+    /// verbatim through the physical client.
     pub fn push(
         &mut self,
-        prefix: &StoreKeyPrefix,
+        client: &PrefixedStoreClient,
         key: &Key,
         value: impl IntoStoreWriteValue,
     ) -> Result<&mut Self, ClientError> {
-        self.entries
-            .push((prefix.encode_key(key)?, value.into_store_write_value()));
+        self.entries.push((
+            client.encode_store_key(key)?,
+            value.into_store_write_value(),
+        ));
         Ok(self)
     }
 
@@ -3215,8 +3222,8 @@ mod tests {
         let key_b = Bytes::from_static(b"b");
 
         let mut batch = StoreWriteBatch::new();
-        batch.push(a.key_prefix(), &key_a, b"va").unwrap();
-        batch.push(b.key_prefix(), &key_b, b"vb").unwrap();
+        batch.push(&a, &key_a, b"va").unwrap();
+        batch.push(&b, &key_b, b"vb").unwrap();
 
         assert_eq!(
             batch.entries[0].0,

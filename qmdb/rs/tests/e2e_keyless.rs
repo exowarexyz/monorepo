@@ -94,7 +94,9 @@ where
             let second = b"second-value".to_vec();
             let finalized = {
                 let batch = db.new_batch().append(first.clone()).append(second);
-                batch.merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
+                batch
+                    .merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
+                    .await
             };
             db.apply_batch(finalized).await.expect("apply");
 
@@ -153,7 +155,9 @@ where
             let second = commonware_cryptography::Sha256::fill(0x22);
             let finalized = {
                 let batch = db.new_batch().append(first).append(second);
-                batch.merkleize(&db, None::<Digest>, db.inactivity_floor_loc())
+                batch
+                    .merkleize(&db, None::<Digest>, db.inactivity_floor_loc())
+                    .await
             };
             db.apply_batch(finalized).await.expect("apply fixed");
 

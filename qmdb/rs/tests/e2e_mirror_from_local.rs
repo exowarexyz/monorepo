@@ -121,6 +121,7 @@ async fn run_keyless_local(
                         b = b.append(v);
                     }
                     b.merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
+                        .await
                 };
                 db.apply_batch(finalized).await.expect("apply");
             }
@@ -351,6 +352,7 @@ async fn run_immutable_local(
                         b = b.set(k, v);
                     }
                     b.merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
+                        .await
                 };
                 db.apply_batch(finalized).await.expect("apply");
             }
