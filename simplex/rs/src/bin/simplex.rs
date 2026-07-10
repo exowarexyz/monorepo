@@ -222,30 +222,30 @@ async fn upload_certificates(
     let block = encode_block_data(&finalized.header, body);
     let notarized_bytes = notarized.encode();
     let finalized_bytes = finalized.encode();
-    let prefix = client.store_client().key_prefix();
+    let store = client.store_client();
     let mut batch = StoreWriteBatch::new();
     batch.push(
-        prefix,
+        store,
         &keys::header_by_digest(&finalized.header.digest()),
         header,
     )?;
     batch.push(
-        prefix,
+        store,
         &keys::block_by_digest(&finalized.header.digest()),
         block,
     )?;
     batch.push(
-        prefix,
+        store,
         &keys::notarization_by_view(notarized.proof.view()),
         notarized_bytes,
     )?;
     batch.push(
-        prefix,
+        store,
         &keys::finalization_by_view(finalized.proof.view()),
         finalized_bytes.clone(),
     )?;
     batch.push(
-        prefix,
+        store,
         &keys::finalized_by_height(finalized.header.height()),
         finalized_bytes,
     )?;

@@ -17,8 +17,8 @@ Use `StoreKeyPrefix` when multiple logical QMDB, SQL, or raw KV instances share 
 use exoware_sdk::{StoreClient, StoreKeyPrefix};
 
 let base = StoreClient::new("http://localhost:10000");
-let orders = base.with_key_prefix(StoreKeyPrefix::new(4, 1)?);
-let accounts = base.with_key_prefix(StoreKeyPrefix::new(4, 2)?);
+let orders = base.prefixed(StoreKeyPrefix::new(vec![1])?);
+let accounts = base.prefixed(StoreKeyPrefix::new(vec![2])?);
 ```
 
 For an atomic write spanning multiple prefixed clients, add each logical row through the client that owns it and commit once:
