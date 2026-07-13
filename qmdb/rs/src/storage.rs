@@ -125,4 +125,3 @@ impl<F: Graftable, D: Digest, const N: usize> MerkleStorage<F> for KvCurrentStor
         })
     }
 }
-

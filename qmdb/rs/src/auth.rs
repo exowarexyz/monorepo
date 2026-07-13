@@ -6,10 +6,9 @@ use exoware_sdk::keys::Key;
 use exoware_sdk::{RangeMode, SerializableReadSession};
 
 use crate::codec::{
-    decode_digest, decode_operation_location_key, decode_watermark_location,
-    encode_node_key, encode_operation_key, encode_presence_key, encode_update_index_value,
-    encode_update_key, encode_watermark_key, ensure_encoded_value_size, merkle_size_for_watermark,
-    WATERMARK_PREFIX,
+    decode_digest, decode_operation_location_key, decode_watermark_location, encode_node_key,
+    encode_operation_key, encode_presence_key, encode_update_index_value, encode_update_key,
+    encode_watermark_key, ensure_encoded_value_size, merkle_size_for_watermark, WATERMARK_PREFIX,
 };
 use crate::error::QmdbError;
 
