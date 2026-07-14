@@ -27,6 +27,12 @@ fn default_value_size() -> usize {
     crate::value::DEFAULT_VALUE_SIZE
 }
 
+// Older reports used the operation stream before Zipf sampling consumed one
+// random draw per operation. Parse them so replay can reject the mismatch.
+fn default_workload_generator_version() -> u16 {
+    1
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct BenchConfig {
     pub endpoint: String,
@@ -41,6 +47,8 @@ pub struct BenchConfig {
     pub value_size: usize,
     pub keyspace_layout_version: u16,
     pub value_generator_version: u16,
+    #[serde(default = "default_workload_generator_version")]
+    pub workload_generator_version: u16,
     pub read_retry_attempts: usize,
 }
 
@@ -249,6 +257,11 @@ impl fmt::Display for BenchReport {
             f,
             "  value_generator_version: {}",
             self.config.value_generator_version
+        )?;
+        writeln!(
+            f,
+            "  workload_generator_version: {}",
+            self.config.workload_generator_version
         )?;
         writeln!(f, "  total_ops: {}", self.config.total_ops)?;
         writeln!(f, "  concurrency: {}", self.config.concurrency)?;
@@ -504,6 +517,7 @@ mod tests {
                 value_size: crate::value::DEFAULT_VALUE_SIZE,
                 keyspace_layout_version: crate::keyspace::KEYSPACE_LAYOUT_VERSION,
                 value_generator_version: crate::value::VALUE_GENERATOR_VERSION,
+                workload_generator_version: crate::workload::WORKLOAD_GENERATOR_VERSION,
                 read_retry_attempts: 3,
             },
             seed: 42,
@@ -691,5 +705,27 @@ mod tests {
         let parsed = read_bench_manifest_json(&path).expect("legacy manifest should parse");
         std::fs::remove_file(&path).ok();
         assert_eq!(parsed.config.value_size, crate::value::DEFAULT_VALUE_SIZE);
+    }
+
+    #[test]
+    fn manifest_without_workload_generator_version_is_marked_legacy() {
+        let report = sample_report();
+        let manifest = BenchManifest::new(report.config, report.seed);
+        let mut value = serde_json::to_value(&manifest).expect("manifest should serialize");
+        value["config"]
+            .as_object_mut()
+            .expect("config should be a JSON object")
+            .remove("workload_generator_version");
+
+        let path = std::env::temp_dir().join(format!(
+            "exoware-workload-manifest-no-workload-generator-version-{}-{}.json",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::write(&path, value.to_string()).expect("manifest fixture should write");
+        let parsed = read_bench_manifest_json(&path).expect("legacy manifest should parse");
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(parsed.config.workload_generator_version, 1);
     }
 }

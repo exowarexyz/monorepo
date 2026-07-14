@@ -1,12 +1,17 @@
-use anyhow::ensure;
+use anyhow::{ensure, Context};
 use clap::ValueEnum;
 use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
+use std::ops::Range;
+use std::sync::Arc;
 
 use crate::deterministic::GOLDEN_RATIO_64;
 
 /// Default seed used when the caller does not provide one.
 pub const DEFAULT_BENCH_RNG_SEED: u64 = 0x5eed_c0de;
+
+/// Version of the deterministic operation-stream generator used in manifests.
+pub const WORKLOAD_GENERATOR_VERSION: u16 = 2;
 
 /// Named workload mixes for benchmark operation selection.
 #[derive(Copy, Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
@@ -75,6 +80,12 @@ pub enum Operation {
 pub struct WorkerPlan {
     rng: rand::rngs::StdRng,
     spec: WorkloadSpec,
+    zipf_sampler: Option<Arc<ZipfSampler>>,
+}
+
+pub(crate) struct ZipfSampler {
+    max_key_exclusive: u64,
+    cdf: Vec<f64>,
 }
 
 impl Scenario {
@@ -173,9 +184,19 @@ impl WorkloadSpec {
 impl WorkerPlan {
     /// Creates a replayable worker stream from the run seed and worker id.
     pub fn new(seed: u64, worker_id: u64, spec: WorkloadSpec) -> Self {
+        Self::with_zipf_sampler(seed, worker_id, spec, None)
+    }
+
+    pub(crate) fn with_zipf_sampler(
+        seed: u64,
+        worker_id: u64,
+        spec: WorkloadSpec,
+        zipf_sampler: Option<Arc<ZipfSampler>>,
+    ) -> Self {
         Self {
             rng: worker_rng(seed, worker_id),
             spec,
+            zipf_sampler,
         }
     }
 
@@ -184,13 +205,13 @@ impl WorkerPlan {
         let p = self.rng.gen::<f64>();
         if p < self.spec.mix.read_ratio {
             return Operation::Read {
-                index: sample_key_index(&mut self.rng, max_key_exclusive, self.spec),
+                index: self.sample_key_index(max_key_exclusive),
             };
         }
 
         if p < self.spec.mix.read_ratio + self.spec.mix.scan_ratio {
             let max_key_exclusive = max_key_exclusive.max(1);
-            let start = sample_key_index(&mut self.rng, max_key_exclusive, self.spec);
+            let start = self.sample_key_index(max_key_exclusive);
             let mut end = start.saturating_add(self.spec.scan_length.saturating_sub(1) as u64);
             if end >= max_key_exclusive {
                 end = max_key_exclusive - 1;
@@ -204,6 +225,60 @@ impl WorkerPlan {
         }
 
         Operation::Write
+    }
+
+    fn sample_key_index(&mut self, max_key_exclusive: u64) -> u64 {
+        if self.spec.key_dist != KeyDistribution::Zipfian {
+            return sample_key_index(&mut self.rng, max_key_exclusive, self.spec);
+        }
+
+        let replace_sampler = self
+            .zipf_sampler
+            .as_ref()
+            .is_none_or(|sampler| sampler.max_key_exclusive != max_key_exclusive);
+        if replace_sampler {
+            self.zipf_sampler = Some(Arc::new(ZipfSampler::new(
+                max_key_exclusive,
+                self.spec.zipf_theta,
+            )));
+        }
+
+        self.zipf_sampler
+            .as_ref()
+            .expect("zipf sampler is initialized")
+            .sample(&mut self.rng)
+    }
+}
+
+impl ZipfSampler {
+    pub(crate) fn new(max_key_exclusive: u64, theta: f64) -> Self {
+        if max_key_exclusive <= 1 {
+            return Self {
+                max_key_exclusive,
+                cdf: vec![1.0],
+            };
+        }
+
+        let mut cdf = Vec::with_capacity(max_key_exclusive as usize);
+        let mut normalization = 0.0;
+        for rank in 1..=max_key_exclusive {
+            normalization += (rank as f64).powf(-theta);
+            cdf.push(normalization);
+        }
+        for probability in &mut cdf {
+            *probability /= normalization;
+        }
+        *cdf.last_mut().expect("non-empty zipf CDF") = 1.0;
+
+        Self {
+            max_key_exclusive,
+            cdf,
+        }
+    }
+
+    fn sample(&self, rng: &mut rand::rngs::StdRng) -> u64 {
+        let draw = rng.gen();
+        self.cdf.partition_point(|probability| *probability < draw) as u64
     }
 }
 
@@ -241,15 +316,51 @@ pub fn worker_operation_count(
     concurrency: usize,
     worker_id: usize,
 ) -> anyhow::Result<u64> {
+    let range = worker_index_range(total_ops, concurrency, worker_id)?;
+    Ok(range.end - range.start)
+}
+
+/// Splits a logical index range across workers with deterministic remainder placement.
+pub fn worker_index_range(
+    total_indices: u64,
+    concurrency: usize,
+    worker_id: usize,
+) -> anyhow::Result<Range<u64>> {
     ensure!(concurrency > 0, "--concurrency must be > 0");
     ensure!(
         worker_id < concurrency,
         "worker_id must be less than concurrency"
     );
 
-    let base_ops = total_ops / concurrency as u64;
-    let remainder = total_ops % concurrency as u64;
-    Ok(base_ops + u64::from(worker_id < remainder as usize))
+    let concurrency = concurrency as u64;
+    let base = total_indices / concurrency;
+    let remainder = total_indices % concurrency;
+    let worker_id = worker_id as u64;
+    let start = worker_id * base + worker_id.min(remainder);
+    let end = start + base + u64::from(worker_id < remainder);
+    Ok(start..end)
+}
+
+/// Returns the concrete key index for one worker's deterministic write sequence.
+pub fn worker_write_index(
+    initial_keys: u64,
+    concurrency: usize,
+    worker_id: usize,
+    write_number: u64,
+) -> anyhow::Result<u64> {
+    ensure!(concurrency > 0, "--concurrency must be > 0");
+    ensure!(
+        worker_id < concurrency,
+        "worker_id must be less than concurrency"
+    );
+
+    let offset = write_number
+        .checked_mul(concurrency as u64)
+        .and_then(|offset| offset.checked_add(worker_id as u64))
+        .context("worker write index overflow")?;
+    initial_keys
+        .checked_add(offset)
+        .context("worker write index overflow")
 }
 
 /// Samples an inserted logical key index according to the workload distribution.
@@ -278,20 +389,7 @@ pub fn sample_key_index(
 }
 
 fn sample_zipf_index(rng: &mut rand::rngs::StdRng, max_key_exclusive: u64, theta: f64) -> u64 {
-    if max_key_exclusive <= 1 {
-        return 0;
-    }
-
-    let n = max_key_exclusive as f64;
-    let u = rng.gen::<f64>().clamp(f64::EPSILON, 1.0 - f64::EPSILON);
-    let one_minus_theta = 1.0 - theta;
-    let rank = if one_minus_theta.abs() < 1e-9 {
-        (u * n.ln()).exp()
-    } else {
-        (u * (n.powf(one_minus_theta) - 1.0) + 1.0).powf(1.0 / one_minus_theta)
-    };
-    let rank = rank.floor().clamp(1.0, n) as u64;
-    rank - 1
+    ZipfSampler::new(max_key_exclusive, theta).sample(rng)
 }
 
 fn approx_eq(a: f64, b: f64, eps: f64) -> bool {
@@ -456,11 +554,153 @@ mod tests {
     }
 
     #[test]
+    fn zipfian_distribution_can_sample_the_last_key() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(11);
+        let spec = WorkloadSpec {
+            key_dist: KeyDistribution::Zipfian,
+            ..sample_spec()
+        };
+
+        assert!((0..10_000).any(|_| sample_key_index(&mut rng, 2, spec) == 1));
+    }
+
+    #[test]
+    fn zipfian_distribution_matches_theoretical_head_probability() {
+        let theta = 0.99;
+        let keys = 4u64;
+        let samples = 100_000u64;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let sampler = ZipfSampler::new(keys, theta);
+
+        let mut counts = [0u64; 4];
+        for _ in 0..samples {
+            counts[sampler.sample(&mut rng) as usize] += 1;
+        }
+
+        for pair in counts.windows(2) {
+            assert!(
+                pair[0] > pair[1],
+                "zipfian counts must decrease by rank: {counts:?}"
+            );
+        }
+
+        let normalization: f64 = (1..=keys).map(|rank| (rank as f64).powf(-theta)).sum();
+        let expected_head = 1.0 / normalization;
+        let actual_head = counts[0] as f64 / samples as f64;
+        assert!(
+            (actual_head - expected_head).abs() < 0.02,
+            "head key frequency {actual_head:.4} deviates from zipf pmf {expected_head:.4}"
+        );
+    }
+
+    #[test]
+    fn worker_plans_share_a_supplied_zipf_sampler() {
+        let spec = WorkloadSpec {
+            key_dist: KeyDistribution::Zipfian,
+            ..sample_spec()
+        };
+        let sampler = Arc::new(ZipfSampler::new(100, spec.zipf_theta));
+        let first = WorkerPlan::with_zipf_sampler(1, 0, spec, Some(sampler.clone()));
+        let second = WorkerPlan::with_zipf_sampler(1, 1, spec, Some(sampler));
+
+        assert!(Arc::ptr_eq(
+            first.zipf_sampler.as_ref().expect("sampler is set"),
+            second.zipf_sampler.as_ref().expect("sampler is set")
+        ));
+    }
+
+    #[test]
+    fn zipfian_distribution_keeps_full_support_near_parameter_bounds() {
+        for theta in [0.000_001, 0.999_999] {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(11);
+            let spec = WorkloadSpec {
+                key_dist: KeyDistribution::Zipfian,
+                zipf_theta: theta,
+                ..sample_spec()
+            };
+            assert!(
+                (0..10_000).any(|_| sample_key_index(&mut rng, 4, spec) == 3),
+                "last key was not sampled for theta={theta}"
+            );
+        }
+    }
+
+    #[test]
     fn worker_operation_count_distributes_remainder_to_first_workers() {
         let counts: Vec<u64> = (0..4)
             .map(|worker| worker_operation_count(10, 4, worker).unwrap())
             .collect();
         assert_eq!(counts, vec![3, 3, 2, 2]);
+    }
+
+    #[test]
+    fn worker_index_ranges_balance_remainder() {
+        let ranges: Vec<Range<u64>> = (0..4)
+            .map(|worker| worker_index_range(7, 4, worker).unwrap())
+            .collect();
+        assert_eq!(ranges, vec![0..2, 2..4, 4..6, 6..7]);
+    }
+
+    #[test]
+    fn worker_write_indexes_are_disjoint_and_replayable() {
+        let indexes: Vec<u64> = (0..4)
+            .flat_map(|worker| {
+                (0..3).map(move |write_number| {
+                    worker_write_index(100, 4, worker, write_number).unwrap()
+                })
+            })
+            .collect();
+        assert_eq!(
+            indexes,
+            vec![100, 104, 108, 101, 105, 109, 102, 106, 110, 103, 107, 111]
+        );
+    }
+
+    #[test]
+    fn worker_schedules_preserve_operation_streams_and_write_indexes() {
+        fn run_schedule(schedule: &[usize], spec: WorkloadSpec) -> Vec<Vec<(Operation, u64)>> {
+            let mut plans = [WorkerPlan::new(42, 0, spec), WorkerPlan::new(42, 1, spec)];
+            let mut writes = [0u64; 2];
+            let mut operations = vec![Vec::new(), Vec::new()];
+
+            for &worker in schedule {
+                let operation = plans[worker].next_operation(100);
+                let write_index = match operation {
+                    Operation::Write => {
+                        let index = worker_write_index(100, 2, worker, writes[worker]).unwrap();
+                        writes[worker] += 1;
+                        index
+                    }
+                    _ => u64::MAX,
+                };
+                operations[worker].push((operation, write_index));
+            }
+            operations
+        }
+
+        let spec = WorkloadSpec::new(
+            WorkloadMix {
+                read_ratio: 0.5,
+                write_ratio: 0.5,
+                scan_ratio: 0.0,
+            },
+            1,
+            KeyDistribution::Latest,
+            10,
+            1.0,
+            0.99,
+        )
+        .unwrap();
+        let serial = (0..64)
+            .map(|_| 0)
+            .chain((0..64).map(|_| 1))
+            .collect::<Vec<_>>();
+        let interleaved = (0..64).flat_map(|_| [0, 1]).collect::<Vec<_>>();
+
+        assert_eq!(
+            run_schedule(&serial, spec),
+            run_schedule(&interleaved, spec)
+        );
     }
 
     #[test]

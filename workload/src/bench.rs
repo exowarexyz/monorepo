@@ -10,8 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::ensure;
+use anyhow::{anyhow, ensure};
 use chrono::Utc;
+use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 
 use crate::client::{build_client, ClientConfig};
@@ -22,8 +23,8 @@ use crate::report::{
 };
 use crate::value::{value_for_index, DEFAULT_VALUE_SIZE, VALUE_GENERATOR_VERSION};
 use crate::workload::{
-    resolve_mix, worker_operation_count, KeyDistribution, Operation, Scenario, WorkerPlan,
-    WorkloadSpec, DEFAULT_BENCH_RNG_SEED,
+    resolve_mix, worker_operation_count, worker_write_index, KeyDistribution, Operation, Scenario,
+    WorkerPlan, WorkloadSpec, ZipfSampler, DEFAULT_BENCH_RNG_SEED, WORKLOAD_GENERATOR_VERSION,
 };
 
 /// Run an Exoware benchmark scenario workload.
@@ -195,6 +196,12 @@ impl Config {
             VALUE_GENERATOR_VERSION
         );
         ensure!(
+            manifest.config.workload_generator_version == WORKLOAD_GENERATOR_VERSION,
+            "manifest workload_generator_version {} does not match current version {}",
+            manifest.config.workload_generator_version,
+            WORKLOAD_GENERATOR_VERSION
+        );
+        ensure!(
             manifest.config.key_space > 0,
             "manifest key_space must be > 0"
         );
@@ -249,18 +256,19 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
 
     let client = Arc::new(build_client(&client_config)?);
     let report_config = BenchConfig {
-        endpoint: client_config.endpoint.clone(),
+        endpoint: client_config.endpoint().to_owned(),
         namespace,
         key_space: initial_keys,
         total_ops,
         concurrency,
         scenario,
         workload,
-        key_len: keyspace.key_len,
+        key_len: keyspace.key_len(),
         value_size,
         keyspace_layout_version: KEYSPACE_LAYOUT_VERSION,
         value_generator_version: VALUE_GENERATOR_VERSION,
-        read_retry_attempts: client_config.read_retry_attempts,
+        workload_generator_version: WORKLOAD_GENERATOR_VERSION,
+        read_retry_attempts: client_config.read_retry_attempts(),
     };
     let ops_done = Arc::new(AtomicU64::new(0));
     let reads_ok = Arc::new(AtomicU64::new(0));
@@ -273,7 +281,13 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
     // Latency is recorded for every SDK attempt, including failed backend
     // calls, so error-heavy runs still explain where time was spent.
     let latencies = Arc::new(LatencyHistogramsRecorder::default());
-    let next_write_index = Arc::new(AtomicU64::new(initial_keys));
+
+    // Reads and scans sample only the keyspace prepared before the benchmark. Including
+    // concurrently appended keys would make a worker's seeded operation stream depend on task
+    // scheduling, while reads could race the write that first creates the key.
+    let readable_key_count = initial_keys;
+    let zipf_sampler = (workload.key_dist == KeyDistribution::Zipfian)
+        .then(|| Arc::new(ZipfSampler::new(readable_key_count, workload.zipf_theta)));
     let started_at = Utc::now();
     let start = Instant::now();
 
@@ -296,7 +310,7 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
         "Starting benchmark phase"
     );
 
-    let mut handles = Vec::new();
+    let mut workers = JoinSet::new();
 
     for worker in 0..concurrency {
         let client = client.clone();
@@ -309,16 +323,21 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
         let scans_rows = scans_rows.clone();
         let errors = errors.clone();
         let latencies = latencies.clone();
-        let next_write_index = next_write_index.clone();
+        let zipf_sampler = zipf_sampler.clone();
         let worker_ops = worker_operation_count(total_ops, concurrency, worker)?;
         let worker_workload = workload;
 
-        handles.push(tokio::spawn(async move {
-            let mut plan = WorkerPlan::new(rng_seed, worker as u64, worker_workload);
+        workers.spawn(async move {
+            let mut plan = WorkerPlan::with_zipf_sampler(
+                rng_seed,
+                worker as u64,
+                worker_workload,
+                zipf_sampler,
+            );
+            let mut write_number = 0u64;
 
             for _ in 0..worker_ops {
-                let max_key_exclusive = next_write_index.load(Ordering::Relaxed).max(1);
-                match plan.next_operation(max_key_exclusive) {
+                match plan.next_operation(readable_key_count) {
                     Operation::Read { index } => {
                         let key = keyspace.inserted_key(index)?;
                         let request_start = Instant::now();
@@ -364,7 +383,9 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
                         }
                     }
                     Operation::Write => {
-                        let write_idx = next_write_index.fetch_add(1, Ordering::Relaxed);
+                        let write_idx =
+                            worker_write_index(initial_keys, concurrency, worker, write_number)?;
+                        write_number += 1;
                         let key = keyspace.inserted_key(write_idx)?;
                         let value = value_for_index(namespace, write_idx, value_size);
 
@@ -386,7 +407,7 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
                 ops_done.fetch_add(1, Ordering::Relaxed);
             }
             Ok::<(), anyhow::Error>(())
-        }));
+        });
     }
 
     let progress_task = if progress_interval_secs > 0 {
@@ -422,14 +443,31 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
         None
     };
 
-    for h in handles {
-        h.await??;
-    }
+    let workers_result = loop {
+        let Some(result) = workers.join_next().await else {
+            break Ok(());
+        };
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                workers.abort_all();
+                while workers.join_next().await.is_some() {}
+                break Err(err);
+            }
+            Err(err) => {
+                workers.abort_all();
+                while workers.join_next().await.is_some() {}
+                break Err(anyhow!("benchmark worker task failed: {err}"));
+            }
+        }
+    };
 
     if let Some(t) = progress_task {
         t.abort();
         let _ = t.await;
     }
+
+    workers_result?;
 
     let elapsed = start.elapsed();
     let finished_at = Utc::now();
@@ -449,6 +487,15 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
         latency_histograms: latencies.snapshot(),
     };
     print_bench_report(&report);
+    if report.read_misses > 0 {
+        // A raw benchmark may deliberately measure absent-key reads, but a preloaded-fixture
+        // benchmark should treat them as a signal that its results are not representative.
+        tracing::warn!(
+            read_misses = report.read_misses,
+            reads = report.reads,
+            "benchmark observed missing reads; verify the intended fixture before using these results"
+        );
+    }
     if let Some(path) = output {
         write_bench_report_json(&path, &report, started_at, finished_at)?;
     }
@@ -486,6 +533,7 @@ mod tests {
                 value_size: DEFAULT_VALUE_SIZE,
                 keyspace_layout_version: KEYSPACE_LAYOUT_VERSION,
                 value_generator_version: VALUE_GENERATOR_VERSION,
+                workload_generator_version: WORKLOAD_GENERATOR_VERSION,
                 read_retry_attempts: 5,
             },
             123,
@@ -521,7 +569,7 @@ mod tests {
     #[test]
     fn config_normalizes_url() {
         let config = Config::try_from(sample_args()).expect("bench args should be valid");
-        assert_eq!(config.client.endpoint, "http://localhost:10000");
+        assert_eq!(config.client.endpoint(), "http://localhost:10000");
     }
 
     #[test]
@@ -529,7 +577,7 @@ mod tests {
         let mut args = sample_args();
         args.key_len = 24;
         let config = Config::try_from(args).expect("bench args should be valid");
-        assert_eq!(config.keyspace.key_len, 24);
+        assert_eq!(config.keyspace.key_len(), 24);
     }
 
     #[test]
@@ -592,7 +640,7 @@ mod tests {
         let config = Config::try_from_manifest(sample_manifest(), output.clone(), 0)
             .expect("manifest should parse");
 
-        assert_eq!(config.client.endpoint, "http://localhost:10000");
+        assert_eq!(config.client.endpoint(), "http://localhost:10000");
         assert_eq!(config.namespace, 42);
         assert_eq!(config.initial_keys, 1_000);
         assert_eq!(config.total_ops, 10_000);
@@ -612,5 +660,15 @@ mod tests {
         let err = Config::try_from_manifest(manifest, None, 10)
             .expect_err("version mismatch should be rejected");
         assert!(err.to_string().contains("value_generator_version"));
+    }
+
+    #[test]
+    fn config_from_manifest_rejects_workload_generator_version_mismatch() {
+        let mut manifest = sample_manifest();
+        manifest.config.workload_generator_version -= 1;
+
+        let err = Config::try_from_manifest(manifest, None, 10)
+            .expect_err("workload generator version mismatch should be rejected");
+        assert!(err.to_string().contains("workload_generator_version"));
     }
 }

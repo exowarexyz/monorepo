@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
+use std::path::Path;
 
 use anyhow::{ensure, Context};
 use exoware_sdk::keys::{validate_key_size, Key};
@@ -39,14 +40,25 @@ pub fn validate_overlap_ledger(ledger: &OverlapLedger) -> anyhow::Result<()> {
 }
 
 /// Writes the overlap ledger with a temporary file and atomic rename.
-pub fn write_overlap_ledger(path: &str, ledger: &OverlapLedger) -> anyhow::Result<()> {
+///
+/// The rename keeps readers from observing a torn replacement after a process
+/// stops, but neither the temporary file nor its parent directory is synced;
+/// this is not a durability guarantee across a host or VM crash.
+pub fn write_overlap_ledger(
+    path: impl AsRef<Path>,
+    namespace: u64,
+    successful_writes: u64,
+    sequence_number: u64,
+    records: &[Record],
+) -> anyhow::Result<()> {
+    let path = path.as_ref();
     let mut body = String::new();
     body.push_str("exoware-overlap-ledger-v1\n");
-    body.push_str(&format!("namespace {}\n", ledger.namespace));
-    body.push_str(&format!("successful_writes {}\n", ledger.successful_writes));
-    body.push_str(&format!("sequence_number {}\n", ledger.sequence_number));
-    body.push_str(&format!("record_count {}\n", ledger.records.len()));
-    for record in &ledger.records {
+    body.push_str(&format!("namespace {namespace}\n"));
+    body.push_str(&format!("successful_writes {successful_writes}\n"));
+    body.push_str(&format!("sequence_number {sequence_number}\n"));
+    body.push_str(&format!("record_count {}\n", records.len()));
+    for record in records {
         body.push_str("record ");
         body.push_str(&hex_encode(&record.key));
         body.push(' ');
@@ -54,18 +66,27 @@ pub fn write_overlap_ledger(path: &str, ledger: &OverlapLedger) -> anyhow::Resul
         body.push('\n');
     }
 
-    let temp_path = format!("{path}.tmp");
-    fs::write(&temp_path, body)
-        .with_context(|| format!("failed to write temporary overlap ledger {temp_path}"))?;
-    fs::rename(&temp_path, path)
-        .with_context(|| format!("failed to atomically publish overlap ledger {path}"))?;
+    let temp_path = path.with_extension("tmp");
+    fs::write(&temp_path, body).with_context(|| {
+        format!(
+            "failed to write temporary overlap ledger {}",
+            temp_path.display()
+        )
+    })?;
+    fs::rename(&temp_path, path).with_context(|| {
+        format!(
+            "failed to atomically publish overlap ledger {}",
+            path.display()
+        )
+    })?;
     Ok(())
 }
 
 /// Reads and validates the overlap-ledger text format.
-pub fn read_overlap_ledger(path: &str) -> anyhow::Result<OverlapLedger> {
+pub fn read_overlap_ledger(path: impl AsRef<Path>) -> anyhow::Result<OverlapLedger> {
+    let path = path.as_ref();
     let body = fs::read_to_string(path)
-        .with_context(|| format!("failed to read overlap ledger file {path}"))?;
+        .with_context(|| format!("failed to read overlap ledger file {}", path.display()))?;
     let mut lines = body.lines();
     let version = lines.next().context("missing overlap ledger header")?;
     ensure!(
@@ -221,8 +242,15 @@ mod tests {
             "exoware-overlap-ledger-test-{}.txt",
             std::process::id()
         ));
-        write_overlap_ledger(path.to_str().unwrap(), &ledger).unwrap();
-        let decoded = read_overlap_ledger(path.to_str().unwrap()).unwrap();
+        write_overlap_ledger(
+            &path,
+            ledger.namespace,
+            ledger.successful_writes,
+            ledger.sequence_number,
+            &ledger.records,
+        )
+        .unwrap();
+        let decoded = read_overlap_ledger(&path).unwrap();
         assert_eq!(decoded.namespace, ledger.namespace);
         assert_eq!(decoded.successful_writes, ledger.successful_writes);
         assert_eq!(decoded.sequence_number, ledger.sequence_number);

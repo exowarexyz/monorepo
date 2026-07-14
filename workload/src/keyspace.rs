@@ -19,6 +19,16 @@ const NAMESPACE_LEN_BYTES: usize = 1;
 const DOMAIN_BYTES: usize = 1;
 const INDEX_BYTES: usize = 8;
 
+// This prefix cannot be emitted by the spread layout: a spread key with a zero
+// namespace length has an inserted or missing domain byte in this position.
+const VALIDATION_PREFIX: [u8; 3] = [0xFE, 0x00, 0xFF];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum KeyLayout {
+    Spread,
+    Validation,
+}
+
 /// Defaults are run-specific so independent runs against persistent stores do
 /// not reuse the same physical keys unless the caller opts into a namespace.
 pub fn default_run_namespace() -> u64 {
@@ -31,37 +41,46 @@ pub fn default_run_namespace() -> u64 {
 
 /// Deterministic workload key generator.
 ///
-/// Every key opens with an entropy byte derived from the logical index, so a
-/// run's keys spread across the entire physical key range instead of sharing a
-/// fixed prefix and stores that shard on leading key bits see load on every
-/// shard. The rest of the key carries the run's identity: namespaces isolate
-/// runs, domains keep inserted keys disjoint from intentionally-missing ones,
-/// and the big-endian index makes every key reproducible from
-/// (namespace, index).
+/// Load and benchmark keys open with entropy derived from the logical index, so
+/// stores that shard on leading bits see load on every shard. Validator keys
+/// reserve a contiguous region so sampled range checks remain bounded.
 ///
-/// The spread means a run's keys do not form a contiguous lexicographic block:
-/// key order does not follow index order, and any key range bounded by a run's
-/// keys interleaves whatever else the store holds.
+/// Namespaces isolate runs, domains keep inserted keys disjoint from
+/// intentionally-missing ones, and the big-endian index makes every key
+/// reproducible from `(namespace, index)`.
 #[derive(Clone, Debug)]
 pub struct Keyspace {
-    pub namespace: Vec<u8>,
-    pub key_len: usize,
+    namespace: Vec<u8>,
+    key_len: usize,
+    layout: KeyLayout,
 }
 
 impl Keyspace {
     /// Creates a keyspace with explicit namespace bytes and physical key length.
     pub fn new(namespace: Vec<u8>, key_len: usize) -> anyhow::Result<Self> {
+        Self::new_with_layout(namespace, key_len, KeyLayout::Spread)
+    }
+
+    fn new_with_layout(
+        namespace: Vec<u8>,
+        key_len: usize,
+        layout: KeyLayout,
+    ) -> anyhow::Result<Self> {
         validate_key_size(key_len)?;
         ensure!(
             namespace.len() <= u8::MAX as usize,
             "keyspace namespace length must fit in one byte"
         );
         ensure!(
-            key_len >= min_key_len(namespace.len()),
+            key_len >= min_key_len(layout, namespace.len()),
             "--key-len must be >= {} for this namespace",
-            min_key_len(namespace.len())
+            min_key_len(layout, namespace.len())
         );
-        Ok(Self { namespace, key_len })
+        Ok(Self {
+            namespace,
+            key_len,
+            layout,
+        })
     }
 
     pub fn unnamespaced(key_len: usize) -> anyhow::Result<Self> {
@@ -70,6 +89,25 @@ impl Keyspace {
 
     pub fn from_u64_namespace(namespace: u64, key_len: usize) -> anyhow::Result<Self> {
         Self::new(namespace.to_be_bytes().to_vec(), key_len)
+    }
+
+    /// Creates a contiguous keyspace reserved for validator-owned records.
+    pub fn validation_from_u64_namespace(namespace: u64, key_len: usize) -> anyhow::Result<Self> {
+        Self::new_with_layout(
+            namespace.to_be_bytes().to_vec(),
+            key_len,
+            KeyLayout::Validation,
+        )
+    }
+
+    /// Returns the namespace bytes embedded in every generated key.
+    pub fn namespace(&self) -> &[u8] {
+        &self.namespace
+    }
+
+    /// Returns the configured physical key length.
+    pub fn key_len(&self) -> usize {
+        self.key_len
     }
 
     /// Returns the deterministic key for an inserted logical index.
@@ -85,24 +123,20 @@ impl Keyspace {
     /// Returns the logical index that produced `key`, or `None` when `key` is
     /// not exactly one of this keyspace's inserted keys.
     ///
-    /// Spread keys share the physical key range with other namespaces and runs,
-    /// so range validation uses this to recognize its own rows and skip the rest.
+    /// Regenerating the key rejects other namespaces, domains, and layouts.
     pub fn inserted_index_of(&self, key: &Key) -> Option<u64> {
         if key.len() != self.key_len {
             return None;
         }
-        let index_start = ENTROPY_BYTES + NAMESPACE_LEN_BYTES + self.namespace.len() + DOMAIN_BYTES;
+        let index_start = self.namespace_start() + self.namespace.len() + DOMAIN_BYTES;
         let index_bytes = key.as_ref().get(index_start..index_start + INDEX_BYTES)?;
         let index = u64::from_be_bytes(index_bytes.try_into().expect("slice is INDEX_BYTES long"));
 
-        // Regenerating and comparing rejects everything that merely resembles an
-        // inserted key: other namespaces, the missing-key domain, or stale layouts.
         let expected = self.inserted_key(index).ok()?;
         (expected == *key).then_some(index)
     }
 
-    /// Yields `0..total` reordered to match the lexicographic order of the keys
-    /// those indices produce.
+    /// Yields `0..total` reordered to match spread-key lexicographic order.
     ///
     /// One keyspace's inserted keys differ only in the entropy byte and the
     /// big-endian index, so key order is (entropy byte, index): walk the 256
@@ -117,18 +151,25 @@ impl Keyspace {
 
     fn key(&self, index: u64, domain: u8) -> anyhow::Result<Key> {
         ensure!(
-            self.key_len >= min_key_len(self.namespace.len()),
+            self.key_len >= min_key_len(self.layout, self.namespace.len()),
             "keyspace key_len is too small for namespace"
         );
 
-        // Layout: entropy byte, namespace length, namespace bytes, domain byte,
-        // big-endian index, mixed suffix.
         let mut key = vec![0u8; self.key_len];
-        key[0] = entropy_byte(index);
-
-        let namespace_start = ENTROPY_BYTES + NAMESPACE_LEN_BYTES;
+        let namespace_start = self.namespace_start();
+        match self.layout {
+            KeyLayout::Spread => {
+                // Leading entropy keeps the benchmark and load phases balanced across shards.
+                key[0] = entropy_byte(index);
+                key[ENTROPY_BYTES] = self.namespace.len() as u8;
+            }
+            KeyLayout::Validation => {
+                // A fixed prefix keeps validator range samples bounded to their own run.
+                key[..VALIDATION_PREFIX.len()].copy_from_slice(&VALIDATION_PREFIX);
+                key[VALIDATION_PREFIX.len()] = self.namespace.len() as u8;
+            }
+        }
         let namespace_end = namespace_start + self.namespace.len();
-        key[ENTROPY_BYTES] = self.namespace.len() as u8;
         key[namespace_start..namespace_end].copy_from_slice(&self.namespace);
 
         let domain_offset = namespace_end;
@@ -140,9 +181,24 @@ impl Keyspace {
 
         fill_suffix(
             &mut key[index_end..],
-            mix64(namespace_hash(&self.namespace) ^ index ^ u64::from(domain)),
+            mix64(
+                namespace_hash(&self.namespace)
+                    ^ index
+                    ^ u64::from(domain)
+                    ^ match self.layout {
+                        KeyLayout::Spread => 0,
+                        KeyLayout::Validation => GOLDEN_RATIO_64,
+                    },
+            ),
         );
         Ok(Key::from(key))
+    }
+
+    fn namespace_start(&self) -> usize {
+        match self.layout {
+            KeyLayout::Spread => ENTROPY_BYTES + NAMESPACE_LEN_BYTES,
+            KeyLayout::Validation => VALIDATION_PREFIX.len() + NAMESPACE_LEN_BYTES,
+        }
     }
 }
 
@@ -155,8 +211,12 @@ fn entropy_byte(index: u64) -> u8 {
     mix64(index) as u8
 }
 
-fn min_key_len(namespace_len: usize) -> usize {
-    ENTROPY_BYTES + NAMESPACE_LEN_BYTES + namespace_len + DOMAIN_BYTES + INDEX_BYTES
+fn min_key_len(layout: KeyLayout, namespace_len: usize) -> usize {
+    let prefix_len = match layout {
+        KeyLayout::Spread => ENTROPY_BYTES,
+        KeyLayout::Validation => VALIDATION_PREFIX.len(),
+    };
+    prefix_len + NAMESPACE_LEN_BYTES + namespace_len + DOMAIN_BYTES + INDEX_BYTES
 }
 
 fn fill_suffix(out: &mut [u8], mut seed: u64) {
@@ -284,5 +344,35 @@ mod tests {
 
         let zeroes = Key::from(vec![0u8; DEFAULT_KEY_LEN]);
         assert_eq!(keyspace.inserted_index_of(&zeroes), None);
+    }
+
+    #[test]
+    fn validation_keys_are_contiguous_and_disjoint_from_spread_keys() {
+        let validation = Keyspace::validation_from_u64_namespace(7, DEFAULT_KEY_LEN).unwrap();
+        let spread = Keyspace::from_u64_namespace(7, DEFAULT_KEY_LEN).unwrap();
+        let unnamespaced_spread = Keyspace::unnamespaced(DEFAULT_KEY_LEN).unwrap();
+
+        let ordered: Vec<Key> = (0..64u64)
+            .map(|index| validation.inserted_key(index).unwrap())
+            .collect();
+        let mut sorted = ordered.clone();
+        sorted.sort_unstable();
+        assert_eq!(ordered, sorted);
+
+        for index in 0..64u64 {
+            let validation_key = validation.inserted_key(index).unwrap();
+            assert_eq!(
+                &validation_key[..VALIDATION_PREFIX.len()],
+                VALIDATION_PREFIX
+            );
+            assert_ne!(
+                &spread.inserted_key(index).unwrap()[..VALIDATION_PREFIX.len()],
+                VALIDATION_PREFIX
+            );
+            assert_ne!(
+                &unnamespaced_spread.inserted_key(index).unwrap()[..VALIDATION_PREFIX.len()],
+                VALIDATION_PREFIX
+            );
+        }
     }
 }

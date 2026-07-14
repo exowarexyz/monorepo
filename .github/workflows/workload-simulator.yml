@@ -105,3 +105,4 @@ jobs:
           name: workload-simulator-log
           path: ${{ steps.simulator.outputs.log }}
           if-no-files-found: ignore
+          overwrite: true

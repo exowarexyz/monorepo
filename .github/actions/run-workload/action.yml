@@ -10,7 +10,7 @@ inputs:
     required: false
     default: ""
   load-keys:
-    description: Number of keys to write during load.
+    description: Number of keys to write during load; must match bench-keys.
     required: false
     default: "5000"
   load-batch-size:
@@ -26,13 +26,13 @@ inputs:
     required: false
     default: ""
   bench-keys:
-    description: Keyspace size for bench.
+    description: Preloaded keyspace size for bench; must match load-keys.
     required: false
     default: "5000"
   bench-ops:
-    description: Number of bench operations.
+    description: Number of bench operations for the CI functionality smoke.
     required: false
-    default: "50000"
+    default: "10000"
   bench-concurrency:
     description: Bench worker concurrency.
     required: false
@@ -167,6 +167,24 @@ runs:
         fi
         echo "value=$namespace" >> "$GITHUB_OUTPUT"
 
+    - name: Validate load and benchmark keyspace sizes
+      shell: bash
+      env:
+        LOAD_KEYS: ${{ inputs.load-keys }}
+        BENCH_KEYS: ${{ inputs.bench-keys }}
+      run: |
+        set -euo pipefail
+        python3 - "$LOAD_KEYS" "$BENCH_KEYS" <<'PY'
+        import sys
+
+        load_keys, bench_keys = map(int, sys.argv[1:])
+        if load_keys != bench_keys:
+            raise SystemExit(
+                f"load-keys ({load_keys}) must match bench-keys ({bench_keys}); "
+                "bench reads the keyspace written by load"
+            )
+        PY
+
     - name: Run load workload
       shell: bash
       env:
@@ -228,6 +246,15 @@ runs:
             json.dump(report, f, indent=2)
         PY
 
+    - name: Upload benchmark report
+      if: ${{ !cancelled() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ runner.temp }}/workload-bench-report.json
+        if-no-files-found: warn
+        overwrite: true
+
     - name: Validate benchmark report
       shell: bash
       env:
@@ -246,13 +273,25 @@ runs:
         with open(path, "r", encoding="utf-8") as f:
             report = json.load(f)
 
-        assert report["schema_version"] == 1
-        assert report["operations"] == expected_ops
-        assert report["errors"] == 0
-        assert "config" in report
-        assert report["config"]["namespace"] == expected_namespace
-        assert "seed" in report
-        assert "latency_histograms" in report
+        def require(condition, message):
+            if not condition:
+                raise AssertionError(message)
+
+        require(report.get("schema_version") == 1,
+                f"unexpected report schema_version: {report.get('schema_version')!r}")
+        require(report.get("operations") == expected_ops,
+                f"completed {report.get('operations')!r} operations; expected {expected_ops}")
+        require(report.get("errors") == 0,
+                f"benchmark reported {report.get('errors')!r} operation errors")
+        require(report.get("read_misses") == 0,
+                f"benchmark reported {report.get('read_misses')!r} read misses; "
+                "load-keys and bench-keys must match")
+        config = report.get("config")
+        require(isinstance(config, dict), "benchmark report has no config object")
+        require(config.get("namespace") == expected_namespace,
+                f"report namespace {config.get('namespace')!r} does not match {expected_namespace}")
+        require("seed" in report, "benchmark report has no seed")
+        require("latency_histograms" in report, "benchmark report has no latency_histograms")
         PY
 
     - name: Write benchmark summary
@@ -310,6 +349,7 @@ runs:
             ("Key distribution", workload["key_dist"]),
             ("Keyspace layout version", config["keyspace_layout_version"]),
             ("Value generator version", config["value_generator_version"]),
+            ("Workload generator version", config["workload_generator_version"]),
         ]
 
         with open(summary_path, "a", encoding="utf-8") as f:
@@ -321,13 +361,6 @@ runs:
                 f.write(f"| {name} | {value} |\n")
             f.write("\n")
         PY
-
-    - name: Upload benchmark report
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ inputs.artifact-name }}
-        path: ${{ runner.temp }}/workload-bench-report.json
-        if-no-files-found: error
 
     - name: Run validation workload
       shell: bash

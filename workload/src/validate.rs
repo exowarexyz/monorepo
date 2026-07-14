@@ -28,10 +28,10 @@ use rand::{Rng, SeedableRng};
 
 use crate::client::{build_client, ClientConfig};
 use crate::deterministic::mix64;
-use crate::ingest::{ingest_with_retry, is_transient_ingest_error};
+use crate::ingest::{ingest_with_retry, is_transient_ingest_error, retry_delay_for_error};
 use crate::keyspace::{Keyspace, DEFAULT_KEY_LEN};
 use crate::ledger::{
-    hex_encode, read_overlap_ledger, validate_overlap_ledger, write_overlap_ledger, OverlapLedger,
+    hex_encode, read_overlap_ledger, validate_overlap_ledger, write_overlap_ledger,
 };
 use crate::record::Record;
 use crate::value::{
@@ -81,6 +81,8 @@ pub struct Args {
     /// Maximum generated value size accepted by this validation run.
     #[arg(long, default_value_t = DEFAULT_MAX_VALUE_SIZE)]
     max_value_size: usize,
+    /// Max attempts for each initial write batch. Continuous overlap-ledger appends retry until
+    /// the process is interrupted so a chaos writer survives temporary outages.
     #[arg(long, default_value_t = 150)]
     ingest_retry_attempts: usize,
     #[arg(long, default_value_t = 200)]
@@ -194,17 +196,17 @@ enum RangeScanError {
     Permanent(anyhow::Error),
 }
 
-/// Outcome of one filtered pass over an inclusive key window.
-#[derive(Debug)]
-enum WindowScan {
-    /// Every expected row appeared in order with the expected value.
-    Complete,
-    /// The window ended before every expected row appeared; retry until the
-    /// caller's visibility deadline.
-    MissingRows { matched: usize, detail: String },
-    /// An own row contradicted the expected sequence: out of order, duplicated,
-    /// or holding the wrong value.
-    Mismatch { detail: String },
+fn range_scan_deadline_error(
+    pages_scanned: u64,
+    matched_rows: u64,
+    expected_rows: u64,
+    foreign_rows: u64,
+    boundary: &Key,
+) -> RangeScanError {
+    RangeScanError::Permanent(anyhow!(
+        "range scan deadline exceeded after {pages_scanned} pages: matched {matched_rows} of {expected_rows} expected rows, skipped {foreign_rows} foreign rows, next boundary {}",
+        hex_encode(boundary)
+    ))
 }
 
 /// Largest key strictly less than `key`: the reverse-pagination mirror of
@@ -226,9 +228,8 @@ fn prev_key(key: &Key) -> Option<Key> {
 /// the rows selected by `is_own` are exactly `expected`, already in traversal
 /// order.
 ///
-/// Generated keys are spread across the whole physical key range, so on a shared
-/// store every window interleaves rows from other namespaces and runs; rows this
-/// check does not own are skipped rather than failing the match.
+/// Other data may lie inside a window on a shared store; rows this check does
+/// not own are skipped rather than failing the match.
 #[allow(clippy::too_many_arguments)]
 async fn scan_window_for_expected(
     client: &PrefixedStoreClient,
@@ -237,31 +238,61 @@ async fn scan_window_for_expected(
     mode: RangeMode,
     page_size: usize,
     min_sequence_number: u64,
+    deadline: Instant,
     expected: &[&Record],
     is_own: impl Fn(&Key) -> bool,
-) -> Result<WindowScan, RangeScanError> {
+) -> Result<(), RangeScanError> {
     let mut window_lo = lo.clone();
     let mut window_hi = hi.clone();
     let mut matched = 0usize;
+    let mut pages_scanned = 0u64;
+    let mut foreign_rows = 0u64;
 
     loop {
-        let rows = client
-            .query()
-            .range_with_mode_and_min_sequence_number(
+        let boundary = match mode {
+            RangeMode::Forward => &window_lo,
+            RangeMode::Reverse => &window_hi,
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(range_scan_deadline_error(
+                pages_scanned,
+                matched as u64,
+                expected.len() as u64,
+                foreign_rows,
+                boundary,
+            ));
+        }
+
+        let query = client.query();
+        let rows = match tokio::time::timeout(
+            remaining,
+            query.range_with_mode_and_min_sequence_number(
                 &window_lo,
                 &window_hi,
                 page_size,
                 mode,
                 min_sequence_number,
-            )
-            .await
-            .map_err(|err| {
-                if is_transient_query_error(&err) {
-                    RangeScanError::Transient(anyhow!(err))
-                } else {
-                    RangeScanError::Permanent(anyhow!(err))
-                }
-            })?;
+            ),
+        )
+        .await
+        {
+            Ok(Ok(rows)) => rows,
+            Ok(Err(err)) if is_transient_query_error(&err) => {
+                return Err(RangeScanError::Transient(anyhow!(err)));
+            }
+            Ok(Err(err)) => return Err(RangeScanError::Permanent(anyhow!(err))),
+            Err(_) => {
+                return Err(range_scan_deadline_error(
+                    pages_scanned,
+                    matched as u64,
+                    expected.len() as u64,
+                    foreign_rows,
+                    boundary,
+                ));
+            }
+        };
+        pages_scanned += 1;
 
         // Ordering must hold for every returned row, foreign rows included, and
         // equality in either direction means a duplicated key.
@@ -277,46 +308,41 @@ async fn scan_window_for_expected(
 
         for (key, value) in &rows {
             if !is_own(key) {
+                foreign_rows += 1;
                 continue;
             }
             let Some(record) = expected.get(matched) else {
-                return Ok(WindowScan::Mismatch {
-                    detail: format!(
-                        "row mismatch: own key {} appeared after all {} expected rows matched",
-                        hex_encode(key),
-                        expected.len()
-                    ),
-                });
+                return Err(RangeScanError::Permanent(anyhow!(
+                    "row mismatch: own key {} appeared after all {} expected rows matched",
+                    hex_encode(key),
+                    expected.len()
+                )));
             };
             if *key != record.key {
-                return Ok(WindowScan::Mismatch {
-                    detail: format!(
-                        "row mismatch at position {matched}: expected key {}, got {}",
-                        hex_encode(&record.key),
-                        hex_encode(key)
-                    ),
-                });
+                return Err(RangeScanError::Permanent(anyhow!(
+                    "row mismatch at position {matched}: expected key {}, got {}",
+                    hex_encode(&record.key),
+                    hex_encode(key)
+                )));
             }
             if value.as_ref() != record.value.as_slice() {
-                return Ok(WindowScan::Mismatch {
-                    detail: format!("value mismatch for key {}", hex_encode(key)),
-                });
+                return Err(RangeScanError::Permanent(anyhow!(
+                    "value mismatch for key {}",
+                    hex_encode(key)
+                )));
             }
             matched += 1;
         }
 
         if matched >= expected.len() {
-            return Ok(WindowScan::Complete);
+            return Ok(());
         }
 
         if rows.len() < page_size {
-            return Ok(WindowScan::MissingRows {
-                matched,
-                detail: format!(
-                    "window exhausted with {matched} of {} expected rows visible",
-                    expected.len()
-                ),
-            });
+            return Err(RangeScanError::Permanent(anyhow!(
+                "range window exhausted with {matched} of {} expected rows visible at sequence floor {min_sequence_number}",
+                expected.len()
+            )));
         }
 
         // Advance past this page's extreme row; the page is non-empty because a
@@ -327,10 +353,10 @@ async fn scan_window_for_expected(
             RangeMode::Reverse => prev_key(boundary).map(|prev| window_hi = prev),
         };
         if advanced.is_none() {
-            return Ok(WindowScan::MissingRows {
-                matched,
-                detail: "reached the edge of the key domain before all expected rows".to_string(),
-            });
+            return Err(RangeScanError::Permanent(anyhow!(
+                "reached the edge of the key domain with {matched} of {} expected rows visible at sequence floor {min_sequence_number}",
+                expected.len()
+            )));
         }
     }
 }
@@ -344,18 +370,18 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     let poll_interval = Duration::from_millis(cli.poll_interval_ms);
     match cli.mode {
         ValidateMode::Standard => {
-            run_standard_validation(&cli, &client, &cli.client.endpoint, timeout, poll_interval)
+            run_standard_validation(&cli, &client, cli.client.endpoint(), timeout, poll_interval)
                 .await
         }
         ValidateMode::OverlapLedgerWrite => {
             let namespace = cli.namespace.unwrap_or_else(|| default_namespace(cli.seed));
-            run_overlap_ledger_write_mode(&cli, &client, &cli.client.endpoint, namespace).await
+            run_overlap_ledger_write_mode(&cli, &client, cli.client.endpoint(), namespace).await
         }
         ValidateMode::OverlapLedgerVerify => {
             run_overlap_ledger_verify_mode(
                 &cli,
                 &client,
-                &cli.client.endpoint,
+                cli.client.endpoint(),
                 timeout,
                 poll_interval,
             )
@@ -372,7 +398,7 @@ async fn run_standard_validation(
     poll_interval: Duration,
 ) -> anyhow::Result<()> {
     let namespace = cli.namespace.unwrap_or_else(|| default_namespace(cli.seed));
-    let keyspace = Keyspace::from_u64_namespace(namespace, cli.key_len)?;
+    let keyspace = Keyspace::validation_from_u64_namespace(namespace, cli.key_len)?;
     let mut rng = StdRng::seed_from_u64(cli.seed ^ namespace.rotate_left(7));
 
     tracing::info!(
@@ -381,7 +407,7 @@ async fn run_standard_validation(
         keys = cli.keys,
         value_size = cli.value_size,
         max_value_size = cli.max_value_size,
-        read_retry_attempts = cli.client.read_retry_attempts,
+        read_retry_attempts = cli.client.read_retry_attempts(),
         namespace,
         "Starting Exoware validation"
     );
@@ -516,7 +542,7 @@ async fn run_overlap_ledger_write_mode(
         ledger_path,
         "Starting overlap ledger writer"
     );
-    let keyspace = Keyspace::from_u64_namespace(namespace, cli.key_len)?;
+    let keyspace = Keyspace::validation_from_u64_namespace(namespace, cli.key_len)?;
     let mut records = build_overlap_records(&keyspace, namespace, cli.keys)?;
     let mut sequence_number = run_write_phase(
         client,
@@ -531,12 +557,10 @@ async fn run_overlap_ledger_write_mode(
     let mut successful_writes = records.len() as u64;
     write_overlap_ledger(
         ledger_path,
-        &OverlapLedger {
-            namespace,
-            successful_writes,
-            sequence_number,
-            records: records.clone(),
-        },
+        namespace,
+        successful_writes,
+        sequence_number,
+        &records,
     )?;
 
     let mut next_index = records.len() as u64;
@@ -544,6 +568,8 @@ async fn run_overlap_ledger_write_mode(
     tokio::pin!(shutdown);
     let write_interval = Duration::from_millis(cli.overlap_write_interval_ms);
 
+    // The initial fixture is bounded so setup failures surface promptly; the steady-state writer
+    // stays alive through transient outages until it is explicitly stopped.
     'writer: loop {
         let key = keyspace.inserted_key(next_index)?;
         let value = overlap_value_for_index(namespace, next_index);
@@ -569,12 +595,10 @@ async fn run_overlap_ledger_write_mode(
                     successful_writes = successful_writes.saturating_add(1);
                     write_overlap_ledger(
                         ledger_path,
-                        &OverlapLedger {
-                            namespace,
-                            successful_writes,
-                            sequence_number,
-                            records: records.clone(),
-                        },
+                        namespace,
+                        successful_writes,
+                        sequence_number,
+                        &records,
                     )?;
                     next_index = next_index.saturating_add(1);
                     break;
@@ -588,8 +612,11 @@ async fn run_overlap_ledger_write_mode(
                         error = %err,
                         "transient ingest failure during overlap-ledger append; retrying"
                     );
-                    let sleep =
-                        tokio::time::sleep(Duration::from_millis(cli.ingest_retry_backoff_ms));
+                    let sleep = tokio::time::sleep(retry_delay_for_error(
+                        &err,
+                        Duration::from_millis(cli.ingest_retry_backoff_ms),
+                        attempt,
+                    ));
                     tokio::pin!(sleep);
                     tokio::select! {
                         _ = &mut shutdown => break 'writer,
@@ -614,12 +641,10 @@ async fn run_overlap_ledger_write_mode(
 
     write_overlap_ledger(
         ledger_path,
-        &OverlapLedger {
-            namespace,
-            successful_writes,
-            sequence_number,
-            records,
-        },
+        namespace,
+        successful_writes,
+        sequence_number,
+        &records,
     )?;
     ensure!(
         successful_writes >= cli.overlap_min_writes,
@@ -734,7 +759,7 @@ fn validate_config(cli: &Config) -> anyhow::Result<()> {
         "--range-page-size must be <= {}",
         QUERY_RANGE_MAX_LIMIT
     );
-    Keyspace::from_u64_namespace(cli.namespace.unwrap_or(0), cli.key_len)?;
+    Keyspace::validation_from_u64_namespace(cli.namespace.unwrap_or(0), cli.key_len)?;
     match cli.mode {
         ValidateMode::Standard => {
             ensure!(
@@ -845,12 +870,13 @@ async fn wait_for_exact_range_match(
             mode,
             page_size,
             min_sequence_number,
+            deadline,
             &expected_order,
             is_own,
         )
         .await;
         let detail = match scan {
-            Ok(WindowScan::Complete) => {
+            Ok(()) => {
                 tracing::info!(
                     query_url = %query_url,
                     mode = ?mode,
@@ -860,11 +886,6 @@ async fn wait_for_exact_range_match(
                 );
                 return Ok(());
             }
-            Ok(WindowScan::MissingRows { matched, detail }) => format!(
-                "{mode:?} range match saw {matched} of {} confirmed rows: {detail}",
-                expected_order.len()
-            ),
-            Ok(WindowScan::Mismatch { detail }) => format!("{mode:?} range {detail}"),
             Err(RangeScanError::Transient(err)) => {
                 format!("{mode:?} transient range error: {err}")
             }
@@ -937,11 +958,6 @@ async fn wait_for_reduce_count_match(
                         );
                     }
                 };
-                // Spread keys interleave other namespaces' rows (and possibly the
-                // writer's unacknowledged final append) inside the confirmed window,
-                // so the distinct-key count is only a floor here. Per-key
-                // correctness is owned by the exact range match; this keeps the
-                // reduce pipeline exercised end to end.
                 if actual >= expected_count {
                     tracing::info!(
                         query_url = %query_url,
@@ -952,9 +968,12 @@ async fn wait_for_reduce_count_match(
                     );
                     return Ok(());
                 }
-                format!(
-                    "range reduce count returned {}, expected at least {}",
-                    actual, expected_count
+                bail!(
+                    "confirmed range reduce count on {} returned {}, expected at least {} at sequence floor {}",
+                    query_url,
+                    actual,
+                    expected_count,
+                    min_sequence_number
                 )
             }
             Err(err) if is_transient_query_error(&err) => {
@@ -1140,10 +1159,22 @@ async fn wait_for_all_visible(
                         );
                     }
                 }
-                Ok(None) => remaining.push(idx),
-                Err(err) => {
+                Ok(None) => {
+                    bail!(
+                        "confirmed key {} was missing on query {} at sequence floor {}",
+                        hex_encode(&record.key),
+                        query_url,
+                        min_sequence_number
+                    );
+                }
+                Err(err) if is_transient_query_error(&err) => {
                     last_error = Some(err.to_string());
                     remaining.push(idx);
+                }
+                Err(err) => {
+                    return Err(anyhow!(err)).with_context(|| {
+                        format!("point-read visibility query failed against {query_url}")
+                    });
                 }
             }
         }
@@ -1233,6 +1264,7 @@ async fn wait_for_all_visible_via_range(
             value_size,
             page_size,
             min_sequence_number,
+            deadline,
         )
         .await
         {
@@ -1271,6 +1303,7 @@ async fn wait_for_all_visible_via_range(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn scan_visible_prefix_via_range(
     client: &PrefixedStoreClient,
     keyspace: &Keyspace,
@@ -1279,6 +1312,7 @@ async fn scan_visible_prefix_via_range(
     value_size: usize,
     page_size: usize,
     min_sequence_number: u64,
+    deadline: Instant,
 ) -> Result<RangeVisibilityScan, RangeScanError> {
     if total_keys == 0 {
         return Ok(RangeVisibilityScan {
@@ -1289,57 +1323,98 @@ async fn scan_visible_prefix_via_range(
         });
     }
 
-    // Spread keys cover the whole physical key range, so the scan walks that
-    // entire range and matches rows against the expected keys in their
-    // lexicographic (not logical-index) order, streamed to keep memory flat at
-    // any key count. Rows that fail the exact inserted-key round-trip belong to
-    // other runs sharing the store and are skipped.
-    let mut next_start = Key::from(vec![0u8; keyspace.key_len]);
-    // An empty end key means unbounded above (see `StoreClient::range`).
-    let unbounded_end = Key::new();
-    let mut expected_order = Keyspace::inserted_indices_in_key_order(total_keys).peekable();
+    let mut next_start = keyspace
+        .inserted_key(0)
+        .map_err(RangeScanError::Permanent)?;
+    let end = keyspace
+        .inserted_key(total_keys - 1)
+        .map_err(RangeScanError::Permanent)?;
+    // Validation keys are contiguous and ordered by their logical index, so
+    // this scan stays within the validator-owned physical range.
+    let mut expected_order = (0..total_keys).peekable();
     let mut visible = 0u64;
     let mut pages_scanned = 0u64;
+    let mut foreign_rows = 0u64;
+    let mut previous_key: Option<Key> = None;
 
     loop {
-        let rows = client
-            .query()
-            .range_with_min_sequence_number(
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(range_scan_deadline_error(
+                pages_scanned,
+                visible,
+                total_keys,
+                foreign_rows,
                 &next_start,
-                &unbounded_end,
-                page_size,
-                min_sequence_number,
-            )
-            .await
-            .map_err(|err| RangeScanError::Transient(anyhow!(err)))?;
+            ));
+        }
+
+        let query = client.query();
+        let rows = match tokio::time::timeout(
+            remaining,
+            query.range_with_min_sequence_number(&next_start, &end, page_size, min_sequence_number),
+        )
+        .await
+        {
+            Ok(Ok(rows)) => rows,
+            Ok(Err(err)) if is_transient_query_error(&err) => {
+                return Err(RangeScanError::Transient(anyhow!(err)));
+            }
+            Ok(Err(err)) => return Err(RangeScanError::Permanent(anyhow!(err))),
+            Err(_) => {
+                return Err(range_scan_deadline_error(
+                    pages_scanned,
+                    visible,
+                    total_keys,
+                    foreign_rows,
+                    &next_start,
+                ));
+            }
+        };
         pages_scanned += 1;
+
+        if let Some(previous_key) = &previous_key {
+            if rows
+                .first()
+                .is_some_and(|(first_key, _)| first_key <= previous_key)
+            {
+                return Err(RangeScanError::Permanent(anyhow!(
+                    "range page repeated or reordered a key after {}",
+                    hex_encode(previous_key)
+                )));
+            }
+        }
+        if rows.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+            return Err(RangeScanError::Permanent(anyhow!(
+                "range page returned unsorted or duplicated keys"
+            )));
+        }
 
         for (actual_key, actual_value) in &rows {
             let Some(index) = keyspace.inserted_index_of(actual_key) else {
+                foreign_rows += 1;
                 continue;
             };
             if index >= total_keys {
                 continue;
             }
-            let Some(expected_index) = expected_order.peek().copied() else {
-                break;
-            };
+            let expected_index = expected_order.peek().copied().ok_or_else(|| {
+                RangeScanError::Permanent(anyhow!(
+                    "range returned an unexpected own key {} after all expected keys",
+                    hex_encode(actual_key)
+                ))
+            })?;
             if index != expected_index {
                 let expected_key = keyspace
                     .inserted_key(expected_index)
                     .map_err(RangeScanError::Permanent)?;
-                return Ok(RangeVisibilityScan {
-                    contiguous_visible: visible,
-                    pages_scanned,
-                    complete: false,
-                    detail: format!(
-                        "expected sorted key {} (index {}) was absent before own row {} (index {})",
-                        hex_encode(&expected_key),
-                        expected_index,
-                        hex_encode(actual_key),
-                        index
-                    ),
-                });
+                return Err(RangeScanError::Permanent(anyhow!(
+                    "expected sorted key {} (index {}) before own row {} (index {})",
+                    hex_encode(&expected_key),
+                    expected_index,
+                    hex_encode(actual_key),
+                    index
+                )));
             }
             let expected_value = value_for_index(namespace, index, value_size);
             if actual_value.as_ref() != expected_value.as_slice() {
@@ -1353,6 +1428,8 @@ async fn scan_visible_prefix_via_range(
             visible += 1;
         }
 
+        previous_key = rows.last().map(|(key, _)| key.clone());
+
         if visible >= total_keys {
             return Ok(RangeVisibilityScan {
                 contiguous_visible: visible,
@@ -1363,25 +1440,22 @@ async fn scan_visible_prefix_via_range(
         }
 
         if rows.len() < page_size {
-            return Ok(RangeVisibilityScan {
-                contiguous_visible: visible,
-                pages_scanned,
-                complete: false,
-                detail: format!(
-                    "range window exhausted with {} of {} sorted keys visible",
-                    visible, total_keys
-                ),
-            });
+            return Err(RangeScanError::Permanent(anyhow!(
+                "range window exhausted with {} of {} sorted keys visible at sequence floor {}",
+                visible,
+                total_keys,
+                min_sequence_number
+            )));
         }
 
         let boundary = &rows.last().expect("page checked non-empty").0;
         let Some(advanced) = next_key(boundary) else {
-            return Ok(RangeVisibilityScan {
-                contiguous_visible: visible,
-                pages_scanned,
-                complete: false,
-                detail: "reached the maximum possible key before full visibility".to_string(),
-            });
+            return Err(RangeScanError::Permanent(anyhow!(
+                "reached the maximum possible key with {} of {} sorted keys visible at sequence floor {}",
+                visible,
+                total_keys,
+                min_sequence_number
+            )));
         };
         next_start = advanced;
     }
@@ -1553,7 +1627,6 @@ async fn run_range_samples(
             let mut pending_rows = 0usize;
             let mut pending_checks = 0usize;
             let mut pending_transient_errors = 0usize;
-            let mut last_pending_detail: Option<String> = None;
             let mut last_transient_error: Option<String> = None;
             for (check_idx, check) in checks.iter().enumerate() {
                 let lo = &sorted_records[check.plan.start_idx].key;
@@ -1567,34 +1640,13 @@ async fn run_range_samples(
                     check.mode,
                     check.plan.page_size,
                     min_sequence_number,
+                    deadline,
                     &expected,
                     is_own,
                 )
                 .await;
                 match scan {
-                    Ok(WindowScan::Complete) => {}
-                    // These reads carry the write phase's sequence floor, so a
-                    // conformant backend already exposes every written key to range
-                    // queries. Missing rows are tolerated as retry headroom; an own
-                    // row with the wrong position or value is a real fault.
-                    Ok(WindowScan::MissingRows { matched, detail }) => {
-                        pending_checks += 1;
-                        pending_rows += expected.len() - matched;
-                        last_pending_detail = Some(format!(
-                            "{:?} range sample {} subsection {}: {}",
-                            check.mode, sample_idx, check_idx, detail
-                        ));
-                    }
-                    Ok(WindowScan::Mismatch { detail }) => {
-                        bail!(
-                            "{:?} range sample {} subsection {} on {}: {}",
-                            check.mode,
-                            sample_idx,
-                            check_idx,
-                            query_url,
-                            detail
-                        );
-                    }
+                    Ok(()) => {}
                     Err(RangeScanError::Transient(err)) => {
                         pending_checks += 1;
                         pending_rows += expected.len();
@@ -1621,13 +1673,12 @@ async fn run_range_samples(
 
             if Instant::now() >= deadline {
                 bail!(
-                    "range visibility timeout on {} for sample {}: {} pending subsection checks, {} rows still missing, transient_query_errors={}, last_detail={}, last_transient_error={}",
+                    "range visibility timeout on {} for sample {}: {} pending subsection checks, {} rows still missing, transient_query_errors={}, last_transient_error={}",
                     query_url,
                     sample_idx,
                     pending_checks,
                     pending_rows,
                     pending_transient_errors,
-                    last_pending_detail.as_deref().unwrap_or("none"),
                     last_transient_error.as_deref().unwrap_or("none")
                 );
             }
@@ -1637,7 +1688,6 @@ async fn run_range_samples(
                 pending_checks,
                 pending_rows,
                 pending_transient_errors,
-                pending_detail = %last_pending_detail.as_deref().unwrap_or("none"),
                 transient_error = %last_transient_error.as_deref().unwrap_or("none"),
                 "Range visibility retry"
             );
@@ -1788,7 +1838,249 @@ fn build_range_subsection_checks(plan: RangePlan, sample_seed: u64) -> Vec<Range
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::Router;
+    use connectrpc::{ConnectError, ConnectRpcService, RequestContext};
+    use exoware_sdk::common::kv::v1::Entry;
+    use exoware_sdk::query::{
+        GetManyFrame, GetResponse, OwnedGetManyRequestView, OwnedGetRequestView,
+        OwnedRangeRequestView, OwnedReduceRequestView, RangeFrame, ReduceResponse,
+        Service as QueryService, ServiceServer as QueryServiceServer,
+    };
+    use futures::stream;
     use std::collections::HashSet;
+
+    #[derive(Clone)]
+    enum RangeHarness {
+        Duplicate { key: Key, value: Vec<u8> },
+        Empty,
+        MissingGet,
+        PermanentError,
+        Delayed { delay: Duration },
+    }
+
+    #[allow(refining_impl_trait)]
+    impl QueryService for RangeHarness {
+        async fn get(
+            &self,
+            _ctx: RequestContext,
+            _request: OwnedGetRequestView,
+        ) -> connectrpc::ServiceResult<GetResponse> {
+            match self {
+                Self::MissingGet => connectrpc::Response::ok(GetResponse::default()),
+                _ => Err(ConnectError::unimplemented("test harness")),
+            }
+        }
+
+        async fn get_many(
+            &self,
+            _ctx: RequestContext,
+            _request: OwnedGetManyRequestView,
+        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<GetManyFrame>> {
+            Err(ConnectError::unimplemented("test harness"))
+        }
+
+        async fn range(
+            &self,
+            _ctx: RequestContext,
+            _request: OwnedRangeRequestView,
+        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<RangeFrame>> {
+            match self {
+                Self::Duplicate { key, value } => {
+                    let entry = Entry {
+                        key: key.to_vec(),
+                        value: value.clone().into(),
+                        ..Default::default()
+                    };
+                    let frame = RangeFrame {
+                        results: vec![entry.clone(), entry],
+                        ..Default::default()
+                    };
+                    Ok(connectrpc::Response::stream(stream::iter([Ok(frame)])))
+                }
+                Self::Empty => Ok(connectrpc::Response::stream(stream::iter([Ok(
+                    RangeFrame::default(),
+                )]))),
+                Self::MissingGet => Err(ConnectError::unimplemented("test harness")),
+                Self::PermanentError => Err(ConnectError::invalid_argument("range rejected")),
+                Self::Delayed { delay } => {
+                    tokio::time::sleep(*delay).await;
+                    Ok(connectrpc::Response::stream(stream::iter([Ok(
+                        RangeFrame::default(),
+                    )])))
+                }
+            }
+        }
+
+        async fn reduce(
+            &self,
+            _ctx: RequestContext,
+            _request: OwnedReduceRequestView,
+        ) -> connectrpc::ServiceResult<ReduceResponse> {
+            Err(ConnectError::unimplemented("test harness"))
+        }
+    }
+
+    async fn spawn_range_harness(harness: RangeHarness) -> PrefixedStoreClient {
+        let connect = ConnectRpcService::new(QueryServiceServer::new(harness));
+        let app = Router::new().fallback_service(connect);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let url = format!(
+            "http://{}",
+            listener.local_addr().expect("listener address")
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+        build_client(&ClientConfig::new(url, 1).expect("client config")).expect("client")
+    }
+
+    #[tokio::test]
+    async fn full_range_scan_rejects_duplicate_own_row_after_expected_sequence() {
+        let namespace = 42;
+        let keyspace = Keyspace::validation_from_u64_namespace(namespace, DEFAULT_KEY_LEN).unwrap();
+        let key = keyspace.inserted_key(0).unwrap();
+        let value = value_for_index(namespace, 0, DEFAULT_VALUE_SIZE);
+        let client = spawn_range_harness(RangeHarness::Duplicate { key, value }).await;
+
+        let result = scan_visible_prefix_via_range(
+            &client,
+            &keyspace,
+            namespace,
+            1,
+            DEFAULT_VALUE_SIZE,
+            2,
+            1,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(RangeScanError::Permanent(_))),
+            "duplicate own rows must be a permanent range correctness failure: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_range_scan_does_not_retry_permanent_query_error_until_timeout() {
+        let client = spawn_range_harness(RangeHarness::PermanentError).await;
+        let keyspace = Keyspace::validation_from_u64_namespace(42, DEFAULT_KEY_LEN).unwrap();
+
+        let err = wait_for_all_visible_via_range(
+            &client,
+            &keyspace,
+            42,
+            1,
+            DEFAULT_VALUE_SIZE,
+            1,
+            1,
+            Duration::from_millis(25),
+            Duration::from_millis(1),
+            "test",
+        )
+        .await
+        .expect_err("InvalidArgument must fail immediately");
+
+        assert!(
+            err.to_string().contains("range rejected"),
+            "permanent query error was masked: {err:#}"
+        );
+        assert!(
+            !err.to_string().contains("full-range visibility timeout"),
+            "permanent query error was retried until timeout: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_range_scan_does_not_retry_missing_rows_after_sequence_floor() {
+        let client = spawn_range_harness(RangeHarness::Empty).await;
+        let keyspace = Keyspace::validation_from_u64_namespace(42, DEFAULT_KEY_LEN).unwrap();
+
+        let err = wait_for_all_visible_via_range(
+            &client,
+            &keyspace,
+            42,
+            1,
+            DEFAULT_VALUE_SIZE,
+            1,
+            1,
+            Duration::from_millis(25),
+            Duration::from_millis(1),
+            "test",
+        )
+        .await
+        .expect_err("a successful read at the write floor must include the written row");
+
+        assert!(
+            !err.to_string().contains("full-range visibility timeout"),
+            "missing row after the sequence floor was retried until timeout: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn point_read_does_not_retry_missing_key_after_sequence_floor() {
+        let namespace = 42;
+        let keyspace = Keyspace::validation_from_u64_namespace(namespace, DEFAULT_KEY_LEN).unwrap();
+        let record = Record {
+            key: keyspace.inserted_key(0).unwrap(),
+            value: value_for_index(namespace, 0, DEFAULT_VALUE_SIZE),
+        };
+        let client = spawn_range_harness(RangeHarness::MissingGet).await;
+
+        let err = wait_for_all_visible(
+            &client,
+            &[record],
+            1,
+            Duration::from_millis(25),
+            Duration::from_millis(1),
+            "test",
+        )
+        .await
+        .expect_err("a missing key at the sequence floor must fail immediately");
+
+        assert!(err.to_string().contains("confirmed key"));
+        assert!(err.to_string().contains("was missing"));
+        assert!(
+            !err.to_string().contains("visibility timeout"),
+            "a permanent missing-key result was retried until timeout: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn range_scan_deadline_cancels_an_in_flight_page_request() {
+        let namespace = 42;
+        let keyspace = Keyspace::validation_from_u64_namespace(namespace, DEFAULT_KEY_LEN).unwrap();
+        let record = Record {
+            key: keyspace.inserted_key(0).unwrap(),
+            value: value_for_index(namespace, 0, DEFAULT_VALUE_SIZE),
+        };
+        let client = spawn_range_harness(RangeHarness::Delayed {
+            delay: Duration::from_millis(100),
+        })
+        .await;
+
+        let err = scan_window_for_expected(
+            &client,
+            &record.key,
+            &record.key,
+            RangeMode::Forward,
+            1,
+            1,
+            Instant::now() + Duration::from_millis(10),
+            &[&record],
+            |key| key == &record.key,
+        )
+        .await
+        .expect_err("a range page that exceeds the validation deadline must fail");
+
+        let detail = match err {
+            RangeScanError::Permanent(err) => err.to_string(),
+            other => panic!("deadline must be a permanent validation failure: {other:?}"),
+        };
+        assert!(detail.contains("range scan deadline exceeded"));
+        assert!(detail.contains("matched 0 of 1 expected rows"));
+    }
 
     #[test]
     fn sample_indices_are_unique_and_bounded() {

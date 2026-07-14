@@ -48,7 +48,7 @@ cargo run -p exoware-workload -- validate --keys 100 --lookup-samples 25 --missi
 
 Exit codes follow each command's purpose:
 
-- `bench` is a measurement tool. It exits non-zero only when the tool itself fails (invalid configuration, a failed manifest read, or a failed JSON report write). Backend operation failures are recorded as counters in the report, not treated as failures; inspect `errors` and apply your own policy.
+- `bench` is a measurement tool. It exits non-zero only when the tool itself fails (invalid configuration, a failed manifest read, or a failed JSON report write). Backend operation failures and absent reads are recorded as `errors` and `read_misses` in the report, not treated as failures; inspect both and apply your own policy.
 - `load` prepares a complete keyspace for later benchmarking. It retries transient ingest failures (`--ingest-retry-attempts`, `--ingest-retry-backoff-ms`) so a complete fixture is far more likely, while still surfacing them: every retry is logged, the total retried count is reported in the final summary, and a persistent failure or any non-transient error still makes `load` exit non-zero rather than hand back an incomplete keyspace.
 - `validate` is a correctness check. It exits non-zero when the tool fails or when any correctness check fails.
 
@@ -56,15 +56,17 @@ Exit codes follow each command's purpose:
 
 Benchmark JSON reports include the normalized config, seed, counters, and per-operation latency histograms for reads, writes, and scans. Histograms use fixed microsecond buckets; stdout and GitHub summaries show p50/p95/p99/max latency lines for readability.
 
-`load` and `bench` use run-specific namespaces by default so independent runs do not reuse the same physical keys on persistent stores. Pass the same `--namespace` to both commands when a benchmark should read from a keyspace written by `load`.
+`load` and `bench` use run-specific namespaces by default so independent runs do not reuse the same physical keys on persistent stores. Pass the same `--namespace` and `--keys` value to both commands when a benchmark should read from a keyspace written by `load`.
 
-Generated keys open with a byte derived from the logical index, so a run's keys spread across the entire physical key range instead of sharing a fixed prefix. Namespaces still make keys unique per run, but a run's keys no longer form a contiguous block: range queries bounded by a run's keys interleave whatever else the store holds, which `validate` accounts for by skipping rows it does not own.
+Generated load and benchmark keys open with a byte derived from the logical index, so a run's keys spread across the entire physical key range instead of sharing a fixed prefix. Standard validation instead uses its own contiguous key layout, keeping its whole-keyspace range checks bounded to the rows it owns.
+
+`bench` reports `scan_rows` as every physical row returned by the store, including rows from other namespaces in the sampled interval. Compare scan latency and row counts only between runs against the same controlled fixture; the action's simulator reports are functionality artifacts, not cross-environment performance evidence.
 
 `load`, `bench`, and `validate` accept `--value-size` (bytes, default 160) to control generated value size. Pass the same `--value-size` to `load` and a reading `bench` so writes appended during the benchmark match the loaded data.
 
 ## Benchmark Manifests
 
-`workload bench --manifest <path>` accepts the normalized `config` and `seed` fields from a benchmark JSON report, so a run can be replayed without reconstructing CLI flags. A minimal manifest has this shape:
+`workload bench --manifest <path>` accepts the normalized `config` and `seed` fields from a benchmark JSON report, so a run can be replayed without reconstructing CLI flags. For a fixed manifest, each worker repeats its logical operation stream and its appended-key allocation independent of task scheduling. A manifest whose key, value, or workload-generator version differs from the current binary is rejected rather than silently replayed with different data. A minimal manifest has this shape:
 
 ```json
 {
@@ -88,6 +90,7 @@ Generated keys open with a byte derived from the logical index, so a run's keys 
     "value_size": 256,
     "keyspace_layout_version": 2,
     "value_generator_version": 1,
+    "workload_generator_version": 2,
     "read_retry_attempts": 3
   },
   "seed": 1592639710

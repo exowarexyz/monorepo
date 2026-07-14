@@ -4,17 +4,19 @@
 //!   workload load --url http://localhost:10000 --keys 10000
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::ensure;
+use anyhow::{anyhow, ensure};
 use exoware_sdk::keys::Key;
+use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 
 use crate::client::{build_client, ClientConfig};
 use crate::ingest::ingest_with_retry;
 use crate::keyspace::{default_run_namespace, Keyspace, DEFAULT_KEY_LEN};
 use crate::value::{value_for_index, DEFAULT_VALUE_SIZE};
+use crate::workload::worker_index_range;
 
 /// Load phase: insert keys via ingest API.
 #[derive(clap::Args, Debug)]
@@ -63,6 +65,10 @@ pub struct Config {
     progress_interval_secs: u64,
     ingest_retry_attempts: usize,
     ingest_retry_backoff_ms: u64,
+}
+
+struct WorkerOutcome {
+    last_error: Option<String>,
 }
 
 impl TryFrom<Args> for Config {
@@ -118,7 +124,6 @@ async fn run_load(config: Config) -> anyhow::Result<()> {
     let keys_loaded = Arc::new(AtomicU64::new(0));
     let errors = Arc::new(AtomicU64::new(0));
     let transient_retries = Arc::new(AtomicU64::new(0));
-    let last_error = Arc::new(Mutex::new(None::<String>));
     let ingest_retry_backoff = Duration::from_millis(ingest_retry_backoff_ms);
     let start = Instant::now();
 
@@ -130,12 +135,7 @@ async fn run_load(config: Config) -> anyhow::Result<()> {
         "Starting load phase"
     );
 
-    let mut handles = Vec::new();
-
-    // Each worker owns a contiguous key range so generated keys stay disjoint without
-    // coordination. When keys < concurrency the leading workers get empty ranges and the last
-    // worker covers the remainder: correct, but not fully parallel for tiny key counts.
-    let keys_per_worker = total_keys / concurrency as u64;
+    let mut workers = JoinSet::new();
 
     for worker in 0..concurrency {
         let client = client.clone();
@@ -143,18 +143,13 @@ async fn run_load(config: Config) -> anyhow::Result<()> {
         let keys_loaded = keys_loaded.clone();
         let errors = errors.clone();
         let transient_retries = transient_retries.clone();
-        let last_error = last_error.clone();
-        let start_key = worker as u64 * keys_per_worker;
-        let end_key = if worker == concurrency - 1 {
-            total_keys
-        } else {
-            start_key + keys_per_worker
-        };
+        let key_range = worker_index_range(total_keys, concurrency, worker)?;
 
-        handles.push(tokio::spawn(async move {
-            let mut i = start_key;
-            while i < end_key {
-                let batch_end = std::cmp::min(i + batch_size as u64, end_key);
+        workers.spawn(async move {
+            let mut last_error = None;
+            let mut i = key_range.start;
+            while i < key_range.end {
+                let batch_end = std::cmp::min(i + batch_size as u64, key_range.end);
                 let mut kvs: Vec<(Key, Vec<u8>)> = Vec::new();
                 for j in i..batch_end {
                     kvs.push((
@@ -181,15 +176,15 @@ async fn run_load(config: Config) -> anyhow::Result<()> {
                     Err(e) => {
                         tracing::debug!("{e}");
                         errors.fetch_add(1, Ordering::Relaxed);
-                        *last_error.lock().expect("last_error mutex poisoned") =
-                            Some(e.to_string());
+                        last_error = Some(e.to_string());
+                        break;
                     }
                 }
 
                 i = batch_end;
             }
-            Ok::<(), anyhow::Error>(())
-        }));
+            Ok::<WorkerOutcome, anyhow::Error>(WorkerOutcome { last_error })
+        });
     }
 
     let progress_task = if progress_interval_secs > 0 {
@@ -227,14 +222,36 @@ async fn run_load(config: Config) -> anyhow::Result<()> {
         None
     };
 
-    for h in handles {
-        h.await??;
-    }
+    let mut last_error = None;
+    let workers_result = loop {
+        let Some(result) = workers.join_next().await else {
+            break Ok(());
+        };
+        match result {
+            Ok(Ok(outcome)) => {
+                if outcome.last_error.is_some() {
+                    last_error = outcome.last_error;
+                }
+            }
+            Ok(Err(err)) => {
+                workers.abort_all();
+                while workers.join_next().await.is_some() {}
+                break Err(err);
+            }
+            Err(err) => {
+                workers.abort_all();
+                while workers.join_next().await.is_some() {}
+                break Err(anyhow!("load worker task failed: {err}"));
+            }
+        }
+    };
 
     if let Some(t) = progress_task {
         t.abort();
         let _ = t.await;
     }
+
+    workers_result?;
 
     let elapsed = start.elapsed();
     let loaded = keys_loaded.load(Ordering::Relaxed);
@@ -257,10 +274,6 @@ async fn run_load(config: Config) -> anyhow::Result<()> {
     // `load` exists to produce a complete keyspace for later benchmarking, so a short write is a
     // failure of the command's purpose, not just a counter: surface it as a non-zero exit.
     if loaded < total_keys {
-        let last_error = last_error
-            .lock()
-            .expect("last_error mutex poisoned")
-            .clone();
         anyhow::bail!(
             "load incomplete: wrote {loaded} of {total_keys} requested keys ({failed} missing) across {errs} failed ingest batches; last error: {}",
             last_error.as_deref().unwrap_or("none captured")
@@ -272,7 +285,74 @@ async fn run_load(config: Config) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
     use super::*;
+    use axum::Router;
+    use connectrpc::{ConnectError, ConnectRpcService, RequestContext};
+    use exoware_sdk::ingest::{
+        OwnedPutRequestView, PutResponse, Service as IngestService,
+        ServiceServer as IngestServiceServer,
+    };
+
+    #[derive(Clone, Copy)]
+    enum IngestFault {
+        AlwaysInvalidArgument,
+        AlwaysUnavailable,
+        UnavailableFirst(u64),
+    }
+
+    #[derive(Clone)]
+    struct IngestHarness {
+        fault: IngestFault,
+        puts: Arc<AtomicU64>,
+    }
+
+    #[allow(refining_impl_trait)]
+    impl IngestService for IngestHarness {
+        async fn put(
+            &self,
+            _ctx: RequestContext,
+            _request: OwnedPutRequestView,
+        ) -> connectrpc::ServiceResult<PutResponse> {
+            let call = self.puts.fetch_add(1, Ordering::SeqCst) + 1;
+            match self.fault {
+                IngestFault::AlwaysInvalidArgument => {
+                    Err(ConnectError::invalid_argument("put rejected"))
+                }
+                IngestFault::AlwaysUnavailable => Err(ConnectError::unavailable("store down")),
+                IngestFault::UnavailableFirst(n) if call <= n => {
+                    Err(ConnectError::unavailable("store warming up"))
+                }
+                IngestFault::UnavailableFirst(_) => connectrpc::Response::ok(PutResponse {
+                    sequence_number: call,
+                    ..Default::default()
+                }),
+            }
+        }
+    }
+
+    async fn spawn_ingest_harness(fault: IngestFault) -> (String, Arc<AtomicU64>) {
+        let puts = Arc::new(AtomicU64::new(0));
+        let harness = IngestHarness {
+            fault,
+            puts: puts.clone(),
+        };
+        let connect = ConnectRpcService::new(IngestServiceServer::new(harness));
+        let app = Router::new().fallback_service(connect);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let url = format!(
+            "http://{}",
+            listener.local_addr().expect("listener address")
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+        (url, puts)
+    }
 
     fn sample_args() -> Args {
         Args {
@@ -293,7 +373,7 @@ mod tests {
     #[test]
     fn config_normalizes_url() {
         let config = Config::try_from(sample_args()).expect("load args should be valid");
-        assert_eq!(config.client.endpoint, "http://localhost:10000");
+        assert_eq!(config.client.endpoint(), "http://localhost:10000");
     }
 
     #[test]
@@ -301,7 +381,7 @@ mod tests {
         let mut args = sample_args();
         args.key_len = 24;
         let config = Config::try_from(args).expect("load args should be valid");
-        assert_eq!(config.keyspace.key_len, 24);
+        assert_eq!(config.keyspace.key_len(), 24);
     }
 
     #[test]
@@ -350,5 +430,71 @@ mod tests {
         let mut args = sample_args();
         args.ingest_retry_backoff_ms = 0;
         assert!(Config::try_from(args).is_err());
+    }
+
+    #[tokio::test]
+    async fn load_reports_incomplete_without_retrying_permanent_ingest_errors() {
+        let (url, puts) = spawn_ingest_harness(IngestFault::AlwaysInvalidArgument).await;
+        let mut args = sample_args();
+        args.url = url;
+        args.keys = 4;
+        args.batch_size = 2;
+        args.concurrency = 2;
+        args.ingest_retry_backoff_ms = 1;
+
+        let err = run(args)
+            .await
+            .expect_err("permanent ingest failures must fail the load");
+        let text = format!("{err:#}");
+        assert!(text.contains("load incomplete: wrote 0 of 4"), "{text}");
+        assert!(text.contains("after 1 attempt(s)"), "{text}");
+        assert_eq!(
+            puts.load(Ordering::SeqCst),
+            2,
+            "permanent errors must not be retried"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_recovers_after_transient_ingest_failures() {
+        let (url, puts) = spawn_ingest_harness(IngestFault::UnavailableFirst(3)).await;
+        let mut args = sample_args();
+        args.url = url;
+        args.keys = 4;
+        args.batch_size = 2;
+        args.concurrency = 1;
+        args.ingest_retry_attempts = 5;
+        args.ingest_retry_backoff_ms = 1;
+
+        run(args)
+            .await
+            .expect("load must complete after transient failures resolve");
+        assert_eq!(puts.load(Ordering::SeqCst), 5);
+    }
+
+    #[tokio::test]
+    async fn load_stops_after_an_exhausted_batch() {
+        let (url, puts) = spawn_ingest_harness(IngestFault::AlwaysUnavailable).await;
+        let mut args = sample_args();
+        args.url = url;
+        args.keys = 4;
+        args.batch_size = 2;
+        args.concurrency = 1;
+        args.ingest_retry_attempts = 3;
+        args.ingest_retry_backoff_ms = 1;
+
+        let err = run(args)
+            .await
+            .expect_err("exhausted retries must fail the load");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("after 3 attempt(s) (configured maximum: 3)"),
+            "{text}"
+        );
+        assert_eq!(
+            puts.load(Ordering::SeqCst),
+            3,
+            "the next batch must not start after retry exhaustion"
+        );
     }
 }
