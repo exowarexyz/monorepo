@@ -33,6 +33,13 @@ fn default_workload_generator_version() -> u16 {
     1
 }
 
+// Reports from before bench supported batched writes did not record this
+// setting. Parse them with the shared command default; replay still rejects
+// their older generator version before execution.
+fn default_batch_size() -> usize {
+    crate::ingest::DEFAULT_INGEST_BATCH_SIZE
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct BenchConfig {
     pub endpoint: String,
@@ -45,6 +52,8 @@ pub struct BenchConfig {
     pub key_len: usize,
     #[serde(default = "default_value_size")]
     pub value_size: usize,
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
     pub keyspace_layout_version: u16,
     pub value_generator_version: u16,
     #[serde(default = "default_workload_generator_version")]
@@ -248,6 +257,7 @@ impl fmt::Display for BenchReport {
         writeln!(f, "  key_space: {}", self.config.key_space)?;
         writeln!(f, "  key_len: {}", self.config.key_len)?;
         writeln!(f, "  value_size: {}", self.config.value_size)?;
+        writeln!(f, "  batch_size: {}", self.config.batch_size)?;
         writeln!(
             f,
             "  keyspace_layout_version: {}",
@@ -515,6 +525,7 @@ mod tests {
                 },
                 key_len: 48,
                 value_size: crate::value::DEFAULT_VALUE_SIZE,
+                batch_size: crate::ingest::DEFAULT_INGEST_BATCH_SIZE,
                 keyspace_layout_version: crate::keyspace::KEYSPACE_LAYOUT_VERSION,
                 value_generator_version: crate::value::VALUE_GENERATOR_VERSION,
                 workload_generator_version: crate::workload::WORKLOAD_GENERATOR_VERSION,
@@ -705,6 +716,31 @@ mod tests {
         let parsed = read_bench_manifest_json(&path).expect("legacy manifest should parse");
         std::fs::remove_file(&path).ok();
         assert_eq!(parsed.config.value_size, crate::value::DEFAULT_VALUE_SIZE);
+    }
+
+    #[test]
+    fn manifest_without_batch_size_defaults_to_shared_command_default() {
+        let report = sample_report();
+        let manifest = BenchManifest::new(report.config, report.seed);
+        let mut value = serde_json::to_value(&manifest).expect("manifest should serialize");
+        value["config"]
+            .as_object_mut()
+            .expect("config should be a JSON object")
+            .remove("batch_size");
+
+        let path = std::env::temp_dir().join(format!(
+            "exoware-workload-manifest-no-batch-size-{}-{}.json",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::write(&path, value.to_string()).expect("manifest fixture should write");
+        let parsed = read_bench_manifest_json(&path).expect("legacy manifest should parse");
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(
+            parsed.config.batch_size,
+            crate::ingest::DEFAULT_INGEST_BATCH_SIZE
+        );
     }
 
     #[test]

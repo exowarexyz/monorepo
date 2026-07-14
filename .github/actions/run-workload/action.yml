@@ -33,6 +33,10 @@ inputs:
     description: Number of bench operations for the CI functionality smoke.
     required: false
     default: "10000"
+  bench-batch-size:
+    description: Keys per bench write operation; defaults to the workload load command default (100).
+    required: false
+    default: "100"
   bench-concurrency:
     description: Bench worker concurrency.
     required: false
@@ -211,6 +215,7 @@ runs:
         WORKLOAD_NAMESPACE: ${{ steps.namespace.outputs.value }}
         BENCH_KEYS: ${{ inputs.bench-keys }}
         BENCH_OPS: ${{ inputs.bench-ops }}
+        BENCH_BATCH_SIZE: ${{ inputs.bench-batch-size }}
         BENCH_CONCURRENCY: ${{ inputs.bench-concurrency }}
         BENCH_SCENARIO: ${{ inputs.bench-scenario }}
         BENCH_RNG_SEED: ${{ inputs.bench-rng-seed }}
@@ -221,6 +226,7 @@ runs:
           --namespace "$WORKLOAD_NAMESPACE" \
           --keys "$BENCH_KEYS" \
           --ops "$BENCH_OPS" \
+          --batch-size "$BENCH_BATCH_SIZE" \
           --concurrency "$BENCH_CONCURRENCY" \
           --scenario "$BENCH_SCENARIO" \
           --rng-seed "$BENCH_RNG_SEED" \
@@ -334,6 +340,7 @@ runs:
             ("Scenario", config["scenario"]),
             ("Seed", report["seed"]),
             ("Operations", report["operations"]),
+            ("Write batch size", config["batch_size"]),
             ("Errors", report["errors"]),
             ("Reads", report["reads"]),
             ("Read misses", report["read_misses"]),

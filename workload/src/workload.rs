@@ -11,7 +11,7 @@ use crate::deterministic::GOLDEN_RATIO_64;
 pub const DEFAULT_BENCH_RNG_SEED: u64 = 0x5eed_c0de;
 
 /// Version of the deterministic operation-stream generator used in manifests.
-pub const WORKLOAD_GENERATOR_VERSION: u16 = 2;
+pub const WORKLOAD_GENERATOR_VERSION: u16 = 3;
 
 /// Named workload mixes for benchmark operation selection.
 #[derive(Copy, Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]

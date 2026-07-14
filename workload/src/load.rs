@@ -13,7 +13,7 @@ use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 
 use crate::client::{build_client, ClientConfig};
-use crate::ingest::ingest_with_retry;
+use crate::ingest::{ingest_with_retry, DEFAULT_INGEST_BATCH_SIZE};
 use crate::keyspace::{default_run_namespace, Keyspace, DEFAULT_KEY_LEN};
 use crate::value::{value_for_index, DEFAULT_VALUE_SIZE};
 use crate::workload::worker_index_range;
@@ -25,7 +25,7 @@ pub struct Args {
     url: String,
     #[arg(long, default_value_t = 10000)]
     keys: u64,
-    #[arg(long, default_value_t = 100)]
+    #[arg(long, default_value_t = DEFAULT_INGEST_BATCH_SIZE)]
     batch_size: usize,
     #[arg(long, default_value_t = 4)]
     concurrency: usize,

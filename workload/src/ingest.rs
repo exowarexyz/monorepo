@@ -8,6 +8,9 @@ use rand::Rng;
 
 const MAX_INGEST_RETRY_BACKOFF: Duration = Duration::from_secs(5);
 
+/// Default number of key/value pairs in one ingest request for workload commands.
+pub(crate) const DEFAULT_INGEST_BATCH_SIZE: usize = 100;
+
 /// Ingest error codes that can self-resolve, so retrying the same batch is worthwhile.
 pub(crate) fn is_transient_ingest_code(code: ErrorCode) -> bool {
     matches!(

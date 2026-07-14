@@ -1,7 +1,7 @@
 //! Exoware benchmark workload runner.
 //!
 //! Usage:
-//!   workload bench --url http://localhost:10000 --keys 10000 --ops 50000 --scenario balanced
+//!   workload bench --url http://localhost:10000 --keys 10000 --ops 50000 --batch-size 100 --scenario balanced
 //!
 //! Progress: `bench` emits `Benchmark progress` every `--progress-interval-secs` (default 10; 0 disables).
 
@@ -10,12 +10,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, ensure};
+use anyhow::{anyhow, ensure, Context};
 use chrono::Utc;
 use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 
 use crate::client::{build_client, ClientConfig};
+use crate::ingest::DEFAULT_INGEST_BATCH_SIZE;
 use crate::keyspace::{default_run_namespace, Keyspace, DEFAULT_KEY_LEN, KEYSPACE_LAYOUT_VERSION};
 use crate::report::{
     print_bench_report, read_bench_manifest_json, write_bench_report_json, BenchConfig,
@@ -37,6 +38,7 @@ pub struct Args {
             "url",
             "keys",
             "ops",
+            "batch_size",
             "concurrency",
             "scenario",
             "scan_length",
@@ -61,6 +63,9 @@ pub struct Args {
     keys: u64,
     #[arg(long, default_value_t = 50000)]
     ops: u64,
+    /// Number of key/value pairs in each benchmark write operation.
+    #[arg(long, default_value_t = DEFAULT_INGEST_BATCH_SIZE)]
+    batch_size: usize,
     #[arg(long, default_value_t = 8)]
     concurrency: usize,
     /// Exoware scenario selector.
@@ -121,6 +126,7 @@ pub struct Config {
     keyspace: Keyspace,
     initial_keys: u64,
     value_size: usize,
+    batch_size: usize,
     total_ops: u64,
     concurrency: usize,
     scenario: Scenario,
@@ -150,6 +156,7 @@ impl TryFrom<Args> for Config {
         )?;
         ensure!(args.concurrency > 0, "--concurrency must be > 0");
         ensure!(args.keys > 0, "--keys must be > 0");
+        ensure!(args.batch_size > 0, "--batch-size must be > 0");
         let namespace = args.namespace.unwrap_or_else(default_run_namespace);
         let workload = WorkloadSpec::new(
             mix,
@@ -166,6 +173,7 @@ impl TryFrom<Args> for Config {
             keyspace: Keyspace::from_u64_namespace(namespace, args.key_len)?,
             initial_keys: args.keys,
             value_size: args.value_size,
+            batch_size: args.batch_size,
             total_ops: args.ops,
             concurrency: args.concurrency,
             scenario: args.scenario,
@@ -209,6 +217,10 @@ impl Config {
             manifest.config.concurrency > 0,
             "manifest concurrency must be > 0"
         );
+        ensure!(
+            manifest.config.batch_size > 0,
+            "manifest batch_size must be > 0"
+        );
         manifest.config.workload.validate()?;
 
         Ok(Self {
@@ -223,6 +235,7 @@ impl Config {
             )?,
             initial_keys: manifest.config.key_space,
             value_size: manifest.config.value_size,
+            batch_size: manifest.config.batch_size,
             total_ops: manifest.config.total_ops,
             concurrency: manifest.config.concurrency,
             scenario: manifest.config.scenario,
@@ -245,6 +258,7 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
         keyspace,
         initial_keys,
         value_size,
+        batch_size,
         total_ops,
         concurrency,
         scenario,
@@ -265,6 +279,7 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
         workload,
         key_len: keyspace.key_len(),
         value_size,
+        batch_size,
         keyspace_layout_version: KEYSPACE_LAYOUT_VERSION,
         value_generator_version: VALUE_GENERATOR_VERSION,
         workload_generator_version: WORKLOAD_GENERATOR_VERSION,
@@ -301,6 +316,7 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
         write_ratio = workload.mix.write_ratio,
         scan_ratio = workload.mix.scan_ratio,
         scan_length = workload.scan_length,
+        batch_size,
         key_dist = ?workload.key_dist,
         latest_window = workload.latest_window,
         latest_prob = workload.latest_prob,
@@ -383,14 +399,29 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
                         }
                     }
                     Operation::Write => {
-                        let write_idx =
-                            worker_write_index(initial_keys, concurrency, worker, write_number)?;
+                        let mut kvs = Vec::with_capacity(batch_size);
+                        for batch_offset in 0..batch_size {
+                            let write_idx = worker_batch_write_index(
+                                initial_keys,
+                                concurrency,
+                                worker,
+                                write_number,
+                                batch_offset,
+                                batch_size,
+                            )?;
+                            kvs.push((
+                                keyspace.inserted_key(write_idx)?,
+                                value_for_index(namespace, write_idx, value_size),
+                            ));
+                        }
                         write_number += 1;
-                        let key = keyspace.inserted_key(write_idx)?;
-                        let value = value_for_index(namespace, write_idx, value_size);
+                        let refs: Vec<(&_, &[_])> = kvs
+                            .iter()
+                            .map(|(key, value)| (key, value.as_slice()))
+                            .collect();
 
                         let request_start = Instant::now();
-                        let result = client.ingest().put(&[(&key, &value)]).await;
+                        let result = client.ingest().put(&refs).await;
                         latencies.record_write(request_start.elapsed());
                         match result {
                             Ok(_) => {
@@ -503,9 +534,79 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn worker_batch_write_index(
+    initial_keys: u64,
+    concurrency: usize,
+    worker: usize,
+    batch_number: u64,
+    batch_offset: usize,
+    batch_size: usize,
+) -> anyhow::Result<u64> {
+    let batch_size = u64::try_from(batch_size).map_err(|_| anyhow!("batch size exceeds u64"))?;
+    let batch_offset =
+        u64::try_from(batch_offset).map_err(|_| anyhow!("batch offset exceeds u64"))?;
+    let write_number = batch_number
+        .checked_mul(batch_size)
+        .and_then(|number| number.checked_add(batch_offset))
+        .context("worker batch write index overflow")?;
+    worker_write_index(initial_keys, concurrency, worker, write_number)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
+
     use super::*;
+    use axum::Router;
+    use connectrpc::{ConnectRpcService, RequestContext};
+    use exoware_sdk::ingest::{
+        OwnedPutRequestView, PutResponse, Service as IngestService,
+        ServiceServer as IngestServiceServer,
+    };
+
+    #[derive(Clone)]
+    struct BenchIngestHarness {
+        batch_sizes: Arc<Mutex<Vec<usize>>>,
+    }
+
+    #[allow(refining_impl_trait)]
+    impl IngestService for BenchIngestHarness {
+        async fn put(
+            &self,
+            _ctx: RequestContext,
+            request: OwnedPutRequestView,
+        ) -> connectrpc::ServiceResult<PutResponse> {
+            self.batch_sizes
+                .lock()
+                .expect("batch size lock")
+                .push(request.kvs.len());
+            connectrpc::Response::ok(PutResponse {
+                sequence_number: 1,
+                ..Default::default()
+            })
+        }
+    }
+
+    async fn spawn_ingest_harness() -> (String, Arc<Mutex<Vec<usize>>>) {
+        let batch_sizes = Arc::new(Mutex::new(Vec::new()));
+        let harness = BenchIngestHarness {
+            batch_sizes: batch_sizes.clone(),
+        };
+        let connect = ConnectRpcService::new(IngestServiceServer::new(harness));
+        let app = Router::new().fallback_service(connect);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let url = format!(
+            "http://{}",
+            listener.local_addr().expect("listener address")
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+        (url, batch_sizes)
+    }
 
     fn sample_manifest() -> BenchManifest {
         BenchManifest::new(
@@ -531,6 +632,7 @@ mod tests {
                 .unwrap(),
                 key_len: DEFAULT_KEY_LEN,
                 value_size: DEFAULT_VALUE_SIZE,
+                batch_size: DEFAULT_INGEST_BATCH_SIZE,
                 keyspace_layout_version: KEYSPACE_LAYOUT_VERSION,
                 value_generator_version: VALUE_GENERATOR_VERSION,
                 workload_generator_version: WORKLOAD_GENERATOR_VERSION,
@@ -546,6 +648,7 @@ mod tests {
             manifest: None,
             keys: 10_000,
             ops: 50_000,
+            batch_size: DEFAULT_INGEST_BATCH_SIZE,
             concurrency: 8,
             scenario: Scenario::Balanced,
             scan_length: 25,
@@ -621,6 +724,58 @@ mod tests {
     }
 
     #[test]
+    fn config_rejects_zero_batch_size() {
+        let mut args = sample_args();
+        args.batch_size = 0;
+        assert!(Config::try_from(args).is_err());
+    }
+
+    #[test]
+    fn batch_write_indexes_are_disjoint_across_workers_and_batches() {
+        let mut indexes = HashSet::new();
+        for worker in 0..4 {
+            for batch_number in 0..3 {
+                for batch_offset in 0..DEFAULT_INGEST_BATCH_SIZE {
+                    let index = worker_batch_write_index(
+                        10_000,
+                        4,
+                        worker,
+                        batch_number,
+                        batch_offset,
+                        DEFAULT_INGEST_BATCH_SIZE,
+                    )
+                    .expect("batch index should be representable");
+                    assert!(indexes.insert(index), "duplicate batch write index {index}");
+                }
+            }
+        }
+        assert_eq!(indexes.len(), 4 * 3 * DEFAULT_INGEST_BATCH_SIZE);
+    }
+
+    #[tokio::test]
+    async fn write_operations_send_configured_ingest_batches() {
+        let (url, batch_sizes) = spawn_ingest_harness().await;
+        let mut args = sample_args();
+        args.url = url;
+        args.keys = 1;
+        args.ops = 4;
+        args.batch_size = 3;
+        args.concurrency = 1;
+        args.read_ratio = Some(0.0);
+        args.write_ratio = Some(1.0);
+        args.scan_ratio = Some(0.0);
+        args.progress_interval_secs = 0;
+
+        run(args)
+            .await
+            .expect("write-only benchmark should succeed");
+        assert_eq!(
+            batch_sizes.lock().expect("batch size lock").as_slice(),
+            [3, 3, 3, 3]
+        );
+    }
+
+    #[test]
     fn config_rejects_invalid_latest_probability() {
         let mut args = sample_args();
         args.latest_prob = 1.1;
@@ -645,6 +800,7 @@ mod tests {
         assert_eq!(config.initial_keys, 1_000);
         assert_eq!(config.total_ops, 10_000);
         assert_eq!(config.concurrency, 4);
+        assert_eq!(config.batch_size, DEFAULT_INGEST_BATCH_SIZE);
         assert_eq!(config.scenario, Scenario::ScanHeavy);
         assert_eq!(config.workload.key_dist, KeyDistribution::Latest);
         assert_eq!(config.rng_seed, 123);

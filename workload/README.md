@@ -29,7 +29,7 @@ cargo run -p exoware-workload -- load --namespace 2026052901 --keys 10000 --valu
 Run a benchmark:
 
 ```bash
-cargo run -p exoware-workload -- bench --namespace 2026052901 --keys 10000 --value-size 256 --ops 50000 --concurrency 8 --scenario balanced --output bench-report.json
+cargo run -p exoware-workload -- bench --namespace 2026052901 --keys 10000 --value-size 256 --ops 50000 --batch-size 100 --concurrency 8 --scenario balanced --output bench-report.json
 ```
 
 Replay a benchmark from a previous JSON report:
@@ -57,6 +57,8 @@ Exit codes follow each command's purpose:
 Benchmark JSON reports include the normalized config, seed, counters, and per-operation latency histograms for reads, writes, and scans. Histograms use fixed microsecond buckets; stdout and GitHub summaries show p50/p95/p99/max latency lines for readability.
 
 `load` and `bench` use run-specific namespaces by default so independent runs do not reuse the same physical keys on persistent stores. Pass the same `--namespace` and `--keys` value to both commands when a benchmark should read from a keyspace written by `load`.
+
+`bench --batch-size` controls the number of key/value pairs in each generated write operation. It defaults to 100, matching `load`; `--ops` still counts benchmark operations (requests), not individual keys in those write batches.
 
 Generated load and benchmark keys open with a byte derived from the logical index, so a run's keys spread across the entire physical key range instead of sharing a fixed prefix. Standard validation instead uses its own contiguous key layout, keeping its whole-keyspace range checks bounded to the rows it owns.
 
@@ -88,9 +90,10 @@ Generated load and benchmark keys open with a byte derived from the logical inde
     },
     "key_len": 48,
     "value_size": 256,
+    "batch_size": 100,
     "keyspace_layout_version": 2,
     "value_generator_version": 1,
-    "workload_generator_version": 2,
+    "workload_generator_version": 3,
     "read_retry_attempts": 3
   },
   "seed": 1592639710
