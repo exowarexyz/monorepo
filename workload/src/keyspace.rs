@@ -136,19 +136,6 @@ impl Keyspace {
         (expected == *key).then_some(index)
     }
 
-    /// Yields `0..total` reordered to match spread-key lexicographic order.
-    ///
-    /// One keyspace's inserted keys differ only in the entropy byte and the
-    /// big-endian index, so key order is (entropy byte, index): walk the 256
-    /// entropy values in byte order and indices in numeric order within each.
-    /// The O(256 * total) rescan keeps memory flat so full-range validation can
-    /// stream expected keys at any key count.
-    pub fn inserted_indices_in_key_order(total: u64) -> impl Iterator<Item = u64> {
-        (0..=u8::MAX).flat_map(move |entropy| {
-            (0..total).filter(move |index| entropy_byte(*index) == entropy)
-        })
-    }
-
     fn key(&self, index: u64, domain: u8) -> anyhow::Result<Key> {
         ensure!(
             self.key_len >= min_key_len(self.layout, self.namespace.len()),
@@ -301,22 +288,6 @@ mod tests {
             .collect();
 
         assert!((0..64u64).all(|index| !a.contains(&keyspace_b.inserted_key(index).unwrap())));
-    }
-
-    #[test]
-    fn inserted_indices_in_key_order_matches_key_sort() {
-        let keyspace = Keyspace::from_u64_namespace(42, DEFAULT_KEY_LEN).unwrap();
-        let total = 300u64;
-        let ordered: Vec<Key> = Keyspace::inserted_indices_in_key_order(total)
-            .map(|index| keyspace.inserted_key(index).unwrap())
-            .collect();
-
-        let mut sorted: Vec<Key> = (0..total)
-            .map(|index| keyspace.inserted_key(index).unwrap())
-            .collect();
-        sorted.sort_unstable();
-
-        assert_eq!(ordered, sorted);
     }
 
     #[test]

@@ -2,7 +2,8 @@
 name = "exoware-workload"
 version.workspace = true
 edition.workspace = true
-publish = true
+# This package is distributed as the repository's workload binary and GitHub Action, not a library API.
+publish = false
 license.workspace = true
 description = "Generate and execute workloads against Exoware deployments."
 readme = "README.md"
@@ -12,13 +13,13 @@ documentation = "https://docs.rs/exoware-workload"
 
 [dependencies]
 exoware-sdk = { workspace = true }
-tokio = { version = "1", features = ["full"] }
-rand = "0.8"
+tokio = { workspace = true, features = ["full"] }
+rand = { workspace = true }
 chrono = { version = "0.4", features = ["serde"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-clap = { version = "4", features = ["derive"] }
-anyhow = "1"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+clap = { workspace = true, features = ["derive"] }
+anyhow = { workspace = true }
 hex = { workspace = true }
 connectrpc = { workspace = true }
 http = { workspace = true }

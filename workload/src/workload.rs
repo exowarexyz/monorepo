@@ -1,6 +1,6 @@
 use anyhow::{ensure, Context};
 use clap::ValueEnum;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
 use std::sync::Arc;
@@ -11,6 +11,8 @@ use crate::deterministic::GOLDEN_RATIO_64;
 pub const DEFAULT_BENCH_RNG_SEED: u64 = 0x5eed_c0de;
 
 /// Version of the deterministic operation-stream generator used in manifests.
+///
+/// Bump this when changing its seeded random stream, including an RNG update.
 pub const WORKLOAD_GENERATOR_VERSION: u16 = 3;
 
 /// Named workload mixes for benchmark operation selection.
@@ -202,7 +204,7 @@ impl WorkerPlan {
 
     /// Emits the next logical operation for the current visible key range.
     pub fn next_operation(&mut self, max_key_exclusive: u64) -> Operation {
-        let p = self.rng.gen::<f64>();
+        let p = self.rng.random::<f64>();
         if p < self.spec.mix.read_ratio {
             return Operation::Read {
                 index: self.sample_key_index(max_key_exclusive),
@@ -229,7 +231,7 @@ impl WorkerPlan {
 
     fn sample_key_index(&mut self, max_key_exclusive: u64) -> u64 {
         if self.spec.key_dist != KeyDistribution::Zipfian {
-            return sample_key_index(&mut self.rng, max_key_exclusive, self.spec);
+            return sample_non_zipf_key_index(&mut self.rng, max_key_exclusive, self.spec);
         }
 
         let replace_sampler = self
@@ -277,7 +279,7 @@ impl ZipfSampler {
     }
 
     fn sample(&self, rng: &mut rand::rngs::StdRng) -> u64 {
-        let draw = rng.gen();
+        let draw = rng.random();
         self.cdf.partition_point(|probability| *probability < draw) as u64
     }
 }
@@ -363,8 +365,7 @@ pub fn worker_write_index(
         .context("worker write index overflow")
 }
 
-/// Samples an inserted logical key index according to the workload distribution.
-pub fn sample_key_index(
+fn sample_non_zipf_key_index(
     rng: &mut rand::rngs::StdRng,
     max_key_exclusive: u64,
     spec: WorkloadSpec,
@@ -374,22 +375,18 @@ pub fn sample_key_index(
     }
 
     match spec.key_dist {
-        KeyDistribution::Uniform => rng.gen_range(0..max_key_exclusive),
+        KeyDistribution::Uniform => rng.random_range(0..max_key_exclusive),
         KeyDistribution::Latest => {
-            if rng.gen::<f64>() < spec.latest_prob {
+            if rng.random::<f64>() < spec.latest_prob {
                 let window = spec.latest_window.max(1).min(max_key_exclusive);
                 let start = max_key_exclusive - window;
-                rng.gen_range(start..max_key_exclusive)
+                rng.random_range(start..max_key_exclusive)
             } else {
-                rng.gen_range(0..max_key_exclusive)
+                rng.random_range(0..max_key_exclusive)
             }
         }
-        KeyDistribution::Zipfian => sample_zipf_index(rng, max_key_exclusive, spec.zipf_theta),
+        KeyDistribution::Zipfian => unreachable!("zipfian samples use WorkerPlan's cached sampler"),
     }
-}
-
-fn sample_zipf_index(rng: &mut rand::rngs::StdRng, max_key_exclusive: u64, theta: f64) -> u64 {
-    ZipfSampler::new(max_key_exclusive, theta).sample(rng)
 }
 
 fn approx_eq(a: f64, b: f64, eps: f64) -> bool {
@@ -399,7 +396,7 @@ fn approx_eq(a: f64, b: f64, eps: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
 
     fn sample_spec() -> WorkloadSpec {
         WorkloadSpec::new(
@@ -498,7 +495,6 @@ mod tests {
 
     #[test]
     fn latest_distribution_stays_in_window_when_prob_one() {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
         let max = 10_000;
         let window = 100;
         let spec = WorkloadSpec {
@@ -507,9 +503,10 @@ mod tests {
             latest_prob: 1.0,
             ..sample_spec()
         };
+        let mut plan = WorkerPlan::new(7, 0, spec);
 
         for _ in 0..1_000 {
-            let idx = sample_key_index(&mut rng, max, spec);
+            let idx = plan.sample_key_index(max);
             assert!(idx >= max - window);
             assert!(idx < max);
         }
@@ -517,7 +514,6 @@ mod tests {
 
     #[test]
     fn all_distributions_respect_bounds() {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(11);
         for key_dist in [
             KeyDistribution::Uniform,
             KeyDistribution::Latest,
@@ -527,9 +523,10 @@ mod tests {
                 key_dist,
                 ..sample_spec()
             };
+            let mut plan = WorkerPlan::new(11, 0, spec);
 
             for _ in 0..1_000 {
-                let idx = sample_key_index(&mut rng, 500, spec);
+                let idx = plan.sample_key_index(500);
                 assert!(idx < 500);
             }
         }
@@ -539,8 +536,8 @@ mod tests {
     fn worker_rng_is_deterministic_per_seed_and_worker() {
         let mut a = worker_rng(42, 3);
         let mut b = worker_rng(42, 3);
-        let seq_a: Vec<u64> = (0..8).map(|_| a.gen()).collect();
-        let seq_b: Vec<u64> = (0..8).map(|_| b.gen()).collect();
+        let seq_a: Vec<u64> = (0..8).map(|_| a.random()).collect();
+        let seq_b: Vec<u64> = (0..8).map(|_| b.random()).collect();
         assert_eq!(seq_a, seq_b);
     }
 
@@ -548,20 +545,20 @@ mod tests {
     fn worker_rng_differs_across_workers() {
         let mut a = worker_rng(42, 3);
         let mut b = worker_rng(42, 4);
-        let seq_a: Vec<u64> = (0..4).map(|_| a.gen()).collect();
-        let seq_b: Vec<u64> = (0..4).map(|_| b.gen()).collect();
+        let seq_a: Vec<u64> = (0..4).map(|_| a.random()).collect();
+        let seq_b: Vec<u64> = (0..4).map(|_| b.random()).collect();
         assert_ne!(seq_a, seq_b);
     }
 
     #[test]
     fn zipfian_distribution_can_sample_the_last_key() {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(11);
         let spec = WorkloadSpec {
             key_dist: KeyDistribution::Zipfian,
             ..sample_spec()
         };
+        let mut plan = WorkerPlan::new(11, 0, spec);
 
-        assert!((0..10_000).any(|_| sample_key_index(&mut rng, 2, spec) == 1));
+        assert!((0..10_000).any(|_| plan.sample_key_index(2) == 1));
     }
 
     #[test]
@@ -612,14 +609,14 @@ mod tests {
     #[test]
     fn zipfian_distribution_keeps_full_support_near_parameter_bounds() {
         for theta in [0.000_001, 0.999_999] {
-            let mut rng = rand::rngs::StdRng::seed_from_u64(11);
             let spec = WorkloadSpec {
                 key_dist: KeyDistribution::Zipfian,
                 zipf_theta: theta,
                 ..sample_spec()
             };
+            let mut plan = WorkerPlan::new(11, 0, spec);
             assert!(
-                (0..10_000).any(|_| sample_key_index(&mut rng, 4, spec) == 3),
+                (0..10_000).any(|_| plan.sample_key_index(4) == 3),
                 "last key was not sampled for theta={theta}"
             );
         }

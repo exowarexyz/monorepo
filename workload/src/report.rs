@@ -162,12 +162,6 @@ impl BenchManifest {
     }
 }
 
-impl LatencyHistograms {
-    pub fn empty() -> Self {
-        LatencyHistogramsRecorder::default().snapshot()
-    }
-}
-
 impl LatencyHistogramsRecorder {
     pub fn record_read(&self, duration: Duration) {
         self.read.record(duration);

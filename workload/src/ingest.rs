@@ -4,7 +4,7 @@ use anyhow::anyhow;
 use connectrpc::ErrorCode;
 use exoware_sdk::keys::Key;
 use exoware_sdk::{ClientError, PrefixedStoreClient};
-use rand::Rng;
+use rand::RngExt;
 
 const MAX_INGEST_RETRY_BACKOFF: Duration = Duration::from_secs(5);
 
@@ -42,7 +42,7 @@ pub(crate) fn retry_delay(backoff: Duration, retry_number: u64) -> Duration {
     let cap = backoff
         .saturating_mul(1_u32 << exponent)
         .min(MAX_INGEST_RETRY_BACKOFF);
-    Duration::from_millis(rand::thread_rng().gen_range(0..=cap.as_millis() as u64))
+    Duration::from_millis(rand::rng().random_range(0..=cap.as_millis() as u64))
 }
 
 /// Keeps server retry hints as a minimum delay and adds local jitter to avoid synchronized retries.
