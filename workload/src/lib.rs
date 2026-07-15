@@ -1,8 +1,4 @@
-//! Workload tooling for exercising Exoware deployments and simulators.
-//!
-//! The crate separates deterministic workload generation from command execution so
-//! benchmark reports can identify the exact key/value generators, workload mix,
-//! and seed used for a run.
+//! Validate an Exoware deployment.
 
 pub mod bench;
 pub mod client;

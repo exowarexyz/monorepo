@@ -1,5 +1,16 @@
 # exoware-workload
 
+[![Crates.io](https://img.shields.io/crates/v/exoware-workload.svg)](https://crates.io/crates/exoware-workload)
+[![Docs.rs](https://docs.rs/exoware-worload/badge.svg)](https://docs.rs/exoware-workload)
+
+Validate an Exoware deployment.
+
+## Status
+
+`exoware-workload` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
+
+## Overview
+
 `exoware-workload` provides small CLI workloads for exercising Exoware-compatible stores. It is meant to support local development, deployment validation, and reproducible benchmark runs.
 
 The tool has three modes:

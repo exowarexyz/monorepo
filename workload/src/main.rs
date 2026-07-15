@@ -4,7 +4,7 @@ use exoware_workload::{bench, load, validate};
 #[derive(Parser, Debug)]
 #[command(
     name = "workload",
-    about = "Generate and execute workloads against Exoware deployments"
+    about = "Validate an Exoware deployment."
 )]
 struct Cli {
     #[command(subcommand)]

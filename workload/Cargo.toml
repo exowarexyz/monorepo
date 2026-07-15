@@ -2,10 +2,9 @@
 name = "exoware-workload"
 version.workspace = true
 edition.workspace = true
-# This package is distributed as the repository's workload binary and GitHub Action, not a library API.
-publish = false
 license.workspace = true
-description = "Generate and execute workloads against Exoware deployments."
+publish = false
+description = "Validate an Exoware deployment."
 readme = "README.md"
 homepage.workspace = true
 repository = "https://github.com/exowarexyz/monorepo/tree/main/workload"
