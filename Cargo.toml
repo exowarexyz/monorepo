@@ -25,7 +25,7 @@ exoware-sdk = { version = "2026.5.0", path = "sdk/rs" }
 exoware-server = { version = "2026.5.0", path = "server" }
 exoware-simplex = { version = "2026.5.0", path = "simplex/rs" }
 exoware-sql = { version = "2026.5.0", path = "sql/rs" }
-exoware-validation = { version = "2026.5.0", path = "validation/" }
+exoware-validation = { version = "2026.5.0", path = "validation" }
 tokio = "1.43.0"
 clap = "4.5.18"
 tracing = "0.1.41"
