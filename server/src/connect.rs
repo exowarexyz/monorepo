@@ -43,7 +43,7 @@ use tokio::sync::Notify;
 use crate::reduce::RangeReducer;
 use crate::stream::{StreamHub, StreamNotifier};
 use crate::validate::{self, IngestLimits};
-use crate::{Ingest, Log, LogBatch, Prune, Query, QueryExtra, RangeScan, StoreEngine};
+use crate::{Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan, StoreEngine};
 
 // TODO (#57): Make limits configurable.
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
@@ -356,6 +356,41 @@ where
     }
 }
 
+/// Backoff floor advertised to `RetryInfo`-aware clients for transient store conditions.
+const RETRY_HINT_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+/// `ErrorInfo.reason` when the ingest worker has not passed its readiness gate.
+const REASON_WORKER_NOT_READY: &str = "WORKER_NOT_READY";
+/// `ErrorInfo.reason` when the backend discovers a transient ingest write failure.
+const REASON_INGEST_UNAVAILABLE: &str = "INGEST_UNAVAILABLE";
+
+/// Attaches an explicit retry hint for "come back soon" responses.
+fn with_retry_hint(err: ConnectError, retry_delay: std::time::Duration) -> ConnectError {
+    with_retry_info_detail(
+        err,
+        RetryInfo {
+            retry_delay: Some(buffa_types::google::protobuf::Duration::from(retry_delay)).into(),
+            ..Default::default()
+        },
+    )
+}
+
+fn ingest_error_to_connect(err: IngestError) -> ConnectError {
+    match err {
+        IngestError::Unavailable { message } => with_retry_hint(
+            with_error_info_detail(
+                ConnectError::unavailable(message),
+                ErrorInfo {
+                    reason: REASON_INGEST_UNAVAILABLE.to_string(),
+                    domain: crate::validate::INGEST_ERROR_DOMAIN.to_string(),
+                    ..Default::default()
+                },
+            ),
+            RETRY_HINT_DELAY,
+        ),
+        IngestError::Internal { message } => ConnectError::internal(message),
+    }
+}
+
 impl<I> IngestApi for IngestConnect<I>
 where
     I: Ingest,
@@ -366,13 +401,16 @@ where
         request: buffa::view::OwnedView<exoware_proto::log::ingest::v1::PutRequestView<'static>>,
     ) -> connectrpc::ServiceResult<ProtoPutResponse> {
         if !self.state.ready.load(Ordering::SeqCst) {
-            return Err(with_error_info_detail(
-                ConnectError::unavailable("ingest is not ready"),
-                ErrorInfo {
-                    reason: "WORKER_NOT_READY".to_string(),
-                    domain: crate::validate::INGEST_ERROR_DOMAIN.to_string(),
-                    ..Default::default()
-                },
+            return Err(with_retry_hint(
+                with_error_info_detail(
+                    ConnectError::unavailable("ingest is not ready"),
+                    ErrorInfo {
+                        reason: REASON_WORKER_NOT_READY.to_string(),
+                        domain: crate::validate::INGEST_ERROR_DOMAIN.to_string(),
+                        ..Default::default()
+                    },
+                ),
+                RETRY_HINT_DELAY,
             ));
         }
 
@@ -391,7 +429,7 @@ where
             .ingest
             .put_batch(batch)
             .await
-            .map_err(ConnectError::internal)?;
+            .map_err(ingest_error_to_connect)?;
 
         // Advance any attached stream frontier after the write is committed.
         if let Some(notifier) = &self.state.notifier {
@@ -439,15 +477,9 @@ where
     }
 
     fn consistency_not_ready_error(&self, required: u64, current: u64) -> ConnectError {
-        let err = with_retry_info_detail(
+        let err = with_retry_hint(
             ConnectError::aborted("minimum consistency token is not yet visible"),
-            RetryInfo {
-                retry_delay: Some(buffa_types::google::protobuf::Duration::from(
-                    std::time::Duration::from_secs(1),
-                ))
-                .into(),
-                ..Default::default()
-            },
+            RETRY_HINT_DELAY,
         );
         with_query_detail(
             with_error_info_detail(
@@ -1228,7 +1260,7 @@ mod tests {
     use futures::StreamExt;
 
     use crate::{
-        Ingest, Log, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence,
+        Ingest, IngestError, Log, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence,
         StreamNotification, StreamNotifier,
     };
 
@@ -1252,6 +1284,7 @@ mod tests {
         range_next_count: usize,
         query_extra: QueryExtra,
         prune_policy_counts: Vec<usize>,
+        put_error: Option<IngestError>,
     }
 
     #[derive(Default)]
@@ -1299,6 +1332,10 @@ mod tests {
     impl FakeEngine {
         fn set_current_sequence(&self, sequence_number: u64) {
             self.state.lock().expect("lock").current_sequence = sequence_number;
+        }
+
+        fn set_put_error(&self, err: IngestError) {
+            self.state.lock().expect("lock").put_error = Some(err);
         }
 
         fn set_batch(&self, sequence_number: u64, kvs: Option<Vec<(Bytes, Bytes)>>) {
@@ -1363,8 +1400,13 @@ mod tests {
     }
 
     impl Ingest for FakeEngine {
-        async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, String> {
-            let mut state = self.state.lock().map_err(|e| e.to_string())?;
+        async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
+            let mut state = self.state.lock().map_err(|e| IngestError::Internal {
+                message: e.to_string(),
+            })?;
+            if let Some(err) = state.put_error.take() {
+                return Err(err);
+            }
             state.current_sequence += 1;
             let seq = state.current_sequence;
             state.batches.insert(seq, Some(kvs));
@@ -1802,6 +1844,67 @@ mod tests {
             .expect_err("put should reject oversized value");
 
         assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn ingest_unavailable_surfaces_as_unavailable_with_retry_info() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_put_error(IngestError::Unavailable {
+            message: "backend bouncing".to_string(),
+        });
+        let connect = IngestConnect::new(IngestState::new(engine));
+
+        let err = IngestApi::put(&connect, Context::default(), put_request(1))
+            .await
+            .expect_err("transient put failure should surface");
+
+        assert_eq!(err.code, connectrpc::ErrorCode::Unavailable);
+        let decoded = decode_connect_error(&err).expect("decode details");
+        assert_eq!(
+            decoded.error_info.expect("error info").reason,
+            REASON_INGEST_UNAVAILABLE
+        );
+        let retry_delay = decoded.retry_info.expect("retry info").retry_delay;
+        let retry_delay = retry_delay.as_option().expect("retry delay");
+        assert_eq!((retry_delay.seconds, retry_delay.nanos), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn ingest_internal_surfaces_as_internal_without_error_info() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_put_error(IngestError::Internal {
+            message: "invariant violated".to_string(),
+        });
+        let connect = IngestConnect::new(IngestState::new(engine));
+
+        let err = IngestApi::put(&connect, Context::default(), put_request(1))
+            .await
+            .expect_err("fatal put failure should surface");
+
+        assert_eq!(err.code, connectrpc::ErrorCode::Internal);
+        let decoded = decode_connect_error(&err).expect("decode details");
+        assert!(decoded.error_info.is_none());
+    }
+
+    #[tokio::test]
+    async fn put_when_not_ready_keeps_worker_not_ready_reason() {
+        let engine = Arc::new(FakeEngine::default());
+        let state = IngestState::new(engine);
+        state.ready.store(false, Ordering::SeqCst);
+        let connect = IngestConnect::new(state);
+
+        let err = IngestApi::put(&connect, Context::default(), put_request(1))
+            .await
+            .expect_err("not-ready gate should reject");
+
+        // Both the gate and a backend-discovered outage surface `unavailable`; the reason string is
+        // what keeps them distinguishable, so pin it against drift toward `INGEST_UNAVAILABLE`.
+        assert_eq!(err.code, connectrpc::ErrorCode::Unavailable);
+        let decoded = decode_connect_error(&err).expect("decode details");
+        assert_eq!(
+            decoded.error_info.expect("error info").reason,
+            REASON_WORKER_NOT_READY
+        );
     }
 
     #[tokio::test]

@@ -69,7 +69,9 @@ async fn build_local_reference(batches: Vec<Vec<(K, V)>>) -> LocalReference {
                     for (k, v) in batch_writes {
                         batch = batch.set(k.clone(), v.clone());
                     }
-                    batch.merkleize(&db, None::<Vec<u8>>, db.bounds().end - 1)
+                    batch
+                        .merkleize(&db, None::<Vec<u8>>, db.bounds().end - 1)
+                        .await
                 };
                 db.apply_batch(finalized).await.expect("apply");
             }

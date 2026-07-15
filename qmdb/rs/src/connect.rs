@@ -37,7 +37,6 @@ use exoware_sdk::stream_filter::{CompiledFilters, Filter};
 use futures::future::BoxFuture;
 use futures::{FutureExt, Stream};
 
-use crate::auth::AuthenticatedBackendNamespace;
 use crate::proof::{
     CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
 };
@@ -161,12 +160,6 @@ trait OperationLogBackend: Clone + Send + Sync + 'static {
     const REJECTS_KEY_FILTERS: bool = false;
 
     fn store_client(&self) -> &exoware_sdk::PrefixedStoreClient;
-    fn classify_and_filter(
-        &self,
-    ) -> (
-        RowClassifier<Self::Family>,
-        exoware_sdk::stream_filter::StreamFilter,
-    );
     fn extract_operation_kv(
         &self,
         location: Location<Self::Family>,
@@ -251,10 +244,6 @@ where
         OrderedClient::store_client(self)
     }
 
-    fn classify_and_filter(&self) -> (RowClassifier<F>, exoware_sdk::stream_filter::StreamFilter) {
-        sub::classify_and_filter::<F>(None)
-    }
-
     fn extract_operation_kv(
         &self,
         location: Location<F>,
@@ -303,10 +292,6 @@ where
 
     fn store_client(&self) -> &exoware_sdk::PrefixedStoreClient {
         UnorderedClient::store_client(self)
-    }
-
-    fn classify_and_filter(&self) -> (RowClassifier<F>, exoware_sdk::stream_filter::StreamFilter) {
-        sub::classify_and_filter::<F>(None)
     }
 
     fn extract_operation_kv(
@@ -366,10 +351,6 @@ where
         ImmutableClient::store_client(self)
     }
 
-    fn classify_and_filter(&self) -> (RowClassifier<F>, exoware_sdk::stream_filter::StreamFilter) {
-        sub::classify_and_filter::<F>(Some(AuthenticatedBackendNamespace::Immutable))
-    }
-
     fn extract_operation_kv(
         &self,
         location: Location<F>,
@@ -418,10 +399,6 @@ where
 
     fn store_client(&self) -> &exoware_sdk::PrefixedStoreClient {
         KeylessClient::store_client(self)
-    }
-
-    fn classify_and_filter(&self) -> (RowClassifier<F>, exoware_sdk::stream_filter::StreamFilter) {
-        sub::classify_and_filter::<F>(Some(AuthenticatedBackendNamespace::Keyless))
     }
 
     fn extract_operation_kv(
@@ -993,7 +970,7 @@ impl<B: OperationLogBackend> OperationLogService for OperationLogConnect<B> {
             let value_matcher = parse_filters(request.value_filters.iter(), "value")
                 .map_err(ConnectError::invalid_argument)?;
             let since = decode_since(request.since_sequence_number);
-            let (classify, filter) = backend.classify_and_filter();
+            let (classify, filter) = sub::classify_and_filter::<B::Family>();
             let sub = sub::open_store_subscription(backend.store_client(), filter, since)
                 .await
                 .map_err(qmdb_error_to_connect)?;

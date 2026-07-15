@@ -83,12 +83,16 @@ async fn build_local_batch() -> LocalBatch {
                     .new_batch()
                     .append(b"first-value".to_vec())
                     .append(b"second-value".to_vec());
-                batch.merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
+                batch
+                    .merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
+                    .await
             };
             db.apply_batch(finalized).await.expect("apply");
             let finalized = {
                 let batch = db.new_batch().append(b"third-value".to_vec());
-                batch.merkleize(&db, None::<Vec<u8>>, db.bounds().end - 1)
+                batch
+                    .merkleize(&db, None::<Vec<u8>>, db.bounds().end - 1)
+                    .await
             };
             db.apply_batch(finalized).await.expect("apply second");
 

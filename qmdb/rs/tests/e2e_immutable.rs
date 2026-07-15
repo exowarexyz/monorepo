@@ -120,7 +120,9 @@ async fn build_local_db() -> LocalReference {
                     .new_batch()
                     .set(key_a, val_a)
                     .set(key_b.clone(), val_b.clone());
-                batch.merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
+                batch
+                    .merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
+                    .await
             };
             db.apply_batch(finalized).await.expect("apply");
 
@@ -173,7 +175,9 @@ async fn build_fixed_local_db() -> FixedLocalReference {
 
             let finalized = {
                 let batch = db.new_batch().set(key_a, val_a).set(key_b.clone(), val_b);
-                batch.merkleize(&db, None::<Digest>, db.inactivity_floor_loc())
+                batch
+                    .merkleize(&db, None::<Digest>, db.inactivity_floor_loc())
+                    .await
             };
             db.apply_batch(finalized).await.expect("apply fixed");
 

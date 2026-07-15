@@ -2719,6 +2719,7 @@ dependencies = [
  "futures",
  "http",
  "regex",
+ "thiserror",
  "tokio",
 ]
 

@@ -16,8 +16,8 @@ Use `StoreKeyPrefix` when multiple logical QMDB, SQL, or raw KV instances share 
 import { Client, StoreKeyPrefix, StoreWriteBatch } from '@exowarexyz/sdk';
 
 const base = new Client('http://localhost:10000').store();
-const orders = base.withKeyPrefix(new StoreKeyPrefix(4, 1));
-const accounts = base.withKeyPrefix(new StoreKeyPrefix(4, 2));
+const orders = base.withKeyPrefix(new StoreKeyPrefix(new Uint8Array([1])));
+const accounts = base.withKeyPrefix(new StoreKeyPrefix(new Uint8Array([2])));
 
 const batch = new StoreWriteBatch()
     .push(orders, orderKey, orderValue)
