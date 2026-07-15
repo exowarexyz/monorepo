@@ -421,8 +421,8 @@ async fn scan_window_for_expected(
         if advanced.is_none() {
             return Err(RangeScanError::Permanent(anyhow!(
                 "reached the edge of the key domain with {matched} of {} expected rows visible at sequence floor {}",
-                ctx.min_sequence_number,
-                expected.len()
+                expected.len(),
+                ctx.min_sequence_number
             )));
         }
     }
