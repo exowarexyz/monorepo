@@ -1,31 +1,38 @@
 use std::time::Duration;
 
-use anyhow::anyhow;
-use connectrpc::ErrorCode;
-use exoware_sdk::keys::Key;
+use anyhow::{anyhow, bail, ensure};
 use exoware_sdk::{ClientError, PrefixedStoreClient};
 use rand::RngExt;
+
+use crate::client::is_transient_ingest_error;
+use crate::record::{record_refs, Record};
 
 const MAX_INGEST_RETRY_BACKOFF: Duration = Duration::from_secs(5);
 
 /// Default number of key/value pairs in one ingest request for workload commands.
 pub(crate) const DEFAULT_INGEST_BATCH_SIZE: usize = 100;
 
-/// Ingest error codes that can self-resolve, so retrying the same batch is worthwhile.
-pub(crate) fn is_transient_ingest_code(code: ErrorCode) -> bool {
-    matches!(
-        code,
-        ErrorCode::ResourceExhausted
-            | ErrorCode::Unavailable
-            | ErrorCode::DeadlineExceeded
-            | ErrorCode::Unknown
-            | ErrorCode::Aborted
-            | ErrorCode::Internal
-    )
+/// Shared ingest retry CLI flags for commands that write through the ingest API.
+#[derive(clap::Args, Clone, Copy, Debug)]
+pub struct IngestRetryArgs {
+    /// Max attempts per batch when ingest returns a transient error.
+    #[arg(long = "ingest-retry-attempts", default_value_t = 150)]
+    pub attempts: usize,
+    /// Backoff in milliseconds between transient ingest retries.
+    #[arg(long = "ingest-retry-backoff-ms", default_value_t = 200)]
+    pub backoff_ms: u64,
 }
 
-pub(crate) fn is_transient_ingest_error(err: &ClientError) -> bool {
-    err.rpc_code().is_some_and(is_transient_ingest_code)
+impl IngestRetryArgs {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        ensure!(self.attempts > 0, "--ingest-retry-attempts must be > 0");
+        ensure!(self.backoff_ms > 0, "--ingest-retry-backoff-ms must be > 0");
+        Ok(())
+    }
+
+    pub fn backoff(&self) -> Duration {
+        Duration::from_millis(self.backoff_ms)
+    }
 }
 
 /// Result of a batch that ingested successfully.
@@ -72,7 +79,7 @@ fn retry_delay_after_hint(hint: Duration, backoff: Duration, retry_number: u64) 
     hint.saturating_add(retry_delay(backoff, retry_number))
 }
 
-/// Ingests `refs`, retrying transient failures up to `attempts` times with capped exponential
+/// Ingests `records`, retrying transient failures up to `attempts` times with capped exponential
 /// backoff and full jitter.
 ///
 /// Each retry is logged so write-path backpressure stays visible rather than hidden, and the
@@ -80,17 +87,15 @@ fn retry_delay_after_hint(hint: Duration, backoff: Duration, retry_number: u64) 
 /// exhausted retries return an error tagged with `label`.
 pub(crate) async fn ingest_with_retry(
     client: &PrefixedStoreClient,
-    refs: &[(&Key, &[u8])],
+    records: &[Record],
     attempts: usize,
     backoff: Duration,
     label: &str,
 ) -> anyhow::Result<IngestOutcome> {
+    let refs = record_refs(records);
     let mut transient_retries = 0u64;
-    let mut last_err: Option<ClientError> = None;
-    let mut attempts_made = 0usize;
     for attempt in 1..=attempts {
-        attempts_made = attempt;
-        match client.ingest().put(refs).await {
+        match client.ingest().put(&refs).await {
             Ok(sequence_number) => {
                 return Ok(IngestOutcome {
                     sequence_number,
@@ -111,34 +116,18 @@ pub(crate) async fn ingest_with_retry(
                 tokio::time::sleep(delay).await;
             }
             Err(err) => {
-                last_err = Some(err);
-                break;
+                return Err(anyhow!(
+                    "ingest failed for {label} after {attempt} attempt(s) (configured maximum: {attempts}): {err}"
+                ));
             }
         }
     }
-
-    let err_text = last_err
-        .map(|e| e.to_string())
-        .unwrap_or_else(|| "ingest exhausted retries without success".to_string());
-    Err(anyhow!(
-        "ingest failed for {label} after {attempts_made} attempt(s) (configured maximum: {attempts}): {err_text}"
-    ))
+    bail!("ingest retry attempts must be > 0")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn transient_ingest_codes_cover_connect_transients() {
-        assert!(is_transient_ingest_code(ErrorCode::ResourceExhausted));
-        assert!(is_transient_ingest_code(ErrorCode::Unavailable));
-        assert!(is_transient_ingest_code(ErrorCode::DeadlineExceeded));
-        assert!(is_transient_ingest_code(ErrorCode::Unknown));
-        assert!(is_transient_ingest_code(ErrorCode::Aborted));
-        assert!(is_transient_ingest_code(ErrorCode::Internal));
-        assert!(!is_transient_ingest_code(ErrorCode::InvalidArgument));
-    }
 
     #[test]
     fn retry_delay_stays_within_the_capped_backoff_window() {

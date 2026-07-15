@@ -31,12 +31,27 @@ enum KeyLayout {
 
 /// Defaults are run-specific so independent runs against persistent stores do
 /// not reuse the same physical keys unless the caller opts into a namespace.
-pub fn default_run_namespace() -> u64 {
+///
+/// `salt` mixes caller-specific entropy (such as a validation seed) into the
+/// derivation; pass 0 when the timestamp and process id suffice.
+pub fn default_run_namespace(salt: u64) -> u64 {
     let now_nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as u64;
-    now_nanos ^ u64::from(std::process::id()).rotate_left(17)
+    now_nanos ^ u64::from(std::process::id()).rotate_left(17) ^ mix64(salt)
+}
+
+/// Shared keyspace CLI flags for workload commands.
+#[derive(clap::Args, Clone, Copy, Debug)]
+pub struct KeyspaceArgs {
+    /// Physical key length for generated workload keys.
+    #[arg(long, default_value_t = DEFAULT_KEY_LEN)]
+    pub key_len: usize,
+    /// Key namespace; pass the same value across commands to share a keyspace
+    /// (defaults to a run-specific value).
+    #[arg(long)]
+    pub namespace: Option<u64>,
 }
 
 /// Deterministic workload key generator.
@@ -73,7 +88,7 @@ impl Keyspace {
         );
         ensure!(
             key_len >= min_key_len(layout, namespace.len()),
-            "--key-len must be >= {} for this namespace",
+            "key_len must be >= {} for this namespace",
             min_key_len(layout, namespace.len())
         );
         Ok(Self {
@@ -111,12 +126,12 @@ impl Keyspace {
     }
 
     /// Returns the deterministic key for an inserted logical index.
-    pub fn inserted_key(&self, index: u64) -> anyhow::Result<Key> {
+    pub fn inserted_key(&self, index: u64) -> Key {
         self.key(index, INSERTED_KEY_DOMAIN)
     }
 
     /// Returns a deterministic key from a disjoint domain for negative lookups.
-    pub fn missing_key(&self, index: u64) -> anyhow::Result<Key> {
+    pub fn missing_key(&self, index: u64) -> Key {
         self.key(index, MISSING_KEY_DOMAIN)
     }
 
@@ -132,16 +147,12 @@ impl Keyspace {
         let index_bytes = key.as_ref().get(index_start..index_start + INDEX_BYTES)?;
         let index = u64::from_be_bytes(index_bytes.try_into().expect("slice is INDEX_BYTES long"));
 
-        let expected = self.inserted_key(index).ok()?;
-        (expected == *key).then_some(index)
+        (self.inserted_key(index) == *key).then_some(index)
     }
 
-    fn key(&self, index: u64, domain: u8) -> anyhow::Result<Key> {
-        ensure!(
-            self.key_len >= min_key_len(self.layout, self.namespace.len()),
-            "keyspace key_len is too small for namespace"
-        );
-
+    // Infallible because the constructor validates that key_len fits the
+    // namespace, domain, and index for this layout, and the fields never change.
+    fn key(&self, index: u64, domain: u8) -> Key {
         let mut key = vec![0u8; self.key_len];
         let namespace_start = self.namespace_start();
         match self.layout {
@@ -178,7 +189,7 @@ impl Keyspace {
                     },
             ),
         );
-        Ok(Key::from(key))
+        Key::from(key)
     }
 
     fn namespace_start(&self) -> usize {
@@ -243,8 +254,8 @@ mod tests {
         let keyspace = Keyspace::new(b"test".to_vec(), DEFAULT_KEY_LEN).unwrap();
         let mut seen = HashSet::new();
         for index in 0..64u64 {
-            let inserted = keyspace.inserted_key(index).unwrap();
-            let missing = keyspace.missing_key(index).unwrap();
+            let inserted = keyspace.inserted_key(index);
+            let missing = keyspace.missing_key(index);
             assert_eq!(inserted[0], missing[0]);
             assert!(seen.insert(inserted));
             assert!(seen.insert(missing));
@@ -256,11 +267,8 @@ mod tests {
         let a = Keyspace::from_u64_namespace(42, DEFAULT_KEY_LEN).unwrap();
         let b = Keyspace::from_u64_namespace(42, DEFAULT_KEY_LEN).unwrap();
         for index in 0..16u64 {
-            assert_eq!(
-                a.inserted_key(index).unwrap(),
-                b.inserted_key(index).unwrap()
-            );
-            assert_eq!(a.missing_key(index).unwrap(), b.missing_key(index).unwrap());
+            assert_eq!(a.inserted_key(index), b.inserted_key(index));
+            assert_eq!(a.missing_key(index), b.missing_key(index));
         }
     }
 
@@ -268,7 +276,7 @@ mod tests {
     fn entropy_byte_spreads_keys_across_all_leading_buckets() {
         let keyspace = Keyspace::unnamespaced(DEFAULT_KEY_LEN).unwrap();
         let buckets: HashSet<u8> = (0..128u64)
-            .map(|index| keyspace.inserted_key(index).unwrap()[0] >> 5)
+            .map(|index| keyspace.inserted_key(index)[0] >> 5)
             .collect();
         assert_eq!(buckets.len(), 8);
     }
@@ -276,7 +284,7 @@ mod tests {
     #[test]
     fn keys_use_configured_length() {
         let keyspace = Keyspace::unnamespaced(24).unwrap();
-        assert_eq!(keyspace.inserted_key(0).unwrap().len(), 24);
+        assert_eq!(keyspace.inserted_key(0).len(), 24);
     }
 
     #[test]
@@ -284,33 +292,29 @@ mod tests {
         let keyspace_a = Keyspace::from_u64_namespace(100, DEFAULT_KEY_LEN).unwrap();
         let keyspace_b = Keyspace::from_u64_namespace(101, DEFAULT_KEY_LEN).unwrap();
         let a: HashSet<Key> = (0..64u64)
-            .map(|index| keyspace_a.inserted_key(index).unwrap())
+            .map(|index| keyspace_a.inserted_key(index))
             .collect();
 
-        assert!((0..64u64).all(|index| !a.contains(&keyspace_b.inserted_key(index).unwrap())));
+        assert!((0..64u64).all(|index| !a.contains(&keyspace_b.inserted_key(index))));
     }
 
     #[test]
     fn inserted_index_of_round_trips_and_rejects_foreign_keys() {
         let keyspace = Keyspace::from_u64_namespace(7, DEFAULT_KEY_LEN).unwrap();
         for index in [0u64, 1, 255, 1 << 40] {
-            let key = keyspace.inserted_key(index).unwrap();
+            let key = keyspace.inserted_key(index);
             assert_eq!(keyspace.inserted_index_of(&key), Some(index));
         }
 
-        let missing = keyspace.missing_key(3).unwrap();
+        let missing = keyspace.missing_key(3);
         assert_eq!(keyspace.inserted_index_of(&missing), None);
 
         let other_namespace = Keyspace::from_u64_namespace(8, DEFAULT_KEY_LEN)
             .unwrap()
-            .inserted_key(3)
-            .unwrap();
+            .inserted_key(3);
         assert_eq!(keyspace.inserted_index_of(&other_namespace), None);
 
-        let other_len = Keyspace::from_u64_namespace(7, 32)
-            .unwrap()
-            .inserted_key(3)
-            .unwrap();
+        let other_len = Keyspace::from_u64_namespace(7, 32).unwrap().inserted_key(3);
         assert_eq!(keyspace.inserted_index_of(&other_len), None);
 
         let zeroes = Key::from(vec![0u8; DEFAULT_KEY_LEN]);
@@ -324,24 +328,24 @@ mod tests {
         let unnamespaced_spread = Keyspace::unnamespaced(DEFAULT_KEY_LEN).unwrap();
 
         let ordered: Vec<Key> = (0..64u64)
-            .map(|index| validation.inserted_key(index).unwrap())
+            .map(|index| validation.inserted_key(index))
             .collect();
         let mut sorted = ordered.clone();
         sorted.sort_unstable();
         assert_eq!(ordered, sorted);
 
         for index in 0..64u64 {
-            let validation_key = validation.inserted_key(index).unwrap();
+            let validation_key = validation.inserted_key(index);
             assert_eq!(
                 &validation_key[..VALIDATION_PREFIX.len()],
                 VALIDATION_PREFIX
             );
             assert_ne!(
-                &spread.inserted_key(index).unwrap()[..VALIDATION_PREFIX.len()],
+                &spread.inserted_key(index)[..VALIDATION_PREFIX.len()],
                 VALIDATION_PREFIX
             );
             assert_ne!(
-                &unnamespaced_spread.inserted_key(index).unwrap()[..VALIDATION_PREFIX.len()],
+                &unnamespaced_spread.inserted_key(index)[..VALIDATION_PREFIX.len()],
                 VALIDATION_PREFIX
             );
         }

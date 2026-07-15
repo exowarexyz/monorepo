@@ -7,34 +7,37 @@
 //! - sampled not-found lookups
 //! - sampled range query correctness
 //!
+//! Overlap-ledger appends retry transient failures until the process is
+//! interrupted, so a chaos writer survives temporary outages.
+//!
 //! Example:
 //!   cargo run --release -p exoware-workload -- validate \
 //!     --url http://localhost:10000 \
 //!     --keys 100
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, ensure, Context};
 use clap::ValueEnum;
-use connectrpc::ErrorCode;
 use exoware_sdk::keys::{next_key, Key, MAX_KEY_LEN};
 use exoware_sdk::kv_codec::KvReducedValue;
-use exoware_sdk::{ClientError, PrefixedStoreClient, RangeMode};
+use exoware_sdk::{PrefixedStoreClient, RangeMode};
 use exoware_sdk::{RangeReduceOp, RangeReduceRequest, RangeReducerSpec};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{RngExt, SeedableRng};
 
-use crate::client::{build_client, ClientConfig};
+use crate::client::{
+    build_client, is_transient_ingest_error, is_transient_query_error, ClientArgs, ClientConfig,
+};
 use crate::deterministic::mix64;
-use crate::ingest::{ingest_with_retry, is_transient_ingest_error, retry_delay_for_error};
-use crate::keyspace::{Keyspace, DEFAULT_KEY_LEN};
+use crate::ingest::{ingest_with_retry, retry_delay_for_error, IngestRetryArgs};
+use crate::keyspace::{default_run_namespace, Keyspace, KeyspaceArgs};
 use crate::ledger::{
-    append_overlap_ledger_record, checkpoint_overlap_ledger, hex_encode, read_overlap_ledger,
-    validate_overlap_ledger, OVERLAP_LEDGER_SNAPSHOT_INTERVAL,
+    read_overlap_ledger, snapshot_interval, validate_overlap_ledger, OverlapLedgerWriter,
 };
 use crate::record::Record;
 use crate::value::{
@@ -43,6 +46,10 @@ use crate::value::{
 };
 
 const QUERY_RANGE_MAX_LIMIT: usize = 10_000;
+
+// One streaming multi-get covers this many pending keys, bounding request
+// size while replacing per-key round trips during visibility polling.
+const VISIBILITY_KEYS_PER_CALL: usize = 1_024;
 
 // Standard validation owns the full write-then-read lifecycle for one run.
 // The overlap ledger modes split that lifecycle across processes so a chaos run
@@ -59,8 +66,8 @@ enum ValidateMode {
 pub struct Args {
     #[arg(long, value_enum, default_value_t = ValidateMode::Standard)]
     mode: ValidateMode,
-    #[arg(long, default_value = "http://localhost:10000")]
-    url: String,
+    #[command(flatten)]
+    client: ClientArgs,
     #[arg(long, default_value_t = 100)]
     keys: u64,
     #[arg(long, default_value_t = 25)]
@@ -84,21 +91,10 @@ pub struct Args {
     /// Maximum generated value size accepted by this validation run.
     #[arg(long, default_value_t = DEFAULT_MAX_VALUE_SIZE)]
     max_value_size: usize,
-    /// Max attempts for each initial write batch. Continuous overlap-ledger appends retry until
-    /// the process is interrupted so a chaos writer survives temporary outages.
-    #[arg(long, default_value_t = 150)]
-    ingest_retry_attempts: usize,
-    #[arg(long, default_value_t = 200)]
-    ingest_retry_backoff_ms: u64,
-    /// Max client read retry attempts for lookup/range calls.
-    #[arg(long, default_value_t = 3)]
-    read_retry_attempts: usize,
-    /// Physical key length for generated validation keys.
-    #[arg(long, default_value_t = DEFAULT_KEY_LEN)]
-    key_len: usize,
-    /// Optional namespace override (defaults to timestamp-derived value).
-    #[arg(long)]
-    namespace: Option<u64>,
+    #[command(flatten)]
+    ingest_retry: IngestRetryArgs,
+    #[command(flatten)]
+    keyspace: KeyspaceArgs,
     /// Validate eventual queryability by scanning the full inserted keyspace via
     /// paginated range queries (scales to very large key counts).
     #[arg(long, default_value_t = false)]
@@ -132,8 +128,7 @@ pub struct Config {
     seed: u64,
     value_size: usize,
     max_value_size: usize,
-    ingest_retry_attempts: usize,
-    ingest_retry_backoff_ms: u64,
+    ingest_retry: IngestRetryArgs,
     key_len: usize,
     namespace: Option<u64>,
     full_range_verify: bool,
@@ -149,7 +144,7 @@ impl TryFrom<Args> for Config {
     fn try_from(args: Args) -> anyhow::Result<Self> {
         let config = Self {
             mode: args.mode,
-            client: ClientConfig::new(args.url, args.read_retry_attempts)?,
+            client: args.client.into_config()?,
             keys: args.keys,
             batch_size: args.batch_size,
             lookup_samples: args.lookup_samples,
@@ -161,10 +156,9 @@ impl TryFrom<Args> for Config {
             seed: args.seed,
             value_size: args.value_size,
             max_value_size: args.max_value_size,
-            ingest_retry_attempts: args.ingest_retry_attempts,
-            ingest_retry_backoff_ms: args.ingest_retry_backoff_ms,
-            key_len: args.key_len,
-            namespace: args.namespace,
+            ingest_retry: args.ingest_retry,
+            key_len: args.keyspace.key_len,
+            namespace: args.keyspace.namespace,
             full_range_verify: args.full_range_verify,
             range_page_size: args.range_page_size,
             ledger_path: args.ledger_path,
@@ -181,14 +175,6 @@ struct RangePlan {
     start_idx: usize,
     end_idx: usize,
     page_size: usize,
-}
-
-#[derive(Debug)]
-struct RangeVisibilityScan {
-    contiguous_visible: u64,
-    pages_scanned: u64,
-    complete: bool,
-    detail: String,
 }
 
 #[derive(Debug)]
@@ -287,7 +273,7 @@ fn range_scan_deadline_error(
 ) -> RangeScanError {
     RangeScanError::Permanent(anyhow!(
         "range scan deadline exceeded after {pages_scanned} pages: matched {matched_rows} of {expected_rows} expected rows, skipped {foreign_rows} foreign rows, next boundary {}",
-        hex_encode(boundary)
+        hex::encode(boundary)
     ))
 }
 
@@ -393,21 +379,21 @@ async fn scan_window_for_expected(
             let Some(record) = expected.get(matched) else {
                 return Err(RangeScanError::Permanent(anyhow!(
                     "row mismatch: own key {} appeared after all {} expected rows matched",
-                    hex_encode(key),
+                    hex::encode(key),
                     expected.len()
                 )));
             };
             if *key != record.key {
                 return Err(RangeScanError::Permanent(anyhow!(
                     "row mismatch at position {matched}: expected key {}, got {}",
-                    hex_encode(&record.key),
-                    hex_encode(key)
+                    hex::encode(&record.key),
+                    hex::encode(key)
                 )));
             }
             if value.as_ref() != record.value.as_slice() {
                 return Err(RangeScanError::Permanent(anyhow!(
                     "value mismatch for key {}",
-                    hex_encode(key)
+                    hex::encode(key)
                 )));
             }
             matched += 1;
@@ -420,8 +406,8 @@ async fn scan_window_for_expected(
         if rows.len() < page_size {
             return Err(RangeScanError::Permanent(anyhow!(
                 "range window exhausted with {matched} of {} expected rows visible at sequence floor {}",
-                ctx.min_sequence_number,
-                expected.len()
+                expected.len(),
+                ctx.min_sequence_number
             )));
         }
 
@@ -455,7 +441,9 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 .await
         }
         ValidateMode::OverlapLedgerWrite => {
-            let namespace = cli.namespace.unwrap_or_else(|| default_namespace(cli.seed));
+            let namespace = cli
+                .namespace
+                .unwrap_or_else(|| default_run_namespace(cli.seed));
             run_overlap_ledger_write_mode(&cli, &client, cli.client.endpoint(), namespace).await
         }
         ValidateMode::OverlapLedgerVerify => {
@@ -478,7 +466,9 @@ async fn run_standard_validation(
     timeout: Duration,
     poll_interval: Duration,
 ) -> anyhow::Result<()> {
-    let namespace = cli.namespace.unwrap_or_else(|| default_namespace(cli.seed));
+    let namespace = cli
+        .namespace
+        .unwrap_or_else(|| default_run_namespace(cli.seed));
     let keyspace = Keyspace::validation_from_u64_namespace(namespace, cli.key_len)?;
     let mut rng = StdRng::seed_from_u64(cli.seed ^ namespace.rotate_left(7));
 
@@ -499,11 +489,10 @@ async fn run_standard_validation(
             cli.keys,
             cli.batch_size,
             namespace,
-            cli.ingest_retry_attempts,
-            Duration::from_millis(cli.ingest_retry_backoff_ms),
+            &cli.ingest_retry,
             |index| {
                 Ok(Record {
-                    key: keyspace.inserted_key(index)?,
+                    key: keyspace.inserted_key(index),
                     value: value_for_index(namespace, index, cli.value_size),
                 })
             },
@@ -532,8 +521,12 @@ async fn run_standard_validation(
         return Ok(());
     }
 
-    let records = build_records(&keyspace, namespace, cli.keys, cli.value_size)?;
-    let mut sorted_records = records.clone();
+    let records = build_records(&keyspace, cli.keys, |index| {
+        value_for_index(namespace, index, cli.value_size)
+    })?;
+    // A sorted view over borrowed records; cloning the dataset for ordering
+    // would double resident memory for the whole run.
+    let mut sorted_records: Vec<&Record> = records.iter().collect();
     sorted_records.sort_by(|a, b| a.key.cmp(&b.key));
 
     let point_indices = sample_unique_indices(records.len(), cli.lookup_samples, &mut rng);
@@ -550,40 +543,17 @@ async fn run_standard_validation(
         u64::try_from(records.len()).context("record count does not fit in u64")?,
         cli.batch_size,
         namespace,
-        cli.ingest_retry_attempts,
-        Duration::from_millis(cli.ingest_retry_backoff_ms),
-        |index| {
-            records
-                .get(usize::try_from(index).context("record index does not fit in usize")?)
-                .cloned()
-                .context("write phase generated an out-of-bounds record index")
-        },
+        &cli.ingest_retry,
+        record_at(&records),
     )
     .await?;
     tracing::info!(query_url = %url, "Validating query endpoint");
-    wait_for_all_visible(
-        &ValidationCtx::new(client, url, min_sequence_number, timeout, poll_interval),
-        &records,
-    )
-    .await?;
-    run_point_samples(
-        &ValidationCtx::new(client, url, min_sequence_number, timeout, poll_interval),
-        &records,
-        &point_indices,
-    )
-    .await?;
-    run_missing_samples(
-        &ValidationCtx::new(client, url, min_sequence_number, timeout, poll_interval),
-        &keyspace,
-        &missing_indices,
-    )
-    .await?;
-    run_range_samples(
-        &ValidationCtx::new(client, url, min_sequence_number, timeout, poll_interval),
-        &sorted_records,
-        &range_plans,
-    )
-    .await?;
+    // Each validation phase polls against its own fresh deadline.
+    let ctx = || ValidationCtx::new(client, url, min_sequence_number, timeout, poll_interval);
+    wait_for_all_visible(&ctx(), &records).await?;
+    run_point_samples(&ctx(), &records, &point_indices).await?;
+    run_missing_samples(&ctx(), &keyspace, &missing_indices).await?;
+    run_range_samples(&ctx(), &sorted_records, &range_plans).await?;
 
     tracing::info!(
         inserted_keys = records.len(),
@@ -615,31 +585,22 @@ async fn run_overlap_ledger_write_mode(
         "Starting overlap ledger writer"
     );
     let keyspace = Keyspace::validation_from_u64_namespace(namespace, cli.key_len)?;
-    let mut records = build_overlap_records(&keyspace, namespace, cli.keys)?;
+    let mut records = build_records(&keyspace, cli.keys, |index| {
+        overlap_value_for_index(namespace, index)
+    })?;
     let mut sequence_number = run_write_phase(
         client,
         u64::try_from(records.len()).context("record count does not fit in u64")?,
         cli.batch_size,
         namespace,
-        cli.ingest_retry_attempts,
-        Duration::from_millis(cli.ingest_retry_backoff_ms),
-        |index| {
-            records
-                .get(usize::try_from(index).context("record index does not fit in usize")?)
-                .cloned()
-                .context("write phase generated an out-of-bounds record index")
-        },
+        &cli.ingest_retry,
+        record_at(&records),
     )
     .await?;
 
     let mut successful_writes = records.len() as u64;
-    checkpoint_overlap_ledger(
-        ledger_path,
-        namespace,
-        successful_writes,
-        sequence_number,
-        &records,
-    )?;
+    let mut ledger_writer = OverlapLedgerWriter::new(ledger_path);
+    ledger_writer.checkpoint(namespace, successful_writes, sequence_number, &records)?;
 
     let mut next_index = records.len() as u64;
     let shutdown = overlap_shutdown_signal();
@@ -650,13 +611,14 @@ async fn run_overlap_ledger_write_mode(
     // The initial fixture is bounded so setup failures surface promptly; the steady-state writer
     // stays alive through transient outages until it is explicitly stopped.
     'writer: loop {
-        let key = keyspace.inserted_key(next_index)?;
-        let value = overlap_value_for_index(namespace, next_index);
-        let ingest_value = value.clone();
-        let refs = [(&key, ingest_value.as_slice())];
+        let record = Record {
+            key: keyspace.inserted_key(next_index),
+            value: overlap_value_for_index(namespace, next_index),
+        };
         let label = format!("overlap-ledger append index {}", next_index);
         let mut attempt = 0u64;
         loop {
+            let refs = [(&record.key, record.value.as_slice())];
             let ingest = client.ingest();
             let ingest_future = ingest.put(&refs);
             tokio::pin!(ingest_future);
@@ -667,30 +629,6 @@ async fn run_overlap_ledger_write_mode(
             match put_result {
                 Ok(token) => {
                     sequence_number = token;
-                    let record = Record {
-                        key: key.clone(),
-                        value,
-                    };
-                    append_overlap_ledger_record(
-                        ledger_path,
-                        successful_writes.saturating_add(1),
-                        sequence_number,
-                        &record,
-                    )?;
-                    records.push(record);
-                    successful_writes = successful_writes.saturating_add(1);
-                    writes_since_checkpoint = writes_since_checkpoint.saturating_add(1);
-                    if writes_since_checkpoint >= OVERLAP_LEDGER_SNAPSHOT_INTERVAL {
-                        checkpoint_overlap_ledger(
-                            ledger_path,
-                            namespace,
-                            successful_writes,
-                            sequence_number,
-                            &records,
-                        )?;
-                        writes_since_checkpoint = 0;
-                    }
-                    next_index = next_index.saturating_add(1);
                     break;
                 }
                 Err(err) if is_transient_ingest_error(&err) => {
@@ -704,7 +642,7 @@ async fn run_overlap_ledger_write_mode(
                     );
                     let sleep = tokio::time::sleep(retry_delay_for_error(
                         &err,
-                        Duration::from_millis(cli.ingest_retry_backoff_ms),
+                        cli.ingest_retry.backoff(),
                         attempt,
                     ));
                     tokio::pin!(sleep);
@@ -719,6 +657,16 @@ async fn run_overlap_ledger_write_mode(
             }
         }
 
+        successful_writes = successful_writes.saturating_add(1);
+        ledger_writer.append(successful_writes, sequence_number, &record)?;
+        records.push(record);
+        writes_since_checkpoint = writes_since_checkpoint.saturating_add(1);
+        if writes_since_checkpoint >= snapshot_interval(records.len()) {
+            ledger_writer.checkpoint(namespace, successful_writes, sequence_number, &records)?;
+            writes_since_checkpoint = 0;
+        }
+        next_index = next_index.saturating_add(1);
+
         if !write_interval.is_zero() {
             let sleep = tokio::time::sleep(write_interval);
             tokio::pin!(sleep);
@@ -729,13 +677,7 @@ async fn run_overlap_ledger_write_mode(
         }
     }
 
-    checkpoint_overlap_ledger(
-        ledger_path,
-        namespace,
-        successful_writes,
-        sequence_number,
-        &records,
-    )?;
+    ledger_writer.checkpoint(namespace, successful_writes, sequence_number, &records)?;
     ensure!(
         successful_writes >= cli.overlap_min_writes,
         "overlap-ledger writer recorded only {} logical writes (minimum required: {})",
@@ -774,32 +716,26 @@ async fn run_overlap_ledger_verify_mode(
         ledger_path,
         "Starting overlap ledger verification"
     );
-    let mut sorted_records = ledger.records.clone();
+    let mut sorted_records: Vec<&Record> = ledger.records.iter().collect();
     sorted_records.sort_by(|a, b| a.key.cmp(&b.key));
-    wait_for_all_visible(
-        &ValidationCtx::new(client, url, ledger.sequence_number, timeout, poll_interval),
-        &sorted_records,
-    )
-    .await?;
+    // Each verification phase polls against its own fresh deadline.
+    let ctx = || ValidationCtx::new(client, url, ledger.sequence_number, timeout, poll_interval);
+    wait_for_all_visible(&ctx(), &ledger.records).await?;
     wait_for_exact_range_match(
-        &ValidationCtx::new(client, url, ledger.sequence_number, timeout, poll_interval),
+        &ctx(),
         &sorted_records,
         RangeMode::Forward,
         cli.range_page_size,
     )
     .await?;
     wait_for_exact_range_match(
-        &ValidationCtx::new(client, url, ledger.sequence_number, timeout, poll_interval),
+        &ctx(),
         &sorted_records,
         RangeMode::Reverse,
         cli.range_page_size,
     )
     .await?;
-    wait_for_reduce_count_match(
-        &ValidationCtx::new(client, url, ledger.sequence_number, timeout, poll_interval),
-        &sorted_records,
-    )
-    .await?;
+    wait_for_reduce_count_match(&ctx(), &sorted_records).await?;
     tracing::info!(
         namespace = ledger.namespace,
         expected_keys = sorted_records.len(),
@@ -818,14 +754,7 @@ fn validate_config(cli: &Config) -> anyhow::Result<()> {
     );
     ensure!(cli.poll_interval_ms > 0, "--poll-interval-ms must be > 0");
     ensure!(cli.max_range_limit > 0, "--max-range-limit must be > 0");
-    ensure!(
-        cli.ingest_retry_attempts > 0,
-        "--ingest-retry-attempts must be > 0"
-    );
-    ensure!(
-        cli.ingest_retry_backoff_ms > 0,
-        "--ingest-retry-backoff-ms must be > 0"
-    );
+    cli.ingest_retry.validate()?;
     validate_value_size(cli.value_size, cli.max_value_size)?;
     ensure!(cli.range_page_size > 0, "--range-page-size must be > 0");
     ensure!(
@@ -859,50 +788,35 @@ fn validate_config(cli: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn default_namespace(seed: u64) -> u64 {
-    let now_nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64;
-    now_nanos ^ seed.rotate_left(13) ^ 0xA5A5_A5A5_A5A5_A5A5
-}
-
 fn build_records(
     keyspace: &Keyspace,
-    namespace: u64,
     keys: u64,
-    value_size: usize,
+    value_for: impl Fn(u64) -> Vec<u8>,
 ) -> anyhow::Result<Vec<Record>> {
     let key_count = usize::try_from(keys).context("--keys does not fit into usize")?;
     let mut records = Vec::with_capacity(key_count);
     for i in 0..keys {
         records.push(Record {
-            key: keyspace.inserted_key(i)?,
-            value: value_for_index(namespace, i, value_size),
+            key: keyspace.inserted_key(i),
+            value: value_for(i),
         });
     }
     Ok(records)
 }
 
-fn build_overlap_records(
-    keyspace: &Keyspace,
-    namespace: u64,
-    keys: u64,
-) -> anyhow::Result<Vec<Record>> {
-    let key_count = usize::try_from(keys).context("--keys does not fit into usize")?;
-    let mut records = Vec::with_capacity(key_count);
-    for i in 0..keys {
-        records.push(Record {
-            key: keyspace.inserted_key(i)?,
-            value: overlap_value_for_index(namespace, i),
-        });
+/// Materializes write batches from a pre-built fixture for [`run_write_phase`].
+fn record_at(records: &[Record]) -> impl FnMut(u64) -> anyhow::Result<Record> + '_ {
+    move |index| {
+        records
+            .get(usize::try_from(index).context("record index does not fit in usize")?)
+            .cloned()
+            .context("write phase generated an out-of-bounds record index")
     }
-    Ok(records)
 }
 
 async fn wait_for_exact_range_match(
     ctx: &ValidationCtx<'_>,
-    expected_records: &[Record],
+    expected_records: &[&Record],
     mode: RangeMode,
     page_size: usize,
 ) -> anyhow::Result<()> {
@@ -913,25 +827,23 @@ async fn wait_for_exact_range_match(
         .last()
         .context("expected_records must not be empty for exact range match")?;
     // Reverse scans return rows highest-key-first, so compare against the reversed expectation.
-    let expected_order = Arc::new(match mode {
-        RangeMode::Forward => expected_records.iter().collect::<Vec<_>>(),
-        RangeMode::Reverse => expected_records.iter().rev().collect::<Vec<_>>(),
-    });
+    let expected_order = match mode {
+        RangeMode::Forward => expected_records.to_vec(),
+        RangeMode::Reverse => expected_records.iter().rev().copied().collect::<Vec<_>>(),
+    };
 
     // Only rows carrying confirmed ledger keys participate in the match: the
     // window interleaves other namespaces' rows on a shared store, plus this
     // writer's final append when it landed without an acknowledgment before
     // shutdown.
-    let own_keys = Arc::new(
-        expected_records
-            .iter()
-            .map(|record| record.key.clone())
-            .collect::<HashSet<Key>>(),
-    );
+    let own_keys = expected_records
+        .iter()
+        .map(|record| record.key.clone())
+        .collect::<HashSet<Key>>();
     let label = format!("exact {mode:?} overlap-ledger range match");
     poll_until(ctx, &label, |attempt| {
-        let expected_order = expected_order.clone();
-        let own_keys = own_keys.clone();
+        let expected_order = &expected_order;
+        let own_keys = &own_keys;
         async move {
             match scan_window_for_expected(
                 ctx,
@@ -939,7 +851,7 @@ async fn wait_for_exact_range_match(
                 &last.key,
                 mode,
                 page_size,
-                &expected_order,
+                expected_order,
                 |key| own_keys.contains(key),
             )
             .await
@@ -971,7 +883,7 @@ async fn wait_for_exact_range_match(
 
 async fn wait_for_reduce_count_match(
     ctx: &ValidationCtx<'_>,
-    expected_records: &[Record],
+    expected_records: &[&Record],
 ) -> anyhow::Result<()> {
     let first = expected_records
         .first()
@@ -979,18 +891,18 @@ async fn wait_for_reduce_count_match(
     let last = expected_records
         .last()
         .context("expected_records must not be empty for range reduction match")?;
-    let request = Arc::new(RangeReduceRequest {
+    let request = RangeReduceRequest {
         reducers: vec![RangeReducerSpec {
             op: RangeReduceOp::CountAll,
             expr: None,
         }],
         group_by: Vec::new(),
         filter: None,
-    });
+    };
     let expected_count = expected_records.len() as u64;
 
     poll_until(ctx, "range reduce", |attempt| {
-        let request = request.clone();
+        let request = &request;
         async move {
             match ctx
             .client
@@ -998,7 +910,7 @@ async fn wait_for_reduce_count_match(
             .range_reduce_with_min_sequence_number(
                 &first.key,
                 &last.key,
-                &request,
+                request,
                 ctx.min_sequence_number,
             )
             .await
@@ -1076,8 +988,7 @@ async fn run_write_phase(
     total_keys: u64,
     batch_size: usize,
     namespace: u64,
-    ingest_retry_attempts: usize,
-    ingest_retry_backoff: Duration,
+    ingest_retry: &IngestRetryArgs,
     mut materialize: impl FnMut(u64) -> anyhow::Result<Record>,
 ) -> anyhow::Result<u64> {
     tracing::info!(
@@ -1098,15 +1009,11 @@ async fn run_write_phase(
         for index in start_idx..end_idx {
             records.push(materialize(index)?);
         }
-        let refs: Vec<(&Key, &[u8])> = records
-            .iter()
-            .map(|record| (&record.key, record.value.as_slice()))
-            .collect();
         last_sequence_number = ingest_with_retry(
             client,
-            &refs,
-            ingest_retry_attempts,
-            ingest_retry_backoff,
+            &records,
+            ingest_retry.attempts,
+            ingest_retry.backoff(),
             &format!("batch index {chunk_idx}"),
         )
         .await?
@@ -1118,18 +1025,92 @@ async fn run_write_phase(
     Ok(last_sequence_number)
 }
 
-fn is_transient_query_code(code: ErrorCode) -> bool {
-    matches!(
-        code,
-        ErrorCode::Aborted | ErrorCode::ResourceExhausted | ErrorCode::Unavailable
-    )
+/// Record indexes a visibility batch could not resolve, plus the transient
+/// error that left them unresolved.
+struct PendingVisibility {
+    indices: Vec<usize>,
+    error: Option<String>,
 }
 
-fn is_transient_query_error(err: &ClientError) -> bool {
-    match err {
-        ClientError::Http(_) => true,
-        _ => err.rpc_code().is_some_and(is_transient_query_code),
+/// Checks one batch of records with a single streaming multi-get.
+///
+/// A miss or value mismatch at the sequence floor is a permanent failure;
+/// transient query errors leave the batch's unresolved keys pending.
+async fn check_batch_visibility(
+    ctx: &ValidationCtx<'_>,
+    records: &[Record],
+    batch: &[usize],
+) -> Result<PendingVisibility, PollOutcome<()>> {
+    let mut by_key: HashMap<&Key, usize> =
+        batch.iter().map(|&idx| (&records[idx].key, idx)).collect();
+    let keys: Vec<&Key> = batch.iter().map(|&idx| &records[idx].key).collect();
+    let batch_size = u32::try_from(keys.len()).unwrap_or(u32::MAX);
+    let permanent = |err: anyhow::Error| {
+        PollOutcome::Permanent(err.context(format!(
+            "point-read visibility query failed against {}",
+            ctx.query_url
+        )))
+    };
+
+    let mut stream = match ctx
+        .client
+        .query()
+        .get_many_with_min_sequence_number(&keys, batch_size, ctx.min_sequence_number)
+        .await
+    {
+        Ok(stream) => stream,
+        Err(err) if is_transient_query_error(&err) => {
+            return Ok(PendingVisibility {
+                indices: by_key.into_values().collect(),
+                error: Some(err.to_string()),
+            });
+        }
+        Err(err) => return Err(permanent(anyhow!(err))),
+    };
+    loop {
+        match stream.next_chunk().await {
+            Ok(Some(chunk)) => {
+                for (key, value) in chunk.entries {
+                    let Some(idx) = by_key.remove(&key) else {
+                        continue;
+                    };
+                    let record = &records[idx];
+                    match value {
+                        Some(value) => {
+                            if value.as_ref() != record.value.as_slice() {
+                                return Err(PollOutcome::Permanent(anyhow!(
+                                    "value mismatch for key {} on query {}",
+                                    hex::encode(&record.key),
+                                    ctx.query_url
+                                )));
+                            }
+                        }
+                        None => {
+                            return Err(PollOutcome::Permanent(anyhow!(
+                                "confirmed key {} was missing on query {} at sequence floor {}",
+                                hex::encode(&record.key),
+                                ctx.query_url,
+                                ctx.min_sequence_number
+                            )));
+                        }
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(err) if is_transient_query_error(&err) => {
+                return Ok(PendingVisibility {
+                    indices: by_key.into_values().collect(),
+                    error: Some(err.to_string()),
+                });
+            }
+            Err(err) => return Err(permanent(anyhow!(err))),
+        }
     }
+    // Keys the stream never reported stay pending for the next poll attempt.
+    Ok(PendingVisibility {
+        indices: by_key.into_values().collect(),
+        error: None,
+    })
 }
 
 async fn wait_for_all_visible(ctx: &ValidationCtx<'_>, records: &[Record]) -> anyhow::Result<()> {
@@ -1138,78 +1119,48 @@ async fn wait_for_all_visible(ctx: &ValidationCtx<'_>, records: &[Record]) -> an
         total_keys = records.len(),
         "Waiting for full point-read visibility"
     );
-    let pending = Arc::new(Mutex::new((0..records.len()).collect::<Vec<_>>()));
-    let client = ctx.client;
-    let query_url = ctx.query_url;
-    let min_sequence_number = ctx.min_sequence_number;
+    let pending = Mutex::new((0..records.len()).collect::<Vec<_>>());
 
-    poll_until(ctx, "point-read visibility", {
-        let pending = pending.clone();
-        move |attempt| {
-            let pending = pending.clone();
-            async move {
-                let current_pending =
-                    std::mem::take(&mut *pending.lock().expect("visibility pending lock"));
-                let mut remaining = Vec::new();
-                let mut last_error: Option<String> = None;
-                for idx in current_pending {
-            let record = &records[idx];
-            let get_result = client
-                .query()
-                .get_with_min_sequence_number(&record.key, min_sequence_number)
-                .await;
-            match get_result {
-                Ok(Some(value)) => {
-                    if value.as_ref() != record.value.as_slice() {
-                        return PollOutcome::Permanent(anyhow!(
-                            "value mismatch for key {} on query {}",
-                            hex_encode(&record.key),
-                            query_url
-                        ));
+    poll_until(ctx, "point-read visibility", |attempt| {
+        let pending = &pending;
+        async move {
+            let current_pending =
+                std::mem::take(&mut *pending.lock().expect("visibility pending lock"));
+            let mut remaining = Vec::new();
+            let mut last_error: Option<String> = None;
+            for batch in current_pending.chunks(VISIBILITY_KEYS_PER_CALL) {
+                match check_batch_visibility(ctx, records, batch).await {
+                    Ok(unresolved) => {
+                        remaining.extend(unresolved.indices);
+                        if unresolved.error.is_some() {
+                            last_error = unresolved.error;
+                        }
                     }
-                }
-                Ok(None) => {
-                    return PollOutcome::Permanent(anyhow!(
-                        "confirmed key {} was missing on query {} at sequence floor {}",
-                        hex_encode(&record.key),
-                        query_url,
-                        min_sequence_number
-                    ));
-                }
-                Err(err) if is_transient_query_error(&err) => {
-                    last_error = Some(err.to_string());
-                    remaining.push(idx);
-                }
-                Err(err) => {
-                    return PollOutcome::Permanent(anyhow!(err).context(format!(
-                        "point-read visibility query failed against {query_url}"
-                    )));
+                    Err(outcome) => return outcome,
                 }
             }
-        }
-        if remaining.is_empty() {
-            tracing::info!(
-                query_url = %query_url,
-                attempts = attempt,
-                "All keys visible and correct"
-            );
-            return PollOutcome::Complete(());
-        }
-        let sample = remaining
-            .iter()
-            .take(5)
-            .map(|idx| hex_encode(&records[*idx].key))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let last_error_msg = last_error
-            .as_deref()
-            .unwrap_or("no lookup errors captured; keys remained missing");
-        let pending_count = remaining.len();
-        *pending.lock().expect("visibility pending lock") = remaining;
-        PollOutcome::Pending(format!(
-            "{pending_count} keys still missing; sample missing keys: [{sample}]; last error: {last_error_msg}"
-        ))
+            if remaining.is_empty() {
+                tracing::info!(
+                    query_url = %ctx.query_url,
+                    attempts = attempt,
+                    "All keys visible and correct"
+                );
+                return PollOutcome::Complete(());
             }
+            let sample = remaining
+                .iter()
+                .take(5)
+                .map(|idx| hex::encode(&records[*idx].key))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let last_error_msg = last_error
+                .as_deref()
+                .unwrap_or("no lookup errors captured; keys remained missing");
+            let pending_count = remaining.len();
+            *pending.lock().expect("visibility pending lock") = remaining;
+            PollOutcome::Pending(format!(
+                "{pending_count} keys still missing; sample missing keys: [{sample}]; last error: {last_error_msg}"
+            ))
         }
     })
     .await
@@ -1229,59 +1180,33 @@ async fn wait_for_all_visible_via_range(
         page_size,
         "Waiting for full range visibility"
     );
-    let best = Arc::new(Mutex::new((0u64, 0u64)));
-    poll_until(ctx, "full-range visibility", {
-        let best = best.clone();
-        move |attempt| {
-            let best = best.clone();
-            async move {
+    poll_until(ctx, "full-range visibility", |attempt| async move {
         match scan_visible_prefix_via_range(
-            ctx,
-            keyspace,
-            namespace,
-            total_keys,
-            value_size,
-            page_size,
+            ctx, keyspace, namespace, total_keys, value_size, page_size,
         )
         .await
         {
-            Ok(scan) => {
-                let mut best = best.lock().expect("range visibility progress lock");
-                best.0 = best.0.max(scan.contiguous_visible);
-                best.1 = best.1.max(scan.pages_scanned);
-                if scan.complete {
-                    tracing::info!(
-                        query_url = %ctx.query_url,
-                        attempts = attempt,
-                        pages_scanned = scan.pages_scanned,
-                        total_keys,
-                        "All keys visible and correct via full-range verification"
-                    );
-                    PollOutcome::Complete(())
-                } else {
-                    PollOutcome::Pending(format!(
-                        "visible_prefix={} of {}, best_pages_scanned={}, last_detail={}",
-                        best.0, total_keys, best.1, scan.detail
-                    ))
-                }
+            Ok(pages_scanned) => {
+                tracing::info!(
+                    query_url = %ctx.query_url,
+                    attempts = attempt,
+                    pages_scanned,
+                    total_keys,
+                    "All keys visible and correct via full-range verification"
+                );
+                PollOutcome::Complete(())
             }
             Err(RangeScanError::Transient(err)) => {
-                let best = best.lock().expect("range visibility progress lock");
-                PollOutcome::Pending(format!(
-                    "visible_prefix={} of {}, best_pages_scanned={}, last_detail=range scan transient failure: {err}",
-                    best.0, total_keys, best.1
-                ))
+                PollOutcome::Pending(format!("range scan transient failure: {err}"))
             }
-            Err(RangeScanError::Permanent(err)) => {
-                PollOutcome::Permanent(err)
-            }
-        }
-            }
+            Err(RangeScanError::Permanent(err)) => PollOutcome::Permanent(err),
         }
     })
     .await
 }
 
+/// Scans the validator-owned range once, returning the pages scanned when
+/// every inserted key is visible and correct; any shortfall is an error.
 async fn scan_visible_prefix_via_range(
     ctx: &ValidationCtx<'_>,
     keyspace: &Keyspace,
@@ -1289,22 +1214,13 @@ async fn scan_visible_prefix_via_range(
     total_keys: u64,
     value_size: usize,
     page_size: usize,
-) -> Result<RangeVisibilityScan, RangeScanError> {
+) -> Result<u64, RangeScanError> {
     if total_keys == 0 {
-        return Ok(RangeVisibilityScan {
-            contiguous_visible: 0,
-            pages_scanned: 0,
-            complete: true,
-            detail: "no keys requested".to_string(),
-        });
+        return Ok(0);
     }
 
-    let mut next_start = keyspace
-        .inserted_key(0)
-        .map_err(RangeScanError::Permanent)?;
-    let end = keyspace
-        .inserted_key(total_keys - 1)
-        .map_err(RangeScanError::Permanent)?;
+    let mut next_start = keyspace.inserted_key(0);
+    let end = keyspace.inserted_key(total_keys - 1);
     // Validation keys are contiguous and ordered by their logical index, so
     // this scan stays within the validator-owned physical range.
     let mut expected_order = (0..total_keys).peekable();
@@ -1361,7 +1277,7 @@ async fn scan_visible_prefix_via_range(
             {
                 return Err(RangeScanError::Permanent(anyhow!(
                     "range page repeated or reordered a key after {}",
-                    hex_encode(previous_key)
+                    hex::encode(previous_key)
                 )));
             }
         }
@@ -1382,18 +1298,16 @@ async fn scan_visible_prefix_via_range(
             let expected_index = expected_order.peek().copied().ok_or_else(|| {
                 RangeScanError::Permanent(anyhow!(
                     "range returned an unexpected own key {} after all expected keys",
-                    hex_encode(actual_key)
+                    hex::encode(actual_key)
                 ))
             })?;
             if index != expected_index {
-                let expected_key = keyspace
-                    .inserted_key(expected_index)
-                    .map_err(RangeScanError::Permanent)?;
+                let expected_key = keyspace.inserted_key(expected_index);
                 return Err(RangeScanError::Permanent(anyhow!(
                     "expected sorted key {} (index {}) before own row {} (index {})",
-                    hex_encode(&expected_key),
+                    hex::encode(&expected_key),
                     expected_index,
-                    hex_encode(actual_key),
+                    hex::encode(actual_key),
                     index
                 )));
             }
@@ -1402,7 +1316,7 @@ async fn scan_visible_prefix_via_range(
                 return Err(RangeScanError::Permanent(anyhow!(
                     "value mismatch at index {} for key {}",
                     index,
-                    hex_encode(actual_key)
+                    hex::encode(actual_key)
                 )));
             }
             expected_order.next();
@@ -1412,12 +1326,7 @@ async fn scan_visible_prefix_via_range(
         previous_key = rows.last().map(|(key, _)| key.clone());
 
         if visible >= total_keys {
-            return Ok(RangeVisibilityScan {
-                contiguous_visible: visible,
-                pages_scanned,
-                complete: true,
-                detail: "full sorted key sequence verified".to_string(),
-            });
+            return Ok(pages_scanned);
         }
 
         if rows.len() < page_size {
@@ -1454,48 +1363,38 @@ async fn run_point_samples(
     );
     for idx in point_indices {
         let record = &records[*idx];
-        let key = record.key.clone();
-        let expected_value = record.value.clone();
-        let label = format!("point lookup sample {}", hex_encode(&key));
-        poll_until(ctx, &label, {
-            let key = key.clone();
-            let expected_value = expected_value.clone();
-            move |_| {
-                let key = key.clone();
-                let expected_value = expected_value.clone();
-                async move {
-                    match ctx
-                        .client
-                        .query()
-                        .get_with_min_sequence_number(&key, ctx.min_sequence_number)
-                        .await
-                    {
-                        Ok(Some(value)) => {
-                            if value.as_ref() != expected_value.as_slice() {
-                                PollOutcome::Permanent(anyhow!(
-                                    "point lookup mismatch for key {} on {}",
-                                    hex_encode(&key),
-                                    ctx.query_url
-                                ))
-                            } else {
-                                PollOutcome::Complete(())
-                            }
-                        }
-                        Ok(None) => PollOutcome::Permanent(anyhow!(
-                            "point lookup returned not found for inserted key {} on {}",
-                            hex_encode(&key),
+        let label = format!("point lookup sample {}", hex::encode(&record.key));
+        poll_until(ctx, &label, |_| async {
+            match ctx
+                .client
+                .query()
+                .get_with_min_sequence_number(&record.key, ctx.min_sequence_number)
+                .await
+            {
+                Ok(Some(value)) => {
+                    if value.as_ref() != record.value.as_slice() {
+                        PollOutcome::Permanent(anyhow!(
+                            "point lookup mismatch for key {} on {}",
+                            hex::encode(&record.key),
                             ctx.query_url
-                        )),
-                        Err(err) if is_transient_query_error(&err) => {
-                            PollOutcome::Pending(format!("point lookup transient failure: {err}"))
-                        }
-                        Err(err) => PollOutcome::Permanent(anyhow!(err).context(format!(
-                            "point lookup request failed for key {} on {}",
-                            hex_encode(&key),
-                            ctx.query_url
-                        ))),
+                        ))
+                    } else {
+                        PollOutcome::Complete(())
                     }
                 }
+                Ok(None) => PollOutcome::Permanent(anyhow!(
+                    "point lookup returned not found for inserted key {} on {}",
+                    hex::encode(&record.key),
+                    ctx.query_url
+                )),
+                Err(err) if is_transient_query_error(&err) => {
+                    PollOutcome::Pending(format!("point lookup transient failure: {err}"))
+                }
+                Err(err) => PollOutcome::Permanent(anyhow!(err).context(format!(
+                    "point lookup request failed for key {} on {}",
+                    hex::encode(&record.key),
+                    ctx.query_url
+                ))),
             }
         })
         .await?;
@@ -1514,39 +1413,36 @@ async fn run_missing_samples(
         "Running missing-key lookup samples"
     );
     for idx in missing_indices {
-        let key = keyspace.missing_key(*idx)?;
-        let label = format!("missing-key lookup sample {}", hex_encode(&key));
-        poll_until(ctx, &label, {
-            let key = key.clone();
-            move |_| {
-                let key = key.clone();
-                async move {
-                    match ctx
-                        .client
-                        .query()
-                        .get_with_min_sequence_number(&key, ctx.min_sequence_number)
-                        .await
-                    {
-                        Ok(result) => {
-                            if result.is_some() {
-                                PollOutcome::Permanent(anyhow!(
-                            "expected key {} to be missing on {}, but lookup returned a value",
-                            hex_encode(&key),
-                            ctx.query_url
-                        ))
-                            } else {
-                                PollOutcome::Complete(())
-                            }
+        let key = keyspace.missing_key(*idx);
+        let label = format!("missing-key lookup sample {}", hex::encode(&key));
+        poll_until(ctx, &label, |_| {
+            let key = &key;
+            async move {
+                match ctx
+                    .client
+                    .query()
+                    .get_with_min_sequence_number(key, ctx.min_sequence_number)
+                    .await
+                {
+                    Ok(result) => {
+                        if result.is_some() {
+                            PollOutcome::Permanent(anyhow!(
+                                "expected key {} to be missing on {}, but lookup returned a value",
+                                hex::encode(key),
+                                ctx.query_url
+                            ))
+                        } else {
+                            PollOutcome::Complete(())
                         }
-                        Err(err) if is_transient_query_error(&err) => PollOutcome::Pending(
-                            format!("missing-key lookup transient failure: {err}"),
-                        ),
-                        Err(err) => PollOutcome::Permanent(anyhow!(err).context(format!(
-                            "missing-key lookup request failed for key {} on {}",
-                            hex_encode(&key),
-                            ctx.query_url
-                        ))),
                     }
+                    Err(err) if is_transient_query_error(&err) => {
+                        PollOutcome::Pending(format!("missing-key lookup transient failure: {err}"))
+                    }
+                    Err(err) => PollOutcome::Permanent(anyhow!(err).context(format!(
+                        "missing-key lookup request failed for key {} on {}",
+                        hex::encode(key),
+                        ctx.query_url
+                    ))),
                 }
             }
         })
@@ -1557,7 +1453,7 @@ async fn run_missing_samples(
 
 async fn run_range_samples(
     ctx: &ValidationCtx<'_>,
-    sorted_records: &[Record],
+    sorted_records: &[&Record],
     range_plans: &[RangePlan],
 ) -> anyhow::Result<()> {
     tracing::info!(
@@ -1638,11 +1534,7 @@ fn sample_unique_indices(total: usize, requested: usize, rng: &mut StdRng) -> Ve
     if total == 0 || requested == 0 {
         return Vec::new();
     }
-    let mut all_indices: Vec<usize> = (0..total).collect();
-    all_indices.shuffle(rng);
-    let sample_size = requested.min(total);
-    all_indices.truncate(sample_size);
-    all_indices
+    rand::seq::index::sample(rng, total, requested.min(total)).into_vec()
 }
 
 fn sample_missing_indices(count: usize, rng: &mut StdRng) -> Vec<u64> {
@@ -1683,25 +1575,15 @@ fn build_range_plans(
     plans
 }
 
-fn expected_range_slice(records: &[Record], plan: RangePlan) -> Vec<&Record> {
-    records[plan.start_idx..=plan.end_idx].iter().collect()
-}
-
-fn expected_reverse_range_slice(records: &[Record], plan: RangePlan) -> Vec<&Record> {
-    records[plan.start_idx..=plan.end_idx]
-        .iter()
-        .rev()
-        .collect()
-}
-
-fn expected_range_slice_for_mode(
-    records: &[Record],
+fn expected_range_slice_for_mode<'a>(
+    records: &[&'a Record],
     plan: RangePlan,
     mode: RangeMode,
-) -> Vec<&Record> {
+) -> Vec<&'a Record> {
+    let window = records[plan.start_idx..=plan.end_idx].iter().copied();
     match mode {
-        RangeMode::Forward => expected_range_slice(records, plan),
-        RangeMode::Reverse => expected_reverse_range_slice(records, plan),
+        RangeMode::Forward => window.collect(),
+        RangeMode::Reverse => window.rev().collect(),
     }
 }
 
@@ -1743,25 +1625,14 @@ fn build_range_subsection_checks(plan: RangePlan, sample_seed: u64) -> Vec<Range
 
     let mut checks = Vec::with_capacity(subsections.len() * 2);
     for subsection in subsections {
+        let mut modes = [RangeMode::Forward, RangeMode::Reverse];
         if rng.random_bool(0.5) {
-            checks.push(RangeSubsectionCheck {
-                plan: subsection,
-                mode: RangeMode::Forward,
-            });
-            checks.push(RangeSubsectionCheck {
-                plan: subsection,
-                mode: RangeMode::Reverse,
-            });
-        } else {
-            checks.push(RangeSubsectionCheck {
-                plan: subsection,
-                mode: RangeMode::Reverse,
-            });
-            checks.push(RangeSubsectionCheck {
-                plan: subsection,
-                mode: RangeMode::Forward,
-            });
+            modes.reverse();
         }
+        checks.extend(modes.map(|mode| RangeSubsectionCheck {
+            plan: subsection,
+            mode,
+        }));
     }
     checks
 }
@@ -1769,11 +1640,12 @@ fn build_range_subsection_checks(plan: RangePlan, sample_seed: u64) -> Vec<Range
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keyspace::DEFAULT_KEY_LEN;
     use axum::Router;
     use connectrpc::{ConnectError, ConnectRpcService, RequestContext};
     use exoware_sdk::common::kv::v1::Entry;
     use exoware_sdk::query::{
-        GetManyFrame, GetResponse, OwnedGetManyRequestView, OwnedGetRequestView,
+        GetManyEntry, GetManyFrame, GetResponse, OwnedGetManyRequestView, OwnedGetRequestView,
         OwnedRangeRequestView, OwnedReduceRequestView, RangeFrame, ReduceResponse,
         Service as QueryService, ServiceServer as QueryServiceServer,
     };
@@ -1805,9 +1677,27 @@ mod tests {
         async fn get_many(
             &self,
             _ctx: RequestContext,
-            _request: OwnedGetManyRequestView,
+            request: OwnedGetManyRequestView,
         ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<GetManyFrame>> {
-            Err(ConnectError::unimplemented("test harness"))
+            match self {
+                Self::MissingGet => {
+                    let results = request
+                        .keys
+                        .iter()
+                        .map(|key| GetManyEntry {
+                            key: key.to_vec(),
+                            ..Default::default()
+                        })
+                        .collect();
+                    Ok(connectrpc::Response::stream(stream::iter([Ok(
+                        GetManyFrame {
+                            results,
+                            ..Default::default()
+                        },
+                    )])))
+                }
+                _ => Err(ConnectError::unimplemented("test harness")),
+            }
         }
 
         async fn range(
@@ -1871,7 +1761,7 @@ mod tests {
     async fn full_range_scan_rejects_duplicate_own_row_after_expected_sequence() {
         let namespace = 42;
         let keyspace = Keyspace::validation_from_u64_namespace(namespace, DEFAULT_KEY_LEN).unwrap();
-        let key = keyspace.inserted_key(0).unwrap();
+        let key = keyspace.inserted_key(0);
         let value = value_for_index(namespace, 0, DEFAULT_VALUE_SIZE);
         let client = spawn_range_harness(RangeHarness::Duplicate { key, value }).await;
 
@@ -1945,7 +1835,7 @@ mod tests {
         let namespace = 42;
         let keyspace = Keyspace::validation_from_u64_namespace(namespace, DEFAULT_KEY_LEN).unwrap();
         let record = Record {
-            key: keyspace.inserted_key(0).unwrap(),
+            key: keyspace.inserted_key(0),
             value: value_for_index(namespace, 0, DEFAULT_VALUE_SIZE),
         };
         let client = spawn_range_harness(RangeHarness::MissingGet).await;
@@ -1974,7 +1864,7 @@ mod tests {
         let namespace = 42;
         let keyspace = Keyspace::validation_from_u64_namespace(namespace, DEFAULT_KEY_LEN).unwrap();
         let record = Record {
-            key: keyspace.inserted_key(0).unwrap(),
+            key: keyspace.inserted_key(0),
             value: value_for_index(namespace, 0, DEFAULT_VALUE_SIZE),
         };
         let client = spawn_range_harness(RangeHarness::Delayed {
@@ -2039,17 +1929,19 @@ mod tests {
         let keyspace = Keyspace::from_u64_namespace(55, DEFAULT_KEY_LEN).unwrap();
         let records = (0..10)
             .map(|i| Record {
-                key: keyspace.inserted_key(i).unwrap(),
+                key: keyspace.inserted_key(i),
                 value: value_for_index(55, i, 160),
             })
             .collect::<Vec<_>>();
-        let slice = expected_range_slice(
-            &records,
+        let record_refs: Vec<&Record> = records.iter().collect();
+        let slice = expected_range_slice_for_mode(
+            &record_refs,
             RangePlan {
                 start_idx: 2,
                 end_idx: 7,
                 page_size: 3,
             },
+            RangeMode::Forward,
         );
         assert_eq!(slice.len(), 6);
         assert_eq!(slice[0].key, records[2].key);
@@ -2061,17 +1953,19 @@ mod tests {
         let keyspace = Keyspace::from_u64_namespace(55, DEFAULT_KEY_LEN).unwrap();
         let records = (0..10)
             .map(|i| Record {
-                key: keyspace.inserted_key(i).unwrap(),
+                key: keyspace.inserted_key(i),
                 value: value_for_index(55, i, 160),
             })
             .collect::<Vec<_>>();
-        let slice = expected_reverse_range_slice(
-            &records,
+        let record_refs: Vec<&Record> = records.iter().collect();
+        let slice = expected_range_slice_for_mode(
+            &record_refs,
             RangePlan {
                 start_idx: 2,
                 end_idx: 7,
                 page_size: 3,
             },
+            RangeMode::Reverse,
         );
         assert_eq!(slice.len(), 6);
         assert_eq!(slice[0].key, records[7].key);
@@ -2132,8 +2026,10 @@ mod tests {
             seed: 7,
             value_size,
             max_value_size: DEFAULT_MAX_VALUE_SIZE,
-            ingest_retry_attempts: 150,
-            ingest_retry_backoff_ms: 200,
+            ingest_retry: IngestRetryArgs {
+                attempts: 150,
+                backoff_ms: 200,
+            },
             key_len: DEFAULT_KEY_LEN,
             namespace: None,
             full_range_verify: false,
@@ -2142,28 +2038,6 @@ mod tests {
             overlap_write_interval_ms: 0,
             overlap_min_writes: 1,
         }
-    }
-
-    #[test]
-    fn transient_query_codes_cover_consistency_and_gateway_transients() {
-        assert!(is_transient_query_code(ErrorCode::Aborted));
-        assert!(is_transient_query_code(ErrorCode::ResourceExhausted));
-        assert!(is_transient_query_code(ErrorCode::Unavailable));
-        assert!(!is_transient_query_code(ErrorCode::InvalidArgument));
-        assert!(!is_transient_query_code(ErrorCode::Internal));
-    }
-
-    #[test]
-    fn transient_query_error_classifies_api_statuses() {
-        assert!(is_transient_query_error(&ClientError::Rpc(Box::new(
-            connectrpc::ConnectError::aborted("consistency not ready"),
-        ))));
-        assert!(is_transient_query_error(&ClientError::Rpc(Box::new(
-            connectrpc::ConnectError::unavailable("load shed"),
-        ))));
-        assert!(!is_transient_query_error(&ClientError::Rpc(Box::new(
-            connectrpc::ConnectError::invalid_argument("bad request"),
-        ))));
     }
 
     #[test]

@@ -8,16 +8,17 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::{anyhow, ensure, Context};
 use chrono::Utc;
 use tokio::task::JoinSet;
-use tokio::time::MissedTickBehavior;
 
-use crate::client::{build_client, ClientConfig};
+use crate::client::{build_client, ClientArgs, ClientConfig};
+use crate::exec::{join_all_or_abort, spawn_progress_task, stop_progress_task};
 use crate::ingest::DEFAULT_INGEST_BATCH_SIZE;
-use crate::keyspace::{default_run_namespace, Keyspace, DEFAULT_KEY_LEN, KEYSPACE_LAYOUT_VERSION};
+use crate::keyspace::{default_run_namespace, Keyspace, KeyspaceArgs, KEYSPACE_LAYOUT_VERSION};
+use crate::record::{record_refs, Record};
 use crate::report::{
     print_bench_report, read_bench_manifest_json, write_bench_report_json, BenchConfig,
     BenchManifest, BenchReport, LatencyHistogramsRecorder,
@@ -57,8 +58,8 @@ pub struct Args {
         ]
     )]
     manifest: Option<PathBuf>,
-    #[arg(long, default_value = "http://localhost:10000")]
-    url: String,
+    #[command(flatten)]
+    client: ClientArgs,
     #[arg(long, default_value_t = 10000)]
     keys: u64,
     #[arg(long, default_value_t = 50000)]
@@ -98,15 +99,8 @@ pub struct Args {
     /// Deterministic RNG seed used for benchmark operation selection.
     #[arg(long, default_value_t = DEFAULT_BENCH_RNG_SEED)]
     rng_seed: u64,
-    /// Max client read retry attempts for lookup/range calls.
-    #[arg(long, default_value_t = 3)]
-    read_retry_attempts: usize,
-    /// Physical key length for generated workload keys.
-    #[arg(long, default_value_t = DEFAULT_KEY_LEN)]
-    key_len: usize,
-    /// Key namespace; use the same value as load for a preloaded keyspace.
-    #[arg(long)]
-    namespace: Option<u64>,
+    #[command(flatten)]
+    keyspace: KeyspaceArgs,
     /// Size in bytes of generated values written by ingest operations.
     #[arg(long, default_value_t = DEFAULT_VALUE_SIZE)]
     value_size: usize,
@@ -157,7 +151,10 @@ impl TryFrom<Args> for Config {
         ensure!(args.concurrency > 0, "--concurrency must be > 0");
         ensure!(args.keys > 0, "--keys must be > 0");
         ensure!(args.batch_size > 0, "--batch-size must be > 0");
-        let namespace = args.namespace.unwrap_or_else(default_run_namespace);
+        let namespace = args
+            .keyspace
+            .namespace
+            .unwrap_or_else(|| default_run_namespace(0));
         let workload = WorkloadSpec::new(
             mix,
             args.scan_length,
@@ -168,9 +165,9 @@ impl TryFrom<Args> for Config {
         )?;
 
         Ok(Self {
-            client: ClientConfig::new(args.url, args.read_retry_attempts)?,
+            client: args.client.into_config()?,
             namespace,
-            keyspace: Keyspace::from_u64_namespace(namespace, args.key_len)?,
+            keyspace: Keyspace::from_u64_namespace(namespace, args.keyspace.key_len)?,
             initial_keys: args.keys,
             value_size: args.value_size,
             batch_size: args.batch_size,
@@ -355,7 +352,7 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
             for _ in 0..worker_ops {
                 match plan.next_operation(readable_key_count) {
                     Operation::Read { index } => {
-                        let key = keyspace.inserted_key(index)?;
+                        let key = keyspace.inserted_key(index);
                         let request_start = Instant::now();
                         let result = client.query().get(&key).await;
                         latencies.record_read(request_start.elapsed());
@@ -376,8 +373,8 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
                         // Index-hashed key placement leaves the two endpoint keys in
                         // arbitrary lexicographic order, so sort them into a valid window.
                         let (start_key, end_key) = {
-                            let a = keyspace.inserted_key(start)?;
-                            let b = keyspace.inserted_key(end)?;
+                            let a = keyspace.inserted_key(start);
+                            let b = keyspace.inserted_key(end);
                             if a <= b {
                                 (a, b)
                             } else {
@@ -399,7 +396,7 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
                         }
                     }
                     Operation::Write => {
-                        let mut kvs = Vec::with_capacity(batch_size);
+                        let mut records = Vec::with_capacity(batch_size);
                         for batch_offset in 0..batch_size {
                             let write_idx = worker_batch_write_index(
                                 initial_keys,
@@ -409,16 +406,13 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
                                 batch_offset,
                                 batch_size,
                             )?;
-                            kvs.push((
-                                keyspace.inserted_key(write_idx)?,
-                                value_for_index(namespace, write_idx, value_size),
-                            ));
+                            records.push(Record {
+                                key: keyspace.inserted_key(write_idx),
+                                value: value_for_index(namespace, write_idx, value_size),
+                            });
                         }
                         write_number += 1;
-                        let refs: Vec<(&_, &[_])> = kvs
-                            .iter()
-                            .map(|(key, value)| (key, value.as_slice()))
-                            .collect();
+                        let refs = record_refs(&records);
 
                         let request_start = Instant::now();
                         let result = client.ingest().put(&refs).await;
@@ -441,63 +435,26 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
         });
     }
 
-    let progress_task = if progress_interval_secs > 0 {
-        let ops_done = ops_done.clone();
-        Some(tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(progress_interval_secs));
-            interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                let done = ops_done.load(Ordering::Relaxed);
-                let elapsed = start.elapsed().as_secs_f64();
-                if done >= total_ops {
-                    break;
-                }
-                let rate = if elapsed > 0.0 {
-                    done as f64 / elapsed
-                } else {
-                    0.0
-                };
-                let pct = (done as f64 / total_ops as f64 * 100.0).min(100.0);
-                tracing::info!(
-                    ops_done = done,
-                    total_ops,
-                    elapsed_secs = %format!("{:.1}", elapsed),
-                    current_ops_per_sec = rate as u64,
-                    percent_complete = %format!("{:.1}", pct),
-                    "Benchmark progress"
-                );
-            }
-        }))
-    } else {
-        None
-    };
+    let progress_task = spawn_progress_task(
+        ops_done.clone(),
+        total_ops,
+        progress_interval_secs,
+        start,
+        move |progress| {
+            tracing::info!(
+                ops_done = progress.done,
+                total_ops,
+                elapsed_secs = %format!("{:.1}", progress.elapsed_secs),
+                current_ops_per_sec = progress.per_sec as u64,
+                percent_complete = %format!("{:.1}", progress.percent),
+                "Benchmark progress"
+            );
+        },
+    );
 
-    let workers_result = loop {
-        let Some(result) = workers.join_next().await else {
-            break Ok(());
-        };
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
-                workers.abort_all();
-                while workers.join_next().await.is_some() {}
-                break Err(err);
-            }
-            Err(err) => {
-                workers.abort_all();
-                while workers.join_next().await.is_some() {}
-                break Err(anyhow!("benchmark worker task failed: {err}"));
-            }
-        }
-    };
+    let workers_result = join_all_or_abort(&mut workers, "benchmark worker", |()| {}).await;
 
-    if let Some(t) = progress_task {
-        t.abort();
-        let _ = t.await;
-    }
-
+    stop_progress_task(progress_task).await;
     workers_result?;
 
     let elapsed = start.elapsed();
@@ -507,7 +464,7 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
     let report = BenchReport {
         config: report_config,
         seed: rng_seed,
-        elapsed_ms: elapsed.as_millis(),
+        elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
         operations: total,
         reads: reads_ok.load(Ordering::Relaxed) + read_misses,
         writes: writes_ok.load(Ordering::Relaxed),
@@ -558,6 +515,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::keyspace::DEFAULT_KEY_LEN;
     use axum::Router;
     use connectrpc::{ConnectRpcService, RequestContext};
     use exoware_sdk::ingest::{
@@ -644,7 +602,10 @@ mod tests {
 
     fn sample_args() -> Args {
         Args {
-            url: "http://localhost:10000/".to_string(),
+            client: ClientArgs {
+                url: "http://localhost:10000/".to_string(),
+                read_retry_attempts: 3,
+            },
             manifest: None,
             keys: 10_000,
             ops: 50_000,
@@ -660,9 +621,10 @@ mod tests {
             write_ratio: None,
             scan_ratio: None,
             rng_seed: DEFAULT_BENCH_RNG_SEED,
-            read_retry_attempts: 3,
-            key_len: DEFAULT_KEY_LEN,
-            namespace: Some(42),
+            keyspace: KeyspaceArgs {
+                key_len: DEFAULT_KEY_LEN,
+                namespace: Some(42),
+            },
             value_size: DEFAULT_VALUE_SIZE,
             progress_interval_secs: 10,
             output: None,
@@ -678,7 +640,7 @@ mod tests {
     #[test]
     fn config_uses_key_len() {
         let mut args = sample_args();
-        args.key_len = 24;
+        args.keyspace.key_len = 24;
         let config = Config::try_from(args).expect("bench args should be valid");
         assert_eq!(config.keyspace.key_len(), 24);
     }
@@ -688,11 +650,10 @@ mod tests {
         let config = Config::try_from(sample_args()).expect("bench args should be valid");
         assert_eq!(config.namespace, 42);
         assert_eq!(
-            config.keyspace.inserted_key(0).unwrap(),
+            config.keyspace.inserted_key(0),
             Keyspace::from_u64_namespace(42, DEFAULT_KEY_LEN)
                 .unwrap()
                 .inserted_key(0)
-                .unwrap()
         );
     }
 
@@ -756,7 +717,7 @@ mod tests {
     async fn write_operations_send_configured_ingest_batches() {
         let (url, batch_sizes) = spawn_ingest_harness().await;
         let mut args = sample_args();
-        args.url = url;
+        args.client.url = url;
         args.keys = 1;
         args.ops = 4;
         args.batch_size = 3;

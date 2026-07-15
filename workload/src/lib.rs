@@ -7,6 +7,7 @@
 pub mod bench;
 pub mod client;
 pub(crate) mod deterministic;
+pub(crate) mod exec;
 pub(crate) mod ingest;
 pub mod keyspace;
 pub mod ledger;

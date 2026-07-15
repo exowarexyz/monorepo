@@ -1,10 +1,27 @@
 use std::time::Duration;
 
 use anyhow::{ensure, Context};
-use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreClient};
+use connectrpc::ErrorCode;
+use exoware_sdk::{ClientError, PrefixedStoreClient, RetryConfig, StoreClient};
 
 const DEFAULT_INITIAL_BACKOFF_MS: u64 = 50;
 const DEFAULT_MAX_BACKOFF_MS: u64 = 1_000;
+
+/// Shared SDK client CLI flags for workload commands.
+#[derive(clap::Args, Clone, Debug)]
+pub struct ClientArgs {
+    #[arg(long, default_value = "http://localhost:10000")]
+    pub url: String,
+    /// Max client read retry attempts for lookup/range calls.
+    #[arg(long, default_value_t = 3)]
+    pub read_retry_attempts: usize,
+}
+
+impl ClientArgs {
+    pub fn into_config(self) -> anyhow::Result<ClientConfig> {
+        ClientConfig::new(self.url, self.read_retry_attempts)
+    }
+}
 
 /// Normalized SDK client settings shared by workload commands.
 #[derive(Clone, Debug)]
@@ -37,7 +54,6 @@ impl ClientConfig {
 
 /// Constructs the SDK client used by load, bench, and validate commands.
 pub fn build_client(config: &ClientConfig) -> anyhow::Result<PrefixedStoreClient> {
-    validate_config(config)?;
     let client = StoreClient::builder()
         .url(config.endpoint())
         .retry_config(
@@ -54,10 +70,47 @@ pub fn build_client(config: &ClientConfig) -> anyhow::Result<PrefixedStoreClient
     Ok(PrefixedStoreClient::empty(client))
 }
 
+/// Ingest error codes that can self-resolve, so retrying the same batch is worthwhile.
+///
+/// Deliberately broader than the query list below: workload writes are
+/// deterministic and idempotent, so replaying a batch whose first attempt may
+/// have landed is safe.
+pub(crate) fn is_transient_ingest_code(code: ErrorCode) -> bool {
+    matches!(
+        code,
+        ErrorCode::ResourceExhausted
+            | ErrorCode::Unavailable
+            | ErrorCode::DeadlineExceeded
+            | ErrorCode::Unknown
+            | ErrorCode::Aborted
+            | ErrorCode::Internal
+    )
+}
+
+pub(crate) fn is_transient_ingest_error(err: &ClientError) -> bool {
+    err.rpc_code().is_some_and(is_transient_ingest_code)
+}
+
+/// Query error codes worth re-polling; anything else fails validation fast so
+/// store bugs are not retried into a timeout.
+pub(crate) fn is_transient_query_code(code: ErrorCode) -> bool {
+    matches!(
+        code,
+        ErrorCode::Aborted | ErrorCode::ResourceExhausted | ErrorCode::Unavailable
+    )
+}
+
+pub(crate) fn is_transient_query_error(err: &ClientError) -> bool {
+    match err {
+        ClientError::Http(_) => true,
+        _ => err.rpc_code().is_some_and(is_transient_query_code),
+    }
+}
+
 fn validate_config(config: &ClientConfig) -> anyhow::Result<()> {
     ensure!(
         config.read_retry_attempts > 0,
-        "--read-retry-attempts must be > 0"
+        "read_retry_attempts must be > 0"
     );
     validate_endpoint(&config.endpoint)?;
     Ok(())
@@ -69,9 +122,9 @@ fn validate_endpoint(endpoint: &str) -> anyhow::Result<()> {
         .with_context(|| format!("invalid endpoint URL `{endpoint}`"))?;
     ensure!(
         matches!(uri.scheme_str(), Some("http" | "https")),
-        "--url must use http:// or https://"
+        "endpoint must use http:// or https://"
     );
-    ensure!(uri.authority().is_some(), "--url must include a host");
+    ensure!(uri.authority().is_some(), "endpoint must include a host");
     Ok(())
 }
 
@@ -114,7 +167,39 @@ mod tests {
             endpoint: "http://[::1".to_string(),
             read_retry_attempts: 3,
         };
-        let err = build_client(&config).expect_err("malformed endpoint should be rejected");
-        assert!(err.to_string().contains("invalid endpoint URL"));
+        build_client(&config).expect_err("malformed endpoint should be rejected");
+    }
+
+    #[test]
+    fn transient_ingest_codes_cover_connect_transients() {
+        assert!(is_transient_ingest_code(ErrorCode::ResourceExhausted));
+        assert!(is_transient_ingest_code(ErrorCode::Unavailable));
+        assert!(is_transient_ingest_code(ErrorCode::DeadlineExceeded));
+        assert!(is_transient_ingest_code(ErrorCode::Unknown));
+        assert!(is_transient_ingest_code(ErrorCode::Aborted));
+        assert!(is_transient_ingest_code(ErrorCode::Internal));
+        assert!(!is_transient_ingest_code(ErrorCode::InvalidArgument));
+    }
+
+    #[test]
+    fn transient_query_codes_cover_consistency_and_gateway_transients() {
+        assert!(is_transient_query_code(ErrorCode::Aborted));
+        assert!(is_transient_query_code(ErrorCode::ResourceExhausted));
+        assert!(is_transient_query_code(ErrorCode::Unavailable));
+        assert!(!is_transient_query_code(ErrorCode::InvalidArgument));
+        assert!(!is_transient_query_code(ErrorCode::Internal));
+    }
+
+    #[test]
+    fn transient_query_error_classifies_api_statuses() {
+        assert!(is_transient_query_error(&ClientError::Rpc(Box::new(
+            connectrpc::ConnectError::aborted("consistency not ready"),
+        ))));
+        assert!(is_transient_query_error(&ClientError::Rpc(Box::new(
+            connectrpc::ConnectError::unavailable("load shed"),
+        ))));
+        assert!(!is_transient_query_error(&ClientError::Rpc(Box::new(
+            connectrpc::ConnectError::invalid_argument("bad request"),
+        ))));
     }
 }

@@ -9,8 +9,8 @@ inputs:
     description: Optional path to a prebuilt workload binary.
     required: false
     default: ""
-  load-keys:
-    description: Number of keys to write during load; must match bench-keys.
+  keys:
+    description: Keyspace size; load writes exactly these keys and bench reads them back.
     required: false
     default: "5000"
   load-batch-size:
@@ -25,18 +25,14 @@ inputs:
     description: Shared load/bench key namespace. Empty generates one for this action run.
     required: false
     default: ""
-  bench-keys:
-    description: Preloaded keyspace size for bench; must match load-keys.
-    required: false
-    default: "5000"
   bench-ops:
     description: Number of bench operations for the CI functionality smoke.
     required: false
     default: "10000"
   bench-batch-size:
-    description: Keys per bench write operation; defaults to the workload load command default (100).
+    description: Keys per bench write operation. Empty uses the workload binary's default.
     required: false
-    default: "100"
+    default: ""
   bench-concurrency:
     description: Bench worker concurrency.
     required: false
@@ -171,31 +167,13 @@ runs:
         fi
         echo "value=$namespace" >> "$GITHUB_OUTPUT"
 
-    - name: Validate load and benchmark keyspace sizes
-      shell: bash
-      env:
-        LOAD_KEYS: ${{ inputs.load-keys }}
-        BENCH_KEYS: ${{ inputs.bench-keys }}
-      run: |
-        set -euo pipefail
-        python3 - "$LOAD_KEYS" "$BENCH_KEYS" <<'PY'
-        import sys
-
-        load_keys, bench_keys = map(int, sys.argv[1:])
-        if load_keys != bench_keys:
-            raise SystemExit(
-                f"load-keys ({load_keys}) must match bench-keys ({bench_keys}); "
-                "bench reads the keyspace written by load"
-            )
-        PY
-
     - name: Run load workload
       shell: bash
       env:
         WORKLOAD: ${{ steps.workload.outputs.path }}
         ENDPOINT: ${{ inputs.endpoint }}
         WORKLOAD_NAMESPACE: ${{ steps.namespace.outputs.value }}
-        LOAD_KEYS: ${{ inputs.load-keys }}
+        KEYS: ${{ inputs.keys }}
         LOAD_BATCH_SIZE: ${{ inputs.load-batch-size }}
         LOAD_CONCURRENCY: ${{ inputs.load-concurrency }}
       run: |
@@ -203,7 +181,7 @@ runs:
         "$WORKLOAD" load \
           --url "$ENDPOINT" \
           --namespace "$WORKLOAD_NAMESPACE" \
-          --keys "$LOAD_KEYS" \
+          --keys "$KEYS" \
           --batch-size "$LOAD_BATCH_SIZE" \
           --concurrency "$LOAD_CONCURRENCY"
 
@@ -213,7 +191,7 @@ runs:
         WORKLOAD: ${{ steps.workload.outputs.path }}
         ENDPOINT: ${{ inputs.endpoint }}
         WORKLOAD_NAMESPACE: ${{ steps.namespace.outputs.value }}
-        BENCH_KEYS: ${{ inputs.bench-keys }}
+        KEYS: ${{ inputs.keys }}
         BENCH_OPS: ${{ inputs.bench-ops }}
         BENCH_BATCH_SIZE: ${{ inputs.bench-batch-size }}
         BENCH_CONCURRENCY: ${{ inputs.bench-concurrency }}
@@ -221,17 +199,22 @@ runs:
         BENCH_RNG_SEED: ${{ inputs.bench-rng-seed }}
       run: |
         set -euo pipefail
-        "$WORKLOAD" bench \
-          --url "$ENDPOINT" \
-          --namespace "$WORKLOAD_NAMESPACE" \
-          --keys "$BENCH_KEYS" \
-          --ops "$BENCH_OPS" \
-          --batch-size "$BENCH_BATCH_SIZE" \
-          --concurrency "$BENCH_CONCURRENCY" \
-          --scenario "$BENCH_SCENARIO" \
-          --rng-seed "$BENCH_RNG_SEED" \
-          --progress-interval-secs 0 \
+        args=(
+          --url "$ENDPOINT"
+          --namespace "$WORKLOAD_NAMESPACE"
+          --keys "$KEYS"
+          --ops "$BENCH_OPS"
+          --concurrency "$BENCH_CONCURRENCY"
+          --scenario "$BENCH_SCENARIO"
+          --rng-seed "$BENCH_RNG_SEED"
+          --progress-interval-secs 0
           --output "$RUNNER_TEMP/workload-bench-report.json"
+        )
+        # Empty means "use the binary's default" so the default lives in one place.
+        if [[ -n "$BENCH_BATCH_SIZE" ]]; then
+          args+=(--batch-size "$BENCH_BATCH_SIZE")
+        fi
+        "$WORKLOAD" bench "${args[@]}"
 
     - name: Stamp report with commit
       if: inputs.commit != ''
@@ -291,7 +274,7 @@ runs:
                 f"benchmark reported {report.get('errors')!r} operation errors")
         require(report.get("read_misses") == 0,
                 f"benchmark reported {report.get('read_misses')!r} read misses; "
-                "load-keys and bench-keys must match")
+                "bench must read the keyspace load wrote")
         config = report.get("config")
         require(isinstance(config, dict), "benchmark report has no config object")
         require(config.get("namespace") == expected_namespace,

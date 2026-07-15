@@ -5,51 +5,40 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use anyhow::{anyhow, ensure};
-use exoware_sdk::keys::Key;
+use anyhow::ensure;
 use tokio::task::JoinSet;
-use tokio::time::MissedTickBehavior;
 
-use crate::client::{build_client, ClientConfig};
-use crate::ingest::{ingest_with_retry, DEFAULT_INGEST_BATCH_SIZE};
-use crate::keyspace::{default_run_namespace, Keyspace, DEFAULT_KEY_LEN};
+use crate::client::{build_client, ClientArgs, ClientConfig};
+use crate::exec::{join_all_or_abort, spawn_progress_task, stop_progress_task};
+use crate::ingest::{ingest_with_retry, IngestRetryArgs, DEFAULT_INGEST_BATCH_SIZE};
+use crate::keyspace::{default_run_namespace, Keyspace, KeyspaceArgs};
+use crate::record::Record;
 use crate::value::{value_for_index, DEFAULT_VALUE_SIZE};
 use crate::workload::worker_index_range;
 
 /// Load phase: insert keys via ingest API.
 #[derive(clap::Args, Debug)]
 pub struct Args {
-    #[arg(long, default_value = "http://localhost:10000")]
-    url: String,
+    #[command(flatten)]
+    client: ClientArgs,
     #[arg(long, default_value_t = 10000)]
     keys: u64,
     #[arg(long, default_value_t = DEFAULT_INGEST_BATCH_SIZE)]
     batch_size: usize,
     #[arg(long, default_value_t = 4)]
     concurrency: usize,
-    /// Max client read retry attempts for lookup/range calls.
-    #[arg(long, default_value_t = 3)]
-    read_retry_attempts: usize,
-    /// Physical key length for generated workload keys.
-    #[arg(long, default_value_t = DEFAULT_KEY_LEN)]
-    key_len: usize,
-    /// Key namespace; pass the same value to bench to use this loaded keyspace.
-    #[arg(long)]
-    namespace: Option<u64>,
+    #[command(flatten)]
+    keyspace: KeyspaceArgs,
     /// Size in bytes of generated values.
     #[arg(long, default_value_t = DEFAULT_VALUE_SIZE)]
     value_size: usize,
     /// Emit periodic `Load progress` logs every N seconds (0 = off).
     #[arg(long, default_value_t = 10)]
     progress_interval_secs: u64,
-    /// Max attempts per batch when ingest returns a transient error.
-    #[arg(long, default_value_t = 150)]
-    ingest_retry_attempts: usize,
-    /// Backoff in milliseconds between transient ingest retries.
-    #[arg(long, default_value_t = 200)]
-    ingest_retry_backoff_ms: u64,
+    #[command(flatten)]
+    ingest_retry: IngestRetryArgs,
 }
 
 /// Validated load configuration independent of Clap.
@@ -63,12 +52,7 @@ pub struct Config {
     batch_size: usize,
     concurrency: usize,
     progress_interval_secs: u64,
-    ingest_retry_attempts: usize,
-    ingest_retry_backoff_ms: u64,
-}
-
-struct WorkerOutcome {
-    last_error: Option<String>,
+    ingest_retry: IngestRetryArgs,
 }
 
 impl TryFrom<Args> for Config {
@@ -78,27 +62,22 @@ impl TryFrom<Args> for Config {
         ensure!(args.keys > 0, "--keys must be > 0");
         ensure!(args.batch_size > 0, "--batch-size must be > 0");
         ensure!(args.concurrency > 0, "--concurrency must be > 0");
-        ensure!(
-            args.ingest_retry_attempts > 0,
-            "--ingest-retry-attempts must be > 0"
-        );
-        ensure!(
-            args.ingest_retry_backoff_ms > 0,
-            "--ingest-retry-backoff-ms must be > 0"
-        );
-        let namespace = args.namespace.unwrap_or_else(default_run_namespace);
+        args.ingest_retry.validate()?;
+        let namespace = args
+            .keyspace
+            .namespace
+            .unwrap_or_else(|| default_run_namespace(0));
 
         Ok(Self {
-            client: ClientConfig::new(args.url, args.read_retry_attempts)?,
+            client: args.client.into_config()?,
             namespace,
-            keyspace: Keyspace::from_u64_namespace(namespace, args.key_len)?,
+            keyspace: Keyspace::from_u64_namespace(namespace, args.keyspace.key_len)?,
             keys: args.keys,
             value_size: args.value_size,
             batch_size: args.batch_size,
             concurrency: args.concurrency,
             progress_interval_secs: args.progress_interval_secs,
-            ingest_retry_attempts: args.ingest_retry_attempts,
-            ingest_retry_backoff_ms: args.ingest_retry_backoff_ms,
+            ingest_retry: args.ingest_retry,
         })
     }
 }
@@ -117,15 +96,13 @@ async fn run_load(config: Config) -> anyhow::Result<()> {
         batch_size,
         concurrency,
         progress_interval_secs,
-        ingest_retry_attempts,
-        ingest_retry_backoff_ms,
+        ingest_retry,
     } = config;
 
     let client = Arc::new(build_client(&client_config)?);
     let keys_loaded = Arc::new(AtomicU64::new(0));
     let errors = Arc::new(AtomicU64::new(0));
     let transient_retries = Arc::new(AtomicU64::new(0));
-    let ingest_retry_backoff = Duration::from_millis(ingest_retry_backoff_ms);
     let start = Instant::now();
 
     tracing::info!(
@@ -151,27 +128,26 @@ async fn run_load(config: Config) -> anyhow::Result<()> {
             let mut i = key_range.start;
             while i < key_range.end {
                 let batch_end = std::cmp::min(i + batch_size as u64, key_range.end);
-                let mut kvs: Vec<(Key, Vec<u8>)> = Vec::new();
+                let mut records = Vec::with_capacity(batch_size);
                 for j in i..batch_end {
-                    kvs.push((
-                        keyspace.inserted_key(j)?,
-                        value_for_index(namespace, j, value_size),
-                    ));
+                    records.push(Record {
+                        key: keyspace.inserted_key(j),
+                        value: value_for_index(namespace, j, value_size),
+                    });
                 }
 
-                let refs: Vec<(&Key, &[u8])> = kvs.iter().map(|(k, v)| (k, v.as_slice())).collect();
                 let label = format!("worker {worker} batch [{i}, {batch_end})");
                 match ingest_with_retry(
                     &client,
-                    &refs,
-                    ingest_retry_attempts,
-                    ingest_retry_backoff,
+                    &records,
+                    ingest_retry.attempts,
+                    ingest_retry.backoff(),
                     &label,
                 )
                 .await
                 {
                     Ok(outcome) => {
-                        keys_loaded.fetch_add(refs.len() as u64, Ordering::Relaxed);
+                        keys_loaded.fetch_add(records.len() as u64, Ordering::Relaxed);
                         transient_retries.fetch_add(outcome.transient_retries, Ordering::Relaxed);
                     }
                     Err(e) => {
@@ -184,74 +160,40 @@ async fn run_load(config: Config) -> anyhow::Result<()> {
 
                 i = batch_end;
             }
-            Ok::<WorkerOutcome, anyhow::Error>(WorkerOutcome { last_error })
+            Ok::<Option<String>, anyhow::Error>(last_error)
         });
     }
 
-    let progress_task = if progress_interval_secs > 0 {
-        let keys_loaded = keys_loaded.clone();
-        let errors = errors.clone();
-        Some(tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(progress_interval_secs));
-            interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                let loaded = keys_loaded.load(Ordering::Relaxed);
-                if loaded >= total_keys {
-                    break;
-                }
-                let elapsed = start.elapsed().as_secs_f64();
-                let rate = if elapsed > 0.0 {
-                    loaded as f64 / elapsed
-                } else {
-                    0.0
-                };
-                let pct = (loaded as f64 / total_keys as f64 * 100.0).min(100.0);
+    let progress_task = spawn_progress_task(
+        keys_loaded.clone(),
+        total_keys,
+        progress_interval_secs,
+        start,
+        {
+            let errors = errors.clone();
+            move |progress| {
                 tracing::info!(
-                    keys_loaded = loaded,
+                    keys_loaded = progress.done,
                     total_keys,
                     errors = errors.load(Ordering::Relaxed),
-                    elapsed_secs = %format!("{:.1}", elapsed),
-                    current_keys_per_sec = rate as u64,
-                    percent_complete = %format!("{:.1}", pct),
+                    elapsed_secs = %format!("{:.1}", progress.elapsed_secs),
+                    current_keys_per_sec = progress.per_sec as u64,
+                    percent_complete = %format!("{:.1}", progress.percent),
                     "Load progress"
                 );
             }
-        }))
-    } else {
-        None
-    };
+        },
+    );
 
     let mut last_error = None;
-    let workers_result = loop {
-        let Some(result) = workers.join_next().await else {
-            break Ok(());
-        };
-        match result {
-            Ok(Ok(outcome)) => {
-                if outcome.last_error.is_some() {
-                    last_error = outcome.last_error;
-                }
-            }
-            Ok(Err(err)) => {
-                workers.abort_all();
-                while workers.join_next().await.is_some() {}
-                break Err(err);
-            }
-            Err(err) => {
-                workers.abort_all();
-                while workers.join_next().await.is_some() {}
-                break Err(anyhow!("load worker task failed: {err}"));
-            }
+    let workers_result = join_all_or_abort(&mut workers, "load worker", |worker_error| {
+        if worker_error.is_some() {
+            last_error = worker_error;
         }
-    };
+    })
+    .await;
 
-    if let Some(t) = progress_task {
-        t.abort();
-        let _ = t.await;
-    }
-
+    stop_progress_task(progress_task).await;
     workers_result?;
 
     let elapsed = start.elapsed();
@@ -290,6 +232,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::keyspace::DEFAULT_KEY_LEN;
     use axum::Router;
     use connectrpc::{ConnectError, ConnectRpcService, RequestContext};
     use exoware_sdk::ingest::{
@@ -357,17 +300,23 @@ mod tests {
 
     fn sample_args() -> Args {
         Args {
-            url: "http://localhost:10000/".to_string(),
+            client: ClientArgs {
+                url: "http://localhost:10000/".to_string(),
+                read_retry_attempts: 3,
+            },
             keys: 100,
             batch_size: 25,
             concurrency: 4,
-            read_retry_attempts: 3,
-            key_len: DEFAULT_KEY_LEN,
-            namespace: Some(42),
+            keyspace: KeyspaceArgs {
+                key_len: DEFAULT_KEY_LEN,
+                namespace: Some(42),
+            },
             value_size: DEFAULT_VALUE_SIZE,
             progress_interval_secs: 0,
-            ingest_retry_attempts: 150,
-            ingest_retry_backoff_ms: 200,
+            ingest_retry: IngestRetryArgs {
+                attempts: 150,
+                backoff_ms: 200,
+            },
         }
     }
 
@@ -380,7 +329,7 @@ mod tests {
     #[test]
     fn config_uses_key_len() {
         let mut args = sample_args();
-        args.key_len = 24;
+        args.keyspace.key_len = 24;
         let config = Config::try_from(args).expect("load args should be valid");
         assert_eq!(config.keyspace.key_len(), 24);
     }
@@ -390,11 +339,10 @@ mod tests {
         let config = Config::try_from(sample_args()).expect("load args should be valid");
         assert_eq!(config.namespace, 42);
         assert_eq!(
-            config.keyspace.inserted_key(0).unwrap(),
+            config.keyspace.inserted_key(0),
             Keyspace::from_u64_namespace(42, DEFAULT_KEY_LEN)
                 .unwrap()
                 .inserted_key(0)
-                .unwrap()
         );
     }
 
@@ -422,21 +370,21 @@ mod tests {
     #[test]
     fn config_rejects_zero_read_retry_attempts() {
         let mut args = sample_args();
-        args.read_retry_attempts = 0;
+        args.client.read_retry_attempts = 0;
         assert!(Config::try_from(args).is_err());
     }
 
     #[test]
     fn config_rejects_zero_ingest_retry_attempts() {
         let mut args = sample_args();
-        args.ingest_retry_attempts = 0;
+        args.ingest_retry.attempts = 0;
         assert!(Config::try_from(args).is_err());
     }
 
     #[test]
     fn config_rejects_zero_ingest_retry_backoff() {
         let mut args = sample_args();
-        args.ingest_retry_backoff_ms = 0;
+        args.ingest_retry.backoff_ms = 0;
         assert!(Config::try_from(args).is_err());
     }
 
@@ -444,11 +392,11 @@ mod tests {
     async fn load_reports_incomplete_without_retrying_permanent_ingest_errors() {
         let (url, puts) = spawn_ingest_harness(IngestFault::AlwaysInvalidArgument).await;
         let mut args = sample_args();
-        args.url = url;
+        args.client.url = url;
         args.keys = 4;
         args.batch_size = 2;
         args.concurrency = 2;
-        args.ingest_retry_backoff_ms = 1;
+        args.ingest_retry.backoff_ms = 1;
 
         let err = run(args)
             .await
@@ -467,12 +415,12 @@ mod tests {
     async fn load_recovers_after_transient_ingest_failures() {
         let (url, puts) = spawn_ingest_harness(IngestFault::UnavailableFirst(3)).await;
         let mut args = sample_args();
-        args.url = url;
+        args.client.url = url;
         args.keys = 4;
         args.batch_size = 2;
         args.concurrency = 1;
-        args.ingest_retry_attempts = 5;
-        args.ingest_retry_backoff_ms = 1;
+        args.ingest_retry.attempts = 5;
+        args.ingest_retry.backoff_ms = 1;
 
         run(args)
             .await
@@ -484,12 +432,12 @@ mod tests {
     async fn load_stops_after_an_exhausted_batch() {
         let (url, puts) = spawn_ingest_harness(IngestFault::AlwaysUnavailable).await;
         let mut args = sample_args();
-        args.url = url;
+        args.client.url = url;
         args.keys = 4;
         args.batch_size = 2;
         args.concurrency = 1;
-        args.ingest_retry_attempts = 3;
-        args.ingest_retry_backoff_ms = 1;
+        args.ingest_retry.attempts = 3;
+        args.ingest_retry.backoff_ms = 1;
 
         let err = run(args)
             .await

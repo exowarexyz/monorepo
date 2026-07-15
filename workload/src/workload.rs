@@ -19,7 +19,6 @@ pub const WORKLOAD_GENERATOR_VERSION: u16 = 3;
 #[derive(Copy, Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 #[value(rename_all = "kebab-case")]
-#[allow(clippy::enum_variant_names)]
 pub enum Scenario {
     ReadHeavy,
     Balanced,
@@ -151,26 +150,26 @@ impl WorkloadSpec {
     pub fn validate(&self) -> anyhow::Result<()> {
         ensure!(
             (0.0..=1.0).contains(&self.mix.read_ratio),
-            "--read-ratio must be in [0, 1]"
+            "read_ratio must be in [0, 1]"
         );
         ensure!(
             (0.0..=1.0).contains(&self.mix.write_ratio),
-            "--write-ratio must be in [0, 1]"
+            "write_ratio must be in [0, 1]"
         );
         ensure!(
             (0.0..=1.0).contains(&self.mix.scan_ratio),
-            "--scan-ratio must be in [0, 1]"
+            "scan_ratio must be in [0, 1]"
         );
-        ensure!(self.scan_length > 0, "--scan-length must be > 0");
+        ensure!(self.scan_length > 0, "scan_length must be > 0");
         ensure!(
             (0.0..=1.0).contains(&self.latest_prob),
-            "--latest-prob must be in [0, 1]"
+            "latest_prob must be in [0, 1]"
         );
         ensure!(
             self.zipf_theta > 0.0 && self.zipf_theta < 1.0,
-            "--zipf-theta must be in (0, 1)"
+            "zipf_theta must be in (0, 1)"
         );
-        ensure!(self.latest_window > 0, "--latest-window must be > 0");
+        ensure!(self.latest_window > 0, "latest_window must be > 0");
         ensure!(
             approx_eq(
                 self.mix.read_ratio + self.mix.write_ratio + self.mix.scan_ratio,
@@ -229,26 +228,46 @@ impl WorkerPlan {
         Operation::Write
     }
 
+    // Each arm draws the same amount of randomness on every call for a given
+    // distribution; the stream is versioned by `WORKLOAD_GENERATOR_VERSION`.
     fn sample_key_index(&mut self, max_key_exclusive: u64) -> u64 {
-        if self.spec.key_dist != KeyDistribution::Zipfian {
-            return sample_non_zipf_key_index(&mut self.rng, max_key_exclusive, self.spec);
-        }
+        match self.spec.key_dist {
+            KeyDistribution::Uniform => {
+                if max_key_exclusive <= 1 {
+                    return 0;
+                }
+                self.rng.random_range(0..max_key_exclusive)
+            }
+            KeyDistribution::Latest => {
+                if max_key_exclusive <= 1 {
+                    return 0;
+                }
+                if self.rng.random::<f64>() < self.spec.latest_prob {
+                    let window = self.spec.latest_window.max(1).min(max_key_exclusive);
+                    let start = max_key_exclusive - window;
+                    self.rng.random_range(start..max_key_exclusive)
+                } else {
+                    self.rng.random_range(0..max_key_exclusive)
+                }
+            }
+            KeyDistribution::Zipfian => {
+                let replace_sampler = self
+                    .zipf_sampler
+                    .as_ref()
+                    .is_none_or(|sampler| sampler.max_key_exclusive != max_key_exclusive);
+                if replace_sampler {
+                    self.zipf_sampler = Some(Arc::new(ZipfSampler::new(
+                        max_key_exclusive,
+                        self.spec.zipf_theta,
+                    )));
+                }
 
-        let replace_sampler = self
-            .zipf_sampler
-            .as_ref()
-            .is_none_or(|sampler| sampler.max_key_exclusive != max_key_exclusive);
-        if replace_sampler {
-            self.zipf_sampler = Some(Arc::new(ZipfSampler::new(
-                max_key_exclusive,
-                self.spec.zipf_theta,
-            )));
+                self.zipf_sampler
+                    .as_ref()
+                    .expect("zipf sampler is initialized")
+                    .sample(&mut self.rng)
+            }
         }
-
-        self.zipf_sampler
-            .as_ref()
-            .expect("zipf sampler is initialized")
-            .sample(&mut self.rng)
     }
 }
 
@@ -328,7 +347,7 @@ pub fn worker_index_range(
     concurrency: usize,
     worker_id: usize,
 ) -> anyhow::Result<Range<u64>> {
-    ensure!(concurrency > 0, "--concurrency must be > 0");
+    ensure!(concurrency > 0, "concurrency must be > 0");
     ensure!(
         worker_id < concurrency,
         "worker_id must be less than concurrency"
@@ -350,7 +369,7 @@ pub fn worker_write_index(
     worker_id: usize,
     write_number: u64,
 ) -> anyhow::Result<u64> {
-    ensure!(concurrency > 0, "--concurrency must be > 0");
+    ensure!(concurrency > 0, "concurrency must be > 0");
     ensure!(
         worker_id < concurrency,
         "worker_id must be less than concurrency"
@@ -363,30 +382,6 @@ pub fn worker_write_index(
     initial_keys
         .checked_add(offset)
         .context("worker write index overflow")
-}
-
-fn sample_non_zipf_key_index(
-    rng: &mut rand::rngs::StdRng,
-    max_key_exclusive: u64,
-    spec: WorkloadSpec,
-) -> u64 {
-    if max_key_exclusive <= 1 {
-        return 0;
-    }
-
-    match spec.key_dist {
-        KeyDistribution::Uniform => rng.random_range(0..max_key_exclusive),
-        KeyDistribution::Latest => {
-            if rng.random::<f64>() < spec.latest_prob {
-                let window = spec.latest_window.max(1).min(max_key_exclusive);
-                let start = max_key_exclusive - window;
-                rng.random_range(start..max_key_exclusive)
-            } else {
-                rng.random_range(0..max_key_exclusive)
-            }
-        }
-        KeyDistribution::Zipfian => unreachable!("zipfian samples use WorkerPlan's cached sampler"),
-    }
 }
 
 fn approx_eq(a: f64, b: f64, eps: f64) -> bool {

@@ -18,7 +18,7 @@ pub const VALUE_GENERATOR_VERSION: u16 = 1;
 pub fn validate_value_size(value_size: usize, max_value_size: usize) -> anyhow::Result<()> {
     ensure!(
         value_size <= max_value_size,
-        "--value-size must be <= --max-value-size ({} > {})",
+        "value_size must be <= max_value_size ({} > {})",
         value_size,
         max_value_size
     );

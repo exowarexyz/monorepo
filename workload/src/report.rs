@@ -65,7 +65,9 @@ pub struct BenchConfig {
 pub struct BenchReport {
     pub config: BenchConfig,
     pub seed: u64,
-    pub elapsed_ms: u128,
+    // u64 rather than u128: serde cannot round-trip u128 through `flatten`,
+    // and u64 milliseconds already spans far beyond any benchmark run.
+    pub elapsed_ms: u64,
     pub operations: u64,
     pub reads: u64,
     pub writes: u64,
@@ -123,24 +125,17 @@ struct LatencyHistogramRecorder {
     max_us: AtomicU64,
 }
 
+// The run metadata lives here; every measured field flattens in from
+// `BenchReport` so a new counter cannot be forgotten during serialization.
 #[derive(Serialize)]
 struct BenchReportJson<'a> {
     schema_version: u16,
     tool_version: &'static str,
     started_at: DateTime<Utc>,
     finished_at: DateTime<Utc>,
-    config: &'a BenchConfig,
-    seed: u64,
-    elapsed_ms: u128,
     ops_per_sec: f64,
-    operations: u64,
-    reads: u64,
-    read_misses: u64,
-    writes: u64,
-    scans: u64,
-    scan_rows: u64,
-    errors: u64,
-    latency_histograms: &'a LatencyHistograms,
+    #[serde(flatten)]
+    report: &'a BenchReport,
 }
 
 impl BenchReport {
@@ -192,8 +187,8 @@ impl LatencyHistogramRecorder {
             .position(|bound| micros <= *bound)
             .unwrap_or(LATENCY_BUCKET_UPPER_BOUNDS_US.len());
         self.counts[bucket].fetch_add(1, Ordering::Relaxed);
-        update_min(&self.min_us, micros);
-        update_max(&self.max_us, micros);
+        self.min_us.fetch_min(micros, Ordering::Relaxed);
+        self.max_us.fetch_max(micros, Ordering::Relaxed);
     }
 
     fn snapshot(&self) -> LatencyHistogram {
@@ -382,18 +377,8 @@ fn bench_report_json(
         tool_version: env!("CARGO_PKG_VERSION"),
         started_at,
         finished_at,
-        config: &report.config,
-        seed: report.seed,
-        elapsed_ms: report.elapsed_ms,
         ops_per_sec: report.ops_per_sec(),
-        operations: report.operations,
-        reads: report.reads,
-        read_misses: report.read_misses,
-        writes: report.writes,
-        scans: report.scans,
-        scan_rows: report.scan_rows,
-        errors: report.errors,
-        latency_histograms: &report.latency_histograms,
+        report,
     };
     serde_json::to_string_pretty(&json).context("failed to serialize benchmark report")
 }
@@ -437,26 +422,6 @@ fn percentile_upper_bound_us(counts: &[u64], percentile: f64, max_us: Option<u64
     max_us
 }
 
-fn update_min(min: &AtomicU64, value: u64) {
-    let mut current = min.load(Ordering::Relaxed);
-    while value < current {
-        match min.compare_exchange_weak(current, value, Ordering::Relaxed, Ordering::Relaxed) {
-            Ok(_) => return,
-            Err(next) => current = next,
-        }
-    }
-}
-
-fn update_max(max: &AtomicU64, value: u64) {
-    let mut current = max.load(Ordering::Relaxed);
-    while value > current {
-        match max.compare_exchange_weak(current, value, Ordering::Relaxed, Ordering::Relaxed) {
-            Ok(_) => return,
-            Err(next) => current = next,
-        }
-    }
-}
-
 fn temporary_output_path(path: &Path) -> PathBuf {
     let mut filename = path
         .file_name()
@@ -477,18 +442,9 @@ mod tests {
         tool_version: String,
         started_at: DateTime<Utc>,
         finished_at: DateTime<Utc>,
-        config: BenchConfig,
-        seed: u64,
-        elapsed_ms: u128,
         ops_per_sec: f64,
-        operations: u64,
-        reads: u64,
-        read_misses: u64,
-        writes: u64,
-        scans: u64,
-        scan_rows: u64,
-        errors: u64,
-        latency_histograms: LatencyHistograms,
+        #[serde(flatten)]
+        report: BenchReport,
     }
 
     fn sample_report() -> BenchReport {
@@ -561,21 +517,21 @@ mod tests {
         assert_eq!(parsed.tool_version, env!("CARGO_PKG_VERSION"));
         assert_eq!(parsed.started_at, started_at);
         assert_eq!(parsed.finished_at, finished_at);
-        assert_eq!(parsed.config, report.config);
-        assert_eq!(parsed.seed, report.seed);
-        assert_eq!(parsed.elapsed_ms, report.elapsed_ms);
         assert_eq!(parsed.ops_per_sec, report.ops_per_sec());
-        assert_eq!(parsed.operations, report.operations);
-        assert_eq!(parsed.reads, report.reads);
-        assert_eq!(parsed.read_misses, report.read_misses);
-        assert_eq!(parsed.writes, report.writes);
-        assert_eq!(parsed.scans, report.scans);
-        assert_eq!(parsed.scan_rows, report.scan_rows);
-        assert_eq!(parsed.errors, report.errors);
-        assert_eq!(parsed.latency_histograms, report.latency_histograms);
-        assert_eq!(parsed.latency_histograms.read.unit, "microseconds");
-        assert_eq!(parsed.latency_histograms.read.count, 2);
-        assert_eq!(parsed.latency_histograms.write.count, 1);
+        assert_eq!(parsed.report.config, report.config);
+        assert_eq!(parsed.report.seed, report.seed);
+        assert_eq!(parsed.report.elapsed_ms, report.elapsed_ms);
+        assert_eq!(parsed.report.operations, report.operations);
+        assert_eq!(parsed.report.reads, report.reads);
+        assert_eq!(parsed.report.read_misses, report.read_misses);
+        assert_eq!(parsed.report.writes, report.writes);
+        assert_eq!(parsed.report.scans, report.scans);
+        assert_eq!(parsed.report.scan_rows, report.scan_rows);
+        assert_eq!(parsed.report.errors, report.errors);
+        assert_eq!(parsed.report.latency_histograms, report.latency_histograms);
+        assert_eq!(parsed.report.latency_histograms.read.unit, "microseconds");
+        assert_eq!(parsed.report.latency_histograms.read.count, 2);
+        assert_eq!(parsed.report.latency_histograms.write.count, 1);
     }
 
     #[test]

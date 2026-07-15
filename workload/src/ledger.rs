@@ -1,6 +1,6 @@
 use std::collections::HashSet;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context};
@@ -8,9 +8,15 @@ use exoware_sdk::keys::{validate_key_size, Key};
 
 use crate::record::Record;
 
-// Keep acknowledged append latency bounded while limiting the verifier's
-// journal tail to a small, fixed number of records.
-pub(crate) const OVERLAP_LEDGER_SNAPSHOT_INTERVAL: u64 = 1_024;
+// Minimum appends between snapshot checkpoints.
+const OVERLAP_LEDGER_SNAPSHOT_INTERVAL: u64 = 1_024;
+
+/// Appends between checkpoints, proportional to the snapshot so total rewrite
+/// cost amortizes to O(1) per append; the floor keeps small ledgers' journal
+/// tails bounded.
+pub(crate) fn snapshot_interval(record_count: usize) -> u64 {
+    OVERLAP_LEDGER_SNAPSHOT_INTERVAL.max(record_count as u64 / 8)
+}
 
 const JOURNAL_HEADER: &str = "exoware-overlap-ledger-journal-v1";
 
@@ -40,7 +46,7 @@ pub fn validate_overlap_ledger(ledger: &OverlapLedger) -> anyhow::Result<()> {
         ensure!(
             seen.insert(record.key.clone()),
             "overlap ledger contains duplicate key {}",
-            hex_encode(&record.key)
+            hex::encode(&record.key)
         );
     }
     Ok(())
@@ -59,27 +65,33 @@ pub fn write_overlap_ledger(
     records: &[Record],
 ) -> anyhow::Result<()> {
     let path = path.as_ref();
-    let mut body = String::new();
-    body.push_str("exoware-overlap-ledger-v1\n");
-    body.push_str(&format!("namespace {namespace}\n"));
-    body.push_str(&format!("successful_writes {successful_writes}\n"));
-    body.push_str(&format!("sequence_number {sequence_number}\n"));
-    body.push_str(&format!("record_count {}\n", records.len()));
-    for record in records {
-        body.push_str("record ");
-        body.push_str(&hex_encode(&record.key));
-        body.push(' ');
-        body.push_str(&hex_encode(&record.value));
-        body.push('\n');
-    }
-
     let temp_path = path.with_extension("tmp");
-    fs::write(&temp_path, body).with_context(|| {
-        format!(
-            "failed to write temporary overlap ledger {}",
-            temp_path.display()
-        )
-    })?;
+    // Stream the snapshot through a buffered writer instead of materializing
+    // the whole hex-encoded body, which would double the dataset in memory.
+    File::create(&temp_path)
+        .map(BufWriter::new)
+        .and_then(|mut out| {
+            writeln!(out, "exoware-overlap-ledger-v1")?;
+            writeln!(out, "namespace {namespace}")?;
+            writeln!(out, "successful_writes {successful_writes}")?;
+            writeln!(out, "sequence_number {sequence_number}")?;
+            writeln!(out, "record_count {}", records.len())?;
+            for record in records {
+                writeln!(
+                    out,
+                    "record {} {}",
+                    hex::encode(&record.key),
+                    hex::encode(&record.value)
+                )?;
+            }
+            out.flush()
+        })
+        .with_context(|| {
+            format!(
+                "failed to write temporary overlap ledger {}",
+                temp_path.display()
+            )
+        })?;
     fs::rename(&temp_path, path).with_context(|| {
         format!(
             "failed to atomically publish overlap ledger {}",
@@ -89,52 +101,79 @@ pub fn write_overlap_ledger(
     Ok(())
 }
 
-/// Publishes a snapshot and starts a journal bound to that exact snapshot.
-///
-/// A verifier can race this two-file handoff: it either merges a journal whose
-/// header matches the snapshot it read, or uses that snapshot alone.
-pub(crate) fn checkpoint_overlap_ledger(
-    path: impl AsRef<Path>,
-    namespace: u64,
-    successful_writes: u64,
-    sequence_number: u64,
-    records: &[Record],
-) -> anyhow::Result<()> {
-    let path = path.as_ref();
-    write_overlap_ledger(path, namespace, successful_writes, sequence_number, records)?;
-    reset_overlap_ledger_journal(path, namespace, successful_writes, sequence_number)
+/// Records the overlap writer's acknowledged writes as snapshot checkpoints
+/// plus a journal of appends since the last checkpoint.
+pub(crate) struct OverlapLedgerWriter {
+    path: PathBuf,
+    // Held open across appends; dropped at each checkpoint because the
+    // checkpoint replaces the journal file by rename, invalidating the handle.
+    journal: Option<File>,
 }
 
-/// Appends one acknowledged write after the most recent snapshot checkpoint.
-pub(crate) fn append_overlap_ledger_record(
-    path: impl AsRef<Path>,
-    successful_writes: u64,
-    sequence_number: u64,
-    record: &Record,
-) -> anyhow::Result<()> {
-    let path = path.as_ref();
-    let journal_path = overlap_ledger_journal_path(path);
-    let mut journal = OpenOptions::new()
-        .append(true)
-        .open(&journal_path)
+impl OverlapLedgerWriter {
+    pub(crate) fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            journal: None,
+        }
+    }
+
+    /// Publishes a snapshot and starts a journal bound to that exact snapshot.
+    ///
+    /// A verifier can race this two-file handoff: it either merges a journal whose
+    /// header matches the snapshot it read, or uses that snapshot alone.
+    pub(crate) fn checkpoint(
+        &mut self,
+        namespace: u64,
+        successful_writes: u64,
+        sequence_number: u64,
+        records: &[Record],
+    ) -> anyhow::Result<()> {
+        self.journal = None;
+        write_overlap_ledger(
+            &self.path,
+            namespace,
+            successful_writes,
+            sequence_number,
+            records,
+        )?;
+        reset_overlap_ledger_journal(&self.path, namespace, successful_writes, sequence_number)
+    }
+
+    /// Appends one acknowledged write after the most recent snapshot checkpoint.
+    pub(crate) fn append(
+        &mut self,
+        successful_writes: u64,
+        sequence_number: u64,
+        record: &Record,
+    ) -> anyhow::Result<()> {
+        let journal_path = overlap_ledger_journal_path(&self.path);
+        if self.journal.is_none() {
+            let journal = OpenOptions::new()
+                .append(true)
+                .open(&journal_path)
+                .with_context(|| {
+                    format!(
+                        "failed to open overlap ledger journal {} for append",
+                        journal_path.display()
+                    )
+                })?;
+            self.journal = Some(journal);
+        }
+        let journal = self.journal.as_mut().expect("journal opened above");
+        writeln!(
+            journal,
+            "record {successful_writes} {sequence_number} {} {}",
+            hex::encode(&record.key),
+            hex::encode(&record.value)
+        )
         .with_context(|| {
             format!(
-                "failed to open overlap ledger journal {} for append",
+                "failed to append overlap ledger journal {}",
                 journal_path.display()
             )
-        })?;
-    writeln!(
-        journal,
-        "record {successful_writes} {sequence_number} {} {}",
-        hex_encode(&record.key),
-        hex_encode(&record.value)
-    )
-    .with_context(|| {
-        format!(
-            "failed to append overlap ledger journal {}",
-            journal_path.display()
-        )
-    })
+        })
+    }
 }
 
 /// Reads and validates the overlap-ledger text format.
@@ -149,30 +188,10 @@ pub fn read_overlap_ledger(path: impl AsRef<Path>) -> anyhow::Result<OverlapLedg
         "unsupported overlap ledger header `{version}`"
     );
 
-    let namespace = parse_prefixed_u64(
-        lines
-            .next()
-            .context("missing overlap ledger namespace line")?,
-        "namespace ",
-    )?;
-    let successful_writes = parse_prefixed_u64(
-        lines
-            .next()
-            .context("missing overlap ledger successful_writes line")?,
-        "successful_writes ",
-    )?;
-    let sequence_number = parse_prefixed_u64(
-        lines
-            .next()
-            .context("missing overlap ledger sequence_number line")?,
-        "sequence_number ",
-    )?;
-    let record_count = parse_prefixed_u64(
-        lines
-            .next()
-            .context("missing overlap ledger record_count line")?,
-        "record_count ",
-    )? as usize;
+    let namespace = next_prefixed_u64(&mut lines, "overlap ledger", "namespace ")?;
+    let successful_writes = next_prefixed_u64(&mut lines, "overlap ledger", "successful_writes ")?;
+    let sequence_number = next_prefixed_u64(&mut lines, "overlap ledger", "sequence_number ")?;
+    let record_count = next_prefixed_u64(&mut lines, "overlap ledger", "record_count ")? as usize;
 
     let mut records = Vec::with_capacity(record_count);
     for line in lines {
@@ -209,11 +228,6 @@ pub fn read_overlap_ledger(path: impl AsRef<Path>) -> anyhow::Result<OverlapLedg
     };
     merge_overlap_ledger_journal(path, &mut ledger)?;
     Ok(ledger)
-}
-
-/// Encodes bytes as lowercase hexadecimal for report and error text.
-pub fn hex_encode(bytes: &[u8]) -> String {
-    hex::encode(bytes)
 }
 
 fn overlap_ledger_journal_path(path: &Path) -> PathBuf {
@@ -274,22 +288,15 @@ fn merge_overlap_ledger_journal(path: &Path, ledger: &mut OverlapLedger) -> anyh
         header == JOURNAL_HEADER,
         "unsupported overlap ledger journal header `{header}`"
     );
-    let namespace = parse_prefixed_u64(
-        lines
-            .next()
-            .context("missing overlap ledger journal namespace line")?,
-        "namespace ",
-    )?;
-    let snapshot_successful_writes = parse_prefixed_u64(
-        lines
-            .next()
-            .context("missing overlap ledger journal snapshot_successful_writes line")?,
+    let namespace = next_prefixed_u64(&mut lines, "overlap ledger journal", "namespace ")?;
+    let snapshot_successful_writes = next_prefixed_u64(
+        &mut lines,
+        "overlap ledger journal",
         "snapshot_successful_writes ",
     )?;
-    let snapshot_sequence_number = parse_prefixed_u64(
-        lines
-            .next()
-            .context("missing overlap ledger journal snapshot_sequence_number line")?,
+    let snapshot_sequence_number = next_prefixed_u64(
+        &mut lines,
+        "overlap ledger journal",
         "snapshot_sequence_number ",
     )?;
 
@@ -302,8 +309,6 @@ fn merge_overlap_ledger_journal(path: &Path, ledger: &mut OverlapLedger) -> anyh
         return Ok(());
     }
 
-    let mut previous_successful_writes = ledger.successful_writes;
-    let mut previous_sequence_number = ledger.sequence_number;
     for line in lines {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -341,12 +346,14 @@ fn merge_overlap_ledger_journal(path: &Path, ledger: &mut OverlapLedger) -> anyh
             "unexpected trailing fields in overlap ledger journal record line"
         );
         ensure!(
-            successful_writes == previous_successful_writes.saturating_add(1),
-            "overlap ledger journal successful_writes {successful_writes} does not follow {previous_successful_writes}"
+            successful_writes == ledger.successful_writes.saturating_add(1),
+            "overlap ledger journal successful_writes {successful_writes} does not follow {}",
+            ledger.successful_writes
         );
         ensure!(
-            sequence_number >= previous_sequence_number,
-            "overlap ledger journal sequence_number {sequence_number} is below {previous_sequence_number}"
+            sequence_number >= ledger.sequence_number,
+            "overlap ledger journal sequence_number {sequence_number} is below {}",
+            ledger.sequence_number
         );
 
         ledger.records.push(Record {
@@ -355,10 +362,19 @@ fn merge_overlap_ledger_journal(path: &Path, ledger: &mut OverlapLedger) -> anyh
         });
         ledger.successful_writes = successful_writes;
         ledger.sequence_number = sequence_number;
-        previous_successful_writes = successful_writes;
-        previous_sequence_number = sequence_number;
     }
     Ok(())
+}
+
+fn next_prefixed_u64<'a>(
+    lines: &mut impl Iterator<Item = &'a str>,
+    what: &str,
+    prefix: &str,
+) -> anyhow::Result<u64> {
+    let line = lines
+        .next()
+        .with_context(|| format!("missing {what} {} line", prefix.trim_end()))?;
+    parse_prefixed_u64(line, prefix)
 }
 
 fn parse_prefixed_u64(line: &str, prefix: &str) -> anyhow::Result<u64> {
@@ -395,7 +411,7 @@ mod tests {
         let keyspace = Keyspace::from_u64_namespace(namespace, DEFAULT_KEY_LEN).unwrap();
         (0..keys)
             .map(|i| Record {
-                key: keyspace.inserted_key(i).unwrap(),
+                key: keyspace.inserted_key(i),
                 value: overlap_value_for_index(namespace, i),
             })
             .collect()
@@ -404,7 +420,7 @@ mod tests {
     #[test]
     fn overlap_ledger_validation_rejects_duplicate_keys() {
         let keyspace = Keyspace::from_u64_namespace(7, DEFAULT_KEY_LEN).unwrap();
-        let key = keyspace.inserted_key(0).unwrap();
+        let key = keyspace.inserted_key(0);
         let err = validate_overlap_ledger(&OverlapLedger {
             namespace: 7,
             successful_writes: 2,
@@ -476,11 +492,12 @@ mod tests {
             "exoware-overlap-ledger-journal-test-{}.txt",
             std::process::id()
         ));
-        checkpoint_overlap_ledger(&path, 42, 2, 10, &records).unwrap();
+        let mut writer = OverlapLedgerWriter::new(&path);
+        writer.checkpoint(42, 2, 10, &records).unwrap();
         let snapshot = std::fs::read_to_string(&path).unwrap();
 
         let appended = overlap_records(42, 3).pop().unwrap();
-        append_overlap_ledger_record(&path, 3, 11, &appended).unwrap();
+        writer.append(3, 11, &appended).unwrap();
         records.push(appended);
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), snapshot);
@@ -507,10 +524,11 @@ mod tests {
             "exoware-overlap-ledger-journal-transition-test-{}.txt",
             std::process::id()
         ));
-        checkpoint_overlap_ledger(&path, 42, 2, 10, &records).unwrap();
+        let mut writer = OverlapLedgerWriter::new(&path);
+        writer.checkpoint(42, 2, 10, &records).unwrap();
 
         let appended = overlap_records(42, 3).pop().unwrap();
-        append_overlap_ledger_record(&path, 3, 11, &appended).unwrap();
+        writer.append(3, 11, &appended).unwrap();
         records.push(appended);
 
         // This simulates a verifier observing the new snapshot before the
