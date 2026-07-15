@@ -2,10 +2,7 @@ use clap::{Parser, Subcommand};
 use exoware_validation::{bench, load, validate};
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "validation",
-    about = "Validate an Exoware deployment."
-)]
+#[command(name = "validation", about = "Validate an Exoware deployment.")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
