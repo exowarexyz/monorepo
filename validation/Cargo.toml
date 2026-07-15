@@ -1,0 +1,34 @@
+[package]
+name = "exoware-validation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Validate an Exoware deployment."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/exowarexyz/monorepo/tree/main/validation"
+documentation = "https://docs.rs/exoware-validation"
+
+[dependencies]
+exoware-sdk = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+rand = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+clap = { workspace = true, features = ["derive"] }
+anyhow = { workspace = true }
+hex = { workspace = true }
+connectrpc = { workspace = true }
+http = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+axum = { workspace = true }
+futures = { workspace = true }
+
+[[bin]]
+name = "validation"
+path = "src/main.rs"

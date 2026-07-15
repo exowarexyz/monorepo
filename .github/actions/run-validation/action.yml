@@ -1,0 +1,371 @@
+name: Run Exoware validation
+description: Run validation load, bench, and validate against an Exoware endpoint.
+
+inputs:
+  endpoint:
+    description: Exoware endpoint URL.
+    required: true
+  validation-bin:
+    description: Optional path to a prebuilt validation binary.
+    required: false
+    default: ""
+  keys:
+    description: Keyspace size; load writes exactly these keys and bench reads them back.
+    required: false
+    default: "5000"
+  load-batch-size:
+    description: Load batch size.
+    required: false
+    default: "25"
+  load-concurrency:
+    description: Load worker concurrency.
+    required: false
+    default: "2"
+  namespace:
+    description: Shared load/bench key namespace. Empty generates one for this action run.
+    required: false
+    default: ""
+  bench-ops:
+    description: Number of bench operations for the CI functionality smoke.
+    required: false
+    default: "10000"
+  bench-batch-size:
+    description: Keys per bench write operation. Empty uses the validation binary's default.
+    required: false
+    default: ""
+  bench-concurrency:
+    description: Bench worker concurrency.
+    required: false
+    default: "4"
+  bench-scenario:
+    description: Bench workload scenario.
+    required: false
+    default: balanced
+  bench-rng-seed:
+    description: Deterministic bench RNG seed.
+    required: false
+    default: "1592639710"
+  validate-keys:
+    description: Number of keys for validate.
+    required: false
+    default: "50"
+  validate-lookup-samples:
+    description: Validate point lookup sample count.
+    required: false
+    default: "10"
+  validate-missing-samples:
+    description: Validate missing lookup sample count.
+    required: false
+    default: "5"
+  validate-range-samples:
+    description: Validate range sample count.
+    required: false
+    default: "5"
+  artifact-name:
+    description: Uploaded benchmark report artifact name.
+    required: false
+    default: validation-benchmark-report
+  commit:
+    description: Commit SHA stamped into the benchmark report and summary for traceability.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Use provided validation binary
+      id: provided-validation
+      if: inputs.validation-bin != ''
+      shell: bash
+      env:
+        VALIDATION_BIN: ${{ inputs.validation-bin }}
+      run: |
+        set -euo pipefail
+        if [[ ! -f "$VALIDATION_BIN" ]]; then
+          echo "validation-bin does not exist: $VALIDATION_BIN" >&2
+          exit 1
+        fi
+        chmod +x "$VALIDATION_BIN"
+        echo "path=$(realpath "$VALIDATION_BIN")" >> "$GITHUB_OUTPUT"
+
+    - name: Validate inferred validation source
+      id: inferred-source
+      if: inputs.validation-bin == ''
+      shell: bash
+      env:
+        ACTION_REPOSITORY: ${{ github.action_repository }}
+        ACTION_REF: ${{ github.action_ref }}
+      run: |
+        set -euo pipefail
+        if [[ -z "$ACTION_REPOSITORY" || -z "$ACTION_REF" ]]; then
+          echo "validation-bin was not provided, and this action could not infer github.action_repository/github.action_ref." >&2
+          echo "Use validation-bin when invoking this action locally." >&2
+          exit 1
+        fi
+        echo "repository=$ACTION_REPOSITORY" >> "$GITHUB_OUTPUT"
+        echo "ref=$ACTION_REF" >> "$GITHUB_OUTPUT"
+
+    - name: Checkout validation source
+      if: inputs.validation-bin == ''
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ steps.inferred-source.outputs.repository }}
+        ref: ${{ steps.inferred-source.outputs.ref }}
+        path: .validation-src
+
+    - name: Install stable Rust toolchain
+      if: inputs.validation-bin == ''
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Build validation from source
+      id: built-validation
+      if: inputs.validation-bin == ''
+      shell: bash
+      working-directory: .validation-src
+      run: |
+        set -euo pipefail
+        cargo build -p exoware-validation --bin validation
+        target_dir="${CARGO_TARGET_DIR:-target}"
+        echo "path=$(realpath "$target_dir/debug/validation")" >> "$GITHUB_OUTPUT"
+
+    - name: Resolve validation binary
+      id: validation
+      shell: bash
+      env:
+        PROVIDED_VALIDATION: ${{ steps.provided-validation.outputs.path }}
+        BUILT_VALIDATION: ${{ steps.built-validation.outputs.path }}
+      run: |
+        set -euo pipefail
+        validation="$PROVIDED_VALIDATION"
+        if [[ -z "$validation" ]]; then
+          validation="$BUILT_VALIDATION"
+        fi
+        if [[ -z "$validation" || ! -x "$validation" ]]; then
+          echo "failed to resolve executable validation binary" >&2
+          exit 1
+        fi
+        echo "path=$validation" >> "$GITHUB_OUTPUT"
+
+    - name: Resolve validation namespace
+      id: namespace
+      shell: bash
+      env:
+        VALIDATION_NAMESPACE: ${{ inputs.namespace }}
+        ACTION_RUN_ID: ${{ github.run_id }}
+      run: |
+        set -euo pipefail
+        # Default the namespace to the Actions run id so the report's namespace is traceable
+        # back to this run. Generated data is deterministic, so re-running an attempt just
+        # rewrites identical keys; off CI, fall back to a timestamp.
+        namespace="$VALIDATION_NAMESPACE"
+        if [[ -z "$namespace" ]]; then
+          namespace="${ACTION_RUN_ID:-$(date +%s)}"
+        fi
+        if [[ ! "$namespace" =~ ^[0-9]+$ ]]; then
+          echo "namespace must be an unsigned integer: $namespace" >&2
+          exit 1
+        fi
+        echo "value=$namespace" >> "$GITHUB_OUTPUT"
+
+    - name: Run load
+      shell: bash
+      env:
+        VALIDATION: ${{ steps.validation.outputs.path }}
+        ENDPOINT: ${{ inputs.endpoint }}
+        VALIDATION_NAMESPACE: ${{ steps.namespace.outputs.value }}
+        KEYS: ${{ inputs.keys }}
+        LOAD_BATCH_SIZE: ${{ inputs.load-batch-size }}
+        LOAD_CONCURRENCY: ${{ inputs.load-concurrency }}
+      run: |
+        set -euo pipefail
+        "$VALIDATION" load \
+          --url "$ENDPOINT" \
+          --namespace "$VALIDATION_NAMESPACE" \
+          --keys "$KEYS" \
+          --batch-size "$LOAD_BATCH_SIZE" \
+          --concurrency "$LOAD_CONCURRENCY"
+
+    - name: Run benchmark
+      shell: bash
+      env:
+        VALIDATION: ${{ steps.validation.outputs.path }}
+        ENDPOINT: ${{ inputs.endpoint }}
+        VALIDATION_NAMESPACE: ${{ steps.namespace.outputs.value }}
+        KEYS: ${{ inputs.keys }}
+        BENCH_OPS: ${{ inputs.bench-ops }}
+        BENCH_BATCH_SIZE: ${{ inputs.bench-batch-size }}
+        BENCH_CONCURRENCY: ${{ inputs.bench-concurrency }}
+        BENCH_SCENARIO: ${{ inputs.bench-scenario }}
+        BENCH_RNG_SEED: ${{ inputs.bench-rng-seed }}
+      run: |
+        set -euo pipefail
+        args=(
+          --url "$ENDPOINT"
+          --namespace "$VALIDATION_NAMESPACE"
+          --keys "$KEYS"
+          --ops "$BENCH_OPS"
+          --concurrency "$BENCH_CONCURRENCY"
+          --scenario "$BENCH_SCENARIO"
+          --rng-seed "$BENCH_RNG_SEED"
+          --progress-interval-secs 0
+          --output "$RUNNER_TEMP/validation-bench-report.json"
+        )
+        # Empty means "use the binary's default" so the default lives in one place.
+        if [[ -n "$BENCH_BATCH_SIZE" ]]; then
+          args+=(--batch-size "$BENCH_BATCH_SIZE")
+        fi
+        "$VALIDATION" bench "${args[@]}"
+
+    - name: Stamp report with commit
+      if: inputs.commit != ''
+      shell: bash
+      env:
+        COMMIT: ${{ inputs.commit }}
+      run: |
+        set -euo pipefail
+        python3 - "$RUNNER_TEMP/validation-bench-report.json" "$COMMIT" <<'PY'
+        import json
+        import sys
+
+        path, commit = sys.argv[1], sys.argv[2]
+        with open(path, "r", encoding="utf-8") as f:
+            report = json.load(f)
+        report["commit"] = commit
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
+        PY
+
+    - name: Upload benchmark report
+      if: ${{ !cancelled() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ runner.temp }}/validation-bench-report.json
+        if-no-files-found: warn
+        overwrite: true
+
+    - name: Validate benchmark report
+      shell: bash
+      env:
+        BENCH_OPS: ${{ inputs.bench-ops }}
+        VALIDATION_NAMESPACE: ${{ steps.namespace.outputs.value }}
+      run: |
+        set -euo pipefail
+        python3 - "$RUNNER_TEMP/validation-bench-report.json" "$BENCH_OPS" <<'PY'
+        import json
+        import os
+        import sys
+
+        path = sys.argv[1]
+        expected_ops = int(sys.argv[2])
+        expected_namespace = int(os.environ["VALIDATION_NAMESPACE"])
+        with open(path, "r", encoding="utf-8") as f:
+            report = json.load(f)
+
+        def require(condition, message):
+            if not condition:
+                raise AssertionError(message)
+
+        require(report.get("schema_version") == 1,
+                f"unexpected report schema_version: {report.get('schema_version')!r}")
+        require(report.get("operations") == expected_ops,
+                f"completed {report.get('operations')!r} operations; expected {expected_ops}")
+        require(report.get("errors") == 0,
+                f"benchmark reported {report.get('errors')!r} operation errors")
+        require(report.get("read_misses") == 0,
+                f"benchmark reported {report.get('read_misses')!r} read misses; "
+                "bench must read the keyspace load wrote")
+        config = report.get("config")
+        require(isinstance(config, dict), "benchmark report has no config object")
+        require(config.get("namespace") == expected_namespace,
+                f"report namespace {config.get('namespace')!r} does not match {expected_namespace}")
+        require("seed" in report, "benchmark report has no seed")
+        require("latency_histograms" in report, "benchmark report has no latency_histograms")
+        PY
+
+    - name: Write benchmark summary
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 - "$RUNNER_TEMP/validation-bench-report.json" "$GITHUB_STEP_SUMMARY" <<'PY'
+        import json
+        import sys
+
+        report_path = sys.argv[1]
+        summary_path = sys.argv[2]
+        with open(report_path, "r", encoding="utf-8") as f:
+            report = json.load(f)
+
+        config = report["config"]
+        workload = config["workload"]
+        mix = workload["mix"]
+        latencies = report["latency_histograms"]
+
+        def latency_summary(name):
+            histogram = latencies[name]
+            if histogram["count"] == 0:
+                return "n/a"
+
+            def ms(value):
+                return "n/a" if value is None else f"{value / 1000:.3f}ms"
+
+            return (
+                f"p50={ms(histogram['p50_us'])}, "
+                f"p95={ms(histogram['p95_us'])}, "
+                f"p99={ms(histogram['p99_us'])}, "
+                f"max={ms(histogram['max_us'])}"
+            )
+
+        rows = [
+            ("Endpoint", config["endpoint"]),
+            ("Commit", report.get("commit", "n/a")),
+            ("Namespace", config["namespace"]),
+            ("Scenario", config["scenario"]),
+            ("Seed", report["seed"]),
+            ("Operations", report["operations"]),
+            ("Write batch size", config["batch_size"]),
+            ("Errors", report["errors"]),
+            ("Reads", report["reads"]),
+            ("Read misses", report["read_misses"]),
+            ("Writes", report["writes"]),
+            ("Scans", report["scans"]),
+            ("Scan rows", report["scan_rows"]),
+            ("Elapsed ms", report["elapsed_ms"]),
+            ("Ops/sec", f"{report['ops_per_sec']:.2f}"),
+            ("Read latency", latency_summary("read")),
+            ("Write latency", latency_summary("write")),
+            ("Scan latency", latency_summary("scan")),
+            ("Mix", f"read={mix['read_ratio']:.4f}, write={mix['write_ratio']:.4f}, scan={mix['scan_ratio']:.4f}"),
+            ("Key distribution", workload["key_dist"]),
+            ("Keyspace layout version", config["keyspace_layout_version"]),
+            ("Value generator version", config["value_generator_version"]),
+            ("Workload generator version", config["workload_generator_version"]),
+        ]
+
+        with open(summary_path, "a", encoding="utf-8") as f:
+            f.write("## Validation Benchmark\n\n")
+            f.write("Simulator benchmark output is a functionality artifact, not performance evidence.\n\n")
+            f.write("| Metric | Value |\n")
+            f.write("|---|---:|\n")
+            for name, value in rows:
+                f.write(f"| {name} | {value} |\n")
+            f.write("\n")
+        PY
+
+    - name: Run validate
+      shell: bash
+      env:
+        VALIDATION: ${{ steps.validation.outputs.path }}
+        ENDPOINT: ${{ inputs.endpoint }}
+        VALIDATE_KEYS: ${{ inputs.validate-keys }}
+        VALIDATE_LOOKUP_SAMPLES: ${{ inputs.validate-lookup-samples }}
+        VALIDATE_MISSING_SAMPLES: ${{ inputs.validate-missing-samples }}
+        VALIDATE_RANGE_SAMPLES: ${{ inputs.validate-range-samples }}
+      run: |
+        set -euo pipefail
+        "$VALIDATION" validate \
+          --url "$ENDPOINT" \
+          --keys "$VALIDATE_KEYS" \
+          --lookup-samples "$VALIDATE_LOOKUP_SAMPLES" \
+          --missing-samples "$VALIDATE_MISSING_SAMPLES" \
+          --range-samples "$VALIDATE_RANGE_SAMPLES"
