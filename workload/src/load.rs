@@ -75,6 +75,7 @@ impl TryFrom<Args> for Config {
     type Error = anyhow::Error;
 
     fn try_from(args: Args) -> anyhow::Result<Self> {
+        ensure!(args.keys > 0, "--keys must be > 0");
         ensure!(args.batch_size > 0, "--batch-size must be > 0");
         ensure!(args.concurrency > 0, "--concurrency must be > 0");
         ensure!(
@@ -395,6 +396,13 @@ mod tests {
                 .inserted_key(0)
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn config_rejects_zero_keys() {
+        let mut args = sample_args();
+        args.keys = 0;
+        assert!(Config::try_from(args).is_err());
     }
 
     #[test]
