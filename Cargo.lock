@@ -2806,7 +2806,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "exoware-workload"
+name = "exoware-validation"
 version = "2026.5.0"
 dependencies = [
  "anyhow",

@@ -11,7 +11,7 @@
 //! interrupted, so a chaos writer survives temporary outages.
 //!
 //! Example:
-//!   cargo run --release -p exoware-workload -- validate \
+//!   cargo run --release -p exoware-validation -- validate \
 //!     --url http://localhost:10000 \
 //!     --keys 100
 

@@ -7,7 +7,7 @@ use exoware_sdk::{ClientError, PrefixedStoreClient, RetryConfig, StoreClient};
 const DEFAULT_INITIAL_BACKOFF_MS: u64 = 50;
 const DEFAULT_MAX_BACKOFF_MS: u64 = 1_000;
 
-/// Shared SDK client CLI flags for workload commands.
+/// Shared SDK client CLI flags for validation commands.
 #[derive(clap::Args, Clone, Debug)]
 pub struct ClientArgs {
     #[arg(long, default_value = "http://localhost:10000")]
@@ -23,7 +23,7 @@ impl ClientArgs {
     }
 }
 
-/// Normalized SDK client settings shared by workload commands.
+/// Normalized SDK client settings shared by validation commands.
 #[derive(Clone, Debug)]
 pub struct ClientConfig {
     endpoint: String,
@@ -72,7 +72,7 @@ pub fn build_client(config: &ClientConfig) -> anyhow::Result<PrefixedStoreClient
 
 /// Ingest error codes that can self-resolve, so retrying the same batch is worthwhile.
 ///
-/// Deliberately broader than the query list below: workload writes are
+/// Deliberately broader than the query list below: validation writes are
 /// deterministic and idempotent, so replaying a batch whose first attempt may
 /// have landed is safe.
 pub(crate) fn is_transient_ingest_code(code: ErrorCode) -> bool {

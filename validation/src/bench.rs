@@ -1,7 +1,7 @@
 //! Exoware benchmark workload runner.
 //!
 //! Usage:
-//!   workload bench --url http://localhost:10000 --keys 10000 --ops 50000 --batch-size 100 --scenario balanced
+//!   validation bench --url http://localhost:10000 --keys 10000 --ops 50000 --batch-size 100 --scenario balanced
 //!
 //! Progress: `bench` emits `Benchmark progress` every `--progress-interval-secs` (default 10; 0 disables).
 
@@ -151,6 +151,7 @@ impl TryFrom<Args> for Config {
         ensure!(args.concurrency > 0, "--concurrency must be > 0");
         ensure!(args.keys > 0, "--keys must be > 0");
         ensure!(args.batch_size > 0, "--batch-size must be > 0");
+        ensure!(args.ops > 0, "--ops must be > 0");
         let namespace = args
             .keyspace
             .namespace
@@ -217,6 +218,10 @@ impl Config {
         ensure!(
             manifest.config.batch_size > 0,
             "manifest batch_size must be > 0"
+        );
+        ensure!(
+            manifest.config.total_ops > 0,
+            "manifest total_ops must be > 0"
         );
         manifest.config.workload.validate()?;
 
@@ -692,6 +697,13 @@ mod tests {
     }
 
     #[test]
+    fn config_rejects_zero_ops() {
+        let mut args = sample_args();
+        args.ops = 0;
+        assert!(Config::try_from(args).is_err());
+    }
+
+    #[test]
     fn batch_write_indexes_are_disjoint_across_workers_and_batches() {
         let mut indexes = HashSet::new();
         for worker in 0..4 {
@@ -787,5 +799,15 @@ mod tests {
         let err = Config::try_from_manifest(manifest, None, 10)
             .expect_err("workload generator version mismatch should be rejected");
         assert!(err.to_string().contains("workload_generator_version"));
+    }
+
+    #[test]
+    fn config_from_manifest_rejects_zero_total_ops() {
+        let mut manifest = sample_manifest();
+        manifest.config.total_ops = 0;
+
+        let err = Config::try_from_manifest(manifest, None, 10)
+            .expect_err("zero total_ops should be rejected");
+        assert!(err.to_string().contains("total_ops"));
     }
 }

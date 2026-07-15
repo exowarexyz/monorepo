@@ -562,7 +562,7 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         let path = std::env::temp_dir().join(format!(
-            "exoware-workload-report-{}-{}.json",
+            "exoware-validation-report-{}-{}.json",
             std::process::id(),
             Utc::now().timestamp_nanos_opt().unwrap_or_default()
         ));
@@ -592,7 +592,7 @@ mod tests {
         let json =
             bench_report_json(&report, started_at, finished_at).expect("report should serialize");
         let path = std::env::temp_dir().join(format!(
-            "exoware-workload-manifest-{}-{}.json",
+            "exoware-validation-manifest-{}-{}.json",
             std::process::id(),
             Utc::now().timestamp_nanos_opt().unwrap_or_default()
         ));
@@ -617,7 +617,7 @@ mod tests {
         // the constant (rather than a literal) keeps this honest if the report schema is bumped.
         value["schema_version"] = serde_json::Value::from(BENCH_REPORT_SCHEMA_VERSION);
         let accepted_path = std::env::temp_dir().join(format!(
-            "exoware-workload-manifest-report-version-{}-{}.json",
+            "exoware-validation-manifest-report-version-{}-{}.json",
             std::process::id(),
             Utc::now().timestamp_nanos_opt().unwrap_or_default()
         ));
@@ -632,7 +632,7 @@ mod tests {
         let unsupported = BENCH_MANIFEST_SCHEMA_VERSION.max(BENCH_REPORT_SCHEMA_VERSION) + 1;
         value["schema_version"] = serde_json::Value::from(unsupported);
         let rejected_path = std::env::temp_dir().join(format!(
-            "exoware-workload-manifest-bad-version-{}-{}.json",
+            "exoware-validation-manifest-bad-version-{}-{}.json",
             std::process::id(),
             Utc::now().timestamp_nanos_opt().unwrap_or_default()
         ));
@@ -658,7 +658,7 @@ mod tests {
             .remove("value_size");
 
         let path = std::env::temp_dir().join(format!(
-            "exoware-workload-manifest-no-value-size-{}-{}.json",
+            "exoware-validation-manifest-no-value-size-{}-{}.json",
             std::process::id(),
             Utc::now().timestamp_nanos_opt().unwrap_or_default()
         ));
@@ -679,7 +679,7 @@ mod tests {
             .remove("batch_size");
 
         let path = std::env::temp_dir().join(format!(
-            "exoware-workload-manifest-no-batch-size-{}-{}.json",
+            "exoware-validation-manifest-no-batch-size-{}-{}.json",
             std::process::id(),
             Utc::now().timestamp_nanos_opt().unwrap_or_default()
         ));
@@ -704,7 +704,7 @@ mod tests {
             .remove("workload_generator_version");
 
         let path = std::env::temp_dir().join(format!(
-            "exoware-workload-manifest-no-workload-generator-version-{}-{}.json",
+            "exoware-validation-manifest-no-workload-generator-version-{}-{}.json",
             std::process::id(),
             Utc::now().timestamp_nanos_opt().unwrap_or_default()
         ));

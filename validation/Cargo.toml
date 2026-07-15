@@ -1,5 +1,5 @@
 [package]
-name = "exoware-workload"
+name = "exoware-validation"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,8 +7,8 @@ publish = false
 description = "Validate an Exoware deployment."
 readme = "README.md"
 homepage.workspace = true
-repository = "https://github.com/exowarexyz/monorepo/tree/main/workload"
-documentation = "https://docs.rs/exoware-workload"
+repository = "https://github.com/exowarexyz/monorepo/tree/main/validation"
+documentation = "https://docs.rs/exoware-validation"
 
 [dependencies]
 exoware-sdk = { workspace = true }
@@ -30,5 +30,5 @@ axum = { workspace = true }
 futures = { workspace = true }
 
 [[bin]]
-name = "workload"
+name = "validation"
 path = "src/main.rs"

@@ -1,9 +1,9 @@
 use clap::{Parser, Subcommand};
-use exoware_workload::{bench, load, validate};
+use exoware_validation::{bench, load, validate};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "workload",
+    name = "validation",
     about = "Validate an Exoware deployment."
 )]
 struct Cli {
@@ -23,8 +23,8 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("exoware_workload=info".parse()?)
-                .add_directive("workload=info".parse()?),
+                .add_directive("exoware_validation=info".parse()?)
+                .add_directive("validation=info".parse()?),
         )
         .init();
 

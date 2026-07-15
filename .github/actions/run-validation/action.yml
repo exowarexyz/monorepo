@@ -1,12 +1,12 @@
-name: Run Exoware workload
-description: Run workload load, bench, and validate against an Exoware endpoint.
+name: Run Exoware validation
+description: Run validation load, bench, and validate against an Exoware endpoint.
 
 inputs:
   endpoint:
     description: Exoware endpoint URL.
     required: true
-  workload-bin:
-    description: Optional path to a prebuilt workload binary.
+  validation-bin:
+    description: Optional path to a prebuilt validation binary.
     required: false
     default: ""
   keys:
@@ -30,7 +30,7 @@ inputs:
     required: false
     default: "10000"
   bench-batch-size:
-    description: Keys per bench write operation. Empty uses the workload binary's default.
+    description: Keys per bench write operation. Empty uses the validation binary's default.
     required: false
     default: ""
   bench-concurrency:
@@ -64,7 +64,7 @@ inputs:
   artifact-name:
     description: Uploaded benchmark report artifact name.
     required: false
-    default: workload-benchmark-report
+    default: validation-benchmark-report
   commit:
     description: Commit SHA stamped into the benchmark report and summary for traceability.
     required: false
@@ -73,24 +73,24 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Use provided workload binary
-      id: provided-workload
-      if: inputs.workload-bin != ''
+    - name: Use provided validation binary
+      id: provided-validation
+      if: inputs.validation-bin != ''
       shell: bash
       env:
-        WORKLOAD_BIN: ${{ inputs.workload-bin }}
+        VALIDATION_BIN: ${{ inputs.validation-bin }}
       run: |
         set -euo pipefail
-        if [[ ! -f "$WORKLOAD_BIN" ]]; then
-          echo "workload-bin does not exist: $WORKLOAD_BIN" >&2
+        if [[ ! -f "$VALIDATION_BIN" ]]; then
+          echo "validation-bin does not exist: $VALIDATION_BIN" >&2
           exit 1
         fi
-        chmod +x "$WORKLOAD_BIN"
-        echo "path=$(realpath "$WORKLOAD_BIN")" >> "$GITHUB_OUTPUT"
+        chmod +x "$VALIDATION_BIN"
+        echo "path=$(realpath "$VALIDATION_BIN")" >> "$GITHUB_OUTPUT"
 
-    - name: Validate inferred workload source
+    - name: Validate inferred validation source
       id: inferred-source
-      if: inputs.workload-bin == ''
+      if: inputs.validation-bin == ''
       shell: bash
       env:
         ACTION_REPOSITORY: ${{ github.action_repository }}
@@ -98,66 +98,66 @@ runs:
       run: |
         set -euo pipefail
         if [[ -z "$ACTION_REPOSITORY" || -z "$ACTION_REF" ]]; then
-          echo "workload-bin was not provided, and this action could not infer github.action_repository/github.action_ref." >&2
-          echo "Use workload-bin when invoking this action locally." >&2
+          echo "validation-bin was not provided, and this action could not infer github.action_repository/github.action_ref." >&2
+          echo "Use validation-bin when invoking this action locally." >&2
           exit 1
         fi
         echo "repository=$ACTION_REPOSITORY" >> "$GITHUB_OUTPUT"
         echo "ref=$ACTION_REF" >> "$GITHUB_OUTPUT"
 
-    - name: Checkout workload source
-      if: inputs.workload-bin == ''
+    - name: Checkout validation source
+      if: inputs.validation-bin == ''
       uses: actions/checkout@v4
       with:
         repository: ${{ steps.inferred-source.outputs.repository }}
         ref: ${{ steps.inferred-source.outputs.ref }}
-        path: .workload-src
+        path: .validation-src
 
     - name: Install stable Rust toolchain
-      if: inputs.workload-bin == ''
+      if: inputs.validation-bin == ''
       uses: dtolnay/rust-toolchain@stable
 
-    - name: Build workload from source
-      id: built-workload
-      if: inputs.workload-bin == ''
+    - name: Build validation from source
+      id: built-validation
+      if: inputs.validation-bin == ''
       shell: bash
-      working-directory: .workload-src
+      working-directory: .validation-src
       run: |
         set -euo pipefail
-        cargo build -p exoware-workload --bin workload
+        cargo build -p exoware-validation --bin validation
         target_dir="${CARGO_TARGET_DIR:-target}"
-        echo "path=$(realpath "$target_dir/debug/workload")" >> "$GITHUB_OUTPUT"
+        echo "path=$(realpath "$target_dir/debug/validation")" >> "$GITHUB_OUTPUT"
 
-    - name: Resolve workload binary
-      id: workload
+    - name: Resolve validation binary
+      id: validation
       shell: bash
       env:
-        PROVIDED_WORKLOAD: ${{ steps.provided-workload.outputs.path }}
-        BUILT_WORKLOAD: ${{ steps.built-workload.outputs.path }}
+        PROVIDED_VALIDATION: ${{ steps.provided-validation.outputs.path }}
+        BUILT_VALIDATION: ${{ steps.built-validation.outputs.path }}
       run: |
         set -euo pipefail
-        workload="$PROVIDED_WORKLOAD"
-        if [[ -z "$workload" ]]; then
-          workload="$BUILT_WORKLOAD"
+        validation="$PROVIDED_VALIDATION"
+        if [[ -z "$validation" ]]; then
+          validation="$BUILT_VALIDATION"
         fi
-        if [[ -z "$workload" || ! -x "$workload" ]]; then
-          echo "failed to resolve executable workload binary" >&2
+        if [[ -z "$validation" || ! -x "$validation" ]]; then
+          echo "failed to resolve executable validation binary" >&2
           exit 1
         fi
-        echo "path=$workload" >> "$GITHUB_OUTPUT"
+        echo "path=$validation" >> "$GITHUB_OUTPUT"
 
-    - name: Resolve workload namespace
+    - name: Resolve validation namespace
       id: namespace
       shell: bash
       env:
-        WORKLOAD_NAMESPACE: ${{ inputs.namespace }}
+        VALIDATION_NAMESPACE: ${{ inputs.namespace }}
         ACTION_RUN_ID: ${{ github.run_id }}
       run: |
         set -euo pipefail
         # Default the namespace to the Actions run id so the report's namespace is traceable
         # back to this run. Generated data is deterministic, so re-running an attempt just
         # rewrites identical keys; off CI, fall back to a timestamp.
-        namespace="$WORKLOAD_NAMESPACE"
+        namespace="$VALIDATION_NAMESPACE"
         if [[ -z "$namespace" ]]; then
           namespace="${ACTION_RUN_ID:-$(date +%s)}"
         fi
@@ -167,30 +167,30 @@ runs:
         fi
         echo "value=$namespace" >> "$GITHUB_OUTPUT"
 
-    - name: Run load workload
+    - name: Run load
       shell: bash
       env:
-        WORKLOAD: ${{ steps.workload.outputs.path }}
+        VALIDATION: ${{ steps.validation.outputs.path }}
         ENDPOINT: ${{ inputs.endpoint }}
-        WORKLOAD_NAMESPACE: ${{ steps.namespace.outputs.value }}
+        VALIDATION_NAMESPACE: ${{ steps.namespace.outputs.value }}
         KEYS: ${{ inputs.keys }}
         LOAD_BATCH_SIZE: ${{ inputs.load-batch-size }}
         LOAD_CONCURRENCY: ${{ inputs.load-concurrency }}
       run: |
         set -euo pipefail
-        "$WORKLOAD" load \
+        "$VALIDATION" load \
           --url "$ENDPOINT" \
-          --namespace "$WORKLOAD_NAMESPACE" \
+          --namespace "$VALIDATION_NAMESPACE" \
           --keys "$KEYS" \
           --batch-size "$LOAD_BATCH_SIZE" \
           --concurrency "$LOAD_CONCURRENCY"
 
-    - name: Run benchmark workload
+    - name: Run benchmark
       shell: bash
       env:
-        WORKLOAD: ${{ steps.workload.outputs.path }}
+        VALIDATION: ${{ steps.validation.outputs.path }}
         ENDPOINT: ${{ inputs.endpoint }}
-        WORKLOAD_NAMESPACE: ${{ steps.namespace.outputs.value }}
+        VALIDATION_NAMESPACE: ${{ steps.namespace.outputs.value }}
         KEYS: ${{ inputs.keys }}
         BENCH_OPS: ${{ inputs.bench-ops }}
         BENCH_BATCH_SIZE: ${{ inputs.bench-batch-size }}
@@ -201,20 +201,20 @@ runs:
         set -euo pipefail
         args=(
           --url "$ENDPOINT"
-          --namespace "$WORKLOAD_NAMESPACE"
+          --namespace "$VALIDATION_NAMESPACE"
           --keys "$KEYS"
           --ops "$BENCH_OPS"
           --concurrency "$BENCH_CONCURRENCY"
           --scenario "$BENCH_SCENARIO"
           --rng-seed "$BENCH_RNG_SEED"
           --progress-interval-secs 0
-          --output "$RUNNER_TEMP/workload-bench-report.json"
+          --output "$RUNNER_TEMP/validation-bench-report.json"
         )
         # Empty means "use the binary's default" so the default lives in one place.
         if [[ -n "$BENCH_BATCH_SIZE" ]]; then
           args+=(--batch-size "$BENCH_BATCH_SIZE")
         fi
-        "$WORKLOAD" bench "${args[@]}"
+        "$VALIDATION" bench "${args[@]}"
 
     - name: Stamp report with commit
       if: inputs.commit != ''
@@ -223,7 +223,7 @@ runs:
         COMMIT: ${{ inputs.commit }}
       run: |
         set -euo pipefail
-        python3 - "$RUNNER_TEMP/workload-bench-report.json" "$COMMIT" <<'PY'
+        python3 - "$RUNNER_TEMP/validation-bench-report.json" "$COMMIT" <<'PY'
         import json
         import sys
 
@@ -240,7 +240,7 @@ runs:
       uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.artifact-name }}
-        path: ${{ runner.temp }}/workload-bench-report.json
+        path: ${{ runner.temp }}/validation-bench-report.json
         if-no-files-found: warn
         overwrite: true
 
@@ -248,17 +248,17 @@ runs:
       shell: bash
       env:
         BENCH_OPS: ${{ inputs.bench-ops }}
-        WORKLOAD_NAMESPACE: ${{ steps.namespace.outputs.value }}
+        VALIDATION_NAMESPACE: ${{ steps.namespace.outputs.value }}
       run: |
         set -euo pipefail
-        python3 - "$RUNNER_TEMP/workload-bench-report.json" "$BENCH_OPS" <<'PY'
+        python3 - "$RUNNER_TEMP/validation-bench-report.json" "$BENCH_OPS" <<'PY'
         import json
         import os
         import sys
 
         path = sys.argv[1]
         expected_ops = int(sys.argv[2])
-        expected_namespace = int(os.environ["WORKLOAD_NAMESPACE"])
+        expected_namespace = int(os.environ["VALIDATION_NAMESPACE"])
         with open(path, "r", encoding="utf-8") as f:
             report = json.load(f)
 
@@ -287,7 +287,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        python3 - "$RUNNER_TEMP/workload-bench-report.json" "$GITHUB_STEP_SUMMARY" <<'PY'
+        python3 - "$RUNNER_TEMP/validation-bench-report.json" "$GITHUB_STEP_SUMMARY" <<'PY'
         import json
         import sys
 
@@ -343,7 +343,7 @@ runs:
         ]
 
         with open(summary_path, "a", encoding="utf-8") as f:
-            f.write("## Workload Benchmark\n\n")
+            f.write("## Validation Benchmark\n\n")
             f.write("Simulator benchmark output is a functionality artifact, not performance evidence.\n\n")
             f.write("| Metric | Value |\n")
             f.write("|---|---:|\n")
@@ -352,10 +352,10 @@ runs:
             f.write("\n")
         PY
 
-    - name: Run validation workload
+    - name: Run validate
       shell: bash
       env:
-        WORKLOAD: ${{ steps.workload.outputs.path }}
+        VALIDATION: ${{ steps.validation.outputs.path }}
         ENDPOINT: ${{ inputs.endpoint }}
         VALIDATE_KEYS: ${{ inputs.validate-keys }}
         VALIDATE_LOOKUP_SAMPLES: ${{ inputs.validate-lookup-samples }}
@@ -363,7 +363,7 @@ runs:
         VALIDATE_RANGE_SAMPLES: ${{ inputs.validate-range-samples }}
       run: |
         set -euo pipefail
-        "$WORKLOAD" validate \
+        "$VALIDATION" validate \
           --url "$ENDPOINT" \
           --keys "$VALIDATE_KEYS" \
           --lookup-samples "$VALIDATE_LOOKUP_SAMPLES" \

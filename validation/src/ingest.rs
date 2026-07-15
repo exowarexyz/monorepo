@@ -9,7 +9,7 @@ use crate::record::{record_refs, Record};
 
 const MAX_INGEST_RETRY_BACKOFF: Duration = Duration::from_secs(5);
 
-/// Default number of key/value pairs in one ingest request for workload commands.
+/// Default number of key/value pairs in one ingest request for validation commands.
 pub(crate) const DEFAULT_INGEST_BATCH_SIZE: usize = 100;
 
 /// Shared ingest retry CLI flags for commands that write through the ingest API.

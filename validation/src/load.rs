@@ -1,7 +1,7 @@
 //! Exoware load generator.
 //!
 //! Usage:
-//!   workload load --url http://localhost:10000 --keys 10000
+//!   validation load --url http://localhost:10000 --keys 10000
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

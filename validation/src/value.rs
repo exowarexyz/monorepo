@@ -11,7 +11,7 @@ pub const DEFAULT_MAX_VALUE_SIZE: usize = 10 * 1024 * 1024;
 /// Compatibility limit for deployments that still cap encoded values at u16::MAX.
 pub const KV_MK1_COMPAT_MAX_VALUE_SIZE: usize = u16::MAX as usize;
 
-/// Version of the deterministic value generator used by workload reports.
+/// Version of the deterministic value generator used by validation reports.
 pub const VALUE_GENERATOR_VERSION: u16 = 1;
 
 /// Validates a generated value size against an explicit run-level limit.

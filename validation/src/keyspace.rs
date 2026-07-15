@@ -5,10 +5,10 @@ use exoware_sdk::keys::{validate_key_size, Key};
 
 use crate::deterministic::{mix64, GOLDEN_RATIO_64};
 
-/// Default physical key length used by the workload commands.
+/// Default physical key length used by the validation commands.
 pub const DEFAULT_KEY_LEN: usize = 48;
 
-/// Version of the deterministic key layout used by workload reports.
+/// Version of the deterministic key layout used by validation reports.
 pub const KEYSPACE_LAYOUT_VERSION: u16 = 2;
 
 // Keep inserted and intentionally-missing keys in disjoint key domains.
@@ -42,10 +42,10 @@ pub fn default_run_namespace(salt: u64) -> u64 {
     now_nanos ^ u64::from(std::process::id()).rotate_left(17) ^ mix64(salt)
 }
 
-/// Shared keyspace CLI flags for workload commands.
+/// Shared keyspace CLI flags for validation commands.
 #[derive(clap::Args, Clone, Copy, Debug)]
 pub struct KeyspaceArgs {
-    /// Physical key length for generated workload keys.
+    /// Physical key length for generated validation keys.
     #[arg(long, default_value_t = DEFAULT_KEY_LEN)]
     pub key_len: usize,
     /// Key namespace; pass the same value across commands to share a keyspace
@@ -54,7 +54,7 @@ pub struct KeyspaceArgs {
     pub namespace: Option<u64>,
 }
 
-/// Deterministic workload key generator.
+/// Deterministic validation key generator.
 ///
 /// Load and benchmark keys open with entropy derived from the logical index, so
 /// stores that shard on leading bits see load on every shard. Validator keys

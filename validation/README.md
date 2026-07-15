@@ -1,17 +1,17 @@
-# exoware-workload
+# exoware-validation
 
-[![Crates.io](https://img.shields.io/crates/v/exoware-workload.svg)](https://crates.io/crates/exoware-workload)
-[![Docs.rs](https://docs.rs/exoware-worload/badge.svg)](https://docs.rs/exoware-workload)
+[![Crates.io](https://img.shields.io/crates/v/exoware-validation.svg)](https://crates.io/crates/exoware-validation)
+[![Docs.rs](https://docs.rs/exoware-validation/badge.svg)](https://docs.rs/exoware-validation)
 
 Validate an Exoware deployment.
 
 ## Status
 
-`exoware-workload` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
+`exoware-validation` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
 
 ## Overview
 
-`exoware-workload` provides small CLI workloads for exercising Exoware-compatible stores. It is meant to support local development, deployment validation, and reproducible benchmark runs.
+`exoware-validation` provides small CLI workloads for exercising Exoware-compatible stores. It is meant to support local development, deployment validation, and reproducible benchmark runs.
 
 The tool has three modes:
 
@@ -27,32 +27,32 @@ Start a local simulator:
 cargo run -p exoware-simulator --bin simulator -- server run --port 10000
 ```
 
-Run workload commands from another terminal. The examples below use the default endpoint, `http://localhost:10000`.
+Run validation commands from another terminal. The examples below use the default endpoint, `http://localhost:10000`.
 
 ## Examples
 
 Load deterministic records:
 
 ```bash
-cargo run -p exoware-workload -- load --namespace 2026052901 --keys 10000 --value-size 256 --batch-size 100 --concurrency 4
+cargo run -p exoware-validation -- load --namespace 2026052901 --keys 10000 --value-size 256 --batch-size 100 --concurrency 4
 ```
 
 Run a benchmark:
 
 ```bash
-cargo run -p exoware-workload -- bench --namespace 2026052901 --keys 10000 --value-size 256 --ops 50000 --batch-size 100 --concurrency 8 --scenario balanced --output bench-report.json
+cargo run -p exoware-validation -- bench --namespace 2026052901 --keys 10000 --value-size 256 --ops 50000 --batch-size 100 --concurrency 8 --scenario balanced --output bench-report.json
 ```
 
 Replay a benchmark from a previous JSON report:
 
 ```bash
-cargo run -p exoware-workload -- bench --manifest bench-report.json --output replay-report.json
+cargo run -p exoware-validation -- bench --manifest bench-report.json --output replay-report.json
 ```
 
 Validate correctness:
 
 ```bash
-cargo run -p exoware-workload -- validate --keys 100 --lookup-samples 25 --missing-samples 10 --range-samples 10
+cargo run -p exoware-validation -- validate --keys 100 --lookup-samples 25 --missing-samples 10 --range-samples 10
 ```
 
 ## Exit Semantics
@@ -79,7 +79,7 @@ Generated load and benchmark keys open with a byte derived from the logical inde
 
 ## Benchmark Manifests
 
-`workload bench --manifest <path>` accepts the normalized `config` and `seed` fields from a benchmark JSON report, so a run can be replayed without reconstructing CLI flags. For a fixed manifest, each worker repeats its logical operation stream and its appended-key allocation independent of task scheduling. A manifest whose key, value, or workload-generator version differs from the current binary is rejected rather than silently replayed with different data. A minimal manifest has this shape:
+`validation bench --manifest <path>` accepts the normalized `config` and `seed` fields from a benchmark JSON report, so a run can be replayed without reconstructing CLI flags. For a fixed manifest, each worker repeats its logical operation stream and its appended-key allocation independent of task scheduling. A manifest whose key, value, or workload-generator version differs from the current binary is rejected rather than silently replayed with different data. A minimal manifest has this shape:
 
 ```json
 {
@@ -114,6 +114,6 @@ Generated load and benchmark keys open with a byte derived from the logical inde
 Use `--help` on the top-level command or any subcommand for all options:
 
 ```bash
-cargo run -p exoware-workload -- --help
-cargo run -p exoware-workload -- bench --help
+cargo run -p exoware-validation -- --help
+cargo run -p exoware-validation -- bench --help
 ```

@@ -1,4 +1,4 @@
-name: Workload Simulator
+name: Validation Simulator
 
 on:
   workflow_dispatch:
@@ -17,8 +17,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  workload-simulator:
-    name: Workload against simulator
+  validation-simulator:
+    name: Validation against simulator
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -31,8 +31,8 @@ jobs:
       - name: Run setup
         uses: ./.github/actions/setup
 
-      - name: Build simulator and workload
-        run: cargo build -p exoware-simulator -p exoware-workload --bins
+      - name: Build simulator and validation
+        run: cargo build -p exoware-simulator -p exoware-validation --bins
 
       - name: Resolve binaries
         id: bins
@@ -41,7 +41,7 @@ jobs:
           set -euo pipefail
           target_dir="${CARGO_TARGET_DIR:-target}"
           echo "simulator=$target_dir/debug/simulator" >> "$GITHUB_OUTPUT"
-          echo "workload=$target_dir/debug/workload" >> "$GITHUB_OUTPUT"
+          echo "validation=$target_dir/debug/validation" >> "$GITHUB_OUTPUT"
 
       - name: Start simulator
         id: simulator
@@ -71,16 +71,16 @@ jobs:
           echo "simulator did not become healthy at http://127.0.0.1:10000/health" >&2
           exit 1
 
-      - name: Run workload
-        uses: ./.github/actions/run-workload
+      - name: Run validation
+        uses: ./.github/actions/run-validation
         with:
           endpoint: http://127.0.0.1:10000
-          workload-bin: ${{ steps.bins.outputs.workload }}
+          validation-bin: ${{ steps.bins.outputs.validation }}
           # Uses the default `balanced` scenario, which now mixes reads, writes, and scans.
           # Stamp the PR head commit (not the ephemeral merge SHA) into the report, summary, and
           # artifact name so results are unambiguously tied to the commit they came from.
           commit: ${{ github.event.pull_request.head.sha || github.sha }}
-          artifact-name: workload-benchmark-report-${{ github.event.pull_request.head.sha || github.sha }}
+          artifact-name: validation-benchmark-report-${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Print simulator log on failure
         if: failure()
@@ -102,7 +102,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: workload-simulator-log
+          name: validation-simulator-log
           path: ${{ steps.simulator.outputs.log }}
           if-no-files-found: ignore
           overwrite: true
