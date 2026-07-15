@@ -101,7 +101,7 @@ impl Reporter for SinkReporter {
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         if let Update::Block(block, ack) = activity {
             let mut delivered = self.delivered.lock();
-            delivered.push(block);
+            delivered.push(Arc::unwrap_or_clone(block));
             if delivered.len() == self.expected {
                 if let Some(sender) = self.done.lock().take() {
                     let _ = sender.send(delivered.clone());
