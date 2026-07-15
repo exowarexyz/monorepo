@@ -21,6 +21,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      - name: Clear disk space
+        uses: ./.github/actions/disk
       - name: Run setup
         uses: ./.github/actions/setup
       - name: Install nightly Rust toolchain
