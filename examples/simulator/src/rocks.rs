@@ -66,8 +66,6 @@ const LOG_INGEST_DIR: &str = "ingest";
 const LOG_CF: &str = "log";
 const LOG_BATCH_KEY_LEN: usize = 8;
 pub const WRITER_THREAD_PREFIX: &str = "simulator-rocks-";
-/// Default number of stage workers building wave SSTs concurrently, and the default depth of
-/// the wave queue feeding them (one queued wave per worker).
 const DEFAULT_STAGE_WORKERS: usize = 4;
 type RocksIterItem = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
 
