@@ -99,8 +99,6 @@ pub(crate) enum ColumnKind {
     Decimal128,
     Decimal256,
     FixedSizeBinary(usize),
-    /// Variable-length bytes. Value-only: not indexable and not a primary-key
-    /// type (no order-preserving variable-length key encoding is defined).
     Binary,
     List(ListElementKind),
 }
