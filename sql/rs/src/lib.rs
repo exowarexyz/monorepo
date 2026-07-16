@@ -37,7 +37,10 @@ mod tests {
     use super::writer::*;
     use super::*;
     use commonware_codec::Encode;
-    use datafusion::arrow::array::{Float64Array, Int64Array, LargeStringArray, StringViewArray};
+    use datafusion::arrow::array::{
+        BinaryViewArray, Float64Array, Int64Array, LargeBinaryArray, LargeStringArray,
+        StringViewArray,
+    };
     use datafusion::arrow::datatypes::{i256, DataType, TimeUnit};
     use datafusion::arrow::record_batch::RecordBatch;
     use datafusion::common::{config::ConfigOptions, ScalarValue};
@@ -1335,6 +1338,168 @@ mod tests {
             .downcast_ref::<StringViewArray>()
             .expect("must build StringViewArray");
         assert_eq!(values.value(0), "hello");
+    }
+
+    #[test]
+    fn build_projected_batch_uses_large_binary_type() {
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", DataType::Int64, false),
+                TableColumnConfig::new("payload", DataType::LargeBinary, false),
+            ],
+            vec!["id".to_string()],
+            vec![],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let rows = vec![KvRow {
+            values: vec![CellValue::Int64(1), CellValue::Binary(vec![1, 2, 3])],
+        }];
+        let batch = build_projected_batch(&rows, &model, &model.schema, &None).unwrap();
+        assert_eq!(batch.column(1).data_type(), &DataType::LargeBinary);
+        let values = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<LargeBinaryArray>()
+            .expect("must build LargeBinaryArray");
+        assert_eq!(values.value(0), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn build_projected_batch_uses_binary_view_type() {
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", DataType::Int64, false),
+                TableColumnConfig::new("payload", DataType::BinaryView, false),
+            ],
+            vec!["id".to_string()],
+            vec![],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let rows = vec![KvRow {
+            values: vec![CellValue::Int64(1), CellValue::Binary(vec![1, 2, 3])],
+        }];
+        let batch = build_projected_batch(&rows, &model, &model.schema, &None).unwrap();
+        assert_eq!(batch.column(1).data_type(), &DataType::BinaryView);
+        let values = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<BinaryViewArray>()
+            .expect("must build BinaryViewArray");
+        assert_eq!(values.value(0), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn binary_column_rejected_in_primary_key() {
+        let error = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", DataType::Binary, false),
+                TableColumnConfig::new("data", DataType::Utf8, true),
+            ],
+            vec!["id".to_string()],
+            vec![],
+        )
+        .expect_err("Binary primary key must be rejected");
+        assert!(
+            error.contains("must be Int64, UInt64, Utf8, or FixedSizeBinary"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn binary_column_rejected_in_index() {
+        let result = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", DataType::Int64, false),
+                TableColumnConfig::new("body", DataType::Binary, false),
+            ],
+            vec!["id".to_string()],
+            vec![IndexSpec::new("body_idx", vec!["body".to_string()]).unwrap()],
+        );
+        assert!(
+            result.is_err() || {
+                let config = result.unwrap();
+                let model = TableModel::from_config(&config).unwrap();
+                model.resolve_index_specs(&config.index_specs).is_err()
+            }
+        );
+    }
+
+    /// Binary predicates are never pushed down: no ordered key encoding exists
+    /// for variable-length bytes, so filters stay with DataFusion over a scan.
+    #[test]
+    fn binary_filters_are_not_pushed_down() {
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", DataType::Int64, false),
+                TableColumnConfig::new("body", DataType::Binary, false),
+            ],
+            vec!["id".to_string()],
+            vec![],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+
+        use datafusion::logical_expr::col;
+        let filter = col("body").eq(Expr::Literal(
+            ScalarValue::Binary(Some(vec![0xAB, 0xCD])),
+            None,
+        ));
+
+        assert!(!QueryPredicate::supports_filter(&filter, &model));
+        let pred = QueryPredicate::from_filters(&[filter], &model);
+        assert!(pred.constraints.is_empty());
+    }
+
+    /// Binary columns carry no KV field kind, so they can never participate in
+    /// KV-side aggregate pushdown.
+    #[test]
+    fn binary_has_no_kv_aggregate_field_kind() {
+        assert!(kv_field_kind(ColumnKind::Binary).is_none());
+    }
+
+    /// The archived read path decodes stored Binary values back into cells of
+    /// their exact lengths, including empty payloads.
+    #[test]
+    fn binary_cells_decode_from_archived_non_pk_values() {
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", DataType::UInt64, false),
+                TableColumnConfig::new("body", DataType::Binary, false),
+            ],
+            vec!["id".to_string()],
+            vec![],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let body_idx = *model.columns_by_name.get("body").expect("body column");
+
+        let bodies: Vec<Vec<u8>> = vec![vec![], vec![0xAB], vec![0xCD; 300]];
+        for body in bodies {
+            let row = KvRow {
+                values: vec![CellValue::UInt64(1), CellValue::Binary(body.clone())],
+            };
+            let encoded = encode_base_row_value(&row, &model).expect("encode row");
+            let stored = decode_stored_row(&encoded).expect("decode stored row");
+            let cell = cell_value_from_archived_non_pk(
+                &model.columns[body_idx],
+                stored.values[body_idx].as_ref(),
+            )
+            .expect("decode archived binary")
+            .expect("value is not null");
+            assert!(
+                matches!(&cell, CellValue::Binary(v) if *v == body),
+                "wrong cell for {}-byte body: {cell:?}",
+                body.len()
+            );
+        }
     }
 
     #[test]

@@ -269,7 +269,7 @@ pub(crate) fn decode_cell_from_ordered_key_bytes(
             }
             CellValue::FixedBinary(bytes.to_vec())
         }
-        ColumnKind::List(_) => return None,
+        ColumnKind::Binary | ColumnKind::List(_) => return None,
     })
 }
 
@@ -579,6 +579,7 @@ pub(crate) fn cell_value_from_archived_non_pk(
             CellValue::Decimal256(i256::from_le_bytes(arr))
         }
         (ColumnKind::Utf8, StoredValue::Utf8(v)) => CellValue::Utf8(v.as_str().to_string()),
+        (ColumnKind::Binary, StoredValue::Bytes(v)) => CellValue::Binary(v.as_slice().to_vec()),
         (ColumnKind::FixedSizeBinary(expected), StoredValue::Bytes(v)) => {
             if v.as_slice().len() != expected {
                 return Err(DataFusionError::Execution(format!(

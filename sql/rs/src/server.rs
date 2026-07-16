@@ -29,11 +29,11 @@ use crate::proto::sql::v1::{
 use bytes::Bytes;
 use connectrpc::{ConnectError, ConnectRpcService, RequestContext as Context};
 use datafusion::arrow::array::{
-    Array, ArrayRef, BooleanArray, Date32Array, Date64Array, Decimal128Array, Decimal256Array,
-    FixedSizeBinaryArray, Float32Array, Float64Array, Int32Array, Int64Array, LargeListArray,
-    LargeStringArray, ListArray, StringArray, StringViewArray, TimestampMicrosecondArray,
-    TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt32Array,
-    UInt64Array,
+    Array, ArrayRef, BinaryArray, BinaryViewArray, BooleanArray, Date32Array, Date64Array,
+    Decimal128Array, Decimal256Array, FixedSizeBinaryArray, Float32Array, Float64Array, Int32Array,
+    Int64Array, LargeBinaryArray, LargeListArray, LargeStringArray, ListArray, StringArray,
+    StringViewArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+    TimestampNanosecondArray, TimestampSecondArray, UInt32Array, UInt64Array,
 };
 use datafusion::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -590,6 +590,27 @@ fn arrow_value_to_kind(array: &ArrayRef, row: usize) -> DataFusionResult<ProtoCe
                     .value(row),
             )))
         }
+        DataType::Binary => Ok(ProtoCellKind::BinaryValue(Bytes::copy_from_slice(
+            array
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .unwrap()
+                .value(row),
+        ))),
+        DataType::LargeBinary => Ok(ProtoCellKind::BinaryValue(Bytes::copy_from_slice(
+            array
+                .as_any()
+                .downcast_ref::<LargeBinaryArray>()
+                .unwrap()
+                .value(row),
+        ))),
+        DataType::BinaryView => Ok(ProtoCellKind::BinaryValue(Bytes::copy_from_slice(
+            array
+                .as_any()
+                .downcast_ref::<BinaryViewArray>()
+                .unwrap()
+                .value(row),
+        ))),
         DataType::Date32 => Ok(ProtoCellKind::Date32Value(
             array
                 .as_any()
@@ -701,4 +722,31 @@ fn client_error_to_connect(err: exoware_sdk::ClientError) -> ConnectError {
 #[allow(dead_code)]
 fn _assert_projected_column_indices_visible() {
     let _ = projected_column_indices;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Result cells for Binary columns can arrive as any of the three arrow
+    /// binary encodings; every one becomes a `binary_value` cell.
+    #[test]
+    fn binary_arrays_convert_to_binary_cells() {
+        let body: &[u8] = &[0x00, 0xFF, 0x42];
+        let arrays: Vec<ArrayRef> = vec![
+            Arc::new(BinaryArray::from_iter_values([body])),
+            Arc::new(LargeBinaryArray::from_iter_values([body])),
+            Arc::new(BinaryViewArray::from_iter_values([body])),
+        ];
+        for array in arrays {
+            let body_type = array.data_type().clone();
+            let cell = arrow_value_to_cell(&array, 0).expect("cell conversion");
+            match cell.kind {
+                Some(ProtoCellKind::BinaryValue(bytes)) => {
+                    assert_eq!(bytes.as_ref(), body, "wrong bytes for {body_type:?}")
+                }
+                other => panic!("expected binary_value for {body_type:?}, got {other:?}"),
+            }
+        }
+    }
 }

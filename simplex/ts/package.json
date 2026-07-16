@@ -1,6 +1,6 @@
 {
   "name": "@exowarexyz/simplex",
-  "version": "2026.7.0",
+  "version": "2026.7.1",
   "description": "Index artifacts emitted by Simplex.",
   "type": "module",
   "license": "(MIT OR Apache-2.0)",

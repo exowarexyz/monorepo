@@ -416,6 +416,7 @@ If you see a warning-sign plan, consider:
 | `Decimal128(p, s)` | -- | yes | yes | 16 bytes |
 | `Decimal256(p, s)` | -- | yes | yes | 32 bytes |
 | `FixedSizeBinary(n)` | yes | yes | yes | n bytes |
+| `Binary` / `LargeBinary` / `BinaryView` | -- | -- | yes | -- |
 | `List<T>` / `LargeList<T>` | -- | -- | yes | -- |
 
 PK-eligible types: `Int64`, `UInt64`, `Utf8`, `FixedSizeBinary`.
@@ -442,6 +443,7 @@ The table below shows what filter patterns are pushed down per column type:
 | `Decimal128` | yes | yes | -- | yes |
 | `Decimal256` | yes | yes | -- | yes |
 | `FixedSizeBinary` | yes | -- | yes | yes |
+| `Binary` | -- | -- | -- | -- |
 | `List` | -- | -- | -- | -- |
 
 **Composite PK pushdown**: For composite primary keys, predicates are

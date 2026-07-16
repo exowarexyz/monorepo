@@ -2158,6 +2158,7 @@ pub(crate) fn kv_field_kind(kind: ColumnKind) -> Option<KvFieldKind> {
         ColumnKind::FixedSizeBinary(width) => Some(KvFieldKind::FixedSizeBinary(width as u8)),
         ColumnKind::Decimal128 => Some(KvFieldKind::Decimal128),
         ColumnKind::Decimal256 => Some(KvFieldKind::Decimal256),
+        ColumnKind::Binary => None,
         ColumnKind::List(_) => None,
     }
 }

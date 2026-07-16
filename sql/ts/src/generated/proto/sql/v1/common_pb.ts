@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file sql/v1/common.proto.
  */
 export const file_sql_v1_common: GenFile = /*@__PURE__*/
-  fileDesc("ChNzcWwvdjEvY29tbW9uLnByb3RvEgZzcWwudjEiIgoDUm93EhsKBWNlbGxzGAEgAygLMgwuc3FsLnYxLkNlbGwiBgoETnVsbCIrCglMaXN0VmFsdWUSHgoIZWxlbWVudHMYASADKAsyDC5zcWwudjEuQ2VsbCL4AgoEQ2VsbBIiCgpudWxsX3ZhbHVlGAEgASgLMgwuc3FsLnYxLk51bGxIABIVCgtpbnQ2NF92YWx1ZRgCIAEoA0gAEhYKDHVpbnQ2NF92YWx1ZRgDIAEoBEgAEhcKDWZsb2F0NjRfdmFsdWUYBCABKAFIABIXCg1ib29sZWFuX3ZhbHVlGAUgASgISAASFAoKdXRmOF92YWx1ZRgGIAEoCUgAEiEKF2ZpeGVkX3NpemVfYmluYXJ5X3ZhbHVlGAcgASgMSAASFgoMZGF0ZTMyX3ZhbHVlGAggASgFSAASFgoMZGF0ZTY0X3ZhbHVlGAkgASgDSAASGQoPdGltZXN0YW1wX3ZhbHVlGAogASgDSAASGgoQZGVjaW1hbDEyOF92YWx1ZRgLIAEoDEgAEhoKEGRlY2ltYWwyNTZfdmFsdWUYDCABKAxIABInCgpsaXN0X3ZhbHVlGA0gASgLMhEuc3FsLnYxLkxpc3RWYWx1ZUgAQgYKBGtpbmRiBnByb3RvMw");
+  fileDesc("ChNzcWwvdjEvY29tbW9uLnByb3RvEgZzcWwudjEiIgoDUm93EhsKBWNlbGxzGAEgAygLMgwuc3FsLnYxLkNlbGwiBgoETnVsbCIrCglMaXN0VmFsdWUSHgoIZWxlbWVudHMYASADKAsyDC5zcWwudjEuQ2VsbCKQAwoEQ2VsbBIiCgpudWxsX3ZhbHVlGAEgASgLMgwuc3FsLnYxLk51bGxIABIVCgtpbnQ2NF92YWx1ZRgCIAEoA0gAEhYKDHVpbnQ2NF92YWx1ZRgDIAEoBEgAEhcKDWZsb2F0NjRfdmFsdWUYBCABKAFIABIXCg1ib29sZWFuX3ZhbHVlGAUgASgISAASFAoKdXRmOF92YWx1ZRgGIAEoCUgAEiEKF2ZpeGVkX3NpemVfYmluYXJ5X3ZhbHVlGAcgASgMSAASFgoMZGF0ZTMyX3ZhbHVlGAggASgFSAASFgoMZGF0ZTY0X3ZhbHVlGAkgASgDSAASGQoPdGltZXN0YW1wX3ZhbHVlGAogASgDSAASGgoQZGVjaW1hbDEyOF92YWx1ZRgLIAEoDEgAEhoKEGRlY2ltYWwyNTZfdmFsdWUYDCABKAxIABInCgpsaXN0X3ZhbHVlGA0gASgLMhEuc3FsLnYxLkxpc3RWYWx1ZUgAEhYKDGJpbmFyeV92YWx1ZRgOIAEoDEgAQgYKBGtpbmRiBnByb3RvMw");
 
 /**
  * Typed row. `cells[i]` aligns with `column[i]` in the parent message.
@@ -186,6 +186,14 @@ export type Cell = Message<"sql.v1.Cell"> & {
      */
     value: ListValue;
     case: "listValue";
+  } | {
+    /**
+     * Binary / LargeBinary / BinaryView column: variable-length bytes.
+     *
+     * @generated from field: bytes binary_value = 14;
+     */
+    value: Uint8Array;
+    case: "binaryValue";
   } | { case: undefined; value?: undefined };
 };
 

@@ -52,5 +52,7 @@ message Cell {
     bytes decimal256_value = 12;
     // List<Int64|Float64|Boolean|Utf8> column.
     ListValue list_value = 13;
+    // Binary / LargeBinary / BinaryView column: variable-length bytes.
+    bytes binary_value = 14;
   }
 }

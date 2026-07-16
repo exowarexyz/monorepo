@@ -309,7 +309,7 @@ impl QueryPredicate {
                         op == Operator::Eq && scalar_to_fixed_binary(&literal).is_some()
                     }
                     ColumnKind::Decimal256 => scalar_to_i256(&literal).is_some() && range_ops,
-                    ColumnKind::List(_) => false,
+                    ColumnKind::Binary | ColumnKind::List(_) => false,
                 }
             }
         }
@@ -642,7 +642,7 @@ impl QueryPredicate {
                 self.constraints
                     .insert(col_idx, PredicateConstraint::Decimal256Range { min, max });
             }
-            ColumnKind::List(_) => {}
+            ColumnKind::Binary | ColumnKind::List(_) => {}
         }
     }
 
@@ -1483,7 +1483,9 @@ impl QueryPredicate {
                         key.resize(key.len() + n, if upper { 0xFF } else { 0x00 });
                     }
                 }
-                ColumnKind::List(_) => unreachable!("list columns cannot be indexed"),
+                ColumnKind::Binary | ColumnKind::List(_) => {
+                    unreachable!("binary and list columns cannot be indexed")
+                }
             }
         }
 
@@ -1739,7 +1741,9 @@ impl QueryPredicate {
                 }
                 bytes
             }
-            ColumnKind::List(_) => unreachable!("list columns cannot be indexed"),
+            ColumnKind::Binary | ColumnKind::List(_) => {
+                unreachable!("binary and list columns cannot be indexed")
+            }
         })
     }
 
