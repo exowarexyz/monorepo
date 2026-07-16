@@ -30,9 +30,9 @@ use bytes::Bytes;
 use connectrpc::{ConnectError, ConnectRpcService, RequestContext as Context};
 use datafusion::arrow::array::{
     Array, ArrayRef, BinaryArray, BinaryViewArray, BooleanArray, Date32Array, Date64Array,
-    Decimal128Array, Decimal256Array, FixedSizeBinaryArray, Float32Array, Float64Array,
-    Int32Array, Int64Array, LargeBinaryArray, LargeListArray, LargeStringArray, ListArray,
-    StringArray, StringViewArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+    Decimal128Array, Decimal256Array, FixedSizeBinaryArray, Float32Array, Float64Array, Int32Array,
+    Int64Array, LargeBinaryArray, LargeListArray, LargeStringArray, ListArray, StringArray,
+    StringViewArray, TimestampMicrosecondArray, TimestampMillisecondArray,
     TimestampNanosecondArray, TimestampSecondArray, UInt32Array, UInt64Array,
 };
 use datafusion::arrow::datatypes::{DataType, SchemaRef, TimeUnit};

@@ -445,9 +445,7 @@ impl Writer {
 
         let prepare = thread::Builder::new()
             .name(format!("{WRITER_THREAD_PREFIX}prepare"))
-            .spawn(move || {
-                run_prepare(next, request_receiver, wave_sender, max_commit_batch_bytes)
-            })
+            .spawn(move || run_prepare(next, request_receiver, wave_sender, max_commit_batch_bytes))
             .expect("failed to spawn RocksDB prepare worker");
 
         handles.insert(0, prepare);
