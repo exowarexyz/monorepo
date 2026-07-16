@@ -944,7 +944,7 @@ pub struct RocksStore {
 impl RocksStore {
     /// Open the store with default options, unless `config` overrides the database or
     /// write-pipeline options. Column families run options tuned to the store's write path
-    /// (see [`state_cf_options`] and [`log_cf_options`]).
+    /// (see `state_cf_options` and `log_cf_options`).
     /// Re-derives the durable frontier from the retained log rows and the state-floor meta row,
     /// then re-applies the newest log row to the state column family so the current state is
     /// complete below the durable sequence even after a crash mid-commit.
