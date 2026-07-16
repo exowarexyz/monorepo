@@ -564,7 +564,7 @@ fn run_commit(
 
     // The channel closes only once every stage worker has exited, after handing over every
     // staged group, so a clean shutdown leaves nothing buffered.
-    debug_assert!(pending.is_empty(), "staged groups lost at shutdown");
+    assert!(pending.is_empty(), "staged groups lost at shutdown");
 }
 
 /// Coalesces one wave from requests already queued behind `first` without waiting for new
