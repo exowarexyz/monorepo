@@ -29,11 +29,11 @@ use crate::proto::sql::v1::{
 use bytes::Bytes;
 use connectrpc::{ConnectError, ConnectRpcService, RequestContext as Context};
 use datafusion::arrow::array::{
-    Array, ArrayRef, BooleanArray, Date32Array, Date64Array, Decimal128Array, Decimal256Array,
-    FixedSizeBinaryArray, Float32Array, Float64Array, Int32Array, Int64Array, LargeListArray,
-    LargeStringArray, ListArray, StringArray, StringViewArray, TimestampMicrosecondArray,
-    TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt32Array,
-    UInt64Array,
+    Array, ArrayRef, BinaryArray, BooleanArray, Date32Array, Date64Array, Decimal128Array,
+    Decimal256Array, FixedSizeBinaryArray, Float32Array, Float64Array, Int32Array, Int64Array,
+    LargeBinaryArray, LargeListArray, LargeStringArray, ListArray, StringArray, StringViewArray,
+    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray, UInt32Array, UInt64Array,
 };
 use datafusion::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -590,6 +590,20 @@ fn arrow_value_to_kind(array: &ArrayRef, row: usize) -> DataFusionResult<ProtoCe
                     .value(row),
             )))
         }
+        DataType::Binary => Ok(ProtoCellKind::BinaryValue(Bytes::copy_from_slice(
+            array
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .unwrap()
+                .value(row),
+        ))),
+        DataType::LargeBinary => Ok(ProtoCellKind::BinaryValue(Bytes::copy_from_slice(
+            array
+                .as_any()
+                .downcast_ref::<LargeBinaryArray>()
+                .unwrap()
+                .value(row),
+        ))),
         DataType::Date32 => Ok(ProtoCellKind::Date32Value(
             array
                 .as_any()

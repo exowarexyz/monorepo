@@ -496,6 +496,9 @@ impl ::buffa::Message for Cell {
                         += 1u32 + ::buffa::encoding::varint_len(inner as u64) as u32
                             + inner;
                 }
+                __buffa::oneof::cell::Kind::BinaryValue(x) => {
+                    size += 1u32 + ::buffa::types::bytes_encoded_len(x) as u32;
+                }
             }
         }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
@@ -615,6 +618,14 @@ impl ::buffa::Message for Cell {
                         .encode(buf);
                     ::buffa::encoding::encode_varint(__cache.consume_next() as u64, buf);
                     x.write_to(__cache, buf);
+                }
+                __buffa::oneof::cell::Kind::BinaryValue(x) => {
+                    ::buffa::encoding::Tag::new(
+                            14u32,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )
+                        .encode(buf);
+                    ::buffa::types::encode_bytes(x, buf);
                 }
             }
         }
@@ -838,6 +849,20 @@ impl ::buffa::Message for Cell {
                         ),
                     );
                 }
+            }
+            14u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 14u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                self.kind = ::core::option::Option::Some(
+                    __buffa::oneof::cell::Kind::BinaryValue(
+                        ::buffa::types::decode_bytes_to_bytes(buf)?,
+                    ),
+                );
             }
             _ => {
                 self.__buffa_unknown_fields
@@ -1228,6 +1253,37 @@ impl<'de> serde::Deserialize<'de> for Cell {
                                     __buffa::oneof::cell::Kind::ListValue(
                                         ::buffa::alloc::boxed::Box::new(v),
                                     ),
+                                );
+                            }
+                        }
+                        "binaryValue" | "binary_value" => {
+                            struct _DeserSeed;
+                            impl<'de> serde::de::DeserializeSeed<'de> for _DeserSeed {
+                                type Value = ::buffa::bytes::Bytes;
+                                fn deserialize<D: serde::Deserializer<'de>>(
+                                    self,
+                                    d: D,
+                                ) -> ::core::result::Result<
+                                    ::buffa::bytes::Bytes,
+                                    D::Error,
+                                > {
+                                    ::buffa::json_helpers::bytes::deserialize(d)
+                                }
+                            }
+                            let v: ::core::option::Option<::buffa::bytes::Bytes> = map
+                                .next_value_seed(
+                                    ::buffa::json_helpers::NullableDeserializeSeed(_DeserSeed),
+                                )?;
+                            if let Some(v) = v {
+                                if __oneof_kind.is_some() {
+                                    return Err(
+                                        serde::de::Error::custom(
+                                            "multiple oneof fields set for 'kind'",
+                                        ),
+                                    );
+                                }
+                                __oneof_kind = Some(
+                                    __buffa::oneof::cell::Kind::BinaryValue(v),
                                 );
                             }
                         }
@@ -4054,6 +4110,22 @@ pub mod __buffa {
                                 );
                             }
                         }
+                        14u32 => {
+                            if tag.wire_type()
+                                != ::buffa::encoding::WireType::LengthDelimited
+                            {
+                                return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                                    field_number: 14u32,
+                                    expected: 2u8,
+                                    actual: tag.wire_type() as u8,
+                                });
+                            }
+                            view.kind = Some(
+                                super::super::__buffa::view::oneof::cell::Kind::BinaryValue(
+                                    ::buffa::types::borrow_bytes(&mut cur)?,
+                                ),
+                            );
+                        }
                         _ => {
                             ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
                             let span_len = before_tag.len() - cur.len();
@@ -4173,6 +4245,13 @@ pub mod __buffa {
                                     ),
                                 )
                             }
+                            super::super::__buffa::view::oneof::cell::Kind::BinaryValue(
+                                v,
+                            ) => {
+                                super::super::__buffa::oneof::cell::Kind::BinaryValue(
+                                    ::buffa::view::bytes_from_source(__buffa_src, v),
+                                )
+                            }
                         }),
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields
@@ -4259,6 +4338,11 @@ pub mod __buffa {
                             size
                                 += 1u32 + ::buffa::encoding::varint_len(inner as u64) as u32
                                     + inner;
+                        }
+                        super::super::__buffa::view::oneof::cell::Kind::BinaryValue(
+                            x,
+                        ) => {
+                            size += 1u32 + ::buffa::types::bytes_encoded_len(x) as u32;
                         }
                     }
                 }
@@ -4406,6 +4490,16 @@ pub mod __buffa {
                                 buf,
                             );
                             x.write_to(__cache, buf);
+                        }
+                        super::super::__buffa::view::oneof::cell::Kind::BinaryValue(
+                            x,
+                        ) => {
+                            ::buffa::encoding::Tag::new(
+                                    14u32,
+                                    ::buffa::encoding::WireType::LengthDelimited,
+                                )
+                                .encode(buf);
+                            ::buffa::types::encode_bytes(x, buf);
                         }
                     }
                 }
@@ -4571,6 +4665,20 @@ pub mod __buffa {
                         }
                         super::super::__buffa::view::oneof::cell::Kind::ListValue(v) => {
                             __map.serialize_entry("listValue", v)?;
+                        }
+                        super::super::__buffa::view::oneof::cell::Kind::BinaryValue(
+                            v,
+                        ) => {
+                            struct _W<'__x>(&'__x [u8]);
+                            impl ::serde::Serialize for _W<'_> {
+                                fn serialize<__S: ::serde::Serializer>(
+                                    &self,
+                                    __s: __S,
+                                ) -> ::core::result::Result<__S::Ok, __S::Error> {
+                                    ::buffa::json_helpers::bytes::serialize(self.0, __s)
+                                }
+                            }
+                            __map.serialize_entry("binaryValue", &_W(v))?;
                         }
                     }
                 }
@@ -6908,6 +7016,7 @@ pub mod __buffa {
                             super::super::super::super::__buffa::view::ListValueView<'a>,
                         >,
                     ),
+                    BinaryValue(&'a [u8]),
                 }
             }
         }
@@ -6933,6 +7042,7 @@ pub mod __buffa {
                 Decimal128Value(::buffa::bytes::Bytes),
                 Decimal256Value(::buffa::bytes::Bytes),
                 ListValue(::buffa::alloc::boxed::Box<super::super::super::ListValue>),
+                BinaryValue(::buffa::bytes::Bytes),
             }
             impl ::buffa::Oneof for Kind {}
             impl From<super::super::super::Null> for Kind {
@@ -7082,6 +7192,18 @@ pub mod __buffa {
                         }
                         Self::ListValue(v) => {
                             map.serialize_entry("listValue", v)?;
+                        }
+                        Self::BinaryValue(v) => {
+                            struct _W<'a>(&'a ::buffa::bytes::Bytes);
+                            impl serde::Serialize for _W<'_> {
+                                fn serialize<S2: serde::Serializer>(
+                                    &self,
+                                    s: S2,
+                                ) -> ::core::result::Result<S2::Ok, S2::Error> {
+                                    ::buffa::json_helpers::bytes::serialize(self.0, s)
+                                }
+                            }
+                            map.serialize_entry("binaryValue", &_W(v))?;
                         }
                     }
                     map.end()

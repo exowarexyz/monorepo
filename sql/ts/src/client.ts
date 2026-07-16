@@ -33,8 +33,8 @@ export type SqlClientOptions = SdkClientOptions;
  * - `null` is SQL NULL (wire `null_value`).
  * - `bigint` covers Int64, UInt64 (unsigned), Date64, and Timestamp.
  * - `number` covers Float64 and Date32 (days since epoch).
- * - `Uint8Array` covers FixedSizeBinary and the big-endian encodings of
- *   Decimal128 (16 bytes) / Decimal256 (32 bytes).
+ * - `Uint8Array` covers FixedSizeBinary, variable-length Binary, and the
+ *   big-endian encodings of Decimal128 (16 bytes) / Decimal256 (32 bytes).
  * - `CellValue[]` covers `List<...>` columns; elements use the same type.
  * - The `undefined` case means the server sent an unknown oneof variant.
  */
@@ -109,6 +109,7 @@ function cellToValue(cell: SqlCell): CellValue {
     case 'utf8Value':
       return cell.kind.value;
     case 'fixedSizeBinaryValue':
+    case 'binaryValue':
     case 'decimal128Value':
     case 'decimal256Value':
       return cell.kind.value;

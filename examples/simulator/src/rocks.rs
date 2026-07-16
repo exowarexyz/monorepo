@@ -47,8 +47,8 @@ use exoware_server::{
 use parking_lot::Mutex;
 use regex::bytes::Regex;
 use rocksdb::{
-    ColumnFamily, ColumnFamilyDescriptor, DBCompressionType, DBIterator, Direction,
-    IngestExternalFileOptions, IteratorMode, Options, SstFileWriter, WriteOptions, DB,
+    ColumnFamily, ColumnFamilyDescriptor, DBCompactionStyle, DBCompressionType, DBIterator,
+    Direction, IngestExternalFileOptions, IteratorMode, Options, SstFileWriter, WriteOptions, DB,
 };
 use tokio::sync::oneshot;
 use tracing::debug;
@@ -63,6 +63,8 @@ const LOG_INGEST_DIR: &str = "ingest";
 const LOG_CF: &str = "log";
 const LOG_BATCH_KEY_LEN: usize = 8;
 pub const WRITER_THREAD_PREFIX: &str = "simulator-rocks-";
+/// Stage workers building wave SSTs concurrently.
+const STAGE_WORKERS: usize = 4;
 type RocksIterItem = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
 
 /// A resource dropped strictly after the database has closed (see [`Database`]).
@@ -360,6 +362,14 @@ struct WriteRequest {
     response: oneshot::Sender<Result<u64, IngestError>>,
 }
 
+/// One coalesced wave awaiting SST staging: every request shares a single sequence number,
+/// whose log row carries all their rows in arrival order.
+struct QueuedWave {
+    sequence: u64,
+    requests: Vec<WriteRequest>,
+    rows: Vec<(Bytes, Bytes)>,
+}
+
 /// One staged commit group: every coalesced request shares a single sequence number, whose log
 /// row carries all their rows in arrival order.
 struct PreparedWrite {
@@ -380,17 +390,17 @@ struct Writer {
 }
 
 impl Writer {
-    /// Starts the two-stage write pipeline. `prepare` drains queued requests up to the
-    /// configured byte cap into a commit group that shares one sequence number (continuing
-    /// from the published frontier, which is exactly the frontier derived at open since
-    /// nothing has committed yet) and stages the group's log and state SSTs in parallel;
-    /// `commit` ingests the log file, then the state file, publishes the frontier, and
-    /// resolves the requests. The stages overlap, so one group is staged while
-    /// the previous commits. `commit` still ingests strictly in order, so a crash leaves
-    /// at most the newest ingested group without its state. Any write failure in either stage
-    /// is fatal (the worker panics): the durable log row alone defines the group, so the next
-    /// open re-derives the frontier and replays the rows above the floor. Sequence numbers
-    /// never need to be reclaimed in-process.
+    /// Starts the write pipeline. `prepare` drains queued requests up to the configured byte
+    /// cap into commit groups that each share one sequence number (continuing from the
+    /// published frontier, which is exactly the frontier derived at open since nothing has
+    /// committed yet) and deals them round-robin to the stage workers, which build each
+    /// group's log and state SSTs concurrently across groups; `commit` reorders staged groups
+    /// back into sequence order, ingests each log file, then its state file, publishes the
+    /// frontier, and resolves the requests. `commit` still ingests strictly in order, so a
+    /// crash leaves at most the newest ingested group without its state. Any write failure in
+    /// any stage is fatal (the worker panics): the durable log row alone defines the group,
+    /// so the next open re-derives the frontier and replays the rows above the floor.
+    /// Sequence numbers never need to be reclaimed in-process.
     fn start(
         db: Arc<Database>,
         ingest_dir: PathBuf,
@@ -400,32 +410,45 @@ impl Writer {
         let next = frontiers.published.load(Ordering::Acquire);
         let (request_sender, request_receiver) = mpsc::channel();
 
-        // Rendezvous so `prepare` runs at most one wave ahead of `commit`: it hands off a
-        // staged group, then stages the next while `commit` ingests this one.
-        let (group_sender, group_receiver) = mpsc::sync_channel(0);
+        // Staged groups queue shallowly toward `commit`, which reorders them by sequence.
+        let (staged_sender, staged_receiver) = mpsc::sync_channel(STAGE_WORKERS);
         let max_commit_batch_bytes = write_pipeline.max_commit_batch_bytes.get();
 
         let commit = thread::Builder::new()
             .name(format!("{WRITER_THREAD_PREFIX}commit"))
-            .spawn(move || run_commit(db, frontiers, group_receiver))
+            .spawn(move || run_commit(db, frontiers, staged_receiver, next))
             .expect("failed to spawn RocksDB commit worker");
+
+        // Bounded to one queued wave per worker so `prepare` cannot run away
+        // from staging; the queue plus in-progress waves bound staged memory.
+        let mut handles = Vec::with_capacity(STAGE_WORKERS + 2);
+        let mut wave_senders = Vec::with_capacity(STAGE_WORKERS);
+        for worker in 0..STAGE_WORKERS {
+            let (wave_sender, wave_receiver) = mpsc::sync_channel::<QueuedWave>(1);
+            wave_senders.push(wave_sender);
+            let ingest_dir = ingest_dir.clone();
+            let staged_sender = staged_sender.clone();
+            handles.push(
+                thread::Builder::new()
+                    .name(format!("{WRITER_THREAD_PREFIX}stage-{worker}"))
+                    .spawn(move || run_stage(ingest_dir, wave_receiver, staged_sender))
+                    .expect("failed to spawn RocksDB stage worker"),
+            );
+        }
+        drop(staged_sender);
 
         let prepare = thread::Builder::new()
             .name(format!("{WRITER_THREAD_PREFIX}prepare"))
             .spawn(move || {
-                run_prepare(
-                    ingest_dir,
-                    next,
-                    request_receiver,
-                    group_sender,
-                    max_commit_batch_bytes,
-                )
+                run_prepare(next, request_receiver, wave_senders, max_commit_batch_bytes)
             })
             .expect("failed to spawn RocksDB prepare worker");
 
+        handles.insert(0, prepare);
+        handles.push(commit);
         Self {
             sender: Some(request_sender),
-            handles: vec![prepare, commit],
+            handles,
         }
     }
 
@@ -469,23 +492,24 @@ impl Drop for Writer {
     }
 }
 
-/// Drains each byte-bounded wave of queued requests into a group with the next sequence number,
-/// stages it, and hands it to `commit`. Exits when the request channel closes (store drop);
-/// panics if `commit` died, since that only happens on a fatal write error.
+/// Drains each byte-bounded wave of queued requests into a group with the next sequence number
+/// and deals it to a stage worker. Exits when the request channel closes (store drop); panics
+/// if a stage worker died, since that only happens on a fatal write error.
 fn run_prepare(
-    ingest_dir: PathBuf,
     mut next: u64,
     receiver: mpsc::Receiver<WriteRequest>,
-    sender: mpsc::SyncSender<PreparedWrite>,
+    workers: Vec<mpsc::SyncSender<QueuedWave>>,
     max_commit_batch_bytes: usize,
 ) {
+    let mut round = 0usize;
     while let Ok(first) = receiver.recv() {
-        let (group, disconnected) =
-            stage_queued_write(&ingest_dir, &receiver, first, next, max_commit_batch_bytes);
-        next = group.sequence;
-        if sender.send(group).is_err() {
-            panic!("rocks commit worker died");
+        let (wave, disconnected) =
+            coalesce_queued_write(&receiver, first, next, max_commit_batch_bytes);
+        next = wave.sequence;
+        if workers[round % workers.len()].send(wave).is_err() {
+            panic!("rocks stage worker died");
         }
+        round += 1;
 
         if disconnected {
             break;
@@ -493,29 +517,55 @@ fn run_prepare(
     }
 }
 
-/// Commits staged groups one at a time (log ingestion, state ingestion, publish, ack) until
-/// the group channel closes (store drop). Any write failure panics inside `commit_group`.
+/// Stages each wave dealt by `prepare` and hands the group to `commit`. Exits when the wave
+/// channel closes (store drop); panics if `commit` died, since that only happens on a fatal
+/// write error.
+fn run_stage(
+    ingest_dir: PathBuf,
+    receiver: mpsc::Receiver<QueuedWave>,
+    sender: mpsc::SyncSender<PreparedWrite>,
+) {
+    while let Ok(wave) = receiver.recv() {
+        let group = stage_wave(&ingest_dir, wave);
+        if sender.send(group).is_err() {
+            panic!("rocks commit worker died");
+        }
+    }
+}
+
+/// Commits staged groups strictly in sequence order (log ingestion, state ingestion, publish,
+/// ack), buffering groups whose predecessors are still staging, until the group channel closes
+/// (store drop). Any write failure panics inside `commit_group`.
 fn run_commit(
     db: Arc<Database>,
     frontiers: Arc<Frontiers>,
     receiver: mpsc::Receiver<PreparedWrite>,
+    mut committed: u64,
 ) {
+    let mut pending: BTreeMap<u64, PreparedWrite> = BTreeMap::new();
+    let commit_ready = |committed: &mut u64, pending: &mut BTreeMap<u64, PreparedWrite>| {
+        while let Some(group) = pending.remove(&(*committed + 1)) {
+            *committed = group.sequence;
+            commit_group(&db, &frontiers, group);
+        }
+    };
     while let Ok(group) = receiver.recv() {
-        commit_group(&db, &frontiers, group);
+        pending.insert(group.sequence, group);
+        commit_ready(&mut committed, &mut pending);
     }
+    commit_ready(&mut committed, &mut pending);
 }
 
-/// Builds one staged group from requests already queued behind `first` without waiting for new
+/// Coalesces one wave from requests already queued behind `first` without waiting for new
 /// arrivals, stopping once the accumulated payload reaches the soft byte cap. The request that
 /// crosses the cap stays in the wave so a single large request can still make progress. The
 /// whole wave shares one sequence number: its rows, in arrival order, form one log batch.
-fn stage_queued_write(
-    ingest_dir: &Path,
+fn coalesce_queued_write(
     receiver: &mpsc::Receiver<WriteRequest>,
     first: WriteRequest,
     from: u64,
     max_batch_bytes: usize,
-) -> (PreparedWrite, bool) {
+) -> (QueuedWave, bool) {
     let sequence = from
         .checked_add(1)
         .expect("rocks sequence number overflowed");
@@ -548,10 +598,26 @@ fn stage_queued_write(
         }
     }
 
-    // Stage the group's two SST files in parallel: the single-row log SST on this thread, the
-    // sorted state SST on a scoped thread. Ingestion later links them into their column
-    // families, so each payload byte reaches the disk exactly once, in its final resting place.
-    // A staging failure is fatal; leftover staged files are removed by the next open.
+    (
+        QueuedWave {
+            sequence,
+            requests,
+            rows,
+        },
+        disconnected,
+    )
+}
+
+/// Stages one wave's two SST files in parallel: the single-row log SST on this thread, the
+/// sorted state SST on a scoped thread. Ingestion later links them into their column
+/// families, so each payload byte reaches the disk exactly once, in its final resting place.
+/// A staging failure is fatal; leftover staged files are removed by the next open.
+fn stage_wave(ingest_dir: &Path, wave: QueuedWave) -> PreparedWrite {
+    let QueuedWave {
+        sequence,
+        requests,
+        rows,
+    } = wave;
     let log = ingest_dir.join(format!("log-{sequence:020}.sst"));
     let state = ingest_dir.join(format!("state-{sequence:020}.sst"));
     let (log_result, state_result) = thread::scope(|scope| {
@@ -568,16 +634,13 @@ fn stage_queued_write(
     let log_bytes = log_result.unwrap_or_else(|error| panic!("failed to stage log SST: {error}"));
     let state_bytes =
         state_result.unwrap_or_else(|error| panic!("failed to stage state SST: {error}"));
-    (
-        PreparedWrite {
-            sequence,
-            requests,
-            log,
-            state,
-            staged_bytes: log_bytes + state_bytes,
-        },
-        disconnected,
-    )
+    PreparedWrite {
+        sequence,
+        requests,
+        log,
+        state,
+        staged_bytes: log_bytes + state_bytes,
+    }
 }
 
 /// Stages the single-row log SST: the group's sequence mapped to the exact encoded batch the
@@ -814,6 +877,36 @@ pub struct RocksConfig {
     pub write_pipeline: RocksWritePipelineConfig,
 }
 
+/// Options for the state column family, tuned to the store's write path.
+///
+/// Ingested state SSTs overlap (store keys are uniformly distributed), so this family bears
+/// all compaction: universal compaction merges whole sorted runs instead of rewriting every
+/// overlapping level, compression stays off (staged SSTs arrive uncompressed; recompressing
+/// them buys nothing on ingest-bound stores), and the level-zero slowdown/stop triggers are
+/// raised because `IngestExternalFile` waits on stop-writes conditions — stock triggers stall
+/// ingest whenever compaction lags.
+fn state_cf_options() -> Options {
+    let mut opts = Options::default();
+    opts.set_compression_type(DBCompressionType::None);
+    opts.set_bottommost_compression_type(DBCompressionType::None);
+    opts.set_compaction_style(DBCompactionStyle::Universal);
+    opts.set_level_zero_file_num_compaction_trigger(16);
+    opts.set_level_zero_slowdown_writes_trigger(1024);
+    opts.set_level_zero_stop_writes_trigger(2048);
+    opts
+}
+
+/// Options for the log column family.
+///
+/// Log rows are keyed by a monotonic sequence, so ingested log SSTs never overlap and settle
+/// without rewrites; compression stays off to match the uncompressed staged files.
+fn log_cf_options() -> Options {
+    let mut opts = Options::default();
+    opts.set_compression_type(DBCompressionType::None);
+    opts.set_bottommost_compression_type(DBCompressionType::None);
+    opts
+}
+
 /// Minimal RocksDB-backed store for the simulator: batch writes plus a global sequence u64
 /// plus a per-sequence log.
 #[derive(Clone)]
@@ -829,7 +922,8 @@ pub struct RocksStore {
 
 impl RocksStore {
     /// Open the store with default options, unless `config` overrides the database or
-    /// write-pipeline options. Column families always run stock options (see [`RocksConfig`]).
+    /// write-pipeline options. Column families run options tuned to the store's write path
+    /// (see [`state_cf_options`] and [`log_cf_options`]).
     /// Re-derives the durable frontier from the retained log rows and the state-floor meta row,
     /// then re-applies the newest log row to the state column family so the current state is
     /// complete below the durable sequence even after a crash mid-commit.
@@ -869,9 +963,9 @@ impl RocksStore {
         db_options.create_if_missing(true);
         db_options.create_missing_column_families(true);
 
-        let cf_state = ColumnFamilyDescriptor::new(STATE_CF, Options::default());
+        let cf_state = ColumnFamilyDescriptor::new(STATE_CF, state_cf_options());
         let cf_meta = ColumnFamilyDescriptor::new(META_CF, Options::default());
-        let cf_log = ColumnFamilyDescriptor::new(LOG_CF, Options::default());
+        let cf_log = ColumnFamilyDescriptor::new(LOG_CF, log_cf_options());
         let db = DB::open_cf_descriptors(&db_options, path, vec![cf_state, cf_meta, cf_log])
             .map_err(|e| e.to_string())?;
         let db = Arc::new(Database {
@@ -1266,14 +1360,13 @@ mod tests {
         let (_sender, receiver) = mpsc::channel::<WriteRequest>();
         let (response, _result) = oneshot::channel();
         let ingest_dir = store.db.path().join(LOG_INGEST_DIR);
-        let (group, _) = stage_queued_write(
-            &ingest_dir,
+        let (wave, _) = coalesce_queued_write(
             &receiver,
             WriteRequest { kvs, response },
             from,
             DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES,
         );
-        group
+        stage_wave(&ingest_dir, wave)
     }
 
     #[test]
@@ -1346,7 +1439,7 @@ mod tests {
     }
 
     #[test]
-    fn stage_queued_write_collects_all_pending_below_byte_cap() {
+    fn coalesce_queued_write_collects_all_pending_below_byte_cap() {
         let dir = tempdir().expect("tempdir");
         let (sender, receiver) = mpsc::channel();
         sender.send(write_request(b"a")).expect("send");
@@ -1355,24 +1448,21 @@ mod tests {
         drop(sender);
 
         let first = receiver.recv().expect("first request");
-        let (group, disconnected) = stage_queued_write(
-            dir.path(),
-            &receiver,
-            first,
-            0,
-            DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES,
-        );
+        let (wave, disconnected) =
+            coalesce_queued_write(&receiver, first, 0, DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES);
+        assert_eq!(wave.sequence, 1);
+        assert_eq!(wave.requests.len(), 3);
+        assert!(disconnected);
+        let group = stage_wave(dir.path(), wave);
         assert_eq!(group.sequence, 1);
         assert_eq!(group.requests.len(), 3);
         assert!(group.log.exists());
         assert!(group.state.exists());
         assert!(group.staged_bytes > 0);
-        assert!(disconnected);
     }
 
     #[test]
-    fn stage_queued_write_stops_after_soft_byte_cap() {
-        let dir = tempdir().expect("tempdir");
+    fn coalesce_queued_write_stops_after_soft_byte_cap() {
         let (sender, receiver) = mpsc::channel();
         sender.send(write_request(b"a")).expect("send");
         sender.send(write_request(b"b")).expect("send");
@@ -1380,10 +1470,10 @@ mod tests {
         drop(sender);
 
         let first = receiver.recv().expect("first request");
-        let (group, disconnected) = stage_queued_write(dir.path(), &receiver, first, 0, 1);
+        let (wave, disconnected) = coalesce_queued_write(&receiver, first, 0, 1);
 
-        assert_eq!(group.requests.len(), 1);
-        assert_eq!(group.requests[0].kvs[0].0.as_ref(), b"a");
+        assert_eq!(wave.requests.len(), 1);
+        assert_eq!(wave.requests[0].kvs[0].0.as_ref(), b"a");
         assert!(!disconnected);
         assert_eq!(
             receiver
@@ -1561,6 +1651,80 @@ mod tests {
             }
         );
         assert_eq!(store.current_sequence(), 0);
+    }
+
+    /// Concurrent puts staged by parallel workers must still commit in
+    /// contiguous sequence order and survive reopen.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_puts_commit_in_sequence_order() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+
+        let puts: Vec<_> = (0..64u32)
+            .map(|i| {
+                let store = store.clone();
+                tokio::spawn(async move {
+                    let key = Bytes::from(format!("key-{i:03}"));
+                    let value = Bytes::from(vec![i as u8; 4096]);
+                    store.put_batch(vec![(key, value)]).await.expect("put")
+                })
+            })
+            .collect();
+        let mut sequences = Vec::with_capacity(puts.len());
+        for put in puts {
+            sequences.push(put.await.expect("put task"));
+        }
+        // Concurrent puts coalesce into shared-sequence waves; the waves must
+        // still commit contiguously from 1 with none skipped or reordered.
+        let top = store.current_sequence();
+        sequences.sort_unstable();
+        sequences.dedup();
+        assert_eq!(sequences, (1..=top).collect::<Vec<u64>>());
+
+        drop(store);
+        let store = RocksStore::open(dir.path(), None).expect("reopen db");
+        assert_eq!(store.current_sequence(), top);
+    }
+
+    /// The tuned column-family options must reach RocksDB: assert against the
+    /// OPTIONS file the database persists on open.
+    #[tokio::test]
+    async fn column_family_options_apply() {
+        let dir = tempdir().expect("tempdir");
+        let _store = RocksStore::open(dir.path(), None).expect("open db");
+
+        let options_file = std::fs::read_dir(dir.path())
+            .expect("read db dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("OPTIONS-"))
+            })
+            .max()
+            .expect("OPTIONS file exists");
+        let options = std::fs::read_to_string(options_file).expect("read OPTIONS file");
+
+        let state = options
+            .split("[CFOptions \"default\"]")
+            .nth(1)
+            .expect("state CF section")
+            .split("[TableOptions")
+            .next()
+            .expect("state CF body");
+        assert!(state.contains("compaction_style=kCompactionStyleUniversal"));
+        assert!(state.contains("compression=kNoCompression"));
+        assert!(state.contains("level0_slowdown_writes_trigger=1024"));
+
+        let log = options
+            .split("[CFOptions \"log\"]")
+            .nth(1)
+            .expect("log CF section")
+            .split("[TableOptions")
+            .next()
+            .expect("log CF body");
+        assert!(log.contains("compression=kNoCompression"));
     }
 
     #[tokio::test]

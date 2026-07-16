@@ -99,6 +99,9 @@ pub(crate) enum ColumnKind {
     Decimal128,
     Decimal256,
     FixedSizeBinary(usize),
+    /// Variable-length bytes. Value-only: not indexable and not a primary-key
+    /// type (no order-preserving variable-length key encoding is defined).
+    Binary,
     List(ListElementKind),
 }
 
@@ -116,6 +119,7 @@ impl ColumnKind {
             DataType::Decimal128(_, _) => Ok(Self::Decimal128),
             DataType::Decimal256(_, _) => Ok(Self::Decimal256),
             DataType::FixedSizeBinary(n) => Ok(Self::FixedSizeBinary(*n as usize)),
+            DataType::Binary | DataType::LargeBinary | DataType::BinaryView => Ok(Self::Binary),
             DataType::List(field) | DataType::LargeList(field) => {
                 let inner = Self::from_data_type(field.data_type())?;
                 let elem = match inner {
@@ -136,7 +140,7 @@ impl ColumnKind {
             other => Err(format!(
                 "unsupported column type {other:?}; supported: \
                  Int64, UInt64, Float64, Boolean, Utf8, Date32, Date64, Timestamp, \
-                 Decimal128, Decimal256, FixedSizeBinary, List"
+                 Decimal128, Decimal256, FixedSizeBinary, Binary, List"
             )),
         }
     }
@@ -154,6 +158,7 @@ impl ColumnKind {
             Self::Decimal128 => Some(16),
             Self::Decimal256 => Some(32),
             Self::FixedSizeBinary(n) => Some(n),
+            Self::Binary => None,
             Self::List(_) => None,
         }
     }
@@ -164,7 +169,7 @@ impl ColumnKind {
     }
 
     pub(crate) fn indexable(self) -> bool {
-        !matches!(self, Self::List(_))
+        !matches!(self, Self::List(_) | Self::Binary)
     }
 }
 
@@ -560,6 +565,7 @@ pub enum CellValue {
     Decimal256(i256),
     Utf8(String),
     FixedBinary(Vec<u8>),
+    Binary(Vec<u8>),
     List(Vec<CellValue>),
 }
 

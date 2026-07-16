@@ -8,9 +8,10 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use commonware_codec::Encode;
 use datafusion::arrow::array::{
-    ArrayRef, BooleanArray, Date32Array, Date64Array, Decimal128Array, Decimal256Array,
-    FixedSizeBinaryArray, Float64Array, Int64Array, LargeStringArray, ListArray, StringArray,
-    StringViewArray, TimestampMicrosecondArray, UInt64Array,
+    ArrayRef, BinaryArray, BooleanArray, Date32Array, Date64Array, Decimal128Array,
+    Decimal256Array, FixedSizeBinaryArray, Float64Array, Int64Array, LargeBinaryArray,
+    LargeStringArray, ListArray, StringArray, StringViewArray, TimestampMicrosecondArray,
+    UInt64Array,
 };
 use datafusion::arrow::datatypes::{i256, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -402,6 +403,7 @@ pub(crate) fn extract_row_from_batch(
             ColumnKind::FixedSizeBinary(_) => {
                 CellValue::FixedBinary(fixed_binary_value_at(array, row_idx, &col.name)?)
             }
+            ColumnKind::Binary => CellValue::Binary(binary_value_at(array, row_idx, &col.name)?),
             ColumnKind::List(elem) => list_value_at(array, row_idx, &col.name, elem)?,
         };
         values.push(value);
@@ -506,6 +508,7 @@ pub(crate) fn encode_non_pk_cell_value(
             }
             Ok(Some(StoredValue::Bytes(v.clone())))
         }
+        (ColumnKind::Binary, CellValue::Binary(v)) => Ok(Some(StoredValue::Bytes(v.clone()))),
         (ColumnKind::List(elem), CellValue::List(items)) => {
             let mut stored_items = Vec::with_capacity(items.len());
             for item in items {
@@ -607,6 +610,7 @@ pub(crate) fn decode_base_row(
                 CellValue::Decimal256(i256::from_le_bytes(arr))
             }
             (ColumnKind::Utf8, StoredValue::Utf8(v)) => CellValue::Utf8(v.as_str().to_string()),
+            (ColumnKind::Binary, StoredValue::Bytes(v)) => CellValue::Binary(v.as_slice().to_vec()),
             (ColumnKind::FixedSizeBinary(_), StoredValue::Bytes(v)) => {
                 CellValue::FixedBinary(v.as_slice().to_vec())
             }
@@ -866,6 +870,28 @@ pub(crate) fn decimal256_value_at(
     Ok(values.value(row_idx))
 }
 
+pub(crate) fn binary_value_at(
+    array: &ArrayRef,
+    row_idx: usize,
+    column_name: &str,
+) -> DataFusionResult<Vec<u8>> {
+    if array.is_null(row_idx) {
+        return Err(DataFusionError::Execution(format!(
+            "column '{column_name}' cannot be NULL for kv table insert"
+        )));
+    }
+    if let Some(values) = array.as_any().downcast_ref::<BinaryArray>() {
+        return Ok(values.value(row_idx).to_vec());
+    }
+    if let Some(values) = array.as_any().downcast_ref::<LargeBinaryArray>() {
+        return Ok(values.value(row_idx).to_vec());
+    }
+    Err(DataFusionError::Execution(format!(
+        "column '{column_name}' expected Binary, got {:?}",
+        array.data_type()
+    )))
+}
+
 pub(crate) fn fixed_binary_value_at(
     array: &ArrayRef,
     row_idx: usize,
@@ -985,6 +1011,55 @@ mod tests {
     use exoware_sdk::StoreClient;
 
     use super::*;
+    use crate::builder::{append_archived_non_pk_value, make_column_builder};
+    use datafusion::arrow::array::BinaryArray;
+    use datafusion::arrow::datatypes::DataType;
+    use exoware_sdk::kv_codec::decode_stored_row;
+
+    /// Variable-length Binary values survive the encode -> store -> arrow
+    /// round trip with their exact lengths.
+    #[test]
+    fn binary_cells_round_trip_through_stored_rows() {
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", DataType::UInt64, false),
+                TableColumnConfig::new("body", DataType::Binary, false),
+            ],
+            vec!["id".to_string()],
+            vec![],
+        )
+        .expect("binary column config");
+        let model = TableModel::from_config(&config).expect("binary column model");
+
+        let bodies: Vec<Vec<u8>> = vec![vec![], vec![0xAB], vec![0xCD; 300]];
+        let body_idx = *model.columns_by_name.get("body").expect("body column");
+        let mut builder = make_column_builder(&model, body_idx);
+        for (id, body) in bodies.iter().enumerate() {
+            let row = KvRow {
+                values: vec![
+                    CellValue::UInt64(id as u64),
+                    CellValue::Binary(body.clone()),
+                ],
+            };
+            let encoded = encode_base_row_value(&row, &model).expect("encode row");
+            let stored = decode_stored_row(&encoded).expect("decode stored row");
+            append_archived_non_pk_value(
+                &mut builder,
+                &model.columns[body_idx],
+                stored.values[body_idx].as_ref(),
+            )
+            .expect("append archived binary");
+        }
+        let array = builder.finish().expect("finish binary array");
+        let array = array
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .expect("binary array");
+        for (id, body) in bodies.iter().enumerate() {
+            assert_eq!(array.value(id), body.as_slice());
+        }
+    }
 
     #[test]
     fn store_batch_upload_stage_preserves_rows_for_failed_retry() {
