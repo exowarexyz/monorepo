@@ -37,7 +37,10 @@ mod tests {
     use super::writer::*;
     use super::*;
     use commonware_codec::Encode;
-    use datafusion::arrow::array::{Float64Array, Int64Array, LargeStringArray, StringViewArray};
+    use datafusion::arrow::array::{
+        BinaryViewArray, Float64Array, Int64Array, LargeBinaryArray, LargeStringArray,
+        StringViewArray,
+    };
     use datafusion::arrow::datatypes::{i256, DataType, TimeUnit};
     use datafusion::arrow::record_batch::RecordBatch;
     use datafusion::common::{config::ConfigOptions, ScalarValue};
@@ -1335,6 +1338,58 @@ mod tests {
             .downcast_ref::<StringViewArray>()
             .expect("must build StringViewArray");
         assert_eq!(values.value(0), "hello");
+    }
+
+    #[test]
+    fn build_projected_batch_uses_large_binary_type() {
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", DataType::Int64, false),
+                TableColumnConfig::new("payload", DataType::LargeBinary, false),
+            ],
+            vec!["id".to_string()],
+            vec![],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let rows = vec![KvRow {
+            values: vec![CellValue::Int64(1), CellValue::Binary(vec![1, 2, 3])],
+        }];
+        let batch = build_projected_batch(&rows, &model, &model.schema, &None).unwrap();
+        assert_eq!(batch.column(1).data_type(), &DataType::LargeBinary);
+        let values = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<LargeBinaryArray>()
+            .expect("must build LargeBinaryArray");
+        assert_eq!(values.value(0), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn build_projected_batch_uses_binary_view_type() {
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", DataType::Int64, false),
+                TableColumnConfig::new("payload", DataType::BinaryView, false),
+            ],
+            vec!["id".to_string()],
+            vec![],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let rows = vec![KvRow {
+            values: vec![CellValue::Int64(1), CellValue::Binary(vec![1, 2, 3])],
+        }];
+        let batch = build_projected_batch(&rows, &model, &model.schema, &None).unwrap();
+        assert_eq!(batch.column(1).data_type(), &DataType::BinaryView);
+        let values = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<BinaryViewArray>()
+            .expect("must build BinaryViewArray");
+        assert_eq!(values.value(0), &[1, 2, 3]);
     }
 
     #[test]

@@ -8,10 +8,10 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use commonware_codec::Encode;
 use datafusion::arrow::array::{
-    ArrayRef, BinaryArray, BooleanArray, Date32Array, Date64Array, Decimal128Array,
-    Decimal256Array, FixedSizeBinaryArray, Float64Array, Int64Array, LargeBinaryArray,
-    LargeStringArray, ListArray, StringArray, StringViewArray, TimestampMicrosecondArray,
-    UInt64Array,
+    ArrayRef, BinaryArray, BinaryViewArray, BooleanArray, Date32Array, Date64Array,
+    Decimal128Array, Decimal256Array, FixedSizeBinaryArray, Float64Array, Int64Array,
+    LargeBinaryArray, LargeStringArray, ListArray, StringArray, StringViewArray,
+    TimestampMicrosecondArray, UInt64Array,
 };
 use datafusion::arrow::datatypes::{i256, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -884,6 +884,9 @@ pub(crate) fn binary_value_at(
         return Ok(values.value(row_idx).to_vec());
     }
     if let Some(values) = array.as_any().downcast_ref::<LargeBinaryArray>() {
+        return Ok(values.value(row_idx).to_vec());
+    }
+    if let Some(values) = array.as_any().downcast_ref::<BinaryViewArray>() {
         return Ok(values.value(row_idx).to_vec());
     }
     Err(DataFusionError::Execution(format!(

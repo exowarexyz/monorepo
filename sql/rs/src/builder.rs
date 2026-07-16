@@ -29,7 +29,10 @@ pub(crate) enum ColumnBuilder {
         target_type: DataType,
     },
     FixedBinary(FixedSizeBinaryBuilder),
-    Binary(BinaryBuilder),
+    Binary {
+        builder: BinaryBuilder,
+        target_type: DataType,
+    },
     ListInt64(ListBuilder<Int64Builder>),
     ListFloat64(ListBuilder<Float64Builder>),
     ListBoolean(ListBuilder<BooleanBuilder>),
@@ -50,7 +53,7 @@ impl ColumnBuilder {
             (Self::Decimal256(b), CellValue::Null) => b.append_null(),
             (Self::Utf8 { builder, .. }, CellValue::Null) => builder.append_null(),
             (Self::FixedBinary(b), CellValue::Null) => b.append_null(),
-            (Self::Binary(b), CellValue::Null) => b.append_null(),
+            (Self::Binary { builder, .. }, CellValue::Null) => builder.append_null(),
             (Self::ListInt64(b), CellValue::Null) => b.append_null(),
             (Self::ListFloat64(b), CellValue::Null) => b.append_null(),
             (Self::ListBoolean(b), CellValue::Null) => b.append_null(),
@@ -70,7 +73,7 @@ impl ColumnBuilder {
                     DataFusionError::Execution(format!("FixedBinary append error: {e}"))
                 })?
             }
-            (Self::Binary(b), CellValue::Binary(v)) => b.append_value(v),
+            (Self::Binary { builder, .. }, CellValue::Binary(v)) => builder.append_value(v),
             (Self::ListInt64(b), CellValue::List(items)) => {
                 for item in items {
                     match item {
@@ -155,7 +158,17 @@ impl ColumnBuilder {
                 }
             }
             Self::FixedBinary(mut b) => Ok(Arc::new(b.finish())),
-            Self::Binary(mut b) => Ok(Arc::new(b.finish())),
+            Self::Binary {
+                mut builder,
+                target_type,
+            } => {
+                let array: ArrayRef = Arc::new(builder.finish());
+                if target_type == DataType::Binary {
+                    Ok(array)
+                } else {
+                    Ok(cast(&array, &target_type)?)
+                }
+            }
             Self::ListInt64(mut b) => Ok(Arc::new(b.finish())),
             Self::ListFloat64(mut b) => Ok(Arc::new(b.finish())),
             Self::ListBoolean(mut b) => Ok(Arc::new(b.finish())),
@@ -226,7 +239,10 @@ pub(crate) fn make_column_builder(model: &TableModel, idx: usize) -> ColumnBuild
         ColumnKind::FixedSizeBinary(n) => {
             ColumnBuilder::FixedBinary(FixedSizeBinaryBuilder::new(n as i32))
         }
-        ColumnKind::Binary => ColumnBuilder::Binary(BinaryBuilder::new()),
+        ColumnKind::Binary => ColumnBuilder::Binary {
+            builder: BinaryBuilder::new(),
+            target_type: model.schema.field(idx).data_type().clone(),
+        },
         ColumnKind::List(elem) => match elem {
             ListElementKind::Int64 => {
                 ColumnBuilder::ListInt64(ListBuilder::new(Int64Builder::new()))
@@ -330,8 +346,8 @@ pub(crate) fn append_archived_non_pk_value(
         (ColumnBuilder::FixedBinary(b), ColumnKind::FixedSizeBinary(_), StoredValue::Bytes(v)) => b
             .append_value(v.as_slice())
             .map_err(|e| DataFusionError::Execution(format!("FixedBinary append error: {e}")))?,
-        (ColumnBuilder::Binary(b), ColumnKind::Binary, StoredValue::Bytes(v)) => {
-            b.append_value(v.as_slice())
+        (ColumnBuilder::Binary { builder, .. }, ColumnKind::Binary, StoredValue::Bytes(v)) => {
+            builder.append_value(v.as_slice())
         }
         (
             ColumnBuilder::ListInt64(b),

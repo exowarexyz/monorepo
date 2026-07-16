@@ -5,13 +5,16 @@
 //! pruning never assume which SST files rows live in, so RocksDB is free to place and compact
 //! them however it likes.
 //!
-//! Writes bypass the WAL and the memtables: `prepare` coalesces queued requests into a commit
-//! group that shares one sequence number and stages the group's log row and sorted state rows
-//! as two SST files (built in parallel), while `commit` ingests the previous group: the log
-//! file first (the durable row alone defines the group; `open` derives the frontier from the
-//! highest retained row and the state-floor meta row), then the state file, then publish and
-//! ack. Ingestion is atomic and strictly ordered, so a crash never leaves a partial batch and
-//! at most the newest group can be missing its state ingestion; `open` repairs that by
+//! Writes bypass the WAL and the memtables: `prepare` coalesces queued requests into commit
+//! groups that each share one sequence number and queues them for a pool of stage workers,
+//! which build each group's log row and sorted state rows as two SST files (concurrently
+//! across groups), while `commit` reorders staged groups back into sequence order and ingests
+//! each: the log file first (the durable row alone defines the group; `open` derives the
+//! frontier from the highest retained row and the state-floor meta row), then the state file,
+//! then publish and ack. Several groups can be queued, staging, or buffered awaiting their
+//! predecessors at once (the queue and worker count bound staged memory), but ingestion stays
+//! atomic and strictly ordered, so a crash never leaves a partial batch and at most the
+//! newest ingested group can be missing its state ingestion; `open` repairs that by
 //! re-applying the newest retained log row (idempotent: its rows are the newest writes for
 //! their keys). The floor meta row is written only by pruning and is durable by the time a
 //! prune acks: it marks state the replay must never touch (re-applying key-pruned rows would
@@ -63,8 +66,9 @@ const LOG_INGEST_DIR: &str = "ingest";
 const LOG_CF: &str = "log";
 const LOG_BATCH_KEY_LEN: usize = 8;
 pub const WRITER_THREAD_PREFIX: &str = "simulator-rocks-";
-/// Stage workers building wave SSTs concurrently.
-const STAGE_WORKERS: usize = 4;
+/// Default number of stage workers building wave SSTs concurrently, and the default depth of
+/// the wave queue feeding them (one queued wave per worker).
+const DEFAULT_STAGE_WORKERS: usize = 4;
 type RocksIterItem = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
 
 /// A resource dropped strictly after the database has closed (see [`Database`]).
@@ -393,14 +397,14 @@ impl Writer {
     /// Starts the write pipeline. `prepare` drains queued requests up to the configured byte
     /// cap into commit groups that each share one sequence number (continuing from the
     /// published frontier, which is exactly the frontier derived at open since nothing has
-    /// committed yet) and deals them round-robin to the stage workers, which build each
-    /// group's log and state SSTs concurrently across groups; `commit` reorders staged groups
-    /// back into sequence order, ingests each log file, then its state file, publishes the
-    /// frontier, and resolves the requests. `commit` still ingests strictly in order, so a
-    /// crash leaves at most the newest ingested group without its state. Any write failure in
-    /// any stage is fatal (the worker panics): the durable log row alone defines the group,
-    /// so the next open re-derives the frontier and replays the rows above the floor.
-    /// Sequence numbers never need to be reclaimed in-process.
+    /// committed yet) and queues them for the stage workers, any of which takes the next
+    /// group and builds its log and state SSTs concurrently with the other workers;
+    /// `commit` reorders staged groups back into sequence order, ingests each log file, then
+    /// its state file, publishes the frontier, and resolves the requests. `commit` still
+    /// ingests strictly in order, so a crash leaves at most the newest ingested group without
+    /// its state. Any write failure in any stage is fatal (the worker panics): the durable
+    /// log row alone defines the group, so the next open re-derives the frontier and replays
+    /// the rows above the floor. Sequence numbers never need to be reclaimed in-process.
     fn start(
         db: Arc<Database>,
         ingest_dir: PathBuf,
@@ -409,25 +413,28 @@ impl Writer {
     ) -> Self {
         let next = frontiers.published.load(Ordering::Acquire);
         let (request_sender, request_receiver) = mpsc::channel();
+        let max_commit_batch_bytes = write_pipeline.max_commit_batch_bytes.get();
+        let stage_workers = write_pipeline.stage_workers.get();
+        let max_queued_waves = write_pipeline.max_queued_waves.get();
 
         // Staged groups queue shallowly toward `commit`, which reorders them by sequence.
-        let (staged_sender, staged_receiver) = mpsc::sync_channel(STAGE_WORKERS);
-        let max_commit_batch_bytes = write_pipeline.max_commit_batch_bytes.get();
+        let (staged_sender, staged_receiver) = mpsc::sync_channel(stage_workers);
 
         let commit = thread::Builder::new()
             .name(format!("{WRITER_THREAD_PREFIX}commit"))
             .spawn(move || run_commit(db, frontiers, staged_receiver, next))
             .expect("failed to spawn RocksDB commit worker");
 
-        // Bounded to one queued wave per worker so `prepare` cannot run away
-        // from staging; the queue plus in-progress waves bound staged memory.
-        let mut handles = Vec::with_capacity(STAGE_WORKERS + 2);
-        let mut wave_senders = Vec::with_capacity(STAGE_WORKERS);
-        for worker in 0..STAGE_WORKERS {
-            let (wave_sender, wave_receiver) = mpsc::sync_channel::<QueuedWave>(1);
-            wave_senders.push(wave_sender);
+        // One shared bounded queue, so `prepare` cannot run away from staging and any idle
+        // worker takes the next wave (a slow wave never blocks the others); the queue plus
+        // in-progress waves bound staged memory.
+        let (wave_sender, wave_receiver) = mpsc::sync_channel::<QueuedWave>(max_queued_waves);
+        let wave_receiver = Arc::new(Mutex::new(wave_receiver));
+        let mut handles = Vec::with_capacity(stage_workers + 2);
+        for worker in 0..stage_workers {
             let ingest_dir = ingest_dir.clone();
             let staged_sender = staged_sender.clone();
+            let wave_receiver = wave_receiver.clone();
             handles.push(
                 thread::Builder::new()
                     .name(format!("{WRITER_THREAD_PREFIX}stage-{worker}"))
@@ -436,11 +443,12 @@ impl Writer {
             );
         }
         drop(staged_sender);
+        drop(wave_receiver);
 
         let prepare = thread::Builder::new()
             .name(format!("{WRITER_THREAD_PREFIX}prepare"))
             .spawn(move || {
-                run_prepare(next, request_receiver, wave_senders, max_commit_batch_bytes)
+                run_prepare(next, request_receiver, wave_sender, max_commit_batch_bytes)
             })
             .expect("failed to spawn RocksDB prepare worker");
 
@@ -493,23 +501,21 @@ impl Drop for Writer {
 }
 
 /// Drains each byte-bounded wave of queued requests into a group with the next sequence number
-/// and deals it to a stage worker. Exits when the request channel closes (store drop); panics
-/// if a stage worker died, since that only happens on a fatal write error.
+/// and queues it for the stage workers. Exits when the request channel closes (store drop);
+/// panics if every stage worker died, since that only happens on a fatal write error.
 fn run_prepare(
     mut next: u64,
     receiver: mpsc::Receiver<WriteRequest>,
-    workers: Vec<mpsc::SyncSender<QueuedWave>>,
+    waves: mpsc::SyncSender<QueuedWave>,
     max_commit_batch_bytes: usize,
 ) {
-    let mut round = 0usize;
     while let Ok(first) = receiver.recv() {
         let (wave, disconnected) =
             coalesce_queued_write(&receiver, first, next, max_commit_batch_bytes);
         next = wave.sequence;
-        if workers[round % workers.len()].send(wave).is_err() {
-            panic!("rocks stage worker died");
+        if waves.send(wave).is_err() {
+            panic!("rocks stage workers died");
         }
-        round += 1;
 
         if disconnected {
             break;
@@ -517,15 +523,19 @@ fn run_prepare(
     }
 }
 
-/// Stages each wave dealt by `prepare` and hands the group to `commit`. Exits when the wave
-/// channel closes (store drop); panics if `commit` died, since that only happens on a fatal
-/// write error.
+/// Stages waves pulled from the queue shared with the other workers and hands each group to
+/// `commit`. The lock is held only while waiting on the channel, never while staging. Exits
+/// when the wave channel closes (store drop); panics if `commit` died, since that only
+/// happens on a fatal write error.
 fn run_stage(
     ingest_dir: PathBuf,
-    receiver: mpsc::Receiver<QueuedWave>,
+    receiver: Arc<Mutex<mpsc::Receiver<QueuedWave>>>,
     sender: mpsc::SyncSender<PreparedWrite>,
 ) {
-    while let Ok(wave) = receiver.recv() {
+    loop {
+        let Ok(wave) = receiver.lock().recv() else {
+            break;
+        };
         let group = stage_wave(&ingest_dir, wave);
         if sender.send(group).is_err() {
             panic!("rocks commit worker died");
@@ -553,7 +563,10 @@ fn run_commit(
         pending.insert(group.sequence, group);
         commit_ready(&mut committed, &mut pending);
     }
-    commit_ready(&mut committed, &mut pending);
+
+    // The channel closes only once every stage worker has exited, after handing over every
+    // staged group, so a clean shutdown leaves nothing buffered.
+    debug_assert!(pending.is_empty(), "staged groups lost at shutdown");
 }
 
 /// Coalesces one wave from requests already queued behind `first` without waiting for new
@@ -662,8 +675,8 @@ fn stage_log_file(path: &Path, sequence: u64, rows: &[(Bytes, Bytes)]) -> Result
 
 /// Stages the current-state SST: the group's rows sorted by key, with the last write per key
 /// winning (in arrival order across coalesced requests). Uncompressed: compressing on the
-/// ingest path would trade ack latency for bytes, and lower levels re-compress state during
-/// compaction per the CF options.
+/// ingest path would trade ack latency for bytes, and the state CF keeps compression off at
+/// every level per [`state_cf_options`].
 fn stage_state_file(path: &Path, rows: &[(Bytes, Bytes)]) -> Result<usize, String> {
     let mut rows: Vec<(&Bytes, &Bytes)> = rows.iter().map(|(key, value)| (key, value)).collect();
 
@@ -853,6 +866,14 @@ pub struct RocksWritePipelineConfig {
     /// Soft maximum combined size (state rows plus encoded log rows) before cutting a prepared
     /// commit group.
     pub max_commit_batch_bytes: NonZeroUsize,
+    /// Stage workers building wave SSTs concurrently. Each worker stages one wave at a time
+    /// across two threads (log and state SSTs in parallel).
+    pub stage_workers: NonZeroUsize,
+    /// Coalesced waves that may queue ahead of the stage workers before `prepare` blocks.
+    /// Together with `stage_workers` this bounds staged memory: every queued or staging wave
+    /// holds up to `max_commit_batch_bytes` of payload. Defaults to one queued wave per
+    /// default worker.
+    pub max_queued_waves: NonZeroUsize,
 }
 
 impl Default for RocksWritePipelineConfig {
@@ -860,6 +881,10 @@ impl Default for RocksWritePipelineConfig {
         Self {
             max_commit_batch_bytes: NonZeroUsize::new(DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES)
                 .expect("default commit batch byte limit must be nonzero"),
+            stage_workers: NonZeroUsize::new(DEFAULT_STAGE_WORKERS)
+                .expect("default stage worker count must be nonzero"),
+            max_queued_waves: NonZeroUsize::new(DEFAULT_STAGE_WORKERS)
+                .expect("default queued wave limit must be nonzero"),
         }
     }
 }
@@ -883,8 +908,8 @@ pub struct RocksConfig {
 /// all compaction: universal compaction merges whole sorted runs instead of rewriting every
 /// overlapping level, compression stays off (staged SSTs arrive uncompressed; recompressing
 /// them buys nothing on ingest-bound stores), and the level-zero slowdown/stop triggers are
-/// raised because `IngestExternalFile` waits on stop-writes conditions — stock triggers stall
-/// ingest whenever compaction lags.
+/// raised because `IngestExternalFile` waits on stop-writes conditions (stock triggers stall
+/// ingest whenever compaction lags).
 fn state_cf_options() -> Options {
     let mut opts = Options::default();
     opts.set_compression_type(DBCompressionType::None);
@@ -1735,6 +1760,8 @@ mod tests {
             Some(RocksConfig {
                 write_pipeline: RocksWritePipelineConfig {
                     max_commit_batch_bytes: NonZeroUsize::new(1).expect("nonzero"),
+                    stage_workers: NonZeroUsize::new(2).expect("nonzero"),
+                    max_queued_waves: NonZeroUsize::new(1).expect("nonzero"),
                 },
                 ..Default::default()
             }),
