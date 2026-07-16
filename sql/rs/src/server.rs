@@ -723,3 +723,30 @@ fn client_error_to_connect(err: exoware_sdk::ClientError) -> ConnectError {
 fn _assert_projected_column_indices_visible() {
     let _ = projected_column_indices;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Result cells for Binary columns can arrive as any of the three arrow
+    /// binary encodings; every one becomes a `binary_value` cell.
+    #[test]
+    fn binary_arrays_convert_to_binary_cells() {
+        let body: &[u8] = &[0x00, 0xFF, 0x42];
+        let arrays: Vec<ArrayRef> = vec![
+            Arc::new(BinaryArray::from_iter_values([body])),
+            Arc::new(LargeBinaryArray::from_iter_values([body])),
+            Arc::new(BinaryViewArray::from_iter_values([body])),
+        ];
+        for array in arrays {
+            let body_type = array.data_type().clone();
+            let cell = arrow_value_to_cell(&array, 0).expect("cell conversion");
+            match cell.kind {
+                Some(ProtoCellKind::BinaryValue(bytes)) => {
+                    assert_eq!(bytes.as_ref(), body, "wrong bytes for {body_type:?}")
+                }
+                other => panic!("expected binary_value for {body_type:?}, got {other:?}"),
+            }
+        }
+    }
+}

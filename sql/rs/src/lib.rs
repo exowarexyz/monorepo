@@ -1393,6 +1393,116 @@ mod tests {
     }
 
     #[test]
+    fn binary_column_rejected_in_primary_key() {
+        let error = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", DataType::Binary, false),
+                TableColumnConfig::new("data", DataType::Utf8, true),
+            ],
+            vec!["id".to_string()],
+            vec![],
+        )
+        .expect_err("Binary primary key must be rejected");
+        assert!(
+            error.contains("must be Int64, UInt64, Utf8, or FixedSizeBinary"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn binary_column_rejected_in_index() {
+        let result = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", DataType::Int64, false),
+                TableColumnConfig::new("body", DataType::Binary, false),
+            ],
+            vec!["id".to_string()],
+            vec![IndexSpec::new("body_idx", vec!["body".to_string()]).unwrap()],
+        );
+        assert!(
+            result.is_err() || {
+                let config = result.unwrap();
+                let model = TableModel::from_config(&config).unwrap();
+                model.resolve_index_specs(&config.index_specs).is_err()
+            }
+        );
+    }
+
+    /// Binary predicates are never pushed down: no ordered key encoding exists
+    /// for variable-length bytes, so filters stay with DataFusion over a scan.
+    #[test]
+    fn binary_filters_are_not_pushed_down() {
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", DataType::Int64, false),
+                TableColumnConfig::new("body", DataType::Binary, false),
+            ],
+            vec!["id".to_string()],
+            vec![],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+
+        use datafusion::logical_expr::col;
+        let filter = col("body").eq(Expr::Literal(
+            ScalarValue::Binary(Some(vec![0xAB, 0xCD])),
+            None,
+        ));
+
+        assert!(!QueryPredicate::supports_filter(&filter, &model));
+        let pred = QueryPredicate::from_filters(&[filter], &model);
+        assert!(pred.constraints.is_empty());
+    }
+
+    /// Binary columns carry no KV field kind, so they can never participate in
+    /// KV-side aggregate pushdown.
+    #[test]
+    fn binary_has_no_kv_aggregate_field_kind() {
+        assert!(kv_field_kind(ColumnKind::Binary).is_none());
+    }
+
+    /// The archived read path decodes stored Binary values back into cells of
+    /// their exact lengths, including empty payloads.
+    #[test]
+    fn binary_cells_decode_from_archived_non_pk_values() {
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", DataType::UInt64, false),
+                TableColumnConfig::new("body", DataType::Binary, false),
+            ],
+            vec!["id".to_string()],
+            vec![],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let body_idx = *model.columns_by_name.get("body").expect("body column");
+
+        let bodies: Vec<Vec<u8>> = vec![vec![], vec![0xAB], vec![0xCD; 300]];
+        for body in bodies {
+            let row = KvRow {
+                values: vec![CellValue::UInt64(1), CellValue::Binary(body.clone())],
+            };
+            let encoded = encode_base_row_value(&row, &model).expect("encode row");
+            let stored = decode_stored_row(&encoded).expect("decode stored row");
+            let cell = cell_value_from_archived_non_pk(
+                &model.columns[body_idx],
+                stored.values[body_idx].as_ref(),
+            )
+            .expect("decode archived binary")
+            .expect("value is not null");
+            assert!(
+                matches!(&cell, CellValue::Binary(v) if *v == body),
+                "wrong cell for {}-byte body: {cell:?}",
+                body.len()
+            );
+        }
+    }
+
+    #[test]
     fn f64_ordered_encoding_preserves_order() {
         let values = [
             f64::NEG_INFINITY,

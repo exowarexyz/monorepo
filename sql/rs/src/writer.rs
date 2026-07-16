@@ -1016,7 +1016,7 @@ mod tests {
     use super::*;
     use crate::builder::{append_archived_non_pk_value, make_column_builder};
     use datafusion::arrow::array::BinaryArray;
-    use datafusion::arrow::datatypes::DataType;
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use exoware_sdk::kv_codec::decode_stored_row;
 
     /// Variable-length Binary values survive the encode -> store -> arrow
@@ -1062,6 +1062,81 @@ mod tests {
         for (id, body) in bodies.iter().enumerate() {
             assert_eq!(array.value(id), body.as_slice());
         }
+    }
+
+    fn binary_body_model() -> TableModel {
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", DataType::UInt64, false),
+                TableColumnConfig::new("body", DataType::Binary, false),
+            ],
+            vec!["id".to_string()],
+            vec![],
+        )
+        .expect("binary column config");
+        TableModel::from_config(&config).expect("binary column model")
+    }
+
+    fn binary_body_batch(body_type: DataType, body_array: ArrayRef) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::UInt64, false),
+            Field::new("body", body_type, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![Arc::new(UInt64Array::from(vec![7u64])), body_array],
+        )
+        .expect("insert batch")
+    }
+
+    /// The insert path accepts all three arrow encodings for a Binary column:
+    /// plain `Binary`, `LargeBinary`, and `BinaryView` (tables may declare the
+    /// wide or view types, and DataFusion may coerce batches to view arrays).
+    #[test]
+    fn extract_row_reads_all_binary_encodings() {
+        let model = binary_body_model();
+        let body: &[u8] = &[0xAB, 0xCD, 0xEF];
+        let arrays: Vec<(DataType, ArrayRef)> = vec![
+            (
+                DataType::Binary,
+                Arc::new(BinaryArray::from_iter_values([body])),
+            ),
+            (
+                DataType::LargeBinary,
+                Arc::new(LargeBinaryArray::from_iter_values([body])),
+            ),
+            (
+                DataType::BinaryView,
+                Arc::new(BinaryViewArray::from_iter_values([body])),
+            ),
+        ];
+        for (body_type, array) in arrays {
+            let batch = binary_body_batch(body_type.clone(), array);
+            let row = extract_row_from_batch(&batch, 0, &model).expect("extract row");
+            assert!(
+                matches!(&row.values[1], CellValue::Binary(v) if v.as_slice() == body),
+                "wrong cell for {body_type:?}: {:?}",
+                row.values[1]
+            );
+        }
+    }
+
+    /// A non-binary array for a Binary column is rejected with the column name
+    /// and the offending arrow type.
+    #[test]
+    fn extract_row_rejects_non_binary_array_for_binary_column() {
+        let model = binary_body_model();
+        let batch = binary_body_batch(
+            DataType::Utf8,
+            Arc::new(StringArray::from(vec!["not bytes"])),
+        );
+        let error = extract_row_from_batch(&batch, 0, &model).expect_err("utf8 body must fail");
+        let message = error.to_string();
+        assert!(
+            message.contains("'body'") && message.contains("expected Binary"),
+            "unexpected error: {message}"
+        );
     }
 
     #[test]
