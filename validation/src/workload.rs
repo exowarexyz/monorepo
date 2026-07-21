@@ -89,6 +89,10 @@ pub struct WorkerPlan {
     rng: rand::rngs::StdRng,
     spec: WorkloadSpec,
     zipf_sampler: Option<Arc<ZipfSampler>>,
+    /// Total bench workers, for the deterministic write-frontier estimate.
+    worker_count: u64,
+    /// Operations this plan has emitted (the stream position).
+    ops_emitted: u64,
 }
 
 pub(crate) struct ZipfSampler {
@@ -192,7 +196,7 @@ impl WorkloadSpec {
 impl WorkerPlan {
     /// Creates a replayable worker stream from the run seed and worker id.
     pub fn new(seed: u64, worker_id: u64, spec: WorkloadSpec) -> Self {
-        Self::with_zipf_sampler(seed, worker_id, spec, None)
+        Self::with_zipf_sampler(seed, worker_id, spec, None, 1)
     }
 
     pub(crate) fn with_zipf_sampler(
@@ -200,16 +204,20 @@ impl WorkerPlan {
         worker_id: u64,
         spec: WorkloadSpec,
         zipf_sampler: Option<Arc<ZipfSampler>>,
+        worker_count: usize,
     ) -> Self {
         Self {
             rng: worker_rng(seed, worker_id),
             spec,
             zipf_sampler,
+            worker_count: (worker_count as u64).max(1),
+            ops_emitted: 0,
         }
     }
 
     /// Emits the next logical operation for the current visible key range.
     pub fn next_operation(&mut self, max_key_exclusive: u64) -> Operation {
+        self.ops_emitted += 1;
         let p = self.rng.random::<f64>();
         if p < self.spec.mix.read_ratio {
             return Operation::Read {
@@ -230,6 +238,21 @@ impl WorkerPlan {
         Operation::Write
     }
 
+    // "Latest" must chase the write frontier or it degenerates into a fixed
+    // dead zone: writes append past the fixture, so a window anchored to the
+    // static fixture top reads keys nothing ever writes. A shared live counter
+    // would make seeded streams depend on task scheduling, so the frontier is
+    // instead *estimated* from this worker's own stream position (a pure
+    // function of the seed): all workers progress through identical op mixes,
+    // so expected appended keys after k ops is k * write_ratio per worker.
+    // Reads near the estimate may race the writes they target; those misses
+    // are the intended "latest" measurement, mirroring visibility lag.
+    fn estimated_write_frontier(&self, initial_keys: u64) -> u64 {
+        let appended =
+            (self.ops_emitted as f64 * self.spec.mix.write_ratio) as u64 * self.worker_count;
+        initial_keys.saturating_add(appended)
+    }
+
     // Each arm draws the same amount of randomness on every call for a given
     // distribution; the stream is versioned by `WORKLOAD_GENERATOR_VERSION`.
     fn sample_key_index(&mut self, max_key_exclusive: u64) -> u64 {
@@ -241,15 +264,19 @@ impl WorkerPlan {
                 self.rng.random_range(0..max_key_exclusive)
             }
             KeyDistribution::Latest => {
-                if max_key_exclusive <= 1 {
+                // Sampling range = fixture plus the estimated frontier (see
+                // estimated_write_frontier); the window hugs the frontier so
+                // "latest" reads chase recent writes rather than a fixed top.
+                let frontier = self.estimated_write_frontier(max_key_exclusive);
+                if frontier <= 1 {
                     return 0;
                 }
                 if self.rng.random::<f64>() < self.spec.latest_prob {
-                    let window = self.spec.latest_window.max(1).min(max_key_exclusive);
-                    let start = max_key_exclusive - window;
-                    self.rng.random_range(start..max_key_exclusive)
+                    let window = self.spec.latest_window.max(1).min(frontier);
+                    let start = frontier - window;
+                    self.rng.random_range(start..frontier)
                 } else {
-                    self.rng.random_range(0..max_key_exclusive)
+                    self.rng.random_range(0..frontier)
                 }
             }
             KeyDistribution::Zipfian => {
@@ -594,8 +621,8 @@ mod tests {
             ..sample_spec()
         };
         let sampler = Arc::new(ZipfSampler::new(100, spec.zipf_theta));
-        let first = WorkerPlan::with_zipf_sampler(1, 0, spec, Some(sampler.clone()));
-        let second = WorkerPlan::with_zipf_sampler(1, 1, spec, Some(sampler));
+        let first = WorkerPlan::with_zipf_sampler(1, 0, spec, Some(sampler.clone()), 2);
+        let second = WorkerPlan::with_zipf_sampler(1, 1, spec, Some(sampler), 2);
 
         assert!(Arc::ptr_eq(
             first.zipf_sampler.as_ref().expect("sampler is set"),
@@ -734,5 +761,48 @@ mod tests {
         let ops_a: Vec<Operation> = (0..32).map(|_| a.next_operation(1_000)).collect();
         let ops_b: Vec<Operation> = (0..32).map(|_| b.next_operation(1_000)).collect();
         assert_ne!(ops_a, ops_b);
+    }
+
+    #[test]
+    fn latest_window_chases_the_estimated_write_frontier() {
+        let spec = WorkloadSpec::new(
+            WorkloadMix {
+                read_ratio: 0.5,
+                write_ratio: 0.5,
+                scan_ratio: 0.0,
+            },
+            25,
+            KeyDistribution::Latest,
+            10,
+            1.0,
+            0.99,
+        )
+        .expect("spec should validate");
+        let initial = 1_000u64;
+        let workers = 4usize;
+
+        // Late in the stream, every latest read must target the moving
+        // frontier region, not the static fixture top: after k ops the
+        // estimate is initial + k*write_ratio*workers, far above `initial`.
+        let mut plan = WorkerPlan::with_zipf_sampler(7, 0, spec, None, workers);
+        let mut read_indexes = Vec::new();
+        for _ in 0..2_000 {
+            if let Operation::Read { index } = plan.next_operation(initial) {
+                read_indexes.push(index);
+            }
+        }
+        let late_reads = &read_indexes[read_indexes.len() - 20..];
+        assert!(
+            late_reads.iter().all(|&idx| idx > initial),
+            "late latest reads should chase appended keys, got {late_reads:?}"
+        );
+
+        // The estimate is a pure function of the seeded stream position, so
+        // two identically-seeded plans emit identical operations.
+        let mut x = WorkerPlan::with_zipf_sampler(7, 0, spec, None, workers);
+        let mut y = WorkerPlan::with_zipf_sampler(7, 0, spec, None, workers);
+        let ops_x: Vec<Operation> = (0..256).map(|_| x.next_operation(initial)).collect();
+        let ops_y: Vec<Operation> = (0..256).map(|_| y.next_operation(initial)).collect();
+        assert_eq!(ops_x, ops_y);
     }
 }
