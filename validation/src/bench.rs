@@ -351,6 +351,7 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
                 worker as u64,
                 worker_workload,
                 zipf_sampler,
+                concurrency,
             );
             let mut write_number = 0u64;
 
