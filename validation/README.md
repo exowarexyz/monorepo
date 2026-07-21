@@ -73,7 +73,7 @@ Benchmark JSON reports include the normalized config, seed, counters, and per-op
 
 Generated load and benchmark keys open with a byte derived from the logical index, so a run's keys spread across the entire physical key range instead of sharing a fixed prefix. Standard validation instead uses its own contiguous key layout, keeping its whole-keyspace range checks bounded to the rows it owns.
 
-`bench` reports `scan_rows` as every physical row returned by the store, including rows from other namespaces in the sampled interval. Compare scan latency and row counts only between runs against the same controlled fixture; the action's simulator reports are functionality artifacts, not cross-environment performance evidence.
+`bench` scans seek forward from one sampled key and bound their work by the row limit (`--scan-length`); because keys spread across the physical range, a window between two sampled keys would span an arbitrarily large fraction of the store. `scan_rows` counts every physical row returned, including rows from other namespaces past the seek point. Compare scan latency and row counts only between runs against the same controlled fixture; the action's simulator reports are functionality artifacts, not cross-environment performance evidence.
 
 `load`, `bench`, and `validate` accept `--value-size` (bytes, default 160) to control generated value size. Pass the same `--value-size` to `load` and a reading `bench` so writes appended during the benchmark match the loaded data.
 

@@ -374,18 +374,12 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
                             }
                         }
                     }
-                    Operation::Scan { start, end, limit } => {
-                        // Index-hashed key placement leaves the two endpoint keys in
-                        // arbitrary lexicographic order, so sort them into a valid window.
-                        let (start_key, end_key) = {
-                            let a = keyspace.inserted_key(start);
-                            let b = keyspace.inserted_key(end);
-                            if a <= b {
-                                (a, b)
-                            } else {
-                                (b, a)
-                            }
-                        };
+                    Operation::Scan { start, limit } => {
+                        // Seek from one inserted key and let the row limit bound the
+                        // scan (see the Operation::Scan doc for why no second hashed
+                        // endpoint is used).
+                        let start_key = keyspace.inserted_key(start);
+                        let end_key = keyspace.scan_upper_bound();
                         let request_start = Instant::now();
                         let result = client.query().range(&start_key, &end_key, limit).await;
                         latencies.record_scan(request_start.elapsed());
@@ -520,6 +514,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::client::RequestCompression;
     use crate::keyspace::DEFAULT_KEY_LEN;
     use axum::Router;
     use connectrpc::{ConnectRpcService, RequestContext};
@@ -610,6 +605,7 @@ mod tests {
             client: ClientArgs {
                 url: "http://localhost:10000/".to_string(),
                 read_retry_attempts: 3,
+                request_compression: RequestCompression::default(),
             },
             manifest: None,
             keys: 10_000,

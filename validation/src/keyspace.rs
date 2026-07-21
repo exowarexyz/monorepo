@@ -135,6 +135,16 @@ impl Keyspace {
         self.key(index, MISSING_KEY_DOMAIN)
     }
 
+    /// Returns the maximal key of this keyspace's physical key length.
+    ///
+    /// Forward scans seek from one inserted key and bound their work by row
+    /// limit, not by a second endpoint (leading entropy scatters inserted
+    /// keys across the byte keyspace, so no narrow endpoint exists). This is
+    /// the end bound such scans pass to the range API.
+    pub fn scan_upper_bound(&self) -> Key {
+        vec![u8::MAX; self.key_len].into()
+    }
+
     /// Returns the logical index that produced `key`, or `None` when `key` is
     /// not exactly one of this keyspace's inserted keys.
     ///

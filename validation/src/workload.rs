@@ -12,8 +12,10 @@ pub const DEFAULT_BENCH_RNG_SEED: u64 = 0x5eed_c0de;
 
 /// Version of the deterministic operation-stream generator used in manifests.
 ///
-/// Bump this when changing its seeded random stream, including an RNG update.
-pub const WORKLOAD_GENERATOR_VERSION: u16 = 3;
+/// Bump this when changing its seeded random stream, including an RNG update,
+/// or when changing what an emitted operation means (v4: scans became
+/// seek-forward-with-limit instead of two-hashed-endpoint windows).
+pub const WORKLOAD_GENERATOR_VERSION: u16 = 4;
 
 /// Named workload mixes for benchmark operation selection.
 #[derive(Copy, Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
@@ -70,9 +72,14 @@ pub struct WorkloadSpec {
 pub enum Operation {
     /// Point read of an inserted logical key index.
     Read { index: u64 },
-    /// Inclusive range scan between the keys of two inserted logical indexes;
-    /// the executor orders the endpoint keys lexicographically.
-    Scan { start: u64, end: u64, limit: usize },
+    /// Forward range scan of up to `limit` physical rows starting at an
+    /// inserted logical index's key. Index-hashed key placement scatters
+    /// logical indexes across the byte keyspace, so a window between two
+    /// hashed endpoints would span an arbitrarily large fraction of the store
+    /// (the server plans every overlapping run for it); seeking from one key
+    /// and bounding by row count keeps each scan's work proportional to
+    /// `limit` regardless of placement.
+    Scan { start: u64, limit: usize },
     /// Ingest write; the executor assigns the next concrete write index.
     Write,
 }
@@ -213,14 +220,9 @@ impl WorkerPlan {
         if p < self.spec.mix.read_ratio + self.spec.mix.scan_ratio {
             let max_key_exclusive = max_key_exclusive.max(1);
             let start = self.sample_key_index(max_key_exclusive);
-            let mut end = start.saturating_add(self.spec.scan_length.saturating_sub(1) as u64);
-            if end >= max_key_exclusive {
-                end = max_key_exclusive - 1;
-            }
 
             return Operation::Scan {
                 start,
-                end,
                 limit: self.spec.scan_length,
             };
         }
