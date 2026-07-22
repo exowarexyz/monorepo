@@ -17,6 +17,9 @@ import "common/v1/kv.proto";
 service Service {
   rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
   rpc Get(GetRequest) returns (GetResponse);
+  // Install (or clear) the sequence-log retention rule. The rule is persistent
+  // and continuously enforced as the log grows — see `SetRetentionRequest`.
+  rpc SetRetention(SetRetentionRequest) returns (SetRetentionResponse);
 }
 
 // Live (and optionally replayed) subscription request.
@@ -64,4 +67,56 @@ message SubscribeResponse {
 message GetResponse {
   uint64 sequence_number = 1;
   repeated common.kv.v1.Entry entries = 2;
+}
+
+// Keep the newest `count` batches. Continuous: as new batches are appended the
+// retained window slides forward with the live frontier, evicting whatever
+// falls below it.
+message RetentionKeepLatest {
+  uint64 count = 1 [(buf.validate.field).uint64.gt = 0];
+}
+
+// Retain sequence numbers strictly greater than `threshold`; evict the rest.
+message RetentionGreaterThan {
+  uint64 threshold = 1;
+}
+
+// Retain sequence numbers greater than or equal to `threshold`; evict the rest.
+message RetentionGreaterThanOrEqual {
+  uint64 threshold = 1;
+}
+
+// Retain nothing: evict up to the live frontier and keep doing so as the log
+// grows.
+message RetentionDropAll {}
+
+// The retention rule to enforce over the sequence log.
+message RetentionPolicy {
+  oneof kind {
+    RetentionKeepLatest keep_latest = 1;
+    RetentionGreaterThan greater_than = 2;
+    RetentionGreaterThanOrEqual greater_than_or_equal = 3;
+    RetentionDropAll drop_all = 4;
+  }
+}
+
+// Install or clear the sequence-log retention rule.
+//
+// Retention is a persistent, continuously-enforced rule owned by the stream
+// service (not a one-shot prune): once installed it keeps tracking the live
+// frontier as batches are appended, evicting whatever falls below the rule's
+// floor. Evicted batches surface to subscribers/point-lookups as
+// `OUT_OF_RANGE` with an `ErrorInfo { reason: "BATCH_EVICTED", metadata: {
+// "oldest_retained": ... } }` detail.
+message SetRetentionRequest {
+  // The rule to install. Absent -> clear the rule: enforcement stops and no
+  // further eviction happens.
+  RetentionPolicy policy = 1;
+}
+
+// Result of applying the rule change once, synchronously.
+message SetRetentionResponse {
+  // Lowest sequence number still retained after that application. Absent when
+  // the log is empty / no floor exists yet.
+  optional uint64 oldest_retained_sequence = 1;
 }

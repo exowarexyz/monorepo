@@ -10,27 +10,22 @@ use crate::kv_codec::Utf8;
 use crate::selector::{compile_payload_regex, Selector};
 
 pub const PRUNE_POLICY_CONTROL_KEY: &str = "manifest/control/compaction-prune-policies";
-pub const PRUNE_POLICY_DOCUMENT_VERSION: u32 = 1;
+/// Wire version of the persisted prune-policy document. A prune document
+/// carries only key scopes; sequence-log retention is configured separately via
+/// `log.stream.v1.SetRetention`.
+pub const PRUNE_POLICY_DOCUMENT_VERSION: u32 = 2;
 
-/// One prune rule. `scope` picks the keyspace; `retain` decides what survives.
+/// One prune rule. `scope` selects which keys to consider; `retain` decides
+/// what survives.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrunePolicy {
-    pub scope: PolicyScope,
+    pub scope: KeysScope,
     pub retain: RetainPolicy,
 }
 
-/// Which keyspace a `PrunePolicy` applies to. `Keys` mirrors the original
-/// user-keys prune (filter by family+regex, group, order, then retain).
-/// `Sequence` operates over the sequence-number-indexed log served by
-/// `log.stream.v1` — no grouping/ordering needed.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PolicyScope {
-    Keys(KeysScope),
-    Sequence,
-}
-
-/// User-key-space scope: same meaning as the previous top-level prune policy
-/// fields, just nested under the scope discriminator.
+/// User-key-space scope: filter a key-prefix family by `selector`, partition
+/// matched keys into `group_by` groups, order within each group by `order_by`,
+/// then apply `retain` to decide which keys to delete.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeysScope {
     pub selector: Selector,
@@ -217,40 +212,6 @@ impl Read for KeysScope {
     }
 }
 
-impl Write for PolicyScope {
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            PolicyScope::Keys(s) => {
-                0u8.write(buf);
-                s.write(buf);
-            }
-            PolicyScope::Sequence => {
-                1u8.write(buf);
-            }
-        }
-    }
-}
-
-impl EncodeSize for PolicyScope {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            PolicyScope::Keys(s) => s.encode_size(),
-            PolicyScope::Sequence => 0,
-        }
-    }
-}
-
-impl Read for PolicyScope {
-    type Cfg = ();
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        match u8::read(buf)? {
-            0 => Ok(PolicyScope::Keys(KeysScope::read(buf)?)),
-            1 => Ok(PolicyScope::Sequence),
-            v => Err(CodecError::InvalidEnum(v)),
-        }
-    }
-}
-
 impl Write for PrunePolicy {
     fn write(&self, buf: &mut impl BufMut) {
         self.scope.write(buf);
@@ -268,7 +229,7 @@ impl Read for PrunePolicy {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Ok(PrunePolicy {
-            scope: PolicyScope::read(buf)?,
+            scope: KeysScope::read(buf)?,
             retain: RetainPolicy::read(buf)?,
         })
     }
@@ -298,13 +259,7 @@ impl Read for PrunePolicyDocument {
 }
 
 pub fn validate_policy(policy: &PrunePolicy) -> anyhow::Result<()> {
-    match &policy.scope {
-        PolicyScope::Keys(scope) => validate_user_keys_scope(scope)?,
-        PolicyScope::Sequence => {
-            // No scope-level configuration to validate; retention rules below
-            // are constrained by `validate_retain_for_scope`.
-        }
-    }
+    validate_user_keys_scope(&policy.scope)?;
     validate_retain_for_scope(policy)?;
     Ok(())
 }
@@ -332,65 +287,45 @@ fn validate_user_keys_scope(scope: &KeysScope) -> anyhow::Result<()> {
 }
 
 fn validate_retain_for_scope(policy: &PrunePolicy) -> anyhow::Result<()> {
-    match &policy.scope {
-        PolicyScope::Keys(scope) => match policy.retain {
-            RetainPolicy::KeepLatest { count } => {
-                ensure!(count > 0, "keep_latest count must be > 0");
-                ensure!(
-                    scope.order_by.is_some(),
-                    "keep_latest requires order_by to be configured"
-                );
-            }
-            RetainPolicy::GreaterThan { .. } | RetainPolicy::GreaterThanOrEqual { .. } => {
-                let order_by = scope
-                    .order_by
-                    .as_ref()
-                    .context("threshold retention requires order_by to be configured")?;
-                ensure!(
-                    matches!(order_by.encoding, OrderEncoding::U64Be),
-                    "threshold retention currently requires order_by.encoding = u64_be"
-                );
-            }
-            RetainPolicy::DropAll => {}
-        },
-        PolicyScope::Sequence => match policy.retain {
-            RetainPolicy::KeepLatest { count } => {
-                ensure!(count > 0, "keep_latest count must be > 0");
-            }
-            RetainPolicy::GreaterThan { .. }
-            | RetainPolicy::GreaterThanOrEqual { .. }
-            | RetainPolicy::DropAll => {}
-        },
+    let scope = &policy.scope;
+    match policy.retain {
+        RetainPolicy::KeepLatest { count } => {
+            ensure!(count > 0, "keep_latest count must be > 0");
+            ensure!(
+                scope.order_by.is_some(),
+                "keep_latest requires order_by to be configured"
+            );
+        }
+        RetainPolicy::GreaterThan { .. } | RetainPolicy::GreaterThanOrEqual { .. } => {
+            let order_by = scope
+                .order_by
+                .as_ref()
+                .context("threshold retention requires order_by to be configured")?;
+            ensure!(
+                matches!(order_by.encoding, OrderEncoding::U64Be),
+                "threshold retention currently requires order_by.encoding = u64_be"
+            );
+        }
+        RetainPolicy::DropAll => {}
     }
     Ok(())
 }
 
 pub fn ensure_unique_policy_families(policies: &[PrunePolicy]) -> anyhow::Result<()> {
     let mut user_prefixes: Vec<&[u8]> = Vec::new();
-    let mut sequence_seen = false;
     for policy in policies {
-        match &policy.scope {
-            PolicyScope::Keys(scope) => {
-                // Nested prefixes select overlapping physical key ranges, so
-                // two policies could disagree about the same rows. Reject any
-                // pair where one prefix extends the other (equality included).
-                let prefix: &[u8] = &scope.selector.prefix;
-                for seen in &user_prefixes {
-                    ensure!(
-                        !seen.starts_with(prefix) && !prefix.starts_with(seen),
-                        "overlapping compaction prune policies for key prefixes {seen:?} and {prefix:?}"
-                    );
-                }
-                user_prefixes.push(prefix);
-            }
-            PolicyScope::Sequence => {
-                ensure!(
-                    !sequence_seen,
-                    "duplicate compaction prune policy for sequence scope"
-                );
-                sequence_seen = true;
-            }
+        let scope = &policy.scope;
+        // Nested prefixes select overlapping physical key ranges, so two
+        // policies could disagree about the same rows. Reject any pair where
+        // one prefix extends the other (equality included).
+        let prefix: &[u8] = &scope.selector.prefix;
+        for seen in &user_prefixes {
+            ensure!(
+                !seen.starts_with(prefix) && !prefix.starts_with(seen),
+                "overlapping compaction prune policies for key prefixes {seen:?} and {prefix:?}"
+            );
         }
+        user_prefixes.push(prefix);
     }
     Ok(())
 }
@@ -451,15 +386,15 @@ fn capture_groups_are_unique(groups: &[Utf8]) -> bool {
 mod tests {
     use super::{
         decode_policy_document, encode_policy_document, GroupBy, KeysScope, OrderBy, OrderEncoding,
-        PolicyScope, PrunePolicy, PrunePolicyDocument, RetainPolicy, Selector,
-        PRUNE_POLICY_CONTROL_KEY,
+        PrunePolicy, PrunePolicyDocument, RetainPolicy, Selector, PRUNE_POLICY_CONTROL_KEY,
+        PRUNE_POLICY_DOCUMENT_VERSION,
     };
     use crate::kv_codec::Utf8;
     use bytes::Bytes;
 
     fn sample_policy() -> PrunePolicy {
         PrunePolicy {
-            scope: PolicyScope::Keys(KeysScope {
+            scope: KeysScope {
                 selector: Selector {
                     prefix: Bytes::copy_from_slice(&[1]),
                     payload_regex: Utf8::from(
@@ -473,14 +408,14 @@ mod tests {
                     capture_group: Utf8::from("version"),
                     encoding: OrderEncoding::U64Be,
                 }),
-            }),
+            },
             retain: RetainPolicy::KeepLatest { count: 10 },
         }
     }
 
     fn sample_document() -> PrunePolicyDocument {
         PrunePolicyDocument {
-            version: 1,
+            version: PRUNE_POLICY_DOCUMENT_VERSION,
             policies: vec![sample_policy()],
         }
     }
@@ -488,20 +423,14 @@ mod tests {
     #[test]
     fn nested_selector_prefixes_rejected() {
         let mut nested = sample_policy();
-        let PolicyScope::Keys(scope) = &mut nested.scope else {
-            unreachable!("sample policy uses Keys scope");
-        };
-        scope.selector.prefix = Bytes::copy_from_slice(&[1, 2]);
+        nested.scope.selector.prefix = Bytes::copy_from_slice(&[1, 2]);
         let err = super::ensure_unique_policy_families(&[sample_policy(), nested])
             .expect_err("nested prefixes overlap");
         assert!(err.to_string().contains("overlapping compaction"));
 
         let disjoint = sample_policy();
         let mut other = sample_policy();
-        let PolicyScope::Keys(scope) = &mut other.scope else {
-            unreachable!("sample policy uses Keys scope");
-        };
-        scope.selector.prefix = Bytes::copy_from_slice(&[2]);
+        other.scope.selector.prefix = Bytes::copy_from_slice(&[2]);
         super::ensure_unique_policy_families(&[disjoint, other]).expect("disjoint prefixes");
     }
 
@@ -515,7 +444,7 @@ mod tests {
     #[test]
     fn empty_bytes_means_no_policies() {
         let decoded = decode_policy_document(b"").expect("empty ok");
-        assert_eq!(decoded.version, 1);
+        assert_eq!(decoded.version, PRUNE_POLICY_DOCUMENT_VERSION);
         assert!(decoded.policies.is_empty());
         assert_eq!(
             PRUNE_POLICY_CONTROL_KEY,
@@ -526,9 +455,9 @@ mod tests {
     #[test]
     fn keep_latest_requires_order_by() {
         let doc = PrunePolicyDocument {
-            version: 1,
+            version: PRUNE_POLICY_DOCUMENT_VERSION,
             policies: vec![PrunePolicy {
-                scope: PolicyScope::Keys(KeysScope {
+                scope: KeysScope {
                     selector: Selector {
                         prefix: Bytes::copy_from_slice(&[1]),
                         payload_regex: Utf8::from(
@@ -539,7 +468,7 @@ mod tests {
                         capture_groups: vec![Utf8::from("logical")],
                     },
                     order_by: None,
-                }),
+                },
                 retain: RetainPolicy::KeepLatest { count: 1 },
             }],
         };
@@ -554,9 +483,9 @@ mod tests {
     #[test]
     fn capture_groups_must_exist() {
         let doc = PrunePolicyDocument {
-            version: 1,
+            version: PRUNE_POLICY_DOCUMENT_VERSION,
             policies: vec![PrunePolicy {
-                scope: PolicyScope::Keys(KeysScope {
+                scope: KeysScope {
                     selector: Selector {
                         prefix: Bytes::copy_from_slice(&[1]),
                         payload_regex: Utf8::from("(?s)^(?P<logical>.+)$"),
@@ -568,7 +497,7 @@ mod tests {
                         capture_group: Utf8::from("logical"),
                         encoding: OrderEncoding::BytesAsc,
                     }),
-                }),
+                },
                 retain: RetainPolicy::KeepLatest { count: 1 },
             }],
         };
@@ -583,53 +512,20 @@ mod tests {
     #[test]
     fn oversized_selector_prefix_returns_error() {
         let doc = PrunePolicyDocument {
-            version: 1,
+            version: PRUNE_POLICY_DOCUMENT_VERSION,
             policies: vec![PrunePolicy {
-                scope: PolicyScope::Keys(KeysScope {
+                scope: KeysScope {
                     selector: Selector {
                         prefix: Bytes::from(vec![0u8; crate::keys::MAX_KEY_LEN + 1]),
                         payload_regex: Utf8::from("(?s)^(?P<logical>.+)$"),
                     },
                     group_by: GroupBy::default(),
                     order_by: None,
-                }),
+                },
                 retain: RetainPolicy::DropAll,
             }],
         };
         let err = encode_policy_document(&doc).expect_err("oversized prefix");
         assert!(err.to_string().contains("invalid selector prefix"));
-    }
-
-    #[test]
-    fn sequence_scope_codec_round_trip() {
-        let doc = PrunePolicyDocument {
-            version: 1,
-            policies: vec![PrunePolicy {
-                scope: PolicyScope::Sequence,
-                retain: RetainPolicy::KeepLatest { count: 100 },
-            }],
-        };
-        let encoded = encode_policy_document(&doc).expect("encode");
-        let decoded = decode_policy_document(&encoded).expect("decode");
-        assert_eq!(decoded, doc);
-    }
-
-    #[test]
-    fn sequence_scope_rejects_duplicate() {
-        let doc = PrunePolicyDocument {
-            version: 1,
-            policies: vec![
-                PrunePolicy {
-                    scope: PolicyScope::Sequence,
-                    retain: RetainPolicy::DropAll,
-                },
-                PrunePolicy {
-                    scope: PolicyScope::Sequence,
-                    retain: RetainPolicy::GreaterThan { threshold: 10 },
-                },
-            ],
-        };
-        let err = encode_policy_document(&doc).unwrap_err();
-        assert!(err.to_string().contains("sequence"));
     }
 }

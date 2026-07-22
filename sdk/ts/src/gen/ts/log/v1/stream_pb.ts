@@ -13,7 +13,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file log/v1/stream.proto.
  */
 export const file_log_v1_stream: GenFile = /*@__PURE__*/
-  fileDesc("ChNsb2cvdjEvc3RyZWFtLnByb3RvEg1sb2cuc3RyZWFtLnYxIr4BChBTdWJzY3JpYmVSZXF1ZXN0EjUKCXNlbGVjdG9ycxgBIAMoCzIWLmNvbW1vbi5rdi52MS5TZWxlY3RvckIKukgHkgEECAEQEBI1Cg12YWx1ZV9maWx0ZXJzGAIgAygLMhQuY29tbW9uLmt2LnYxLkZpbHRlckIIukgFkgECEBASIgoVc2luY2Vfc2VxdWVuY2VfbnVtYmVyGAMgASgESACIAQFCGAoWX3NpbmNlX3NlcXVlbmNlX251bWJlciIlCgpHZXRSZXF1ZXN0EhcKD3NlcXVlbmNlX251bWJlchgBIAEoBCJSChFTdWJzY3JpYmVSZXNwb25zZRIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQSJAoHZW50cmllcxgCIAMoCzITLmNvbW1vbi5rdi52MS5FbnRyeSJMCgtHZXRSZXNwb25zZRIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQSJAoHZW50cmllcxgCIAMoCzITLmNvbW1vbi5rdi52MS5FbnRyeTKZAQoHU2VydmljZRJQCglTdWJzY3JpYmUSHy5sb2cuc3RyZWFtLnYxLlN1YnNjcmliZVJlcXVlc3QaIC5sb2cuc3RyZWFtLnYxLlN1YnNjcmliZVJlc3BvbnNlMAESPAoDR2V0EhkubG9nLnN0cmVhbS52MS5HZXRSZXF1ZXN0GhoubG9nLnN0cmVhbS52MS5HZXRSZXNwb25zZWIGcHJvdG8z", [file_buf_validate_validate, file_common_v1_kv]);
+  fileDesc("ChNsb2cvdjEvc3RyZWFtLnByb3RvEg1sb2cuc3RyZWFtLnYxIr4BChBTdWJzY3JpYmVSZXF1ZXN0EjUKCXNlbGVjdG9ycxgBIAMoCzIWLmNvbW1vbi5rdi52MS5TZWxlY3RvckIKukgHkgEECAEQEBI1Cg12YWx1ZV9maWx0ZXJzGAIgAygLMhQuY29tbW9uLmt2LnYxLkZpbHRlckIIukgFkgECEBASIgoVc2luY2Vfc2VxdWVuY2VfbnVtYmVyGAMgASgESACIAQFCGAoWX3NpbmNlX3NlcXVlbmNlX251bWJlciIlCgpHZXRSZXF1ZXN0EhcKD3NlcXVlbmNlX251bWJlchgBIAEoBCJSChFTdWJzY3JpYmVSZXNwb25zZRIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQSJAoHZW50cmllcxgCIAMoCzITLmNvbW1vbi5rdi52MS5FbnRyeSJMCgtHZXRSZXNwb25zZRIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQSJAoHZW50cmllcxgCIAMoCzITLmNvbW1vbi5rdi52MS5FbnRyeSItChNSZXRlbnRpb25LZWVwTGF0ZXN0EhYKBWNvdW50GAEgASgEQge6SAQyAiAAIikKFFJldGVudGlvbkdyZWF0ZXJUaGFuEhEKCXRocmVzaG9sZBgBIAEoBCIwChtSZXRlbnRpb25HcmVhdGVyVGhhbk9yRXF1YWwSEQoJdGhyZXNob2xkGAEgASgEIhIKEFJldGVudGlvbkRyb3BBbGwikwIKD1JldGVudGlvblBvbGljeRI5CgtrZWVwX2xhdGVzdBgBIAEoCzIiLmxvZy5zdHJlYW0udjEuUmV0ZW50aW9uS2VlcExhdGVzdEgAEjsKDGdyZWF0ZXJfdGhhbhgCIAEoCzIjLmxvZy5zdHJlYW0udjEuUmV0ZW50aW9uR3JlYXRlclRoYW5IABJLChVncmVhdGVyX3RoYW5fb3JfZXF1YWwYAyABKAsyKi5sb2cuc3RyZWFtLnYxLlJldGVudGlvbkdyZWF0ZXJUaGFuT3JFcXVhbEgAEjMKCGRyb3BfYWxsGAQgASgLMh8ubG9nLnN0cmVhbS52MS5SZXRlbnRpb25Ecm9wQWxsSABCBgoEa2luZCJFChNTZXRSZXRlbnRpb25SZXF1ZXN0Ei4KBnBvbGljeRgBIAEoCzIeLmxvZy5zdHJlYW0udjEuUmV0ZW50aW9uUG9saWN5IloKFFNldFJldGVudGlvblJlc3BvbnNlEiUKGG9sZGVzdF9yZXRhaW5lZF9zZXF1ZW5jZRgBIAEoBEgAiAEBQhsKGV9vbGRlc3RfcmV0YWluZWRfc2VxdWVuY2Uy8gEKB1NlcnZpY2USUAoJU3Vic2NyaWJlEh8ubG9nLnN0cmVhbS52MS5TdWJzY3JpYmVSZXF1ZXN0GiAubG9nLnN0cmVhbS52MS5TdWJzY3JpYmVSZXNwb25zZTABEjwKA0dldBIZLmxvZy5zdHJlYW0udjEuR2V0UmVxdWVzdBoaLmxvZy5zdHJlYW0udjEuR2V0UmVzcG9uc2USVwoMU2V0UmV0ZW50aW9uEiIubG9nLnN0cmVhbS52MS5TZXRSZXRlbnRpb25SZXF1ZXN0GiMubG9nLnN0cmVhbS52MS5TZXRSZXRlbnRpb25SZXNwb25zZWIGcHJvdG8z", [file_buf_validate_validate, file_common_v1_kv]);
 
 /**
  * Live (and optionally replayed) subscription request.
@@ -135,6 +135,175 @@ export const GetResponseSchema: GenMessage<GetResponse> = /*@__PURE__*/
   messageDesc(file_log_v1_stream, 3);
 
 /**
+ * Keep the newest `count` batches. Continuous: as new batches are appended the
+ * retained window slides forward with the live frontier, evicting whatever
+ * falls below it.
+ *
+ * @generated from message log.stream.v1.RetentionKeepLatest
+ */
+export type RetentionKeepLatest = Message<"log.stream.v1.RetentionKeepLatest"> & {
+  /**
+   * @generated from field: uint64 count = 1;
+   */
+  count: bigint;
+};
+
+/**
+ * Describes the message log.stream.v1.RetentionKeepLatest.
+ * Use `create(RetentionKeepLatestSchema)` to create a new message.
+ */
+export const RetentionKeepLatestSchema: GenMessage<RetentionKeepLatest> = /*@__PURE__*/
+  messageDesc(file_log_v1_stream, 4);
+
+/**
+ * Retain sequence numbers strictly greater than `threshold`; evict the rest.
+ *
+ * @generated from message log.stream.v1.RetentionGreaterThan
+ */
+export type RetentionGreaterThan = Message<"log.stream.v1.RetentionGreaterThan"> & {
+  /**
+   * @generated from field: uint64 threshold = 1;
+   */
+  threshold: bigint;
+};
+
+/**
+ * Describes the message log.stream.v1.RetentionGreaterThan.
+ * Use `create(RetentionGreaterThanSchema)` to create a new message.
+ */
+export const RetentionGreaterThanSchema: GenMessage<RetentionGreaterThan> = /*@__PURE__*/
+  messageDesc(file_log_v1_stream, 5);
+
+/**
+ * Retain sequence numbers greater than or equal to `threshold`; evict the rest.
+ *
+ * @generated from message log.stream.v1.RetentionGreaterThanOrEqual
+ */
+export type RetentionGreaterThanOrEqual = Message<"log.stream.v1.RetentionGreaterThanOrEqual"> & {
+  /**
+   * @generated from field: uint64 threshold = 1;
+   */
+  threshold: bigint;
+};
+
+/**
+ * Describes the message log.stream.v1.RetentionGreaterThanOrEqual.
+ * Use `create(RetentionGreaterThanOrEqualSchema)` to create a new message.
+ */
+export const RetentionGreaterThanOrEqualSchema: GenMessage<RetentionGreaterThanOrEqual> = /*@__PURE__*/
+  messageDesc(file_log_v1_stream, 6);
+
+/**
+ * Retain nothing: evict up to the live frontier and keep doing so as the log
+ * grows.
+ *
+ * @generated from message log.stream.v1.RetentionDropAll
+ */
+export type RetentionDropAll = Message<"log.stream.v1.RetentionDropAll"> & {
+};
+
+/**
+ * Describes the message log.stream.v1.RetentionDropAll.
+ * Use `create(RetentionDropAllSchema)` to create a new message.
+ */
+export const RetentionDropAllSchema: GenMessage<RetentionDropAll> = /*@__PURE__*/
+  messageDesc(file_log_v1_stream, 7);
+
+/**
+ * The retention rule to enforce over the sequence log.
+ *
+ * @generated from message log.stream.v1.RetentionPolicy
+ */
+export type RetentionPolicy = Message<"log.stream.v1.RetentionPolicy"> & {
+  /**
+   * @generated from oneof log.stream.v1.RetentionPolicy.kind
+   */
+  kind: {
+    /**
+     * @generated from field: log.stream.v1.RetentionKeepLatest keep_latest = 1;
+     */
+    value: RetentionKeepLatest;
+    case: "keepLatest";
+  } | {
+    /**
+     * @generated from field: log.stream.v1.RetentionGreaterThan greater_than = 2;
+     */
+    value: RetentionGreaterThan;
+    case: "greaterThan";
+  } | {
+    /**
+     * @generated from field: log.stream.v1.RetentionGreaterThanOrEqual greater_than_or_equal = 3;
+     */
+    value: RetentionGreaterThanOrEqual;
+    case: "greaterThanOrEqual";
+  } | {
+    /**
+     * @generated from field: log.stream.v1.RetentionDropAll drop_all = 4;
+     */
+    value: RetentionDropAll;
+    case: "dropAll";
+  } | { case: undefined; value?: undefined };
+};
+
+/**
+ * Describes the message log.stream.v1.RetentionPolicy.
+ * Use `create(RetentionPolicySchema)` to create a new message.
+ */
+export const RetentionPolicySchema: GenMessage<RetentionPolicy> = /*@__PURE__*/
+  messageDesc(file_log_v1_stream, 8);
+
+/**
+ * Install or clear the sequence-log retention rule.
+ *
+ * Retention is a persistent, continuously-enforced rule owned by the stream
+ * service (not a one-shot prune): once installed it keeps tracking the live
+ * frontier as batches are appended, evicting whatever falls below the rule's
+ * floor. Evicted batches surface to subscribers/point-lookups as
+ * `OUT_OF_RANGE` with an `ErrorInfo { reason: "BATCH_EVICTED", metadata: {
+ * "oldest_retained": ... } }` detail.
+ *
+ * @generated from message log.stream.v1.SetRetentionRequest
+ */
+export type SetRetentionRequest = Message<"log.stream.v1.SetRetentionRequest"> & {
+  /**
+   * The rule to install. Absent -> clear the rule: enforcement stops and no
+   * further eviction happens.
+   *
+   * @generated from field: log.stream.v1.RetentionPolicy policy = 1;
+   */
+  policy?: RetentionPolicy;
+};
+
+/**
+ * Describes the message log.stream.v1.SetRetentionRequest.
+ * Use `create(SetRetentionRequestSchema)` to create a new message.
+ */
+export const SetRetentionRequestSchema: GenMessage<SetRetentionRequest> = /*@__PURE__*/
+  messageDesc(file_log_v1_stream, 9);
+
+/**
+ * Result of applying the rule change once, synchronously.
+ *
+ * @generated from message log.stream.v1.SetRetentionResponse
+ */
+export type SetRetentionResponse = Message<"log.stream.v1.SetRetentionResponse"> & {
+  /**
+   * Lowest sequence number still retained after that application. Absent when
+   * the log is empty / no floor exists yet.
+   *
+   * @generated from field: optional uint64 oldest_retained_sequence = 1;
+   */
+  oldestRetainedSequence?: bigint;
+};
+
+/**
+ * Describes the message log.stream.v1.SetRetentionResponse.
+ * Use `create(SetRetentionResponseSchema)` to create a new message.
+ */
+export const SetRetentionResponseSchema: GenMessage<SetRetentionResponse> = /*@__PURE__*/
+  messageDesc(file_log_v1_stream, 10);
+
+/**
  * Push-based subscription + point-lookup over the store's log.
  *
  * `Subscribe` delivers a `SubscribeResponse` per atomic `Put` batch whose
@@ -163,6 +332,17 @@ export const Service: GenService<{
     methodKind: "unary";
     input: typeof GetRequestSchema;
     output: typeof GetResponseSchema;
+  },
+  /**
+   * Install (or clear) the sequence-log retention rule. The rule is persistent
+   * and continuously enforced as the log grows — see `SetRetentionRequest`.
+   *
+   * @generated from rpc log.stream.v1.Service.SetRetention
+   */
+  setRetention: {
+    methodKind: "unary";
+    input: typeof SetRetentionRequestSchema;
+    output: typeof SetRetentionResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_log_v1_stream, 0);

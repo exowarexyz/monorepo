@@ -16,9 +16,11 @@
 //! atomic and strictly ordered, so a crash never leaves a partial batch and at most the
 //! newest ingested group can be missing its state ingestion; `open` repairs that by
 //! re-applying the newest retained log row (idempotent: its rows are the newest writes for
-//! their keys). The floor meta row is written only by pruning and is durable by the time a
-//! prune acks: it marks state the replay must never touch (re-applying key-pruned rows would
-//! resurrect them) and keeps a fully-pruned log from regressing the frontier.
+//! their keys). The floor meta row is written by key pruning and by sequence-log retention
+//! enforcement, and is durable by the time either acks: it marks state the replay must never
+//! touch (re-applying key-pruned rows would resurrect them) and keeps a fully-evicted log from
+//! regressing the frontier. A separate meta row persists the active retention rule (see the
+//! [`Retention`] impl), which the ingest path re-enforces continuously as the log grows.
 //!
 //! Any write failure in the pipeline is fatal: once a group's log row is durable it cannot be
 //! rolled back (its sequence number must never be re-issued), so the writer panics and the next
@@ -34,18 +36,18 @@ use std::thread;
 
 use buffa::{Message, MessageView};
 use bytes::Bytes;
+use commonware_codec::{DecodeExt, Encode};
 use exoware_sdk::common::kv::v1::Entry;
 use exoware_sdk::keys::Prefix;
 use exoware_sdk::log::stream::v1::{
     GetResponse as StreamGetResponse, GetResponseView as StreamGetResponseView,
 };
-use exoware_sdk::prune_policy::{
-    KeysScope, OrderEncoding, PolicyScope, PrunePolicyDocument, RetainPolicy,
-};
+use exoware_sdk::prune_policy::{KeysScope, OrderEncoding, PrunePolicyDocument, RetainPolicy};
+use exoware_sdk::retention::RetentionPolicy;
 use exoware_sdk::selector::compile_payload_regex;
 use exoware_server::{
     Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan, RangeScanBatch,
-    Sequence,
+    Retention, Sequence,
 };
 use parking_lot::Mutex;
 use regex::bytes::Regex;
@@ -59,6 +61,9 @@ use tracing::debug;
 const STATE_CF: &str = rocksdb::DEFAULT_COLUMN_FAMILY_NAME;
 const META_CF: &str = "meta";
 const SEQ_META_KEY: &[u8] = b"sequence";
+/// Meta row holding the active sequence-log retention rule (the codec-encoded
+/// [`RetentionPolicy`]). Absence of the row means no rule is installed.
+const RETENTION_META_KEY: &[u8] = b"retention";
 const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
 const PRUNE_DELETE_CHUNK_KEYS: usize = 4096;
 const DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
@@ -348,6 +353,12 @@ struct Frontiers {
     /// loads `published` under it sees a frontier covering every row its scan could have
     /// observed.
     persist: Mutex<()>,
+    /// Highest `cutoff_exclusive` already applied by `prune_log` in this process. Lets the
+    /// per-append retention hook skip the write entirely when the floor has not advanced
+    /// (static thresholds, coalesced ingest waves), so redundant range tombstones never pile
+    /// up ahead of compaction. Starts at zero on open; the first trim after a reopen rewrites
+    /// one already-applied tombstone, which is harmless.
+    trimmed: AtomicU64,
 }
 
 impl Frontiers {
@@ -355,6 +366,7 @@ impl Frontiers {
         Self {
             published: AtomicU64::new(published),
             persist: Mutex::new(()),
+            trimmed: AtomicU64::new(0),
         }
     }
 }
@@ -821,6 +833,35 @@ fn read_state_floor(db: &DB) -> Result<u64, String> {
     }
 }
 
+/// Reads the persisted retention rule. Absence of the row means no rule is installed (a cleared
+/// rule deletes the row), so enforcement stops. A malformed row is corruption and fails the open.
+fn read_retention_policy(db: &DB) -> Result<Option<RetentionPolicy>, String> {
+    let meta_cf = db
+        .cf_handle(META_CF)
+        .expect("meta CF must exist (created on open)");
+    match db
+        .get_cf(meta_cf, RETENTION_META_KEY)
+        .map_err(|e| e.to_string())?
+    {
+        Some(bytes) => RetentionPolicy::decode(bytes.as_slice())
+            .map(Some)
+            .map_err(|e| format!("corrupt retention rule meta row: {e}")),
+        None => Ok(None),
+    }
+}
+
+/// Lowest sequence a retention rule keeps against `frontier`: the exclusive cutoff for log
+/// trimming, so every row below it is evicted and the row at it (if any) is the oldest retained.
+/// Mirrors the floor math the stream service owns end to end.
+fn retention_floor(policy: &RetentionPolicy, frontier: u64) -> u64 {
+    match policy {
+        RetentionPolicy::KeepLatest { count } => frontier.saturating_sub(*count).saturating_add(1),
+        RetentionPolicy::GreaterThan { threshold } => threshold.saturating_add(1),
+        RetentionPolicy::GreaterThanOrEqual { threshold } => *threshold,
+        RetentionPolicy::DropAll => frontier.saturating_add(1),
+    }
+}
+
 /// Re-applies the newest retained log row to the state column family and returns its sequence
 /// (zero when the log is empty). Rows are only ever ingested by sequential, atomic commits, so
 /// the returned sequence is a lower bound on the durable frontier. `commit` ingests strictly
@@ -939,6 +980,10 @@ pub struct RocksStore {
     writer: Arc<Writer>,
     db: Arc<Database>,
     frontiers: Arc<Frontiers>,
+    /// In-memory mirror of the persisted retention rule (the meta row is the source of truth
+    /// across reopens). The ingest path reads it on every commit to trim continuously, so a
+    /// cheap cache keeps a rule-less store off the disk on that hot path.
+    retention: Arc<Mutex<Option<RetentionPolicy>>>,
 }
 
 impl RocksStore {
@@ -1000,6 +1045,9 @@ impl RocksStore {
         let floor = read_state_floor(&db)?;
         let seq = floor.max(replay_newest_log_row(&db, floor)?);
 
+        // Restore the retention rule so the ingest path keeps enforcing it after a reopen.
+        let retention = Arc::new(Mutex::new(read_retention_policy(&db)?));
+
         let frontiers = Arc::new(Frontiers::new(seq));
         let writer = Arc::new(Writer::start(
             db.clone(),
@@ -1011,6 +1059,7 @@ impl RocksStore {
             db,
             frontiers,
             writer,
+            retention,
         })
     }
 
@@ -1075,21 +1124,34 @@ impl RocksStore {
         Ok(())
     }
 
-    /// Deletes replay-log rows with sequence numbers below `cutoff_exclusive`.
+    /// Deletes replay-log rows with sequence numbers below `cutoff_exclusive`. A no-op when
+    /// the cutoff does not advance past what this process already trimmed.
     fn prune_log(&self, cutoff_exclusive: u64) -> Result<(), String> {
-        if cutoff_exclusive == 0 {
+        if cutoff_exclusive == 0
+            || self.frontiers.trimmed.load(Ordering::Acquire) >= cutoff_exclusive
+        {
             return Ok(());
         }
         let _guard = self.frontiers.persist.lock();
+        // Recheck under the lock: a concurrent trim from the same ingest wave may have
+        // covered this cutoff while we waited.
+        if self.frontiers.trimmed.load(Ordering::Acquire) >= cutoff_exclusive {
+            return Ok(());
+        }
 
-        // One synced, atomic batch: the range tombstone that deletes the rows, and the state
-        // floor that keeps `open` from re-deriving a regressed frontier once they are gone.
+        // One atomic batch: the range tombstone that deletes the rows, and the state floor
+        // that keeps `open` from re-deriving a regressed frontier once they are gone.
         // The published frontier covers every pruned row (the cutoff is capped at
         // published + 1), and everything at or below it is durable and applied to the state.
         // That also makes this safe against the writer's concurrent, lock-free log ingestion:
         // an in-flight group's row sits above every published frontier this prune could have
         // loaded. Space is reclaimed by ordinary compaction; nothing assumes which SST files
         // hold the rows.
+        //
+        // Unsynced: batch atomicity means a crash loses the tombstone and the floor raise
+        // together, leaving the rows intact and open's re-derivation consistent; the next
+        // enforcement reapplies the trim. This keeps the per-append retention hook from
+        // adding a second fsync to every ingest.
         let published = self.frontiers.published.load(Ordering::Acquire);
         let mut batch = rocksdb::WriteBatch::default();
         batch.put_cf(self.meta_cf(), SEQ_META_KEY, published.to_le_bytes());
@@ -1098,20 +1160,19 @@ impl RocksStore {
             sequence_log_key(0),
             sequence_log_key(cutoff_exclusive),
         );
-        write_synced_batch(&self.db, batch)
+        self.db.write(batch).map_err(|e| e.to_string())?;
+        self.frontiers
+            .trimmed
+            .store(cutoff_exclusive, Ordering::Release);
+        Ok(())
     }
 
-    /// Applies each prune policy in document order to either current rows or replay-log rows.
+    /// Applies each prune policy in document order to current rows. A prune document is
+    /// Keys-only; sequence-log retention is handled by the stream service's `SetRetention`
+    /// (see the [`Retention`] impl).
     fn apply_prune_policies(&self, document: PrunePolicyDocument) -> Result<(), String> {
         for policy in &document.policies {
-            match &policy.scope {
-                PolicyScope::Keys(scope) => {
-                    self.apply_key_prune_policy(scope, &policy.retain)?;
-                }
-                PolicyScope::Sequence => {
-                    self.apply_sequence_prune_policy(&policy.retain)?;
-                }
-            }
+            self.apply_key_prune_policy(&policy.scope, &policy.retain)?;
         }
         Ok(())
     }
@@ -1173,24 +1234,70 @@ impl RocksStore {
         self.delete_keys(&all_deletes)
     }
 
-    /// Computes the replay-log cutoff for a sequence policy and prunes only log rows.
-    fn apply_sequence_prune_policy(&self, retain: &RetainPolicy) -> Result<(), String> {
-        let current = self.frontiers.published.load(Ordering::Acquire);
-        let cutoff_exclusive = match retain {
-            RetainPolicy::KeepLatest { count } => {
-                let count = *count as u64;
-                current.saturating_add(1).saturating_sub(count)
-            }
-            RetainPolicy::GreaterThan { threshold } => threshold.saturating_add(1),
-            RetainPolicy::GreaterThanOrEqual { threshold } => *threshold,
-            RetainPolicy::DropAll => current.saturating_add(1),
-        };
+    /// Lowest retained log sequence at or below the published frontier, or `None` when the log
+    /// holds no such row. Shared by `oldest_retained_batch` and retention enforcement.
+    fn oldest_retained_sequence(&self) -> Result<Option<u64>, String> {
+        let mut it = self.db.iterator_cf(self.log_cf(), IteratorMode::Start);
+        match it.next() {
+            None => Ok(None),
+            Some(item) => {
+                let (key, _) = item.map_err(|e| e.to_string())?;
+                let sequence = sequence_from_log_key(key.as_ref())?;
 
-        // Never delete log rows above the published frontier: a group whose log ingestion
-        // committed but whose state ingestion did not still needs its rows for the repair replay
-        // at the next open.
-        let cutoff_exclusive = cutoff_exclusive.min(current.saturating_add(1));
-        self.prune_log(cutoff_exclusive)
+                // Gate on the published frontier: never advertise an oldest batch that
+                // `get_batch` would then hide (a log row can outrun the published frontier while
+                // its group's state ingestion is in flight or has failed).
+                if sequence > self.frontiers.published.load(Ordering::Acquire) {
+                    return Ok(None);
+                }
+                Ok(Some(sequence))
+            }
+        }
+    }
+
+    /// Persists the retention rule durably, or deletes the row when clearing. A single-admin
+    /// control write, so it is synced and last-write-wins; enforcement reads go through the
+    /// in-memory cache seeded from this row at open.
+    fn store_retention_policy(&self, policy: Option<&RetentionPolicy>) -> Result<(), String> {
+        let mut batch = rocksdb::WriteBatch::default();
+        match policy {
+            Some(policy) => batch.put_cf(self.meta_cf(), RETENTION_META_KEY, policy.encode()),
+            None => batch.delete_cf(self.meta_cf(), RETENTION_META_KEY),
+        }
+        write_synced_batch(&self.db, batch)
+    }
+
+    /// Runs one round of retention enforcement against the current frontier and returns the
+    /// resulting oldest retained sequence (`None` when the log is empty / no floor exists). With
+    /// no rule installed this only reports the current oldest batch, leaving the log untouched.
+    fn enforce_retention(&self) -> Result<Option<u64>, String> {
+        // Clone the rule out in its own statement so the cache lock drops before trimming:
+        // an `if let self.retention.lock().clone()` scrutinee would (edition 2021) hold the
+        // guard for the whole block. `prune_log` takes the persist lock and issues a range
+        // delete; holding the retention mutex across that disk write would block every
+        // `put_batch` rule check on a Tokio worker.
+        let policy = self.retention.lock().clone();
+        if let Some(policy) = policy {
+            let frontier = self.frontiers.published.load(Ordering::Acquire);
+
+            // Never delete log rows above the published frontier: a group whose log ingestion
+            // committed but whose state ingestion did not still needs its rows for the repair
+            // replay at the next open.
+            let cutoff_exclusive =
+                retention_floor(&policy, frontier).min(frontier.saturating_add(1));
+            self.prune_log(cutoff_exclusive)?;
+        }
+        self.oldest_retained_sequence()
+    }
+
+    /// Installs (`Some`) or clears (`None`) the retention rule, then enforces it once. The rule
+    /// is persisted durably and mirrored into the cache the ingest path reads, so it keeps
+    /// tracking the frontier continuously; clearing stops enforcement but leaves already-evicted
+    /// rows evicted. Returns the oldest retained sequence after this enforcement.
+    fn set_retention(&self, policy: Option<RetentionPolicy>) -> Result<Option<u64>, String> {
+        self.store_retention_policy(policy.as_ref())?;
+        *self.retention.lock() = policy;
+        self.enforce_retention()
     }
 }
 
@@ -1205,7 +1312,34 @@ impl Sequence for RocksStore {
 // number and replay-log batch.
 impl Ingest for RocksStore {
     async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
-        self.writer.put_batch(kvs).await
+        let sequence = self.writer.put_batch(kvs).await?;
+
+        // Continuous retention: trim the just-grown log to the active rule's floor so the rule
+        // tracks the frontier without another RPC. The rule-less case is a cheap cache check;
+        // an installed rule takes the blocking trim (an unsynced range tombstone, skipped
+        // outright when the floor has not advanced) off the Tokio worker.
+        //
+        // Best-effort: the batch is already durably committed and acked above, so a trim failure
+        // must NOT fail the ingest. Failing here would make the caller re-ingest durable data
+        // under a fresh sequence, duplicating the batch for subscribers. The trim is idempotent,
+        // so the next append (or a `SetRetention`) reapplies it.
+        if self.retention.lock().is_some() {
+            let store = self.clone();
+            match tokio::task::spawn_blocking(move || store.enforce_retention()).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(message)) => tracing::warn!(
+                    sequence,
+                    error = %message,
+                    "continuous retention trim failed after commit; batch is durable, retrying on the next append",
+                ),
+                Err(join_error) => tracing::warn!(
+                    sequence,
+                    error = %join_error,
+                    "retention enforcement task failed after commit; batch is durable, retrying on the next append",
+                ),
+            }
+        }
+        Ok(sequence)
     }
 }
 
@@ -1285,22 +1419,19 @@ impl Log for RocksStore {
     }
 
     async fn oldest_retained_batch(&self) -> Result<Option<u64>, String> {
-        let mut it = self.db.iterator_cf(self.log_cf(), IteratorMode::Start);
-        match it.next() {
-            None => Ok(None),
-            Some(item) => {
-                let (key, _) = item.map_err(|e| e.to_string())?;
-                let sequence = sequence_from_log_key(key.as_ref())?;
+        self.oldest_retained_sequence()
+    }
+}
 
-                // Gate on the published frontier like `get_batch`: never advertise an oldest
-                // batch that `get_batch` would then hide (a log row can outrun the published
-                // frontier while its group's state ingestion is in flight or has failed).
-                if sequence > self.frontiers.published.load(Ordering::Acquire) {
-                    return Ok(None);
-                }
-                Ok(Some(sequence))
-            }
-        }
+// Retention persists a rule (a synced write) and trims the sequence log, so it runs on the
+// blocking pool instead of occupying a Tokio worker. The ingest path enforces the same rule
+// continuously as the log grows (see `Ingest::put_batch`).
+impl Retention for RocksStore {
+    async fn set_retention(&self, policy: Option<RetentionPolicy>) -> Result<Option<u64>, String> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || store.set_retention(policy))
+            .await
+            .map_err(|e| format!("retention task failed: {e}"))?
     }
 }
 
@@ -1568,16 +1699,10 @@ mod tests {
             Some(vec![1u8; 4096])
         );
 
-        // Sequence pruning deletes the rows by key; space reclamation is compaction's job.
+        // Retention evicts log rows by key; space reclamation is compaction's job.
         store
-            .apply_prune_policies(PrunePolicyDocument {
-                version: exoware_sdk::prune_policy::PRUNE_POLICY_DOCUMENT_VERSION,
-                policies: vec![exoware_sdk::prune_policy::PrunePolicy {
-                    scope: PolicyScope::Sequence,
-                    retain: RetainPolicy::KeepLatest { count: 1 },
-                }],
-            })
-            .expect("prune");
+            .set_retention(Some(RetentionPolicy::KeepLatest { count: 1 }))
+            .expect("set retention");
         assert!(store.get_batch(first).await.expect("get").is_none());
         assert!(store.get_batch(second).await.expect("get").is_some());
         assert_eq!(
@@ -1863,28 +1988,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sequence_prune_spares_log_rows_above_published_frontier() {
+    async fn retention_spares_log_rows_above_published_frontier() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
 
         // A durable log row whose group never published (its state ingestion was in flight at
-        // a crash): pruning must spare it. It is the repair replay's input at the next open.
+        // a crash): retention must spare it. It is the repair replay's input at the next open.
         seed_log_row(&store, 1, &encoded_log_entry(1, b"k", b"v"));
 
         store
-            .apply_prune_policies(PrunePolicyDocument {
-                version: exoware_sdk::prune_policy::PRUNE_POLICY_DOCUMENT_VERSION,
-                policies: vec![exoware_sdk::prune_policy::PrunePolicy {
-                    scope: PolicyScope::Sequence,
-                    retain: RetainPolicy::DropAll,
-                }],
-            })
-            .expect("prune");
+            .set_retention(Some(RetentionPolicy::DropAll))
+            .expect("set retention");
 
         assert_eq!(
             live_log_rows(&store),
             1,
-            "unpublished log row must survive the prune"
+            "unpublished log row must survive retention enforcement"
         );
     }
 
