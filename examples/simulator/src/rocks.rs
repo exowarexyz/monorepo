@@ -43,7 +43,7 @@ use exoware_sdk::log::stream::v1::{
     GetResponse as StreamGetResponse, GetResponseView as StreamGetResponseView,
 };
 use exoware_sdk::prune_policy::{KeysScope, OrderEncoding, PrunePolicyDocument, RetainPolicy};
-use exoware_sdk::retention::RetentionPolicy;
+use exoware_sdk::retention::{validate_retention_policy, RetentionPolicy};
 use exoware_sdk::selector::compile_payload_regex;
 use exoware_server::{
     Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan, RangeScanBatch,
@@ -834,7 +834,9 @@ fn read_state_floor(db: &DB) -> Result<u64, String> {
 }
 
 /// Reads the persisted retention rule. Absence of the row means no rule is installed (a cleared
-/// rule deletes the row), so enforcement stops. A malformed row is corruption and fails the open.
+/// rule deletes the row), so enforcement stops. A row that fails to decode or validate is
+/// corruption and fails the open: a rule the RPC layer would reject (`keep_latest` count zero
+/// enforces like `drop_all`) must not be enforced just because it round-trips the codec.
 fn read_retention_policy(db: &DB) -> Result<Option<RetentionPolicy>, String> {
     let meta_cf = db
         .cf_handle(META_CF)
@@ -843,9 +845,13 @@ fn read_retention_policy(db: &DB) -> Result<Option<RetentionPolicy>, String> {
         .get_cf(meta_cf, RETENTION_META_KEY)
         .map_err(|e| e.to_string())?
     {
-        Some(bytes) => RetentionPolicy::decode(bytes.as_slice())
-            .map(Some)
-            .map_err(|e| format!("corrupt retention rule meta row: {e}")),
+        Some(bytes) => {
+            let policy = RetentionPolicy::decode(bytes.as_slice())
+                .map_err(|e| format!("corrupt retention rule meta row: {e}"))?;
+            validate_retention_policy(&policy)
+                .map_err(|e| format!("corrupt retention rule meta row: {e}"))?;
+            Ok(Some(policy))
+        }
         None => Ok(None),
     }
 }
@@ -1743,6 +1749,24 @@ mod tests {
             store.oldest_retained_batch().await.expect("oldest"),
             Some(third)
         );
+    }
+
+    #[tokio::test]
+    async fn reopen_rejects_invalid_persisted_retention_rule() {
+        let dir = tempdir().expect("tempdir");
+        {
+            let store = RocksStore::open(dir.path(), None).expect("open db");
+            // Bypass `set_retention` (whose callers validate) to persist a rule the RPC
+            // layer would reject: `keep_latest` count zero enforces like `drop_all`.
+            store
+                .store_retention_policy(Some(&RetentionPolicy::KeepLatest { count: 0 }))
+                .expect("store policy");
+        }
+
+        let Err(error) = RocksStore::open(dir.path(), None) else {
+            panic!("invalid rule must fail open");
+        };
+        assert!(error.contains("keep_latest count must be > 0"), "{error}");
     }
 
     /// Number of retained rows in the log column family.
