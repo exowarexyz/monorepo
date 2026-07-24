@@ -356,8 +356,8 @@ struct Frontiers {
     /// Highest `cutoff_exclusive` already applied by `prune_log` in this process. Lets the
     /// per-append retention hook skip the write entirely when the floor has not advanced
     /// (static thresholds, coalesced ingest waves), so redundant range tombstones never pile
-    /// up ahead of compaction. Starts at zero on open; the first trim after a reopen rewrites
-    /// one already-applied tombstone, which is harmless.
+    /// up ahead of compaction. Starts at zero; open's one-shot enforcement re-seeds it
+    /// when a rule is installed.
     trimmed: AtomicU64,
 }
 
@@ -1055,12 +1055,19 @@ impl RocksStore {
             frontiers.clone(),
             write_pipeline,
         ));
-        Ok(Self {
+        let store = Self {
             db,
             frontiers,
             writer,
             retention,
-        })
+        };
+        // Re-apply the rule against the reopened log before serving reads: a crash can
+        // lose the last (unsynced) trim, and a batch observed as evicted must never
+        // become readable again.
+        if store.retention.lock().is_some() {
+            store.enforce_retention()?;
+        }
+        Ok(store)
     }
 
     /// Returns the log column-family handle created during open.
@@ -1708,6 +1715,33 @@ mod tests {
         assert_eq!(
             store.oldest_retained_batch().await.expect("oldest"),
             Some(second)
+        );
+    }
+
+    #[tokio::test]
+    async fn reopen_enforces_restored_retention_rule() {
+        let dir = tempdir().expect("tempdir");
+        let (first, second, third) = {
+            let store = RocksStore::open(dir.path(), None).expect("open db");
+            let first = store.put_batch(large_batch(1)).await.expect("put");
+            let second = store.put_batch(large_batch(2)).await.expect("put");
+            let third = store.put_batch(large_batch(3)).await.expect("put");
+            // Persist the rule without running its enforcement, leaving rows below the
+            // rule's floor in the log — the state a crash that lost the last (unsynced)
+            // trim leaves behind.
+            store
+                .store_retention_policy(Some(&RetentionPolicy::KeepLatest { count: 1 }))
+                .expect("store policy");
+            (first, second, third)
+        };
+
+        let store = RocksStore::open(dir.path(), None).expect("reopen db");
+        for evicted in [first, second] {
+            assert!(store.get_batch(evicted).await.expect("get").is_none());
+        }
+        assert_eq!(
+            store.oldest_retained_batch().await.expect("oldest"),
+            Some(third)
         );
     }
 
