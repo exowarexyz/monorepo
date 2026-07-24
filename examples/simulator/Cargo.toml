@@ -14,6 +14,7 @@ documentation = "https://docs.rs/exoware-simulator"
 axum = { workspace = true }
 buffa = { workspace = true }
 bytes = { workspace = true }
+commonware-codec = { workspace = true }
 exoware-sdk = { workspace = true }
 exoware-server = { workspace = true }
 mimalloc = { workspace = true }
@@ -29,7 +30,6 @@ clap = { workspace = true }
 tower-http = { workspace = true }
 
 [dev-dependencies]
-commonware-codec = { workspace = true }
 connectrpc = { workspace = true }
 http = { workspace = true }
 

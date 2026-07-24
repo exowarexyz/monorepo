@@ -741,6 +741,1257 @@ pub const __GET_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buff
     from_json: ::buffa::type_registry::any_from_json::<GetResponse>,
     is_wkt: false,
 };
+/// Keep the newest `count` batches. Continuous: as new batches are appended the
+/// retained window slides forward with the live frontier, evicting whatever
+/// falls below it.
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct RetentionKeepLatest {
+    /// Field 1: `count`
+    #[serde(
+        rename = "count",
+        with = "::buffa::json_helpers::uint64",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
+    )]
+    pub count: u64,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for RetentionKeepLatest {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("RetentionKeepLatest").field("count", &self.count).finish()
+    }
+}
+impl RetentionKeepLatest {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.RetentionKeepLatest";
+}
+impl ::buffa::DefaultInstance for RetentionKeepLatest {
+    fn default_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<RetentionKeepLatest> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+impl ::buffa::MessageName for RetentionKeepLatest {
+    const PACKAGE: &'static str = "log.stream.v1";
+    const NAME: &'static str = "RetentionKeepLatest";
+    const FULL_NAME: &'static str = "log.stream.v1.RetentionKeepLatest";
+    const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.RetentionKeepLatest";
+}
+impl ::buffa::Message for RetentionKeepLatest {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// The result is a `u32`; the protobuf specification requires all
+    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
+    /// compliant message will never overflow this type.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        if self.count != 0u64 {
+            size += 1u32 + ::buffa::types::uint64_encoded_len(self.count) as u32;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        size
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::bytes::BufMut,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if self.count != 0u64 {
+            ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Varint)
+                .encode(buf);
+            ::buffa::types::encode_uint64(self.count, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 1u32,
+                        expected: 0u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                self.count = ::buffa::types::decode_uint64(buf)?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.count = 0u64;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for RetentionKeepLatest {
+    const PROTO_FQN: &'static str = "log.stream.v1.RetentionKeepLatest";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for RetentionKeepLatest {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __RETENTION_KEEP_LATEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/log.stream.v1.RetentionKeepLatest",
+    to_json: ::buffa::type_registry::any_to_json::<RetentionKeepLatest>,
+    from_json: ::buffa::type_registry::any_from_json::<RetentionKeepLatest>,
+    is_wkt: false,
+};
+/// Retain sequence numbers strictly greater than `threshold`; evict the rest.
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct RetentionGreaterThan {
+    /// Field 1: `threshold`
+    #[serde(
+        rename = "threshold",
+        with = "::buffa::json_helpers::uint64",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
+    )]
+    pub threshold: u64,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for RetentionGreaterThan {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("RetentionGreaterThan")
+            .field("threshold", &self.threshold)
+            .finish()
+    }
+}
+impl RetentionGreaterThan {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.RetentionGreaterThan";
+}
+impl ::buffa::DefaultInstance for RetentionGreaterThan {
+    fn default_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<RetentionGreaterThan> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+impl ::buffa::MessageName for RetentionGreaterThan {
+    const PACKAGE: &'static str = "log.stream.v1";
+    const NAME: &'static str = "RetentionGreaterThan";
+    const FULL_NAME: &'static str = "log.stream.v1.RetentionGreaterThan";
+    const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.RetentionGreaterThan";
+}
+impl ::buffa::Message for RetentionGreaterThan {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// The result is a `u32`; the protobuf specification requires all
+    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
+    /// compliant message will never overflow this type.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        if self.threshold != 0u64 {
+            size += 1u32 + ::buffa::types::uint64_encoded_len(self.threshold) as u32;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        size
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::bytes::BufMut,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if self.threshold != 0u64 {
+            ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Varint)
+                .encode(buf);
+            ::buffa::types::encode_uint64(self.threshold, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 1u32,
+                        expected: 0u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                self.threshold = ::buffa::types::decode_uint64(buf)?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.threshold = 0u64;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for RetentionGreaterThan {
+    const PROTO_FQN: &'static str = "log.stream.v1.RetentionGreaterThan";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for RetentionGreaterThan {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __RETENTION_GREATER_THAN_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/log.stream.v1.RetentionGreaterThan",
+    to_json: ::buffa::type_registry::any_to_json::<RetentionGreaterThan>,
+    from_json: ::buffa::type_registry::any_from_json::<RetentionGreaterThan>,
+    is_wkt: false,
+};
+/// Retain sequence numbers greater than or equal to `threshold`; evict the rest.
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct RetentionGreaterThanOrEqual {
+    /// Field 1: `threshold`
+    #[serde(
+        rename = "threshold",
+        with = "::buffa::json_helpers::uint64",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
+    )]
+    pub threshold: u64,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for RetentionGreaterThanOrEqual {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("RetentionGreaterThanOrEqual")
+            .field("threshold", &self.threshold)
+            .finish()
+    }
+}
+impl RetentionGreaterThanOrEqual {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.RetentionGreaterThanOrEqual";
+}
+impl ::buffa::DefaultInstance for RetentionGreaterThanOrEqual {
+    fn default_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<RetentionGreaterThanOrEqual> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+impl ::buffa::MessageName for RetentionGreaterThanOrEqual {
+    const PACKAGE: &'static str = "log.stream.v1";
+    const NAME: &'static str = "RetentionGreaterThanOrEqual";
+    const FULL_NAME: &'static str = "log.stream.v1.RetentionGreaterThanOrEqual";
+    const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.RetentionGreaterThanOrEqual";
+}
+impl ::buffa::Message for RetentionGreaterThanOrEqual {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// The result is a `u32`; the protobuf specification requires all
+    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
+    /// compliant message will never overflow this type.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        if self.threshold != 0u64 {
+            size += 1u32 + ::buffa::types::uint64_encoded_len(self.threshold) as u32;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        size
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::bytes::BufMut,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if self.threshold != 0u64 {
+            ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Varint)
+                .encode(buf);
+            ::buffa::types::encode_uint64(self.threshold, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 1u32,
+                        expected: 0u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                self.threshold = ::buffa::types::decode_uint64(buf)?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.threshold = 0u64;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for RetentionGreaterThanOrEqual {
+    const PROTO_FQN: &'static str = "log.stream.v1.RetentionGreaterThanOrEqual";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for RetentionGreaterThanOrEqual {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __RETENTION_GREATER_THAN_OR_EQUAL_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/log.stream.v1.RetentionGreaterThanOrEqual",
+    to_json: ::buffa::type_registry::any_to_json::<RetentionGreaterThanOrEqual>,
+    from_json: ::buffa::type_registry::any_from_json::<RetentionGreaterThanOrEqual>,
+    is_wkt: false,
+};
+/// Retain nothing: evict up to the live frontier and keep doing so as the log
+/// grows.
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct RetentionDropAll {
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for RetentionDropAll {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("RetentionDropAll").finish()
+    }
+}
+impl RetentionDropAll {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.RetentionDropAll";
+}
+impl ::buffa::DefaultInstance for RetentionDropAll {
+    fn default_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<RetentionDropAll> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+impl ::buffa::MessageName for RetentionDropAll {
+    const PACKAGE: &'static str = "log.stream.v1";
+    const NAME: &'static str = "RetentionDropAll";
+    const FULL_NAME: &'static str = "log.stream.v1.RetentionDropAll";
+    const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.RetentionDropAll";
+}
+impl ::buffa::Message for RetentionDropAll {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// The result is a `u32`; the protobuf specification requires all
+    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
+    /// compliant message will never overflow this type.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        size
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::bytes::BufMut,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for RetentionDropAll {
+    const PROTO_FQN: &'static str = "log.stream.v1.RetentionDropAll";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for RetentionDropAll {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __RETENTION_DROP_ALL_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/log.stream.v1.RetentionDropAll",
+    to_json: ::buffa::type_registry::any_to_json::<RetentionDropAll>,
+    from_json: ::buffa::type_registry::any_from_json::<RetentionDropAll>,
+    is_wkt: false,
+};
+/// The retention rule to enforce over the sequence log.
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize)]
+#[serde(default)]
+pub struct RetentionPolicy {
+    #[serde(flatten)]
+    pub kind: ::core::option::Option<__buffa::oneof::retention_policy::Kind>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for RetentionPolicy {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("RetentionPolicy").field("kind", &self.kind).finish()
+    }
+}
+impl RetentionPolicy {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.RetentionPolicy";
+}
+impl ::buffa::DefaultInstance for RetentionPolicy {
+    fn default_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<RetentionPolicy> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+impl ::buffa::MessageName for RetentionPolicy {
+    const PACKAGE: &'static str = "log.stream.v1";
+    const NAME: &'static str = "RetentionPolicy";
+    const FULL_NAME: &'static str = "log.stream.v1.RetentionPolicy";
+    const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.RetentionPolicy";
+}
+impl ::buffa::Message for RetentionPolicy {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// The result is a `u32`; the protobuf specification requires all
+    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
+    /// compliant message will never overflow this type.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        if let ::core::option::Option::Some(ref v) = self.kind {
+            match v {
+                __buffa::oneof::retention_policy::Kind::KeepLatest(x) => {
+                    let __slot = __cache.reserve();
+                    let inner = x.compute_size(__cache);
+                    __cache.set(__slot, inner);
+                    size
+                        += 1u32 + ::buffa::encoding::varint_len(inner as u64) as u32
+                            + inner;
+                }
+                __buffa::oneof::retention_policy::Kind::GreaterThan(x) => {
+                    let __slot = __cache.reserve();
+                    let inner = x.compute_size(__cache);
+                    __cache.set(__slot, inner);
+                    size
+                        += 1u32 + ::buffa::encoding::varint_len(inner as u64) as u32
+                            + inner;
+                }
+                __buffa::oneof::retention_policy::Kind::GreaterThanOrEqual(x) => {
+                    let __slot = __cache.reserve();
+                    let inner = x.compute_size(__cache);
+                    __cache.set(__slot, inner);
+                    size
+                        += 1u32 + ::buffa::encoding::varint_len(inner as u64) as u32
+                            + inner;
+                }
+                __buffa::oneof::retention_policy::Kind::DropAll(x) => {
+                    let __slot = __cache.reserve();
+                    let inner = x.compute_size(__cache);
+                    __cache.set(__slot, inner);
+                    size
+                        += 1u32 + ::buffa::encoding::varint_len(inner as u64) as u32
+                            + inner;
+                }
+            }
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        size
+    }
+    fn write_to(
+        &self,
+        __cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::bytes::BufMut,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let ::core::option::Option::Some(ref v) = self.kind {
+            match v {
+                __buffa::oneof::retention_policy::Kind::KeepLatest(x) => {
+                    ::buffa::encoding::Tag::new(
+                            1u32,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )
+                        .encode(buf);
+                    ::buffa::encoding::encode_varint(__cache.consume_next() as u64, buf);
+                    x.write_to(__cache, buf);
+                }
+                __buffa::oneof::retention_policy::Kind::GreaterThan(x) => {
+                    ::buffa::encoding::Tag::new(
+                            2u32,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )
+                        .encode(buf);
+                    ::buffa::encoding::encode_varint(__cache.consume_next() as u64, buf);
+                    x.write_to(__cache, buf);
+                }
+                __buffa::oneof::retention_policy::Kind::GreaterThanOrEqual(x) => {
+                    ::buffa::encoding::Tag::new(
+                            3u32,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )
+                        .encode(buf);
+                    ::buffa::encoding::encode_varint(__cache.consume_next() as u64, buf);
+                    x.write_to(__cache, buf);
+                }
+                __buffa::oneof::retention_policy::Kind::DropAll(x) => {
+                    ::buffa::encoding::Tag::new(
+                            4u32,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )
+                        .encode(buf);
+                    ::buffa::encoding::encode_varint(__cache.consume_next() as u64, buf);
+                    x.write_to(__cache, buf);
+                }
+            }
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 1u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                if let ::core::option::Option::Some(
+                    __buffa::oneof::retention_policy::Kind::KeepLatest(ref mut existing),
+                ) = self.kind
+                {
+                    ::buffa::Message::merge_length_delimited(
+                        &mut **existing,
+                        buf,
+                        depth,
+                    )?;
+                } else {
+                    let mut val = ::core::default::Default::default();
+                    ::buffa::Message::merge_length_delimited(&mut val, buf, depth)?;
+                    self.kind = ::core::option::Option::Some(
+                        __buffa::oneof::retention_policy::Kind::KeepLatest(
+                            ::buffa::alloc::boxed::Box::new(val),
+                        ),
+                    );
+                }
+            }
+            2u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 2u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                if let ::core::option::Option::Some(
+                    __buffa::oneof::retention_policy::Kind::GreaterThan(ref mut existing),
+                ) = self.kind
+                {
+                    ::buffa::Message::merge_length_delimited(
+                        &mut **existing,
+                        buf,
+                        depth,
+                    )?;
+                } else {
+                    let mut val = ::core::default::Default::default();
+                    ::buffa::Message::merge_length_delimited(&mut val, buf, depth)?;
+                    self.kind = ::core::option::Option::Some(
+                        __buffa::oneof::retention_policy::Kind::GreaterThan(
+                            ::buffa::alloc::boxed::Box::new(val),
+                        ),
+                    );
+                }
+            }
+            3u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 3u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                if let ::core::option::Option::Some(
+                    __buffa::oneof::retention_policy::Kind::GreaterThanOrEqual(
+                        ref mut existing,
+                    ),
+                ) = self.kind
+                {
+                    ::buffa::Message::merge_length_delimited(
+                        &mut **existing,
+                        buf,
+                        depth,
+                    )?;
+                } else {
+                    let mut val = ::core::default::Default::default();
+                    ::buffa::Message::merge_length_delimited(&mut val, buf, depth)?;
+                    self.kind = ::core::option::Option::Some(
+                        __buffa::oneof::retention_policy::Kind::GreaterThanOrEqual(
+                            ::buffa::alloc::boxed::Box::new(val),
+                        ),
+                    );
+                }
+            }
+            4u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 4u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                if let ::core::option::Option::Some(
+                    __buffa::oneof::retention_policy::Kind::DropAll(ref mut existing),
+                ) = self.kind
+                {
+                    ::buffa::Message::merge_length_delimited(
+                        &mut **existing,
+                        buf,
+                        depth,
+                    )?;
+                } else {
+                    let mut val = ::core::default::Default::default();
+                    ::buffa::Message::merge_length_delimited(&mut val, buf, depth)?;
+                    self.kind = ::core::option::Option::Some(
+                        __buffa::oneof::retention_policy::Kind::DropAll(
+                            ::buffa::alloc::boxed::Box::new(val),
+                        ),
+                    );
+                }
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.kind = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for RetentionPolicy {
+    const PROTO_FQN: &'static str = "log.stream.v1.RetentionPolicy";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl<'de> serde::Deserialize<'de> for RetentionPolicy {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        struct _V;
+        impl<'de> serde::de::Visitor<'de> for _V {
+            type Value = RetentionPolicy;
+            fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.write_str("struct RetentionPolicy")
+            }
+            #[allow(clippy::field_reassign_with_default)]
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> ::core::result::Result<RetentionPolicy, A::Error> {
+                let mut __oneof_kind: ::core::option::Option<
+                    __buffa::oneof::retention_policy::Kind,
+                > = None;
+                while let Some(key) = map.next_key::<::buffa::alloc::string::String>()? {
+                    match key.as_str() {
+                        "keepLatest" | "keep_latest" => {
+                            let v: ::core::option::Option<RetentionKeepLatest> = map
+                                .next_value_seed(
+                                    ::buffa::json_helpers::NullableDeserializeSeed(
+                                        ::buffa::json_helpers::DefaultDeserializeSeed::<
+                                            RetentionKeepLatest,
+                                        >::new(),
+                                    ),
+                                )?;
+                            if let Some(v) = v {
+                                if __oneof_kind.is_some() {
+                                    return Err(
+                                        serde::de::Error::custom(
+                                            "multiple oneof fields set for 'kind'",
+                                        ),
+                                    );
+                                }
+                                __oneof_kind = Some(
+                                    __buffa::oneof::retention_policy::Kind::KeepLatest(
+                                        ::buffa::alloc::boxed::Box::new(v),
+                                    ),
+                                );
+                            }
+                        }
+                        "greaterThan" | "greater_than" => {
+                            let v: ::core::option::Option<RetentionGreaterThan> = map
+                                .next_value_seed(
+                                    ::buffa::json_helpers::NullableDeserializeSeed(
+                                        ::buffa::json_helpers::DefaultDeserializeSeed::<
+                                            RetentionGreaterThan,
+                                        >::new(),
+                                    ),
+                                )?;
+                            if let Some(v) = v {
+                                if __oneof_kind.is_some() {
+                                    return Err(
+                                        serde::de::Error::custom(
+                                            "multiple oneof fields set for 'kind'",
+                                        ),
+                                    );
+                                }
+                                __oneof_kind = Some(
+                                    __buffa::oneof::retention_policy::Kind::GreaterThan(
+                                        ::buffa::alloc::boxed::Box::new(v),
+                                    ),
+                                );
+                            }
+                        }
+                        "greaterThanOrEqual" | "greater_than_or_equal" => {
+                            let v: ::core::option::Option<RetentionGreaterThanOrEqual> = map
+                                .next_value_seed(
+                                    ::buffa::json_helpers::NullableDeserializeSeed(
+                                        ::buffa::json_helpers::DefaultDeserializeSeed::<
+                                            RetentionGreaterThanOrEqual,
+                                        >::new(),
+                                    ),
+                                )?;
+                            if let Some(v) = v {
+                                if __oneof_kind.is_some() {
+                                    return Err(
+                                        serde::de::Error::custom(
+                                            "multiple oneof fields set for 'kind'",
+                                        ),
+                                    );
+                                }
+                                __oneof_kind = Some(
+                                    __buffa::oneof::retention_policy::Kind::GreaterThanOrEqual(
+                                        ::buffa::alloc::boxed::Box::new(v),
+                                    ),
+                                );
+                            }
+                        }
+                        "dropAll" | "drop_all" => {
+                            let v: ::core::option::Option<RetentionDropAll> = map
+                                .next_value_seed(
+                                    ::buffa::json_helpers::NullableDeserializeSeed(
+                                        ::buffa::json_helpers::DefaultDeserializeSeed::<
+                                            RetentionDropAll,
+                                        >::new(),
+                                    ),
+                                )?;
+                            if let Some(v) = v {
+                                if __oneof_kind.is_some() {
+                                    return Err(
+                                        serde::de::Error::custom(
+                                            "multiple oneof fields set for 'kind'",
+                                        ),
+                                    );
+                                }
+                                __oneof_kind = Some(
+                                    __buffa::oneof::retention_policy::Kind::DropAll(
+                                        ::buffa::alloc::boxed::Box::new(v),
+                                    ),
+                                );
+                            }
+                        }
+                        _ => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                let mut __r = <RetentionPolicy as ::core::default::Default>::default();
+                __r.kind = __oneof_kind;
+                Ok(__r)
+            }
+        }
+        d.deserialize_map(_V)
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for RetentionPolicy {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __RETENTION_POLICY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/log.stream.v1.RetentionPolicy",
+    to_json: ::buffa::type_registry::any_to_json::<RetentionPolicy>,
+    from_json: ::buffa::type_registry::any_from_json::<RetentionPolicy>,
+    is_wkt: false,
+};
+pub mod retention_policy {
+    #[allow(unused_imports)]
+    use super::*;
+    #[doc(inline)]
+    pub use super::__buffa::oneof::retention_policy::Kind;
+    #[doc(inline)]
+    pub use super::__buffa::view::oneof::retention_policy::Kind as KindView;
+}
+/// Install or clear the sequence-log retention rule.
+///
+/// Retention is a persistent, continuously-enforced rule owned by the stream
+/// service (not a one-shot prune): once installed it keeps tracking the live
+/// frontier as batches are appended, evicting whatever falls below the rule's
+/// floor. Evicted batches surface to subscribers/point-lookups as
+/// `OUT_OF_RANGE` with an `ErrorInfo { reason: "BATCH_EVICTED", metadata: {
+/// "oldest_retained": ... } }` detail.
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct SetRetentionRequest {
+    /// The rule to install. Absent -\> clear the rule: enforcement stops and no
+    /// further eviction happens.
+    ///
+    /// Field 1: `policy`
+    #[serde(
+        rename = "policy",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
+    )]
+    pub policy: ::buffa::MessageField<RetentionPolicy>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for SetRetentionRequest {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("SetRetentionRequest").field("policy", &self.policy).finish()
+    }
+}
+impl SetRetentionRequest {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.SetRetentionRequest";
+}
+impl ::buffa::DefaultInstance for SetRetentionRequest {
+    fn default_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<SetRetentionRequest> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+impl ::buffa::MessageName for SetRetentionRequest {
+    const PACKAGE: &'static str = "log.stream.v1";
+    const NAME: &'static str = "SetRetentionRequest";
+    const FULL_NAME: &'static str = "log.stream.v1.SetRetentionRequest";
+    const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.SetRetentionRequest";
+}
+impl ::buffa::Message for SetRetentionRequest {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// The result is a `u32`; the protobuf specification requires all
+    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
+    /// compliant message will never overflow this type.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        if self.policy.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.policy.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
+                    + inner_size;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        size
+    }
+    fn write_to(
+        &self,
+        __cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::bytes::BufMut,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if self.policy.is_set() {
+            ::buffa::encoding::Tag::new(
+                    1u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::encoding::encode_varint(__cache.consume_next() as u64, buf);
+            self.policy.write_to(__cache, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 1u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                ::buffa::Message::merge_length_delimited(
+                    self.policy.get_or_insert_default(),
+                    buf,
+                    depth,
+                )?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.policy = ::buffa::MessageField::none();
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for SetRetentionRequest {
+    const PROTO_FQN: &'static str = "log.stream.v1.SetRetentionRequest";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for SetRetentionRequest {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __SET_RETENTION_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/log.stream.v1.SetRetentionRequest",
+    to_json: ::buffa::type_registry::any_to_json::<SetRetentionRequest>,
+    from_json: ::buffa::type_registry::any_from_json::<SetRetentionRequest>,
+    is_wkt: false,
+};
+/// Result of applying the rule change once, synchronously.
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct SetRetentionResponse {
+    /// Lowest sequence number still retained after that application. Absent when
+    /// the log is empty / no floor exists yet.
+    ///
+    /// Field 1: `oldest_retained_sequence`
+    #[serde(
+        rename = "oldestRetainedSequence",
+        alias = "oldest_retained_sequence",
+        with = "::buffa::json_helpers::opt_uint64",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub oldest_retained_sequence: ::core::option::Option<u64>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for SetRetentionResponse {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("SetRetentionResponse")
+            .field("oldest_retained_sequence", &self.oldest_retained_sequence)
+            .finish()
+    }
+}
+impl SetRetentionResponse {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.SetRetentionResponse";
+}
+impl SetRetentionResponse {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::oldest_retained_sequence`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_oldest_retained_sequence(mut self, value: u64) -> Self {
+        self.oldest_retained_sequence = Some(value);
+        self
+    }
+}
+impl ::buffa::DefaultInstance for SetRetentionResponse {
+    fn default_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<SetRetentionResponse> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+impl ::buffa::MessageName for SetRetentionResponse {
+    const PACKAGE: &'static str = "log.stream.v1";
+    const NAME: &'static str = "SetRetentionResponse";
+    const FULL_NAME: &'static str = "log.stream.v1.SetRetentionResponse";
+    const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.SetRetentionResponse";
+}
+impl ::buffa::Message for SetRetentionResponse {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// The result is a `u32`; the protobuf specification requires all
+    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
+    /// compliant message will never overflow this type.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        if let Some(v) = self.oldest_retained_sequence {
+            size += 1u32 + ::buffa::types::uint64_encoded_len(v) as u32;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        size
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::bytes::BufMut,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(v) = self.oldest_retained_sequence {
+            ::buffa::encoding::Tag::new(1u32, ::buffa::encoding::WireType::Varint)
+                .encode(buf);
+            ::buffa::types::encode_uint64(v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 1u32,
+                        expected: 0u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                self.oldest_retained_sequence = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint64(buf)?,
+                );
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.oldest_retained_sequence = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for SetRetentionResponse {
+    const PROTO_FQN: &'static str = "log.stream.v1.SetRetentionResponse";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for SetRetentionResponse {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __SET_RETENTION_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/log.stream.v1.SetRetentionResponse",
+    to_json: ::buffa::type_registry::any_to_json::<SetRetentionResponse>,
+    from_json: ::buffa::type_registry::any_from_json::<SetRetentionResponse>,
+    is_wkt: false,
+};
 #[allow(
     non_camel_case_types,
     dead_code,
@@ -1774,6 +3025,1759 @@ pub mod __buffa {
                 this
             }
         }
+        /// Keep the newest `count` batches. Continuous: as new batches are appended the
+        /// retained window slides forward with the live frontier, evicting whatever
+        /// falls below it.
+        #[derive(Clone, Debug, Default)]
+        pub struct RetentionKeepLatestView<'a> {
+            /// Field 1: `count`
+            pub count: u64,
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> RetentionKeepLatestView<'a> {
+            /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
+            ///
+            /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
+            /// and by generated sub-message decode arms with `depth - 1`.
+            ///
+            /// **Not part of the public API.** Named with a leading underscore to
+            /// signal that it is for generated-code use only.
+            #[doc(hidden)]
+            pub fn _decode_depth(
+                buf: &'a [u8],
+                depth: u32,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let mut view = Self::default();
+                view._merge_into_view(buf, depth)?;
+                ::core::result::Result::Ok(view)
+            }
+            /// Merge fields from `buf` into this view (proto merge semantics).
+            ///
+            /// Repeated fields append; singular fields last-wins; singular
+            /// MESSAGE fields merge recursively. Used by sub-message decode
+            /// arms when the same field appears multiple times on the wire.
+            ///
+            /// **Not part of the public API.**
+            #[doc(hidden)]
+            pub fn _merge_into_view(
+                &mut self,
+                buf: &'a [u8],
+                depth: u32,
+            ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+                let _ = depth;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur: &'a [u8] = buf;
+                while !cur.is_empty() {
+                    let before_tag = cur;
+                    let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
+                    match tag.field_number() {
+                        1u32 => {
+                            if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                                return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                                    field_number: 1u32,
+                                    expected: 0u8,
+                                    actual: tag.wire_type() as u8,
+                                });
+                            }
+                            view.count = ::buffa::types::decode_uint64(&mut cur)?;
+                        }
+                        _ => {
+                            ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
+                            let span_len = before_tag.len() - cur.len();
+                            view.__buffa_unknown_fields
+                                .push_raw(&before_tag[..span_len]);
+                        }
+                    }
+                }
+                ::core::result::Result::Ok(())
+            }
+        }
+        impl<'a> ::buffa::MessageView<'a> for RetentionKeepLatestView<'a> {
+            type Owned = super::super::RetentionKeepLatest;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                Self::_decode_depth(buf, ::buffa::RECURSION_LIMIT)
+            }
+            fn decode_view_with_limit(
+                buf: &'a [u8],
+                depth: u32,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                Self::_decode_depth(buf, depth)
+            }
+            fn to_owned_message(&self) -> super::super::RetentionKeepLatest {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> super::super::RetentionKeepLatest {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                super::super::RetentionKeepLatest {
+                    count: self.count,
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()
+                        .unwrap_or_default()
+                        .into(),
+                    ..::core::default::Default::default()
+                }
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for RetentionKeepLatestView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u32;
+                if self.count != 0u64 {
+                    size += 1u32 + ::buffa::types::uint64_encoded_len(self.count) as u32;
+                }
+                size += self.__buffa_unknown_fields.encoded_len() as u32;
+                size
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                _cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::bytes::BufMut,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                if self.count != 0u64 {
+                    ::buffa::encoding::Tag::new(
+                            1u32,
+                            ::buffa::encoding::WireType::Varint,
+                        )
+                        .encode(buf);
+                    ::buffa::types::encode_uint64(self.count, buf);
+                }
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        /// Serializes this view as protobuf JSON.
+        ///
+        /// Implicit-presence fields with default values are omitted, `required`
+        /// fields are always emitted, explicit-presence (`optional`) fields are
+        /// emitted only when set, bytes fields are base64-encoded, and enum
+        /// values are their proto name strings.
+        ///
+        /// This impl uses `serialize_map(None)` because the number of emitted
+        /// fields depends on default-omission rules; serializers that require
+        /// known map lengths (e.g. `bincode`) will return a runtime error.
+        /// Use the owned message type for those formats.
+        impl<'__a> ::serde::Serialize for RetentionKeepLatestView<'__a> {
+            fn serialize<__S: ::serde::Serializer>(
+                &self,
+                __s: __S,
+            ) -> ::core::result::Result<__S::Ok, __S::Error> {
+                use ::serde::ser::SerializeMap as _;
+                let mut __map = __s.serialize_map(::core::option::Option::None)?;
+                if !::buffa::json_helpers::skip_if::is_zero_u64(&self.count) {
+                    struct _W(u64);
+                    impl ::serde::Serialize for _W {
+                        fn serialize<__S: ::serde::Serializer>(
+                            &self,
+                            __s: __S,
+                        ) -> ::core::result::Result<__S::Ok, __S::Error> {
+                            ::buffa::json_helpers::uint64::serialize(&self.0, __s)
+                        }
+                    }
+                    __map.serialize_entry("count", &_W(self.count))?;
+                }
+                __map.end()
+            }
+        }
+        impl<'a> ::buffa::MessageName for RetentionKeepLatestView<'a> {
+            const PACKAGE: &'static str = "log.stream.v1";
+            const NAME: &'static str = "RetentionKeepLatest";
+            const FULL_NAME: &'static str = "log.stream.v1.RetentionKeepLatest";
+            const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.RetentionKeepLatest";
+        }
+        impl<'v> ::buffa::DefaultViewInstance for RetentionKeepLatestView<'v> {
+            fn default_view_instance<'a>() -> &'a Self
+            where
+                Self: 'a,
+            {
+                static VALUE: ::buffa::__private::OnceBox<
+                    RetentionKeepLatestView<'static>,
+                > = ::buffa::__private::OnceBox::new();
+                VALUE
+                    .get_or_init(|| ::buffa::alloc::boxed::Box::new(
+                        <RetentionKeepLatestView<'static>>::default(),
+                    ))
+            }
+        }
+        impl ::buffa::ViewReborrow for RetentionKeepLatestView<'static> {
+            type Reborrowed<'b> = RetentionKeepLatestView<'b>;
+            fn reborrow<'b>(this: &'b Self) -> &'b Self::Reborrowed<'b> {
+                this
+            }
+        }
+        /// Retain sequence numbers strictly greater than `threshold`; evict the rest.
+        #[derive(Clone, Debug, Default)]
+        pub struct RetentionGreaterThanView<'a> {
+            /// Field 1: `threshold`
+            pub threshold: u64,
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> RetentionGreaterThanView<'a> {
+            /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
+            ///
+            /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
+            /// and by generated sub-message decode arms with `depth - 1`.
+            ///
+            /// **Not part of the public API.** Named with a leading underscore to
+            /// signal that it is for generated-code use only.
+            #[doc(hidden)]
+            pub fn _decode_depth(
+                buf: &'a [u8],
+                depth: u32,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let mut view = Self::default();
+                view._merge_into_view(buf, depth)?;
+                ::core::result::Result::Ok(view)
+            }
+            /// Merge fields from `buf` into this view (proto merge semantics).
+            ///
+            /// Repeated fields append; singular fields last-wins; singular
+            /// MESSAGE fields merge recursively. Used by sub-message decode
+            /// arms when the same field appears multiple times on the wire.
+            ///
+            /// **Not part of the public API.**
+            #[doc(hidden)]
+            pub fn _merge_into_view(
+                &mut self,
+                buf: &'a [u8],
+                depth: u32,
+            ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+                let _ = depth;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur: &'a [u8] = buf;
+                while !cur.is_empty() {
+                    let before_tag = cur;
+                    let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
+                    match tag.field_number() {
+                        1u32 => {
+                            if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                                return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                                    field_number: 1u32,
+                                    expected: 0u8,
+                                    actual: tag.wire_type() as u8,
+                                });
+                            }
+                            view.threshold = ::buffa::types::decode_uint64(&mut cur)?;
+                        }
+                        _ => {
+                            ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
+                            let span_len = before_tag.len() - cur.len();
+                            view.__buffa_unknown_fields
+                                .push_raw(&before_tag[..span_len]);
+                        }
+                    }
+                }
+                ::core::result::Result::Ok(())
+            }
+        }
+        impl<'a> ::buffa::MessageView<'a> for RetentionGreaterThanView<'a> {
+            type Owned = super::super::RetentionGreaterThan;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                Self::_decode_depth(buf, ::buffa::RECURSION_LIMIT)
+            }
+            fn decode_view_with_limit(
+                buf: &'a [u8],
+                depth: u32,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                Self::_decode_depth(buf, depth)
+            }
+            fn to_owned_message(&self) -> super::super::RetentionGreaterThan {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> super::super::RetentionGreaterThan {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                super::super::RetentionGreaterThan {
+                    threshold: self.threshold,
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()
+                        .unwrap_or_default()
+                        .into(),
+                    ..::core::default::Default::default()
+                }
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for RetentionGreaterThanView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u32;
+                if self.threshold != 0u64 {
+                    size
+                        += 1u32
+                            + ::buffa::types::uint64_encoded_len(self.threshold) as u32;
+                }
+                size += self.__buffa_unknown_fields.encoded_len() as u32;
+                size
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                _cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::bytes::BufMut,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                if self.threshold != 0u64 {
+                    ::buffa::encoding::Tag::new(
+                            1u32,
+                            ::buffa::encoding::WireType::Varint,
+                        )
+                        .encode(buf);
+                    ::buffa::types::encode_uint64(self.threshold, buf);
+                }
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        /// Serializes this view as protobuf JSON.
+        ///
+        /// Implicit-presence fields with default values are omitted, `required`
+        /// fields are always emitted, explicit-presence (`optional`) fields are
+        /// emitted only when set, bytes fields are base64-encoded, and enum
+        /// values are their proto name strings.
+        ///
+        /// This impl uses `serialize_map(None)` because the number of emitted
+        /// fields depends on default-omission rules; serializers that require
+        /// known map lengths (e.g. `bincode`) will return a runtime error.
+        /// Use the owned message type for those formats.
+        impl<'__a> ::serde::Serialize for RetentionGreaterThanView<'__a> {
+            fn serialize<__S: ::serde::Serializer>(
+                &self,
+                __s: __S,
+            ) -> ::core::result::Result<__S::Ok, __S::Error> {
+                use ::serde::ser::SerializeMap as _;
+                let mut __map = __s.serialize_map(::core::option::Option::None)?;
+                if !::buffa::json_helpers::skip_if::is_zero_u64(&self.threshold) {
+                    struct _W(u64);
+                    impl ::serde::Serialize for _W {
+                        fn serialize<__S: ::serde::Serializer>(
+                            &self,
+                            __s: __S,
+                        ) -> ::core::result::Result<__S::Ok, __S::Error> {
+                            ::buffa::json_helpers::uint64::serialize(&self.0, __s)
+                        }
+                    }
+                    __map.serialize_entry("threshold", &_W(self.threshold))?;
+                }
+                __map.end()
+            }
+        }
+        impl<'a> ::buffa::MessageName for RetentionGreaterThanView<'a> {
+            const PACKAGE: &'static str = "log.stream.v1";
+            const NAME: &'static str = "RetentionGreaterThan";
+            const FULL_NAME: &'static str = "log.stream.v1.RetentionGreaterThan";
+            const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.RetentionGreaterThan";
+        }
+        impl<'v> ::buffa::DefaultViewInstance for RetentionGreaterThanView<'v> {
+            fn default_view_instance<'a>() -> &'a Self
+            where
+                Self: 'a,
+            {
+                static VALUE: ::buffa::__private::OnceBox<
+                    RetentionGreaterThanView<'static>,
+                > = ::buffa::__private::OnceBox::new();
+                VALUE
+                    .get_or_init(|| ::buffa::alloc::boxed::Box::new(
+                        <RetentionGreaterThanView<'static>>::default(),
+                    ))
+            }
+        }
+        impl ::buffa::ViewReborrow for RetentionGreaterThanView<'static> {
+            type Reborrowed<'b> = RetentionGreaterThanView<'b>;
+            fn reborrow<'b>(this: &'b Self) -> &'b Self::Reborrowed<'b> {
+                this
+            }
+        }
+        /// Retain sequence numbers greater than or equal to `threshold`; evict the rest.
+        #[derive(Clone, Debug, Default)]
+        pub struct RetentionGreaterThanOrEqualView<'a> {
+            /// Field 1: `threshold`
+            pub threshold: u64,
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> RetentionGreaterThanOrEqualView<'a> {
+            /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
+            ///
+            /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
+            /// and by generated sub-message decode arms with `depth - 1`.
+            ///
+            /// **Not part of the public API.** Named with a leading underscore to
+            /// signal that it is for generated-code use only.
+            #[doc(hidden)]
+            pub fn _decode_depth(
+                buf: &'a [u8],
+                depth: u32,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let mut view = Self::default();
+                view._merge_into_view(buf, depth)?;
+                ::core::result::Result::Ok(view)
+            }
+            /// Merge fields from `buf` into this view (proto merge semantics).
+            ///
+            /// Repeated fields append; singular fields last-wins; singular
+            /// MESSAGE fields merge recursively. Used by sub-message decode
+            /// arms when the same field appears multiple times on the wire.
+            ///
+            /// **Not part of the public API.**
+            #[doc(hidden)]
+            pub fn _merge_into_view(
+                &mut self,
+                buf: &'a [u8],
+                depth: u32,
+            ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+                let _ = depth;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur: &'a [u8] = buf;
+                while !cur.is_empty() {
+                    let before_tag = cur;
+                    let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
+                    match tag.field_number() {
+                        1u32 => {
+                            if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                                return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                                    field_number: 1u32,
+                                    expected: 0u8,
+                                    actual: tag.wire_type() as u8,
+                                });
+                            }
+                            view.threshold = ::buffa::types::decode_uint64(&mut cur)?;
+                        }
+                        _ => {
+                            ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
+                            let span_len = before_tag.len() - cur.len();
+                            view.__buffa_unknown_fields
+                                .push_raw(&before_tag[..span_len]);
+                        }
+                    }
+                }
+                ::core::result::Result::Ok(())
+            }
+        }
+        impl<'a> ::buffa::MessageView<'a> for RetentionGreaterThanOrEqualView<'a> {
+            type Owned = super::super::RetentionGreaterThanOrEqual;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                Self::_decode_depth(buf, ::buffa::RECURSION_LIMIT)
+            }
+            fn decode_view_with_limit(
+                buf: &'a [u8],
+                depth: u32,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                Self::_decode_depth(buf, depth)
+            }
+            fn to_owned_message(&self) -> super::super::RetentionGreaterThanOrEqual {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> super::super::RetentionGreaterThanOrEqual {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                super::super::RetentionGreaterThanOrEqual {
+                    threshold: self.threshold,
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()
+                        .unwrap_or_default()
+                        .into(),
+                    ..::core::default::Default::default()
+                }
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for RetentionGreaterThanOrEqualView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u32;
+                if self.threshold != 0u64 {
+                    size
+                        += 1u32
+                            + ::buffa::types::uint64_encoded_len(self.threshold) as u32;
+                }
+                size += self.__buffa_unknown_fields.encoded_len() as u32;
+                size
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                _cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::bytes::BufMut,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                if self.threshold != 0u64 {
+                    ::buffa::encoding::Tag::new(
+                            1u32,
+                            ::buffa::encoding::WireType::Varint,
+                        )
+                        .encode(buf);
+                    ::buffa::types::encode_uint64(self.threshold, buf);
+                }
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        /// Serializes this view as protobuf JSON.
+        ///
+        /// Implicit-presence fields with default values are omitted, `required`
+        /// fields are always emitted, explicit-presence (`optional`) fields are
+        /// emitted only when set, bytes fields are base64-encoded, and enum
+        /// values are their proto name strings.
+        ///
+        /// This impl uses `serialize_map(None)` because the number of emitted
+        /// fields depends on default-omission rules; serializers that require
+        /// known map lengths (e.g. `bincode`) will return a runtime error.
+        /// Use the owned message type for those formats.
+        impl<'__a> ::serde::Serialize for RetentionGreaterThanOrEqualView<'__a> {
+            fn serialize<__S: ::serde::Serializer>(
+                &self,
+                __s: __S,
+            ) -> ::core::result::Result<__S::Ok, __S::Error> {
+                use ::serde::ser::SerializeMap as _;
+                let mut __map = __s.serialize_map(::core::option::Option::None)?;
+                if !::buffa::json_helpers::skip_if::is_zero_u64(&self.threshold) {
+                    struct _W(u64);
+                    impl ::serde::Serialize for _W {
+                        fn serialize<__S: ::serde::Serializer>(
+                            &self,
+                            __s: __S,
+                        ) -> ::core::result::Result<__S::Ok, __S::Error> {
+                            ::buffa::json_helpers::uint64::serialize(&self.0, __s)
+                        }
+                    }
+                    __map.serialize_entry("threshold", &_W(self.threshold))?;
+                }
+                __map.end()
+            }
+        }
+        impl<'a> ::buffa::MessageName for RetentionGreaterThanOrEqualView<'a> {
+            const PACKAGE: &'static str = "log.stream.v1";
+            const NAME: &'static str = "RetentionGreaterThanOrEqual";
+            const FULL_NAME: &'static str = "log.stream.v1.RetentionGreaterThanOrEqual";
+            const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.RetentionGreaterThanOrEqual";
+        }
+        impl<'v> ::buffa::DefaultViewInstance for RetentionGreaterThanOrEqualView<'v> {
+            fn default_view_instance<'a>() -> &'a Self
+            where
+                Self: 'a,
+            {
+                static VALUE: ::buffa::__private::OnceBox<
+                    RetentionGreaterThanOrEqualView<'static>,
+                > = ::buffa::__private::OnceBox::new();
+                VALUE
+                    .get_or_init(|| ::buffa::alloc::boxed::Box::new(
+                        <RetentionGreaterThanOrEqualView<'static>>::default(),
+                    ))
+            }
+        }
+        impl ::buffa::ViewReborrow for RetentionGreaterThanOrEqualView<'static> {
+            type Reborrowed<'b> = RetentionGreaterThanOrEqualView<'b>;
+            fn reborrow<'b>(this: &'b Self) -> &'b Self::Reborrowed<'b> {
+                this
+            }
+        }
+        /// Retain nothing: evict up to the live frontier and keep doing so as the log
+        /// grows.
+        #[derive(Clone, Debug, Default)]
+        pub struct RetentionDropAllView<'a> {
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> RetentionDropAllView<'a> {
+            /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
+            ///
+            /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
+            /// and by generated sub-message decode arms with `depth - 1`.
+            ///
+            /// **Not part of the public API.** Named with a leading underscore to
+            /// signal that it is for generated-code use only.
+            #[doc(hidden)]
+            pub fn _decode_depth(
+                buf: &'a [u8],
+                depth: u32,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let mut view = Self::default();
+                view._merge_into_view(buf, depth)?;
+                ::core::result::Result::Ok(view)
+            }
+            /// Merge fields from `buf` into this view (proto merge semantics).
+            ///
+            /// Repeated fields append; singular fields last-wins; singular
+            /// MESSAGE fields merge recursively. Used by sub-message decode
+            /// arms when the same field appears multiple times on the wire.
+            ///
+            /// **Not part of the public API.**
+            #[doc(hidden)]
+            pub fn _merge_into_view(
+                &mut self,
+                buf: &'a [u8],
+                depth: u32,
+            ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+                let _ = depth;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur: &'a [u8] = buf;
+                while !cur.is_empty() {
+                    let before_tag = cur;
+                    let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
+                    match tag.field_number() {
+                        _ => {
+                            ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
+                            let span_len = before_tag.len() - cur.len();
+                            view.__buffa_unknown_fields
+                                .push_raw(&before_tag[..span_len]);
+                        }
+                    }
+                }
+                ::core::result::Result::Ok(())
+            }
+        }
+        impl<'a> ::buffa::MessageView<'a> for RetentionDropAllView<'a> {
+            type Owned = super::super::RetentionDropAll;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                Self::_decode_depth(buf, ::buffa::RECURSION_LIMIT)
+            }
+            fn decode_view_with_limit(
+                buf: &'a [u8],
+                depth: u32,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                Self::_decode_depth(buf, depth)
+            }
+            fn to_owned_message(&self) -> super::super::RetentionDropAll {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> super::super::RetentionDropAll {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                super::super::RetentionDropAll {
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()
+                        .unwrap_or_default()
+                        .into(),
+                    ..::core::default::Default::default()
+                }
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for RetentionDropAllView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u32;
+                size += self.__buffa_unknown_fields.encoded_len() as u32;
+                size
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                _cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::bytes::BufMut,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        /// Serializes this view as protobuf JSON.
+        ///
+        /// Implicit-presence fields with default values are omitted, `required`
+        /// fields are always emitted, explicit-presence (`optional`) fields are
+        /// emitted only when set, bytes fields are base64-encoded, and enum
+        /// values are their proto name strings.
+        ///
+        /// This impl uses `serialize_map(None)` because the number of emitted
+        /// fields depends on default-omission rules; serializers that require
+        /// known map lengths (e.g. `bincode`) will return a runtime error.
+        /// Use the owned message type for those formats.
+        impl<'__a> ::serde::Serialize for RetentionDropAllView<'__a> {
+            fn serialize<__S: ::serde::Serializer>(
+                &self,
+                __s: __S,
+            ) -> ::core::result::Result<__S::Ok, __S::Error> {
+                use ::serde::ser::SerializeMap as _;
+                let mut __map = __s.serialize_map(::core::option::Option::None)?;
+                __map.end()
+            }
+        }
+        impl<'a> ::buffa::MessageName for RetentionDropAllView<'a> {
+            const PACKAGE: &'static str = "log.stream.v1";
+            const NAME: &'static str = "RetentionDropAll";
+            const FULL_NAME: &'static str = "log.stream.v1.RetentionDropAll";
+            const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.RetentionDropAll";
+        }
+        impl<'v> ::buffa::DefaultViewInstance for RetentionDropAllView<'v> {
+            fn default_view_instance<'a>() -> &'a Self
+            where
+                Self: 'a,
+            {
+                static VALUE: ::buffa::__private::OnceBox<
+                    RetentionDropAllView<'static>,
+                > = ::buffa::__private::OnceBox::new();
+                VALUE
+                    .get_or_init(|| ::buffa::alloc::boxed::Box::new(
+                        <RetentionDropAllView<'static>>::default(),
+                    ))
+            }
+        }
+        impl ::buffa::ViewReborrow for RetentionDropAllView<'static> {
+            type Reborrowed<'b> = RetentionDropAllView<'b>;
+            fn reborrow<'b>(this: &'b Self) -> &'b Self::Reborrowed<'b> {
+                this
+            }
+        }
+        /// The retention rule to enforce over the sequence log.
+        #[derive(Clone, Debug, Default)]
+        pub struct RetentionPolicyView<'a> {
+            pub kind: ::core::option::Option<
+                super::super::__buffa::view::oneof::retention_policy::Kind<'a>,
+            >,
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> RetentionPolicyView<'a> {
+            /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
+            ///
+            /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
+            /// and by generated sub-message decode arms with `depth - 1`.
+            ///
+            /// **Not part of the public API.** Named with a leading underscore to
+            /// signal that it is for generated-code use only.
+            #[doc(hidden)]
+            pub fn _decode_depth(
+                buf: &'a [u8],
+                depth: u32,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let mut view = Self::default();
+                view._merge_into_view(buf, depth)?;
+                ::core::result::Result::Ok(view)
+            }
+            /// Merge fields from `buf` into this view (proto merge semantics).
+            ///
+            /// Repeated fields append; singular fields last-wins; singular
+            /// MESSAGE fields merge recursively. Used by sub-message decode
+            /// arms when the same field appears multiple times on the wire.
+            ///
+            /// **Not part of the public API.**
+            #[doc(hidden)]
+            pub fn _merge_into_view(
+                &mut self,
+                buf: &'a [u8],
+                depth: u32,
+            ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+                let _ = depth;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur: &'a [u8] = buf;
+                while !cur.is_empty() {
+                    let before_tag = cur;
+                    let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
+                    match tag.field_number() {
+                        1u32 => {
+                            if tag.wire_type()
+                                != ::buffa::encoding::WireType::LengthDelimited
+                            {
+                                return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                                    field_number: 1u32,
+                                    expected: 2u8,
+                                    actual: tag.wire_type() as u8,
+                                });
+                            }
+                            if depth == 0 {
+                                return Err(::buffa::DecodeError::RecursionLimitExceeded);
+                            }
+                            let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                            if let Some(
+                                super::super::__buffa::view::oneof::retention_policy::Kind::KeepLatest(
+                                    ref mut existing,
+                                ),
+                            ) = view.kind
+                            {
+                                existing._merge_into_view(sub, depth - 1)?;
+                            } else {
+                                view.kind = Some(
+                                    super::super::__buffa::view::oneof::retention_policy::Kind::KeepLatest(
+                                        ::buffa::alloc::boxed::Box::new(
+                                            super::super::__buffa::view::RetentionKeepLatestView::_decode_depth(
+                                                sub,
+                                                depth - 1,
+                                            )?,
+                                        ),
+                                    ),
+                                );
+                            }
+                        }
+                        2u32 => {
+                            if tag.wire_type()
+                                != ::buffa::encoding::WireType::LengthDelimited
+                            {
+                                return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                                    field_number: 2u32,
+                                    expected: 2u8,
+                                    actual: tag.wire_type() as u8,
+                                });
+                            }
+                            if depth == 0 {
+                                return Err(::buffa::DecodeError::RecursionLimitExceeded);
+                            }
+                            let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                            if let Some(
+                                super::super::__buffa::view::oneof::retention_policy::Kind::GreaterThan(
+                                    ref mut existing,
+                                ),
+                            ) = view.kind
+                            {
+                                existing._merge_into_view(sub, depth - 1)?;
+                            } else {
+                                view.kind = Some(
+                                    super::super::__buffa::view::oneof::retention_policy::Kind::GreaterThan(
+                                        ::buffa::alloc::boxed::Box::new(
+                                            super::super::__buffa::view::RetentionGreaterThanView::_decode_depth(
+                                                sub,
+                                                depth - 1,
+                                            )?,
+                                        ),
+                                    ),
+                                );
+                            }
+                        }
+                        3u32 => {
+                            if tag.wire_type()
+                                != ::buffa::encoding::WireType::LengthDelimited
+                            {
+                                return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                                    field_number: 3u32,
+                                    expected: 2u8,
+                                    actual: tag.wire_type() as u8,
+                                });
+                            }
+                            if depth == 0 {
+                                return Err(::buffa::DecodeError::RecursionLimitExceeded);
+                            }
+                            let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                            if let Some(
+                                super::super::__buffa::view::oneof::retention_policy::Kind::GreaterThanOrEqual(
+                                    ref mut existing,
+                                ),
+                            ) = view.kind
+                            {
+                                existing._merge_into_view(sub, depth - 1)?;
+                            } else {
+                                view.kind = Some(
+                                    super::super::__buffa::view::oneof::retention_policy::Kind::GreaterThanOrEqual(
+                                        ::buffa::alloc::boxed::Box::new(
+                                            super::super::__buffa::view::RetentionGreaterThanOrEqualView::_decode_depth(
+                                                sub,
+                                                depth - 1,
+                                            )?,
+                                        ),
+                                    ),
+                                );
+                            }
+                        }
+                        4u32 => {
+                            if tag.wire_type()
+                                != ::buffa::encoding::WireType::LengthDelimited
+                            {
+                                return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                                    field_number: 4u32,
+                                    expected: 2u8,
+                                    actual: tag.wire_type() as u8,
+                                });
+                            }
+                            if depth == 0 {
+                                return Err(::buffa::DecodeError::RecursionLimitExceeded);
+                            }
+                            let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                            if let Some(
+                                super::super::__buffa::view::oneof::retention_policy::Kind::DropAll(
+                                    ref mut existing,
+                                ),
+                            ) = view.kind
+                            {
+                                existing._merge_into_view(sub, depth - 1)?;
+                            } else {
+                                view.kind = Some(
+                                    super::super::__buffa::view::oneof::retention_policy::Kind::DropAll(
+                                        ::buffa::alloc::boxed::Box::new(
+                                            super::super::__buffa::view::RetentionDropAllView::_decode_depth(
+                                                sub,
+                                                depth - 1,
+                                            )?,
+                                        ),
+                                    ),
+                                );
+                            }
+                        }
+                        _ => {
+                            ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
+                            let span_len = before_tag.len() - cur.len();
+                            view.__buffa_unknown_fields
+                                .push_raw(&before_tag[..span_len]);
+                        }
+                    }
+                }
+                ::core::result::Result::Ok(())
+            }
+        }
+        impl<'a> ::buffa::MessageView<'a> for RetentionPolicyView<'a> {
+            type Owned = super::super::RetentionPolicy;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                Self::_decode_depth(buf, ::buffa::RECURSION_LIMIT)
+            }
+            fn decode_view_with_limit(
+                buf: &'a [u8],
+                depth: u32,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                Self::_decode_depth(buf, depth)
+            }
+            fn to_owned_message(&self) -> super::super::RetentionPolicy {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> super::super::RetentionPolicy {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                super::super::RetentionPolicy {
+                    kind: self
+                        .kind
+                        .as_ref()
+                        .map(|v| match v {
+                            super::super::__buffa::view::oneof::retention_policy::Kind::KeepLatest(
+                                v,
+                            ) => {
+                                super::super::__buffa::oneof::retention_policy::Kind::KeepLatest(
+                                    ::buffa::alloc::boxed::Box::new(
+                                        v.to_owned_from_source(__buffa_src),
+                                    ),
+                                )
+                            }
+                            super::super::__buffa::view::oneof::retention_policy::Kind::GreaterThan(
+                                v,
+                            ) => {
+                                super::super::__buffa::oneof::retention_policy::Kind::GreaterThan(
+                                    ::buffa::alloc::boxed::Box::new(
+                                        v.to_owned_from_source(__buffa_src),
+                                    ),
+                                )
+                            }
+                            super::super::__buffa::view::oneof::retention_policy::Kind::GreaterThanOrEqual(
+                                v,
+                            ) => {
+                                super::super::__buffa::oneof::retention_policy::Kind::GreaterThanOrEqual(
+                                    ::buffa::alloc::boxed::Box::new(
+                                        v.to_owned_from_source(__buffa_src),
+                                    ),
+                                )
+                            }
+                            super::super::__buffa::view::oneof::retention_policy::Kind::DropAll(
+                                v,
+                            ) => {
+                                super::super::__buffa::oneof::retention_policy::Kind::DropAll(
+                                    ::buffa::alloc::boxed::Box::new(
+                                        v.to_owned_from_source(__buffa_src),
+                                    ),
+                                )
+                            }
+                        }),
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()
+                        .unwrap_or_default()
+                        .into(),
+                    ..::core::default::Default::default()
+                }
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for RetentionPolicyView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u32;
+                if let ::core::option::Option::Some(ref v) = self.kind {
+                    match v {
+                        super::super::__buffa::view::oneof::retention_policy::Kind::KeepLatest(
+                            x,
+                        ) => {
+                            let __slot = __cache.reserve();
+                            let inner = x.compute_size(__cache);
+                            __cache.set(__slot, inner);
+                            size
+                                += 1u32 + ::buffa::encoding::varint_len(inner as u64) as u32
+                                    + inner;
+                        }
+                        super::super::__buffa::view::oneof::retention_policy::Kind::GreaterThan(
+                            x,
+                        ) => {
+                            let __slot = __cache.reserve();
+                            let inner = x.compute_size(__cache);
+                            __cache.set(__slot, inner);
+                            size
+                                += 1u32 + ::buffa::encoding::varint_len(inner as u64) as u32
+                                    + inner;
+                        }
+                        super::super::__buffa::view::oneof::retention_policy::Kind::GreaterThanOrEqual(
+                            x,
+                        ) => {
+                            let __slot = __cache.reserve();
+                            let inner = x.compute_size(__cache);
+                            __cache.set(__slot, inner);
+                            size
+                                += 1u32 + ::buffa::encoding::varint_len(inner as u64) as u32
+                                    + inner;
+                        }
+                        super::super::__buffa::view::oneof::retention_policy::Kind::DropAll(
+                            x,
+                        ) => {
+                            let __slot = __cache.reserve();
+                            let inner = x.compute_size(__cache);
+                            __cache.set(__slot, inner);
+                            size
+                                += 1u32 + ::buffa::encoding::varint_len(inner as u64) as u32
+                                    + inner;
+                        }
+                    }
+                }
+                size += self.__buffa_unknown_fields.encoded_len() as u32;
+                size
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                __cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::bytes::BufMut,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                if let ::core::option::Option::Some(ref v) = self.kind {
+                    match v {
+                        super::super::__buffa::view::oneof::retention_policy::Kind::KeepLatest(
+                            x,
+                        ) => {
+                            ::buffa::encoding::Tag::new(
+                                    1u32,
+                                    ::buffa::encoding::WireType::LengthDelimited,
+                                )
+                                .encode(buf);
+                            ::buffa::encoding::encode_varint(
+                                __cache.consume_next() as u64,
+                                buf,
+                            );
+                            x.write_to(__cache, buf);
+                        }
+                        super::super::__buffa::view::oneof::retention_policy::Kind::GreaterThan(
+                            x,
+                        ) => {
+                            ::buffa::encoding::Tag::new(
+                                    2u32,
+                                    ::buffa::encoding::WireType::LengthDelimited,
+                                )
+                                .encode(buf);
+                            ::buffa::encoding::encode_varint(
+                                __cache.consume_next() as u64,
+                                buf,
+                            );
+                            x.write_to(__cache, buf);
+                        }
+                        super::super::__buffa::view::oneof::retention_policy::Kind::GreaterThanOrEqual(
+                            x,
+                        ) => {
+                            ::buffa::encoding::Tag::new(
+                                    3u32,
+                                    ::buffa::encoding::WireType::LengthDelimited,
+                                )
+                                .encode(buf);
+                            ::buffa::encoding::encode_varint(
+                                __cache.consume_next() as u64,
+                                buf,
+                            );
+                            x.write_to(__cache, buf);
+                        }
+                        super::super::__buffa::view::oneof::retention_policy::Kind::DropAll(
+                            x,
+                        ) => {
+                            ::buffa::encoding::Tag::new(
+                                    4u32,
+                                    ::buffa::encoding::WireType::LengthDelimited,
+                                )
+                                .encode(buf);
+                            ::buffa::encoding::encode_varint(
+                                __cache.consume_next() as u64,
+                                buf,
+                            );
+                            x.write_to(__cache, buf);
+                        }
+                    }
+                }
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        /// Serializes this view as protobuf JSON.
+        ///
+        /// Implicit-presence fields with default values are omitted, `required`
+        /// fields are always emitted, explicit-presence (`optional`) fields are
+        /// emitted only when set, bytes fields are base64-encoded, and enum
+        /// values are their proto name strings.
+        ///
+        /// This impl uses `serialize_map(None)` because the number of emitted
+        /// fields depends on default-omission rules; serializers that require
+        /// known map lengths (e.g. `bincode`) will return a runtime error.
+        /// Use the owned message type for those formats.
+        impl<'__a> ::serde::Serialize for RetentionPolicyView<'__a> {
+            fn serialize<__S: ::serde::Serializer>(
+                &self,
+                __s: __S,
+            ) -> ::core::result::Result<__S::Ok, __S::Error> {
+                use ::serde::ser::SerializeMap as _;
+                let mut __map = __s.serialize_map(::core::option::Option::None)?;
+                if let ::core::option::Option::Some(ref __ov) = self.kind {
+                    match __ov {
+                        super::super::__buffa::view::oneof::retention_policy::Kind::KeepLatest(
+                            v,
+                        ) => {
+                            __map.serialize_entry("keepLatest", v)?;
+                        }
+                        super::super::__buffa::view::oneof::retention_policy::Kind::GreaterThan(
+                            v,
+                        ) => {
+                            __map.serialize_entry("greaterThan", v)?;
+                        }
+                        super::super::__buffa::view::oneof::retention_policy::Kind::GreaterThanOrEqual(
+                            v,
+                        ) => {
+                            __map.serialize_entry("greaterThanOrEqual", v)?;
+                        }
+                        super::super::__buffa::view::oneof::retention_policy::Kind::DropAll(
+                            v,
+                        ) => {
+                            __map.serialize_entry("dropAll", v)?;
+                        }
+                    }
+                }
+                __map.end()
+            }
+        }
+        impl<'a> ::buffa::MessageName for RetentionPolicyView<'a> {
+            const PACKAGE: &'static str = "log.stream.v1";
+            const NAME: &'static str = "RetentionPolicy";
+            const FULL_NAME: &'static str = "log.stream.v1.RetentionPolicy";
+            const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.RetentionPolicy";
+        }
+        impl<'v> ::buffa::DefaultViewInstance for RetentionPolicyView<'v> {
+            fn default_view_instance<'a>() -> &'a Self
+            where
+                Self: 'a,
+            {
+                static VALUE: ::buffa::__private::OnceBox<
+                    RetentionPolicyView<'static>,
+                > = ::buffa::__private::OnceBox::new();
+                VALUE
+                    .get_or_init(|| ::buffa::alloc::boxed::Box::new(
+                        <RetentionPolicyView<'static>>::default(),
+                    ))
+            }
+        }
+        impl ::buffa::ViewReborrow for RetentionPolicyView<'static> {
+            type Reborrowed<'b> = RetentionPolicyView<'b>;
+            fn reborrow<'b>(this: &'b Self) -> &'b Self::Reborrowed<'b> {
+                this
+            }
+        }
+        /// Install or clear the sequence-log retention rule.
+        ///
+        /// Retention is a persistent, continuously-enforced rule owned by the stream
+        /// service (not a one-shot prune): once installed it keeps tracking the live
+        /// frontier as batches are appended, evicting whatever falls below the rule's
+        /// floor. Evicted batches surface to subscribers/point-lookups as
+        /// `OUT_OF_RANGE` with an `ErrorInfo { reason: "BATCH_EVICTED", metadata: {
+        /// "oldest_retained": ... } }` detail.
+        #[derive(Clone, Debug, Default)]
+        pub struct SetRetentionRequestView<'a> {
+            /// The rule to install. Absent -\> clear the rule: enforcement stops and no
+            /// further eviction happens.
+            ///
+            /// Field 1: `policy`
+            pub policy: ::buffa::MessageFieldView<
+                super::super::__buffa::view::RetentionPolicyView<'a>,
+            >,
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> SetRetentionRequestView<'a> {
+            /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
+            ///
+            /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
+            /// and by generated sub-message decode arms with `depth - 1`.
+            ///
+            /// **Not part of the public API.** Named with a leading underscore to
+            /// signal that it is for generated-code use only.
+            #[doc(hidden)]
+            pub fn _decode_depth(
+                buf: &'a [u8],
+                depth: u32,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let mut view = Self::default();
+                view._merge_into_view(buf, depth)?;
+                ::core::result::Result::Ok(view)
+            }
+            /// Merge fields from `buf` into this view (proto merge semantics).
+            ///
+            /// Repeated fields append; singular fields last-wins; singular
+            /// MESSAGE fields merge recursively. Used by sub-message decode
+            /// arms when the same field appears multiple times on the wire.
+            ///
+            /// **Not part of the public API.**
+            #[doc(hidden)]
+            pub fn _merge_into_view(
+                &mut self,
+                buf: &'a [u8],
+                depth: u32,
+            ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+                let _ = depth;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur: &'a [u8] = buf;
+                while !cur.is_empty() {
+                    let before_tag = cur;
+                    let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
+                    match tag.field_number() {
+                        1u32 => {
+                            if tag.wire_type()
+                                != ::buffa::encoding::WireType::LengthDelimited
+                            {
+                                return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                                    field_number: 1u32,
+                                    expected: 2u8,
+                                    actual: tag.wire_type() as u8,
+                                });
+                            }
+                            if depth == 0 {
+                                return Err(::buffa::DecodeError::RecursionLimitExceeded);
+                            }
+                            let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                            match view.policy.as_mut() {
+                                Some(existing) => existing._merge_into_view(sub, depth - 1)?,
+                                None => {
+                                    view.policy = ::buffa::MessageFieldView::set(
+                                        super::super::__buffa::view::RetentionPolicyView::_decode_depth(
+                                            sub,
+                                            depth - 1,
+                                        )?,
+                                    );
+                                }
+                            }
+                        }
+                        _ => {
+                            ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
+                            let span_len = before_tag.len() - cur.len();
+                            view.__buffa_unknown_fields
+                                .push_raw(&before_tag[..span_len]);
+                        }
+                    }
+                }
+                ::core::result::Result::Ok(())
+            }
+        }
+        impl<'a> ::buffa::MessageView<'a> for SetRetentionRequestView<'a> {
+            type Owned = super::super::SetRetentionRequest;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                Self::_decode_depth(buf, ::buffa::RECURSION_LIMIT)
+            }
+            fn decode_view_with_limit(
+                buf: &'a [u8],
+                depth: u32,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                Self::_decode_depth(buf, depth)
+            }
+            fn to_owned_message(&self) -> super::super::SetRetentionRequest {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> super::super::SetRetentionRequest {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                super::super::SetRetentionRequest {
+                    policy: match self.policy.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::RetentionPolicy,
+                            >::some(v.to_owned_from_source(__buffa_src))
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()
+                        .unwrap_or_default()
+                        .into(),
+                    ..::core::default::Default::default()
+                }
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for SetRetentionRequestView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u32;
+                if self.policy.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.policy.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
+                            + inner_size;
+                }
+                size += self.__buffa_unknown_fields.encoded_len() as u32;
+                size
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                __cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::bytes::BufMut,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                if self.policy.is_set() {
+                    ::buffa::encoding::Tag::new(
+                            1u32,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )
+                        .encode(buf);
+                    ::buffa::encoding::encode_varint(__cache.consume_next() as u64, buf);
+                    self.policy.write_to(__cache, buf);
+                }
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        /// Serializes this view as protobuf JSON.
+        ///
+        /// Implicit-presence fields with default values are omitted, `required`
+        /// fields are always emitted, explicit-presence (`optional`) fields are
+        /// emitted only when set, bytes fields are base64-encoded, and enum
+        /// values are their proto name strings.
+        ///
+        /// This impl uses `serialize_map(None)` because the number of emitted
+        /// fields depends on default-omission rules; serializers that require
+        /// known map lengths (e.g. `bincode`) will return a runtime error.
+        /// Use the owned message type for those formats.
+        impl<'__a> ::serde::Serialize for SetRetentionRequestView<'__a> {
+            fn serialize<__S: ::serde::Serializer>(
+                &self,
+                __s: __S,
+            ) -> ::core::result::Result<__S::Ok, __S::Error> {
+                use ::serde::ser::SerializeMap as _;
+                let mut __map = __s.serialize_map(::core::option::Option::None)?;
+                {
+                    if let ::core::option::Option::Some(__v) = self.policy.as_option() {
+                        __map.serialize_entry("policy", __v)?;
+                    }
+                }
+                __map.end()
+            }
+        }
+        impl<'a> ::buffa::MessageName for SetRetentionRequestView<'a> {
+            const PACKAGE: &'static str = "log.stream.v1";
+            const NAME: &'static str = "SetRetentionRequest";
+            const FULL_NAME: &'static str = "log.stream.v1.SetRetentionRequest";
+            const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.SetRetentionRequest";
+        }
+        impl<'v> ::buffa::DefaultViewInstance for SetRetentionRequestView<'v> {
+            fn default_view_instance<'a>() -> &'a Self
+            where
+                Self: 'a,
+            {
+                static VALUE: ::buffa::__private::OnceBox<
+                    SetRetentionRequestView<'static>,
+                > = ::buffa::__private::OnceBox::new();
+                VALUE
+                    .get_or_init(|| ::buffa::alloc::boxed::Box::new(
+                        <SetRetentionRequestView<'static>>::default(),
+                    ))
+            }
+        }
+        impl ::buffa::ViewReborrow for SetRetentionRequestView<'static> {
+            type Reborrowed<'b> = SetRetentionRequestView<'b>;
+            fn reborrow<'b>(this: &'b Self) -> &'b Self::Reborrowed<'b> {
+                this
+            }
+        }
+        /// Result of applying the rule change once, synchronously.
+        #[derive(Clone, Debug, Default)]
+        pub struct SetRetentionResponseView<'a> {
+            /// Lowest sequence number still retained after that application. Absent when
+            /// the log is empty / no floor exists yet.
+            ///
+            /// Field 1: `oldest_retained_sequence`
+            pub oldest_retained_sequence: ::core::option::Option<u64>,
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> SetRetentionResponseView<'a> {
+            /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
+            ///
+            /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
+            /// and by generated sub-message decode arms with `depth - 1`.
+            ///
+            /// **Not part of the public API.** Named with a leading underscore to
+            /// signal that it is for generated-code use only.
+            #[doc(hidden)]
+            pub fn _decode_depth(
+                buf: &'a [u8],
+                depth: u32,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let mut view = Self::default();
+                view._merge_into_view(buf, depth)?;
+                ::core::result::Result::Ok(view)
+            }
+            /// Merge fields from `buf` into this view (proto merge semantics).
+            ///
+            /// Repeated fields append; singular fields last-wins; singular
+            /// MESSAGE fields merge recursively. Used by sub-message decode
+            /// arms when the same field appears multiple times on the wire.
+            ///
+            /// **Not part of the public API.**
+            #[doc(hidden)]
+            pub fn _merge_into_view(
+                &mut self,
+                buf: &'a [u8],
+                depth: u32,
+            ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+                let _ = depth;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur: &'a [u8] = buf;
+                while !cur.is_empty() {
+                    let before_tag = cur;
+                    let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
+                    match tag.field_number() {
+                        1u32 => {
+                            if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                                return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                                    field_number: 1u32,
+                                    expected: 0u8,
+                                    actual: tag.wire_type() as u8,
+                                });
+                            }
+                            view.oldest_retained_sequence = Some(
+                                ::buffa::types::decode_uint64(&mut cur)?,
+                            );
+                        }
+                        _ => {
+                            ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
+                            let span_len = before_tag.len() - cur.len();
+                            view.__buffa_unknown_fields
+                                .push_raw(&before_tag[..span_len]);
+                        }
+                    }
+                }
+                ::core::result::Result::Ok(())
+            }
+        }
+        impl<'a> ::buffa::MessageView<'a> for SetRetentionResponseView<'a> {
+            type Owned = super::super::SetRetentionResponse;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                Self::_decode_depth(buf, ::buffa::RECURSION_LIMIT)
+            }
+            fn decode_view_with_limit(
+                buf: &'a [u8],
+                depth: u32,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                Self::_decode_depth(buf, depth)
+            }
+            fn to_owned_message(&self) -> super::super::SetRetentionResponse {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> super::super::SetRetentionResponse {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                super::super::SetRetentionResponse {
+                    oldest_retained_sequence: self.oldest_retained_sequence,
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()
+                        .unwrap_or_default()
+                        .into(),
+                    ..::core::default::Default::default()
+                }
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for SetRetentionResponseView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u32;
+                if let Some(v) = self.oldest_retained_sequence {
+                    size += 1u32 + ::buffa::types::uint64_encoded_len(v) as u32;
+                }
+                size += self.__buffa_unknown_fields.encoded_len() as u32;
+                size
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                _cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::bytes::BufMut,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                if let Some(v) = self.oldest_retained_sequence {
+                    ::buffa::encoding::Tag::new(
+                            1u32,
+                            ::buffa::encoding::WireType::Varint,
+                        )
+                        .encode(buf);
+                    ::buffa::types::encode_uint64(v, buf);
+                }
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        /// Serializes this view as protobuf JSON.
+        ///
+        /// Implicit-presence fields with default values are omitted, `required`
+        /// fields are always emitted, explicit-presence (`optional`) fields are
+        /// emitted only when set, bytes fields are base64-encoded, and enum
+        /// values are their proto name strings.
+        ///
+        /// This impl uses `serialize_map(None)` because the number of emitted
+        /// fields depends on default-omission rules; serializers that require
+        /// known map lengths (e.g. `bincode`) will return a runtime error.
+        /// Use the owned message type for those formats.
+        impl<'__a> ::serde::Serialize for SetRetentionResponseView<'__a> {
+            fn serialize<__S: ::serde::Serializer>(
+                &self,
+                __s: __S,
+            ) -> ::core::result::Result<__S::Ok, __S::Error> {
+                use ::serde::ser::SerializeMap as _;
+                let mut __map = __s.serialize_map(::core::option::Option::None)?;
+                if let ::core::option::Option::Some(__v) = self.oldest_retained_sequence
+                {
+                    struct _W(u64);
+                    impl ::serde::Serialize for _W {
+                        fn serialize<__S: ::serde::Serializer>(
+                            &self,
+                            __s: __S,
+                        ) -> ::core::result::Result<__S::Ok, __S::Error> {
+                            ::buffa::json_helpers::uint64::serialize(&self.0, __s)
+                        }
+                    }
+                    __map.serialize_entry("oldestRetainedSequence", &_W(__v))?;
+                }
+                __map.end()
+            }
+        }
+        impl<'a> ::buffa::MessageName for SetRetentionResponseView<'a> {
+            const PACKAGE: &'static str = "log.stream.v1";
+            const NAME: &'static str = "SetRetentionResponse";
+            const FULL_NAME: &'static str = "log.stream.v1.SetRetentionResponse";
+            const TYPE_URL: &'static str = "type.googleapis.com/log.stream.v1.SetRetentionResponse";
+        }
+        impl<'v> ::buffa::DefaultViewInstance for SetRetentionResponseView<'v> {
+            fn default_view_instance<'a>() -> &'a Self
+            where
+                Self: 'a,
+            {
+                static VALUE: ::buffa::__private::OnceBox<
+                    SetRetentionResponseView<'static>,
+                > = ::buffa::__private::OnceBox::new();
+                VALUE
+                    .get_or_init(|| ::buffa::alloc::boxed::Box::new(
+                        <SetRetentionResponseView<'static>>::default(),
+                    ))
+            }
+        }
+        impl ::buffa::ViewReborrow for SetRetentionResponseView<'static> {
+            type Reborrowed<'b> = SetRetentionResponseView<'b>;
+            fn reborrow<'b>(this: &'b Self) -> &'b Self::Reborrowed<'b> {
+                this
+            }
+        }
+        pub mod oneof {
+            #[allow(unused_imports)]
+            use super::*;
+            pub mod retention_policy {
+                #[allow(unused_imports)]
+                use super::*;
+                #[derive(Clone, Debug)]
+                pub enum Kind<'a> {
+                    KeepLatest(
+                        ::buffa::alloc::boxed::Box<
+                            super::super::super::super::__buffa::view::RetentionKeepLatestView<
+                                'a,
+                            >,
+                        >,
+                    ),
+                    GreaterThan(
+                        ::buffa::alloc::boxed::Box<
+                            super::super::super::super::__buffa::view::RetentionGreaterThanView<
+                                'a,
+                            >,
+                        >,
+                    ),
+                    GreaterThanOrEqual(
+                        ::buffa::alloc::boxed::Box<
+                            super::super::super::super::__buffa::view::RetentionGreaterThanOrEqualView<
+                                'a,
+                            >,
+                        >,
+                    ),
+                    DropAll(
+                        ::buffa::alloc::boxed::Box<
+                            super::super::super::super::__buffa::view::RetentionDropAllView<
+                                'a,
+                            >,
+                        >,
+                    ),
+                }
+            }
+        }
+    }
+    pub mod oneof {
+        #[allow(unused_imports)]
+        use super::*;
+        pub mod retention_policy {
+            #[allow(unused_imports)]
+            use super::*;
+            #[derive(Clone, PartialEq, Debug)]
+            pub enum Kind {
+                KeepLatest(
+                    ::buffa::alloc::boxed::Box<super::super::super::RetentionKeepLatest>,
+                ),
+                GreaterThan(
+                    ::buffa::alloc::boxed::Box<super::super::super::RetentionGreaterThan>,
+                ),
+                GreaterThanOrEqual(
+                    ::buffa::alloc::boxed::Box<
+                        super::super::super::RetentionGreaterThanOrEqual,
+                    >,
+                ),
+                DropAll(
+                    ::buffa::alloc::boxed::Box<super::super::super::RetentionDropAll>,
+                ),
+            }
+            impl ::buffa::Oneof for Kind {}
+            impl From<super::super::super::RetentionKeepLatest> for Kind {
+                fn from(v: super::super::super::RetentionKeepLatest) -> Self {
+                    Self::KeepLatest(::buffa::alloc::boxed::Box::new(v))
+                }
+            }
+            impl From<super::super::super::RetentionKeepLatest>
+            for ::core::option::Option<Kind> {
+                fn from(v: super::super::super::RetentionKeepLatest) -> Self {
+                    Self::Some(Kind::from(v))
+                }
+            }
+            impl From<super::super::super::RetentionGreaterThan> for Kind {
+                fn from(v: super::super::super::RetentionGreaterThan) -> Self {
+                    Self::GreaterThan(::buffa::alloc::boxed::Box::new(v))
+                }
+            }
+            impl From<super::super::super::RetentionGreaterThan>
+            for ::core::option::Option<Kind> {
+                fn from(v: super::super::super::RetentionGreaterThan) -> Self {
+                    Self::Some(Kind::from(v))
+                }
+            }
+            impl From<super::super::super::RetentionGreaterThanOrEqual> for Kind {
+                fn from(v: super::super::super::RetentionGreaterThanOrEqual) -> Self {
+                    Self::GreaterThanOrEqual(::buffa::alloc::boxed::Box::new(v))
+                }
+            }
+            impl From<super::super::super::RetentionGreaterThanOrEqual>
+            for ::core::option::Option<Kind> {
+                fn from(v: super::super::super::RetentionGreaterThanOrEqual) -> Self {
+                    Self::Some(Kind::from(v))
+                }
+            }
+            impl From<super::super::super::RetentionDropAll> for Kind {
+                fn from(v: super::super::super::RetentionDropAll) -> Self {
+                    Self::DropAll(::buffa::alloc::boxed::Box::new(v))
+                }
+            }
+            impl From<super::super::super::RetentionDropAll>
+            for ::core::option::Option<Kind> {
+                fn from(v: super::super::super::RetentionDropAll) -> Self {
+                    Self::Some(Kind::from(v))
+                }
+            }
+            impl serde::Serialize for Kind {
+                fn serialize<S: serde::Serializer>(
+                    &self,
+                    s: S,
+                ) -> ::core::result::Result<S::Ok, S::Error> {
+                    use serde::ser::SerializeMap;
+                    let mut map = s.serialize_map(Some(1))?;
+                    match self {
+                        Self::KeepLatest(v) => {
+                            map.serialize_entry("keepLatest", v)?;
+                        }
+                        Self::GreaterThan(v) => {
+                            map.serialize_entry("greaterThan", v)?;
+                        }
+                        Self::GreaterThanOrEqual(v) => {
+                            map.serialize_entry("greaterThanOrEqual", v)?;
+                        }
+                        Self::DropAll(v) => {
+                            map.serialize_entry("dropAll", v)?;
+                        }
+                    }
+                    map.end()
+                }
+            }
+        }
     }
 }
 #[doc(inline)]
@@ -1784,6 +4788,20 @@ pub use self::__buffa::view::GetRequestView;
 pub use self::__buffa::view::SubscribeResponseView;
 #[doc(inline)]
 pub use self::__buffa::view::GetResponseView;
+#[doc(inline)]
+pub use self::__buffa::view::RetentionKeepLatestView;
+#[doc(inline)]
+pub use self::__buffa::view::RetentionGreaterThanView;
+#[doc(inline)]
+pub use self::__buffa::view::RetentionGreaterThanOrEqualView;
+#[doc(inline)]
+pub use self::__buffa::view::RetentionDropAllView;
+#[doc(inline)]
+pub use self::__buffa::view::RetentionPolicyView;
+#[doc(inline)]
+pub use self::__buffa::view::SetRetentionRequestView;
+#[doc(inline)]
+pub use self::__buffa::view::SetRetentionResponseView;
 
 ///Shorthand for `OwnedView<SubscribeRequestView<'static>>`.
 pub type OwnedSubscribeRequestView = ::buffa::view::OwnedView<
@@ -1800,6 +4818,14 @@ pub type OwnedGetRequestView = ::buffa::view::OwnedView<
 ///Shorthand for `OwnedView<GetResponseView<'static>>`.
 pub type OwnedGetResponseView = ::buffa::view::OwnedView<
     __buffa::view::GetResponseView<'static>,
+>;
+///Shorthand for `OwnedView<SetRetentionRequestView<'static>>`.
+pub type OwnedSetRetentionRequestView = ::buffa::view::OwnedView<
+    __buffa::view::SetRetentionRequestView<'static>,
+>;
+///Shorthand for `OwnedView<SetRetentionResponseView<'static>>`.
+pub type OwnedSetRetentionResponseView = ::buffa::view::OwnedView<
+    __buffa::view::SetRetentionResponseView<'static>,
 >;
 impl ::connectrpc::Encodable<SubscribeResponse>
 for __buffa::view::SubscribeResponseView<'_> {
@@ -1836,6 +4862,24 @@ for ::buffa::view::OwnedView<__buffa::view::GetResponseView<'static>> {
         ::connectrpc::__codegen::encode_view_body(&**self, codec)
     }
 }
+impl ::connectrpc::Encodable<SetRetentionResponse>
+for __buffa::view::SetRetentionResponseView<'_> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self, codec)
+    }
+}
+impl ::connectrpc::Encodable<SetRetentionResponse>
+for ::buffa::view::OwnedView<__buffa::view::SetRetentionResponseView<'static>> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(&**self, codec)
+    }
+}
 /// Full service name for this service.
 pub const SERVICE_SERVICE_NAME: &str = "log.stream.v1.Service";
 /// Static [`Spec`](::connectrpc::Spec) for the server-side `Subscribe` RPC.
@@ -1853,6 +4897,15 @@ pub const SERVICE_SUBSCRIBE_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::serve
 /// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
 pub const SERVICE_GET_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/log.stream.v1.Service/Get",
+        ::connectrpc::StreamType::Unary,
+    )
+    .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
+/// Static [`Spec`](::connectrpc::Spec) for the server-side `SetRetention` RPC.
+///
+/// The dispatcher surfaces this on
+/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+pub const SERVICE_SET_RETENTION_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
+        "/log.stream.v1.Service/SetRetention",
         ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
@@ -1923,6 +4976,19 @@ pub trait Service: Send + Sync + 'static {
             impl ::connectrpc::Encodable<GetResponse> + Send + use<'a, Self>,
         >,
     > + Send;
+    /// Install (or clear) the sequence-log retention rule. The rule is persistent
+    /// and continuously enforced as the log grows — see `SetRetentionRequest`.
+    ///
+    /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
+    fn set_retention<'a>(
+        &'a self,
+        ctx: ::connectrpc::RequestContext,
+        request: OwnedSetRetentionRequestView,
+    ) -> impl ::std::future::Future<
+        Output = ::connectrpc::ServiceResult<
+            impl ::connectrpc::Encodable<SetRetentionResponse> + Send + use<'a, Self>,
+        >,
+    > + Send;
 }
 /// Extension trait for registering a service implementation with a Router.
 ///
@@ -1982,6 +5048,22 @@ impl<S: Service> ServiceExt for S {
                 },
             )
             .with_spec(SERVICE_GET_SPEC)
+            .route_view(
+                SERVICE_SERVICE_NAME,
+                "SetRetention",
+                {
+                    let svc = ::std::sync::Arc::clone(&self);
+                    ::connectrpc::view_handler_fn(move |ctx, req, format| {
+                        let svc = ::std::sync::Arc::clone(&svc);
+                        async move {
+                            svc.set_retention(ctx, req)
+                                .await?
+                                .encode::<SetRetentionResponse>(format)
+                        }
+                    })
+                },
+            )
+            .with_spec(SERVICE_SET_RETENTION_SPEC)
     }
 }
 /// Monomorphic dispatcher for `Service`.
@@ -2039,6 +5121,12 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
                         .with_spec(SERVICE_GET_SPEC),
                 )
             }
+            "SetRetention" => {
+                Some(
+                    ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
+                        .with_spec(SERVICE_SET_RETENTION_SPEC),
+                )
+            }
             _ => None,
         }
     }
@@ -2061,6 +5149,17 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
                         __buffa::view::GetRequestView,
                     >(request.encoded()?, format)?;
                     svc.get(ctx, req).await?.encode::<GetResponse>(format)
+                })
+            }
+            "SetRetention" => {
+                let svc = ::std::sync::Arc::clone(&self.inner);
+                Box::pin(async move {
+                    let req = ::connectrpc::dispatcher::codegen::decode_request_view::<
+                        __buffa::view::SetRetentionRequestView,
+                    >(request.encoded()?, format)?;
+                    svc.set_retention(ctx, req)
+                        .await?
+                        .encode::<SetRetentionResponse>(format)
                 })
             }
             _ => ::connectrpc::dispatcher::codegen::unimplemented_unary(path),
@@ -2268,6 +5367,43 @@ where
                 &self.config,
                 SERVICE_SERVICE_NAME,
                 "Get",
+                request,
+                options,
+            )
+            .await
+    }
+    /// Call the SetRetention RPC. Sends a request to /log.stream.v1.Service/SetRetention.
+    pub async fn set_retention(
+        &self,
+        request: SetRetentionRequest,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::SetRetentionResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        self.set_retention_with_options(
+                request,
+                ::connectrpc::client::CallOptions::default(),
+            )
+            .await
+    }
+    /// Call the SetRetention RPC with explicit per-call options. Options override [`ClientConfig`](::connectrpc::client::ClientConfig) defaults.
+    pub async fn set_retention_with_options(
+        &self,
+        request: SetRetentionRequest,
+        options: ::connectrpc::client::CallOptions,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::SetRetentionResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        ::connectrpc::client::call_unary(
+                &self.transport,
+                &self.config,
+                SERVICE_SERVICE_NAME,
+                "SetRetention",
                 request,
                 options,
             )

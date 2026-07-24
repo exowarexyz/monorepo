@@ -303,18 +303,15 @@ function toStoreBatch(
 function prefixPolicies(policies: Policy[], prefix?: StoreKeyPrefix): Policy[] {
     if (!prefix) return policies;
     return policies.map((policy) => {
-        if (policy.scope.case !== 'keys') {
+        const scope = policy.keys;
+        if (!scope) {
             return policy;
         }
-        const scope = policy.scope.value;
         return {
             ...policy,
-            scope: {
-                case: 'keys',
-                value: {
-                    ...scope,
-                    selector: scope.selector ? prefix.prefixSelector(scope.selector) : undefined,
-                },
+            keys: {
+                ...scope,
+                selector: scope.selector ? prefix.prefixSelector(scope.selector) : undefined,
             },
         } as Policy;
     });

@@ -3,7 +3,7 @@ use commonware_codec::Encode;
 use connectrpc::client::ClientConfig;
 use exoware_sdk::common::Selector as ProtoSelector;
 use exoware_sdk::compact::{
-    policy, policy_retain, KeysScope as ProtoKeysScope, Policy, PolicyGroupBy, PolicyOrderBy,
+    policy_retain, KeysScope as ProtoKeysScope, Policy, PolicyGroupBy, PolicyOrderBy,
     PolicyOrderEncoding, PolicyRetain, PruneRequest, RetainGreaterThan, RetainKeepLatest,
     ServiceClient as CompactServiceClient,
 };
@@ -273,7 +273,7 @@ async fn prune_drop_all_removes_keys() {
     compact_client
         .prune(PruneRequest {
             policies: vec![Policy {
-                scope: Some(policy::Scope::Keys(Box::new(ProtoKeysScope {
+                keys: Some(ProtoKeysScope {
                     selector: Some(ProtoSelector {
                         prefix: Bytes::from(vec![1]),
                         payload_regex: "(?s-u)^.*$".to_string(),
@@ -287,7 +287,8 @@ async fn prune_drop_all_removes_keys() {
                     .into(),
                     order_by: Default::default(),
                     ..Default::default()
-                }))),
+                })
+                .into(),
                 retain: Some(PolicyRetain {
                     kind: Some(policy_retain::Kind::DropAll(Box::default())),
                     ..Default::default()
@@ -439,7 +440,7 @@ async fn prune_keep_latest_retains_newest() {
     compact_client
         .prune(PruneRequest {
             policies: vec![Policy {
-                scope: Some(policy::Scope::Keys(Box::new(ProtoKeysScope {
+                keys: Some(ProtoKeysScope {
                     selector: Some(ProtoSelector {
                         prefix: Bytes::from(vec![2]),
                         payload_regex: "(?s-u)^(?P<logical>.{3})\\x00\\x00(?P<version>.{8})$"
@@ -459,7 +460,8 @@ async fn prune_keep_latest_retains_newest() {
                     })
                     .into(),
                     ..Default::default()
-                }))),
+                })
+                .into(),
                 retain: Some(PolicyRetain {
                     kind: Some(policy_retain::Kind::KeepLatest(Box::new(
                         RetainKeepLatest {
@@ -612,14 +614,14 @@ async fn store_client_prune_drop_all() {
     client
         .compact()
         .prune(&[prune_policy::PrunePolicy {
-            scope: prune_policy::PolicyScope::Keys(prune_policy::KeysScope {
+            scope: prune_policy::KeysScope {
                 selector: DomainSelector {
                     prefix: Bytes::from(vec![5]),
                     payload_regex: ".*".into(),
                 },
                 group_by: prune_policy::GroupBy::default(),
                 order_by: None,
-            }),
+            },
             retain: prune_policy::RetainPolicy::DropAll,
         }])
         .await
@@ -660,7 +662,7 @@ async fn prune_greater_than_retains_above_threshold() {
     compact_client
         .prune(PruneRequest {
             policies: vec![Policy {
-                scope: Some(policy::Scope::Keys(Box::new(ProtoKeysScope {
+                keys: Some(ProtoKeysScope {
                     selector: Some(ProtoSelector {
                         prefix: Bytes::from(vec![3]),
                         payload_regex: "(?s-u)^(?P<logical>.{2})(?P<version>.{8})$".to_string(),
@@ -679,7 +681,8 @@ async fn prune_greater_than_retains_above_threshold() {
                     })
                     .into(),
                     ..Default::default()
-                }))),
+                })
+                .into(),
                 retain: Some(PolicyRetain {
                     kind: Some(policy_retain::Kind::GreaterThan(Box::new(
                         RetainGreaterThan {

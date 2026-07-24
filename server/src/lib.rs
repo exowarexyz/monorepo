@@ -16,7 +16,7 @@ pub use connect::{
 };
 pub use engine::{
     Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan, RangeScanBatch,
-    Sequence, StoreEngine,
+    Retention, Sequence, StoreEngine,
 };
 pub use reduce::RangeError;
 pub use stream::{StreamHub, StreamNotification, StreamNotifier};

@@ -3,7 +3,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use exoware_sdk::keys::{Key, Prefix};
 use exoware_sdk::kv_codec::Utf8;
-use exoware_sdk::prune_policy::{PolicyScope, PrunePolicy, RetainPolicy};
+use exoware_sdk::retention::RetentionPolicy;
 use exoware_sdk::selector::Selector;
 use exoware_sdk::stream_filter::StreamFilter;
 use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreClient};
@@ -30,20 +30,6 @@ fn filter(family: u8) -> StreamFilter {
             payload_regex: Utf8::from("(?s).*"),
         }],
         value_filters: vec![],
-    }
-}
-
-fn keep_latest_batches(count: usize) -> PrunePolicy {
-    PrunePolicy {
-        scope: PolicyScope::Sequence,
-        retain: RetainPolicy::KeepLatest { count },
-    }
-}
-
-fn drop_all_batches() -> PrunePolicy {
-    PrunePolicy {
-        scope: PolicyScope::Sequence,
-        retain: RetainPolicy::DropAll,
     }
 }
 
@@ -248,7 +234,7 @@ async fn replay_past_end_delivers_only_live() {
 }
 
 #[tokio::test]
-async fn replay_miss_after_prune_returns_batch_evicted() {
+async fn replay_miss_after_retention_returns_batch_evicted() {
     let client = spawn_client().await;
     for i in 0..20u8 {
         client
@@ -257,12 +243,14 @@ async fn replay_miss_after_prune_returns_batch_evicted() {
             .await
             .expect("put");
     }
-    // Prune via compact batch-log policy: keep last 10.
-    client
-        .compact()
-        .prune(&[keep_latest_batches(10)])
+    // Install a keep-last-10 retention rule via the stream service; one synchronous enforcement
+    // reports 11 as the oldest retained sequence.
+    let oldest = client
+        .stream()
+        .set_retention(Some(RetentionPolicy::KeepLatest { count: 10 }))
         .await
-        .expect("prune keep_latest batches");
+        .expect("set_retention keep_latest");
+    assert_eq!(oldest, Some(11));
 
     // Subscribing from seq 1 should fail with BATCH_EVICTED. The error may
     // surface either on the subscribe call itself or on the first next()
@@ -332,14 +320,16 @@ async fn get_batch_after_drop_all_returns_none() {
         .put(&[(&key(1, b"a"), b"1")])
         .await
         .expect("put");
-    client
-        .compact()
-        .prune(&[drop_all_batches()])
+    // drop_all evicts up to the live frontier, so nothing is retained.
+    let oldest = client
+        .stream()
+        .set_retention(Some(RetentionPolicy::DropAll))
         .await
-        .expect("prune");
+        .expect("set_retention drop_all");
+    assert_eq!(oldest, None);
 
     let got = client.stream().get(seq).await.expect("get_batch");
-    assert!(got.is_none(), "pruned batch should return None");
+    assert!(got.is_none(), "evicted batch should return None");
 }
 
 #[tokio::test]
@@ -354,11 +344,12 @@ async fn get_batch_after_keep_latest_evicts_old_but_keeps_new() {
             .expect("put");
         seqs.push(s);
     }
-    client
-        .compact()
-        .prune(&[keep_latest_batches(10)])
+    let oldest = client
+        .stream()
+        .set_retention(Some(RetentionPolicy::KeepLatest { count: 10 }))
         .await
-        .expect("prune keep_latest batches");
+        .expect("set_retention keep_latest");
+    assert_eq!(oldest, Some(*seqs.last().unwrap() - 9));
 
     // Earliest seq should be evicted.
     assert!(client.stream().get(seqs[0]).await.expect("get").is_none());
