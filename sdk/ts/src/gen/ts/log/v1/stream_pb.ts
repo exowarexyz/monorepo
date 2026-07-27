@@ -334,9 +334,6 @@ export const Service: GenService<{
     output: typeof GetResponseSchema;
   },
   /**
-   * Install (or clear) the sequence-log retention rule. The rule is persistent
-   * and continuously enforced as the log grows — see `SetRetentionRequest`.
-   *
    * @generated from rpc log.stream.v1.Service.SetRetention
    */
   setRetention: {

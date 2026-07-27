@@ -4976,8 +4976,7 @@ pub trait Service: Send + Sync + 'static {
             impl ::connectrpc::Encodable<GetResponse> + Send + use<'a, Self>,
         >,
     > + Send;
-    /// Install (or clear) the sequence-log retention rule. The rule is persistent
-    /// and continuously enforced as the log grows — see `SetRetentionRequest`.
+    /// Handle the SetRetention RPC.
     ///
     /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
     fn set_retention<'a>(
