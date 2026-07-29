@@ -1,6 +1,6 @@
 use exoware_sdk::kv_codec::Utf8;
 use exoware_sdk::prune_policy::{
-    GroupBy, KeysScope, OrderBy, OrderEncoding, PolicyScope, PrunePolicy, RetainPolicy,
+    GroupBy, KeysScope, OrderBy, OrderEncoding, PrunePolicy, RetainPolicy,
 };
 use exoware_sdk::selector::Selector;
 
@@ -31,7 +31,7 @@ fn keep_latest_versions_with_regex(
     }
 
     Ok(PrunePolicy {
-        scope: PolicyScope::Keys(KeysScope {
+        scope: KeysScope {
             selector: Selector {
                 prefix: prefix.as_bytes().clone(),
                 payload_regex,
@@ -43,7 +43,7 @@ fn keep_latest_versions_with_regex(
                 capture_group: Utf8::from("version"),
                 encoding: OrderEncoding::U64Be,
             }),
-        }),
+        },
         retain: RetainPolicy::KeepLatest { count },
     })
 }
@@ -97,14 +97,11 @@ mod tests {
     use crate::CellValue;
     use datafusion::arrow::datatypes::DataType;
     use exoware_sdk::kv_codec::Utf8;
-    use exoware_sdk::prune_policy::{validate_policy, OrderEncoding, PolicyScope, RetainPolicy};
+    use exoware_sdk::prune_policy::{validate_policy, OrderEncoding, RetainPolicy};
     use exoware_sdk::selector::compile_payload_regex;
 
     fn keys_scope(policy: &super::PrunePolicy) -> &super::KeysScope {
-        match &policy.scope {
-            PolicyScope::Keys(s) => s,
-            PolicyScope::Sequence => panic!("expected Keys scope"),
-        }
+        &policy.scope
     }
 
     fn entity_version_model(entity_type: DataType) -> TableModel {

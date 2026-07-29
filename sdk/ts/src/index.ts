@@ -71,7 +71,6 @@ export type {
 export {
     PolicySchema,
     KeysScopeSchema,
-    SequenceScopeSchema,
     PolicyGroupBySchema,
     PolicyOrderBySchema,
     PolicyRetainSchema,
@@ -86,7 +85,6 @@ export {
 export type {
     Policy,
     KeysScope,
-    SequenceScope,
     PolicyGroupBy,
     PolicyOrderBy,
     PolicyRetain,
@@ -104,10 +102,24 @@ export {
     SubscribeResponseSchema,
     GetRequestSchema,
     GetResponseSchema,
+    RetentionKeepLatestSchema,
+    RetentionGreaterThanSchema,
+    RetentionGreaterThanOrEqualSchema,
+    RetentionDropAllSchema,
+    RetentionPolicySchema,
+    SetRetentionRequestSchema,
+    SetRetentionResponseSchema,
 } from './gen/ts/log/v1/stream_pb.js';
 export type {
     SubscribeRequest,
     SubscribeResponse,
     GetRequest,
     GetResponse,
+    RetentionKeepLatest,
+    RetentionGreaterThan,
+    RetentionGreaterThanOrEqual,
+    RetentionDropAll,
+    RetentionPolicy,
+    SetRetentionRequest,
+    SetRetentionResponse,
 } from './gen/ts/log/v1/stream_pb.js';

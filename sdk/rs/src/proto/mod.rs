@@ -1144,6 +1144,12 @@ pub use prune_policy_proto::{
     validate_prune_policy_document,
 };
 
+mod retention_proto;
+pub use retention_proto::{
+    parse_retention_policy_from_proto, parse_set_retention_request_view, retention_policy_to_proto,
+    validate_retention_policy,
+};
+
 mod error_details;
 pub use error_details::{
     decode_connect_error, with_bad_request_detail, with_error_info_detail, with_query_detail,

@@ -21,7 +21,8 @@ use exoware_proto::ingest::{
 };
 use exoware_proto::log::stream::v1::{
     GetRequestView, GetResponse as StreamGetResponse, Service as StreamApi,
-    ServiceServer as StreamServiceServer, SubscribeRequestView, SubscribeResponse,
+    ServiceServer as StreamServiceServer, SetRetentionRequestView, SetRetentionResponse,
+    SubscribeRequestView, SubscribeResponse,
 };
 use exoware_proto::query::{
     Detail, GetManyEntry, GetManyFrame, GetResponse, RangeFrame, ReduceResponse,
@@ -43,7 +44,9 @@ use tokio::sync::Notify;
 use crate::reduce::RangeReducer;
 use crate::stream::{StreamHub, StreamNotifier};
 use crate::validate::{self, IngestLimits};
-use crate::{Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan, StoreEngine};
+use crate::{
+    Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan, Retention, StoreEngine,
+};
 
 // TODO (#57): Make limits configurable.
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
@@ -317,7 +320,7 @@ impl<L> Clone for StreamState<L> {
 
 impl<L> StreamState<L>
 where
-    L: Log,
+    L: Log + Retention,
 {
     pub fn new(log: Arc<L>, notifier: Arc<dyn StreamNotifier>) -> Self {
         Self { log, notifier }
@@ -772,7 +775,7 @@ impl<B> Clone for StreamConnect<B> {
 
 impl<B> StreamConnect<B>
 where
-    B: Log,
+    B: Log + Retention,
 {
     pub fn new(state: impl Into<StreamState<B>>) -> Self {
         Self {
@@ -857,7 +860,7 @@ struct SubscriptionState<B> {
 
 impl<B> SubscriptionState<B>
 where
-    B: Log,
+    B: Log + Retention,
 {
     fn new(
         state: StreamState<B>,
@@ -1020,7 +1023,7 @@ fn domain_filter_from_subscribe_view(
 
 impl<B> StreamApi for StreamConnect<B>
 where
-    B: Log,
+    B: Log + Retention,
 {
     async fn subscribe(
         &self,
@@ -1115,6 +1118,33 @@ where
             }
         }
     }
+
+    async fn set_retention(
+        &self,
+        _ctx: Context,
+        request: buffa::view::OwnedView<SetRetentionRequestView<'static>>,
+    ) -> connectrpc::ServiceResult<SetRetentionResponse> {
+        // Parse the wire shape, then authoritatively validate: buf.validate
+        // annotations on the proto are documentation, so the handler enforces
+        // the rule (e.g. keep_latest count > 0), mirroring the Prune handler.
+        let policy = exoware_proto::parse_set_retention_request_view(&request)
+            .map_err(ConnectError::invalid_argument)?;
+        if let Some(policy) = policy.as_ref() {
+            exoware_proto::validate_retention_policy(policy)
+                .map_err(ConnectError::invalid_argument)?;
+        }
+
+        let oldest_retained_sequence = self
+            .state
+            .log
+            .set_retention(policy)
+            .await
+            .map_err(ConnectError::internal)?;
+        connectrpc::Response::ok(SetRetentionResponse {
+            oldest_retained_sequence,
+            ..Default::default()
+        })
+    }
 }
 
 fn connect_limits() -> Limits {
@@ -1163,7 +1193,7 @@ where
 
 fn stream_server<B>(state: StreamState<B>) -> StreamServiceServer<StreamConnect<B>>
 where
-    B: Log,
+    B: Log + Retention,
 {
     StreamServiceServer::new(StreamConnect::new(state))
 }
@@ -1197,7 +1227,7 @@ where
 
 pub fn stream_service<B>(state: StreamState<B>) -> StreamService<B>
 where
-    B: Log,
+    B: Log + Retention,
 {
     ConnectRpcService::new(stream_server(state))
         .with_limits(connect_limits())
@@ -1210,7 +1240,7 @@ pub fn query_stack<Q, B>(
 ) -> QueryStack<Q, B>
 where
     Q: Query,
-    B: Log,
+    B: Log + Retention,
 {
     ConnectRpcService::new(Chain(
         query_server(query_state),
@@ -1248,20 +1278,23 @@ mod tests {
 
     use buffa::Message;
     use exoware_proto::common::kv::v1::Selector as ProtoSelector;
-    use exoware_proto::log::stream::v1::{SubscribeRequest, SubscribeRequestView};
+    use exoware_proto::log::stream::v1::{
+        SetRetentionRequest, SubscribeRequest, SubscribeRequestView,
+    };
     use exoware_proto::store::compact::v1::{
-        policy, policy_retain, Policy as ProtoPolicy, PolicyRetain, PruneRequest, PruneRequestView,
-        RetainKeepLatest,
+        policy_retain, KeysScope, Policy as ProtoPolicy, PolicyRetain, PruneRequest,
+        PruneRequestView, RetainKeepLatest,
     };
     use exoware_sdk::keys::Prefix;
     use exoware_sdk::kv_codec::KvReducedValue;
     use exoware_sdk::prune_policy::{PrunePolicyDocument, PRUNE_POLICY_DOCUMENT_VERSION};
+    use exoware_sdk::retention::RetentionPolicy;
     use exoware_sdk::{decode_connect_error, to_domain_reduce_response};
     use futures::StreamExt;
 
     use crate::{
-        Ingest, IngestError, Log, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence,
-        StreamNotification, StreamNotifier,
+        Ingest, IngestError, Log, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Retention,
+        Sequence, StreamNotification, StreamNotifier,
     };
 
     const TEST_PREFIX: u8 = 1;
@@ -1285,6 +1318,8 @@ mod tests {
         query_extra: QueryExtra,
         prune_policy_counts: Vec<usize>,
         put_error: Option<IngestError>,
+        retention_calls: Vec<Option<RetentionPolicy>>,
+        retention_floor: Option<u64>,
     }
 
     #[derive(Default)]
@@ -1390,6 +1425,14 @@ mod tests {
 
         fn set_query_extra(&self, extra: QueryExtra) {
             self.state.lock().expect("lock").query_extra = extra;
+        }
+
+        fn set_retention_floor(&self, floor: Option<u64>) {
+            self.state.lock().expect("lock").retention_floor = floor;
+        }
+
+        fn retention_calls(&self) -> Vec<Option<RetentionPolicy>> {
+            self.state.lock().expect("lock").retention_calls.clone()
         }
     }
 
@@ -1509,6 +1552,21 @@ mod tests {
         }
     }
 
+    impl Retention for FakeEngine {
+        async fn set_retention(
+            &self,
+            policy: Option<RetentionPolicy>,
+        ) -> Result<Option<u64>, String> {
+            self.state
+                .lock()
+                .map(|mut state| {
+                    state.retention_calls.push(policy);
+                    state.retention_floor
+                })
+                .map_err(|e| e.to_string())
+        }
+    }
+
     struct QueryOnlyEngine {
         sequence_number: u64,
         value: Option<Bytes>,
@@ -1571,6 +1629,15 @@ mod tests {
                     documents.push((document.version, document.policies.len()));
                 })
                 .map_err(|e| e.to_string())
+        }
+    }
+
+    impl Retention for PruneOnlyEngine {
+        async fn set_retention(
+            &self,
+            _policy: Option<RetentionPolicy>,
+        ) -> Result<Option<u64>, String> {
+            Ok(None)
         }
     }
 
@@ -1651,9 +1718,21 @@ mod tests {
         .expect("decode put request")
     }
 
-    fn sequence_drop_all_policy() -> ProtoPolicy {
+    fn keys_scope() -> KeysScope {
+        KeysScope {
+            selector: Some(ProtoSelector {
+                prefix: Bytes::from(vec![TEST_PREFIX]),
+                payload_regex: "(?s).*".to_string(),
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        }
+    }
+
+    fn keys_drop_all_policy() -> ProtoPolicy {
         ProtoPolicy {
-            scope: Some(policy::Scope::Sequence(Box::default())),
+            keys: Some(keys_scope()).into(),
             retain: Some(PolicyRetain {
                 kind: Some(policy_retain::Kind::DropAll(Box::default())),
                 ..Default::default()
@@ -1663,9 +1742,9 @@ mod tests {
         }
     }
 
-    fn sequence_keep_latest_policy(count: u64) -> ProtoPolicy {
+    fn keys_keep_latest_policy(count: u64) -> ProtoPolicy {
         ProtoPolicy {
-            scope: Some(policy::Scope::Sequence(Box::default())),
+            keys: Some(keys_scope()).into(),
             retain: Some(PolicyRetain {
                 kind: Some(policy_retain::Kind::KeepLatest(Box::new(
                     RetainKeepLatest {
@@ -1700,7 +1779,7 @@ mod tests {
         ConnectError,
     >
     where
-        B: Log,
+        B: Log + Retention,
     {
         let bytes = subscribe_request_bytes(since_sequence_number);
         let request = buffa::view::OwnedView::<SubscribeRequestView<'static>>::decode(bytes.into())
@@ -1710,11 +1789,36 @@ mod tests {
             .body)
     }
 
+    async fn set_retention<B>(
+        connect: &StreamConnect<B>,
+        policy: Option<RetentionPolicy>,
+    ) -> Result<SetRetentionResponse, ConnectError>
+    where
+        B: Log + Retention,
+    {
+        let bytes = SetRetentionRequest {
+            policy: policy
+                .as_ref()
+                .map(exoware_proto::retention_policy_to_proto)
+                .into(),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let request =
+            buffa::view::OwnedView::<SetRetentionRequestView<'static>>::decode(bytes.into())
+                .expect("decode set_retention request");
+        Ok(
+            StreamApi::set_retention(connect, Context::default(), request)
+                .await?
+                .body,
+        )
+    }
+
     #[tokio::test]
     async fn compact_connect_accepts_prune_only_engine() {
         let prune = Arc::new(PruneOnlyEngine::default());
         let connect = CompactConnect::new(CompactState::new(prune.clone()));
-        let request = prune_request(vec![sequence_drop_all_policy()]);
+        let request = prune_request(vec![keys_drop_all_policy()]);
 
         CompactApi::prune(&connect, Context::default(), request)
             .await
@@ -1731,8 +1835,10 @@ mod tests {
     async fn compact_rejects_unparseable_policy_before_engine_prune() {
         let prune = Arc::new(PruneOnlyEngine::default());
         let connect = CompactConnect::new(CompactState::new(prune.clone()));
+        // A Keys scope without its required selector fails to parse into a
+        // domain policy, so the handler rejects it before reaching the engine.
         let invalid_policy = ProtoPolicy {
-            scope: Some(policy::Scope::Sequence(Box::default())),
+            keys: Some(KeysScope::default()).into(),
             ..Default::default()
         };
         let request = prune_request(vec![invalid_policy]);
@@ -1749,7 +1855,7 @@ mod tests {
     async fn compact_rejects_invalid_policy_before_engine_prune() {
         let prune = Arc::new(PruneOnlyEngine::default());
         let connect = CompactConnect::new(CompactState::new(prune.clone()));
-        let request = prune_request(vec![sequence_keep_latest_policy(0)]);
+        let request = prune_request(vec![keys_keep_latest_policy(0)]);
 
         let err = CompactApi::prune(&connect, Context::default(), request)
             .await
@@ -1757,6 +1863,57 @@ mod tests {
 
         assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
         assert_eq!(prune.applied_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn set_retention_applies_policy_and_returns_floor() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(5);
+        engine.set_retention_floor(Some(4));
+        let notifier = Arc::new(ManualNotifier::new(5));
+        let connect = StreamConnect::new(StreamState::new(engine.clone(), notifier));
+
+        let response = set_retention(&connect, Some(RetentionPolicy::KeepLatest { count: 2 }))
+            .await
+            .expect("set_retention");
+
+        // The floor is whatever the backend reports after one enforcement.
+        assert_eq!(response.oldest_retained_sequence, Some(4));
+        assert_eq!(
+            engine.retention_calls(),
+            vec![Some(RetentionPolicy::KeepLatest { count: 2 })]
+        );
+    }
+
+    #[tokio::test]
+    async fn set_retention_rejects_zero_keep_latest_before_engine() {
+        let engine = Arc::new(FakeEngine::default());
+        let notifier = Arc::new(ManualNotifier::new(0));
+        let connect = StreamConnect::new(StreamState::new(engine.clone(), notifier));
+
+        let err = set_retention(&connect, Some(RetentionPolicy::KeepLatest { count: 0 }))
+            .await
+            .expect_err("count 0 rejected");
+
+        assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
+        // Validation is authoritative, so the backend is never touched.
+        assert!(engine.retention_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn set_retention_absent_policy_clears_rule() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_retention_floor(None);
+        let notifier = Arc::new(ManualNotifier::new(0));
+        let connect = StreamConnect::new(StreamState::new(engine.clone(), notifier));
+
+        let response = set_retention(&connect, None)
+            .await
+            .expect("clear retention");
+
+        // Clearing keeps enforcement off; no floor exists so none is returned.
+        assert_eq!(response.oldest_retained_sequence, None);
+        assert_eq!(engine.retention_calls(), vec![None]);
     }
 
     #[tokio::test]

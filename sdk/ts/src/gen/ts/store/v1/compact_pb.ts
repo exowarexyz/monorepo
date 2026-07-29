@@ -13,7 +13,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file store/v1/compact.proto.
  */
 export const file_store_v1_compact: GenFile = /*@__PURE__*/
-  fileDesc("ChZzdG9yZS92MS9jb21wYWN0LnByb3RvEhBzdG9yZS5jb21wYWN0LnYxIicKDVBvbGljeUdyb3VwQnkSFgoOY2FwdHVyZV9ncm91cHMYASADKAkiXwoNUG9saWN5T3JkZXJCeRIVCg1jYXB0dXJlX2dyb3VwGAEgASgJEjcKCGVuY29kaW5nGAIgASgOMiUuc3RvcmUuY29tcGFjdC52MS5Qb2xpY3lPcmRlckVuY29kaW5nIioKEFJldGFpbktlZXBMYXRlc3QSFgoFY291bnQYASABKARCB7pIBDICIAAiJgoRUmV0YWluR3JlYXRlclRoYW4SEQoJdGhyZXNob2xkGAEgASgEIi0KGFJldGFpbkdyZWF0ZXJUaGFuT3JFcXVhbBIRCgl0aHJlc2hvbGQYASABKAQiDwoNUmV0YWluRHJvcEFsbCKQAgoMUG9saWN5UmV0YWluEjkKC2tlZXBfbGF0ZXN0GAEgASgLMiIuc3RvcmUuY29tcGFjdC52MS5SZXRhaW5LZWVwTGF0ZXN0SAASOwoMZ3JlYXRlcl90aGFuGAIgASgLMiMuc3RvcmUuY29tcGFjdC52MS5SZXRhaW5HcmVhdGVyVGhhbkgAEksKFWdyZWF0ZXJfdGhhbl9vcl9lcXVhbBgDIAEoCzIqLnN0b3JlLmNvbXBhY3QudjEuUmV0YWluR3JlYXRlclRoYW5PckVxdWFsSAASMwoIZHJvcF9hbGwYBCABKAsyHy5zdG9yZS5jb21wYWN0LnYxLlJldGFpbkRyb3BBbGxIAEIGCgRraW5kIq0BCglLZXlzU2NvcGUSKAoIc2VsZWN0b3IYASABKAsyFi5jb21tb24ua3YudjEuU2VsZWN0b3ISMQoIZ3JvdXBfYnkYAiABKAsyHy5zdG9yZS5jb21wYWN0LnYxLlBvbGljeUdyb3VwQnkSNgoIb3JkZXJfYnkYAyABKAsyHy5zdG9yZS5jb21wYWN0LnYxLlBvbGljeU9yZGVyQnlIAIgBAUILCglfb3JkZXJfYnkiDwoNU2VxdWVuY2VTY29wZSKjAQoGUG9saWN5EisKBGtleXMYASABKAsyGy5zdG9yZS5jb21wYWN0LnYxLktleXNTY29wZUgAEjMKCHNlcXVlbmNlGAIgASgLMh8uc3RvcmUuY29tcGFjdC52MS5TZXF1ZW5jZVNjb3BlSAASLgoGcmV0YWluGAMgASgLMh4uc3RvcmUuY29tcGFjdC52MS5Qb2xpY3lSZXRhaW5CBwoFc2NvcGUiRAoMUHJ1bmVSZXF1ZXN0EjQKCHBvbGljaWVzGAEgAygLMhguc3RvcmUuY29tcGFjdC52MS5Qb2xpY3lCCLpIBZIBAggBIg8KDVBydW5lUmVzcG9uc2UqfgoTUG9saWN5T3JkZXJFbmNvZGluZxIjCh9QT0xJQ1lfT1JERVJfRU5DT0RJTkdfQllURVNfQVNDEAASIAocUE9MSUNZX09SREVSX0VOQ09ESU5HX1U2NF9CRRABEiAKHFBPTElDWV9PUkRFUl9FTkNPRElOR19JNjRfQkUQAjJTCgdTZXJ2aWNlEkgKBVBydW5lEh4uc3RvcmUuY29tcGFjdC52MS5QcnVuZVJlcXVlc3QaHy5zdG9yZS5jb21wYWN0LnYxLlBydW5lUmVzcG9uc2ViBnByb3RvMw", [file_buf_validate_validate, file_common_v1_kv]);
+  fileDesc("ChZzdG9yZS92MS9jb21wYWN0LnByb3RvEhBzdG9yZS5jb21wYWN0LnYxIicKDVBvbGljeUdyb3VwQnkSFgoOY2FwdHVyZV9ncm91cHMYASADKAkiXwoNUG9saWN5T3JkZXJCeRIVCg1jYXB0dXJlX2dyb3VwGAEgASgJEjcKCGVuY29kaW5nGAIgASgOMiUuc3RvcmUuY29tcGFjdC52MS5Qb2xpY3lPcmRlckVuY29kaW5nIioKEFJldGFpbktlZXBMYXRlc3QSFgoFY291bnQYASABKARCB7pIBDICIAAiJgoRUmV0YWluR3JlYXRlclRoYW4SEQoJdGhyZXNob2xkGAEgASgEIi0KGFJldGFpbkdyZWF0ZXJUaGFuT3JFcXVhbBIRCgl0aHJlc2hvbGQYASABKAQiDwoNUmV0YWluRHJvcEFsbCKQAgoMUG9saWN5UmV0YWluEjkKC2tlZXBfbGF0ZXN0GAEgASgLMiIuc3RvcmUuY29tcGFjdC52MS5SZXRhaW5LZWVwTGF0ZXN0SAASOwoMZ3JlYXRlcl90aGFuGAIgASgLMiMuc3RvcmUuY29tcGFjdC52MS5SZXRhaW5HcmVhdGVyVGhhbkgAEksKFWdyZWF0ZXJfdGhhbl9vcl9lcXVhbBgDIAEoCzIqLnN0b3JlLmNvbXBhY3QudjEuUmV0YWluR3JlYXRlclRoYW5PckVxdWFsSAASMwoIZHJvcF9hbGwYBCABKAsyHy5zdG9yZS5jb21wYWN0LnYxLlJldGFpbkRyb3BBbGxIAEIGCgRraW5kIq0BCglLZXlzU2NvcGUSKAoIc2VsZWN0b3IYASABKAsyFi5jb21tb24ua3YudjEuU2VsZWN0b3ISMQoIZ3JvdXBfYnkYAiABKAsyHy5zdG9yZS5jb21wYWN0LnYxLlBvbGljeUdyb3VwQnkSNgoIb3JkZXJfYnkYAyABKAsyHy5zdG9yZS5jb21wYWN0LnYxLlBvbGljeU9yZGVyQnlIAIgBAUILCglfb3JkZXJfYnkiYwoGUG9saWN5EikKBGtleXMYASABKAsyGy5zdG9yZS5jb21wYWN0LnYxLktleXNTY29wZRIuCgZyZXRhaW4YAyABKAsyHi5zdG9yZS5jb21wYWN0LnYxLlBvbGljeVJldGFpbiJECgxQcnVuZVJlcXVlc3QSNAoIcG9saWNpZXMYASADKAsyGC5zdG9yZS5jb21wYWN0LnYxLlBvbGljeUIIukgFkgECCAEiDwoNUHJ1bmVSZXNwb25zZSp+ChNQb2xpY3lPcmRlckVuY29kaW5nEiMKH1BPTElDWV9PUkRFUl9FTkNPRElOR19CWVRFU19BU0MQABIgChxQT0xJQ1lfT1JERVJfRU5DT0RJTkdfVTY0X0JFEAESIAocUE9MSUNZX09SREVSX0VOQ09ESU5HX0k2NF9CRRACMlMKB1NlcnZpY2USSAoFUHJ1bmUSHi5zdG9yZS5jb21wYWN0LnYxLlBydW5lUmVxdWVzdBofLnN0b3JlLmNvbXBhY3QudjEuUHJ1bmVSZXNwb25zZWIGcHJvdG8z", [file_buf_validate_validate, file_common_v1_kv]);
 
 /**
  * Controls how matched keys are partitioned into independent groups before
@@ -227,52 +227,16 @@ export const KeysScopeSchema: GenMessage<KeysScope> = /*@__PURE__*/
   messageDesc(file_store_v1_compact, 7);
 
 /**
- * Sequence-number scope: prune the per-batch sequence log served by the
- * store's `Stream` service. `selector` / `group_by` / `order_by` are not
- * meaningful here — the log has a single implicit ordering by sequence
- * number. The `retain` rule on the parent `Policy` is interpreted directly
- * over sequence numbers:
- *
- *   - `keep_latest { count: N }`        -> keep the last N batches
- *   - `greater_than { threshold: T }`   -> keep sequence numbers > T
- *   - `greater_than_or_equal { .. T }`  -> keep sequence numbers >= T
- *   - `drop_all`                        -> clear the log entirely
- *
- * @generated from message store.compact.v1.SequenceScope
- */
-export type SequenceScope = Message<"store.compact.v1.SequenceScope"> & {
-};
-
-/**
- * Describes the message store.compact.v1.SequenceScope.
- * Use `create(SequenceScopeSchema)` to create a new message.
- */
-export const SequenceScopeSchema: GenMessage<SequenceScope> = /*@__PURE__*/
-  messageDesc(file_store_v1_compact, 8);
-
-/**
- * A single prune policy. `scope` discriminates the keyspace the rule applies
- * to; `retain` is shared between scopes.
+ * A single prune policy: group keys via `keys`, then apply `retain` to decide
+ * which of them survive. `keys` is required.
  *
  * @generated from message store.compact.v1.Policy
  */
 export type Policy = Message<"store.compact.v1.Policy"> & {
   /**
-   * @generated from oneof store.compact.v1.Policy.scope
+   * @generated from field: store.compact.v1.KeysScope keys = 1;
    */
-  scope: {
-    /**
-     * @generated from field: store.compact.v1.KeysScope keys = 1;
-     */
-    value: KeysScope;
-    case: "keys";
-  } | {
-    /**
-     * @generated from field: store.compact.v1.SequenceScope sequence = 2;
-     */
-    value: SequenceScope;
-    case: "sequence";
-  } | { case: undefined; value?: undefined };
+  keys?: KeysScope;
 
   /**
    * @generated from field: store.compact.v1.PolicyRetain retain = 3;
@@ -285,7 +249,7 @@ export type Policy = Message<"store.compact.v1.Policy"> & {
  * Use `create(PolicySchema)` to create a new message.
  */
 export const PolicySchema: GenMessage<Policy> = /*@__PURE__*/
-  messageDesc(file_store_v1_compact, 9);
+  messageDesc(file_store_v1_compact, 8);
 
 /**
  * Request to execute prune policies.
@@ -307,7 +271,7 @@ export type PruneRequest = Message<"store.compact.v1.PruneRequest"> & {
  * Use `create(PruneRequestSchema)` to create a new message.
  */
 export const PruneRequestSchema: GenMessage<PruneRequest> = /*@__PURE__*/
-  messageDesc(file_store_v1_compact, 10);
+  messageDesc(file_store_v1_compact, 9);
 
 /**
  * Empty response returned on successful prune execution.
@@ -322,7 +286,7 @@ export type PruneResponse = Message<"store.compact.v1.PruneResponse"> & {
  * Use `create(PruneResponseSchema)` to create a new message.
  */
 export const PruneResponseSchema: GenMessage<PruneResponse> = /*@__PURE__*/
-  messageDesc(file_store_v1_compact, 11);
+  messageDesc(file_store_v1_compact, 10);
 
 /**
  * Interpretation of the order-by capture group bytes when comparing keys

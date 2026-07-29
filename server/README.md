@@ -25,8 +25,8 @@ default.
 use bytes::Bytes;
 use exoware_sdk::prune_policy::PrunePolicyDocument;
 use exoware_server::{
-    AppState, Log, Ingest, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Sequence,
-    StoreEngine, connect_stack,
+    AppState, Log, Ingest, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Retention,
+    Sequence, StoreEngine, connect_stack,
 };
 use std::future::Future;
 
@@ -49,4 +49,7 @@ use std::future::Future;
 //   Log:
 //   fn get_batch(&self, sequence_number: u64) -> impl Future<Output = Result<Option<Vec<(Bytes, Bytes)>>, String>> + Send + '_;
 //   fn oldest_retained_batch(&self) -> impl Future<Output = Result<Option<u64>, String>> + Send + '_;
+//
+//   Retention:
+//   fn set_retention(&self, policy: Option<RetentionPolicy>) -> impl Future<Output = Result<Option<u64>, String>> + Send + '_;
 ```

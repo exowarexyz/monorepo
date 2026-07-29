@@ -12,6 +12,7 @@ use bytes::Bytes;
 use exoware_sdk::common::kv::v1::Entry;
 use exoware_sdk::log::stream::v1::GetResponse as StreamGetResponse;
 use exoware_sdk::prune_policy::PrunePolicyDocument;
+use exoware_sdk::retention::RetentionPolicy;
 
 /// Backend-defined query metadata.
 ///
@@ -191,7 +192,17 @@ pub trait Log: Sequence {
     fn oldest_retained_batch(&self) -> impl Future<Output = Result<Option<u64>, String>> + Send;
 }
 
-/// Compatibility facade for backends that serve every store capability.
-pub trait StoreEngine: Ingest + Query + Prune + Log {}
+/// Sequence-log retention capability (`log.stream.v1` SetRetention).
+pub trait Retention: Send + Sync + 'static {
+    /// Persist and apply the retention rule; `None` clears it. Returns the oldest retained
+    /// sequence after one synchronous enforcement (`None` when the log is empty / no floor).
+    fn set_retention(
+        &self,
+        policy: Option<RetentionPolicy>,
+    ) -> impl Future<Output = Result<Option<u64>, String>> + Send;
+}
 
-impl<T: Ingest + Query + Prune + Log> StoreEngine for T {}
+/// Compatibility facade for backends that serve every store capability.
+pub trait StoreEngine: Ingest + Query + Prune + Log + Retention {}
+
+impl<T: Ingest + Query + Prune + Log + Retention> StoreEngine for T {}

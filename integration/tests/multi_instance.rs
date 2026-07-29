@@ -19,7 +19,7 @@ use exoware_sdk::keys::Key;
 use exoware_sdk::kv_codec::Utf8;
 use exoware_sdk::proto::PreferZstdHttpClient;
 use exoware_sdk::prune_policy::{
-    GroupBy, KeysScope, OrderBy, OrderEncoding, PolicyScope, PrunePolicy, RetainPolicy,
+    GroupBy, KeysScope, OrderBy, OrderEncoding, PrunePolicy, RetainPolicy,
 };
 use exoware_sdk::selector::Selector;
 use exoware_sdk::stream_filter::StreamFilter;
@@ -791,7 +791,7 @@ async fn prefixed_prune_composes_selector_and_prunes_cleanly() {
     // NOT the composed bytes. Scope/group_by/order_by/retain mirror
     // prune_contract.rs's version_policy_with_encoding.
     let policy = PrunePolicy {
-        scope: PolicyScope::Keys(KeysScope {
+        scope: KeysScope {
             selector: Selector {
                 prefix: Bytes::from(vec![0x07]),
                 payload_regex: Utf8::from(
@@ -805,7 +805,7 @@ async fn prefixed_prune_composes_selector_and_prunes_cleanly() {
                 capture_group: Utf8::from("version"),
                 encoding: OrderEncoding::U64Be,
             }),
-        }),
+        },
         retain: RetainPolicy::KeepLatest { count: 1 },
     };
 

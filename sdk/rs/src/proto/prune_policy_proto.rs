@@ -6,12 +6,12 @@
 use crate::common::kv::v1::Selector as ProtoSelector;
 use crate::kv_codec::Utf8;
 use crate::prune_policy::{
-    GroupBy, KeysScope, OrderBy, OrderEncoding, PolicyScope, PrunePolicy, PrunePolicyDocument,
-    RetainPolicy, PRUNE_POLICY_DOCUMENT_VERSION,
+    GroupBy, KeysScope, OrderBy, OrderEncoding, PrunePolicy, PrunePolicyDocument, RetainPolicy,
+    PRUNE_POLICY_DOCUMENT_VERSION,
 };
 use crate::selector::Selector;
 use crate::store::compact::v1::{
-    policy, policy_retain, KeysScope as ProtoKeysScope, Policy as ProtoPolicy, PolicyOrderBy,
+    policy_retain, KeysScope as ProtoKeysScope, Policy as ProtoPolicy, PolicyOrderBy,
     PolicyOrderEncoding, PruneRequestView,
 };
 use buffa::MessageView;
@@ -94,13 +94,10 @@ fn keys_scope_from_proto(s: &ProtoKeysScope) -> Result<KeysScope, String> {
 }
 
 pub fn parse_prune_policy_from_proto(p: &ProtoPolicy) -> Result<PrunePolicy, String> {
-    let Some(scope_proto) = p.scope.as_ref() else {
-        return Err("prune policy scope is required".to_string());
+    let Some(keys) = p.keys.as_option() else {
+        return Err("prune policy keys scope is required".to_string());
     };
-    let scope = match scope_proto {
-        policy::Scope::Keys(keys) => PolicyScope::Keys(keys_scope_from_proto(keys)?),
-        policy::Scope::Sequence(_) => PolicyScope::Sequence,
-    };
+    let scope = keys_scope_from_proto(keys)?;
 
     let Some(retain_proto) = p.retain.as_option() else {
         return Err("prune policy retain is required".to_string());
@@ -187,18 +184,13 @@ fn prune_policy_to_proto(p: &PrunePolicy) -> crate::store::compact::v1::Policy {
         RetainPolicy::DropAll => policy_retain::Kind::DropAll(Box::default()),
     };
 
-    let scope = match &p.scope {
-        PolicyScope::Keys(s) => policy::Scope::Keys(Box::new(keys_scope_to_proto(s))),
-        PolicyScope::Sequence => policy::Scope::Sequence(Box::default()),
-    };
-
     Policy {
         retain: Some(PolicyRetain {
             kind: Some(retain_kind),
             ..Default::default()
         })
         .into(),
-        scope: Some(scope),
+        keys: Some(keys_scope_to_proto(&p.scope)).into(),
         ..Default::default()
     }
 }
@@ -245,7 +237,7 @@ mod tests {
     #[test]
     fn owned_proto_policy_round_trips_to_domain_policy() {
         let expected = PrunePolicy {
-            scope: PolicyScope::Keys(KeysScope {
+            scope: KeysScope {
                 selector: Selector {
                     prefix: bytes::Bytes::copy_from_slice(&[1]),
                     payload_regex: Utf8::from("(?s)^(?P<logical>.*)-(?P<version>.{8})$"),
@@ -257,7 +249,7 @@ mod tests {
                     capture_group: Utf8::from("version"),
                     encoding: OrderEncoding::U64Be,
                 }),
-            }),
+            },
             retain: RetainPolicy::KeepLatest { count: 2 },
         };
         let proto = prune_policies_to_proto(std::slice::from_ref(&expected))
@@ -275,7 +267,19 @@ mod tests {
         use buffa::Message as _;
 
         let invalid = PrunePolicy {
-            scope: PolicyScope::Sequence,
+            scope: KeysScope {
+                selector: Selector {
+                    prefix: bytes::Bytes::copy_from_slice(&[1]),
+                    payload_regex: Utf8::from("(?s)^(?P<logical>.*)-(?P<version>.{8})$"),
+                },
+                group_by: GroupBy {
+                    capture_groups: vec![Utf8::from("logical")],
+                },
+                order_by: Some(OrderBy {
+                    capture_group: Utf8::from("version"),
+                    encoding: OrderEncoding::U64Be,
+                }),
+            },
             retain: RetainPolicy::KeepLatest { count: 0 },
         };
         let request = crate::store::compact::v1::PruneRequest {

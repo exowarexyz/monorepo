@@ -1655,136 +1655,24 @@ pub const __KEYS_SCOPE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa:
     from_json: ::buffa::type_registry::any_from_json::<KeysScope>,
     is_wkt: false,
 };
-/// Sequence-number scope: prune the per-batch sequence log served by the
-/// store's `Stream` service. `selector` / `group_by` / `order_by` are not
-/// meaningful here — the log has a single implicit ordering by sequence
-/// number. The `retain` rule on the parent `Policy` is interpreted directly
-/// over sequence numbers:
-///
-///   - `keep_latest { count: N }`        -\> keep the last N batches
-///   - `greater_than { threshold: T }`   -\> keep sequence numbers \> T
-///   - `greater_than_or_equal { .. T }`  -\> keep sequence numbers \>= T
-///   - `drop_all`                        -\> clear the log entirely
+/// A single prune policy: group keys via `keys`, then apply `retain` to decide
+/// which of them survive. `keys` is required.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
-pub struct SequenceScope {
-    #[serde(skip)]
-    #[doc(hidden)]
-    pub __buffa_unknown_fields: ::buffa::UnknownFields,
-}
-impl ::core::fmt::Debug for SequenceScope {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("SequenceScope").finish()
-    }
-}
-impl SequenceScope {
-    /// Protobuf type URL for this message, for use with `Any::pack` and
-    /// `Any::unpack_if`.
-    ///
-    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.SequenceScope";
-}
-impl ::buffa::DefaultInstance for SequenceScope {
-    fn default_instance() -> &'static Self {
-        static VALUE: ::buffa::__private::OnceBox<SequenceScope> = ::buffa::__private::OnceBox::new();
-        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
-    }
-}
-impl ::buffa::MessageName for SequenceScope {
-    const PACKAGE: &'static str = "store.compact.v1";
-    const NAME: &'static str = "SequenceScope";
-    const FULL_NAME: &'static str = "store.compact.v1.SequenceScope";
-    const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.SequenceScope";
-}
-impl ::buffa::Message for SequenceScope {
-    /// Returns the total encoded size in bytes.
-    ///
-    /// The result is a `u32`; the protobuf specification requires all
-    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
-    /// compliant message will never overflow this type.
-    #[allow(clippy::let_and_return)]
-    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
-        #[allow(unused_imports)]
-        use ::buffa::Enumeration as _;
-        let mut size = 0u32;
-        size += self.__buffa_unknown_fields.encoded_len() as u32;
-        size
-    }
-    fn write_to(
-        &self,
-        _cache: &mut ::buffa::SizeCache,
-        buf: &mut impl ::buffa::bytes::BufMut,
-    ) {
-        #[allow(unused_imports)]
-        use ::buffa::Enumeration as _;
-        self.__buffa_unknown_fields.write_to(buf);
-    }
-    fn merge_field(
-        &mut self,
-        tag: ::buffa::encoding::Tag,
-        buf: &mut impl ::buffa::bytes::Buf,
-        depth: u32,
-    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
-        #[allow(unused_imports)]
-        use ::buffa::bytes::Buf as _;
-        #[allow(unused_imports)]
-        use ::buffa::Enumeration as _;
-        match tag.field_number() {
-            _ => {
-                self.__buffa_unknown_fields
-                    .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
-            }
-        }
-        ::core::result::Result::Ok(())
-    }
-    fn clear(&mut self) {
-        self.__buffa_unknown_fields.clear();
-    }
-}
-impl ::buffa::ExtensionSet for SequenceScope {
-    const PROTO_FQN: &'static str = "store.compact.v1.SequenceScope";
-    fn unknown_fields(&self) -> &::buffa::UnknownFields {
-        &self.__buffa_unknown_fields
-    }
-    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
-        &mut self.__buffa_unknown_fields
-    }
-}
-impl ::buffa::json_helpers::ProtoElemJson for SequenceScope {
-    fn serialize_proto_json<S: ::serde::Serializer>(
-        v: &Self,
-        s: S,
-    ) -> ::core::result::Result<S::Ok, S::Error> {
-        ::serde::Serialize::serialize(v, s)
-    }
-    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
-        d: D,
-    ) -> ::core::result::Result<Self, D::Error> {
-        <Self as ::serde::Deserialize>::deserialize(d)
-    }
-}
-#[doc(hidden)]
-pub const __SEQUENCE_SCOPE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.compact.v1.SequenceScope",
-    to_json: ::buffa::type_registry::any_to_json::<SequenceScope>,
-    from_json: ::buffa::type_registry::any_from_json::<SequenceScope>,
-    is_wkt: false,
-};
-/// A single prune policy. `scope` discriminates the keyspace the rule applies
-/// to; `retain` is shared between scopes.
-#[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize)]
-#[serde(default)]
 pub struct Policy {
+    /// Field 1: `keys`
+    #[serde(
+        rename = "keys",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
+    )]
+    pub keys: ::buffa::MessageField<KeysScope>,
     /// Field 3: `retain`
     #[serde(
         rename = "retain",
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
     )]
     pub retain: ::buffa::MessageField<PolicyRetain>,
-    #[serde(flatten)]
-    pub scope: ::core::option::Option<__buffa::oneof::policy::Scope>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -1792,8 +1680,8 @@ pub struct Policy {
 impl ::core::fmt::Debug for Policy {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         f.debug_struct("Policy")
+            .field("keys", &self.keys)
             .field("retain", &self.retain)
-            .field("scope", &self.scope)
             .finish()
     }
 }
@@ -1827,25 +1715,13 @@ impl ::buffa::Message for Policy {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
-        if let ::core::option::Option::Some(ref v) = self.scope {
-            match v {
-                __buffa::oneof::policy::Scope::Keys(x) => {
-                    let __slot = __cache.reserve();
-                    let inner = x.compute_size(__cache);
-                    __cache.set(__slot, inner);
-                    size
-                        += 1u32 + ::buffa::encoding::varint_len(inner as u64) as u32
-                            + inner;
-                }
-                __buffa::oneof::policy::Scope::Sequence(x) => {
-                    let __slot = __cache.reserve();
-                    let inner = x.compute_size(__cache);
-                    __cache.set(__slot, inner);
-                    size
-                        += 1u32 + ::buffa::encoding::varint_len(inner as u64) as u32
-                            + inner;
-                }
-            }
+        if self.keys.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.keys.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
+                    + inner_size;
         }
         if self.retain.is_set() {
             let __slot = __cache.reserve();
@@ -1865,27 +1741,14 @@ impl ::buffa::Message for Policy {
     ) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if let ::core::option::Option::Some(ref v) = self.scope {
-            match v {
-                __buffa::oneof::policy::Scope::Keys(x) => {
-                    ::buffa::encoding::Tag::new(
-                            1u32,
-                            ::buffa::encoding::WireType::LengthDelimited,
-                        )
-                        .encode(buf);
-                    ::buffa::encoding::encode_varint(__cache.consume_next() as u64, buf);
-                    x.write_to(__cache, buf);
-                }
-                __buffa::oneof::policy::Scope::Sequence(x) => {
-                    ::buffa::encoding::Tag::new(
-                            2u32,
-                            ::buffa::encoding::WireType::LengthDelimited,
-                        )
-                        .encode(buf);
-                    ::buffa::encoding::encode_varint(__cache.consume_next() as u64, buf);
-                    x.write_to(__cache, buf);
-                }
-            }
+        if self.keys.is_set() {
+            ::buffa::encoding::Tag::new(
+                    1u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::encoding::encode_varint(__cache.consume_next() as u64, buf);
+            self.keys.write_to(__cache, buf);
         }
         if self.retain.is_set() {
             ::buffa::encoding::Tag::new(
@@ -1917,51 +1780,11 @@ impl ::buffa::Message for Policy {
                         actual: tag.wire_type() as u8,
                     });
                 }
-                if let ::core::option::Option::Some(
-                    __buffa::oneof::policy::Scope::Keys(ref mut existing),
-                ) = self.scope
-                {
-                    ::buffa::Message::merge_length_delimited(
-                        &mut **existing,
-                        buf,
-                        depth,
-                    )?;
-                } else {
-                    let mut val = ::core::default::Default::default();
-                    ::buffa::Message::merge_length_delimited(&mut val, buf, depth)?;
-                    self.scope = ::core::option::Option::Some(
-                        __buffa::oneof::policy::Scope::Keys(
-                            ::buffa::alloc::boxed::Box::new(val),
-                        ),
-                    );
-                }
-            }
-            2u32 => {
-                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
-                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                        field_number: 2u32,
-                        expected: 2u8,
-                        actual: tag.wire_type() as u8,
-                    });
-                }
-                if let ::core::option::Option::Some(
-                    __buffa::oneof::policy::Scope::Sequence(ref mut existing),
-                ) = self.scope
-                {
-                    ::buffa::Message::merge_length_delimited(
-                        &mut **existing,
-                        buf,
-                        depth,
-                    )?;
-                } else {
-                    let mut val = ::core::default::Default::default();
-                    ::buffa::Message::merge_length_delimited(&mut val, buf, depth)?;
-                    self.scope = ::core::option::Option::Some(
-                        __buffa::oneof::policy::Scope::Sequence(
-                            ::buffa::alloc::boxed::Box::new(val),
-                        ),
-                    );
-                }
+                ::buffa::Message::merge_length_delimited(
+                    self.keys.get_or_insert_default(),
+                    buf,
+                    depth,
+                )?;
             }
             3u32 => {
                 if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
@@ -1985,7 +1808,7 @@ impl ::buffa::Message for Policy {
         ::core::result::Result::Ok(())
     }
     fn clear(&mut self) {
-        self.scope = ::core::option::Option::None;
+        self.keys = ::buffa::MessageField::none();
         self.retain = ::buffa::MessageField::none();
         self.__buffa_unknown_fields.clear();
     }
@@ -1997,98 +1820,6 @@ impl ::buffa::ExtensionSet for Policy {
     }
     fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
         &mut self.__buffa_unknown_fields
-    }
-}
-impl<'de> serde::Deserialize<'de> for Policy {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        d: D,
-    ) -> ::core::result::Result<Self, D::Error> {
-        struct _V;
-        impl<'de> serde::de::Visitor<'de> for _V {
-            type Value = Policy;
-            fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                f.write_str("struct Policy")
-            }
-            #[allow(clippy::field_reassign_with_default)]
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> ::core::result::Result<Policy, A::Error> {
-                let mut __f_retain: ::core::option::Option<
-                    ::buffa::MessageField<PolicyRetain>,
-                > = None;
-                let mut __oneof_scope: ::core::option::Option<
-                    __buffa::oneof::policy::Scope,
-                > = None;
-                while let Some(key) = map.next_key::<::buffa::alloc::string::String>()? {
-                    match key.as_str() {
-                        "retain" => {
-                            __f_retain = Some(
-                                map.next_value::<::buffa::MessageField<PolicyRetain>>()?,
-                            );
-                        }
-                        "keys" => {
-                            let v: ::core::option::Option<KeysScope> = map
-                                .next_value_seed(
-                                    ::buffa::json_helpers::NullableDeserializeSeed(
-                                        ::buffa::json_helpers::DefaultDeserializeSeed::<
-                                            KeysScope,
-                                        >::new(),
-                                    ),
-                                )?;
-                            if let Some(v) = v {
-                                if __oneof_scope.is_some() {
-                                    return Err(
-                                        serde::de::Error::custom(
-                                            "multiple oneof fields set for 'scope'",
-                                        ),
-                                    );
-                                }
-                                __oneof_scope = Some(
-                                    __buffa::oneof::policy::Scope::Keys(
-                                        ::buffa::alloc::boxed::Box::new(v),
-                                    ),
-                                );
-                            }
-                        }
-                        "sequence" => {
-                            let v: ::core::option::Option<SequenceScope> = map
-                                .next_value_seed(
-                                    ::buffa::json_helpers::NullableDeserializeSeed(
-                                        ::buffa::json_helpers::DefaultDeserializeSeed::<
-                                            SequenceScope,
-                                        >::new(),
-                                    ),
-                                )?;
-                            if let Some(v) = v {
-                                if __oneof_scope.is_some() {
-                                    return Err(
-                                        serde::de::Error::custom(
-                                            "multiple oneof fields set for 'scope'",
-                                        ),
-                                    );
-                                }
-                                __oneof_scope = Some(
-                                    __buffa::oneof::policy::Scope::Sequence(
-                                        ::buffa::alloc::boxed::Box::new(v),
-                                    ),
-                                );
-                            }
-                        }
-                        _ => {
-                            map.next_value::<serde::de::IgnoredAny>()?;
-                        }
-                    }
-                }
-                let mut __r = <Policy as ::core::default::Default>::default();
-                if let ::core::option::Option::Some(v) = __f_retain {
-                    __r.retain = v;
-                }
-                __r.scope = __oneof_scope;
-                Ok(__r)
-            }
-        }
-        d.deserialize_map(_V)
     }
 }
 impl ::buffa::json_helpers::ProtoElemJson for Policy {
@@ -2111,14 +1842,6 @@ pub const __POLICY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::typ
     from_json: ::buffa::type_registry::any_from_json::<Policy>,
     is_wkt: false,
 };
-pub mod policy {
-    #[allow(unused_imports)]
-    use super::*;
-    #[doc(inline)]
-    pub use super::__buffa::oneof::policy::Scope;
-    #[doc(inline)]
-    pub use super::__buffa::view::oneof::policy::Scope as ScopeView;
-}
 /// Request to execute prune policies.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
@@ -4354,178 +4077,17 @@ pub mod __buffa {
                 this
             }
         }
-        /// Sequence-number scope: prune the per-batch sequence log served by the
-        /// store's `Stream` service. `selector` / `group_by` / `order_by` are not
-        /// meaningful here — the log has a single implicit ordering by sequence
-        /// number. The `retain` rule on the parent `Policy` is interpreted directly
-        /// over sequence numbers:
-        ///
-        ///   - `keep_latest { count: N }`        -\> keep the last N batches
-        ///   - `greater_than { threshold: T }`   -\> keep sequence numbers \> T
-        ///   - `greater_than_or_equal { .. T }`  -\> keep sequence numbers \>= T
-        ///   - `drop_all`                        -\> clear the log entirely
-        #[derive(Clone, Debug, Default)]
-        pub struct SequenceScopeView<'a> {
-            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
-        }
-        impl<'a> SequenceScopeView<'a> {
-            /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
-            ///
-            /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
-            /// and by generated sub-message decode arms with `depth - 1`.
-            ///
-            /// **Not part of the public API.** Named with a leading underscore to
-            /// signal that it is for generated-code use only.
-            #[doc(hidden)]
-            pub fn _decode_depth(
-                buf: &'a [u8],
-                depth: u32,
-            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
-                let mut view = Self::default();
-                view._merge_into_view(buf, depth)?;
-                ::core::result::Result::Ok(view)
-            }
-            /// Merge fields from `buf` into this view (proto merge semantics).
-            ///
-            /// Repeated fields append; singular fields last-wins; singular
-            /// MESSAGE fields merge recursively. Used by sub-message decode
-            /// arms when the same field appears multiple times on the wire.
-            ///
-            /// **Not part of the public API.**
-            #[doc(hidden)]
-            pub fn _merge_into_view(
-                &mut self,
-                buf: &'a [u8],
-                depth: u32,
-            ) -> ::core::result::Result<(), ::buffa::DecodeError> {
-                let _ = depth;
-                #[allow(unused_variables)]
-                let view = self;
-                let mut cur: &'a [u8] = buf;
-                while !cur.is_empty() {
-                    let before_tag = cur;
-                    let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
-                    match tag.field_number() {
-                        _ => {
-                            ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
-                            let span_len = before_tag.len() - cur.len();
-                            view.__buffa_unknown_fields
-                                .push_raw(&before_tag[..span_len]);
-                        }
-                    }
-                }
-                ::core::result::Result::Ok(())
-            }
-        }
-        impl<'a> ::buffa::MessageView<'a> for SequenceScopeView<'a> {
-            type Owned = super::super::SequenceScope;
-            fn decode_view(
-                buf: &'a [u8],
-            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
-                Self::_decode_depth(buf, ::buffa::RECURSION_LIMIT)
-            }
-            fn decode_view_with_limit(
-                buf: &'a [u8],
-                depth: u32,
-            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
-                Self::_decode_depth(buf, depth)
-            }
-            fn to_owned_message(&self) -> super::super::SequenceScope {
-                self.to_owned_from_source(None)
-            }
-            #[allow(clippy::useless_conversion, clippy::needless_update)]
-            fn to_owned_from_source(
-                &self,
-                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
-            ) -> super::super::SequenceScope {
-                #[allow(unused_imports)]
-                use ::buffa::alloc::string::ToString as _;
-                let _ = __buffa_src;
-                super::super::SequenceScope {
-                    __buffa_unknown_fields: self
-                        .__buffa_unknown_fields
-                        .to_owned()
-                        .unwrap_or_default()
-                        .into(),
-                    ..::core::default::Default::default()
-                }
-            }
-        }
-        impl<'a> ::buffa::ViewEncode<'a> for SequenceScopeView<'a> {
-            #[allow(clippy::needless_borrow, clippy::let_and_return)]
-            fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
-                #[allow(unused_imports)]
-                use ::buffa::Enumeration as _;
-                let mut size = 0u32;
-                size += self.__buffa_unknown_fields.encoded_len() as u32;
-                size
-            }
-            #[allow(clippy::needless_borrow)]
-            fn write_to(
-                &self,
-                _cache: &mut ::buffa::SizeCache,
-                buf: &mut impl ::buffa::bytes::BufMut,
-            ) {
-                #[allow(unused_imports)]
-                use ::buffa::Enumeration as _;
-                self.__buffa_unknown_fields.write_to(buf);
-            }
-        }
-        /// Serializes this view as protobuf JSON.
-        ///
-        /// Implicit-presence fields with default values are omitted, `required`
-        /// fields are always emitted, explicit-presence (`optional`) fields are
-        /// emitted only when set, bytes fields are base64-encoded, and enum
-        /// values are their proto name strings.
-        ///
-        /// This impl uses `serialize_map(None)` because the number of emitted
-        /// fields depends on default-omission rules; serializers that require
-        /// known map lengths (e.g. `bincode`) will return a runtime error.
-        /// Use the owned message type for those formats.
-        impl<'__a> ::serde::Serialize for SequenceScopeView<'__a> {
-            fn serialize<__S: ::serde::Serializer>(
-                &self,
-                __s: __S,
-            ) -> ::core::result::Result<__S::Ok, __S::Error> {
-                use ::serde::ser::SerializeMap as _;
-                let mut __map = __s.serialize_map(::core::option::Option::None)?;
-                __map.end()
-            }
-        }
-        impl<'a> ::buffa::MessageName for SequenceScopeView<'a> {
-            const PACKAGE: &'static str = "store.compact.v1";
-            const NAME: &'static str = "SequenceScope";
-            const FULL_NAME: &'static str = "store.compact.v1.SequenceScope";
-            const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.SequenceScope";
-        }
-        impl<'v> ::buffa::DefaultViewInstance for SequenceScopeView<'v> {
-            fn default_view_instance<'a>() -> &'a Self
-            where
-                Self: 'a,
-            {
-                static VALUE: ::buffa::__private::OnceBox<SequenceScopeView<'static>> = ::buffa::__private::OnceBox::new();
-                VALUE
-                    .get_or_init(|| ::buffa::alloc::boxed::Box::new(
-                        <SequenceScopeView<'static>>::default(),
-                    ))
-            }
-        }
-        impl ::buffa::ViewReborrow for SequenceScopeView<'static> {
-            type Reborrowed<'b> = SequenceScopeView<'b>;
-            fn reborrow<'b>(this: &'b Self) -> &'b Self::Reborrowed<'b> {
-                this
-            }
-        }
-        /// A single prune policy. `scope` discriminates the keyspace the rule applies
-        /// to; `retain` is shared between scopes.
+        /// A single prune policy: group keys via `keys`, then apply `retain` to decide
+        /// which of them survive. `keys` is required.
         #[derive(Clone, Debug, Default)]
         pub struct PolicyView<'a> {
+            /// Field 1: `keys`
+            pub keys: ::buffa::MessageFieldView<
+                super::super::__buffa::view::KeysScopeView<'a>,
+            >,
             /// Field 3: `retain`
             pub retain: ::buffa::MessageFieldView<
                 super::super::__buffa::view::PolicyRetainView<'a>,
-            >,
-            pub scope: ::core::option::Option<
-                super::super::__buffa::view::oneof::policy::Scope<'a>,
             >,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
@@ -4567,6 +4129,32 @@ pub mod __buffa {
                     let before_tag = cur;
                     let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
                     match tag.field_number() {
+                        1u32 => {
+                            if tag.wire_type()
+                                != ::buffa::encoding::WireType::LengthDelimited
+                            {
+                                return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                                    field_number: 1u32,
+                                    expected: 2u8,
+                                    actual: tag.wire_type() as u8,
+                                });
+                            }
+                            if depth == 0 {
+                                return Err(::buffa::DecodeError::RecursionLimitExceeded);
+                            }
+                            let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                            match view.keys.as_mut() {
+                                Some(existing) => existing._merge_into_view(sub, depth - 1)?,
+                                None => {
+                                    view.keys = ::buffa::MessageFieldView::set(
+                                        super::super::__buffa::view::KeysScopeView::_decode_depth(
+                                            sub,
+                                            depth - 1,
+                                        )?,
+                                    );
+                                }
+                            }
+                        }
                         3u32 => {
                             if tag.wire_type()
                                 != ::buffa::encoding::WireType::LengthDelimited
@@ -4591,74 +4179,6 @@ pub mod __buffa {
                                         )?,
                                     );
                                 }
-                            }
-                        }
-                        1u32 => {
-                            if tag.wire_type()
-                                != ::buffa::encoding::WireType::LengthDelimited
-                            {
-                                return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                                    field_number: 1u32,
-                                    expected: 2u8,
-                                    actual: tag.wire_type() as u8,
-                                });
-                            }
-                            if depth == 0 {
-                                return Err(::buffa::DecodeError::RecursionLimitExceeded);
-                            }
-                            let sub = ::buffa::types::borrow_bytes(&mut cur)?;
-                            if let Some(
-                                super::super::__buffa::view::oneof::policy::Scope::Keys(
-                                    ref mut existing,
-                                ),
-                            ) = view.scope
-                            {
-                                existing._merge_into_view(sub, depth - 1)?;
-                            } else {
-                                view.scope = Some(
-                                    super::super::__buffa::view::oneof::policy::Scope::Keys(
-                                        ::buffa::alloc::boxed::Box::new(
-                                            super::super::__buffa::view::KeysScopeView::_decode_depth(
-                                                sub,
-                                                depth - 1,
-                                            )?,
-                                        ),
-                                    ),
-                                );
-                            }
-                        }
-                        2u32 => {
-                            if tag.wire_type()
-                                != ::buffa::encoding::WireType::LengthDelimited
-                            {
-                                return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                                    field_number: 2u32,
-                                    expected: 2u8,
-                                    actual: tag.wire_type() as u8,
-                                });
-                            }
-                            if depth == 0 {
-                                return Err(::buffa::DecodeError::RecursionLimitExceeded);
-                            }
-                            let sub = ::buffa::types::borrow_bytes(&mut cur)?;
-                            if let Some(
-                                super::super::__buffa::view::oneof::policy::Scope::Sequence(
-                                    ref mut existing,
-                                ),
-                            ) = view.scope
-                            {
-                                existing._merge_into_view(sub, depth - 1)?;
-                            } else {
-                                view.scope = Some(
-                                    super::super::__buffa::view::oneof::policy::Scope::Sequence(
-                                        ::buffa::alloc::boxed::Box::new(
-                                            super::super::__buffa::view::SequenceScopeView::_decode_depth(
-                                                sub,
-                                                depth - 1,
-                                            )?,
-                                        ),
-                                    ),
-                                );
                             }
                         }
                         _ => {
@@ -4697,6 +4217,14 @@ pub mod __buffa {
                 use ::buffa::alloc::string::ToString as _;
                 let _ = __buffa_src;
                 super::super::Policy {
+                    keys: match self.keys.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::KeysScope,
+                            >::some(v.to_owned_from_source(__buffa_src))
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
                     retain: match self.retain.as_option() {
                         Some(v) => {
                             ::buffa::MessageField::<
@@ -4705,29 +4233,6 @@ pub mod __buffa {
                         }
                         None => ::buffa::MessageField::none(),
                     },
-                    scope: self
-                        .scope
-                        .as_ref()
-                        .map(|v| match v {
-                            super::super::__buffa::view::oneof::policy::Scope::Keys(
-                                v,
-                            ) => {
-                                super::super::__buffa::oneof::policy::Scope::Keys(
-                                    ::buffa::alloc::boxed::Box::new(
-                                        v.to_owned_from_source(__buffa_src),
-                                    ),
-                                )
-                            }
-                            super::super::__buffa::view::oneof::policy::Scope::Sequence(
-                                v,
-                            ) => {
-                                super::super::__buffa::oneof::policy::Scope::Sequence(
-                                    ::buffa::alloc::boxed::Box::new(
-                                        v.to_owned_from_source(__buffa_src),
-                                    ),
-                                )
-                            }
-                        }),
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields
                         .to_owned()
@@ -4743,27 +4248,13 @@ pub mod __buffa {
                 #[allow(unused_imports)]
                 use ::buffa::Enumeration as _;
                 let mut size = 0u32;
-                if let ::core::option::Option::Some(ref v) = self.scope {
-                    match v {
-                        super::super::__buffa::view::oneof::policy::Scope::Keys(x) => {
-                            let __slot = __cache.reserve();
-                            let inner = x.compute_size(__cache);
-                            __cache.set(__slot, inner);
-                            size
-                                += 1u32 + ::buffa::encoding::varint_len(inner as u64) as u32
-                                    + inner;
-                        }
-                        super::super::__buffa::view::oneof::policy::Scope::Sequence(
-                            x,
-                        ) => {
-                            let __slot = __cache.reserve();
-                            let inner = x.compute_size(__cache);
-                            __cache.set(__slot, inner);
-                            size
-                                += 1u32 + ::buffa::encoding::varint_len(inner as u64) as u32
-                                    + inner;
-                        }
-                    }
+                if self.keys.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.keys.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
+                            + inner_size;
                 }
                 if self.retain.is_set() {
                     let __slot = __cache.reserve();
@@ -4784,35 +4275,14 @@ pub mod __buffa {
             ) {
                 #[allow(unused_imports)]
                 use ::buffa::Enumeration as _;
-                if let ::core::option::Option::Some(ref v) = self.scope {
-                    match v {
-                        super::super::__buffa::view::oneof::policy::Scope::Keys(x) => {
-                            ::buffa::encoding::Tag::new(
-                                    1u32,
-                                    ::buffa::encoding::WireType::LengthDelimited,
-                                )
-                                .encode(buf);
-                            ::buffa::encoding::encode_varint(
-                                __cache.consume_next() as u64,
-                                buf,
-                            );
-                            x.write_to(__cache, buf);
-                        }
-                        super::super::__buffa::view::oneof::policy::Scope::Sequence(
-                            x,
-                        ) => {
-                            ::buffa::encoding::Tag::new(
-                                    2u32,
-                                    ::buffa::encoding::WireType::LengthDelimited,
-                                )
-                                .encode(buf);
-                            ::buffa::encoding::encode_varint(
-                                __cache.consume_next() as u64,
-                                buf,
-                            );
-                            x.write_to(__cache, buf);
-                        }
-                    }
+                if self.keys.is_set() {
+                    ::buffa::encoding::Tag::new(
+                            1u32,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )
+                        .encode(buf);
+                    ::buffa::encoding::encode_varint(__cache.consume_next() as u64, buf);
+                    self.keys.write_to(__cache, buf);
                 }
                 if self.retain.is_set() {
                     ::buffa::encoding::Tag::new(
@@ -4845,20 +4315,13 @@ pub mod __buffa {
                 use ::serde::ser::SerializeMap as _;
                 let mut __map = __s.serialize_map(::core::option::Option::None)?;
                 {
-                    if let ::core::option::Option::Some(__v) = self.retain.as_option() {
-                        __map.serialize_entry("retain", __v)?;
+                    if let ::core::option::Option::Some(__v) = self.keys.as_option() {
+                        __map.serialize_entry("keys", __v)?;
                     }
                 }
-                if let ::core::option::Option::Some(ref __ov) = self.scope {
-                    match __ov {
-                        super::super::__buffa::view::oneof::policy::Scope::Keys(v) => {
-                            __map.serialize_entry("keys", v)?;
-                        }
-                        super::super::__buffa::view::oneof::policy::Scope::Sequence(
-                            v,
-                        ) => {
-                            __map.serialize_entry("sequence", v)?;
-                        }
+                {
+                    if let ::core::option::Option::Some(__v) = self.retain.as_option() {
+                        __map.serialize_entry("retain", __v)?;
                     }
                 }
                 __map.end()
@@ -5287,25 +4750,6 @@ pub mod __buffa {
                     ),
                 }
             }
-            pub mod policy {
-                #[allow(unused_imports)]
-                use super::*;
-                #[derive(Clone, Debug)]
-                pub enum Scope<'a> {
-                    Keys(
-                        ::buffa::alloc::boxed::Box<
-                            super::super::super::super::__buffa::view::KeysScopeView<'a>,
-                        >,
-                    ),
-                    Sequence(
-                        ::buffa::alloc::boxed::Box<
-                            super::super::super::super::__buffa::view::SequenceScopeView<
-                                'a,
-                            >,
-                        >,
-                    ),
-                }
-            }
         }
     }
     pub mod oneof {
@@ -5399,55 +4843,6 @@ pub mod __buffa {
                 }
             }
         }
-        pub mod policy {
-            #[allow(unused_imports)]
-            use super::*;
-            #[derive(Clone, PartialEq, Debug)]
-            pub enum Scope {
-                Keys(::buffa::alloc::boxed::Box<super::super::super::KeysScope>),
-                Sequence(::buffa::alloc::boxed::Box<super::super::super::SequenceScope>),
-            }
-            impl ::buffa::Oneof for Scope {}
-            impl From<super::super::super::KeysScope> for Scope {
-                fn from(v: super::super::super::KeysScope) -> Self {
-                    Self::Keys(::buffa::alloc::boxed::Box::new(v))
-                }
-            }
-            impl From<super::super::super::KeysScope> for ::core::option::Option<Scope> {
-                fn from(v: super::super::super::KeysScope) -> Self {
-                    Self::Some(Scope::from(v))
-                }
-            }
-            impl From<super::super::super::SequenceScope> for Scope {
-                fn from(v: super::super::super::SequenceScope) -> Self {
-                    Self::Sequence(::buffa::alloc::boxed::Box::new(v))
-                }
-            }
-            impl From<super::super::super::SequenceScope>
-            for ::core::option::Option<Scope> {
-                fn from(v: super::super::super::SequenceScope) -> Self {
-                    Self::Some(Scope::from(v))
-                }
-            }
-            impl serde::Serialize for Scope {
-                fn serialize<S: serde::Serializer>(
-                    &self,
-                    s: S,
-                ) -> ::core::result::Result<S::Ok, S::Error> {
-                    use serde::ser::SerializeMap;
-                    let mut map = s.serialize_map(Some(1))?;
-                    match self {
-                        Self::Keys(v) => {
-                            map.serialize_entry("keys", v)?;
-                        }
-                        Self::Sequence(v) => {
-                            map.serialize_entry("sequence", v)?;
-                        }
-                    }
-                    map.end()
-                }
-            }
-        }
     }
 }
 #[doc(inline)]
@@ -5466,8 +4861,6 @@ pub use self::__buffa::view::RetainDropAllView;
 pub use self::__buffa::view::PolicyRetainView;
 #[doc(inline)]
 pub use self::__buffa::view::KeysScopeView;
-#[doc(inline)]
-pub use self::__buffa::view::SequenceScopeView;
 #[doc(inline)]
 pub use self::__buffa::view::PolicyView;
 #[doc(inline)]

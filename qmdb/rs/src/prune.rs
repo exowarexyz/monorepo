@@ -1,6 +1,6 @@
 use exoware_sdk::kv_codec::Utf8;
 use exoware_sdk::prune_policy::{
-    GroupBy, KeysScope, OrderBy, OrderEncoding, PolicyScope, PrunePolicy, RetainPolicy,
+    GroupBy, KeysScope, OrderBy, OrderEncoding, PrunePolicy, RetainPolicy,
 };
 use exoware_sdk::selector::Selector;
 
@@ -28,7 +28,7 @@ fn base_keys_scope() -> KeysScope {
 /// key in the standard qmdb update family.
 pub fn keep_latest_updates(count: usize) -> PrunePolicy {
     PrunePolicy {
-        scope: PolicyScope::Keys(base_keys_scope()),
+        scope: base_keys_scope(),
         retain: RetainPolicy::KeepLatest { count },
     }
 }
@@ -37,27 +37,10 @@ pub fn keep_latest_updates(count: usize) -> PrunePolicy {
 /// greater than or equal to `min_location`.
 pub fn keep_positions_gte(min_location: u64) -> PrunePolicy {
     PrunePolicy {
-        scope: PolicyScope::Keys(base_keys_scope()),
+        scope: base_keys_scope(),
         retain: RetainPolicy::GreaterThanOrEqual {
             threshold: min_location,
         },
-    }
-}
-
-/// Prune the store's log to the last `count` batches. Use with the
-/// store's `stream.v1` service when you want to bound replay history.
-pub fn keep_latest_batches(count: usize) -> PrunePolicy {
-    PrunePolicy {
-        scope: PolicyScope::Sequence,
-        retain: RetainPolicy::KeepLatest { count },
-    }
-}
-
-/// Drop every retained batch. Disables replay + GetBatch entirely.
-pub fn drop_all_batches() -> PrunePolicy {
-    PrunePolicy {
-        scope: PolicyScope::Sequence,
-        retain: RetainPolicy::DropAll,
     }
 }
 
@@ -65,21 +48,19 @@ pub fn drop_all_batches() -> PrunePolicy {
 mod tests {
     use std::collections::HashSet;
 
-    use super::{drop_all_batches, keep_latest_batches, keep_latest_updates, keep_positions_gte};
+    use super::{keep_latest_updates, keep_positions_gte};
     use crate::codec::{
         encode_ordered_key_bytes, encode_update_key, ORDERED_KEY_TERMINATOR_LEN, UPDATE_FAMILY,
         UPDATE_PREFIX,
     };
     use commonware_storage::merkle::{mmr, Location};
     use exoware_sdk::kv_codec::Utf8;
-    use exoware_sdk::prune_policy::{validate_policy, OrderEncoding, PolicyScope, RetainPolicy};
+    use exoware_sdk::prune_policy::{validate_policy, OrderEncoding, RetainPolicy};
     use exoware_sdk::selector::compile_payload_regex;
 
     fn compiled_update_regex() -> regex::bytes::Regex {
         let policy = keep_latest_updates(1);
-        let PolicyScope::Keys(scope) = &policy.scope else {
-            panic!("expected Keys scope");
-        };
+        let scope = &policy.scope;
         validate_policy(&policy).expect("policy should validate");
         compile_payload_regex(&scope.selector.payload_regex).expect("regex")
     }
@@ -87,9 +68,7 @@ mod tests {
     #[test]
     fn keep_latest_updates_matches_update_key_layout() {
         let policy = keep_latest_updates(3);
-        let PolicyScope::Keys(scope) = &policy.scope else {
-            panic!("expected UserKeys scope");
-        };
+        let scope = &policy.scope;
         assert_eq!(scope.selector.prefix.as_ref(), &[UPDATE_FAMILY]);
         assert_eq!(
             &*scope.selector.payload_regex,
@@ -188,9 +167,7 @@ mod tests {
     #[test]
     fn keep_positions_gte_uses_threshold_retention() {
         let policy = keep_positions_gte(42);
-        let PolicyScope::Keys(scope) = &policy.scope else {
-            panic!("expected UserKeys scope");
-        };
+        let scope = &policy.scope;
         assert_eq!(
             policy.retain,
             RetainPolicy::GreaterThanOrEqual { threshold: 42 }
@@ -199,19 +176,5 @@ mod tests {
             &*scope.order_by.as_ref().expect("order_by").capture_group,
             "version"
         );
-    }
-
-    #[test]
-    fn keep_latest_batches_uses_log_scope() {
-        let policy = keep_latest_batches(10);
-        assert!(matches!(policy.scope, PolicyScope::Sequence));
-        assert_eq!(policy.retain, RetainPolicy::KeepLatest { count: 10 });
-    }
-
-    #[test]
-    fn drop_all_batches_uses_log_scope() {
-        let policy = drop_all_batches();
-        assert!(matches!(policy.scope, PolicyScope::Sequence));
-        assert_eq!(policy.retain, RetainPolicy::DropAll);
     }
 }

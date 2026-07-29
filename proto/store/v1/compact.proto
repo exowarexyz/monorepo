@@ -82,25 +82,10 @@ message KeysScope {
   optional PolicyOrderBy order_by = 3;
 }
 
-// Sequence-number scope: prune the per-batch sequence log served by the
-// store's `Stream` service. `selector` / `group_by` / `order_by` are not
-// meaningful here — the log has a single implicit ordering by sequence
-// number. The `retain` rule on the parent `Policy` is interpreted directly
-// over sequence numbers:
-//
-//   - `keep_latest { count: N }`        -> keep the last N batches
-//   - `greater_than { threshold: T }`   -> keep sequence numbers > T
-//   - `greater_than_or_equal { .. T }`  -> keep sequence numbers >= T
-//   - `drop_all`                        -> clear the log entirely
-message SequenceScope {}
-
-// A single prune policy. `scope` discriminates the keyspace the rule applies
-// to; `retain` is shared between scopes.
+// A single prune policy: group keys via `keys`, then apply `retain` to decide
+// which of them survive. `keys` is required.
 message Policy {
-  oneof scope {
-    KeysScope keys = 1;
-    SequenceScope sequence = 2;
-  }
+  KeysScope keys = 1;
   PolicyRetain retain = 3;
 }
 

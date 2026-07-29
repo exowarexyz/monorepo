@@ -496,23 +496,20 @@ describe('Exoware TS SDK', () => {
             }
 
             const policy = create(PolicySchema, {
-                scope: {
-                    case: 'keys',
-                    value: create(KeysScopeSchema, {
-                        selector: create(SelectorSchema, {
-                            prefix: new Uint8Array(),
-                            payloadRegex:
-                                '(?s-u)^prune-test-(?P<group>[a-z]+)\\x00\\x00(?P<version>.{8})$',
-                        }),
-                        groupBy: create(PolicyGroupBySchema, {
-                            captureGroups: ['group'],
-                        }),
-                        orderBy: create(PolicyOrderBySchema, {
-                            captureGroup: 'version',
-                            encoding: PolicyOrderEncoding.U64_BE,
-                        }),
+                keys: create(KeysScopeSchema, {
+                    selector: create(SelectorSchema, {
+                        prefix: new Uint8Array(),
+                        payloadRegex:
+                            '(?s-u)^prune-test-(?P<group>[a-z]+)\\x00\\x00(?P<version>.{8})$',
                     }),
-                },
+                    groupBy: create(PolicyGroupBySchema, {
+                        captureGroups: ['group'],
+                    }),
+                    orderBy: create(PolicyOrderBySchema, {
+                        captureGroup: 'version',
+                        encoding: PolicyOrderEncoding.U64_BE,
+                    }),
+                }),
                 retain: create(PolicyRetainSchema, {
                     kind: {
                         case: 'keepLatest',

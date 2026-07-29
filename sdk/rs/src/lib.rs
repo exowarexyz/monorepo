@@ -14,6 +14,7 @@ pub mod keys;
 pub mod kv_codec;
 pub mod proto;
 pub mod prune_policy;
+pub mod retention;
 pub mod selector;
 pub mod stream_filter;
 pub use keys::{Key, KeyMut, KeyValidationError, Prefix, PrefixError, Value, MAX_KEY_LEN};
@@ -350,15 +351,9 @@ impl PrefixedStoreClient {
         policies
             .iter()
             .map(|policy| {
-                use crate::prune_policy::{PolicyScope, PrunePolicy};
-                let scope = match &policy.scope {
-                    PolicyScope::Keys(scope) => {
-                        let mut scope = scope.clone();
-                        scope.selector = self.prefix.prefix_selector(&scope.selector)?;
-                        PolicyScope::Keys(scope)
-                    }
-                    PolicyScope::Sequence => PolicyScope::Sequence,
-                };
+                use crate::prune_policy::PrunePolicy;
+                let mut scope = policy.scope.clone();
+                scope.selector = self.prefix.prefix_selector(&scope.selector)?;
                 Ok(PrunePolicy {
                     scope,
                     retain: policy.retain.clone(),
@@ -805,6 +800,15 @@ impl PrefixedStoreClient {
             out.push((self.decode_store_key(&key)?, entry.value));
         }
         Ok(Some(out))
+    }
+
+    pub(crate) async fn set_retention(
+        &self,
+        policy: Option<crate::retention::RetentionPolicy>,
+    ) -> Result<Option<u64>, ClientError> {
+        // Retention operates on sequence numbers, not keys, so there is no
+        // per-namespace prefixing to apply here.
+        self.client.set_retention(policy).await
     }
 }
 
@@ -1957,6 +1961,32 @@ impl StoreClient {
         }
     }
 
+    /// Install (`Some`) or clear (`None`) the sequence-log retention rule via
+    /// `log.stream.v1.SetRetention`. Returns the lowest retained sequence after
+    /// one synchronous enforcement of the new rule (`None` when the log is
+    /// empty / no floor exists yet).
+    async fn set_retention(
+        &self,
+        policy: Option<crate::retention::RetentionPolicy>,
+    ) -> Result<Option<u64>, ClientError> {
+        let request = exoware_proto::log::stream::v1::SetRetentionRequest {
+            policy: policy
+                .as_ref()
+                .map(exoware_proto::retention_policy_to_proto)
+                .into(),
+            ..Default::default()
+        };
+        let config =
+            store_connect_client_config(self.stream_uri.clone(), self.connect_request_compression);
+        let client =
+            exoware_proto::log::stream::v1::ServiceClient::new(self.connect_http.clone(), config);
+        let response = client
+            .set_retention(request)
+            .await
+            .map_err(client_error_from_connect)?;
+        Ok(response.into_owned().oldest_retained_sequence)
+    }
+
     pub async fn health(&self) -> Result<bool, ClientError> {
         let resp = self
             .http
@@ -2515,6 +2545,19 @@ impl<'a> Stream<'a> {
         sequence_number: u64,
     ) -> Result<Option<Vec<(Key, Bytes)>>, ClientError> {
         self.c.stream_get(sequence_number).await
+    }
+
+    /// `log.stream.v1.Service.SetRetention` — install (`Some`) or clear
+    /// (`None`) the sequence-log retention rule. The rule is persistent and
+    /// continuously enforced as the log grows; eviction surfaces to
+    /// subscribers as `BATCH_EVICTED`. Returns the lowest retained sequence
+    /// after one synchronous enforcement (`None` when the log is empty / no
+    /// floor exists yet).
+    pub async fn set_retention(
+        &self,
+        policy: Option<crate::retention::RetentionPolicy>,
+    ) -> Result<Option<u64>, ClientError> {
+        self.c.set_retention(policy).await
     }
 }
 
