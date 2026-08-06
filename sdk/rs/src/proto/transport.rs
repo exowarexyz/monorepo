@@ -28,11 +28,13 @@ use std::sync::Mutex;
 
 use connectrpc::client::{BoxFuture, ClientBody, ClientTransport, HttpClient};
 use connectrpc::compression::CompressionRegistry;
+use connectrpc::rustls;
 use connectrpc::ConnectError;
 use cookie_store::{Cookie, CookieDomain, CookieStore};
 use http::header::{ACCEPT_ENCODING, COOKIE, SET_COOKIE};
 use http::{Request, Response};
 use reqwest::Url;
+use rustls_platform_verifier::ConfigVerifierExt;
 
 /// gzip + zstd - used for [`connectrpc::ConnectRpcService::with_compression`] and
 /// [`connectrpc::client::ClientConfig::compression`].
@@ -53,8 +55,24 @@ pub struct PreferZstdHttpClient {
 
 impl PreferZstdHttpClient {
     pub fn plaintext() -> Self {
+        Self::wrap(HttpClient::plaintext())
+    }
+
+    /// TLS client trusting the platform certificate store.
+    pub fn tls() -> Result<Self, rustls::Error> {
+        Ok(Self::with_tls(Arc::new(
+            rustls::ClientConfig::with_platform_verifier()?,
+        )))
+    }
+
+    /// TLS client with a caller-supplied configuration, for a private CA or client certificates.
+    pub fn with_tls(config: Arc<rustls::ClientConfig>) -> Self {
+        Self::wrap(HttpClient::with_tls(config))
+    }
+
+    fn wrap(inner: HttpClient) -> Self {
         Self {
-            inner: HttpClient::plaintext(),
+            inner,
             cookies: Arc::new(Mutex::new(CookieStore::new())),
         }
     }

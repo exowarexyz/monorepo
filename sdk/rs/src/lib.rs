@@ -1486,6 +1486,16 @@ fn trim_connect_base(url: &str) -> String {
     url.trim_end_matches('/').to_string()
 }
 
+/// True for `https`, false for `http`. Any other scheme is an error rather than an
+/// assumption of cleartext, since no transport here can serve one.
+fn uri_uses_tls(uri: &http::Uri) -> Result<bool, ClientBuildError> {
+    match uri.scheme_str() {
+        Some("https") => Ok(true),
+        Some("http") => Ok(false),
+        _ => Err(ClientBuildError::UnsupportedScheme(uri.to_string())),
+    }
+}
+
 fn new_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .pool_max_idle_per_host(32)
@@ -1512,6 +1522,12 @@ pub enum ClientBuildError {
         url: String,
         source: http::uri::InvalidUri,
     },
+    #[error("StoreClientBuilder: service URLs mix http:// and https://")]
+    MixedSchemes,
+    #[error("StoreClientBuilder: unsupported scheme in \"{0}\" (expected http:// or https://)")]
+    UnsupportedScheme(String),
+    #[error("StoreClientBuilder: TLS setup failed: {0}")]
+    Tls(#[source] connectrpc::rustls::Error),
 }
 
 /// Configures a [`StoreClient`] with explicit bases for health probes and store services.
@@ -1619,6 +1635,22 @@ impl StoreClientBuilder {
                     url: stream_url.clone(),
                     source: e,
                 })?;
+        // One transport serves all four RPC URIs, and a transport is either TLS or
+        // cleartext, so the URIs have to agree on scheme. health_url is left out because
+        // `health()` / `ready()` go through reqwest, which does its own TLS.
+        let tls = [
+            uri_uses_tls(&ingest_uri)?,
+            uri_uses_tls(&query_uri)?,
+            uri_uses_tls(&compact_uri)?,
+            uri_uses_tls(&stream_uri)?,
+        ];
+        let connect_http = if tls.iter().all(|&t| t) {
+            ProtoPreferZstdHttpClient::tls().map_err(ClientBuildError::Tls)?
+        } else if tls.iter().any(|&t| t) {
+            return Err(ClientBuildError::MixedSchemes);
+        } else {
+            ProtoPreferZstdHttpClient::plaintext()
+        };
         Ok(StoreClient {
             health_url,
             ingest_uri,
@@ -1626,7 +1658,7 @@ impl StoreClientBuilder {
             compact_uri,
             stream_uri,
             http: new_http_client(),
-            connect_http: ProtoPreferZstdHttpClient::plaintext(),
+            connect_http,
             retry_config: self.retry_config,
             connect_request_compression: self.connect_request_compression,
         })
@@ -2955,6 +2987,45 @@ mod tests {
                 .build(),
             Err(ClientBuildError::MissingStreamUrl)
         ));
+    }
+
+    #[test]
+    fn builder_rejects_mixed_schemes() {
+        assert!(matches!(
+            StoreClient::builder()
+                .url("https://example.test")
+                .ingest_url("http://example.test")
+                .build(),
+            Err(ClientBuildError::MixedSchemes)
+        ));
+    }
+
+    #[test]
+    fn builder_rejects_a_non_http_scheme() {
+        // A gRPC-flavoured scheme parses as a URI but no transport can serve it, so it is
+        // refused instead of silently treated as cleartext.
+        assert!(matches!(
+            StoreClient::builder()
+                .url("grpc+https://example.test")
+                .build(),
+            Err(ClientBuildError::UnsupportedScheme(_))
+        ));
+        assert!(matches!(
+            StoreClient::builder().url("example.test:443").build(),
+            Err(ClientBuildError::UnsupportedScheme(_))
+        ));
+    }
+
+    #[test]
+    fn builder_accepts_a_uniform_scheme() {
+        assert!(StoreClient::builder()
+            .url("https://example.test")
+            .build()
+            .is_ok());
+        assert!(StoreClient::builder()
+            .url("http://example.test")
+            .build()
+            .is_ok());
     }
 
     #[test]

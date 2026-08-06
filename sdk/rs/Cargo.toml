@@ -23,6 +23,7 @@ http-body = "1"
 hyper = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
+rustls-platform-verifier = { workspace = true }
 commonware-codec = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
