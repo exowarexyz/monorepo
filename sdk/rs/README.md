@@ -5,6 +5,9 @@
 
 Interact with the Exoware API in Rust.
 
+`StoreClient` supports HTTP and HTTPS endpoints. HTTPS connections verify certificates using the
+platform trust configuration.
+
 ## Status
 
 `exoware-sdk` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
