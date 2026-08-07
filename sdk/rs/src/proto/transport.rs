@@ -8,7 +8,7 @@
 //!
 //! ## Rust client transport
 //!
-//! HTTP transport that sets `Accept-Encoding: zstd, gzip` on every outbound request.
+//! HTTP and HTTPS transport that sets `Accept-Encoding: zstd, gzip` on every outbound request.
 //!
 //! [`connectrpc::compression::CompressionRegistry::default`] builds the header value in sorted
 //! order (`gzip, zstd`), so servers negotiate **gzip** first. Replacing the header after
@@ -28,6 +28,7 @@ use std::sync::Mutex;
 
 use connectrpc::client::{BoxFuture, ClientBody, ClientTransport, HttpClient};
 use connectrpc::compression::CompressionRegistry;
+use connectrpc::rustls::ClientConfig;
 use connectrpc::ConnectError;
 use cookie_store::{Cookie, CookieDomain, CookieStore};
 use http::header::{ACCEPT_ENCODING, COOKIE, SET_COOKIE};
@@ -47,16 +48,33 @@ pub fn connect_compression_registry() -> CompressionRegistry {
 /// replayed as `Cookie` when it matches a later request URL.
 #[derive(Clone, Debug)]
 pub struct PreferZstdHttpClient {
-    inner: HttpClient,
+    plaintext: HttpClient,
+    tls: Option<HttpClient>,
     cookies: Arc<Mutex<CookieStore>>,
 }
 
 impl PreferZstdHttpClient {
+    /// Creates a transport for HTTP endpoints.
     pub fn plaintext() -> Self {
         Self {
-            inner: HttpClient::plaintext(),
+            plaintext: HttpClient::plaintext(),
+            tls: None,
             cookies: Arc::new(Mutex::new(CookieStore::new())),
         }
+    }
+
+    /// Creates a transport for HTTP and HTTPS endpoints using the provided TLS configuration.
+    pub fn with_tls(tls_config: Arc<ClientConfig>) -> Self {
+        Self {
+            plaintext: HttpClient::plaintext(),
+            tls: Some(HttpClient::with_tls(tls_config)),
+            cookies: Arc::new(Mutex::new(CookieStore::new())),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn supports_tls(&self) -> bool {
+        self.tls.is_some()
     }
 
     /// Render the `Cookie` header value for `url` from the jar, or `None` if it holds none.
@@ -115,6 +133,23 @@ impl ClientTransport for PreferZstdHttpClient {
         &self,
         mut request: Request<ClientBody>,
     ) -> BoxFuture<'static, Result<Response<Self::ResponseBody>, Self::Error>> {
+        let transport = match request.uri().scheme_str() {
+            Some("http") => self.plaintext.clone(),
+            Some("https") => match &self.tls {
+                Some(tls) => tls.clone(),
+                None => {
+                    return Box::pin(async {
+                        Err(ConnectError::invalid_argument(
+                            "HTTPS endpoint requires a TLS transport",
+                        ))
+                    });
+                }
+            },
+            scheme => {
+                let message = format!("unsupported endpoint URL scheme {scheme:?}");
+                return Box::pin(async move { Err(ConnectError::invalid_argument(message)) });
+            }
+        };
         let url = request_url(request.uri());
 
         if let Some(ref url) = url {
@@ -130,7 +165,7 @@ impl ClientTransport for PreferZstdHttpClient {
 
         let this = self.clone();
         Box::pin(async move {
-            let response = this.inner.send(request).await?;
+            let response = transport.send(request).await?;
             let (parts, body) = response.into_parts();
             if let Some(url) = url {
                 this.store_set_cookies(&url, &parts.headers);
@@ -298,6 +333,18 @@ mod tests {
             headers.append(SET_COOKIE, v.parse().unwrap());
         }
         headers
+    }
+
+    #[test]
+    fn transport_modes_report_tls_support() {
+        let plaintext = PreferZstdHttpClient::plaintext();
+        assert!(!plaintext.supports_tls());
+
+        let tls_config = ClientConfig::builder()
+            .with_root_certificates(connectrpc::rustls::RootCertStore::empty())
+            .with_no_client_auth();
+        let tls = PreferZstdHttpClient::with_tls(Arc::new(tls_config));
+        assert!(tls.supports_tls());
     }
 
     #[test]

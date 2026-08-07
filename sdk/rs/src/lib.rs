@@ -1,7 +1,7 @@
 //! Store Rust SDK Client.
 //!
 //! Provides typed access to the store put/get/query APIs plus
-//! plain HTTP health/readiness probes.
+//! HTTP health/readiness probes.
 //!
 //! ## Errors
 //!
@@ -45,6 +45,7 @@ use exoware_proto::{
 use futures::future::BoxFuture;
 use keys::is_valid_key_size;
 use kv_codec::{KvExpr, KvFieldRef, KvReducedValue};
+use rustls_platform_verifier::ConfigVerifierExt;
 use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -1486,6 +1487,19 @@ fn trim_connect_base(url: &str) -> String {
     url.trim_end_matches('/').to_string()
 }
 
+fn parse_connect_uri(url: &str) -> Result<http::Uri, ClientBuildError> {
+    let uri: http::Uri = url.parse().map_err(|source| ClientBuildError::InvalidUrl {
+        url: url.to_string(),
+        source,
+    })?;
+    if uri.authority().is_none() || !matches!(uri.scheme_str(), Some("http" | "https")) {
+        return Err(ClientBuildError::InvalidEndpointUrl {
+            url: url.to_string(),
+        });
+    }
+    Ok(uri)
+}
+
 fn new_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .pool_max_idle_per_host(32)
@@ -1494,7 +1508,7 @@ fn new_http_client() -> reqwest::Client {
         .expect("failed to build HTTP client")
 }
 
-/// Error returned when [`StoreClientBuilder`] is missing a required endpoint URL.
+/// Error returned while building a [`StoreClient`].
 #[derive(Debug, thiserror::Error)]
 pub enum ClientBuildError {
     #[error("StoreClientBuilder: missing health URL (set health_url or url)")]
@@ -1512,12 +1526,19 @@ pub enum ClientBuildError {
         url: String,
         source: http::uri::InvalidUri,
     },
+    #[error(
+        "StoreClientBuilder: invalid endpoint URL \"{url}\" (expected absolute HTTP or HTTPS URL)"
+    )]
+    InvalidEndpointUrl { url: String },
+    #[error("StoreClientBuilder: failed to configure platform TLS verifier: {0}")]
+    TlsConfig(#[source] connectrpc::rustls::Error),
 }
 
 /// Configures a [`StoreClient`] with explicit bases for health probes and store services.
 ///
 /// Use [`StoreClient::builder()`] to construct. Call [`Self::url`] to point every
 /// service at the same origin, or set each base separately. Finish with [`Self::build`].
+/// HTTP and HTTPS service URLs may be mixed. HTTPS uses the platform certificate verifier.
 #[derive(Debug, Default)]
 pub struct StoreClientBuilder {
     health_url: Option<String>,
@@ -1541,7 +1562,7 @@ impl StoreClientBuilder {
         self
     }
 
-    /// Base URL for plain HTTP `GET /health` and `GET /ready` (often the query worker).
+    /// Base URL for `GET /health` and `GET /ready` (often the query worker).
     pub fn health_url(mut self, url: &str) -> Self {
         self.health_url = Some(trim_connect_base(url));
         self
@@ -1592,33 +1613,20 @@ impl StoreClientBuilder {
             .compact_url
             .ok_or(ClientBuildError::MissingCompactUrl)?;
         let stream_url = self.stream_url.ok_or(ClientBuildError::MissingStreamUrl)?;
-        let ingest_uri: http::Uri =
-            ingest_url
-                .parse()
-                .map_err(|e| ClientBuildError::InvalidUrl {
-                    url: ingest_url.clone(),
-                    source: e,
-                })?;
-        let query_uri: http::Uri = query_url
-            .parse()
-            .map_err(|e| ClientBuildError::InvalidUrl {
-                url: query_url.clone(),
-                source: e,
-            })?;
-        let compact_uri: http::Uri =
-            compact_url
-                .parse()
-                .map_err(|e| ClientBuildError::InvalidUrl {
-                    url: compact_url.clone(),
-                    source: e,
-                })?;
-        let stream_uri: http::Uri =
-            stream_url
-                .parse()
-                .map_err(|e| ClientBuildError::InvalidUrl {
-                    url: stream_url.clone(),
-                    source: e,
-                })?;
+        let ingest_uri = parse_connect_uri(&ingest_url)?;
+        let query_uri = parse_connect_uri(&query_url)?;
+        let compact_uri = parse_connect_uri(&compact_url)?;
+        let stream_uri = parse_connect_uri(&stream_url)?;
+        let uses_tls = [&ingest_uri, &query_uri, &compact_uri, &stream_uri]
+            .into_iter()
+            .any(|uri| uri.scheme_str() == Some("https"));
+        let connect_http = if uses_tls {
+            let tls_config = connectrpc::rustls::ClientConfig::with_platform_verifier()
+                .map_err(ClientBuildError::TlsConfig)?;
+            ProtoPreferZstdHttpClient::with_tls(Arc::new(tls_config))
+        } else {
+            ProtoPreferZstdHttpClient::plaintext()
+        };
         Ok(StoreClient {
             health_url,
             ingest_uri,
@@ -1626,7 +1634,7 @@ impl StoreClientBuilder {
             compact_uri,
             stream_uri,
             http: new_http_client(),
-            connect_http: ProtoPreferZstdHttpClient::plaintext(),
+            connect_http,
             retry_config: self.retry_config,
             connect_request_compression: self.connect_request_compression,
         })
@@ -1702,7 +1710,7 @@ impl StoreClient {
             .url(url)
             .retry_config(retry_config)
             .build()
-            .expect("url sets all service URLs")
+            .expect("failed to configure Store client")
     }
 
     /// Pair this physical client with `prefix`, yielding the logical
@@ -2923,6 +2931,45 @@ mod tests {
         assert_eq!(client.ingest_uri.to_string(), "http://localhost:10000/");
         assert_eq!(client.query_uri.to_string(), "http://localhost:10000/");
         assert_eq!(client.stream_uri.to_string(), "http://localhost:10000/");
+        assert!(!client.connect_http.supports_tls());
+    }
+
+    #[test]
+    fn client_creation_enables_tls_for_https() {
+        let client = StoreClient::new("https://store.example.com");
+        assert_eq!(client.health_url, "https://store.example.com");
+        assert_eq!(client.ingest_uri.to_string(), "https://store.example.com/");
+        assert_eq!(client.query_uri.to_string(), "https://store.example.com/");
+        assert_eq!(client.stream_uri.to_string(), "https://store.example.com/");
+        assert!(client.connect_http.supports_tls());
+    }
+
+    #[test]
+    fn builder_supports_mixed_http_and_https_services() {
+        let client = StoreClient::builder()
+            .health_url("https://health.example.com")
+            .ingest_url("http://ingest.internal")
+            .query_url("https://query.example.com")
+            .compact_url("http://compact.internal")
+            .stream_url("https://stream.example.com")
+            .build()
+            .unwrap();
+
+        assert_eq!(client.ingest_uri.scheme_str(), Some("http"));
+        assert_eq!(client.query_uri.scheme_str(), Some("https"));
+        assert_eq!(client.compact_uri.scheme_str(), Some("http"));
+        assert_eq!(client.stream_uri.scheme_str(), Some("https"));
+        assert!(client.connect_http.supports_tls());
+    }
+
+    #[test]
+    fn builder_rejects_non_http_connect_urls() {
+        for url in ["store.example.com", "ftp://store.example.com", "/relative"] {
+            assert!(matches!(
+                StoreClient::builder().url(url).build(),
+                Err(ClientBuildError::InvalidEndpointUrl { .. })
+            ));
+        }
     }
 
     #[test]
