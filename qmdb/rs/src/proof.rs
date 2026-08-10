@@ -60,28 +60,23 @@ impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
         let size = Position::try_from(self.proof.leaves)
             .map_err(|e| QmdbError::CorruptData(format!("invalid checkpoint leaf count: {e}")))?;
         let peak_entries: Vec<(Position<F>, u32)> = F::peaks(size).collect();
-        if self.start_location == Location::new(0)
-            && self.encoded_operations.len() as u64 == self.proof.leaves.as_u64()
-        {
-            return Ok(crate::core::extend_merkle_from_peaks::<F, H, _>(
-                Vec::new(),
-                Position::new(0),
-                self.encoded_operations.iter().map(Vec::as_slice),
-            )?
-            .peaks);
-        }
-
+        // Pinned-node verification is the single authentication boundary for
+        // every checkpoint shape. It also exposes fold-prefix peaks needed by
+        // suffix checkpoints.
         let hasher = commonware_storage::qmdb::hasher::<H>();
         let digests = self
             .proof
-            .verify_range_inclusion_and_extract_digests(
+            .verify_proof_and_pinned_nodes_and_extract_digests(
                 &hasher,
                 &self.encoded_operations,
                 self.start_location,
+                &self.pinned_nodes,
                 &self.root,
             )
-            .map_err(|e| {
-                QmdbError::CorruptData(format!("reconstruct checkpoint peaks failed: {e}"))
+            .ok_or_else(|| {
+                QmdbError::CorruptData(
+                    "reconstruct checkpoint peaks failed: pinned proof rejected".to_string(),
+                )
             })?;
         let digest_map: std::collections::BTreeMap<Position<F>, D> = digests.into_iter().collect();
         peak_entries
