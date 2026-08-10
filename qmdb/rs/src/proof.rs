@@ -54,47 +54,61 @@ impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
         )
     }
 
+    /// Reconstruct the writer frontier from an authenticated range ending at the watermark.
     pub fn reconstruct_peaks<H: Hasher<Digest = D>>(
         &self,
     ) -> Result<Vec<(Position<F>, u32, D)>, QmdbError> {
         let size = Position::try_from(self.proof.leaves)
             .map_err(|e| QmdbError::CorruptData(format!("invalid checkpoint leaf count: {e}")))?;
-        let peak_entries: Vec<(Position<F>, u32)> = F::peaks(size).collect();
-        if self.start_location == Location::new(0)
-            && self.encoded_operations.len() as u64 == self.proof.leaves.as_u64()
-        {
-            return Ok(crate::core::extend_merkle_from_peaks::<F, H, _>(
-                Vec::new(),
-                Position::new(0),
-                self.encoded_operations.iter().map(Vec::as_slice),
-            )?
-            .peaks);
+
+        let checkpoint_leaves = self.watermark.checked_add(1).ok_or_else(|| {
+            QmdbError::CorruptData("checkpoint watermark exceeds the location domain".into())
+        })?;
+        if checkpoint_leaves != self.proof.leaves {
+            return Err(QmdbError::CorruptData(format!(
+                "checkpoint watermark implies {checkpoint_leaves} leaves, proof has {}",
+                self.proof.leaves
+            )));
         }
 
-        let hasher = commonware_storage::qmdb::hasher::<H>();
-        let digests = self
-            .proof
-            .verify_range_inclusion_and_extract_digests(
-                &hasher,
-                &self.encoded_operations,
-                self.start_location,
-                &self.root,
-            )
-            .map_err(|e| {
-                QmdbError::CorruptData(format!("reconstruct checkpoint peaks failed: {e}"))
-            })?;
-        let digest_map: std::collections::BTreeMap<Position<F>, D> = digests.into_iter().collect();
-        peak_entries
-            .into_iter()
-            .map(|(pos, height)| {
-                let digest = digest_map.get(&pos).copied().ok_or_else(|| {
-                    QmdbError::CorruptData(format!(
-                        "checkpoint proof did not expose peak digest at position {pos}"
-                    ))
-                })?;
-                Ok((pos, height, digest))
-            })
-            .collect()
+        let operation_count = u64::try_from(self.encoded_operations.len())
+            .map_err(|_| QmdbError::CorruptData("checkpoint operation count exceeds u64".into()))?;
+        let end_location = self
+            .start_location
+            .checked_add(operation_count)
+            .ok_or_else(|| QmdbError::CorruptData("checkpoint range end overflow".into()))?;
+        if end_location != self.proof.leaves {
+            return Err(QmdbError::CorruptData(format!(
+                "checkpoint range ends at {end_location}, expected {}",
+                self.proof.leaves
+            )));
+        }
+
+        if !self.verify::<H>() {
+            return Err(QmdbError::CorruptData(
+                "reconstruct checkpoint peaks failed because the proof or pins are invalid".into(),
+            ));
+        }
+
+        let extension = crate::core::extend_merkle_from_pinned_nodes::<F, H, _>(
+            self.pinned_nodes.clone(),
+            self.start_location,
+            self.encoded_operations.iter().map(Vec::as_slice),
+            self.proof.inactive_peaks,
+        )?;
+        if extension.size != size {
+            return Err(QmdbError::CorruptData(format!(
+                "checkpoint extension size mismatch. Expected {size}, got {}",
+                extension.size
+            )));
+        }
+        if extension.root != self.root {
+            return Err(QmdbError::CorruptData(
+                "checkpoint extension root mismatch".into(),
+            ));
+        }
+
+        Ok(extension.peaks)
     }
 }
 
