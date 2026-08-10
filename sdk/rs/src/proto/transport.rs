@@ -31,7 +31,7 @@ use connectrpc::compression::CompressionRegistry;
 use connectrpc::rustls::ClientConfig;
 use connectrpc::ConnectError;
 use cookie_store::{Cookie, CookieDomain, CookieStore};
-use http::header::{ACCEPT_ENCODING, COOKIE, SET_COOKIE};
+use http::header::{ACCEPT_ENCODING, AUTHORIZATION, COOKIE, SET_COOKIE};
 use http::{Request, Response};
 use reqwest::Url;
 
@@ -46,11 +46,15 @@ pub fn connect_compression_registry() -> CompressionRegistry {
 ///
 /// Also persists HTTP cookies: every `Set-Cookie` response header is stored in an RFC6265 jar and
 /// replayed as `Cookie` when it matches a later request URL.
+///
+/// Carries the optional bearer credential too, so one place authenticates every RPC service
+/// rather than each generated client doing it.
 #[derive(Clone, Debug)]
 pub struct PreferZstdHttpClient {
     plaintext: HttpClient,
     tls: Option<HttpClient>,
     cookies: Arc<Mutex<CookieStore>>,
+    authorization: Option<http::HeaderValue>,
 }
 
 impl PreferZstdHttpClient {
@@ -60,6 +64,7 @@ impl PreferZstdHttpClient {
             plaintext: HttpClient::plaintext(),
             tls: None,
             cookies: Arc::new(Mutex::new(CookieStore::new())),
+            authorization: None,
         }
     }
 
@@ -69,7 +74,26 @@ impl PreferZstdHttpClient {
             plaintext: HttpClient::plaintext(),
             tls: Some(HttpClient::with_tls(tls_config)),
             cookies: Arc::new(Mutex::new(CookieStore::new())),
+            authorization: None,
         }
+    }
+
+    /// Send `value` as `Authorization` on every RPC.
+    ///
+    /// Mark the value sensitive before passing it here so it stays redacted in `Debug` output.
+    #[must_use]
+    pub fn with_authorization(mut self, value: http::HeaderValue) -> Self {
+        self.authorization = Some(value);
+        self
+    }
+
+    /// The `Authorization` value this client sends, if it has one.
+    ///
+    /// Only the crate's own tests read this back. Nothing on the request path needs it, because
+    /// `send` uses the field directly.
+    #[cfg(test)]
+    pub(crate) fn authorization(&self) -> Option<&http::HeaderValue> {
+        self.authorization.as_ref()
     }
 
     #[cfg(test)]
@@ -163,6 +187,10 @@ impl ClientTransport for PreferZstdHttpClient {
             http::HeaderValue::from_static("zstd, gzip"),
         );
 
+        if let Some(ref authorization) = self.authorization {
+            apply_authorization(request.headers_mut(), authorization);
+        }
+
         let this = self.clone();
         Box::pin(async move {
             let response = transport.send(request).await?;
@@ -172,6 +200,17 @@ impl ClientTransport for PreferZstdHttpClient {
             }
             Ok(Response::from_parts(parts, body))
         })
+    }
+}
+
+/// Set the client's credential as `Authorization`, leaving any caller-supplied one alone.
+///
+/// Deferring to the caller matches how jar cookies defer to caller-supplied cookie names, and it
+/// is what lets one client reach a deployment that expects a different credential on a specific
+/// call.
+fn apply_authorization(headers: &mut http::HeaderMap, value: &http::HeaderValue) {
+    if !headers.contains_key(AUTHORIZATION) {
+        headers.insert(AUTHORIZATION, value.clone());
     }
 }
 
@@ -533,5 +572,33 @@ mod tests {
         assert!(values.contains(&b"caller=token".to_vec()));
         assert!(values.contains(&b"AWSALB=abc".to_vec()));
         assert!(!values.contains(&b"opaque=jar".to_vec()));
+    }
+
+    #[test]
+    fn authorization_is_set_when_absent() {
+        let mut headers = http::HeaderMap::new();
+
+        apply_authorization(&mut headers, &"Bearer client".parse().unwrap());
+
+        assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Bearer client");
+    }
+
+    #[test]
+    fn authorization_defers_to_the_caller() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(AUTHORIZATION, "Bearer caller".parse().unwrap());
+
+        apply_authorization(&mut headers, &"Bearer client".parse().unwrap());
+
+        assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Bearer caller");
+        assert_eq!(headers.get_all(AUTHORIZATION).iter().count(), 1);
+    }
+
+    #[test]
+    fn no_credential_sends_no_authorization() {
+        let client = PreferZstdHttpClient::plaintext();
+
+        // A deployment with no load balancer in front of it must still be reachable.
+        assert!(client.authorization.is_none());
     }
 }

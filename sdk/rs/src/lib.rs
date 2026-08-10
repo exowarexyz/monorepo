@@ -23,7 +23,7 @@ extern crate self as exoware_proto;
 
 use bytes::Bytes;
 use connectrpc::client::{ClientConfig, ServerStream as ConnectServerStream};
-use connectrpc::{ConnectError, ErrorCode};
+pub use connectrpc::{ConnectError, ErrorCode};
 use exoware_proto::compact::ServiceClient as CompactServiceClient;
 use exoware_proto::ingest::ServiceClient as IngestServiceClient;
 use exoware_proto::log::ingest::v1::PutRequest as ProtoPutRequest;
@@ -47,6 +47,7 @@ use keys::is_valid_key_size;
 use kv_codec::{KvExpr, KvFieldRef, KvReducedValue};
 use rustls_platform_verifier::ConfigVerifierExt;
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -1114,6 +1115,7 @@ pub struct RangeStream {
     finished: bool,
     observed_sequence: Option<Arc<AtomicU64>>,
     key_prefix: Option<StoreKeyPrefix>,
+    credential: Credential,
 }
 
 impl RangeStream {
@@ -1124,6 +1126,7 @@ impl RangeStream {
         >,
         observed_sequence: Option<Arc<AtomicU64>>,
         key_prefix: Option<StoreKeyPrefix>,
+        credential: Credential,
     ) -> Self {
         Self {
             stream,
@@ -1133,6 +1136,7 @@ impl RangeStream {
             finished: false,
             observed_sequence,
             key_prefix,
+            credential,
         }
     }
 
@@ -1174,11 +1178,11 @@ impl RangeStream {
                     .stream
                     .message()
                     .await
-                    .map_err(client_error_from_connect)?
+                    .map_err(|err| client_error_from_connect(err, self.credential))?
                 else {
                     self.finished = true;
                     if let Some(err) = self.stream.error() {
-                        return Err(client_error_from_connect(err.clone()));
+                        return Err(client_error_from_connect(err.clone(), self.credential));
                     }
                     self.final_count = Some(self.rows_seen);
                     return Ok(None);
@@ -1228,6 +1232,7 @@ pub struct GetManyStream {
     finished: bool,
     observed_sequence: Option<Arc<AtomicU64>>,
     key_prefix: Option<StoreKeyPrefix>,
+    credential: Credential,
 }
 
 impl GetManyStream {
@@ -1238,6 +1243,7 @@ impl GetManyStream {
         >,
         observed_sequence: Option<Arc<AtomicU64>>,
         key_prefix: Option<StoreKeyPrefix>,
+        credential: Credential,
     ) -> Self {
         Self {
             stream,
@@ -1245,6 +1251,7 @@ impl GetManyStream {
             finished: false,
             observed_sequence,
             key_prefix,
+            credential,
         }
     }
 
@@ -1280,11 +1287,11 @@ impl GetManyStream {
                     .stream
                     .message()
                     .await
-                    .map_err(client_error_from_connect)?
+                    .map_err(|err| client_error_from_connect(err, self.credential))?
                 else {
                     self.finished = true;
                     if let Some(err) = self.stream.error() {
-                        return Err(client_error_from_connect(err.clone()));
+                        return Err(client_error_from_connect(err.clone(), self.credential));
                     }
                     return Ok(None);
                 };
@@ -1365,6 +1372,7 @@ pub struct StreamSubscription {
         exoware_proto::log::stream::v1::SubscribeResponseView<'static>,
     >,
     key_prefix: Option<StoreKeyPrefix>,
+    credential: Credential,
 }
 
 impl std::fmt::Debug for StreamSubscription {
@@ -1381,7 +1389,7 @@ impl StreamSubscription {
                 .stream
                 .message()
                 .await
-                .map_err(client_error_from_connect)?
+                .map_err(|err| client_error_from_connect(err, self.credential))?
             {
                 Some(view) => {
                     let owned = view.to_owned_message();
@@ -1408,7 +1416,7 @@ impl StreamSubscription {
                 }
                 None => {
                     if let Some(err) = self.stream.error() {
-                        return Err(client_error_from_connect(err.clone()));
+                        return Err(client_error_from_connect(err.clone(), self.credential));
                     } else {
                         return Ok(None);
                     }
@@ -1532,6 +1540,24 @@ pub enum ClientBuildError {
     InvalidEndpointUrl { url: String },
     #[error("StoreClientBuilder: failed to configure platform TLS verifier: {0}")]
     TlsConfig(#[source] connectrpc::rustls::Error),
+    #[error("StoreClientBuilder: API key is not valid in an HTTP header (check for whitespace or non-ASCII)")]
+    InvalidApiKey,
+}
+
+/// Environment variable read for the API key when none is set on the builder.
+pub const API_KEY_ENV: &str = "EXOWARE_API_KEY";
+
+/// The API key, held so that it is never printed.
+///
+/// The credential authorizes every RPC this client makes, so a `Debug` of the builder must not
+/// leak it into a log.
+#[derive(Clone, Default)]
+struct ApiKey(String);
+
+impl fmt::Debug for ApiKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<redacted>")
+    }
 }
 
 /// Configures a [`StoreClient`] with explicit bases for health probes and store services.
@@ -1548,6 +1574,7 @@ pub struct StoreClientBuilder {
     stream_url: Option<String>,
     retry_config: RetryConfig,
     connect_request_compression: ConnectRequestCompression,
+    api_key: Option<ApiKey>,
 }
 
 impl StoreClientBuilder {
@@ -1592,6 +1619,16 @@ impl StoreClientBuilder {
         self
     }
 
+    /// API key sent as `Authorization: Bearer <key>` on every RPC.
+    ///
+    /// Leaving this unset falls back to the `EXOWARE_API_KEY` environment variable, if present.
+    ///
+    /// Ignored for [`StoreClient::health`] and [`StoreClient::ready`].
+    pub fn api_key(mut self, key: &str) -> Self {
+        self.api_key = Some(ApiKey(key.to_string()));
+        self
+    }
+
     /// Retry policy for idempotent read operations (get / range / reduce).
     pub fn retry_config(mut self, retry: RetryConfig) -> Self {
         self.retry_config = retry.sanitized();
@@ -1627,6 +1664,38 @@ impl StoreClientBuilder {
         } else {
             ProtoPreferZstdHttpClient::plaintext()
         };
+
+        // Surrounding whitespace is trimmed rather than rejected. A key routinely arrives as
+        // EXOWARE_API_KEY=$(cat token), which carries a trailing newline that is no part of it.
+        let (api_key, from_env) = match self.api_key.map(|key| key.0) {
+            Some(key) => (Some(key), false),
+            None => (std::env::var(API_KEY_ENV).ok(), true),
+        };
+        let api_key = api_key
+            .map(|key| key.trim().to_string())
+            .filter(|key| !key.is_empty());
+
+        let mut credential = if api_key.is_some() {
+            Credential::Sent
+        } else {
+            Credential::Absent
+        };
+        let connect_http = match api_key {
+            Some(key) => match bearer_header(&key) {
+                Some(value) => connect_http.with_authorization(value),
+                // An explicit key is the caller's own argument and they called a fallible
+                // build, so it fails. One from the environment is deployment config reaching
+                // an infallible constructor, and a stray byte there must not abort the
+                // process, so the client is built without a credential and says so when a
+                // request is rejected.
+                None if !from_env => return Err(ClientBuildError::InvalidApiKey),
+                None => {
+                    credential = Credential::Unusable;
+                    connect_http
+                }
+            },
+            None => connect_http,
+        };
         Ok(StoreClient {
             health_url,
             ingest_uri,
@@ -1637,6 +1706,7 @@ impl StoreClientBuilder {
             connect_http,
             retry_config: self.retry_config,
             connect_request_compression: self.connect_request_compression,
+            credential,
         })
     }
 }
@@ -1654,6 +1724,7 @@ pub struct StoreClient {
     connect_http: ProtoPreferZstdHttpClient,
     retry_config: RetryConfig,
     connect_request_compression: ConnectRequestCompression,
+    credential: Credential,
 }
 
 /// A session that enforces monotonic read consistency via a fixed `min_sequence_number` floor.
@@ -1786,7 +1857,7 @@ impl StoreClient {
                 ..Default::default()
             })
             .await
-            .map_err(client_error_from_connect)?;
+            .map_err(|err| client_error_from_connect(err, self.credential))?;
         Ok(response.into_owned().sequence_number)
     }
 
@@ -1840,8 +1911,12 @@ impl StoreClient {
                 .await
             {
                 Ok(stream) => {
-                    let mut gms =
-                        GetManyStream::from_connect_stream(stream, observed_sequence.clone(), None);
+                    let mut gms = GetManyStream::from_connect_stream(
+                        stream,
+                        observed_sequence.clone(),
+                        None,
+                        self.credential,
+                    );
                     if let Err(err) = gms.prefetch_first_frame().await {
                         if attempt < max_attempts && is_retryable_error(&err) {
                             let delay = retry_delay_for_error(&err, attempt, self.retry_config);
@@ -1849,7 +1924,7 @@ impl StoreClient {
                             attempt += 1;
                             continue;
                         }
-                        return Err(client_error_from_connect(err));
+                        return Err(client_error_from_connect(err, self.credential));
                     }
                     return Ok(gms);
                 }
@@ -1860,7 +1935,7 @@ impl StoreClient {
                         attempt += 1;
                         continue;
                     }
-                    return Err(client_error_from_connect(err));
+                    return Err(client_error_from_connect(err, self.credential));
                 }
             }
         }
@@ -1879,7 +1954,7 @@ impl StoreClient {
                 ..Default::default()
             })
             .await
-            .map_err(client_error_from_connect)?;
+            .map_err(|err| client_error_from_connect(err, self.credential))?;
         Ok(())
     }
 
@@ -1932,10 +2007,11 @@ impl StoreClient {
         let stream = client
             .subscribe(request)
             .await
-            .map_err(client_error_from_connect)?;
+            .map_err(|err| client_error_from_connect(err, self.credential))?;
         Ok(StreamSubscription {
             stream,
             key_prefix: None,
+            credential: self.credential,
         })
     }
 
@@ -1963,7 +2039,7 @@ impl StoreClient {
                 if is_batch_missing_error(&err) {
                     Ok(None)
                 } else {
-                    Err(client_error_from_connect(err))
+                    Err(client_error_from_connect(err, self.credential))
                 }
             }
         }
@@ -1991,7 +2067,7 @@ impl StoreClient {
         let response = client
             .set_retention(request)
             .await
-            .map_err(client_error_from_connect)?;
+            .map_err(|err| client_error_from_connect(err, self.credential))?;
         Ok(response.into_owned().oldest_retained_sequence)
     }
 
@@ -2129,12 +2205,16 @@ impl StoreClient {
                         attempt += 1;
                         continue;
                     }
-                    return Err(client_error_from_connect(err));
+                    return Err(client_error_from_connect(err, self.credential));
                 }
             };
 
-            let mut stream =
-                RangeStream::from_connect_stream(response, options.observed_sequence.clone(), None);
+            let mut stream = RangeStream::from_connect_stream(
+                response,
+                options.observed_sequence.clone(),
+                None,
+                self.credential,
+            );
             if let Err(err) = stream.prefetch_first_frame().await {
                 if attempt < max_attempts && is_retryable_error(&err) {
                     let delay = retry_delay_for_error(&err, attempt, self.retry_config);
@@ -2149,7 +2229,7 @@ impl StoreClient {
                     attempt += 1;
                     continue;
                 }
-                return Err(client_error_from_connect(err));
+                return Err(client_error_from_connect(err, self.credential));
             }
             return Ok(stream);
         }
@@ -2215,7 +2295,7 @@ impl StoreClient {
                         attempt += 1;
                         continue;
                     }
-                    return Err(client_error_from_connect(err));
+                    return Err(client_error_from_connect(err, self.credential));
                 }
             }
         }
@@ -2860,8 +2940,79 @@ impl SerializableReadSession {
     }
 }
 
-fn client_error_from_connect(err: ConnectError) -> ClientError {
+/// Whether this client sends a credential with every request.
+///
+/// Decided once when the client is built, then carried to each site that can raise an RPC error.
+/// A rejection is the only place the distinction matters and the least able to see it, since an
+/// endpoint reports the same code whether a credential was missing or merely refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Credential {
+    Sent,
+    Absent,
+    /// Configured through the environment, but not sendable as an HTTP header value.
+    Unusable,
+}
+
+/// Builds the Authorization header for a key, or `None` if the key cannot be one.
+///
+/// Marked sensitive so the credential cannot reach a log or a Debug of the client.
+fn bearer_header(key: &str) -> Option<http::HeaderValue> {
+    let mut value = http::HeaderValue::from_str(&format!("Bearer {key}")).ok()?;
+    value.set_sensitive(true);
+    Some(value)
+}
+
+impl Credential {
+    /// What to do about an unauthenticated rejection. The two cases share no advice, which is
+    /// the reason this is threaded through at all.
+    ///
+    /// Whoever reads this may be running a binary they did not build, so neither case names an
+    /// API. `Absent` means nothing was configured in code either, so the environment variable is
+    /// something the reader can act on.
+    const fn remedy(self) -> &'static str {
+        match self {
+            Self::Absent => concat!(
+                "This endpoint requires a credential and none was sent. The EXOWARE_API_KEY ",
+                "environment variable supplies one"
+            ),
+            Self::Sent => concat!(
+                "The credential sent with this request was refused. It may have expired, or ",
+                "been issued for a different deployment, or lack the scope this call needs"
+            ),
+            Self::Unusable => concat!(
+                "The EXOWARE_API_KEY environment variable is set to a value that cannot be an ",
+                "HTTP header, so no credential was sent. Remove any control or non-ASCII ",
+                "characters from it"
+            ),
+        }
+    }
+}
+
+fn client_error_from_connect(mut err: ConnectError, credential: Credential) -> ClientError {
+    err.message = err.message.take().and_then(without_html_body);
+    if err.code == ErrorCode::Unauthenticated {
+        let remedy = credential.remedy();
+        err.message = Some(match err.message.take() {
+            Some(message) => format!("{message}. {remedy}"),
+            None => remedy.to_string(),
+        });
+    }
     ClientError::Rpc(Box::new(err))
+}
+
+/// Drops an HTML error page from a message, keeping whatever preceded it.
+fn without_html_body(message: String) -> Option<String> {
+    let lowercase = message.to_ascii_lowercase();
+    let Some(start) = ["<html", "<!doctype"]
+        .iter()
+        .filter_map(|marker| lowercase.find(marker))
+        .min()
+    else {
+        return Some(message);
+    };
+
+    let kept = message[..start].trim_end().trim_end_matches(':').trim_end();
+    (!kept.is_empty()).then(|| kept.to_string())
 }
 
 fn is_retryable_error(err: &ConnectError) -> bool {
@@ -2934,6 +3085,103 @@ mod tests {
         assert!(!client.connect_http.supports_tls());
     }
 
+    /// The 401 body an ALB serves when it rejects a token, verbatim.
+    const PROXY_REJECTION: &str = "HTTP error 401: <html>\r\n<head><title>401 Authorization Required</title></head>\r\n<body>\r\n<center><h1>401 Authorization Required</h1></center>\r\n</body>\r\n</html>\r\n";
+
+    fn rejection(credential: Credential) -> String {
+        client_error_from_connect(
+            ConnectError::new(ErrorCode::Unauthenticated, PROXY_REJECTION),
+            credential,
+        )
+        .to_string()
+    }
+
+    #[test]
+    fn proxy_rejection_keeps_the_status_and_drops_the_page() {
+        let err = client_error_from_connect(
+            ConnectError::new(ErrorCode::Unauthenticated, PROXY_REJECTION),
+            Credential::Sent,
+        );
+        let rendered = err.to_string();
+        assert_eq!(err.rpc_code(), Some(ErrorCode::Unauthenticated));
+        assert!(!rendered.contains('<'), "kept markup: {rendered}");
+        assert!(rendered.contains("HTTP error 401"), "{rendered}");
+    }
+
+    #[test]
+    fn a_missing_credential_is_told_how_to_supply_one() {
+        let rendered = rejection(Credential::Absent);
+        assert!(rendered.contains("none was sent"), "{rendered}");
+        assert!(rendered.contains(API_KEY_ENV), "{rendered}");
+    }
+
+    /// The reader may not control the binary, so no rejection may point at a Rust API.
+    #[test]
+    fn no_remedy_names_an_api() {
+        for credential in [Credential::Sent, Credential::Absent, Credential::Unusable] {
+            let rendered = rejection(credential);
+            assert!(!rendered.contains("StoreClient"), "{rendered}");
+            assert!(!rendered.contains("::"), "{rendered}");
+        }
+    }
+
+    /// A client that sent a credential needs to hear why one it already has failed, so it must
+    /// not be told to set the variable it already set.
+    #[test]
+    fn a_refused_credential_is_told_why_rather_than_how_to_set_one() {
+        let rendered = rejection(Credential::Sent);
+        assert!(rendered.contains("refused"), "{rendered}");
+        assert!(rendered.contains("expired"), "{rendered}");
+        assert!(!rendered.contains(API_KEY_ENV), "{rendered}");
+    }
+
+    #[test]
+    fn other_codes_carry_no_credential_remedy() {
+        let err = client_error_from_connect(
+            ConnectError::new(ErrorCode::NotFound, "no such key"),
+            Credential::Absent,
+        );
+        assert_eq!(err.to_string(), "RPC error (not_found: no such key)");
+    }
+
+    #[test]
+    fn the_builder_records_whether_a_credential_will_be_sent() {
+        let _guard = API_KEY_ENV_LOCK.lock().unwrap();
+        std::env::remove_var(API_KEY_ENV);
+        assert_eq!(
+            StoreClient::new("https://store.example.com").credential,
+            Credential::Absent
+        );
+        assert_eq!(built_with_api_key("token").credential, Credential::Sent);
+
+        // The environment is the other way a credential arrives, and it counts the same.
+        std::env::set_var(API_KEY_ENV, "from-env");
+        assert_eq!(
+            StoreClient::new("https://store.example.com").credential,
+            Credential::Sent
+        );
+        std::env::remove_var(API_KEY_ENV);
+    }
+
+    #[test]
+    fn html_body_recognized_with_a_doctype_and_when_it_is_the_whole_message() {
+        assert_eq!(
+            without_html_body("HTTP error 502: <!DOCTYPE html><html></html>".to_string()),
+            Some("HTTP error 502".to_string())
+        );
+        assert_eq!(without_html_body("<html>bare</html>".to_string()), None);
+    }
+
+    #[test]
+    fn a_service_message_survives_untouched() {
+        // Service errors are the common case, and nothing about them should be trimmed.
+        let message = "key not found: a < b";
+        assert_eq!(
+            without_html_body(message.to_string()),
+            Some(message.to_string())
+        );
+    }
+
     #[test]
     fn client_creation_enables_tls_for_https() {
         let client = StoreClient::new("https://store.example.com");
@@ -3002,6 +3250,151 @@ mod tests {
                 .build(),
             Err(ClientBuildError::MissingStreamUrl)
         ));
+    }
+
+    /// Serializes the tests that mutate `EXOWARE_API_KEY`, which is process-wide.
+    static API_KEY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn built_with_api_key(key: &str) -> StoreClient {
+        StoreClient::builder()
+            .url("https://example.test")
+            .api_key(key)
+            .build()
+            .expect("builder should accept this key")
+    }
+
+    #[test]
+    fn api_key_becomes_a_bearer_header() {
+        let client = built_with_api_key("token-abc");
+
+        assert_eq!(
+            client.connect_http.authorization().unwrap(),
+            "Bearer token-abc"
+        );
+    }
+
+    #[test]
+    fn api_key_is_redacted_in_debug_output() {
+        let rendered = format!(
+            "{:?}",
+            StoreClient::builder()
+                .url("https://example.test")
+                .api_key("token-abc")
+        );
+
+        assert!(!rendered.contains("token-abc"), "builder leaked the key");
+        assert!(rendered.contains("<redacted>"));
+    }
+
+    #[test]
+    fn a_bearer_header_never_renders_the_key() {
+        // set_sensitive is what keeps the credential out of any log that debugs the transport.
+        let client = built_with_api_key("token-abc");
+        let rendered = format!("{:?}", client.connect_http.authorization().unwrap());
+
+        assert!(!rendered.contains("token-abc"));
+    }
+
+    #[test]
+    fn no_api_key_sends_no_header() {
+        let _guard = API_KEY_ENV_LOCK.lock().unwrap();
+        std::env::remove_var(API_KEY_ENV);
+
+        // A deployment with no load balancer in front of it authenticates nothing, so local and
+        // in-VPC clients must keep working with no credential configured.
+        let client = StoreClient::builder()
+            .url("https://example.test")
+            .build()
+            .unwrap();
+
+        assert!(client.connect_http.authorization().is_none());
+    }
+
+    #[test]
+    fn the_environment_supplies_a_key_and_an_explicit_one_wins() {
+        let _guard = API_KEY_ENV_LOCK.lock().unwrap();
+        std::env::set_var(API_KEY_ENV, "from-env");
+
+        let from_env = StoreClient::builder()
+            .url("https://example.test")
+            .build()
+            .unwrap();
+        assert_eq!(
+            from_env.connect_http.authorization().unwrap(),
+            "Bearer from-env"
+        );
+
+        let explicit = built_with_api_key("explicit");
+        assert_eq!(
+            explicit.connect_http.authorization().unwrap(),
+            "Bearer explicit"
+        );
+
+        // An empty variable is an unset one, not a credential of "Bearer ".
+        std::env::set_var(API_KEY_ENV, "");
+        let empty = StoreClient::builder()
+            .url("https://example.test")
+            .build()
+            .unwrap();
+        assert!(empty.connect_http.authorization().is_none());
+
+        std::env::remove_var(API_KEY_ENV);
+    }
+
+    #[test]
+    fn a_key_that_cannot_be_a_header_fails_the_build() {
+        assert!(matches!(
+            StoreClient::builder()
+                .url("https://example.test")
+                .api_key("has\nnewline")
+                .build(),
+            Err(ClientBuildError::InvalidApiKey)
+        ));
+    }
+
+    /// `new` returns `Self`, so a variable an operator sets must not be able to abort the
+    /// process. An unusable one yields a client with no credential that says why.
+    #[test]
+    fn an_unusable_environment_key_does_not_panic_the_infallible_constructors() {
+        let _guard = API_KEY_ENV_LOCK.lock().unwrap();
+        std::env::set_var(API_KEY_ENV, "has\nnewline");
+
+        let client = StoreClient::new("https://example.test");
+        assert!(client.connect_http.authorization().is_none());
+        assert_eq!(client.credential, Credential::Unusable);
+
+        let rendered = client_error_from_connect(
+            ConnectError::new(ErrorCode::Unauthenticated, PROXY_REJECTION),
+            client.credential,
+        )
+        .to_string();
+        assert!(rendered.contains(API_KEY_ENV), "{rendered}");
+        assert!(rendered.contains("cannot be an HTTP header"), "{rendered}");
+
+        std::env::remove_var(API_KEY_ENV);
+    }
+
+    /// A key reaching the environment through `$(cat token)` carries a trailing newline, which
+    /// would otherwise make it unusable.
+    #[test]
+    fn surrounding_whitespace_in_a_key_is_trimmed_rather_than_rejected() {
+        let _guard = API_KEY_ENV_LOCK.lock().unwrap();
+        std::env::set_var(API_KEY_ENV, "  padded-token\n");
+
+        let client = StoreClient::new("https://example.test");
+        assert_eq!(
+            client.connect_http.authorization().unwrap(),
+            "Bearer padded-token"
+        );
+        assert_eq!(client.credential, Credential::Sent);
+
+        // A variable holding only whitespace is an unset one, not an unusable credential.
+        std::env::set_var(API_KEY_ENV, "   \n");
+        let blank = StoreClient::new("https://example.test");
+        assert!(blank.connect_http.authorization().is_none());
+        assert_eq!(blank.credential, Credential::Absent);
+
+        std::env::remove_var(API_KEY_ENV);
     }
 
     #[test]
