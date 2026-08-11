@@ -26,6 +26,7 @@ use exoware_sdk::keys::{next_key, Key, MAX_KEY_LEN};
 use exoware_sdk::kv_codec::KvReducedValue;
 use exoware_sdk::{PrefixedStoreClient, RangeMode};
 use exoware_sdk::{RangeReduceOp, RangeReduceRequest, RangeReducerSpec};
+use futures::stream::{self, StreamExt};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{RngExt, SeedableRng};
@@ -50,6 +51,13 @@ const QUERY_RANGE_MAX_LIMIT: usize = 10_000;
 // One streaming multi-get covers this many pending keys, bounding request
 // size while replacing per-key round trips during visibility polling.
 const VISIBILITY_KEYS_PER_CALL: usize = 1_024;
+
+// Midpoint of the usable band documented on `--range-page-timeout-secs`.
+const DEFAULT_RANGE_PAGE_TIMEOUT_SECS: u64 = 10;
+
+// Subsection checks of one range sample run this many at a time. Samples stay
+// sequential, so the validator holds at most this many page reads in flight.
+const RANGE_SUBSECTION_CONCURRENCY: usize = 4;
 
 // Standard validation owns the full write-then-read lifecycle for one run.
 // The overlap ledger modes split that lifecycle across processes so a chaos run
@@ -82,6 +90,15 @@ pub struct Args {
     max_range_limit: usize,
     #[arg(long, default_value_t = 30)]
     max_visibility_wait_secs: u64,
+    /// Time one range page may take before it counts as stalled and is retried.
+    ///
+    /// Keep it over ~3s so a read's own retry cycle fits inside it — the SDK
+    /// allows three attempts backing off to 1s — and under 30s so it expires
+    /// before the SDK's HTTP timeout, which reports a transport error in place of
+    /// the scan's progress. `--max-visibility-wait-secs` must be at least this
+    /// value, since a phase that cannot afford one whole page issues none.
+    #[arg(long, default_value_t = DEFAULT_RANGE_PAGE_TIMEOUT_SECS)]
+    range_page_timeout_secs: u64,
     #[arg(long, default_value_t = 250)]
     poll_interval_ms: u64,
     #[arg(long, default_value_t = 7)]
@@ -124,6 +141,7 @@ pub struct Config {
     range_samples: usize,
     max_range_limit: usize,
     max_visibility_wait_secs: u64,
+    range_page_timeout_secs: u64,
     poll_interval_ms: u64,
     seed: u64,
     value_size: usize,
@@ -152,6 +170,7 @@ impl TryFrom<Args> for Config {
             range_samples: args.range_samples,
             max_range_limit: args.max_range_limit,
             max_visibility_wait_secs: args.max_visibility_wait_secs,
+            range_page_timeout_secs: args.range_page_timeout_secs,
             poll_interval_ms: args.poll_interval_ms,
             seed: args.seed,
             value_size: args.value_size,
@@ -185,6 +204,18 @@ enum RangeScanError {
     Permanent(anyhow::Error),
 }
 
+/// The time bounds a read phase runs under, resolved from the CLI once and
+/// applied to every phase.
+#[derive(Clone, Copy, Debug)]
+struct PhaseTimings {
+    /// Total one phase may spend before it fails.
+    budget: Duration,
+    /// Ceiling on one range page, past which the page counts as stalled.
+    page: Duration,
+    /// Gap between a phase's retry attempts.
+    poll: Duration,
+}
+
 /// Shared query-consistency settings for one bounded validation check.
 struct ValidationCtx<'a> {
     client: &'a PrefixedStoreClient,
@@ -192,6 +223,7 @@ struct ValidationCtx<'a> {
     min_sequence_number: u64,
     deadline: Instant,
     poll_interval: Duration,
+    page_timeout: Duration,
 }
 
 impl<'a> ValidationCtx<'a> {
@@ -199,16 +231,21 @@ impl<'a> ValidationCtx<'a> {
         client: &'a PrefixedStoreClient,
         query_url: &'a str,
         min_sequence_number: u64,
-        timeout: Duration,
-        poll_interval: Duration,
+        timings: PhaseTimings,
     ) -> Self {
         Self {
             client,
             query_url,
             min_sequence_number,
-            deadline: Instant::now() + timeout,
-            poll_interval,
+            deadline: Instant::now() + timings.budget,
+            poll_interval: timings.poll,
+            page_timeout: timings.page,
         }
+    }
+
+    /// Budget left in this phase.
+    fn remaining(&self) -> Duration {
+        self.deadline.saturating_duration_since(Instant::now())
     }
 }
 
@@ -264,16 +301,64 @@ where
     }
 }
 
-fn range_scan_deadline_error(
+/// How far a paginated scan got. Carried into every failure message so a failing
+/// run reports its own page-latency tail rather than leaving it to be guessed.
+struct ScanProgress {
     pages_scanned: u64,
     matched_rows: u64,
     expected_rows: u64,
     foreign_rows: u64,
+    slowest_page: Duration,
+}
+
+impl ScanProgress {
+    fn detail(&self, boundary: &Key) -> String {
+        format!(
+            "after {} pages: matched {} of {} expected rows, skipped {} foreign rows, slowest page {:?}, next boundary {}",
+            self.pages_scanned,
+            self.matched_rows,
+            self.expected_rows,
+            self.foreign_rows,
+            self.slowest_page,
+            hex::encode(boundary)
+        )
+    }
+}
+
+/// The phase has less budget left than one page is allowed to take, so the scan
+/// stops rather than issuing a request it cannot see through. Retrying cannot
+/// help, and a page cut off partway through reports against a subsection that was
+/// never given time to finish.
+///
+/// The wording opens with `range scan deadline exceeded`: `e2e-common.sh` in
+/// kv-mk1 greps for that phrase to classify a load-active witness failure as
+/// liveness lag rather than a safety violation.
+fn range_scan_deadline_error(
+    ctx: &ValidationCtx<'_>,
+    remaining: Duration,
+    progress: &ScanProgress,
     boundary: &Key,
 ) -> RangeScanError {
     RangeScanError::Permanent(anyhow!(
-        "range scan deadline exceeded after {pages_scanned} pages: matched {matched_rows} of {expected_rows} expected rows, skipped {foreign_rows} foreign rows, next boundary {}",
-        hex::encode(boundary)
+        "range scan deadline exceeded: {:?} of budget left, under the {:?} one page is allowed, {}",
+        remaining,
+        ctx.page_timeout,
+        progress.detail(boundary)
+    ))
+}
+
+/// One page outran its own bound with budget to spare, so the caller can wait it
+/// out. Budget exhaustion is owned entirely by [`range_scan_deadline_error`],
+/// which is why this is unconditionally transient.
+fn page_stalled_error(
+    ctx: &ValidationCtx<'_>,
+    progress: &ScanProgress,
+    boundary: &Key,
+) -> RangeScanError {
+    RangeScanError::Transient(anyhow!(
+        "range page exceeded its {:?} bound, {}",
+        ctx.page_timeout,
+        progress.detail(boundary)
     ))
 }
 
@@ -312,26 +397,38 @@ async fn scan_window_for_expected(
     let mut matched = 0usize;
     let mut pages_scanned = 0u64;
     let mut foreign_rows = 0u64;
+    let mut slowest_page = Duration::ZERO;
 
     loop {
         let boundary = match mode {
             RangeMode::Forward => &window_lo,
             RangeMode::Reverse => &window_hi,
         };
-        let remaining = ctx.deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
+        let progress = |slowest_page| ScanProgress {
+            pages_scanned,
+            matched_rows: matched as u64,
+            expected_rows: expected.len() as u64,
+            foreign_rows,
+            slowest_page,
+        };
+
+        // A page is issued only when the phase can afford the whole bound, so
+        // every timeout below means the page stalled and never that the budget
+        // ran out underneath it.
+        let remaining = ctx.remaining();
+        if remaining < ctx.page_timeout {
             return Err(range_scan_deadline_error(
-                pages_scanned,
-                matched as u64,
-                expected.len() as u64,
-                foreign_rows,
+                ctx,
+                remaining,
+                &progress(slowest_page),
                 boundary,
             ));
         }
 
         let query = ctx.client.query();
+        let page_started = Instant::now();
         let rows = match tokio::time::timeout(
-            remaining,
+            ctx.page_timeout,
             query.range_with_mode_and_min_sequence_number(
                 &window_lo,
                 &window_hi,
@@ -348,15 +445,11 @@ async fn scan_window_for_expected(
             }
             Ok(Err(err)) => return Err(RangeScanError::Permanent(anyhow!(err))),
             Err(_) => {
-                return Err(range_scan_deadline_error(
-                    pages_scanned,
-                    matched as u64,
-                    expected.len() as u64,
-                    foreign_rows,
-                    boundary,
-                ));
+                let slowest_page = slowest_page.max(page_started.elapsed());
+                return Err(page_stalled_error(ctx, &progress(slowest_page), boundary));
             }
         };
+        slowest_page = slowest_page.max(page_started.elapsed());
         pages_scanned += 1;
 
         // Ordering must hold for every returned row, foreign rows included, and
@@ -433,12 +526,14 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 
     let client = build_client(&cli.client)?;
 
-    let timeout = Duration::from_secs(cli.max_visibility_wait_secs);
-    let poll_interval = Duration::from_millis(cli.poll_interval_ms);
+    let timings = PhaseTimings {
+        budget: Duration::from_secs(cli.max_visibility_wait_secs),
+        page: Duration::from_secs(cli.range_page_timeout_secs),
+        poll: Duration::from_millis(cli.poll_interval_ms),
+    };
     match cli.mode {
         ValidateMode::Standard => {
-            run_standard_validation(&cli, &client, cli.client.endpoint(), timeout, poll_interval)
-                .await
+            run_standard_validation(&cli, &client, cli.client.endpoint(), timings).await
         }
         ValidateMode::OverlapLedgerWrite => {
             let namespace = cli
@@ -447,14 +542,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             run_overlap_ledger_write_mode(&cli, &client, cli.client.endpoint(), namespace).await
         }
         ValidateMode::OverlapLedgerVerify => {
-            run_overlap_ledger_verify_mode(
-                &cli,
-                &client,
-                cli.client.endpoint(),
-                timeout,
-                poll_interval,
-            )
-            .await
+            run_overlap_ledger_verify_mode(&cli, &client, cli.client.endpoint(), timings).await
         }
     }
 }
@@ -463,8 +551,7 @@ async fn run_standard_validation(
     cli: &Config,
     client: &PrefixedStoreClient,
     url: &str,
-    timeout: Duration,
-    poll_interval: Duration,
+    timings: PhaseTimings,
 ) -> anyhow::Result<()> {
     let namespace = cli
         .namespace
@@ -503,7 +590,7 @@ async fn run_standard_validation(
             page_size = cli.range_page_size,
             "Validating full queryability with paginated range scan"
         );
-        let ctx = ValidationCtx::new(client, url, min_sequence_number, timeout, poll_interval);
+        let ctx = ValidationCtx::new(client, url, min_sequence_number, timings);
         wait_for_all_visible_via_range(
             &ctx,
             &keyspace,
@@ -549,7 +636,7 @@ async fn run_standard_validation(
     .await?;
     tracing::info!(query_url = %url, "Validating query endpoint");
     // Each validation phase polls against its own fresh deadline.
-    let ctx = || ValidationCtx::new(client, url, min_sequence_number, timeout, poll_interval);
+    let ctx = || ValidationCtx::new(client, url, min_sequence_number, timings);
     wait_for_all_visible(&ctx(), &records).await?;
     run_point_samples(&ctx(), &records, &point_indices).await?;
     run_missing_samples(&ctx(), &keyspace, &missing_indices).await?;
@@ -697,8 +784,7 @@ async fn run_overlap_ledger_verify_mode(
     cli: &Config,
     client: &PrefixedStoreClient,
     url: &str,
-    timeout: Duration,
-    poll_interval: Duration,
+    timings: PhaseTimings,
 ) -> anyhow::Result<()> {
     let ledger_path = cli
         .ledger_path
@@ -719,7 +805,7 @@ async fn run_overlap_ledger_verify_mode(
     let mut sorted_records: Vec<&Record> = ledger.records.iter().collect();
     sorted_records.sort_by(|a, b| a.key.cmp(&b.key));
     // Each verification phase polls against its own fresh deadline.
-    let ctx = || ValidationCtx::new(client, url, ledger.sequence_number, timeout, poll_interval);
+    let ctx = || ValidationCtx::new(client, url, ledger.sequence_number, timings);
     wait_for_all_visible(&ctx(), &ledger.records).await?;
     wait_for_exact_range_match(
         &ctx(),
@@ -749,8 +835,16 @@ fn validate_config(cli: &Config) -> anyhow::Result<()> {
     ensure!(cli.keys > 0, "--keys must be > 0");
     ensure!(cli.batch_size > 0, "--batch-size must be > 0");
     ensure!(
-        cli.max_visibility_wait_secs > 0,
-        "--max-visibility-wait-secs must be > 0"
+        cli.range_page_timeout_secs > 0,
+        "--range-page-timeout-secs must be > 0"
+    );
+    // A phase that cannot afford one page's full bound refuses to issue any page
+    // at all, so reject that pairing here rather than at the first scan.
+    ensure!(
+        cli.max_visibility_wait_secs >= cli.range_page_timeout_secs,
+        "--max-visibility-wait-secs ({}) must be at least --range-page-timeout-secs ({})",
+        cli.max_visibility_wait_secs,
+        cli.range_page_timeout_secs
     );
     ensure!(cli.poll_interval_ms > 0, "--poll-interval-ms must be > 0");
     ensure!(cli.max_range_limit > 0, "--max-range-limit must be > 0");
@@ -1227,23 +1321,32 @@ async fn scan_visible_prefix_via_range(
     let mut visible = 0u64;
     let mut pages_scanned = 0u64;
     let mut foreign_rows = 0u64;
+    let mut slowest_page = Duration::ZERO;
     let mut previous_key: Option<Key> = None;
 
     loop {
-        let remaining = ctx.deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
+        let progress = |slowest_page| ScanProgress {
+            pages_scanned,
+            matched_rows: visible,
+            expected_rows: total_keys,
+            foreign_rows,
+            slowest_page,
+        };
+
+        let remaining = ctx.remaining();
+        if remaining < ctx.page_timeout {
             return Err(range_scan_deadline_error(
-                pages_scanned,
-                visible,
-                total_keys,
-                foreign_rows,
+                ctx,
+                remaining,
+                &progress(slowest_page),
                 &next_start,
             ));
         }
 
         let query = ctx.client.query();
+        let page_started = Instant::now();
         let rows = match tokio::time::timeout(
-            remaining,
+            ctx.page_timeout,
             query.range_with_min_sequence_number(
                 &next_start,
                 &end,
@@ -1259,15 +1362,15 @@ async fn scan_visible_prefix_via_range(
             }
             Ok(Err(err)) => return Err(RangeScanError::Permanent(anyhow!(err))),
             Err(_) => {
-                return Err(range_scan_deadline_error(
-                    pages_scanned,
-                    visible,
-                    total_keys,
-                    foreign_rows,
+                let slowest_page = slowest_page.max(page_started.elapsed());
+                return Err(page_stalled_error(
+                    ctx,
+                    &progress(slowest_page),
                     &next_start,
                 ));
             }
         };
+        slowest_page = slowest_page.max(page_started.elapsed());
         pages_scanned += 1;
 
         if let Some(previous_key) = &previous_key {
@@ -1468,44 +1571,62 @@ async fn run_range_samples(
         .iter()
         .map(|record| record.key.clone())
         .collect();
+    // Every concurrent check borrows this set, so the futures share one reference.
+    let own_keys = &own_keys;
     for (sample_idx, plan) in range_plans.iter().enumerate() {
         let checks = build_range_subsection_checks(*plan, sample_idx as u64);
         let label = format!("range visibility sample {sample_idx}");
         poll_until(ctx, &label, |_| async {
+            // Subsections cover disjoint windows and read at a fixed sequence
+            // floor, so the checks are independent and overlap safely.
+            let mut outcomes: Vec<(usize, usize, Result<(), RangeScanError>)> =
+                stream::iter(checks.iter().enumerate())
+                    .map(|(check_idx, check)| async move {
+                        let lo = &sorted_records[check.plan.start_idx].key;
+                        let hi = &sorted_records[check.plan.end_idx].key;
+                        let expected =
+                            expected_range_slice_for_mode(sorted_records, check.plan, check.mode);
+                        let scan = scan_window_for_expected(
+                            ctx,
+                            lo,
+                            hi,
+                            check.mode,
+                            check.plan.page_size,
+                            &expected,
+                            |key| own_keys.contains(key),
+                        )
+                        .await;
+                        (check_idx, expected.len(), scan)
+                    })
+                    .buffer_unordered(RANGE_SUBSECTION_CONCURRENCY)
+                    .collect()
+                    .await;
+
+            // Completion order varies run to run, so ordering by subsection index
+            // keeps a seed's reported failure reproducible.
+            outcomes.sort_by_key(|(check_idx, _, _)| *check_idx);
+
             let mut pending_rows = 0usize;
             let mut pending_checks = 0usize;
             let mut pending_transient_errors = 0usize;
             let mut last_transient_error: Option<String> = None;
-            for (check_idx, check) in checks.iter().enumerate() {
-                let lo = &sorted_records[check.plan.start_idx].key;
-                let hi = &sorted_records[check.plan.end_idx].key;
-                let expected =
-                    expected_range_slice_for_mode(sorted_records, check.plan, check.mode);
-                let scan = scan_window_for_expected(
-                    ctx,
-                    lo,
-                    hi,
-                    check.mode,
-                    check.plan.page_size,
-                    &expected,
-                    |key| own_keys.contains(key),
-                )
-                .await;
+            for (check_idx, expected_rows, scan) in outcomes {
+                let mode = checks[check_idx].mode;
                 match scan {
                     Ok(()) => {}
                     Err(RangeScanError::Transient(err)) => {
                         pending_checks += 1;
-                        pending_rows += expected.len();
+                        pending_rows += expected_rows;
                         pending_transient_errors += 1;
                         last_transient_error = Some(format!(
                             "{:?} range sample {} subsection {} transient error: {}",
-                            check.mode, sample_idx, check_idx, err
+                            mode, sample_idx, check_idx, err
                         ));
                     }
                     Err(RangeScanError::Permanent(err)) => {
                         return PollOutcome::Permanent(err.context(format!(
                             "{:?} range request failed for sample {}, subsection {}",
-                            check.mode, sample_idx, check_idx
+                            mode, sample_idx, check_idx
                         )));
                     }
                 }
@@ -1741,6 +1862,16 @@ mod tests {
         }
     }
 
+    /// `page` under `budget` lets a scan issue requests at all: a scan given a
+    /// budget smaller than one page's bound fails before reaching the harness.
+    fn test_timings(budget: Duration, page: Duration) -> PhaseTimings {
+        PhaseTimings {
+            budget,
+            page,
+            poll: Duration::from_millis(1),
+        }
+    }
+
     async fn spawn_range_harness(harness: RangeHarness) -> PrefixedStoreClient {
         let connect = ConnectRpcService::new(QueryServiceServer::new(harness));
         let app = Router::new().fallback_service(connect);
@@ -1769,16 +1900,25 @@ mod tests {
             &client,
             "test",
             1,
-            Duration::from_secs(1),
-            Duration::from_millis(1),
+            test_timings(Duration::from_secs(1), Duration::from_millis(500)),
         );
         let result =
             scan_visible_prefix_via_range(&ctx, &keyspace, namespace, 1, DEFAULT_VALUE_SIZE, 2)
                 .await;
 
+        let detail = match result {
+            Err(RangeScanError::Permanent(err)) => err.to_string(),
+            other => {
+                panic!(
+                    "duplicate own rows must be a permanent range correctness failure: {other:?}"
+                )
+            }
+        };
+        // Asserting the mechanism, not just the variant: a budget or bound
+        // failure is also permanent and would otherwise satisfy this test.
         assert!(
-            matches!(result, Err(RangeScanError::Permanent(_))),
-            "duplicate own rows must be a permanent range correctness failure: {result:?}"
+            detail.contains("unsorted or duplicated keys"),
+            "the duplicate must be caught by the ordering check: {detail}"
         );
     }
 
@@ -1791,8 +1931,7 @@ mod tests {
             &client,
             "test",
             1,
-            Duration::from_millis(25),
-            Duration::from_millis(1),
+            test_timings(Duration::from_secs(2), Duration::from_millis(100)),
         );
         let err = wait_for_all_visible_via_range(&ctx, &keyspace, 42, 1, DEFAULT_VALUE_SIZE, 1)
             .await
@@ -1817,8 +1956,7 @@ mod tests {
             &client,
             "test",
             1,
-            Duration::from_millis(25),
-            Duration::from_millis(1),
+            test_timings(Duration::from_secs(2), Duration::from_millis(100)),
         );
         let err = wait_for_all_visible_via_range(&ctx, &keyspace, 42, 1, DEFAULT_VALUE_SIZE, 1)
             .await
@@ -1844,8 +1982,7 @@ mod tests {
             &client,
             "test",
             1,
-            Duration::from_millis(25),
-            Duration::from_millis(1),
+            test_timings(Duration::from_secs(2), Duration::from_millis(100)),
         );
         let err = wait_for_all_visible(&ctx, &[record])
             .await
@@ -1860,15 +1997,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn range_scan_deadline_cancels_an_in_flight_page_request() {
+    async fn range_scan_refuses_a_page_it_cannot_time_in_full() {
         let namespace = 42;
         let keyspace = Keyspace::validation_from_u64_namespace(namespace, DEFAULT_KEY_LEN).unwrap();
         let record = Record {
             key: keyspace.inserted_key(0),
             value: value_for_index(namespace, 0, DEFAULT_VALUE_SIZE),
         };
+        // A delay far longer than the test can afford to wait: reaching the
+        // request at all would stall this test rather than fail it.
         let client = spawn_range_harness(RangeHarness::Delayed {
-            delay: Duration::from_millis(100),
+            delay: Duration::from_secs(30),
         })
         .await;
 
@@ -1876,8 +2015,55 @@ mod tests {
             &client,
             "test",
             1,
-            Duration::from_millis(10),
-            Duration::from_millis(1),
+            test_timings(Duration::from_millis(50), Duration::from_secs(10)),
+        );
+        let started = Instant::now();
+        let err = scan_window_for_expected(
+            &ctx,
+            &record.key,
+            &record.key,
+            RangeMode::Forward,
+            1,
+            &[&record],
+            |key| key == &record.key,
+        )
+        .await
+        .expect_err("a budget under one page's bound must fail the scan");
+
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the scan awaited a request it could not have finished: {:?}",
+            started.elapsed()
+        );
+        let detail = match err {
+            RangeScanError::Permanent(err) => err.to_string(),
+            other => panic!("an unaffordable budget is a permanent failure: {other:?}"),
+        };
+        // kv-mk1's e2e log classifier greps for this phrase; see
+        // `range_scan_deadline_error`.
+        assert!(detail.contains("range scan deadline exceeded"));
+        assert!(detail.contains("under the 10s one page is allowed"));
+        assert!(detail.contains("matched 0 of 1 expected rows"));
+    }
+
+    #[tokio::test]
+    async fn stalled_range_page_is_transient_while_phase_budget_remains() {
+        let namespace = 42;
+        let keyspace = Keyspace::validation_from_u64_namespace(namespace, DEFAULT_KEY_LEN).unwrap();
+        let record = Record {
+            key: keyspace.inserted_key(0),
+            value: value_for_index(namespace, 0, DEFAULT_VALUE_SIZE),
+        };
+        let client = spawn_range_harness(RangeHarness::Delayed {
+            delay: Duration::from_secs(30),
+        })
+        .await;
+
+        let ctx = ValidationCtx::new(
+            &client,
+            "test",
+            1,
+            test_timings(Duration::from_secs(30), Duration::from_millis(10)),
         );
         let err = scan_window_for_expected(
             &ctx,
@@ -1889,14 +2075,69 @@ mod tests {
             |key| key == &record.key,
         )
         .await
-        .expect_err("a range page that exceeds the validation deadline must fail");
+        .expect_err("a range page that exceeds the per-page bound must fail");
 
         let detail = match err {
-            RangeScanError::Permanent(err) => err.to_string(),
-            other => panic!("deadline must be a permanent validation failure: {other:?}"),
+            RangeScanError::Transient(err) => err.to_string(),
+            other => panic!("a stalled page with budget left must be transient: {other:?}"),
         };
-        assert!(detail.contains("range scan deadline exceeded"));
+        assert!(detail.contains("range page exceeded its 10ms bound"));
         assert!(detail.contains("matched 0 of 1 expected rows"));
+        // The observed page latency is what makes the next CI occurrence data
+        // rather than another argument about the bound.
+        assert!(
+            detail.contains("slowest page"),
+            "a stall must report the page latency it observed: {detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_subsection_failures_are_reported_by_lowest_index() {
+        let namespace = 42;
+        let keyspace = Keyspace::validation_from_u64_namespace(namespace, DEFAULT_KEY_LEN).unwrap();
+        // A window past 32 rows splits into four subsections, so this sample runs
+        // eight checks: enough to overlap and complete out of subsection order.
+        let records: Vec<Record> = (0..40)
+            .map(|index| Record {
+                key: keyspace.inserted_key(index),
+                value: value_for_index(namespace, index, DEFAULT_VALUE_SIZE),
+            })
+            .collect();
+        let mut sorted_records: Vec<&Record> = records.iter().collect();
+        sorted_records.sort_by(|a, b| a.key.cmp(&b.key));
+
+        let plan = RangePlan {
+            start_idx: 0,
+            end_idx: sorted_records.len() - 1,
+            page_size: 4,
+        };
+        let first = build_range_subsection_checks(plan, 0)[0];
+
+        let client = spawn_range_harness(RangeHarness::Empty).await;
+        // Budget comfortably above the page bound so the scan reaches the
+        // harness instead of being refused for lack of time.
+        let ctx = ValidationCtx::new(
+            &client,
+            "test",
+            1,
+            test_timings(Duration::from_secs(30), Duration::from_secs(10)),
+        );
+        let err = run_range_samples(&ctx, &sorted_records, &[plan])
+            .await
+            .expect_err("an empty range page leaves expected rows unmatched");
+
+        let detail = format!("{err:#}");
+        assert!(
+            detail.contains(&format!(
+                "{:?} range request failed for sample 0, subsection 0",
+                first.mode
+            )),
+            "the failure must be attributed to the lowest-index subsection: {detail}"
+        );
+        assert!(
+            !detail.contains("timeout"),
+            "a permanent subsection failure must not wait out the phase budget: {detail}"
+        );
     }
 
     #[test]
@@ -2011,6 +2252,29 @@ mod tests {
             .all(|c| c.plan.page_size <= (c.plan.end_idx - c.plan.start_idx + 1)));
     }
 
+    #[test]
+    fn validate_config_rejects_a_phase_budget_under_one_page_bound() {
+        let mut config = sample_config(DEFAULT_VALUE_SIZE);
+        config.max_visibility_wait_secs = 5;
+        config.range_page_timeout_secs = 10;
+
+        let err = validate_config(&config)
+            .expect_err("a phase that cannot afford one page must be rejected up front");
+        assert!(
+            err.to_string().contains("--max-visibility-wait-secs (5)")
+                && err.to_string().contains("--range-page-timeout-secs (10)"),
+            "the error must name both bounds: {err:#}"
+        );
+    }
+
+    #[test]
+    fn validate_config_accepts_a_budget_equal_to_one_page_bound() {
+        let mut config = sample_config(DEFAULT_VALUE_SIZE);
+        config.max_visibility_wait_secs = 10;
+        config.range_page_timeout_secs = 10;
+        assert!(validate_config(&config).is_ok());
+    }
+
     fn sample_config(value_size: usize) -> Config {
         Config {
             mode: ValidateMode::Standard,
@@ -2022,6 +2286,7 @@ mod tests {
             range_samples: 10,
             max_range_limit: 32,
             max_visibility_wait_secs: 30,
+            range_page_timeout_secs: DEFAULT_RANGE_PAGE_TIMEOUT_SECS,
             poll_interval_ms: 250,
             seed: 7,
             value_size,
