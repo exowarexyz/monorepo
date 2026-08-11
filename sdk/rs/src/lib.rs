@@ -26,7 +26,7 @@ extern crate self as exoware_proto;
 use bytes::Bytes;
 use connectrpc::client::{ClientConfig, ServerStream as ConnectServerStream};
 pub use connectrpc::{ConnectError, ErrorCode};
-use credential::{bearer_header, client_error_from_connect, ApiKey, Credential};
+use credential::{client_error_from_connect, ApiKey, Credential, UnusableEnvKey};
 use exoware_proto::compact::ServiceClient as CompactServiceClient;
 use exoware_proto::ingest::ServiceClient as IngestServiceClient;
 use exoware_proto::log::ingest::v1::PutRequest as ProtoPutRequest;
@@ -1542,8 +1542,10 @@ pub enum ClientBuildError {
     InvalidEndpointUrl { url: String },
     #[error("StoreClientBuilder: failed to configure platform TLS verifier: {0}")]
     TlsConfig(#[source] connectrpc::rustls::Error),
-    #[error("StoreClientBuilder: API key is not valid in an HTTP header (check for whitespace or non-ASCII)")]
+    #[error("StoreClientBuilder: API key is not valid in an HTTP header (check for control or non-ASCII characters)")]
     InvalidApiKey,
+    #[error("{API_KEY_ENV} is set to a value that cannot be an HTTP header. Remove any control or non-ASCII characters from it")]
+    InvalidApiKeyEnv,
 }
 
 /// Configures a [`StoreClient`] with explicit bases for health probes and store services.
@@ -1628,7 +1630,19 @@ impl StoreClientBuilder {
     }
 
     /// Build the client, or return an error if any required URL was not set.
+    /// Takes the API key from [`API_KEY_ENV`] unless [`Self::api_key`] set one, and fails if
+    /// either cannot be an HTTP header.
     pub fn build(self) -> Result<StoreClient, ClientBuildError> {
+        self.build_with(std::env::var(API_KEY_ENV).ok(), UnusableEnvKey::Reject)
+    }
+
+    /// Takes the environment lookup as an argument, so a test can cover every credential case
+    /// without mutating a variable that the rest of the process is reading.
+    fn build_with(
+        self,
+        env_api_key: Option<String>,
+        unusable_env_key: UnusableEnvKey,
+    ) -> Result<StoreClient, ClientBuildError> {
         let health_url = self.health_url.ok_or(ClientBuildError::MissingHealthUrl)?;
         let ingest_url = self.ingest_url.ok_or(ClientBuildError::MissingIngestUrl)?;
         let query_url = self.query_url.ok_or(ClientBuildError::MissingQueryUrl)?;
@@ -1651,35 +1665,11 @@ impl StoreClientBuilder {
             ProtoPreferZstdHttpClient::plaintext()
         };
 
-        // Surrounding whitespace is trimmed rather than rejected. A key routinely arrives as
-        // EXOWARE_API_KEY=$(cat token), which carries a trailing newline that is no part of it.
-        let (api_key, from_env) = match self.api_key.map(|key| key.0) {
-            Some(key) => (Some(key), false),
-            None => (std::env::var(API_KEY_ENV).ok(), true),
-        };
-        let api_key = api_key
-            .map(|key| key.trim().to_string())
-            .filter(|key| !key.is_empty());
-
-        let mut credential = if api_key.is_some() {
-            Credential::Sent
-        } else {
-            Credential::Absent
-        };
-        let connect_http = match api_key {
-            Some(key) => match bearer_header(&key) {
-                Some(value) => connect_http.with_authorization(value),
-                // An explicit key is the caller's own argument and they called a fallible
-                // build, so it fails. One from the environment is deployment config reaching
-                // an infallible constructor, and a stray byte there must not abort the
-                // process, so the client is built without a credential and says so when a
-                // request is rejected.
-                None if !from_env => return Err(ClientBuildError::InvalidApiKey),
-                None => {
-                    credential = Credential::Unusable;
-                    connect_http
-                }
-            },
+        let resolved =
+            credential::resolve(self.api_key.map(|key| key.0), env_api_key, unusable_env_key)?;
+        let credential = resolved.credential;
+        let connect_http = match resolved.header {
+            Some(value) => connect_http.with_authorization(value),
             None => connect_http,
         };
         Ok(StoreClient {
@@ -1762,11 +1752,13 @@ impl StoreClient {
         Self::with_retry_config(url, RetryConfig::standard())
     }
 
+    /// Panics if `url` is not a valid endpoint. A malformed [`API_KEY_ENV`] is ignored rather
+    /// than panicking, so use [`Self::builder`] to have it rejected.
     pub fn with_retry_config(url: &str, retry_config: RetryConfig) -> Self {
         Self::builder()
             .url(url)
             .retry_config(retry_config)
-            .build()
+            .build_with(std::env::var(API_KEY_ENV).ok(), UnusableEnvKey::Tolerate)
             .expect("failed to configure Store client")
     }
 
@@ -2974,7 +2966,6 @@ fn retry_backoff_delay(attempt: usize, retry_config: RetryConfig) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::credential::PROXY_REJECTION;
     use crate::kv_codec::{KvFieldKind, KvPredicate, KvPredicateCheck, KvPredicateConstraint};
     use exoware_proto::query::TraversalMode as ProtoTraversalMode;
 
@@ -2998,22 +2989,8 @@ mod tests {
     }
 
     #[test]
-    fn the_builder_records_whether_a_credential_will_be_sent() {
-        let _guard = API_KEY_ENV_LOCK.lock().unwrap();
-        std::env::remove_var(API_KEY_ENV);
-        assert_eq!(
-            StoreClient::new("https://store.example.com").credential,
-            Credential::Absent
-        );
+    fn an_explicit_key_records_that_one_will_be_sent() {
         assert_eq!(built_with_api_key("token").credential, Credential::Sent);
-
-        // The environment is the other way a credential arrives, and it counts the same.
-        std::env::set_var(API_KEY_ENV, "from-env");
-        assert_eq!(
-            StoreClient::new("https://store.example.com").credential,
-            Credential::Sent
-        );
-        std::env::remove_var(API_KEY_ENV);
     }
 
     #[test]
@@ -3086,9 +3063,6 @@ mod tests {
         ));
     }
 
-    /// Serializes the tests that mutate `EXOWARE_API_KEY`, which is process-wide.
-    static API_KEY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn built_with_api_key(key: &str) -> StoreClient {
         StoreClient::builder()
             .url("https://example.test")
@@ -3129,50 +3103,34 @@ mod tests {
         assert!(!rendered.contains("token-abc"));
     }
 
-    #[test]
-    fn no_api_key_sends_no_header() {
-        let _guard = API_KEY_ENV_LOCK.lock().unwrap();
-        std::env::remove_var(API_KEY_ENV);
-
-        // A deployment with no load balancer in front of it authenticates nothing, so local and
-        // in-VPC clients must keep working with no credential configured.
-        let client = StoreClient::builder()
+    /// Builds with `key` standing in for the environment lookup, so nothing here depends on a
+    /// variable another test could be changing. `credential.rs` covers which key wins.
+    fn built_with_env_key(key: Option<&str>, unusable_env_key: UnusableEnvKey) -> StoreClient {
+        StoreClient::builder()
             .url("https://example.test")
-            .build()
-            .unwrap();
-
-        assert!(client.connect_http.authorization().is_none());
+            .build_with(key.map(str::to_string), unusable_env_key)
+            .expect("builder should accept this environment key")
     }
 
     #[test]
-    fn the_environment_supplies_a_key_and_an_explicit_one_wins() {
-        let _guard = API_KEY_ENV_LOCK.lock().unwrap();
-        std::env::set_var(API_KEY_ENV, "from-env");
+    fn no_api_key_sends_no_header() {
+        // A deployment with no load balancer in front of it authenticates nothing, so local and
+        // in-VPC clients must keep working with no credential configured.
+        let client = built_with_env_key(None, UnusableEnvKey::Reject);
 
-        let from_env = StoreClient::builder()
-            .url("https://example.test")
-            .build()
-            .unwrap();
+        assert!(client.connect_http.authorization().is_none());
+        assert_eq!(client.credential, Credential::Absent);
+    }
+
+    #[test]
+    fn an_environment_key_reaches_the_transport() {
+        let client = built_with_env_key(Some("from-env"), UnusableEnvKey::Reject);
+
         assert_eq!(
-            from_env.connect_http.authorization().unwrap(),
+            client.connect_http.authorization().unwrap(),
             "Bearer from-env"
         );
-
-        let explicit = built_with_api_key("explicit");
-        assert_eq!(
-            explicit.connect_http.authorization().unwrap(),
-            "Bearer explicit"
-        );
-
-        // An empty variable is an unset one, not a credential of "Bearer ".
-        std::env::set_var(API_KEY_ENV, "");
-        let empty = StoreClient::builder()
-            .url("https://example.test")
-            .build()
-            .unwrap();
-        assert!(empty.connect_http.authorization().is_none());
-
-        std::env::remove_var(API_KEY_ENV);
+        assert_eq!(client.credential, Credential::Sent);
     }
 
     #[test]
@@ -3186,49 +3144,21 @@ mod tests {
         ));
     }
 
-    /// `new` returns `Self`, so a variable an operator sets must not be able to abort the
-    /// process. An unusable one yields a client with no credential that says why.
+    /// The infallible constructors would have to panic, so they build a client that carries no
+    /// credential and says why when a request is rejected.
     #[test]
-    fn an_unusable_environment_key_does_not_panic_the_infallible_constructors() {
-        let _guard = API_KEY_ENV_LOCK.lock().unwrap();
-        std::env::set_var(API_KEY_ENV, "has\nnewline");
-
-        let client = StoreClient::new("https://example.test");
+    fn a_tolerated_unusable_key_yields_a_client_that_explains_itself() {
+        let client = built_with_env_key(Some("has\nnewline"), UnusableEnvKey::Tolerate);
         assert!(client.connect_http.authorization().is_none());
         assert_eq!(client.credential, Credential::Unusable);
 
         let rendered = client_error_from_connect(
-            ConnectError::new(ErrorCode::Unauthenticated, PROXY_REJECTION),
+            ConnectError::new(ErrorCode::Unauthenticated, "HTTP error 401"),
             client.credential,
         )
         .to_string();
         assert!(rendered.contains(API_KEY_ENV), "{rendered}");
         assert!(rendered.contains("cannot be an HTTP header"), "{rendered}");
-
-        std::env::remove_var(API_KEY_ENV);
-    }
-
-    /// A key reaching the environment through `$(cat token)` carries a trailing newline, which
-    /// would otherwise make it unusable.
-    #[test]
-    fn surrounding_whitespace_in_a_key_is_trimmed_rather_than_rejected() {
-        let _guard = API_KEY_ENV_LOCK.lock().unwrap();
-        std::env::set_var(API_KEY_ENV, "  padded-token\n");
-
-        let client = StoreClient::new("https://example.test");
-        assert_eq!(
-            client.connect_http.authorization().unwrap(),
-            "Bearer padded-token"
-        );
-        assert_eq!(client.credential, Credential::Sent);
-
-        // A variable holding only whitespace is an unset one, not an unusable credential.
-        std::env::set_var(API_KEY_ENV, "   \n");
-        let blank = StoreClient::new("https://example.test");
-        assert!(blank.connect_http.authorization().is_none());
-        assert_eq!(blank.credential, Credential::Absent);
-
-        std::env::remove_var(API_KEY_ENV);
     }
 
     #[test]

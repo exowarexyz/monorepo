@@ -1,20 +1,17 @@
 //! The API key a client presents, and what a rejection tells the caller to do about it.
 //!
-//! A deployment behind a load balancer authenticates every RPC, and one without a load balancer
-//! authenticates none, so a client cannot know from its configuration whether a credential is
-//! required. It carries whatever it has and explains itself when a call comes back rejected.
+//! A client cannot tell from its configuration whether the endpoint requires a credential, since
+//! a deployment behind a load balancer authenticates every RPC and one without authenticates
+//! none. It sends whatever it has and explains itself when a call is rejected.
 
 use std::fmt;
 
-use crate::{ClientError, ConnectError, ErrorCode};
+use crate::{ClientBuildError, ClientError, ConnectError, ErrorCode};
 
 /// Environment variable read for the API key when none is set on the builder.
 pub const API_KEY_ENV: &str = "EXOWARE_API_KEY";
 
-/// The API key, held so that it is never printed.
-///
-/// The credential authorizes every RPC this client makes, so a `Debug` of the builder must not
-/// leak it into a log.
+/// The API key, wrapped so a `Debug` of the builder cannot leak it into a log.
 #[derive(Clone, Default)]
 pub(crate) struct ApiKey(pub(crate) String);
 
@@ -24,11 +21,20 @@ impl fmt::Debug for ApiKey {
     }
 }
 
+/// How a constructor handles an `EXOWARE_API_KEY` that cannot be an HTTP header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UnusableEnvKey {
+    /// Fail the build.
+    Reject,
+    /// Build without a credential, leaving a rejected request to name the variable. The only
+    /// option for the infallible constructors, which would otherwise have to panic.
+    Tolerate,
+}
+
 /// Whether this client sends a credential with every request.
 ///
-/// Decided once when the client is built, then carried to each site that can raise an RPC error.
-/// A rejection is the only place the distinction matters and the least able to see it, since an
-/// endpoint reports the same code whether a credential was missing or merely refused.
+/// Threaded to every site that can raise an RPC error, because an endpoint reports the same code
+/// whether a credential was missing or refused, and only the client knows which.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Credential {
     Sent,
@@ -37,22 +43,69 @@ pub(crate) enum Credential {
     Unusable,
 }
 
+/// A resolved credential, ready to configure a client with.
+#[derive(Debug)]
+pub(crate) struct Resolved {
+    pub(crate) header: Option<http::HeaderValue>,
+    pub(crate) credential: Credential,
+}
+
+/// Chooses between an explicitly configured key and one found in the environment.
+///
+/// Takes the environment lookup as an argument rather than reading it, so that every case is
+/// reachable without touching a process-wide variable.
+pub(crate) fn resolve(
+    explicit: Option<String>,
+    from_environment: Option<String>,
+    unusable_env_key: UnusableEnvKey,
+) -> Result<Resolved, ClientBuildError> {
+    let (key, is_from_environment) = match explicit {
+        Some(key) => (Some(key), false),
+        None => (from_environment, true),
+    };
+
+    // Surrounding whitespace is trimmed rather than rejected. A key routinely arrives as
+    // EXOWARE_API_KEY=$(cat token), which carries a trailing newline that is no part of it.
+    let key = key
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty());
+    let Some(key) = key else {
+        return Ok(Resolved {
+            header: None,
+            credential: Credential::Absent,
+        });
+    };
+
+    match bearer_header(&key) {
+        Some(header) => Ok(Resolved {
+            header: Some(header),
+            credential: Credential::Sent,
+        }),
+        None if !is_from_environment => Err(ClientBuildError::InvalidApiKey),
+        None => match unusable_env_key {
+            UnusableEnvKey::Reject => Err(ClientBuildError::InvalidApiKeyEnv),
+            UnusableEnvKey::Tolerate => Ok(Resolved {
+                header: None,
+                credential: Credential::Unusable,
+            }),
+        },
+    }
+}
+
 /// Builds the Authorization header for a key, or `None` if the key cannot be one.
 ///
 /// Marked sensitive so the credential cannot reach a log or a Debug of the client.
-pub(crate) fn bearer_header(key: &str) -> Option<http::HeaderValue> {
+fn bearer_header(key: &str) -> Option<http::HeaderValue> {
     let mut value = http::HeaderValue::from_str(&format!("Bearer {key}")).ok()?;
     value.set_sensitive(true);
     Some(value)
 }
 
 impl Credential {
-    /// What to do about an unauthenticated rejection. The two cases share no advice, which is
-    /// the reason this is threaded through at all.
+    /// Advice for an unauthenticated rejection.
     ///
-    /// Whoever reads this may be running a binary they did not build, so neither case names an
-    /// API. `Absent` means nothing was configured in code either, so the environment variable is
-    /// something the reader can act on.
+    /// The reader may be running a binary they did not build, so no case names a Rust API. The
+    /// environment variable is the one thing they can always act on.
     const fn remedy(self) -> &'static str {
         match self {
             Self::Absent => concat!(
@@ -72,6 +125,8 @@ impl Credential {
     }
 }
 
+/// Presents an RPC error to the caller, dropping any page a proxy answered with and telling a
+/// rejected caller what to do about their credential.
 pub(crate) fn client_error_from_connect(
     mut err: ConnectError,
     credential: Credential,
@@ -88,6 +143,10 @@ pub(crate) fn client_error_from_connect(
 }
 
 /// Drops an HTML error page from a message, keeping whatever preceded it.
+///
+/// A proxy that rejects a request before it reaches a service answers with a page rather than a
+/// ConnectRPC error, and the whole page arrives in the message. Returns `None` when nothing but
+/// markup was there.
 fn without_html_body(message: String) -> Option<String> {
     let lowercase = message.to_ascii_lowercase();
     let Some(start) = ["<html", "<!doctype"]
@@ -102,14 +161,15 @@ fn without_html_body(message: String) -> Option<String> {
     (!kept.is_empty()).then(|| kept.to_string())
 }
 
-/// The 401 body an ALB serves when it rejects a token, verbatim. Shared with the builder tests
-/// in `lib.rs`, which check that a client built from an unusable key explains itself.
-#[cfg(test)]
-pub(crate) const PROXY_REJECTION: &str = "HTTP error 401: <html>\r\n<head><title>401 Authorization Required</title></head>\r\n<body>\r\n<center><h1>401 Authorization Required</h1></center>\r\n</body>\r\n</html>\r\n";
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The 401 body an ALB serves when it rejects a token, verbatim.
+    const PROXY_REJECTION: &str = "HTTP error 401: <html>\r\n<head><title>401 Authorization Required</title></head>\r\n<body>\r\n<center><h1>401 Authorization Required</h1></center>\r\n</body>\r\n</html>\r\n";
+
+    /// An unusable key, being a byte no base64url token contains.
+    const UNUSABLE: &str = "has\nnewline";
 
     fn rejection(credential: Credential) -> String {
         client_error_from_connect(
@@ -117,6 +177,10 @@ mod tests {
             credential,
         )
         .to_string()
+    }
+
+    fn from_env(key: &str, unusable_env_key: UnusableEnvKey) -> Result<Resolved, ClientBuildError> {
+        resolve(None, Some(key.to_string()), unusable_env_key)
     }
 
     #[test]
@@ -188,15 +252,87 @@ mod tests {
 
     #[test]
     fn a_key_becomes_a_sensitive_bearer_header() {
-        let value = bearer_header("token-abc").unwrap();
-        assert_eq!(value, "Bearer token-abc");
+        let resolved = from_env("token-abc", UnusableEnvKey::Reject).unwrap();
+        let header = resolved.header.unwrap();
 
+        assert_eq!(resolved.credential, Credential::Sent);
+        assert_eq!(header, "Bearer token-abc");
         // set_sensitive is what keeps the credential out of any log that debugs the transport.
-        assert!(!format!("{value:?}").contains("token-abc"));
+        assert!(!format!("{header:?}").contains("token-abc"));
     }
 
     #[test]
-    fn a_key_that_cannot_be_a_header_yields_no_header() {
-        assert!(bearer_header("has\nnewline").is_none());
+    fn an_explicit_key_wins_over_the_environment() {
+        let resolved = resolve(
+            Some("explicit".to_string()),
+            Some("from-env".to_string()),
+            UnusableEnvKey::Reject,
+        )
+        .unwrap();
+
+        assert_eq!(resolved.header.unwrap(), "Bearer explicit");
+    }
+
+    #[test]
+    fn no_key_anywhere_sends_no_header() {
+        // A deployment with no load balancer in front of it authenticates nothing, so this has to
+        // keep working rather than demand a credential.
+        let resolved = resolve(None, None, UnusableEnvKey::Reject).unwrap();
+
+        assert!(resolved.header.is_none());
+        assert_eq!(resolved.credential, Credential::Absent);
+    }
+
+    /// A key reaching the environment through `$(cat token)` carries a trailing newline, which
+    /// would otherwise make it unusable.
+    #[test]
+    fn surrounding_whitespace_is_trimmed_rather_than_rejected() {
+        let resolved = from_env("  padded-token\n", UnusableEnvKey::Reject).unwrap();
+
+        assert_eq!(resolved.header.unwrap(), "Bearer padded-token");
+        assert_eq!(resolved.credential, Credential::Sent);
+    }
+
+    #[test]
+    fn a_variable_holding_only_whitespace_is_an_unset_one() {
+        let resolved = from_env("   \n", UnusableEnvKey::Reject).unwrap();
+
+        assert!(resolved.header.is_none());
+        assert_eq!(resolved.credential, Credential::Absent);
+    }
+
+    #[test]
+    fn an_explicit_unusable_key_always_fails() {
+        // The caller passed it in code and called a fallible build, so the policy never applies.
+        for unusable_env_key in [UnusableEnvKey::Reject, UnusableEnvKey::Tolerate] {
+            assert!(matches!(
+                resolve(Some(UNUSABLE.to_string()), None, unusable_env_key),
+                Err(ClientBuildError::InvalidApiKey)
+            ));
+        }
+    }
+
+    #[test]
+    fn an_unusable_environment_key_follows_the_policy() {
+        assert!(matches!(
+            from_env(UNUSABLE, UnusableEnvKey::Reject),
+            Err(ClientBuildError::InvalidApiKeyEnv)
+        ));
+
+        let tolerated = from_env(UNUSABLE, UnusableEnvKey::Tolerate).unwrap();
+        assert!(tolerated.header.is_none());
+        assert_eq!(tolerated.credential, Credential::Unusable);
+    }
+
+    /// Whoever set the variable may not have written the binary, so the message names the
+    /// variable and not the builder.
+    #[test]
+    fn rejecting_an_environment_key_names_the_variable() {
+        let rendered = from_env(UNUSABLE, UnusableEnvKey::Reject)
+            .unwrap_err()
+            .to_string();
+
+        assert!(rendered.contains(API_KEY_ENV), "{rendered}");
+        assert!(!rendered.contains("StoreClient"), "{rendered}");
     }
 }
