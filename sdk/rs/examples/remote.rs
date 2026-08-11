@@ -64,15 +64,19 @@ async fn round_trip(url: &str, write_url: &str) -> Result<(), Box<dyn std::error
     println!("\ncommitted {} entries at sequence {sequence}", batch.len());
 
     // Query replicas trail the write path, so pin each read to the sequence just
-    // committed rather than racing it.
+    // committed rather than racing it. Pinned there, a miss or a wrong value is the
+    // deployment failing, so both reads below are checked rather than printed.
     let greeting = key(b"greeting");
-    match store
+    let value = store
         .query()
         .get_with_min_sequence_number(&greeting, sequence)
         .await?
-    {
-        Some(value) => println!("greeting = {}", String::from_utf8_lossy(&value)),
-        None => println!("greeting = <missing>"),
+        .ok_or_else(|| format!("greeting is absent at sequence {sequence}, which committed it"))?;
+    println!("greeting = {}", String::from_utf8_lossy(&value));
+    if value != b"hello".as_slice() {
+        return Err(
+            format!("greeting reads back as {value:?} rather than the \"hello\" written").into(),
+        );
     }
 
     // Logical bounds spanning the namespace: the empty key up to 0xFF repeated to
@@ -91,6 +95,22 @@ async fn round_trip(url: &str, write_url: &str) -> Result<(), Box<dyn std::error
             String::from_utf8_lossy(k),
             String::from_utf8_lossy(value)
         );
+    }
+
+    // Containment rather than an exact count, because the namespace may hold keys this
+    // run did not write.
+    for (expected_key, expected_value) in &entries {
+        let name = String::from_utf8_lossy(expected_key);
+        match scanned.iter().find(|(k, _)| k == expected_key) {
+            Some((_, value)) if value == expected_value => {}
+            Some((_, value)) => {
+                return Err(format!(
+                    "range returns {name} as {value:?} rather than {expected_value:?}"
+                )
+                .into())
+            }
+            None => return Err(format!("range over the namespace omits {name}").into()),
+        }
     }
 
     Ok(())
