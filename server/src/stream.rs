@@ -1,9 +1,9 @@
 //! Live stream coordination for `log.stream.v1`.
 //!
 //! A [`StreamNotifier`] tracks the highest published batch sequence and wakes
-//! subscribers. Each subscriber then pulls batches from the log at its own
-//! pace, so live delivery is naturally paced by client reads instead of an
-//! internal per-subscriber backlog.
+//! subscribers. Each subscriber pulls batches from the log at its own pace.
+//! A small ordered lookahead overlaps log reads without allowing an unbounded
+//! per-subscriber backlog.
 //!
 //! `StreamNotifier` is an in-process coordination primitive. Split deployments
 //! need a separate remote notification path that advances a local notifier after

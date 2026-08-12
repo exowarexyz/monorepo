@@ -42,7 +42,7 @@ use exoware_sdk as exoware_proto;
 use exoware_sdk::common::kv::v1::filter::KindView as ProtoFilterKindView;
 use exoware_sdk::keys::Key;
 use exoware_sdk::selector::Selector;
-use futures::{stream as stream_util, Stream};
+use futures::{stream as stream_util, Stream, StreamExt};
 use tokio::sync::Notify;
 
 use crate::reduce::RangeReducer;
@@ -56,6 +56,7 @@ use crate::{
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
 const RANGE_STREAM_MAX_FRAME_ROWS: usize = 4096;
 const REDUCE_SCAN_BATCH_SIZE: usize = 4096;
+const SUBSCRIBE_GET_BATCH_LOOKAHEAD: usize = 8;
 
 fn query_detail(sequence_number: u64, extra: QueryExtra) -> Detail {
     Detail {
@@ -864,10 +865,35 @@ fn filtered_subscribe_response(
     }))
 }
 
-struct ReplayState {
-    next_sequence: u64,
-    bound: u64,
+type OrderedBatchStream = Pin<Box<dyn Stream<Item = Result<Option<LogBatch>, String>> + Send>>;
+
+fn ordered_batch_stream<B>(
+    log: Arc<B>,
+    range: std::ops::RangeInclusive<u64>,
     first_batch: Option<LogBatch>,
+) -> OrderedBatchStream
+where
+    B: Log,
+{
+    let mut first_batch = first_batch;
+    Box::pin(
+        stream_util::iter(range)
+            .map(move |sequence_number| {
+                let log = log.clone();
+                let first_batch = first_batch.take();
+                async move {
+                    match first_batch {
+                        Some(batch) => Ok(Some(batch)),
+                        None => log.get_batch(sequence_number).await,
+                    }
+                }
+            })
+            .buffered(SUBSCRIBE_GET_BATCH_LOOKAHEAD),
+    )
+}
+
+struct ReplayState {
+    batches: OrderedBatchStream,
 }
 
 enum ReplayProgress {
@@ -886,7 +912,8 @@ struct SubscriptionState<B> {
     state: StreamState<B>,
     matchers: crate::stream::CompiledMatchers,
     replay: Option<ReplayState>,
-    next_live_sequence: u64,
+    live: Option<OrderedBatchStream>,
+    next_live_sequence: Option<u64>,
     live_notify: Arc<Notify>,
     terminated: bool,
 }
@@ -899,13 +926,14 @@ where
         state: StreamState<B>,
         matchers: crate::stream::CompiledMatchers,
         replay: Option<ReplayState>,
-        next_live_sequence: u64,
+        next_live_sequence: Option<u64>,
         live_notify: Arc<Notify>,
     ) -> Self {
         Self {
             state,
             matchers,
             replay,
+            live: None,
             next_live_sequence,
             live_notify,
             terminated: false,
@@ -952,48 +980,48 @@ where
         let Some(replay) = &mut self.replay else {
             return Ok(ReplayProgress::Done);
         };
-        let seq = replay.next_sequence;
-        let batch = if let Some(first_batch) = replay.first_batch.take() {
-            Some(first_batch)
-        } else {
-            self.state
-                .log
-                .get_batch(seq)
-                .await
-                .map_err(ConnectError::internal)?
-        };
-        replay.next_sequence += 1;
-        if replay.next_sequence > replay.bound {
+        let Some(batch) = replay.batches.next().await else {
             self.replay = None;
-        }
-        let Some(batch) = batch else {
-            let oldest = self
-                .state
-                .log
-                .oldest_retained_batch()
-                .await
-                .map_err(ConnectError::internal)?;
-            return Err(StreamConnect::<B>::batch_evicted_connect_error(oldest));
+            return Ok(ReplayProgress::Done);
         };
-        Ok(match filtered_subscribe_response(&batch, &self.matchers)? {
+        Ok(match self.resolve_batch(batch).await? {
             Some(frame) => ReplayProgress::Frame(frame),
             None => ReplayProgress::Advanced,
         })
     }
 
     async fn next_live_frame(&mut self) -> Result<LiveProgress, ConnectError> {
-        let current = self.state.notifier.current_sequence();
-        if self.next_live_sequence > current {
-            return Ok(LiveProgress::NeedWait);
+        if self.live.is_none() {
+            let Some(next_sequence) = self.next_live_sequence else {
+                return Ok(LiveProgress::NeedWait);
+            };
+            let current = self.state.notifier.current_sequence();
+            if next_sequence > current {
+                return Ok(LiveProgress::NeedWait);
+            }
+            self.live = Some(ordered_batch_stream(
+                self.state.log.clone(),
+                next_sequence..=current,
+                None,
+            ));
+            self.next_live_sequence = current.checked_add(1);
         }
-        let seq = self.next_live_sequence;
-        self.next_live_sequence += 1;
-        let batch = self
-            .state
-            .log
-            .get_batch(seq)
-            .await
-            .map_err(ConnectError::internal)?;
+
+        let Some(batch) = self.live.as_mut().expect("live stream exists").next().await else {
+            self.live = None;
+            return Ok(LiveProgress::Advanced);
+        };
+        Ok(match self.resolve_batch(batch).await? {
+            Some(frame) => LiveProgress::Frame(frame),
+            None => LiveProgress::Advanced,
+        })
+    }
+
+    async fn resolve_batch(
+        &mut self,
+        batch: Result<Option<LogBatch>, String>,
+    ) -> Result<Option<SubscribeResponse>, ConnectError> {
+        let batch = batch.map_err(ConnectError::internal)?;
         let Some(batch) = batch else {
             let oldest = self
                 .state
@@ -1003,18 +1031,20 @@ where
                 .map_err(ConnectError::internal)?;
             return Err(StreamConnect::<B>::batch_evicted_connect_error(oldest));
         };
-        Ok(match filtered_subscribe_response(&batch, &self.matchers)? {
-            Some(frame) => LiveProgress::Frame(frame),
-            None => LiveProgress::Advanced,
-        })
+        filtered_subscribe_response(&batch, &self.matchers)
     }
 
-    async fn wait_for_live(&self) {
-        if self.next_live_sequence <= self.state.notifier.current_sequence() {
+    fn live_available(&self) -> bool {
+        self.next_live_sequence
+            .is_some_and(|next| next <= self.state.notifier.current_sequence())
+    }
+
+    async fn wait_for_live(&mut self) {
+        if self.live_available() {
             return;
         }
         let notified = self.live_notify.clone().notified_owned();
-        if self.next_live_sequence <= self.state.notifier.current_sequence() {
+        if self.live_available() {
             return;
         }
         notified.await;
@@ -1067,9 +1097,8 @@ where
         let since = request.since_sequence_number;
 
         // Snapshot the current published frontier and subscribe for future
-        // wakeups. The stream then walks the log by sequence cursor, so
-        // live delivery is paced by client reads instead of server-side
-        // buffering.
+        // wakeups. Bounded lookahead overlaps log reads while retaining
+        // client-driven backpressure.
         let matchers = crate::stream::compile_matchers(&filter)?;
         let subscription = self.state.notifier.subscribe();
         let replay_bound = subscription.current_sequence;
@@ -1097,14 +1126,16 @@ where
                     return Err(self.batch_evicted_error(oldest));
                 };
                 Some(ReplayState {
-                    next_sequence: s,
-                    bound: replay_bound,
-                    first_batch: Some(first_batch),
+                    batches: ordered_batch_stream(
+                        self.state.log.clone(),
+                        s..=replay_bound,
+                        Some(first_batch),
+                    ),
                 })
             }
             _ => None,
         };
-        let next_live_sequence = replay_bound.saturating_add(1);
+        let next_live_sequence = replay_bound.checked_add(1);
 
         Ok(connectrpc::Response::stream(
             SubscriptionState::new(
@@ -1360,7 +1391,7 @@ where
 mod tests {
     use super::*;
     use std::collections::{BTreeMap, HashMap};
-    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::{AtomicU64, AtomicUsize};
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -1654,6 +1685,230 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct BatchGate {
+        released: AtomicBool,
+        waits: AtomicUsize,
+        notify: Notify,
+    }
+
+    impl BatchGate {
+        async fn wait(&self) {
+            loop {
+                if self.released.load(Ordering::Acquire) {
+                    return;
+                }
+                let notified = self.notify.notified();
+                self.waits.fetch_add(1, Ordering::Release);
+                if self.released.load(Ordering::Acquire) {
+                    return;
+                }
+                notified.await;
+            }
+        }
+
+        fn release(&self) {
+            self.released.store(true, Ordering::Release);
+            self.notify.notify_waiters();
+        }
+
+        fn wake(&self) {
+            self.notify.notify_waiters();
+        }
+
+        fn wait_count(&self) -> usize {
+            self.waits.load(Ordering::Acquire)
+        }
+    }
+
+    #[derive(Default)]
+    struct GatedLogState {
+        batches: BTreeMap<u64, Vec<(Bytes, Bytes)>>,
+        errors: HashMap<u64, String>,
+        gates: HashMap<u64, Arc<BatchGate>>,
+        started_sequences: Vec<u64>,
+        get_counts: HashMap<u64, usize>,
+        in_flight: usize,
+        max_in_flight: usize,
+    }
+
+    #[derive(Default)]
+    struct GatedLog {
+        current_sequence: AtomicU64,
+        state: Arc<Mutex<GatedLogState>>,
+        started: Arc<Notify>,
+    }
+
+    impl GatedLog {
+        fn set_batch(&self, sequence_number: u64, kvs: Vec<(Bytes, Bytes)>) {
+            self.current_sequence
+                .fetch_max(sequence_number, Ordering::Release);
+            self.state
+                .lock()
+                .expect("lock")
+                .batches
+                .insert(sequence_number, kvs);
+        }
+
+        fn gate(&self, sequence_number: u64) {
+            self.state
+                .lock()
+                .expect("lock")
+                .gates
+                .insert(sequence_number, Arc::new(BatchGate::default()));
+        }
+
+        fn set_error(&self, sequence_number: u64, error: impl Into<String>) {
+            self.state
+                .lock()
+                .expect("lock")
+                .errors
+                .insert(sequence_number, error.into());
+        }
+
+        fn release(&self, sequence_number: u64) {
+            self.state
+                .lock()
+                .expect("lock")
+                .gates
+                .get(&sequence_number)
+                .expect("gate")
+                .release();
+        }
+
+        fn wake(&self, sequence_number: u64) {
+            self.state
+                .lock()
+                .expect("lock")
+                .gates
+                .get(&sequence_number)
+                .expect("gate")
+                .wake();
+        }
+
+        fn gate_wait_count(&self, sequence_number: u64) -> usize {
+            self.state
+                .lock()
+                .expect("lock")
+                .gates
+                .get(&sequence_number)
+                .expect("gate")
+                .wait_count()
+        }
+
+        fn started_sequences(&self) -> Vec<u64> {
+            self.state.lock().expect("lock").started_sequences.clone()
+        }
+
+        fn get_count(&self, sequence_number: u64) -> usize {
+            self.state
+                .lock()
+                .expect("lock")
+                .get_counts
+                .get(&sequence_number)
+                .copied()
+                .unwrap_or_default()
+        }
+
+        fn in_flight(&self) -> usize {
+            self.state.lock().expect("lock").in_flight
+        }
+
+        fn max_in_flight(&self) -> usize {
+            self.state.lock().expect("lock").max_in_flight
+        }
+
+        async fn wait_for_started(&self, count: usize) {
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if self.started_sequences().len() >= count {
+                        return;
+                    }
+                    let notified = self.started.notified();
+                    if self.started_sequences().len() >= count {
+                        return;
+                    }
+                    notified.await;
+                }
+            })
+            .await
+            .expect("batch reads should start");
+        }
+
+        async fn wait_for_gate_waits(&self, sequence_number: u64, count: usize) {
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while self.gate_wait_count(sequence_number) < count {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("batch gate should be polled");
+        }
+    }
+
+    struct InFlightGuard {
+        state: Arc<Mutex<GatedLogState>>,
+    }
+
+    impl Drop for InFlightGuard {
+        fn drop(&mut self) {
+            self.state.lock().expect("lock").in_flight -= 1;
+        }
+    }
+
+    impl Sequence for GatedLog {
+        fn current_sequence(&self) -> u64 {
+            self.current_sequence.load(Ordering::Acquire)
+        }
+    }
+
+    impl Log for GatedLog {
+        async fn get_batch(&self, sequence_number: u64) -> Result<Option<LogBatch>, String> {
+            let (gate, batch, error) = {
+                let mut state = self.state.lock().map_err(|err| err.to_string())?;
+                state.started_sequences.push(sequence_number);
+                *state.get_counts.entry(sequence_number).or_default() += 1;
+                state.in_flight += 1;
+                state.max_in_flight = state.max_in_flight.max(state.in_flight);
+                (
+                    state.gates.get(&sequence_number).cloned(),
+                    state.batches.get(&sequence_number).cloned(),
+                    state.errors.get(&sequence_number).cloned(),
+                )
+            };
+            self.started.notify_waiters();
+            let _guard = InFlightGuard {
+                state: self.state.clone(),
+            };
+            if let Some(gate) = gate {
+                gate.wait().await;
+            }
+            if let Some(error) = error {
+                return Err(error);
+            }
+            Ok(batch.map(|kvs| LogBatch::from_entries(sequence_number, kvs)))
+        }
+
+        async fn oldest_retained_batch(&self) -> Result<Option<u64>, String> {
+            Ok(self
+                .state
+                .lock()
+                .map_err(|err| err.to_string())?
+                .batches
+                .first_key_value()
+                .map(|(sequence_number, _)| *sequence_number))
+        }
+    }
+
+    impl Retention for GatedLog {
+        async fn set_retention(
+            &self,
+            _policy: Option<RetentionPolicy>,
+        ) -> Result<Option<u64>, String> {
+            self.oldest_retained_batch().await
+        }
+    }
+
     struct QueryOnlyEngine {
         sequence_number: u64,
         value: Option<Bytes>,
@@ -1767,6 +2022,13 @@ mod tests {
         (key, Bytes::copy_from_slice(value))
     }
 
+    fn nonmatching_kv(payload: &[u8], value: &[u8]) -> (Bytes, Bytes) {
+        let key = Prefix::from_byte(TEST_PREFIX + 1)
+            .encode(payload)
+            .expect("encode key");
+        (key, Bytes::copy_from_slice(value))
+    }
+
     fn numeric_query_extra(name: &str, value: f64) -> QueryExtra {
         HashMap::from([(
             name.to_string(),
@@ -1874,6 +2136,16 @@ mod tests {
         Ok(StreamApi::subscribe(connect, Context::default(), request)
             .await?
             .body)
+    }
+
+    async fn next_subscribe_frame(
+        frames: &mut tokio::sync::mpsc::UnboundedReceiver<Result<SubscribeResponse, ConnectError>>,
+    ) -> SubscribeResponse {
+        tokio::time::timeout(Duration::from_secs(1), frames.recv())
+            .await
+            .expect("stream should yield")
+            .expect("frame should exist")
+            .expect("frame should be ok")
     }
 
     async fn set_retention<R>(
@@ -2412,6 +2684,232 @@ mod tests {
         assert_eq!(frame.sequence_number, 1);
         assert_eq!(frame.entries.len(), 1);
         assert_eq!(frame.entries[0].value.as_ref(), b"v1");
+    }
+
+    #[tokio::test]
+    async fn replay_lookahead_is_bounded_and_emits_in_order() {
+        let last_sequence = SUBSCRIBE_GET_BATCH_LOOKAHEAD as u64 + 1;
+        let engine = Arc::new(GatedLog::default());
+        for sequence_number in 1..=last_sequence {
+            engine.set_batch(
+                sequence_number,
+                vec![matching_kv(b"replay", &[sequence_number as u8])],
+            );
+        }
+        for sequence_number in 2..=last_sequence {
+            engine.gate(sequence_number);
+        }
+
+        let notifier = Arc::new(ManualNotifier::new(last_sequence));
+        let connect = StreamConnect::new(StreamState::new(engine.clone(), notifier));
+        let mut stream = subscribe_stream(&connect, Some(1))
+            .await
+            .expect("subscribe");
+
+        assert_eq!(engine.started_sequences(), vec![1]);
+
+        let (sender, mut frames) = tokio::sync::mpsc::unbounded_channel();
+        let reader = tokio::spawn(async move {
+            while let Some(frame) = stream.next().await {
+                if sender.send(frame).is_err() {
+                    return;
+                }
+            }
+        });
+
+        assert_eq!(next_subscribe_frame(&mut frames).await.sequence_number, 1);
+        engine.wait_for_started(last_sequence as usize).await;
+
+        assert_eq!(engine.in_flight(), SUBSCRIBE_GET_BATCH_LOOKAHEAD);
+        assert_eq!(engine.max_in_flight(), SUBSCRIBE_GET_BATCH_LOOKAHEAD);
+        assert_eq!(
+            engine.started_sequences(),
+            (1..=last_sequence).collect::<Vec<_>>()
+        );
+
+        for sequence_number in (3..=last_sequence).rev() {
+            engine.release(sequence_number);
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), frames.recv())
+                .await
+                .is_err(),
+            "later batches must wait for the first pending batch",
+        );
+
+        engine.release(2);
+        for expected in 2..=last_sequence {
+            assert_eq!(
+                next_subscribe_frame(&mut frames).await.sequence_number,
+                expected
+            );
+        }
+        assert_eq!(engine.get_count(1), 1);
+
+        reader.abort();
+        let _ = reader.await;
+    }
+
+    #[tokio::test]
+    async fn replay_lookahead_refills_after_filtered_batches() {
+        let last_sequence = SUBSCRIBE_GET_BATCH_LOOKAHEAD as u64 + 2;
+        let engine = Arc::new(GatedLog::default());
+        for sequence_number in 1..=last_sequence {
+            let kv = if sequence_number == 1 || sequence_number == last_sequence {
+                matching_kv(b"match", &[sequence_number as u8])
+            } else {
+                nonmatching_kv(b"skip", &[sequence_number as u8])
+            };
+            engine.set_batch(sequence_number, vec![kv]);
+        }
+
+        let notifier = Arc::new(ManualNotifier::new(last_sequence));
+        let connect = StreamConnect::new(StreamState::new(engine.clone(), notifier));
+        let mut stream = subscribe_stream(&connect, Some(1))
+            .await
+            .expect("subscribe");
+
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(first.sequence_number, 1);
+        let last = stream.next().await.unwrap().unwrap();
+        assert_eq!(last.sequence_number, last_sequence);
+
+        for sequence_number in 1..=last_sequence {
+            assert_eq!(engine.get_count(sequence_number), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn replay_lookahead_emits_earliest_error_and_terminates() {
+        let engine = Arc::new(GatedLog::default());
+        engine.set_batch(1, vec![matching_kv(b"first", b"v1")]);
+        engine.set_batch(3, vec![matching_kv(b"later", b"v3")]);
+        engine.set_error(2, "batch read failed");
+        engine.gate(2);
+
+        let notifier = Arc::new(ManualNotifier::new(3));
+        let connect = StreamConnect::new(StreamState::new(engine.clone(), notifier));
+        let mut stream = subscribe_stream(&connect, Some(1))
+            .await
+            .expect("subscribe");
+
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(first.sequence_number, 1);
+        let mut next = Box::pin(stream.next());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut next)
+                .await
+                .is_err(),
+            "later successes must wait behind an earlier error",
+        );
+        engine.wait_for_started(3).await;
+        assert_eq!(engine.get_count(3), 1);
+
+        engine.release(2);
+        let error = next.await.unwrap().expect_err("stream error");
+        assert_eq!(error.code, connectrpc::ErrorCode::Internal);
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn replay_to_live_catch_up_uses_repeated_bounded_lookahead() {
+        const REPLAY_BOUND: u64 = 4;
+
+        let first_live_bound = REPLAY_BOUND + SUBSCRIBE_GET_BATCH_LOOKAHEAD as u64;
+        let second_live_bound = first_live_bound + SUBSCRIBE_GET_BATCH_LOOKAHEAD as u64;
+        let engine = Arc::new(GatedLog::default());
+        for sequence_number in 1..=second_live_bound {
+            engine.set_batch(
+                sequence_number,
+                vec![matching_kv(b"batch", &[sequence_number as u8])],
+            );
+        }
+        engine.gate(2);
+        for sequence_number in (REPLAY_BOUND + 1)..=second_live_bound {
+            engine.gate(sequence_number);
+        }
+
+        let notifier = Arc::new(ManualNotifier::new(REPLAY_BOUND));
+        let connect = StreamConnect::new(StreamState::new(engine.clone(), notifier.clone()));
+        let mut stream = subscribe_stream(&connect, Some(1))
+            .await
+            .expect("subscribe");
+        let (sender, mut frames) = tokio::sync::mpsc::unbounded_channel();
+        let reader = tokio::spawn(async move {
+            while let Some(frame) = stream.next().await {
+                if sender.send(frame).is_err() {
+                    return;
+                }
+            }
+        });
+
+        assert_eq!(next_subscribe_frame(&mut frames).await.sequence_number, 1);
+        engine.wait_for_started(REPLAY_BOUND as usize).await;
+        engine.wait_for_gate_waits(2, 1).await;
+
+        notifier.advance(first_live_bound);
+        engine.wake(2);
+        engine.wait_for_gate_waits(2, 2).await;
+        assert_eq!(
+            engine.started_sequences(),
+            (1..=REPLAY_BOUND).collect::<Vec<_>>()
+        );
+
+        engine.release(2);
+        for expected in 2..=REPLAY_BOUND {
+            assert_eq!(
+                next_subscribe_frame(&mut frames).await.sequence_number,
+                expected
+            );
+        }
+
+        engine.wait_for_started(first_live_bound as usize).await;
+        assert_eq!(engine.in_flight(), SUBSCRIBE_GET_BATCH_LOOKAHEAD);
+
+        notifier.advance(second_live_bound);
+        for sequence_number in ((REPLAY_BOUND + 2)..=first_live_bound).rev() {
+            engine.release(sequence_number);
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), frames.recv())
+                .await
+                .is_err(),
+            "live batches must remain ordered within a frontier snapshot",
+        );
+        assert_eq!(engine.started_sequences().len(), first_live_bound as usize);
+
+        engine.release(REPLAY_BOUND + 1);
+        for expected in (REPLAY_BOUND + 1)..=first_live_bound {
+            assert_eq!(
+                next_subscribe_frame(&mut frames).await.sequence_number,
+                expected
+            );
+        }
+
+        engine.wait_for_started(second_live_bound as usize).await;
+        assert_eq!(engine.in_flight(), SUBSCRIBE_GET_BATCH_LOOKAHEAD);
+        assert_eq!(engine.max_in_flight(), SUBSCRIBE_GET_BATCH_LOOKAHEAD);
+
+        for sequence_number in ((first_live_bound + 2)..=second_live_bound).rev() {
+            engine.release(sequence_number);
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), frames.recv())
+                .await
+                .is_err(),
+            "a later frontier snapshot must preserve batch order",
+        );
+
+        engine.release(first_live_bound + 1);
+        for expected in (first_live_bound + 1)..=second_live_bound {
+            assert_eq!(
+                next_subscribe_frame(&mut frames).await.sequence_number,
+                expected
+            );
+        }
+
+        reader.abort();
+        let _ = reader.await;
     }
 
     #[tokio::test]
