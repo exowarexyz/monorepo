@@ -212,6 +212,16 @@ impl<D: Digest, F: Family> WriterState<D, F> {
         S: Strategy,
         Op: Encode,
     {
+        let next_location = watermark.checked_add(1).ok_or_else(|| {
+            QmdbError::CorruptData("proof watermark exceeds the location domain".into())
+        })?;
+        if next_location != proof.leaves {
+            return Err(QmdbError::CorruptData(format!(
+                "proof watermark implies {next_location} leaves, proof has {}",
+                proof.leaves
+            )));
+        }
+
         let encoded_operations: Vec<Vec<u8>> =
             operations.iter().map(|op| op.encode().to_vec()).collect();
         if start_location != Location::new(0)
@@ -238,9 +248,7 @@ impl<D: Digest, F: Family> WriterState<D, F> {
         Ok(Self {
             peaks: extension.peaks,
             ops_size,
-            next_location: watermark
-                .checked_add(1)
-                .ok_or_else(|| QmdbError::CorruptData("proof watermark overflow".into()))?,
+            next_location,
         })
     }
 }
