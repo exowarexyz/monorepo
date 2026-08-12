@@ -95,8 +95,10 @@ pub struct Args {
     /// Keep it over ~3s so a read's own retry cycle fits inside it — the SDK
     /// allows three attempts backing off to 1s — and under 30s so it expires
     /// before the SDK's HTTP timeout, which reports a transport error in place of
-    /// the scan's progress. `--max-visibility-wait-secs` must be at least this
-    /// value, since a phase that cannot afford one whole page issues none.
+    /// the scan's progress. `--max-visibility-wait-secs` must exceed this value,
+    /// and by a wide enough margin for the pages a scan needs: a phase issues a
+    /// page only while it can still afford the whole bound, so a budget of one
+    /// page issues none at all.
     #[arg(long, default_value_t = DEFAULT_RANGE_PAGE_TIMEOUT_SECS)]
     range_page_timeout_secs: u64,
     #[arg(long, default_value_t = 250)]
@@ -325,14 +327,27 @@ impl ScanProgress {
     }
 }
 
-/// The phase has less budget left than one page is allowed to take, so the scan
-/// stops rather than issuing a request it cannot see through. Retrying cannot
-/// help, and a page cut off partway through reports against a subsection that was
-/// never given time to finish.
+/// A phase with less budget left than one page is allowed to take cannot see
+/// another request through, so the scan stops here.
 ///
 /// The wording opens with `range scan deadline exceeded`: `e2e-common.sh` in
 /// kv-mk1 greps for that phrase to classify a load-active witness failure as
-/// liveness lag rather than a safety violation.
+/// liveness lag rather than a safety violation. Every path that ends a scan for
+/// want of budget must produce it.
+fn budget_spent_detail(
+    ctx: &ValidationCtx<'_>,
+    remaining: Duration,
+    progress: &ScanProgress,
+    boundary: &Key,
+) -> String {
+    format!(
+        "range scan deadline exceeded: {:?} of budget left, under the {:?} one page is allowed, {}",
+        remaining,
+        ctx.page_timeout,
+        progress.detail(boundary)
+    )
+}
+
 fn range_scan_deadline_error(
     ctx: &ValidationCtx<'_>,
     remaining: Duration,
@@ -340,26 +355,43 @@ fn range_scan_deadline_error(
     boundary: &Key,
 ) -> RangeScanError {
     RangeScanError::Permanent(anyhow!(
-        "range scan deadline exceeded: {:?} of budget left, under the {:?} one page is allowed, {}",
-        remaining,
-        ctx.page_timeout,
-        progress.detail(boundary)
+        "{}",
+        budget_spent_detail(ctx, remaining, progress, boundary)
     ))
 }
 
-/// One page outran its own bound with budget to spare, so the caller can wait it
-/// out. Budget exhaustion is owned entirely by [`range_scan_deadline_error`],
-/// which is why this is unconditionally transient.
-fn page_stalled_error(
+/// A transient verdict asks the caller to wait and retry, which is only honest
+/// while the phase can still afford a page. Once it cannot, the retry will never
+/// run — `poll_until` sleeps its poll interval and then abandons the phase — so
+/// the scan reports the spent budget and keeps the transient cause as detail.
+fn transient_unless_budget_spent(
     ctx: &ValidationCtx<'_>,
+    cause: anyhow::Error,
     progress: &ScanProgress,
     boundary: &Key,
 ) -> RangeScanError {
-    RangeScanError::Transient(anyhow!(
+    let remaining = ctx.remaining();
+    if remaining >= ctx.page_timeout {
+        return RangeScanError::Transient(cause);
+    }
+    RangeScanError::Permanent(anyhow!(
+        "{}; last failure: {cause:#}",
+        budget_spent_detail(ctx, remaining, progress, boundary)
+    ))
+}
+
+/// One page outran its own bound. Whether that is worth retrying depends on the
+/// budget left, so it is routed through [`transient_unless_budget_spent`].
+fn page_stalled_cause(
+    ctx: &ValidationCtx<'_>,
+    progress: &ScanProgress,
+    boundary: &Key,
+) -> anyhow::Error {
+    anyhow!(
         "range page exceeded its {:?} bound, {}",
         ctx.page_timeout,
         progress.detail(boundary)
-    ))
+    )
 }
 
 /// Largest key strictly less than `key`: the reverse-pagination mirror of
@@ -441,12 +473,21 @@ async fn scan_window_for_expected(
         {
             Ok(Ok(rows)) => rows,
             Ok(Err(err)) if is_transient_query_error(&err) => {
-                return Err(RangeScanError::Transient(anyhow!(err)));
+                let scanned = progress(slowest_page);
+                return Err(transient_unless_budget_spent(
+                    ctx,
+                    anyhow!(err),
+                    &scanned,
+                    boundary,
+                ));
             }
             Ok(Err(err)) => return Err(RangeScanError::Permanent(anyhow!(err))),
             Err(_) => {
-                let slowest_page = slowest_page.max(page_started.elapsed());
-                return Err(page_stalled_error(ctx, &progress(slowest_page), boundary));
+                let scanned = progress(slowest_page.max(page_started.elapsed()));
+                let cause = page_stalled_cause(ctx, &scanned, boundary);
+                return Err(transient_unless_budget_spent(
+                    ctx, cause, &scanned, boundary,
+                ));
             }
         };
         slowest_page = slowest_page.max(page_started.elapsed());
@@ -841,8 +882,8 @@ fn validate_config(cli: &Config) -> anyhow::Result<()> {
     // A phase that cannot afford one page's full bound refuses to issue any page
     // at all, so reject that pairing here rather than at the first scan.
     ensure!(
-        cli.max_visibility_wait_secs >= cli.range_page_timeout_secs,
-        "--max-visibility-wait-secs ({}) must be at least --range-page-timeout-secs ({})",
+        cli.max_visibility_wait_secs > cli.range_page_timeout_secs,
+        "--max-visibility-wait-secs ({}) must exceed --range-page-timeout-secs ({})",
         cli.max_visibility_wait_secs,
         cli.range_page_timeout_secs
     );
@@ -1358,14 +1399,22 @@ async fn scan_visible_prefix_via_range(
         {
             Ok(Ok(rows)) => rows,
             Ok(Err(err)) if is_transient_query_error(&err) => {
-                return Err(RangeScanError::Transient(anyhow!(err)));
+                let scanned = progress(slowest_page);
+                return Err(transient_unless_budget_spent(
+                    ctx,
+                    anyhow!(err),
+                    &scanned,
+                    &next_start,
+                ));
             }
             Ok(Err(err)) => return Err(RangeScanError::Permanent(anyhow!(err))),
             Err(_) => {
-                let slowest_page = slowest_page.max(page_started.elapsed());
-                return Err(page_stalled_error(
+                let scanned = progress(slowest_page.max(page_started.elapsed()));
+                let cause = page_stalled_cause(ctx, &scanned, &next_start);
+                return Err(transient_unless_budget_spent(
                     ctx,
-                    &progress(slowest_page),
+                    cause,
+                    &scanned,
                     &next_start,
                 ));
             }
@@ -1996,6 +2045,60 @@ mod tests {
         );
     }
 
+    /// A stall landing within one poll interval of the deadline ends the phase
+    /// without any retry re-entering the scan, so the stall itself has to report
+    /// the spent budget. kv-mk1's `witness_failure_is_pure_visibility_lag` greps
+    /// for that phrase; without it a hung witness reads as a safety violation.
+    #[tokio::test]
+    async fn a_stall_that_spends_the_budget_reports_the_deadline_phrase() {
+        let namespace = 42;
+        let keyspace = Keyspace::validation_from_u64_namespace(namespace, DEFAULT_KEY_LEN).unwrap();
+        let records: Vec<Record> = (0..4)
+            .map(|index| Record {
+                key: keyspace.inserted_key(index),
+                value: value_for_index(namespace, index, DEFAULT_VALUE_SIZE),
+            })
+            .collect();
+        let mut sorted_records: Vec<&Record> = records.iter().collect();
+        sorted_records.sort_by(|a, b| a.key.cmp(&b.key));
+        let plan = RangePlan {
+            start_idx: 0,
+            end_idx: 3,
+            page_size: 1,
+        };
+
+        let client = spawn_range_harness(RangeHarness::Delayed {
+            delay: Duration::from_secs(30),
+        })
+        .await;
+        // The budget outlives one page by less than a poll interval, so the
+        // deadline passes while `poll_until` sleeps between attempts.
+        let ctx = ValidationCtx::new(
+            &client,
+            "test",
+            1,
+            PhaseTimings {
+                budget: Duration::from_millis(300),
+                page: Duration::from_millis(200),
+                poll: Duration::from_millis(250),
+            },
+        );
+
+        let err = run_range_samples(&ctx, &sorted_records, &[plan])
+            .await
+            .expect_err("a stalled page that spends the budget must fail the sample");
+
+        let detail = format!("{err:#}");
+        assert!(
+            detail.contains("range scan deadline exceeded"),
+            "the e2e liveness classifier greps for this phrase: {detail}"
+        );
+        assert!(
+            detail.contains("range page exceeded its 200ms bound"),
+            "the stall that spent the budget must still be named: {detail}"
+        );
+    }
+
     #[tokio::test]
     async fn range_scan_refuses_a_page_it_cannot_time_in_full() {
         let namespace = 42;
@@ -2268,11 +2371,17 @@ mod tests {
     }
 
     #[test]
-    fn validate_config_accepts_a_budget_equal_to_one_page_bound() {
+    fn validate_config_rejects_a_budget_equal_to_one_page_bound() {
         let mut config = sample_config(DEFAULT_VALUE_SIZE);
         config.max_visibility_wait_secs = 10;
         config.range_page_timeout_secs = 10;
-        assert!(validate_config(&config).is_ok());
+
+        // Equal bounds issue no page at all: any time spent reaching the guard
+        // leaves the budget just under what one whole page requires.
+        assert!(
+            validate_config(&config).is_err(),
+            "a budget of exactly one page can never issue a page"
+        );
     }
 
     fn sample_config(value_size: usize) -> Config {
