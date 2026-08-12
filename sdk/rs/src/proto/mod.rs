@@ -13,6 +13,16 @@ pub mod log {
         }
     }
 
+    pub mod retention {
+        pub mod v1 {
+            #![allow(non_camel_case_types)]
+            #![allow(unused_imports)]
+            #![allow(clippy::derivable_impls)]
+            #![allow(clippy::match_single_binding)]
+            include!("../gen/log.retention.v1.rs");
+        }
+    }
+
     pub mod stream {
         pub mod v1 {
             #![allow(non_camel_case_types)]

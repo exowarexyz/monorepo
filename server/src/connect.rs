@@ -1,4 +1,5 @@
-//! Ingest, query, prune, and stream services; storage is provided by capability traits.
+//! Ingest, query, prune, retention, and stream services; storage is provided by capability
+//! traits.
 
 #![allow(refining_impl_trait)]
 
@@ -16,10 +17,13 @@ use exoware_proto::google::rpc::{ErrorInfo, RetryInfo};
 use exoware_proto::ingest::{
     PutResponse as ProtoPutResponse, Service as IngestApi, ServiceServer as IngestServiceServer,
 };
+use exoware_proto::log::retention::v1::{
+    Service as RetentionApi, ServiceServer as RetentionServiceServer, SetRetentionRequestView,
+    SetRetentionResponse,
+};
 use exoware_proto::log::stream::v1::{
     GetRequestView, GetResponse as StreamGetResponse, Service as StreamApi,
-    ServiceServer as StreamServiceServer, SetRetentionRequestView, SetRetentionResponse,
-    SubscribeRequestView, SubscribeResponse,
+    ServiceServer as StreamServiceServer, SubscribeRequestView, SubscribeResponse,
 };
 use exoware_proto::prune::{
     PruneResponse, Service as PruneApi, ServiceServer as PruneServiceServer,
@@ -139,8 +143,8 @@ pub struct AppState<E> {
     pub engine: Arc<E>,
     /// Limits enforced by the ingest service before writing.
     pub ingest_limits: IngestLimits,
-    /// Gates ingest (writes) only. Query and prune remain available during drains so that
-    /// in-flight reads can complete while the worker sheds write traffic.
+    /// Gates ingest (writes) only. The read and administrative services remain available during
+    /// drains so that in-flight reads can complete while the worker sheds write traffic.
     pub ready: Arc<AtomicBool>,
     /// Shared fan-out hub for `log.stream.v1.Subscribe`.
     pub stream: Arc<StreamHub>,
@@ -301,6 +305,37 @@ impl<E> From<AppState<E>> for PruneState<E> {
     }
 }
 
+/// State for a retention-only service.
+pub struct RetentionState<R> {
+    /// Backend that owns the sequence-log retention rule.
+    pub retention: Arc<R>,
+}
+
+impl<R> Clone for RetentionState<R> {
+    fn clone(&self) -> Self {
+        Self {
+            retention: self.retention.clone(),
+        }
+    }
+}
+
+impl<R> RetentionState<R>
+where
+    R: Retention,
+{
+    pub fn new(retention: Arc<R>) -> Self {
+        Self { retention }
+    }
+}
+
+impl<E> From<AppState<E>> for RetentionState<E> {
+    fn from(state: AppState<E>) -> Self {
+        Self {
+            retention: state.engine,
+        }
+    }
+}
+
 /// State for a stream-only service.
 pub struct StreamState<L> {
     /// Backend used to load committed batches.
@@ -320,7 +355,7 @@ impl<L> Clone for StreamState<L> {
 
 impl<L> StreamState<L>
 where
-    L: Log + Retention,
+    L: Log,
 {
     pub fn new(log: Arc<L>, notifier: Arc<dyn StreamNotifier>) -> Self {
         Self { log, notifier }
@@ -773,7 +808,7 @@ impl<B> Clone for StreamConnect<B> {
 
 impl<B> StreamConnect<B>
 where
-    B: Log + Retention,
+    B: Log,
 {
     pub fn new(state: impl Into<StreamState<B>>) -> Self {
         Self {
@@ -858,7 +893,7 @@ struct SubscriptionState<B> {
 
 impl<B> SubscriptionState<B>
 where
-    B: Log + Retention,
+    B: Log,
 {
     fn new(
         state: StreamState<B>,
@@ -1021,7 +1056,7 @@ fn domain_filter_from_subscribe_view(
 
 impl<B> StreamApi for StreamConnect<B>
 where
-    B: Log + Retention,
+    B: Log,
 {
     async fn subscribe(
         &self,
@@ -1116,7 +1151,35 @@ where
             }
         }
     }
+}
 
+pub struct RetentionConnect<R> {
+    state: RetentionState<R>,
+}
+
+impl<R> Clone for RetentionConnect<R> {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+        }
+    }
+}
+
+impl<R> RetentionConnect<R>
+where
+    R: Retention,
+{
+    pub fn new(state: impl Into<RetentionState<R>>) -> Self {
+        Self {
+            state: state.into(),
+        }
+    }
+}
+
+impl<R> RetentionApi for RetentionConnect<R>
+where
+    R: Retention,
+{
     async fn set_retention(
         &self,
         _ctx: Context,
@@ -1134,7 +1197,7 @@ where
 
         let oldest_retained_sequence = self
             .state
-            .log
+            .retention
             .set_retention(policy)
             .await
             .map_err(ConnectError::internal)?;
@@ -1154,16 +1217,24 @@ fn connect_limits() -> Limits {
 pub(crate) type IngestService<I> = ConnectRpcService<IngestServiceServer<IngestConnect<I>>>;
 pub(crate) type QueryService<Q> = ConnectRpcService<QueryServiceServer<QueryConnect<Q>>>;
 pub(crate) type PruneService<P> = ConnectRpcService<PruneServiceServer<PruneConnect<P>>>;
+pub(crate) type RetentionService<R> =
+    ConnectRpcService<RetentionServiceServer<RetentionConnect<R>>>;
 pub(crate) type StreamService<B> = ConnectRpcService<StreamServiceServer<StreamConnect<B>>>;
 pub(crate) type QueryStack<Q, B> = ConnectRpcService<
     Chain<QueryServiceServer<QueryConnect<Q>>, StreamServiceServer<StreamConnect<B>>>,
 >;
-pub(crate) type ConnectStack<I, Q, P, B> = ConnectRpcService<
+pub(crate) type ConnectStack<I, Q, P, R, B> = ConnectRpcService<
     Chain<
         IngestServiceServer<IngestConnect<I>>,
         Chain<
             QueryServiceServer<QueryConnect<Q>>,
-            Chain<PruneServiceServer<PruneConnect<P>>, StreamServiceServer<StreamConnect<B>>>,
+            Chain<
+                PruneServiceServer<PruneConnect<P>>,
+                Chain<
+                    RetentionServiceServer<RetentionConnect<R>>,
+                    StreamServiceServer<StreamConnect<B>>,
+                >,
+            >,
         >,
     >,
 >;
@@ -1189,9 +1260,16 @@ where
     PruneServiceServer::new(PruneConnect::new(state))
 }
 
+fn retention_server<R>(state: RetentionState<R>) -> RetentionServiceServer<RetentionConnect<R>>
+where
+    R: Retention,
+{
+    RetentionServiceServer::new(RetentionConnect::new(state))
+}
+
 fn stream_server<B>(state: StreamState<B>) -> StreamServiceServer<StreamConnect<B>>
 where
-    B: Log + Retention,
+    B: Log,
 {
     StreamServiceServer::new(StreamConnect::new(state))
 }
@@ -1223,9 +1301,18 @@ where
         .with_compression(connect_compression_registry())
 }
 
+pub fn retention_service<R>(state: RetentionState<R>) -> RetentionService<R>
+where
+    R: Retention,
+{
+    ConnectRpcService::new(retention_server(state))
+        .with_limits(connect_limits())
+        .with_compression(connect_compression_registry())
+}
+
 pub fn stream_service<B>(state: StreamState<B>) -> StreamService<B>
 where
-    B: Log + Retention,
+    B: Log,
 {
     ConnectRpcService::new(stream_server(state))
         .with_limits(connect_limits())
@@ -1238,7 +1325,7 @@ pub fn query_stack<Q, B>(
 ) -> QueryStack<Q, B>
 where
     Q: Query,
-    B: Log + Retention,
+    B: Log,
 {
     ConnectRpcService::new(Chain(
         query_server(query_state),
@@ -1248,7 +1335,7 @@ where
     .with_compression(connect_compression_registry())
 }
 
-pub fn connect_stack<E>(state: AppState<E>) -> ConnectStack<E, E, E, E>
+pub fn connect_stack<E>(state: AppState<E>) -> ConnectStack<E, E, E, E, E>
 where
     E: StoreEngine,
 {
@@ -1258,7 +1345,10 @@ where
             query_server(state.clone().into()),
             Chain(
                 prune_server(state.clone().into()),
-                stream_server(state.into()),
+                Chain(
+                    retention_server(state.clone().into()),
+                    stream_server(state.into()),
+                ),
             ),
         ),
     ))
@@ -1276,9 +1366,8 @@ mod tests {
 
     use buffa::Message;
     use exoware_proto::common::kv::v1::Selector as ProtoSelector;
-    use exoware_proto::log::stream::v1::{
-        SetRetentionRequest, SubscribeRequest, SubscribeRequestView,
-    };
+    use exoware_proto::log::retention::v1::SetRetentionRequest;
+    use exoware_proto::log::stream::v1::{SubscribeRequest, SubscribeRequestView};
     use exoware_proto::store::prune::v1::{
         policy_retain, KeysScope, Policy as ProtoPolicy, PolicyRetain, PruneRequest,
         PruneRequestView, RetainKeepLatest,
@@ -1777,7 +1866,7 @@ mod tests {
         ConnectError,
     >
     where
-        B: Log + Retention,
+        B: Log,
     {
         let bytes = subscribe_request_bytes(since_sequence_number);
         let request = buffa::view::OwnedView::<SubscribeRequestView<'static>>::decode(bytes.into())
@@ -1787,12 +1876,12 @@ mod tests {
             .body)
     }
 
-    async fn set_retention<B>(
-        connect: &StreamConnect<B>,
+    async fn set_retention<R>(
+        connect: &RetentionConnect<R>,
         policy: Option<RetentionPolicy>,
     ) -> Result<SetRetentionResponse, ConnectError>
     where
-        B: Log + Retention,
+        R: Retention,
     {
         let bytes = SetRetentionRequest {
             policy: policy
@@ -1806,7 +1895,7 @@ mod tests {
             buffa::view::OwnedView::<SetRetentionRequestView<'static>>::decode(bytes.into())
                 .expect("decode set_retention request");
         Ok(
-            StreamApi::set_retention(connect, Context::default(), request)
+            RetentionApi::set_retention(connect, Context::default(), request)
                 .await?
                 .body,
         )
@@ -1868,8 +1957,7 @@ mod tests {
         let engine = Arc::new(FakeEngine::default());
         engine.set_current_sequence(5);
         engine.set_retention_floor(Some(4));
-        let notifier = Arc::new(ManualNotifier::new(5));
-        let connect = StreamConnect::new(StreamState::new(engine.clone(), notifier));
+        let connect = RetentionConnect::new(RetentionState::new(engine.clone()));
 
         let response = set_retention(&connect, Some(RetentionPolicy::KeepLatest { count: 2 }))
             .await
@@ -1886,8 +1974,7 @@ mod tests {
     #[tokio::test]
     async fn set_retention_rejects_zero_keep_latest_before_engine() {
         let engine = Arc::new(FakeEngine::default());
-        let notifier = Arc::new(ManualNotifier::new(0));
-        let connect = StreamConnect::new(StreamState::new(engine.clone(), notifier));
+        let connect = RetentionConnect::new(RetentionState::new(engine.clone()));
 
         let err = set_retention(&connect, Some(RetentionPolicy::KeepLatest { count: 0 }))
             .await
@@ -1902,8 +1989,7 @@ mod tests {
     async fn set_retention_absent_policy_clears_rule() {
         let engine = Arc::new(FakeEngine::default());
         engine.set_retention_floor(None);
-        let notifier = Arc::new(ManualNotifier::new(0));
-        let connect = StreamConnect::new(StreamState::new(engine.clone(), notifier));
+        let connect = RetentionConnect::new(RetentionState::new(engine.clone()));
 
         let response = set_retention(&connect, None)
             .await
@@ -1984,6 +2070,7 @@ mod tests {
         let _ingest = ingest_service(state.clone().into());
         let _query = query_service(state.clone().into());
         let _prune = prune_service(state.clone().into());
+        let _retention = retention_service(state.clone().into());
         let _stream = stream_service(state.clone().into());
         let _query_stack = query_stack(state.clone().into(), state.into());
     }

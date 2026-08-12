@@ -12,7 +12,7 @@ use crate::selector::{compile_payload_regex, Selector};
 pub const PRUNE_POLICY_CONTROL_KEY: &str = "manifest/control/compaction-prune-policies";
 /// Wire version of the persisted prune-policy document. A prune document
 /// carries only key scopes; sequence-log retention is configured separately via
-/// `log.stream.v1.SetRetention`.
+/// `log.retention.v1.SetRetention`.
 pub const PRUNE_POLICY_DOCUMENT_VERSION: u32 = 2;
 
 /// One prune rule. `scope` selects which keys to consider; `retain` decides

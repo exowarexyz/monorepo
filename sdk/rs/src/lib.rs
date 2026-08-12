@@ -408,6 +408,11 @@ impl PrefixedStoreClient {
         Prune { c: self }
     }
 
+    /// Typed access to the `log.retention.v1` service.
+    pub fn retention(&self) -> Retention<'_> {
+        Retention { c: self }
+    }
+
     /// Typed access to the `log.stream.v1` service.
     pub fn stream(&self) -> Stream<'_> {
         Stream { c: self }
@@ -1529,6 +1534,8 @@ pub enum ClientBuildError {
     MissingQueryUrl,
     #[error("StoreClientBuilder: missing prune URL (set prune_url or url)")]
     MissingPruneUrl,
+    #[error("StoreClientBuilder: missing retention URL (set retention_url or url)")]
+    MissingRetentionUrl,
     #[error("StoreClientBuilder: missing stream URL (set stream_url or url)")]
     MissingStreamUrl,
     #[error("StoreClientBuilder: invalid URL \"{url}\": {source}")]
@@ -1559,6 +1566,7 @@ pub struct StoreClientBuilder {
     ingest_url: Option<String>,
     query_url: Option<String>,
     prune_url: Option<String>,
+    retention_url: Option<String>,
     stream_url: Option<String>,
     retry_config: RetryConfig,
     connect_request_compression: ConnectRequestCompression,
@@ -1567,13 +1575,14 @@ pub struct StoreClientBuilder {
 
 impl StoreClientBuilder {
     /// Sets the same base URL for all services (health, ingest, query, prune,
-    /// stream).
+    /// retention, stream).
     pub fn url(mut self, url: &str) -> Self {
         let u = trim_connect_base(url);
         self.health_url = Some(u.clone());
         self.ingest_url = Some(u.clone());
         self.query_url = Some(u.clone());
         self.prune_url = Some(u.clone());
+        self.retention_url = Some(u.clone());
         self.stream_url = Some(u);
         self
     }
@@ -1599,6 +1608,12 @@ impl StoreClientBuilder {
     /// Base URL for the prune service (`store.prune.v1.Service`).
     pub fn prune_url(mut self, url: &str) -> Self {
         self.prune_url = Some(trim_connect_base(url));
+        self
+    }
+
+    /// Base URL for the retention service (`log.retention.v1.Service`).
+    pub fn retention_url(mut self, url: &str) -> Self {
+        self.retention_url = Some(trim_connect_base(url));
         self
     }
 
@@ -1648,14 +1663,24 @@ impl StoreClientBuilder {
         let ingest_url = self.ingest_url.ok_or(ClientBuildError::MissingIngestUrl)?;
         let query_url = self.query_url.ok_or(ClientBuildError::MissingQueryUrl)?;
         let prune_url = self.prune_url.ok_or(ClientBuildError::MissingPruneUrl)?;
+        let retention_url = self
+            .retention_url
+            .ok_or(ClientBuildError::MissingRetentionUrl)?;
         let stream_url = self.stream_url.ok_or(ClientBuildError::MissingStreamUrl)?;
         let ingest_uri = parse_connect_uri(&ingest_url)?;
         let query_uri = parse_connect_uri(&query_url)?;
         let prune_uri = parse_connect_uri(&prune_url)?;
+        let retention_uri = parse_connect_uri(&retention_url)?;
         let stream_uri = parse_connect_uri(&stream_url)?;
-        let uses_tls = [&ingest_uri, &query_uri, &prune_uri, &stream_uri]
-            .into_iter()
-            .any(|uri| uri.scheme_str() == Some("https"));
+        let uses_tls = [
+            &ingest_uri,
+            &query_uri,
+            &prune_uri,
+            &retention_uri,
+            &stream_uri,
+        ]
+        .into_iter()
+        .any(|uri| uri.scheme_str() == Some("https"));
         let connect_http = if uses_tls {
             let tls_config = connectrpc::rustls::ClientConfig::with_platform_verifier()
                 .map_err(ClientBuildError::TlsConfig)?;
@@ -1676,6 +1701,7 @@ impl StoreClientBuilder {
             ingest_uri,
             query_uri,
             prune_uri,
+            retention_uri,
             stream_uri,
             http: new_http_client(),
             connect_http,
@@ -1694,6 +1720,7 @@ pub struct StoreClient {
     ingest_uri: http::Uri,
     query_uri: http::Uri,
     prune_uri: http::Uri,
+    retention_uri: http::Uri,
     stream_uri: http::Uri,
     http: reqwest::Client,
     connect_http: ProtoPreferZstdHttpClient,
@@ -2023,24 +2050,28 @@ impl StoreClient {
     }
 
     /// Install (`Some`) or clear (`None`) the sequence-log retention rule via
-    /// `log.stream.v1.SetRetention`. Returns the lowest retained sequence after
-    /// one synchronous enforcement of the new rule (`None` when the log is
+    /// `log.retention.v1.SetRetention`. Returns the lowest retained sequence
+    /// after one synchronous enforcement of the new rule (`None` when the log is
     /// empty / no floor exists yet).
     async fn set_retention(
         &self,
         policy: Option<crate::retention::RetentionPolicy>,
     ) -> Result<Option<u64>, ClientError> {
-        let request = exoware_proto::log::stream::v1::SetRetentionRequest {
+        let request = exoware_proto::log::retention::v1::SetRetentionRequest {
             policy: policy
                 .as_ref()
                 .map(exoware_proto::retention_policy_to_proto)
                 .into(),
             ..Default::default()
         };
-        let config =
-            store_connect_client_config(self.stream_uri.clone(), self.connect_request_compression);
-        let client =
-            exoware_proto::log::stream::v1::ServiceClient::new(self.connect_http.clone(), config);
+        let config = store_connect_client_config(
+            self.retention_uri.clone(),
+            self.connect_request_compression,
+        );
+        let client = exoware_proto::log::retention::v1::ServiceClient::new(
+            self.connect_http.clone(),
+            config,
+        );
         let response = client
             .set_retention(request)
             .await
@@ -2374,6 +2405,11 @@ pub struct Prune<'a> {
 }
 
 #[derive(Clone, Copy, Debug)]
+pub struct Retention<'a> {
+    c: &'a PrefixedStoreClient,
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct Stream<'a> {
     c: &'a PrefixedStoreClient,
 }
@@ -2612,13 +2648,15 @@ impl<'a> Stream<'a> {
     ) -> Result<Option<Vec<(Key, Bytes)>>, ClientError> {
         self.c.stream_get(sequence_number).await
     }
+}
 
-    /// `log.stream.v1.Service.SetRetention` — install (`Some`) or clear
+impl<'a> Retention<'a> {
+    /// `log.retention.v1.Service.SetRetention` — install (`Some`) or clear
     /// (`None`) the sequence-log retention rule. The rule is persistent and
     /// continuously enforced as the log grows; eviction surfaces to
-    /// subscribers as `BATCH_EVICTED`. Returns the lowest retained sequence
-    /// after one synchronous enforcement (`None` when the log is empty / no
-    /// floor exists yet).
+    /// `log.stream.v1` subscribers as `BATCH_EVICTED`. Returns the lowest
+    /// retained sequence after one synchronous enforcement (`None` when the log
+    /// is empty / no floor exists yet).
     pub async fn set_retention(
         &self,
         policy: Option<crate::retention::RetentionPolicy>,
@@ -3010,6 +3048,7 @@ mod tests {
             .ingest_url("http://ingest.internal")
             .query_url("https://query.example.com")
             .prune_url("http://prune.internal")
+            .retention_url("http://retention.internal")
             .stream_url("https://stream.example.com")
             .build()
             .unwrap();
@@ -3017,6 +3056,7 @@ mod tests {
         assert_eq!(client.ingest_uri.scheme_str(), Some("http"));
         assert_eq!(client.query_uri.scheme_str(), Some("https"));
         assert_eq!(client.prune_uri.scheme_str(), Some("http"));
+        assert_eq!(client.retention_uri.scheme_str(), Some("http"));
         assert_eq!(client.stream_uri.scheme_str(), Some("https"));
         assert!(client.connect_http.supports_tls());
     }
@@ -3058,6 +3098,16 @@ mod tests {
                 .ingest_url("http://i")
                 .query_url("http://q")
                 .prune_url("http://p")
+                .build(),
+            Err(ClientBuildError::MissingRetentionUrl)
+        ));
+        assert!(matches!(
+            StoreClient::builder()
+                .health_url("http://h")
+                .ingest_url("http://i")
+                .query_url("http://q")
+                .prune_url("http://p")
+                .retention_url("http://r")
                 .build(),
             Err(ClientBuildError::MissingStreamUrl)
         ));

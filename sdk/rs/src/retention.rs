@@ -1,11 +1,8 @@
 //! Sequence-log retention policy (the domain model behind
-//! `log.stream.v1.SetRetention`).
+//! `log.retention.v1.SetRetention`).
 //!
-//! Retention is owned end-to-end by the stream service: unlike a one-shot
-//! prune, an installed rule is persistent and continuously enforced as the log
-//! grows, evicting whatever falls below the rule's floor. This module carries
-//! the wire-stable domain type plus its `commonware_codec` impls (so the rule
-//! can be persisted next to the log) and its validation.
+//! This module carries the wire-stable domain type plus its `commonware_codec` impls (so the
+//! rule can be persisted next to the log) and its validation.
 
 use anyhow::ensure;
 use bytes::{Buf, BufMut};

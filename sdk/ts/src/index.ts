@@ -102,6 +102,14 @@ export {
     SubscribeResponseSchema,
     GetRequestSchema,
     GetResponseSchema,
+} from './gen/ts/log/v1/stream_pb.js';
+export type {
+    SubscribeRequest,
+    SubscribeResponse,
+    GetRequest,
+    GetResponse,
+} from './gen/ts/log/v1/stream_pb.js';
+export {
     RetentionKeepLatestSchema,
     RetentionGreaterThanSchema,
     RetentionGreaterThanOrEqualSchema,
@@ -109,12 +117,8 @@ export {
     RetentionPolicySchema,
     SetRetentionRequestSchema,
     SetRetentionResponseSchema,
-} from './gen/ts/log/v1/stream_pb.js';
+} from './gen/ts/log/v1/retention_pb.js';
 export type {
-    SubscribeRequest,
-    SubscribeResponse,
-    GetRequest,
-    GetResponse,
     RetentionKeepLatest,
     RetentionGreaterThan,
     RetentionGreaterThanOrEqual,
@@ -122,4 +126,4 @@ export type {
     RetentionPolicy,
     SetRetentionRequest,
     SetRetentionResponse,
-} from './gen/ts/log/v1/stream_pb.js';
+} from './gen/ts/log/v1/retention_pb.js';

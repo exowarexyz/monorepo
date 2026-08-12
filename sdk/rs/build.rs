@@ -43,6 +43,7 @@ fn main() {
         "google/rpc/error_details.proto",
         "common/v1/kv.proto",
         "log/v1/ingest.proto",
+        "log/v1/retention.proto",
         "log/v1/stream.proto",
         "store/v1/prune.proto",
         "store/v1/query.proto",

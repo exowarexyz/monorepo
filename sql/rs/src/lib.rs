@@ -9465,6 +9465,7 @@ mod tests {
                     .ingest_url(&self.ingest_url)
                     .query_url(&self.query_url)
                     .prune_url(&self.ingest_url)
+                    .retention_url(&self.ingest_url)
                     .stream_url(&self.query_url)
                     .build()
                     .expect("test server URLs are set")

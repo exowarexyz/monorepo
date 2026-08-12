@@ -243,10 +243,10 @@ async fn replay_miss_after_retention_returns_batch_evicted() {
             .await
             .expect("put");
     }
-    // Install a keep-last-10 retention rule via the stream service; one synchronous enforcement
-    // reports 11 as the oldest retained sequence.
+    // Install a keep-last-10 retention rule via the retention service; one synchronous
+    // enforcement reports 11 as the oldest retained sequence.
     let oldest = client
-        .stream()
+        .retention()
         .set_retention(Some(RetentionPolicy::KeepLatest { count: 10 }))
         .await
         .expect("set_retention keep_latest");
@@ -322,7 +322,7 @@ async fn get_batch_after_drop_all_returns_none() {
         .expect("put");
     // drop_all evicts up to the live frontier, so nothing is retained.
     let oldest = client
-        .stream()
+        .retention()
         .set_retention(Some(RetentionPolicy::DropAll))
         .await
         .expect("set_retention drop_all");
@@ -345,7 +345,7 @@ async fn get_batch_after_keep_latest_evicts_old_but_keeps_new() {
         seqs.push(s);
     }
     let oldest = client
-        .stream()
+        .retention()
         .set_retention(Some(RetentionPolicy::KeepLatest { count: 10 }))
         .await
         .expect("set_retention keep_latest");
