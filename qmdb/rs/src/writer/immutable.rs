@@ -5,6 +5,7 @@ use std::marker::PhantomData;
 
 use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::Hasher;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_storage::merkle::{Family, Location, Position};
 use commonware_storage::qmdb::{
     any::value::{ValueEncoding, VariableEncoding},
@@ -52,16 +53,45 @@ where
     E: ValueEncoding<Value = V>,
     immutable::Operation<F, K, E>: Encode,
 {
+    build_immutable_upload_with_strategy::<F, H, K, V, E, Sequential>(
+        peaks,
+        prev_ops_size,
+        latest_location,
+        ops,
+        watermark_at,
+        &Sequential,
+    )
+}
+
+/// Strategy-aware form of [`build_immutable_upload`].
+pub fn build_immutable_upload_with_strategy<F, H, K, V, E, S>(
+    peaks: Vec<(Position<F>, u32, H::Digest)>,
+    prev_ops_size: Position<F>,
+    latest_location: Location<F>,
+    ops: &[immutable::Operation<F, K, E>],
+    watermark_at: Option<Location<F>>,
+    strategy: &S,
+) -> Result<BuiltImmutableUpload<H::Digest, F>, QmdbError>
+where
+    F: Family,
+    H: Hasher,
+    K: Array + Codec + Clone + AsRef<[u8]>,
+    V: Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V>,
+    S: Strategy,
+    immutable::Operation<F, K, E>: Encode,
+{
     if ops.is_empty() {
         return Err(QmdbError::EmptyBatch);
     }
     let prepared = build_auth_immutable_upload_rows(latest_location, ops)?;
     let inactive_peaks = immutable_inactive_peaks(latest_location, ops)?;
-    let ext = extend_merkle_from_peaks_with_inactive_peaks::<F, H, _>(
+    let ext = extend_merkle_from_peaks_with_inactive_peaks::<F, H, S, _>(
         peaks,
         prev_ops_size,
         prepared.op_bytes(),
         inactive_peaks,
+        strategy,
     )?;
     let keyed_operation_count = prepared.keyed_operation_count;
     let mut rows = prepared.into_all_rows();
@@ -113,13 +143,14 @@ pub struct ImmutableWriter<
     K: Array + Codec,
     V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
+    S: Strategy = Sequential,
 > {
     client: PrefixedStoreClient,
-    core: WriterCore<H::Digest, F>,
+    core: WriterCore<H::Digest, F, S>,
     _marker: PhantomData<(F, K, E)>,
 }
 
-impl<F, H, K, V, E> ImmutableWriter<F, H, K, V, E>
+impl<F, H, K, V, E, S> ImmutableWriter<F, H, K, V, E, S>
 where
     F: Family,
     H: Hasher,
@@ -128,22 +159,27 @@ where
     V::Cfg: Clone,
     K::Cfg: Clone,
     E: ValueEncoding<Value = V>,
+    S: Strategy,
     immutable::Operation<F, K, E>: Encode + Decode + Clone,
 {
     /// Construct a writer over `client`'s namespace prefix from caller-supplied
     /// frontier state (no store I/O).
-    pub fn new(client: PrefixedStoreClient, state: WriterState<H::Digest, F>) -> Self {
+    pub fn new_with_strategy(
+        client: PrefixedStoreClient,
+        state: WriterState<H::Digest, F>,
+        strategy: S,
+    ) -> Self {
         Self {
             client,
-            core: WriterCore::from_cache(Cache::from_writer_state(state)),
+            core: WriterCore::from_cache(Cache::from_writer_state(state), strategy),
             _marker: PhantomData,
         }
     }
 
     /// Construct a fresh writer over `client`'s namespace prefix with empty
     /// frontier state (no prior published checkpoint).
-    pub fn fresh(client: PrefixedStoreClient) -> Self {
-        Self::new(client, WriterState::empty())
+    pub fn fresh_with_strategy(client: PrefixedStoreClient, strategy: S) -> Self {
+        Self::new_with_strategy(client, WriterState::empty(), strategy)
     }
 
     pub async fn latest_published_watermark(&self) -> Option<Location<F>> {
@@ -160,13 +196,14 @@ where
     ) -> Result<super::PreparedUpload<F>, QmdbError> {
         let prepared = self
             .core
-            .prepare(ops.len() as u64, |ctx| {
-                let built = build_immutable_upload::<F, H, K, V, E>(
+            .prepare(ops.len() as u64, |ctx, strategy| {
+                let built = build_immutable_upload_with_strategy::<F, H, K, V, E, S>(
                     ctx.peaks,
                     ctx.ops_size,
                     ctx.latest_location,
                     ops,
                     ctx.watermark_at,
+                    strategy,
                 )?;
                 Ok(crate::writer::core::BuildResult {
                     new_peaks: built.new_peaks,
@@ -280,20 +317,45 @@ where
     }
 }
 
-impl<F, H, K, V, E> std::fmt::Debug for ImmutableWriter<F, H, K, V, E>
+impl<F, H, K, V, E> ImmutableWriter<F, H, K, V, E, Sequential>
+where
+    F: Family,
+    H: Hasher,
+    K: Array + Codec + Clone + AsRef<[u8]>,
+    V: Codec + Clone + Send + Sync,
+    V::Cfg: Clone,
+    K::Cfg: Clone,
+    E: ValueEncoding<Value = V>,
+    immutable::Operation<F, K, E>: Encode + Decode + Clone,
+{
+    /// Construct a writer over `client`'s namespace prefix from caller-supplied
+    /// frontier state (no store I/O).
+    pub fn new(client: PrefixedStoreClient, state: WriterState<H::Digest, F>) -> Self {
+        Self::new_with_strategy(client, state, Sequential)
+    }
+
+    /// Construct a fresh writer over `client`'s namespace prefix with empty
+    /// frontier state (no prior published checkpoint).
+    pub fn fresh(client: PrefixedStoreClient) -> Self {
+        Self::fresh_with_strategy(client, Sequential)
+    }
+}
+
+impl<F, H, K, V, E, S> std::fmt::Debug for ImmutableWriter<F, H, K, V, E, S>
 where
     F: Family,
     H: Hasher,
     K: Array + Codec,
     V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
+    S: Strategy,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ImmutableWriter").finish_non_exhaustive()
     }
 }
 
-impl<F, H, K, V, E> StoreBatchUpload for ImmutableWriter<F, H, K, V, E>
+impl<F, H, K, V, E, S> StoreBatchUpload for ImmutableWriter<F, H, K, V, E, S>
 where
     F: Family,
     H: Hasher + Sync,
@@ -302,6 +364,7 @@ where
     V::Cfg: Clone,
     K::Cfg: Clone,
     E: ValueEncoding<Value = V> + Sync,
+    S: Strategy,
     immutable::Operation<F, K, E>: Encode + Decode + Clone,
 {
     type Prepared = super::PreparedUpload<F>;
@@ -353,7 +416,7 @@ where
     }
 }
 
-impl<F, H, K, V, E> StoreBatchPublication for ImmutableWriter<F, H, K, V, E>
+impl<F, H, K, V, E, S> StoreBatchPublication for ImmutableWriter<F, H, K, V, E, S>
 where
     F: Family,
     H: Hasher + Sync,
@@ -362,6 +425,7 @@ where
     V::Cfg: Clone,
     K::Cfg: Clone,
     E: ValueEncoding<Value = V> + Sync,
+    S: Strategy,
     immutable::Operation<F, K, E>: Encode + Decode + Clone,
 {
     type PreparedPublication = super::PreparedWatermark<F>;
@@ -399,7 +463,7 @@ where
     }
 }
 
-impl<F, H, K, V, E> StorePublicationFrontierWriter for ImmutableWriter<F, H, K, V, E>
+impl<F, H, K, V, E, S> StorePublicationFrontierWriter for ImmutableWriter<F, H, K, V, E, S>
 where
     F: Family,
     H: Hasher + Sync,
@@ -408,6 +472,7 @@ where
     V::Cfg: Clone,
     K::Cfg: Clone,
     E: ValueEncoding<Value = V> + Sync,
+    S: Strategy,
     immutable::Operation<F, K, E>: Encode + Decode + Clone,
 {
     fn latest_publication_receipt<'a>(&'a self) -> BoxFuture<'a, Option<PublishedCheckpoint<F>>>
@@ -433,5 +498,63 @@ where
         Self: Sync + 'a,
     {
         Box::pin(async move { ImmutableWriter::flush_with_receipt(self).await })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::Sha256;
+    use commonware_parallel::Rayon;
+    use commonware_storage::merkle::mmr;
+    use commonware_utils::sequence::FixedBytes;
+    use std::num::NonZeroUsize;
+
+    type TestEncoding = VariableEncoding<Vec<u8>>;
+    type TestOp = immutable::Operation<mmr::Family, FixedBytes<32>, TestEncoding>;
+
+    #[test]
+    fn sequential_and_parallel_builds_match() {
+        let ops = vec![
+            TestOp::Set(FixedBytes::new([1; 32]), b"one".to_vec()),
+            TestOp::Set(FixedBytes::new([2; 32]), b"two".to_vec()),
+            TestOp::Commit(None, Location::new(0)),
+        ];
+        let sequential =
+            build_immutable_upload::<mmr::Family, Sha256, FixedBytes<32>, Vec<u8>, TestEncoding>(
+                Vec::new(),
+                Position::new(0),
+                Location::new(2),
+                &ops,
+                Some(Location::new(2)),
+            )
+            .expect("sequential");
+        let strategy = Rayon::new(NonZeroUsize::new(2).expect("non-zero threads"))
+            .expect("construct Rayon strategy")
+            .manual();
+        let parallel = build_immutable_upload_with_strategy::<
+            mmr::Family,
+            Sha256,
+            FixedBytes<32>,
+            Vec<u8>,
+            TestEncoding,
+            _,
+        >(
+            Vec::new(),
+            Position::new(0),
+            Location::new(2),
+            &ops,
+            Some(Location::new(2)),
+            &strategy,
+        )
+        .expect("parallel");
+        assert_eq!(sequential.rows, parallel.rows);
+        assert_eq!(sequential.new_peaks, parallel.new_peaks);
+        assert_eq!(sequential.new_ops_size, parallel.new_ops_size);
+        assert_eq!(sequential.new_root, parallel.new_root);
+        assert_eq!(
+            sequential.keyed_operation_count,
+            parallel.keyed_operation_count
+        );
     }
 }

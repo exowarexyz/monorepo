@@ -32,6 +32,7 @@ use std::marker::PhantomData;
 
 use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::Hasher;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_storage::merkle::{Graftable, Location, Position};
 use commonware_storage::qmdb::{
     any::{
@@ -88,17 +89,48 @@ where
     E: ValueEncoding<Value = V>,
     ordered::Operation<F, K, E>: Encode,
 {
+    build_ordered_upload_with_strategy::<F, H, K, V, N, E, Sequential>(
+        peaks,
+        prev_ops_size,
+        latest_location,
+        ops,
+        current_boundary,
+        watermark_at,
+        &Sequential,
+    )
+}
+
+/// Strategy-aware form of [`build_ordered_upload`].
+pub fn build_ordered_upload_with_strategy<F, H, K, V, const N: usize, E, S>(
+    peaks: Vec<(Position<F>, u32, H::Digest)>,
+    prev_ops_size: Position<F>,
+    latest_location: Location<F>,
+    ops: &[ordered::Operation<F, K, E>],
+    current_boundary: &CurrentBoundaryState<H::Digest, N, F>,
+    watermark_at: Option<Location<F>>,
+    strategy: &S,
+) -> Result<BuiltOrderedUpload<H::Digest, F>, QmdbError>
+where
+    F: Graftable,
+    H: Hasher,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V>,
+    S: Strategy,
+    ordered::Operation<F, K, E>: Encode,
+{
     if ops.is_empty() {
         return Err(QmdbError::EmptyBatch);
     }
     let prepared_ops = CorePreparedUpload::build(latest_location, ops)?;
     let prepared_current = PreparedCurrentBoundaryUpload::build(latest_location, current_boundary)?;
     let inactive_peaks = ordered_inactive_peaks(latest_location, ops)?;
-    let ext = extend_merkle_from_peaks_with_inactive_peaks::<F, H, _>(
+    let ext = extend_merkle_from_peaks_with_inactive_peaks::<F, H, S, _>(
         peaks,
         prev_ops_size,
         prepared_ops.op_bytes(),
         inactive_peaks,
+        strategy,
     )?;
     let operation_count = prepared_ops.operation_count;
     let keyed_operation_count = prepared_ops.keyed_operation_count;
@@ -160,13 +192,14 @@ pub struct OrderedWriter<
     V: Codec + Clone + Send + Sync,
     const N: usize,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
+    S: Strategy = Sequential,
 > {
     client: PrefixedStoreClient,
-    core: WriterCore<H::Digest, F>,
+    core: WriterCore<H::Digest, F, S>,
     _marker: PhantomData<(F, K, V, E)>,
 }
 
-impl<F, H, K, V, const N: usize, E> OrderedWriter<F, H, K, V, N, E>
+impl<F, H, K, V, const N: usize, E, S> OrderedWriter<F, H, K, V, N, E, S>
 where
     F: Graftable,
     H: Hasher,
@@ -174,22 +207,27 @@ where
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
     E: ValueEncoding<Value = V>,
+    S: Strategy,
     ordered::Operation<F, K, E>: Encode + Decode,
 {
     /// Construct a writer over `client`'s namespace prefix from caller-supplied
     /// frontier state (no store I/O).
-    pub fn new(client: PrefixedStoreClient, state: WriterState<H::Digest, F>) -> Self {
+    pub fn new_with_strategy(
+        client: PrefixedStoreClient,
+        state: WriterState<H::Digest, F>,
+        strategy: S,
+    ) -> Self {
         Self {
             client,
-            core: WriterCore::from_cache(Cache::from_writer_state(state)),
+            core: WriterCore::from_cache(Cache::from_writer_state(state), strategy),
             _marker: PhantomData,
         }
     }
 
     /// Construct a fresh writer over `client`'s namespace prefix with empty
     /// frontier state (no prior published checkpoint).
-    pub fn fresh(client: PrefixedStoreClient) -> Self {
-        Self::new(client, WriterState::empty())
+    pub fn fresh_with_strategy(client: PrefixedStoreClient, strategy: S) -> Self {
+        Self::new_with_strategy(client, WriterState::empty(), strategy)
     }
 
     pub async fn latest_published_watermark(&self) -> Option<Location<F>> {
@@ -218,14 +256,15 @@ where
     ) -> Result<super::PreparedUpload<F>, QmdbError> {
         let prepared = self
             .core
-            .prepare(ops.len() as u64, |ctx| {
-                let built = build_ordered_upload::<F, H, K, V, N, E>(
+            .prepare(ops.len() as u64, |ctx, strategy| {
+                let built = build_ordered_upload_with_strategy::<F, H, K, V, N, E, S>(
                     ctx.peaks,
                     ctx.ops_size,
                     ctx.latest_location,
                     ops,
                     current_boundary,
                     ctx.watermark_at,
+                    strategy,
                 )?;
                 Ok(crate::writer::core::BuildResult {
                     new_peaks: built.new_peaks,
@@ -339,20 +378,44 @@ where
     }
 }
 
-impl<F, H, K, V, const N: usize, E> std::fmt::Debug for OrderedWriter<F, H, K, V, N, E>
+impl<F, H, K, V, const N: usize, E> OrderedWriter<F, H, K, V, N, E, Sequential>
+where
+    F: Graftable,
+    H: Hasher,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+    V::Cfg: Clone,
+    E: ValueEncoding<Value = V>,
+    ordered::Operation<F, K, E>: Encode + Decode,
+{
+    /// Construct a writer over `client`'s namespace prefix from caller-supplied
+    /// frontier state (no store I/O).
+    pub fn new(client: PrefixedStoreClient, state: WriterState<H::Digest, F>) -> Self {
+        Self::new_with_strategy(client, state, Sequential)
+    }
+
+    /// Construct a fresh writer over `client`'s namespace prefix with empty
+    /// frontier state (no prior published checkpoint).
+    pub fn fresh(client: PrefixedStoreClient) -> Self {
+        Self::fresh_with_strategy(client, Sequential)
+    }
+}
+
+impl<F, H, K, V, const N: usize, E, S> std::fmt::Debug for OrderedWriter<F, H, K, V, N, E, S>
 where
     F: Graftable,
     H: Hasher,
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
+    S: Strategy,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OrderedWriter").finish_non_exhaustive()
     }
 }
 
-impl<F, H, K, V, const N: usize, E> StoreBatchUpload for OrderedWriter<F, H, K, V, N, E>
+impl<F, H, K, V, const N: usize, E, S> StoreBatchUpload for OrderedWriter<F, H, K, V, N, E, S>
 where
     F: Graftable,
     H: Hasher + Sync,
@@ -360,6 +423,7 @@ where
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
     E: ValueEncoding<Value = V> + Sync,
+    S: Strategy,
     ordered::Operation<F, K, E>: Encode + Decode,
 {
     type Prepared = super::PreparedUpload<F>;
@@ -411,7 +475,7 @@ where
     }
 }
 
-impl<F, H, K, V, const N: usize, E> StoreBatchPublication for OrderedWriter<F, H, K, V, N, E>
+impl<F, H, K, V, const N: usize, E, S> StoreBatchPublication for OrderedWriter<F, H, K, V, N, E, S>
 where
     F: Graftable,
     H: Hasher + Sync,
@@ -419,6 +483,7 @@ where
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
     E: ValueEncoding<Value = V> + Sync,
+    S: Strategy,
     ordered::Operation<F, K, E>: Encode + Decode,
 {
     type PreparedPublication = super::PreparedWatermark<F>;
@@ -456,8 +521,8 @@ where
     }
 }
 
-impl<F, H, K, V, const N: usize, E> StorePublicationFrontierWriter
-    for OrderedWriter<F, H, K, V, N, E>
+impl<F, H, K, V, const N: usize, E, S> StorePublicationFrontierWriter
+    for OrderedWriter<F, H, K, V, N, E, S>
 where
     F: Graftable,
     H: Hasher + Sync,
@@ -465,6 +530,7 @@ where
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
     E: ValueEncoding<Value = V> + Sync,
+    S: Strategy,
     ordered::Operation<F, K, E>: Encode + Decode,
 {
     fn latest_publication_receipt<'a>(&'a self) -> BoxFuture<'a, Option<PublishedCheckpoint<F>>>

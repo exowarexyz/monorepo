@@ -441,7 +441,7 @@ async fn commit_mmb_upload(client: &StoreClient, batch: &MmbLocalBatch) {
 async fn commit_fixed_upload(client: &StoreClient, batch: &FixedLocalBatch) {
     let writer: UnorderedWriter<mmr::Family, Sha256, Digest, Vec<u8>> =
         UnorderedWriter::fresh(PrefixedStoreClient::empty(client.clone()));
-    common::commit_unordered_current_upload::<_, _, _, _, N, _>(
+    common::commit_unordered_current_upload::<_, _, _, _, N, _, _>(
         &writer,
         &batch.operations,
         &batch.current_boundary,

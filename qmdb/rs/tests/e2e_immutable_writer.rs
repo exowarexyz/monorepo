@@ -4,11 +4,13 @@
 
 mod common;
 
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 
+use commonware_parallel::Strategy as _;
 use commonware_runtime::{deterministic, Runner as _};
 use commonware_storage::merkle::{mmr, Location};
+use commonware_storage::qmdb::any::value::VariableEncoding;
 use commonware_storage::qmdb::immutable::variable::{
     Db as Immutable, Operation as ImmutableOperation,
 };
@@ -161,6 +163,39 @@ async fn sequential_upload_matches_local_root() {
             let r = fresh_reader(client.clone());
             let latest = local.latest_location;
             async move { r.root_at(latest).await }
+        },
+        "root_at",
+    )
+    .await;
+    assert_eq!(got_root, local.root);
+}
+
+#[tokio::test]
+async fn parallel_upload_matches_local_root() {
+    let client = common::local_store_client().await;
+    let local =
+        build_local_reference(vec![vec![(FixedBytes::new([0x11; 32]), b"alpha".to_vec())]]).await;
+    let strategy =
+        commonware_parallel::Rayon::new(NonZeroUsize::new(4).expect("non-zero thread count"))
+            .expect("construct Rayon strategy")
+            .manual();
+    let writer = ImmutableWriter::<
+        mmr::Family,
+        commonware_cryptography::Sha256,
+        K,
+        V,
+        VariableEncoding<V>,
+        _,
+    >::fresh_with_strategy(PrefixedStoreClient::empty(client.clone()), strategy);
+
+    common::commit_immutable_upload(&writer, &local.operations)
+        .await
+        .expect("upload");
+    let got_root = retry(
+        || {
+            let reader = fresh_reader(client.clone());
+            let latest = local.latest_location;
+            async move { reader.root_at(latest).await }
         },
         "root_at",
     )

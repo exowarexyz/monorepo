@@ -172,8 +172,8 @@ where
 }
 
 #[allow(dead_code)]
-pub async fn commit_keyless_upload<F, H, V, E>(
-    writer: &KeylessWriter<F, H, V, E>,
+pub async fn commit_keyless_upload<F, H, V, E, S>(
+    writer: &KeylessWriter<F, H, V, E, S>,
     ops: &[keyless::Operation<F, E>],
 ) -> Result<UploadReceipt<F>, QmdbError>
 where
@@ -181,6 +181,7 @@ where
     H: Hasher + Sync,
     V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V> + Sync,
+    S: commonware_parallel::Strategy,
     keyless::Operation<F, E>: Encode,
 {
     let prepared = writer.prepare_upload(ops).await?;
@@ -188,8 +189,8 @@ where
 }
 
 #[allow(dead_code)]
-pub async fn commit_unordered_upload<F, H, K, V, E>(
-    writer: &UnorderedWriter<F, H, K, V, E>,
+pub async fn commit_unordered_upload<F, H, K, V, E, S>(
+    writer: &UnorderedWriter<F, H, K, V, E, S>,
     ops: &[unordered::Operation<F, K, E>],
 ) -> Result<UploadReceipt<F>, QmdbError>
 where
@@ -199,6 +200,7 @@ where
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
     E: ValueEncoding<Value = V> + Sync,
+    S: commonware_parallel::Strategy,
     unordered::Operation<F, K, E>: Encode,
 {
     let prepared = writer.prepare_upload(ops).await?;
@@ -206,8 +208,8 @@ where
 }
 
 #[allow(dead_code)]
-pub async fn commit_unordered_current_upload<F, H, K, V, const N: usize, E>(
-    writer: &UnorderedWriter<F, H, K, V, E>,
+pub async fn commit_unordered_current_upload<F, H, K, V, const N: usize, E, S>(
+    writer: &UnorderedWriter<F, H, K, V, E, S>,
     ops: &[unordered::Operation<F, K, E>],
     current_boundary: &CurrentBoundaryState<H::Digest, N, F>,
 ) -> Result<UploadReceipt<F>, QmdbError>
@@ -218,6 +220,7 @@ where
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
     E: ValueEncoding<Value = V> + Sync,
+    S: commonware_parallel::Strategy,
     unordered::Operation<F, K, E>: Encode,
 {
     let prepared = writer.prepare_current_upload(ops, current_boundary).await?;
@@ -225,8 +228,8 @@ where
 }
 
 #[allow(dead_code)]
-pub async fn commit_ordered_upload<F, H, K, V, const N: usize, E>(
-    writer: &OrderedWriter<F, H, K, V, N, E>,
+pub async fn commit_ordered_upload<F, H, K, V, const N: usize, E, S>(
+    writer: &OrderedWriter<F, H, K, V, N, E, S>,
     ops: &[ordered::Operation<F, K, E>],
     current_boundary: &CurrentBoundaryState<H::Digest, N, F>,
 ) -> Result<UploadReceipt<F>, QmdbError>
@@ -237,6 +240,7 @@ where
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
     E: ValueEncoding<Value = V> + Sync,
+    S: commonware_parallel::Strategy,
     ordered::Operation<F, K, E>: Encode + Decode,
 {
     let prepared = writer.prepare_upload(ops, current_boundary).await?;
@@ -244,8 +248,8 @@ where
 }
 
 #[allow(dead_code)]
-pub async fn commit_immutable_upload<F, H, K, V, E>(
-    writer: &ImmutableWriter<F, H, K, V, E>,
+pub async fn commit_immutable_upload<F, H, K, V, E, S>(
+    writer: &ImmutableWriter<F, H, K, V, E, S>,
     ops: &[immutable::Operation<F, K, E>],
 ) -> Result<UploadReceipt<F>, QmdbError>
 where
@@ -256,6 +260,7 @@ where
     V::Cfg: Clone,
     K::Cfg: Clone,
     E: ValueEncoding<Value = V> + Sync,
+    S: commonware_parallel::Strategy,
     immutable::Operation<F, K, E>: Encode + Decode + Clone,
 {
     let prepared = writer.prepare_upload(ops).await?;

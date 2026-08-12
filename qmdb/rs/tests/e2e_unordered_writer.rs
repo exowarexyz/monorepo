@@ -4,15 +4,17 @@
 
 mod common;
 
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 
 use commonware_cryptography::Sha256;
+use commonware_parallel::Strategy as _;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
 use commonware_storage::merkle::{mmr, Location, Proof};
 use commonware_storage::qmdb::any::unordered::variable::Db as LocalUnorderedDb;
 use commonware_storage::qmdb::any::unordered::variable::Operation as UnorderedQmdbOperation;
+use commonware_storage::qmdb::any::value::VariableEncoding;
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{UnorderedClient, UnorderedWriter, MAX_OPERATION_SIZE};
@@ -133,6 +135,42 @@ async fn sequential_upload_matches_local_root() {
             let r = fresh_reader(client.clone());
             let latest = local.latest_location;
             async move { r.root_at(latest).await }
+        },
+        "root_at",
+    )
+    .await;
+    assert_eq!(got_root, local.root);
+}
+
+#[tokio::test]
+async fn parallel_upload_matches_local_root() {
+    let client = common::local_store_client().await;
+    let local = build_local_reference(vec![vec![
+        (b"alpha".to_vec(), Some(b"one".to_vec())),
+        (b"beta".to_vec(), Some(b"two".to_vec())),
+    ]])
+    .await;
+    let strategy =
+        commonware_parallel::Rayon::new(NonZeroUsize::new(4).expect("non-zero thread count"))
+            .expect("construct Rayon strategy")
+            .manual();
+    let writer = UnorderedWriter::<
+        mmr::Family,
+        Sha256,
+        Vec<u8>,
+        Vec<u8>,
+        VariableEncoding<Vec<u8>>,
+        _,
+    >::fresh_with_strategy(PrefixedStoreClient::empty(client.clone()), strategy);
+
+    common::commit_unordered_upload(&writer, &local.operations)
+        .await
+        .expect("upload");
+    let got_root = retry(
+        || {
+            let reader = fresh_reader(client.clone());
+            let latest = local.latest_location;
+            async move { reader.root_at(latest).await }
         },
         "root_at",
     )

@@ -25,10 +25,20 @@ mod keyless;
 mod ordered;
 mod unordered;
 
-pub use immutable::{build_immutable_upload, BuiltImmutableUpload, ImmutableWriter};
-pub use keyless::{build_keyless_upload, BuiltKeylessUpload, KeylessWriter};
-pub use ordered::{build_ordered_upload, BuiltOrderedUpload, OrderedWriter};
-pub use unordered::{build_unordered_upload, BuiltUnorderedUpload, UnorderedWriter};
+pub use immutable::{
+    build_immutable_upload, build_immutable_upload_with_strategy, BuiltImmutableUpload,
+    ImmutableWriter,
+};
+pub use keyless::{
+    build_keyless_upload, build_keyless_upload_with_strategy, BuiltKeylessUpload, KeylessWriter,
+};
+pub use ordered::{
+    build_ordered_upload, build_ordered_upload_with_strategy, BuiltOrderedUpload, OrderedWriter,
+};
+pub use unordered::{
+    build_unordered_upload, build_unordered_upload_with_strategy, BuiltUnorderedUpload,
+    UnorderedWriter,
+};
 
 use std::borrow::Borrow;
 

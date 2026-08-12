@@ -2649,6 +2649,7 @@ dependencies = [
  "commonware-utils",
  "connectrpc",
  "connectrpc-build",
+ "criterion 0.5.1",
  "exoware-qmdb",
  "exoware-sdk",
  "exoware-server",

@@ -4,6 +4,7 @@ use std::marker::PhantomData;
 
 use commonware_codec::{Codec, Encode};
 use commonware_cryptography::Hasher;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_storage::merkle::{Family, Location, Position};
 use commonware_storage::qmdb::{
     any::value::{ValueEncoding, VariableEncoding},
@@ -56,17 +57,45 @@ where
     E: ValueEncoding<Value = V>,
     keyless::Operation<F, E>: Encode,
 {
+    build_keyless_upload_with_strategy::<F, H, V, E, Sequential>(
+        peaks,
+        prev_ops_size,
+        latest_location,
+        ops,
+        watermark_at,
+        &Sequential,
+    )
+}
+
+/// Strategy-aware form of [`build_keyless_upload`].
+pub fn build_keyless_upload_with_strategy<F, H, V, E, S>(
+    peaks: Vec<(Position<F>, u32, H::Digest)>,
+    prev_ops_size: Position<F>,
+    latest_location: Location<F>,
+    ops: &[keyless::Operation<F, E>],
+    watermark_at: Option<Location<F>>,
+    strategy: &S,
+) -> Result<BuiltKeylessUpload<H::Digest, F>, QmdbError>
+where
+    F: Family,
+    H: Hasher,
+    V: Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V>,
+    S: Strategy,
+    keyless::Operation<F, E>: Encode,
+{
     if ops.is_empty() {
         return Err(QmdbError::EmptyBatch);
     }
     let encoded: Vec<Vec<u8>> = ops.iter().map(|op| op.encode().to_vec()).collect();
     let prepared = build_auth_upload_rows(latest_location, encoded)?;
     let inactive_peaks = keyless_inactive_peaks(latest_location, ops)?;
-    let ext = extend_merkle_from_peaks_with_inactive_peaks::<F, H, _>(
+    let ext = extend_merkle_from_peaks_with_inactive_peaks::<F, H, S, _>(
         peaks,
         prev_ops_size,
         prepared.op_bytes(),
         inactive_peaks,
+        strategy,
     )?;
     let operation_count = prepared.operation_count;
     let mut rows = prepared.into_all_rows();
@@ -150,34 +179,40 @@ pub struct KeylessWriter<
     H: Hasher,
     V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
+    S: Strategy = Sequential,
 > {
     client: PrefixedStoreClient,
-    core: WriterCore<H::Digest, F>,
+    core: WriterCore<H::Digest, F, S>,
     _marker: PhantomData<(F, E)>,
 }
 
-impl<F, H, V, E> KeylessWriter<F, H, V, E>
+impl<F, H, V, E, S> KeylessWriter<F, H, V, E, S>
 where
     F: Family,
     H: Hasher,
     V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
+    S: Strategy,
     keyless::Operation<F, E>: Encode,
 {
     /// Construct a writer over `client`'s namespace prefix from caller-supplied
     /// frontier state (no store I/O).
-    pub fn new(client: PrefixedStoreClient, state: WriterState<H::Digest, F>) -> Self {
+    pub fn new_with_strategy(
+        client: PrefixedStoreClient,
+        state: WriterState<H::Digest, F>,
+        strategy: S,
+    ) -> Self {
         Self {
             client,
-            core: WriterCore::from_cache(Cache::from_writer_state(state)),
+            core: WriterCore::from_cache(Cache::from_writer_state(state), strategy),
             _marker: PhantomData,
         }
     }
 
     /// Construct a fresh writer over `client`'s namespace prefix with empty
     /// frontier state (no prior published checkpoint).
-    pub fn fresh(client: PrefixedStoreClient) -> Self {
-        Self::new(client, WriterState::empty())
+    pub fn fresh_with_strategy(client: PrefixedStoreClient, strategy: S) -> Self {
+        Self::new_with_strategy(client, WriterState::empty(), strategy)
     }
 
     pub async fn latest_published_watermark(&self) -> Option<Location<F>> {
@@ -194,13 +229,14 @@ where
     ) -> Result<super::PreparedUpload<F>, QmdbError> {
         let prepared = self
             .core
-            .prepare(ops.len() as u64, |ctx| {
-                let built = build_keyless_upload::<F, H, V, E>(
+            .prepare(ops.len() as u64, |ctx, strategy| {
+                let built = build_keyless_upload_with_strategy::<F, H, V, E, S>(
                     ctx.peaks,
                     ctx.ops_size,
                     ctx.latest_location,
                     ops,
                     ctx.watermark_at,
+                    strategy,
                 )?;
                 Ok(crate::writer::core::BuildResult {
                     new_peaks: built.new_peaks,
@@ -314,24 +350,47 @@ where
     }
 }
 
-impl<F, H, V, E> std::fmt::Debug for KeylessWriter<F, H, V, E>
+impl<F, H, V, E> KeylessWriter<F, H, V, E, Sequential>
 where
     F: Family,
     H: Hasher,
     V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
+    keyless::Operation<F, E>: Encode,
+{
+    /// Construct a writer over `client`'s namespace prefix from caller-supplied
+    /// frontier state (no store I/O).
+    pub fn new(client: PrefixedStoreClient, state: WriterState<H::Digest, F>) -> Self {
+        Self::new_with_strategy(client, state, Sequential)
+    }
+
+    /// Construct a fresh writer over `client`'s namespace prefix with empty
+    /// frontier state (no prior published checkpoint).
+    pub fn fresh(client: PrefixedStoreClient) -> Self {
+        Self::fresh_with_strategy(client, Sequential)
+    }
+}
+
+impl<F, H, V, E, S> std::fmt::Debug for KeylessWriter<F, H, V, E, S>
+where
+    F: Family,
+    H: Hasher,
+    V: Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V>,
+    S: Strategy,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KeylessWriter").finish_non_exhaustive()
     }
 }
 
-impl<F, H, V, E> StoreBatchUpload for KeylessWriter<F, H, V, E>
+impl<F, H, V, E, S> StoreBatchUpload for KeylessWriter<F, H, V, E, S>
 where
     F: Family,
     H: Hasher + Sync,
     V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V> + Sync,
+    S: Strategy,
     keyless::Operation<F, E>: Encode,
 {
     type Prepared = super::PreparedUpload<F>;
@@ -383,12 +442,13 @@ where
     }
 }
 
-impl<F, H, V, E> StoreBatchPublication for KeylessWriter<F, H, V, E>
+impl<F, H, V, E, S> StoreBatchPublication for KeylessWriter<F, H, V, E, S>
 where
     F: Family,
     H: Hasher + Sync,
     V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V> + Sync,
+    S: Strategy,
     keyless::Operation<F, E>: Encode,
 {
     type PreparedPublication = super::PreparedWatermark<F>;
@@ -426,12 +486,13 @@ where
     }
 }
 
-impl<F, H, V, E> StorePublicationFrontierWriter for KeylessWriter<F, H, V, E>
+impl<F, H, V, E, S> StorePublicationFrontierWriter for KeylessWriter<F, H, V, E, S>
 where
     F: Family,
     H: Hasher + Sync,
     V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V> + Sync,
+    S: Strategy,
     keyless::Operation<F, E>: Encode,
 {
     fn latest_publication_receipt<'a>(&'a self) -> BoxFuture<'a, Option<PublishedCheckpoint<F>>>
@@ -464,7 +525,9 @@ where
 mod tests {
     use super::*;
     use commonware_cryptography::Sha256;
+    use commonware_parallel::Rayon;
     use commonware_storage::merkle::mmr;
+    use std::num::NonZeroUsize;
 
     type TestEncoding = VariableEncoding<Vec<u8>>;
     type TestOp = keyless::Operation<mmr::Family, TestEncoding>;
@@ -517,28 +580,33 @@ mod tests {
     }
 
     #[test]
-    fn build_is_deterministic_on_same_inputs() {
+    fn sequential_and_parallel_builds_match() {
         let ops = vec![op(b"a"), op(b"b"), op(b"c"), op(b"d"), commit(0)];
-        let a = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>, TestEncoding>(
+        let sequential = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>, TestEncoding>(
             Vec::new(),
             Position::new(0),
             Location::new(4),
             &ops,
             Some(Location::new(4)),
         )
-        .expect("a");
-        let b = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>, TestEncoding>(
-            Vec::new(),
-            Position::new(0),
-            Location::new(4),
-            &ops,
-            Some(Location::new(4)),
-        )
-        .expect("b");
-        assert_eq!(a.rows, b.rows);
-        assert_eq!(a.new_peaks, b.new_peaks);
-        assert_eq!(a.new_ops_size, b.new_ops_size);
-        assert_eq!(a.new_root, b.new_root);
+        .expect("sequential");
+        let strategy = Rayon::new(NonZeroUsize::new(2).expect("non-zero threads"))
+            .expect("construct Rayon strategy")
+            .manual();
+        let parallel =
+            build_keyless_upload_with_strategy::<mmr::Family, Sha256, Vec<u8>, TestEncoding, _>(
+                Vec::new(),
+                Position::new(0),
+                Location::new(4),
+                &ops,
+                Some(Location::new(4)),
+                &strategy,
+            )
+            .expect("parallel");
+        assert_eq!(sequential.rows, parallel.rows);
+        assert_eq!(sequential.new_peaks, parallel.new_peaks);
+        assert_eq!(sequential.new_ops_size, parallel.new_ops_size);
+        assert_eq!(sequential.new_root, parallel.new_root);
     }
 
     #[test]

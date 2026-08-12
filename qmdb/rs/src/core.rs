@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use commonware_codec::{Codec, Encode};
 use commonware_cryptography::{Digest, Hasher};
+use commonware_parallel::Strategy;
 use commonware_storage::merkle::{
     hasher::Hasher as MerkleHasher, mem::Mem, Family, Graftable, Location, Position,
 };
@@ -478,29 +479,44 @@ pub(crate) struct MerkleExtension<F: Family, D: Digest> {
     pub(crate) new_nodes: Vec<(Position<F>, D)>,
 }
 
-pub(crate) fn extend_merkle_from_peaks<F: Family, H: Hasher, Op: AsRef<[u8]>>(
+pub(crate) fn extend_merkle_from_peaks<F, H, S, I>(
     peaks: Vec<(Position<F>, u32, H::Digest)>,
     previous_size: Position<F>,
-    encoded_operations: impl IntoIterator<Item = Op>,
-) -> Result<MerkleExtension<F, H::Digest>, QmdbError> {
-    extend_merkle_from_peaks_with_inactive_peaks::<F, H, _>(
+    encoded_operations: I,
+    strategy: &S,
+) -> Result<MerkleExtension<F, H::Digest>, QmdbError>
+where
+    F: Family,
+    H: Hasher,
+    S: Strategy,
+    I: IntoIterator + Send,
+    I::Item: AsRef<[u8]> + Send,
+    I::IntoIter: Send,
+{
+    extend_merkle_from_peaks_with_inactive_peaks::<F, H, S, I>(
         peaks,
         previous_size,
         encoded_operations,
         0,
+        strategy,
     )
 }
 
-pub(crate) fn extend_merkle_from_peaks_with_inactive_peaks<
-    F: Family,
-    H: Hasher,
-    Op: AsRef<[u8]>,
->(
+pub(crate) fn extend_merkle_from_peaks_with_inactive_peaks<F, H, S, I>(
     peaks: Vec<(Position<F>, u32, H::Digest)>,
     previous_size: Position<F>,
-    encoded_operations: impl IntoIterator<Item = Op>,
+    encoded_operations: I,
     inactive_peaks: usize,
-) -> Result<MerkleExtension<F, H::Digest>, QmdbError> {
+    strategy: &S,
+) -> Result<MerkleExtension<F, H::Digest>, QmdbError>
+where
+    F: Family,
+    H: Hasher,
+    S: Strategy,
+    I: IntoIterator + Send,
+    I::Item: AsRef<[u8]> + Send,
+    I::IntoIter: Send,
+{
     let previous_leaves = Location::<F>::try_from(previous_size)
         .map_err(|e| QmdbError::CorruptData(format!("invalid incremental ops size: {e}")))?;
     let mut peak_map: std::collections::BTreeMap<Position<F>, (u32, H::Digest)> = peaks
@@ -528,33 +544,57 @@ pub(crate) fn extend_merkle_from_peaks_with_inactive_peaks<
         )));
     }
 
-    extend_merkle_from_pinned_nodes::<F, H, _>(
+    extend_merkle_from_pinned_nodes::<F, H, S, I>(
         pinned_nodes,
         previous_leaves,
         encoded_operations,
         inactive_peaks,
+        strategy,
     )
 }
 
-pub(crate) fn extend_merkle_from_pinned_nodes<F: Family, H: Hasher, Op: AsRef<[u8]>>(
+pub(crate) fn extend_merkle_from_pinned_nodes<F, H, S, I>(
     pinned_nodes: Vec<H::Digest>,
     pruning_boundary: Location<F>,
-    encoded_operations: impl IntoIterator<Item = Op>,
+    encoded_operations: I,
     inactive_peaks: usize,
-) -> Result<MerkleExtension<F, H::Digest>, QmdbError> {
+    strategy: &S,
+) -> Result<MerkleExtension<F, H::Digest>, QmdbError>
+where
+    F: Family,
+    H: Hasher,
+    S: Strategy,
+    I: IntoIterator + Send,
+    I::Item: AsRef<[u8]> + Send,
+    I::IntoIter: Send,
+{
     let previous_size = Position::try_from(pruning_boundary)
         .map_err(|e| QmdbError::CorruptData(format!("invalid incremental ops size {e}")))?;
 
     let hasher = commonware_storage::qmdb::hasher::<H>();
     let mem = Mem::<F, H::Digest>::from_components(Vec::new(), pruning_boundary, pinned_nodes)
         .map_err(|e| QmdbError::CommonwareMerkle(e.to_string()))?;
-    let mut batch = mem.new_batch();
-    for encoded in encoded_operations {
-        let encoded = encoded.as_ref();
-        ensure_encoded_value_size(encoded.len())?;
-        batch = batch.add(&hasher, encoded);
-    }
+    let leaf_digests = strategy.try_map_collect_vec(
+        encoded_operations.into_iter().enumerate(),
+        |(offset, encoded)| {
+            let encoded = encoded.as_ref();
+            ensure_encoded_value_size(encoded.len())?;
+            let offset = u64::try_from(offset)
+                .map_err(|_| QmdbError::CorruptData("operation offset exceeds u64".into()))?;
+            let location = pruning_boundary
+                .checked_add(offset)
+                .ok_or_else(|| QmdbError::CorruptData("operation location overflow".into()))?;
+            let position = Position::try_from(location).map_err(|e| {
+                QmdbError::CorruptData(format!("invalid operation location {location}. {e}"))
+            })?;
+            Ok::<_, QmdbError>(hasher.leaf_digest(position, encoded))
+        },
+    )?;
 
+    let batch = leaf_digests.into_iter().fold(
+        mem.new_batch_with_strategy(strategy.clone()),
+        |batch, digest| batch.add_leaf_digest(digest),
+    );
     let batch = batch.merkleize(&mem, &hasher);
     let size = batch.size();
     let new_nodes = (*previous_size..*size)
@@ -592,7 +632,61 @@ pub(crate) fn extend_merkle_from_pinned_nodes<F: Family, H: Hasher, Op: AsRef<[u
 mod tests {
     use super::*;
     use commonware_cryptography::Sha256;
-    use commonware_storage::merkle::mmr;
+    use commonware_parallel::{Rayon, Sequential};
+    use commonware_storage::merkle::{mmb, mmr};
+    use std::num::NonZeroUsize;
+
+    fn assert_parallel_extension_matches<F: Family>() {
+        let prefix = (0u64..17)
+            .map(|i| format!("prefix-{i}").into_bytes())
+            .collect::<Vec<_>>();
+        let suffix = (0u64..257)
+            .map(|i| format!("suffix-{i}").into_bytes())
+            .collect::<Vec<_>>();
+        let base = extend_merkle_from_peaks::<F, Sha256, Sequential, _>(
+            Vec::new(),
+            Position::new(0),
+            prefix.iter().map(Vec::as_slice),
+            &Sequential,
+        )
+        .expect("build resumed frontier");
+        assert!(!base.peaks.is_empty());
+
+        let sequential = extend_merkle_from_peaks_with_inactive_peaks::<F, Sha256, Sequential, _>(
+            base.peaks.clone(),
+            base.size,
+            suffix.iter().map(Vec::as_slice),
+            1,
+            &Sequential,
+        )
+        .expect("extend sequentially");
+        let parallel_strategy = Rayon::new(NonZeroUsize::new(4).expect("nonzero thread count"))
+            .expect("build rayon strategy")
+            .manual();
+        let parallel = extend_merkle_from_peaks_with_inactive_peaks::<F, Sha256, _, _>(
+            base.peaks,
+            base.size,
+            suffix.iter().map(Vec::as_slice),
+            1,
+            &parallel_strategy,
+        )
+        .expect("extend in parallel");
+
+        assert_eq!(parallel.size, sequential.size);
+        assert_eq!(parallel.peaks, sequential.peaks);
+        assert_eq!(parallel.root, sequential.root);
+        assert_eq!(parallel.new_nodes, sequential.new_nodes);
+    }
+
+    #[test]
+    fn parallel_merkle_extension_matches_sequential_mmr() {
+        assert_parallel_extension_matches::<mmr::Family>();
+    }
+
+    #[test]
+    fn parallel_merkle_extension_matches_sequential_mmb() {
+        assert_parallel_extension_matches::<mmb::Family>();
+    }
 
     #[test]
     fn current_boundary_upload_keys_grafted_nodes_by_grafted_space_position() {

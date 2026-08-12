@@ -24,6 +24,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use commonware_cryptography::Digest;
+use commonware_parallel::Strategy;
 use commonware_storage::merkle::{Family, Location, Position};
 use tokio::sync::{Mutex, Notify};
 
@@ -74,8 +75,9 @@ pub(crate) enum State<D: Digest, F: Family> {
     },
 }
 
-pub(crate) struct WriterCore<D: Digest, F: Family> {
+pub(crate) struct WriterCore<D: Digest, F: Family, S: Strategy> {
     state: Mutex<State<D, F>>,
+    strategy: S,
     /// Monotonic counter of `advance` calls — also the next dispatch_id.
     dispatched: AtomicU64,
     /// Monotonic counter of `ack_success` + `ack_failure` calls. Used only
@@ -115,10 +117,11 @@ pub(crate) struct PreparedDispatch<F: Family, R> {
     pub latest_location: Location<F>,
 }
 
-impl<D: Digest, F: Family> WriterCore<D, F> {
-    pub(crate) fn from_cache(cache: Cache<D, F>) -> Self {
+impl<D: Digest, F: Family, S: Strategy> WriterCore<D, F, S> {
+    pub(crate) fn from_cache(cache: Cache<D, F>, strategy: S) -> Self {
         Self {
             state: Mutex::new(State::Ready(cache)),
+            strategy,
             dispatched: AtomicU64::new(0),
             acked: AtomicU64::new(0),
             ack_notify: Notify::new(),
@@ -138,7 +141,7 @@ impl<D: Digest, F: Family> WriterCore<D, F> {
     pub(crate) async fn prepare<R>(
         &self,
         ops_len: u64,
-        build: impl FnOnce(BuildContext<D, F>) -> Result<BuildResult<D, F, R>, QmdbError>,
+        build: impl FnOnce(BuildContext<D, F>, &S) -> Result<BuildResult<D, F, R>, QmdbError>,
     ) -> Result<PreparedDispatch<F, R>, QmdbError> {
         let mut state = self.state.lock().await;
         let cache = match &mut *state {
@@ -171,7 +174,7 @@ impl<D: Digest, F: Family> WriterCore<D, F> {
             latest_location,
             watermark_at,
         };
-        let result = build(ctx)?;
+        let result = build(ctx, &self.strategy)?;
 
         let dispatch_id = self.dispatched.fetch_add(1, Ordering::SeqCst);
         cache.peaks = result.new_peaks;
@@ -389,19 +392,23 @@ impl<D: Digest, F: Family> Cache<D, F> {
 mod tests {
     use super::*;
     use commonware_cryptography::sha256::Digest as Sha256Digest;
+    use commonware_parallel::Sequential;
     use commonware_storage::merkle::mmr;
 
-    fn fresh_core() -> WriterCore<Sha256Digest, mmr::Family> {
-        WriterCore::from_cache(Cache {
-            peaks: Vec::new(),
-            ops_size: Position::new(0),
-            next_location: Location::new(0),
-            latest_published: None,
-            latest_committed_published: None,
-            latest_dispatched: None,
-            pending: VecDeque::new(),
-            latest_contiguous_acked: None,
-        })
+    fn fresh_core() -> WriterCore<Sha256Digest, mmr::Family, Sequential> {
+        WriterCore::from_cache(
+            Cache {
+                peaks: Vec::new(),
+                ops_size: Position::new(0),
+                next_location: Location::new(0),
+                latest_published: None,
+                latest_committed_published: None,
+                latest_dispatched: None,
+                pending: VecDeque::new(),
+                latest_contiguous_acked: None,
+            },
+            Sequential,
+        )
     }
 
     // `await_drain` must complete once `acked >= dispatched`, even when the
@@ -449,6 +456,7 @@ mod tests {
 
     fn passthrough_build(
         ctx: BuildContext<Sha256Digest, mmr::Family>,
+        _strategy: &Sequential,
     ) -> Result<BuildResult<Sha256Digest, mmr::Family, ()>, QmdbError> {
         Ok(BuildResult {
             new_peaks: ctx.peaks,
@@ -459,14 +467,14 @@ mod tests {
 
     #[tokio::test]
     async fn restored_writer_state_reports_committed_watermark_immediately() {
-        let core = WriterCore::from_cache(Cache::from_writer_state(WriterState::<
-            Sha256Digest,
-            mmr::Family,
-        > {
-            peaks: Vec::new(),
-            ops_size: Position::new(8),
-            next_location: loc(8),
-        }));
+        let core = WriterCore::from_cache(
+            Cache::from_writer_state(WriterState::<Sha256Digest, mmr::Family> {
+                peaks: Vec::new(),
+                ops_size: Position::new(8),
+                next_location: loc(8),
+            }),
+            Sequential,
+        );
         assert_eq!(core.latest_published().await, Some(loc(7)));
     }
 
@@ -581,14 +589,14 @@ mod tests {
 
     #[tokio::test]
     async fn seeded_state_flush_path_only_needs_one_tail_publication() {
-        let core = WriterCore::from_cache(Cache::from_writer_state(WriterState::<
-            Sha256Digest,
-            mmr::Family,
-        > {
-            peaks: Vec::new(),
-            ops_size: Position::new(8),
-            next_location: loc(8),
-        }));
+        let core = WriterCore::from_cache(
+            Cache::from_writer_state(WriterState::<Sha256Digest, mmr::Family> {
+                peaks: Vec::new(),
+                ops_size: Position::new(8),
+                next_location: loc(8),
+            }),
+            Sequential,
+        );
 
         let first = core
             .prepare(1, passthrough_build)
@@ -628,7 +636,7 @@ mod tests {
 
     #[tokio::test]
     async fn poisoned_writer_reports_last_committed_not_speculative_watermark() {
-        let core = WriterCore::from_cache(ready_cache(loc(8), Some(loc(7))));
+        let core = WriterCore::from_cache(ready_cache(loc(8), Some(loc(7))), Sequential);
 
         let prepared = core.prepare(1, passthrough_build).await.expect("prepare");
         assert_eq!(
