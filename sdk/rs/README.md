@@ -34,3 +34,18 @@ batch.push(&orders, &order_key, order_value)?;
 batch.push(&accounts, &account_key, account_value)?;
 let sequence = batch.commit(&base).await?;
 ```
+
+## Examples
+
+`remote` writes a batch to a deployed endpoint and reads it back, pinning each read to the sequence it just committed:
+
+```bash
+EXOWARE_URL=https://query.<deployment>.<domain> \
+    EXOWARE_API_KEY=<token> \
+    cargo run -p exoware-sdk --example remote
+```
+
+`EXOWARE_API_KEY` is the credential a public deployment requires, and the builder reads it from
+the environment when `.api_key(...)` is not set. This example needs one covering both scopes.
+
+Add `EXOWARE_WRITE_URL` to reach a deployment that serves its write path on a separate origin.
