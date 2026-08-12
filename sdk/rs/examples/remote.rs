@@ -49,6 +49,7 @@ async fn round_trip(url: &str, write_url: &str) -> Result<(), Box<dyn std::error
         .health_url(url)
         .ingest_url(write_url)
         .prune_url(write_url)
+        .retention_url(write_url)
         .build()?;
     let store = client.prefixed(StoreKeyPrefix::new(Bytes::from_static(NAMESPACE))?);
 
