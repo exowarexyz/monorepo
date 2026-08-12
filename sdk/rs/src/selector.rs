@@ -1,6 +1,6 @@
 //! Shared key-filter shape: `(prefix, payload_regex)`.
 //!
-//! Used by both `prune_policy` (compact service) and `stream_filter` (stream
+//! Used by both `prune_policy` (prune service) and `stream_filter` (stream
 //! service) so one domain type round-trips through the `common.kv.v1.Selector`
 //! proto message and one regex compiler handles validation everywhere.
 

@@ -147,8 +147,258 @@ impl ::buffa::Enumeration for PolicyOrderEncoding {
         ]
     }
 }
-/// Prune policy graph and admin RPC (served by the compaction worker).
-///
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct PruneRequest {
+    /// One or more prune policies to apply. At least one is required. UserKeys
+    /// policies must not share the same key prefix.
+    ///
+    /// Field 1: `policies`
+    #[serde(
+        rename = "policies",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
+        deserialize_with = "::buffa::json_helpers::null_as_default"
+    )]
+    pub policies: ::buffa::alloc::vec::Vec<Policy>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for PruneRequest {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("PruneRequest").field("policies", &self.policies).finish()
+    }
+}
+impl PruneRequest {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.PruneRequest";
+}
+impl ::buffa::DefaultInstance for PruneRequest {
+    fn default_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<PruneRequest> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+impl ::buffa::MessageName for PruneRequest {
+    const PACKAGE: &'static str = "store.prune.v1";
+    const NAME: &'static str = "PruneRequest";
+    const FULL_NAME: &'static str = "store.prune.v1.PruneRequest";
+    const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.PruneRequest";
+}
+impl ::buffa::Message for PruneRequest {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// The result is a `u32`; the protobuf specification requires all
+    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
+    /// compliant message will never overflow this type.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        for v in &self.policies {
+            let __slot = __cache.reserve();
+            let inner_size = v.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
+                    + inner_size;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        size
+    }
+    fn write_to(
+        &self,
+        __cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::bytes::BufMut,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        for v in &self.policies {
+            ::buffa::encoding::Tag::new(
+                    1u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::encoding::encode_varint(__cache.consume_next() as u64, buf);
+            v.write_to(__cache, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 1u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                let mut elem = ::core::default::Default::default();
+                ::buffa::Message::merge_length_delimited(&mut elem, buf, depth)?;
+                self.policies.push(elem);
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.policies.clear();
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for PruneRequest {
+    const PROTO_FQN: &'static str = "store.prune.v1.PruneRequest";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for PruneRequest {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __PRUNE_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/store.prune.v1.PruneRequest",
+    to_json: ::buffa::type_registry::any_to_json::<PruneRequest>,
+    from_json: ::buffa::type_registry::any_from_json::<PruneRequest>,
+    is_wkt: false,
+};
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct PruneResponse {
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for PruneResponse {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("PruneResponse").finish()
+    }
+}
+impl PruneResponse {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.PruneResponse";
+}
+impl ::buffa::DefaultInstance for PruneResponse {
+    fn default_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<PruneResponse> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+impl ::buffa::MessageName for PruneResponse {
+    const PACKAGE: &'static str = "store.prune.v1";
+    const NAME: &'static str = "PruneResponse";
+    const FULL_NAME: &'static str = "store.prune.v1.PruneResponse";
+    const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.PruneResponse";
+}
+impl ::buffa::Message for PruneResponse {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// The result is a `u32`; the protobuf specification requires all
+    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
+    /// compliant message will never overflow this type.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        size
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::bytes::BufMut,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for PruneResponse {
+    const PROTO_FQN: &'static str = "store.prune.v1.PruneResponse";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for PruneResponse {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __PRUNE_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/store.prune.v1.PruneResponse",
+    to_json: ::buffa::type_registry::any_to_json::<PruneResponse>,
+    from_json: ::buffa::type_registry::any_from_json::<PruneResponse>,
+    is_wkt: false,
+};
 /// Controls how matched keys are partitioned into independent groups before
 /// the retain policy is applied. Each group is pruned independently.
 #[derive(Clone, PartialEq, Default)]
@@ -184,7 +434,7 @@ impl PolicyGroupBy {
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.PolicyGroupBy";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.PolicyGroupBy";
 }
 impl ::buffa::DefaultInstance for PolicyGroupBy {
     fn default_instance() -> &'static Self {
@@ -193,10 +443,10 @@ impl ::buffa::DefaultInstance for PolicyGroupBy {
     }
 }
 impl ::buffa::MessageName for PolicyGroupBy {
-    const PACKAGE: &'static str = "store.compact.v1";
+    const PACKAGE: &'static str = "store.prune.v1";
     const NAME: &'static str = "PolicyGroupBy";
-    const FULL_NAME: &'static str = "store.compact.v1.PolicyGroupBy";
-    const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.PolicyGroupBy";
+    const FULL_NAME: &'static str = "store.prune.v1.PolicyGroupBy";
+    const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.PolicyGroupBy";
 }
 impl ::buffa::Message for PolicyGroupBy {
     /// Returns the total encoded size in bytes.
@@ -266,7 +516,7 @@ impl ::buffa::Message for PolicyGroupBy {
     }
 }
 impl ::buffa::ExtensionSet for PolicyGroupBy {
-    const PROTO_FQN: &'static str = "store.compact.v1.PolicyGroupBy";
+    const PROTO_FQN: &'static str = "store.prune.v1.PolicyGroupBy";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -289,7 +539,7 @@ impl ::buffa::json_helpers::ProtoElemJson for PolicyGroupBy {
 }
 #[doc(hidden)]
 pub const __POLICY_GROUP_BY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.compact.v1.PolicyGroupBy",
+    type_url: "type.googleapis.com/store.prune.v1.PolicyGroupBy",
     to_json: ::buffa::type_registry::any_to_json::<PolicyGroupBy>,
     from_json: ::buffa::type_registry::any_from_json::<PolicyGroupBy>,
     is_wkt: false,
@@ -338,7 +588,7 @@ impl PolicyOrderBy {
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.PolicyOrderBy";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.PolicyOrderBy";
 }
 impl ::buffa::DefaultInstance for PolicyOrderBy {
     fn default_instance() -> &'static Self {
@@ -347,10 +597,10 @@ impl ::buffa::DefaultInstance for PolicyOrderBy {
     }
 }
 impl ::buffa::MessageName for PolicyOrderBy {
-    const PACKAGE: &'static str = "store.compact.v1";
+    const PACKAGE: &'static str = "store.prune.v1";
     const NAME: &'static str = "PolicyOrderBy";
-    const FULL_NAME: &'static str = "store.compact.v1.PolicyOrderBy";
-    const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.PolicyOrderBy";
+    const FULL_NAME: &'static str = "store.prune.v1.PolicyOrderBy";
+    const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.PolicyOrderBy";
 }
 impl ::buffa::Message for PolicyOrderBy {
     /// Returns the total encoded size in bytes.
@@ -448,7 +698,7 @@ impl ::buffa::Message for PolicyOrderBy {
     }
 }
 impl ::buffa::ExtensionSet for PolicyOrderBy {
-    const PROTO_FQN: &'static str = "store.compact.v1.PolicyOrderBy";
+    const PROTO_FQN: &'static str = "store.prune.v1.PolicyOrderBy";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -471,7 +721,7 @@ impl ::buffa::json_helpers::ProtoElemJson for PolicyOrderBy {
 }
 #[doc(hidden)]
 pub const __POLICY_ORDER_BY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.compact.v1.PolicyOrderBy",
+    type_url: "type.googleapis.com/store.prune.v1.PolicyOrderBy",
     to_json: ::buffa::type_registry::any_to_json::<PolicyOrderBy>,
     from_json: ::buffa::type_registry::any_from_json::<PolicyOrderBy>,
     is_wkt: false,
@@ -505,7 +755,7 @@ impl RetainKeepLatest {
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.RetainKeepLatest";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.RetainKeepLatest";
 }
 impl ::buffa::DefaultInstance for RetainKeepLatest {
     fn default_instance() -> &'static Self {
@@ -514,10 +764,10 @@ impl ::buffa::DefaultInstance for RetainKeepLatest {
     }
 }
 impl ::buffa::MessageName for RetainKeepLatest {
-    const PACKAGE: &'static str = "store.compact.v1";
+    const PACKAGE: &'static str = "store.prune.v1";
     const NAME: &'static str = "RetainKeepLatest";
-    const FULL_NAME: &'static str = "store.compact.v1.RetainKeepLatest";
-    const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.RetainKeepLatest";
+    const FULL_NAME: &'static str = "store.prune.v1.RetainKeepLatest";
+    const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.RetainKeepLatest";
 }
 impl ::buffa::Message for RetainKeepLatest {
     /// Returns the total encoded size in bytes.
@@ -584,7 +834,7 @@ impl ::buffa::Message for RetainKeepLatest {
     }
 }
 impl ::buffa::ExtensionSet for RetainKeepLatest {
-    const PROTO_FQN: &'static str = "store.compact.v1.RetainKeepLatest";
+    const PROTO_FQN: &'static str = "store.prune.v1.RetainKeepLatest";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -607,7 +857,7 @@ impl ::buffa::json_helpers::ProtoElemJson for RetainKeepLatest {
 }
 #[doc(hidden)]
 pub const __RETAIN_KEEP_LATEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.compact.v1.RetainKeepLatest",
+    type_url: "type.googleapis.com/store.prune.v1.RetainKeepLatest",
     to_json: ::buffa::type_registry::any_to_json::<RetainKeepLatest>,
     from_json: ::buffa::type_registry::any_from_json::<RetainKeepLatest>,
     is_wkt: false,
@@ -641,7 +891,7 @@ impl RetainGreaterThan {
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.RetainGreaterThan";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.RetainGreaterThan";
 }
 impl ::buffa::DefaultInstance for RetainGreaterThan {
     fn default_instance() -> &'static Self {
@@ -650,10 +900,10 @@ impl ::buffa::DefaultInstance for RetainGreaterThan {
     }
 }
 impl ::buffa::MessageName for RetainGreaterThan {
-    const PACKAGE: &'static str = "store.compact.v1";
+    const PACKAGE: &'static str = "store.prune.v1";
     const NAME: &'static str = "RetainGreaterThan";
-    const FULL_NAME: &'static str = "store.compact.v1.RetainGreaterThan";
-    const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.RetainGreaterThan";
+    const FULL_NAME: &'static str = "store.prune.v1.RetainGreaterThan";
+    const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.RetainGreaterThan";
 }
 impl ::buffa::Message for RetainGreaterThan {
     /// Returns the total encoded size in bytes.
@@ -720,7 +970,7 @@ impl ::buffa::Message for RetainGreaterThan {
     }
 }
 impl ::buffa::ExtensionSet for RetainGreaterThan {
-    const PROTO_FQN: &'static str = "store.compact.v1.RetainGreaterThan";
+    const PROTO_FQN: &'static str = "store.prune.v1.RetainGreaterThan";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -743,7 +993,7 @@ impl ::buffa::json_helpers::ProtoElemJson for RetainGreaterThan {
 }
 #[doc(hidden)]
 pub const __RETAIN_GREATER_THAN_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.compact.v1.RetainGreaterThan",
+    type_url: "type.googleapis.com/store.prune.v1.RetainGreaterThan",
     to_json: ::buffa::type_registry::any_to_json::<RetainGreaterThan>,
     from_json: ::buffa::type_registry::any_from_json::<RetainGreaterThan>,
     is_wkt: false,
@@ -779,7 +1029,7 @@ impl RetainGreaterThanOrEqual {
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.RetainGreaterThanOrEqual";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.RetainGreaterThanOrEqual";
 }
 impl ::buffa::DefaultInstance for RetainGreaterThanOrEqual {
     fn default_instance() -> &'static Self {
@@ -788,10 +1038,10 @@ impl ::buffa::DefaultInstance for RetainGreaterThanOrEqual {
     }
 }
 impl ::buffa::MessageName for RetainGreaterThanOrEqual {
-    const PACKAGE: &'static str = "store.compact.v1";
+    const PACKAGE: &'static str = "store.prune.v1";
     const NAME: &'static str = "RetainGreaterThanOrEqual";
-    const FULL_NAME: &'static str = "store.compact.v1.RetainGreaterThanOrEqual";
-    const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.RetainGreaterThanOrEqual";
+    const FULL_NAME: &'static str = "store.prune.v1.RetainGreaterThanOrEqual";
+    const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.RetainGreaterThanOrEqual";
 }
 impl ::buffa::Message for RetainGreaterThanOrEqual {
     /// Returns the total encoded size in bytes.
@@ -858,7 +1108,7 @@ impl ::buffa::Message for RetainGreaterThanOrEqual {
     }
 }
 impl ::buffa::ExtensionSet for RetainGreaterThanOrEqual {
-    const PROTO_FQN: &'static str = "store.compact.v1.RetainGreaterThanOrEqual";
+    const PROTO_FQN: &'static str = "store.prune.v1.RetainGreaterThanOrEqual";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -881,7 +1131,7 @@ impl ::buffa::json_helpers::ProtoElemJson for RetainGreaterThanOrEqual {
 }
 #[doc(hidden)]
 pub const __RETAIN_GREATER_THAN_OR_EQUAL_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.compact.v1.RetainGreaterThanOrEqual",
+    type_url: "type.googleapis.com/store.prune.v1.RetainGreaterThanOrEqual",
     to_json: ::buffa::type_registry::any_to_json::<RetainGreaterThanOrEqual>,
     from_json: ::buffa::type_registry::any_from_json::<RetainGreaterThanOrEqual>,
     is_wkt: false,
@@ -905,7 +1155,7 @@ impl RetainDropAll {
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.RetainDropAll";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.RetainDropAll";
 }
 impl ::buffa::DefaultInstance for RetainDropAll {
     fn default_instance() -> &'static Self {
@@ -914,10 +1164,10 @@ impl ::buffa::DefaultInstance for RetainDropAll {
     }
 }
 impl ::buffa::MessageName for RetainDropAll {
-    const PACKAGE: &'static str = "store.compact.v1";
+    const PACKAGE: &'static str = "store.prune.v1";
     const NAME: &'static str = "RetainDropAll";
-    const FULL_NAME: &'static str = "store.compact.v1.RetainDropAll";
-    const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.RetainDropAll";
+    const FULL_NAME: &'static str = "store.prune.v1.RetainDropAll";
+    const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.RetainDropAll";
 }
 impl ::buffa::Message for RetainDropAll {
     /// Returns the total encoded size in bytes.
@@ -965,7 +1215,7 @@ impl ::buffa::Message for RetainDropAll {
     }
 }
 impl ::buffa::ExtensionSet for RetainDropAll {
-    const PROTO_FQN: &'static str = "store.compact.v1.RetainDropAll";
+    const PROTO_FQN: &'static str = "store.prune.v1.RetainDropAll";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -988,7 +1238,7 @@ impl ::buffa::json_helpers::ProtoElemJson for RetainDropAll {
 }
 #[doc(hidden)]
 pub const __RETAIN_DROP_ALL_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.compact.v1.RetainDropAll",
+    type_url: "type.googleapis.com/store.prune.v1.RetainDropAll",
     to_json: ::buffa::type_registry::any_to_json::<RetainDropAll>,
     from_json: ::buffa::type_registry::any_from_json::<RetainDropAll>,
     is_wkt: false,
@@ -1014,7 +1264,7 @@ impl PolicyRetain {
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.PolicyRetain";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.PolicyRetain";
 }
 impl ::buffa::DefaultInstance for PolicyRetain {
     fn default_instance() -> &'static Self {
@@ -1023,10 +1273,10 @@ impl ::buffa::DefaultInstance for PolicyRetain {
     }
 }
 impl ::buffa::MessageName for PolicyRetain {
-    const PACKAGE: &'static str = "store.compact.v1";
+    const PACKAGE: &'static str = "store.prune.v1";
     const NAME: &'static str = "PolicyRetain";
-    const FULL_NAME: &'static str = "store.compact.v1.PolicyRetain";
-    const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.PolicyRetain";
+    const FULL_NAME: &'static str = "store.prune.v1.PolicyRetain";
+    const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.PolicyRetain";
 }
 impl ::buffa::Message for PolicyRetain {
     /// Returns the total encoded size in bytes.
@@ -1261,7 +1511,7 @@ impl ::buffa::Message for PolicyRetain {
     }
 }
 impl ::buffa::ExtensionSet for PolicyRetain {
-    const PROTO_FQN: &'static str = "store.compact.v1.PolicyRetain";
+    const PROTO_FQN: &'static str = "store.prune.v1.PolicyRetain";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -1413,7 +1663,7 @@ impl ::buffa::json_helpers::ProtoElemJson for PolicyRetain {
 }
 #[doc(hidden)]
 pub const __POLICY_RETAIN_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.compact.v1.PolicyRetain",
+    type_url: "type.googleapis.com/store.prune.v1.PolicyRetain",
     to_json: ::buffa::type_registry::any_to_json::<PolicyRetain>,
     from_json: ::buffa::type_registry::any_from_json::<PolicyRetain>,
     is_wkt: false,
@@ -1471,7 +1721,7 @@ impl KeysScope {
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.KeysScope";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.KeysScope";
 }
 impl ::buffa::DefaultInstance for KeysScope {
     fn default_instance() -> &'static Self {
@@ -1480,10 +1730,10 @@ impl ::buffa::DefaultInstance for KeysScope {
     }
 }
 impl ::buffa::MessageName for KeysScope {
-    const PACKAGE: &'static str = "store.compact.v1";
+    const PACKAGE: &'static str = "store.prune.v1";
     const NAME: &'static str = "KeysScope";
-    const FULL_NAME: &'static str = "store.compact.v1.KeysScope";
-    const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.KeysScope";
+    const FULL_NAME: &'static str = "store.prune.v1.KeysScope";
+    const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.KeysScope";
 }
 impl ::buffa::Message for KeysScope {
     /// Returns the total encoded size in bytes.
@@ -1627,7 +1877,7 @@ impl ::buffa::Message for KeysScope {
     }
 }
 impl ::buffa::ExtensionSet for KeysScope {
-    const PROTO_FQN: &'static str = "store.compact.v1.KeysScope";
+    const PROTO_FQN: &'static str = "store.prune.v1.KeysScope";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -1650,7 +1900,7 @@ impl ::buffa::json_helpers::ProtoElemJson for KeysScope {
 }
 #[doc(hidden)]
 pub const __KEYS_SCOPE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.compact.v1.KeysScope",
+    type_url: "type.googleapis.com/store.prune.v1.KeysScope",
     to_json: ::buffa::type_registry::any_to_json::<KeysScope>,
     from_json: ::buffa::type_registry::any_from_json::<KeysScope>,
     is_wkt: false,
@@ -1690,7 +1940,7 @@ impl Policy {
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.Policy";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.Policy";
 }
 impl ::buffa::DefaultInstance for Policy {
     fn default_instance() -> &'static Self {
@@ -1699,10 +1949,10 @@ impl ::buffa::DefaultInstance for Policy {
     }
 }
 impl ::buffa::MessageName for Policy {
-    const PACKAGE: &'static str = "store.compact.v1";
+    const PACKAGE: &'static str = "store.prune.v1";
     const NAME: &'static str = "Policy";
-    const FULL_NAME: &'static str = "store.compact.v1.Policy";
-    const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.Policy";
+    const FULL_NAME: &'static str = "store.prune.v1.Policy";
+    const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.Policy";
 }
 impl ::buffa::Message for Policy {
     /// Returns the total encoded size in bytes.
@@ -1814,7 +2064,7 @@ impl ::buffa::Message for Policy {
     }
 }
 impl ::buffa::ExtensionSet for Policy {
-    const PROTO_FQN: &'static str = "store.compact.v1.Policy";
+    const PROTO_FQN: &'static str = "store.prune.v1.Policy";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -1837,263 +2087,9 @@ impl ::buffa::json_helpers::ProtoElemJson for Policy {
 }
 #[doc(hidden)]
 pub const __POLICY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.compact.v1.Policy",
+    type_url: "type.googleapis.com/store.prune.v1.Policy",
     to_json: ::buffa::type_registry::any_to_json::<Policy>,
     from_json: ::buffa::type_registry::any_from_json::<Policy>,
-    is_wkt: false,
-};
-/// Request to execute prune policies.
-#[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
-pub struct PruneRequest {
-    /// One or more prune policies to apply. At least one is required. UserKeys
-    /// policies must not share the same key prefix.
-    ///
-    /// Field 1: `policies`
-    #[serde(
-        rename = "policies",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
-        deserialize_with = "::buffa::json_helpers::null_as_default"
-    )]
-    pub policies: ::buffa::alloc::vec::Vec<Policy>,
-    #[serde(skip)]
-    #[doc(hidden)]
-    pub __buffa_unknown_fields: ::buffa::UnknownFields,
-}
-impl ::core::fmt::Debug for PruneRequest {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("PruneRequest").field("policies", &self.policies).finish()
-    }
-}
-impl PruneRequest {
-    /// Protobuf type URL for this message, for use with `Any::pack` and
-    /// `Any::unpack_if`.
-    ///
-    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.PruneRequest";
-}
-impl ::buffa::DefaultInstance for PruneRequest {
-    fn default_instance() -> &'static Self {
-        static VALUE: ::buffa::__private::OnceBox<PruneRequest> = ::buffa::__private::OnceBox::new();
-        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
-    }
-}
-impl ::buffa::MessageName for PruneRequest {
-    const PACKAGE: &'static str = "store.compact.v1";
-    const NAME: &'static str = "PruneRequest";
-    const FULL_NAME: &'static str = "store.compact.v1.PruneRequest";
-    const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.PruneRequest";
-}
-impl ::buffa::Message for PruneRequest {
-    /// Returns the total encoded size in bytes.
-    ///
-    /// The result is a `u32`; the protobuf specification requires all
-    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
-    /// compliant message will never overflow this type.
-    #[allow(clippy::let_and_return)]
-    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
-        #[allow(unused_imports)]
-        use ::buffa::Enumeration as _;
-        let mut size = 0u32;
-        for v in &self.policies {
-            let __slot = __cache.reserve();
-            let inner_size = v.compute_size(__cache);
-            __cache.set(__slot, inner_size);
-            size
-                += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
-                    + inner_size;
-        }
-        size += self.__buffa_unknown_fields.encoded_len() as u32;
-        size
-    }
-    fn write_to(
-        &self,
-        __cache: &mut ::buffa::SizeCache,
-        buf: &mut impl ::buffa::bytes::BufMut,
-    ) {
-        #[allow(unused_imports)]
-        use ::buffa::Enumeration as _;
-        for v in &self.policies {
-            ::buffa::encoding::Tag::new(
-                    1u32,
-                    ::buffa::encoding::WireType::LengthDelimited,
-                )
-                .encode(buf);
-            ::buffa::encoding::encode_varint(__cache.consume_next() as u64, buf);
-            v.write_to(__cache, buf);
-        }
-        self.__buffa_unknown_fields.write_to(buf);
-    }
-    fn merge_field(
-        &mut self,
-        tag: ::buffa::encoding::Tag,
-        buf: &mut impl ::buffa::bytes::Buf,
-        depth: u32,
-    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
-        #[allow(unused_imports)]
-        use ::buffa::bytes::Buf as _;
-        #[allow(unused_imports)]
-        use ::buffa::Enumeration as _;
-        match tag.field_number() {
-            1u32 => {
-                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
-                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                        field_number: 1u32,
-                        expected: 2u8,
-                        actual: tag.wire_type() as u8,
-                    });
-                }
-                let mut elem = ::core::default::Default::default();
-                ::buffa::Message::merge_length_delimited(&mut elem, buf, depth)?;
-                self.policies.push(elem);
-            }
-            _ => {
-                self.__buffa_unknown_fields
-                    .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
-            }
-        }
-        ::core::result::Result::Ok(())
-    }
-    fn clear(&mut self) {
-        self.policies.clear();
-        self.__buffa_unknown_fields.clear();
-    }
-}
-impl ::buffa::ExtensionSet for PruneRequest {
-    const PROTO_FQN: &'static str = "store.compact.v1.PruneRequest";
-    fn unknown_fields(&self) -> &::buffa::UnknownFields {
-        &self.__buffa_unknown_fields
-    }
-    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
-        &mut self.__buffa_unknown_fields
-    }
-}
-impl ::buffa::json_helpers::ProtoElemJson for PruneRequest {
-    fn serialize_proto_json<S: ::serde::Serializer>(
-        v: &Self,
-        s: S,
-    ) -> ::core::result::Result<S::Ok, S::Error> {
-        ::serde::Serialize::serialize(v, s)
-    }
-    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
-        d: D,
-    ) -> ::core::result::Result<Self, D::Error> {
-        <Self as ::serde::Deserialize>::deserialize(d)
-    }
-}
-#[doc(hidden)]
-pub const __PRUNE_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.compact.v1.PruneRequest",
-    to_json: ::buffa::type_registry::any_to_json::<PruneRequest>,
-    from_json: ::buffa::type_registry::any_from_json::<PruneRequest>,
-    is_wkt: false,
-};
-/// Empty response returned on successful prune execution.
-#[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
-pub struct PruneResponse {
-    #[serde(skip)]
-    #[doc(hidden)]
-    pub __buffa_unknown_fields: ::buffa::UnknownFields,
-}
-impl ::core::fmt::Debug for PruneResponse {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("PruneResponse").finish()
-    }
-}
-impl PruneResponse {
-    /// Protobuf type URL for this message, for use with `Any::pack` and
-    /// `Any::unpack_if`.
-    ///
-    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.PruneResponse";
-}
-impl ::buffa::DefaultInstance for PruneResponse {
-    fn default_instance() -> &'static Self {
-        static VALUE: ::buffa::__private::OnceBox<PruneResponse> = ::buffa::__private::OnceBox::new();
-        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
-    }
-}
-impl ::buffa::MessageName for PruneResponse {
-    const PACKAGE: &'static str = "store.compact.v1";
-    const NAME: &'static str = "PruneResponse";
-    const FULL_NAME: &'static str = "store.compact.v1.PruneResponse";
-    const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.PruneResponse";
-}
-impl ::buffa::Message for PruneResponse {
-    /// Returns the total encoded size in bytes.
-    ///
-    /// The result is a `u32`; the protobuf specification requires all
-    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
-    /// compliant message will never overflow this type.
-    #[allow(clippy::let_and_return)]
-    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
-        #[allow(unused_imports)]
-        use ::buffa::Enumeration as _;
-        let mut size = 0u32;
-        size += self.__buffa_unknown_fields.encoded_len() as u32;
-        size
-    }
-    fn write_to(
-        &self,
-        _cache: &mut ::buffa::SizeCache,
-        buf: &mut impl ::buffa::bytes::BufMut,
-    ) {
-        #[allow(unused_imports)]
-        use ::buffa::Enumeration as _;
-        self.__buffa_unknown_fields.write_to(buf);
-    }
-    fn merge_field(
-        &mut self,
-        tag: ::buffa::encoding::Tag,
-        buf: &mut impl ::buffa::bytes::Buf,
-        depth: u32,
-    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
-        #[allow(unused_imports)]
-        use ::buffa::bytes::Buf as _;
-        #[allow(unused_imports)]
-        use ::buffa::Enumeration as _;
-        match tag.field_number() {
-            _ => {
-                self.__buffa_unknown_fields
-                    .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
-            }
-        }
-        ::core::result::Result::Ok(())
-    }
-    fn clear(&mut self) {
-        self.__buffa_unknown_fields.clear();
-    }
-}
-impl ::buffa::ExtensionSet for PruneResponse {
-    const PROTO_FQN: &'static str = "store.compact.v1.PruneResponse";
-    fn unknown_fields(&self) -> &::buffa::UnknownFields {
-        &self.__buffa_unknown_fields
-    }
-    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
-        &mut self.__buffa_unknown_fields
-    }
-}
-impl ::buffa::json_helpers::ProtoElemJson for PruneResponse {
-    fn serialize_proto_json<S: ::serde::Serializer>(
-        v: &Self,
-        s: S,
-    ) -> ::core::result::Result<S::Ok, S::Error> {
-        ::serde::Serialize::serialize(v, s)
-    }
-    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
-        d: D,
-    ) -> ::core::result::Result<Self, D::Error> {
-        <Self as ::serde::Deserialize>::deserialize(d)
-    }
-}
-#[doc(hidden)]
-pub const __PRUNE_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/store.compact.v1.PruneResponse",
-    to_json: ::buffa::type_registry::any_to_json::<PruneResponse>,
-    from_json: ::buffa::type_registry::any_from_json::<PruneResponse>,
     is_wkt: false,
 };
 #[allow(
@@ -2113,8 +2109,365 @@ pub mod __buffa {
     pub mod view {
         #[allow(unused_imports)]
         use super::*;
-        /// Prune policy graph and admin RPC (served by the compaction worker).
+        #[derive(Clone, Debug, Default)]
+        pub struct PruneRequestView<'a> {
+            /// One or more prune policies to apply. At least one is required. UserKeys
+            /// policies must not share the same key prefix.
+            ///
+            /// Field 1: `policies`
+            pub policies: ::buffa::RepeatedView<
+                'a,
+                super::super::__buffa::view::PolicyView<'a>,
+            >,
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> PruneRequestView<'a> {
+            /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
+            ///
+            /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
+            /// and by generated sub-message decode arms with `depth - 1`.
+            ///
+            /// **Not part of the public API.** Named with a leading underscore to
+            /// signal that it is for generated-code use only.
+            #[doc(hidden)]
+            pub fn _decode_depth(
+                buf: &'a [u8],
+                depth: u32,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let mut view = Self::default();
+                view._merge_into_view(buf, depth)?;
+                ::core::result::Result::Ok(view)
+            }
+            /// Merge fields from `buf` into this view (proto merge semantics).
+            ///
+            /// Repeated fields append; singular fields last-wins; singular
+            /// MESSAGE fields merge recursively. Used by sub-message decode
+            /// arms when the same field appears multiple times on the wire.
+            ///
+            /// **Not part of the public API.**
+            #[doc(hidden)]
+            pub fn _merge_into_view(
+                &mut self,
+                buf: &'a [u8],
+                depth: u32,
+            ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+                let _ = depth;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur: &'a [u8] = buf;
+                while !cur.is_empty() {
+                    let before_tag = cur;
+                    let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
+                    match tag.field_number() {
+                        1u32 => {
+                            if tag.wire_type()
+                                != ::buffa::encoding::WireType::LengthDelimited
+                            {
+                                return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                                    field_number: 1u32,
+                                    expected: 2u8,
+                                    actual: tag.wire_type() as u8,
+                                });
+                            }
+                            if depth == 0 {
+                                return Err(::buffa::DecodeError::RecursionLimitExceeded);
+                            }
+                            let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                            view.policies
+                                .push(
+                                    super::super::__buffa::view::PolicyView::_decode_depth(
+                                        sub,
+                                        depth - 1,
+                                    )?,
+                                );
+                        }
+                        _ => {
+                            ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
+                            let span_len = before_tag.len() - cur.len();
+                            view.__buffa_unknown_fields
+                                .push_raw(&before_tag[..span_len]);
+                        }
+                    }
+                }
+                ::core::result::Result::Ok(())
+            }
+        }
+        impl<'a> ::buffa::MessageView<'a> for PruneRequestView<'a> {
+            type Owned = super::super::PruneRequest;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                Self::_decode_depth(buf, ::buffa::RECURSION_LIMIT)
+            }
+            fn decode_view_with_limit(
+                buf: &'a [u8],
+                depth: u32,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                Self::_decode_depth(buf, depth)
+            }
+            fn to_owned_message(&self) -> super::super::PruneRequest {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> super::super::PruneRequest {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                super::super::PruneRequest {
+                    policies: self
+                        .policies
+                        .iter()
+                        .map(|v| v.to_owned_from_source(__buffa_src))
+                        .collect(),
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()
+                        .unwrap_or_default()
+                        .into(),
+                    ..::core::default::Default::default()
+                }
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for PruneRequestView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u32;
+                for v in &self.policies {
+                    let __slot = __cache.reserve();
+                    let inner_size = v.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
+                            + inner_size;
+                }
+                size += self.__buffa_unknown_fields.encoded_len() as u32;
+                size
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                __cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::bytes::BufMut,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                for v in &self.policies {
+                    ::buffa::encoding::Tag::new(
+                            1u32,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )
+                        .encode(buf);
+                    ::buffa::encoding::encode_varint(__cache.consume_next() as u64, buf);
+                    v.write_to(__cache, buf);
+                }
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        /// Serializes this view as protobuf JSON.
         ///
+        /// Implicit-presence fields with default values are omitted, `required`
+        /// fields are always emitted, explicit-presence (`optional`) fields are
+        /// emitted only when set, bytes fields are base64-encoded, and enum
+        /// values are their proto name strings.
+        ///
+        /// This impl uses `serialize_map(None)` because the number of emitted
+        /// fields depends on default-omission rules; serializers that require
+        /// known map lengths (e.g. `bincode`) will return a runtime error.
+        /// Use the owned message type for those formats.
+        impl<'__a> ::serde::Serialize for PruneRequestView<'__a> {
+            fn serialize<__S: ::serde::Serializer>(
+                &self,
+                __s: __S,
+            ) -> ::core::result::Result<__S::Ok, __S::Error> {
+                use ::serde::ser::SerializeMap as _;
+                let mut __map = __s.serialize_map(::core::option::Option::None)?;
+                if !self.policies.is_empty() {
+                    __map.serialize_entry("policies", &*self.policies)?;
+                }
+                __map.end()
+            }
+        }
+        impl<'a> ::buffa::MessageName for PruneRequestView<'a> {
+            const PACKAGE: &'static str = "store.prune.v1";
+            const NAME: &'static str = "PruneRequest";
+            const FULL_NAME: &'static str = "store.prune.v1.PruneRequest";
+            const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.PruneRequest";
+        }
+        impl<'v> ::buffa::DefaultViewInstance for PruneRequestView<'v> {
+            fn default_view_instance<'a>() -> &'a Self
+            where
+                Self: 'a,
+            {
+                static VALUE: ::buffa::__private::OnceBox<PruneRequestView<'static>> = ::buffa::__private::OnceBox::new();
+                VALUE
+                    .get_or_init(|| ::buffa::alloc::boxed::Box::new(
+                        <PruneRequestView<'static>>::default(),
+                    ))
+            }
+        }
+        impl ::buffa::ViewReborrow for PruneRequestView<'static> {
+            type Reborrowed<'b> = PruneRequestView<'b>;
+            fn reborrow<'b>(this: &'b Self) -> &'b Self::Reborrowed<'b> {
+                this
+            }
+        }
+        #[derive(Clone, Debug, Default)]
+        pub struct PruneResponseView<'a> {
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> PruneResponseView<'a> {
+            /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
+            ///
+            /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
+            /// and by generated sub-message decode arms with `depth - 1`.
+            ///
+            /// **Not part of the public API.** Named with a leading underscore to
+            /// signal that it is for generated-code use only.
+            #[doc(hidden)]
+            pub fn _decode_depth(
+                buf: &'a [u8],
+                depth: u32,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let mut view = Self::default();
+                view._merge_into_view(buf, depth)?;
+                ::core::result::Result::Ok(view)
+            }
+            /// Merge fields from `buf` into this view (proto merge semantics).
+            ///
+            /// Repeated fields append; singular fields last-wins; singular
+            /// MESSAGE fields merge recursively. Used by sub-message decode
+            /// arms when the same field appears multiple times on the wire.
+            ///
+            /// **Not part of the public API.**
+            #[doc(hidden)]
+            pub fn _merge_into_view(
+                &mut self,
+                buf: &'a [u8],
+                depth: u32,
+            ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+                let _ = depth;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur: &'a [u8] = buf;
+                while !cur.is_empty() {
+                    let before_tag = cur;
+                    let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
+                    match tag.field_number() {
+                        _ => {
+                            ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
+                            let span_len = before_tag.len() - cur.len();
+                            view.__buffa_unknown_fields
+                                .push_raw(&before_tag[..span_len]);
+                        }
+                    }
+                }
+                ::core::result::Result::Ok(())
+            }
+        }
+        impl<'a> ::buffa::MessageView<'a> for PruneResponseView<'a> {
+            type Owned = super::super::PruneResponse;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                Self::_decode_depth(buf, ::buffa::RECURSION_LIMIT)
+            }
+            fn decode_view_with_limit(
+                buf: &'a [u8],
+                depth: u32,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                Self::_decode_depth(buf, depth)
+            }
+            fn to_owned_message(&self) -> super::super::PruneResponse {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> super::super::PruneResponse {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                super::super::PruneResponse {
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()
+                        .unwrap_or_default()
+                        .into(),
+                    ..::core::default::Default::default()
+                }
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for PruneResponseView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u32;
+                size += self.__buffa_unknown_fields.encoded_len() as u32;
+                size
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                _cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::bytes::BufMut,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        /// Serializes this view as protobuf JSON.
+        ///
+        /// Implicit-presence fields with default values are omitted, `required`
+        /// fields are always emitted, explicit-presence (`optional`) fields are
+        /// emitted only when set, bytes fields are base64-encoded, and enum
+        /// values are their proto name strings.
+        ///
+        /// This impl uses `serialize_map(None)` because the number of emitted
+        /// fields depends on default-omission rules; serializers that require
+        /// known map lengths (e.g. `bincode`) will return a runtime error.
+        /// Use the owned message type for those formats.
+        impl<'__a> ::serde::Serialize for PruneResponseView<'__a> {
+            fn serialize<__S: ::serde::Serializer>(
+                &self,
+                __s: __S,
+            ) -> ::core::result::Result<__S::Ok, __S::Error> {
+                use ::serde::ser::SerializeMap as _;
+                let mut __map = __s.serialize_map(::core::option::Option::None)?;
+                __map.end()
+            }
+        }
+        impl<'a> ::buffa::MessageName for PruneResponseView<'a> {
+            const PACKAGE: &'static str = "store.prune.v1";
+            const NAME: &'static str = "PruneResponse";
+            const FULL_NAME: &'static str = "store.prune.v1.PruneResponse";
+            const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.PruneResponse";
+        }
+        impl<'v> ::buffa::DefaultViewInstance for PruneResponseView<'v> {
+            fn default_view_instance<'a>() -> &'a Self
+            where
+                Self: 'a,
+            {
+                static VALUE: ::buffa::__private::OnceBox<PruneResponseView<'static>> = ::buffa::__private::OnceBox::new();
+                VALUE
+                    .get_or_init(|| ::buffa::alloc::boxed::Box::new(
+                        <PruneResponseView<'static>>::default(),
+                    ))
+            }
+        }
+        impl ::buffa::ViewReborrow for PruneResponseView<'static> {
+            type Reborrowed<'b> = PruneResponseView<'b>;
+            fn reborrow<'b>(this: &'b Self) -> &'b Self::Reborrowed<'b> {
+                this
+            }
+        }
         /// Controls how matched keys are partitioned into independent groups before
         /// the retain policy is applied. Each group is pruned independently.
         #[derive(Clone, Debug, Default)]
@@ -2285,10 +2638,10 @@ pub mod __buffa {
             }
         }
         impl<'a> ::buffa::MessageName for PolicyGroupByView<'a> {
-            const PACKAGE: &'static str = "store.compact.v1";
+            const PACKAGE: &'static str = "store.prune.v1";
             const NAME: &'static str = "PolicyGroupBy";
-            const FULL_NAME: &'static str = "store.compact.v1.PolicyGroupBy";
-            const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.PolicyGroupBy";
+            const FULL_NAME: &'static str = "store.prune.v1.PolicyGroupBy";
+            const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.PolicyGroupBy";
         }
         impl<'v> ::buffa::DefaultViewInstance for PolicyGroupByView<'v> {
             fn default_view_instance<'a>() -> &'a Self
@@ -2514,10 +2867,10 @@ pub mod __buffa {
             }
         }
         impl<'a> ::buffa::MessageName for PolicyOrderByView<'a> {
-            const PACKAGE: &'static str = "store.compact.v1";
+            const PACKAGE: &'static str = "store.prune.v1";
             const NAME: &'static str = "PolicyOrderBy";
-            const FULL_NAME: &'static str = "store.compact.v1.PolicyOrderBy";
-            const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.PolicyOrderBy";
+            const FULL_NAME: &'static str = "store.prune.v1.PolicyOrderBy";
+            const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.PolicyOrderBy";
         }
         impl<'v> ::buffa::DefaultViewInstance for PolicyOrderByView<'v> {
             fn default_view_instance<'a>() -> &'a Self
@@ -2706,10 +3059,10 @@ pub mod __buffa {
             }
         }
         impl<'a> ::buffa::MessageName for RetainKeepLatestView<'a> {
-            const PACKAGE: &'static str = "store.compact.v1";
+            const PACKAGE: &'static str = "store.prune.v1";
             const NAME: &'static str = "RetainKeepLatest";
-            const FULL_NAME: &'static str = "store.compact.v1.RetainKeepLatest";
-            const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.RetainKeepLatest";
+            const FULL_NAME: &'static str = "store.prune.v1.RetainKeepLatest";
+            const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.RetainKeepLatest";
         }
         impl<'v> ::buffa::DefaultViewInstance for RetainKeepLatestView<'v> {
             fn default_view_instance<'a>() -> &'a Self
@@ -2902,10 +3255,10 @@ pub mod __buffa {
             }
         }
         impl<'a> ::buffa::MessageName for RetainGreaterThanView<'a> {
-            const PACKAGE: &'static str = "store.compact.v1";
+            const PACKAGE: &'static str = "store.prune.v1";
             const NAME: &'static str = "RetainGreaterThan";
-            const FULL_NAME: &'static str = "store.compact.v1.RetainGreaterThan";
-            const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.RetainGreaterThan";
+            const FULL_NAME: &'static str = "store.prune.v1.RetainGreaterThan";
+            const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.RetainGreaterThan";
         }
         impl<'v> ::buffa::DefaultViewInstance for RetainGreaterThanView<'v> {
             fn default_view_instance<'a>() -> &'a Self
@@ -3098,10 +3451,10 @@ pub mod __buffa {
             }
         }
         impl<'a> ::buffa::MessageName for RetainGreaterThanOrEqualView<'a> {
-            const PACKAGE: &'static str = "store.compact.v1";
+            const PACKAGE: &'static str = "store.prune.v1";
             const NAME: &'static str = "RetainGreaterThanOrEqual";
-            const FULL_NAME: &'static str = "store.compact.v1.RetainGreaterThanOrEqual";
-            const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.RetainGreaterThanOrEqual";
+            const FULL_NAME: &'static str = "store.prune.v1.RetainGreaterThanOrEqual";
+            const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.RetainGreaterThanOrEqual";
         }
         impl<'v> ::buffa::DefaultViewInstance for RetainGreaterThanOrEqualView<'v> {
             fn default_view_instance<'a>() -> &'a Self
@@ -3253,10 +3606,10 @@ pub mod __buffa {
             }
         }
         impl<'a> ::buffa::MessageName for RetainDropAllView<'a> {
-            const PACKAGE: &'static str = "store.compact.v1";
+            const PACKAGE: &'static str = "store.prune.v1";
             const NAME: &'static str = "RetainDropAll";
-            const FULL_NAME: &'static str = "store.compact.v1.RetainDropAll";
-            const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.RetainDropAll";
+            const FULL_NAME: &'static str = "store.prune.v1.RetainDropAll";
+            const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.RetainDropAll";
         }
         impl<'v> ::buffa::DefaultViewInstance for RetainDropAllView<'v> {
             fn default_view_instance<'a>() -> &'a Self
@@ -3714,10 +4067,10 @@ pub mod __buffa {
             }
         }
         impl<'a> ::buffa::MessageName for PolicyRetainView<'a> {
-            const PACKAGE: &'static str = "store.compact.v1";
+            const PACKAGE: &'static str = "store.prune.v1";
             const NAME: &'static str = "PolicyRetain";
-            const FULL_NAME: &'static str = "store.compact.v1.PolicyRetain";
-            const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.PolicyRetain";
+            const FULL_NAME: &'static str = "store.prune.v1.PolicyRetain";
+            const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.PolicyRetain";
         }
         impl<'v> ::buffa::DefaultViewInstance for PolicyRetainView<'v> {
             fn default_view_instance<'a>() -> &'a Self
@@ -4054,10 +4407,10 @@ pub mod __buffa {
             }
         }
         impl<'a> ::buffa::MessageName for KeysScopeView<'a> {
-            const PACKAGE: &'static str = "store.compact.v1";
+            const PACKAGE: &'static str = "store.prune.v1";
             const NAME: &'static str = "KeysScope";
-            const FULL_NAME: &'static str = "store.compact.v1.KeysScope";
-            const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.KeysScope";
+            const FULL_NAME: &'static str = "store.prune.v1.KeysScope";
+            const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.KeysScope";
         }
         impl<'v> ::buffa::DefaultViewInstance for KeysScopeView<'v> {
             fn default_view_instance<'a>() -> &'a Self
@@ -4328,10 +4681,10 @@ pub mod __buffa {
             }
         }
         impl<'a> ::buffa::MessageName for PolicyView<'a> {
-            const PACKAGE: &'static str = "store.compact.v1";
+            const PACKAGE: &'static str = "store.prune.v1";
             const NAME: &'static str = "Policy";
-            const FULL_NAME: &'static str = "store.compact.v1.Policy";
-            const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.Policy";
+            const FULL_NAME: &'static str = "store.prune.v1.Policy";
+            const TYPE_URL: &'static str = "type.googleapis.com/store.prune.v1.Policy";
         }
         impl<'v> ::buffa::DefaultViewInstance for PolicyView<'v> {
             fn default_view_instance<'a>() -> &'a Self
@@ -4347,367 +4700,6 @@ pub mod __buffa {
         }
         impl ::buffa::ViewReborrow for PolicyView<'static> {
             type Reborrowed<'b> = PolicyView<'b>;
-            fn reborrow<'b>(this: &'b Self) -> &'b Self::Reborrowed<'b> {
-                this
-            }
-        }
-        /// Request to execute prune policies.
-        #[derive(Clone, Debug, Default)]
-        pub struct PruneRequestView<'a> {
-            /// One or more prune policies to apply. At least one is required. UserKeys
-            /// policies must not share the same key prefix.
-            ///
-            /// Field 1: `policies`
-            pub policies: ::buffa::RepeatedView<
-                'a,
-                super::super::__buffa::view::PolicyView<'a>,
-            >,
-            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
-        }
-        impl<'a> PruneRequestView<'a> {
-            /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
-            ///
-            /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
-            /// and by generated sub-message decode arms with `depth - 1`.
-            ///
-            /// **Not part of the public API.** Named with a leading underscore to
-            /// signal that it is for generated-code use only.
-            #[doc(hidden)]
-            pub fn _decode_depth(
-                buf: &'a [u8],
-                depth: u32,
-            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
-                let mut view = Self::default();
-                view._merge_into_view(buf, depth)?;
-                ::core::result::Result::Ok(view)
-            }
-            /// Merge fields from `buf` into this view (proto merge semantics).
-            ///
-            /// Repeated fields append; singular fields last-wins; singular
-            /// MESSAGE fields merge recursively. Used by sub-message decode
-            /// arms when the same field appears multiple times on the wire.
-            ///
-            /// **Not part of the public API.**
-            #[doc(hidden)]
-            pub fn _merge_into_view(
-                &mut self,
-                buf: &'a [u8],
-                depth: u32,
-            ) -> ::core::result::Result<(), ::buffa::DecodeError> {
-                let _ = depth;
-                #[allow(unused_variables)]
-                let view = self;
-                let mut cur: &'a [u8] = buf;
-                while !cur.is_empty() {
-                    let before_tag = cur;
-                    let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
-                    match tag.field_number() {
-                        1u32 => {
-                            if tag.wire_type()
-                                != ::buffa::encoding::WireType::LengthDelimited
-                            {
-                                return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
-                                    field_number: 1u32,
-                                    expected: 2u8,
-                                    actual: tag.wire_type() as u8,
-                                });
-                            }
-                            if depth == 0 {
-                                return Err(::buffa::DecodeError::RecursionLimitExceeded);
-                            }
-                            let sub = ::buffa::types::borrow_bytes(&mut cur)?;
-                            view.policies
-                                .push(
-                                    super::super::__buffa::view::PolicyView::_decode_depth(
-                                        sub,
-                                        depth - 1,
-                                    )?,
-                                );
-                        }
-                        _ => {
-                            ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
-                            let span_len = before_tag.len() - cur.len();
-                            view.__buffa_unknown_fields
-                                .push_raw(&before_tag[..span_len]);
-                        }
-                    }
-                }
-                ::core::result::Result::Ok(())
-            }
-        }
-        impl<'a> ::buffa::MessageView<'a> for PruneRequestView<'a> {
-            type Owned = super::super::PruneRequest;
-            fn decode_view(
-                buf: &'a [u8],
-            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
-                Self::_decode_depth(buf, ::buffa::RECURSION_LIMIT)
-            }
-            fn decode_view_with_limit(
-                buf: &'a [u8],
-                depth: u32,
-            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
-                Self::_decode_depth(buf, depth)
-            }
-            fn to_owned_message(&self) -> super::super::PruneRequest {
-                self.to_owned_from_source(None)
-            }
-            #[allow(clippy::useless_conversion, clippy::needless_update)]
-            fn to_owned_from_source(
-                &self,
-                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
-            ) -> super::super::PruneRequest {
-                #[allow(unused_imports)]
-                use ::buffa::alloc::string::ToString as _;
-                let _ = __buffa_src;
-                super::super::PruneRequest {
-                    policies: self
-                        .policies
-                        .iter()
-                        .map(|v| v.to_owned_from_source(__buffa_src))
-                        .collect(),
-                    __buffa_unknown_fields: self
-                        .__buffa_unknown_fields
-                        .to_owned()
-                        .unwrap_or_default()
-                        .into(),
-                    ..::core::default::Default::default()
-                }
-            }
-        }
-        impl<'a> ::buffa::ViewEncode<'a> for PruneRequestView<'a> {
-            #[allow(clippy::needless_borrow, clippy::let_and_return)]
-            fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
-                #[allow(unused_imports)]
-                use ::buffa::Enumeration as _;
-                let mut size = 0u32;
-                for v in &self.policies {
-                    let __slot = __cache.reserve();
-                    let inner_size = v.compute_size(__cache);
-                    __cache.set(__slot, inner_size);
-                    size
-                        += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
-                            + inner_size;
-                }
-                size += self.__buffa_unknown_fields.encoded_len() as u32;
-                size
-            }
-            #[allow(clippy::needless_borrow)]
-            fn write_to(
-                &self,
-                __cache: &mut ::buffa::SizeCache,
-                buf: &mut impl ::buffa::bytes::BufMut,
-            ) {
-                #[allow(unused_imports)]
-                use ::buffa::Enumeration as _;
-                for v in &self.policies {
-                    ::buffa::encoding::Tag::new(
-                            1u32,
-                            ::buffa::encoding::WireType::LengthDelimited,
-                        )
-                        .encode(buf);
-                    ::buffa::encoding::encode_varint(__cache.consume_next() as u64, buf);
-                    v.write_to(__cache, buf);
-                }
-                self.__buffa_unknown_fields.write_to(buf);
-            }
-        }
-        /// Serializes this view as protobuf JSON.
-        ///
-        /// Implicit-presence fields with default values are omitted, `required`
-        /// fields are always emitted, explicit-presence (`optional`) fields are
-        /// emitted only when set, bytes fields are base64-encoded, and enum
-        /// values are their proto name strings.
-        ///
-        /// This impl uses `serialize_map(None)` because the number of emitted
-        /// fields depends on default-omission rules; serializers that require
-        /// known map lengths (e.g. `bincode`) will return a runtime error.
-        /// Use the owned message type for those formats.
-        impl<'__a> ::serde::Serialize for PruneRequestView<'__a> {
-            fn serialize<__S: ::serde::Serializer>(
-                &self,
-                __s: __S,
-            ) -> ::core::result::Result<__S::Ok, __S::Error> {
-                use ::serde::ser::SerializeMap as _;
-                let mut __map = __s.serialize_map(::core::option::Option::None)?;
-                if !self.policies.is_empty() {
-                    __map.serialize_entry("policies", &*self.policies)?;
-                }
-                __map.end()
-            }
-        }
-        impl<'a> ::buffa::MessageName for PruneRequestView<'a> {
-            const PACKAGE: &'static str = "store.compact.v1";
-            const NAME: &'static str = "PruneRequest";
-            const FULL_NAME: &'static str = "store.compact.v1.PruneRequest";
-            const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.PruneRequest";
-        }
-        impl<'v> ::buffa::DefaultViewInstance for PruneRequestView<'v> {
-            fn default_view_instance<'a>() -> &'a Self
-            where
-                Self: 'a,
-            {
-                static VALUE: ::buffa::__private::OnceBox<PruneRequestView<'static>> = ::buffa::__private::OnceBox::new();
-                VALUE
-                    .get_or_init(|| ::buffa::alloc::boxed::Box::new(
-                        <PruneRequestView<'static>>::default(),
-                    ))
-            }
-        }
-        impl ::buffa::ViewReborrow for PruneRequestView<'static> {
-            type Reborrowed<'b> = PruneRequestView<'b>;
-            fn reborrow<'b>(this: &'b Self) -> &'b Self::Reborrowed<'b> {
-                this
-            }
-        }
-        /// Empty response returned on successful prune execution.
-        #[derive(Clone, Debug, Default)]
-        pub struct PruneResponseView<'a> {
-            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
-        }
-        impl<'a> PruneResponseView<'a> {
-            /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
-            ///
-            /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
-            /// and by generated sub-message decode arms with `depth - 1`.
-            ///
-            /// **Not part of the public API.** Named with a leading underscore to
-            /// signal that it is for generated-code use only.
-            #[doc(hidden)]
-            pub fn _decode_depth(
-                buf: &'a [u8],
-                depth: u32,
-            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
-                let mut view = Self::default();
-                view._merge_into_view(buf, depth)?;
-                ::core::result::Result::Ok(view)
-            }
-            /// Merge fields from `buf` into this view (proto merge semantics).
-            ///
-            /// Repeated fields append; singular fields last-wins; singular
-            /// MESSAGE fields merge recursively. Used by sub-message decode
-            /// arms when the same field appears multiple times on the wire.
-            ///
-            /// **Not part of the public API.**
-            #[doc(hidden)]
-            pub fn _merge_into_view(
-                &mut self,
-                buf: &'a [u8],
-                depth: u32,
-            ) -> ::core::result::Result<(), ::buffa::DecodeError> {
-                let _ = depth;
-                #[allow(unused_variables)]
-                let view = self;
-                let mut cur: &'a [u8] = buf;
-                while !cur.is_empty() {
-                    let before_tag = cur;
-                    let tag = ::buffa::encoding::Tag::decode(&mut cur)?;
-                    match tag.field_number() {
-                        _ => {
-                            ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
-                            let span_len = before_tag.len() - cur.len();
-                            view.__buffa_unknown_fields
-                                .push_raw(&before_tag[..span_len]);
-                        }
-                    }
-                }
-                ::core::result::Result::Ok(())
-            }
-        }
-        impl<'a> ::buffa::MessageView<'a> for PruneResponseView<'a> {
-            type Owned = super::super::PruneResponse;
-            fn decode_view(
-                buf: &'a [u8],
-            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
-                Self::_decode_depth(buf, ::buffa::RECURSION_LIMIT)
-            }
-            fn decode_view_with_limit(
-                buf: &'a [u8],
-                depth: u32,
-            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
-                Self::_decode_depth(buf, depth)
-            }
-            fn to_owned_message(&self) -> super::super::PruneResponse {
-                self.to_owned_from_source(None)
-            }
-            #[allow(clippy::useless_conversion, clippy::needless_update)]
-            fn to_owned_from_source(
-                &self,
-                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
-            ) -> super::super::PruneResponse {
-                #[allow(unused_imports)]
-                use ::buffa::alloc::string::ToString as _;
-                let _ = __buffa_src;
-                super::super::PruneResponse {
-                    __buffa_unknown_fields: self
-                        .__buffa_unknown_fields
-                        .to_owned()
-                        .unwrap_or_default()
-                        .into(),
-                    ..::core::default::Default::default()
-                }
-            }
-        }
-        impl<'a> ::buffa::ViewEncode<'a> for PruneResponseView<'a> {
-            #[allow(clippy::needless_borrow, clippy::let_and_return)]
-            fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
-                #[allow(unused_imports)]
-                use ::buffa::Enumeration as _;
-                let mut size = 0u32;
-                size += self.__buffa_unknown_fields.encoded_len() as u32;
-                size
-            }
-            #[allow(clippy::needless_borrow)]
-            fn write_to(
-                &self,
-                _cache: &mut ::buffa::SizeCache,
-                buf: &mut impl ::buffa::bytes::BufMut,
-            ) {
-                #[allow(unused_imports)]
-                use ::buffa::Enumeration as _;
-                self.__buffa_unknown_fields.write_to(buf);
-            }
-        }
-        /// Serializes this view as protobuf JSON.
-        ///
-        /// Implicit-presence fields with default values are omitted, `required`
-        /// fields are always emitted, explicit-presence (`optional`) fields are
-        /// emitted only when set, bytes fields are base64-encoded, and enum
-        /// values are their proto name strings.
-        ///
-        /// This impl uses `serialize_map(None)` because the number of emitted
-        /// fields depends on default-omission rules; serializers that require
-        /// known map lengths (e.g. `bincode`) will return a runtime error.
-        /// Use the owned message type for those formats.
-        impl<'__a> ::serde::Serialize for PruneResponseView<'__a> {
-            fn serialize<__S: ::serde::Serializer>(
-                &self,
-                __s: __S,
-            ) -> ::core::result::Result<__S::Ok, __S::Error> {
-                use ::serde::ser::SerializeMap as _;
-                let mut __map = __s.serialize_map(::core::option::Option::None)?;
-                __map.end()
-            }
-        }
-        impl<'a> ::buffa::MessageName for PruneResponseView<'a> {
-            const PACKAGE: &'static str = "store.compact.v1";
-            const NAME: &'static str = "PruneResponse";
-            const FULL_NAME: &'static str = "store.compact.v1.PruneResponse";
-            const TYPE_URL: &'static str = "type.googleapis.com/store.compact.v1.PruneResponse";
-        }
-        impl<'v> ::buffa::DefaultViewInstance for PruneResponseView<'v> {
-            fn default_view_instance<'a>() -> &'a Self
-            where
-                Self: 'a,
-            {
-                static VALUE: ::buffa::__private::OnceBox<PruneResponseView<'static>> = ::buffa::__private::OnceBox::new();
-                VALUE
-                    .get_or_init(|| ::buffa::alloc::boxed::Box::new(
-                        <PruneResponseView<'static>>::default(),
-                    ))
-            }
-        }
-        impl ::buffa::ViewReborrow for PruneResponseView<'static> {
-            type Reborrowed<'b> = PruneResponseView<'b>;
             fn reborrow<'b>(this: &'b Self) -> &'b Self::Reborrowed<'b> {
                 this
             }
@@ -4846,6 +4838,10 @@ pub mod __buffa {
     }
 }
 #[doc(inline)]
+pub use self::__buffa::view::PruneRequestView;
+#[doc(inline)]
+pub use self::__buffa::view::PruneResponseView;
+#[doc(inline)]
 pub use self::__buffa::view::PolicyGroupByView;
 #[doc(inline)]
 pub use self::__buffa::view::PolicyOrderByView;
@@ -4863,10 +4859,6 @@ pub use self::__buffa::view::PolicyRetainView;
 pub use self::__buffa::view::KeysScopeView;
 #[doc(inline)]
 pub use self::__buffa::view::PolicyView;
-#[doc(inline)]
-pub use self::__buffa::view::PruneRequestView;
-#[doc(inline)]
-pub use self::__buffa::view::PruneResponseView;
 
 ///Shorthand for `OwnedView<PruneRequestView<'static>>`.
 pub type OwnedPruneRequestView = ::buffa::view::OwnedView<
@@ -4894,17 +4886,17 @@ for ::buffa::view::OwnedView<__buffa::view::PruneResponseView<'static>> {
     }
 }
 /// Full service name for this service.
-pub const SERVICE_SERVICE_NAME: &str = "store.compact.v1.Service";
+pub const SERVICE_SERVICE_NAME: &str = "store.prune.v1.Service";
 /// Static [`Spec`](::connectrpc::Spec) for the server-side `Prune` RPC.
 ///
 /// The dispatcher surfaces this on
 /// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
 pub const SERVICE_PRUNE_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
-        "/store.compact.v1.Service/Prune",
+        "/store.prune.v1.Service/Prune",
         ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
-/// Compaction service, typically served by the compaction worker.
+/// Server trait for Service.
 ///
 /// # Implementing handlers
 ///
@@ -4941,8 +4933,7 @@ pub const SERVICE_PRUNE_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
 /// example` doc.
 #[allow(clippy::type_complexity)]
 pub trait Service: Send + Sync + 'static {
-    /// Execute one or more prune policies against the store. Each policy is
-    /// applied sequentially.
+    /// Handle the Prune RPC.
     ///
     /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
     fn prune<'a>(
@@ -5040,7 +5031,7 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
         &self,
         path: &str,
     ) -> Option<::connectrpc::dispatcher::codegen::MethodDescriptor> {
-        let method = path.strip_prefix("store.compact.v1.Service/")?;
+        let method = path.strip_prefix("store.prune.v1.Service/")?;
         match method {
             "Prune" => {
                 Some(
@@ -5058,7 +5049,7 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
         request: ::connectrpc::Payload,
         format: ::connectrpc::CodecFormat,
     ) -> ::connectrpc::dispatcher::codegen::UnaryResult {
-        let Some(method) = path.strip_prefix("store.compact.v1.Service/") else {
+        let Some(method) = path.strip_prefix("store.prune.v1.Service/") else {
             return ::connectrpc::dispatcher::codegen::unimplemented_unary(path);
         };
         let _ = (&ctx, &request, &format);
@@ -5082,7 +5073,7 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
         request: ::buffa::bytes::Bytes,
         format: ::connectrpc::CodecFormat,
     ) -> ::connectrpc::dispatcher::codegen::StreamingResult {
-        let Some(method) = path.strip_prefix("store.compact.v1.Service/") else {
+        let Some(method) = path.strip_prefix("store.prune.v1.Service/") else {
             return ::connectrpc::dispatcher::codegen::unimplemented_streaming(path);
         };
         let _ = (&ctx, &request, &format);
@@ -5097,7 +5088,7 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
         requests: ::connectrpc::dispatcher::codegen::RequestStream,
         format: ::connectrpc::CodecFormat,
     ) -> ::connectrpc::dispatcher::codegen::UnaryResult {
-        let Some(method) = path.strip_prefix("store.compact.v1.Service/") else {
+        let Some(method) = path.strip_prefix("store.prune.v1.Service/") else {
             return ::connectrpc::dispatcher::codegen::unimplemented_unary(path);
         };
         let _ = (&ctx, &requests, &format);
@@ -5112,7 +5103,7 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
         requests: ::connectrpc::dispatcher::codegen::RequestStream,
         format: ::connectrpc::CodecFormat,
     ) -> ::connectrpc::dispatcher::codegen::StreamingResult {
-        let Some(method) = path.strip_prefix("store.compact.v1.Service/") else {
+        let Some(method) = path.strip_prefix("store.prune.v1.Service/") else {
             return ::connectrpc::dispatcher::codegen::unimplemented_streaming(path);
         };
         let _ = (&ctx, &requests, &format);
@@ -5192,7 +5183,7 @@ where
     pub fn config_mut(&mut self) -> &mut ::connectrpc::client::ClientConfig {
         &mut self.config
     }
-    /// Call the Prune RPC. Sends a request to /store.compact.v1.Service/Prune.
+    /// Call the Prune RPC. Sends a request to /store.prune.v1.Service/Prune.
     pub async fn prune(
         &self,
         request: PruneRequest,

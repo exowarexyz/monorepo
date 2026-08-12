@@ -240,14 +240,14 @@ pub fn reduce_params_error(description: impl Into<String>) -> ConnectError {
     )
 }
 
-// -- compact --
+// -- prune --
 
 pub fn validate_prune_request(
-    request: &exoware_proto::store::compact::v1::PruneRequestView<'_>,
+    request: &exoware_proto::store::prune::v1::PruneRequestView<'_>,
 ) -> Result<(), ConnectError> {
     if request.policies.is_empty() {
         return Err(field_error(
-            "store.compact",
+            "store.prune",
             "policies",
             "at least one policy is required",
             "INVALID_PRUNE_REQUEST",
@@ -434,9 +434,9 @@ mod tests {
 
     fn prune_request_bytes(n_policies: usize) -> Vec<u8> {
         use buffa::Message;
-        exoware_proto::compact::PruneRequest {
+        exoware_proto::prune::PruneRequest {
             policies: (0..n_policies)
-                .map(|_| exoware_proto::compact::Policy::default())
+                .map(|_| exoware_proto::prune::Policy::default())
                 .collect(),
             ..Default::default()
         }
@@ -446,27 +446,27 @@ mod tests {
     #[test]
     fn prune_rejects_empty_policies() {
         let bytes = prune_request_bytes(0);
-        let view = exoware_proto::store::compact::v1::PruneRequestView::decode_view(&bytes)
-            .expect("parse");
+        let view =
+            exoware_proto::store::prune::v1::PruneRequestView::decode_view(&bytes).expect("parse");
         assert!(validate_prune_request(&view).is_err());
     }
 
     #[test]
     fn prune_accepts_one_policy() {
         let bytes = prune_request_bytes(1);
-        let view = exoware_proto::store::compact::v1::PruneRequestView::decode_view(&bytes)
-            .expect("parse");
+        let view =
+            exoware_proto::store::prune::v1::PruneRequestView::decode_view(&bytes).expect("parse");
         validate_prune_request(&view).expect("should be valid");
     }
 
     #[test]
     fn prune_shape_accepts_keep_latest_count_zero() {
         use buffa::Message;
-        let bytes = exoware_proto::compact::PruneRequest {
-            policies: vec![exoware_proto::compact::Policy {
-                retain: Some(exoware_proto::compact::PolicyRetain {
-                    kind: Some(exoware_proto::compact::policy_retain::Kind::KeepLatest(
-                        Box::new(exoware_proto::compact::RetainKeepLatest {
+        let bytes = exoware_proto::prune::PruneRequest {
+            policies: vec![exoware_proto::prune::Policy {
+                retain: Some(exoware_proto::prune::PolicyRetain {
+                    kind: Some(exoware_proto::prune::policy_retain::Kind::KeepLatest(
+                        Box::new(exoware_proto::prune::RetainKeepLatest {
                             count: 0,
                             ..Default::default()
                         }),
@@ -479,8 +479,8 @@ mod tests {
             ..Default::default()
         }
         .encode_to_vec();
-        let view = exoware_proto::store::compact::v1::PruneRequestView::decode_view(&bytes)
-            .expect("parse");
+        let view =
+            exoware_proto::store::prune::v1::PruneRequestView::decode_view(&bytes).expect("parse");
         validate_prune_request(&view).expect("shape should be valid");
     }
 

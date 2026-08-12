@@ -25,13 +25,13 @@ pub mod log {
 }
 
 pub mod store {
-    pub mod compact {
+    pub mod prune {
         pub mod v1 {
             #![allow(non_camel_case_types)]
             #![allow(unused_imports)]
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
-            include!("../gen/store.compact.v1.rs");
+            include!("../gen/store.prune.v1.rs");
         }
     }
 
@@ -69,20 +69,20 @@ pub mod common {
     pub use kv::v1::*;
 }
 
-pub mod compact {
-    #![allow(non_camel_case_types)]
-    #![allow(unused_imports)]
-    #![allow(clippy::derivable_impls)]
-    #![allow(clippy::match_single_binding)]
-    pub use crate::store::compact::v1::*;
-}
-
 pub mod ingest {
     #![allow(non_camel_case_types)]
     #![allow(unused_imports)]
     #![allow(clippy::derivable_impls)]
     #![allow(clippy::match_single_binding)]
     pub use crate::log::ingest::v1::*;
+}
+
+pub mod prune {
+    #![allow(non_camel_case_types)]
+    #![allow(unused_imports)]
+    #![allow(clippy::derivable_impls)]
+    #![allow(clippy::match_single_binding)]
+    pub use crate::store::prune::v1::*;
 }
 
 pub mod query {

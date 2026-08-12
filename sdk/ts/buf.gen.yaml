@@ -10,7 +10,7 @@ inputs:
     paths:
       - ../../proto/google/rpc/error_details.proto
       - ../../proto/common/v1/kv.proto
-      - ../../proto/store/v1/compact.proto
+      - ../../proto/store/v1/prune.proto
       - ../../proto/log/v1/ingest.proto
       - ../../proto/store/v1/query.proto
       - ../../proto/log/v1/stream.proto

@@ -813,7 +813,7 @@ async fn prefixed_prune_composes_selector_and_prunes_cleanly() {
     // selector, producing merged physical prefix [0x05, 0x06, 0x07]
     // (prefix_prune_policies), and the server reconstructs a codec from the merged
     // selector and strips.
-    client.compact().prune(&[policy]).await.expect("prune");
+    client.prune().prune(&[policy]).await.expect("prune");
 
     // Verified through the prefixed client (which strips the store prefix
     // transparently). Because KeepLatest grouping depends on the server stripping

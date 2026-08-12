@@ -1,4 +1,4 @@
-//! Ingest, query, compact, and stream services; storage is provided by capability traits.
+//! Ingest, query, prune, and stream services; storage is provided by capability traits.
 
 #![allow(refining_impl_trait)]
 
@@ -12,9 +12,6 @@ use connectrpc::{
     Chain, ConnectError, ConnectRpcService, Limits, PreEncoded, RequestContext as Context,
 };
 use exoware_proto::common::Entry;
-use exoware_proto::compact::{
-    PruneResponse, Service as CompactApi, ServiceServer as CompactServiceServer,
-};
 use exoware_proto::google::rpc::{ErrorInfo, RetryInfo};
 use exoware_proto::ingest::{
     PutResponse as ProtoPutResponse, Service as IngestApi, ServiceServer as IngestServiceServer,
@@ -23,6 +20,9 @@ use exoware_proto::log::stream::v1::{
     GetRequestView, GetResponse as StreamGetResponse, Service as StreamApi,
     ServiceServer as StreamServiceServer, SetRetentionRequestView, SetRetentionResponse,
     SubscribeRequestView, SubscribeResponse,
+};
+use exoware_proto::prune::{
+    PruneResponse, Service as PruneApi, ServiceServer as PruneServiceServer,
 };
 use exoware_proto::query::{
     Detail, GetManyEntry, GetManyFrame, GetResponse, RangeFrame, ReduceResponse,
@@ -139,7 +139,7 @@ pub struct AppState<E> {
     pub engine: Arc<E>,
     /// Limits enforced by the ingest service before writing.
     pub ingest_limits: IngestLimits,
-    /// Gates ingest (writes) only. Query and compact remain available during drains so that
+    /// Gates ingest (writes) only. Query and prune remain available during drains so that
     /// in-flight reads can complete while the worker sheds write traffic.
     pub ready: Arc<AtomicBool>,
     /// Shared fan-out hub for `log.stream.v1.Subscribe`.
@@ -270,13 +270,13 @@ impl<E> From<AppState<E>> for QueryState<E> {
     }
 }
 
-/// State for a compact-only service.
-pub struct CompactState<P> {
+/// State for a prune-only service.
+pub struct PruneState<P> {
     /// Backend used for prune requests.
     pub prune: Arc<P>,
 }
 
-impl<P> Clone for CompactState<P> {
+impl<P> Clone for PruneState<P> {
     fn clone(&self) -> Self {
         Self {
             prune: self.prune.clone(),
@@ -284,7 +284,7 @@ impl<P> Clone for CompactState<P> {
     }
 }
 
-impl<P> CompactState<P>
+impl<P> PruneState<P>
 where
     P: Prune,
 {
@@ -293,7 +293,7 @@ where
     }
 }
 
-impl<E> From<AppState<E>> for CompactState<E> {
+impl<E> From<AppState<E>> for PruneState<E> {
     fn from(state: AppState<E>) -> Self {
         Self {
             prune: state.engine,
@@ -714,11 +714,11 @@ where
     }
 }
 
-pub struct CompactConnect<P> {
-    state: CompactState<P>,
+pub struct PruneConnect<P> {
+    state: PruneState<P>,
 }
 
-impl<P> Clone for CompactConnect<P> {
+impl<P> Clone for PruneConnect<P> {
     fn clone(&self) -> Self {
         Self {
             state: self.state.clone(),
@@ -726,27 +726,25 @@ impl<P> Clone for CompactConnect<P> {
     }
 }
 
-impl<P> CompactConnect<P>
+impl<P> PruneConnect<P>
 where
     P: Prune,
 {
-    pub fn new(state: impl Into<CompactState<P>>) -> Self {
+    pub fn new(state: impl Into<PruneState<P>>) -> Self {
         Self {
             state: state.into(),
         }
     }
 }
 
-impl<P> CompactApi for CompactConnect<P>
+impl<P> PruneApi for PruneConnect<P>
 where
     P: Prune,
 {
     async fn prune(
         &self,
         _ctx: Context,
-        request: buffa::view::OwnedView<
-            exoware_proto::store::compact::v1::PruneRequestView<'static>,
-        >,
+        request: buffa::view::OwnedView<exoware_proto::store::prune::v1::PruneRequestView<'static>>,
     ) -> connectrpc::ServiceResult<PruneResponse> {
         validate::validate_prune_request(&request)?;
         let document = exoware_proto::parse_and_validate_policy_document(&request)
@@ -1155,7 +1153,7 @@ fn connect_limits() -> Limits {
 
 pub(crate) type IngestService<I> = ConnectRpcService<IngestServiceServer<IngestConnect<I>>>;
 pub(crate) type QueryService<Q> = ConnectRpcService<QueryServiceServer<QueryConnect<Q>>>;
-pub(crate) type CompactService<P> = ConnectRpcService<CompactServiceServer<CompactConnect<P>>>;
+pub(crate) type PruneService<P> = ConnectRpcService<PruneServiceServer<PruneConnect<P>>>;
 pub(crate) type StreamService<B> = ConnectRpcService<StreamServiceServer<StreamConnect<B>>>;
 pub(crate) type QueryStack<Q, B> = ConnectRpcService<
     Chain<QueryServiceServer<QueryConnect<Q>>, StreamServiceServer<StreamConnect<B>>>,
@@ -1165,7 +1163,7 @@ pub(crate) type ConnectStack<I, Q, P, B> = ConnectRpcService<
         IngestServiceServer<IngestConnect<I>>,
         Chain<
             QueryServiceServer<QueryConnect<Q>>,
-            Chain<CompactServiceServer<CompactConnect<P>>, StreamServiceServer<StreamConnect<B>>>,
+            Chain<PruneServiceServer<PruneConnect<P>>, StreamServiceServer<StreamConnect<B>>>,
         >,
     >,
 >;
@@ -1184,11 +1182,11 @@ where
     QueryServiceServer::new(QueryConnect::new(state))
 }
 
-fn compact_server<P>(state: CompactState<P>) -> CompactServiceServer<CompactConnect<P>>
+fn prune_server<P>(state: PruneState<P>) -> PruneServiceServer<PruneConnect<P>>
 where
     P: Prune,
 {
-    CompactServiceServer::new(CompactConnect::new(state))
+    PruneServiceServer::new(PruneConnect::new(state))
 }
 
 fn stream_server<B>(state: StreamState<B>) -> StreamServiceServer<StreamConnect<B>>
@@ -1216,11 +1214,11 @@ where
         .with_compression(connect_compression_registry())
 }
 
-pub fn compact_service<P>(state: CompactState<P>) -> CompactService<P>
+pub fn prune_service<P>(state: PruneState<P>) -> PruneService<P>
 where
     P: Prune,
 {
-    ConnectRpcService::new(compact_server(state))
+    ConnectRpcService::new(prune_server(state))
         .with_limits(connect_limits())
         .with_compression(connect_compression_registry())
 }
@@ -1259,7 +1257,7 @@ where
         Chain(
             query_server(state.clone().into()),
             Chain(
-                compact_server(state.clone().into()),
+                prune_server(state.clone().into()),
                 stream_server(state.into()),
             ),
         ),
@@ -1281,7 +1279,7 @@ mod tests {
     use exoware_proto::log::stream::v1::{
         SetRetentionRequest, SubscribeRequest, SubscribeRequestView,
     };
-    use exoware_proto::store::compact::v1::{
+    use exoware_proto::store::prune::v1::{
         policy_retain, KeysScope, Policy as ProtoPolicy, PolicyRetain, PruneRequest,
         PruneRequestView, RetainKeepLatest,
     };
@@ -1815,12 +1813,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_connect_accepts_prune_only_engine() {
+    async fn prune_connect_accepts_prune_only_engine() {
         let prune = Arc::new(PruneOnlyEngine::default());
-        let connect = CompactConnect::new(CompactState::new(prune.clone()));
+        let connect = PruneConnect::new(PruneState::new(prune.clone()));
         let request = prune_request(vec![keys_drop_all_policy()]);
 
-        CompactApi::prune(&connect, Context::default(), request)
+        PruneApi::prune(&connect, Context::default(), request)
             .await
             .expect("prune");
 
@@ -1832,9 +1830,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_rejects_unparseable_policy_before_engine_prune() {
+    async fn prune_rejects_unparseable_policy_before_engine_prune() {
         let prune = Arc::new(PruneOnlyEngine::default());
-        let connect = CompactConnect::new(CompactState::new(prune.clone()));
+        let connect = PruneConnect::new(PruneState::new(prune.clone()));
         // A Keys scope without its required selector fails to parse into a
         // domain policy, so the handler rejects it before reaching the engine.
         let invalid_policy = ProtoPolicy {
@@ -1843,7 +1841,7 @@ mod tests {
         };
         let request = prune_request(vec![invalid_policy]);
 
-        let err = CompactApi::prune(&connect, Context::default(), request)
+        let err = PruneApi::prune(&connect, Context::default(), request)
             .await
             .expect_err("invalid prune");
 
@@ -1852,12 +1850,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_rejects_invalid_policy_before_engine_prune() {
+    async fn prune_rejects_invalid_policy_before_engine_prune() {
         let prune = Arc::new(PruneOnlyEngine::default());
-        let connect = CompactConnect::new(CompactState::new(prune.clone()));
+        let connect = PruneConnect::new(PruneState::new(prune.clone()));
         let request = prune_request(vec![keys_keep_latest_policy(0)]);
 
-        let err = CompactApi::prune(&connect, Context::default(), request)
+        let err = PruneApi::prune(&connect, Context::default(), request)
             .await
             .expect_err("invalid prune");
 
@@ -1985,7 +1983,7 @@ mod tests {
 
         let _ingest = ingest_service(state.clone().into());
         let _query = query_service(state.clone().into());
-        let _compact = compact_service(state.clone().into());
+        let _prune = prune_service(state.clone().into());
         let _stream = stream_service(state.clone().into());
         let _query_stack = query_stack(state.clone().into(), state.into());
     }

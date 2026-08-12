@@ -44,7 +44,7 @@ fn main() {
         "common/v1/kv.proto",
         "log/v1/ingest.proto",
         "log/v1/stream.proto",
-        "store/v1/compact.proto",
+        "store/v1/prune.proto",
         "store/v1/query.proto",
     ];
 
