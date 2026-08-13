@@ -2,6 +2,7 @@ import { create, type MessageInitShape } from '@bufbuild/protobuf';
 import { Code, ConnectError } from '@connectrpc/connect';
 import type { CallOptions } from '@connectrpc/connect';
 import type { Client } from './client.js';
+import { credentialRemedy, withoutHtmlBody, type Credential } from './credential.js';
 import { HttpError } from './error.js';
 import { PruneRequestSchema } from './gen/ts/store/v1/prune_pb.js';
 import type { Policy } from './gen/ts/store/v1/prune_pb.js';
@@ -222,10 +223,19 @@ function normalizeMinSequenceNumber(value?: bigint): bigint | undefined {
     return value !== undefined && value > 0n ? value : undefined;
 }
 
-function mapConnectToHttpError(err: unknown): never {
+/**
+ * Presents an RPC failure to the caller, dropping any page a proxy answered with and telling a
+ * rejected caller what to do about their credential.
+ */
+function mapConnectToHttpError(err: unknown, credential: Credential): never {
     if (err instanceof ConnectError) {
         const status = connectCodeToHttpStatus(err.code);
-        throw new HttpError(status, err.message || String(err.code), err.code, err);
+        let message = withoutHtmlBody(err.message);
+        if (err.code === Code.Unauthenticated) {
+            const remedy = credentialRemedy(credential);
+            message = message === undefined ? remedy : `${message}. ${remedy}`;
+        }
+        throw new HttpError(status, message || String(err.code), err.code, err);
     }
     throw err;
 }
@@ -462,7 +472,7 @@ async function performGet(
         }
         return { value: res.value };
     } catch (e) {
-        mapConnectToHttpError(e);
+        mapConnectToHttpError(e, client.credential);
     }
 }
 
@@ -502,7 +512,7 @@ async function performGetMany(
         }
         return results;
     } catch (e) {
-        mapConnectToHttpError(e);
+        mapConnectToHttpError(e, client.credential);
     }
 }
 
@@ -540,7 +550,7 @@ async function performQuery(
         }
         return { results };
     } catch (e) {
-        mapConnectToHttpError(e);
+        mapConnectToHttpError(e, client.credential);
     }
 }
 
@@ -568,7 +578,7 @@ async function performReduce(
         }
         return res;
     } catch (e) {
-        mapConnectToHttpError(e);
+        mapConnectToHttpError(e, client.credential);
     }
 }
 
@@ -589,7 +599,7 @@ async function performGetBatch(
         ) {
             return null;
         }
-        mapConnectToHttpError(e);
+        mapConnectToHttpError(e, client.credential);
     }
 }
 
@@ -623,7 +633,7 @@ async function* performSubscribe(
             yield batch;
         }
     } catch (e) {
-        mapConnectToHttpError(e);
+        mapConnectToHttpError(e, client.credential);
     }
 }
 
@@ -827,7 +837,7 @@ export class StoreClient {
             const res = await this.client.ingest.put(req);
             return res.sequenceNumber;
         } catch (e) {
-            mapConnectToHttpError(e);
+            mapConnectToHttpError(e, this.client.credential);
         }
     }
 
@@ -844,7 +854,7 @@ export class StoreClient {
             const res = await this.client.ingest.put(req);
             return res.sequenceNumber;
         } catch (e) {
-            mapConnectToHttpError(e);
+            mapConnectToHttpError(e, this.client.credential);
         }
     }
 
@@ -861,7 +871,7 @@ export class StoreClient {
             const res = await this.client.ingest.put(req);
             return res.sequenceNumber;
         } catch (e) {
-            mapConnectToHttpError(e);
+            mapConnectToHttpError(e, this.client.credential);
         }
     }
 
@@ -912,7 +922,7 @@ export class StoreClient {
         try {
             await this.client.prune.prune(req);
         } catch (e) {
-            mapConnectToHttpError(e);
+            mapConnectToHttpError(e, this.client.credential);
         }
     }
 

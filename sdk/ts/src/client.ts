@@ -1,6 +1,7 @@
 import { createClient, type Client as ConnectClient, type Interceptor, Code, ConnectError } from '@connectrpc/connect';
 import { createConnectTransport } from '@connectrpc/connect-web';
 import { CookieJar, fetchWithCookieJar } from './cookies.js';
+import { environmentApiKey, resolveCredential, type Credential } from './credential.js';
 import { StoreClient, type StoreKeyPrefix } from './store.js';
 import { Service as IngestService } from './gen/ts/log/v1/ingest_pb.js';
 import { Service as PruneService } from './gen/ts/store/v1/prune_pb.js';
@@ -67,23 +68,40 @@ function normalizeClientOptions(tokenOrOptions?: string | ClientOptions): Client
     return typeof tokenOrOptions === 'string' ? { token: tokenOrOptions } : tokenOrOptions ?? {};
 }
 
-export function createTransport(baseUrl: string, tokenOrOptions?: string | ClientOptions) {
-    const opts = normalizeClientOptions(tokenOrOptions);
+/**
+ * Builds the transport and reports whether it carries a credential, so a `Client` resolves the
+ * token once rather than reading the environment again.
+ */
+function transportWithCredential(
+    baseUrl: string,
+    opts: ClientOptions,
+): { transport: ReturnType<typeof createConnectTransport>; credential: Credential } {
     const retryConfig = opts.retry ?? DEFAULT_RETRY_CONFIG;
+    const { token, credential } = resolveCredential(opts.token, environmentApiKey());
     const interceptors: Interceptor[] = [];
-    if (opts.token !== undefined) {
-        const token = opts.token;
+    if (token !== undefined) {
         interceptors.push((next) => async (req) => {
             req.header.set('Authorization', `Bearer ${token}`);
             return next(req);
         });
     }
     interceptors.push(makeRetryInterceptor(retryConfig));
-    return createConnectTransport({
-        baseUrl: baseUrl.replace(/\/$/, ''),
-        interceptors,
-        fetch: fetchWithCookieJar(new CookieJar()),
-    });
+    return {
+        transport: createConnectTransport({
+            baseUrl: baseUrl.replace(/\/$/, ''),
+            interceptors,
+            fetch: fetchWithCookieJar(new CookieJar()),
+        }),
+        credential,
+    };
+}
+
+/**
+ * Takes the API key from `EXOWARE_API_KEY` when running under Node and no `token` is given, and
+ * throws `InvalidApiKeyError` if either cannot be an HTTP header.
+ */
+export function createTransport(baseUrl: string, tokenOrOptions?: string | ClientOptions) {
+    return transportWithCredential(baseUrl, normalizeClientOptions(tokenOrOptions)).transport;
 }
 
 export class Client {
@@ -94,12 +112,15 @@ export class Client {
     public readonly retention: ConnectClient<typeof RetentionService>;
     public readonly stream: ConnectClient<typeof StreamService>;
     public readonly retryConfig: RetryConfig;
+    /** Whether this client sends a credential, which is what makes a 401 explicable. */
+    public readonly credential: Credential;
 
     constructor(baseUrl: string, tokenOrOptions?: string | ClientOptions) {
         const opts = normalizeClientOptions(tokenOrOptions);
         this.baseUrl = baseUrl.replace(/\/$/, '');
         this.retryConfig = opts.retry ?? DEFAULT_RETRY_CONFIG;
-        const transport = createTransport(this.baseUrl, opts);
+        const { transport, credential } = transportWithCredential(this.baseUrl, opts);
+        this.credential = credential;
         this.ingest = createClient(IngestService, transport);
         this.prune = createClient(PruneService, transport);
         this.query = createClient(QueryService, transport);

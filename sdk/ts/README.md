@@ -8,6 +8,17 @@ Interact with the Exoware API in TypeScript.
 
 `@exowarexyz/sdk` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
 
+## Credentials
+
+An auth token can be provided when constructing the client:
+
+```ts
+const client = new Client('https://query.<deployment>.<domain>', '<token>');
+```
+
+Or under Node the token may come from the `EXOWARE_API_KEY` environment variable instead, read when no token is passed to the client constructor.
+Browsers have no environment, so a browser client must be given its token explicitly.
+
 ## Store Key Prefixes
 
 Use `StoreKeyPrefix` when multiple logical QMDB, SQL, or raw KV instances share one Store database. The prefix is applied by the SDK, so higher-level clients keep using their normal logical keys:
