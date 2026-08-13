@@ -14,6 +14,8 @@ use exoware_sdk::log::stream::v1::GetResponse as StreamGetResponse;
 use exoware_sdk::prune_policy::PrunePolicyDocument;
 use exoware_sdk::retention::RetentionPolicy;
 
+use crate::stream::{apply_filter, CompiledMatchers};
+
 /// Backend-defined query metadata.
 ///
 /// Keep this lightweight: streaming query RPCs may emit detail on every frame.
@@ -168,6 +170,37 @@ impl LogBatch {
     }
 }
 
+/// Filtered and fully resolved entries from a retained sequence batch.
+///
+/// An empty entry list represents a retained batch with no matches.
+#[derive(Clone, Debug)]
+pub struct FilteredBatch {
+    sequence_number: u64,
+    entries: Vec<Entry>,
+}
+
+impl FilteredBatch {
+    /// Build a filtered batch from owned caller-visible entries.
+    ///
+    /// Values must contain resolved payload bytes.
+    pub fn from_entries(sequence_number: u64, entries: Vec<Entry>) -> Self {
+        Self {
+            sequence_number,
+            entries,
+        }
+    }
+
+    /// Sequence number under which this batch was loaded.
+    pub fn sequence_number(&self) -> u64 {
+        self.sequence_number
+    }
+
+    /// Consume the batch into its entries.
+    pub fn into_entries(self) -> Vec<Entry> {
+        self.entries
+    }
+}
+
 /// Retained per-sequence batch-log access for stream replay and lookups.
 pub trait Log: Sequence {
     /// Return the pre-encoded `GetResponse` for the `put_batch` call that was
@@ -185,6 +218,29 @@ pub trait Log: Sequence {
         &self,
         sequence_number: u64,
     ) -> impl Future<Output = Result<Option<LogBatch>, String>> + Send;
+
+    /// Return fully resolved matching entries from a retained sequence batch.
+    ///
+    /// Return `Some` with no entries when the batch is retained but no entries
+    /// match. Return `None` only when the batch is unavailable.
+    ///
+    /// Optimized implementations only need to resolve entries whose keys match.
+    /// Failures confined to key-excluded values do not fail the filtered read.
+    fn get_batch_filtered(
+        &self,
+        sequence_number: u64,
+        matchers: &CompiledMatchers,
+    ) -> impl Future<Output = Result<Option<FilteredBatch>, String>> + Send {
+        async move {
+            let Some(batch) = self.get_batch(sequence_number).await? else {
+                return Ok(None);
+            };
+            let sequence_number = batch.sequence_number();
+            let response = batch.decode_response()?;
+            let entries = apply_filter(matchers, response.entries);
+            Ok(Some(FilteredBatch::from_entries(sequence_number, entries)))
+        }
+    }
 
     /// Lowest retained batch sequence number, or `None` when the log is
     /// empty. Surfaced in `BATCH_EVICTED` error details so clients know where
@@ -206,3 +262,92 @@ pub trait Retention: Send + Sync + 'static {
 pub trait StoreEngine: Ingest + Query + Prune + Log + Retention {}
 
 impl<T: Ingest + Query + Prune + Log + Retention> StoreEngine for T {}
+
+#[cfg(test)]
+mod tests {
+    use std::future::ready;
+
+    use super::*;
+    use exoware_sdk::kv_codec::Utf8;
+    use exoware_sdk::selector::Selector;
+    use exoware_sdk::stream_filter::StreamFilter;
+
+    #[derive(Clone)]
+    struct TestLog {
+        batch: Option<LogBatch>,
+    }
+
+    impl Sequence for TestLog {
+        fn current_sequence(&self) -> u64 {
+            u64::from(self.batch.is_some())
+        }
+    }
+
+    impl Log for TestLog {
+        fn get_batch(
+            &self,
+            sequence_number: u64,
+        ) -> impl Future<Output = Result<Option<LogBatch>, String>> + Send {
+            ready(Ok((sequence_number == 1)
+                .then(|| self.batch.clone())
+                .flatten()))
+        }
+
+        fn oldest_retained_batch(
+            &self,
+        ) -> impl Future<Output = Result<Option<u64>, String>> + Send {
+            ready(Ok(self.batch.as_ref().map(|_| 1)))
+        }
+    }
+
+    fn matchers() -> CompiledMatchers {
+        crate::stream::compile_matchers(&StreamFilter {
+            selectors: vec![Selector {
+                prefix: Bytes::from_static(&[1]),
+                payload_regex: Utf8::from("^keep$"),
+            }],
+            value_filters: vec![],
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn default_filtered_batch_preserves_retained_and_missing_states() {
+        let matching = (
+            Bytes::from_static(&[1, b'k', b'e', b'e', b'p']),
+            Bytes::from_static(b"one"),
+        );
+        let excluded = (
+            Bytes::from_static(&[2, b'k', b'e', b'e', b'p']),
+            Bytes::from_static(b"two"),
+        );
+        let log = TestLog {
+            batch: Some(LogBatch::from_entries(1, vec![matching, excluded])),
+        };
+        let filtered = futures::executor::block_on(log.get_batch_filtered(1, &matchers()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(filtered.sequence_number(), 1);
+        let entries = filtered.into_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].value.as_ref(), b"one");
+
+        let retained_without_matches = TestLog {
+            batch: Some(LogBatch::from_entries(
+                1,
+                vec![(Bytes::from_static(&[2]), Bytes::from_static(b"value"))],
+            )),
+        };
+        let filtered = futures::executor::block_on(
+            retained_without_matches.get_batch_filtered(1, &matchers()),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(filtered.into_entries().is_empty());
+
+        let missing = TestLog { batch: None };
+        let filtered =
+            futures::executor::block_on(missing.get_batch_filtered(1, &matchers())).unwrap();
+        assert!(filtered.is_none());
+    }
+}

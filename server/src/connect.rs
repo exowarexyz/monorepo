@@ -49,7 +49,8 @@ use crate::reduce::RangeReducer;
 use crate::stream::{StreamHub, StreamNotifier};
 use crate::validate::{self, IngestLimits};
 use crate::{
-    Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan, Retention, StoreEngine,
+    FilteredBatch, Ingest, IngestError, Log, Prune, Query, QueryExtra, RangeScan, Retention,
+    StoreEngine,
 };
 
 // TODO (#57): Make limits configurable.
@@ -857,25 +858,13 @@ where
     }
 }
 
-fn filtered_subscribe_response(
-    batch: &LogBatch,
-    matchers: &crate::stream::CompiledMatchers,
-) -> Result<Option<SubscribeResponse>, ConnectError> {
-    let response = batch.decode_response().map_err(ConnectError::internal)?;
-    let entries = crate::stream::apply_filter(matchers, &response.entries);
-    Ok((!entries.is_empty()).then_some(SubscribeResponse {
-        sequence_number: batch.sequence_number(),
-        entries,
-        ..Default::default()
-    }))
-}
-
-type OrderedBatchStream = Pin<Box<dyn Stream<Item = Result<Option<LogBatch>, String>> + Send>>;
+type OrderedBatchStream = Pin<Box<dyn Stream<Item = Result<Option<FilteredBatch>, String>> + Send>>;
 
 fn ordered_batch_stream<B, S>(
     log: Arc<B>,
     sequences: S,
-    mut first_batch: Option<LogBatch>,
+    mut first_batch: Option<FilteredBatch>,
+    matchers: Arc<crate::stream::CompiledMatchers>,
 ) -> OrderedBatchStream
 where
     B: Log,
@@ -889,10 +878,14 @@ where
                 // closure invocation observes the eagerly fetched batch and it
                 // pairs with the first sequence.
                 let first_batch = first_batch.take();
+                let matchers = matchers.clone();
                 async move {
                     match first_batch {
                         Some(batch) => Ok(Some(batch)),
-                        None => log.get_batch(sequence_number).await,
+                        None => {
+                            log.get_batch_filtered(sequence_number, matchers.as_ref())
+                                .await
+                        }
                     }
                 }
             })
@@ -941,7 +934,6 @@ enum ReplayProgress {
 
 struct SubscriptionState<B> {
     state: StreamState<B>,
-    matchers: crate::stream::CompiledMatchers,
     // Both streams are dropped at termination so buffered batches free at the
     // failure boundary instead of when the client tears the stream down.
     replay: Option<ReplayState>,
@@ -953,15 +945,9 @@ impl<B> SubscriptionState<B>
 where
     B: Log,
 {
-    fn new(
-        state: StreamState<B>,
-        matchers: crate::stream::CompiledMatchers,
-        replay: Option<ReplayState>,
-        live: OrderedBatchStream,
-    ) -> Self {
+    fn new(state: StreamState<B>, replay: Option<ReplayState>, live: OrderedBatchStream) -> Self {
         Self {
             state,
-            matchers,
             replay,
             live: Some(live),
             terminated: false,
@@ -1021,7 +1007,7 @@ where
 
     async fn resolve_batch(
         &mut self,
-        batch: Result<Option<LogBatch>, String>,
+        batch: Result<Option<FilteredBatch>, String>,
     ) -> Result<Option<SubscribeResponse>, ConnectError> {
         let batch = batch.map_err(ConnectError::internal)?;
         let Some(batch) = batch else {
@@ -1033,7 +1019,16 @@ where
                 .map_err(ConnectError::internal)?;
             return Err(StreamConnect::<B>::batch_evicted_connect_error(oldest));
         };
-        filtered_subscribe_response(&batch, &self.matchers)
+        let sequence_number = batch.sequence_number();
+        let entries = batch.into_entries();
+        if entries.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(SubscribeResponse {
+            sequence_number,
+            entries,
+            ..Default::default()
+        }))
     }
 }
 
@@ -1085,7 +1080,7 @@ where
         // Snapshot the published frontier to bound replay and subscribe for
         // live wakeups. Bounded lookahead overlaps log reads while retaining
         // client-driven backpressure.
-        let matchers = crate::stream::compile_matchers(&filter)?;
+        let matchers = Arc::new(crate::stream::compile_matchers(&filter)?);
         let subscription = self.state.notifier.subscribe();
         let replay_bound = subscription.current_sequence;
         let live_notify = subscription.notify;
@@ -1099,7 +1094,7 @@ where
                 let first_batch = self
                     .state
                     .log
-                    .get_batch(s)
+                    .get_batch_filtered(s, matchers.as_ref())
                     .await
                     .map_err(ConnectError::internal)?;
                 let Some(first_batch) = first_batch else {
@@ -1116,6 +1111,7 @@ where
                         self.state.log.clone(),
                         stream_util::iter(s..=replay_bound),
                         Some(first_batch),
+                        matchers.clone(),
                     ),
                 })
             }
@@ -1129,10 +1125,11 @@ where
                 replay_bound.checked_add(1),
             ),
             None,
+            matchers.clone(),
         );
 
         Ok(connectrpc::Response::stream(
-            SubscriptionState::new(self.state.clone(), matchers, replay, live).into_stream(),
+            SubscriptionState::new(self.state.clone(), replay, live).into_stream(),
         ))
     }
 
@@ -1385,7 +1382,9 @@ mod tests {
     use buffa::Message;
     use exoware_proto::common::kv::v1::Selector as ProtoSelector;
     use exoware_proto::log::retention::v1::SetRetentionRequest;
-    use exoware_proto::log::stream::v1::{SubscribeRequest, SubscribeRequestView};
+    use exoware_proto::log::stream::v1::{
+        GetRequest as StreamGetRequest, SubscribeRequest, SubscribeRequestView,
+    };
     use exoware_proto::store::prune::v1::{
         policy_retain, KeysScope, Policy as ProtoPolicy, PolicyRetain, PruneRequest,
         PruneRequestView, RetainKeepLatest,
@@ -1398,8 +1397,8 @@ mod tests {
     use futures::StreamExt;
 
     use crate::{
-        Ingest, IngestError, Log, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Retention,
-        Sequence, StreamNotification, StreamNotifier,
+        Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan, RangeScanBatch,
+        Retention, Sequence, StreamNotification, StreamNotifier,
     };
 
     const TEST_PREFIX: u8 = 1;
@@ -1893,6 +1892,71 @@ mod tests {
             _policy: Option<RetentionPolicy>,
         ) -> Result<Option<u64>, String> {
             self.oldest_retained_batch().await
+        }
+    }
+
+    struct DispatchLog {
+        current_sequence: u64,
+        get_batch_calls: AtomicUsize,
+        get_batch_filtered_calls: AtomicUsize,
+    }
+
+    impl DispatchLog {
+        fn new(current_sequence: u64) -> Self {
+            Self {
+                current_sequence,
+                get_batch_calls: AtomicUsize::new(0),
+                get_batch_filtered_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl Sequence for DispatchLog {
+        fn current_sequence(&self) -> u64 {
+            self.current_sequence
+        }
+    }
+
+    impl Log for DispatchLog {
+        async fn get_batch(&self, sequence_number: u64) -> Result<Option<LogBatch>, String> {
+            self.get_batch_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(Some(LogBatch::from_entries(
+                sequence_number,
+                vec![matching_kv(b"unfiltered", b"whole")],
+            )))
+        }
+
+        async fn get_batch_filtered(
+            &self,
+            sequence_number: u64,
+            _matchers: &crate::stream::CompiledMatchers,
+        ) -> Result<Option<FilteredBatch>, String> {
+            self.get_batch_filtered_calls
+                .fetch_add(1, Ordering::Relaxed);
+            let entries = if sequence_number == 1 {
+                Vec::new()
+            } else {
+                let (key, value) = matching_kv(b"filtered", b"selected");
+                vec![Entry {
+                    key: key.to_vec(),
+                    value,
+                    ..Default::default()
+                }]
+            };
+            Ok(Some(FilteredBatch::from_entries(sequence_number, entries)))
+        }
+
+        async fn oldest_retained_batch(&self) -> Result<Option<u64>, String> {
+            Ok(Some(1))
+        }
+    }
+
+    impl Retention for DispatchLog {
+        async fn set_retention(
+            &self,
+            _policy: Option<RetentionPolicy>,
+        ) -> Result<Option<u64>, String> {
+            Ok(Some(1))
         }
     }
 
@@ -2714,6 +2778,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn subscribe_uses_filtered_override_and_get_remains_unfiltered() {
+        let engine = Arc::new(DispatchLog::new(3));
+        let notifier = Arc::new(ManualNotifier::new(2));
+        let connect = StreamConnect::new(StreamState::new(engine.clone(), notifier.clone()));
+        let mut stream = subscribe_stream(&connect, Some(1))
+            .await
+            .expect("subscribe");
+
+        let replay = stream.next().await.unwrap().unwrap();
+        assert_eq!(replay.sequence_number, 2);
+        assert_eq!(replay.entries[0].value.as_ref(), b"selected");
+        assert_eq!(engine.get_batch_filtered_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(engine.get_batch_calls.load(Ordering::Relaxed), 0);
+
+        notifier.advance(3);
+        let live = stream.next().await.unwrap().unwrap();
+        assert_eq!(live.sequence_number, 3);
+        assert_eq!(engine.get_batch_filtered_calls.load(Ordering::Relaxed), 3);
+
+        let request = buffa::view::OwnedView::<GetRequestView<'static>>::decode(
+            StreamGetRequest {
+                sequence_number: 3,
+                ..Default::default()
+            }
+            .encode_to_vec()
+            .into(),
+        )
+        .expect("decode get request");
+        StreamApi::get(&connect, Context::default(), request)
+            .await
+            .expect("get");
+
+        assert_eq!(engine.get_batch_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(engine.get_batch_filtered_calls.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
     async fn replay_lookahead_is_bounded_and_emits_in_order() {
         let last_sequence = SUBSCRIBE_GET_BATCH_LOOKAHEAD as u64 + 1;
         let engine = Arc::new(GatedLog::default());
@@ -2782,7 +2883,7 @@ mod tests {
         let last_sequence = SUBSCRIBE_GET_BATCH_LOOKAHEAD as u64 + 2;
         let engine = Arc::new(GatedLog::default());
         for sequence_number in 1..=last_sequence {
-            let kv = if sequence_number == 1 || sequence_number == last_sequence {
+            let kv = if sequence_number == last_sequence {
                 matching_kv(b"match", &[sequence_number as u8])
             } else {
                 nonmatching_kv(b"skip", &[sequence_number as u8])
@@ -2796,8 +2897,6 @@ mod tests {
             .await
             .expect("subscribe");
 
-        let first = stream.next().await.unwrap().unwrap();
-        assert_eq!(first.sequence_number, 1);
         let last = stream.next().await.unwrap().unwrap();
         assert_eq!(last.sequence_number, last_sequence);
 

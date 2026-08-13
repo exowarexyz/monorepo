@@ -31,16 +31,40 @@ pub const REASON_BATCH_NOT_FOUND: &str = "BATCH_NOT_FOUND";
 /// Metadata key on `BATCH_EVICTED` errors carrying the lowest retained seq.
 pub const METADATA_OLDEST_RETAINED: &str = "oldest_retained";
 
-#[derive(Clone)]
-pub(crate) struct CompiledKeyMatcher {
+#[derive(Clone, Debug)]
+struct CompiledKeyMatcher {
     prefix: Prefix,
     regex: Regex,
 }
 
-#[derive(Clone)]
-pub(crate) struct CompiledMatchers {
-    pub keys: Vec<CompiledKeyMatcher>,
-    pub values: Option<CompiledFilters>,
+/// Validated stream matchers compiled for repeated evaluation.
+#[derive(Clone, Debug)]
+pub struct CompiledMatchers {
+    keys: Vec<CompiledKeyMatcher>,
+    values: Option<CompiledFilters>,
+}
+
+impl CompiledMatchers {
+    /// Return whether any selector matches the key.
+    ///
+    /// Selector regular expressions evaluate bytes after the matching prefix.
+    pub fn matches_key(&self, key: &[u8]) -> bool {
+        self.keys.iter().any(|matcher| {
+            matcher
+                .prefix
+                .strip_slice(key)
+                .is_some_and(|payload| matcher.regex.is_match(payload))
+        })
+    }
+
+    /// Return whether the configured value filters match the value.
+    ///
+    /// Values pass when no value filter is configured.
+    pub fn matches_value(&self, value: &[u8]) -> bool {
+        self.values
+            .as_ref()
+            .is_none_or(|matcher| matcher.matches(value))
+    }
 }
 
 /// Validate and compile a `StreamFilter`. Shared between replay and live
@@ -64,26 +88,13 @@ pub(crate) fn compile_matchers(filter: &StreamFilter) -> Result<CompiledMatchers
     Ok(CompiledMatchers { keys, values })
 }
 
-/// Apply a compiled filter to a batch. First-match-wins per entry.
-pub(crate) fn apply_filter(matchers: &CompiledMatchers, kvs: &[Entry]) -> Vec<Entry> {
-    let mut out = Vec::with_capacity(kvs.len());
-    'outer: for kv in kvs {
-        let v = kv.value.as_ref();
-        let value_ok = matchers.values.as_ref().is_none_or(|m| m.matches(v));
-        if !value_ok {
-            continue;
-        }
-        for matcher in &matchers.keys {
-            let Some(payload) = matcher.prefix.strip_slice(&kv.key) else {
-                continue;
-            };
-            if matcher.regex.is_match(payload) {
-                out.push(kv.clone());
-                continue 'outer;
-            }
-        }
-    }
-    out
+/// Apply compiled matchers while consuming the source entries.
+pub(crate) fn apply_filter(matchers: &CompiledMatchers, kvs: Vec<Entry>) -> Vec<Entry> {
+    kvs.into_iter()
+        .filter(|kv| {
+            matchers.matches_value(kv.value.as_ref()) && matchers.matches_key(kv.key.as_ref())
+        })
+        .collect()
 }
 
 #[derive(Clone)]
@@ -205,7 +216,7 @@ mod tests {
     fn apply_filter_still_selects_matching_entries() {
         let matchers = compile_matchers(&filter(1, "(?s).*")).unwrap();
         let kvs = vec![kv(1, b"hit", b"v1"), kv(2, b"miss", b"v2")];
-        let entries = apply_filter(&matchers, &kvs);
+        let entries = apply_filter(&matchers, kvs);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].value.as_ref(), b"v1");
     }
@@ -228,7 +239,7 @@ mod tests {
         ))
         .unwrap();
         let kvs = vec![kv(1, b"a", b"keep"), kv(1, b"b", b"drop")];
-        let entries = apply_filter(&matchers, &kvs);
+        let entries = apply_filter(&matchers, kvs);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].value.as_ref(), b"keep");
     }
@@ -242,7 +253,7 @@ mod tests {
         ))
         .unwrap();
         let kvs = vec![kv(1, b"a", b"target"), kv(1, b"b", b"other")];
-        let entries = apply_filter(&matchers, &kvs);
+        let entries = apply_filter(&matchers, kvs);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].value.as_ref(), b"target");
     }
@@ -251,7 +262,32 @@ mod tests {
     fn value_filter_empty_accepts_all_matching_keys() {
         let matchers = compile_matchers(&filter(1, "(?s).*")).unwrap();
         let kvs = vec![kv(1, b"a", b"one"), kv(1, b"b", b"two")];
-        let entries = apply_filter(&matchers, &kvs);
+        let entries = apply_filter(&matchers, kvs);
         assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn matcher_methods_preserve_key_and_value_semantics() {
+        let matchers = compile_matchers(&filter_with_values(
+            1,
+            "^hit$",
+            vec![
+                Filter::Prefix(Bytes::from_static(b"keep")),
+                Filter::Exact(Bytes::from_static(b"exact")),
+                Filter::Regex("^regex$".into()),
+            ],
+        ))
+        .unwrap();
+
+        assert!(matchers.matches_key(key(1, b"hit").as_ref()));
+        assert!(!matchers.matches_key(key(1, b"miss").as_ref()));
+        assert!(!matchers.matches_key(key(2, b"hit").as_ref()));
+        assert!(matchers.matches_value(b"keep-suffix"));
+        assert!(matchers.matches_value(b"exact"));
+        assert!(matchers.matches_value(b"regex"));
+        assert!(!matchers.matches_value(b"drop"));
+
+        let without_value_filters = compile_matchers(&filter(1, "(?s).*")).unwrap();
+        assert!(without_value_filters.matches_value(b"anything"));
     }
 }

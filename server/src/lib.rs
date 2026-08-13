@@ -15,9 +15,9 @@ pub use connect::{
     stream_service, AppState, IngestState, PruneState, QueryState, RetentionState, StreamState,
 };
 pub use engine::{
-    Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan, RangeScanBatch,
-    Retention, Sequence, StoreEngine,
+    FilteredBatch, Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan,
+    RangeScanBatch, Retention, Sequence, StoreEngine,
 };
 pub use reduce::RangeError;
-pub use stream::{StreamHub, StreamNotification, StreamNotifier};
+pub use stream::{CompiledMatchers, StreamHub, StreamNotification, StreamNotifier};
 pub use validate::{IngestLimits, DEFAULT_MAX_VALUE_LEN};
