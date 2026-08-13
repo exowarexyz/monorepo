@@ -45,7 +45,6 @@ pub(crate) struct Cache<D: Digest, F: Family> {
     /// successful `flush()` watermark PUT). Recovery helpers must report this
     /// value, not the speculative `latest_published`.
     pub latest_committed_published: Option<PublishedCheckpoint<F>>,
-    pub latest_dispatched: Option<Location<F>>,
     /// Dispatched-but-not-yet-ACKd batches, in dispatch order. Per-batch
     /// `acked` lets us handle out-of-order ACKs correctly: we only advance
     /// `latest_contiguous_acked` when the FRONT of the queue has ACKd (and
@@ -215,8 +214,6 @@ impl<D: Digest, F: Family, S: Strategy> WriterCore<D, F, S> {
         cache.peaks = result.new_peaks;
         cache.ops_size = result.new_ops_size;
         cache.next_location = latest_location + 1;
-        cache.latest_dispatched = Some(latest_location);
-
         // Flush can advance the watermark while the build runs.
         if let Some(wm) = watermark_at {
             if cache.latest_published.is_none_or(|p| wm > p) {
@@ -423,7 +420,6 @@ impl<D: Digest, F: Family> Cache<D, F> {
             next_location: state.next_location,
             latest_published: latest_committed,
             latest_committed_published,
-            latest_dispatched: None,
             pending: VecDeque::new(),
             latest_contiguous_acked: latest_committed,
         }
@@ -449,7 +445,6 @@ mod tests {
                 next_location: Location::new(0),
                 latest_published: None,
                 latest_committed_published: None,
-                latest_dispatched: None,
                 pending: VecDeque::new(),
                 latest_contiguous_acked: None,
             },
@@ -494,7 +489,6 @@ mod tests {
                 location,
                 sequence_number: 0,
             }),
-            latest_dispatched: latest_published,
             pending: VecDeque::new(),
             latest_contiguous_acked: latest_published,
         }

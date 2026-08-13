@@ -574,3 +574,121 @@ where
         Box::pin(async move { UnorderedWriter::flush_with_receipt(self).await })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::Sha256;
+    use commonware_parallel::Rayon;
+    use commonware_storage::merkle::{mmr, Unused};
+    use commonware_storage::qmdb::current::proof::OpsRootWitness;
+    use exoware_sdk::StoreClient;
+    use std::num::NonZeroUsize;
+
+    type TestEncoding = VariableEncoding<Vec<u8>>;
+    type TestOp = unordered::Operation<mmr::Family, Vec<u8>, TestEncoding>;
+
+    #[tokio::test]
+    async fn sequential_and_parallel_current_builds_match() {
+        let ops = vec![
+            TestOp::Delete(b"alpha".to_vec()),
+            TestOp::Delete(b"beta".to_vec()),
+            TestOp::CommitFloor(None, Location::new(0)),
+        ];
+        let digest = Sha256::fill(0x7A);
+        let boundary = CurrentBoundaryState::<_, 32, mmr::Family> {
+            root: digest,
+            pruned_chunks: 0,
+            ops_root_witness: OpsRootWitness {
+                grafted_root: digest,
+                pending_chunk_digest: Unused,
+                partial_chunk: None,
+            },
+            chunks: Vec::new(),
+            grafted_nodes: Vec::new(),
+        };
+
+        let sequential = build_unordered_current_upload_with_strategy::<
+            mmr::Family,
+            Sha256,
+            Vec<u8>,
+            Vec<u8>,
+            32,
+            TestEncoding,
+            _,
+        >(
+            Vec::new(),
+            Position::new(0),
+            Location::new(2),
+            &ops,
+            &boundary,
+            Some(Location::new(2)),
+            &Sequential,
+        )
+        .expect("build sequentially");
+
+        let strategy = Rayon::new(NonZeroUsize::new(2).expect("non-zero thread count"))
+            .expect("construct Rayon strategy")
+            .manual();
+        let parallel = build_unordered_current_upload_with_strategy::<
+            mmr::Family,
+            Sha256,
+            Vec<u8>,
+            Vec<u8>,
+            32,
+            TestEncoding,
+            _,
+        >(
+            Vec::new(),
+            Position::new(0),
+            Location::new(2),
+            &ops,
+            &boundary,
+            Some(Location::new(2)),
+            &strategy,
+        )
+        .expect("build in parallel");
+
+        assert_eq!(sequential.rows, parallel.rows);
+        assert_eq!(sequential.new_peaks, parallel.new_peaks);
+        assert_eq!(sequential.new_ops_size, parallel.new_ops_size);
+        assert_eq!(sequential.new_root, parallel.new_root);
+
+        let sequential_writer =
+            UnorderedWriter::<mmr::Family, Sha256, Vec<u8>, Vec<u8>, TestEncoding>::fresh(
+                PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:9")),
+            );
+        let parallel_writer = UnorderedWriter::<
+            mmr::Family,
+            Sha256,
+            Vec<u8>,
+            Vec<u8>,
+            TestEncoding,
+            _,
+        >::fresh_with_strategy(
+            PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:9")),
+            strategy,
+        );
+
+        let sequential_prepared = sequential_writer
+            .prepare_current_upload(ops.clone(), boundary.clone())
+            .await
+            .expect("prepare sequentially");
+        let parallel_prepared = parallel_writer
+            .prepare_current_upload(ops, boundary)
+            .await
+            .expect("prepare in parallel");
+
+        assert_eq!(sequential_prepared.rows, parallel_prepared.rows);
+        assert_eq!(sequential_prepared.rows, sequential.rows);
+        assert_eq!(parallel_prepared.rows, parallel.rows);
+        assert_eq!(
+            sequential_prepared.writer_location_watermark,
+            parallel_prepared.writer_location_watermark
+        );
+        assert_eq!(
+            sequential_prepared.latest_location,
+            parallel_prepared.latest_location
+        );
+    }
+}
