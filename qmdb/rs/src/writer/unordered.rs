@@ -235,18 +235,18 @@ where
 
     pub async fn prepare_upload(
         &self,
-        ops: &[unordered::Operation<F, K, E>],
+        ops: Vec<unordered::Operation<F, K, E>>,
     ) -> Result<super::PreparedUpload<F>, QmdbError> {
         let prepared = self
             .core
-            .prepare(ops.len() as u64, |ctx, strategy| {
+            .prepare(ops.len() as u64, move |ctx, strategy| {
                 let built = build_unordered_upload_with_strategy::<F, H, K, V, E, S>(
                     ctx.peaks,
                     ctx.ops_size,
                     ctx.latest_location,
-                    ops,
+                    &ops,
                     ctx.watermark_at,
-                    strategy,
+                    &strategy,
                 )?;
                 Ok(crate::writer::core::BuildResult {
                     new_peaks: built.new_peaks,
@@ -265,20 +265,23 @@ where
 
     pub async fn prepare_current_upload<const N: usize>(
         &self,
-        ops: &[unordered::Operation<F, K, E>],
-        current_boundary: &CurrentBoundaryState<H::Digest, N, F>,
-    ) -> Result<super::PreparedUpload<F>, QmdbError> {
+        ops: Vec<unordered::Operation<F, K, E>>,
+        current_boundary: CurrentBoundaryState<H::Digest, N, F>,
+    ) -> Result<super::PreparedUpload<F>, QmdbError>
+    where
+        F::PendingChunk<H::Digest>: 'static,
+    {
         let prepared = self
             .core
-            .prepare(ops.len() as u64, |ctx, strategy| {
+            .prepare(ops.len() as u64, move |ctx, strategy| {
                 let built = build_unordered_current_upload_with_strategy::<F, H, K, V, N, E, S>(
                     ctx.peaks,
                     ctx.ops_size,
                     ctx.latest_location,
-                    ops,
-                    current_boundary,
+                    &ops,
+                    &current_boundary,
                     ctx.watermark_at,
-                    strategy,
+                    &strategy,
                 )?;
                 Ok(crate::writer::core::BuildResult {
                     new_peaks: built.new_peaks,

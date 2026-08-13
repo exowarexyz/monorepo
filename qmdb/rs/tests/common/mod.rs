@@ -184,7 +184,7 @@ where
     S: commonware_parallel::Strategy,
     keyless::Operation<F, E>: Encode,
 {
-    let prepared = writer.prepare_upload(ops).await?;
+    let prepared = writer.prepare_upload(ops.to_vec()).await?;
     writer.commit_upload(prepared).await
 }
 
@@ -203,7 +203,7 @@ where
     S: commonware_parallel::Strategy,
     unordered::Operation<F, K, E>: Encode,
 {
-    let prepared = writer.prepare_upload(ops).await?;
+    let prepared = writer.prepare_upload(ops.to_vec()).await?;
     writer.commit_upload(prepared).await
 }
 
@@ -222,8 +222,11 @@ where
     E: ValueEncoding<Value = V> + Sync,
     S: commonware_parallel::Strategy,
     unordered::Operation<F, K, E>: Encode,
+    F::PendingChunk<H::Digest>: 'static,
 {
-    let prepared = writer.prepare_current_upload(ops, current_boundary).await?;
+    let prepared = writer
+        .prepare_current_upload(ops.to_vec(), current_boundary.clone())
+        .await?;
     writer.commit_upload(prepared).await
 }
 
@@ -242,8 +245,11 @@ where
     E: ValueEncoding<Value = V> + Sync,
     S: commonware_parallel::Strategy,
     ordered::Operation<F, K, E>: Encode + Decode,
+    F::PendingChunk<H::Digest>: 'static,
 {
-    let prepared = writer.prepare_upload(ops, current_boundary).await?;
+    let prepared = writer
+        .prepare_upload(ops.to_vec(), current_boundary.clone())
+        .await?;
     writer.commit_upload(prepared).await
 }
 
@@ -263,7 +269,7 @@ where
     S: commonware_parallel::Strategy,
     immutable::Operation<F, K, E>: Encode + Decode + Clone,
 {
-    let prepared = writer.prepare_upload(ops).await?;
+    let prepared = writer.prepare_upload(ops.to_vec()).await?;
     writer.commit_upload(prepared).await
 }
 

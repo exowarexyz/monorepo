@@ -157,7 +157,7 @@ async fn commit_qmdb_upload(
     writer: &QmdbWriter,
     ops: &[QmdbOp],
 ) -> Result<exoware_qmdb::UploadReceipt<QmdbFamily>, QmdbError> {
-    let prepared = writer.prepare_upload(ops).await?;
+    let prepared = writer.prepare_upload(ops.to_vec()).await?;
     writer.commit_upload(prepared).await
 }
 
@@ -570,8 +570,8 @@ async fn prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_receipts(
     let ops1 = qops("atomic", 0);
     let ops2 = qops("atomic", 1);
     let (prepared_qmdb_1, prepared_qmdb_2) = tokio::join!(
-        qmdb_writer.prepare_upload(&ops1),
-        qmdb_writer.prepare_upload(&ops2)
+        qmdb_writer.prepare_upload(ops1.clone()),
+        qmdb_writer.prepare_upload(ops2.clone())
     );
     let mut prepared_qmdb_1 = prepared_qmdb_1.expect("prepare qmdb 1");
     let mut prepared_qmdb_2 = prepared_qmdb_2.expect("prepare qmdb 2");

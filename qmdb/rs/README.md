@@ -460,8 +460,8 @@ not allowed:
 ## Writers
 
 Each backend exposes a `*Writer` helper for sole-writer ingest. Writers hold
-cached Merkle peaks + a pending-batch queue in memory; `prepare_upload` reserves
-writer state and encodes store rows with zero store reads in the hot loop.
+cached Merkle peaks + a pending-batch queue in memory. `prepare_upload` encodes
+store rows with zero store reads in the hot loop.
 Construction always starts from caller-supplied frontier state. Multiple
 `prepare_upload` calls may be issued concurrently against the same writer; the
 writer handles location assignment, in-flight pipelining, and contiguous
@@ -469,6 +469,9 @@ watermark publication internally. Callers own the enclosing `StoreWriteBatch`:
 stage prepared uploads and prepared watermark publications from one or more
 instances, commit once, then mark each prepared handle persisted with the
 returned Store sequence number.
+
+Operation batches are passed by value. This lets preparation yield while it
+encodes and hashes the batch.
 
 The generic Store traits cover the prepared-handle lifecycle:
 
@@ -497,7 +500,7 @@ let writer: Arc<KeylessWriter<mmr::Family, Sha256, Vec<u8>>> =
     Arc::new(KeylessWriter::new(client.clone(), WriterState::empty()));
 
 // Sequential single-instance usage still goes through an explicit Store batch.
-let prepared = writer.prepare_upload(&batch_ops).await?;
+let prepared = writer.prepare_upload(batch_ops).await?;
 let receipt = writer.commit_upload(prepared).await?;
 
 // Pipelined usage — prepare/commit concurrent Store batches up to a bounded depth.
@@ -509,7 +512,7 @@ for batch in batches {
     }
     let w = writer.clone();
     in_flight.push(Box::pin(async move {
-        let prepared = w.prepare_upload(&batch).await?;
+        let prepared = w.prepare_upload(batch).await?;
         w.commit_upload(prepared).await
     }));
 }

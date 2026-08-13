@@ -74,7 +74,10 @@ async fn commit_ordered_upload(
     ops: &[QmdbOperation<DemoFamily, Vec<u8>, Vec<u8>>],
     boundary: &CurrentBoundaryState<commonware_cryptography::sha256::Digest, N, DemoFamily>,
 ) {
-    let prepared = writer.prepare_upload(ops, boundary).await.expect("prepare");
+    let prepared = writer
+        .prepare_upload(ops.to_vec(), boundary.clone())
+        .await
+        .expect("prepare");
     writer.commit_upload(prepared).await.expect("commit upload");
 }
 

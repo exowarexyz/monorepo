@@ -143,6 +143,8 @@ where
 /// Multiple [`prepare_upload`](Self::prepare_upload) calls can be in flight
 /// simultaneously — the writer's mutex is released before any Store write
 /// awaits, so independent Store batches can run concurrently on the transport.
+/// Preparation yields during CPU work. ACK and watermark processing remain
+/// responsive while another batch is being prepared.
 ///
 /// Each dispatched batch's PUT carries a watermark row at the **latest safe
 /// location**:
@@ -225,18 +227,18 @@ where
 
     pub async fn prepare_upload(
         &self,
-        ops: &[keyless::Operation<F, E>],
+        ops: Vec<keyless::Operation<F, E>>,
     ) -> Result<super::PreparedUpload<F>, QmdbError> {
         let prepared = self
             .core
-            .prepare(ops.len() as u64, |ctx, strategy| {
+            .prepare(ops.len() as u64, move |ctx, strategy| {
                 let built = build_keyless_upload_with_strategy::<F, H, V, E, S>(
                     ctx.peaks,
                     ctx.ops_size,
                     ctx.latest_location,
-                    ops,
+                    &ops,
                     ctx.watermark_at,
-                    strategy,
+                    &strategy,
                 )?;
                 Ok(crate::writer::core::BuildResult {
                     new_peaks: built.new_peaks,

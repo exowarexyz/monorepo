@@ -192,18 +192,18 @@ where
 
     pub async fn prepare_upload(
         &self,
-        ops: &[immutable::Operation<F, K, E>],
+        ops: Vec<immutable::Operation<F, K, E>>,
     ) -> Result<super::PreparedUpload<F>, QmdbError> {
         let prepared = self
             .core
-            .prepare(ops.len() as u64, |ctx, strategy| {
+            .prepare(ops.len() as u64, move |ctx, strategy| {
                 let built = build_immutable_upload_with_strategy::<F, H, K, V, E, S>(
                     ctx.peaks,
                     ctx.ops_size,
                     ctx.latest_location,
-                    ops,
+                    &ops,
                     ctx.watermark_at,
-                    strategy,
+                    &strategy,
                 )?;
                 Ok(crate::writer::core::BuildResult {
                     new_peaks: built.new_peaks,

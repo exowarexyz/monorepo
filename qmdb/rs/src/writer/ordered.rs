@@ -251,20 +251,23 @@ where
     /// correct contiguous watermark semantics internally.
     pub async fn prepare_upload(
         &self,
-        ops: &[ordered::Operation<F, K, E>],
-        current_boundary: &CurrentBoundaryState<H::Digest, N, F>,
-    ) -> Result<super::PreparedUpload<F>, QmdbError> {
+        ops: Vec<ordered::Operation<F, K, E>>,
+        current_boundary: CurrentBoundaryState<H::Digest, N, F>,
+    ) -> Result<super::PreparedUpload<F>, QmdbError>
+    where
+        F::PendingChunk<H::Digest>: 'static,
+    {
         let prepared = self
             .core
-            .prepare(ops.len() as u64, |ctx, strategy| {
+            .prepare(ops.len() as u64, move |ctx, strategy| {
                 let built = build_ordered_upload_with_strategy::<F, H, K, V, N, E, S>(
                     ctx.peaks,
                     ctx.ops_size,
                     ctx.latest_location,
-                    ops,
-                    current_boundary,
+                    &ops,
+                    &current_boundary,
                     ctx.watermark_at,
-                    strategy,
+                    &strategy,
                 )?;
                 Ok(crate::writer::core::BuildResult {
                     new_peaks: built.new_peaks,

@@ -9,10 +9,10 @@
 //! plus batch-local flush preparation for atomic multi-upload Store batches.
 //!
 //! Multiple `prepare_upload` calls may be issued concurrently against the same
-//! writer instance. The writer serializes frontier assignment under its
-//! internal mutex, then releases that lock before any network I/O, so
-//! independent Store batches can be in flight at the same time while watermark
-//! publication still follows the contiguous-committed prefix.
+//! writer instance. Preparation yields during Merkle build work, so ACK and
+//! watermark processing remains responsive. No lock is held during network
+//! I/O, so independent Store batches can be in flight at the same time while
+//! watermark publication still follows the contiguous-committed prefix.
 //!
 //! Callers own durability. On any PUT error the writer poisons; the caller must
 //! construct a fresh writer from a caller-owned committed frontier. Since PUT
