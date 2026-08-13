@@ -240,6 +240,15 @@ where
     let client = common::local_store_client().await;
     let local = build_local_db::<F>().await;
 
+    let state = fresh_keyless::<F>(client.clone())
+        .recover_writer_state()
+        .await
+        .expect("recover empty writer state");
+    let empty_state = WriterState::empty();
+    assert_eq!(state.peaks, empty_state.peaks);
+    assert_eq!(state.ops_size, empty_state.ops_size);
+    assert_eq!(state.next_location, empty_state.next_location);
+
     let writer = fresh_writer::<F>(client.clone());
     common::commit_keyless_upload(&writer, &local.operations)
         .await
@@ -397,10 +406,18 @@ where
         .is_err()
     );
 
-    let state = WriterState::<Digest, F>::from_checkpoint::<commonware_cryptography::Sha256>(
-        &suffix_checkpoint,
-    )
-    .expect("writer state from suffix checkpoint");
+    let expected_state =
+        WriterState::<Digest, F>::from_checkpoint::<commonware_cryptography::Sha256>(
+            &suffix_checkpoint,
+        )
+        .expect("writer state from suffix checkpoint");
+    let state = c
+        .recover_writer_state()
+        .await
+        .expect("recover writer state");
+    assert_eq!(state.peaks, expected_state.peaks);
+    assert_eq!(state.ops_size, expected_state.ops_size);
+    assert_eq!(state.next_location, expected_state.next_location);
     let resumed_writer =
         TestKeylessWriter::<F>::new(PrefixedStoreClient::empty(client.clone()), state);
     let receipt = common::commit_keyless_upload(&resumed_writer, &local.continuation_operations)

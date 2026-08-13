@@ -24,7 +24,7 @@ use crate::core::retry_transient_post_ingest_query;
 use crate::error::QmdbError;
 use crate::proof::{OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange};
 use crate::storage::KvMerkleStorage;
-use crate::VersionedValue;
+use crate::{VersionedValue, WriterState};
 
 #[derive(Clone)]
 pub struct ImmutableClient<
@@ -109,6 +109,19 @@ where
             let session = self.client.create_session();
             async move { read_latest_auth_watermark::<F>(&session).await }
         })
+        .await
+    }
+
+    /// Recover writer state at the latest published watermark.
+    ///
+    /// Returns empty state when no watermark has been published.
+    pub async fn recover_writer_state(&self) -> Result<WriterState<H::Digest, F>, QmdbError> {
+        crate::recover_writer_state::<F, H, _, _>(
+            self.writer_location_watermark().await?,
+            |watermark, start_location, max_locations| {
+                self.operation_range_checkpoint(watermark, start_location, max_locations)
+            },
+        )
         .await
     }
 

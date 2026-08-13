@@ -538,15 +538,15 @@ pub(crate) fn extend_merkle_from_peaks_with_inactive_peaks<
 
 pub(crate) fn extend_merkle_from_pinned_nodes<F: Family, H: Hasher, Op: AsRef<[u8]>>(
     pinned_nodes: Vec<H::Digest>,
-    previous_leaves: Location<F>,
+    pruning_boundary: Location<F>,
     encoded_operations: impl IntoIterator<Item = Op>,
     inactive_peaks: usize,
 ) -> Result<MerkleExtension<F, H::Digest>, QmdbError> {
-    let previous_size = Position::try_from(previous_leaves)
+    let previous_size = Position::try_from(pruning_boundary)
         .map_err(|e| QmdbError::CorruptData(format!("invalid incremental ops size {e}")))?;
 
     let hasher = commonware_storage::qmdb::hasher::<H>();
-    let mem = Mem::<F, H::Digest>::from_components(Vec::new(), previous_leaves, pinned_nodes)
+    let mem = Mem::<F, H::Digest>::from_components(Vec::new(), pruning_boundary, pinned_nodes)
         .map_err(|e| QmdbError::CommonwareMerkle(e.to_string()))?;
     let mut batch = mem.new_batch();
     for encoded in encoded_operations {
