@@ -79,7 +79,7 @@ Generated load and benchmark keys open with a byte derived from the logical inde
 
 ## Benchmark Manifests
 
-`validation bench --manifest <path>` accepts the normalized `config` and `seed` fields from a benchmark JSON report, so a run can be replayed without reconstructing CLI flags. The config includes request compression because it materially affects measured throughput. For a fixed manifest, each worker repeats its logical operation stream and its appended-key allocation independent of task scheduling. A manifest whose key, value, or workload-generator version differs from the current binary is rejected rather than silently replayed with different data. A minimal manifest has this shape:
+`validation bench --manifest <path>` accepts the normalized `config` and `seed` fields from a benchmark JSON report, so a run can be replayed without reconstructing CLI flags. The config includes request compression because it materially affects measured throughput. For a fixed manifest and the same acknowledged write outcomes, each worker repeats its logical operation stream and its appended-key allocation independent of task scheduling. A manifest whose key, value, or workload-generator version differs from the current binary is rejected rather than silently replayed with different data. A minimal manifest has this shape:
 
 ```json
 {
@@ -104,7 +104,7 @@ Generated load and benchmark keys open with a byte derived from the logical inde
     "batch_size": 100,
     "keyspace_layout_version": 2,
     "value_generator_version": 1,
-    "workload_generator_version": 6,
+    "workload_generator_version": 7,
     "read_retry_attempts": 3,
     "request_compression": "zstd"
   },

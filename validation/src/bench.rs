@@ -401,13 +401,14 @@ async fn run_workload(config: Config) -> anyhow::Result<BenchReport> {
                         }
                     }
                     Operation::Write => {
+                        let batch_number = write_number;
                         let mut records = Vec::with_capacity(batch_size);
                         for batch_offset in 0..batch_size {
                             let write_idx = worker_batch_write_index(
                                 initial_keys,
                                 concurrency,
                                 worker,
-                                write_number,
+                                batch_number,
                                 batch_offset,
                                 batch_size,
                             )?;
@@ -422,6 +423,7 @@ async fn run_workload(config: Config) -> anyhow::Result<BenchReport> {
                         let request_start = Instant::now();
                         let result = client.ingest().put(&refs).await;
                         latencies.record_write(request_start.elapsed());
+                        plan.record_write_result(batch_number, result.is_ok())?;
                         match result {
                             Ok(_) => {
                                 writes_ok.fetch_add(1, Ordering::Relaxed);
@@ -570,6 +572,7 @@ mod tests {
         available_keys: HashSet<Vec<u8>>,
         written_keys: HashSet<Vec<u8>>,
         written_read_hits: usize,
+        reject_writes: bool,
     }
 
     #[derive(Clone)]
@@ -656,6 +659,9 @@ mod tests {
             request: OwnedPutRequestView,
         ) -> connectrpc::ServiceResult<PutResponse> {
             let mut state = self.state.lock().expect("store state lock");
+            if state.reject_writes {
+                return Err(ConnectError::invalid_argument("put rejected"));
+            }
             for entry in request.kvs.iter() {
                 let key = entry.key.to_vec();
                 state.available_keys.insert(key.clone());
@@ -986,12 +992,15 @@ mod tests {
             .expect("latest workload should validate");
         let mut replay = WorkerPlan::new(seed, 0, workload, 1, batch_size);
         let mut total_ops = 0u64;
+        let mut write_batch = 0u64;
         loop {
             total_ops += 1;
-            if matches!(
-                replay.next_operation(initial_keys),
-                Operation::Read { index } if index >= initial_keys
-            ) {
+            let operation = replay.next_operation(initial_keys);
+            if matches!(operation, Operation::Write) {
+                replay.record_write_result(write_batch, true).unwrap();
+                write_batch += 1;
+            }
+            if matches!(operation, Operation::Read { index } if index >= initial_keys) {
                 break;
             }
             assert!(total_ops < 256, "replay should reach an appended-key read");
@@ -1033,6 +1042,49 @@ mod tests {
         assert!(
             state.lock().expect("store state lock").written_read_hits > 0,
             "latest replay should read a key from an earlier put"
+        );
+    }
+
+    #[tokio::test]
+    async fn latest_reads_do_not_target_failed_puts() {
+        let initial_keys = 1u64;
+        let (url, state) = spawn_store_harness().await;
+        let keyspace = Keyspace::from_u64_namespace(42, DEFAULT_KEY_LEN)
+            .expect("test keyspace should validate");
+        {
+            let mut state = state.lock().expect("store state lock");
+            state
+                .available_keys
+                .insert(keyspace.inserted_key(0).to_vec());
+            state.reject_writes = true;
+        }
+
+        let mut args = sample_args();
+        args.client.url = url;
+        args.keys = initial_keys;
+        args.ops = 256;
+        args.batch_size = 3;
+        args.concurrency = 1;
+        args.key_dist = KeyDistribution::Latest;
+        args.latest_window = 10;
+        args.latest_prob = 1.0;
+        args.read_ratio = Some(0.5);
+        args.write_ratio = Some(0.5);
+        args.scan_ratio = Some(0.0);
+        args.rng_seed = 42;
+        args.progress_interval_secs = 0;
+
+        let config = Config::try_from(args).expect("latest config should validate");
+        let report = run_workload(config)
+            .await
+            .expect("benchmark should record failed puts");
+
+        assert!(report.errors > 0, "failed puts should be reported");
+        assert!(report.reads > 0, "benchmark should issue reads");
+        assert_eq!(report.writes, 0, "rejected puts must not be counted");
+        assert_eq!(
+            report.read_misses, 0,
+            "latest reads must not target rejected write batches"
         );
     }
 

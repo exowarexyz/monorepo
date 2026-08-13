@@ -13,9 +13,9 @@ pub const DEFAULT_BENCH_RNG_SEED: u64 = 0x5eed_c0de;
 /// Version of the deterministic operation-stream generator used in manifests.
 ///
 /// Bump this when changing its seeded random stream or operation semantics.
-/// Version 6 samples latest keys from the fixture and prior writes in the
-/// current worker's lane.
-pub const WORKLOAD_GENERATOR_VERSION: u16 = 6;
+/// Version 7 samples latest keys from the fixture and acknowledged writes in
+/// the current worker's lane.
+pub const WORKLOAD_GENERATOR_VERSION: u16 = 7;
 
 /// Named workload mixes for benchmark operation selection.
 #[derive(Copy, Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
@@ -75,7 +75,7 @@ pub enum Operation {
     /// Forward range scan of up to `limit` physical rows starting at an
     /// inserted logical index's key.
     Scan { start: u64, limit: usize },
-    /// Ingest write. The executor assigns the next concrete write index.
+    /// Ingest write. The executor assigns its concrete index and reports the outcome.
     Write,
 }
 
@@ -90,15 +90,20 @@ pub struct WorkerPlan {
     worker_count: u64,
     write_batch_size: u64,
 
-    // The executor awaits each operation before requesting the next one.
-    // This promotes only earlier write batches into latest-key candidates.
-    write_batches_completed: u64,
-    previous_operation_was_write: bool,
+    // Failed batches leave holes in the worker's allocated write sequence.
+    successful_write_batches: Vec<u64>,
+    next_write_batch: u64,
 }
 
 pub(crate) struct ZipfSampler {
     max_key_exclusive: u64,
     cdf: Vec<f64>,
+}
+
+struct SuccessfulWriteWindow {
+    batch_indices: Range<usize>,
+    first_write_number: u64,
+    last_write_number: u64,
 }
 
 impl Scenario {
@@ -195,7 +200,7 @@ impl WorkloadSpec {
 }
 
 impl WorkerPlan {
-    /// Creates a replayable worker stream from the run seed and worker id.
+    /// Creates a seeded worker stream from the run seed and worker id.
     pub fn new(
         seed: u64,
         worker_id: u64,
@@ -221,18 +226,46 @@ impl WorkerPlan {
             worker_id,
             worker_count: u64::try_from(worker_count).unwrap_or(u64::MAX).max(1),
             write_batch_size: u64::try_from(write_batch_size).unwrap_or(u64::MAX).max(1),
-            write_batches_completed: 0,
-            previous_operation_was_write: false,
+            successful_write_batches: Vec::new(),
+            next_write_batch: 0,
         }
     }
 
-    /// Emits the next logical operation for the current visible key range.
-    pub fn next_operation(&mut self, max_key_exclusive: u64) -> Operation {
-        if self.previous_operation_was_write {
-            self.write_batches_completed = self.write_batches_completed.saturating_add(1);
-            self.previous_operation_was_write = false;
+    /// Records whether the backend acknowledged a generated write batch.
+    ///
+    /// Results must be reported in batch order.
+    pub fn record_write_result(
+        &mut self,
+        batch_number: u64,
+        succeeded: bool,
+    ) -> anyhow::Result<()> {
+        ensure!(
+            batch_number == self.next_write_batch,
+            "write batches must be reported in order"
+        );
+        self.next_write_batch = self
+            .next_write_batch
+            .checked_add(1)
+            .context("write batch number overflow")?;
+
+        if !succeeded {
+            return Ok(());
         }
 
+        let first_write_number = batch_number
+            .checked_mul(self.write_batch_size)
+            .context("write batch number overflow")?;
+        first_write_number
+            .checked_add(self.write_batch_size - 1)
+            .context("write batch number overflow")?;
+        self.successful_write_batches.push(batch_number);
+        Ok(())
+    }
+
+    /// Emits the next logical operation for the current visible key range.
+    ///
+    /// Report each emitted write outcome before requesting another operation.
+    pub fn next_operation(&mut self, max_key_exclusive: u64) -> Operation {
         let p = self.rng.random::<f64>();
         if p < self.spec.mix.read_ratio {
             return Operation::Read {
@@ -250,19 +283,7 @@ impl WorkerPlan {
             };
         }
 
-        self.previous_operation_was_write = true;
         Operation::Write
-    }
-
-    fn prior_written_key_count(&self, initial_keys: u64) -> u64 {
-        let requested = self
-            .write_batches_completed
-            .saturating_mul(self.write_batch_size);
-        let Some(first) = initial_keys.checked_add(self.worker_id) else {
-            return 0;
-        };
-        let representable = ((u64::MAX - first) / self.worker_count).saturating_add(1);
-        requested.min(representable)
     }
 
     fn prior_written_key_index(&self, initial_keys: u64, write_number: u64) -> Option<u64> {
@@ -272,31 +293,137 @@ impl WorkerPlan {
             .and_then(|offset| initial_keys.checked_add(offset))
     }
 
-    fn first_prior_write_at_or_after(
-        &self,
-        initial_keys: u64,
-        lower_bound: u64,
-        written_keys: u64,
-    ) -> u64 {
-        let Some(first) = initial_keys.checked_add(self.worker_id) else {
-            return written_keys;
-        };
+    fn write_batch_first_write_number(&self, batch_number: u64) -> u64 {
+        batch_number
+            .checked_mul(self.write_batch_size)
+            .expect("acknowledged write batch should be representable")
+    }
+
+    fn write_batch_last_write_number(&self, batch_number: u64) -> u64 {
+        self.write_batch_first_write_number(batch_number)
+            .checked_add(self.write_batch_size - 1)
+            .expect("acknowledged write batch should be representable")
+    }
+
+    fn first_prior_write_at_or_after(&self, initial_keys: u64, lower_bound: u64) -> Option<u64> {
+        let first = initial_keys.checked_add(self.worker_id)?;
         if lower_bound <= first {
-            return 0;
+            return Some(0);
         }
 
         let delta = lower_bound - first;
-        delta.div_ceil(self.worker_count).min(written_keys)
+        Some(delta.div_ceil(self.worker_count))
+    }
+
+    fn last_representable_write_number(&self, initial_keys: u64) -> Option<u64> {
+        let first = initial_keys.checked_add(self.worker_id)?;
+        Some((u64::MAX - first) / self.worker_count)
+    }
+
+    fn successful_write_window(
+        &self,
+        initial_keys: u64,
+        lower_bound: u64,
+    ) -> Option<SuccessfulWriteWindow> {
+        let first_write_number = self.first_prior_write_at_or_after(initial_keys, lower_bound)?;
+        let last_write_number = self.last_representable_write_number(initial_keys)?;
+        let first_batch = self
+            .successful_write_batches
+            .partition_point(|&batch_number| {
+                self.write_batch_last_write_number(batch_number) < first_write_number
+            });
+        let end_batch = self
+            .successful_write_batches
+            .partition_point(|&batch_number| {
+                self.write_batch_first_write_number(batch_number) <= last_write_number
+            });
+        if first_batch >= end_batch {
+            return None;
+        }
+
+        let first_write_number = first_write_number
+            .max(self.write_batch_first_write_number(self.successful_write_batches[first_batch]));
+        let last_write_number = last_write_number
+            .min(self.write_batch_last_write_number(self.successful_write_batches[end_batch - 1]));
+        if first_write_number > last_write_number {
+            return None;
+        }
+
+        Some(SuccessfulWriteWindow {
+            batch_indices: first_batch..end_batch,
+            first_write_number,
+            last_write_number,
+        })
+    }
+
+    fn successful_write_count(&self, window: &SuccessfulWriteWindow) -> u64 {
+        let first_batch = window.batch_indices.start;
+        let last_batch = window.batch_indices.end - 1;
+        if first_batch == last_batch {
+            return window
+                .last_write_number
+                .saturating_sub(window.first_write_number)
+                .saturating_add(1);
+        }
+
+        let first_count = self
+            .write_batch_last_write_number(self.successful_write_batches[first_batch])
+            - window.first_write_number
+            + 1;
+        let middle_batches = window.batch_indices.end - first_batch - 2;
+        let middle_count = u64::try_from(middle_batches)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(self.write_batch_size);
+        let last_count = window.last_write_number
+            - self.write_batch_first_write_number(self.successful_write_batches[last_batch])
+            + 1;
+
+        first_count
+            .saturating_add(middle_count)
+            .saturating_add(last_count)
+    }
+
+    fn successful_write_number_at(&self, window: &SuccessfulWriteWindow, choice: u64) -> u64 {
+        let first_batch = window.batch_indices.start;
+        let last_batch = window.batch_indices.end - 1;
+        if first_batch == last_batch {
+            return window.first_write_number + choice;
+        }
+
+        let first_count = self
+            .write_batch_last_write_number(self.successful_write_batches[first_batch])
+            - window.first_write_number
+            + 1;
+        if choice < first_count {
+            return window.first_write_number + choice;
+        }
+
+        let choice = choice - first_count;
+        let middle_batches = window.batch_indices.end - first_batch - 2;
+        let middle_count = u64::try_from(middle_batches)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(self.write_batch_size);
+        if choice < middle_count {
+            let batch_index = first_batch
+                + 1
+                + usize::try_from(choice / self.write_batch_size)
+                    .expect("successful write batch index should fit");
+            return self.write_batch_first_write_number(self.successful_write_batches[batch_index])
+                + choice % self.write_batch_size;
+        }
+
+        self.write_batch_first_write_number(self.successful_write_batches[last_batch]) + choice
+            - middle_count
     }
 
     fn sample_known_key_index(&mut self, initial_keys: u64, lower_bound: u64) -> u64 {
-        let written_keys = self.prior_written_key_count(initial_keys);
         let fixture_start = lower_bound.min(initial_keys);
         let fixture_keys = initial_keys - fixture_start;
-        let first_write =
-            self.first_prior_write_at_or_after(initial_keys, lower_bound, written_keys);
-        let eligible_writes = written_keys - first_write;
-        let candidates = fixture_keys.saturating_add(eligible_writes);
+        let successful_writes = self.successful_write_window(initial_keys, lower_bound);
+        let successful_write_count = successful_writes
+            .as_ref()
+            .map_or(0, |window| self.successful_write_count(window));
+        let candidates = fixture_keys.saturating_add(successful_write_count);
         if candidates == 0 {
             return 0;
         }
@@ -306,17 +433,23 @@ impl WorkerPlan {
             return fixture_start + choice;
         }
 
-        let write_number = first_write + choice - fixture_keys;
+        let write_number = self.successful_write_number_at(
+            successful_writes
+                .as_ref()
+                .expect("write candidate requires an acknowledged write batch"),
+            choice - fixture_keys,
+        );
         self.prior_written_key_index(initial_keys, write_number)
-            .expect("prior written key index should fit")
+            .expect("acknowledged write index should fit")
     }
 
     fn sample_latest_key_index(&mut self, initial_keys: u64) -> u64 {
         let lower_bound = if self.rng.random::<f64>() < self.spec.latest_prob {
-            let written_keys = self.prior_written_key_count(initial_keys);
-            let latest_key = written_keys
-                .checked_sub(1)
-                .and_then(|write_number| self.prior_written_key_index(initial_keys, write_number))
+            let latest_key = self
+                .successful_write_window(initial_keys, 0)
+                .and_then(|window| {
+                    self.prior_written_key_index(initial_keys, window.last_write_number)
+                })
                 .unwrap_or_else(|| initial_keys.saturating_sub(1));
             latest_key.saturating_sub(self.spec.latest_window.saturating_sub(1))
         } else {
@@ -511,8 +644,16 @@ mod tests {
                 let worker_ops = worker_operation_count(total_ops, concurrency, worker).unwrap();
                 let mut plan =
                     WorkerPlan::new(seed, worker as u64, spec, concurrency, write_batch_size);
+                let mut write_batch = 0;
                 (0..worker_ops)
-                    .map(|_| plan.next_operation(max_key_exclusive))
+                    .map(|_| {
+                        let operation = plan.next_operation(max_key_exclusive);
+                        if matches!(operation, Operation::Write) {
+                            plan.record_write_result(write_batch, true).unwrap();
+                            write_batch += 1;
+                        }
+                        operation
+                    })
                     .collect()
             })
             .collect()
@@ -755,9 +896,13 @@ mod tests {
                 let operation = plans[worker].next_operation(100);
                 let write_index = match operation {
                     Operation::Write => {
-                        let write_number = writes[worker] * write_batch_size as u64;
+                        let write_batch = writes[worker];
+                        let write_number = write_batch * write_batch_size as u64;
                         let index =
                             worker_write_index(100, worker_count, worker, write_number).unwrap();
+                        plans[worker]
+                            .record_write_result(write_batch, true)
+                            .unwrap();
                         writes[worker] += 1;
                         index
                     }
@@ -854,9 +999,15 @@ mod tests {
         // static fixture boundary.
         let mut plan = WorkerPlan::with_zipf_sampler(7, 0, spec, None, workers, 1);
         let mut read_indexes = Vec::new();
+        let mut write_batch = 0;
         for _ in 0..2_000 {
-            if let Operation::Read { index } = plan.next_operation(initial) {
-                read_indexes.push(index);
+            match plan.next_operation(initial) {
+                Operation::Read { index } => read_indexes.push(index),
+                Operation::Write => {
+                    plan.record_write_result(write_batch, true).unwrap();
+                    write_batch += 1;
+                }
+                Operation::Scan { .. } => unreachable!("scan ratio is zero"),
             }
         }
         let late_reads = &read_indexes[read_indexes.len() - 20..];
@@ -928,6 +1079,7 @@ mod tests {
                                 .expect("write index should be valid");
                             written.insert(index);
                         }
+                        plan.record_write_result(write_batch, true).unwrap();
                         write_batch += 1;
                     }
                     Operation::Scan { .. } => unreachable!("scan ratio is zero"),
@@ -940,5 +1092,102 @@ mod tests {
             appended_read_count > 0,
             "stream should exercise reads from prior writes"
         );
+    }
+
+    #[test]
+    fn latest_reads_do_not_target_failed_write_attempts() {
+        let spec = WorkloadSpec::new(
+            WorkloadMix {
+                read_ratio: 0.5,
+                write_ratio: 0.5,
+                scan_ratio: 0.0,
+            },
+            25,
+            KeyDistribution::Latest,
+            10,
+            1.0,
+            0.99,
+        )
+        .expect("spec should validate");
+        let initial = 1u64;
+        let mut plan = WorkerPlan::new(42, 0, spec, 1, 3);
+        let mut failed_write_attempts = 0;
+
+        for _ in 0..256 {
+            match plan.next_operation(initial) {
+                Operation::Read { index } => assert!(
+                    index < initial,
+                    "latest read targeted key {index} after {failed_write_attempts} failed write attempts"
+                ),
+                Operation::Write => failed_write_attempts += 1,
+                Operation::Scan { .. } => unreachable!("scan ratio is zero"),
+            }
+        }
+
+        assert!(failed_write_attempts > 0, "stream should contain writes");
+    }
+
+    #[test]
+    fn latest_scans_do_not_target_failed_write_attempts() {
+        let spec = WorkloadSpec::new(
+            WorkloadMix {
+                read_ratio: 0.0,
+                write_ratio: 0.5,
+                scan_ratio: 0.5,
+            },
+            25,
+            KeyDistribution::Latest,
+            10,
+            1.0,
+            0.99,
+        )
+        .expect("spec should validate");
+        let initial = 1u64;
+        let mut plan = WorkerPlan::new(42, 0, spec, 1, 3);
+        let mut failed_write_attempts = 0;
+
+        for _ in 0..256 {
+            match plan.next_operation(initial) {
+                Operation::Read { .. } => unreachable!("read ratio is zero"),
+                Operation::Scan { start, .. } => assert!(
+                    start < initial,
+                    "latest scan targeted key {start} after {failed_write_attempts} failed write attempts"
+                ),
+                Operation::Write => failed_write_attempts += 1,
+            }
+        }
+
+        assert!(failed_write_attempts > 0, "stream should contain writes");
+    }
+
+    #[test]
+    fn acknowledged_write_batches_keep_failed_gaps() {
+        let spec = WorkloadSpec::new(
+            WorkloadMix {
+                read_ratio: 0.5,
+                write_ratio: 0.5,
+                scan_ratio: 0.0,
+            },
+            25,
+            KeyDistribution::Latest,
+            10,
+            1.0,
+            0.99,
+        )
+        .expect("spec should validate");
+        let mut plan = WorkerPlan::new(42, 0, spec, 1, 3);
+
+        plan.record_write_result(0, true).unwrap();
+        plan.record_write_result(1, false).unwrap();
+        plan.record_write_result(2, true).unwrap();
+
+        let window = plan
+            .successful_write_window(1, 0)
+            .expect("successful writes should be available");
+        let writes: Vec<u64> = (0..plan.successful_write_count(&window))
+            .map(|choice| plan.successful_write_number_at(&window, choice))
+            .collect();
+
+        assert_eq!(writes, [0, 1, 2, 6, 7, 8]);
     }
 }
