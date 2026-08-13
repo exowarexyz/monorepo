@@ -13,6 +13,7 @@ documentation = "https://docs.rs/exoware-validation"
 [dependencies]
 exoware-sdk = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+futures = { workspace = true }
 rand = { workspace = true }
 chrono = { version = "0.4", features = ["serde"] }
 tracing = { workspace = true }
@@ -27,7 +28,6 @@ serde_json = "1"
 
 [dev-dependencies]
 axum = { workspace = true }
-futures = { workspace = true }
 
 [[bin]]
 name = "validation"
