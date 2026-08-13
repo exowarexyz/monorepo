@@ -135,14 +135,14 @@ impl Keyspace {
         self.key(index, MISSING_KEY_DOMAIN)
     }
 
-    /// Returns the maximal key of this keyspace's physical key length.
-    ///
-    /// Forward scans seek from one inserted key and bound their work by row
-    /// limit, not by a second endpoint (leading entropy scatters inserted
-    /// keys across the byte keyspace, so no narrow endpoint exists). This is
-    /// the end bound such scans pass to the range API.
-    pub fn scan_upper_bound(&self) -> Key {
-        vec![u8::MAX; self.key_len].into()
+    // Generated keys use their leading byte for entropy. Keeping both bounds
+    // under the same leading byte narrows the ordered key range the backend
+    // must plan while the row limit still caps returned data.
+    pub(crate) fn scan_upper_bound(&self, start: &Key) -> Key {
+        debug_assert_eq!(start.len(), self.key_len);
+        let mut end = vec![u8::MAX; self.key_len];
+        end[0] = start[0];
+        end.into()
     }
 
     /// Returns the logical index that produced `key`, or `None` when `key` is
@@ -295,6 +295,18 @@ mod tests {
     fn keys_use_configured_length() {
         let keyspace = Keyspace::unnamespaced(24).unwrap();
         assert_eq!(keyspace.inserted_key(0).len(), 24);
+    }
+
+    #[test]
+    fn scan_upper_bound_keeps_the_starting_leading_byte() {
+        let keyspace = Keyspace::from_u64_namespace(7, DEFAULT_KEY_LEN).unwrap();
+        let start = keyspace.inserted_key(42);
+        let end = keyspace.scan_upper_bound(&start);
+
+        assert_eq!(end.len(), start.len());
+        assert_eq!(end[0], start[0]);
+        assert!(end[1..].iter().all(|byte| *byte == u8::MAX));
+        assert!(end > start);
     }
 
     #[test]

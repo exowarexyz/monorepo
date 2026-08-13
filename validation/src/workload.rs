@@ -12,10 +12,10 @@ pub const DEFAULT_BENCH_RNG_SEED: u64 = 0x5eed_c0de;
 
 /// Version of the deterministic operation-stream generator used in manifests.
 ///
-/// Bump this when changing its seeded random stream, including an RNG update,
-/// or when changing what an emitted operation means (v4: scans became
-/// seek-forward-with-limit instead of two-hashed-endpoint windows).
-pub const WORKLOAD_GENERATOR_VERSION: u16 = 4;
+/// Bump this when changing its seeded random stream or operation semantics.
+/// Version 5 makes the latest frontier batch-aware and bounds scans to one
+/// leading-byte prefix.
+pub const WORKLOAD_GENERATOR_VERSION: u16 = 5;
 
 /// Named workload mixes for benchmark operation selection.
 #[derive(Copy, Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
@@ -55,7 +55,7 @@ pub struct WorkloadMix {
 pub struct WorkloadSpec {
     /// Operation mix used by every worker.
     pub mix: WorkloadMix,
-    /// Requested row limit and maximum logical span for generated scans.
+    /// Maximum number of physical rows returned by a generated scan.
     pub scan_length: usize,
     /// Distribution used when selecting existing-key indexes.
     pub key_dist: KeyDistribution,
@@ -73,14 +73,9 @@ pub enum Operation {
     /// Point read of an inserted logical key index.
     Read { index: u64 },
     /// Forward range scan of up to `limit` physical rows starting at an
-    /// inserted logical index's key. Index-hashed key placement scatters
-    /// logical indexes across the byte keyspace, so a window between two
-    /// hashed endpoints would span an arbitrarily large fraction of the store
-    /// (the server plans every overlapping run for it); seeking from one key
-    /// and bounding by row count keeps each scan's work proportional to
-    /// `limit` regardless of placement.
+    /// inserted logical index's key.
     Scan { start: u64, limit: usize },
-    /// Ingest write; the executor assigns the next concrete write index.
+    /// Ingest write. The executor assigns the next concrete write index.
     Write,
 }
 
@@ -89,9 +84,11 @@ pub struct WorkerPlan {
     rng: rand::rngs::StdRng,
     spec: WorkloadSpec,
     zipf_sampler: Option<Arc<ZipfSampler>>,
-    /// Total bench workers, for the deterministic write-frontier estimate.
+    // Execution shape used by the deterministic write-frontier estimate.
     worker_count: u64,
-    /// Operations this plan has emitted (the stream position).
+    write_batch_size: u64,
+
+    // Position in this worker's operation stream.
     ops_emitted: u64,
 }
 
@@ -196,7 +193,7 @@ impl WorkloadSpec {
 impl WorkerPlan {
     /// Creates a replayable worker stream from the run seed and worker id.
     pub fn new(seed: u64, worker_id: u64, spec: WorkloadSpec) -> Self {
-        Self::with_zipf_sampler(seed, worker_id, spec, None, 1)
+        Self::with_zipf_sampler(seed, worker_id, spec, None, 1, 1)
     }
 
     pub(crate) fn with_zipf_sampler(
@@ -205,12 +202,14 @@ impl WorkerPlan {
         spec: WorkloadSpec,
         zipf_sampler: Option<Arc<ZipfSampler>>,
         worker_count: usize,
+        write_batch_size: usize,
     ) -> Self {
         Self {
             rng: worker_rng(seed, worker_id),
             spec,
             zipf_sampler,
-            worker_count: (worker_count as u64).max(1),
+            worker_count: u64::try_from(worker_count).unwrap_or(u64::MAX).max(1),
+            write_batch_size: u64::try_from(write_batch_size).unwrap_or(u64::MAX).max(1),
             ops_emitted: 0,
         }
     }
@@ -238,18 +237,16 @@ impl WorkerPlan {
         Operation::Write
     }
 
-    // "Latest" must chase the write frontier or it degenerates into a fixed
-    // dead zone: writes append past the fixture, so a window anchored to the
-    // static fixture top reads keys nothing ever writes. A shared live counter
-    // would make seeded streams depend on task scheduling, so the frontier is
-    // instead *estimated* from this worker's own stream position (a pure
-    // function of the seed): all workers progress through identical op mixes,
-    // so expected appended keys after k ops is k * write_ratio per worker.
-    // Reads near the estimate may race the writes they target; those misses
-    // are the intended "latest" measurement, mirroring visibility lag.
+    // A shared live counter would make seeded streams depend on task
+    // scheduling. Estimate the latest frontier from this worker's stream
+    // position and the configured execution shape instead. Reads near the
+    // estimate may race the writes they target. Those misses measure
+    // visibility lag at the latest frontier.
     fn estimated_write_frontier(&self, initial_keys: u64) -> u64 {
-        let appended =
-            (self.ops_emitted as f64 * self.spec.mix.write_ratio) as u64 * self.worker_count;
+        let writes_per_worker = (self.ops_emitted as f64 * self.spec.mix.write_ratio) as u64;
+        let appended = writes_per_worker
+            .saturating_mul(self.worker_count)
+            .saturating_mul(self.write_batch_size);
         initial_keys.saturating_add(appended)
     }
 
@@ -264,9 +261,8 @@ impl WorkerPlan {
                 self.rng.random_range(0..max_key_exclusive)
             }
             KeyDistribution::Latest => {
-                // Sampling range = fixture plus the estimated frontier (see
-                // estimated_write_frontier); the window hugs the frontier so
-                // "latest" reads chase recent writes rather than a fixed top.
+                // Keep the recency window against the estimated append
+                // frontier instead of the static fixture boundary.
                 let frontier = self.estimated_write_frontier(max_key_exclusive);
                 if frontier <= 1 {
                     return 0;
@@ -621,8 +617,8 @@ mod tests {
             ..sample_spec()
         };
         let sampler = Arc::new(ZipfSampler::new(100, spec.zipf_theta));
-        let first = WorkerPlan::with_zipf_sampler(1, 0, spec, Some(sampler.clone()), 2);
-        let second = WorkerPlan::with_zipf_sampler(1, 1, spec, Some(sampler), 2);
+        let first = WorkerPlan::with_zipf_sampler(1, 0, spec, Some(sampler.clone()), 2, 1);
+        let second = WorkerPlan::with_zipf_sampler(1, 1, spec, Some(sampler), 2, 1);
 
         assert!(Arc::ptr_eq(
             first.zipf_sampler.as_ref().expect("sampler is set"),
@@ -781,10 +777,9 @@ mod tests {
         let initial = 1_000u64;
         let workers = 4usize;
 
-        // Late in the stream, every latest read must target the moving
-        // frontier region, not the static fixture top: after k ops the
-        // estimate is initial + k*write_ratio*workers, far above `initial`.
-        let mut plan = WorkerPlan::with_zipf_sampler(7, 0, spec, None, workers);
+        // Late reads must target the moving frontier instead of the static
+        // fixture boundary.
+        let mut plan = WorkerPlan::with_zipf_sampler(7, 0, spec, None, workers, 1);
         let mut read_indexes = Vec::new();
         for _ in 0..2_000 {
             if let Operation::Read { index } = plan.next_operation(initial) {
@@ -797,12 +792,33 @@ mod tests {
             "late latest reads should chase appended keys, got {late_reads:?}"
         );
 
-        // The estimate is a pure function of the seeded stream position, so
-        // two identically-seeded plans emit identical operations.
-        let mut x = WorkerPlan::with_zipf_sampler(7, 0, spec, None, workers);
-        let mut y = WorkerPlan::with_zipf_sampler(7, 0, spec, None, workers);
+        // Identical execution shapes and seeds must remain replayable.
+        let mut x = WorkerPlan::with_zipf_sampler(7, 0, spec, None, workers, 1);
+        let mut y = WorkerPlan::with_zipf_sampler(7, 0, spec, None, workers, 1);
         let ops_x: Vec<Operation> = (0..256).map(|_| x.next_operation(initial)).collect();
         let ops_y: Vec<Operation> = (0..256).map(|_| y.next_operation(initial)).collect();
         assert_eq!(ops_x, ops_y);
+    }
+
+    #[test]
+    fn latest_frontier_accounts_for_write_batch_size() {
+        let spec = WorkloadSpec::new(
+            WorkloadMix {
+                read_ratio: 0.5,
+                write_ratio: 0.5,
+                scan_ratio: 0.0,
+            },
+            25,
+            KeyDistribution::Latest,
+            10,
+            1.0,
+            0.99,
+        )
+        .expect("spec should validate");
+        let initial = 1_000u64;
+        let mut plan = WorkerPlan::with_zipf_sampler(7, 0, spec, None, 4, 100);
+        plan.ops_emitted = 2_000;
+
+        assert_eq!(plan.estimated_write_frontier(initial), 401_000);
     }
 }

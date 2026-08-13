@@ -5,19 +5,17 @@ use connectrpc::ErrorCode;
 use exoware_sdk::{
     ClientError, ConnectRequestCompression, PrefixedStoreClient, RetryConfig, StoreClient,
 };
+use serde::{Deserialize, Serialize};
 
 const DEFAULT_INITIAL_BACKOFF_MS: u64 = 50;
 const DEFAULT_MAX_BACKOFF_MS: u64 = 1_000;
 
-/// Request-body compression for the SDK client.
-///
-/// Generated workload payloads are mostly zero bytes (big-endian encodings of
-/// small integers), so uncompressed batches are an order of magnitude larger
-/// on the wire and shift their cost onto the edge proxy and object-store
-/// emulator; measured in kv-mk1 CI, flipping the SDK default to uncompressed
-/// cut batched-load throughput ~4x. Zstd stays this tool's default even
-/// though the SDK now defaults to none.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, clap::ValueEnum)]
+// Deterministic validation values contain long zero-filled regions. Zstd keeps
+// generated write batches small without changing the SDK default for callers
+// with less compressible payloads.
+/// Request-body compression for outgoing RPCs.
+#[derive(Copy, Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
 #[value(rename_all = "kebab-case")]
 pub enum RequestCompression {
     #[default]
@@ -90,6 +88,11 @@ impl ClientConfig {
     /// Returns the maximum number of attempts for SDK reads.
     pub fn read_retry_attempts(&self) -> usize {
         self.read_retry_attempts
+    }
+
+    /// Returns the request-body compression used by the SDK client.
+    pub fn request_compression(&self) -> RequestCompression {
+        self.request_compression
     }
 }
 

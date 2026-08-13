@@ -324,6 +324,7 @@ runs:
             ("Seed", report["seed"]),
             ("Operations", report["operations"]),
             ("Write batch size", config["batch_size"]),
+            ("Request compression", config["request_compression"]),
             ("Errors", report["errors"]),
             ("Reads", report["reads"]),
             ("Read misses", report["read_misses"]),

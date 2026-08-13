@@ -8,6 +8,7 @@ use anyhow::{ensure, Context};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::client::RequestCompression;
 use crate::workload::{Scenario, WorkloadSpec};
 
 const BENCH_MANIFEST_SCHEMA_VERSION: u16 = 1;
@@ -59,6 +60,8 @@ pub struct BenchConfig {
     #[serde(default = "default_workload_generator_version")]
     pub workload_generator_version: u16,
     pub read_retry_attempts: usize,
+    #[serde(default)]
+    pub request_compression: RequestCompression,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -285,6 +288,11 @@ impl fmt::Display for BenchReport {
             "  read_retry_attempts: {}",
             self.config.read_retry_attempts
         )?;
+        writeln!(
+            f,
+            "  request_compression: {:?}",
+            self.config.request_compression
+        )?;
         writeln!(f, "  elapsed_ms: {}", self.elapsed_ms)?;
         writeln!(f, "  ops_per_sec: {:.2}", self.ops_per_sec())?;
         writeln!(f, "  operations: {}", self.operations)?;
@@ -480,6 +488,7 @@ mod tests {
                 value_generator_version: crate::value::VALUE_GENERATOR_VERSION,
                 workload_generator_version: crate::workload::WORKLOAD_GENERATOR_VERSION,
                 read_retry_attempts: 3,
+                request_compression: RequestCompression::Gzip,
             },
             seed: 42,
             elapsed_ms: 2_000,
@@ -713,5 +722,27 @@ mod tests {
         std::fs::remove_file(&path).ok();
 
         assert_eq!(parsed.config.workload_generator_version, 1);
+    }
+
+    #[test]
+    fn manifest_without_request_compression_defaults_to_zstd() {
+        let report = sample_report();
+        let manifest = BenchManifest::new(report.config, report.seed);
+        let mut value = serde_json::to_value(&manifest).expect("manifest should serialize");
+        value["config"]
+            .as_object_mut()
+            .expect("config should be a JSON object")
+            .remove("request_compression");
+
+        let path = std::env::temp_dir().join(format!(
+            "exoware-validation-manifest-no-request-compression-{}-{}.json",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::write(&path, value.to_string()).expect("manifest fixture should write");
+        let parsed = read_bench_manifest_json(&path).expect("legacy manifest should parse");
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(parsed.config.request_compression, RequestCompression::Zstd);
     }
 }

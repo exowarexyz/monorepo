@@ -52,6 +52,7 @@ pub struct Args {
             "scan_ratio",
             "rng_seed",
             "read_retry_attempts",
+            "request_compression",
             "key_len",
             "namespace",
             "value_size"
@@ -229,7 +230,8 @@ impl Config {
             client: ClientConfig::new(
                 manifest.config.endpoint,
                 manifest.config.read_retry_attempts,
-            )?,
+            )?
+            .with_request_compression(manifest.config.request_compression),
             namespace: manifest.config.namespace,
             keyspace: Keyspace::from_u64_namespace(
                 manifest.config.namespace,
@@ -286,6 +288,7 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
         value_generator_version: VALUE_GENERATOR_VERSION,
         workload_generator_version: WORKLOAD_GENERATOR_VERSION,
         read_retry_attempts: client_config.read_retry_attempts(),
+        request_compression: client_config.request_compression(),
     };
     let ops_done = Arc::new(AtomicU64::new(0));
     let reads_ok = Arc::new(AtomicU64::new(0));
@@ -299,9 +302,8 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
     // calls, so error-heavy runs still explain where time was spent.
     let latencies = Arc::new(LatencyHistogramsRecorder::default());
 
-    // Reads and scans sample only the keyspace prepared before the benchmark. Including
-    // concurrently appended keys would make a worker's seeded operation stream depend on task
-    // scheduling, while reads could race the write that first creates the key.
+    // Uniform and Zipfian reads sample the prepared fixture. Latest reads use
+    // a deterministic estimate of the appended frontier.
     let readable_key_count = initial_keys;
     let zipf_sampler = (workload.key_dist == KeyDistribution::Zipfian)
         .then(|| Arc::new(ZipfSampler::new(readable_key_count, workload.zipf_theta)));
@@ -352,6 +354,7 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
                 worker_workload,
                 zipf_sampler,
                 concurrency,
+                batch_size,
             );
             let mut write_number = 0u64;
 
@@ -376,11 +379,8 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
                         }
                     }
                     Operation::Scan { start, limit } => {
-                        // Seek from one inserted key and let the row limit bound the
-                        // scan (see the Operation::Scan doc for why no second hashed
-                        // endpoint is used).
                         let start_key = keyspace.inserted_key(start);
-                        let end_key = keyspace.scan_upper_bound();
+                        let end_key = keyspace.scan_upper_bound(&start_key);
                         let request_start = Instant::now();
                         let result = client.query().range(&start_key, &end_key, limit).await;
                         latencies.record_scan(request_start.elapsed());
@@ -518,11 +518,18 @@ mod tests {
     use crate::client::RequestCompression;
     use crate::keyspace::DEFAULT_KEY_LEN;
     use axum::Router;
+    use clap::Parser;
     use connectrpc::{ConnectRpcService, RequestContext};
     use exoware_sdk::ingest::{
         OwnedPutRequestView, PutResponse, Service as IngestService,
         ServiceServer as IngestServiceServer,
     };
+
+    #[derive(Parser)]
+    struct BenchCli {
+        #[command(flatten)]
+        args: Args,
+    }
 
     #[derive(Clone)]
     struct BenchIngestHarness {
@@ -596,6 +603,7 @@ mod tests {
                 value_generator_version: VALUE_GENERATOR_VERSION,
                 workload_generator_version: WORKLOAD_GENERATOR_VERSION,
                 read_retry_attempts: 5,
+                request_compression: RequestCompression::Gzip,
             },
             123,
         )
@@ -637,6 +645,22 @@ mod tests {
     fn config_normalizes_url() {
         let config = Config::try_from(sample_args()).expect("bench args should be valid");
         assert_eq!(config.client.endpoint(), "http://localhost:10000");
+    }
+
+    #[test]
+    fn manifest_rejects_request_compression_override() {
+        assert!(BenchCli::try_parse_from([
+            "validation",
+            "--manifest",
+            "report.json",
+            "--request-compression",
+            "none",
+        ])
+        .is_err());
+
+        let parsed = BenchCli::try_parse_from(["validation", "--manifest", "report.json"])
+            .expect("manifest without overrides should parse");
+        assert_eq!(parsed.args.manifest, Some(PathBuf::from("report.json")));
     }
 
     #[test]
@@ -771,6 +795,10 @@ mod tests {
         assert_eq!(config.total_ops, 10_000);
         assert_eq!(config.concurrency, 4);
         assert_eq!(config.batch_size, DEFAULT_INGEST_BATCH_SIZE);
+        assert_eq!(
+            config.client.request_compression(),
+            RequestCompression::Gzip
+        );
         assert_eq!(config.scenario, Scenario::ScanHeavy);
         assert_eq!(config.workload.key_dist, KeyDistribution::Latest);
         assert_eq!(config.rng_seed, 123);
