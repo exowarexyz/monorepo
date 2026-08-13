@@ -208,6 +208,10 @@ impl Config {
             manifest.config.workload_generator_version,
             WORKLOAD_GENERATOR_VERSION
         );
+        let request_compression = manifest
+            .config
+            .request_compression
+            .context("current manifest requires request_compression")?;
         ensure!(
             manifest.config.key_space > 0,
             "manifest key_space must be > 0"
@@ -231,7 +235,7 @@ impl Config {
                 manifest.config.endpoint,
                 manifest.config.read_retry_attempts,
             )?
-            .with_request_compression(manifest.config.request_compression),
+            .with_request_compression(request_compression),
             namespace: manifest.config.namespace,
             keyspace: Keyspace::from_u64_namespace(
                 manifest.config.namespace,
@@ -252,10 +256,11 @@ impl Config {
 }
 
 pub async fn run(args: Args) -> anyhow::Result<()> {
-    run_workload(Config::try_from(args)?).await
+    run_workload(Config::try_from(args)?).await?;
+    Ok(())
 }
 
-async fn run_workload(config: Config) -> anyhow::Result<()> {
+async fn run_workload(config: Config) -> anyhow::Result<BenchReport> {
     let Config {
         client: client_config,
         namespace,
@@ -288,7 +293,7 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
         value_generator_version: VALUE_GENERATOR_VERSION,
         workload_generator_version: WORKLOAD_GENERATOR_VERSION,
         read_retry_attempts: client_config.read_retry_attempts(),
-        request_compression: client_config.request_compression(),
+        request_compression: Some(client_config.request_compression()),
     };
     let ops_done = Arc::new(AtomicU64::new(0));
     let reads_ok = Arc::new(AtomicU64::new(0));
@@ -302,8 +307,8 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
     // calls, so error-heavy runs still explain where time was spent.
     let latencies = Arc::new(LatencyHistogramsRecorder::default());
 
-    // Uniform and Zipfian reads sample the prepared fixture. Latest reads use
-    // a deterministic estimate of the appended frontier.
+    // Uniform and Zipfian reads sample the prepared fixture. Latest reads also
+    // sample prior writes from the current worker's deterministic lane.
     let readable_key_count = initial_keys;
     let zipf_sampler = (workload.key_dist == KeyDistribution::Zipfian)
         .then(|| Arc::new(ZipfSampler::new(readable_key_count, workload.zipf_theta)));
@@ -476,19 +481,24 @@ async fn run_workload(config: Config) -> anyhow::Result<()> {
     };
     print_bench_report(&report);
     if report.read_misses > 0 {
-        // A raw benchmark may deliberately measure absent-key reads, but a preloaded-fixture
-        // benchmark should treat them as a signal that its results are not representative.
-        tracing::warn!(
-            read_misses = report.read_misses,
-            reads = report.reads,
-            "benchmark observed missing reads; verify the intended fixture before using these results"
-        );
+        match report.config.workload.key_dist {
+            KeyDistribution::Latest => tracing::warn!(
+                read_misses = report.read_misses,
+                reads = report.reads,
+                "benchmark observed missing latest reads. Inspect post-write visibility before using these results"
+            ),
+            KeyDistribution::Uniform | KeyDistribution::Zipfian => tracing::warn!(
+                read_misses = report.read_misses,
+                reads = report.reads,
+                "benchmark observed missing fixture reads. Verify the intended fixture before using these results"
+            ),
+        }
     }
     if let Some(path) = output {
         write_bench_report_json(&path, &report, started_at, finished_at)?;
     }
 
-    Ok(())
+    Ok(report)
 }
 
 fn worker_batch_write_index(
@@ -519,11 +529,18 @@ mod tests {
     use crate::keyspace::DEFAULT_KEY_LEN;
     use axum::Router;
     use clap::Parser;
-    use connectrpc::{ConnectRpcService, RequestContext};
+    use connectrpc::{Chain, ConnectError, ConnectRpcService, RequestContext};
+    use exoware_sdk::common::kv::v1::Entry;
     use exoware_sdk::ingest::{
         OwnedPutRequestView, PutResponse, Service as IngestService,
         ServiceServer as IngestServiceServer,
     };
+    use exoware_sdk::query::{
+        GetManyFrame, GetResponse, OwnedGetManyRequestView, OwnedGetRequestView,
+        OwnedRangeRequestView, OwnedReduceRequestView, RangeFrame, ReduceResponse,
+        Service as QueryService, ServiceServer as QueryServiceServer,
+    };
+    use futures::stream;
 
     #[derive(Parser)]
     struct BenchCli {
@@ -534,6 +551,30 @@ mod tests {
     #[derive(Clone)]
     struct BenchIngestHarness {
         batch_sizes: Arc<Mutex<Vec<usize>>>,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct CapturedRange {
+        start: Vec<u8>,
+        end: Vec<u8>,
+        limit: Option<u32>,
+    }
+
+    #[derive(Clone)]
+    struct BenchQueryHarness {
+        ranges: Arc<Mutex<Vec<CapturedRange>>>,
+    }
+
+    #[derive(Default)]
+    struct BenchStoreState {
+        available_keys: HashSet<Vec<u8>>,
+        written_keys: HashSet<Vec<u8>>,
+        written_read_hits: usize,
+    }
+
+    #[derive(Clone)]
+    struct BenchStoreHarness {
+        state: Arc<Mutex<BenchStoreState>>,
     }
 
     #[allow(refining_impl_trait)]
@@ -551,6 +592,125 @@ mod tests {
                 sequence_number: 1,
                 ..Default::default()
             })
+        }
+    }
+
+    #[allow(refining_impl_trait)]
+    impl QueryService for BenchQueryHarness {
+        async fn get(
+            &self,
+            _ctx: RequestContext,
+            _request: OwnedGetRequestView,
+        ) -> connectrpc::ServiceResult<GetResponse> {
+            Err(ConnectError::unimplemented("test harness"))
+        }
+
+        async fn get_many(
+            &self,
+            _ctx: RequestContext,
+            _request: OwnedGetManyRequestView,
+        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<GetManyFrame>> {
+            Err(ConnectError::unimplemented("test harness"))
+        }
+
+        async fn range(
+            &self,
+            _ctx: RequestContext,
+            request: OwnedRangeRequestView,
+        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<RangeFrame>> {
+            self.ranges
+                .lock()
+                .expect("range request lock")
+                .push(CapturedRange {
+                    start: request.start.to_vec(),
+                    end: request.end.to_vec(),
+                    limit: request.limit,
+                });
+            let entry = Entry {
+                key: request.start.to_vec(),
+                value: vec![1].into(),
+                ..Default::default()
+            };
+            Ok(connectrpc::Response::stream(stream::iter([Ok(
+                RangeFrame {
+                    results: vec![entry.clone(), entry],
+                    ..Default::default()
+                },
+            )])))
+        }
+
+        async fn reduce(
+            &self,
+            _ctx: RequestContext,
+            _request: OwnedReduceRequestView,
+        ) -> connectrpc::ServiceResult<ReduceResponse> {
+            Err(ConnectError::unimplemented("test harness"))
+        }
+    }
+
+    #[allow(refining_impl_trait)]
+    impl IngestService for BenchStoreHarness {
+        async fn put(
+            &self,
+            _ctx: RequestContext,
+            request: OwnedPutRequestView,
+        ) -> connectrpc::ServiceResult<PutResponse> {
+            let mut state = self.state.lock().expect("store state lock");
+            for entry in request.kvs.iter() {
+                let key = entry.key.to_vec();
+                state.available_keys.insert(key.clone());
+                state.written_keys.insert(key);
+            }
+            connectrpc::Response::ok(PutResponse {
+                sequence_number: 1,
+                ..Default::default()
+            })
+        }
+    }
+
+    #[allow(refining_impl_trait)]
+    impl QueryService for BenchStoreHarness {
+        async fn get(
+            &self,
+            _ctx: RequestContext,
+            request: OwnedGetRequestView,
+        ) -> connectrpc::ServiceResult<GetResponse> {
+            let mut state = self.state.lock().expect("store state lock");
+            let value = state
+                .available_keys
+                .contains(request.key)
+                .then(|| vec![1].into());
+            if state.written_keys.contains(request.key) {
+                state.written_read_hits += 1;
+            }
+            connectrpc::Response::ok(GetResponse {
+                value,
+                ..Default::default()
+            })
+        }
+
+        async fn get_many(
+            &self,
+            _ctx: RequestContext,
+            _request: OwnedGetManyRequestView,
+        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<GetManyFrame>> {
+            Err(ConnectError::unimplemented("test harness"))
+        }
+
+        async fn range(
+            &self,
+            _ctx: RequestContext,
+            _request: OwnedRangeRequestView,
+        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<RangeFrame>> {
+            Err(ConnectError::unimplemented("test harness"))
+        }
+
+        async fn reduce(
+            &self,
+            _ctx: RequestContext,
+            _request: OwnedReduceRequestView,
+        ) -> connectrpc::ServiceResult<ReduceResponse> {
+            Err(ConnectError::unimplemented("test harness"))
         }
     }
 
@@ -572,6 +732,49 @@ mod tests {
             axum::serve(listener, app).await.expect("serve test app");
         });
         (url, batch_sizes)
+    }
+
+    async fn spawn_query_harness() -> (String, Arc<Mutex<Vec<CapturedRange>>>) {
+        let ranges = Arc::new(Mutex::new(Vec::new()));
+        let harness = BenchQueryHarness {
+            ranges: ranges.clone(),
+        };
+        let connect = ConnectRpcService::new(QueryServiceServer::new(harness));
+        let app = Router::new().fallback_service(connect);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let url = format!(
+            "http://{}",
+            listener.local_addr().expect("listener address")
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+        (url, ranges)
+    }
+
+    async fn spawn_store_harness() -> (String, Arc<Mutex<BenchStoreState>>) {
+        let state = Arc::new(Mutex::new(BenchStoreState::default()));
+        let harness = BenchStoreHarness {
+            state: state.clone(),
+        };
+        let connect = ConnectRpcService::new(Chain(
+            IngestServiceServer::new(harness.clone()),
+            QueryServiceServer::new(harness),
+        ));
+        let app = Router::new().fallback_service(connect);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let url = format!(
+            "http://{}",
+            listener.local_addr().expect("listener address")
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+        (url, state)
     }
 
     fn sample_manifest() -> BenchManifest {
@@ -603,7 +806,7 @@ mod tests {
                 value_generator_version: VALUE_GENERATOR_VERSION,
                 workload_generator_version: WORKLOAD_GENERATOR_VERSION,
                 read_retry_attempts: 5,
-                request_compression: RequestCompression::Gzip,
+                request_compression: Some(RequestCompression::Gzip),
             },
             123,
         )
@@ -769,6 +972,133 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn latest_reads_hit_keys_appended_by_earlier_puts() {
+        let initial_keys = 1u64;
+        let batch_size = 3usize;
+        let seed = 42u64;
+        let mix = crate::workload::WorkloadMix {
+            read_ratio: 0.5,
+            write_ratio: 0.5,
+            scan_ratio: 0.0,
+        };
+        let workload = WorkloadSpec::new(mix, 1, KeyDistribution::Latest, 10, 1.0, 0.99)
+            .expect("latest workload should validate");
+        let mut replay = WorkerPlan::new(seed, 0, workload, 1, batch_size);
+        let mut total_ops = 0u64;
+        loop {
+            total_ops += 1;
+            if matches!(
+                replay.next_operation(initial_keys),
+                Operation::Read { index } if index >= initial_keys
+            ) {
+                break;
+            }
+            assert!(total_ops < 256, "replay should reach an appended-key read");
+        }
+
+        let (url, state) = spawn_store_harness().await;
+        let keyspace = Keyspace::from_u64_namespace(42, DEFAULT_KEY_LEN)
+            .expect("test keyspace should validate");
+        state
+            .lock()
+            .expect("store state lock")
+            .available_keys
+            .insert(keyspace.inserted_key(0).to_vec());
+
+        let mut args = sample_args();
+        args.client.url = url;
+        args.keys = initial_keys;
+        args.ops = total_ops;
+        args.batch_size = batch_size;
+        args.concurrency = 1;
+        args.key_dist = KeyDistribution::Latest;
+        args.latest_window = 10;
+        args.latest_prob = 1.0;
+        args.read_ratio = Some(mix.read_ratio);
+        args.write_ratio = Some(mix.write_ratio);
+        args.scan_ratio = Some(mix.scan_ratio);
+        args.rng_seed = seed;
+        args.progress_interval_secs = 0;
+
+        let config = Config::try_from(args).expect("latest config should validate");
+        let report = run_workload(config)
+            .await
+            .expect("latest benchmark should succeed");
+
+        assert_eq!(report.errors, 0);
+        assert_eq!(report.read_misses, 0);
+        assert!(report.reads > 0);
+        assert!(report.writes > 0);
+        assert!(
+            state.lock().expect("store state lock").written_read_hits > 0,
+            "latest replay should read a key from an earlier put"
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_operations_send_prefix_bound_and_limit_and_count_rows() {
+        let (url, ranges) = spawn_query_harness().await;
+        let initial_keys = 100;
+        let scan_length = 7;
+        let batch_size = 3;
+        let mix = crate::workload::WorkloadMix {
+            read_ratio: 0.0,
+            write_ratio: 0.0,
+            scan_ratio: 1.0,
+        };
+        let workload = WorkloadSpec::new(
+            mix,
+            scan_length,
+            KeyDistribution::Uniform,
+            5_000,
+            0.90,
+            0.99,
+        )
+        .expect("scan workload should validate");
+        let mut plan =
+            WorkerPlan::with_zipf_sampler(DEFAULT_BENCH_RNG_SEED, 0, workload, None, 1, batch_size);
+        let expected_start_index = match plan.next_operation(initial_keys) {
+            Operation::Scan { start, .. } => start,
+            operation => panic!("expected scan operation, got {operation:?}"),
+        };
+        let keyspace = Keyspace::from_u64_namespace(42, DEFAULT_KEY_LEN)
+            .expect("test keyspace should validate");
+        let expected_start = keyspace.inserted_key(expected_start_index);
+        let expected_end = keyspace.scan_upper_bound(&expected_start);
+
+        let mut args = sample_args();
+        args.client.url = url;
+        args.keys = initial_keys;
+        args.ops = 1;
+        args.batch_size = batch_size;
+        args.concurrency = 1;
+        args.scan_length = scan_length;
+        args.key_dist = KeyDistribution::Uniform;
+        args.read_ratio = Some(mix.read_ratio);
+        args.write_ratio = Some(mix.write_ratio);
+        args.scan_ratio = Some(mix.scan_ratio);
+        args.progress_interval_secs = 0;
+
+        let config = Config::try_from(args).expect("scan config should validate");
+        let report = run_workload(config)
+            .await
+            .expect("scan-only benchmark should succeed");
+
+        assert_eq!(
+            ranges.lock().expect("range request lock").as_slice(),
+            [CapturedRange {
+                start: expected_start.to_vec(),
+                end: expected_end.to_vec(),
+                limit: Some(scan_length as u32),
+            }]
+        );
+        assert_eq!(report.operations, 1);
+        assert_eq!(report.scans, 1);
+        assert_eq!(report.scan_rows, 2);
+        assert_eq!(report.errors, 0);
+    }
+
     #[test]
     fn config_rejects_invalid_latest_probability() {
         let mut args = sample_args();
@@ -824,6 +1154,23 @@ mod tests {
         let err = Config::try_from_manifest(manifest, None, 10)
             .expect_err("workload generator version mismatch should be rejected");
         assert!(err.to_string().contains("workload_generator_version"));
+    }
+
+    #[test]
+    fn config_from_current_manifest_requires_request_compression() {
+        let manifest = sample_manifest();
+        let mut value = serde_json::to_value(manifest).expect("manifest should serialize");
+        value["config"]
+            .as_object_mut()
+            .expect("config should be an object")
+            .remove("request_compression");
+
+        let config = serde_json::from_value::<BenchManifest>(value)
+            .map_err(anyhow::Error::from)
+            .and_then(|manifest| Config::try_from_manifest(manifest, None, 10));
+        let err = config.expect_err("current manifest should require request_compression");
+
+        assert!(err.to_string().contains("request_compression"));
     }
 
     #[test]

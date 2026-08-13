@@ -136,8 +136,8 @@ impl Keyspace {
     }
 
     // Generated keys use their leading byte for entropy. Keeping both bounds
-    // under the same leading byte narrows the ordered key range the backend
-    // must plan while the row limit still caps returned data.
+    // under the same leading byte narrows the requested range. Any planning
+    // or storage-read reduction depends on the backend implementation.
     pub(crate) fn scan_upper_bound(&self, start: &Key) -> Key {
         debug_assert_eq!(start.len(), self.key_len);
         let mut end = vec![u8::MAX; self.key_len];

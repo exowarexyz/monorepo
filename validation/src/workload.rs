@@ -13,9 +13,9 @@ pub const DEFAULT_BENCH_RNG_SEED: u64 = 0x5eed_c0de;
 /// Version of the deterministic operation-stream generator used in manifests.
 ///
 /// Bump this when changing its seeded random stream or operation semantics.
-/// Version 5 makes the latest frontier batch-aware and bounds scans to one
-/// leading-byte prefix.
-pub const WORKLOAD_GENERATOR_VERSION: u16 = 5;
+/// Version 6 samples latest keys from the fixture and prior writes in the
+/// current worker's lane.
+pub const WORKLOAD_GENERATOR_VERSION: u16 = 6;
 
 /// Named workload mixes for benchmark operation selection.
 #[derive(Copy, Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
@@ -84,12 +84,16 @@ pub struct WorkerPlan {
     rng: rand::rngs::StdRng,
     spec: WorkloadSpec,
     zipf_sampler: Option<Arc<ZipfSampler>>,
-    // Execution shape used by the deterministic write-frontier estimate.
+
+    // The execution shape maps prior write batches to their concrete keys.
+    worker_id: u64,
     worker_count: u64,
     write_batch_size: u64,
 
-    // Position in this worker's operation stream.
-    ops_emitted: u64,
+    // The executor awaits each operation before requesting the next one.
+    // This promotes only earlier write batches into latest-key candidates.
+    write_batches_completed: u64,
+    previous_operation_was_write: bool,
 }
 
 pub(crate) struct ZipfSampler {
@@ -192,8 +196,14 @@ impl WorkloadSpec {
 
 impl WorkerPlan {
     /// Creates a replayable worker stream from the run seed and worker id.
-    pub fn new(seed: u64, worker_id: u64, spec: WorkloadSpec) -> Self {
-        Self::with_zipf_sampler(seed, worker_id, spec, None, 1, 1)
+    pub fn new(
+        seed: u64,
+        worker_id: u64,
+        spec: WorkloadSpec,
+        worker_count: usize,
+        write_batch_size: usize,
+    ) -> Self {
+        Self::with_zipf_sampler(seed, worker_id, spec, None, worker_count, write_batch_size)
     }
 
     pub(crate) fn with_zipf_sampler(
@@ -208,15 +218,21 @@ impl WorkerPlan {
             rng: worker_rng(seed, worker_id),
             spec,
             zipf_sampler,
+            worker_id,
             worker_count: u64::try_from(worker_count).unwrap_or(u64::MAX).max(1),
             write_batch_size: u64::try_from(write_batch_size).unwrap_or(u64::MAX).max(1),
-            ops_emitted: 0,
+            write_batches_completed: 0,
+            previous_operation_was_write: false,
         }
     }
 
     /// Emits the next logical operation for the current visible key range.
     pub fn next_operation(&mut self, max_key_exclusive: u64) -> Operation {
-        self.ops_emitted += 1;
+        if self.previous_operation_was_write {
+            self.write_batches_completed = self.write_batches_completed.saturating_add(1);
+            self.previous_operation_was_write = false;
+        }
+
         let p = self.rng.random::<f64>();
         if p < self.spec.mix.read_ratio {
             return Operation::Read {
@@ -234,20 +250,80 @@ impl WorkerPlan {
             };
         }
 
+        self.previous_operation_was_write = true;
         Operation::Write
     }
 
-    // A shared live counter would make seeded streams depend on task
-    // scheduling. Estimate the latest frontier from this worker's stream
-    // position and the configured execution shape instead. Reads near the
-    // estimate may race the writes they target. Those misses measure
-    // visibility lag at the latest frontier.
-    fn estimated_write_frontier(&self, initial_keys: u64) -> u64 {
-        let writes_per_worker = (self.ops_emitted as f64 * self.spec.mix.write_ratio) as u64;
-        let appended = writes_per_worker
-            .saturating_mul(self.worker_count)
+    fn prior_written_key_count(&self, initial_keys: u64) -> u64 {
+        let requested = self
+            .write_batches_completed
             .saturating_mul(self.write_batch_size);
-        initial_keys.saturating_add(appended)
+        let Some(first) = initial_keys.checked_add(self.worker_id) else {
+            return 0;
+        };
+        let representable = ((u64::MAX - first) / self.worker_count).saturating_add(1);
+        requested.min(representable)
+    }
+
+    fn prior_written_key_index(&self, initial_keys: u64, write_number: u64) -> Option<u64> {
+        write_number
+            .checked_mul(self.worker_count)
+            .and_then(|offset| offset.checked_add(self.worker_id))
+            .and_then(|offset| initial_keys.checked_add(offset))
+    }
+
+    fn first_prior_write_at_or_after(
+        &self,
+        initial_keys: u64,
+        lower_bound: u64,
+        written_keys: u64,
+    ) -> u64 {
+        let Some(first) = initial_keys.checked_add(self.worker_id) else {
+            return written_keys;
+        };
+        if lower_bound <= first {
+            return 0;
+        }
+
+        let delta = lower_bound - first;
+        delta.div_ceil(self.worker_count).min(written_keys)
+    }
+
+    fn sample_known_key_index(&mut self, initial_keys: u64, lower_bound: u64) -> u64 {
+        let written_keys = self.prior_written_key_count(initial_keys);
+        let fixture_start = lower_bound.min(initial_keys);
+        let fixture_keys = initial_keys - fixture_start;
+        let first_write =
+            self.first_prior_write_at_or_after(initial_keys, lower_bound, written_keys);
+        let eligible_writes = written_keys - first_write;
+        let candidates = fixture_keys.saturating_add(eligible_writes);
+        if candidates == 0 {
+            return 0;
+        }
+
+        let choice = self.rng.random_range(0..candidates);
+        if choice < fixture_keys {
+            return fixture_start + choice;
+        }
+
+        let write_number = first_write + choice - fixture_keys;
+        self.prior_written_key_index(initial_keys, write_number)
+            .expect("prior written key index should fit")
+    }
+
+    fn sample_latest_key_index(&mut self, initial_keys: u64) -> u64 {
+        let lower_bound = if self.rng.random::<f64>() < self.spec.latest_prob {
+            let written_keys = self.prior_written_key_count(initial_keys);
+            let latest_key = written_keys
+                .checked_sub(1)
+                .and_then(|write_number| self.prior_written_key_index(initial_keys, write_number))
+                .unwrap_or_else(|| initial_keys.saturating_sub(1));
+            latest_key.saturating_sub(self.spec.latest_window.saturating_sub(1))
+        } else {
+            0
+        };
+
+        self.sample_known_key_index(initial_keys, lower_bound)
     }
 
     // Each arm draws the same amount of randomness on every call for a given
@@ -260,21 +336,7 @@ impl WorkerPlan {
                 }
                 self.rng.random_range(0..max_key_exclusive)
             }
-            KeyDistribution::Latest => {
-                // Keep the recency window against the estimated append
-                // frontier instead of the static fixture boundary.
-                let frontier = self.estimated_write_frontier(max_key_exclusive);
-                if frontier <= 1 {
-                    return 0;
-                }
-                if self.rng.random::<f64>() < self.spec.latest_prob {
-                    let window = self.spec.latest_window.max(1).min(frontier);
-                    let start = frontier - window;
-                    self.rng.random_range(start..frontier)
-                } else {
-                    self.rng.random_range(0..frontier)
-                }
-            }
+            KeyDistribution::Latest => self.sample_latest_key_index(max_key_exclusive),
             KeyDistribution::Zipfian => {
                 let replace_sampler = self
                     .zipf_sampler
@@ -415,6 +477,8 @@ fn approx_eq(a: f64, b: f64, eps: f64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use rand::{RngExt, SeedableRng};
 
@@ -439,12 +503,14 @@ mod tests {
         spec: WorkloadSpec,
         total_ops: u64,
         concurrency: usize,
+        write_batch_size: usize,
         max_key_exclusive: u64,
     ) -> Vec<Vec<Operation>> {
         (0..concurrency)
             .map(|worker| {
                 let worker_ops = worker_operation_count(total_ops, concurrency, worker).unwrap();
-                let mut plan = WorkerPlan::new(seed, worker as u64, spec);
+                let mut plan =
+                    WorkerPlan::new(seed, worker as u64, spec, concurrency, write_batch_size);
                 (0..worker_ops)
                     .map(|_| plan.next_operation(max_key_exclusive))
                     .collect()
@@ -523,7 +589,7 @@ mod tests {
             latest_prob: 1.0,
             ..sample_spec()
         };
-        let mut plan = WorkerPlan::new(7, 0, spec);
+        let mut plan = WorkerPlan::new(7, 0, spec, 1, 1);
 
         for _ in 0..1_000 {
             let idx = plan.sample_key_index(max);
@@ -543,7 +609,7 @@ mod tests {
                 key_dist,
                 ..sample_spec()
             };
-            let mut plan = WorkerPlan::new(11, 0, spec);
+            let mut plan = WorkerPlan::new(11, 0, spec, 1, 1);
 
             for _ in 0..1_000 {
                 let idx = plan.sample_key_index(500);
@@ -576,7 +642,7 @@ mod tests {
             key_dist: KeyDistribution::Zipfian,
             ..sample_spec()
         };
-        let mut plan = WorkerPlan::new(11, 0, spec);
+        let mut plan = WorkerPlan::new(11, 0, spec, 1, 1);
 
         assert!((0..10_000).any(|_| plan.sample_key_index(2) == 1));
     }
@@ -634,7 +700,7 @@ mod tests {
                 zipf_theta: theta,
                 ..sample_spec()
             };
-            let mut plan = WorkerPlan::new(11, 0, spec);
+            let mut plan = WorkerPlan::new(11, 0, spec, 1, 1);
             assert!(
                 (0..10_000).any(|_| plan.sample_key_index(4) == 3),
                 "last key was not sampled for theta={theta}"
@@ -676,7 +742,12 @@ mod tests {
     #[test]
     fn worker_schedules_preserve_operation_streams_and_write_indexes() {
         fn run_schedule(schedule: &[usize], spec: WorkloadSpec) -> Vec<Vec<(Operation, u64)>> {
-            let mut plans = [WorkerPlan::new(42, 0, spec), WorkerPlan::new(42, 1, spec)];
+            let worker_count = 2;
+            let write_batch_size = 3;
+            let mut plans = [
+                WorkerPlan::new(42, 0, spec, worker_count, write_batch_size),
+                WorkerPlan::new(42, 1, spec, worker_count, write_batch_size),
+            ];
             let mut writes = [0u64; 2];
             let mut operations = vec![Vec::new(), Vec::new()];
 
@@ -684,7 +755,9 @@ mod tests {
                 let operation = plans[worker].next_operation(100);
                 let write_index = match operation {
                     Operation::Write => {
-                        let index = worker_write_index(100, 2, worker, writes[worker]).unwrap();
+                        let write_number = writes[worker] * write_batch_size as u64;
+                        let index =
+                            worker_write_index(100, worker_count, worker, write_number).unwrap();
                         writes[worker] += 1;
                         index
                     }
@@ -723,8 +796,8 @@ mod tests {
     #[test]
     fn worker_plan_is_replayable_for_same_seed_and_worker() {
         let spec = sample_spec();
-        let mut a = WorkerPlan::new(42, 0, spec);
-        let mut b = WorkerPlan::new(42, 0, spec);
+        let mut a = WorkerPlan::new(42, 0, spec, 4, 100);
+        let mut b = WorkerPlan::new(42, 0, spec, 4, 100);
         let ops_a: Vec<Operation> = (0..32).map(|_| a.next_operation(1_000)).collect();
         let ops_b: Vec<Operation> = (0..32).map(|_| b.next_operation(1_000)).collect();
         assert_eq!(ops_a, ops_b);
@@ -741,9 +814,9 @@ mod tests {
             0.99,
         )
         .unwrap();
-        let first = worker_streams(42, spec, 257, 8, 10_000);
-        let second = worker_streams(42, spec, 257, 8, 10_000);
-        let different_seed = worker_streams(43, spec, 257, 8, 10_000);
+        let first = worker_streams(42, spec, 257, 8, 100, 10_000);
+        let second = worker_streams(42, spec, 257, 8, 100, 10_000);
+        let different_seed = worker_streams(43, spec, 257, 8, 100, 10_000);
 
         assert_eq!(first, second);
         assert_ne!(first, different_seed);
@@ -752,15 +825,15 @@ mod tests {
     #[test]
     fn worker_plan_differs_across_workers() {
         let spec = sample_spec();
-        let mut a = WorkerPlan::new(42, 0, spec);
-        let mut b = WorkerPlan::new(42, 1, spec);
+        let mut a = WorkerPlan::new(42, 0, spec, 4, 100);
+        let mut b = WorkerPlan::new(42, 1, spec, 4, 100);
         let ops_a: Vec<Operation> = (0..32).map(|_| a.next_operation(1_000)).collect();
         let ops_b: Vec<Operation> = (0..32).map(|_| b.next_operation(1_000)).collect();
         assert_ne!(ops_a, ops_b);
     }
 
     #[test]
-    fn latest_window_chases_the_estimated_write_frontier() {
+    fn latest_window_chases_prior_writes() {
         let spec = WorkloadSpec::new(
             WorkloadMix {
                 read_ratio: 0.5,
@@ -777,8 +850,8 @@ mod tests {
         let initial = 1_000u64;
         let workers = 4usize;
 
-        // Late reads must target the moving frontier instead of the static
-        // fixture boundary.
+        // Late reads must target prior appended keys instead of staying at the
+        // static fixture boundary.
         let mut plan = WorkerPlan::with_zipf_sampler(7, 0, spec, None, workers, 1);
         let mut read_indexes = Vec::new();
         for _ in 0..2_000 {
@@ -801,7 +874,7 @@ mod tests {
     }
 
     #[test]
-    fn latest_frontier_accounts_for_write_batch_size() {
+    fn latest_reads_target_keys_written_by_the_replayed_stream() {
         let spec = WorkloadSpec::new(
             WorkloadMix {
                 read_ratio: 0.5,
@@ -815,10 +888,57 @@ mod tests {
             0.99,
         )
         .expect("spec should validate");
-        let initial = 1_000u64;
-        let mut plan = WorkerPlan::with_zipf_sampler(7, 0, spec, None, 4, 100);
-        plan.ops_emitted = 2_000;
+        let initial = 1u64;
+        let workers = 4usize;
+        let batch_size = 3u64;
+        let total_ops = 256u64;
+        let mut read_count = 0;
+        let mut appended_read_count = 0;
 
-        assert_eq!(plan.estimated_write_frontier(initial), 401_000);
+        for worker in 0..workers {
+            let worker_ops = worker_operation_count(total_ops, workers, worker)
+                .expect("worker operation count should be valid");
+            let mut plan = WorkerPlan::with_zipf_sampler(
+                42,
+                worker as u64,
+                spec,
+                None,
+                workers,
+                batch_size as usize,
+            );
+            let mut write_batch = 0u64;
+            let mut written = HashSet::new();
+
+            for _ in 0..worker_ops {
+                match plan.next_operation(initial) {
+                    Operation::Read { index } => {
+                        read_count += 1;
+                        if index >= initial {
+                            appended_read_count += 1;
+                            assert!(
+                                written.contains(&index),
+                                "latest read targeted key {index} before its write"
+                            );
+                        }
+                    }
+                    Operation::Write => {
+                        for offset in 0..batch_size {
+                            let write_number = write_batch * batch_size + offset;
+                            let index = worker_write_index(initial, workers, worker, write_number)
+                                .expect("write index should be valid");
+                            written.insert(index);
+                        }
+                        write_batch += 1;
+                    }
+                    Operation::Scan { .. } => unreachable!("scan ratio is zero"),
+                }
+            }
+        }
+
+        assert!(read_count > 0, "stream should contain reads");
+        assert!(
+            appended_read_count > 0,
+            "stream should exercise reads from prior writes"
+        );
     }
 }

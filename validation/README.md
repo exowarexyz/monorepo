@@ -104,7 +104,7 @@ Generated load and benchmark keys open with a byte derived from the logical inde
     "batch_size": 100,
     "keyspace_layout_version": 2,
     "value_generator_version": 1,
-    "workload_generator_version": 5,
+    "workload_generator_version": 6,
     "read_retry_attempts": 3,
     "request_compression": "zstd"
   },
