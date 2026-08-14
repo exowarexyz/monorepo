@@ -5,6 +5,7 @@ import {
     API_KEY_ENV,
     InvalidApiKeyError,
     credentialRemedy,
+    environmentApiKey,
     resolveCredential,
     withoutHtmlBody,
 } from '../src/credential';
@@ -112,6 +113,75 @@ describe('Client credential', () => {
 
     test('an unusable token fails construction', () => {
         expect(() => new Client('http://localhost:10000', UNUSABLE)).toThrow(InvalidApiKeyError);
+    });
+});
+
+describe('the Authorization header actually sent', () => {
+    const realFetch = globalThis.fetch;
+
+    afterEach(() => {
+        globalThis.fetch = realFetch;
+    });
+
+    /**
+     * Captures what reaches the network. The stub is installed before the client is built, because
+     * the transport resolves `fetch` once at construction.
+     */
+    function captureAuthorization(): () => string | null {
+        let seen: string | null = null;
+        globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+            const headers = new Headers(
+                init?.headers ?? (input instanceof Request ? input.headers : undefined),
+            );
+            seen = headers.get('authorization');
+            return new Response('{"code":"unauthenticated","message":"stub"}', {
+                status: 401,
+                headers: { 'content-type': 'application/json' },
+            });
+        }) as typeof fetch;
+        return () => seen;
+    }
+
+    async function get(client: Client, headers?: Record<string, string>): Promise<void> {
+        // The stub always rejects, so the assertion is on the request rather than the result.
+        await expect(
+            client.query.get({ key: new Uint8Array([1]) }, headers ? { headers } : undefined),
+        ).rejects.toThrow();
+    }
+
+    test("the client's token is sent when the caller supplies none", async () => {
+        const sent = captureAuthorization();
+        await get(new Client('http://localhost:10000', 'client-token'));
+
+        expect(sent()).toBe('Bearer client-token');
+    });
+
+    test('a caller-supplied credential is left alone', async () => {
+        // What lets one client reach a deployment expecting a different credential on one call.
+        const sent = captureAuthorization();
+        await get(new Client('http://localhost:10000', 'client-token'), {
+            Authorization: 'Bearer caller-token',
+        });
+
+        expect(sent()).toBe('Bearer caller-token');
+    });
+
+    test('a caller-supplied credential survives a token from the environment', async () => {
+        // The regression this guards: an ambient variable must not replace a per-call credential.
+        const sent = captureAuthorization();
+        const client = new Client('http://localhost:10000', {
+            token: environmentApiKey() ?? 'from-env',
+        });
+        await get(client, { Authorization: 'Bearer caller-token' });
+
+        expect(sent()).toBe('Bearer caller-token');
+    });
+
+    test('no credential anywhere sends no header', async () => {
+        const sent = captureAuthorization();
+        await get(new Client('http://localhost:10000'));
+
+        expect(sent()).toBeNull();
     });
 });
 

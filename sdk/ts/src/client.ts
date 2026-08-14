@@ -81,7 +81,11 @@ function transportWithCredential(
     const interceptors: Interceptor[] = [];
     if (token !== undefined) {
         interceptors.push((next) => async (req) => {
-            req.header.set('Authorization', `Bearer ${token}`);
+            // Connect seeds req.header from CallOptions.headers before interceptors run, so a
+            // caller-supplied credential is already here and takes precedence.
+            if (!req.header.has('Authorization')) {
+                req.header.set('Authorization', `Bearer ${token}`);
+            }
             return next(req);
         });
     }
