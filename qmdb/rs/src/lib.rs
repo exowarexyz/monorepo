@@ -207,6 +207,66 @@ impl<D: Digest, F: Family> WriterState<D, F> {
     }
 }
 
+async fn recover_writer_state<F, H, Fetch, Fut>(
+    watermark: Option<Location<F>>,
+    fetch: Fetch,
+) -> Result<WriterState<H::Digest, F>, QmdbError>
+where
+    F: Graftable,
+    H: Hasher,
+    Fetch: FnOnce(Location<F>, Location<F>, u32) -> Fut,
+    Fut: std::future::Future<Output = Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError>>,
+{
+    let Some(watermark) = watermark else {
+        return Ok(WriterState::empty());
+    };
+
+    let checkpoint = fetch(watermark, watermark, 1).await?;
+    WriterState::from_checkpoint::<H>(&checkpoint)
+}
+
+#[cfg(test)]
+mod recover_writer_state_tests {
+    use super::*;
+    use commonware_cryptography::Sha256;
+    use commonware_storage::merkle::mmr;
+
+    #[test]
+    fn empty_state_skips_checkpoint_fetch() {
+        let fetched = std::cell::Cell::new(false);
+        let state = futures::executor::block_on(recover_writer_state::<mmr::Family, Sha256, _, _>(
+            None,
+            |_, _, _| {
+                fetched.set(true);
+                std::future::ready(Err(QmdbError::EmptyBatch))
+            },
+        ))
+        .expect("recover empty state");
+
+        assert!(!fetched.get());
+        assert!(state.peaks.is_empty());
+        assert_eq!(state.ops_size, Position::new(0));
+        assert_eq!(state.next_location, Location::new(0));
+    }
+
+    #[test]
+    fn fetches_only_the_final_operation() {
+        let watermark = Location::<mmr::Family>::new(7);
+        let result =
+            futures::executor::block_on(recover_writer_state::<mmr::Family, Sha256, _, _>(
+                Some(watermark),
+                |requested_watermark, start_location, max_locations| {
+                    assert_eq!(requested_watermark, watermark);
+                    assert_eq!(start_location, watermark);
+                    assert_eq!(max_locations, 1);
+                    std::future::ready(Err(QmdbError::EmptyBatch))
+                },
+            ));
+
+        assert!(matches!(result, Err(QmdbError::EmptyBatch)));
+    }
+}
+
 /// Current-state rows for one uploaded current batch boundary.
 ///
 /// Current QMDB uploads carry more than the historical op log: each published

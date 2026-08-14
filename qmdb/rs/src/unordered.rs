@@ -30,7 +30,7 @@ use crate::proof::{
     RawUnorderedKeyValueProof, VerifiedOperationRange, VerifiedUnorderedKeyValue,
 };
 use crate::storage::{KvCurrentStorage, KvMerkleStorage};
-use crate::VersionedValue;
+use crate::{VersionedValue, WriterState};
 
 #[derive(Clone, Debug)]
 struct MaterializedBitmapStatus<const N: usize> {
@@ -202,6 +202,19 @@ where
 
     pub async fn writer_location_watermark(&self) -> Result<Option<Location<F>>, QmdbError> {
         self.core().writer_location_watermark().await
+    }
+
+    /// Recover writer state at the latest published watermark.
+    ///
+    /// Returns empty state when no watermark has been published.
+    pub async fn recover_writer_state(&self) -> Result<WriterState<H::Digest, F>, QmdbError> {
+        crate::recover_writer_state::<F, H, _, _>(
+            self.writer_location_watermark().await?,
+            |watermark, start_location, max_locations| {
+                self.operation_range_checkpoint(watermark, start_location, max_locations)
+            },
+        )
+        .await
     }
 
     pub async fn query_many_at<Q: AsRef<[u8]>>(

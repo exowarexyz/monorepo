@@ -14,7 +14,7 @@ use commonware_storage::qmdb::keyless::fixed::{
 };
 use commonware_storage::qmdb::keyless::variable::{Db as Keyless, Operation as KeylessOperation};
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use exoware_qmdb::{KeylessClient, KeylessWriter};
+use exoware_qmdb::{KeylessClient, KeylessWriter, WriterState};
 use exoware_sdk::{PrefixedStoreClient, StoreClient};
 
 use common::retry;
@@ -65,6 +65,9 @@ struct LocalReference<F: Family> {
     latest_location: Location<F>,
     root: Digest,
     operations: Vec<KeylessOperation<F, Vec<u8>>>,
+    continuation_operations: Vec<KeylessOperation<F, Vec<u8>>>,
+    continued_latest_location: Location<F>,
+    continued_root: Digest,
     queried_location: Location<F>,
     queried_value: Vec<u8>,
 }
@@ -92,13 +95,31 @@ where
 
             let first = b"first-value".to_vec();
             let second = b"second-value".to_vec();
+            let third = b"third-value".to_vec();
+            let fourth = b"fourth-value".to_vec();
             let finalized = {
-                let batch = db.new_batch().append(first.clone()).append(second);
+                let batch = db
+                    .new_batch()
+                    .append(first.clone())
+                    .append(second)
+                    .append(third)
+                    .append(fourth)
+                    .append(b"fifth-value".to_vec())
+                    .append(b"sixth-value".to_vec())
+                    .append(b"seventh-value".to_vec());
                 batch
                     .merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
                     .await
             };
             db.apply_batch(finalized).await.expect("apply");
+
+            let finalized = {
+                let batch = db.new_batch().append(b"eighth-value".to_vec());
+                batch
+                    .merkleize(&db, None::<Vec<u8>>, db.bounds().end - 1)
+                    .await
+            };
+            db.apply_batch(finalized).await.expect("apply second");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -107,6 +128,23 @@ where
                 .await
                 .expect("proof");
             let root = db.root();
+
+            let finalized = {
+                let batch = db.new_batch().append(b"ninth-value".to_vec());
+                batch
+                    .merkleize(&db, None::<Vec<u8>>, db.bounds().end - 1)
+                    .await
+            };
+            db.apply_batch(finalized).await.expect("apply third");
+
+            let continued_latest_location = db.bounds().end - 1;
+            let n = NonZeroU64::new(*continued_latest_location + 1).unwrap();
+            let (_proof, all_operations) = db
+                .historical_proof(continued_latest_location + 1, Location::<F>::new(0), n)
+                .await
+                .expect("continued proof");
+            let continuation_operations = all_operations[ops.len()..].to_vec();
+            let continued_root = db.root();
             db.destroy().await.expect("destroy");
             let queried_location = ops
                 .iter()
@@ -121,6 +159,9 @@ where
                 latest_location: latest,
                 root,
                 operations: ops,
+                continuation_operations,
+                continued_latest_location,
+                continued_root,
                 queried_location,
                 queried_value: first,
             }
@@ -199,6 +240,15 @@ where
     let client = common::local_store_client().await;
     let local = build_local_db::<F>().await;
 
+    let state = fresh_keyless::<F>(client.clone())
+        .recover_writer_state()
+        .await
+        .expect("recover empty writer state");
+    let empty_state = WriterState::empty();
+    assert_eq!(state.peaks, empty_state.peaks);
+    assert_eq!(state.ops_size, empty_state.ops_size);
+    assert_eq!(state.next_location, empty_state.next_location);
+
     let writer = fresh_writer::<F>(client.clone());
     common::commit_keyless_upload(&writer, &local.operations)
         .await
@@ -251,6 +301,15 @@ where
         !malformed_checkpoint.verify::<commonware_cryptography::Sha256>(),
         "zero-start checkpoints must not verify with pinned nodes"
     );
+    assert!(malformed_checkpoint
+        .reconstruct_peaks::<commonware_cryptography::Sha256>()
+        .is_err());
+    assert!(
+        WriterState::<Digest, F>::from_checkpoint::<commonware_cryptography::Sha256>(
+            &malformed_checkpoint,
+        )
+        .is_err()
+    );
     let peaks = checkpoint
         .reconstruct_peaks::<commonware_cryptography::Sha256>()
         .expect("reconstruct_peaks");
@@ -258,11 +317,124 @@ where
     let reconstructed_root = commonware_storage::merkle::hasher::Hasher::<F>::root(
         &hasher,
         checkpoint.proof.leaves,
-        0,
+        checkpoint.proof.inactive_peaks,
         peaks.iter().map(|(_, _, digest)| digest),
     )
     .expect("reconstruct root");
     assert_eq!(reconstructed_root, checkpoint.root);
+
+    let suffix_checkpoint = c
+        .operation_range_checkpoint(local.latest_location, local.latest_location, 1)
+        .await
+        .expect("suffix checkpoint");
+    assert!(suffix_checkpoint.verify::<commonware_cryptography::Sha256>());
+    assert!(!suffix_checkpoint.pinned_nodes.is_empty());
+    assert!(
+        suffix_checkpoint.proof.inactive_peaks > 0,
+        "suffix checkpoint must exercise folded inactive peaks"
+    );
+    let range_digests = suffix_checkpoint
+        .proof
+        .verify_range_inclusion_and_extract_digests(
+            &hasher,
+            &suffix_checkpoint.encoded_operations,
+            suffix_checkpoint.start_location,
+            &suffix_checkpoint.root,
+        )
+        .expect("verify suffix range");
+    assert!(
+        peaks
+            .iter()
+            .any(|(peak, _, _)| !range_digests.iter().any(|(position, _)| position == peak)),
+        "suffix checkpoint must exercise a peak omitted by range extraction"
+    );
+    assert_eq!(
+        suffix_checkpoint
+            .reconstruct_peaks::<commonware_cryptography::Sha256>()
+            .expect("reconstruct suffix peaks"),
+        peaks,
+    );
+
+    let mut suffix_without_pins = suffix_checkpoint.clone();
+    suffix_without_pins.pinned_nodes.clear();
+    let mut suffix_with_wrong_pin = suffix_checkpoint.clone();
+    suffix_with_wrong_pin.pinned_nodes[0] = suffix_with_wrong_pin.root;
+    let mut suffix_with_extra_pin = suffix_checkpoint.clone();
+    suffix_with_extra_pin
+        .pinned_nodes
+        .push(suffix_with_extra_pin.root);
+    for malformed in [
+        &suffix_without_pins,
+        &suffix_with_wrong_pin,
+        &suffix_with_extra_pin,
+    ] {
+        assert!(!malformed.verify::<commonware_cryptography::Sha256>());
+        assert!(malformed
+            .reconstruct_peaks::<commonware_cryptography::Sha256>()
+            .is_err());
+        assert!(
+            WriterState::<Digest, F>::from_checkpoint::<commonware_cryptography::Sha256>(malformed)
+                .is_err()
+        );
+    }
+
+    let mut checkpoint_with_wrong_watermark = suffix_checkpoint.clone();
+    checkpoint_with_wrong_watermark.watermark -= 1;
+    assert!(checkpoint_with_wrong_watermark.verify::<commonware_cryptography::Sha256>());
+    assert!(checkpoint_with_wrong_watermark
+        .reconstruct_peaks::<commonware_cryptography::Sha256>()
+        .is_err());
+    assert!(
+        WriterState::<Digest, F>::from_checkpoint::<commonware_cryptography::Sha256>(
+            &checkpoint_with_wrong_watermark,
+        )
+        .is_err()
+    );
+
+    let middle_checkpoint = c
+        .operation_range_checkpoint(local.latest_location, local.latest_location - 1, 1)
+        .await
+        .expect("middle checkpoint");
+    assert!(middle_checkpoint.verify::<commonware_cryptography::Sha256>());
+    assert!(middle_checkpoint
+        .reconstruct_peaks::<commonware_cryptography::Sha256>()
+        .is_err());
+    assert!(
+        WriterState::<Digest, F>::from_checkpoint::<commonware_cryptography::Sha256>(
+            &middle_checkpoint,
+        )
+        .is_err()
+    );
+
+    let expected_state =
+        WriterState::<Digest, F>::from_checkpoint::<commonware_cryptography::Sha256>(
+            &suffix_checkpoint,
+        )
+        .expect("writer state from suffix checkpoint");
+    let state = c
+        .recover_writer_state()
+        .await
+        .expect("recover writer state");
+    assert_eq!(state.peaks, expected_state.peaks);
+    assert_eq!(state.ops_size, expected_state.ops_size);
+    assert_eq!(state.next_location, expected_state.next_location);
+    let resumed_writer =
+        TestKeylessWriter::<F>::new(PrefixedStoreClient::empty(client.clone()), state);
+    let receipt = common::commit_keyless_upload(&resumed_writer, &local.continuation_operations)
+        .await
+        .expect("continued upload");
+    assert_eq!(receipt.latest_location, local.continued_latest_location);
+
+    let continued_root = retry(
+        || {
+            let c = fresh_keyless::<F>(client.clone());
+            let loc = local.continued_latest_location;
+            async move { c.root_at(loc).await }
+        },
+        "continued root_at",
+    )
+    .await;
+    assert_eq!(continued_root, local.continued_root);
 }
 
 #[tokio::test]
