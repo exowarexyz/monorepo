@@ -1181,7 +1181,7 @@ impl RocksStore {
     }
 
     /// Applies each prune policy in document order to current rows. A prune document is
-    /// Keys-only; sequence-log retention is handled by the stream service's `SetRetention`
+    /// Keys-only; sequence-log retention is handled by `log.retention.v1.SetRetention`
     /// (see the [`Retention`] impl).
     fn apply_prune_policies(&self, document: PrunePolicyDocument) -> Result<(), String> {
         for policy in &document.policies {

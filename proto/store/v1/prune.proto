@@ -1,11 +1,22 @@
 syntax = "proto3";
 
-package store.compact.v1;
+package store.prune.v1;
 
 import "buf/validate/validate.proto";
 import "common/v1/kv.proto";
 
-// Prune policy graph and admin RPC (served by the compaction worker).
+service Service {
+  rpc Prune(PruneRequest) returns (PruneResponse);
+}
+
+message PruneRequest {
+  // One or more prune policies to apply. At least one is required. UserKeys
+  // policies must not share the same key prefix.
+  repeated Policy policies = 1 [(buf.validate.field).repeated.min_items = 1];
+}
+
+message PruneResponse {}
+
 
 // Controls how matched keys are partitioned into independent groups before
 // the retain policy is applied. Each group is pruned independently.
@@ -88,20 +99,3 @@ message Policy {
   KeysScope keys = 1;
   PolicyRetain retain = 3;
 }
-
-// Compaction service, typically served by the compaction worker.
-service Service {
-  // Execute one or more prune policies against the store. Each policy is
-  // applied sequentially.
-  rpc Prune(PruneRequest) returns (PruneResponse);
-}
-
-// Request to execute prune policies.
-message PruneRequest {
-  // One or more prune policies to apply. At least one is required. UserKeys
-  // policies must not share the same key prefix.
-  repeated Policy policies = 1 [(buf.validate.field).repeated.min_items = 1];
-}
-
-// Empty response returned on successful prune execution.
-message PruneResponse {}

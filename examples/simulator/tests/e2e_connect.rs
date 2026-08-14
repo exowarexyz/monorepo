@@ -2,14 +2,14 @@ use bytes::Bytes;
 use commonware_codec::Encode;
 use connectrpc::client::ClientConfig;
 use exoware_sdk::common::Selector as ProtoSelector;
-use exoware_sdk::compact::{
-    policy_retain, KeysScope as ProtoKeysScope, Policy, PolicyGroupBy, PolicyOrderBy,
-    PolicyOrderEncoding, PolicyRetain, PruneRequest, RetainGreaterThan, RetainKeepLatest,
-    ServiceClient as CompactServiceClient,
-};
 use exoware_sdk::keys::{Key, Prefix};
 use exoware_sdk::kv_codec::{
     KvExpr, KvFieldKind, KvFieldRef, KvReducedValue, StoredRow, StoredValue,
+};
+use exoware_sdk::prune::{
+    policy_retain, KeysScope as ProtoKeysScope, Policy, PolicyGroupBy, PolicyOrderBy,
+    PolicyOrderEncoding, PolicyRetain, PruneRequest, RetainGreaterThan, RetainKeepLatest,
+    ServiceClient as PruneServiceClient,
 };
 use exoware_sdk::prune_policy;
 use exoware_sdk::selector::Selector as DomainSelector;
@@ -247,7 +247,7 @@ async fn reduce_sum_int64() {
     assert_eq!(results[0], Some(KvReducedValue::Int64(60)));
 }
 
-// -- prune via compact ServiceClient --
+// -- prune via the prune ServiceClient --
 
 #[tokio::test]
 async fn prune_drop_all_removes_keys() {
@@ -266,11 +266,10 @@ async fn prune_drop_all_removes_keys() {
     // Verify keys exist
     assert!(client.query().get(&ka).await.expect("get a").is_some());
 
-    let compact_config = ClientConfig::new(url.parse::<http::Uri>().unwrap())
+    let prune_config = ClientConfig::new(url.parse::<http::Uri>().unwrap())
         .with_compression(connect_compression_registry());
-    let compact_client =
-        CompactServiceClient::new(PreferZstdHttpClient::plaintext(), compact_config);
-    compact_client
+    let prune_client = PruneServiceClient::new(PreferZstdHttpClient::plaintext(), prune_config);
+    prune_client
         .prune(PruneRequest {
             policies: vec![Policy {
                 keys: Some(ProtoKeysScope {
@@ -433,11 +432,10 @@ async fn prune_keep_latest_retains_newest() {
         .await
         .expect("put");
 
-    let compact_config = ClientConfig::new(url.parse::<http::Uri>().unwrap())
+    let prune_config = ClientConfig::new(url.parse::<http::Uri>().unwrap())
         .with_compression(connect_compression_registry());
-    let compact_client =
-        CompactServiceClient::new(PreferZstdHttpClient::plaintext(), compact_config);
-    compact_client
+    let prune_client = PruneServiceClient::new(PreferZstdHttpClient::plaintext(), prune_config);
+    prune_client
         .prune(PruneRequest {
             policies: vec![Policy {
                 keys: Some(ProtoKeysScope {
@@ -612,7 +610,7 @@ async fn store_client_prune_drop_all() {
     assert!(client.query().get(&ka).await.expect("get").is_some());
 
     client
-        .compact()
+        .prune()
         .prune(&[prune_policy::PrunePolicy {
             scope: prune_policy::KeysScope {
                 selector: DomainSelector {
@@ -655,11 +653,10 @@ async fn prune_greater_than_retains_above_threshold() {
         .await
         .expect("put");
 
-    let compact_config = ClientConfig::new(url.parse::<http::Uri>().unwrap())
+    let prune_config = ClientConfig::new(url.parse::<http::Uri>().unwrap())
         .with_compression(connect_compression_registry());
-    let compact_client =
-        CompactServiceClient::new(PreferZstdHttpClient::plaintext(), compact_config);
-    compact_client
+    let prune_client = PruneServiceClient::new(PreferZstdHttpClient::plaintext(), prune_config);
+    prune_client
         .prune(PruneRequest {
             policies: vec![Policy {
                 keys: Some(ProtoKeysScope {

@@ -10,7 +10,7 @@ use crate::prune_policy::{
     PRUNE_POLICY_DOCUMENT_VERSION,
 };
 use crate::selector::Selector;
-use crate::store::compact::v1::{
+use crate::store::prune::v1::{
     policy_retain, KeysScope as ProtoKeysScope, Policy as ProtoPolicy, PolicyOrderBy,
     PolicyOrderEncoding, PruneRequestView,
 };
@@ -118,7 +118,7 @@ pub fn validate_prune_policy_document(document: &PrunePolicyDocument) -> Result<
     crate::prune_policy::validate_policy_document(document).map_err(|e| e.to_string())
 }
 
-pub fn prune_policies_to_proto(policies: &[PrunePolicy]) -> Vec<crate::store::compact::v1::Policy> {
+pub fn prune_policies_to_proto(policies: &[PrunePolicy]) -> Vec<crate::store::prune::v1::Policy> {
     policies.iter().map(prune_policy_to_proto).collect()
 }
 
@@ -131,7 +131,7 @@ fn selector_to_proto(mk: &Selector) -> ProtoSelector {
 }
 
 fn keys_scope_to_proto(s: &KeysScope) -> ProtoKeysScope {
-    use crate::store::compact::v1::{PolicyGroupBy, PolicyOrderBy};
+    use crate::store::prune::v1::{PolicyGroupBy, PolicyOrderBy};
 
     let selector = selector_to_proto(&s.selector);
     let group_by = PolicyGroupBy {
@@ -156,8 +156,8 @@ fn keys_scope_to_proto(s: &KeysScope) -> ProtoKeysScope {
     }
 }
 
-fn prune_policy_to_proto(p: &PrunePolicy) -> crate::store::compact::v1::Policy {
-    use crate::store::compact::v1::{
+fn prune_policy_to_proto(p: &PrunePolicy) -> crate::store::prune::v1::Policy {
+    use crate::store::prune::v1::{
         policy_retain, Policy, PolicyRetain, RetainGreaterThan, RetainGreaterThanOrEqual,
         RetainKeepLatest,
     };
@@ -282,7 +282,7 @@ mod tests {
             },
             retain: RetainPolicy::KeepLatest { count: 0 },
         };
-        let request = crate::store::compact::v1::PruneRequest {
+        let request = crate::store::prune::v1::PruneRequest {
             policies: prune_policies_to_proto(&[invalid]),
             ..Default::default()
         };

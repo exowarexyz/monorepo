@@ -4,7 +4,7 @@
 //! output before applying retention effects (the handler is authoritative;
 //! `buf.validate` annotations on the proto are documentation).
 
-use crate::log::stream::v1::{
+use crate::log::retention::v1::{
     retention_policy, RetentionGreaterThan, RetentionGreaterThanOrEqual, RetentionKeepLatest,
     RetentionPolicy as ProtoRetentionPolicy, SetRetentionRequestView,
 };
@@ -95,7 +95,7 @@ mod tests {
 
     #[test]
     fn set_retention_view_with_policy_parses() {
-        let request = crate::log::stream::v1::SetRetentionRequest {
+        let request = crate::log::retention::v1::SetRetentionRequest {
             policy: Some(retention_policy_to_proto(&RetentionPolicy::KeepLatest {
                 count: 2,
             }))
@@ -111,7 +111,7 @@ mod tests {
 
     #[test]
     fn set_retention_view_absent_policy_clears() {
-        let request = crate::log::stream::v1::SetRetentionRequest::default();
+        let request = crate::log::retention::v1::SetRetentionRequest::default();
         let bytes = request.encode_to_vec();
         let view = SetRetentionRequestView::decode_view(&bytes).expect("decode view");
 

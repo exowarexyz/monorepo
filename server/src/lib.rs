@@ -1,5 +1,5 @@
 #![allow(clippy::result_large_err, clippy::type_complexity)]
-//! Store server for ingest/query/compact/stream APIs.
+//! Store server for ingest/query/prune/retention/stream APIs.
 //!
 //! Use [`AppState`] with [`connect_stack`] for an all-in-one server, or the narrower
 //! state and service constructors when capabilities are served separately.
@@ -11,8 +11,8 @@ mod stream;
 mod validate;
 
 pub use connect::{
-    compact_service, connect_stack, ingest_service, query_service, query_stack, stream_service,
-    AppState, CompactState, IngestState, QueryState, StreamState,
+    connect_stack, ingest_service, prune_service, query_service, query_stack, retention_service,
+    stream_service, AppState, IngestState, PruneState, QueryState, RetentionState, StreamState,
 };
 pub use engine::{
     Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan, RangeScanBatch,

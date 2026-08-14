@@ -3,8 +3,8 @@ import { Code, ConnectError } from '@connectrpc/connect';
 import type { CallOptions } from '@connectrpc/connect';
 import type { Client } from './client.js';
 import { HttpError } from './error.js';
-import { PruneRequestSchema } from './gen/ts/store/v1/compact_pb.js';
-import type { Policy } from './gen/ts/store/v1/compact_pb.js';
+import { PruneRequestSchema } from './gen/ts/store/v1/prune_pb.js';
+import type { Policy } from './gen/ts/store/v1/prune_pb.js';
 import {
     FilterSchema,
     EntrySchema,
@@ -910,7 +910,7 @@ export class StoreClient {
     async prune(policies: Policy[]): Promise<void> {
         const req = create(PruneRequestSchema, { policies: prefixPolicies(policies, this.keyPrefix) });
         try {
-            await this.client.compact.prune(req);
+            await this.client.prune.prune(req);
         } catch (e) {
             mapConnectToHttpError(e);
         }

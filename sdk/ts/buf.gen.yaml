@@ -10,9 +10,10 @@ inputs:
     paths:
       - ../../proto/google/rpc/error_details.proto
       - ../../proto/common/v1/kv.proto
-      - ../../proto/store/v1/compact.proto
+      - ../../proto/store/v1/prune.proto
       - ../../proto/log/v1/ingest.proto
       - ../../proto/store/v1/query.proto
+      - ../../proto/log/v1/retention.proto
       - ../../proto/log/v1/stream.proto
   - module: buf.build/bufbuild/protovalidate:80ab13bee0bf4272b6161a72bf7034e0
     paths:

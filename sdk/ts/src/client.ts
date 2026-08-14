@@ -2,9 +2,10 @@ import { createClient, type Client as ConnectClient, type Interceptor, Code, Con
 import { createConnectTransport } from '@connectrpc/connect-web';
 import { CookieJar, fetchWithCookieJar } from './cookies.js';
 import { StoreClient, type StoreKeyPrefix } from './store.js';
-import { Service as CompactService } from './gen/ts/store/v1/compact_pb.js';
 import { Service as IngestService } from './gen/ts/log/v1/ingest_pb.js';
+import { Service as PruneService } from './gen/ts/store/v1/prune_pb.js';
 import { Service as QueryService } from './gen/ts/store/v1/query_pb.js';
+import { Service as RetentionService } from './gen/ts/log/v1/retention_pb.js';
 import { Service as StreamService } from './gen/ts/log/v1/stream_pb.js';
 
 export type RetryConfig = {
@@ -87,9 +88,10 @@ export function createTransport(baseUrl: string, tokenOrOptions?: string | Clien
 
 export class Client {
     public readonly baseUrl: string;
-    public readonly compact: ConnectClient<typeof CompactService>;
     public readonly ingest: ConnectClient<typeof IngestService>;
+    public readonly prune: ConnectClient<typeof PruneService>;
     public readonly query: ConnectClient<typeof QueryService>;
+    public readonly retention: ConnectClient<typeof RetentionService>;
     public readonly stream: ConnectClient<typeof StreamService>;
     public readonly retryConfig: RetryConfig;
 
@@ -98,9 +100,10 @@ export class Client {
         this.baseUrl = baseUrl.replace(/\/$/, '');
         this.retryConfig = opts.retry ?? DEFAULT_RETRY_CONFIG;
         const transport = createTransport(this.baseUrl, opts);
-        this.compact = createClient(CompactService, transport);
         this.ingest = createClient(IngestService, transport);
+        this.prune = createClient(PruneService, transport);
         this.query = createClient(QueryService, transport);
+        this.retention = createClient(RetentionService, transport);
         this.stream = createClient(StreamService, transport);
     }
 

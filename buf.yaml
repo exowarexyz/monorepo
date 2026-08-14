@@ -9,8 +9,8 @@ lint:
     - STANDARD
   except:
     # Each directory (e.g. log/v1, store/v1) holds several logically separate
-    # packages for convenience (log/v1 -> ingest, stream; store/v1 ->
-    # compact, query). The shared common.kv.v1 package lives at common/v1/kv.proto.
+    # packages for convenience (log/v1 -> ingest, retention, stream; store/v1 ->
+    # prune, query). The shared common.kv.v1 package lives at common/v1/kv.proto.
     # The generated code uses the distinct package names for proper namespacing.
     - PACKAGE_DIRECTORY_MATCH
     - PACKAGE_SAME_DIRECTORY

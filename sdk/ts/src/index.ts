@@ -81,7 +81,7 @@ export {
     PruneRequestSchema,
     PolicyOrderEncoding,
     PolicyOrderEncodingSchema,
-} from './gen/ts/store/v1/compact_pb.js';
+} from './gen/ts/store/v1/prune_pb.js';
 export type {
     Policy,
     KeysScope,
@@ -94,7 +94,7 @@ export type {
     RetainDropAll,
     PruneRequest,
     PruneResponse,
-} from './gen/ts/store/v1/compact_pb.js';
+} from './gen/ts/store/v1/prune_pb.js';
 export { FilterSchema, EntrySchema, SelectorSchema } from './gen/ts/common/v1/kv_pb.js';
 export type { Filter, Entry, Selector } from './gen/ts/common/v1/kv_pb.js';
 export {
@@ -102,6 +102,14 @@ export {
     SubscribeResponseSchema,
     GetRequestSchema,
     GetResponseSchema,
+} from './gen/ts/log/v1/stream_pb.js';
+export type {
+    SubscribeRequest,
+    SubscribeResponse,
+    GetRequest,
+    GetResponse,
+} from './gen/ts/log/v1/stream_pb.js';
+export {
     RetentionKeepLatestSchema,
     RetentionGreaterThanSchema,
     RetentionGreaterThanOrEqualSchema,
@@ -109,12 +117,8 @@ export {
     RetentionPolicySchema,
     SetRetentionRequestSchema,
     SetRetentionResponseSchema,
-} from './gen/ts/log/v1/stream_pb.js';
+} from './gen/ts/log/v1/retention_pb.js';
 export type {
-    SubscribeRequest,
-    SubscribeResponse,
-    GetRequest,
-    GetResponse,
     RetentionKeepLatest,
     RetentionGreaterThan,
     RetentionGreaterThanOrEqual,
@@ -122,4 +126,4 @@ export type {
     RetentionPolicy,
     SetRetentionRequest,
     SetRetentionResponse,
-} from './gen/ts/log/v1/stream_pb.js';
+} from './gen/ts/log/v1/retention_pb.js';
