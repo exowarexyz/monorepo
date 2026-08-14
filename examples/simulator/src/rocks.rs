@@ -1420,13 +1420,22 @@ impl Log for RocksStore {
         if sequence_number > self.frontiers.published.load(Ordering::Acquire) {
             return Ok(None);
         }
-        let value = match self
-            .db
-            .get_cf(self.log_cf(), sequence_log_key(sequence_number))
-            .map_err(|e| e.to_string())?
-        {
-            Some(value) => value,
-            None => return Ok(None),
+
+        // The read runs on the blocking pool so this future yields. An inline read
+        // holds a Tokio worker for the whole RocksDB lookup, which serializes the
+        // subscribe lookahead and stalls unrelated tasks on cold reads.
+        let store = self.clone();
+        let value = tokio::task::spawn_blocking(move || {
+            store
+                .db
+                .get_cf(store.log_cf(), sequence_log_key(sequence_number))
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| format!("log read task failed: {e}"))??;
+
+        let Some(value) = value else {
+            return Ok(None);
         };
         Ok(Some(LogBatch::from_response_bytes(sequence_number, value)))
     }
@@ -2098,6 +2107,52 @@ mod tests {
             .expect("get batch")
             .expect("batch retained");
         assert_eq!(batch_entries(batch), vec![(key, value)]);
+    }
+
+    // The subscribe lookahead can only overlap log reads if `get_batch` yields.
+    // An inline read completes within a single poll, so the in-flight gauge
+    // would never exceed one and this test would fail.
+    #[tokio::test]
+    async fn get_batch_reads_overlap_under_buffered_lookahead() {
+        use futures::StreamExt;
+
+        let dir = tempdir().expect("tempdir");
+        let store = Arc::new(RocksStore::open(dir.path(), None).expect("open db"));
+        let batches = 8u64;
+        for i in 0..batches {
+            store
+                .put_batch(vec![(
+                    Bytes::from(format!("key-{i}")),
+                    Bytes::from_static(b"value"),
+                )])
+                .await
+                .expect("put");
+        }
+
+        let in_flight = Arc::new(AtomicU64::new(0));
+        let max_in_flight = Arc::new(AtomicU64::new(0));
+        let mut reads = futures::stream::iter(1..=batches)
+            .map(|sequence| {
+                let store = store.clone();
+                let in_flight = in_flight.clone();
+                let max_in_flight = max_in_flight.clone();
+                async move {
+                    let level = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_in_flight.fetch_max(level, Ordering::SeqCst);
+                    let result = store.get_batch(sequence).await;
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                    result
+                }
+            })
+            .buffered(batches as usize);
+        while let Some(batch) = reads.next().await {
+            batch.expect("get batch").expect("batch retained");
+        }
+
+        assert!(
+            max_in_flight.load(Ordering::SeqCst) >= 2,
+            "buffered get_batch reads never overlapped",
+        );
     }
 
     #[tokio::test]

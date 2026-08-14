@@ -2768,6 +2768,7 @@ dependencies = [
  "connectrpc",
  "exoware-sdk",
  "exoware-server",
+ "futures",
  "http",
  "mimalloc",
  "parking_lot",

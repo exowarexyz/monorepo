@@ -56,6 +56,11 @@ use crate::{
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
 const RANGE_STREAM_MAX_FRAME_ROWS: usize = 4096;
 const REDUCE_SCAN_BATCH_SIZE: usize = 4096;
+// Per-subscription bound on concurrent subscribe log reads. Each slot can pin
+// a fully materialized batch (in flight, or completed but held for in-order
+// delivery), so server-wide memory and engine read pressure scale with this
+// bound times the subscriber count. Engines stay responsible for protecting
+// their own read path (for example via caching or request collapsing).
 const SUBSCRIBE_GET_BATCH_LOOKAHEAD: usize = 8;
 
 fn query_detail(sequence_number: u64, extra: QueryExtra) -> Detail {
@@ -867,19 +872,22 @@ fn filtered_subscribe_response(
 
 type OrderedBatchStream = Pin<Box<dyn Stream<Item = Result<Option<LogBatch>, String>> + Send>>;
 
-fn ordered_batch_stream<B>(
+fn ordered_batch_stream<B, S>(
     log: Arc<B>,
-    range: std::ops::RangeInclusive<u64>,
-    first_batch: Option<LogBatch>,
+    sequences: S,
+    mut first_batch: Option<LogBatch>,
 ) -> OrderedBatchStream
 where
     B: Log,
+    S: Stream<Item = u64> + Send + 'static,
 {
-    let mut first_batch = first_batch;
     Box::pin(
-        stream_util::iter(range)
+        sequences
             .map(move |sequence_number| {
                 let log = log.clone();
+                // The sequence stream is consumed in order, so only the first
+                // closure invocation observes the eagerly fetched batch and it
+                // pairs with the first sequence.
                 let first_batch = first_batch.take();
                 async move {
                     match first_batch {
@@ -892,6 +900,35 @@ where
     )
 }
 
+// Live sequences are generated on demand and re-check the published frontier
+// on every pull. The lookahead therefore keeps extending through new commits
+// while earlier reads drain, instead of stopping at a frontier snapshot. When
+// the subscriber is caught up the next pull parks on a publish notification,
+// which keeps one live stream serving the whole subscription.
+fn live_sequence_stream(
+    notifier: Arc<dyn StreamNotifier>,
+    notify: Arc<Notify>,
+    start: Option<u64>,
+) -> impl Stream<Item = u64> + Send {
+    stream_util::unfold(start, move |next| {
+        let notifier = notifier.clone();
+        let notify = notify.clone();
+        async move {
+            let sequence_number = next?;
+            // Re-check the frontier after arming the notifier so a publish
+            // racing this pull is not lost.
+            while sequence_number > notifier.current_sequence() {
+                let notified = notify.clone().notified_owned();
+                if sequence_number <= notifier.current_sequence() {
+                    break;
+                }
+                notified.await;
+            }
+            Some((sequence_number, sequence_number.checked_add(1)))
+        }
+    })
+}
+
 struct ReplayState {
     batches: OrderedBatchStream,
 }
@@ -902,19 +939,13 @@ enum ReplayProgress {
     Done,
 }
 
-enum LiveProgress {
-    Frame(SubscribeResponse),
-    Advanced,
-    NeedWait,
-}
-
 struct SubscriptionState<B> {
     state: StreamState<B>,
     matchers: crate::stream::CompiledMatchers,
+    // Both streams are dropped at termination so buffered batches free at the
+    // failure boundary instead of when the client tears the stream down.
     replay: Option<ReplayState>,
     live: Option<OrderedBatchStream>,
-    next_live_sequence: Option<u64>,
-    live_notify: Arc<Notify>,
     terminated: bool,
 }
 
@@ -926,16 +957,13 @@ where
         state: StreamState<B>,
         matchers: crate::stream::CompiledMatchers,
         replay: Option<ReplayState>,
-        next_live_sequence: Option<u64>,
-        live_notify: Arc<Notify>,
+        live: OrderedBatchStream,
     ) -> Self {
         Self {
             state,
             matchers,
             replay,
-            live: None,
-            next_live_sequence,
-            live_notify,
+            live: Some(live),
             terminated: false,
         }
     }
@@ -954,26 +982,27 @@ where
                         Ok(ReplayProgress::Frame(frame)) => return Some((Ok(frame), state)),
                         Ok(ReplayProgress::Advanced) => continue,
                         Ok(ReplayProgress::Done) => {}
-                        Err(err) => {
-                            state.terminated = true;
-                            return Some((Err(err), state));
-                        }
+                        Err(err) => return Some((state.terminate(err), state)),
                     }
                 }
 
-                match state.next_live_frame().await {
-                    Ok(LiveProgress::Frame(frame)) => return Some((Ok(frame), state)),
-                    Ok(LiveProgress::Advanced) => continue,
-                    Ok(LiveProgress::NeedWait) => {
-                        state.wait_for_live().await;
-                    }
-                    Err(err) => {
-                        state.terminated = true;
-                        return Some((Err(err), state));
-                    }
+                // The live sequence source only ends past u64::MAX, so an
+                // exhausted live stream ends the subscription.
+                let batch = state.live.as_mut()?.next().await?;
+                match state.resolve_batch(batch).await {
+                    Ok(Some(frame)) => return Some((Ok(frame), state)),
+                    Ok(None) => continue,
+                    Err(err) => return Some((state.terminate(err), state)),
                 }
             }
         }))
+    }
+
+    fn terminate(&mut self, err: ConnectError) -> Result<SubscribeResponse, ConnectError> {
+        self.terminated = true;
+        self.replay = None;
+        self.live = None;
+        Err(err)
     }
 
     async fn next_replay_frame(&mut self) -> Result<ReplayProgress, ConnectError> {
@@ -987,33 +1016,6 @@ where
         Ok(match self.resolve_batch(batch).await? {
             Some(frame) => ReplayProgress::Frame(frame),
             None => ReplayProgress::Advanced,
-        })
-    }
-
-    async fn next_live_frame(&mut self) -> Result<LiveProgress, ConnectError> {
-        if self.live.is_none() {
-            let Some(next_sequence) = self.next_live_sequence else {
-                return Ok(LiveProgress::NeedWait);
-            };
-            let current = self.state.notifier.current_sequence();
-            if next_sequence > current {
-                return Ok(LiveProgress::NeedWait);
-            }
-            self.live = Some(ordered_batch_stream(
-                self.state.log.clone(),
-                next_sequence..=current,
-                None,
-            ));
-            self.next_live_sequence = current.checked_add(1);
-        }
-
-        let Some(batch) = self.live.as_mut().expect("live stream exists").next().await else {
-            self.live = None;
-            return Ok(LiveProgress::Advanced);
-        };
-        Ok(match self.resolve_batch(batch).await? {
-            Some(frame) => LiveProgress::Frame(frame),
-            None => LiveProgress::Advanced,
         })
     }
 
@@ -1032,22 +1034,6 @@ where
             return Err(StreamConnect::<B>::batch_evicted_connect_error(oldest));
         };
         filtered_subscribe_response(&batch, &self.matchers)
-    }
-
-    fn live_available(&self) -> bool {
-        self.next_live_sequence
-            .is_some_and(|next| next <= self.state.notifier.current_sequence())
-    }
-
-    async fn wait_for_live(&mut self) {
-        if self.live_available() {
-            return;
-        }
-        let notified = self.live_notify.clone().notified_owned();
-        if self.live_available() {
-            return;
-        }
-        notified.await;
     }
 }
 
@@ -1096,8 +1082,8 @@ where
         let filter = domain_filter_from_subscribe_view(&request)?;
         let since = request.since_sequence_number;
 
-        // Snapshot the current published frontier and subscribe for future
-        // wakeups. Bounded lookahead overlaps log reads while retaining
+        // Snapshot the published frontier to bound replay and subscribe for
+        // live wakeups. Bounded lookahead overlaps log reads while retaining
         // client-driven backpressure.
         let matchers = crate::stream::compile_matchers(&filter)?;
         let subscription = self.state.notifier.subscribe();
@@ -1128,24 +1114,25 @@ where
                 Some(ReplayState {
                     batches: ordered_batch_stream(
                         self.state.log.clone(),
-                        s..=replay_bound,
+                        stream_util::iter(s..=replay_bound),
                         Some(first_batch),
                     ),
                 })
             }
             _ => None,
         };
-        let next_live_sequence = replay_bound.checked_add(1);
+        let live = ordered_batch_stream(
+            self.state.log.clone(),
+            live_sequence_stream(
+                self.state.notifier.clone(),
+                live_notify,
+                replay_bound.checked_add(1),
+            ),
+            None,
+        );
 
         Ok(connectrpc::Response::stream(
-            SubscriptionState::new(
-                self.state.clone(),
-                matchers,
-                replay,
-                next_live_sequence,
-                live_notify,
-            )
-            .into_stream(),
+            SubscriptionState::new(self.state.clone(), matchers, replay, live).into_stream(),
         ))
     }
 
@@ -2687,6 +2674,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dropping_subscription_cancels_in_flight_lookahead() {
+        let last_sequence = SUBSCRIBE_GET_BATCH_LOOKAHEAD as u64 + 1;
+        let engine = Arc::new(GatedLog::default());
+        for sequence_number in 1..=last_sequence {
+            engine.set_batch(
+                sequence_number,
+                vec![matching_kv(b"replay", &[sequence_number as u8])],
+            );
+        }
+        for sequence_number in 2..=last_sequence {
+            engine.gate(sequence_number);
+        }
+
+        let notifier = Arc::new(ManualNotifier::new(last_sequence));
+        let connect = StreamConnect::new(StreamState::new(engine.clone(), notifier));
+        let mut stream = subscribe_stream(&connect, Some(1))
+            .await
+            .expect("subscribe");
+
+        let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("first frame")
+            .expect("frame exists")
+            .expect("frame ok");
+        assert_eq!(first.sequence_number, 1);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), stream.next())
+                .await
+                .is_err(),
+            "gated batches must hold the stream pending",
+        );
+        engine.wait_for_started(last_sequence as usize).await;
+        assert_eq!(engine.in_flight(), SUBSCRIBE_GET_BATCH_LOOKAHEAD);
+
+        drop(stream);
+        assert_eq!(engine.in_flight(), 0);
+    }
+
+    #[tokio::test]
     async fn replay_lookahead_is_bounded_and_emits_in_order() {
         let last_sequence = SUBSCRIBE_GET_BATCH_LOOKAHEAD as u64 + 1;
         let engine = Arc::new(GatedLog::default());
@@ -2812,7 +2839,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replay_to_live_catch_up_uses_repeated_bounded_lookahead() {
+    async fn replay_to_live_catch_up_extends_bounded_lookahead() {
         const REPLAY_BOUND: u64 = 4;
 
         let first_live_bound = REPLAY_BOUND + SUBSCRIBE_GET_BATCH_LOOKAHEAD as u64;
@@ -2874,7 +2901,7 @@ mod tests {
             tokio::time::timeout(Duration::from_millis(50), frames.recv())
                 .await
                 .is_err(),
-            "live batches must remain ordered within a frontier snapshot",
+            "live batches must remain ordered within the lookahead",
         );
         assert_eq!(engine.started_sequences().len(), first_live_bound as usize);
 
@@ -2897,7 +2924,7 @@ mod tests {
             tokio::time::timeout(Duration::from_millis(50), frames.recv())
                 .await
                 .is_err(),
-            "a later frontier snapshot must preserve batch order",
+            "batches read past the old frontier must preserve batch order",
         );
 
         engine.release(first_live_bound + 1);
@@ -2907,6 +2934,59 @@ mod tests {
                 expected
             );
         }
+
+        reader.abort();
+        let _ = reader.await;
+    }
+
+    #[tokio::test]
+    async fn live_lookahead_extends_while_earlier_reads_are_in_flight() {
+        let last_sequence = 12u64;
+        let engine = Arc::new(GatedLog::default());
+        for sequence_number in 3..=last_sequence {
+            engine.set_batch(
+                sequence_number,
+                vec![matching_kv(b"live", &[sequence_number as u8])],
+            );
+            engine.gate(sequence_number);
+        }
+
+        let notifier = Arc::new(ManualNotifier::new(2));
+        let connect = StreamConnect::new(StreamState::new(engine.clone(), notifier.clone()));
+        let mut stream = subscribe_stream(&connect, None).await.expect("subscribe");
+        let (sender, mut frames) = tokio::sync::mpsc::unbounded_channel();
+        let reader = tokio::spawn(async move {
+            while let Some(frame) = stream.next().await {
+                if sender.send(frame).is_err() {
+                    return;
+                }
+            }
+        });
+
+        notifier.advance(4);
+        engine.wait_for_started(2).await;
+        assert_eq!(engine.in_flight(), 2);
+
+        // Reads past the old frontier must start while 3 and 4 are still in
+        // flight, rather than after the pre-advance window fully drains.
+        notifier.advance(last_sequence);
+        engine.wait_for_started(SUBSCRIBE_GET_BATCH_LOOKAHEAD).await;
+        assert_eq!(engine.in_flight(), SUBSCRIBE_GET_BATCH_LOOKAHEAD);
+        assert_eq!(
+            engine.started_sequences(),
+            (3..=2 + SUBSCRIBE_GET_BATCH_LOOKAHEAD as u64).collect::<Vec<_>>()
+        );
+
+        for sequence_number in 3..=last_sequence {
+            engine.release(sequence_number);
+        }
+        for expected in 3..=last_sequence {
+            assert_eq!(
+                next_subscribe_frame(&mut frames).await.sequence_number,
+                expected
+            );
+        }
+        assert_eq!(engine.max_in_flight(), SUBSCRIBE_GET_BATCH_LOOKAHEAD);
 
         reader.abort();
         let _ = reader.await;

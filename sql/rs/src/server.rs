@@ -341,6 +341,10 @@ type SubscriptionStream =
 
 enum StagedSubscriptionEvent {
     Frame(StreamSubscriptionFrame),
+    Terminal(TerminalSubscriptionEvent),
+}
+
+enum TerminalSubscriptionEvent {
     End,
     Error(ConnectError),
 }
@@ -400,22 +404,23 @@ impl BatchPredicateStream {
             std::task::Poll::Ready(Some(Ok(frame))) => {
                 std::task::Poll::Ready(StagedSubscriptionEvent::Frame(frame))
             }
-            std::task::Poll::Ready(Some(Err(err))) => {
-                std::task::Poll::Ready(StagedSubscriptionEvent::Error(err))
-            }
-            std::task::Poll::Ready(None) => std::task::Poll::Ready(StagedSubscriptionEvent::End),
+            std::task::Poll::Ready(Some(Err(err))) => std::task::Poll::Ready(
+                StagedSubscriptionEvent::Terminal(TerminalSubscriptionEvent::Error(err)),
+            ),
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(
+                StagedSubscriptionEvent::Terminal(TerminalSubscriptionEvent::End),
+            ),
         }
     }
 
     fn finish_event(
         &mut self,
-        event: StagedSubscriptionEvent,
+        event: TerminalSubscriptionEvent,
     ) -> Option<Result<SubscribeResponse, ConnectError>> {
         self.done = true;
         match event {
-            StagedSubscriptionEvent::End => None,
-            StagedSubscriptionEvent::Error(err) => Some(Err(err)),
-            StagedSubscriptionEvent::Frame(_) => unreachable!(),
+            TerminalSubscriptionEvent::End => None,
+            TerminalSubscriptionEvent::Error(err) => Some(Err(err)),
         }
     }
 }
@@ -481,8 +486,16 @@ impl Stream for BatchPredicateStream {
             match event {
                 StagedSubscriptionEvent::Frame(frame) => {
                     this.building = Some((this.evaluator)(frame));
+                    // Register upstream demand before the evaluation is first
+                    // polled, so the next frame is fetched during evaluations
+                    // that complete on their first poll.
+                    if let std::task::Poll::Ready(event) = this.poll_upstream(cx) {
+                        this.staged = Some(event);
+                    }
                 }
-                terminal => return std::task::Poll::Ready(this.finish_event(terminal)),
+                StagedSubscriptionEvent::Terminal(terminal) => {
+                    return std::task::Poll::Ready(this.finish_event(terminal))
+                }
             }
         }
     }
@@ -923,6 +936,27 @@ mod tests {
             .next()
             .now_or_never()
             .expect("stream should be ready")
+    }
+
+    #[test]
+    fn prefetches_upstream_when_evaluation_completes_synchronously() {
+        let (input, polls) =
+            controlled_input([ControlledEvent::Frame(1), ControlledEvent::Frame(2)]);
+        // Mirrors evaluate_batch for the empty-WHERE path and for simple
+        // predicates over a single MemTable batch. Those futures have no
+        // yielding await points, so they are Ready on the first poll.
+        let evaluator = |frame: StreamSubscriptionFrame| {
+            let sequence_number = frame.sequence_number;
+            async move { Ok::<_, ConnectError>(Some(response(sequence_number))) }
+        };
+        let mut stream = BatchPredicateStream::with_evaluator(input, evaluator);
+
+        assert_eq!(next_ready(&mut stream).unwrap().unwrap().sequence_number, 1);
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            2,
+            "frame 2 should be pulled from upstream while frame 1 evaluates",
+        );
     }
 
     #[test]
