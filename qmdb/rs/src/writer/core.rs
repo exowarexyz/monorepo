@@ -147,7 +147,7 @@ impl<D: Digest, F: Family, S: Strategy> WriterCore<D, F, S> {
         }
     }
 
-    /// Serialize frontier builds without holding the state mutex during CPU
+    /// Serialize builds without holding the state mutex during CPU
     /// work. State changes only after a successful build, so cancellation or
     /// poisoning leaves the previous frontier intact.
     pub(crate) async fn prepare<R>(
