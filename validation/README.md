@@ -73,13 +73,13 @@ Benchmark JSON reports include the normalized config, seed, counters, and per-op
 
 Generated load and benchmark keys open with a byte derived from the logical index, so a run's keys spread across the entire physical key range instead of sharing a fixed prefix. Standard validation instead uses its own contiguous key layout, keeping its whole-keyspace range checks bounded to the rows it owns.
 
-`bench` reports `scan_rows` as every physical row returned by the store, including rows from other namespaces in the sampled interval. Compare scan latency and row counts only between runs against the same controlled fixture; the action's simulator reports are functionality artifacts, not cross-environment performance evidence.
+`bench` scans seek forward from one sampled key within the ordered range that shares its leading byte. `--scan-length` caps returned rows. A scan can return fewer rows when it reaches the end of that prefix range. This keeps the requested key range narrow even though generated keys spread across the full keyspace. `scan_rows` counts every physical row returned, including rows from other namespaces after the seek point. Compare scan latency and row counts only between runs against the same controlled fixture. The action's simulator reports are functionality artifacts rather than cross-environment performance evidence.
 
 `load`, `bench`, and `validate` accept `--value-size` (bytes, default 160) to control generated value size. Pass the same `--value-size` to `load` and a reading `bench` so writes appended during the benchmark match the loaded data.
 
 ## Benchmark Manifests
 
-`validation bench --manifest <path>` accepts the normalized `config` and `seed` fields from a benchmark JSON report, so a run can be replayed without reconstructing CLI flags. For a fixed manifest, each worker repeats its logical operation stream and its appended-key allocation independent of task scheduling. A manifest whose key, value, or workload-generator version differs from the current binary is rejected rather than silently replayed with different data. A minimal manifest has this shape:
+`validation bench --manifest <path>` accepts the normalized `config` and `seed` fields from a benchmark JSON report, so a run can be replayed without reconstructing CLI flags. The config includes request compression because it materially affects measured throughput. For a fixed manifest and the same acknowledged write outcomes, each worker repeats its logical operation stream and its appended-key allocation independent of task scheduling. A manifest whose key, value, or workload-generator version differs from the current binary is rejected rather than silently replayed with different data. A minimal manifest has this shape:
 
 ```json
 {
@@ -104,8 +104,9 @@ Generated load and benchmark keys open with a byte derived from the logical inde
     "batch_size": 100,
     "keyspace_layout_version": 2,
     "value_generator_version": 1,
-    "workload_generator_version": 3,
-    "read_retry_attempts": 3
+    "workload_generator_version": 7,
+    "read_retry_attempts": 3,
+    "request_compression": "zstd"
   },
   "seed": 1592639710
 }

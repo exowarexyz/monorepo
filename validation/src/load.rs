@@ -232,6 +232,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::client::RequestCompression;
     use crate::keyspace::DEFAULT_KEY_LEN;
     use axum::Router;
     use connectrpc::{ConnectError, ConnectRpcService, RequestContext};
@@ -303,6 +304,7 @@ mod tests {
             client: ClientArgs {
                 url: "http://localhost:10000/".to_string(),
                 read_retry_attempts: 3,
+                request_compression: RequestCompression::default(),
             },
             keys: 100,
             batch_size: 25,

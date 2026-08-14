@@ -2,10 +2,37 @@ use std::time::Duration;
 
 use anyhow::{ensure, Context};
 use connectrpc::ErrorCode;
-use exoware_sdk::{ClientError, PrefixedStoreClient, RetryConfig, StoreClient};
+use exoware_sdk::{
+    ClientError, ConnectRequestCompression, PrefixedStoreClient, RetryConfig, StoreClient,
+};
+use serde::{Deserialize, Serialize};
 
 const DEFAULT_INITIAL_BACKOFF_MS: u64 = 50;
 const DEFAULT_MAX_BACKOFF_MS: u64 = 1_000;
+
+// Deterministic validation values contain long zero-filled regions. Zstd keeps
+// generated write batches small without changing the SDK default for callers
+// with less compressible payloads.
+/// Request-body compression for outgoing RPCs.
+#[derive(Copy, Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+#[value(rename_all = "kebab-case")]
+pub enum RequestCompression {
+    #[default]
+    Zstd,
+    Gzip,
+    None,
+}
+
+impl From<RequestCompression> for ConnectRequestCompression {
+    fn from(value: RequestCompression) -> Self {
+        match value {
+            RequestCompression::Zstd => Self::Zstd,
+            RequestCompression::Gzip => Self::Gzip,
+            RequestCompression::None => Self::None,
+        }
+    }
+}
 
 /// Shared SDK client CLI flags for validation commands.
 #[derive(clap::Args, Clone, Debug)]
@@ -15,11 +42,15 @@ pub struct ClientArgs {
     /// Max client read retry attempts for lookup/range calls.
     #[arg(long, default_value_t = 3)]
     pub read_retry_attempts: usize,
+    /// Request-body compression for outgoing RPCs.
+    #[arg(long, value_enum, default_value_t = RequestCompression::Zstd)]
+    pub request_compression: RequestCompression,
 }
 
 impl ClientArgs {
     pub fn into_config(self) -> anyhow::Result<ClientConfig> {
-        ClientConfig::new(self.url, self.read_retry_attempts)
+        Ok(ClientConfig::new(self.url, self.read_retry_attempts)?
+            .with_request_compression(self.request_compression))
     }
 }
 
@@ -28,6 +59,7 @@ impl ClientArgs {
 pub struct ClientConfig {
     endpoint: String,
     read_retry_attempts: usize,
+    request_compression: RequestCompression,
 }
 
 impl ClientConfig {
@@ -36,9 +68,16 @@ impl ClientConfig {
         let config = Self {
             endpoint: normalize_endpoint(&endpoint.into()),
             read_retry_attempts,
+            request_compression: RequestCompression::default(),
         };
         validate_config(&config)?;
         Ok(config)
+    }
+
+    /// Overrides the request-body compression (see [`RequestCompression`]).
+    pub fn with_request_compression(mut self, compression: RequestCompression) -> Self {
+        self.request_compression = compression;
+        self
     }
 
     /// Returns the normalized endpoint passed to the SDK client.
@@ -50,12 +89,18 @@ impl ClientConfig {
     pub fn read_retry_attempts(&self) -> usize {
         self.read_retry_attempts
     }
+
+    /// Returns the request-body compression used by the SDK client.
+    pub fn request_compression(&self) -> RequestCompression {
+        self.request_compression
+    }
 }
 
 /// Constructs the SDK client used by load, bench, and validate commands.
 pub fn build_client(config: &ClientConfig) -> anyhow::Result<PrefixedStoreClient> {
     let client = StoreClient::builder()
         .url(config.endpoint())
+        .connect_request_compression(config.request_compression.into())
         .retry_config(
             RetryConfig::standard()
                 .with_max_attempts(config.read_retry_attempts())
@@ -166,6 +211,7 @@ mod tests {
         let config = ClientConfig {
             endpoint: "http://[::1".to_string(),
             read_retry_attempts: 3,
+            request_compression: RequestCompression::default(),
         };
         build_client(&config).expect_err("malformed endpoint should be rejected");
     }
