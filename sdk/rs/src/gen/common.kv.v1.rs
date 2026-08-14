@@ -174,7 +174,7 @@ pub const __ENTRY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type
 };
 /// Identifies a subset of keys by a byte prefix and a byte regex over the
 /// payload portion of each key (the bytes after the prefix). Shared across
-/// `store.compact.v1` prune policies, `log.stream.v1` subscriptions, and any
+/// `store.prune.v1` prune policies, `log.stream.v1` subscriptions, and any
 /// future filter-by-key surface so that one domain type is used end-to-end.
 ///
 /// Named capture groups referenced by callers (e.g. `PolicyGroupBy` /
@@ -924,7 +924,7 @@ pub mod __buffa {
         }
         /// Identifies a subset of keys by a byte prefix and a byte regex over the
         /// payload portion of each key (the bytes after the prefix). Shared across
-        /// `store.compact.v1` prune policies, `log.stream.v1` subscriptions, and any
+        /// `store.prune.v1` prune policies, `log.stream.v1` subscriptions, and any
         /// future filter-by-key surface so that one domain type is used end-to-end.
         ///
         /// Named capture groups referenced by callers (e.g. `PolicyGroupBy` /
