@@ -591,10 +591,9 @@ where
         },
     )?;
 
-    let batch = leaf_digests.into_iter().fold(
-        mem.new_batch_with_strategy(strategy.clone()),
-        |batch, digest| batch.add_leaf_digest(digest),
-    );
+    let batch = mem
+        .new_batch_with_strategy(strategy.clone())
+        .add_leaf_digests(leaf_digests);
     let batch = batch.merkleize(&mem, &hasher);
     let size = batch.size();
     let new_nodes = (*previous_size..*size)
