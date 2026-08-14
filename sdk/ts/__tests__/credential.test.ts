@@ -1,5 +1,14 @@
 import { Code, ConnectError } from '@connectrpc/connect';
 
+/**
+ * Stands in for the environment lookup, so no assertion here depends on whether the developer
+ * running the suite happens to have `EXOWARE_API_KEY` exported.
+ */
+jest.mock('../src/credential', () => ({
+    ...jest.requireActual('../src/credential'),
+    environmentApiKey: jest.fn(),
+}));
+
 import { Client } from '../src/client';
 import {
     API_KEY_ENV,
@@ -18,6 +27,16 @@ const PROXY_REJECTION =
 
 /** A byte no base64url token contains, so the value is broken config rather than a near-miss. */
 const UNUSABLE = 'has\nnewline';
+
+/** Sets what the environment appears to hold for the rest of the current test. */
+function givenEnvironmentKey(key: string | undefined): void {
+    jest.mocked(environmentApiKey).mockReturnValue(key);
+}
+
+// Every test starts from an environment holding nothing, and says so when it wants otherwise.
+beforeEach(() => {
+    givenEnvironmentKey(undefined);
+});
 
 describe('resolveCredential', () => {
     test('an explicit token wins over the environment', () => {
@@ -111,6 +130,12 @@ describe('Client credential', () => {
         expect(new Client('http://localhost:10000').credential).toBe('absent');
     });
 
+    test('a token from the environment counts as one that will be sent', () => {
+        givenEnvironmentKey('from-env');
+
+        expect(new Client('http://localhost:10000').credential).toBe('sent');
+    });
+
     test('an unusable token fails construction', () => {
         expect(() => new Client('http://localhost:10000', UNUSABLE)).toThrow(InvalidApiKeyError);
     });
@@ -166,13 +191,22 @@ describe('the Authorization header actually sent', () => {
         expect(sent()).toBe('Bearer caller-token');
     });
 
-    test('a caller-supplied credential survives a token from the environment', async () => {
-        // The regression this guards: an ambient variable must not replace a per-call credential.
+    test('a token from the environment is sent when the caller supplies none', async () => {
+        givenEnvironmentKey('from-env');
         const sent = captureAuthorization();
-        const client = new Client('http://localhost:10000', {
-            token: environmentApiKey() ?? 'from-env',
+        await get(new Client('http://localhost:10000'));
+
+        expect(sent()).toBe('Bearer from-env');
+    });
+
+    test('a caller-supplied credential survives a token from the environment', async () => {
+        // The regression this guards: a variable the caller never passed, and may not know is set,
+        // must not replace the credential they attached to this call.
+        givenEnvironmentKey('from-env');
+        const sent = captureAuthorization();
+        await get(new Client('http://localhost:10000'), {
+            Authorization: 'Bearer caller-token',
         });
-        await get(client, { Authorization: 'Bearer caller-token' });
 
         expect(sent()).toBe('Bearer caller-token');
     });

@@ -2,6 +2,17 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { create } from '@bufbuild/protobuf';
+
+/**
+ * These tests reach a local simulator that authenticates nothing, so the client is built without a
+ * credential regardless of what the developer running them has exported. `credential.test.ts` is
+ * where the environment lookup itself is covered.
+ */
+jest.mock('../src/credential', () => ({
+    ...jest.requireActual('../src/credential'),
+    environmentApiKey: () => undefined,
+}));
+
 import { Client } from '../src/client';
 import { StoreKeyPrefix, StoreWriteBatch, TraversalMode } from '../src/store';
 import {
