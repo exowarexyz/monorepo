@@ -19,5 +19,14 @@ pub use engine::{
     RangeScanBatch, Retention, Sequence, StoreEngine,
 };
 pub use reduce::RangeError;
-pub use stream::{CompiledMatchers, StreamHub, StreamNotification, StreamNotifier};
+pub use stream::{CompiledMatchers, InvalidFilter, StreamHub, StreamNotification, StreamNotifier};
 pub use validate::{IngestLimits, DEFAULT_MAX_VALUE_LEN};
+
+/// Types used by filtered-batch and matcher APIs, re-exported so backends can
+/// use the server API without a version-matched direct SDK dependency.
+pub use exoware_sdk::{
+    common::kv::v1::Entry,
+    kv_codec::Utf8,
+    selector::Selector,
+    stream_filter::{Filter, StreamFilter},
+};

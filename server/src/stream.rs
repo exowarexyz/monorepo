@@ -37,6 +37,14 @@ struct CompiledKeyMatcher {
     regex: Regex,
 }
 
+/// A stream filter rejected during validation or compilation.
+///
+/// Messages describe the invalid selector or value filter and are safe to
+/// surface to clients.
+#[derive(Clone, Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct InvalidFilter(String);
+
 /// Validated stream matchers compiled for repeated evaluation.
 #[derive(Clone, Debug)]
 pub struct CompiledMatchers {
@@ -45,6 +53,35 @@ pub struct CompiledMatchers {
 }
 
 impl CompiledMatchers {
+    /// Validate and compile a `StreamFilter`.
+    pub fn compile(filter: &StreamFilter) -> Result<Self, InvalidFilter> {
+        validate_filter(filter).map_err(|e| InvalidFilter(e.to_string()))?;
+        let keys = filter
+            .selectors
+            .iter()
+            .map(|mk| {
+                let regex = compile_payload_regex(&mk.payload_regex)
+                    .map_err(|e| InvalidFilter(e.to_string()))?;
+                let prefix =
+                    Prefix::new(mk.prefix.clone()).map_err(|e| InvalidFilter(e.to_string()))?;
+                Ok(CompiledKeyMatcher { prefix, regex })
+            })
+            .collect::<Result<Vec<_>, InvalidFilter>>()?;
+        let values = CompiledFilters::compile(&filter.value_filters)
+            .map_err(|e| InvalidFilter(format!("invalid value_filter: {e}")))?;
+        Ok(Self { keys, values })
+    }
+
+    /// Return whether both predicates accept an already-resolved entry.
+    ///
+    /// The key predicate runs first, so key-excluded entries avoid the
+    /// value-filter scan. Implementations that resolve values lazily must call
+    /// [`Self::matches_key`] before resolving the value and
+    /// [`Self::matches_value`] afterward.
+    pub fn matches(&self, key: &[u8], value: &[u8]) -> bool {
+        self.matches_key(key) && self.matches_value(value)
+    }
+
     /// Return whether any selector matches the key.
     ///
     /// Selector regular expressions evaluate bytes after the matching prefix.
@@ -71,29 +108,13 @@ impl CompiledMatchers {
 /// delivery so both paths match identically and regexes are compiled once per
 /// subscribe.
 pub(crate) fn compile_matchers(filter: &StreamFilter) -> Result<CompiledMatchers, ConnectError> {
-    validate_filter(filter).map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
-    let keys = filter
-        .selectors
-        .iter()
-        .map(|mk| {
-            let regex = compile_payload_regex(&mk.payload_regex)
-                .map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
-            let prefix = Prefix::new(mk.prefix.clone())
-                .map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
-            Ok(CompiledKeyMatcher { prefix, regex })
-        })
-        .collect::<Result<Vec<_>, ConnectError>>()?;
-    let values = CompiledFilters::compile(&filter.value_filters)
-        .map_err(|e| ConnectError::invalid_argument(format!("invalid value_filter: {e}")))?;
-    Ok(CompiledMatchers { keys, values })
+    CompiledMatchers::compile(filter).map_err(|e| ConnectError::invalid_argument(e.to_string()))
 }
 
 /// Apply compiled matchers while consuming the source entries.
 pub(crate) fn apply_filter(matchers: &CompiledMatchers, kvs: Vec<Entry>) -> Vec<Entry> {
     kvs.into_iter()
-        .filter(|kv| {
-            matchers.matches_value(kv.value.as_ref()) && matchers.matches_key(kv.key.as_ref())
-        })
+        .filter(|kv| matchers.matches(kv.key.as_ref(), kv.value.as_ref()))
         .collect()
 }
 
@@ -157,11 +178,9 @@ impl StreamNotifier for StreamHub {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Filter, Selector, StreamFilter, Utf8};
     use bytes::Bytes;
     use exoware_sdk::keys::Key;
-    use exoware_sdk::kv_codec::Utf8;
-    use exoware_sdk::selector::Selector;
-    use exoware_sdk::stream_filter::Filter;
 
     fn filter(prefix: u8, regex: &str) -> StreamFilter {
         StreamFilter {
@@ -264,6 +283,98 @@ mod tests {
         let kvs = vec![kv(1, b"a", b"one"), kv(1, b"b", b"two")];
         let entries = apply_filter(&matchers, kvs);
         assert_eq!(entries.len(), 2);
+    }
+
+    // Verbatim copy of the pre-refactor apply_filter loop. The differential
+    // test below pins the rewrite to the old first-match-wins semantics.
+    fn apply_filter_reference(matchers: &CompiledMatchers, kvs: &[Entry]) -> Vec<Entry> {
+        let mut out = Vec::with_capacity(kvs.len());
+        'outer: for kv in kvs {
+            let v = kv.value.as_ref();
+            let value_ok = matchers.values.as_ref().is_none_or(|m| m.matches(v));
+            if !value_ok {
+                continue;
+            }
+            for matcher in &matchers.keys {
+                let Some(payload) = matcher.prefix.strip_slice(&kv.key) else {
+                    continue;
+                };
+                if matcher.regex.is_match(payload) {
+                    out.push(kv.clone());
+                    continue 'outer;
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn apply_filter_matches_reference_implementation() {
+        let overlapping = StreamFilter {
+            selectors: vec![
+                Selector {
+                    prefix: Bytes::from_static(&[1]),
+                    payload_regex: Utf8::from("^a"),
+                },
+                Selector {
+                    prefix: Bytes::from_static(&[1]),
+                    payload_regex: Utf8::from("b$"),
+                },
+                Selector {
+                    prefix: Bytes::from_static(&[2]),
+                    payload_regex: Utf8::from("(?s).*"),
+                },
+            ],
+            value_filters: vec![],
+        };
+        let with_values = StreamFilter {
+            value_filters: vec![
+                Filter::Prefix(Bytes::from_static(b"keep")),
+                Filter::Exact(Bytes::from_static(b"exact")),
+                Filter::Regex("^regex$".into()),
+            ],
+            ..overlapping.clone()
+        };
+        let entries = vec![
+            // Matches both prefix-1 selectors and must appear exactly once.
+            kv(1, b"ab", b"keep-anything"),
+            kv(1, b"aX", b"exact"),
+            kv(1, b"Xb", b"regex"),
+            kv(1, b"XX", b"keep"),
+            kv(1, b"", b"keep"),
+            kv(2, b"", b"exact"),
+            kv(2, b"anything", b"drop"),
+            kv(3, b"ab", b"keep"),
+            // Duplicate entry preserves multiplicity.
+            kv(1, b"ab", b"keep-anything"),
+            kv(1, b"ab", b"nope"),
+        ];
+
+        for filter in [overlapping, with_values] {
+            let matchers = compile_matchers(&filter).unwrap();
+            let expected = apply_filter_reference(&matchers, &entries);
+            let actual = apply_filter(&matchers, entries.clone());
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn public_compile_builds_usable_matchers_and_rejects_invalid_filters() {
+        let matchers = CompiledMatchers::compile(&filter_with_values(
+            1,
+            "^hit$",
+            vec![Filter::Exact(Bytes::from_static(b"v"))],
+        ))
+        .expect("compile");
+        assert!(matchers.matches(key(1, b"hit").as_ref(), b"v"));
+        assert!(!matchers.matches(key(1, b"miss").as_ref(), b"v"));
+        assert!(!matchers.matches(key(1, b"hit").as_ref(), b"other"));
+
+        let invalid = StreamFilter {
+            selectors: vec![],
+            value_filters: vec![],
+        };
+        assert!(CompiledMatchers::compile(&invalid).is_err());
     }
 
     #[test]

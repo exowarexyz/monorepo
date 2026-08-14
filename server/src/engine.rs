@@ -172,10 +172,11 @@ impl LogBatch {
 
 /// Filtered and fully resolved entries from a retained sequence batch.
 ///
-/// An empty entry list represents a retained batch with no matches.
+/// An empty entry list represents a retained batch with no matches. Subscribe
+/// frames are stamped with the sequence number the read was requested under,
+/// so a filtered batch carries no sequence number a backend could misstamp.
 #[derive(Clone, Debug)]
 pub struct FilteredBatch {
-    sequence_number: u64,
     entries: Vec<Entry>,
 }
 
@@ -183,16 +184,22 @@ impl FilteredBatch {
     /// Build a filtered batch from owned caller-visible entries.
     ///
     /// Values must contain resolved payload bytes.
-    pub fn from_entries(sequence_number: u64, entries: Vec<Entry>) -> Self {
-        Self {
-            sequence_number,
-            entries,
-        }
+    pub fn from_entries(entries: Vec<Entry>) -> Self {
+        Self { entries }
     }
 
-    /// Sequence number under which this batch was loaded.
-    pub fn sequence_number(&self) -> u64 {
-        self.sequence_number
+    /// Build a filtered batch from resolved key-value pairs.
+    pub fn from_kvs(kvs: Vec<(Bytes, Bytes)>) -> Self {
+        Self {
+            entries: kvs
+                .into_iter()
+                .map(|(key, value)| Entry {
+                    key: key.to_vec(),
+                    value,
+                    ..Default::default()
+                })
+                .collect(),
+        }
     }
 
     /// Consume the batch into its entries.
@@ -219,13 +226,23 @@ pub trait Log: Sequence {
         sequence_number: u64,
     ) -> impl Future<Output = Result<Option<LogBatch>, String>> + Send;
 
-    /// Return fully resolved matching entries from a retained sequence batch.
+    /// Return fully resolved matching entries from the batch assigned
+    /// `sequence_number`.
     ///
     /// Return `Some` with no entries when the batch is retained but no entries
     /// match. Return `None` only when the batch is unavailable.
     ///
-    /// Optimized implementations only need to resolve entries whose keys match.
-    /// Failures confined to key-excluded values do not fail the filtered read.
+    /// An entry matches only when [`CompiledMatchers::matches_key`] accepts its
+    /// key and [`CompiledMatchers::matches_value`] accepts its resolved value.
+    /// Matching entries must keep their original batch order and multiplicity
+    /// without truncation, so subscribers observe the same frames the default
+    /// implementation would produce. Subscribe frames are stamped with the
+    /// requested `sequence_number`, so entries taken from any other batch would
+    /// be delivered under the wrong resume cursor.
+    ///
+    /// Optimized implementations must call `matches_key` before resolving a
+    /// value and `matches_value` afterward. Failures confined to key-excluded
+    /// values do not fail the filtered read.
     fn get_batch_filtered(
         &self,
         sequence_number: u64,
@@ -235,10 +252,9 @@ pub trait Log: Sequence {
             let Some(batch) = self.get_batch(sequence_number).await? else {
                 return Ok(None);
             };
-            let sequence_number = batch.sequence_number();
             let response = batch.decode_response()?;
             let entries = apply_filter(matchers, response.entries);
-            Ok(Some(FilteredBatch::from_entries(sequence_number, entries)))
+            Ok(Some(FilteredBatch::from_entries(entries)))
         }
     }
 
@@ -327,7 +343,6 @@ mod tests {
         let filtered = futures::executor::block_on(log.get_batch_filtered(1, &matchers()))
             .unwrap()
             .unwrap();
-        assert_eq!(filtered.sequence_number(), 1);
         let entries = filtered.into_entries();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].value.as_ref(), b"one");
