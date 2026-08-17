@@ -44,9 +44,9 @@ use exoware_sdk::keys::Key;
 use exoware_sdk::kv_codec::{decode_stored_row, Utf8};
 use exoware_sdk::selector::Selector;
 use exoware_sdk::stream_filter::StreamFilter;
-use exoware_sdk::{PrefixedStoreClient, StreamSubscription};
+use exoware_sdk::{PrefixedStoreClient, StreamSubscription, StreamSubscriptionFrame};
 use futures::future::BoxFuture;
-use futures::stream::Stream;
+use futures::stream::{self, Stream};
 use futures::FutureExt;
 
 use crate::builder::{projected_column_indices, ProjectedBatchBuilder};
@@ -334,12 +334,27 @@ impl Service for SqlConnect {
     }
 }
 
+type BatchEvaluation = BoxFuture<'static, Result<Option<SubscribeResponse>, ConnectError>>;
+type BatchEvaluator = Box<dyn FnMut(StreamSubscriptionFrame) -> BatchEvaluation + Send>;
+type SubscriptionStream =
+    Pin<Box<dyn Stream<Item = Result<StreamSubscriptionFrame, ConnectError>> + Send>>;
+
+enum StagedSubscriptionEvent {
+    Frame(StreamSubscriptionFrame),
+    Terminal(TerminalSubscriptionEvent),
+}
+
+enum TerminalSubscriptionEvent {
+    End,
+    Error(ConnectError),
+}
+
 struct BatchPredicateStream {
-    sub: StreamSubscription,
-    state: TableStream,
-    table_name: String,
-    where_sql: String,
-    building: Option<BoxFuture<'static, Result<Option<SubscribeResponse>, ConnectError>>>,
+    upstream: SubscriptionStream,
+    evaluator: BatchEvaluator,
+    building: Option<BatchEvaluation>,
+    staged: Option<StagedSubscriptionEvent>,
+    done: bool,
 }
 
 impl BatchPredicateStream {
@@ -349,14 +364,76 @@ impl BatchPredicateStream {
         table_name: String,
         where_sql: String,
     ) -> Self {
+        let upstream = subscription_stream(sub);
+        let evaluator = move |frame: StreamSubscriptionFrame| {
+            let sequence_number = frame.sequence_number;
+            let entries = frame
+                .entries
+                .into_iter()
+                .map(|entry| (entry.key, entry.value))
+                .collect();
+            let state = state.clone();
+            let table_name = table_name.clone();
+            let where_sql = where_sql.clone();
+            async move { evaluate_batch(state, table_name, where_sql, sequence_number, entries).await }
+        };
+        Self::with_evaluator(upstream, evaluator)
+    }
+
+    fn with_evaluator<S, E, F>(upstream: S, mut evaluator: E) -> Self
+    where
+        S: Stream<Item = Result<StreamSubscriptionFrame, ConnectError>> + Send + 'static,
+        E: FnMut(StreamSubscriptionFrame) -> F + Send + 'static,
+        F: Future<Output = Result<Option<SubscribeResponse>, ConnectError>> + Send + 'static,
+    {
         Self {
-            sub,
-            state,
-            table_name,
-            where_sql,
+            upstream: Box::pin(upstream),
+            evaluator: Box::new(move |frame| evaluator(frame).boxed()),
             building: None,
+            staged: None,
+            done: false,
         }
     }
+
+    fn poll_upstream(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<StagedSubscriptionEvent> {
+        match self.upstream.as_mut().poll_next(cx) {
+            std::task::Poll::Pending => std::task::Poll::Pending,
+            std::task::Poll::Ready(Some(Ok(frame))) => {
+                std::task::Poll::Ready(StagedSubscriptionEvent::Frame(frame))
+            }
+            std::task::Poll::Ready(Some(Err(err))) => std::task::Poll::Ready(
+                StagedSubscriptionEvent::Terminal(TerminalSubscriptionEvent::Error(err)),
+            ),
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(
+                StagedSubscriptionEvent::Terminal(TerminalSubscriptionEvent::End),
+            ),
+        }
+    }
+
+    fn finish_event(
+        &mut self,
+        event: TerminalSubscriptionEvent,
+    ) -> Option<Result<SubscribeResponse, ConnectError>> {
+        self.done = true;
+        match event {
+            TerminalSubscriptionEvent::End => None,
+            TerminalSubscriptionEvent::Error(err) => Some(Err(err)),
+        }
+    }
+}
+
+fn subscription_stream(sub: StreamSubscription) -> SubscriptionStream {
+    Box::pin(stream::unfold(Some(sub), |sub| async move {
+        let mut sub = sub?;
+        match sub.next().await {
+            Ok(Some(frame)) => Some((Ok(frame), Some(sub))),
+            Ok(None) => None,
+            Err(err) => Some((Err(client_error_to_connect(err)), None)),
+        }
+    }))
 }
 
 impl Stream for BatchPredicateStream {
@@ -367,10 +444,21 @@ impl Stream for BatchPredicateStream {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        if this.done {
+            return std::task::Poll::Ready(None);
+        }
+
         loop {
             if let Some(fut) = this.building.as_mut() {
                 match fut.as_mut().poll(cx) {
-                    std::task::Poll::Pending => return std::task::Poll::Pending,
+                    std::task::Poll::Pending => {
+                        if this.staged.is_none() {
+                            if let std::task::Poll::Ready(event) = this.poll_upstream(cx) {
+                                this.staged = Some(event);
+                            }
+                        }
+                        return std::task::Poll::Pending;
+                    }
                     std::task::Poll::Ready(Ok(Some(resp))) => {
                         this.building = None;
                         return std::task::Poll::Ready(Some(Ok(resp)));
@@ -380,39 +468,35 @@ impl Stream for BatchPredicateStream {
                     }
                     std::task::Poll::Ready(Err(err)) => {
                         this.building = None;
+                        this.staged = None;
+                        this.done = true;
                         return std::task::Poll::Ready(Some(Err(err)));
                     }
                 }
             }
 
-            let frame = {
-                let next_fut = this.sub.next();
-                tokio::pin!(next_fut);
-                match next_fut.as_mut().poll(cx) {
-                    std::task::Poll::Ready(Ok(Some(frame))) => frame,
-                    std::task::Poll::Ready(Ok(None)) => return std::task::Poll::Ready(None),
-                    std::task::Poll::Ready(Err(err)) => {
-                        return std::task::Poll::Ready(Some(Err(client_error_to_connect(err))));
-                    }
+            let event = match this.staged.take() {
+                Some(event) => event,
+                None => match this.poll_upstream(cx) {
                     std::task::Poll::Pending => return std::task::Poll::Pending,
-                }
+                    std::task::Poll::Ready(event) => event,
+                },
             };
 
-            let sequence_number = frame.sequence_number;
-            let entries: Vec<(Key, Bytes)> = frame
-                .entries
-                .into_iter()
-                .map(|entry| (entry.key, entry.value))
-                .collect();
-            let state = this.state.clone();
-            let table_name = this.table_name.clone();
-            let where_sql = this.where_sql.clone();
-            this.building = Some(
-                async move {
-                    evaluate_batch(state, table_name, where_sql, sequence_number, entries).await
+            match event {
+                StagedSubscriptionEvent::Frame(frame) => {
+                    this.building = Some((this.evaluator)(frame));
+                    // Register upstream demand before the evaluation is first
+                    // polled, so the next frame is fetched during evaluations
+                    // that complete on their first poll.
+                    if let std::task::Poll::Ready(event) = this.poll_upstream(cx) {
+                        this.staged = Some(event);
+                    }
                 }
-                .boxed(),
-            );
+                StagedSubscriptionEvent::Terminal(terminal) => {
+                    return std::task::Poll::Ready(this.finish_event(terminal))
+                }
+            }
         }
     }
 }
@@ -727,6 +811,297 @@ fn _assert_projected_column_indices_visible() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    use futures::channel::oneshot;
+    use futures::StreamExt;
+
+    enum ControlledEvent {
+        Frame(u64),
+        End,
+        Error,
+    }
+
+    struct ControlledInput {
+        events: VecDeque<ControlledEvent>,
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl Stream for ControlledInput {
+        type Item = Result<StreamSubscriptionFrame, ConnectError>;
+
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            match self.events.pop_front() {
+                Some(ControlledEvent::Frame(sequence_number)) => {
+                    std::task::Poll::Ready(Some(Ok(StreamSubscriptionFrame {
+                        sequence_number,
+                        entries: Vec::new(),
+                    })))
+                }
+                Some(ControlledEvent::End) => std::task::Poll::Ready(None),
+                Some(ControlledEvent::Error) => {
+                    std::task::Poll::Ready(Some(Err(ConnectError::internal("upstream failed"))))
+                }
+                None => std::task::Poll::Pending,
+            }
+        }
+    }
+
+    struct ActiveEvaluation(Arc<AtomicUsize>);
+
+    impl Drop for ActiveEvaluation {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    type EvaluationResult = Result<Option<SubscribeResponse>, ConnectError>;
+
+    struct ControlledEvaluator {
+        evaluator: BatchEvaluator,
+        senders: HashMap<u64, oneshot::Sender<EvaluationResult>>,
+        started: Arc<Mutex<Vec<u64>>>,
+        max_active: Arc<AtomicUsize>,
+    }
+
+    fn controlled_input(
+        events: impl IntoIterator<Item = ControlledEvent>,
+    ) -> (ControlledInput, Arc<AtomicUsize>) {
+        let polls = Arc::new(AtomicUsize::new(0));
+        (
+            ControlledInput {
+                events: events.into_iter().collect(),
+                polls: polls.clone(),
+            },
+            polls,
+        )
+    }
+
+    fn controlled_evaluator(sequence_numbers: &[u64]) -> ControlledEvaluator {
+        let mut senders = HashMap::new();
+        let mut receivers = HashMap::new();
+        for &sequence_number in sequence_numbers {
+            let (sender, receiver) = oneshot::channel();
+            senders.insert(sequence_number, sender);
+            receivers.insert(sequence_number, receiver);
+        }
+
+        let started = Arc::new(Mutex::new(Vec::new()));
+        let evaluator_started = started.clone();
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let evaluator_active = active.clone();
+        let evaluator_max_active = max_active.clone();
+        let evaluator: BatchEvaluator = Box::new(move |frame| {
+            let sequence_number = frame.sequence_number;
+            evaluator_started.lock().unwrap().push(sequence_number);
+            let receiver = receivers
+                .remove(&sequence_number)
+                .expect("evaluation receiver");
+            let active = evaluator_active.clone();
+            let max_active = evaluator_max_active.clone();
+            async move {
+                let active_count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                max_active.fetch_max(active_count, Ordering::SeqCst);
+                let _active = ActiveEvaluation(active);
+                receiver.await.expect("evaluation result")
+            }
+            .boxed()
+        });
+        ControlledEvaluator {
+            evaluator,
+            senders,
+            started,
+            max_active,
+        }
+    }
+
+    fn response(sequence_number: u64) -> SubscribeResponse {
+        SubscribeResponse {
+            sequence_number,
+            ..Default::default()
+        }
+    }
+
+    fn next_ready(
+        stream: &mut BatchPredicateStream,
+    ) -> Option<Result<SubscribeResponse, ConnectError>> {
+        stream
+            .next()
+            .now_or_never()
+            .expect("stream should be ready")
+    }
+
+    #[test]
+    fn prefetches_upstream_when_evaluation_completes_synchronously() {
+        let (input, polls) =
+            controlled_input([ControlledEvent::Frame(1), ControlledEvent::Frame(2)]);
+        // Mirrors evaluate_batch for the empty-WHERE path and for simple
+        // predicates over a single MemTable batch. Those futures have no
+        // yielding await points, so they are Ready on the first poll.
+        let evaluator = |frame: StreamSubscriptionFrame| {
+            let sequence_number = frame.sequence_number;
+            async move { Ok::<_, ConnectError>(Some(response(sequence_number))) }
+        };
+        let mut stream = BatchPredicateStream::with_evaluator(input, evaluator);
+
+        assert_eq!(next_ready(&mut stream).unwrap().unwrap().sequence_number, 1);
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            2,
+            "frame 2 should be pulled from upstream while frame 1 evaluates",
+        );
+    }
+
+    #[test]
+    fn prefetches_one_frame_and_keeps_evaluation_ordered() {
+        let (input, polls) = controlled_input([
+            ControlledEvent::Frame(1),
+            ControlledEvent::Frame(2),
+            ControlledEvent::Frame(3),
+        ]);
+        let mut evaluator = controlled_evaluator(&[1, 2]);
+        let mut stream = BatchPredicateStream::with_evaluator(input, evaluator.evaluator);
+
+        assert!(stream.next().now_or_never().is_none());
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+        assert_eq!(*evaluator.started.lock().unwrap(), vec![1]);
+
+        assert!(stream.next().now_or_never().is_none());
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+        assert_eq!(*evaluator.started.lock().unwrap(), vec![1]);
+
+        evaluator
+            .senders
+            .remove(&1)
+            .unwrap()
+            .send(Ok(Some(response(1))))
+            .unwrap();
+        assert_eq!(next_ready(&mut stream).unwrap().unwrap().sequence_number, 1);
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+
+        assert!(stream.next().now_or_never().is_none());
+        assert_eq!(polls.load(Ordering::SeqCst), 3);
+        assert_eq!(*evaluator.started.lock().unwrap(), vec![1, 2]);
+
+        evaluator
+            .senders
+            .remove(&2)
+            .unwrap()
+            .send(Ok(Some(response(2))))
+            .unwrap();
+        assert_eq!(next_ready(&mut stream).unwrap().unwrap().sequence_number, 2);
+        assert_eq!(evaluator.max_active.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn filtered_frame_advances_to_staged_frame() {
+        let (input, polls) = controlled_input([
+            ControlledEvent::Frame(1),
+            ControlledEvent::Frame(2),
+            ControlledEvent::End,
+        ]);
+        let mut evaluator = controlled_evaluator(&[1, 2]);
+        let mut stream = BatchPredicateStream::with_evaluator(input, evaluator.evaluator);
+
+        assert!(stream.next().now_or_never().is_none());
+        evaluator
+            .senders
+            .remove(&1)
+            .unwrap()
+            .send(Ok(None))
+            .unwrap();
+        assert!(stream.next().now_or_never().is_none());
+        assert_eq!(*evaluator.started.lock().unwrap(), vec![1, 2]);
+        assert_eq!(polls.load(Ordering::SeqCst), 3);
+
+        evaluator
+            .senders
+            .remove(&2)
+            .unwrap()
+            .send(Ok(Some(response(2))))
+            .unwrap();
+        assert_eq!(next_ready(&mut stream).unwrap().unwrap().sequence_number, 2);
+        assert!(next_ready(&mut stream).is_none());
+        assert!(next_ready(&mut stream).is_none());
+        assert_eq!(evaluator.max_active.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn defers_upstream_end_until_pending_evaluation_finishes() {
+        let (input, polls) = controlled_input([ControlledEvent::Frame(1), ControlledEvent::End]);
+        let mut evaluator = controlled_evaluator(&[1]);
+        let mut stream = BatchPredicateStream::with_evaluator(input, evaluator.evaluator);
+
+        assert!(stream.next().now_or_never().is_none());
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+
+        evaluator
+            .senders
+            .remove(&1)
+            .unwrap()
+            .send(Ok(Some(response(1))))
+            .unwrap();
+        assert_eq!(next_ready(&mut stream).unwrap().unwrap().sequence_number, 1);
+        assert!(next_ready(&mut stream).is_none());
+        assert!(next_ready(&mut stream).is_none());
+    }
+
+    #[test]
+    fn defers_upstream_error_until_pending_evaluation_finishes() {
+        let (input, polls) = controlled_input([
+            ControlledEvent::Frame(1),
+            ControlledEvent::Error,
+            ControlledEvent::Frame(2),
+        ]);
+        let mut evaluator = controlled_evaluator(&[1]);
+        let mut stream = BatchPredicateStream::with_evaluator(input, evaluator.evaluator);
+
+        assert!(stream.next().now_or_never().is_none());
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+
+        evaluator
+            .senders
+            .remove(&1)
+            .unwrap()
+            .send(Ok(Some(response(1))))
+            .unwrap();
+        assert_eq!(next_ready(&mut stream).unwrap().unwrap().sequence_number, 1);
+        assert!(next_ready(&mut stream).unwrap().is_err());
+        assert!(next_ready(&mut stream).is_none());
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+        assert_eq!(*evaluator.started.lock().unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn predicate_error_fuses_and_discards_staged_frame() {
+        let (input, polls) = controlled_input([
+            ControlledEvent::Frame(1),
+            ControlledEvent::Frame(2),
+            ControlledEvent::Frame(3),
+        ]);
+        let mut evaluator = controlled_evaluator(&[1]);
+        let mut stream = BatchPredicateStream::with_evaluator(input, evaluator.evaluator);
+
+        assert!(stream.next().now_or_never().is_none());
+        evaluator
+            .senders
+            .remove(&1)
+            .unwrap()
+            .send(Err(ConnectError::internal("predicate failed")))
+            .unwrap();
+
+        assert!(next_ready(&mut stream).unwrap().is_err());
+        assert!(next_ready(&mut stream).is_none());
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+        assert_eq!(*evaluator.started.lock().unwrap(), vec![1]);
+    }
 
     /// Result cells for Binary columns can arrive as any of the three arrow
     /// binary encodings; every one becomes a `binary_value` cell.

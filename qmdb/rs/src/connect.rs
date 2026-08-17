@@ -586,6 +586,20 @@ struct BatchSubscribeStream<D: commonware_cryptography::Digest, F: Graftable> {
     watermarks: BTreeMap<Location<F>, u64>,
     ready: VecDeque<ReadyBatch<F>>,
     building: Option<BoxFuture<'static, Result<PreEncoded<SubscribeResponse>, ConnectError>>>,
+    // Terminal upstream event observed while a proof was still building. It is
+    // delivered after the staged batches drain.
+    staged_terminal: Option<StagedTerminal>,
+}
+
+// Bound on batches staged (pending plus ready) while a proof builds. Staging
+// keeps demand flowing to the store subscription so the server-side lookahead
+// stays occupied during proof construction, and the bound keeps the staged
+// queues finite when the subscriber outruns proof throughput.
+const SUBSCRIBE_STAGED_BATCHES: usize = 8;
+
+enum StagedTerminal {
+    End,
+    Error(ConnectError),
 }
 
 impl<D: commonware_cryptography::Digest, F: Graftable> Unpin for BatchSubscribeStream<D, F> {}
@@ -625,7 +639,23 @@ impl<D: commonware_cryptography::Digest, F: Graftable> BatchSubscribeStream<D, F
             watermarks: BTreeMap::new(),
             ready: VecDeque::new(),
             building: None,
+            staged_terminal: None,
         }
+    }
+
+    fn poll_frame(
+        &mut self,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<Option<exoware_sdk::StreamSubscriptionFrame>, ConnectError>> {
+        let next_fut = self.sub.next();
+        tokio::pin!(next_fut);
+        next_fut.as_mut().poll(cx).map_err(|err| {
+            if let Some(rpc) = err.rpc_error() {
+                ConnectError::new(rpc.code, rpc.message.clone().unwrap_or_default())
+            } else {
+                ConnectError::new(ErrorCode::Internal, err.to_string())
+            }
+        })
     }
 
     fn ingest_frame(
@@ -730,7 +760,30 @@ impl<D: commonware_cryptography::Digest, F: Graftable> Stream for BatchSubscribe
                         this.building = None;
                         return Poll::Ready(Some(result));
                     }
-                    Poll::Pending => return Poll::Pending,
+                    Poll::Pending => {
+                        // Keep pulling upstream frames while the proof builds
+                        // so demand reaches the store subscription, up to the
+                        // staged-batch bound.
+                        while this.staged_terminal.is_none()
+                            && this.pending.len() + this.ready.len() < SUBSCRIBE_STAGED_BATCHES
+                        {
+                            match this.poll_frame(cx) {
+                                Poll::Ready(Ok(Some(frame))) => {
+                                    if let Err(err) = this.ingest_frame(&frame) {
+                                        this.staged_terminal = Some(StagedTerminal::Error(*err));
+                                    }
+                                }
+                                Poll::Ready(Ok(None)) => {
+                                    this.staged_terminal = Some(StagedTerminal::End);
+                                }
+                                Poll::Ready(Err(err)) => {
+                                    this.staged_terminal = Some(StagedTerminal::Error(err));
+                                }
+                                Poll::Pending => break,
+                            }
+                        }
+                        return Poll::Pending;
+                    }
                 }
             }
 
@@ -750,26 +803,22 @@ impl<D: commonware_cryptography::Digest, F: Graftable> Stream for BatchSubscribe
                 continue;
             }
 
-            let frame = {
-                let next_fut = this.sub.next();
-                tokio::pin!(next_fut);
-                match next_fut.as_mut().poll(cx) {
-                    Poll::Ready(Ok(Some(frame))) => frame,
-                    Poll::Ready(Ok(None)) => return Poll::Ready(None),
-                    Poll::Ready(Err(err)) => {
-                        let connect = if let Some(rpc) = err.rpc_error() {
-                            ConnectError::new(rpc.code, rpc.message.clone().unwrap_or_default())
-                        } else {
-                            ConnectError::new(ErrorCode::Internal, err.to_string())
-                        };
-                        return Poll::Ready(Some(Err(connect)));
-                    }
-                    Poll::Pending => return Poll::Pending,
-                }
-            };
+            if let Some(terminal) = this.staged_terminal.take() {
+                return Poll::Ready(match terminal {
+                    StagedTerminal::End => None,
+                    StagedTerminal::Error(err) => Some(Err(err)),
+                });
+            }
 
-            if let Err(err) = this.ingest_frame(&frame) {
-                return Poll::Ready(Some(Err(*err)));
+            match this.poll_frame(cx) {
+                Poll::Ready(Ok(Some(frame))) => {
+                    if let Err(err) = this.ingest_frame(&frame) {
+                        return Poll::Ready(Some(Err(*err)));
+                    }
+                }
+                Poll::Ready(Ok(None)) => return Poll::Ready(None),
+                Poll::Ready(Err(err)) => return Poll::Ready(Some(Err(err))),
+                Poll::Pending => return Poll::Pending,
             }
         }
     }
