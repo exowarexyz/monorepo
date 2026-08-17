@@ -2,6 +2,7 @@ use std::marker::PhantomData;
 
 use commonware_codec::{Codec, Decode, Encode, Read as CodecRead};
 use commonware_cryptography::Hasher;
+use commonware_parallel::Strategy;
 use commonware_storage::{
     merkle::{Family, Graftable, Location},
     qmdb::{
@@ -121,6 +122,21 @@ where
             |watermark, start_location, max_locations| {
                 self.operation_range_checkpoint(watermark, start_location, max_locations)
             },
+        )
+        .await
+    }
+
+    /// Recover writer state using `strategy` for Merkle hashing.
+    pub async fn recover_writer_state_with_strategy<S: Strategy>(
+        &self,
+        strategy: &S,
+    ) -> Result<WriterState<H::Digest, F>, QmdbError> {
+        crate::recover_writer_state_with_strategy::<F, H, S, _, _>(
+            self.writer_location_watermark().await?,
+            |watermark, start_location, max_locations| {
+                self.operation_range_checkpoint(watermark, start_location, max_locations)
+            },
+            strategy,
         )
         .await
     }

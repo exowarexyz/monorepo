@@ -24,6 +24,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use commonware_cryptography::Digest;
+use commonware_parallel::Strategy;
 use commonware_storage::merkle::{Family, Location, Position};
 use tokio::sync::{Mutex, Notify};
 
@@ -44,7 +45,6 @@ pub(crate) struct Cache<D: Digest, F: Family> {
     /// successful `flush()` watermark PUT). Recovery helpers must report this
     /// value, not the speculative `latest_published`.
     pub latest_committed_published: Option<PublishedCheckpoint<F>>,
-    pub latest_dispatched: Option<Location<F>>,
     /// Dispatched-but-not-yet-ACKd batches, in dispatch order. Per-batch
     /// `acked` lets us handle out-of-order ACKs correctly: we only advance
     /// `latest_contiguous_acked` when the FRONT of the queue has ACKd (and
@@ -74,8 +74,12 @@ pub(crate) enum State<D: Digest, F: Family> {
     },
 }
 
-pub(crate) struct WriterCore<D: Digest, F: Family> {
+pub(crate) struct WriterCore<D: Digest, F: Family, S: Strategy> {
     state: Mutex<State<D, F>>,
+    /// Serializes live frontier builds so each starts from its predecessor's
+    /// peaks. A cancelled CPU job may finish later but cannot mutate state.
+    build_gate: Mutex<()>,
+    strategy: S,
     /// Monotonic counter of `advance` calls — also the next dispatch_id.
     dispatched: AtomicU64,
     /// Monotonic counter of `ack_success` + `ack_failure` calls. Used only
@@ -115,71 +119,106 @@ pub(crate) struct PreparedDispatch<F: Family, R> {
     pub latest_location: Location<F>,
 }
 
-impl<D: Digest, F: Family> WriterCore<D, F> {
-    pub(crate) fn from_cache(cache: Cache<D, F>) -> Self {
+fn newest_checkpoint<F: Family>(
+    current: Option<PublishedCheckpoint<F>>,
+    candidate: PublishedCheckpoint<F>,
+) -> PublishedCheckpoint<F> {
+    match current {
+        Some(current)
+            if current.location > candidate.location
+                || (current.location == candidate.location
+                    && current.sequence_number >= candidate.sequence_number) =>
+        {
+            current
+        }
+        _ => candidate,
+    }
+}
+
+impl<D: Digest, F: Family, S: Strategy> WriterCore<D, F, S> {
+    pub(crate) fn from_cache(cache: Cache<D, F>, strategy: S) -> Self {
         Self {
             state: Mutex::new(State::Ready(cache)),
+            build_gate: Mutex::new(()),
+            strategy,
             dispatched: AtomicU64::new(0),
             acked: AtomicU64::new(0),
             ack_notify: Notify::new(),
         }
     }
 
-    /// Atomically reserve a batch slot, run the variant-specific `build`
-    /// closure under the state mutex, and commit the resulting Merkle delta to
-    /// the cache — all in one locked step. This is what prevents the
-    /// `dispatch_id` race: because the cache (peaks, size, next_location,
-    /// pending) is updated inside the same lock that `build` runs under, no
-    /// concurrent `prepare` call can observe stale pre-batch state.
-    ///
-    /// Build phase is therefore serialized across pipelined uploads, but the
-    /// PUT dispatch itself happens AFTER `prepare` returns (i.e. outside the
-    /// lock), so network round-trips still pipeline freely.
+    /// Serialize builds without holding the state mutex during CPU
+    /// work. State changes only after a successful build, so cancellation or
+    /// poisoning leaves the previous frontier intact.
     pub(crate) async fn prepare<R>(
         &self,
         ops_len: u64,
-        build: impl FnOnce(BuildContext<D, F>) -> Result<BuildResult<D, F, R>, QmdbError>,
-    ) -> Result<PreparedDispatch<F, R>, QmdbError> {
+        build: impl FnOnce(BuildContext<D, F>, S) -> Result<BuildResult<D, F, R>, QmdbError>
+            + Send
+            + 'static,
+    ) -> Result<PreparedDispatch<F, R>, QmdbError>
+    where
+        R: Send + 'static,
+    {
+        if ops_len == 0 {
+            return Err(QmdbError::EmptyBatch);
+        }
+
+        let _build_slot = self.build_gate.lock().await;
+
+        let ctx = {
+            let mut state = self.state.lock().await;
+            let cache = match &mut *state {
+                State::Ready(c) => c,
+                State::Uninit => unreachable!("writer core is always constructed with state"),
+                State::Poisoned { msg, .. } => return Err(QmdbError::WriterPoisoned(msg.clone())),
+            };
+            let latest_location = cache
+                .next_location
+                .checked_add(ops_len - 1)
+                .ok_or_else(|| QmdbError::CorruptData("next_location overflow".to_string()))?;
+
+            // Safe watermark:
+            // - Pipeline empty: our own latest_location (we're the only in-flight PUT).
+            // - Pipeline non-empty: latest_contiguous_acked (last fully-acked prefix location).
+            // - Don't re-publish what's already out.
+            let candidate = if cache.pending.is_empty() {
+                Some(latest_location)
+            } else {
+                cache.latest_contiguous_acked
+            };
+            let watermark_at = candidate.filter(|c| cache.latest_published.is_none_or(|p| *c > p));
+
+            BuildContext {
+                peaks: cache.peaks.clone(),
+                ops_size: cache.ops_size,
+                latest_location,
+                watermark_at,
+            }
+        };
+        let latest_location = ctx.latest_location;
+        let watermark_at = ctx.watermark_at;
+
+        let result = self
+            .strategy
+            .spawn(move |strategy| build(ctx, strategy))
+            .await?;
+
         let mut state = self.state.lock().await;
         let cache = match &mut *state {
             State::Ready(c) => c,
             State::Uninit => unreachable!("writer core is always constructed with state"),
             State::Poisoned { msg, .. } => return Err(QmdbError::WriterPoisoned(msg.clone())),
         };
-        if ops_len == 0 {
-            return Err(QmdbError::EmptyBatch);
-        }
-        let latest_location = cache
-            .next_location
-            .checked_add(ops_len - 1)
-            .ok_or_else(|| QmdbError::CorruptData("next_location overflow".to_string()))?;
-
-        // Safe watermark:
-        // - Pipeline empty: our own latest_location (we're the only in-flight PUT).
-        // - Pipeline non-empty: latest_contiguous_acked (last fully-acked prefix location).
-        // - Don't re-publish what's already out.
-        let candidate = if cache.pending.is_empty() {
-            Some(latest_location)
-        } else {
-            cache.latest_contiguous_acked
-        };
-        let watermark_at = candidate.filter(|c| cache.latest_published.is_none_or(|p| *c > p));
-
-        let ctx = BuildContext {
-            peaks: cache.peaks.clone(),
-            ops_size: cache.ops_size,
-            latest_location,
-            watermark_at,
-        };
-        let result = build(ctx)?;
-
         let dispatch_id = self.dispatched.fetch_add(1, Ordering::SeqCst);
         cache.peaks = result.new_peaks;
         cache.ops_size = result.new_ops_size;
         cache.next_location = latest_location + 1;
-        cache.latest_dispatched = Some(latest_location);
+        // Flush can advance the watermark while the build runs.
         if let Some(wm) = watermark_at {
-            cache.latest_published = Some(wm);
+            if cache.latest_published.is_none_or(|p| wm > p) {
+                cache.latest_published = Some(wm);
+            }
         }
         cache.pending.push_back(PendingBatch {
             id: dispatch_id,
@@ -216,11 +255,10 @@ impl<D: Digest, F: Family> WriterCore<D, F> {
                             location: wm,
                             sequence_number,
                         };
-                        cache.latest_committed_published =
-                            Some(match cache.latest_committed_published {
-                                Some(cur) if cur.location > checkpoint.location => cur,
-                                _ => checkpoint,
-                            });
+                        cache.latest_committed_published = Some(newest_checkpoint(
+                            cache.latest_committed_published,
+                            checkpoint,
+                        ));
                     }
                     matched = true;
                 }
@@ -340,11 +378,15 @@ impl<D: Digest, F: Family> WriterCore<D, F> {
     ) {
         let mut state = self.state.lock().await;
         if let State::Ready(c) = &mut *state {
-            c.latest_published = Some(location);
-            c.latest_committed_published = Some(PublishedCheckpoint {
+            if c.latest_published.is_none_or(|current| location > current) {
+                c.latest_published = Some(location);
+            }
+            let checkpoint = PublishedCheckpoint {
                 location,
                 sequence_number,
-            });
+            };
+            c.latest_committed_published =
+                Some(newest_checkpoint(c.latest_committed_published, checkpoint));
         }
     }
 
@@ -378,7 +420,6 @@ impl<D: Digest, F: Family> Cache<D, F> {
             next_location: state.next_location,
             latest_published: latest_committed,
             latest_committed_published,
-            latest_dispatched: None,
             pending: VecDeque::new(),
             latest_contiguous_acked: latest_committed,
         }
@@ -387,21 +428,28 @@ impl<D: Digest, F: Family> Cache<D, F> {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
+
     use super::*;
     use commonware_cryptography::sha256::Digest as Sha256Digest;
+    use commonware_parallel::{Rayon, Sequential};
     use commonware_storage::merkle::mmr;
 
-    fn fresh_core() -> WriterCore<Sha256Digest, mmr::Family> {
-        WriterCore::from_cache(Cache {
-            peaks: Vec::new(),
-            ops_size: Position::new(0),
-            next_location: Location::new(0),
-            latest_published: None,
-            latest_committed_published: None,
-            latest_dispatched: None,
-            pending: VecDeque::new(),
-            latest_contiguous_acked: None,
-        })
+    fn fresh_core() -> WriterCore<Sha256Digest, mmr::Family, Sequential> {
+        WriterCore::from_cache(
+            Cache {
+                peaks: Vec::new(),
+                ops_size: Position::new(0),
+                next_location: Location::new(0),
+                latest_published: None,
+                latest_committed_published: None,
+                pending: VecDeque::new(),
+                latest_contiguous_acked: None,
+            },
+            Sequential,
+        )
     }
 
     // `await_drain` must complete once `acked >= dispatched`, even when the
@@ -441,7 +489,6 @@ mod tests {
                 location,
                 sequence_number: 0,
             }),
-            latest_dispatched: latest_published,
             pending: VecDeque::new(),
             latest_contiguous_acked: latest_published,
         }
@@ -449,6 +496,24 @@ mod tests {
 
     fn passthrough_build(
         ctx: BuildContext<Sha256Digest, mmr::Family>,
+        _strategy: Sequential,
+    ) -> Result<BuildResult<Sha256Digest, mmr::Family, ()>, QmdbError> {
+        Ok(BuildResult {
+            new_peaks: ctx.peaks,
+            new_ops_size: ctx.ops_size,
+            output: (),
+        })
+    }
+
+    fn rayon_core() -> WriterCore<Sha256Digest, mmr::Family, Rayon> {
+        let strategy =
+            Rayon::new(NonZeroUsize::new(2).expect("non-zero")).expect("construct Rayon strategy");
+        WriterCore::from_cache(ready_cache(loc(0), None), strategy)
+    }
+
+    fn rayon_passthrough_build(
+        ctx: BuildContext<Sha256Digest, mmr::Family>,
+        _strategy: Rayon,
     ) -> Result<BuildResult<Sha256Digest, mmr::Family, ()>, QmdbError> {
         Ok(BuildResult {
             new_peaks: ctx.peaks,
@@ -459,14 +524,14 @@ mod tests {
 
     #[tokio::test]
     async fn restored_writer_state_reports_committed_watermark_immediately() {
-        let core = WriterCore::from_cache(Cache::from_writer_state(WriterState::<
-            Sha256Digest,
-            mmr::Family,
-        > {
-            peaks: Vec::new(),
-            ops_size: Position::new(8),
-            next_location: loc(8),
-        }));
+        let core = WriterCore::from_cache(
+            Cache::from_writer_state(WriterState::<Sha256Digest, mmr::Family> {
+                peaks: Vec::new(),
+                ops_size: Position::new(8),
+                next_location: loc(8),
+            }),
+            Sequential,
+        );
         assert_eq!(core.latest_published().await, Some(loc(7)));
     }
 
@@ -581,14 +646,14 @@ mod tests {
 
     #[tokio::test]
     async fn seeded_state_flush_path_only_needs_one_tail_publication() {
-        let core = WriterCore::from_cache(Cache::from_writer_state(WriterState::<
-            Sha256Digest,
-            mmr::Family,
-        > {
-            peaks: Vec::new(),
-            ops_size: Position::new(8),
-            next_location: loc(8),
-        }));
+        let core = WriterCore::from_cache(
+            Cache::from_writer_state(WriterState::<Sha256Digest, mmr::Family> {
+                peaks: Vec::new(),
+                ops_size: Position::new(8),
+                next_location: loc(8),
+            }),
+            Sequential,
+        );
 
         let first = core
             .prepare(1, passthrough_build)
@@ -627,8 +692,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_flush_completion_does_not_regress_published_checkpoint() {
+        let core = fresh_core();
+        let first = core
+            .prepare(1, passthrough_build)
+            .await
+            .expect("prepare first");
+        let second = core
+            .prepare(1, passthrough_build)
+            .await
+            .expect("prepare second");
+        let third = core
+            .prepare(1, passthrough_build)
+            .await
+            .expect("prepare third");
+
+        core.ack_success(first.dispatch_id, 10).await;
+        core.ack_success(second.dispatch_id, 11).await;
+        let stale_flush = core
+            .pending_watermark()
+            .await
+            .expect("prepare stale flush")
+            .expect("stale flush target");
+        assert_eq!(stale_flush, loc(1));
+
+        core.ack_success(third.dispatch_id, 12).await;
+        let fourth = core
+            .prepare(1, passthrough_build)
+            .await
+            .expect("prepare fourth");
+        assert_eq!(fourth.watermark_at, Some(loc(3)));
+        core.ack_success(fourth.dispatch_id, 13).await;
+
+        core.mark_watermark_published(stale_flush, 14).await;
+        assert_eq!(core.latest_published().await, Some(loc(3)));
+        assert_eq!(
+            core.latest_published_checkpoint().await,
+            Some(PublishedCheckpoint {
+                location: loc(3),
+                sequence_number: 13,
+            })
+        );
+
+        core.mark_watermark_published(loc(3), 12).await;
+        assert_eq!(
+            core.latest_published_checkpoint()
+                .await
+                .map(|checkpoint| checkpoint.sequence_number),
+            Some(13)
+        );
+
+        core.mark_watermark_published(loc(3), 15).await;
+        assert_eq!(
+            core.latest_published_checkpoint()
+                .await
+                .map(|checkpoint| checkpoint.sequence_number),
+            Some(15)
+        );
+    }
+
+    #[tokio::test]
     async fn poisoned_writer_reports_last_committed_not_speculative_watermark() {
-        let core = WriterCore::from_cache(ready_cache(loc(8), Some(loc(7))));
+        let core = WriterCore::from_cache(ready_cache(loc(8), Some(loc(7))), Sequential);
 
         let prepared = core.prepare(1, passthrough_build).await.expect("prepare");
         assert_eq!(
@@ -647,6 +772,184 @@ mod tests {
             core.latest_published().await,
             Some(loc(7)),
             "poisoned recovery helper must not expose the speculative watermark from the failed PUT",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_build_does_not_reserve_frontier_state() {
+        let core = Arc::new(rayon_core());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+
+        let build_core = core.clone();
+        let build = tokio::spawn(async move {
+            build_core
+                .prepare(1, move |ctx, _strategy| {
+                    started_tx.send(()).expect("report build start");
+                    release_rx.recv().expect("release cancelled build");
+                    finished_tx.send(()).expect("report build completion");
+                    Ok(BuildResult {
+                        new_peaks: ctx.peaks,
+                        new_ops_size: ctx.ops_size,
+                        output: (),
+                    })
+                })
+                .await
+        });
+
+        started_rx.await.expect("build started");
+        let watermark = tokio::time::timeout(Duration::from_secs(1), core.latest_published())
+            .await
+            .expect("watermark read waited for CPU work");
+        assert_eq!(watermark, None);
+
+        build.abort();
+        let join_error = match build.await {
+            Ok(_) => panic!("build task was not cancelled"),
+            Err(error) => error,
+        };
+        assert!(join_error.is_cancelled());
+
+        let prepared = tokio::time::timeout(
+            Duration::from_secs(1),
+            core.prepare(1, rayon_passthrough_build),
+        )
+        .await
+        .expect("replacement prepare waited for cancelled CPU work")
+        .expect("prepare replacement");
+        assert_eq!(prepared.dispatch_id, 0);
+        assert_eq!(prepared.latest_location, loc(0));
+
+        release_tx.send(()).expect("release cancelled build");
+        finished_rx.await.expect("cancelled CPU work finished");
+
+        let state = core.state.lock().await;
+        let cache = match &*state {
+            State::Ready(cache) => cache,
+            other => panic!("unexpected writer state: {other:?}"),
+        };
+        assert_eq!(cache.next_location, loc(1));
+        assert_eq!(cache.pending.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_builds_commit_frontiers_in_prepare_order() {
+        let core = Arc::new(rayon_core());
+        let (first_started_tx, first_started_rx) = tokio::sync::oneshot::channel();
+        let (release_first_tx, release_first_rx) = mpsc::channel();
+
+        let first_core = core.clone();
+        let first = tokio::spawn(async move {
+            first_core
+                .prepare(1, move |ctx, _strategy| {
+                    first_started_tx.send(()).expect("report first start");
+                    release_first_rx.recv().expect("release first build");
+                    let latest_location = ctx.latest_location;
+                    Ok(BuildResult {
+                        new_peaks: ctx.peaks,
+                        new_ops_size: ctx.ops_size,
+                        output: latest_location,
+                    })
+                })
+                .await
+        });
+        first_started_rx.await.expect("first build started");
+
+        let (second_entered_tx, second_entered_rx) = tokio::sync::oneshot::channel();
+        let (second_started_tx, mut second_started_rx) = tokio::sync::oneshot::channel();
+        let second_core = core.clone();
+        let second = tokio::spawn(async move {
+            second_entered_tx.send(()).expect("report second prepare");
+            second_core
+                .prepare(1, move |ctx, _strategy| {
+                    second_started_tx.send(()).expect("report second start");
+                    let latest_location = ctx.latest_location;
+                    Ok(BuildResult {
+                        new_peaks: ctx.peaks,
+                        new_ops_size: ctx.ops_size,
+                        output: latest_location,
+                    })
+                })
+                .await
+        });
+        second_entered_rx.await.expect("second prepare started");
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut second_started_rx)
+                .await
+                .is_err(),
+            "second build started from an uncommitted frontier"
+        );
+
+        release_first_tx.send(()).expect("release first build");
+        tokio::time::timeout(Duration::from_secs(1), &mut second_started_rx)
+            .await
+            .expect("second build did not start")
+            .expect("report second start");
+
+        let first = first
+            .await
+            .expect("first task")
+            .expect("prepare first batch");
+        let second = second
+            .await
+            .expect("second task")
+            .expect("prepare second batch");
+        assert_eq!(first.dispatch_id, 0);
+        assert_eq!(first.latest_location, loc(0));
+        assert_eq!(first.output, loc(0));
+        assert_eq!(second.dispatch_id, 1);
+        assert_eq!(second.latest_location, loc(1));
+        assert_eq!(second.output, loc(1));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn poisoned_writer_discards_inflight_build() {
+        let core = Arc::new(rayon_core());
+        let first = core
+            .prepare(1, rayon_passthrough_build)
+            .await
+            .expect("prepare first batch");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+
+        let build_core = core.clone();
+        let build = tokio::spawn(async move {
+            build_core
+                .prepare(1, move |ctx, _strategy| {
+                    started_tx.send(()).expect("report build start");
+                    release_rx.recv().expect("release build");
+                    Ok(BuildResult {
+                        new_peaks: ctx.peaks,
+                        new_ops_size: ctx.ops_size,
+                        output: (),
+                    })
+                })
+                .await
+        });
+
+        started_rx.await.expect("build started");
+        core.ack_failure("first upload failed".to_string()).await;
+        release_tx.send(()).expect("release build");
+
+        let error = match build.await.expect("build task") {
+            Ok(_) => panic!("poisoned build committed"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, QmdbError::WriterPoisoned(_)));
+        assert_eq!(core.dispatched.load(Ordering::SeqCst), 1);
+
+        let state = core.state.lock().await;
+        let cache = match &*state {
+            State::Poisoned { cache, .. } => cache,
+            other => panic!("unexpected writer state: {other:?}"),
+        };
+        assert_eq!(cache.next_location, loc(1));
+        assert_eq!(cache.pending.len(), 1);
+        assert_eq!(
+            cache.pending.front().map(|pending| pending.id),
+            Some(first.dispatch_id)
         );
     }
 }

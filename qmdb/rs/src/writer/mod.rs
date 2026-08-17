@@ -9,10 +9,10 @@
 //! plus batch-local flush preparation for atomic multi-upload Store batches.
 //!
 //! Multiple `prepare_upload` calls may be issued concurrently against the same
-//! writer instance. The writer serializes frontier assignment under its
-//! internal mutex, then releases that lock before any network I/O, so
-//! independent Store batches can be in flight at the same time while watermark
-//! publication still follows the contiguous-committed prefix.
+//! writer instance. Preparation yields during Merkle build work, so ACK and
+//! watermark processing remains responsive. No lock is held during network
+//! I/O, so independent Store batches can be in flight at the same time while
+//! watermark publication still follows the contiguous-committed prefix.
 //!
 //! Callers own durability. On any PUT error the writer poisons; the caller must
 //! construct a fresh writer from a caller-owned committed frontier. Since PUT
@@ -25,10 +25,20 @@ mod keyless;
 mod ordered;
 mod unordered;
 
-pub use immutable::{build_immutable_upload, BuiltImmutableUpload, ImmutableWriter};
-pub use keyless::{build_keyless_upload, BuiltKeylessUpload, KeylessWriter};
-pub use ordered::{build_ordered_upload, BuiltOrderedUpload, OrderedWriter};
-pub use unordered::{build_unordered_upload, BuiltUnorderedUpload, UnorderedWriter};
+pub use immutable::{
+    build_immutable_upload, build_immutable_upload_with_strategy, BuiltImmutableUpload,
+    ImmutableWriter,
+};
+pub use keyless::{
+    build_keyless_upload, build_keyless_upload_with_strategy, BuiltKeylessUpload, KeylessWriter,
+};
+pub use ordered::{
+    build_ordered_upload, build_ordered_upload_with_strategy, BuiltOrderedUpload, OrderedWriter,
+};
+pub use unordered::{
+    build_unordered_upload, build_unordered_upload_with_strategy, BuiltUnorderedUpload,
+    UnorderedWriter,
+};
 
 use std::borrow::Borrow;
 

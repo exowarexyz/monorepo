@@ -5,6 +5,7 @@ use std::marker::PhantomData;
 
 use commonware_codec::{Codec, Encode};
 use commonware_cryptography::Hasher;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_storage::merkle::{Graftable, Location, Position};
 use commonware_storage::qmdb::{
     any::{
@@ -60,16 +61,45 @@ where
     E: ValueEncoding<Value = V>,
     unordered::Operation<F, K, E>: Encode,
 {
+    build_unordered_upload_with_strategy::<F, H, K, V, E, Sequential>(
+        peaks,
+        prev_ops_size,
+        latest_location,
+        ops,
+        watermark_at,
+        &Sequential,
+    )
+}
+
+/// Strategy-aware form of [`build_unordered_upload`].
+pub fn build_unordered_upload_with_strategy<F, H, K, V, E, S>(
+    peaks: Vec<(Position<F>, u32, H::Digest)>,
+    prev_ops_size: Position<F>,
+    latest_location: Location<F>,
+    ops: &[unordered::Operation<F, K, E>],
+    watermark_at: Option<Location<F>>,
+    strategy: &S,
+) -> Result<BuiltUnorderedUpload<H::Digest, F>, QmdbError>
+where
+    F: Graftable,
+    H: Hasher,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V>,
+    S: Strategy,
+    unordered::Operation<F, K, E>: Encode,
+{
     if ops.is_empty() {
         return Err(QmdbError::EmptyBatch);
     }
     let prepared = CorePreparedUpload::build_unordered(latest_location, ops)?;
     let inactive_peaks = unordered_inactive_peaks(latest_location, ops)?;
-    let ext = extend_merkle_from_peaks_with_inactive_peaks::<F, H, _>(
+    let ext = extend_merkle_from_peaks_with_inactive_peaks::<F, H, S, _>(
         peaks,
         prev_ops_size,
         prepared.op_bytes(),
         inactive_peaks,
+        strategy,
     )?;
     let operation_count = prepared.operation_count;
     let keyed_operation_count = prepared.keyed_operation_count;
@@ -117,13 +147,14 @@ where
     ))
 }
 
-pub fn build_unordered_current_upload<F, H, K, V, const N: usize, E>(
+fn build_unordered_current_upload_with_strategy<F, H, K, V, const N: usize, E, S>(
     peaks: Vec<(Position<F>, u32, H::Digest)>,
     prev_ops_size: Position<F>,
     latest_location: Location<F>,
     ops: &[unordered::Operation<F, K, E>],
     current_boundary: &CurrentBoundaryState<H::Digest, N, F>,
     watermark_at: Option<Location<F>>,
+    strategy: &S,
 ) -> Result<BuiltUnorderedUpload<H::Digest, F>, QmdbError>
 where
     F: Graftable,
@@ -131,14 +162,16 @@ where
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
+    S: Strategy,
     unordered::Operation<F, K, E>: Encode,
 {
-    let mut built = build_unordered_upload::<F, H, K, V, E>(
+    let mut built = build_unordered_upload_with_strategy::<F, H, K, V, E, S>(
         peaks,
         prev_ops_size,
         latest_location,
         ops,
         watermark_at,
+        strategy,
     )?;
     let prepared_current = PreparedCurrentBoundaryUpload::build(latest_location, current_boundary)?;
     built.rows.extend(prepared_current.rows);
@@ -154,13 +187,14 @@ pub struct UnorderedWriter<
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
+    S: Strategy = Sequential,
 > {
     client: PrefixedStoreClient,
-    core: WriterCore<H::Digest, F>,
+    core: WriterCore<H::Digest, F, S>,
     _marker: PhantomData<(F, K, V, E)>,
 }
 
-impl<F, H, K, V, E> UnorderedWriter<F, H, K, V, E>
+impl<F, H, K, V, E, S> UnorderedWriter<F, H, K, V, E, S>
 where
     F: Graftable,
     H: Hasher,
@@ -168,22 +202,27 @@ where
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
     E: ValueEncoding<Value = V>,
+    S: Strategy,
     unordered::Operation<F, K, E>: Encode,
 {
     /// Construct a writer over `client`'s namespace prefix from caller-supplied
     /// frontier state (no store I/O).
-    pub fn new(client: PrefixedStoreClient, state: WriterState<H::Digest, F>) -> Self {
+    pub fn new_with_strategy(
+        client: PrefixedStoreClient,
+        state: WriterState<H::Digest, F>,
+        strategy: S,
+    ) -> Self {
         Self {
             client,
-            core: WriterCore::from_cache(Cache::from_writer_state(state)),
+            core: WriterCore::from_cache(Cache::from_writer_state(state), strategy),
             _marker: PhantomData,
         }
     }
 
     /// Construct a fresh writer over `client`'s namespace prefix with empty
     /// frontier state (no prior published checkpoint).
-    pub fn fresh(client: PrefixedStoreClient) -> Self {
-        Self::new(client, WriterState::empty())
+    pub fn fresh_with_strategy(client: PrefixedStoreClient, strategy: S) -> Self {
+        Self::new_with_strategy(client, WriterState::empty(), strategy)
     }
 
     pub async fn latest_published_watermark(&self) -> Option<Location<F>> {
@@ -196,17 +235,18 @@ where
 
     pub async fn prepare_upload(
         &self,
-        ops: &[unordered::Operation<F, K, E>],
+        ops: Vec<unordered::Operation<F, K, E>>,
     ) -> Result<super::PreparedUpload<F>, QmdbError> {
         let prepared = self
             .core
-            .prepare(ops.len() as u64, |ctx| {
-                let built = build_unordered_upload::<F, H, K, V, E>(
+            .prepare(ops.len() as u64, move |ctx, strategy| {
+                let built = build_unordered_upload_with_strategy::<F, H, K, V, E, S>(
                     ctx.peaks,
                     ctx.ops_size,
                     ctx.latest_location,
-                    ops,
+                    &ops,
                     ctx.watermark_at,
+                    &strategy,
                 )?;
                 Ok(crate::writer::core::BuildResult {
                     new_peaks: built.new_peaks,
@@ -225,19 +265,23 @@ where
 
     pub async fn prepare_current_upload<const N: usize>(
         &self,
-        ops: &[unordered::Operation<F, K, E>],
-        current_boundary: &CurrentBoundaryState<H::Digest, N, F>,
-    ) -> Result<super::PreparedUpload<F>, QmdbError> {
+        ops: Vec<unordered::Operation<F, K, E>>,
+        current_boundary: CurrentBoundaryState<H::Digest, N, F>,
+    ) -> Result<super::PreparedUpload<F>, QmdbError>
+    where
+        F::PendingChunk<H::Digest>: 'static,
+    {
         let prepared = self
             .core
-            .prepare(ops.len() as u64, |ctx| {
-                let built = build_unordered_current_upload::<F, H, K, V, N, E>(
+            .prepare(ops.len() as u64, move |ctx, strategy| {
+                let built = build_unordered_current_upload_with_strategy::<F, H, K, V, N, E, S>(
                     ctx.peaks,
                     ctx.ops_size,
                     ctx.latest_location,
-                    ops,
-                    current_boundary,
+                    &ops,
+                    &current_boundary,
                     ctx.watermark_at,
+                    &strategy,
                 )?;
                 Ok(crate::writer::core::BuildResult {
                     new_peaks: built.new_peaks,
@@ -351,20 +395,44 @@ where
     }
 }
 
-impl<F, H, K, V, E> std::fmt::Debug for UnorderedWriter<F, H, K, V, E>
+impl<F, H, K, V, E> UnorderedWriter<F, H, K, V, E, Sequential>
+where
+    F: Graftable,
+    H: Hasher,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+    V::Cfg: Clone,
+    E: ValueEncoding<Value = V>,
+    unordered::Operation<F, K, E>: Encode,
+{
+    /// Construct a writer over `client`'s namespace prefix from caller-supplied
+    /// frontier state (no store I/O).
+    pub fn new(client: PrefixedStoreClient, state: WriterState<H::Digest, F>) -> Self {
+        Self::new_with_strategy(client, state, Sequential)
+    }
+
+    /// Construct a fresh writer over `client`'s namespace prefix with empty
+    /// frontier state (no prior published checkpoint).
+    pub fn fresh(client: PrefixedStoreClient) -> Self {
+        Self::fresh_with_strategy(client, Sequential)
+    }
+}
+
+impl<F, H, K, V, E, S> std::fmt::Debug for UnorderedWriter<F, H, K, V, E, S>
 where
     F: Graftable,
     H: Hasher,
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
+    S: Strategy,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UnorderedWriter").finish_non_exhaustive()
     }
 }
 
-impl<F, H, K, V, E> StoreBatchUpload for UnorderedWriter<F, H, K, V, E>
+impl<F, H, K, V, E, S> StoreBatchUpload for UnorderedWriter<F, H, K, V, E, S>
 where
     F: Graftable,
     H: Hasher + Sync,
@@ -372,6 +440,7 @@ where
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
     E: ValueEncoding<Value = V> + Sync,
+    S: Strategy,
     unordered::Operation<F, K, E>: Encode,
 {
     type Prepared = super::PreparedUpload<F>;
@@ -423,7 +492,7 @@ where
     }
 }
 
-impl<F, H, K, V, E> StoreBatchPublication for UnorderedWriter<F, H, K, V, E>
+impl<F, H, K, V, E, S> StoreBatchPublication for UnorderedWriter<F, H, K, V, E, S>
 where
     F: Graftable,
     H: Hasher + Sync,
@@ -431,6 +500,7 @@ where
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
     E: ValueEncoding<Value = V> + Sync,
+    S: Strategy,
     unordered::Operation<F, K, E>: Encode,
 {
     type PreparedPublication = super::PreparedWatermark<F>;
@@ -468,7 +538,7 @@ where
     }
 }
 
-impl<F, H, K, V, E> StorePublicationFrontierWriter for UnorderedWriter<F, H, K, V, E>
+impl<F, H, K, V, E, S> StorePublicationFrontierWriter for UnorderedWriter<F, H, K, V, E, S>
 where
     F: Graftable,
     H: Hasher + Sync,
@@ -476,6 +546,7 @@ where
     V: Codec + Clone + Send + Sync,
     V::Cfg: Clone,
     E: ValueEncoding<Value = V> + Sync,
+    S: Strategy,
     unordered::Operation<F, K, E>: Encode,
 {
     fn latest_publication_receipt<'a>(&'a self) -> BoxFuture<'a, Option<PublishedCheckpoint<F>>>
@@ -501,5 +572,123 @@ where
         Self: Sync + 'a,
     {
         Box::pin(async move { UnorderedWriter::flush_with_receipt(self).await })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::Sha256;
+    use commonware_parallel::Rayon;
+    use commonware_storage::merkle::{mmr, Unused};
+    use commonware_storage::qmdb::current::proof::OpsRootWitness;
+    use exoware_sdk::StoreClient;
+    use std::num::NonZeroUsize;
+
+    type TestEncoding = VariableEncoding<Vec<u8>>;
+    type TestOp = unordered::Operation<mmr::Family, Vec<u8>, TestEncoding>;
+
+    #[tokio::test]
+    async fn sequential_and_parallel_current_builds_match() {
+        let ops = vec![
+            TestOp::Delete(b"alpha".to_vec()),
+            TestOp::Delete(b"beta".to_vec()),
+            TestOp::CommitFloor(None, Location::new(0)),
+        ];
+        let digest = Sha256::fill(0x7A);
+        let boundary = CurrentBoundaryState::<_, 32, mmr::Family> {
+            root: digest,
+            pruned_chunks: 0,
+            ops_root_witness: OpsRootWitness {
+                grafted_root: digest,
+                pending_chunk_digest: Unused,
+                partial_chunk: None,
+            },
+            chunks: Vec::new(),
+            grafted_nodes: Vec::new(),
+        };
+
+        let sequential = build_unordered_current_upload_with_strategy::<
+            mmr::Family,
+            Sha256,
+            Vec<u8>,
+            Vec<u8>,
+            32,
+            TestEncoding,
+            _,
+        >(
+            Vec::new(),
+            Position::new(0),
+            Location::new(2),
+            &ops,
+            &boundary,
+            Some(Location::new(2)),
+            &Sequential,
+        )
+        .expect("build sequentially");
+
+        let strategy = Rayon::new(NonZeroUsize::new(2).expect("non-zero thread count"))
+            .expect("construct Rayon strategy")
+            .manual();
+        let parallel = build_unordered_current_upload_with_strategy::<
+            mmr::Family,
+            Sha256,
+            Vec<u8>,
+            Vec<u8>,
+            32,
+            TestEncoding,
+            _,
+        >(
+            Vec::new(),
+            Position::new(0),
+            Location::new(2),
+            &ops,
+            &boundary,
+            Some(Location::new(2)),
+            &strategy,
+        )
+        .expect("build in parallel");
+
+        assert_eq!(sequential.rows, parallel.rows);
+        assert_eq!(sequential.new_peaks, parallel.new_peaks);
+        assert_eq!(sequential.new_ops_size, parallel.new_ops_size);
+        assert_eq!(sequential.new_root, parallel.new_root);
+
+        let sequential_writer =
+            UnorderedWriter::<mmr::Family, Sha256, Vec<u8>, Vec<u8>, TestEncoding>::fresh(
+                PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:9")),
+            );
+        let parallel_writer = UnorderedWriter::<
+            mmr::Family,
+            Sha256,
+            Vec<u8>,
+            Vec<u8>,
+            TestEncoding,
+            _,
+        >::fresh_with_strategy(
+            PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:9")),
+            strategy,
+        );
+
+        let sequential_prepared = sequential_writer
+            .prepare_current_upload(ops.clone(), boundary.clone())
+            .await
+            .expect("prepare sequentially");
+        let parallel_prepared = parallel_writer
+            .prepare_current_upload(ops, boundary)
+            .await
+            .expect("prepare in parallel");
+
+        assert_eq!(sequential_prepared.rows, parallel_prepared.rows);
+        assert_eq!(sequential_prepared.rows, sequential.rows);
+        assert_eq!(parallel_prepared.rows, parallel.rows);
+        assert_eq!(
+            sequential_prepared.writer_location_watermark,
+            parallel_prepared.writer_location_watermark
+        );
+        assert_eq!(
+            sequential_prepared.latest_location,
+            parallel_prepared.latest_location
+        );
     }
 }

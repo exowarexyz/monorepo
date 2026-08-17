@@ -59,10 +59,11 @@ pub use proof::{
 };
 pub use unordered::UnorderedClient;
 pub use writer::{
-    build_immutable_upload, build_keyless_upload, build_ordered_upload, build_unordered_upload,
-    BuiltImmutableUpload, BuiltKeylessUpload, BuiltOrderedUpload, BuiltUnorderedUpload,
-    ImmutableWriter, KeylessWriter, OrderedWriter, PreparedUpload, PreparedWatermark,
-    UnorderedWriter,
+    build_immutable_upload, build_immutable_upload_with_strategy, build_keyless_upload,
+    build_keyless_upload_with_strategy, build_ordered_upload, build_ordered_upload_with_strategy,
+    build_unordered_upload, build_unordered_upload_with_strategy, BuiltImmutableUpload,
+    BuiltKeylessUpload, BuiltOrderedUpload, BuiltUnorderedUpload, ImmutableWriter, KeylessWriter,
+    OrderedWriter, PreparedUpload, PreparedWatermark, UnorderedWriter,
 };
 
 pub use boundary::recover_boundary_state;
@@ -79,6 +80,7 @@ pub use connect_client::{
 
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
+use commonware_parallel::{Sequential, Strategy};
 use commonware_storage::merkle::{self, Family, Graftable, Location, Position, Proof};
 use commonware_storage::qmdb::current::proof::OpsRootWitness;
 
@@ -153,8 +155,21 @@ impl<D: Digest, F: Family> WriterState<D, F> {
     where
         F: Graftable,
     {
+        Self::from_checkpoint_with_strategy::<H, Sequential>(checkpoint, &Sequential)
+    }
+
+    /// Reconstruct writer state using `strategy` for Merkle hashing.
+    pub fn from_checkpoint_with_strategy<H, S>(
+        checkpoint: &OperationRangeCheckpoint<D, F>,
+        strategy: &S,
+    ) -> Result<Self, QmdbError>
+    where
+        F: Graftable,
+        H: Hasher<Digest = D>,
+        S: Strategy,
+    {
         Ok(Self {
-            peaks: checkpoint.reconstruct_peaks::<H>()?,
+            peaks: checkpoint.reconstruct_peaks_with_strategy::<H, S>(strategy)?,
             ops_size: Position::try_from(checkpoint.proof.leaves).map_err(|e| {
                 QmdbError::CorruptData(format!("invalid checkpoint leaf count: {e}"))
             })?,
@@ -175,6 +190,38 @@ impl<D: Digest, F: Family> WriterState<D, F> {
         H: Hasher<Digest = D>,
         Op: Encode,
     {
+        Self::from_proof_with_strategy::<H, Sequential, Op>(
+            watermark,
+            start_location,
+            proof,
+            operations,
+            &Sequential,
+        )
+    }
+
+    /// Reconstruct writer state using `strategy` for Merkle hashing.
+    pub fn from_proof_with_strategy<H, S, Op>(
+        watermark: Location<F>,
+        start_location: Location<F>,
+        proof: &Proof<F, D>,
+        operations: &[Op],
+        strategy: &S,
+    ) -> Result<Self, QmdbError>
+    where
+        H: Hasher<Digest = D>,
+        S: Strategy,
+        Op: Encode,
+    {
+        let next_location = watermark.checked_add(1).ok_or_else(|| {
+            QmdbError::CorruptData("proof watermark exceeds the location domain".into())
+        })?;
+        if next_location != proof.leaves {
+            return Err(QmdbError::CorruptData(format!(
+                "proof watermark implies {next_location} leaves, proof has {}",
+                proof.leaves
+            )));
+        }
+
         let encoded_operations: Vec<Vec<u8>> =
             operations.iter().map(|op| op.encode().to_vec()).collect();
         if start_location != Location::new(0)
@@ -186,10 +233,11 @@ impl<D: Digest, F: Family> WriterState<D, F> {
         }
         let ops_size = Position::try_from(proof.leaves)
             .map_err(|e| QmdbError::CorruptData(format!("invalid proof leaf count: {e}")))?;
-        let extension = crate::core::extend_merkle_from_peaks::<F, H, _>(
+        let extension = crate::core::extend_merkle_from_peaks::<F, H, S, _>(
             Vec::new(),
             Position::new(0),
             encoded_operations.iter().map(Vec::as_slice),
+            strategy,
         )?;
         if extension.size != ops_size {
             return Err(QmdbError::CorruptData(format!(
@@ -200,9 +248,7 @@ impl<D: Digest, F: Family> WriterState<D, F> {
         Ok(Self {
             peaks: extension.peaks,
             ops_size,
-            next_location: watermark
-                .checked_add(1)
-                .ok_or_else(|| QmdbError::CorruptData("proof watermark overflow".into()))?,
+            next_location,
         })
     }
 }
@@ -217,12 +263,28 @@ where
     Fetch: FnOnce(Location<F>, Location<F>, u32) -> Fut,
     Fut: std::future::Future<Output = Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError>>,
 {
+    recover_writer_state_with_strategy::<F, H, Sequential, _, _>(watermark, fetch, &Sequential)
+        .await
+}
+
+async fn recover_writer_state_with_strategy<F, H, S, Fetch, Fut>(
+    watermark: Option<Location<F>>,
+    fetch: Fetch,
+    strategy: &S,
+) -> Result<WriterState<H::Digest, F>, QmdbError>
+where
+    F: Graftable,
+    H: Hasher,
+    S: Strategy,
+    Fetch: FnOnce(Location<F>, Location<F>, u32) -> Fut,
+    Fut: std::future::Future<Output = Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError>>,
+{
     let Some(watermark) = watermark else {
         return Ok(WriterState::empty());
     };
 
     let checkpoint = fetch(watermark, watermark, 1).await?;
-    WriterState::from_checkpoint::<H>(&checkpoint)
+    WriterState::from_checkpoint_with_strategy::<H, S>(&checkpoint, strategy)
 }
 
 #[cfg(test)]

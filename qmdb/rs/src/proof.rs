@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use commonware_codec::{Codec, Encode};
 use commonware_cryptography::{Digest, Hasher};
+use commonware_parallel::{Sequential, Strategy};
 use commonware_storage::{
     merkle::{
         self, storage::Storage as MerkleStorage, Family, Graftable, Location, Position, Proof,
@@ -58,6 +59,18 @@ impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
     pub fn reconstruct_peaks<H: Hasher<Digest = D>>(
         &self,
     ) -> Result<Vec<(Position<F>, u32, D)>, QmdbError> {
+        self.reconstruct_peaks_with_strategy::<H, Sequential>(&Sequential)
+    }
+
+    /// Reconstruct the writer frontier using `strategy` for Merkle hashing.
+    pub fn reconstruct_peaks_with_strategy<H, S>(
+        &self,
+        strategy: &S,
+    ) -> Result<Vec<(Position<F>, u32, D)>, QmdbError>
+    where
+        H: Hasher<Digest = D>,
+        S: Strategy,
+    {
         let size = Position::try_from(self.proof.leaves)
             .map_err(|e| QmdbError::CorruptData(format!("invalid checkpoint leaf count: {e}")))?;
 
@@ -90,11 +103,12 @@ impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
             ));
         }
 
-        let extension = crate::core::extend_merkle_from_pinned_nodes::<F, H, _>(
+        let extension = crate::core::extend_merkle_from_pinned_nodes::<F, H, S, _>(
             self.pinned_nodes.clone(),
             self.start_location,
             self.encoded_operations.iter().map(Vec::as_slice),
             self.proof.inactive_peaks,
+            strategy,
         )?;
         if extension.size != size {
             return Err(QmdbError::CorruptData(format!(

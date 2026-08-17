@@ -4,11 +4,13 @@
 
 mod common;
 
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 
+use commonware_parallel::Strategy as _;
 use commonware_runtime::{deterministic, Runner as _};
 use commonware_storage::merkle::{mmr, Location, Proof};
+use commonware_storage::qmdb::any::value::VariableEncoding;
 use commonware_storage::qmdb::keyless::variable::{Db as Keyless, Operation as KeylessOperation};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{KeylessClient, KeylessWriter};
@@ -187,6 +189,37 @@ async fn sequential_upload_matches_local_root() {
         .expect("proof");
     assert_eq!(proof.root, local_root);
     assert_eq!(proof.operations, writer_ops);
+}
+
+#[tokio::test]
+async fn parallel_upload_matches_local_root() {
+    let client = common::local_store_client().await;
+    let (local_root, _proof, operations, latest) =
+        build_local_reference(vec![vec![b"alpha".to_vec(), b"beta".to_vec()]]).await;
+    let strategy =
+        commonware_parallel::Rayon::new(NonZeroUsize::new(4).expect("non-zero thread count"))
+            .expect("construct Rayon strategy")
+            .manual();
+    let writer = KeylessWriter::<
+        mmr::Family,
+        commonware_cryptography::Sha256,
+        Vec<u8>,
+        VariableEncoding<Vec<u8>>,
+        _,
+    >::fresh_with_strategy(PrefixedStoreClient::empty(client.clone()), strategy);
+
+    common::commit_keyless_upload(&writer, &operations)
+        .await
+        .expect("upload");
+    let got_root = retry(
+        || {
+            let reader = fresh_reader(client.clone());
+            async move { reader.root_at(latest).await }
+        },
+        "root_at",
+    )
+    .await;
+    assert_eq!(got_root, local_root);
 }
 
 // Multiple sequential batches: each call completes before the next starts.

@@ -4,19 +4,22 @@
 
 mod common;
 
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 
 use commonware_cryptography::Sha256;
+use commonware_parallel::Strategy as _;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
-use commonware_storage::merkle::{mmr, Location, Proof};
+use commonware_storage::merkle::{mmr, Location, Position, Proof};
 use commonware_storage::qmdb::any::ordered::variable::Operation as QmdbOperation;
+use commonware_storage::qmdb::any::value::VariableEncoding;
 use commonware_storage::qmdb::current::ordered::variable::Db as LocalQmdbDb;
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
-    recover_boundary_state, CurrentBoundaryState, OrderedClient, OrderedWriter, MAX_OPERATION_SIZE,
+    build_ordered_upload, recover_boundary_state, CurrentBoundaryState, OrderedClient,
+    OrderedWriter, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{PrefixedStoreClient, StoreClient};
 
@@ -199,6 +202,74 @@ async fn sequential_upload_matches_local_root() {
     )
     .await;
     assert_eq!(got_root, local.root);
+}
+
+#[tokio::test]
+async fn parallel_upload_matches_local_root() {
+    let client = common::local_store_client().await;
+    let local = build_local_reference(
+        vec![vec![
+            (b"alpha".to_vec(), Some(b"one".to_vec())),
+            (b"beta".to_vec(), Some(b"two".to_vec())),
+        ]],
+        None,
+    )
+    .await;
+    let strategy =
+        commonware_parallel::Rayon::new(NonZeroUsize::new(4).expect("non-zero thread count"))
+            .expect("construct Rayon strategy")
+            .manual();
+    let writer = OrderedWriter::<
+        mmr::Family,
+        Sha256,
+        Vec<u8>,
+        Vec<u8>,
+        N,
+        VariableEncoding<Vec<u8>>,
+        _,
+    >::fresh_with_strategy(PrefixedStoreClient::empty(client.clone()), strategy);
+
+    common::commit_ordered_upload(&writer, &local.operations, &local.current_boundary)
+        .await
+        .expect("upload");
+    let got_root = retry(
+        || {
+            let reader = fresh_reader(client.clone());
+            let latest = local.latest_location;
+            async move { reader.current_root_at(latest).await }
+        },
+        "current_root_at",
+    )
+    .await;
+    assert_eq!(got_root, local.root);
+
+    let expected_ops_root = build_ordered_upload::<
+        mmr::Family,
+        Sha256,
+        Vec<u8>,
+        Vec<u8>,
+        N,
+        VariableEncoding<Vec<u8>>,
+    >(
+        Vec::new(),
+        Position::new(0),
+        local.latest_location,
+        &local.operations,
+        &local.current_boundary,
+        None,
+    )
+    .expect("sequential reference build")
+    .new_ops_root;
+    let got_ops_root = retry(
+        || {
+            let reader = fresh_reader(client.clone());
+            let latest = local.latest_location;
+            async move { reader.root_at(latest).await }
+        },
+        "root_at",
+    )
+    .await;
+    assert_eq!(got_ops_root, expected_ops_root);
 }
 
 // Pipelined burst for ordered: each batch must carry its own current-boundary
