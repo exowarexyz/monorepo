@@ -65,7 +65,7 @@ async fn build_local_reference(
                         .merkleize(&db, None::<Vec<u8>>, db.bounds().end - 1)
                         .await
                 };
-                db.apply_batch(finalized).await.expect("apply");
+                (db, _) = db.apply_batch(finalized).await.expect("apply");
             }
 
             let latest = db.bounds().end - 1;

@@ -21,7 +21,7 @@ use crate::codec::{
     bitmap_chunk_bits, chunk_index_for_location, clear_below_floor,
     decode_current_boundary_metadata, decode_update_index_value_present, decode_update_location,
     encode_chunk_key, encode_current_meta_key, encode_ops_root_witness_key,
-    merkle_size_for_watermark, CurrentBoundaryMetadata,
+    merkle_size_for_watermark, op_count_for_watermark, CurrentBoundaryMetadata,
 };
 use crate::connect::OperationKv;
 use crate::core::HistoricalOpsClientCore;
@@ -801,7 +801,7 @@ where
             .load_ops_inactivity_floor_at(session, watermark)
             .await?;
         Ok(F::inactive_peaks(
-            merkle_size_for_watermark(watermark)?,
+            op_count_for_watermark(watermark)?,
             inactivity_floor,
         ))
     }

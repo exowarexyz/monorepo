@@ -221,6 +221,8 @@ async fn seed(
                 grafted_metadata_partition: "mmb-grafted-metadata".into(),
                 translator: TwoCap,
                 init_cache_size: None,
+                init_buffer: NZUsize!(1 << 21),
+                init_concurrency: (),
             };
             let mut db = LocalQmdbDb::<
                 DemoFamily,
@@ -318,8 +320,8 @@ async fn seed(
                         .await
                         .expect("merkleize")
                 };
-                db.apply_batch(finalized).await.expect("apply batch");
-                db.sync().await.expect("sync local ordered db");
+                (db, _) = db.apply_batch(finalized).await.expect("apply batch");
+                db = db.sync().await.expect("sync local ordered db");
 
                 let latest = db.bounds().end - 1;
                 let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");

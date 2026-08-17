@@ -407,20 +407,8 @@ mod tests {
 
     const DEMO_NAMESPACE: &[u8] = b"_EXOWARE_SIMPLEX_DEMO";
 
-    fn sha256_payload(header: &[u8]) -> sha256::Digest {
-        let mut hasher = Sha256::new();
-        hasher.update(header);
-        hasher.finalize()
-    }
-
-    fn blake3_payload(header: &[u8]) -> blake3::Digest {
-        let mut hasher = Blake3::new();
-        hasher.update(header);
-        hasher.finalize()
-    }
-
     fn transcript_summary_payload(header: &[u8]) -> transcript::Summary {
-        transcript::Transcript::new(DEMO_NAMESPACE)
+        transcript::Transcript::new(DEMO_NAMESPACE, transcript::Version::V0)
             .commit(header)
             .summarize()
     }
@@ -673,7 +661,7 @@ mod tests {
             schemes,
             verification_material.clone(),
             "sha256",
-            sha256_payload,
+            |header| Sha256::hash(&[header]),
         );
         verify_round_trip(
             identity_name,
@@ -681,7 +669,7 @@ mod tests {
             schemes,
             verification_material.clone(),
             "blake3",
-            blake3_payload,
+            |header| Blake3::hash(&[header]),
         );
         verify_round_trip(
             identity_name,

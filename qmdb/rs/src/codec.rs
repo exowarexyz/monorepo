@@ -101,11 +101,17 @@ pub(crate) fn decode_current_boundary_metadata<D: Digest>(
 pub(crate) fn merkle_size_for_watermark<F: Family>(
     watermark: Location<F>,
 ) -> Result<Position<F>, QmdbError> {
-    let leaves = watermark
-        .checked_add(1)
-        .ok_or_else(|| QmdbError::CorruptData("watermark overflow".to_string()))?;
+    let leaves = op_count_for_watermark(watermark)?;
     Position::try_from(leaves)
         .map_err(|e| QmdbError::CorruptData(format!("invalid merkle size for watermark: {e}")))
+}
+
+pub(crate) fn op_count_for_watermark<F: Family>(
+    watermark: Location<F>,
+) -> Result<Location<F>, QmdbError> {
+    watermark
+        .checked_add(1)
+        .ok_or_else(|| QmdbError::CorruptData("watermark overflow".to_string()))
 }
 
 pub(crate) fn ensure_encoded_value_size(len: usize) -> Result<(), QmdbError> {

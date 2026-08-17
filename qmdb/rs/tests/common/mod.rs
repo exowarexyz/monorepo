@@ -95,6 +95,8 @@ pub fn any_variable_config<C>(
         ),
         translator: TwoCap,
         init_cache_size: None,
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
@@ -126,6 +128,8 @@ pub fn ordered_variable_config<C>(
         grafted_metadata_partition: format!("{prefix}-grafted-metadata"),
         translator: TwoCap,
         init_cache_size: None,
+        init_buffer: NZUsize!(1 << 21),
+        init_concurrency: (),
     }
 }
 
@@ -141,6 +145,7 @@ pub fn immutable_variable_config<C>(
         log: variable_journal_config(prefix, page_cache, codec_config, items_per_section),
         translator: TwoCap,
         init_cache_size: None,
+        init_buffer: NZUsize!(1 << 21),
     }
 }
 

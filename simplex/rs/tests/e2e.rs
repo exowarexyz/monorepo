@@ -68,9 +68,7 @@ impl TestBlock {
     fn compute_digest(&self) -> Sha256Digest {
         let mut header = BytesMut::with_capacity(self.encode_size());
         self.write(&mut header);
-        let mut hasher = Sha256::new();
-        hasher.update(&header);
-        hasher.finalize()
+        Sha256::hash(&[&header])
     }
 }
 
@@ -367,7 +365,7 @@ async fn marshal_resolver_sinks_finalized_chain_from_simplex_api() {
                     start: Start::Genesis(genesis),
                     partition_prefix: partition_prefix.to_string(),
                     mailbox_size: NZUsize!(100),
-                    view_retention_timeout: ViewDelta::new(10),
+                    view_retention: ViewDelta::new(10),
                     prunable_items_per_section: NZU64!(10),
                     page_cache,
                     replay_buffer: NZUsize!(1024),

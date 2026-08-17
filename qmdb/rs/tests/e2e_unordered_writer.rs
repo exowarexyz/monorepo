@@ -88,7 +88,7 @@ async fn build_local_reference(batches: Vec<WriteBatch>) -> LocalReference {
                         .await
                         .expect("merkleize")
                 };
-                db.apply_batch(finalized).await.expect("apply");
+                (db, _) = db.apply_batch(finalized).await.expect("apply");
             }
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();

@@ -87,14 +87,14 @@ async fn build_local_batch() -> LocalBatch {
                     .merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
                     .await
             };
-            db.apply_batch(finalized).await.expect("apply");
+            (db, _) = db.apply_batch(finalized).await.expect("apply");
             let finalized = {
                 let batch = db.new_batch().set(key_c, b"gamma".to_vec());
                 batch
                     .merkleize(&db, None::<Vec<u8>>, db.bounds().end - 1)
                     .await
             };
-            db.apply_batch(finalized).await.expect("apply second");
+            (db, _) = db.apply_batch(finalized).await.expect("apply second");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();

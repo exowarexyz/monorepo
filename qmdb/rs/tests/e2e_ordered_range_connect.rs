@@ -14,17 +14,13 @@ use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
 use commonware_storage::merkle::{mmb, mmr, Location, Proof};
 use commonware_storage::qmdb::any::ordered::variable::Operation as QmdbOperation;
-use commonware_storage::qmdb::sync::resolver::Resolver as _;
 use commonware_storage::qmdb::{
     any::ordered::{variable::Db as AnyOrderedQmdbDb, Update},
     current::ordered::variable::Db as LocalQmdbDb,
-    sync as qmdb_sync,
+    sync::{self as qmdb_sync, Request, Response, Source as _},
 };
 use commonware_storage::translator::TwoCap;
-use commonware_utils::{
-    channel::{mpsc, oneshot},
-    NZUsize, NZU16, NZU64,
-};
+use commonware_utils::{channel::mpsc, NZUsize, NZU16, NZU64};
 use exoware_qmdb::proto::qmdb::v1::{
     GetCurrentOperationRangeRequest as ProtoGetCurrentOperationRangeRequest,
     GetOperationRangeRequest as ProtoGetOperationRangeRequest,
@@ -227,7 +223,7 @@ async fn build_local_batch() -> LocalBatch {
                         .await
                         .expect("merkleize")
                 };
-                db.apply_batch(finalized).await.expect("apply");
+                (db, _) = db.apply_batch(finalized).await.expect("apply");
 
                 let latest = db.bounds().end - 1;
                 let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -246,7 +242,7 @@ async fn build_local_batch() -> LocalBatch {
                 "MMR subscribe fixture must exercise nonzero inactivity floor"
             );
             let boundary = boundary_from_local_db(&db, None, &ops).await;
-            db.sync().await.expect("sync");
+            db = db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
 
             LocalBatch {
@@ -340,7 +336,7 @@ async fn build_mmb_local_batch() -> MmbLocalBatch {
                         .await
                         .expect("merkleize")
                 };
-                db.apply_batch(finalized).await.expect("apply");
+                (db, _) = db.apply_batch(finalized).await.expect("apply");
 
                 let latest = db.bounds().end - 1;
                 let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -359,7 +355,7 @@ async fn build_mmb_local_batch() -> MmbLocalBatch {
                 "MMB fixture must exercise nonzero inactivity floor and multiple sync batches"
             );
             let boundary = boundary_from_mmb_local_db(&db, &ops).await;
-            db.sync().await.expect("sync");
+            db = db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
 
             MmbLocalBatch {
@@ -409,7 +405,7 @@ async fn build_mmb_growing_local_batch() -> MmbGrowingLocalBatch {
                         .await
                         .expect("merkleize")
                 };
-                db.apply_batch(finalized).await.expect("apply");
+                (db, _) = db.apply_batch(finalized).await.expect("apply");
 
                 let latest = db.bounds().end - 1;
                 let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -445,7 +441,7 @@ async fn build_mmb_growing_local_batch() -> MmbGrowingLocalBatch {
                 "MMB growing fixture must add enough operations for multiple updated sync fetches"
             );
             let boundary = boundary_from_mmb_local_db(&db, &ops).await;
-            db.sync().await.expect("sync");
+            db = db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
 
             MmbGrowingLocalBatch {
@@ -551,11 +547,11 @@ async fn ordered_current_state_sync_from_connect_api_reconstructs_current_db() {
             );
             let db: LocalDb = qmdb_sync::sync(qmdb_sync::engine::Config {
                 context: context.child("sync"),
-                resolver,
+                source: resolver,
                 target,
                 max_outstanding_requests: 4,
                 fetch_batch_size: NZU64!(7),
-                apply_batch_size: 32,
+                apply_batch_size: NZU64!(32),
                 db_config: cfg,
                 update_rx: None,
                 finish_rx: None,
@@ -637,11 +633,11 @@ async fn ordered_mmb_current_state_sync_from_nonzero_connect_api_reconstructs_cu
             );
             let db: MmbLocalDb = qmdb_sync::sync(qmdb_sync::engine::Config {
                 context: context.child("sync"),
-                resolver,
+                source: resolver,
                 target,
                 max_outstanding_requests: 4,
                 fetch_batch_size: NZU64!(3),
-                apply_batch_size: 32,
+                apply_batch_size: NZU64!(32),
                 db_config: cfg,
                 update_rx: None,
                 finish_rx: None,
@@ -696,26 +692,28 @@ async fn ordered_mmb_sync_resolvers_return_pinned_nodes_for_nonzero_fetches() {
         .target_range(start, op_count)
         .await
         .expect("any nonzero sync target");
-    let (_cancel_tx, cancel_rx) = oneshot::channel();
-    let any_fetch = any_resolver
-        .get_operations(op_count, start, NZU64!(1), true, cancel_rx)
+    let (any_response, _) = any_resolver
+        .serve(Request::Boundary {
+            size: op_count,
+            start,
+        })
         .await
         .expect("any resolver nonzero pinned fetch");
-    let any_pinned_nodes = any_fetch
-        .pinned_nodes
-        .as_ref()
-        .expect("any resolver returned pinned nodes");
+    let Response::Boundary {
+        proof: any_proof,
+        op: any_op,
+        pinned_nodes: any_pinned_nodes,
+    } = any_response
+    else {
+        panic!("boundary request returned operations response");
+    };
     assert!(!any_pinned_nodes.is_empty());
-    let any_elements = any_fetch
-        .operations
-        .iter()
-        .map(|operation| operation.encode())
-        .collect::<Vec<_>>();
-    assert!(any_fetch.proof.verify_proof_and_pinned_nodes(
+    let any_elements = [any_op.encode()];
+    assert!(any_proof.verify_proof_and_pinned_nodes(
         &hasher,
         &any_elements,
         start,
-        any_pinned_nodes,
+        &any_pinned_nodes,
         &any_target.root,
     ));
 
@@ -729,26 +727,28 @@ async fn ordered_mmb_sync_resolvers_return_pinned_nodes_for_nonzero_fetches() {
         .target_range(start, op_count)
         .await
         .expect("current nonzero sync target");
-    let (_cancel_tx, cancel_rx) = oneshot::channel();
-    let current_fetch = current_resolver
-        .get_operations(op_count, start, NZU64!(1), true, cancel_rx)
+    let (current_response, _) = current_resolver
+        .serve(Request::Boundary {
+            size: op_count,
+            start,
+        })
         .await
         .expect("current resolver nonzero pinned fetch");
-    let current_pinned_nodes = current_fetch
-        .pinned_nodes
-        .as_ref()
-        .expect("current resolver returned pinned nodes");
+    let Response::Boundary {
+        proof: current_proof,
+        op: current_op,
+        pinned_nodes: current_pinned_nodes,
+    } = current_response
+    else {
+        panic!("boundary request returned operations response");
+    };
     assert!(!current_pinned_nodes.is_empty());
-    let current_elements = current_fetch
-        .operations
-        .iter()
-        .map(|operation| operation.encode())
-        .collect::<Vec<_>>();
-    assert!(current_fetch.proof.verify_proof_and_pinned_nodes(
+    let current_elements = [current_op.encode()];
+    assert!(current_proof.verify_proof_and_pinned_nodes(
         &hasher,
         &current_elements,
         start,
-        current_pinned_nodes,
+        &current_pinned_nodes,
         &current_target.root,
     ));
 }
@@ -1296,11 +1296,11 @@ async fn ordered_mmb_operation_log_any_sync_from_connect_api_reconstructs_any_db
             );
             let db: MmbAnyLocalDb = qmdb_sync::sync(qmdb_sync::engine::Config {
                 context: context.child("sync"),
-                resolver,
+                source: resolver,
                 target,
                 max_outstanding_requests: 4,
                 fetch_batch_size: NZU64!(3),
-                apply_batch_size: 32,
+                apply_batch_size: NZU64!(32),
                 db_config: cfg,
                 update_rx: None,
                 finish_rx: None,
@@ -1372,11 +1372,11 @@ async fn ordered_mmb_operation_log_any_sync_from_nonzero_connect_api_reconstruct
             );
             let db: MmbAnyLocalDb = qmdb_sync::sync(qmdb_sync::engine::Config {
                 context: context.child("sync"),
-                resolver,
+                source: resolver,
                 target,
                 max_outstanding_requests: 4,
                 fetch_batch_size: NZU64!(3),
-                apply_batch_size: 32,
+                apply_batch_size: NZU64!(32),
                 db_config: cfg,
                 update_rx: None,
                 finish_rx: None,
@@ -1469,11 +1469,11 @@ async fn ordered_mmb_operation_log_any_sync_accepts_target_update_from_growing_b
             );
             let db: MmbAnyLocalDb = qmdb_sync::sync(qmdb_sync::engine::Config {
                 context: context.child("sync"),
-                resolver,
+                source: resolver,
                 target: initial_target,
                 max_outstanding_requests: 1,
                 fetch_batch_size: NZU64!(3),
-                apply_batch_size: 4,
+                apply_batch_size: NZU64!(4),
                 db_config: cfg,
                 update_rx: Some(update_rx),
                 finish_rx: Some(finish_rx),

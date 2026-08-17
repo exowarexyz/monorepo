@@ -123,7 +123,7 @@ async fn run_keyless_local(
                     b.merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
                         .await
                 };
-                db.apply_batch(finalized).await.expect("apply");
+                (db, _) = db.apply_batch(finalized).await.expect("apply");
             }
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -244,7 +244,7 @@ async fn run_unordered_local(
                     }
                     b.merkleize(&db, None::<Vec<u8>>).await.expect("merkleize")
                 };
-                db.apply_batch(finalized).await.expect("apply");
+                (db, _) = db.apply_batch(finalized).await.expect("apply");
             }
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -354,7 +354,7 @@ async fn run_immutable_local(
                     b.merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
                         .await
                 };
-                db.apply_batch(finalized).await.expect("apply");
+                (db, _) = db.apply_batch(finalized).await.expect("apply");
             }
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -535,7 +535,7 @@ async fn run_ordered_local(
                     }
                     b.merkleize(&db, None::<Vec<u8>>).await.expect("merkleize")
                 };
-                db.apply_batch(finalized).await.expect("apply");
+                (db, _) = db.apply_batch(finalized).await.expect("apply");
             }
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -546,7 +546,7 @@ async fn run_ordered_local(
             let boundary =
                 ordered_boundary_from_local_db(&db, previous_operations.as_deref(), &ops).await;
             let root = db.root();
-            db.sync().await.expect("sync");
+            db = db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
             (ops, proof, latest, root, boundary)
         })

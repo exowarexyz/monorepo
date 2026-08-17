@@ -142,7 +142,7 @@ where
         }
     };
     Ok(F::inactive_peaks(
-        crate::codec::merkle_size_for_watermark(latest_location)?,
+        crate::codec::op_count_for_watermark(latest_location)?,
         floor,
     ))
 }

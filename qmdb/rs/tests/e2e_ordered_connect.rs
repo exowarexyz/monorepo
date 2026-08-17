@@ -218,7 +218,7 @@ async fn build_local_batch_with_writes(label: &str, writes: &[(Vec<u8>, Vec<u8>)
                     .await
                     .expect("merkleize")
             };
-            db.apply_batch(finalized).await.expect("apply");
+            (db, _) = db.apply_batch(finalized).await.expect("apply");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -229,7 +229,7 @@ async fn build_local_batch_with_writes(label: &str, writes: &[(Vec<u8>, Vec<u8>)
 
             let boundary = boundary_from_local_db(&db, None, &ops).await;
 
-            db.sync().await.expect("sync");
+            db = db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
 
             LocalBatch {
