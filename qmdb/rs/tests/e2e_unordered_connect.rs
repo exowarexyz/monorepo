@@ -244,7 +244,7 @@ async fn build_local_batch() -> LocalBatch {
                         .await
                         .expect("merkleize")
                 };
-                db.apply_batch(finalized).await.expect("apply");
+                (db, _) = db.apply_batch(finalized).await.expect("apply");
 
                 let latest = db.bounds().end - 1;
                 let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -264,7 +264,7 @@ async fn build_local_batch() -> LocalBatch {
             );
             let root = db.root();
 
-            db.sync().await.expect("sync");
+            db = db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
 
             LocalBatch {
@@ -323,7 +323,7 @@ async fn build_mmb_local_batch() -> MmbLocalBatch {
                         .await
                         .expect("merkleize")
                 };
-                db.apply_batch(finalized).await.expect("apply");
+                (db, _) = db.apply_batch(finalized).await.expect("apply");
 
                 let latest = db.bounds().end - 1;
                 let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -343,7 +343,7 @@ async fn build_mmb_local_batch() -> MmbLocalBatch {
             );
             let root = db.root();
 
-            db.sync().await.expect("sync");
+            db = db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
 
             MmbLocalBatch {
@@ -395,7 +395,7 @@ async fn build_fixed_local_batch() -> FixedLocalBatch {
                     .await
                     .expect("merkleize")
             };
-            db.apply_batch(finalized).await.expect("apply");
+            (db, _) = db.apply_batch(finalized).await.expect("apply");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -405,7 +405,7 @@ async fn build_fixed_local_batch() -> FixedLocalBatch {
                 .expect("proof");
             let boundary = boundary_from_local_current_db(&db, &ops).await;
 
-            db.sync().await.expect("sync");
+            db = db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
 
             FixedLocalBatch {

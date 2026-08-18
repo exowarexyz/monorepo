@@ -83,14 +83,15 @@ where
                 .append(b"seventh-value".to_vec())
                 .merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
                 .await;
-            db.apply_batch(initial).await.expect("apply initial batch");
+            (db, _) = db.apply_batch(initial).await.expect("apply initial batch");
 
             let checkpoint_batch = db
                 .new_batch()
                 .append(b"eighth-value".to_vec())
                 .merkleize(&db, None::<Vec<u8>>, db.bounds().end - 1)
                 .await;
-            db.apply_batch(checkpoint_batch)
+            (db, _) = db
+                .apply_batch(checkpoint_batch)
                 .await
                 .expect("apply checkpoint batch");
 
@@ -106,7 +107,8 @@ where
                 .append(b"ninth-value".to_vec())
                 .merkleize(&db, None::<Vec<u8>>, db.bounds().end - 1)
                 .await;
-            db.apply_batch(continuation)
+            (db, _) = db
+                .apply_batch(continuation)
                 .await
                 .expect("apply continuation batch");
 

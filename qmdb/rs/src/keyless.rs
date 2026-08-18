@@ -24,7 +24,6 @@ use crate::proof::{OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperati
 use crate::storage::KvMerkleStorage;
 use crate::WriterState;
 
-#[derive(Clone)]
 pub struct KeylessClient<
     F: Family,
     H: Hasher,
@@ -36,6 +35,24 @@ pub struct KeylessClient<
     client: PrefixedStoreClient,
     op_cfg: <keyless::Operation<F, E> as CodecRead>::Cfg,
     _marker: PhantomData<(F, H, E)>,
+}
+
+impl<F, H, V, E> Clone for KeylessClient<F, H, V, E>
+where
+    F: Family,
+    H: Hasher,
+    V: Codec + Send + Sync,
+    E: ValueEncoding<Value = V>,
+    keyless::Operation<F, E>: CodecRead,
+    <keyless::Operation<F, E> as CodecRead>::Cfg: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            op_cfg: self.op_cfg.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<F, H, V, E> std::fmt::Debug for KeylessClient<F, H, V, E>

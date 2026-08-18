@@ -689,9 +689,7 @@ mod tests {
 
     #[test]
     fn current_boundary_upload_keys_grafted_nodes_by_grafted_space_position() {
-        let mut hasher = Sha256::default();
-        hasher.update(b"grafted-node");
-        let digest = hasher.finalize();
+        let digest = Sha256::hash(&[b"grafted-node".as_slice()]);
 
         let ops_position = Position::new(2046);
         let latest_location = Location::new(1024);

@@ -87,9 +87,7 @@ impl DemoBlock {
     fn compute_digest(&self) -> Sha256Digest {
         let mut header = BytesMut::with_capacity(self.encode_size());
         self.write(&mut header);
-        let mut hasher = Sha256::new();
-        hasher.update(&header);
-        hasher.finalize()
+        Sha256::hash(&[&header])
     }
 }
 
@@ -304,7 +302,7 @@ async fn seed(
         }
 
         let body = Bytes::from(format!("simplex-demo-block-body-{height}").into_bytes());
-        let body_digest = Sha256::hash(&body);
+        let body_digest = Sha256::hash(&[&body]);
         let block = DemoBlock::new(
             height,
             parent_view,

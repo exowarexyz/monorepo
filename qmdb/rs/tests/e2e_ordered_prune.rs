@@ -150,12 +150,13 @@ async fn mirror_ordered_prune_past_chunk_zero() {
                             .await
                             .expect("merkleize")
                     };
-                    db.apply_batch(finalized).await.expect("apply");
+                    (db, _) = db.apply_batch(finalized).await.expect("apply");
                     // Current pruning is now explicit in Commonware. Keep the
                     // historical operation log intact for this mirror test while
                     // allowing the current bitmap/grafted overlay to prune as far
                     // as the sync boundary permits.
-                    db.prune(Location::<mmr::Family>::new(0))
+                    db = db
+                        .prune(Location::<mmr::Family>::new(0))
                         .await
                         .expect("prune current");
 
@@ -202,7 +203,7 @@ async fn mirror_ordered_prune_past_chunk_zero() {
                         Ok(_) => false,
                     }
                 };
-                db.sync().await.expect("sync");
+                db = db.sync().await.expect("sync");
                 db.destroy().await.expect("destroy");
                 (
                     batches,

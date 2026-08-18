@@ -301,11 +301,11 @@ where
 {
     let previous_floor = previous_operations
         .and_then(|ops| ops.last())
-        .and_then(QmdbOperation::has_floor)
+        .and_then(|operation| operation.has_floor())
         .unwrap_or(Location::new(0));
     let floor = operations
         .last()
-        .and_then(QmdbOperation::has_floor)
+        .and_then(|operation| operation.has_floor())
         .unwrap_or(Location::new(0));
     let chunk_bits = bitmap_chunk_bits::<N>();
 

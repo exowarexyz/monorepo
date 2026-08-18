@@ -8,7 +8,8 @@ use exoware_sdk::{RangeMode, SerializableReadSession};
 use crate::codec::{
     decode_digest, decode_operation_location_key, decode_watermark_location, encode_node_key,
     encode_operation_key, encode_presence_key, encode_update_index_value, encode_update_key,
-    encode_watermark_key, ensure_encoded_value_size, merkle_size_for_watermark, WATERMARK_PREFIX,
+    encode_watermark_key, ensure_encoded_value_size, merkle_size_for_watermark,
+    op_count_for_watermark, WATERMARK_PREFIX,
 };
 use crate::error::QmdbError;
 
@@ -156,7 +157,7 @@ pub(crate) fn auth_inactive_peaks<F: Family>(
     inactivity_floor: Location<F>,
 ) -> Result<usize, QmdbError> {
     Ok(F::inactive_peaks(
-        merkle_size_for_watermark(watermark)?,
+        op_count_for_watermark(watermark)?,
         inactivity_floor,
     ))
 }
@@ -167,9 +168,7 @@ pub(crate) async fn compute_auth_root<F: Family, H: Hasher>(
     inactive_peaks: usize,
 ) -> Result<H::Digest, QmdbError> {
     let size = merkle_size_for_watermark(watermark)?;
-    let leaves = watermark
-        .checked_add(1)
-        .ok_or_else(|| QmdbError::CorruptData("watermark overflow".to_string()))?;
+    let leaves = op_count_for_watermark(watermark)?;
     let peak_positions: Vec<(Position<F>, u32)> = F::peaks(size).collect();
     let fetched = if peak_positions.is_empty() {
         std::collections::HashMap::new()

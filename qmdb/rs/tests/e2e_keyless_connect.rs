@@ -13,8 +13,8 @@ use commonware_glue::stateful::db::{StateSyncDb, SyncEngineConfig};
 use commonware_runtime::{deterministic, tokio as cw_tokio, Runner as _};
 use commonware_storage::merkle::{mmr, Location};
 use commonware_storage::qmdb::keyless::variable::{Db as Keyless, Operation as KeylessOperation};
-use commonware_storage::qmdb::sync::resolver::Resolver as _;
-use commonware_utils::channel::{mpsc, oneshot};
+use commonware_storage::qmdb::sync::{Request, Response, Source as _};
+use commonware_utils::channel::mpsc;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::proto::qmdb::v1::{
     GetOperationRangeRequest as ProtoGetOperationRangeRequest,
@@ -87,14 +87,14 @@ async fn build_local_batch() -> LocalBatch {
                     .merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
                     .await
             };
-            db.apply_batch(finalized).await.expect("apply");
+            (db, _) = db.apply_batch(finalized).await.expect("apply");
             let finalized = {
                 let batch = db.new_batch().append(b"third-value".to_vec());
                 batch
                     .merkleize(&db, None::<Vec<u8>>, db.bounds().end - 1)
                     .await
             };
-            db.apply_batch(finalized).await.expect("apply second");
+            (db, _) = db.apply_batch(finalized).await.expect("apply second");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -235,27 +235,27 @@ async fn keyless_operation_log_sync_resolver_fetches_api_batches() {
     let target = resolver.target(op_count).await.expect("sync target");
     assert_eq!(target.root, local.root);
 
-    let (_cancel_tx, cancel_rx) = oneshot::channel();
-    let fetched = resolver
-        .get_operations(op_count, Location::new(0), NZU64!(2), false, cancel_rx)
+    let (response, callback) = resolver
+        .serve(Request::Operations {
+            size: op_count,
+            start: Location::new(0),
+            max_ops: NZU64!(2),
+        })
         .await
         .expect("fetch sync operations");
-    assert_eq!(fetched.operations.as_slice(), &local.operations[..2]);
+    let Response::Operations { proof, operations } = response else {
+        panic!("operation request returned boundary response");
+    };
+    assert_eq!(operations.as_slice(), &local.operations[..2]);
 
     let hasher = commonware_storage::qmdb::hasher::<commonware_cryptography::Sha256>();
-    let elements = fetched
-        .operations
+    let elements = operations
         .iter()
         .map(|operation| operation.encode())
         .collect::<Vec<_>>();
-    assert!(fetched.proof.verify_range_inclusion(
-        &hasher,
-        &elements,
-        Location::new(0),
-        &target.root
-    ));
+    assert!(proof.verify_range_inclusion(&hasher, &elements, Location::new(0), &target.root));
     assert!(
-        fetched.callback.is_none(),
+        callback.is_none(),
         "direct sync resolver fetches do not allocate an unused validation callback"
     );
 }
@@ -332,7 +332,7 @@ async fn keyless_commonware_glue_state_sync_uses_operation_log_resolver() {
                 None,
                 SyncEngineConfig {
                     fetch_batch_size: NZU64!(1),
-                    apply_batch_size: 1,
+                    apply_batch_size: NZU64!(1),
                     max_outstanding_requests: 2,
                     update_channel_size: NZUsize!(1),
                     max_retained_roots: 4,
@@ -356,30 +356,6 @@ async fn keyless_commonware_glue_state_sync_uses_operation_log_resolver() {
     })
     .await
     .expect("join glue state sync runner");
-}
-
-#[tokio::test]
-async fn keyless_operation_log_sync_resolver_observes_cancelled_fetch() {
-    let resolver = OperationLogSyncResolver::<
-        _,
-        mmr::Family,
-        commonware_cryptography::Sha256,
-        BatchOperation,
-    >::plaintext("http://127.0.0.1:1", ((0..=10000).into(), ()));
-    let (cancel_tx, cancel_rx) = oneshot::channel();
-    drop(cancel_tx);
-
-    let err = resolver
-        .get_operations(
-            Location::new(1),
-            Location::new(0),
-            NZU64!(1),
-            false,
-            cancel_rx,
-        )
-        .await
-        .expect_err("closed cancellation channel aborts fetch");
-    assert!(matches!(err, QmdbError::SyncFetchCancelled));
 }
 
 #[tokio::test]

@@ -216,7 +216,7 @@ where
                     .await
                     .expect("merkleize")
             };
-            db.apply_batch(finalized).await.expect("apply");
+            (db, _) = db.apply_batch(finalized).await.expect("apply");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -237,7 +237,7 @@ where
                 db.get(&b"beta".to_vec()).await.expect("get"),
             );
 
-            db.sync().await.expect("sync");
+            db = db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
 
             LocalReference {
@@ -340,7 +340,7 @@ where
                     .await
                     .expect("merkleize")
             };
-            db.apply_batch(finalized).await.expect("apply");
+            (db, _) = db.apply_batch(finalized).await.expect("apply");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -351,7 +351,7 @@ where
 
             let boundary = boundary_from_local_db_with_chunk_size::<F, M>(&db, None, &ops).await;
 
-            db.sync().await.expect("sync");
+            db = db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
 
             ChunkSizedLocalReference {
@@ -385,6 +385,8 @@ where
                 grafted_metadata_partition: "ordered_fixed_grafted_metadata".to_string(),
                 translator: TwoCap,
                 init_cache_size: None,
+                init_buffer: NZUsize!(1 << 21),
+                init_concurrency: (),
             };
             let mut db: FixedLocalDb<F> = FixedLocalDb::init(context.child("ordered_fixed"), cfg)
                 .await
@@ -404,7 +406,7 @@ where
                     .await
                     .expect("fixed merkleize")
             };
-            db.apply_batch(finalized).await.expect("apply fixed");
+            (db, _) = db.apply_batch(finalized).await.expect("apply fixed");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -425,7 +427,7 @@ where
                 db.get(&beta).await.expect("get beta"),
             );
 
-            db.sync().await.expect("sync fixed");
+            db = db.sync().await.expect("sync fixed");
             db.destroy().await.expect("destroy fixed");
 
             FixedLocalReference {
@@ -630,7 +632,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
                             .await
                             .expect("merkleize")
                     };
-                    db.apply_batch(finalized).await.expect("apply");
+                    (db, _) = db.apply_batch(finalized).await.expect("apply");
 
                     let latest = db.bounds().end - 1;
                     let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");
@@ -788,8 +790,8 @@ async fn ordered_mmb_persistent_interleaved_seed_batches_keep_current_proofs_ver
                                 .await
                                 .expect("merkleize")
                         };
-                        db.apply_batch(finalized).await.expect("apply");
-                        db.sync().await.expect("sync");
+                        (db, _) = db.apply_batch(finalized).await.expect("apply");
+                        db = db.sync().await.expect("sync");
 
                         let latest = db.bounds().end - 1;
                         let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");

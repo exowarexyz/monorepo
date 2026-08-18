@@ -28,13 +28,13 @@ use commonware_storage::{
         current::unordered::db::KeyValueProof as UnorderedKeyValueProof,
         operation::Key as QmdbKey,
         sync::{
-            resolver::{fetch_operation_range, FetchResult, FetchedOperations, Resolver},
+            FeedbackTx, Request as SyncRequest, Response as SyncResponse, Source,
             Target as SyncTarget,
         },
         verify::{verify_multi_proof, verify_proof_and_pinned_nodes},
     },
 };
-use commonware_utils::{channel::oneshot, range::NonEmptyRange};
+use commonware_utils::range::NonEmptyRange;
 use connectrpc::client::{ClientConfig, ClientTransport, ServerStream};
 use connectrpc::ConnectError;
 use exoware_sdk::proto::PreferZstdHttpClient;
@@ -598,11 +598,11 @@ where
         .await
     }
 
-    fn decode_fetched_operations(
+    fn decode_sync_response(
         &self,
         proto: HistoricalOperationRangeProof,
-        include_pinned_nodes: bool,
-    ) -> Result<FetchedOperations<F, Op, H::Digest>, QmdbError> {
+        request: SyncRequest<F>,
+    ) -> Result<SyncResponse<F, Op, H::Digest>, QmdbError> {
         let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
         let proof = Proof::<F, H::Digest>::decode_cfg(proto.proof.as_ref(), &max_digests).map_err(
             |err| {
@@ -620,24 +620,33 @@ where
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let pinned_nodes = if include_pinned_nodes {
-            Some(
-                proto
+        match request {
+            SyncRequest::Operations { .. } => Ok(SyncResponse::Operations { proof, operations }),
+            SyncRequest::Boundary { .. } => {
+                let [op] = operations.try_into().map_err(|operations: Vec<Op>| {
+                    QmdbError::CorruptData(format!(
+                        "sync boundary response contained {} operations instead of one",
+                        operations.len()
+                    ))
+                })?;
+                let pinned_nodes = proto
                     .pinned_nodes
                     .iter()
                     .map(|bytes| {
                         decode_digest::<H::Digest>(bytes.as_ref(), "operation sync pinned node")
                     })
-                    .collect::<Result<Vec<_>, _>>()?,
-            )
-        } else {
-            None
-        };
-        Ok(FetchedOperations::new(proof, operations, pinned_nodes))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(SyncResponse::Boundary {
+                    proof,
+                    op,
+                    pinned_nodes,
+                })
+            }
+        }
     }
 }
 
-impl<T, F, H, Op> Resolver for OperationLogSyncResolver<T, F, H, Op>
+impl<T, F, H, Op> Source for OperationLogSyncResolver<T, F, H, Op>
 where
     T: ClientTransport + Clone + Send + Sync + 'static,
     T::ResponseBody: Body<Data = Bytes> + Unpin,
@@ -652,37 +661,20 @@ where
     type Op = Op;
     type Error = QmdbError;
 
-    async fn get_operations(
+    async fn serve(
         &self,
-        op_count: Location<Self::Family>,
-        start_loc: Location<Self::Family>,
-        max_ops: NonZeroU64,
-        include_pinned_nodes: bool,
-        mut cancel_rx: oneshot::Receiver<()>,
-    ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-        let fetch_result = tokio::select! {
-            biased;
-            _ = &mut cancel_rx => return Err(QmdbError::SyncFetchCancelled),
-            fetch_result = fetch_operation_range(
-                op_count,
-                start_loc,
-                max_ops,
-                include_pinned_nodes,
-                |op_count, start_loc, max_ops, include_pinned_nodes| async move {
-                    let proto = self
-                        .operation_range_proto(op_count, start_loc, max_ops)
-                        .await?;
-                    self.decode_fetched_operations(proto, include_pinned_nodes)
-                },
-            ) => fetch_result?,
-        };
-        match cancel_rx.try_recv() {
-            Ok(()) | Err(oneshot::error::TryRecvError::Closed) => {
-                return Err(QmdbError::SyncFetchCancelled);
-            }
-            Err(oneshot::error::TryRecvError::Empty) => {}
-        }
-        Ok(fetch_result)
+        request: SyncRequest<Self::Family>,
+    ) -> Result<
+        (
+            SyncResponse<Self::Family, Self::Op, Self::Digest>,
+            FeedbackTx,
+        ),
+        Self::Error,
+    > {
+        let proto = self
+            .operation_range_proto(request.size(), request.start(), request.max_ops())
+            .await?;
+        Ok((self.decode_sync_response(proto, request)?, None))
     }
 }
 
@@ -792,7 +784,7 @@ where
     }
 }
 
-impl<T, F, H, Op> Resolver for CurrentSyncResolver<T, F, H, Op>
+impl<T, F, H, Op> Source for CurrentSyncResolver<T, F, H, Op>
 where
     T: ClientTransport + Clone + Send + Sync + 'static,
     T::ResponseBody: Body<Data = Bytes> + Unpin,
@@ -807,23 +799,17 @@ where
     type Op = Op;
     type Error = QmdbError;
 
-    async fn get_operations(
+    async fn serve(
         &self,
-        op_count: Location<Self::Family>,
-        start_loc: Location<Self::Family>,
-        max_ops: NonZeroU64,
-        include_pinned_nodes: bool,
-        cancel_rx: oneshot::Receiver<()>,
-    ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
-        self.operation_log
-            .get_operations(
-                op_count,
-                start_loc,
-                max_ops,
-                include_pinned_nodes,
-                cancel_rx,
-            )
-            .await
+        request: SyncRequest<Self::Family>,
+    ) -> Result<
+        (
+            SyncResponse<Self::Family, Self::Op, Self::Digest>,
+            FeedbackTx,
+        ),
+        Self::Error,
+    > {
+        self.operation_log.serve(request).await
     }
 }
 

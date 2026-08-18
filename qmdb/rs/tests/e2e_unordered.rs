@@ -94,7 +94,7 @@ async fn build_local_db() -> LocalReference {
                     .await
                     .expect("merkleize")
             };
-            db.apply_batch(finalized).await.expect("apply");
+            (db, _) = db.apply_batch(finalized).await.expect("apply");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -113,7 +113,7 @@ async fn build_local_db() -> LocalReference {
                 db.get(&b"beta".to_vec()).await.expect("get"),
             );
 
-            db.sync().await.expect("sync");
+            db = db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
 
             LocalReference {
@@ -142,6 +142,8 @@ async fn build_fixed_local_db() -> FixedLocalReference {
                 },
                 translator: TwoCap,
                 init_cache_size: None,
+                init_buffer: NZUsize!(1 << 21),
+                init_concurrency: (),
             };
             let mut db: FixedLocalDb = FixedLocalDb::init(context.child("unordered_fixed"), cfg)
                 .await
@@ -161,7 +163,7 @@ async fn build_fixed_local_db() -> FixedLocalReference {
                     .await
                     .expect("merkleize fixed")
             };
-            db.apply_batch(finalized).await.expect("apply fixed");
+            (db, _) = db.apply_batch(finalized).await.expect("apply fixed");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -180,7 +182,7 @@ async fn build_fixed_local_db() -> FixedLocalReference {
                 db.get(&beta).await.expect("get beta"),
             );
 
-            db.sync().await.expect("sync fixed");
+            db = db.sync().await.expect("sync fixed");
             db.destroy().await.expect("destroy fixed");
 
             FixedLocalReference {

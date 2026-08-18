@@ -75,7 +75,7 @@ async fn build_local_reference(batches: Vec<Vec<(K, V)>>) -> LocalReference {
                         .merkleize(&db, None::<Vec<u8>>, db.bounds().end - 1)
                         .await
                 };
-                db.apply_batch(finalized).await.expect("apply");
+                (db, _) = db.apply_batch(finalized).await.expect("apply");
             }
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();

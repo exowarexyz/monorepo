@@ -227,7 +227,7 @@ where
         };
         if end_chunk == complete_chunks {
             let last_chunk = chunks.last().expect("chunks non-empty");
-            if *last_chunk_digest != grafting_verifier.hash([last_chunk.as_slice()]) {
+            if *last_chunk_digest != grafting_verifier.hash(&[last_chunk.as_slice()]) {
                 return Err("current proof partial chunk digest mismatch".to_string());
             }
         }
@@ -243,7 +243,7 @@ where
             let Some(pending_chunk) = chunks.get(local) else {
                 return Err("current proof pending chunk index out of range".to_string());
             };
-            if *pending_digest != grafting_verifier.hash([pending_chunk.as_slice()]) {
+            if *pending_digest != grafting_verifier.hash(&[pending_chunk.as_slice()]) {
                 return Err("current proof pending chunk digest mismatch".to_string());
             }
         }
