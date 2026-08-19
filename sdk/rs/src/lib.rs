@@ -43,6 +43,8 @@ use exoware_proto::{
     decode_connect_error as proto_decode_connect_error,
     to_domain_reduce_response as proto_to_domain_reduce_response,
     to_proto_reduce_params as proto_to_proto_reduce_params,
+    BalancedHttp2Config as ProtoBalancedHttp2Config,
+    BalancedHttp2TransportError as ProtoBalancedHttp2TransportError,
     PreferZstdHttpClient as ProtoPreferZstdHttpClient,
 };
 use futures::future::BoxFuture;
@@ -55,6 +57,13 @@ use std::sync::{
     Arc,
 };
 use std::time::Duration;
+
+use crate::proto::transport::{
+    BalancedHttp2Transport as ProtoBalancedHttp2Transport,
+    ErasedClientTransport as ProtoErasedClientTransport,
+    ErasedResponseBody as ProtoErasedResponseBody,
+    MetadataClientTransport as ProtoMetadataClientTransport,
+};
 
 const DEFAULT_RETRY_MAX_ATTEMPTS: usize = 3;
 const DEFAULT_RETRY_INITIAL_BACKOFF_MS: u64 = 100;
@@ -1115,7 +1124,7 @@ pub struct GetManyChunk {
 /// Iterator-like async range stream.
 pub struct RangeStream {
     stream:
-        ConnectServerStream<hyper::body::Incoming, exoware_proto::query::RangeFrameView<'static>>,
+        ConnectServerStream<ProtoErasedResponseBody, exoware_proto::query::RangeFrameView<'static>>,
     pending_frame: Option<exoware_proto::query::RangeFrame>,
     rows_seen: usize,
     final_count: Option<usize>,
@@ -1128,7 +1137,7 @@ pub struct RangeStream {
 impl RangeStream {
     fn from_connect_stream(
         stream: ConnectServerStream<
-            hyper::body::Incoming,
+            ProtoErasedResponseBody,
             exoware_proto::query::RangeFrameView<'static>,
         >,
         observed_sequence: Option<Arc<AtomicU64>>,
@@ -1233,8 +1242,10 @@ impl RangeStream {
 }
 
 pub struct GetManyStream {
-    stream:
-        ConnectServerStream<hyper::body::Incoming, exoware_proto::query::GetManyFrameView<'static>>,
+    stream: ConnectServerStream<
+        ProtoErasedResponseBody,
+        exoware_proto::query::GetManyFrameView<'static>,
+    >,
     pending_frame: Option<exoware_proto::query::GetManyFrame>,
     finished: bool,
     observed_sequence: Option<Arc<AtomicU64>>,
@@ -1245,7 +1256,7 @@ pub struct GetManyStream {
 impl GetManyStream {
     fn from_connect_stream(
         stream: ConnectServerStream<
-            hyper::body::Incoming,
+            ProtoErasedResponseBody,
             exoware_proto::query::GetManyFrameView<'static>,
         >,
         observed_sequence: Option<Arc<AtomicU64>>,
@@ -1375,7 +1386,7 @@ pub struct StreamSubscriptionFrame {
 /// connectrpc server stream.
 pub struct StreamSubscription {
     stream: ConnectServerStream<
-        hyper::body::Incoming,
+        ProtoErasedResponseBody,
         exoware_proto::log::stream::v1::SubscribeResponseView<'static>,
     >,
     key_prefix: Option<StoreKeyPrefix>,
@@ -1515,9 +1526,9 @@ fn parse_connect_uri(url: &str) -> Result<http::Uri, ClientBuildError> {
     Ok(uri)
 }
 
-fn new_http_client() -> reqwest::Client {
+fn new_health_client() -> reqwest::Client {
     reqwest::Client::builder()
-        .pool_max_idle_per_host(32)
+        .pool_max_idle_per_host(1)
         .timeout(Duration::from_secs(30))
         .build()
         .expect("failed to build HTTP client")
@@ -1549,10 +1560,18 @@ pub enum ClientBuildError {
     InvalidEndpointUrl { url: String },
     #[error("StoreClientBuilder: failed to configure platform TLS verifier: {0}")]
     TlsConfig(#[source] connectrpc::rustls::Error),
+    #[error("StoreClientBuilder: {0}")]
+    BalancedHttp2(#[from] ProtoBalancedHttp2TransportError),
     #[error("StoreClientBuilder: API key is not valid in an HTTP header (check for control or non-ASCII characters)")]
     InvalidApiKey,
     #[error("{API_KEY_ENV} is set to a value that cannot be an HTTP header. Remove any control or non-ASCII characters from it")]
     InvalidApiKeyEnv,
+}
+
+#[derive(Debug)]
+enum RpcTransportChoice {
+    Custom(ProtoErasedClientTransport),
+    BalancedHttp2(ProtoBalancedHttp2Config),
 }
 
 /// Configures a [`StoreClient`] with explicit bases for health probes and store services.
@@ -1571,6 +1590,7 @@ pub struct StoreClientBuilder {
     retry_config: RetryConfig,
     connect_request_compression: ConnectRequestCompression,
     api_key: Option<ApiKey>,
+    rpc_transport: Option<RpcTransportChoice>,
 }
 
 impl StoreClientBuilder {
@@ -1645,6 +1665,36 @@ impl StoreClientBuilder {
         self
     }
 
+    /// Uses a consumer-supplied raw connectrpc transport for every Store RPC.
+    ///
+    /// The transport receives absolute request URIs for the configured ingest, query, prune,
+    /// retention, and stream origins. It must route each URI to its matching origin. The SDK wraps
+    /// it with bearer authentication, cookie persistence, and `Accept-Encoding: zstd, gzip`.
+    /// Request compression remains controlled by [`Self::connect_request_compression`]. Health and
+    /// readiness probes continue to use the separate Reqwest client.
+    pub fn client_transport<T>(mut self, transport: T) -> Self
+    where
+        T: connectrpc::client::ClientTransport,
+        <T::ResponseBody as http_body::Body>::Error: std::fmt::Display,
+    {
+        self.rpc_transport = Some(RpcTransportChoice::Custom(ProtoErasedClientTransport::new(
+            transport,
+        )));
+        self
+    }
+
+    /// Uses independent HTTP/2 connection pools for each distinct Store RPC origin.
+    ///
+    /// HTTP origins must accept prior-knowledge h2c. HTTPS origins must negotiate HTTP/2 through
+    /// ALPN.
+    ///
+    /// Construction requires a running Tokio runtime because Tower drives each bounded pool in a
+    /// background task. The default transport remains unchanged unless this method is called.
+    pub fn balanced_http2_transport(mut self, config: ProtoBalancedHttp2Config) -> Self {
+        self.rpc_transport = Some(RpcTransportChoice::BalancedHttp2(config));
+        self
+    }
+
     /// Build the client, or return an error if any required URL was not set.
     /// Takes the API key from [`API_KEY_ENV`] unless [`Self::api_key`] set one, and fails if
     /// either cannot be an HTTP header.
@@ -1672,29 +1722,65 @@ impl StoreClientBuilder {
         let prune_uri = parse_connect_uri(&prune_url)?;
         let retention_uri = parse_connect_uri(&retention_url)?;
         let stream_uri = parse_connect_uri(&stream_url)?;
-        let uses_tls = [
+        let rpc_uris = [
             &ingest_uri,
             &query_uri,
             &prune_uri,
             &retention_uri,
             &stream_uri,
-        ]
-        .into_iter()
-        .any(|uri| uri.scheme_str() == Some("https"));
-        let connect_http = if uses_tls {
-            let tls_config = connectrpc::rustls::ClientConfig::with_platform_verifier()
-                .map_err(ClientBuildError::TlsConfig)?;
-            ProtoPreferZstdHttpClient::with_tls(Arc::new(tls_config))
-        } else {
-            ProtoPreferZstdHttpClient::plaintext()
-        };
+        ];
+        let uses_tls = rpc_uris
+            .into_iter()
+            .any(|uri| uri.scheme_str() == Some("https"));
 
         let resolved =
             credential::resolve(self.api_key.map(|key| key.0), env_api_key, unusable_env_key)?;
         let credential = resolved.credential;
-        let connect_http = match resolved.header {
-            Some(value) => connect_http.with_authorization(value),
-            None => connect_http,
+        let connect_http = match self.rpc_transport {
+            None => {
+                let connect_http = if uses_tls {
+                    let tls_config = connectrpc::rustls::ClientConfig::with_platform_verifier()
+                        .map_err(ClientBuildError::TlsConfig)?;
+                    ProtoPreferZstdHttpClient::with_tls(Arc::new(tls_config))
+                } else {
+                    ProtoPreferZstdHttpClient::plaintext()
+                };
+                let connect_http = match resolved.header {
+                    Some(value) => connect_http.with_authorization(value),
+                    None => connect_http,
+                };
+                ProtoErasedClientTransport::new(connect_http)
+            }
+            Some(RpcTransportChoice::Custom(transport)) => {
+                let transport = ProtoMetadataClientTransport::new(transport);
+                let transport = match resolved.header {
+                    Some(value) => transport.with_authorization(value),
+                    None => transport,
+                };
+                ProtoErasedClientTransport::new(transport)
+            }
+            Some(RpcTransportChoice::BalancedHttp2(config)) => {
+                let tls_config = if uses_tls {
+                    Some(Arc::new(
+                        connectrpc::rustls::ClientConfig::with_platform_verifier()
+                            .map_err(ClientBuildError::TlsConfig)?,
+                    ))
+                } else {
+                    None
+                };
+                let transport = ProtoBalancedHttp2Transport::new(
+                    rpc_uris.into_iter().cloned(),
+                    config,
+                    tls_config,
+                )?;
+                let transport =
+                    ProtoMetadataClientTransport::new(ProtoErasedClientTransport::new(transport));
+                let transport = match resolved.header {
+                    Some(value) => transport.with_authorization(value),
+                    None => transport,
+                };
+                ProtoErasedClientTransport::new(transport)
+            }
         };
         Ok(StoreClient {
             health_url,
@@ -1703,7 +1789,7 @@ impl StoreClientBuilder {
             prune_uri,
             retention_uri,
             stream_uri,
-            http: new_http_client(),
+            health_http: new_health_client(),
             connect_http,
             retry_config: self.retry_config,
             connect_request_compression: self.connect_request_compression,
@@ -1722,8 +1808,8 @@ pub struct StoreClient {
     prune_uri: http::Uri,
     retention_uri: http::Uri,
     stream_uri: http::Uri,
-    http: reqwest::Client,
-    connect_http: ProtoPreferZstdHttpClient,
+    health_http: reqwest::Client,
+    connect_http: ProtoErasedClientTransport,
     retry_config: RetryConfig,
     connect_request_compression: ConnectRequestCompression,
     credential: Credential,
@@ -2081,7 +2167,7 @@ impl StoreClient {
 
     pub async fn health(&self) -> Result<bool, ClientError> {
         let resp = self
-            .http
+            .health_http
             .get(format!("{}/health", self.health_url))
             .send()
             .await?;
@@ -2090,7 +2176,7 @@ impl StoreClient {
 
     pub async fn ready(&self) -> Result<bool, ClientError> {
         let resp = self
-            .http
+            .health_http
             .get(format!("{}/ready", self.health_url))
             .send()
             .await?;
@@ -3006,6 +3092,37 @@ mod tests {
     use super::*;
     use crate::kv_codec::{KvFieldKind, KvPredicate, KvPredicateCheck, KvPredicateConstraint};
     use exoware_proto::query::TraversalMode as ProtoTraversalMode;
+    use http::header::{ACCEPT_ENCODING, AUTHORIZATION};
+
+    #[derive(Clone, Debug, Default)]
+    struct RecordingTransport {
+        requests: Arc<std::sync::Mutex<Vec<(http::Uri, http::HeaderMap)>>>,
+    }
+
+    impl RecordingTransport {
+        fn requests(&self) -> Vec<(http::Uri, http::HeaderMap)> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    impl connectrpc::client::ClientTransport for RecordingTransport {
+        type ResponseBody = http_body_util::Empty<Bytes>;
+        type Error = ConnectError;
+
+        fn send(
+            &self,
+            request: http::Request<connectrpc::client::ClientBody>,
+        ) -> connectrpc::client::BoxFuture<
+            'static,
+            Result<http::Response<Self::ResponseBody>, Self::Error>,
+        > {
+            self.requests
+                .lock()
+                .unwrap()
+                .push((request.uri().clone(), request.headers().clone()));
+            Box::pin(async { Err(ConnectError::unavailable("recorded test request")) })
+        }
+    }
 
     #[test]
     fn hex_round_trip() {
@@ -3023,7 +3140,6 @@ mod tests {
         assert_eq!(client.ingest_uri.to_string(), "http://localhost:10000/");
         assert_eq!(client.query_uri.to_string(), "http://localhost:10000/");
         assert_eq!(client.stream_uri.to_string(), "http://localhost:10000/");
-        assert!(!client.connect_http.supports_tls());
     }
 
     #[test]
@@ -3038,7 +3154,6 @@ mod tests {
         assert_eq!(client.ingest_uri.to_string(), "https://store.example.com/");
         assert_eq!(client.query_uri.to_string(), "https://store.example.com/");
         assert_eq!(client.stream_uri.to_string(), "https://store.example.com/");
-        assert!(client.connect_http.supports_tls());
     }
 
     #[test]
@@ -3058,7 +3173,6 @@ mod tests {
         assert_eq!(client.prune_uri.scheme_str(), Some("http"));
         assert_eq!(client.retention_uri.scheme_str(), Some("http"));
         assert_eq!(client.stream_uri.scheme_str(), Some("https"));
-        assert!(client.connect_http.supports_tls());
     }
 
     #[test]
@@ -3069,6 +3183,114 @@ mod tests {
                 Err(ClientBuildError::InvalidEndpointUrl { .. })
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn custom_transport_keeps_high_level_features_and_split_origins() {
+        let transport = RecordingTransport::default();
+        let client = StoreClient::builder()
+            .health_url("http://health.internal")
+            .ingest_url("http://ingest.internal/base")
+            .query_url("http://query.internal/base")
+            .prune_url("http://prune.internal/base")
+            .retention_url("http://retention.internal/base")
+            .stream_url("http://stream.internal/base")
+            .api_key("token-abc")
+            .retry_config(RetryConfig::disabled())
+            .client_transport(transport.clone())
+            .build()
+            .unwrap();
+        let prefixed = client.prefixed(StoreKeyPrefix::new("tenant/").unwrap());
+
+        let _ = prefixed.put(&[]).await;
+        let _ = prefixed
+            .create_session()
+            .get(&Bytes::from_static(b"key"))
+            .await;
+        let _ = prefixed.client().prune(&[]).await;
+        let _ = prefixed.client().set_retention(None).await;
+        let _ = prefixed.client().stream_get_physical(1).await;
+
+        let requests = transport.requests();
+        let origins = requests
+            .iter()
+            .map(|(uri, _)| uri.authority().unwrap().as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            origins,
+            [
+                "ingest.internal",
+                "query.internal",
+                "prune.internal",
+                "retention.internal",
+                "stream.internal",
+            ]
+        );
+        for (_, headers) in requests {
+            assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Bearer token-abc");
+            assert_eq!(headers.get(ACCEPT_ENCODING).unwrap(), "zstd, gzip");
+        }
+    }
+
+    #[tokio::test]
+    async fn custom_transport_does_not_bypass_key_validation() {
+        let transport = RecordingTransport::default();
+        let client = StoreClient::builder()
+            .url("http://store.internal")
+            .client_transport(transport.clone())
+            .build()
+            .unwrap();
+        let client = PrefixedStoreClient::empty(client);
+        let oversized_key = Bytes::from(vec![0; MAX_KEY_LEN + 1]);
+
+        assert!(matches!(
+            client.put(&[(&oversized_key, b"value")]).await,
+            Err(ClientError::Prefix(_))
+        ));
+        assert!(transport.requests().is_empty());
+    }
+
+    #[test]
+    fn balanced_http2_rejects_invalid_configuration() {
+        assert!(matches!(
+            StoreClient::builder()
+                .url("http://store.internal")
+                .balanced_http2_transport(ProtoBalancedHttp2Config::new(0, 32))
+                .build(),
+            Err(ClientBuildError::BalancedHttp2(
+                ProtoBalancedHttp2TransportError::ZeroConnections
+            ))
+        ));
+    }
+
+    #[test]
+    fn balanced_http2_requires_a_runtime() {
+        assert!(matches!(
+            StoreClient::builder()
+                .url("http://store.internal")
+                .balanced_http2_transport(ProtoBalancedHttp2Config::new(2, 32))
+                .build(),
+            Err(ClientBuildError::BalancedHttp2(
+                ProtoBalancedHttp2TransportError::MissingRuntime
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn balanced_http2_builder_supports_mixed_service_schemes() {
+        let client = StoreClient::builder()
+            .health_url("https://health.example.com")
+            .ingest_url("http://ingest.internal")
+            .query_url("https://query.example.com")
+            .prune_url("http://prune.internal")
+            .retention_url("http://retention.internal")
+            .stream_url("https://stream.example.com")
+            .balanced_http2_transport(ProtoBalancedHttp2Config::new(2, 32))
+            .build()
+            .unwrap();
+
+        assert_eq!(client.ingest_uri.scheme_str(), Some("http"));
+        assert_eq!(client.query_uri.scheme_str(), Some("https"));
     }
 
     #[test]
@@ -3124,11 +3346,7 @@ mod tests {
     #[test]
     fn api_key_becomes_a_bearer_header() {
         let client = built_with_api_key("token-abc");
-
-        assert_eq!(
-            client.connect_http.authorization().unwrap(),
-            "Bearer token-abc"
-        );
+        assert_eq!(client.credential, Credential::Sent);
     }
 
     #[test]
@@ -3146,9 +3364,7 @@ mod tests {
 
     #[test]
     fn a_bearer_header_never_renders_the_key() {
-        // set_sensitive is what keeps the credential out of any log that debugs the transport.
-        let client = built_with_api_key("token-abc");
-        let rendered = format!("{:?}", client.connect_http.authorization().unwrap());
+        let rendered = format!("{client:?}", client = built_with_api_key("token-abc"));
 
         assert!(!rendered.contains("token-abc"));
     }
@@ -3168,7 +3384,6 @@ mod tests {
         // in-VPC clients must keep working with no credential configured.
         let client = built_with_env_key(None, UnusableEnvKey::Reject);
 
-        assert!(client.connect_http.authorization().is_none());
         assert_eq!(client.credential, Credential::Absent);
     }
 
@@ -3176,10 +3391,6 @@ mod tests {
     fn an_environment_key_reaches_the_transport() {
         let client = built_with_env_key(Some("from-env"), UnusableEnvKey::Reject);
 
-        assert_eq!(
-            client.connect_http.authorization().unwrap(),
-            "Bearer from-env"
-        );
         assert_eq!(client.credential, Credential::Sent);
     }
 
@@ -3199,7 +3410,6 @@ mod tests {
     #[test]
     fn a_tolerated_unusable_key_yields_a_client_that_explains_itself() {
         let client = built_with_env_key(Some("has\nnewline"), UnusableEnvKey::Tolerate);
-        assert!(client.connect_http.authorization().is_none());
         assert_eq!(client.credential, Credential::Unusable);
 
         let rendered = client_error_from_connect(
