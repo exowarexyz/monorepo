@@ -23,130 +23,131 @@
 //! domain, path, expiry, and deletion semantics.
 
 use std::collections::{BTreeSet, HashMap};
+use std::error::Error;
 use std::fmt;
+use std::num::NonZeroUsize;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
-use bytes::Bytes;
-use connectrpc::client::{
-    BoxFuture, ClientBody, ClientTransport, Http2Connection, HttpClient, ServiceTransport,
+pub use bytes::Bytes;
+pub use connectrpc::client::{
+    BoxFuture, ClientBody, ClientTransport, HttpClient, ServiceTransport,
 };
 use connectrpc::compression::CompressionRegistry;
-use connectrpc::rustls::ClientConfig;
-use connectrpc::ConnectError;
+pub use connectrpc::rustls::ClientConfig;
+pub use connectrpc::ConnectError;
 use cookie_store::{Cookie, CookieDomain, CookieStore};
 use http::header::{ACCEPT_ENCODING, AUTHORIZATION, COOKIE, SET_COOKIE};
-use http::{Request, Response};
-use http_body::Body;
-use http_body_util::combinators::UnsyncBoxBody;
+pub use http::{Request, Response};
+pub use http_body::Body;
+use http_body_util::combinators::BoxBody;
 use http_body_util::BodyExt;
+pub use http_body_util::{Empty, Full};
+use hyper::body::Incoming;
+use hyper_rustls::{HttpsConnectorBuilder, MaybeHttpsStream};
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::client::legacy::Client as HyperClient;
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use reqwest::Url;
-use tower::balance::p2c::Balance;
-use tower::discover::ServiceList;
-use tower::load::completion::CompleteOnResponse;
-use tower::load::PeakEwmaDiscover;
+use tower::util::BoxCloneSyncService;
 use tower::ServiceExt;
 
 const DEFAULT_CONNECTIONS_PER_ORIGIN: usize = 4;
-const DEFAULT_REQUEST_BUFFER_CAPACITY: usize = 64;
-const DEFAULT_RTT: Duration = Duration::from_secs(1);
-const DEFAULT_EWMA_DECAY: Duration = Duration::from_secs(10);
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Configures an opt-in pool of independent HTTP/2 connections per RPC origin.
+/// Configures an opt-in pool of independent HTTP clients per RPC origin.
 ///
-/// Requests wait in a bounded Tower buffer. Peak EWMA balancing favors connections with lower
-/// observed response latency and fewer pending requests.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Plain HTTP uses prior-knowledge h2c. HTTPS requires HTTP/2 through ALPN. Requests favor the
+/// client with the fewest response bodies still in progress.
+#[derive(Clone, Debug)]
 pub struct BalancedHttp2Config {
-    connections_per_origin: usize,
-    request_buffer_capacity: usize,
-    default_rtt: Duration,
-    ewma_decay: Duration,
+    connections_per_origin: NonZeroUsize,
+    request_timeout: Duration,
+    tls_config: Option<Arc<ClientConfig>>,
 }
 
 impl BalancedHttp2Config {
-    /// Creates a configuration with the requested connection and buffer counts.
-    pub const fn new(connections_per_origin: usize, request_buffer_capacity: usize) -> Self {
-        Self {
-            connections_per_origin,
-            request_buffer_capacity,
-            default_rtt: DEFAULT_RTT,
-            ewma_decay: DEFAULT_EWMA_DECAY,
-        }
-    }
-
-    /// Sets the initial latency estimate used before a connection completes a request.
+    /// Sets the number of independent clients created for each distinct RPC origin.
     #[must_use]
-    pub const fn with_default_rtt(mut self, default_rtt: Duration) -> Self {
-        self.default_rtt = default_rtt;
+    pub const fn with_connections_per_origin(
+        mut self,
+        connections_per_origin: NonZeroUsize,
+    ) -> Self {
+        self.connections_per_origin = connections_per_origin;
         self
     }
 
-    /// Sets how quickly an observed peak latency decays toward the moving average.
+    /// Sets the unary RPC deadline and the maximum wait for streaming response headers.
     #[must_use]
-    pub const fn with_ewma_decay(mut self, ewma_decay: Duration) -> Self {
-        self.ewma_decay = ewma_decay;
+    pub const fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
         self
     }
 
-    /// Number of independent connections created for each distinct RPC origin.
+    /// Uses an application-provided TLS configuration for HTTPS origins.
+    #[must_use]
+    pub fn with_tls_config(mut self, tls_config: Arc<ClientConfig>) -> Self {
+        self.tls_config = Some(tls_config);
+        self
+    }
+
+    /// Returns the number of independent clients for each distinct RPC origin.
     pub const fn connections_per_origin(&self) -> usize {
-        self.connections_per_origin
+        self.connections_per_origin.get()
     }
 
-    /// Maximum number of requests waiting for a balanced connection.
-    pub const fn request_buffer_capacity(&self) -> usize {
-        self.request_buffer_capacity
+    /// Returns the unary RPC deadline and streaming response-header timeout.
+    pub const fn request_timeout(&self) -> Duration {
+        self.request_timeout
+    }
+
+    pub(crate) fn has_tls_config(&self) -> bool {
+        self.tls_config.is_some()
     }
 }
 
 impl Default for BalancedHttp2Config {
     fn default() -> Self {
-        Self::new(
-            DEFAULT_CONNECTIONS_PER_ORIGIN,
-            DEFAULT_REQUEST_BUFFER_CAPACITY,
-        )
+        Self {
+            connections_per_origin: NonZeroUsize::new(DEFAULT_CONNECTIONS_PER_ORIGIN).unwrap(),
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            tls_config: None,
+        }
     }
-}
-
-/// Error returned while constructing the balanced HTTP/2 transport.
-#[derive(Debug, thiserror::Error)]
-pub enum BalancedHttp2TransportError {
-    #[error("balanced HTTP/2 connections per origin must be nonzero")]
-    ZeroConnections,
-    #[error("balanced HTTP/2 request buffer capacity must be nonzero")]
-    ZeroBufferCapacity,
-    #[error("balanced HTTP/2 default RTT must be nonzero")]
-    ZeroDefaultRtt,
-    #[error("balanced HTTP/2 EWMA decay must be nonzero")]
-    ZeroEwmaDecay,
-    #[error("balanced HTTP/2 transport construction requires a running Tokio runtime")]
-    MissingRuntime,
-    #[error("balanced HTTP/2 HTTPS origins require a TLS configuration")]
-    MissingTlsConfig,
 }
 
 /// Error type used after normalizing a consumer transport to the SDK's concrete body type.
 #[derive(Debug)]
-pub(crate) struct ErasedTransportError(String);
+pub(crate) struct ErasedTransportError(anyhow::Error);
 
 impl ErasedTransportError {
-    fn new(error: impl fmt::Display) -> Self {
-        Self(error.to_string())
+    fn new(error: impl Error + Send + Sync + 'static) -> Self {
+        Self(anyhow::Error::new(error))
+    }
+
+    fn from_display(error: impl fmt::Display) -> Self {
+        Self(anyhow::anyhow!(error.to_string()))
     }
 }
 
 impl fmt::Display for ErasedTransportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        fmt::Display::fmt(&self.0, f)
     }
 }
 
-impl std::error::Error for ErasedTransportError {}
+impl Error for ErasedTransportError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
 
 /// Response body used by the type-erased Store client transport.
-pub(crate) type ErasedResponseBody = UnsyncBoxBody<Bytes, ErasedTransportError>;
+pub(crate) type ErasedResponseBody = BoxBody<Bytes, ErasedTransportError>;
 
 trait DynClientTransport: Send + Sync {
     fn send(
@@ -162,6 +163,7 @@ struct ClientTransportAdapter<T> {
 impl<T> DynClientTransport for ClientTransportAdapter<T>
 where
     T: ClientTransport,
+    T::ResponseBody: Sync,
     <T::ResponseBody as Body>::Error: fmt::Display,
 {
     fn send(
@@ -171,7 +173,7 @@ where
         let future = self.inner.send(request);
         Box::pin(async move {
             let response = future.await.map_err(ErasedTransportError::new)?;
-            Ok(response.map(|body| body.map_err(ErasedTransportError::new).boxed_unsync()))
+            Ok(response.map(|body| body.map_err(ErasedTransportError::from_display).boxed()))
         })
     }
 }
@@ -180,17 +182,29 @@ where
 #[derive(Clone)]
 pub(crate) struct ErasedClientTransport {
     inner: Arc<dyn DynClientTransport>,
+    metadata: Option<ClientMetadata>,
 }
 
 impl ErasedClientTransport {
     pub(crate) fn new<T>(transport: T) -> Self
     where
         T: ClientTransport,
+        T::ResponseBody: Sync,
         <T::ResponseBody as Body>::Error: fmt::Display,
     {
         Self {
             inner: Arc::new(ClientTransportAdapter { inner: transport }),
+            metadata: None,
         }
+    }
+
+    pub(crate) fn with_metadata(mut self, authorization: Option<http::HeaderValue>) -> Self {
+        let metadata = ClientMetadata::new();
+        self.metadata = Some(match authorization {
+            Some(value) => metadata.with_authorization(value),
+            None => metadata,
+        });
+        self
     }
 }
 
@@ -206,9 +220,21 @@ impl ClientTransport for ErasedClientTransport {
 
     fn send(
         &self,
-        request: Request<ClientBody>,
+        mut request: Request<ClientBody>,
     ) -> BoxFuture<'static, Result<Response<Self::ResponseBody>, Self::Error>> {
-        self.inner.send(request)
+        let metadata = self.metadata.clone();
+        let url = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.prepare_request(&mut request));
+        let future = self.inner.send(request);
+        Box::pin(async move {
+            let response = future.await?;
+            let (parts, body) = response.into_parts();
+            if let (Some(metadata), Some(url)) = (metadata, url) {
+                metadata.store_set_cookies(&url, &parts.headers);
+            }
+            Ok(Response::from_parts(parts, body))
+        })
     }
 }
 
@@ -274,49 +300,6 @@ impl ClientMetadata {
     }
 }
 
-/// Applies SDK metadata policy around a consumer-supplied raw transport.
-#[derive(Clone, Debug)]
-pub(crate) struct MetadataClientTransport {
-    inner: ErasedClientTransport,
-    metadata: ClientMetadata,
-}
-
-impl MetadataClientTransport {
-    pub(crate) fn new(inner: ErasedClientTransport) -> Self {
-        Self {
-            inner,
-            metadata: ClientMetadata::new(),
-        }
-    }
-
-    pub(crate) fn with_authorization(mut self, value: http::HeaderValue) -> Self {
-        self.metadata = self.metadata.with_authorization(value);
-        self
-    }
-}
-
-impl ClientTransport for MetadataClientTransport {
-    type ResponseBody = ErasedResponseBody;
-    type Error = ErasedTransportError;
-
-    fn send(
-        &self,
-        mut request: Request<ClientBody>,
-    ) -> BoxFuture<'static, Result<Response<Self::ResponseBody>, Self::Error>> {
-        let url = self.metadata.prepare_request(&mut request);
-        let future = self.inner.send(request);
-        let metadata = self.metadata.clone();
-        Box::pin(async move {
-            let response = future.await?;
-            let (parts, body) = response.into_parts();
-            if let Some(url) = url {
-                metadata.store_set_cookies(&url, &parts.headers);
-            }
-            Ok(Response::from_parts(parts, body))
-        })
-    }
-}
-
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct RpcOrigin(String);
 
@@ -328,27 +311,181 @@ impl RpcOrigin {
             uri.authority()?
         )))
     }
+}
 
-    fn uri(&self) -> http::Uri {
-        self.0.parse().expect("validated RPC origin must be a URI")
+#[derive(Clone)]
+struct BalancedConnection {
+    transport: Http2Client,
+    pending: Arc<AtomicUsize>,
+}
+
+impl BalancedConnection {
+    fn load(&self) -> usize {
+        self.pending.load(Ordering::Relaxed)
+    }
+
+    fn track(&self) -> PendingRequest {
+        self.pending.fetch_add(1, Ordering::Relaxed);
+        PendingRequest(self.pending.clone())
     }
 }
 
-/// Routes requests to one balanced connection pool for each distinct RPC origin.
-#[derive(Clone, Debug)]
+struct BalancedOrigin {
+    connections: Vec<BalancedConnection>,
+    next: AtomicUsize,
+    request_timeout: Duration,
+}
+
+impl BalancedOrigin {
+    fn select(&self) -> BalancedConnection {
+        let len = self.connections.len();
+        let start = self.next.fetch_add(1, Ordering::Relaxed) % len;
+        (0..len)
+            .map(|offset| &self.connections[(start + offset) % len])
+            .min_by_key(|connection| connection.load())
+            .expect("balanced origin always has a connection")
+            .clone()
+    }
+}
+
+struct PendingRequest(Arc<AtomicUsize>);
+
+impl Drop for PendingRequest {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+type BoxError = Box<dyn Error + Send + Sync>;
+type TlsHttp2Stream = MaybeHttpsStream<TokioIo<tokio::net::TcpStream>>;
+type TlsHttp2Connector = BoxCloneSyncService<http::Uri, TlsHttp2Stream, BoxError>;
+type TlsHttp2Client = HyperClient<TlsHttp2Connector, ClientBody>;
+
+async fn require_http2_alpn(stream: TlsHttp2Stream) -> Result<TlsHttp2Stream, BoxError> {
+    let negotiated_h2 = match &stream {
+        MaybeHttpsStream::Https(stream) => {
+            stream.inner().get_ref().1.alpn_protocol() == Some(b"h2")
+        }
+        MaybeHttpsStream::Http(_) => false,
+    };
+    negotiated_h2
+        .then_some(stream)
+        .ok_or_else(|| std::io::Error::other("HTTPS server did not negotiate h2 with ALPN").into())
+}
+
+#[derive(Clone)]
+enum Http2Client {
+    Plain(HttpClient),
+    Tls(TlsHttp2Client),
+}
+
+impl Http2Client {
+    fn plaintext() -> Self {
+        Self::Plain(HttpClient::plaintext_http2_only())
+    }
+
+    fn with_tls(tls_config: Arc<ClientConfig>) -> Self {
+        let mut http = HttpConnector::new();
+        http.set_nodelay(true);
+        http.enforce_http(false);
+
+        // The connector owns ALPN and rejects preconfigured values.
+        let mut tls_config = (*tls_config).clone();
+        tls_config.alpn_protocols.clear();
+
+        // Restrict ALPN at the connector and reject non-h2 sessions in Hyper.
+        let https = HttpsConnectorBuilder::new()
+            .with_tls_config(tls_config)
+            .https_only()
+            .enable_http2()
+            .wrap_connector(http);
+        let client = HyperClient::builder(TokioExecutor::new())
+            .http2_only(true)
+            .build(BoxCloneSyncService::new(https.and_then(require_http2_alpn)));
+        Self::Tls(client)
+    }
+}
+
+impl ClientTransport for Http2Client {
+    type ResponseBody = Incoming;
+    type Error = ConnectError;
+
+    fn send(
+        &self,
+        request: Request<ClientBody>,
+    ) -> BoxFuture<'static, Result<Response<Self::ResponseBody>, Self::Error>> {
+        match self {
+            Self::Plain(client) => client.send(request),
+            Self::Tls(client) => {
+                let client = client.clone();
+                Box::pin(async move {
+                    client.request(request).await.map_err(|error| {
+                        ConnectError::unavailable(format!("HTTPS request failed: {error}"))
+                    })
+                })
+            }
+        }
+    }
+}
+
+pub(crate) struct PendingResponseBody<B> {
+    body: Pin<Box<B>>,
+    pending: Option<PendingRequest>,
+}
+
+impl<B> PendingResponseBody<B> {
+    fn new(body: B, pending: PendingRequest) -> Self {
+        Self {
+            body: Box::pin(body),
+            pending: Some(pending),
+        }
+    }
+}
+
+impl<B> Body for PendingResponseBody<B>
+where
+    B: Body<Data = Bytes>,
+{
+    type Data = Bytes;
+    type Error = B::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        let this = self.as_mut().get_mut();
+        let result = this.body.as_mut().poll_frame(cx);
+        let finished = match &result {
+            Poll::Ready(None | Some(Err(_))) => true,
+            Poll::Ready(Some(Ok(_))) => this.body.is_end_stream(),
+            Poll::Pending => false,
+        };
+        if finished {
+            this.pending.take();
+        }
+        result
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.body.size_hint()
+    }
+}
+
+/// Routes requests to independent clients for each distinct RPC origin.
+#[derive(Clone)]
 pub(crate) struct BalancedHttp2Transport {
-    origins: Arc<HashMap<RpcOrigin, ErasedClientTransport>>,
+    origins: Arc<HashMap<RpcOrigin, BalancedOrigin>>,
 }
 
 impl BalancedHttp2Transport {
     pub(crate) fn new(
         uris: impl IntoIterator<Item = http::Uri>,
         config: BalancedHttp2Config,
-        tls_config: Option<Arc<ClientConfig>>,
-    ) -> Result<Self, BalancedHttp2TransportError> {
-        validate_balanced_config(config)?;
-        let runtime = tokio::runtime::Handle::try_current()
-            .map_err(|_| BalancedHttp2TransportError::MissingRuntime)?;
+    ) -> Self {
         let mut origins = HashMap::new();
 
         for uri in uris {
@@ -358,36 +495,38 @@ impl BalancedHttp2Transport {
                 continue;
             }
 
-            let connection_uri = origin.uri();
-            let connections = (0..config.connections_per_origin)
-                .map(|_| match connection_uri.scheme_str() {
-                    Some("http") => Ok(Http2Connection::lazy_plaintext(connection_uri.clone())),
-                    Some("https") => tls_config
-                        .clone()
-                        .map(|tls| Http2Connection::lazy_tls(connection_uri.clone(), tls))
-                        .ok_or(BalancedHttp2TransportError::MissingTlsConfig),
-                    _ => unreachable!("StoreClientBuilder validates RPC endpoint schemes"),
+            let scheme = uri.scheme_str();
+            let connections = (0..config.connections_per_origin())
+                .map(|_| {
+                    let transport = match scheme {
+                        Some("http") => Http2Client::plaintext(),
+                        Some("https") => Http2Client::with_tls(
+                            config
+                                .tls_config
+                                .clone()
+                                .expect("HTTPS origins always receive a TLS configuration"),
+                        ),
+                        _ => unreachable!("StoreClientBuilder validates RPC endpoint schemes"),
+                    };
+                    BalancedConnection {
+                        transport,
+                        pending: Arc::new(AtomicUsize::new(0)),
+                    }
                 })
-                .collect::<Result<Vec<_>, _>>()?;
-            let discover = ServiceList::new(connections);
-            let discover = PeakEwmaDiscover::new::<Request<ClientBody>>(
-                discover,
-                config.default_rtt,
-                config.ewma_decay,
-                CompleteOnResponse::default(),
+                .collect();
+            origins.insert(
+                origin,
+                BalancedOrigin {
+                    connections,
+                    next: AtomicUsize::new(0),
+                    request_timeout: config.request_timeout,
+                },
             );
-            let balance = Balance::new(discover);
-            let (buffer, worker) =
-                tower::buffer::Buffer::pair(balance, config.request_buffer_capacity);
-            runtime.spawn(worker);
-            let service = buffer.map_err(ErasedTransportError::new);
-            let transport = ServiceTransport::new(service);
-            origins.insert(origin, ErasedClientTransport::new(transport));
         }
 
-        Ok(Self {
+        Self {
             origins: Arc::new(origins),
-        })
+        }
     }
 
     #[cfg(test)]
@@ -397,8 +536,8 @@ impl BalancedHttp2Transport {
 }
 
 impl ClientTransport for BalancedHttp2Transport {
-    type ResponseBody = ErasedResponseBody;
-    type Error = ErasedTransportError;
+    type ResponseBody = PendingResponseBody<Incoming>;
+    type Error = ConnectError;
 
     fn send(
         &self,
@@ -406,39 +545,34 @@ impl ClientTransport for BalancedHttp2Transport {
     ) -> BoxFuture<'static, Result<Response<Self::ResponseBody>, Self::Error>> {
         let Some(origin) = RpcOrigin::from_uri(request.uri()) else {
             return Box::pin(async {
-                Err(ErasedTransportError::new(
+                Err(ConnectError::invalid_argument(
                     "RPC request URI does not contain an origin",
                 ))
             });
         };
-        let Some(transport) = self.origins.get(&origin).cloned() else {
+        let Some(pool) = self.origins.get(&origin) else {
             return Box::pin(async move {
-                Err(ErasedTransportError::new(format!(
+                Err(ConnectError::invalid_argument(format!(
                     "no balanced HTTP/2 pool configured for RPC origin {}",
                     origin.0
                 )))
             });
         };
-        transport.send(request)
+        let connection = pool.select();
+        let timeout = pool.request_timeout;
+        let pending = connection.track();
+        Box::pin(async move {
+            match tokio::time::timeout(timeout, connection.transport.send(request)).await {
+                Ok(Ok(response)) => {
+                    Ok(response.map(|body| PendingResponseBody::new(body, pending)))
+                }
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err(ConnectError::unavailable(
+                    "balanced HTTP transport timed out before response headers",
+                )),
+            }
+        })
     }
-}
-
-fn validate_balanced_config(
-    config: BalancedHttp2Config,
-) -> Result<(), BalancedHttp2TransportError> {
-    if config.connections_per_origin == 0 {
-        return Err(BalancedHttp2TransportError::ZeroConnections);
-    }
-    if config.request_buffer_capacity == 0 {
-        return Err(BalancedHttp2TransportError::ZeroBufferCapacity);
-    }
-    if config.default_rtt.is_zero() {
-        return Err(BalancedHttp2TransportError::ZeroDefaultRtt);
-    }
-    if config.ewma_decay.is_zero() {
-        return Err(BalancedHttp2TransportError::ZeroEwmaDecay);
-    }
-    Ok(())
 }
 
 /// gzip + zstd - used for [`connectrpc::ConnectRpcService::with_compression`] and
@@ -767,25 +901,6 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug)]
-    struct NamedTransport {
-        name: &'static str,
-        calls: Arc<Mutex<Vec<&'static str>>>,
-    }
-
-    impl ClientTransport for NamedTransport {
-        type ResponseBody = http_body_util::Empty<Bytes>;
-        type Error = ConnectError;
-
-        fn send(
-            &self,
-            _request: Request<ClientBody>,
-        ) -> BoxFuture<'static, Result<Response<Self::ResponseBody>, Self::Error>> {
-            self.calls.lock().unwrap().push(self.name);
-            Box::pin(async { Err(ConnectError::unavailable("recorded route")) })
-        }
-    }
-
     fn request(uri: &str) -> Request<ClientBody> {
         Request::post(uri)
             .body(connectrpc::client::full_body(Bytes::new()))
@@ -821,8 +936,8 @@ mod tests {
     #[tokio::test]
     async fn metadata_wraps_a_supplied_transport_and_persists_cookies() {
         let raw = ScriptedTransport::default();
-        let transport = MetadataClientTransport::new(ErasedClientTransport::new(raw.clone()))
-            .with_authorization("Bearer token".parse().unwrap());
+        let transport = ErasedClientTransport::new(raw.clone())
+            .with_metadata(Some("Bearer token".parse().unwrap()));
 
         transport
             .send(request("http://query.internal/rpc/first"))
@@ -842,53 +957,34 @@ mod tests {
         assert_eq!(requests[1].get(COOKIE).unwrap(), "AWSALB=sticky");
     }
 
-    #[tokio::test]
-    async fn balanced_transport_builds_one_pool_per_distinct_origin() {
+    #[test]
+    fn balanced_transport_builds_one_pool_per_distinct_origin() {
         let transport = BalancedHttp2Transport::new(
             [
                 "http://one.internal/a".parse().unwrap(),
                 "http://one.internal/b".parse().unwrap(),
                 "http://two.internal/a".parse().unwrap(),
             ],
-            BalancedHttp2Config::new(2, 32),
-            None,
-        )
-        .unwrap();
+            BalancedHttp2Config::default()
+                .with_connections_per_origin(NonZeroUsize::new(2).unwrap()),
+        );
 
         assert_eq!(transport.origin_count(), 2);
     }
 
     #[tokio::test]
-    async fn balanced_transport_routes_by_request_origin() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let origins = HashMap::from([
-            (
-                RpcOrigin("http://ingest.internal".to_string()),
-                ErasedClientTransport::new(NamedTransport {
-                    name: "ingest",
-                    calls: calls.clone(),
-                }),
-            ),
-            (
-                RpcOrigin("http://query.internal".to_string()),
-                ErasedClientTransport::new(NamedTransport {
-                    name: "query",
-                    calls: calls.clone(),
-                }),
-            ),
-        ]);
-        let transport = BalancedHttp2Transport {
-            origins: Arc::new(origins),
-        };
+    async fn pending_load_ends_with_the_response_body() {
+        let pending = Arc::new(AtomicUsize::new(0));
+        pending.fetch_add(1, Ordering::Relaxed);
+        let mut body = PendingResponseBody::new(
+            http_body_util::Full::new(Bytes::from_static(b"frame")),
+            PendingRequest(pending.clone()),
+        );
 
-        let _ = transport
-            .send(request("http://query.internal/store.query.v1.Service/Get"))
-            .await;
-        let _ = transport
-            .send(request("http://ingest.internal/log.ingest.v1.Service/Put"))
-            .await;
-
-        assert_eq!(*calls.lock().unwrap(), ["query", "ingest"]);
+        assert_eq!(pending.load(Ordering::Relaxed), 1);
+        assert!(body.frame().await.unwrap().unwrap().is_data());
+        assert_eq!(pending.load(Ordering::Relaxed), 0);
+        assert!(body.frame().await.is_none());
     }
 
     #[test]

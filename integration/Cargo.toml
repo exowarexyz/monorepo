@@ -8,6 +8,7 @@ description = "Unpublished cross-crate integration tests for Exoware."
 
 [dependencies]
 axum = { workspace = true }
+base64 = { workspace = true }
 buffa = { workspace = true }
 bytes = { workspace = true }
 commonware-cryptography = { workspace = true }
@@ -19,5 +20,9 @@ exoware-sdk = { workspace = true }
 exoware-simulator = { path = "../examples/simulator" }
 exoware-sql = { workspace = true }
 futures = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { version = "0.1", features = ["http2", "server", "service", "tokio"] }
 reqwest = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+tokio-rustls = "0.26"

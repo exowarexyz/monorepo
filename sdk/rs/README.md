@@ -49,3 +49,36 @@ EXOWARE_URL=https://query.<deployment>.<domain> \
 the environment when `.api_key(...)` is not set. This example needs one covering both scopes.
 
 Add `EXOWARE_WRITE_URL` to reach a deployment that serves its write path on a separate origin.
+
+## RPC Transports
+
+The default transport remains suitable for general use. High-throughput writers can opt into
+independent HTTP clients per RPC origin.
+
+```rust
+use std::num::NonZeroUsize;
+use std::time::Duration;
+
+use exoware_sdk::{BalancedHttp2Config, StoreClient};
+
+let transport = BalancedHttp2Config::default()
+    .with_connections_per_origin(NonZeroUsize::new(4).unwrap())
+    .with_request_timeout(Duration::from_secs(10));
+let client = StoreClient::builder()
+    .url("http://localhost:10000")
+    .balanced_http2_transport(transport)
+    .build()?;
+```
+
+Plain HTTP endpoints must accept prior-knowledge h2c. HTTPS endpoints require HTTP/2 through
+ALPN and use platform trust by default. `with_tls_config` accepts custom roots or client
+certificates. The request timeout bounds complete unary calls and streaming response headers. It
+does not stop a streaming response after its headers arrive.
+
+`StoreClientBuilder::client_transport` accepts a consumer transport built from the exact trait and
+body types re-exported under `exoware_sdk::transport`. The SDK still owns bearer authentication,
+cookies, and response compression preferences. Custom response bodies must be `Sync` so the public
+SDK stream types remain `Sync`.
+
+Tower services can use `exoware_sdk::transport::ServiceTransport`. Middleware that exposes
+`tower::BoxError` must map it into a sized application error before constructing the transport.

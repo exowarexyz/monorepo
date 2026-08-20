@@ -2592,6 +2592,7 @@ name = "exoware-integration"
 version = "2026.7.1"
 dependencies = [
  "axum",
+ "base64",
  "buffa",
  "bytes",
  "commonware-cryptography",
@@ -2603,8 +2604,12 @@ dependencies = [
  "exoware-simulator",
  "exoware-sql",
  "futures",
+ "hyper",
+ "hyper-util",
  "reqwest",
+ "tempfile",
  "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]
@@ -2680,6 +2685,8 @@ dependencies = [
  "http-body",
  "http-body-util",
  "hyper",
+ "hyper-rustls",
+ "hyper-util",
  "psl",
  "regex",
  "reqwest",
@@ -5692,9 +5699,7 @@ checksum = "ebe5ef63511595f1344e2d5cfa636d973292adc0eec1f0ad45fae9f0851ab1d4"
 dependencies = [
  "futures-core",
  "futures-util",
- "indexmap",
  "pin-project-lite",
- "slab",
  "sync_wrapper",
  "tokio",
  "tokio-util",

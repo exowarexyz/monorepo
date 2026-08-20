@@ -117,10 +117,7 @@ pub mod transport;
 pub use range_traversal::{
     parse_range_traversal_direction, RangeTraversalDirection, RangeTraversalModeError,
 };
-pub use transport::{
-    connect_compression_registry, BalancedHttp2Config, BalancedHttp2TransportError,
-    PreferZstdHttpClient,
-};
+pub use transport::{connect_compression_registry, BalancedHttp2Config, PreferZstdHttpClient};
 
 use crate::kv_codec::{
     KvExpr, KvFieldKind, KvFieldRef, KvPredicate, KvPredicateCheck, KvPredicateConstraint,
