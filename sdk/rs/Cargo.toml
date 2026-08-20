@@ -22,6 +22,8 @@ http = { workspace = true }
 http-body = "1"
 http-body-util = { workspace = true }
 hyper = { workspace = true }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http2"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http2", "tokio"] }
 regex = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
 rustls-platform-verifier = { workspace = true }
@@ -30,7 +32,7 @@ serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-tower = { workspace = true, features = ["balance", "buffer"] }
+tower = { workspace = true }
 cookie_store = { version = "0.22.1", default-features = false }
 psl = "2.1.212"
 
